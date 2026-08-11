@@ -75,15 +75,6 @@ deploy() {
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
-  log_info "Validating runtime LOGIN provisioning secrets"
-  if ! compose run --rm -T migration bun -e '
-    import { assertRuntimeLoginProvisioningEnvironment } from "./src/services/runtime-login-provisioning.service";
-    assertRuntimeLoginProvisioningEnvironment();
-    console.log(JSON.stringify({ status: "runtime_login_secrets_preflight_passed" }));
-  '; then
-    log_error "Runtime LOGIN provisioning secrets are invalid; services were not stopped."
-    exit 1
-  fi
   log_info "Stopping services and waiting for workers to settle"
   if ! compose stop -t 45 api worker; then
     log_error "Services did not stop cleanly; migration was not started."
@@ -115,11 +106,7 @@ deploy() {
     exit 1
   fi
   log_info "Provisioning the runtime LOGINs"
-  if ! compose run --rm -T migration bun -e '
-    import { provisionRuntimeLogins } from "./src/services/runtime-login-provisioning.service";
-    const result = await provisionRuntimeLogins();
-    console.log(JSON.stringify({ operation: "runtime-login-provisioning", ...result }, null, 2));
-  '; then
+  if ! compose run --rm -T migration bun run db:provision-runtime-logins; then
     log_error "Runtime LOGIN provisioning failed; services remain stopped for a forward fix."
     exit 1
   fi

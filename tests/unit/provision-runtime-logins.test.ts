@@ -7,7 +7,7 @@ import {
   GRAPHQL_RUNTIME_CAPABILITY,
   GRAPHQL_RUNTIME_LOGIN,
   type RuntimeLoginProvisioningSnapshot,
-} from '../../src/services/runtime-login-provisioning.service';
+} from '../../scripts/provision-runtime-logins';
 
 const capability = (roleName: string) => ({
   roleName,

@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import postgres from 'postgres';
 
 export const DATA_RUNTIME_LOGIN = 'letletme_data_runtime';
@@ -57,23 +58,6 @@ function requiredPassword(name: string): string {
     throw new Error(`${name} must be an exact 64-character base64url secret`);
   }
   return value;
-}
-
-export function assertRuntimeLoginProvisioningEnvironment(): void {
-  const dataPassword = requiredPassword('DATA_RUNTIME_DB_PASSWORD');
-  const graphqlPassword = requiredPassword('GRAPHQL_RUNTIME_DB_PASSWORD');
-  if (dataPassword === graphqlPassword) {
-    throw new Error('Data and GraphQL runtime passwords must be unique');
-  }
-}
-
-function runtimePasswords(): { readonly data: string; readonly graphql: string } {
-  const data = requiredPassword('DATA_RUNTIME_DB_PASSWORD');
-  const graphql = requiredPassword('GRAPHQL_RUNTIME_DB_PASSWORD');
-  if (data === graphql) {
-    throw new Error('Data and GraphQL runtime passwords must be unique');
-  }
-  return { data, graphql };
 }
 
 function roleAttributes(row: RoleRow): RoleAttributes {
@@ -159,53 +143,53 @@ async function inspectRoles(client: QueryClient): Promise<RuntimeLoginProvisioni
     GRAPHQL_RUNTIME_CAPABILITY,
   ];
   const roleRows = await client<RoleRow[]>`
-    SELECT
-      rolname AS role_name,
-      rolcanlogin,
-      rolsuper,
-      rolcreatedb,
-      rolcreaterole,
-      rolinherit,
-      rolreplication,
-      rolbypassrls,
-      COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
-    FROM pg_roles
-    WHERE rolname = ANY(${roleNames}::text[])
-    ORDER BY rolname
-  `;
+      SELECT
+        rolname AS role_name,
+        rolcanlogin,
+        rolsuper,
+        rolcreatedb,
+        rolcreaterole,
+        rolinherit,
+        rolreplication,
+        rolbypassrls,
+        COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
+      FROM pg_roles
+      WHERE rolname = ANY(${roleNames}::text[])
+      ORDER BY rolname
+    `;
   const membershipRows = await client<
     Array<{ login_role: string; granted_role: string; admin_option: boolean }>
   >`
-    WITH RECURSIVE inherited(login_role, role_oid, granted_role, admin_option, path) AS (
-      SELECT
-        member_role.rolname,
-        granted_role.oid,
-        granted_role.rolname,
-        membership.admin_option,
-        ARRAY[member_role.oid, granted_role.oid]
-      FROM pg_auth_members membership
-      JOIN pg_roles member_role ON member_role.oid = membership.member
-      JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
-      WHERE member_role.rolname = ANY(${[DATA_RUNTIME_LOGIN, GRAPHQL_RUNTIME_LOGIN]}::text[])
+      WITH RECURSIVE inherited(login_role, role_oid, granted_role, admin_option, path) AS (
+        SELECT
+          member_role.rolname,
+          granted_role.oid,
+          granted_role.rolname,
+          membership.admin_option,
+          ARRAY[member_role.oid, granted_role.oid]
+        FROM pg_auth_members membership
+        JOIN pg_roles member_role ON member_role.oid = membership.member
+        JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+        WHERE member_role.rolname = ANY(${[DATA_RUNTIME_LOGIN, GRAPHQL_RUNTIME_LOGIN]}::text[])
 
-      UNION ALL
+        UNION ALL
 
-      SELECT
-        inherited.login_role,
-        granted_role.oid,
-        granted_role.rolname,
-        membership.admin_option,
-        inherited.path || granted_role.oid
+        SELECT
+          inherited.login_role,
+          granted_role.oid,
+          granted_role.rolname,
+          membership.admin_option,
+          inherited.path || granted_role.oid
+        FROM inherited
+        JOIN pg_auth_members membership ON membership.member = inherited.role_oid
+        JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+        WHERE NOT granted_role.oid = ANY(inherited.path)
+      )
+      SELECT login_role, granted_role, bool_or(admin_option) AS admin_option
       FROM inherited
-      JOIN pg_auth_members membership ON membership.member = inherited.role_oid
-      JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
-      WHERE NOT granted_role.oid = ANY(inherited.path)
-    )
-    SELECT login_role, granted_role, bool_or(admin_option) AS admin_option
-    FROM inherited
-    GROUP BY login_role, granted_role
-    ORDER BY login_role, granted_role
-  `;
+      GROUP BY login_role, granted_role
+      ORDER BY login_role, granted_role
+    `;
   return {
     roles: roleRows.map(roleAttributes),
     memberships: membershipRows.map((row) => ({
@@ -233,7 +217,11 @@ async function formattedStatement(
         `
       : operation === 'password'
         ? await client<Array<{ statement: string }>>`
-            SELECT format('ALTER ROLE %I PASSWORD %L', ${login}::text, ${value}::text) AS statement
+            SELECT format(
+              'ALTER ROLE %I PASSWORD %L',
+              ${login}::text,
+              ${value}::text
+            ) AS statement
           `
         : await client<Array<{ statement: string }>>`
             SELECT format('GRANT %I TO %I', ${value}::text, ${login}::text) AS statement
@@ -274,9 +262,14 @@ async function provisionLogin(
   }
 }
 
-export async function provisionRuntimeLogins(): Promise<RuntimeLoginProvisioningSnapshot> {
+async function main(): Promise<void> {
   const databaseUrl = requiredEnvironment('DATABASE_URL');
-  const passwords = runtimePasswords();
+  const dataPassword = requiredPassword('DATA_RUNTIME_DB_PASSWORD');
+  const graphqlPassword = requiredPassword('GRAPHQL_RUNTIME_DB_PASSWORD');
+  if (dataPassword === graphqlPassword) {
+    throw new Error('Data and GraphQL runtime passwords must be unique');
+  }
+
   const client = postgres(databaseUrl, { max: 1, prepare: false });
   try {
     await client.begin(async (transaction) => {
@@ -287,25 +280,37 @@ export async function provisionRuntimeLogins(): Promise<RuntimeLoginProvisioning
           throw new Error(`Runtime capability role ${capability} is missing or unsafe`);
         }
       }
-      await provisionLogin(
-        transaction,
-        DATA_RUNTIME_LOGIN,
-        DATA_RUNTIME_CAPABILITY,
-        passwords.data,
-      );
+      await provisionLogin(transaction, DATA_RUNTIME_LOGIN, DATA_RUNTIME_CAPABILITY, dataPassword);
       await provisionLogin(
         transaction,
         GRAPHQL_RUNTIME_LOGIN,
         GRAPHQL_RUNTIME_CAPABILITY,
-        passwords.graphql,
+        graphqlPassword,
       );
       assertRuntimeLoginProvisioningSnapshot(await inspectRoles(transaction));
     });
 
     const verified = await inspectRoles(client);
     assertRuntimeLoginProvisioningSnapshot(verified);
-    return verified;
+    console.log(
+      JSON.stringify(
+        {
+          operation: 'provision-runtime-logins',
+          roles: verified.roles,
+          memberships: verified.memberships,
+        },
+        null,
+        2,
+      ),
+    );
   } finally {
     await client.end();
   }
+}
+
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error('[provision-runtime-logins] failed', error);
+    process.exitCode = 1;
+  });
 }
