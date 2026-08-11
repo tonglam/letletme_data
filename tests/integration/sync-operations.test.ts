@@ -65,8 +65,6 @@ function publicationManifest(
 ): DataPublicationManifest {
   const payload = '[]';
   return {
-    schemaVersion: 'v3',
-    planVersion: '3.2.5',
     dataset: 'fpl:core',
     seasonCode: season.seasonCode,
     eventId: null,
@@ -74,20 +72,19 @@ function publicationManifest(
     publicationId,
     sourceCheckedAt: '2026-08-09T01:00:00.000Z',
     publishedAt: '2026-08-09T01:00:01.000Z',
-    items: [
-      {
-        name: 'events',
-        key: dataPublicationItemKey(
-          { dataset: 'fpl:core', seasonCode: season.seasonCode },
-          revision,
-          'events',
-        ),
-        type: 'string',
-        count: 0,
-        bytes: Buffer.byteLength(payload, 'utf8'),
-        sha256: createHash('sha256').update(payload, 'utf8').digest('hex'),
-      },
-    ],
+    state: 'active',
+    items: ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'].map((name) => ({
+      name,
+      key: dataPublicationItemKey(
+        { dataset: 'fpl:core', seasonCode: season.seasonCode },
+        revision,
+        name,
+      ),
+      type: 'string',
+      count: 0,
+      bytes: Buffer.byteLength(payload, 'utf8'),
+      sha256: createHash('sha256').update(payload, 'utf8').digest('hex'),
+    })),
   };
 }
 
@@ -144,7 +141,7 @@ describe('ops sync state machine', () => {
         status: 'completed',
         attempts: 2,
         sourceHash: 'new-hash',
-        normalizedPayload: { version: 2 },
+        normalizedPayload: { attempt: 2 },
         completedAt: new Date('2026-08-09T00:02:00.000Z'),
       },
     ]);
@@ -155,7 +152,7 @@ describe('ops sync state machine', () => {
         status: 'running',
         attempts: 1,
         sourceHash: 'stale-hash',
-        normalizedPayload: { version: 1 },
+        normalizedPayload: { attempt: 1 },
       },
     ]);
 
@@ -164,7 +161,7 @@ describe('ops sync state machine', () => {
         status: string;
         attempts: number;
         source_hash: string | null;
-        normalized_payload: { version: number } | null;
+        normalized_payload: { attempt: number } | null;
         completed_at: Date | string | null;
       }>
     >`
@@ -178,7 +175,7 @@ describe('ops sync state machine', () => {
       status: 'completed',
       attempts: 2,
       source_hash: 'new-hash',
-      normalized_payload: { version: 2 },
+      normalized_payload: { attempt: 2 },
     });
     expect(new Date(String(rows[0]?.completed_at)).toISOString()).toBe('2026-08-09T00:02:00.000Z');
   });

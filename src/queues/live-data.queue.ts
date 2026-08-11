@@ -1,7 +1,9 @@
-import type { MutationPriorityTier } from '../domain/job-priority';
-import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
+import { Queue } from 'bullmq';
 
-export const liveDataQueueName = 'live-data';
+import { getQueueConnection } from '../utils/queue';
+import { liveDataQueueName } from './names';
+
+export { liveDataQueueName } from './names';
 
 export const LIVE_JOBS = {
   LIVE_SNAPSHOT: 'live-snapshot',
@@ -21,35 +23,25 @@ export interface LiveDataJobData {
   finalizeEvent?: boolean;
 }
 
-const tieredQueueSet = createTieredQueueSet<LiveDataJobData>(liveDataQueueName, {
-  attempts: 3,
-  backoff: {
-    type: 'exponential',
-    delay: 60_000, // 1 minute
-  },
-  removeOnComplete: {
-    age: 86400, // 24 hours
-    count: 100,
-  },
-  removeOnFail: {
-    age: 172800, // 48 hours
-    count: 50,
+export const liveDataQueue = new Queue<LiveDataJobData>(liveDataQueueName, {
+  connection: getQueueConnection(),
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 60_000, // 1 minute
+    },
+    removeOnComplete: {
+      age: 86400, // 24 hours
+      count: 100,
+    },
+    removeOnFail: {
+      age: 172800, // 48 hours
+      count: 50,
+    },
   },
 });
 
-export const isLiveDataTieredQueueEnabled = tieredQueueSet.enabled;
-export const liveDataQueuesByTier = tieredQueueSet.queuesByTier;
-export const liveDataQueueNamesByTier = tieredQueueSet.queueNamesByTier;
-export const liveDataQueue = liveDataQueuesByTier.p3;
-
-export function getLiveDataQueue(tier: MutationPriorityTier) {
-  return liveDataQueuesByTier[tier];
-}
-
-export function getLiveDataQueueName(tier: MutationPriorityTier) {
-  return liveDataQueueNamesByTier[tier];
-}
-
 export async function closeLiveDataQueue() {
-  await closeTieredQueues(tieredQueueSet.uniqueQueues);
+  await liveDataQueue.close();
 }

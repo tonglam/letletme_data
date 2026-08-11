@@ -1,13 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
-import { MUTATION_PRIORITY_ORDER } from '../domain/job-priority';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
-import {
-  type DataSyncJobData,
-  dataSyncQueuesByTier,
-  getDataSyncQueueName,
-  isDataSyncTieredQueueEnabled,
-} from '../queues/data-sync.queue';
+import { type DataSyncJobData, dataSyncQueue, dataSyncQueueName } from '../queues/data-sync.queue';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
@@ -23,7 +17,6 @@ import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { formatCronDateKey } from '../utils/timezone';
-import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
@@ -94,69 +87,30 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
 
 export function createDataSyncWorker(): WorkerRuntime {
   const connection = getQueueConnection();
-  const activeTiers = isDataSyncTieredQueueEnabled ? MUTATION_PRIORITY_ORDER : (['p1'] as const);
-  const workers: Worker<DataSyncJobData>[] = [];
-  const queueEvents: QueueEvents[] = [];
-  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
+  const worker = new Worker<DataSyncJobData>(dataSyncQueueName, processDataSyncJob, {
+    connection,
+    lockDuration: 120_000,
+    maxStalledCount: 2,
+    stalledInterval: 15_000,
+  });
+  const queueEvents = new QueueEvents(dataSyncQueueName, { connection });
 
-  for (const tier of activeTiers) {
-    const queueName = getDataSyncQueueName(tier);
-    const worker = new Worker<DataSyncJobData>(queueName, processDataSyncJob, {
-      connection,
-      lockDuration: 120_000,
-      maxStalledCount: 2,
-      stalledInterval: 15_000,
+  worker.on('completed', (job) => {
+    logInfo('Data sync job completed', { jobId: job.id, name: job.name });
+  });
+
+  worker.on('failed', (job, error) => {
+    logError('Data sync job failed', error, {
+      jobId: job?.id,
+      name: job?.name,
+      attemptsMade: job?.attemptsMade,
     });
-    const events = new QueueEvents(queueName, { connection });
+    if (job) void alertOnFinalFailure(job, error);
+  });
 
-    worker.on('completed', (job) => {
-      logInfo('Data sync job completed', { jobId: job.id, name: job.name, tier });
-    });
-
-    worker.on('failed', (job, error) => {
-      logError('Data sync job failed', error, {
-        jobId: job?.id,
-        name: job?.name,
-        attemptsMade: job?.attemptsMade,
-        tier,
-      });
-      if (job) {
-        void alertOnFinalFailure(job, error);
-      }
-    });
-
-    workers.push(worker);
-    queueEvents.push(events);
-    monitorTargets.push({
-      queue: dataSyncQueuesByTier[tier],
-      queueEvents: events,
-      queueName,
-      tier,
-    });
-  }
-
-  const gate = startStrictPriorityGate(
-    'data-sync',
-    {
-      p0: { queue: dataSyncQueuesByTier.p0, worker: workersByTier(workers, activeTiers, 'p0') },
-      p1: { queue: dataSyncQueuesByTier.p1, worker: workersByTier(workers, activeTiers, 'p1') },
-      p2: { queue: dataSyncQueuesByTier.p2, worker: workersByTier(workers, activeTiers, 'p2') },
-      p3: { queue: dataSyncQueuesByTier.p3, worker: workersByTier(workers, activeTiers, 'p3') },
-    },
-    { enabled: isDataSyncTieredQueueEnabled },
-  );
-
-  return { workers, queueEvents, monitorTargets, stop: gate.stop };
-}
-
-function workersByTier(
-  workers: Worker<DataSyncJobData>[],
-  activeTiers: readonly string[],
-  tier: 'p0' | 'p1' | 'p2' | 'p3',
-) {
-  const index = activeTiers.indexOf(tier);
-  if (index >= 0) {
-    return workers[index];
-  }
-  return workers[0];
+  return {
+    workers: [worker],
+    queueEvents: [queueEvents],
+    monitorTargets: [{ queue: dataSyncQueue, queueEvents, queueName: dataSyncQueueName }],
+  };
 }

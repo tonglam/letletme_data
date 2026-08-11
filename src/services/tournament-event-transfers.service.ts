@@ -408,7 +408,6 @@ export async function syncTournamentEventTransfersPre(
         {
           elementInPlayed: false,
           defaultPoints: 0,
-          syncMode: 'all',
           checkpointThroughEventId: Math.max(0, eventId - 1),
           sourceCheckedAt,
         },

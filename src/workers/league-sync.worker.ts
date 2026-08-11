@@ -1,11 +1,9 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
-import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
-  getLeagueSyncQueueName,
-  isLeagueSyncTieredQueueEnabled,
-  leagueSyncQueuesByTier,
+  leagueSyncQueue,
+  leagueSyncQueueName,
   LEAGUE_JOBS,
   type LeagueSyncJobData,
 } from '../queues/league-sync.queue';
@@ -20,7 +18,6 @@ import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
-import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
 /**
@@ -91,85 +88,39 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
 
 export function createLeagueSyncWorker(): WorkerRuntime {
   const connection = getQueueConnection();
-  const activeTiers = isLeagueSyncTieredQueueEnabled ? MUTATION_PRIORITY_ORDER : (['p3'] as const);
-  const workers: Worker<LeagueSyncJobData>[] = [];
-  const queueEvents: QueueEvents[] = [];
-  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
+  const worker = new Worker<LeagueSyncJobData>(leagueSyncQueueName, processLeagueSyncJob, {
+    connection,
+    concurrency: 10,
+    removeOnComplete: { count: 100 },
+    removeOnFail: { count: 50 },
+    lockDuration: 120_000,
+    maxStalledCount: 2,
+    stalledInterval: 15_000,
+  });
+  const queueEvents = new QueueEvents(leagueSyncQueueName, { connection });
 
-  for (const tier of activeTiers) {
-    const queueName = getLeagueSyncQueueName(tier);
-    const worker = new Worker<LeagueSyncJobData>(queueName, processLeagueSyncJob, {
-      connection,
-      concurrency: 10,
-      removeOnComplete: { count: 100 },
-      removeOnFail: { count: 50 },
-      lockDuration: 120_000,
-      maxStalledCount: 2,
-      stalledInterval: 15_000,
+  worker.on('completed', (job) => {
+    logInfo('League sync worker completed job', {
+      jobId: job.id,
+      jobName: job.name,
+      eventId: job.data.eventId,
+      tournamentId: job.data.tournamentId,
     });
-    const events = new QueueEvents(queueName, { connection });
-
-    worker.on('completed', (job) => {
-      logInfo('League sync worker completed job', {
-        jobId: job.id,
-        jobName: job.name,
-        eventId: job.data.eventId,
-        tournamentId: job.data.tournamentId,
-        tier,
-      });
+  });
+  worker.on('failed', (job, err) => {
+    logError('League sync worker failed job', err, {
+      jobId: job?.id,
+      jobName: job?.name,
+      eventId: job?.data.eventId,
+      tournamentId: job?.data.tournamentId,
     });
+    if (job) void alertOnFinalFailure(job, err);
+  });
+  worker.on('error', (err) => logError('League sync worker error', err));
 
-    worker.on('failed', (job, err) => {
-      logError('League sync worker failed job', err, {
-        jobId: job?.id,
-        jobName: job?.name,
-        eventId: job?.data.eventId,
-        tournamentId: job?.data.tournamentId,
-        tier,
-      });
-      if (job) {
-        void alertOnFinalFailure(job, err);
-      }
-    });
-
-    worker.on('error', (err) => {
-      logError('League sync worker error', err, { tier });
-    });
-
-    workers.push(worker);
-    queueEvents.push(events);
-    monitorTargets.push({
-      queue: leagueSyncQueuesByTier[tier],
-      queueEvents: events,
-      queueName,
-      tier,
-    });
-  }
-
-  const workerByTier = buildWorkerTierMap(workers, activeTiers);
-  const gate = startStrictPriorityGate(
-    'league-sync',
-    {
-      p0: { queue: leagueSyncQueuesByTier.p0, worker: workerByTier.p0 },
-      p1: { queue: leagueSyncQueuesByTier.p1, worker: workerByTier.p1 },
-      p2: { queue: leagueSyncQueuesByTier.p2, worker: workerByTier.p2 },
-      p3: { queue: leagueSyncQueuesByTier.p3, worker: workerByTier.p3 },
-    },
-    { enabled: isLeagueSyncTieredQueueEnabled },
-  );
-
-  return { workers, queueEvents, monitorTargets, stop: gate.stop };
-}
-
-function buildWorkerTierMap(
-  workers: Worker<LeagueSyncJobData>[],
-  activeTiers: readonly MutationPriorityTier[],
-): Record<MutationPriorityTier, Worker<LeagueSyncJobData>> {
-  const fallback = workers[0];
-  const workerByTier = {} as Record<MutationPriorityTier, Worker<LeagueSyncJobData>>;
-  for (const tier of MUTATION_PRIORITY_ORDER) {
-    const index = activeTiers.indexOf(tier);
-    workerByTier[tier] = index >= 0 ? workers[index] : fallback;
-  }
-  return workerByTier;
+  return {
+    workers: [worker],
+    queueEvents: [queueEvents],
+    monitorTargets: [{ queue: leagueSyncQueue, queueEvents, queueName: leagueSyncQueueName }],
+  };
 }

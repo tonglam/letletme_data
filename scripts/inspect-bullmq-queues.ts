@@ -12,30 +12,8 @@ import 'dotenv/config';
 
 import { Queue } from 'bullmq';
 
+import { queueNames } from '../src/queues/names';
 import { getQueueConnection } from '../src/utils/queue';
-
-const TIER_SUFFIXES = ['p0', 'p1', 'p2', 'p3'] as const;
-
-function tieredQueuesEnabled(): boolean {
-  const v = (process.env.ENABLE_TIERED_MUTATION_QUEUES ?? '').trim().toLowerCase();
-  return ['1', 'true', 'yes', 'on'].includes(v);
-}
-
-function expandQueueBase(base: string): string[] {
-  if (!tieredQueuesEnabled()) {
-    return [base];
-  }
-  return TIER_SUFFIXES.map((t) => `${base}-${t}`);
-}
-
-const QUEUE_BASES = [
-  'data-sync',
-  'live-data',
-  'entry-sync',
-  'league-sync',
-  'tournament-sync',
-  'tournament-setup',
-] as const;
 
 async function main(): Promise<void> {
   const jobIdArg = process.argv[2];
@@ -44,7 +22,6 @@ async function main(): Promise<void> {
   console.log(
     JSON.stringify(
       {
-        tieredQueues: tieredQueuesEnabled(),
         redis: {
           host: connection.host,
           port: connection.port,
@@ -56,9 +33,7 @@ async function main(): Promise<void> {
     ),
   );
 
-  const names = QUEUE_BASES.flatMap((b) => expandQueueBase(b));
-
-  for (const name of names) {
+  for (const name of queueNames) {
     const queue = new Queue(name, { connection });
     const counts = await queue.getJobCounts(
       'waiting',
@@ -101,7 +76,7 @@ async function main(): Promise<void> {
 
   if (jobIdArg) {
     console.log(
-      '(If job not printed above, it was not found in these queues — wrong id, tier flag mismatch vs prod, or removed by removeOnComplete/removeOnFail.)',
+      '(If the job was not printed above, it was not found in these queues or was removed by its retention policy.)',
     );
   }
 }

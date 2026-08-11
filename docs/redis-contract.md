@@ -1,150 +1,117 @@
-# Redis Contract — LetLetMe Data Platform v3
+# Redis contract
 
-**Status:** authoritative v3 writer/reader contract
-**Owner:** `letletme_data` for Data publications and worker coordination
-**Schema version:** `v3`
-
-## Invariants
-
-1. PostgreSQL is canonical. Redis contains rebuildable read models and worker state only.
-2. `fpl.seasons.is_current` is the sole current-season authority. Redis and wall-clock season
-   inference are not authorities.
-3. Cache and queue clients must resolve to different host/port/database tuples. Production must
-   explicitly configure both `CACHE_REDIS_*` and `QUEUE_REDIS_*`.
-4. A Data publication is one immutable revision. Writers stage every item, validate it, and move
-   one active manifest pointer atomically.
-5. Readers accept every item from one validated manifest or reject the whole revision and use one
-   coherent PostgreSQL fallback. Per-item cache/DB mixing is forbidden.
-6. Data never writes GraphQL query-cache keys and never scans/deletes GraphQL keys during normal
-   operation.
-7. `FLUSHDB`, `FLUSHALL`, broad `KEYS`, and unscoped deletion are prohibited.
+PostgreSQL is canonical. Redis contains only rebuildable publications, TTL-bound GraphQL query and
+security caches, BullMQ state, and bounded worker coordination state.
 
 ## Endpoint ownership
 
-| Configuration | Contents | Default local DB |
+| Configuration | Contents | Local database |
 | --- | --- | ---: |
-| `CACHE_REDIS_*` | Rebuildable immutable Data publications | 0 |
-| `QUEUE_REDIS_*` | BullMQ and worker coordination/dedupe state | 1 |
+| `CACHE_REDIS_*` | Data publications and GraphQL query/security caches | 0 |
+| `QUEUE_REDIS_*` | BullMQ and worker coordination | 1 |
 
-Application startup rejects an identical cache and queue endpoint. Cache outages must not corrupt
-or block BullMQ state; queue outages must not mutate an active Data publication.
+Startup rejects identical cache and queue tuples. Understat business data is deliberately not
+cached.
 
-## Data publication namespace
+## Data publications
 
-All Data cache keys begin with `llm:v3:data`.
+Core keys:
 
-### Core
+```text
+llm:data:fpl:core:<season>:active
+llm:data:fpl:core:<season>:<revision>:<item>
+```
 
-| Purpose | Key |
-| --- | --- |
-| Active manifest | `llm:v3:data:fpl:core:{season}:active` |
-| Immutable item | `llm:v3:data:fpl:core:{season}:{revision}:{item}` |
+Core items are exactly `events`, `teams`, `players`, `phases`, `fixtures`, and `currentEventId`.
 
-Core items are `events`, `teams`, `players`, `phases`, `fixtures`, and `currentEventId`.
+Live keys:
 
-### Live event
+```text
+llm:data:fpl:live:<season>:<event>:active
+llm:data:fpl:live:<season>:<event>:<revision>:<item>
+```
 
-| Purpose | Key |
-| --- | --- |
-| Active manifest | `llm:v3:data:fpl:live:{season}:{event}:active` |
-| Immutable item | `llm:v3:data:fpl:live:{season}:{event}:{revision}:{item}` |
+Live items are exactly `eventLives`, `fixtures`, `liveFixtures`, and `liveBonus`. A live manifest
+state is `scheduled`, `live`, or `settled`.
 
-Live items are `eventLives`, `fixtures`, `liveFixtures`, `liveFixturesV2`, `liveBonus`, and
-`liveBonusV2`. The manifest state is `scheduled`, `live`, or `settled`.
+The active manifest has this exact top-level field set:
 
-`{season}` is a four-digit short code such as `2627`; `{event}` and `{revision}` are positive
-integers. Item names are lower camel case. Every item is a JSON string and carries type, count,
-UTF-8 byte length, and SHA-256 evidence in the active manifest.
+- `dataset`, `seasonCode`, nullable `eventId`, `revision`, and `publicationId`;
+- `sourceCheckedAt`, `publishedAt`, and `state`;
+- `items`.
 
-## Manifest contract
+Each item contains exactly `name`, `key`, `type`, `count`, `bytes`, and `sha256`. Readers validate
+the exact field and item sets, scope, key prefix, Redis type, byte length, count, JSON payload, and
+SHA-256 before accepting a publication. A rejected publication falls back to one coherent
+PostgreSQL read model; per-item Redis/PostgreSQL mixing is prohibited.
 
-An active manifest contains:
+### Publication lifecycle
 
-- `schemaVersion`, `dataset`, `seasonCode`, and nullable `eventId`;
-- monotonic PostgreSQL-reserved `revision` and UUID `publicationId`;
-- database-clock `sourceCheckedAt` and diagnostic `publishedAt`;
-- optional live `state`;
-- the complete item list with `name`, exact `key`, Redis `type`, `count`, `bytes`, and `sha256`.
+1. Reserve a monotonically increasing revision in `ops.dataset_publications`.
+2. Stage every immutable item with a 15-minute TTL.
+3. Persist and validate the complete PostgreSQL scope.
+4. Verify all staged keys and atomically replace the active manifest in Lua.
+5. Persist accepted items and give replaced items a 24-hour TTL.
+6. Mark the database publication active and its predecessor retired.
 
-Readers reject malformed scope, missing items, wrong Redis type, count/size/hash mismatch, invalid
-JSON, duplicate item names, or an item key outside the manifest revision prefix.
-
-## Publication and TTL lifecycle
-
-1. Reserve `ops.dataset_publications.revision` and create a `staging` row linked to
-   `ops.sync_runs`.
-2. Write every immutable item with a 15-minute staging TTL.
-3. Complete durable PostgreSQL persistence and revalidate the explicit season/scope.
-4. In one Lua operation, verify every staged key and atomically replace the active manifest.
-5. Remove staging TTLs from accepted items and give items from the prior revision a 24-hour TTL.
-6. Mark the new ops publication `active`, the prior one `retired`, and the run `published`.
-
-Ordering is by `sourceCheckedAt`, then revision. Repeating the same publication ID is idempotent.
-An older/equal competing revision is `skipped`, not `failed`. If the process stops after the Redis
-swap but before the ops transaction, recovery activates the exact staging row referenced by the
-validated manifest; it never manufactures or regresses a revision.
+Repeating the same publication ID is idempotent. Ordering uses `sourceCheckedAt`, then revision; an
+older competing candidate cannot replace the active pointer.
 
 | State | TTL |
 | --- | ---: |
 | Active manifest | none |
-| Active revision items | none |
-| Unactivated staging items | 15 minutes |
-| Retired revision items | 24 hours |
+| Active items | none |
+| Unactivated staged items | 15 minutes |
+| Replaced items | 24 hours |
 
-## Queue and coordination namespace
+## GraphQL cache ownership
 
-BullMQ keys remain `bull:{queue}:*`, but exist only on `QUEUE_REDIS_*`. Owned queues are
-`data-sync`, `entry-sync`, `live-data`, `league-sync`, `tournament-sync`, and
-`tournament-setup`, including optional `-p0` through `-p3` tier suffixes. The migrated v3 queue
-topology also retains `understat-team-sync` and `understat-player-sync` metadata as durable DB
-identity anchors. Their clients are created lazily, so the default disabled Understat runtime opens
-no provider queue connection even though those metadata keys remain present.
+GraphQL owns these DB0 families:
 
-Runtime redeploy acceptance stops API and worker, then compares two consecutive type-aware queue
-manifests before restarting either producer. It excludes only BullMQ `stalled-check` and per-job
-lock leases that still have a positive TTL (or disappear during inspection). Persistent leases and
-non-empty `active` lists fail closed. The manifest also requires the exact configured queue-name
-set, every queue's durable `meta` key, and at least one durable job-state key, so an
-empty/flushed/wrong Redis database cannot self-approve. The exact DB0-to-DB1 migration manifest
-still includes every key and remains the immutable cutover artifact.
+```text
+llm:gql:<dataset-revision>:<query-name>:<args-hash>
+llm:gql:security:rate:<scope>:<subject>
+```
 
-Non-BullMQ worker state begins with `llm:v3:queue:coordination:*`, including mutation locks,
-Understat request-permit leases, tournament cascade barriers, daily entry-sync markers, and
-launch-notification dedupe. It must not be written with the cache client.
+Query invalidation follows dataset revision plus TTL. Data never writes, scans, or removes GraphQL
+keys during normal operation.
+
+## BullMQ and coordination
+
+BullMQ uses `bull:<queue>:*` in DB1. The eight owned queues are:
+
+- `data-sync`, `entry-sync`, `live-data`, and `league-sync`;
+- `tournament-sync` and `tournament-setup`;
+- `understat-team-sync` and `understat-player-sync`.
+
+Understat queues are opened lazily. Their completed jobs retain at most 20 records for seven days;
+failed jobs retain at most 50 records for fourteen days.
+
+Non-BullMQ state uses:
+
+```text
+llm:queue:coordination:<purpose>
+```
+
+Purposes include mutation locks, Understat request permits, tournament cascade barriers, daily
+entry-sync markers, and launch-notification deduplication. Coordination keys must use the queue
+client and carry a purpose-specific bounded TTL or documented durable-marker lifecycle.
 
 ## Deliberately uncached data
 
-- Understat ingestion writes business data and staged evidence only to PostgreSQL. Data publishes
-  no Understat Redis read-model/cache keys; its short-lived request permits are queue-coordination
-  state under `llm:v3:queue:coordination:*`.
-- Player market history is read from PostgreSQL; `PlayerValue:*` is retired.
-- Player season summaries are reporting reads; `EventLiveSummary:*` is retired.
-- Tournament selection statistics and tournament entry-event summaries are reporting MVs, not
-  Data Redis entities.
+- Understat facts and normalized staging evidence;
+- player market history and value changes;
+- player season summaries;
+- tournament selection and entry-event reporting.
 
-GraphQL may own revision-keyed query caches under `llm:v3:gql:*`. Those keys are outside the Data
-writer contract and have their own query TTLs.
+These remain PostgreSQL reads. Redis loss may reduce performance, but cannot remove canonical
+business data.
 
-## Legacy retirement
+## Safety rules
 
-`src/cache/legacy-cleanup.ts` is the only v2 key-retirement implementation. It:
-
-- defaults to dry-run;
-- accepts only immutable, code-defined cleanup groups;
-- enumerates with cursor-based `SCAN MATCH`;
-- deduplicates and sorts exact keys, then records a SHA-256 key manifest;
-- enforces a maximum matched-key bound before any mutation;
-- deletes in bounded `UNLINK` batches; and
-- contains no `DEL`, `FLUSHDB`, or `FLUSHALL` path.
-
-Cleanup groups are independently gated:
-
-| Group | Scope | Earliest safe point |
-| --- | --- | --- |
-| `dataCache` | v2 FPL/Understat Data cache and abandoned staging/backup keys | v3 Data + GraphQL readers active |
-| `dataCoordination` | old Data dedupe/lock/cascade keys in cache DB | workers stopped and v3 queue state active |
-| `graphqlCache` | old `gql:v2`, `player_state`, and `PlayerValueMissing` keys | GraphQL v3 hard cutover verified |
-| `legacyQueueDb0` | exact Data/Understat BullMQ queue names left in DB 0 | queue copy/drain verification complete |
-
-The operator must save the dry-run key list/hash, compare it to the cutover inventory, and use the
-same groups and safety bound for execution. Unknown keys and every `llm:v3:*` key survive.
+- Never use `KEYS`, `FLUSHDB`, `FLUSHALL`, or unbounded deletion in application code.
+- Operational removal resolves an exact namespace with cursor-based `SCAN`, records key type and
+  TTL, applies a maximum-count bound, and deletes exact keys with bounded `UNLINK` batches.
+- A publication writer may only retire keys named by the previously validated active manifest.
+- Current-season authority is exactly one `fpl.seasons.is_current=true` row; Redis and wall-clock
+  inference are not authorities.

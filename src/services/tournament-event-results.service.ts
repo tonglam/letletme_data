@@ -261,8 +261,8 @@ export async function syncTournamentEventResultsForEntryIds(
           pointsByElement,
           // The endpoint returned the entrant's complete transfer history.
           // Persist and checkpoint that same scope so the following audit
-          // cannot reject a successful legacy/backfill repair.
-          { syncMode: 'all', sourceCheckedAt: transferSourceCheckedAt! },
+          // cannot reject a successful backfill repair.
+          { sourceCheckedAt: transferSourceCheckedAt! },
         );
       }
       return { entryId, success: true } satisfies EntrySyncOutcome;
@@ -351,7 +351,6 @@ export async function syncEntryTransferHistories(
           transfers,
           undefined,
           {
-            syncMode: 'all',
             sourceCheckedAt,
           },
         ),

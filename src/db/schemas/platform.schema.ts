@@ -1,3 +1,4 @@
+// Canonical PostgreSQL schema mapping shared by runtime readers and writers.
 import {
   pgSchema,
   foreignKey,
@@ -141,39 +142,6 @@ export const seasonImportsInOps = ops.table(
       'season_imports_completion_order',
       sql`(completed_at IS NULL) OR (started_at IS NULL) OR (completed_at >= started_at)`,
     ),
-  ],
-);
-
-export const migrationRunsInOps = ops.table(
-  'migration_runs',
-  {
-    runId: text('run_id').primaryKey().notNull(),
-    planVersion: text('plan_version').notNull(),
-    sourceProject: text('source_project').notNull(),
-    sourcePostgresVersion: text('source_postgres_version').notNull(),
-    sourceDataSha: text('source_data_sha').notNull(),
-    status: text().default('running').notNull(),
-    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
-    metadata: jsonb().default({}).notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-  },
-  (_table) => [
-    check(
-      'migration_runs_run_id_format',
-      sql`run_id ~ '^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$'::text`,
-    ),
-    check('migration_runs_plan_version_nonempty', sql`btrim(plan_version) <> ''::text`),
-    check('migration_runs_source_sha_format', sql`source_data_sha ~ '^[0-9a-f]{7,40}$'::text`),
-    check(
-      'migration_runs_status_valid',
-      sql`status = ANY (ARRAY['running'::text, 'validated'::text, 'activated'::text, 'failed'::text, 'rolled_back'::text])`,
-    ),
-    check(
-      'migration_runs_completion_order',
-      sql`(completed_at IS NULL) OR (completed_at >= started_at)`,
-    ),
-    check('migration_runs_metadata_object', sql`jsonb_typeof(metadata) = 'object'::text`),
   ],
 );
 
@@ -595,7 +563,7 @@ export const entityLinksInBridge = bridge.table(
     rightEntityId: text('right_entity_id').notNull(),
     status: linkStatusInBridge().notNull(),
     method: text().notNull(),
-    ruleVersion: text('rule_version').notNull(),
+    ruleId: text('rule_id').notNull(),
     evidence: jsonb().default({}).notNull(),
     firstSeenSeason: text('first_seen_season'),
     lastSeenSeason: text('last_seen_season'),
@@ -642,8 +610,8 @@ export const entityLinksInBridge = bridge.table(
       .nullsNotDistinct(),
     check('bridge_entity_links_distinct_providers', sql`left_provider <> right_provider`),
     check(
-      'bridge_entity_links_fields_nonempty',
-      sql`(btrim(left_provider) <> ''::text) AND (btrim(right_provider) <> ''::text) AND (btrim(right_entity_id) <> ''::text) AND (btrim(method) <> ''::text) AND (btrim(rule_version) <> ''::text)`,
+      'bridge_entity_links_required_fields_nonempty',
+      sql`(btrim(left_provider) <> ''::text) AND (btrim(right_provider) <> ''::text) AND (btrim(right_entity_id) <> ''::text) AND (btrim(method) <> ''::text) AND (btrim(rule_id) <> ''::text)`,
     ),
     check(
       'bridge_entity_links_verified_complete',
@@ -668,7 +636,7 @@ export const matchLinksInBridge = bridge.table(
     rightMatchId: text('right_match_id').notNull(),
     status: linkStatusInBridge().notNull(),
     method: text().notNull(),
-    ruleVersion: text('rule_version').notNull(),
+    ruleId: text('rule_id').notNull(),
     evidence: jsonb().default({}).notNull(),
     reviewedBy: text('reviewed_by'),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true, mode: 'date' }),
@@ -711,8 +679,8 @@ export const matchLinksInBridge = bridge.table(
     check('bridge_match_links_season_format', sql`season_code ~ '^[0-9]{4}$'::text`),
     check('bridge_match_links_distinct_providers', sql`left_provider <> right_provider`),
     check(
-      'bridge_match_links_fields_nonempty',
-      sql`(btrim(left_provider) <> ''::text) AND (btrim(left_match_id) <> ''::text) AND (btrim(right_provider) <> ''::text) AND (btrim(right_match_id) <> ''::text) AND (btrim(method) <> ''::text) AND (btrim(rule_version) <> ''::text)`,
+      'bridge_match_links_required_fields_nonempty',
+      sql`(btrim(left_provider) <> ''::text) AND (btrim(left_match_id) <> ''::text) AND (btrim(right_provider) <> ''::text) AND (btrim(right_match_id) <> ''::text) AND (btrim(method) <> ''::text) AND (btrim(rule_id) <> ''::text)`,
     ),
     check('bridge_match_links_evidence_object', sql`jsonb_typeof(evidence) = 'object'::text`),
   ],
@@ -1314,58 +1282,6 @@ export const entryLeaguesInCompetition = competition.table(
     check(
       'entry_leagues_started_event_positive',
       sql`(started_event IS NULL) OR (started_event > 0)`,
-    ),
-  ],
-);
-
-export const migrationObjectsInOps = ops.table(
-  'migration_objects',
-  {
-    runId: text('run_id').notNull(),
-    checkName: text('check_name').notNull(),
-    sourceObject: text('source_object').default('').notNull(),
-    targetObject: text('target_object').default('').notNull(),
-    querySha256: text('query_sha256').notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    sourceRowCount: bigint('source_row_count', { mode: 'number' }),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    targetRowCount: bigint('target_row_count', { mode: 'number' }),
-    sourceHash: text('source_hash'),
-    targetHash: text('target_hash'),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    failedCount: bigint('failed_count', { mode: 'number' }).default(0).notNull(),
-    sampleFailedKeys: jsonb('sample_failed_keys').default([]).notNull(),
-    status: text().notNull(),
-    executedAt: timestamp('executed_at', { withTimezone: true, mode: 'date' })
-      .defaultNow()
-      .notNull(),
-  },
-  (table) => [
-    index('migration_objects_status_idx').using(
-      'btree',
-      table.runId.asc().nullsLast(),
-      table.status.asc().nullsLast(),
-      table.executedAt.asc().nullsLast(),
-    ),
-    foreignKey({
-      columns: [table.runId],
-      foreignColumns: [migrationRunsInOps.runId],
-      name: 'migration_objects_run_fk',
-    }).onDelete('cascade'),
-    primaryKey({
-      columns: [table.runId, table.checkName, table.sourceObject, table.targetObject],
-      name: 'migration_objects_pkey',
-    }),
-    check('migration_objects_check_name_nonempty', sql`btrim(check_name) <> ''::text`),
-    check('migration_objects_query_hash_sha256', sql`query_sha256 ~ '^[0-9a-f]{64}$'::text`),
-    check(
-      'migration_objects_counts_nonnegative',
-      sql`((source_row_count IS NULL) OR (source_row_count >= 0)) AND ((target_row_count IS NULL) OR (target_row_count >= 0)) AND (failed_count >= 0)`,
-    ),
-    check('migration_objects_samples_array', sql`jsonb_typeof(sample_failed_keys) = 'array'::text`),
-    check(
-      'migration_objects_status_valid',
-      sql`status = ANY (ARRAY['passed'::text, 'failed'::text, 'accepted_exception'::text])`,
     ),
   ],
 );
@@ -3145,7 +3061,7 @@ export const playerMarketSnapshotsInFpl = fpl.table(
     ),
     check(
       'player_market_snapshots_source_valid',
-      sql`((snapshot_source = 'upstream'::text) AND (source_snapshot_id IS NOT NULL) AND (source_value_id IS NULL)) OR ((snapshot_source = 'legacy_value_seed'::text) AND (source_snapshot_id IS NULL) AND (source_value_id IS NOT NULL) AND (source_event_id IS NOT NULL))`,
+      sql`((snapshot_source = 'upstream'::text) AND (source_snapshot_id IS NOT NULL) AND (source_value_id IS NULL)) OR ((snapshot_source = 'value_seed'::text) AND (source_snapshot_id IS NULL) AND (source_value_id IS NOT NULL) AND (source_event_id IS NOT NULL))`,
     ),
     check('player_market_snapshots_price_nonnegative', sql`price >= 0`),
     check(

@@ -212,7 +212,7 @@ export async function evaluateLaunchMonitor(
     const redis = await dependencies.getRedis();
     const delivery = await sendLaunchNotificationOnce(
       redis,
-      `llm:v3:queue:coordination:launch-notification:warning:${now.getFullYear()}`,
+      `llm:queue:coordination:launch-notification:warning:${now.getFullYear()}`,
       '【NEW SEASON】WARNING! WARNING! WARNING!',
       dependencies,
     );
@@ -231,7 +231,7 @@ export async function evaluateLaunchMonitor(
   const redis = await dependencies.getRedis();
   const delivery = await sendLaunchNotificationOnce(
     redis,
-    `llm:v3:queue:coordination:launch-notification:happening:${publishedSeason}`,
+    `llm:queue:coordination:launch-notification:happening:${publishedSeason}`,
     '【NEW SEASON】ITS HAPPENING!!!',
     dependencies,
   );

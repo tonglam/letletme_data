@@ -234,7 +234,6 @@ export async function reconcileTournamentRoster(
       jobName: 'reconcile-authoritative-roster',
       tournamentId,
       scopes: [tournamentSetupLifecycleScope(tournamentId)],
-      required: true,
     },
     () => reconcileTournamentRosterUnlocked(season, tournamentId, options),
   );
@@ -267,7 +266,6 @@ export async function reconcileOfficialTournamentRosters(season: FplSeasonRef): 
           jobName: 'reconcile-authoritative-roster',
           tournamentId: tournament.id,
           scopes: [tournamentSetupLifecycleScope(tournament.id)],
-          required: true,
         },
         () => reconcileTournamentRosterUnlocked(season, tournament.id),
       );

@@ -13,12 +13,14 @@ services:
       target: runner
     profiles: ['migration']
     env_file:
+      - path: .env.deploy
+        required: false
       - path: ${MIGRATION_ENV_FILE:-.env.migrate}
         required: true
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
-    command: bun scripts/v3-migration-login-contract.ts
+    command: bun scripts/migration-login-contract.ts
     logging: *default-logging
     restart: 'no'
 

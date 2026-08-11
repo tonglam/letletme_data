@@ -197,7 +197,7 @@ export type TournamentBackfillWindow = {
 };
 
 export type TournamentSetupRequestEstimate = {
-  legacyColdStart: number;
+  unoptimizedColdStart: number;
   optimizedColdStartUpperBound: number;
   optimizedTransferHistoryRequests: number;
   coreStandingsBaseline: number;
@@ -210,7 +210,7 @@ export const estimateTournamentSetupRequests = (
   const entries = Math.max(0, Math.trunc(entryCount));
   const events = Math.max(0, Math.trunc(eventCount));
   return {
-    legacyColdStart: 2 * entries + events + 2 * entries * events,
+    unoptimizedColdStart: 2 * entries + events + 2 * entries * events,
     optimizedColdStartUpperBound: 3 * entries + events + entries * events,
     optimizedTransferHistoryRequests: entries,
     coreStandingsBaseline: 2 * entries,

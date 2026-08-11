@@ -1,7 +1,9 @@
-import type { MutationPriorityTier } from '../domain/job-priority';
-import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
+import { Queue } from 'bullmq';
 
-export const entrySyncQueueName = 'entry-sync';
+import { getQueueConnection } from '../utils/queue';
+import { entrySyncQueueName } from './names';
+
+export { entrySyncQueueName } from './names';
 
 export type EntrySyncJobName = 'entry-info' | 'entry-picks' | 'entry-transfers' | 'entry-results';
 
@@ -37,8 +39,6 @@ export interface EntrySyncJobData {
   triggeredAt: string;
   entryIds?: number[];
   retryCount?: number;
-  /** Legacy in-flight job compatibility; new table scans use afterEntryId. */
-  chunkOffset?: number;
   afterEntryId?: number;
   /** Continue the table scan here only after an exact failed-ID retry succeeds. */
   resumeAfterEntryId?: number;
@@ -52,29 +52,19 @@ export interface EntrySyncJobData {
   removeOnSettle?: boolean;
 }
 
-const tieredQueueSet = createTieredQueueSet<EntrySyncJobData>(entrySyncQueueName, {
-  attempts: 3,
-  backoff: {
-    type: 'exponential',
-    delay: 60_000,
+export const entrySyncQueue = new Queue<EntrySyncJobData>(entrySyncQueueName, {
+  connection: getQueueConnection(),
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 60_000,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 200,
   },
-  removeOnComplete: 100,
-  removeOnFail: 200,
 });
 
-export const isEntrySyncTieredQueueEnabled = tieredQueueSet.enabled;
-export const entrySyncQueuesByTier = tieredQueueSet.queuesByTier;
-export const entrySyncQueueNamesByTier = tieredQueueSet.queueNamesByTier;
-export const entrySyncQueue = entrySyncQueuesByTier.p2;
-
-export function getEntrySyncQueue(tier: MutationPriorityTier) {
-  return entrySyncQueuesByTier[tier];
-}
-
-export function getEntrySyncQueueName(tier: MutationPriorityTier) {
-  return entrySyncQueueNamesByTier[tier];
-}
-
 export async function closeEntrySyncQueue() {
-  await closeTieredQueues(tieredQueueSet.uniqueQueues);
+  await entrySyncQueue.close();
 }

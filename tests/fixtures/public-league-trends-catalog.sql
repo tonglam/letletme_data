@@ -123,6 +123,20 @@ SELECT
 FROM fpl.seasons season
 WHERE season.season_code = '2627';
 
+INSERT INTO competition.tournament_entries (
+  tournament_id,
+  season_id,
+  league_id,
+  entry_id
+)
+SELECT
+  900001,
+  season.season_id,
+  900001,
+  900001
+FROM fpl.seasons season
+WHERE season.season_code = '2627';
+
 INSERT INTO public.public_league_trends_catalog (
   tournament_id,
   display_name,

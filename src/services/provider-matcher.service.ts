@@ -17,7 +17,9 @@ import {
 import { providerIdentityRepository } from '../repositories/provider-identity';
 import { fplSeasonDataRepository } from '../repositories/fpl-season-data';
 
-const RULE_VERSION = 'understat-fpl-v1';
+const TEAM_RULE_ID = 'understat-fpl-team-season-confirmation';
+const MATCH_RULE_ID = 'understat-fpl-match-kickoff-score';
+const PLAYER_RULE_ID = 'understat-fpl-player-roster-evidence';
 const VERIFIED_STATUSES = ['auto_verified', 'manual_verified'] as const;
 
 export function isAutoMappingProtectedStatus(status: ProviderLinkStatus): boolean {
@@ -80,7 +82,7 @@ function understatPositionTypes(position: string, seasonPosition: string | null)
   return result;
 }
 
-export function rosterEvidenceCompatible(
+export function rosterEvidenceAligns(
   fpl: FplFixturePlayerEvidence,
   understat: UnderstatRosterEvidence,
   mappedTeamCode: number | undefined,
@@ -227,7 +229,7 @@ export async function manualVerifyProviderTeam(input: {
     rightEntityId: String(input.fplTeamCode),
     status: 'manual_verified',
     method: 'manual-season-team-confirmation',
-    ruleVersion: RULE_VERSION,
+    ruleId: TEAM_RULE_ID,
     season: input.season,
     reviewedBy: input.reviewedBy,
     evidence: {
@@ -324,7 +326,7 @@ export async function reconcileProviderMatches(season: string) {
         rightMatchId: String(candidate.fixtureCode),
         status,
         method: 'verified-teams-kickoff-score',
-        ruleVersion: RULE_VERSION,
+        ruleId: MATCH_RULE_ID,
         evidence: {
           kickoffDifferenceSeconds:
             Math.abs(match.kickoffAt.getTime() - candidate.kickoffAt!.getTime()) / 1000,
@@ -408,9 +410,7 @@ export async function reconcileProviderPlayers(season: string) {
     if (!matchId) continue;
     let candidates = new Set(
       (rosterByMatch.get(matchId) ?? [])
-        .filter((understat) =>
-          rosterEvidenceCompatible(fpl, understat, teamMap.get(understat.teamId)),
-        )
+        .filter((understat) => rosterEvidenceAligns(fpl, understat, teamMap.get(understat.teamId)))
         .map((understat) => understat.playerId),
     );
     if (candidates.size > 1) {
@@ -495,7 +495,7 @@ export async function reconcileProviderPlayers(season: string) {
       rightEntityId: String(playerCode),
       status: 'auto_verified',
       method: 'verified-match-roster-bipartite',
-      ruleVersion: RULE_VERSION,
+      ruleId: PLAYER_RULE_ID,
       season,
       evidence: {
         understatName: understat.name,
@@ -540,7 +540,7 @@ export async function reconcileProviderPlayers(season: string) {
         rightEntityId: String(playerCode),
         status,
         method: 'verified-match-roster-candidate',
-        ruleVersion: RULE_VERSION,
+        ruleId: PLAYER_RULE_ID,
         season,
         evidence: {
           understatName: understat.name,

@@ -68,7 +68,6 @@ export function resolveBullMqAttemptQueueWaitMs(
 
 export interface DataSyncAttemptReport {
   event: 'data_sync_attempt';
-  schemaVersion: 1;
   queue: string;
   jobName: string;
   runId: string;
@@ -226,7 +225,6 @@ export async function runDataSyncAttempt<T>(
       targetEventId ??= context.targetEventId;
       const report: DataSyncAttemptReport = {
         event: 'data_sync_attempt',
-        schemaVersion: 1,
         queue: context.queue,
         jobName: context.jobName,
         runId: context.runId,

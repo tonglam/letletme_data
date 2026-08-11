@@ -1,8 +1,10 @@
-import type { MutationPriorityTier } from '../domain/job-priority';
-import type { TournamentFinalizationTarget } from '../domain/tournament';
-import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
+import { Queue } from 'bullmq';
 
-export const tournamentSyncQueueName = 'tournament-sync';
+import type { TournamentFinalizationTarget } from '../domain/tournament';
+import { getQueueConnection } from '../utils/queue';
+import { tournamentSyncQueueName } from './names';
+
+export { tournamentSyncQueueName } from './names';
 
 export const TOURNAMENT_JOBS = {
   // Base job (triggers cascade)
@@ -44,35 +46,25 @@ export interface TournamentSyncJobData {
   finalizationTargets?: TournamentFinalizationTarget[];
 }
 
-const tieredQueueSet = createTieredQueueSet<TournamentSyncJobData>(tournamentSyncQueueName, {
-  attempts: 3,
-  backoff: {
-    type: 'exponential',
-    delay: 60_000, // 1 minute
-  },
-  removeOnComplete: {
-    age: 86400, // 24 hours
-    count: 100,
-  },
-  removeOnFail: {
-    age: 172800, // 48 hours
-    count: 50,
+export const tournamentSyncQueue = new Queue<TournamentSyncJobData>(tournamentSyncQueueName, {
+  connection: getQueueConnection(),
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 60_000, // 1 minute
+    },
+    removeOnComplete: {
+      age: 86400, // 24 hours
+      count: 100,
+    },
+    removeOnFail: {
+      age: 172800, // 48 hours
+      count: 50,
+    },
   },
 });
 
-export const isTournamentSyncTieredQueueEnabled = tieredQueueSet.enabled;
-export const tournamentSyncQueuesByTier = tieredQueueSet.queuesByTier;
-export const tournamentSyncQueueNamesByTier = tieredQueueSet.queueNamesByTier;
-export const tournamentSyncQueue = tournamentSyncQueuesByTier.p2;
-
-export function getTournamentSyncQueue(tier: MutationPriorityTier) {
-  return tournamentSyncQueuesByTier[tier];
-}
-
-export function getTournamentSyncQueueName(tier: MutationPriorityTier) {
-  return tournamentSyncQueueNamesByTier[tier];
-}
-
 export async function closeTournamentSyncQueue() {
-  await closeTieredQueues(tieredQueueSet.uniqueQueues);
+  await tournamentSyncQueue.close();
 }

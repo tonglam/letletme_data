@@ -138,7 +138,6 @@ describe('data sync attempt reporting', () => {
     expect(reports).toHaveLength(1);
     expect(reports[0]).toMatchObject({
       event: 'data_sync_attempt',
-      schemaVersion: 1,
       queue: 'entry-sync',
       jobName: 'entry-picks',
       runId: 'run-1',

@@ -16,7 +16,7 @@ export interface ProviderEntityLink {
   rightEntityId: string;
   status: ProviderLinkStatus;
   method: string;
-  ruleVersion: string;
+  ruleId: string;
   evidence: Record<string, unknown>;
   firstSeenSeason: string | null;
   lastSeenSeason: string | null;
@@ -33,7 +33,7 @@ export interface ProviderMatchLink {
   rightMatchId: string;
   status: ProviderLinkStatus;
   method: string;
-  ruleVersion: string;
+  ruleId: string;
   evidence: Record<string, unknown>;
   reviewedBy: string | null;
   reviewedAt: Date | null;

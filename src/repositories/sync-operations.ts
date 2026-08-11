@@ -9,8 +9,6 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
-  DATA_PLATFORM_PLAN_VERSION,
-  DATA_PUBLICATION_SCHEMA_VERSION,
   isDataPublicationId,
   type DataPublicationDataset,
   type DataPublicationManifest,
@@ -90,8 +88,6 @@ function assertPublicationManifest(
   },
 ): void {
   if (
-    manifest.schemaVersion !== DATA_PUBLICATION_SCHEMA_VERSION ||
-    manifest.planVersion !== DATA_PLATFORM_PLAN_VERSION ||
     manifest.publicationId !== input.publicationId ||
     manifest.dataset !== input.dataset ||
     manifest.seasonCode !== input.season.seasonCode ||
@@ -361,11 +357,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           seasonId: input.season.seasonId,
           eventId: input.eventId,
           status: 'staging',
-          manifest: {
-            ...(input.manifest ?? {}),
-            schemaVersion: DATA_PUBLICATION_SCHEMA_VERSION,
-            planVersion: DATA_PLATFORM_PLAN_VERSION,
-          },
+          manifest: input.manifest ?? {},
           sourceRunId: input.sourceRunId,
           expiresAt: new Date(Date.now() + 15 * 60 * 1_000),
         })

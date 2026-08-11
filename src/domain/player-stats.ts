@@ -149,46 +149,18 @@ export function getPointsPerMillion(playerStat: PlayerStat): number | null {
 }
 
 /**
- * Calculate form as a number (now stored as a number; kept for compatibility).
- */
-export function getFormAsNumber(playerStat: PlayerStat): number | null {
-  return playerStat.form;
-}
-
-/**
  * Get player's form rating
  */
 export function getFormRating(
   playerStat: PlayerStat,
 ): 'excellent' | 'good' | 'average' | 'poor' | 'unknown' {
-  const form = getFormAsNumber(playerStat);
+  const form = playerStat.form;
   if (form === null) return 'unknown';
 
   if (form >= 5.0) return 'excellent';
   if (form >= 3.5) return 'good';
   if (form >= 2.0) return 'average';
   return 'poor';
-}
-
-/**
- * Calculate expected goals as a number (now stored as a number; kept for compatibility).
- */
-export function getExpectedGoalsAsNumber(playerStat: PlayerStat): number | null {
-  return playerStat.expectedGoals;
-}
-
-/**
- * Calculate expected assists as a number (now stored as a number; kept for compatibility).
- */
-export function getExpectedAssistsAsNumber(playerStat: PlayerStat): number | null {
-  return playerStat.expectedAssists;
-}
-
-/**
- * Calculate ICT Index as a number (now stored as a number; kept for compatibility).
- */
-export function getIctIndexAsNumber(playerStat: PlayerStat): number | null {
-  return playerStat.ictIndex;
 }
 
 /**
@@ -226,7 +198,7 @@ export function getAttackingReturns(playerStat: PlayerStat): number | null {
  * Check if player is a differential pick (based on value and form)
  */
 export function isDifferentialPick(playerStat: PlayerStat): boolean {
-  const form = getFormAsNumber(playerStat);
+  const form = playerStat.form;
   const pointsPerMillion = getPointsPerMillion(playerStat);
 
   if (form === null || pointsPerMillion === null) return false;

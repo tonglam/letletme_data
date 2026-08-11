@@ -17,9 +17,6 @@ import { CRON_TIMEZONE } from '../utils/timezone';
  * - Runs every 5 minutes during select time (no hour restrictions)
  * - Tracks transfers as they happen
  *
- * Post-Transfer (After Deadline):
- * - Part of cascade (triggered by tournament-event-results completion)
- * - No separate cron needed
  */
 
 export async function runTournamentEventTransfersPreSync() {
@@ -52,19 +49,6 @@ export async function runTournamentEventTransfersPreSync() {
     jobId: job.id,
     eventId: currentEvent.id,
   });
-}
-
-// Post-transfer is part of cascade, no separate function needed
-export async function runTournamentEventTransfersPostSync() {
-  // This is now handled by cascade from tournament-event-results
-  // Keeping function for backward compatibility with manual triggers
-  logInfo('Tournament transfers post is now part of cascade');
-}
-
-export function registerTournamentEventTransfersPostJobs(app: Elysia) {
-  // Post-transfer is now part of cascade, no cron needed
-  // Return app unchanged for backward compatibility
-  return app;
 }
 
 export function registerTournamentEventTransfersPreJobs(app: Elysia) {

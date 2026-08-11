@@ -85,7 +85,6 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       reportEmitted = true;
       logInfo('Tournament creation report', {
         event: 'tournament_creation',
-        schemaVersion: 1,
         outcome,
         tournamentId,
         participantCount,

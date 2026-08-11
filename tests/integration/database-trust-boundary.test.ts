@@ -52,7 +52,7 @@ const PLAYER_SEASON_SUMMARY_COLUMNS = [
 const B0_ACCEPTANCE_ENABLED = process.env.RUN_B0_ACCEPTANCE === '1';
 const b0Test = B0_ACCEPTANCE_ENABLED ? test : test.skip;
 
-describe('v3 database trust boundary', () => {
+describe('database trust boundary', () => {
   test('has one explicit current season and one active core publication', async () => {
     const sql = await getDbClient();
     const current = await seasonRepository.findCurrent();
@@ -63,10 +63,18 @@ describe('v3 database trust boundary', () => {
       isCurrent: true,
     });
 
-    const active = await sql<Array<{ count: number; schema_version: string | null }>>`
+    const active = await sql<Array<{ count: number; invalid_manifests: number }>>`
       SELECT
         count(*)::integer AS count,
-        min(publication.manifest ->> 'schemaVersion') AS schema_version
+        count(*) FILTER (
+          WHERE NOT publication.manifest ?& ARRAY[
+            'dataset', 'seasonCode', 'eventId', 'revision', 'publicationId',
+            'sourceCheckedAt', 'publishedAt', 'state', 'items'
+          ] OR publication.manifest - ARRAY[
+            'dataset', 'seasonCode', 'eventId', 'revision', 'publicationId',
+            'sourceCheckedAt', 'publishedAt', 'state', 'items'
+          ] <> '{}'::jsonb
+        )::integer AS invalid_manifests
       FROM ops.dataset_publications publication
       JOIN fpl.seasons season ON season.season_id = publication.season_id
       WHERE publication.dataset = 'fpl:core'
@@ -74,7 +82,7 @@ describe('v3 database trust boundary', () => {
         AND publication.status = 'active'
         AND season.is_current
     `;
-    expect(active[0]).toEqual({ count: 1, schema_version: 'v3' });
+    expect(active[0]).toEqual({ count: 1, invalid_manifests: 0 });
 
     const duplicateActiveScopes = await sql<NamedFinding[]>`
       SELECT concat_ws(':', dataset, season_id::text, coalesce(event_id::text, 'core')) AS name
@@ -90,10 +98,14 @@ describe('v3 database trust boundary', () => {
       FROM ops.dataset_publications
       WHERE publication_id::text !~
         '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-         OR (
-           manifest ->> 'schemaVersion' = 'v3'
-           AND manifest ->> 'planVersion' IS DISTINCT FROM '3.2.5'
-         )
+         OR NOT manifest ?& ARRAY[
+           'dataset', 'seasonCode', 'eventId', 'revision', 'publicationId',
+           'sourceCheckedAt', 'publishedAt', 'state', 'items'
+         ]
+         OR manifest - ARRAY[
+           'dataset', 'seasonCode', 'eventId', 'revision', 'publicationId',
+           'sourceCheckedAt', 'publishedAt', 'state', 'items'
+         ] <> '{}'::jsonb
     `;
     expect(invalidPublicationIdentities).toHaveLength(0);
   });
@@ -221,65 +233,20 @@ describe('v3 database trust boundary', () => {
     `;
     expect(publicationBoundary).toEqual({ readable: true, writable: false });
 
-    const [cachePreflightBoundary] = await sql<
-      Array<{
-        broadSelect: boolean;
-        exactColumnSelect: boolean;
-        columnWritable: boolean;
-        tableWritable: boolean;
-      }>
-    >`
-      SELECT
-        has_table_privilege(
-          'letletme_data_writer',
-          'ops.migration_runs',
-          'SELECT'
-        ) AS "broadSelect",
-        bool_and(
-          has_column_privilege(
-            'letletme_data_writer',
-            attribute_row.attrelid,
-            attribute_row.attnum,
-            'SELECT'
-          ) = (attribute_row.attname = ANY (ARRAY['run_id', 'status', 'metadata']))
-        ) AS "exactColumnSelect",
-        bool_or(
-          has_column_privilege(
-            'letletme_data_writer',
-            attribute_row.attrelid,
-            attribute_row.attnum,
-            'INSERT'
-          )
-          OR has_column_privilege(
-            'letletme_data_writer',
-            attribute_row.attrelid,
-            attribute_row.attnum,
-            'UPDATE'
-          )
-          OR has_column_privilege(
-            'letletme_data_writer',
-            attribute_row.attrelid,
-            attribute_row.attnum,
-            'REFERENCES'
-          )
-        ) AS "columnWritable",
-        has_table_privilege(
-          'letletme_data_writer',
-          'ops.migration_runs',
-          'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
-        ) AS "tableWritable"
-      FROM pg_attribute attribute_row
-      WHERE attribute_row.attrelid = 'ops.migration_runs'::regclass
-        AND attribute_row.attnum > 0
-        AND NOT attribute_row.attisdropped
-      GROUP BY 1, 4
+    const opsTables = await sql<NamedFinding[]>`
+      SELECT relation.relname AS name
+      FROM pg_class relation
+      WHERE relation.relnamespace = 'ops'::regnamespace
+        AND relation.relkind IN ('r', 'p')
+      ORDER BY relation.relname
     `;
-    expect(cachePreflightBoundary).toEqual({
-      broadSelect: false,
-      exactColumnSelect: true,
-      columnWritable: false,
-      tableWritable: false,
-    });
+    expect(opsTables.map((table) => table.name)).toEqual([
+      'dataset_publications',
+      'schema_migrations',
+      'season_imports',
+      'sync_items',
+      'sync_runs',
+    ]);
 
     const [writerReportingBoundary] = await sql<
       Array<{

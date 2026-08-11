@@ -16,17 +16,10 @@ import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
 import { runLaunchMonitor } from '../jobs/launch.jobs';
 import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
-import { runTournamentBattleRaceResultsSync } from '../jobs/tournament-battle-race-results.jobs';
-import { runTournamentEventCupResultsSync } from '../jobs/tournament-event-cup-results.jobs';
 import { runTournamentEventPicksSync } from '../jobs/tournament-event-picks.jobs';
 import { runTournamentEventResultsSync } from '../jobs/tournament-event-results.jobs';
-import {
-  runTournamentEventTransfersPostSync,
-  runTournamentEventTransfersPreSync,
-} from '../jobs/tournament-event-transfers.jobs';
+import { runTournamentEventTransfersPreSync } from '../jobs/tournament-event-transfers.jobs';
 import { runTournamentInfoSync } from '../jobs/tournament-info.jobs';
-import { runTournamentKnockoutResultsSync } from '../jobs/tournament-knockout-results.jobs';
-import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
 import { getCurrentEvent } from './events.service';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
@@ -137,16 +130,6 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     schedule: 'Every 5 minutes during select time',
   },
   {
-    name: 'tournament-event-transfers-post-sync',
-    description: 'Finalize tournament transfers (cascade)',
-    schedule: 'Cascade after event-results',
-  },
-  {
-    name: 'tournament-event-cup-results-sync',
-    description: 'Calculate tournament cup results (cascade)',
-    schedule: 'Cascade after event-results',
-  },
-  {
     name: 'tournament-selection-stats-sync',
     description: 'Build tournament selection stats read model',
     schedule: 'Cascade after tournament transfers post',
@@ -155,21 +138,6 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     name: 'tournament-info-sync',
     description: 'Refresh tournament info names daily',
     schedule: 'Daily 10:45',
-  },
-  {
-    name: 'tournament-points-race-results-sync',
-    description: 'Calculate points race standings (cascade)',
-    schedule: 'Cascade after event-results',
-  },
-  {
-    name: 'tournament-battle-race-results-sync',
-    description: 'Calculate battle race standings (cascade)',
-    schedule: 'Cascade after event-results',
-  },
-  {
-    name: 'tournament-knockout-results-sync',
-    description: 'Calculate knockout bracket results (cascade)',
-    schedule: 'Cascade after event-results',
   },
   {
     name: 'tournament-materialized-views-refresh',
@@ -275,12 +243,6 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     'tournament-event-transfers-pre-sync': async () => {
       await runTournamentEventTransfersPreSync();
     },
-    'tournament-event-transfers-post-sync': async () => {
-      await runTournamentEventTransfersPostSync();
-    },
-    'tournament-event-cup-results-sync': async () => {
-      await runTournamentEventCupResultsSync();
-    },
     'tournament-selection-stats-sync': async () => {
       const season = await seasonRepository.findCurrent();
       const currentEvent = await getCurrentEvent(season);
@@ -291,15 +253,6 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     },
     'tournament-info-sync': async () => {
       await runTournamentInfoSync();
-    },
-    'tournament-points-race-results-sync': async () => {
-      await runTournamentPointsRaceResultsSync();
-    },
-    'tournament-battle-race-results-sync': async () => {
-      await runTournamentBattleRaceResultsSync();
-    },
-    'tournament-knockout-results-sync': async () => {
-      await runTournamentKnockoutResultsSync();
     },
     'tournament-materialized-views-refresh': async () => {
       await refreshTournamentMaterializedViews();

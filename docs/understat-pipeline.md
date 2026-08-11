@@ -1,9 +1,8 @@
-# Understat Pipeline — Data Platform v3
+# Understat pipeline
 
-Status: authoritative candidate contract for the hard cut to Data Platform v3.
+Status: authoritative runtime and storage contract.
 
-This document describes the code on the integrated v3 branch. It replaces the former design that
-published Understat generations and manifests to Redis.
+Understat uses an independent DB-first ingestion pipeline and publishes no business-data cache.
 
 ## 1. Locked boundaries
 
@@ -35,7 +34,7 @@ The client validates parsed payloads from these provider routes:
 
 The client applies schema validation, timeout handling, retry classification, and concurrency
 permits. Provider permits use the queue-coordination key
-`llm:v3:queue:coordination:understat-request-permits`; they never use the Data cache endpoint.
+`llm:queue:coordination:understat-request-permits`; they never use the Data cache endpoint.
 
 ## 3. Runtime controls
 
@@ -65,13 +64,13 @@ does not open an Understat queue connection.
 All Understat jobs take the provider-reference mutation scope. This serializes shared season/team/
 match mutations across both lanes and replicas. Detail jobs also take a resource-specific scope.
 
-There are no routine Understat cron schedules in Data v3. The dataset is low-frequency and is
+There are no routine Understat cron schedules. The dataset is low-frequency and is
 refreshed through explicit internal API/manual queue commands. This avoids ongoing provider,
 compute, and storage cost for pages that are rarely read.
 
 ## 5. Durable run and staging state
 
-Understat uses the shared v3 operations tables:
+Understat uses the shared operations tables:
 
 ### `ops.sync_runs`
 
@@ -105,7 +104,6 @@ Every staged payload contains:
 
 ```json
 {
-  "version": 1,
   "kind": "team-league",
   "season": "2526",
   "capturedAt": "2026-08-09T00:00:00.000Z",
@@ -117,7 +115,7 @@ Before finalization, the reader verifies:
 
 - payload exists and is an object;
 - SHA-256 equals `source_hash`;
-- version, kind, and season match the sync item;
+- kind and season match the sync item;
 - arrays and required object fields have the expected shape;
 - serialized dates rehydrate as valid timestamps;
 - team/match identity inside each detail payload matches its resource key.
@@ -199,15 +197,14 @@ manual-review states remain explicit; no name-only join is silently promoted to 
 ## 11. Redis contract
 
 There are no Understat business/cache keys, manifests, generations, active-season pointers, or
-publication TTLs in Data v3.
+publication TTLs in Data.
 
 Allowed Redis state is limited to `QUEUE_REDIS_*`:
 
 - BullMQ keys for the two Understat queues;
-- `llm:v3:queue:coordination:mutation-lock:understat:*`;
-- `llm:v3:queue:coordination:understat-request-permits`.
+- `llm:queue:coordination:mutation-lock:understat:*`;
+- `llm:queue:coordination:understat-request-permits`.
 
-Legacy `Understat:*` cache keys are retirement-only patterns in the manifest-gated cleanup tool.
 GraphQL may later add a bounded, revision-aware query cache for the few Understat pages, but that
 cache is GraphQL-owned and cannot become a Data ingestion dependency.
 
@@ -236,7 +233,7 @@ and Player runs independently and counts facts directly from the provider tables
 - Recovery retries or starts a new scoped run. It does not truncate provider tables or clear Redis.
 - PostgreSQL backup/restore is the recovery path for durable Understat data; Redis restoration is not.
 
-## 14. Acceptance gates
+## 14. Acceptance criteria
 
 - Typecheck, lint, format, unit tests, integration tests, and build pass.
 - Staging round-trip, timestamp hydration, hash tampering, season mismatch, and resource identity
@@ -247,4 +244,4 @@ and Player runs independently and counts facts directly from the provider tables
 - Incomplete Team and Player snapshots preserve the prior complete facts byte-for-byte.
 - Runtime source contains no Understat Data cache client/key/manifest/publication path.
 - Permit and mutation-lock clients resolve only to `QUEUE_REDIS_*`.
-- No legacy FPL archive service, schema, job, API, or table-name routing is reintroduced.
+- No FPL archive service, duplicate schema, duplicate job, API, or table-name routing is introduced.

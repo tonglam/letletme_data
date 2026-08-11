@@ -29,7 +29,7 @@ function mapEntityLink(row: typeof providerEntityLinks.$inferSelect): ProviderEn
     rightEntityId: row.rightEntityId,
     status: row.status,
     method: row.method,
-    ruleVersion: row.ruleVersion,
+    ruleId: row.ruleId,
     evidence: row.evidence as Record<string, unknown>,
     firstSeenSeason: row.firstSeenSeason,
     lastSeenSeason: row.lastSeenSeason,
@@ -48,11 +48,15 @@ function mapMatchLink(row: typeof providerMatchLinks.$inferSelect): ProviderMatc
     rightMatchId: row.rightMatchId,
     status: row.status,
     method: row.method,
-    ruleVersion: row.ruleVersion,
+    ruleId: row.ruleId,
     evidence: row.evidence as Record<string, unknown>,
     reviewedBy: row.reviewedBy,
     reviewedAt: row.reviewedAt,
   };
+}
+
+function canonicalEvidence(evidence: Record<string, unknown> | undefined, ruleId: string) {
+  return { ...(evidence ?? {}), ruleId };
 }
 
 export interface UpsertEntityLinkInput {
@@ -63,7 +67,7 @@ export interface UpsertEntityLinkInput {
   rightEntityId: string;
   status: ProviderLinkStatus;
   method: string;
-  ruleVersion: string;
+  ruleId: string;
   evidence?: Record<string, unknown>;
   season?: string;
   reviewedBy?: string;
@@ -77,7 +81,7 @@ export interface UpsertMatchLinkInput {
   rightMatchId: string;
   status: ProviderLinkStatus;
   method: string;
-  ruleVersion: string;
+  ruleId: string;
   evidence?: Record<string, unknown>;
   reviewedBy?: string;
 }
@@ -92,7 +96,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
       .values({
         linkId: randomUUID(),
         ...identity,
-        evidence: evidence ?? {},
+        evidence: canonicalEvidence(evidence, input.ruleId),
         firstSeenSeason: season,
         lastSeenSeason: season,
         reviewedBy: reviewed ? reviewedBy : null,
@@ -109,8 +113,8 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         set: {
           status: input.status,
           method: input.method,
-          ruleVersion: input.ruleVersion,
-          evidence: input.evidence ?? {},
+          ruleId: input.ruleId,
+          evidence: canonicalEvidence(input.evidence, input.ruleId),
           firstSeenSeason: sql`CASE
             WHEN ${providerEntityLinks.firstSeenSeason} IS NULL THEN excluded.first_seen_season
             WHEN excluded.first_seen_season IS NULL THEN ${providerEntityLinks.firstSeenSeason}
@@ -140,7 +144,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         linkId: randomUUID(),
         ...identity,
         seasonCode: season,
-        evidence: evidence ?? {},
+        evidence: canonicalEvidence(evidence, input.ruleId),
         reviewedBy: reviewed ? reviewedBy : null,
         reviewedAt: reviewed ? new Date() : null,
       })
@@ -155,8 +159,8 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         set: {
           status: input.status,
           method: input.method,
-          ruleVersion: input.ruleVersion,
-          evidence: input.evidence ?? {},
+          ruleId: input.ruleId,
+          evidence: canonicalEvidence(input.evidence, input.ruleId),
           reviewedBy: reviewed ? input.reviewedBy : null,
           reviewedAt: reviewed ? new Date() : null,
           updatedAt: new Date(),

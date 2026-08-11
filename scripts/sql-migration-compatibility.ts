@@ -7,6 +7,10 @@ const LEGACY_TRANSACTION_CONTROL_MIGRATIONS = new Set([
   '0066_repair_fpl_team_archive_names.sql',
   '0067_repair_fpl_1718_stoke_name.sql',
 ]);
+const OPTIONAL_PUBLIC_LEAGUE_CATALOG_MIGRATION = '0091_drop_v2_reporting_and_rpcs.sql';
+const OPTIONAL_CATALOG_REGCLASS_CAST = /('public\.public_league_trends_catalog')::regclass/g;
+const OPTIONAL_CATALOG_REGPROCEDURE_CAST =
+  /('public\.touch_public_league_trends_catalog_updated_at\(\)')::regprocedure/g;
 
 const LOCAL_TIMEOUT_PATTERN =
   /^\s*SET\s+LOCAL\s+(statement_timeout|lock_timeout)\s*=\s*'([^']+)'\s*;\s*$/gim;
@@ -55,7 +59,23 @@ export function getSqlMigrationPreconditions(filename: string): readonly string[
  * control while executing them on a fresh database.
  */
 export function getSqlMigrationExecutionContents(filename: string, contents: string): string {
-  if (!LEGACY_TRANSACTION_CONTROL_MIGRATIONS.has(filename)) return contents;
+  let executionContents = contents;
 
-  return contents.replace(/^\s*BEGIN;\s*$/gm, '').replace(/^\s*COMMIT;\s*$/gm, '');
+  if (LEGACY_TRANSACTION_CONTROL_MIGRATIONS.has(filename)) {
+    executionContents = executionContents
+      .replace(/^\s*BEGIN;\s*$/gm, '')
+      .replace(/^\s*COMMIT;\s*$/gm, '');
+  }
+
+  // PostgreSQL can evaluate both sides of a PL/pgSQL boolean expression. The
+  // immutable 0091 source therefore needs nullable catalog OID lookups when
+  // the optional source table was absent. The original file and checksum stay
+  // unchanged; only the disposable historical execution text is normalized.
+  if (filename === OPTIONAL_PUBLIC_LEAGUE_CATALOG_MIGRATION) {
+    executionContents = executionContents
+      .replace(OPTIONAL_CATALOG_REGCLASS_CAST, 'to_regclass($1)')
+      .replace(OPTIONAL_CATALOG_REGPROCEDURE_CAST, 'to_regprocedure($1)');
+  }
+
+  return executionContents;
 }

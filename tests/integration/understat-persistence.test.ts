@@ -888,7 +888,7 @@ describe('Understat persistence', () => {
       trigger: 'manual',
     });
     await understatSyncRepository.addItems(runId, [{ resourceType: 'league', resourceId: league }]);
-    const originalPayload = { version: 1, value: 'accepted' };
+    const originalPayload = { attempt: 1, value: 'accepted' };
     expect(
       await understatSyncRepository.completeItem(
         runId,
@@ -909,7 +909,7 @@ describe('Understat persistence', () => {
     ).toBe(1);
     await understatSyncRepository.markRunFailed(runId, 'late run failure');
     await understatSyncRepository.markRunSkipped(runId, 'late skip');
-    const delayedPayload = { version: 1, value: 'late' };
+    const delayedPayload = { attempt: 1, value: 'late' };
     expect(
       await understatSyncRepository.completeItem(
         runId,
@@ -989,10 +989,11 @@ describe('Understat persistence', () => {
       rightEntityId: identity,
       status: 'pending',
       method: 'integration-test',
-      ruleVersion: 'test-v1',
+      ruleId: 'test-rule',
       season: '2728',
     });
     providerLinkIds.push(initial.id);
+    expect(initial.evidence).toMatchObject({ ruleId: 'test-rule' });
     await providerIdentityRepository.upsertEntityLink({
       entityType: 'player',
       leftProvider: 'understat',
@@ -1001,7 +1002,7 @@ describe('Understat persistence', () => {
       rightEntityId: identity,
       status: 'pending',
       method: 'integration-test',
-      ruleVersion: 'test-v1',
+      ruleId: 'test-rule',
       season: '2627',
     });
     const latest = await providerIdentityRepository.upsertEntityLink({
@@ -1012,12 +1013,13 @@ describe('Understat persistence', () => {
       rightEntityId: identity,
       status: 'pending',
       method: 'integration-test',
-      ruleVersion: 'test-v1',
+      ruleId: 'test-rule',
       season: '2829',
     });
 
     expect(latest.firstSeenSeason).toBe('2627');
     expect(latest.lastSeenSeason).toBe('2829');
+    expect(latest.evidence).toMatchObject({ ruleId: 'test-rule' });
   });
 
   test('reconciles only stale evidence from a completed FPL fixture', async () => {

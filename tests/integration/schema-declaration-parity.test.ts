@@ -205,7 +205,7 @@ function normalizeIndex(row: IndexRow): IndexRow {
 }
 
 parityTest(
-  'keeps the Drizzle declaration equal to the migrated v3 catalog',
+  'keeps the Drizzle declaration equal to the migrated catalog',
   async () => {
     if (!SCHEMA_EXPORT_DATABASE_URL) {
       throw new Error('SCHEMA_EXPORT_DATABASE_URL is required for schema declaration parity');

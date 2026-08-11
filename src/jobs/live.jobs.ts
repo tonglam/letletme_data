@@ -66,11 +66,6 @@ export async function runLiveSnapshot(
   return job;
 }
 
-/** Backward-compatible manual trigger name; the coordinated snapshot owns scores now. */
-export async function runLiveScores(): Promise<unknown | null> {
-  return runLiveSnapshot(new Date(), false);
-}
-
 // Fixed morning ticks catch delayed FPL finalization and force canonical
 // persistence even after the ordinary live polling window has closed.
 export async function runPostMatchConsolidation(): Promise<unknown | null> {

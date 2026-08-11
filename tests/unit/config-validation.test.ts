@@ -33,18 +33,53 @@ describe('production environment preflight', () => {
     expect(await runEnvCheck('a'.repeat(64))).toBe(0);
   });
 
-  test('runs before production migrations and service replacement', () => {
+  test('validates identity and quiescence before migration, then publishes before restart', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
-    const preflight = workflow.indexOf('bun run env:check');
-    const migrationContract = workflow.indexOf('bun run db:migration-contract');
-    const migrate = workflow.indexOf('bun run db:migrate');
-    const replaceServices = workflow.indexOf('docker compose up -d');
+    const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+    const preflight = deployScript.indexOf('bun run env:check');
+    const identityContract = deployScript.indexOf(
+      'bun scripts/migration-login-contract.ts --preflight',
+    );
+    const stopServices = deployScript.indexOf('compose stop -t 45 api worker');
+    const quiescence = deployScript.indexOf('inspectAndAssertDeploymentQueueQuiescence');
+    const migrate = deployScript.indexOf('bun run db:migrate');
+    const canonicalContract = deployScript.indexOf(
+      'bun scripts/migration-login-contract.ts',
+      migrate,
+    );
+    const publishCore = deployScript.indexOf('bun run cache:publish-core -- --execute');
+    const provisionRuntimeLogins = deployScript.indexOf('bun run db:provision-runtime-logins');
+    const publishLive = deployScript.indexOf('publishActiveLiveCachesForDeployment');
+    const migrateRedis = deployScript.indexOf('migrateRetiredRedisStateForDeployment');
+    const replaceServices = deployScript.indexOf('compose up -d', migrateRedis);
 
     expect(preflight).toBeGreaterThan(0);
-    expect(migrationContract).toBeGreaterThan(preflight);
-    expect(migrationContract).toBeLessThan(migrate);
-    expect(preflight).toBeLessThan(migrate);
-    expect(preflight).toBeLessThan(replaceServices);
+    expect(identityContract).toBeGreaterThan(preflight);
+    expect(stopServices).toBeGreaterThan(identityContract);
+    expect(quiescence).toBeGreaterThan(stopServices);
+    expect(migrate).toBeGreaterThan(quiescence);
+    expect(canonicalContract).toBeGreaterThan(migrate);
+    expect(provisionRuntimeLogins).toBeGreaterThan(canonicalContract);
+    expect(publishCore).toBeGreaterThan(canonicalContract);
+    expect(publishCore).toBeGreaterThan(provisionRuntimeLogins);
+    expect(publishLive).toBeGreaterThan(publishCore);
+    expect(migrateRedis).toBeGreaterThan(publishLive);
+    expect(replaceServices).toBeGreaterThan(migrateRedis);
+    expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(workflow).toContain('docker compose ps -aq api');
+    expect(workflow).toContain('APP_IMAGE="$IMAGE_REF" bash scripts/deploy.sh deploy');
+  });
+
+  test('restores stopped services when a pre-migration deployment gate rejects', () => {
+    const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+
+    expect(deployScript).toMatch(
+      /if ! compose stop -t 45 api worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+    );
+    expect(deployScript).toMatch(
+      /if ! compose run --rm -T migration bun -e '[\s\S]*?inspectAndAssertDeploymentQueueQuiescence[\s\S]*?then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+    );
+    expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?compose start api worker/);
   });
 
   test('keeps migration credentials out of API and worker services', () => {

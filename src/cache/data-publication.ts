@@ -5,9 +5,7 @@ import type Redis from 'ioredis';
 import { CacheError } from '../utils/errors';
 import { redisSingleton } from './singleton';
 
-export const DATA_CACHE_NAMESPACE = 'llm:v3:data';
-export const DATA_PUBLICATION_SCHEMA_VERSION = 'v3';
-export const DATA_PLATFORM_PLAN_VERSION = '3.2.5';
+export const DATA_CACHE_NAMESPACE = 'llm:data';
 export const DATA_PUBLICATION_STAGING_TTL_MS = 15 * 60 * 1_000;
 export const DATA_PUBLICATION_RETIRED_TTL_MS = 24 * 60 * 60 * 1_000;
 
@@ -20,6 +18,7 @@ export function isDataPublicationId(value: unknown): value is string {
 
 export type DataPublicationDataset = 'fpl:core' | 'fpl:live';
 export type DataPublicationItemType = 'string';
+export type DataPublicationState = 'active' | 'scheduled' | 'live' | 'settled';
 
 export interface DataPublicationScope {
   readonly dataset: DataPublicationDataset;
@@ -42,8 +41,6 @@ export interface DataPublicationManifestItem {
 }
 
 export interface DataPublicationManifest {
-  readonly schemaVersion: typeof DATA_PUBLICATION_SCHEMA_VERSION;
-  readonly planVersion: typeof DATA_PLATFORM_PLAN_VERSION;
   readonly dataset: DataPublicationDataset;
   readonly seasonCode: string;
   readonly eventId: number | null;
@@ -51,7 +48,7 @@ export interface DataPublicationManifest {
   readonly publicationId: string;
   readonly sourceCheckedAt: string;
   readonly publishedAt: string;
-  readonly state?: string;
+  readonly state: DataPublicationState;
   readonly items: readonly DataPublicationManifestItem[];
 }
 
@@ -64,7 +61,7 @@ export interface PublishDataRevisionInput extends DataPublicationScope {
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
-  readonly state?: string;
+  readonly state: DataPublicationState;
   readonly items: readonly DataPublicationItemInput[];
 }
 
@@ -84,6 +81,52 @@ type SerializedItem = {
   readonly manifest: DataPublicationManifestItem;
   readonly payload: string;
 };
+
+const MANIFEST_FIELDS = [
+  'dataset',
+  'seasonCode',
+  'eventId',
+  'revision',
+  'publicationId',
+  'sourceCheckedAt',
+  'publishedAt',
+  'state',
+  'items',
+] as const;
+const MANIFEST_ITEM_FIELDS = ['name', 'key', 'type', 'count', 'bytes', 'sha256'] as const;
+const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
+  'fpl:core': ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'],
+  'fpl:live': ['eventLives', 'fixtures', 'liveFixtures', 'liveBonus'],
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  return (
+    actual.length === expected.length && actual.every((field, index) => field === expected[index])
+  );
+}
+
+function hasExactItemNames(dataset: DataPublicationDataset, names: readonly string[]): boolean {
+  const actual = [...names].sort();
+  const expected = [...DATASET_ITEM_NAMES[dataset]].sort();
+  return (
+    actual.length === expected.length && actual.every((name, index) => name === expected[index])
+  );
+}
+
+function isCanonicalState(
+  dataset: DataPublicationDataset,
+  state: unknown,
+): state is DataPublicationState {
+  return dataset === 'fpl:core'
+    ? state === 'active'
+    : state === 'scheduled' || state === 'live' || state === 'settled';
+}
 
 const ACTIVATE_REVISION_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
@@ -243,7 +286,7 @@ function serializeItems(input: PublishDataRevisionInput): SerializedItem[] {
     );
   }
   const names = new Set<string>();
-  return input.items.map((item) => {
+  const serialized: SerializedItem[] = input.items.map((item) => {
     if (names.has(item.name)) {
       throw new CacheError(
         `Duplicate publication item: ${item.name}`,
@@ -263,13 +306,20 @@ function serializeItems(input: PublishDataRevisionInput): SerializedItem[] {
       manifest: {
         name: item.name,
         key: dataPublicationItemKey(input, input.revision, item.name),
-        type: 'string',
+        type: 'string' as const,
         count: itemCount(item.value),
         bytes: Buffer.byteLength(payload, 'utf8'),
         sha256: sha256(payload),
       },
     };
   });
+  if (!hasExactItemNames(input.dataset, [...names])) {
+    throw new CacheError(
+      `Publication item set does not match ${input.dataset}`,
+      'DATA_PUBLICATION_ITEM_SET_INVALID',
+    );
+  }
+  return serialized;
 }
 
 function createManifest(
@@ -286,9 +336,10 @@ function createManifest(
   if (!isDataPublicationId(input.publicationId)) {
     throw new CacheError('Invalid publication ID', 'DATA_PUBLICATION_ID_INVALID');
   }
+  if (!isCanonicalState(input.dataset, input.state)) {
+    throw new CacheError('Invalid publication state', 'DATA_PUBLICATION_STATE_INVALID');
+  }
   return {
-    schemaVersion: DATA_PUBLICATION_SCHEMA_VERSION,
-    planVersion: DATA_PLATFORM_PLAN_VERSION,
     dataset: input.dataset,
     seasonCode: input.seasonCode,
     eventId: input.eventId ?? null,
@@ -296,7 +347,7 @@ function createManifest(
     publicationId: input.publicationId,
     sourceCheckedAt,
     publishedAt: new Date().toISOString(),
-    ...(input.state ? { state: input.state } : {}),
+    state: input.state,
     items: items.map((item) => item.manifest),
   };
 }
@@ -304,43 +355,57 @@ function createManifest(
 export function parseDataPublicationManifest(raw: string | null): DataPublicationManifest | null {
   if (!raw) return null;
   try {
-    const value = JSON.parse(raw) as Partial<DataPublicationManifest>;
+    const value = JSON.parse(raw) as unknown;
+    if (!isRecord(value) || !hasExactFields(value, MANIFEST_FIELDS)) return null;
+    if (value.dataset !== 'fpl:core' && value.dataset !== 'fpl:live') return null;
+    const dataset = value.dataset;
     if (
-      value.schemaVersion !== DATA_PUBLICATION_SCHEMA_VERSION ||
-      value.planVersion !== DATA_PLATFORM_PLAN_VERSION ||
-      (value.dataset !== 'fpl:core' && value.dataset !== 'fpl:live') ||
       typeof value.seasonCode !== 'string' ||
       !/^\d{4}$/.test(value.seasonCode) ||
+      typeof value.revision !== 'number' ||
       !Number.isSafeInteger(value.revision) ||
-      (value.revision ?? 0) <= 0 ||
+      value.revision <= 0 ||
       !isDataPublicationId(value.publicationId) ||
       typeof value.sourceCheckedAt !== 'string' ||
       !Number.isFinite(new Date(value.sourceCheckedAt).getTime()) ||
       typeof value.publishedAt !== 'string' ||
       !Number.isFinite(new Date(value.publishedAt).getTime()) ||
+      !isCanonicalState(dataset, value.state) ||
       !Array.isArray(value.items)
     ) {
       return null;
     }
+    if (
+      (dataset === 'fpl:core' && value.eventId !== null) ||
+      (dataset === 'fpl:live' &&
+        (typeof value.eventId !== 'number' ||
+          !Number.isSafeInteger(value.eventId) ||
+          value.eventId <= 0))
+    ) {
+      return null;
+    }
     const scope: DataPublicationScope = {
-      dataset: value.dataset,
+      dataset,
       seasonCode: value.seasonCode,
-      ...(value.eventId === null ? {} : { eventId: value.eventId }),
+      ...(dataset === 'fpl:live' ? { eventId: value.eventId as number } : {}),
     };
     assertScope(scope);
     const revision = value.revision as number;
     const names = new Set<string>();
     for (const item of value.items) {
       if (
-        !item ||
+        !isRecord(item) ||
+        !hasExactFields(item, MANIFEST_ITEM_FIELDS) ||
         typeof item.name !== 'string' ||
         !/^[a-z][a-zA-Z0-9]*$/.test(item.name) ||
         names.has(item.name) ||
         item.type !== 'string' ||
         typeof item.key !== 'string' ||
         item.key !== dataPublicationItemKey(scope, revision, item.name) ||
+        typeof item.count !== 'number' ||
         !Number.isInteger(item.count) ||
         item.count < 0 ||
+        typeof item.bytes !== 'number' ||
         !Number.isInteger(item.bytes) ||
         item.bytes < 0 ||
         typeof item.sha256 !== 'string' ||
@@ -350,7 +415,8 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
       }
       names.add(item.name);
     }
-    return value as DataPublicationManifest;
+    if (!hasExactItemNames(dataset, [...names])) return null;
+    return value as unknown as DataPublicationManifest;
   } catch {
     return null;
   }

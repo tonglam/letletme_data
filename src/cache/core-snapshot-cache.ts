@@ -60,6 +60,7 @@ export async function publishCoreSnapshotCache(
       revision: options.revision,
       publicationId: options.publicationId,
       sourceCheckedAt: options.sourceCheckedAt,
+      state: 'active',
       items: [
         { name: 'events', value: snapshot.events },
         { name: 'teams', value: snapshot.teams },

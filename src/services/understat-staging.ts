@@ -11,8 +11,6 @@ import type {
 } from '../domain/understat';
 import { contentHash } from '../utils/content-hash';
 
-const STAGING_VERSION = 1;
-
 type StagingKind =
   | 'team-league'
   | 'team-detail'
@@ -21,15 +19,24 @@ type StagingKind =
   | 'player-match-detail';
 
 interface StagingEnvelope {
-  version: number;
   kind: StagingKind;
   season: string;
   capturedAt: string;
   data: Record<string, unknown>;
 }
 
+const STAGING_ENVELOPE_FIELDS = ['kind', 'season', 'capturedAt', 'data'] as const;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  return (
+    actual.length === expected.length && actual.every((field, index) => field === expected[index])
+  );
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
@@ -65,7 +72,6 @@ function createEnvelope(
 ): Record<string, unknown> {
   return JSON.parse(
     JSON.stringify({
-      version: STAGING_VERSION,
       kind,
       season,
       capturedAt: new Date().toISOString(),
@@ -84,12 +90,11 @@ function parseEnvelope(
   if (sourceHash !== contentHash(payload)) {
     throw new Error(`Staged Understat ${expectedKind} payload hash mismatch`);
   }
+  if (!hasExactFields(payload, STAGING_ENVELOPE_FIELDS)) {
+    throw new Error(`Unexpected Understat staging envelope fields for ${expectedKind}`);
+  }
   const envelope = payload as Partial<StagingEnvelope>;
-  if (
-    envelope.version !== STAGING_VERSION ||
-    envelope.kind !== expectedKind ||
-    envelope.season !== expectedSeason
-  ) {
+  if (envelope.kind !== expectedKind || envelope.season !== expectedSeason) {
     throw new Error(
       `Unexpected Understat staging envelope: kind=${String(envelope.kind)} season=${String(envelope.season)}`,
     );

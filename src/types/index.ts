@@ -121,7 +121,7 @@ export interface Fixture {
 // ---------------------------------------------------------------------------
 // Raw FPL API types — inferred from client Zod schemas (FP-19).
 // The canonical definitions live in src/clients/fpl.ts as exported Zod schemas.
-// These re-exports preserve backward compatibility for downstream importers.
+// Re-export the canonical client types from the package boundary.
 // ---------------------------------------------------------------------------
 export type {
   RawFPLEvent,

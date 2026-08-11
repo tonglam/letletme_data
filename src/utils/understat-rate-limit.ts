@@ -8,7 +8,7 @@ import {
   type RedisEndpointConfig,
 } from './config';
 
-const PERMIT_KEY = 'llm:v3:queue:coordination:understat-request-permits';
+const PERMIT_KEY = 'llm:queue:coordination:understat-request-permits';
 const PERMIT_LEASE_PADDING_MS = 5_000;
 const PERMIT_WAIT_TIMEOUT_MS = 120_000;
 const PERMIT_POLL_MS = 100;

@@ -16,7 +16,7 @@ import { playerRepository } from '../../src/repositories/players';
 import { seasonRepository } from '../../src/repositories/seasons';
 import { teamRepository } from '../../src/repositories/teams';
 
-const SCOPE_PATTERN = 'llm:v3:data:fpl:core:2526:*';
+const SCOPE_PATTERN = 'llm:data:fpl:core:2526:*';
 const PUBLICATION_ID = '30000000-0000-4000-8000-000000000001';
 const REVISION = 9_000_000_001;
 const b0Test = process.env.RUN_B0_ACCEPTANCE === '1' ? test : test.skip;

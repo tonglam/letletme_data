@@ -241,7 +241,7 @@ describe('tournament initialization window and request budget', () => {
 
   test('proves the 75-entry by 38-GW cold-start request gate', () => {
     expect(estimateTournamentSetupRequests(75, 38)).toEqual({
-      legacyColdStart: 5888,
+      unoptimizedColdStart: 5888,
       optimizedColdStartUpperBound: 3113,
       optimizedTransferHistoryRequests: 75,
       coreStandingsBaseline: 150,

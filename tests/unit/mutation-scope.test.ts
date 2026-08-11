@@ -8,9 +8,9 @@ import {
 } from '../../src/domain/mutation-scope';
 
 describe('resolveMutationScopes', () => {
-  it('normalizes tiered queue names', () => {
+  it('maps the canonical live queue name', () => {
     const scopes = resolveMutationScopes({
-      queueName: 'live-data-p0',
+      queueName: 'live-data',
       jobName: 'live-snapshot',
       eventId: 33,
     });
@@ -23,18 +23,18 @@ describe('resolveMutationScopes', () => {
     'live-fixture-cache',
     'live-bonus-cache',
     'live-scores',
-  ])('does not recognize removed v2 live job %s', (jobName) => {
-    expect(resolveMutationScopes({ queueName: 'live-data-p0', jobName, eventId: 33 })).toEqual([]);
+  ])('does not recognize unknown live job %s', (jobName) => {
+    expect(resolveMutationScopes({ queueName: 'live-data', jobName, eventId: 33 })).toEqual([]);
   });
 
   it('maps only the canonical snapshot jobs to complete publication scopes', () => {
     const snapshotScopes = resolveMutationScopes({
-      queueName: 'live-data-p0',
+      queueName: 'live-data',
       jobName: 'live-snapshot',
       eventId: 33,
     });
     const fixtureScopes = resolveMutationScopes({
-      queueName: 'data-sync-p1',
+      queueName: 'data-sync',
       jobName: 'core-snapshot',
       eventId: 33,
     });
@@ -51,9 +51,9 @@ describe('resolveMutationScopes', () => {
   });
 
   it('keeps partial price updates inside the canonical player publication scope', () => {
-    const fullSync = resolveMutationScopes({ queueName: 'data-sync-p1', jobName: 'core-snapshot' });
+    const fullSync = resolveMutationScopes({ queueName: 'data-sync', jobName: 'core-snapshot' });
     const priceSync = resolveMutationScopes({
-      queueName: 'data-sync-p1',
+      queueName: 'data-sync',
       jobName: 'player-prices',
     });
 
@@ -63,7 +63,7 @@ describe('resolveMutationScopes', () => {
 
   it('adds event-scoped conflict groups for league event results', () => {
     const scopes = resolveMutationScopes({
-      queueName: 'league-sync-p3',
+      queueName: 'league-sync',
       jobName: 'league-event-results',
       eventId: 33,
       tournamentId: 1001,
@@ -75,7 +75,7 @@ describe('resolveMutationScopes', () => {
 
   it('does not lock the whole setup job by default (phase locks are explicit)', () => {
     const scopes = resolveMutationScopes({
-      queueName: 'tournament-setup-p0',
+      queueName: 'tournament-setup',
       jobName: 'tournament-setup',
       tournamentId: 789,
     });
@@ -96,7 +96,7 @@ describe('resolveMutationScopes', () => {
 
   it('keeps tournament selection stats serialized with tournament event mutations', () => {
     const scopes = resolveMutationScopes({
-      queueName: 'tournament-sync-p2',
+      queueName: 'tournament-sync',
       jobName: 'tournament-selection-stats',
       eventId: 35,
     });
@@ -118,7 +118,7 @@ describe('resolveMutationScopes', () => {
 
   it('narrows tournament event results to per-table entry scopes (FP-14h)', () => {
     const scopes = resolveMutationScopes({
-      queueName: 'tournament-sync-p2',
+      queueName: 'tournament-sync',
       jobName: 'tournament-event-results',
       eventId: 35,
     });
