@@ -43,7 +43,7 @@ describe('production environment preflight', () => {
       'bun run db:provision-runtime-logins --preflight',
     );
     const runtimeUrl = workflow.search(
-      /data_runtime_database_url=\$\(APP_IMAGE="\$IMAGE_REF" docker compose run[\s\S]*?api env/,
+      /data_runtime_database_url=\$\(APP_IMAGE="\$IMAGE_REF" docker compose run[\s\S]*?api[\s\S]*?read-runtime-database-url\.ts/,
     );
     const graphqlRuntimeUrl = workflow.search(/graphql_runtime_database_url=\$\(sed -n/);
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
@@ -90,7 +90,7 @@ describe('production environment preflight', () => {
       /bun scripts\/migration-login-contract\.ts --preflight[\s\S]*?bun run db:provision-runtime-logins --preflight[\s\S]*?compose stop -t 45 api worker/,
     );
     expect(deployScript).toMatch(
-      /data_runtime_database_url=\$\(compose run --rm -T api env[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$\{data_runtime_database_url\}/,
+      /data_runtime_database_url=\$\(compose run --rm -T api[\s\S]*?read-runtime-database-url\.ts[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$\{data_runtime_database_url\}/,
     );
     expect(deployScript).toMatch(
       /(docker compose ps -q graphql|docker ps --filter label=com\.docker\.compose\.service=graphql)[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$\{graphql_runtime_database_url\}/,
