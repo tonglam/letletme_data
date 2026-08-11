@@ -106,8 +106,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/migration-login-contract.ts --preflight
-            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun -e 'process.stdout.write(process.env.DATABASE_URL ?? "")')
+            data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' .env.deploy)
             test -n "$data_runtime_database_url"
             graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
             graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
@@ -125,13 +124,11 @@ jobs:
                 graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
                   "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
               else
-                graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
-                  bun -e 'process.stdout.write(process.env.GRAPHQL_RUNTIME_DATABASE_URL ?? "")')
+                graphql_runtime_database_url=$(sed -n 's/^GRAPHQL_RUNTIME_DATABASE_URL=//p' .env.migrate)
               fi
             fi
             test -n "$graphql_runtime_database_url"
-            graphql_runtime_database_password=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
-              bun -e 'process.stdout.write(process.env.GRAPHQL_RUNTIME_DB_PASSWORD ?? "")')
+            graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' .env.migrate)
             test -n "$graphql_runtime_database_password"
             graphql_runtime_database_url=$(GRAPHQL_RUNTIME_DATABASE_URL="$graphql_runtime_database_url" \
               GRAPHQL_RUNTIME_DATABASE_PASSWORD="$graphql_runtime_database_password" \
