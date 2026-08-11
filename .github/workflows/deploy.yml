@@ -161,7 +161,7 @@ jobs:
             port = f":{parsed.port}" if parsed.port else ""
             netloc = f"{quote('letletme_graphql_runtime', safe='')}@{host}{port}"
             print(urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)), end="")
-              PY
+            PY
               )
               echo "deploy preflight: derived GraphQL URL"
             fi
