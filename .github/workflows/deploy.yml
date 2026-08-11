@@ -121,10 +121,13 @@ jobs:
               echo "deploy preflight: DATABASE_URL missing from $env_file"
               exit 1
             fi
-            echo "deploy preflight: using configured Data runtime URL"
-            data_runtime_database_password=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "DATABASE_URL=$data_runtime_database_url" migration \
-              bun scripts/format-runtime-database-url.ts extract-password)
+            echo "deploy preflight: rotating the Data runtime credential"
+            data_runtime_database_password=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '\n=')
+            [[ "$data_runtime_database_password" =~ ^[A-Za-z0-9_-]{64}$ ]]
+            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "GRAPHQL_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
+              -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=$data_runtime_database_password" migration \
+              bun scripts/format-runtime-database-url.ts with-password)
             graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
               "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
             if [ -z "$graphql_runtime_database_password" ]; then
@@ -142,7 +145,11 @@ jobs:
             awk '!/^DATABASE_URL=/' "$env_file" > "$runtime_env_file"
             printf 'DATABASE_URL="%s"\n' "$data_runtime_database_url" >> "$runtime_env_file"
             export ENV_FILE="$runtime_env_file"
-            cleanup_runtime_env() { rm -f "$runtime_env_file" "$runtime_env_file.bak"; }
+            cleanup_runtime_env() {
+              if [ -n "$runtime_env_file" ]; then
+                rm -f "$runtime_env_file" "$runtime_env_file.bak"
+              fi
+            }
             trap cleanup_runtime_env EXIT
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
@@ -201,6 +208,11 @@ jobs:
               fi
               sleep 2
             done
+
+            chmod 600 "$runtime_env_file"
+            mv "$runtime_env_file" "$env_file"
+            runtime_env_file=""
+            export ENV_FILE="$env_file"
 
             trap - ERR
             worker_container=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)

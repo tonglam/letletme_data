@@ -75,9 +75,12 @@ deploy() {
     log_error "DATABASE_URL missing from ${ENV_FILE}"
     exit 1
   fi
-  data_runtime_database_password=$(compose run --rm -T \
-    -e "DATABASE_URL=${data_runtime_database_url}" migration \
-    bun scripts/format-runtime-database-url.ts extract-password)
+  data_runtime_database_password=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '\n=')
+  [[ "${data_runtime_database_password}" =~ ^[A-Za-z0-9_-]{64}$ ]]
+  data_runtime_database_url=$(compose run --rm -T \
+    -e "GRAPHQL_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
+    -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=${data_runtime_database_password}" migration \
+    bun scripts/format-runtime-database-url.ts with-password)
   graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   if [[ -z "${graphql_runtime_database_password}" ]]; then
     log_error "GRAPHQL_RUNTIME_DB_PASSWORD missing from ${MIGRATION_ENV_FILE}"
@@ -91,10 +94,15 @@ deploy() {
     -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=${graphql_runtime_database_password}" migration \
     bun scripts/format-runtime-database-url.ts with-password)
   runtime_env_file=$(mktemp)
+  configured_env_file="${ENV_FILE}"
   awk '!/^DATABASE_URL=/' "${ENV_FILE}" >"${runtime_env_file}"
   printf 'DATABASE_URL="%s"\n' "${data_runtime_database_url}" >>"${runtime_env_file}"
   export ENV_FILE="${runtime_env_file}"
-  cleanup_runtime_env() { rm -f "${runtime_env_file}" "${runtime_env_file}.bak"; }
+  cleanup_runtime_env() {
+    if [[ -n "${runtime_env_file}" ]]; then
+      rm -f "${runtime_env_file}" "${runtime_env_file}.bak"
+    fi
+  }
   trap cleanup_runtime_env EXIT
   log_info "Validating the application environment"
   if ! compose run --rm -T api bun run env:check; then
@@ -163,6 +171,10 @@ deploy() {
   fi
   log_info "Starting services"
   compose up -d --remove-orphans
+  chmod 600 "${runtime_env_file}"
+  mv "${runtime_env_file}" "${configured_env_file}"
+  runtime_env_file=''
+  export ENV_FILE="${configured_env_file}"
   log_info "Current service status"
   compose ps
 }
