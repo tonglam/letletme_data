@@ -109,13 +109,17 @@ jobs:
 
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
             echo "deploy preflight: image pulled"
+            echo "deploy preflight: reading Data runtime URL"
             data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "$env_file" | sed -e 's/^"//' -e 's/"$//')
+            echo "deploy preflight: Data runtime URL read"
             if [ -z "$data_runtime_database_url" ]; then
               echo "deploy preflight: DATABASE_URL missing from $env_file"
               exit 1
             fi
+            echo "deploy preflight: reading Data runtime password"
             data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' \
               "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
+            echo "deploy preflight: Data runtime password read"
             if [ -z "$data_runtime_database_password" ]; then
               echo "deploy preflight: DATA_RUNTIME_DB_PASSWORD missing from $migration_env_file"
               exit 1
