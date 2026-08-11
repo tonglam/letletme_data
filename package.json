@@ -33,6 +33,8 @@
     "db:apply-sql": "bun scripts/apply-sql-migrations.ts",
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
     "cache:publish-core": "bun scripts/publish-core-cache.ts",
+    "cache:publish-live": "bun scripts/publish-active-live-caches.ts",
+    "ops:migrate-retired-redis": "bun scripts/migrate-retired-redis-state.ts",
     "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts"
   },
   "repository": {

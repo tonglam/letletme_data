@@ -42,7 +42,9 @@ describe('production environment preflight', () => {
     const migrate = workflow.indexOf('bun run db:migrate');
     const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
     const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute');
-    const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
+    const publishLive = workflow.indexOf('bun run cache:publish-live -- --execute');
+    const migrateRedis = workflow.indexOf('bun run ops:migrate-retired-redis -- --execute');
+    const replaceServices = workflow.indexOf('docker compose up -d', migrateRedis);
 
     expect(preflight).toBeGreaterThan(0);
     expect(identityContract).toBeGreaterThan(preflight);
@@ -51,7 +53,10 @@ describe('production environment preflight', () => {
     expect(migrate).toBeGreaterThan(quiescence);
     expect(canonicalContract).toBeGreaterThan(migrate);
     expect(publishCore).toBeGreaterThan(canonicalContract);
-    expect(replaceServices).toBeGreaterThan(publishCore);
+    expect(publishLive).toBeGreaterThan(publishCore);
+    expect(migrateRedis).toBeGreaterThan(publishLive);
+    expect(replaceServices).toBeGreaterThan(migrateRedis);
+    expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {

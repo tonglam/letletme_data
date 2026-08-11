@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import {
   assertQueueQuiescence,
@@ -17,6 +18,7 @@ const accepted = () => ({
       delayed: 0,
       prioritized: 0,
       'waiting-children': 0,
+      paused: 0,
     },
   },
   unsettledCascadeIds: [] as string[],
@@ -37,6 +39,13 @@ describe('queue quiescence gate', () => {
     expect(new Set(queueNames).size).toBe(8);
   });
 
+  test('counts paused jobs and scans both sides of the one-time coordination transition', () => {
+    const script = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
+    expect(script).toMatch(/'paused'/);
+    expect(script).toMatch(/'llm:queue:coordination:tournament-cascade:\*'/);
+    expect(script).toMatch(/'llm:v\*:queue:coordination:tournament-cascade:\*'/);
+  });
+
   test('accepts a fully settled hard-cut boundary', () => {
     expect(() => assertQueueQuiescence(accepted())).not.toThrow();
   });
@@ -49,6 +58,12 @@ describe('queue quiescence gate', () => {
       assertQueueQuiescence({
         ...accepted(),
         runnableQueues: { 'data-sync': { waiting: 1 } },
+      }),
+    ).toThrow('runnable jobs');
+    expect(() =>
+      assertQueueQuiescence({
+        ...accepted(),
+        runnableQueues: { 'data-sync': { paused: 1 } },
       }),
     ).toThrow('runnable jobs');
     expect(() =>

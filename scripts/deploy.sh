@@ -101,6 +101,16 @@ deploy() {
     log_error "Core cache publication failed; services remain stopped for a forward fix."
     exit 1
   fi
+  log_info "Publishing and verifying every active live cache"
+  if ! compose run --rm -T api bun run cache:publish-live -- --execute; then
+    log_error "Live cache publication failed; services remain stopped for a forward fix."
+    exit 1
+  fi
+  log_info "Migrating retained coordination state and retiring old Data cache keys"
+  if ! compose run --rm -T api bun run ops:migrate-retired-redis -- --execute; then
+    log_error "Redis state migration failed; services remain stopped for a forward fix."
+    exit 1
+  fi
   log_info "Starting services"
   compose up -d --remove-orphans
   log_info "Current service status"

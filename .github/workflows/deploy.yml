@@ -98,7 +98,7 @@ jobs:
             test -n "$old_container"
             old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
             test -n "$old_image"
-            printf '%s\n' "$old_image" > /home/workspace/.letletme-data-previous-image
+            printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
 
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
@@ -123,6 +123,10 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun run cache:publish-core -- --execute
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun run cache:publish-live -- --execute
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun run ops:migrate-retired-redis -- --execute
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
             for attempt in $(seq 1 30); do

@@ -17,8 +17,12 @@ const RUNNABLE_JOB_TYPES = [
   'delayed',
   'prioritized',
   'waiting-children',
+  'paused',
 ] as const satisfies readonly JobType[];
-const CASCADE_PATTERN = 'llm:queue:coordination:tournament-cascade:*';
+const CASCADE_PATTERNS = [
+  'llm:queue:coordination:tournament-cascade:*',
+  'llm:v*:queue:coordination:tournament-cascade:*',
+] as const;
 
 async function scan(redis: Redis, pattern: string): Promise<string[]> {
   const keys: string[] = [];
@@ -47,7 +51,7 @@ async function main(): Promise<void> {
 
   try {
     if (redis.status === 'wait' || redis.status === 'end') await redis.connect();
-    const [databaseRows, cascadeKeys, queueCountRows] = await Promise.all([
+    const [databaseRows, cascadeKeyGroups, queueCountRows] = await Promise.all([
       database<Array<{ non_terminal_sync_runs: number; staging_publications: number }>>`
         SELECT
           count(*) FILTER (
@@ -60,7 +64,7 @@ async function main(): Promise<void> {
           ) AS staging_publications
         FROM ops.sync_runs
       `,
-      scan(redis, CASCADE_PATTERN),
+      Promise.all(CASCADE_PATTERNS.map((pattern) => scan(redis, pattern))),
       Promise.all(
         queues.map(
           async (queue) => [queue.name, await queue.getJobCounts(...RUNNABLE_JOB_TYPES)] as const,
@@ -74,7 +78,7 @@ async function main(): Promise<void> {
       nonTerminalSyncRuns: databaseState.non_terminal_sync_runs,
       stagingPublications: databaseState.staging_publications,
       runnableQueues: Object.fromEntries(queueCountRows) as Record<string, RunnableQueueCounts>,
-      unsettledCascadeIds: findUnsettledCascades(cascadeKeys),
+      unsettledCascadeIds: findUnsettledCascades(cascadeKeyGroups.flat()),
     };
     assertQueueQuiescence(snapshot);
     console.log(JSON.stringify({ status: 'queue_quiescence_passed', ...snapshot }, null, 2));
