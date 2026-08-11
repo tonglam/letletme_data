@@ -62,6 +62,7 @@ WITH contract_rows AS (
     )::text AS definition
   FROM pg_namespace namespace_row
   WHERE namespace_row.nspname = ANY ($1::text[])
+     OR namespace_row.nspname = 'public'
 
   UNION ALL
 
@@ -147,6 +148,24 @@ WITH contract_rows AS (
       'isPartition', relation_row.relispartition,
       'partitionBound', pg_get_expr(relation_row.relpartbound, relation_row.oid, true),
       'options', COALESCE(to_jsonb(relation_row.reloptions), '[]'::jsonb),
+      'foreignServer', CASE
+        WHEN relation_row.relkind = 'f' THEN (
+          SELECT foreign_server.srvname
+          FROM pg_foreign_table foreign_table
+          JOIN pg_foreign_server foreign_server
+            ON foreign_server.oid = foreign_table.ftserver
+          WHERE foreign_table.ftrelid = relation_row.oid
+        )
+        ELSE NULL
+      END,
+      'foreignOptions', CASE
+        WHEN relation_row.relkind = 'f' THEN COALESCE((
+          SELECT to_jsonb(foreign_table.ftoptions)
+          FROM pg_foreign_table foreign_table
+          WHERE foreign_table.ftrelid = relation_row.oid
+        ), '[]'::jsonb)
+        ELSE '[]'::jsonb
+      END,
       'acl', COALESCE((
         SELECT jsonb_agg(
           jsonb_build_object(
@@ -205,6 +224,7 @@ WITH contract_rows AS (
       END,
       'storage', attribute_row.attstorage,
       'compression', attribute_row.attcompression,
+      'foreignOptions', COALESCE(to_jsonb(attribute_row.attfdwoptions), '[]'::jsonb),
       'acl', COALESCE((
         SELECT jsonb_agg(
           jsonb_build_object(
@@ -531,7 +551,7 @@ WITH contract_rows AS (
   FROM pg_type public_type
   JOIN pg_namespace public_namespace ON public_namespace.oid = public_type.typnamespace
   WHERE public_namespace.nspname = 'public'
-    AND public_type.typtype IN ('d', 'e')
+    AND public_type.typtype IN ('d', 'e', 'r', 'm')
     AND NOT EXISTS (
       SELECT 1
       FROM pg_depend dependency

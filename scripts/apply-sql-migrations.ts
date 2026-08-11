@@ -9,6 +9,7 @@ import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
 
 import {
   adoptProductionPlatformBaseline,
+  assertCanonicalCapabilityRoleContract,
   assertCanonicalCapabilityRoleMemberships,
   EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT,
   EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT,
@@ -133,6 +134,17 @@ async function assertCanonicalSchemaContract(): Promise<void> {
   }
 }
 
+async function assertCanonicalReportingState(): Promise<void> {
+  const materializedViews = await loadReportingMaterializedViewState(sql);
+  const expectedNames = ['tournament_entry_event_summaries', 'tournament_selection_stats'];
+  if (
+    materializedViews.length !== expectedNames.length ||
+    materializedViews.some((view, index) => view.name !== expectedNames[index] || !view.isPopulated)
+  ) {
+    throw new Error('Canonical reporting materialized views are not fully populated');
+  }
+}
+
 async function applyFreshBaseline(baseline: Migration): Promise<void> {
   const startedAt = performance.now();
   await sql.begin(async (transaction) => {
@@ -242,8 +254,10 @@ async function printStatus(migrations: readonly Migration[], state: DatabaseStat
 
   try {
     assertCanonicalLedger(migrations, ledger, true);
-    await assertCanonicalCapabilityRoleMemberships(sql);
+    await assertCanonicalCapabilityRoleMemberships(sql, true);
+    await assertCanonicalCapabilityRoleContract(sql);
     await assertCanonicalSchemaContract();
+    await assertCanonicalReportingState();
     for (const migration of migrations) console.log(`applied  ${migration.filename}`);
   } catch (error) {
     console.error(error);
@@ -258,6 +272,7 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
   await sql`SELECT pg_advisory_lock(${ADVISORY_LOCK_KEY})`;
   try {
     let state = await inspectDatabaseState();
+    const startedFromEmptyDatabase = !state.hasLedger;
     let ledger: LedgerRow[];
     if (!state.hasLedger) {
       if (state.platformSchemas.length > 0) {
@@ -278,9 +293,11 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
     }
 
     const pending = assertCanonicalLedger(migrations, ledger, false);
-    await assertCanonicalCapabilityRoleMemberships(sql);
+    await assertCanonicalCapabilityRoleMemberships(sql, !startedFromEmptyDatabase);
+    if (!startedFromEmptyDatabase) await assertCanonicalCapabilityRoleContract(sql);
     for (const migration of pending) await applyPendingMigration(migration);
     await assertCanonicalSchemaContract();
+    if (!startedFromEmptyDatabase) await assertCanonicalReportingState();
     console.log('[sql-migrate] up to date');
   } finally {
     await sql`SELECT pg_advisory_unlock(${ADVISORY_LOCK_KEY})`.catch((error) => {

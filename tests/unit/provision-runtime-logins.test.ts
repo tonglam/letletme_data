@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   assertRuntimeLoginProvisioningSnapshot,
   assertRuntimeDatabaseUrl,
+  assertRuntimeDatabaseTarget,
   DATA_RUNTIME_CAPABILITY,
   DATA_RUNTIME_LOGIN,
   GRAPHQL_RUNTIME_CAPABILITY,
@@ -109,6 +110,30 @@ describe('production runtime LOGIN provisioning contract', () => {
         'DATA_RUNTIME_DATABASE_URL',
       ),
     ).toThrow('must use letletme_data_runtime');
+  });
+
+  test('requires runtime URLs to target the migration database', () => {
+    expect(() =>
+      assertRuntimeDatabaseTarget(
+        'postgresql://postgres:password@db.projectref.supabase.co:5432/postgres',
+        'postgresql://letletme_data_runtime:password@aws-0-au.pooler.supabase.com:6543/postgres',
+        'DATA_RUNTIME_DATABASE_URL',
+      ),
+    ).toThrow('same PostgreSQL project');
+    expect(() =>
+      assertRuntimeDatabaseTarget(
+        'postgresql://postgres.projectref:password@aws-0-au.pooler.supabase.com:5432/postgres',
+        'postgresql://letletme_data_runtime.projectref:password@aws-0-au.pooler.supabase.com:6543/postgres',
+        'DATA_RUNTIME_DATABASE_URL',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertRuntimeDatabaseTarget(
+        'postgresql://postgres:password@db.projectref.supabase.co:5432/postgres',
+        'postgresql://letletme_data_runtime:password@db.projectref.supabase.co:5432/other',
+        'DATA_RUNTIME_DATABASE_URL',
+      ),
+    ).toThrow('same PostgreSQL database');
   });
 
   test('rejects elevated, missing, and multiply inherited runtime identities', () => {

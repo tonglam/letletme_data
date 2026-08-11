@@ -93,6 +93,63 @@ export function assertRuntimeDatabaseUrl(
   }
 }
 
+type DatabaseTarget = {
+  readonly databaseName: string;
+  readonly hostname: string;
+  readonly projectRef: string | null;
+};
+
+function parseDatabaseTarget(value: string, variableName: string): DatabaseTarget {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${variableName} must be a valid PostgreSQL URL`);
+  }
+  if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+    throw new Error(`${variableName} must use the postgres or postgresql scheme`);
+  }
+  const databaseName = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+  if (!parsed.hostname || !databaseName) {
+    throw new Error(`${variableName} must include a database name`);
+  }
+  const directProject = parsed.hostname.match(/^db\.([^.]+)\.supabase\.co$/i)?.[1] ?? null;
+  let username = '';
+  try {
+    username = decodeURIComponent(parsed.username);
+  } catch {
+    throw new Error(`${variableName} contains invalid URL encoding`);
+  }
+  const usernameProject = username.includes('.')
+    ? username.slice(username.lastIndexOf('.') + 1)
+    : null;
+  return {
+    databaseName,
+    hostname: parsed.hostname.toLowerCase(),
+    projectRef: directProject ?? usernameProject,
+  };
+}
+
+export function assertRuntimeDatabaseTarget(
+  migrationUrl: string,
+  runtimeUrl: string,
+  variableName: string,
+): void {
+  const migration = parseDatabaseTarget(migrationUrl, 'DATABASE_URL');
+  const runtime = parseDatabaseTarget(runtimeUrl, variableName);
+  if (migration.databaseName !== runtime.databaseName) {
+    throw new Error(`${variableName} must target the same PostgreSQL database as DATABASE_URL`);
+  }
+  const sameProject =
+    migration.projectRef !== null &&
+    runtime.projectRef !== null &&
+    migration.projectRef.toLowerCase() === runtime.projectRef.toLowerCase();
+  const sameHost = migration.hostname === runtime.hostname;
+  if (!sameProject && !sameHost) {
+    throw new Error(`${variableName} must target the same PostgreSQL project as DATABASE_URL`);
+  }
+}
+
 function roleAttributes(row: RoleRow): RoleAttributes {
   return {
     roleName: row.role_name,
@@ -191,10 +248,19 @@ async function inspectRoles(client: QueryClient): Promise<RuntimeLoginProvisioni
         rolbypassrls,
         rolconnlimit,
         (rolvaliduntil IS NULL OR rolvaliduntil > CURRENT_TIMESTAMP) AS valid_until_ok,
-        COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
-      FROM pg_roles
-      WHERE rolname = ANY(${roleNames}::text[])
-      ORDER BY rolname
+        COALESCE(role_row.rolconfig, ARRAY[]::text[]) || COALESCE((
+          SELECT array_agg(setting.value ORDER BY setting.value)
+          FROM pg_db_role_setting database_setting
+          CROSS JOIN LATERAL unnest(database_setting.setconfig) AS setting(value)
+          WHERE database_setting.setrole = role_row.oid
+            AND database_setting.setdatabase IN (
+              0,
+              (SELECT oid FROM pg_database WHERE datname = current_database())
+            )
+        ), ARRAY[]::text[]) AS role_settings
+      FROM pg_roles role_row
+      WHERE role_row.rolname = ANY(${roleNames}::text[])
+      ORDER BY role_row.rolname
     `;
   const membershipRows = await client<
     Array<{ login_role: string; granted_role: string; admin_option: boolean }>
@@ -327,6 +393,8 @@ async function main(): Promise<void> {
     graphqlPassword,
     'GRAPHQL_RUNTIME_DATABASE_URL',
   );
+  assertRuntimeDatabaseTarget(databaseUrl, dataRuntimeUrl, 'DATA_RUNTIME_DATABASE_URL');
+  assertRuntimeDatabaseTarget(databaseUrl, graphqlRuntimeUrl, 'GRAPHQL_RUNTIME_DATABASE_URL');
   if (preflight) {
     console.log(
       JSON.stringify(

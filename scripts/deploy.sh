@@ -82,13 +82,19 @@ deploy() {
   fi
   graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
   graphql_container_count=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d' | wc -l | tr -d ' ')
-  if [[ "${graphql_container_count}" -ne 1 ]]; then
-    log_error "Exactly one running GraphQL container is required to validate its runtime DATABASE_URL."
+  if [[ "${graphql_container_count}" -gt 1 ]]; then
+    log_error "At most one running GraphQL container is allowed to validate its runtime DATABASE_URL."
     exit 1
   fi
-  graphql_container=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d')
-  graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-    "${graphql_container}" | sed -n 's/^DATABASE_URL=//p')
+  if [[ "${graphql_container_count}" -eq 1 ]]; then
+    graphql_container=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d')
+    graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+      "${graphql_container}" | sed -n 's/^DATABASE_URL=//p')
+  else
+    log_warn "No running GraphQL container found; using GRAPHQL_RUNTIME_DATABASE_URL from ${MIGRATION_ENV_FILE}."
+    graphql_runtime_database_url=$(compose run --rm -T migration bun -e \
+      'process.stdout.write(process.env.GRAPHQL_RUNTIME_DATABASE_URL ?? "")')
+  fi
   if [[ -z "${graphql_runtime_database_url}" ]]; then
     log_error "The GraphQL runtime DATABASE_URL is missing; services were not stopped."
     exit 1

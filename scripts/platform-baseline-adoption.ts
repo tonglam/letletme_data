@@ -21,13 +21,13 @@ const EXPECTED_LEDGER_FINGERPRINT =
 // The baseline fingerprint is immutable. Update only the current fingerprint when a
 // later hand-written migration changes the canonical schema contract.
 export const EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT =
-  '4ff91f41a6c402f68a3e82d2ced3dc91e662cb8bbc1117ae9ad2dfee9b3f9217';
+  '16b50904f992bf0d3a63ee5e50e0cb67b85fee4a902220a4115d0e4b565c9f64';
 
 export const EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT =
-  '4ff91f41a6c402f68a3e82d2ced3dc91e662cb8bbc1117ae9ad2dfee9b3f9217';
+  '16b50904f992bf0d3a63ee5e50e0cb67b85fee4a902220a4115d0e4b565c9f64';
 
 const EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT =
-  '3e69f992cd73e94af51436639d533abb2781678daefa5ab9704bcaa6f6140411';
+  'c6d087ffb9ab2c96c3801d94246dda6587185a667ed50d503020a84950a395ca';
 
 export const EXPECTED_PRODUCTION_DATA_FINGERPRINT = [
   '69f4cdb2748dd486',
@@ -77,7 +77,7 @@ export type BaselineAdoptionExpectations = {
 
 export const PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS: BaselineAdoptionExpectations = {
   ledgerFingerprint: EXPECTED_LEDGER_FINGERPRINT,
-  schemaFingerprint: EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT,
+  schemaFingerprint: EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT,
   dataFingerprint: EXPECTED_PRODUCTION_DATA_FINGERPRINT,
 };
 
@@ -129,7 +129,7 @@ async function assertReportingViewsPopulated(client: QueryClient): Promise<void>
 
 export async function assertCanonicalCapabilityRoleMemberships(
   client: QueryClient,
-  requireComplete = false,
+  requireComplete = true,
 ): Promise<void> {
   const [currentUser] = await client<{ role_name: string }[]>`
     SELECT current_user::text AS role_name
@@ -187,7 +187,7 @@ export async function assertCanonicalCapabilityRoleMemberships(
   }
 }
 
-async function assertCapabilityRoleMemberships(client: QueryClient): Promise<void> {
+export async function assertCanonicalCapabilityRoleContract(client: QueryClient): Promise<void> {
   await assertCanonicalCapabilityRoleMemberships(client, true);
 
   const runtimeRoles = await client<RuntimeRoleRow[]>`
@@ -202,9 +202,18 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
       rolbypassrls AS bypass_rls,
       rolconnlimit AS connection_limit,
       (rolvaliduntil IS NULL OR rolvaliduntil > CURRENT_TIMESTAMP) AS valid_until_ok,
-      COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
-    FROM pg_roles
-    WHERE rolname = ANY(${[
+      COALESCE(role_row.rolconfig, ARRAY[]::text[]) || COALESCE((
+        SELECT array_agg(setting.value ORDER BY setting.value)
+        FROM pg_db_role_setting database_setting
+        CROSS JOIN LATERAL unnest(database_setting.setconfig) AS setting(value)
+        WHERE database_setting.setrole = role_row.oid
+          AND database_setting.setdatabase IN (
+            0,
+            (SELECT oid FROM pg_database WHERE datname = current_database())
+          )
+      ), ARRAY[]::text[]) AS role_settings
+    FROM pg_roles role_row
+    WHERE role_row.rolname = ANY(${[
       'letletme_data_runtime',
       'letletme_graphql_runtime',
       'letletme_web_runtime',
@@ -227,9 +236,18 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
       rolbypassrls AS bypass_rls,
       rolconnlimit AS connection_limit,
       (rolvaliduntil IS NULL OR rolvaliduntil > CURRENT_TIMESTAMP) AS valid_until_ok,
-      COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
-    FROM pg_roles
-    WHERE rolname = ANY(${[
+      COALESCE(role_row.rolconfig, ARRAY[]::text[]) || COALESCE((
+        SELECT array_agg(setting.value ORDER BY setting.value)
+        FROM pg_db_role_setting database_setting
+        CROSS JOIN LATERAL unnest(database_setting.setconfig) AS setting(value)
+        WHERE database_setting.setrole = role_row.oid
+          AND database_setting.setdatabase IN (
+            0,
+            (SELECT oid FROM pg_database WHERE datname = current_database())
+          )
+      ), ARRAY[]::text[]) AS role_settings
+    FROM pg_roles role_row
+    WHERE role_row.rolname = ANY(${[
       'letletme_data_owner',
       'letletme_data_writer',
       'letletme_graphql_reader',
@@ -421,7 +439,7 @@ export async function adoptProductionPlatformBaseline(
   assertExpectedLedger(ledgerBefore, expectations.ledgerFingerprint);
   await assertRetiredRoleAbsent(transaction);
   await assertReportingViewsPopulated(transaction);
-  await assertCapabilityRoleMemberships(transaction);
+  await assertCanonicalCapabilityRoleContract(transaction);
 
   const schemaBefore = fingerprintSchemaContract(await loadPlatformSchemaContract(transaction));
   if (schemaBefore === EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT) {
@@ -431,7 +449,7 @@ export async function adoptProductionPlatformBaseline(
       `Platform schema fingerprint mismatch: expected=${expectations.schemaFingerprint} actual=${schemaBefore}`,
     );
   }
-  await assertCapabilityRoleMemberships(transaction);
+  await assertCanonicalCapabilityRoleContract(transaction);
 
   const dataBefore = fingerprintPlatformDataManifest(await loadPlatformDataManifest(transaction));
   if (dataBefore !== expectations.dataFingerprint) {
