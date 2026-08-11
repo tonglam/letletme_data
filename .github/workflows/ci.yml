@@ -71,6 +71,7 @@ jobs:
       fail-fast: false
       matrix:
         bun-version: ['1.3.3']
+        catalog-mode: ['absent', 'present']
     services:
       postgres:
         image: postgres:15
