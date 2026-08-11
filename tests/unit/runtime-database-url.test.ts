@@ -138,4 +138,19 @@ describe('runtime database URL formatter', () => {
       'postgresql://letletme_data_runtime.projectref:runtime-secret@aws-0-region.pooler.supabase.com:5432/app?pgbouncer=true',
     );
   });
+
+  test('keeps a direct runtime role bare when the migration target is direct', async () => {
+    const result = await runFormatter('replace-password', {
+      DATABASE_URL:
+        'postgresql://letletme_data_runtime:old-secret@db.projectref.supabase.co:5432/app?sslmode=require',
+      RUNTIME_DATABASE_SOURCE_URL:
+        'postgresql://postgres:admin@db.projectref.supabase.co:5432/app?sslmode=require',
+      RUNTIME_DATABASE_PASSWORD: 'runtime-secret',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      'postgresql://letletme_data_runtime:runtime-secret@db.projectref.supabase.co:5432/app?sslmode=require',
+    );
+  });
 });

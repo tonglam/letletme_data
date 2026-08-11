@@ -8,11 +8,12 @@ function required(name: string): string {
   return value;
 }
 
-function projectSuffix(value: string): string {
+function projectSuffix(value: string, allowDirectHost: boolean): string {
   const source = new URL(value);
   const username = decodeURIComponent(source.username);
   const separator = username.indexOf('.');
   if (separator >= 0) return username.slice(separator);
+  if (!allowDirectHost) return '';
   const directProject = source.hostname.match(/^db\.([^.]+)\.supabase\.co$/i)?.[1];
   return directProject ? `.${directProject}` : '';
 }
@@ -60,7 +61,10 @@ if (mode === 'extract-password') {
     databaseUrl.port = '5432';
   }
   if (!databaseUrl.username.includes('.') && process.env.RUNTIME_DATABASE_SOURCE_URL) {
-    databaseUrl.username += projectSuffix(required('RUNTIME_DATABASE_SOURCE_URL'));
+    databaseUrl.username += projectSuffix(
+      required('RUNTIME_DATABASE_SOURCE_URL'),
+      databaseUrl.hostname.endsWith('.pooler.supabase.com'),
+    );
   }
   databaseUrl.password = required('RUNTIME_DATABASE_PASSWORD');
 } else {
