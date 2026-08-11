@@ -29,7 +29,7 @@ services:
       target: runner
     command: bun dist/index.js
     env_file:
-      - path: .env.deploy
+      - path: ${ENV_FILE:-.env.deploy}
         required: false
     environment:
       # Force production even if .env.deploy omits/overrides NODE_ENV — logger
@@ -60,7 +60,7 @@ services:
       target: runner
     command: bun dist/worker.js
     env_file:
-      - path: .env.deploy
+      - path: ${ENV_FILE:-.env.deploy}
         required: false
     environment:
       - NODE_ENV=production

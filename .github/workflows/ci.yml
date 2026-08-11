@@ -117,7 +117,7 @@ jobs:
           await sql.unsafe("DO $$ BEGIN CREATE ROLE " + role + " NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$");
           await sql.end();'
 
-      - name: Apply canonical baseline and verify repeatability
+      - name: Apply schema and verify repeatability
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: |
@@ -125,20 +125,7 @@ jobs:
           bun run db:migrate
           bun run db:migrate:status
 
-      - name: Verify strict production baseline adoption
-        env:
-          RUN_INTEGRATION: 1
-          RUN_BASELINE_ADOPTION_INTEGRATION: 1
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-          CACHE_REDIS_HOST: 127.0.0.1
-          CACHE_REDIS_PORT: '6379'
-          CACHE_REDIS_DB: '9'
-          QUEUE_REDIS_HOST: 127.0.0.1
-          QUEUE_REDIS_PORT: '6379'
-          QUEUE_REDIS_DB: '10'
-        run: bun test tests/integration/platform-baseline-adoption.test.ts
-
-      - name: Provision and retry disposable production-shaped runtime logins
+      - name: Provision disposable runtime logins
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           DATA_RUNTIME_DB_PASSWORD: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
@@ -157,6 +144,12 @@ jobs:
           bun -e 'import postgres from "postgres"; const db = postgres(process.env.DATABASE_URL, { max: 1 }); await db.unsafe("CREATE DATABASE schema_export_test"); await db.end();'
           DATABASE_URL="$SCHEMA_EXPORT_DATABASE_URL" bun run db:export > /tmp/schema-export.sql
           bun -e 'import postgres from "postgres"; const db = postgres(process.env.SCHEMA_EXPORT_DATABASE_URL, { max: 1 }); const ddl = await Bun.file("/tmp/schema-export.sql").text(); await db.unsafe(ddl); await db.end();'
+
+      - name: Populate reporting materialized views for integration fixtures
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: |
+          bun -e 'import postgres from "postgres"; const db = postgres(process.env.DATABASE_URL, { max: 1 }); await db`REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries`; await db`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`; await db.end();'
 
       - name: Fresh-database integration tests
         env:

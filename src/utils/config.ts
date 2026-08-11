@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { logError, logInfo, logWarn } from './logger';
+import { logError, logInfo } from './logger';
 
 function booleanEnv(defaultValue: boolean) {
   return z
@@ -52,9 +52,6 @@ const EnvSchema = z.object({
   MUTATION_LOCK_WAIT_TIMEOUT_MS: integerEnv(120_000),
   MUTATION_LOCK_RETRY_DELAY_MS: integerEnv(250),
   MUTATION_LOCK_HEARTBEAT_MS: integerEnv(10_000),
-  // Optional Supabase hints (DB provider)
-  SUPABASE_URL: z.string().optional(),
-  SUPABASE_KEY: z.string().optional(),
   PULSELIVE_COMP_SEASON: z.string().optional(),
   // Disabled until automated Understat access is explicitly approved.
   UNDERSTAT_ENABLED: booleanEnv(false),
@@ -151,11 +148,6 @@ export function getConfig(): AppConfig {
 
     if (Number(parsed.UNDERSTAT_MIN_SEASON) > Number(parsed.UNDERSTAT_SEASON)) {
       throw new Error('UNDERSTAT_MIN_SEASON cannot be newer than UNDERSTAT_SEASON');
-    }
-
-    // Helpful warnings (non-fatal)
-    if (!parsed.SUPABASE_URL || !parsed.SUPABASE_KEY) {
-      logWarn('Supabase env not fully set (optional)');
     }
 
     cachedConfig = parsed;

@@ -7,22 +7,9 @@ import postgres from 'postgres';
 
 import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
 
-import {
-  adoptProductionPlatformBaseline,
-  assertCanonicalCapabilityRoleContract,
-  assertCanonicalCapabilityRoleMemberships,
-  EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT,
-  EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT,
-} from './platform-baseline-adoption';
-import {
-  fingerprintSchemaContract,
-  loadPlatformSchemaContract,
-  loadReportingMaterializedViewState,
-  PLATFORM_SCHEMAS,
-} from './platform-schema-contract';
-
 const MIGRATIONS_DIR = process.env.MIGRATIONS_DIR ?? 'migrations';
-const BASELINE_FILENAME = '0000_platform_baseline.sql';
+const INITIAL_MIGRATION = '0000_platform_baseline.sql';
+const PLATFORM_SCHEMAS = ['bridge', 'competition', 'fpl', 'ops', 'reporting', 'understat'];
 const ADVISORY_LOCK_KEY = 912_883_471;
 const STATUS_ONLY = process.argv.includes('--status');
 
@@ -38,10 +25,7 @@ if (isTransactionPoolerConnection(databaseUrl)) {
   );
 }
 
-const sql = postgres(databaseUrl, {
-  max: 1,
-  prepare: true,
-});
+const sql = postgres(databaseUrl, { max: 1, prepare: true });
 
 type Migration = {
   filename: string;
@@ -52,7 +36,6 @@ type Migration = {
 type LedgerRow = {
   filename: string;
   checksum: string;
-  applied_at: Date;
 };
 
 type DatabaseState = {
@@ -72,14 +55,9 @@ function loadMigrations(): Migration[] {
       return { filename, contents, checksum: checksum(contents) };
     });
 
-  if (migrations[0]?.filename !== BASELINE_FILENAME) {
-    throw new Error(`Migration history must start with ${BASELINE_FILENAME}`);
+  if (migrations[0]?.filename !== INITIAL_MIGRATION) {
+    throw new Error(`Migration history must start with ${INITIAL_MIGRATION}`);
   }
-  const duplicateNames = migrations.filter(
-    (migration, index) =>
-      migrations.findIndex((item) => item.filename === migration.filename) !== index,
-  );
-  if (duplicateNames.length > 0) throw new Error('Migration filenames must be unique');
   return migrations;
 }
 
@@ -97,115 +75,35 @@ async function inspectDatabaseState(): Promise<DatabaseState> {
   return { hasLedger: state.has_ledger, platformSchemas: state.platform_schemas };
 }
 
-async function hasRuntimeData(sqlClient: postgres.Sql | postgres.TransactionSql): Promise<boolean> {
-  const [{ exists }] = await sqlClient<{ exists: boolean }[]>`
-    SELECT EXISTS (SELECT 1 FROM fpl.seasons) AS exists
-  `;
-  return exists;
-}
-
 async function loadLedger(): Promise<LedgerRow[]> {
   return sql<LedgerRow[]>`
-    SELECT filename, checksum, applied_at
+    SELECT filename, checksum
     FROM ops.schema_migrations
     ORDER BY filename
   `;
 }
 
-async function assertFreshBaselineContract(transaction: postgres.TransactionSql): Promise<void> {
-  const schemaFingerprint = fingerprintSchemaContract(
-    await loadPlatformSchemaContract(transaction),
-  );
-  if (schemaFingerprint !== EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT) {
-    throw new Error(
-      `Fresh baseline schema fingerprint mismatch: expected=${EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT} actual=${schemaFingerprint}`,
-    );
-  }
-
-  const materializedViews = await loadReportingMaterializedViewState(transaction);
-  const expectedNames = ['tournament_entry_event_summaries', 'tournament_selection_stats'];
-  if (
-    materializedViews.length !== expectedNames.length ||
-    materializedViews.some((view, index) => view.name !== expectedNames[index] || view.isPopulated)
-  ) {
-    throw new Error('Fresh baseline materialized views must exist WITH NO DATA');
-  }
-}
-
-async function assertCanonicalSchemaContract(): Promise<void> {
-  const schemaFingerprint = fingerprintSchemaContract(await loadPlatformSchemaContract(sql));
-  if (schemaFingerprint !== EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT) {
-    throw new Error(
-      `Current platform schema fingerprint mismatch: expected=${EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT} actual=${schemaFingerprint}`,
-    );
-  }
-}
-
-async function assertCanonicalReportingState(): Promise<void> {
-  const materializedViews = await loadReportingMaterializedViewState(sql);
-  const expectedNames = ['tournament_entry_event_summaries', 'tournament_selection_stats'];
-  if (
-    materializedViews.length !== expectedNames.length ||
-    materializedViews.some((view, index) => view.name !== expectedNames[index] || !view.isPopulated)
-  ) {
-    throw new Error('Canonical reporting materialized views are not fully populated');
-  }
-}
-
-async function applyFreshBaseline(baseline: Migration): Promise<void> {
-  const startedAt = performance.now();
-  await sql.begin(async (transaction) => {
-    await transaction`SELECT set_config('lock_timeout', '5s', true)`;
-    await transaction`SELECT set_config('statement_timeout', '15min', true)`;
-    await transaction.unsafe(baseline.contents);
-    await assertFreshBaselineContract(transaction);
-    await transaction`
-      INSERT INTO ops.schema_migrations (filename, checksum)
-      VALUES (${baseline.filename}, ${baseline.checksum})
-    `;
-  });
-  console.log(
-    `[sql-migrate] applied ${baseline.filename} duration_ms=${(
-      performance.now() - startedAt
-    ).toFixed(2)}`,
-  );
-}
-
-async function adoptProductionBaseline(baseline: Migration): Promise<void> {
-  const startedAt = performance.now();
-  await sql.begin(async (transaction) => {
-    await transaction`SELECT set_config('lock_timeout', '5s', true)`;
-    await transaction`SELECT set_config('statement_timeout', '30min', true)`;
-    await adoptProductionPlatformBaseline(transaction, baseline.filename, baseline.checksum);
-  });
-  console.log(
-    `[sql-migrate] adopted ${baseline.filename} duration_ms=${(
-      performance.now() - startedAt
-    ).toFixed(2)}`,
-  );
-}
-
-function assertCanonicalLedger(
+function pendingMigrations(
   migrations: readonly Migration[],
   ledger: readonly LedgerRow[],
   requireComplete: boolean,
 ): Migration[] {
   const localByName = new Map(migrations.map((migration) => [migration.filename, migration]));
-  const appliedByName = new Map<string, LedgerRow>();
+  const applied = new Set<string>();
+
   for (const row of ledger) {
-    if (appliedByName.has(row.filename)) {
+    if (applied.has(row.filename))
       throw new Error(`Duplicate migration ledger row: ${row.filename}`);
-    }
-    appliedByName.set(row.filename, row);
+    applied.add(row.filename);
     const migration = localByName.get(row.filename);
     if (!migration) throw new Error(`Ledgered migration file is missing: ${row.filename}`);
-    if (row.checksum !== migration.checksum) {
+    if (migration.checksum !== row.checksum) {
       throw new Error(`Checksum mismatch for applied migration ${row.filename}`);
     }
   }
 
   const latestApplied = ledger.at(-1)?.filename;
-  const pending = migrations.filter((migration) => !appliedByName.has(migration.filename));
+  const pending = migrations.filter((migration) => !applied.has(migration.filename));
   const backdated = latestApplied
     ? pending.filter((migration) => migration.filename < latestApplied)
     : [];
@@ -224,7 +122,7 @@ function assertCanonicalLedger(
   return pending;
 }
 
-async function applyPendingMigration(migration: Migration): Promise<void> {
+async function applyMigration(migration: Migration): Promise<void> {
   const startedAt = performance.now();
   await sql.begin(async (transaction) => {
     await transaction`SELECT set_config('lock_timeout', '5s', true)`;
@@ -242,34 +140,33 @@ async function applyPendingMigration(migration: Migration): Promise<void> {
   );
 }
 
+async function applyInitialMigration(migration: Migration): Promise<void> {
+  const state = await inspectDatabaseState();
+  if (state.platformSchemas.length > 0) {
+    throw new Error(
+      `Refusing to initialize a partial platform schema: ${state.platformSchemas.join(', ')}`,
+    );
+  }
+  await applyMigration(migration);
+}
+
 async function printStatus(migrations: readonly Migration[], state: DatabaseState): Promise<void> {
   if (!state.hasLedger) {
-    console.log(`pending  ${BASELINE_FILENAME}`);
+    console.log(`pending ${INITIAL_MIGRATION}`);
     if (state.platformSchemas.length > 0) {
-      console.log(`invalid  partial platform schemas: ${state.platformSchemas.join(', ')}`);
+      console.log(`invalid partial platform schemas: ${state.platformSchemas.join(', ')}`);
     }
-    process.exitCode = 1;
-    return;
-  }
-
-  const ledger = await loadLedger();
-  if (ledger[0]?.filename !== BASELINE_FILENAME) {
-    console.log(`pending  ${BASELINE_FILENAME} (strict production adoption required)`);
     process.exitCode = 1;
     return;
   }
 
   try {
-    assertCanonicalLedger(migrations, ledger, true);
-    const runtimeData = await hasRuntimeData(sql);
-    const requireCompleteMemberships = runtimeData;
-    await assertCanonicalCapabilityRoleMemberships(sql, requireCompleteMemberships);
-    if (requireCompleteMemberships) {
-      await assertCanonicalCapabilityRoleContract(sql);
-      await assertCanonicalReportingState();
+    const ledger = await loadLedger();
+    if (ledger[0]?.filename !== INITIAL_MIGRATION) {
+      throw new Error(`Migration ledger must start with ${INITIAL_MIGRATION}`);
     }
-    await assertCanonicalSchemaContract();
-    for (const migration of migrations) console.log(`applied  ${migration.filename}`);
+    pendingMigrations(migrations, ledger, true);
+    for (const migration of migrations) console.log(`applied ${migration.filename}`);
   } catch (error) {
     console.error(error);
     process.exitCode = 1;
@@ -277,42 +174,28 @@ async function printStatus(migrations: readonly Migration[], state: DatabaseStat
 }
 
 async function migrate(migrations: readonly Migration[]): Promise<void> {
-  const baseline = migrations[0];
-  if (!baseline) throw new Error('No baseline migration found');
+  const initial = migrations[0];
+  if (!initial) throw new Error('No initial migration found');
 
   await sql`SELECT pg_advisory_lock(${ADVISORY_LOCK_KEY})`;
   try {
-    let state = await inspectDatabaseState();
-    const startedFromEmptyDatabase = !state.hasLedger;
+    const state = await inspectDatabaseState();
     let ledger: LedgerRow[];
     if (!state.hasLedger) {
-      if (state.platformSchemas.length > 0) {
-        throw new Error(
-          `Refusing to baseline a partial platform schema: ${state.platformSchemas.join(', ')}`,
-        );
-      }
-      await applyFreshBaseline(baseline);
+      await applyInitialMigration(initial);
       ledger = await loadLedger();
     } else {
       ledger = await loadLedger();
-      if (ledger[0]?.filename !== BASELINE_FILENAME) {
-        await adoptProductionBaseline(baseline);
-        state = await inspectDatabaseState();
-        if (!state.hasLedger) throw new Error('Baseline adoption removed the migration ledger');
-        ledger = await loadLedger();
+      if (ledger[0]?.filename !== INITIAL_MIGRATION) {
+        throw new Error(
+          `Migration ledger is not using ${INITIAL_MIGRATION}; manual cleanup is required`,
+        );
       }
     }
 
-    const pending = assertCanonicalLedger(migrations, ledger, false);
-    const runtimeData = await hasRuntimeData(sql);
-    const requireCompleteMemberships = !startedFromEmptyDatabase && runtimeData;
-    await assertCanonicalCapabilityRoleMemberships(sql, requireCompleteMemberships);
-    if (requireCompleteMemberships) {
-      await assertCanonicalCapabilityRoleContract(sql);
-      await assertCanonicalReportingState();
-    }
-    for (const migration of pending) await applyPendingMigration(migration);
-    await assertCanonicalSchemaContract();
+    const pending = pendingMigrations(migrations, ledger, false);
+    for (const migration of pending) await applyMigration(migration);
+    pendingMigrations(migrations, await loadLedger(), true);
     console.log('[sql-migrate] up to date');
   } finally {
     await sql`SELECT pg_advisory_unlock(${ADVISORY_LOCK_KEY})`.catch((error) => {
