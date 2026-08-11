@@ -303,9 +303,10 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
     }
 
     const pending = assertCanonicalLedger(migrations, ledger, false);
-    await assertCanonicalCapabilityRoleMemberships(sql, !startedFromEmptyDatabase);
     const runtimeData = await hasRuntimeData(sql);
-    if (runtimeData || pending.length > 0) {
+    const requireCompleteMemberships = !startedFromEmptyDatabase && (runtimeData || pending.length > 0);
+    await assertCanonicalCapabilityRoleMemberships(sql, requireCompleteMemberships);
+    if (requireCompleteMemberships) {
       await assertCanonicalCapabilityRoleContract(sql);
       await assertCanonicalReportingState();
     }
