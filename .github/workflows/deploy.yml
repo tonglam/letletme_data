@@ -111,8 +111,8 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/migration-login-contract.ts --preflight
-            data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "$env_file" | \
-              sed -e 's/^"//' -e 's/"$//')
+            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun -e 'process.stdout.write(process.env.DATABASE_URL ?? "")')
             test -n "$data_runtime_database_url"
             graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
             graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
