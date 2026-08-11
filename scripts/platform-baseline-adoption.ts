@@ -19,10 +19,10 @@ const EXPECTED_LEDGER_FINGERPRINT =
   '7e73ca4d98ecf3dbdf595eaa214c6ec609a7d538d57157f82f2fffed84842e27';
 
 export const EXPECTED_PLATFORM_SCHEMA_FINGERPRINT =
-  '6f5eae07f8d7d4851ef3fbd4352a6d05d921e8661132c2e462e91653796324c9';
+  'b1b07b0cd9d788568ee7a11bf3ab6e2370eb4f8f8ec6d254460bd997c0db929a';
 
 const EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT =
-  '99d9f477cc4250cb661bf01bcfb2ff51dfaa48d51e667ad6e1e42025a24a0685';
+  'd18b919cdd84fdeaa9b56691dec3f0db528defa5a2552294522081b071916105';
 
 export const EXPECTED_PRODUCTION_DATA_FINGERPRINT = [
   '69f4cdb2748dd486',
@@ -36,6 +36,12 @@ type QueryClient = postgres.Sql | postgres.TransactionSql;
 type LedgerRow = {
   filename: string;
   checksum: string | null;
+};
+
+type CapabilityMembershipRow = {
+  granted_role: string;
+  member_role: string;
+  admin_option: boolean;
 };
 
 export type BaselineAdoptionExpectations = {
@@ -96,9 +102,60 @@ async function assertReportingViewsPopulated(client: QueryClient): Promise<void>
   }
 }
 
+async function assertCapabilityRoleMemberships(client: QueryClient): Promise<void> {
+  const [currentUser] = await client<{ role_name: string }[]>`
+    SELECT current_user::text AS role_name
+  `;
+  if (!currentUser) throw new Error('Migration LOGIN identity is unavailable');
+
+  const rows = await client<CapabilityMembershipRow[]>`
+    SELECT
+      granted_role.rolname AS granted_role,
+      member_role.rolname AS member_role,
+      membership.admin_option
+    FROM pg_auth_members membership
+    JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+    JOIN pg_roles member_role ON member_role.oid = membership.member
+    WHERE granted_role.rolname IN (
+      'letletme_data_owner',
+      'letletme_data_writer',
+      'letletme_graphql_reader',
+      'letletme_web_auth'
+    )
+       OR member_role.rolname IN (
+      'letletme_data_owner',
+      'letletme_data_writer',
+      'letletme_graphql_reader',
+      'letletme_web_auth'
+    )
+    ORDER BY granted_role.rolname, member_role.rolname
+  `;
+  const allowed = new Set([
+    `letletme_data_owner->${currentUser.role_name}`,
+    'letletme_data_writer->letletme_data_runtime',
+    'letletme_graphql_reader->letletme_graphql_runtime',
+    'letletme_web_auth->letletme_web_runtime',
+  ]);
+  const unexpected = rows.filter(
+    (row) => row.admin_option || !allowed.has(`${row.granted_role}->${row.member_role}`),
+  );
+  if (unexpected.length > 0) {
+    throw new Error(
+      `Unexpected capability role membership: ${unexpected
+        .map((row) => `${row.granted_role}->${row.member_role}`)
+        .join(', ')}`,
+    );
+  }
+}
+
 async function repairProductionReportingContract(client: QueryClient): Promise<void> {
   // The accepted production boundary predates these schema-only reporting repairs.
   // Keep this allowlist narrow so any unrelated drift still fails closed.
+  const [ownerGrant] = await client<{ statement: string }[]>`
+    SELECT format('GRANT %I TO %I', 'letletme_data_owner', current_user::text) AS statement
+  `;
+  if (!ownerGrant?.statement) throw new Error('Unable to prepare the migration owner grant');
+  await client.unsafe(ownerGrant.statement);
   await client`
     CREATE INDEX IF NOT EXISTS tournament_knockouts_season_fk_idx
       ON competition.tournament_knockouts USING btree (season_id)
@@ -167,6 +224,7 @@ export async function adoptProductionPlatformBaseline(
   assertExpectedLedger(ledgerBefore, expectations.ledgerFingerprint);
   await assertRetiredRoleAbsent(transaction);
   await assertReportingViewsPopulated(transaction);
+  await assertCapabilityRoleMemberships(transaction);
 
   const schemaBefore = fingerprintSchemaContract(await loadPlatformSchemaContract(transaction));
   if (schemaBefore === EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT) {
@@ -176,6 +234,7 @@ export async function adoptProductionPlatformBaseline(
       `Platform schema fingerprint mismatch: expected=${expectations.schemaFingerprint} actual=${schemaBefore}`,
     );
   }
+  await assertCapabilityRoleMemberships(transaction);
 
   const dataBefore = fingerprintPlatformDataManifest(await loadPlatformDataManifest(transaction));
   if (dataBefore !== expectations.dataFingerprint) {

@@ -202,7 +202,38 @@ WITH contract_rows AS (
         ELSE attribute_row.attcollation::regcollation::text
       END,
       'storage', attribute_row.attstorage,
-      'compression', attribute_row.attcompression
+      'compression', attribute_row.attcompression,
+      'acl', COALESCE((
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'grantor', pg_get_userbyid(acl_row.grantor),
+            'grantee', CASE
+              WHEN acl_row.grantee = 0 THEN 'PUBLIC'
+              WHEN acl_row.grantee = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+                THEN '$MIGRATION_ACTOR'
+              ELSE pg_get_userbyid(acl_row.grantee)
+            END,
+            'privilege', acl_row.privilege_type,
+            'grantable', acl_row.is_grantable
+          )
+          ORDER BY
+            pg_get_userbyid(acl_row.grantor),
+            CASE
+              WHEN acl_row.grantee = 0 THEN 'PUBLIC'
+              WHEN acl_row.grantee = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+                THEN '$MIGRATION_ACTOR'
+              ELSE pg_get_userbyid(acl_row.grantee)
+            END,
+            acl_row.privilege_type,
+            acl_row.is_grantable
+        )
+        FROM aclexplode(
+          COALESCE(
+            attribute_row.attacl,
+            acldefault('c', relation_row.relowner)
+          )
+        ) acl_row
+      ), '[]'::jsonb)
     )::text
   FROM pg_attribute attribute_row
   JOIN pg_class relation_row ON relation_row.oid = attribute_row.attrelid

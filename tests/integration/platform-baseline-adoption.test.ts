@@ -42,6 +42,15 @@ async function expectCanonicalLedger(): Promise<void> {
 }
 
 beforeAll(async () => {
+  await sql.unsafe(`
+    DO $$
+    BEGIN
+      CREATE ROLE anon NOLOGIN;
+    EXCEPTION WHEN duplicate_object THEN
+      NULL;
+    END
+    $$;
+  `);
   await sql`REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries`;
   await sql`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`;
   await sql`DROP INDEX IF EXISTS competition.tournament_knockouts_season_fk_idx`;
@@ -107,6 +116,17 @@ describe('canonical platform baseline adoption', () => {
         { name: 'dataset_publications_season_fk_idx' },
         { name: 'tournament_knockouts_season_fk_idx' },
       ]);
+      const [ownerMembership] = await sql<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1
+          FROM pg_auth_members membership
+          JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+          JOIN pg_roles member_role ON member_role.oid = membership.member
+          WHERE granted_role.rolname = 'letletme_data_owner'
+            AND member_role.rolname = current_user
+        ) AS exists
+      `;
+      expect(ownerMembership?.exists).toBe(true);
     },
     60_000,
   );
@@ -163,6 +183,19 @@ describe('canonical platform baseline adoption', () => {
           });
         }),
       ).rejects.toThrow('schema fingerprint mismatch');
+      await expectCanonicalLedger();
+
+      await expect(
+        sql.begin(async (transaction) => {
+          await transaction`DELETE FROM ops.schema_migrations`;
+          await transaction.unsafe(productionLedgerFixture);
+          await transaction`GRANT letletme_data_writer TO anon`;
+          await adoptProductionPlatformBaseline(transaction, baselineFilename, baselineChecksum, {
+            ...PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS,
+            dataFingerprint,
+          });
+        }),
+      ).rejects.toThrow('Unexpected capability role membership');
       await expectCanonicalLedger();
     },
     60_000,
