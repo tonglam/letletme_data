@@ -65,13 +65,8 @@ deploy() {
     log_info "Building containers"
     compose build --pull
   fi
-  log_info "Validating the application environment"
-  if ! compose run --rm -T api bun run env:check; then
-    log_error "Application environment validation failed; services were not stopped."
-    exit 1
-  fi
   log_info "Validating the migration LOGIN before service shutdown"
-  if ! compose run --rm -T migration bun scripts/migration-login-contract.ts --preflight; then
+  if ! compose run --rm -T migration bun run db:migration-contract; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
@@ -81,56 +76,24 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  if ! compose run --rm -T migration bun -e '
-    import { inspectAndAssertDeploymentQueueQuiescence } from "./src/services/deployment-queue-quiescence-runner.service";
-    const snapshot = await inspectAndAssertDeploymentQueueQuiescence();
-    console.log(JSON.stringify({ status: "queue_quiescence_passed", ...snapshot }, null, 2));
-  '; then
+  if ! compose run --rm -T api bun run ops:assert-queue-quiescence; then
     log_error "Queue/database work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1
   fi
   log_info "Running migrations"
   if ! compose run --rm -T migration bun run db:migrate; then
-    log_error "Drizzle migrations failed; aborting deploy before services start."
-    exit 1
-  fi
-  log_info "Applying numbered SQL migrations (0006+)"
-  if ! compose run --rm -T migration bun scripts/apply-sql-migrations.ts; then
     log_error "SQL migrations failed; aborting deploy before services start."
     exit 1
   fi
   compose run --rm -T migration bun run db:migrate:status
-  if ! compose run --rm -T migration bun scripts/migration-login-contract.ts; then
+  if ! compose run --rm -T migration bun run db:migration-contract; then
     log_error "Migration LOGIN contract failed after migrations."
-    exit 1
-  fi
-  log_info "Provisioning the runtime LOGINs"
-  if ! compose run --rm -T migration bun run db:provision-runtime-logins; then
-    log_error "Runtime LOGIN provisioning failed; services remain stopped for a forward fix."
     exit 1
   fi
   log_info "Publishing and verifying the canonical core cache"
   if ! compose run --rm -T api bun run cache:publish-core -- --execute; then
     log_error "Core cache publication failed; services remain stopped for a forward fix."
-    exit 1
-  fi
-  log_info "Publishing and verifying every active live cache"
-  if ! compose run --rm -T api bun -e '
-    import { publishActiveLiveCachesForDeployment } from "./src/services/deployment-live-publication.service";
-    const result = await publishActiveLiveCachesForDeployment(true);
-    console.log(JSON.stringify(result, null, 2));
-  '; then
-    log_error "Live cache publication failed; services remain stopped for a forward fix."
-    exit 1
-  fi
-  log_info "Migrating retained coordination state and retiring old Data cache keys"
-  if ! compose run --rm -T api bun -e '
-    import { migrateRetiredRedisStateForDeployment } from "./src/services/deployment-redis-transition.service";
-    const result = await migrateRetiredRedisStateForDeployment(true);
-    console.log(JSON.stringify(result, null, 2));
-  '; then
-    log_error "Redis state migration failed; services remain stopped for a forward fix."
     exit 1
   fi
   log_info "Starting services"

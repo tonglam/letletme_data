@@ -23,16 +23,14 @@
     "lint": "bunx eslint . --ext .ts,.tsx --cache --config eslint.config.mjs",
     "lint:fix": "bunx eslint . --ext .ts,.tsx --cache --fix --config eslint.config.mjs",
     "format:fix": "bunx prettier --write .",
-    "db:generate": "bunx drizzle-kit generate",
     "db:export": "bunx drizzle-kit export",
-    "db:migrate": "bunx drizzle-kit migrate",
-    "db:check": "bunx drizzle-kit check",
+    "db:migrate": "bun scripts/apply-sql-migrations.ts",
     "db:studio": "bunx drizzle-kit studio",
     "db:migration-contract": "bun scripts/migration-login-contract.ts",
     "db:provision-runtime-logins": "bun scripts/provision-runtime-logins.ts",
-    "db:apply-sql": "bun scripts/apply-sql-migrations.ts",
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
-    "cache:publish-core": "bun scripts/publish-core-cache.ts"
+    "cache:publish-core": "bun scripts/publish-core-cache.ts",
+    "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts"
   },
   "repository": {
     "type": "git",

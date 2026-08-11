@@ -94,13 +94,35 @@ jobs:
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
             test -f .env.migrate
 
-            old_container=$(docker compose ps -aq api)
+            old_container=$(docker compose ps -q api)
             test -n "$old_container"
             old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
             test -n "$old_image"
             printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
 
-            APP_IMAGE="$IMAGE_REF" bash scripts/deploy.sh deploy
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+              bun run db:migration-contract
+
+            migration_started=false
+            restore_before_migration() {
+              if [ "$migration_started" = false ]; then
+                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
+              fi
+            }
+            trap restore_before_migration ERR
+
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun run ops:assert-queue-quiescence
+            migration_started=true
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun run cache:publish-core -- --execute
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:3000/health >/dev/null \
@@ -109,7 +131,7 @@ jobs:
               fi
               if [ "$attempt" -eq 30 ]; then
                 docker compose ps
-                docker logs --tail 100 "$(docker compose ps -aq api)" || true
+                docker logs --tail 100 "$(docker compose ps -q api)" || true
                 exit 1
               fi
               sleep 2
@@ -130,5 +152,6 @@ jobs:
               sleep 2
             done
 
+            trap - ERR
             docker compose ps
             docker image prune --force

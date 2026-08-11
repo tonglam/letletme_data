@@ -1,11 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
 
 import {
   assertQueueQuiescence,
   cascadeId,
   findUnsettledCascades,
-} from '../../src/services/deployment-queue-quiescence.service';
+} from '../../scripts/queue-quiescence-gate';
 import { queueNames } from '../../src/queues/names';
 
 const accepted = () => ({
@@ -37,18 +36,6 @@ describe('queue quiescence gate', () => {
       'understat-team-sync',
     ]);
     expect(new Set(queueNames).size).toBe(8);
-  });
-
-  test('counts paused jobs and scans both sides of the one-time coordination transition', () => {
-    const script = readFileSync(
-      'src/services/deployment-queue-quiescence-runner.service.ts',
-      'utf8',
-    );
-    expect(script).toMatch(/'paused'/);
-    expect(script).toMatch(/'llm:queue:coordination:tournament-cascade:\*'/);
-    expect(script).toMatch(/'llm:v\*:queue:coordination:tournament-cascade:\*'/);
-    expect(script).toMatch(/to_regclass\('ops\.sync_runs'\)/);
-    expect(script).toContain('Database quiescence tables are only partially initialized');
   });
 
   test('accepts a fully settled hard-cut boundary', () => {

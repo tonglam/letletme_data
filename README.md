@@ -132,7 +132,6 @@ cp .env.example .env
 bun install --frozen-lockfile
 bun run env:check
 bun run db:migrate
-bun run db:apply-sql
 bun run db:migrate:status
 ```
 
@@ -209,9 +208,8 @@ in the [API cheat sheet](docs/api-cheat-sheet.md).
 | `bun run typecheck` | Type-check without emitting files |
 | `bun run lint` | Run ESLint |
 | `bun run coverage` | Run unit tests with coverage |
-| `bun run db:migrate` | Apply Drizzle-journaled migrations |
-| `bun run db:apply-sql` | Apply repository-numbered SQL migrations |
-| `bun run db:migrate:status` | Verify both migration histories and checksums |
+| `bun run db:migrate` | Apply canonical SQL migrations |
+| `bun run db:migrate:status` | Verify the canonical migration ledger and checksums |
 
 Integration tests refuse production-like database or Redis targets. See
 [tests/README.md](tests/README.md) for the required isolated setup.
@@ -239,9 +237,9 @@ runbook.
 - [FPL season readiness runbook](docs/fpl-season-readiness.md)
 - [System contracts](docs/SYSTEM_CONTRACTS.md)
 - [Redis key contract](docs/redis-contract.md)
+- [Database security boundary](docs/database-security.md)
 - [Job schedule and gates](docs/job-schedule.md)
 - [Internal API cheat sheet](docs/api-cheat-sheet.md)
-- [Non-live sync evaluation standard](docs/non-live-sync-evaluation.md)
 - [Migration ownership](migrations/README.md)
 - [Test strategy](tests/README.md)
 - [Deployment guide](DEPLOYMENT.md)

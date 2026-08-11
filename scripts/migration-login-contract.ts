@@ -2,9 +2,7 @@
 import postgres from 'postgres';
 
 import {
-  assertMigrationLoginPreflightSnapshot,
   assertMigrationLoginSnapshot,
-  type MigrationLoginPreflightSnapshot,
   type MigrationLoginSnapshot,
 } from './migration-login-policy';
 
@@ -22,59 +20,17 @@ type ContractRow = {
   public_application_object_count: number;
 };
 
-type PreflightRow = Pick<
-  ContractRow,
-  | 'role_name'
-  | 'session_user'
-  | 'server_major'
-  | 'rolcanlogin'
-  | 'rolcreaterole'
-  | 'rolinherit'
-  | 'rolbypassrls'
->;
-
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const preflight = args.length === 1 && args[0] === '--preflight';
-  if (args.length > 0 && !preflight) {
-    throw new Error(`Migration contract does not accept arguments: ${args.join(' ')}`);
+  if (process.argv.length > 2) {
+    throw new Error(
+      `Migration contract does not accept arguments: ${process.argv.slice(2).join(' ')}`,
+    );
   }
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
 
   const sql = postgres(databaseUrl, { max: 1, prepare: false });
   try {
-    if (preflight) {
-      const rows = await sql<PreflightRow[]>`
-        SELECT
-          current_user::text AS role_name,
-          session_user::text AS session_user,
-          current_setting('server_version_num')::integer / 10000 AS server_major,
-          role_row.rolcanlogin,
-          role_row.rolcreaterole,
-          role_row.rolinherit,
-          role_row.rolbypassrls
-        FROM pg_roles role_row
-        WHERE role_row.rolname = current_user
-      `;
-      const base = rows[0];
-      if (!base) throw new Error('Migration LOGIN role is unavailable');
-      const snapshot: MigrationLoginPreflightSnapshot = {
-        roleName: base.role_name,
-        sessionUser: base.session_user,
-        serverMajor: base.server_major,
-        canLogin: base.rolcanlogin,
-        createRole: base.rolcreaterole,
-        inherit: base.rolinherit,
-        bypassRls: base.rolbypassrls,
-      };
-      assertMigrationLoginPreflightSnapshot(snapshot);
-      console.log(
-        JSON.stringify({ status: 'migration_login_preflight_passed', ...snapshot }, null, 2),
-      );
-      return;
-    }
-
     const rows = await sql<ContractRow[]>`
       SELECT
         current_user::text AS role_name,

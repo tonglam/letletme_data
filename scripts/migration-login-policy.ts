@@ -13,25 +13,6 @@ export type MigrationLoginSnapshot = {
   readonly inheritedRoles: readonly string[];
 };
 
-export type MigrationLoginPreflightSnapshot = Pick<
-  MigrationLoginSnapshot,
-  'roleName' | 'sessionUser' | 'serverMajor' | 'canLogin' | 'createRole' | 'inherit' | 'bypassRls'
->;
-
-export function assertMigrationLoginPreflightSnapshot(
-  snapshot: MigrationLoginPreflightSnapshot,
-): void {
-  if (snapshot.serverMajor !== 15) {
-    throw new Error('Platform migration requires PostgreSQL 15');
-  }
-  if (snapshot.roleName !== 'postgres' || snapshot.sessionUser !== snapshot.roleName) {
-    throw new Error('Production migration requires the direct Supabase postgres LOGIN');
-  }
-  if (!snapshot.canLogin || !snapshot.createRole || !snapshot.inherit || !snapshot.bypassRls) {
-    throw new Error('Supabase postgres migration LOGIN capabilities are incomplete');
-  }
-}
-
 export function assertMigrationLoginSnapshot(snapshot: MigrationLoginSnapshot): void {
   if (snapshot.serverMajor !== 15) {
     throw new Error('Platform migration requires PostgreSQL 15');

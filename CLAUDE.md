@@ -4,9 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Hard rules
 
-1. **Redis keys/shapes are frozen.** Multiple external systems read this Redis. Fixes stay within existing key patterns, hash fields, and JSON shapes; new data needs go to **new additive keys only**. Consumer-facing deletions need sign-off (prefer manual runbooks). Exception already in code: when `Season:active` advances, entity writers auto-`DEL` stale keys for their prefixes — see `docs/redis-contract.md` §10. Do not add new automatic cleanup jobs without updating that contract.
-2. **`bun run db:generate` is frozen** (would emit a schema-reset migration). Add migrations as hand-written, idempotent `migrations/NNNN_name.sql` files — see `migrations/README.md`.
-3. One fix-plan item = one PR. Tracker: `docs/fix-plan-checklist.md`.
+1. **Redis has one canonical contract.** Coordinate producer and consumer changes; do not add alternate readers, writers, or compatibility namespaces.
+2. **Database DDL has one migration path.** Add the next hand-written `migrations/NNNN_name.sql` file and update the typed Drizzle mapping; see `migrations/README.md`.
 
 ## Commands
 
@@ -32,9 +31,9 @@ bun run lint:fix     # ESLint auto-fix
 bun run format:fix   # Prettier format
 
 # Database
-bun run db:generate  # Generate Drizzle migrations from schema changes
-bun run db:migrate   # Apply migrations
-bun run db:studio    # Open Drizzle Studio (DB browser)
+bun run db:migrate          # Apply canonical SQL migrations
+bun run db:migrate:status   # Verify ledger and checksums
+bun run db:studio           # Open Drizzle Studio (DB browser)
 ```
 
 Integration tests require a live PostgreSQL + Redis instance. Unit tests run without any infrastructure.
@@ -103,7 +102,7 @@ Every domain file in `src/domain/` must have:
 
 ### Adding a New Entity
 
-1. Add DB schema to `src/db/schemas/` → run `bun run db:generate && bun run db:migrate`
+1. Add the next SQL migration and update `src/db/schemas/` → run `bun run db:migrate`
 2. Add domain interface + Zod schema + predicates to `src/domain/`
 3. Add transformer in `src/transformers/` (Zod validate raw input, map to domain type)
 4. Add repository in `src/repositories/` using `createXRepository(dbInstance?)` factory

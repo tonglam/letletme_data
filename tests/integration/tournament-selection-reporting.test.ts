@@ -55,6 +55,11 @@ async function cleanup(): Promise<void> {
     WHERE season_id = ${SEASON_ID}
       AND team_id = ${TEAM_ID}
   `;
+  await sql`
+    DELETE FROM fpl.seasons
+    WHERE season_id = ${SEASON_ID}
+      AND season_code = '1112'
+  `;
   await refreshTournamentSelectionStatsMaterializedView();
 }
 
@@ -62,6 +67,26 @@ async function seed(): Promise<void> {
   const sql = await getDbClient();
   await cleanup();
 
+  await sql`
+    INSERT INTO fpl.seasons (
+      season_id,
+      season_code,
+      display_name,
+      start_year,
+      end_year,
+      lifecycle_state,
+      is_current
+    )
+    VALUES (
+      ${SEASON_ID},
+      '1112',
+      '2011/12 tournament selection integration',
+      ${SEASON_ID},
+      ${SEASON_ID + 1},
+      'completed',
+      false
+    )
+  `;
   await sql`
     INSERT INTO fpl.teams (season_id, team_id, code, name, short_name)
     VALUES (${SEASON_ID}, ${TEAM_ID}, ${TEAM_ID}, 'Integration Team', 'INT')
