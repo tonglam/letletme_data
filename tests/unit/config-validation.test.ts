@@ -70,6 +70,8 @@ describe('production environment preflight', () => {
     expect(publishCore).toBeGreaterThan(canonicalContract);
     expect(replaceServices).toBeGreaterThan(publishCore);
     expect(workflow).toContain('docker ps --filter label=com.docker.compose.service=graphql');
+    expect(workflow).toContain('Both runtime logins use the same database target');
+    expect(workflow).toMatch(/quote\('letletme_graphql_runtime', safe=''\)/);
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
   });
 
