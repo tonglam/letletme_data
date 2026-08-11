@@ -95,4 +95,17 @@ describe('runtime database URL formatter', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toBe('p@ss/word');
   });
+
+  test('uses session mode for a shared Supabase pooler runtime target', async () => {
+    const result = await runFormatter('replace-password', {
+      DATABASE_URL:
+        'postgresql://letletme_data_runtime.projectref:old-secret@aws-0-region.pooler.supabase.com:6543/app?pgbouncer=true',
+      RUNTIME_DATABASE_PASSWORD: 'runtime-secret',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      'postgresql://letletme_data_runtime.projectref:runtime-secret@aws-0-region.pooler.supabase.com:5432/app?pgbouncer=true',
+    );
+  });
 });
