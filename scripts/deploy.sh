@@ -65,41 +65,26 @@ deploy() {
     log_info "Building containers"
     compose build --pull
   fi
-  data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "${ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  replace_runtime_password() {
-    runtime_url=$1
-    runtime_password=$2
-    runtime_userinfo=${runtime_url%%@*}
-    runtime_suffix=${runtime_url#*@}
-    if [[ "${runtime_userinfo}" == "${runtime_url}" || "${runtime_userinfo}" != *:* ]]; then
-      log_error "Runtime URL has no user/password authority"
+  migration_database_url=$(sed -n 's/^DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  with_runtime_credentials() {
+    source_url=$1
+    runtime_user=$2
+    runtime_password=$3
+    source_suffix=${source_url#*@}
+    if [[ "${source_suffix}" == "${source_url}" ]]; then
+      log_error "Migration DATABASE_URL has no authority"
       return 1
     fi
-    printf '%s:%s@%s' "${runtime_userinfo%:*}" "${runtime_password}" "${runtime_suffix}"
+    source_prefix=${source_url%%://*}://
+    printf '%s%s:%s@%s' "${source_prefix}" "${runtime_user}" "${runtime_password}" "${source_suffix}"
   }
-  data_runtime_database_url=$(replace_runtime_password "${data_runtime_database_url}" "${data_runtime_database_password}")
-  graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
-  graphql_container_count=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d' | wc -l | tr -d ' ')
-  if [[ "${graphql_container_count}" -eq 1 ]]; then
-    graphql_container=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d')
-    graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-      "${graphql_container}" | sed -n 's/^DATABASE_URL=//p')
-  else
-    graphql_runtime_database_url=$(compose run --rm -T migration \
-      bun scripts/read-runtime-database-url.ts GRAPHQL_RUNTIME_DATABASE_URL)
-  fi
   graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  graphql_runtime_database_url=$(replace_runtime_password "${graphql_runtime_database_url}" "${graphql_runtime_database_password}")
+  data_runtime_database_url=$(with_runtime_credentials "${migration_database_url}" letletme_data_runtime "${data_runtime_database_password}")
+  graphql_runtime_database_url=$(with_runtime_credentials "${migration_database_url}" letletme_graphql_runtime "${graphql_runtime_database_password}")
   runtime_env_file=$(mktemp)
-  cp "${ENV_FILE}" "${runtime_env_file}"
-  escaped_data_runtime_database_url=$(printf '%s' "${data_runtime_database_url}" | sed 's/[&|\\]/\\&/g')
-  if grep -q '^DATABASE_URL=' "${runtime_env_file}"; then
-    sed -i.bak "s|^DATABASE_URL=.*$|DATABASE_URL=\"${escaped_data_runtime_database_url}\"|" "${runtime_env_file}"
-    rm -f "${runtime_env_file}.bak"
-  else
-    printf 'DATABASE_URL="%s"\n' "${data_runtime_database_url}" >>"${runtime_env_file}"
-  fi
+  awk '!/^DATABASE_URL=/' "${ENV_FILE}" >"${runtime_env_file}"
+  printf 'DATABASE_URL="%s"\n' "${data_runtime_database_url}" >>"${runtime_env_file}"
   export ENV_FILE="${runtime_env_file}"
   cleanup_runtime_env() { rm -f "${runtime_env_file}" "${runtime_env_file}.bak"; }
   trap cleanup_runtime_env EXIT
