@@ -42,7 +42,9 @@ describe('production environment preflight', () => {
     const provisioningPreflight = workflow.indexOf(
       'bun run db:provision-runtime-logins --preflight',
     );
-    const runtimeUrl = workflow.search(/data_runtime_database_url=\$\(sed -n/);
+    const runtimeUrl = workflow.search(
+      /data_runtime_database_url=\$\(APP_IMAGE="\$IMAGE_REF" docker compose run/,
+    );
     const graphqlRuntimeUrl = workflow.search(/graphql_runtime_database_url=\$\(sed -n/);
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
