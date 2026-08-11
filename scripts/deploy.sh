@@ -130,7 +130,10 @@ deploy() {
     exit 1
   fi
   compose run --rm -T migration bun run db:migrate:status
-  if ! compose run --rm -T migration bun run db:provision-runtime-logins; then
+  if ! compose run --rm -T \
+    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
+    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
+    bun run db:provision-runtime-logins; then
     log_error "Runtime LOGIN provisioning failed; services remain stopped for a forward fix."
     exit 1
   fi
