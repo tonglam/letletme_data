@@ -71,18 +71,12 @@ deploy() {
     log_error "DATABASE_URL missing from ${MIGRATION_ENV_FILE}"
     exit 1
   fi
-  data_runtime_database_url=$(sed -n 's/^DATA_RUNTIME_DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  if [[ -z "${data_runtime_database_url}" ]]; then
-    log_error "DATA_RUNTIME_DATABASE_URL missing from ${MIGRATION_ENV_FILE}"
-    exit 1
-  fi
+  data_runtime_database_url=$(compose run --rm -T \
+    -e "DATABASE_URL=${migration_database_url}" \
+    -e RUNTIME_DATABASE_USER=letletme_data_runtime \
+    -e "RUNTIME_DATABASE_PASSWORD=${data_runtime_database_password}" migration \
+    bun scripts/format-runtime-database-url.ts with-credentials)
   graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  configured_data_runtime_password=$(compose run --rm -T \
-    -e "DATABASE_URL=${data_runtime_database_url}" migration \
-    bun scripts/format-runtime-database-url.ts extract-password)
-  if [[ -n "${configured_data_runtime_password}" ]]; then
-    data_runtime_database_password=${configured_data_runtime_password}
-  fi
   data_runtime_database_url=$(compose run --rm -T \
     -e "DATABASE_URL=${data_runtime_database_url}" \
     -e "RUNTIME_DATABASE_SOURCE_URL=${migration_database_url}" \
