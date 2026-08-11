@@ -93,8 +93,8 @@ deploy() {
       "${graphql_container}" | sed -n 's/^DATABASE_URL=//p')
   else
     log_warn "No running GraphQL container found; using GRAPHQL_RUNTIME_DATABASE_URL from ${MIGRATION_ENV_FILE}."
-    graphql_runtime_database_url=$(compose run --rm -T migration bun -e \
-      'process.stdout.write(process.env.GRAPHQL_RUNTIME_DATABASE_URL ?? "")')
+    graphql_runtime_database_url=$(compose run --rm -T migration \
+      bun scripts/read-runtime-database-url.ts GRAPHQL_RUNTIME_DATABASE_URL)
   fi
   if [[ -z "${graphql_runtime_database_url}" ]]; then
     log_error "The GraphQL runtime DATABASE_URL is missing; services were not stopped."

@@ -1,7 +1,10 @@
-const databaseUrl = process.env.DATABASE_URL?.trim();
+export {};
+
+const variableName = process.argv[2] ?? 'DATABASE_URL';
+const databaseUrl = process.env[variableName]?.trim();
 
 if (!databaseUrl) {
-  console.error('DATABASE_URL is required');
+  console.error(`${variableName} is required`);
   process.exit(1);
 }
 
