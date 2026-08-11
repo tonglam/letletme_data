@@ -70,8 +70,13 @@ deploy() {
   replace_runtime_password() {
     runtime_url=$1
     runtime_password=$2
-    escaped_runtime_password=$(printf '%s' "${runtime_password}" | sed 's/[&|\\]/\\&/g')
-    printf '%s' "${runtime_url}" | sed "s|^\([^:]*://[^:]*:\)[^@]*\(@.*\)$|\1${escaped_runtime_password}\2|"
+    runtime_userinfo=${runtime_url%%@*}
+    runtime_suffix=${runtime_url#*@}
+    if [[ "${runtime_userinfo}" == "${runtime_url}" || "${runtime_userinfo}" != *:* ]]; then
+      log_error "Runtime URL has no user/password authority"
+      return 1
+    fi
+    printf '%s:%s@%s' "${runtime_userinfo%:*}" "${runtime_password}" "${runtime_suffix}"
   }
   data_runtime_database_url=$(replace_runtime_password "${data_runtime_database_url}" "${data_runtime_database_password}")
   graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
