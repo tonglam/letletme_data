@@ -97,6 +97,13 @@ async function inspectDatabaseState(): Promise<DatabaseState> {
   return { hasLedger: state.has_ledger, platformSchemas: state.platform_schemas };
 }
 
+async function hasRuntimeData(sqlClient: postgres.Sql | postgres.TransactionSql): Promise<boolean> {
+  const [{ exists }] = await sqlClient<{ exists: boolean }[]>`
+    SELECT EXISTS (SELECT 1 FROM fpl.seasons) AS exists
+  `;
+  return exists;
+}
+
 async function loadLedger(): Promise<LedgerRow[]> {
   return sql<LedgerRow[]>`
     SELECT filename, checksum, applied_at
@@ -255,9 +262,12 @@ async function printStatus(migrations: readonly Migration[], state: DatabaseStat
   try {
     assertCanonicalLedger(migrations, ledger, true);
     await assertCanonicalCapabilityRoleMemberships(sql, true);
-    await assertCanonicalCapabilityRoleContract(sql);
+    const runtimeData = await hasRuntimeData(sql);
+    if (runtimeData) {
+      await assertCanonicalCapabilityRoleContract(sql);
+      await assertCanonicalReportingState();
+    }
     await assertCanonicalSchemaContract();
-    await assertCanonicalReportingState();
     for (const migration of migrations) console.log(`applied  ${migration.filename}`);
   } catch (error) {
     console.error(error);
@@ -294,10 +304,13 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
 
     const pending = assertCanonicalLedger(migrations, ledger, false);
     await assertCanonicalCapabilityRoleMemberships(sql, !startedFromEmptyDatabase);
-    if (!startedFromEmptyDatabase) await assertCanonicalCapabilityRoleContract(sql);
+    const runtimeData = await hasRuntimeData(sql);
+    if (runtimeData || pending.length > 0) {
+      await assertCanonicalCapabilityRoleContract(sql);
+      await assertCanonicalReportingState();
+    }
     for (const migration of pending) await applyPendingMigration(migration);
     await assertCanonicalSchemaContract();
-    if (!startedFromEmptyDatabase) await assertCanonicalReportingState();
     console.log('[sql-migrate] up to date');
   } finally {
     await sql`SELECT pg_advisory_unlock(${ADVISORY_LOCK_KEY})`.catch((error) => {
