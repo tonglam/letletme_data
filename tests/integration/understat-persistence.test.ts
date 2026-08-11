@@ -993,6 +993,7 @@ describe('Understat persistence', () => {
       season: '2728',
     });
     providerLinkIds.push(initial.id);
+    expect(initial.evidence).toMatchObject({ ruleId: 'test-rule' });
     await providerIdentityRepository.upsertEntityLink({
       entityType: 'player',
       leftProvider: 'understat',
@@ -1018,6 +1019,7 @@ describe('Understat persistence', () => {
 
     expect(latest.firstSeenSeason).toBe('2627');
     expect(latest.lastSeenSeason).toBe('2829');
+    expect(latest.evidence).toMatchObject({ ruleId: 'test-rule' });
   });
 
   test('reconciles only stale evidence from a completed FPL fixture', async () => {

@@ -81,7 +81,7 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  if ! compose run --rm -T api bun -e '
+  if ! compose run --rm -T migration bun -e '
     import { inspectAndAssertDeploymentQueueQuiescence } from "./src/services/deployment-queue-quiescence-runner.service";
     const snapshot = await inspectAndAssertDeploymentQueueQuiescence();
     console.log(JSON.stringify({ status: "queue_quiescence_passed", ...snapshot }, null, 2));

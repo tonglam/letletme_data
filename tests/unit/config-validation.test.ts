@@ -73,7 +73,7 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 api worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T api bun -e '[\s\S]*?inspectAndAssertDeploymentQueueQuiescence[\s\S]*?then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T migration bun -e '[\s\S]*?inspectAndAssertDeploymentQueueQuiescence[\s\S]*?then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?compose start api worker/);
   });

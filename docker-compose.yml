@@ -13,6 +13,8 @@ services:
       target: runner
     profiles: ['migration']
     env_file:
+      - path: .env.deploy
+        required: false
       - path: ${MIGRATION_ENV_FILE:-.env.migrate}
         required: true
     environment:

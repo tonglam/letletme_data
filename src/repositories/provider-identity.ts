@@ -55,6 +55,10 @@ function mapMatchLink(row: typeof providerMatchLinks.$inferSelect): ProviderMatc
   };
 }
 
+function canonicalEvidence(evidence: Record<string, unknown> | undefined, ruleId: string) {
+  return { ...(evidence ?? {}), ruleId };
+}
+
 export interface UpsertEntityLinkInput {
   entityType: ProviderEntityType;
   leftProvider: string;
@@ -92,7 +96,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
       .values({
         linkId: randomUUID(),
         ...identity,
-        evidence: evidence ?? {},
+        evidence: canonicalEvidence(evidence, input.ruleId),
         firstSeenSeason: season,
         lastSeenSeason: season,
         reviewedBy: reviewed ? reviewedBy : null,
@@ -110,7 +114,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
           status: input.status,
           method: input.method,
           ruleId: input.ruleId,
-          evidence: input.evidence ?? {},
+          evidence: canonicalEvidence(input.evidence, input.ruleId),
           firstSeenSeason: sql`CASE
             WHEN ${providerEntityLinks.firstSeenSeason} IS NULL THEN excluded.first_seen_season
             WHEN excluded.first_seen_season IS NULL THEN ${providerEntityLinks.firstSeenSeason}
@@ -140,7 +144,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         linkId: randomUUID(),
         ...identity,
         seasonCode: season,
-        evidence: evidence ?? {},
+        evidence: canonicalEvidence(evidence, input.ruleId),
         reviewedBy: reviewed ? reviewedBy : null,
         reviewedAt: reviewed ? new Date() : null,
       })
@@ -156,7 +160,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
           status: input.status,
           method: input.method,
           ruleId: input.ruleId,
-          evidence: input.evidence ?? {},
+          evidence: canonicalEvidence(input.evidence, input.ruleId),
           reviewedBy: reviewed ? input.reviewedBy : null,
           reviewedAt: reviewed ? new Date() : null,
           updatedAt: new Date(),

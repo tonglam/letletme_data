@@ -84,6 +84,41 @@ function assertLiveCacheIdentity(
   }
 }
 
+export function assertImmutableLiveManifestMatch(
+  databaseManifest: DataPublicationManifest,
+  cachedManifest: DataPublicationManifest,
+): void {
+  const databaseItems = databaseManifest.items.map(({ name, key, type, count, bytes, sha256 }) => ({
+    name,
+    key,
+    type,
+    count,
+    bytes,
+    sha256,
+  }));
+  const cachedItems = cachedManifest.items.map(({ name, key, type, count, bytes, sha256 }) => ({
+    name,
+    key,
+    type,
+    count,
+    bytes,
+    sha256,
+  }));
+  if (
+    databaseManifest.dataset !== cachedManifest.dataset ||
+    databaseManifest.seasonCode !== cachedManifest.seasonCode ||
+    databaseManifest.eventId !== cachedManifest.eventId ||
+    databaseManifest.revision !== cachedManifest.revision ||
+    databaseManifest.publicationId !== cachedManifest.publicationId ||
+    databaseManifest.state !== cachedManifest.state ||
+    JSON.stringify(databaseItems) !== JSON.stringify(cachedItems)
+  ) {
+    throw new Error(
+      `Canonical live cache manifest differs from PostgreSQL publication ${databaseManifest.publicationId}`,
+    );
+  }
+}
+
 function toLivePayload(
   expected: ActivePublicationIdentity,
   items: Readonly<Record<string, unknown>>,
@@ -197,6 +232,7 @@ export async function publishActiveLiveCachesForDeployment(execute: boolean): Pr
       const existing = await readLiveSnapshotCache(row.seasonCode, row.eventId, redis);
       if (existing) {
         assertLiveCacheIdentity(existing, expected);
+        assertImmutableLiveManifestMatch(databaseManifest, existing.manifest);
         if (execute) await persistManifest(row, existing.manifest);
         publications.push({ ...expected, eventId: row.eventId, action: 'reuse' });
         continue;
