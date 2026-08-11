@@ -23,6 +23,10 @@ import {
 
 const MIGRATIONS_DIR = process.env.MIGRATIONS_DIR ?? 'migrations';
 const BASELINE_FILENAME = '0000_platform_baseline.sql';
+const PRODUCTION_ONLY_MIGRATIONS = new Set([
+  '0094_remove_cutover_state.sql',
+  '0095_canonicalize_platform_contract.sql',
+]);
 const ADVISORY_LOCK_KEY = 912_883_471;
 const STATUS_ONLY = process.argv.includes('--status');
 
@@ -224,6 +228,18 @@ function assertCanonicalLedger(
   return pending;
 }
 
+function migrationsForLedger(
+  migrations: readonly Migration[],
+  ledger: readonly LedgerRow[],
+): Migration[] {
+  // These two files are the one-time production cleanup tail for the pre-baseline
+  // ledger. A fresh database and an already-adopted baseline must not replay them.
+  if (ledger[0]?.filename === BASELINE_FILENAME) {
+    return migrations.filter((migration) => !PRODUCTION_ONLY_MIGRATIONS.has(migration.filename));
+  }
+  return [...migrations];
+}
+
 async function applyPendingMigration(migration: Migration): Promise<void> {
   const startedAt = performance.now();
   await sql.begin(async (transaction) => {
@@ -260,7 +276,7 @@ async function printStatus(migrations: readonly Migration[], state: DatabaseStat
   }
 
   try {
-    assertCanonicalLedger(migrations, ledger, true);
+    assertCanonicalLedger(migrationsForLedger(migrations, ledger), ledger, true);
     const runtimeData = await hasRuntimeData(sql);
     const requireCompleteMemberships = runtimeData;
     await assertCanonicalCapabilityRoleMemberships(sql, requireCompleteMemberships);
@@ -269,7 +285,9 @@ async function printStatus(migrations: readonly Migration[], state: DatabaseStat
       await assertCanonicalReportingState();
     }
     await assertCanonicalSchemaContract();
-    for (const migration of migrations) console.log(`applied  ${migration.filename}`);
+    for (const migration of migrationsForLedger(migrations, ledger)) {
+      console.log(`applied  ${migration.filename}`);
+    }
   } catch (error) {
     console.error(error);
     process.exitCode = 1;
@@ -303,7 +321,7 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
       }
     }
 
-    const pending = assertCanonicalLedger(migrations, ledger, false);
+    const pending = assertCanonicalLedger(migrationsForLedger(migrations, ledger), ledger, false);
     const runtimeData = await hasRuntimeData(sql);
     const requireCompleteMemberships = !startedFromEmptyDatabase && runtimeData;
     await assertCanonicalCapabilityRoleMemberships(sql, requireCompleteMemberships);

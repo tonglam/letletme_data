@@ -16,7 +16,7 @@ const EXPECTED_LEDGER_COUNT = 99;
 const EXPECTED_LEDGER_FIRST = '0006_align_event_lives_table_name.sql';
 const EXPECTED_LEDGER_LAST = '0095_canonicalize_platform_contract.sql';
 const EXPECTED_LEDGER_FINGERPRINT =
-  '5bef65406a3ee36881ca42e6e0d8f828ba04e1ae41d4145a979c963cf882504d';
+  '3858506aa6b5d36703f608f91ad2183fa23d456d52ff51eab97943681667a7df';
 
 // The baseline fingerprint is immutable. Update only the current fingerprint when a
 // later hand-written migration changes the canonical schema contract.

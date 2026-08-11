@@ -97,4 +97,4 @@ INSERT INTO ops.schema_migrations (filename, checksum) VALUES
   ('0092_drop_v2_tables_partitions_triggers.sql', 'e2a97689c35538a28b87019157eabc9a0126372067e034f80bcac032be591ee5'),
   ('0093_finalize_v3_migration_ownership.sql', '10957db72e3433594efb0c3e333eda87824577fee3065518db369c1b1c27b76b'),
   ('0094_remove_cutover_state.sql', '7d2bcc8ea82a35ca4b141477fdaff3ce7e8acefa0ed7387cfc9749a6329b685b'),
-  ('0095_canonicalize_platform_contract.sql', '626712357c7be986f03239c2b159a2c9d2e1dc396f233920562fd983b32cf751');
+  ('0095_canonicalize_platform_contract.sql', '5a5b349e9d9e544a73c340a1dc067691ea4fef0320dcc4b8782735b1ae4077ae');
