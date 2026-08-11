@@ -118,13 +118,11 @@ jobs:
             graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
             graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
             echo "deploy preflight: running GraphQL containers=$graphql_container_count"
-            case "$graphql_container_count" in
-              1)
+            if [ "$graphql_container_count" = "1" ]; then
                 graphql_container=$(printf '%s\n' "$graphql_containers" | sed '/^$/d')
                 graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
                   "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
-                ;;
-              0)
+            elif [ "$graphql_container_count" = "0" ]; then
               echo "deploy preflight: no running GraphQL container; checking stopped container/env fallback"
               graphql_container=$(docker ps -aq --filter label=com.docker.compose.service=graphql | head -n 1)
               if [ -n "$graphql_container" ]; then
@@ -140,12 +138,10 @@ jobs:
                   "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
                 echo "deploy preflight: migration env GraphQL URL read"
               fi
-                ;;
-              *)
+            else
                 echo "At most one running GraphQL container is allowed"
                 exit 1
-                ;;
-            esac
+            fi
             if [ -z "$graphql_runtime_database_url" ]; then
               echo "deploy preflight: deriving GraphQL URL from Data URL"
               # Both runtime logins use the same database target. The URL may be
