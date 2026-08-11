@@ -61,6 +61,39 @@ if (process.env.RUN_BASELINE_ADOPTION_INTEGRATION === '1') {
       END
       $$;
     `);
+    await sql.unsafe(`
+      DO $$
+      BEGIN
+        CREATE ROLE letletme_data_runtime NOLOGIN;
+      EXCEPTION WHEN duplicate_object THEN
+        NULL;
+      END
+      $$;
+      DO $$
+      BEGIN
+        CREATE ROLE letletme_graphql_runtime NOLOGIN;
+      EXCEPTION WHEN duplicate_object THEN
+        NULL;
+      END
+      $$;
+      DO $$
+      BEGIN
+        CREATE ROLE letletme_web_auth NOLOGIN;
+      EXCEPTION WHEN duplicate_object THEN
+        NULL;
+      END
+      $$;
+      DO $$
+      BEGIN
+        CREATE ROLE letletme_web_runtime NOLOGIN;
+      EXCEPTION WHEN duplicate_object THEN
+        NULL;
+      END
+      $$;
+    `);
+    await sql`GRANT letletme_data_writer TO letletme_data_runtime`;
+    await sql`GRANT letletme_graphql_reader TO letletme_graphql_runtime`;
+    await sql`GRANT letletme_web_auth TO letletme_web_runtime`;
     await sql`REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries`;
     await sql`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`;
     await sql`DROP INDEX IF EXISTS competition.tournament_knockouts_season_fk_idx`;
