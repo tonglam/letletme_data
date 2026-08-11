@@ -188,7 +188,8 @@ jobs:
               -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
               bun run db:provision-runtime-logins
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATABASE_URL=$data_runtime_database_url" api \
               bun run cache:publish-core -- --execute --allow-empty
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
