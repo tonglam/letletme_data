@@ -75,7 +75,8 @@ deploy() {
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
-  data_runtime_database_url=$(compose run --rm -T api bun -e 'process.stdout.write(process.env.DATABASE_URL ?? "")')
+  data_runtime_database_url=$(compose run --rm -T api env \
+    | sed -n 's/^DATABASE_URL=//p' | head -n 1)
   if [[ -z "${data_runtime_database_url}" ]]; then
     log_error "The API runtime DATABASE_URL is missing; services were not stopped."
     exit 1
