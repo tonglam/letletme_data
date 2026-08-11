@@ -47,4 +47,18 @@ describe('runtime database URL formatter', () => {
       'postgresql://letletme_data_runtime:p%40ss%2Fword@db.example:5432/app?options=project%3Dabc',
     );
   });
+
+  test('preserves the Supabase pooler project suffix on runtime users', async () => {
+    const result = await runFormatter('with-credentials', {
+      DATABASE_URL:
+        'postgresql://postgres.projectref:admin@aws-0-region.pooler.supabase.com:6543/postgres',
+      RUNTIME_DATABASE_USER: 'letletme_data_runtime',
+      RUNTIME_DATABASE_PASSWORD: 'runtime-secret',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      'postgresql://letletme_data_runtime.projectref:runtime-secret@aws-0-region.pooler.supabase.com:6543/postgres',
+    );
+  });
 });
