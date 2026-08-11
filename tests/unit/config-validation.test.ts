@@ -39,9 +39,7 @@ describe('production environment preflight', () => {
     const identityContract = workflow.indexOf(
       'bun scripts/migration-login-contract.ts --preflight',
     );
-    const configuredRuntimeUrl = workflow.indexOf(
-      'data_runtime_database_url=$(sed -n',
-    );
+    const configuredRuntimeUrl = workflow.indexOf('data_runtime_database_url=$(sed -n');
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
@@ -82,9 +80,7 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(
       /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
-    const configuredRuntimeUrl = deployScript.indexOf(
-      'data_runtime_database_url=$(sed -n',
-    );
+    const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(deployScript).not.toContain('bun run db:provision-runtime-logins');
     expect(deployScript).toContain('runtime_env_file=$(mktemp)');
