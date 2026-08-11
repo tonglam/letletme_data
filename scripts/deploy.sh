@@ -75,6 +75,21 @@ deploy() {
     log_error "DATABASE_URL missing from ${ENV_FILE}"
     exit 1
   fi
+  data_runtime_database_password=$(compose run --rm -T \
+    -e "DATABASE_URL=${data_runtime_database_url}" migration \
+    bun scripts/format-runtime-database-url.ts extract-password)
+  graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  if [[ -z "${graphql_runtime_database_password}" ]]; then
+    log_error "GRAPHQL_RUNTIME_DB_PASSWORD missing from ${MIGRATION_ENV_FILE}"
+    exit 1
+  fi
+  graphql_runtime_database_url=$(compose run --rm -T \
+    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" migration \
+    bun scripts/format-runtime-database-url.ts derive-graphql)
+  graphql_runtime_database_url=$(compose run --rm -T \
+    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" \
+    -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=${graphql_runtime_database_password}" migration \
+    bun scripts/format-runtime-database-url.ts with-password)
   runtime_env_file=$(mktemp)
   awk '!/^DATABASE_URL=/' "${ENV_FILE}" >"${runtime_env_file}"
   printf 'DATABASE_URL="%s"\n' "${data_runtime_database_url}" >>"${runtime_env_file}"
@@ -89,6 +104,15 @@ deploy() {
   log_info "Validating the migration LOGIN before service shutdown"
   if ! compose run --rm -T migration bun scripts/migration-login-contract.ts --preflight; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
+    exit 1
+  fi
+  if ! compose run --rm -T \
+    -e "DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}" \
+    -e "GRAPHQL_RUNTIME_DB_PASSWORD=${graphql_runtime_database_password}" \
+    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
+    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
+    bun run db:provision-runtime-logins --preflight; then
+    log_error "Runtime LOGIN provisioning inputs failed; services were not stopped."
     exit 1
   fi
   log_info "Stopping services and waiting for workers to settle"
@@ -117,6 +141,19 @@ deploy() {
     log_error "Migration LOGIN contract failed after migrations."
     exit 1
   fi
+  if ! compose run --rm -T \
+    -e "DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}" \
+    -e "GRAPHQL_RUNTIME_DB_PASSWORD=${graphql_runtime_database_password}" \
+    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
+    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
+    bun run db:provision-runtime-logins; then
+    log_error "Runtime LOGIN provisioning failed; services remain stopped for a forward fix."
+    exit 1
+  fi
+  log_info "Waiting for Supavisor credentials to converge"
+  for _ in 1 2; do
+    sleep 60
+  done
   log_info "Publishing and verifying the canonical core cache"
   if ! compose run --rm -T \
     -e "DATABASE_URL=${data_runtime_database_url}" api \
