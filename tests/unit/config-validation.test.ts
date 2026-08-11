@@ -48,7 +48,10 @@ describe('production environment preflight', () => {
       migrate,
     );
     const publishCore = deployScript.indexOf('bun run cache:publish-core -- --execute');
-    const provisionRuntimeLogins = deployScript.indexOf('bun run db:provision-runtime-logins');
+    const runtimeSecretPreflight = deployScript.indexOf(
+      'assertRuntimeLoginProvisioningEnvironment',
+    );
+    const provisionRuntimeLogins = deployScript.indexOf('provisionRuntimeLogins');
     const publishLive = deployScript.indexOf('publishActiveLiveCachesForDeployment');
     const migrateRedis = deployScript.indexOf('migrateRetiredRedisStateForDeployment');
     const replaceServices = deployScript.indexOf('compose up -d', migrateRedis);
@@ -59,6 +62,8 @@ describe('production environment preflight', () => {
     expect(quiescence).toBeGreaterThan(stopServices);
     expect(migrate).toBeGreaterThan(quiescence);
     expect(canonicalContract).toBeGreaterThan(migrate);
+    expect(runtimeSecretPreflight).toBeGreaterThan(identityContract);
+    expect(runtimeSecretPreflight).toBeLessThan(stopServices);
     expect(provisionRuntimeLogins).toBeGreaterThan(canonicalContract);
     expect(publishCore).toBeGreaterThan(canonicalContract);
     expect(publishCore).toBeGreaterThan(provisionRuntimeLogins);
