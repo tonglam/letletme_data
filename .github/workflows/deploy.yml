@@ -108,11 +108,18 @@ jobs:
             fi
 
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
+            echo "deploy preflight: image pulled"
             data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "$env_file" | sed -e 's/^"//' -e 's/"$//')
-            test -n "$data_runtime_database_url"
+            if [ -z "$data_runtime_database_url" ]; then
+              echo "deploy preflight: DATABASE_URL missing from $env_file"
+              exit 1
+            fi
             data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' \
               "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
-            test -n "$data_runtime_database_password"
+            if [ -z "$data_runtime_database_password" ]; then
+              echo "deploy preflight: DATA_RUNTIME_DB_PASSWORD missing from $migration_env_file"
+              exit 1
+            fi
             replace_runtime_password() {
               runtime_url=$1
               runtime_password=$2
@@ -138,7 +145,10 @@ jobs:
             fi
             graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
               "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
-            test -n "$graphql_runtime_database_password"
+            if [ -z "$graphql_runtime_database_password" ]; then
+              echo "deploy preflight: GRAPHQL_RUNTIME_DB_PASSWORD missing from $migration_env_file"
+              exit 1
+            fi
             graphql_runtime_database_url=$(replace_runtime_password \
               "$graphql_runtime_database_url" "$graphql_runtime_database_password")
             runtime_env_file=$(mktemp)
