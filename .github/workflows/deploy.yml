@@ -98,6 +98,12 @@ jobs:
             export MIGRATION_ENV_FILE="$migration_env_file"
             test -f "$env_file"
             test -f "$migration_env_file"
+            migration_database_url=$(sed -n 's/^DATABASE_URL=//p' "$migration_env_file" \
+              | sed -e 's/^"//' -e 's/"$//')
+            if [ -z "$migration_database_url" ]; then
+              echo "deploy preflight: DATABASE_URL missing from $migration_env_file"
+              exit 1
+            fi
 
             old_container=$(docker compose ps -aq api | head -n 1)
             old_image=""
@@ -131,6 +137,7 @@ jobs:
             fi
             data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
               -e "DATABASE_URL=$data_runtime_database_url" \
+              -e "RUNTIME_DATABASE_SOURCE_URL=$migration_database_url" \
               -e "RUNTIME_DATABASE_PASSWORD=$data_runtime_database_password" migration \
               bun scripts/format-runtime-database-url.ts replace-password)
             graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
