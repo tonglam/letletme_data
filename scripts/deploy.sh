@@ -145,7 +145,7 @@ deploy() {
   fi
   log_info "Publishing and verifying the canonical core cache"
   if ! compose run --rm -T \
-    -e "DATABASE_URL=${migration_database_url}" api \
+    -e "DATABASE_URL=${data_runtime_database_url}" api \
     bun run cache:publish-core -- --execute --allow-empty; then
     log_error "Core cache publication failed; services remain stopped for a forward fix."
     exit 1
