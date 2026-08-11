@@ -133,6 +133,10 @@ jobs:
               -e "RUNTIME_DATABASE_SOURCE_URL=$migration_database_url" \
               -e "RUNTIME_DATABASE_PASSWORD=$data_runtime_database_password" migration \
               bun scripts/format-runtime-database-url.ts replace-password)
+            data_runtime_target=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATABASE_URL=$data_runtime_database_url" migration \
+              bun -e 'const url = new URL(process.env.DATABASE_URL); console.log(JSON.stringify({ hostname: url.hostname, port: url.port, username: url.username, database: url.pathname, search: url.search }));')
+            echo "deploy preflight: Data runtime target $data_runtime_target"
             graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
               "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
             if [ -z "$graphql_runtime_database_password" ]; then
