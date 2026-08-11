@@ -114,8 +114,10 @@ jobs:
             data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun scripts/read-runtime-database-url.ts)
             test -n "$data_runtime_database_url"
+            echo "deploy preflight: data runtime URL present"
             graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
             graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
+            echo "deploy preflight: running GraphQL containers=$graphql_container_count"
             if [ "$graphql_container_count" -gt 1 ]; then
               echo "At most one running GraphQL container is allowed"
               exit 1
@@ -155,9 +157,11 @@ jobs:
               )
             fi
             test -n "$graphql_runtime_database_url"
+            echo "deploy preflight: GraphQL runtime URL present"
             graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
               "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
             test -n "$graphql_runtime_database_password"
+            echo "deploy preflight: GraphQL runtime password present"
             graphql_runtime_database_url=$(GRAPHQL_RUNTIME_DATABASE_URL="$graphql_runtime_database_url" \
               GRAPHQL_RUNTIME_DATABASE_PASSWORD="$graphql_runtime_database_password" \
               python3 - <<'PY'
@@ -182,6 +186,7 @@ jobs:
               -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
               -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
               bun run db:provision-runtime-logins --preflight
+            echo "deploy preflight: runtime login provisioning inputs passed"
 
             migration_started=false
             restore_before_migration() {
