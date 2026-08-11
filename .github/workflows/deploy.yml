@@ -193,7 +193,7 @@ jobs:
               -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
               bun run db:provision-runtime-logins
             echo "deploy: waiting for Supavisor credentials to converge"
-            for _ in 1 2; do
+            for _ in 1 2 3 4 5; do
               sleep 60
             done
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
