@@ -47,6 +47,9 @@ if (mode === 'extract-password') {
   databaseUrl.password = required('GRAPHQL_RUNTIME_DATABASE_PASSWORD');
 } else if (mode === 'replace-password') {
   if (!databaseUrl.username) throw new Error('Runtime database URL must include a username');
+  if (databaseUrl.hostname.endsWith('.pooler.supabase.com') && databaseUrl.port === '6543') {
+    databaseUrl.port = '5432';
+  }
   databaseUrl.password = required('RUNTIME_DATABASE_PASSWORD');
 } else {
   const sourceUsername = databaseUrl.username;
