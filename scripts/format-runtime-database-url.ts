@@ -8,8 +8,13 @@ function required(name: string): string {
   return value;
 }
 
-if (mode !== 'derive-graphql' && mode !== 'with-password' && mode !== 'with-credentials') {
-  throw new Error('Expected derive-graphql, with-password, or with-credentials');
+if (
+  mode !== 'derive-graphql' &&
+  mode !== 'with-password' &&
+  mode !== 'with-credentials' &&
+  mode !== 'replace-password'
+) {
+  throw new Error('Expected derive-graphql, with-password, with-credentials, or replace-password');
 }
 
 const databaseUrl = new URL(
@@ -25,11 +30,18 @@ if (!databaseUrl.hostname || !databaseUrl.pathname || databaseUrl.pathname === '
 }
 
 if (mode === 'derive-graphql') {
-  databaseUrl.username = 'letletme_graphql_runtime';
+  const sourceUsername = databaseUrl.username;
+  const projectSuffix = sourceUsername.includes('.')
+    ? sourceUsername.slice(sourceUsername.indexOf('.'))
+    : '';
+  databaseUrl.username = `letletme_graphql_runtime${projectSuffix}`;
   databaseUrl.password = '';
 } else if (mode === 'with-password') {
   if (!databaseUrl.username) throw new Error('GraphQL runtime URL must include a username');
   databaseUrl.password = required('GRAPHQL_RUNTIME_DATABASE_PASSWORD');
+} else if (mode === 'replace-password') {
+  if (!databaseUrl.username) throw new Error('Runtime database URL must include a username');
+  databaseUrl.password = required('RUNTIME_DATABASE_PASSWORD');
 } else {
   const sourceUsername = databaseUrl.username;
   const projectSuffix = sourceUsername.includes('.')

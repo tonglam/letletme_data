@@ -43,7 +43,7 @@ describe('production environment preflight', () => {
       'bun run db:provision-runtime-logins --preflight',
     );
     const runtimeUrl = workflow.indexOf(
-      'bun scripts/format-runtime-database-url.ts with-credentials',
+      'bun scripts/format-runtime-database-url.ts replace-password',
     );
     const graphqlRuntimeUrl = workflow.indexOf(
       'graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run',
@@ -99,7 +99,7 @@ describe('production environment preflight', () => {
       /bun scripts\/migration-login-contract\.ts --preflight[\s\S]*?bun run db:provision-runtime-logins --preflight[\s\S]*?compose stop -t 45 api worker/,
     );
     const runtimeUrl = deployScript.indexOf(
-      'bun scripts/format-runtime-database-url.ts with-credentials',
+      'bun scripts/format-runtime-database-url.ts replace-password',
     );
     const graphqlRuntimeUrl = deployScript.indexOf(
       'graphql_runtime_database_url=$(compose run --rm -T',

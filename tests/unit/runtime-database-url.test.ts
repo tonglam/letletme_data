@@ -61,4 +61,29 @@ describe('runtime database URL formatter', () => {
       'postgresql://letletme_data_runtime.projectref:runtime-secret@aws-0-region.pooler.supabase.com:6543/postgres',
     );
   });
+
+  test('replaces the password without changing the configured runtime target', async () => {
+    const result = await runFormatter('replace-password', {
+      DATABASE_URL:
+        'postgresql://letletme_data_runtime:old-secret@db.example:6543/app?pgbouncer=true',
+      RUNTIME_DATABASE_PASSWORD: 'runtime-secret',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      'postgresql://letletme_data_runtime:runtime-secret@db.example:6543/app?pgbouncer=true',
+    );
+  });
+
+  test('preserves the project suffix when deriving the GraphQL runtime target', async () => {
+    const result = await runFormatter('derive-graphql', {
+      DATA_RUNTIME_DATABASE_URL:
+        'postgresql://letletme_data_runtime.projectref:runtime-secret@aws-0-region.pooler.supabase.com:5432/postgres',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      'postgresql://letletme_graphql_runtime.projectref@aws-0-region.pooler.supabase.com:5432/postgres',
+    );
+  });
 });
