@@ -7,6 +7,17 @@ export type QueueQuiescenceSnapshot = {
   readonly unsettledCascadeIds: readonly string[];
 };
 
+export function assertQuiescenceCatalogPair(
+  hasSyncRuns: boolean,
+  hasDatasetPublications: boolean,
+): void {
+  if (hasSyncRuns !== hasDatasetPublications) {
+    throw new Error(
+      'Database has a partial quiescence catalog: ops.sync_runs and ops.dataset_publications must exist together',
+    );
+  }
+}
+
 export function runnableJobCount(counts: RunnableQueueCounts): number {
   return Object.values(counts).reduce((total, count) => total + count, 0);
 }

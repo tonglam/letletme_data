@@ -42,6 +42,7 @@ describe('production environment preflight', () => {
     const provisioningPreflight = workflow.indexOf(
       'bun run db:provision-runtime-logins --preflight',
     );
+    const runtimeUrl = workflow.indexOf('process.env.DATABASE_URL');
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
@@ -55,7 +56,9 @@ describe('production environment preflight', () => {
 
     expect(preflight).toBeGreaterThan(0);
     expect(identityContract).toBeGreaterThan(preflight);
+    expect(runtimeUrl).toBeGreaterThan(identityContract);
     expect(provisioningPreflight).toBeGreaterThan(identityContract);
+    expect(provisioningPreflight).toBeGreaterThan(runtimeUrl);
     expect(stopServices).toBeGreaterThan(provisioningPreflight);
     expect(databaseQuiescence).toBeGreaterThan(stopServices);
     expect(redisQuiescence).toBeGreaterThan(databaseQuiescence);
@@ -78,6 +81,9 @@ describe('production environment preflight', () => {
     );
     expect(deployScript).toMatch(
       /bun scripts\/migration-login-contract\.ts --preflight[\s\S]*?bun run db:provision-runtime-logins --preflight[\s\S]*?compose stop -t 45 api worker/,
+    );
+    expect(deployScript).toMatch(
+      /data_runtime_database_url=\$\(compose run --rm -T api bun -e[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$\{data_runtime_database_url\}/,
     );
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,

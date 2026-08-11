@@ -104,7 +104,11 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/migration-login-contract.ts --preflight
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun -e 'process.stdout.write(process.env.DATABASE_URL ?? "")')
+            test -n "$data_runtime_database_url"
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" migration \
               bun run db:provision-runtime-logins --preflight
 
             migration_started=false

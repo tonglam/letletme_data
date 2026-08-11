@@ -122,6 +122,15 @@ async function assertFreshBaselineContract(transaction: postgres.TransactionSql)
   }
 }
 
+async function assertCanonicalSchemaContract(): Promise<void> {
+  const schemaFingerprint = fingerprintSchemaContract(await loadPlatformSchemaContract(sql));
+  if (schemaFingerprint !== EXPECTED_PLATFORM_SCHEMA_FINGERPRINT) {
+    throw new Error(
+      `Current platform schema fingerprint mismatch: expected=${EXPECTED_PLATFORM_SCHEMA_FINGERPRINT} actual=${schemaFingerprint}`,
+    );
+  }
+}
+
 async function applyFreshBaseline(baseline: Migration): Promise<void> {
   const startedAt = performance.now();
   await sql.begin(async (transaction) => {
@@ -231,6 +240,7 @@ async function printStatus(migrations: readonly Migration[], state: DatabaseStat
 
   try {
     assertCanonicalLedger(migrations, ledger, true);
+    await assertCanonicalSchemaContract();
     for (const migration of migrations) console.log(`applied  ${migration.filename}`);
   } catch (error) {
     console.error(error);
@@ -266,6 +276,7 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
 
     const pending = assertCanonicalLedger(migrations, ledger, false);
     for (const migration of pending) await applyPendingMigration(migration);
+    await assertCanonicalSchemaContract();
     console.log('[sql-migrate] up to date');
   } finally {
     await sql`SELECT pg_advisory_unlock(${ADVISORY_LOCK_KEY})`.catch((error) => {

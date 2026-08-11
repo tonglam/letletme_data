@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  assertQuiescenceCatalogPair,
   assertQueueQuiescence,
   cascadeId,
   findUnsettledCascades,
@@ -24,6 +25,12 @@ const accepted = () => ({
 });
 
 describe('queue quiescence gate', () => {
+  test('rejects a partially initialized database catalog', () => {
+    expect(() => assertQuiescenceCatalogPair(true, false)).toThrow('partial quiescence catalog');
+    expect(() => assertQuiescenceCatalogPair(false, true)).toThrow('partial quiescence catalog');
+    expect(() => assertQuiescenceCatalogPair(false, false)).not.toThrow();
+    expect(() => assertQuiescenceCatalogPair(true, true)).not.toThrow();
+  });
   test('covers every canonical BullMQ queue exactly once', () => {
     expect(queueNames).toEqual([
       'data-sync',

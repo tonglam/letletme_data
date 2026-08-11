@@ -77,7 +77,8 @@ WITH contract_rows AS (
       'replication', role_row.rolreplication,
       'bypassrls', role_row.rolbypassrls,
       'connectionLimit', role_row.rolconnlimit,
-      'validUntil', role_row.rolvaliduntil
+      'validUntil', role_row.rolvaliduntil,
+      'settings', COALESCE(to_jsonb(role_row.rolconfig), '[]'::jsonb)
     )::text
   FROM pg_roles role_row
   WHERE role_row.rolname = ANY (
@@ -129,7 +130,7 @@ WITH contract_rows AS (
   FROM pg_type type_row
   JOIN pg_namespace namespace_row ON namespace_row.oid = type_row.typnamespace
   WHERE namespace_row.nspname = ANY ($1::text[])
-    AND type_row.typtype IN ('d', 'e', 'm', 'r')
+    AND type_row.typtype IN ('c', 'd', 'e', 'm', 'r')
 
   UNION ALL
 
@@ -140,6 +141,7 @@ WITH contract_rows AS (
       'kind', relation_row.relkind,
       'owner', pg_get_userbyid(relation_row.relowner),
       'persistence', relation_row.relpersistence,
+      'replicaIdentity', relation_row.relreplident,
       'rowSecurity', relation_row.relrowsecurity,
       'forceRowSecurity', relation_row.relforcerowsecurity,
       'isPartition', relation_row.relispartition,
@@ -183,7 +185,7 @@ WITH contract_rows AS (
   FROM pg_class relation_row
   JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
   WHERE namespace_row.nspname = ANY ($1::text[])
-    AND relation_row.relkind IN ('r', 'p', 'f', 'v', 'm', 'S')
+    AND relation_row.relkind IN ('r', 'p', 'f', 'c', 'v', 'm', 'S')
 
   UNION ALL
 
@@ -242,7 +244,7 @@ WITH contract_rows AS (
     ON default_row.adrelid = attribute_row.attrelid
    AND default_row.adnum = attribute_row.attnum
   WHERE namespace_row.nspname = ANY ($1::text[])
-    AND relation_row.relkind IN ('r', 'p', 'f', 'v', 'm')
+    AND relation_row.relkind IN ('r', 'p', 'f', 'c', 'v', 'm')
     AND attribute_row.attnum > 0
     AND NOT attribute_row.attisdropped
 
@@ -469,7 +471,7 @@ WITH contract_rows AS (
   FROM pg_class public_relation
   JOIN pg_namespace public_namespace ON public_namespace.oid = public_relation.relnamespace
   WHERE public_namespace.nspname = 'public'
-    AND public_relation.relkind IN ('r', 'p', 'f', 'v', 'm', 'S')
+    AND public_relation.relkind IN ('r', 'p', 'f', 'c', 'v', 'm', 'S')
     AND NOT EXISTS (
       SELECT 1
       FROM pg_depend dependency

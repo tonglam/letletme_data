@@ -4,6 +4,7 @@ import Redis from 'ioredis';
 import postgres from 'postgres';
 
 import {
+  assertQuiescenceCatalogPair,
   assertQueueQuiescence,
   findUnsettledCascades,
   type RunnableQueueCounts,
@@ -46,6 +47,7 @@ async function readDatabaseQuiescenceState(
       to_regclass('ops.dataset_publications') IS NOT NULL AS has_dataset_publications
   `;
   if (!catalog) throw new Error('Could not inspect the sync-run quiescence state');
+  assertQuiescenceCatalogPair(catalog.has_sync_runs, catalog.has_dataset_publications);
 
   let nonTerminalSyncRuns = 0;
   let stagingPublications = 0;

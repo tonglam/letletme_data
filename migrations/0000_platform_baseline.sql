@@ -42,7 +42,8 @@ BEGIN
             rolcreaterole,
             rolinherit,
             rolreplication,
-            rolbypassrls
+            rolbypassrls,
+            COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
         INTO STRICT role_row
         FROM pg_roles
         WHERE rolname = role_name;
@@ -53,7 +54,8 @@ BEGIN
            OR role_row.rolcreaterole
            OR role_row.rolinherit
            OR role_row.rolreplication
-           OR role_row.rolbypassrls THEN
+           OR role_row.rolbypassrls
+           OR cardinality(role_row.role_settings) > 0 THEN
             RAISE EXCEPTION 'capability role % has unsafe attributes', role_name;
         END IF;
     END LOOP;

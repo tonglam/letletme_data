@@ -19,10 +19,10 @@ const EXPECTED_LEDGER_FINGERPRINT =
   '7e73ca4d98ecf3dbdf595eaa214c6ec609a7d538d57157f82f2fffed84842e27';
 
 export const EXPECTED_PLATFORM_SCHEMA_FINGERPRINT =
-  'c2c62563ff0634f681e20a3d334154e47fe36a22e31d7bd8c41d225f5df9f2b0';
+  '378c6820b2c12ed6ca95ad198f31f9a702d2531594dc9427e9fdb3c6f33082fa';
 
 const EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT =
-  '2506130c6f307d9c7d8aeee6e80f0a90ab8d0f5fc68e3b412135ff91bc3a03c4';
+  '3bbb0ffb8c2c4ed7ede747b1e73216d58ddbdf208d12de5eaa7993e5c870c945';
 
 export const EXPECTED_PRODUCTION_DATA_FINGERPRINT = [
   '69f4cdb2748dd486',
@@ -203,6 +203,55 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
     'letletme_graphql_runtime',
     'letletme_web_runtime',
   ]);
+  const capabilityRoles = await client<RuntimeRoleRow[]>`
+    SELECT
+      rolname AS role_name,
+      rolcanlogin AS can_login,
+      rolsuper AS superuser,
+      rolcreatedb AS create_database,
+      rolcreaterole AS create_role,
+      rolinherit AS inherit,
+      rolreplication AS replication,
+      rolbypassrls AS bypass_rls,
+      rolconnlimit AS connection_limit,
+      (rolvaliduntil IS NULL OR rolvaliduntil > CURRENT_TIMESTAMP) AS valid_until_ok,
+      COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
+    FROM pg_roles
+    WHERE rolname = ANY(${[
+      'letletme_data_owner',
+      'letletme_data_writer',
+      'letletme_graphql_reader',
+      'letletme_web_auth',
+    ]}::text[])
+  `;
+  const expectedCapabilityRoles = new Set([
+    'letletme_data_owner',
+    'letletme_data_writer',
+    'letletme_graphql_reader',
+    'letletme_web_auth',
+  ]);
+  const unsafeCapabilityRoles = capabilityRoles.filter(
+    (role) =>
+      role.can_login ||
+      role.superuser ||
+      role.create_database ||
+      role.create_role ||
+      role.inherit ||
+      role.replication ||
+      role.bypass_rls ||
+      role.role_settings.length > 0,
+  );
+  const missingCapabilityRoles = [...expectedCapabilityRoles].filter(
+    (roleName) => !capabilityRoles.some((role) => role.role_name === roleName),
+  );
+  if (unsafeCapabilityRoles.length > 0 || missingCapabilityRoles.length > 0) {
+    throw new Error(
+      `Required capability roles are missing or unsafe: ${[
+        ...missingCapabilityRoles,
+        ...unsafeCapabilityRoles.map((role) => role.role_name),
+      ].join(', ')}`,
+    );
+  }
   const unsafeRuntimeRoles = runtimeRoles.filter(
     (role) =>
       !role.can_login ||

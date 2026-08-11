@@ -39,6 +39,7 @@ const fixtureRuntimeLoginRoles = new Set([
   'letletme_graphql_runtime',
   'letletme_web_runtime',
 ]);
+const fixtureCapabilityRoles = new Set(['letletme_web_auth']);
 const createdFixtureRoles = new Set<string>();
 
 async function currentDataFingerprint(): Promise<string> {
@@ -75,7 +76,9 @@ if (process.env.RUN_BASELINE_ADOPTION_INTEGRATION === '1') {
       if (existingRoleNames.has(roleName)) continue;
       const roleDefinition = fixtureRuntimeLoginRoles.has(roleName)
         ? 'LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
-        : 'NOLOGIN';
+        : fixtureCapabilityRoles.has(roleName)
+          ? 'NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          : 'NOLOGIN';
       await sql.unsafe(`CREATE ROLE "${roleName}" ${roleDefinition}`);
       createdFixtureRoles.add(roleName);
     }

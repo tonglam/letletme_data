@@ -75,8 +75,14 @@ deploy() {
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
+  data_runtime_database_url=$(compose run --rm -T api bun -e 'process.stdout.write(process.env.DATABASE_URL ?? "")')
+  if [[ -z "${data_runtime_database_url}" ]]; then
+    log_error "The API runtime DATABASE_URL is missing; services were not stopped."
+    exit 1
+  fi
   log_info "Validating runtime LOGIN provisioning inputs before service shutdown"
-  if ! compose run --rm -T migration bun run db:provision-runtime-logins --preflight; then
+  if ! compose run --rm -T -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" migration \
+    bun run db:provision-runtime-logins --preflight; then
     log_error "Runtime LOGIN provisioning inputs failed; services were not stopped."
     exit 1
   fi
