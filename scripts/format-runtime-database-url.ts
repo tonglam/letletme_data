@@ -31,7 +31,11 @@ if (mode === 'derive-graphql') {
   if (!databaseUrl.username) throw new Error('GraphQL runtime URL must include a username');
   databaseUrl.password = required('GRAPHQL_RUNTIME_DATABASE_PASSWORD');
 } else {
-  databaseUrl.username = required('RUNTIME_DATABASE_USER');
+  const sourceUsername = databaseUrl.username;
+  const projectSuffix = sourceUsername.includes('.')
+    ? sourceUsername.slice(sourceUsername.indexOf('.'))
+    : '';
+  databaseUrl.username = `${required('RUNTIME_DATABASE_USER')}${projectSuffix}`;
   databaseUrl.password = required('RUNTIME_DATABASE_PASSWORD');
 }
 
