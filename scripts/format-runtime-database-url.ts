@@ -12,7 +12,9 @@ function projectSuffix(value: string): string {
   const source = new URL(value);
   const username = decodeURIComponent(source.username);
   const separator = username.indexOf('.');
-  return separator >= 0 ? username.slice(separator) : '';
+  if (separator >= 0) return username.slice(separator);
+  const directProject = source.hostname.match(/^db\.([^.]+)\.supabase\.co$/i)?.[1];
+  return directProject ? `.${directProject}` : '';
 }
 
 if (
