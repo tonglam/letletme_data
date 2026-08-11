@@ -39,14 +39,8 @@ describe('production environment preflight', () => {
     const identityContract = workflow.indexOf(
       'bun scripts/migration-login-contract.ts --preflight',
     );
-    const provisioningPreflight = workflow.indexOf(
-      'bun run db:provision-runtime-logins --preflight',
-    );
-    const runtimeUrl = workflow.indexOf(
-      'bun scripts/format-runtime-database-url.ts replace-password',
-    );
-    const graphqlRuntimeUrl = workflow.indexOf(
-      'graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run',
+    const configuredRuntimeUrl = workflow.indexOf(
+      'data_runtime_database_url=$(sed -n',
     );
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
@@ -54,37 +48,28 @@ describe('production environment preflight', () => {
     );
     const redisQuiescence = workflow.indexOf('bun scripts/assert-queue-quiescence.ts --redis-only');
     const migrate = workflow.indexOf('bun run db:migrate');
-    const provision = workflow.indexOf('bun run db:provision-runtime-logins', migrate);
     const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
     const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute --allow-empty');
     const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
 
     expect(preflight).toBeGreaterThan(0);
+    expect(configuredRuntimeUrl).toBeGreaterThan(0);
+    expect(configuredRuntimeUrl).toBeLessThan(preflight);
     expect(identityContract).toBeGreaterThan(preflight);
-    expect(runtimeUrl).toBeGreaterThan(0);
-    expect(graphqlRuntimeUrl).toBeGreaterThan(runtimeUrl);
-    expect(provisioningPreflight).toBeGreaterThan(identityContract);
-    expect(provisioningPreflight).toBeGreaterThan(graphqlRuntimeUrl);
-    expect(stopServices).toBeGreaterThan(provisioningPreflight);
+    expect(stopServices).toBeGreaterThan(identityContract);
     expect(databaseQuiescence).toBeGreaterThan(stopServices);
     expect(redisQuiescence).toBeGreaterThan(databaseQuiescence);
     expect(migrate).toBeGreaterThan(redisQuiescence);
-    expect(provision).toBeGreaterThan(migrate);
-    expect(canonicalContract).toBeGreaterThan(provision);
+    expect(canonicalContract).toBeGreaterThan(migrate);
     expect(publishCore).toBeGreaterThan(canonicalContract);
     expect(replaceServices).toBeGreaterThan(publishCore);
     expect(workflow).toContain('runtime_env_file=$(mktemp)');
     expect(workflow).toContain('export ENV_FILE="$runtime_env_file"');
-    expect(workflow).toMatch(
-      /bun run db:migrate:status[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$data_runtime_database_url[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$graphql_runtime_database_url[\s\S]*?bun run db:provision-runtime-logins(?! --preflight)/,
-    );
+    expect(workflow).toContain('using configured Data runtime URL');
+    expect(workflow).not.toContain('bun run db:provision-runtime-logins');
     expect(workflow).toMatch(
       /DATABASE_URL=\$data_runtime_database_url[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
     );
-    expect(workflow).toContain('DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password');
-    expect(workflow).toContain('GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password');
-    expect(workflow).toContain('RUNTIME_DATABASE_USER=letletme_data_runtime');
-    expect(workflow).toContain('bun scripts/format-runtime-database-url.ts with-credentials');
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
   });
 
@@ -97,24 +82,12 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(
       /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
-    expect(deployScript).toMatch(
-      /bun scripts\/migration-login-contract\.ts --preflight[\s\S]*?bun run db:provision-runtime-logins --preflight[\s\S]*?compose stop -t 45 api worker/,
+    const configuredRuntimeUrl = deployScript.indexOf(
+      'data_runtime_database_url=$(sed -n',
     );
-    const runtimeUrl = deployScript.indexOf(
-      'bun scripts/format-runtime-database-url.ts replace-password',
-    );
-    const graphqlRuntimeUrl = deployScript.indexOf(
-      'graphql_runtime_database_url=$(compose run --rm -T',
-    );
-    expect(runtimeUrl).toBeGreaterThan(0);
-    expect(graphqlRuntimeUrl).toBeGreaterThan(runtimeUrl);
+    expect(configuredRuntimeUrl).toBeGreaterThan(0);
+    expect(deployScript).not.toContain('bun run db:provision-runtime-logins');
     expect(deployScript).toContain('runtime_env_file=$(mktemp)');
-    expect(deployScript).toMatch(
-      /bun run db:migrate:status[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$\{data_runtime_database_url\}[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$\{graphql_runtime_database_url\}[\s\S]*?bun run db:provision-runtime-logins(?! --preflight)/,
-    );
-    expect(deployScript).toContain('DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}');
-    expect(deployScript).toContain('RUNTIME_DATABASE_USER=letletme_data_runtime');
-    expect(deployScript).toContain('bun scripts/format-runtime-database-url.ts with-credentials');
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
