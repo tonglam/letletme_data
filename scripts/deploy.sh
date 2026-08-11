@@ -57,18 +57,35 @@ restore_stopped_services() {
 deploy() {
   require_compose
   require_files
-  data_runtime_database_url=$(sed -n 's/^DATA_RUNTIME_DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  graphql_runtime_database_url=$(sed -n 's/^GRAPHQL_RUNTIME_DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  if [[ -z "${data_runtime_database_url}" || -z "${graphql_runtime_database_url}" ]]; then
-    log_error "Runtime database URLs are missing from ${MIGRATION_ENV_FILE}."
-    exit 1
+  if [[ -n "${APP_IMAGE:-}" ]]; then
+    export APP_IMAGE
+    log_info "Pulling the configured application image"
+    compose pull api worker migration
+  else
+    log_info "Building containers"
+    compose build --pull
   fi
-  data_runtime_database_password=$(printf '%s' "${data_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
-  graphql_runtime_database_password=$(printf '%s' "${graphql_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
-  if [[ -z "${data_runtime_database_password}" || -z "${graphql_runtime_database_password}" ]]; then
-    log_error "Runtime database URL passwords are missing from ${MIGRATION_ENV_FILE}."
-    exit 1
+  data_runtime_database_url=$(compose run --rm -T api bun scripts/read-runtime-database-url.ts)
+  data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  replace_runtime_password() {
+    runtime_url=$1
+    runtime_password=$2
+    escaped_runtime_password=$(printf '%s' "${runtime_password}" | sed 's/[&|\\]/\\&/g')
+    printf '%s' "${runtime_url}" | sed "s|^\([^:]*://[^:]*:\)[^@]*\(@.*\)$|\1${escaped_runtime_password}\2|"
+  }
+  data_runtime_database_url=$(replace_runtime_password "${data_runtime_database_url}" "${data_runtime_database_password}")
+  graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
+  graphql_container_count=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d' | wc -l | tr -d ' ')
+  if [[ "${graphql_container_count}" -eq 1 ]]; then
+    graphql_container=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d')
+    graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+      "${graphql_container}" | sed -n 's/^DATABASE_URL=//p')
+  else
+    graphql_runtime_database_url=$(compose run --rm -T migration \
+      bun scripts/read-runtime-database-url.ts GRAPHQL_RUNTIME_DATABASE_URL)
   fi
+  graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  graphql_runtime_database_url=$(replace_runtime_password "${graphql_runtime_database_url}" "${graphql_runtime_database_password}")
   runtime_env_file=$(mktemp)
   cp "${ENV_FILE}" "${runtime_env_file}"
   escaped_data_runtime_database_url=$(printf '%s' "${data_runtime_database_url}" | sed 's/[&|\\]/\\&/g')
@@ -81,14 +98,6 @@ deploy() {
   export ENV_FILE="${runtime_env_file}"
   cleanup_runtime_env() { rm -f "${runtime_env_file}" "${runtime_env_file}.bak"; }
   trap cleanup_runtime_env EXIT
-  if [[ -n "${APP_IMAGE:-}" ]]; then
-    export APP_IMAGE
-    log_info "Pulling the configured application image"
-    compose pull api worker migration
-  else
-    log_info "Building containers"
-    compose build --pull
-  fi
   log_info "Validating the application environment"
   if ! compose run --rm -T api bun run env:check; then
     log_error "Application environment contract failed; services were not stopped."
