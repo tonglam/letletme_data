@@ -130,6 +130,29 @@ jobs:
               fi
             fi
             test -n "$graphql_runtime_database_url"
+            graphql_runtime_database_password=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+              bun -e 'process.stdout.write(process.env.GRAPHQL_RUNTIME_DB_PASSWORD ?? "")')
+            test -n "$graphql_runtime_database_password"
+            graphql_runtime_database_url=$(GRAPHQL_RUNTIME_DATABASE_URL="$graphql_runtime_database_url" \
+              GRAPHQL_RUNTIME_DATABASE_PASSWORD="$graphql_runtime_database_password" \
+              python3 - <<'PY'
+            import os
+            from urllib.parse import quote, unquote, urlsplit, urlunsplit
+
+            raw_url = os.environ["GRAPHQL_RUNTIME_DATABASE_URL"]
+            password = os.environ["GRAPHQL_RUNTIME_DATABASE_PASSWORD"]
+            parsed = urlsplit(raw_url)
+            username = unquote(parsed.username or "")
+            if not parsed.hostname or not username:
+                raise SystemExit("GraphQL runtime URL must include a host and username")
+            host = parsed.hostname
+            if ":" in host:
+                host = f"[{host}]"
+            port = f":{parsed.port}" if parsed.port else ""
+            netloc = f"{quote(username, safe='')}:{quote(password, safe='')}@{host}{port}"
+            print(urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)), end="")
+            PY
+            )
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
               -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
               -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
