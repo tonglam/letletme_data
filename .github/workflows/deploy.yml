@@ -92,7 +92,12 @@ jobs:
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
-            test -f .env.migrate
+            env_file=${ENV_FILE:-.env.deploy}
+            migration_env_file=${MIGRATION_ENV_FILE:-.env.migrate}
+            export ENV_FILE="$env_file"
+            export MIGRATION_ENV_FILE="$migration_env_file"
+            test -f "$env_file"
+            test -f "$migration_env_file"
 
             old_container=$(docker compose ps -aq api | head -n 1)
             old_image=""
@@ -119,7 +124,7 @@ jobs:
               esac
               printf '%s' "$value"
             }
-            data_runtime_database_url=$(env_file_value DATABASE_URL .env.deploy)
+            data_runtime_database_url=$(env_file_value DATABASE_URL "$env_file")
             test -n "$data_runtime_database_url"
             graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
             graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
@@ -137,11 +142,11 @@ jobs:
                 graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
                   "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
               else
-                graphql_runtime_database_url=$(env_file_value GRAPHQL_RUNTIME_DATABASE_URL .env.migrate)
+                graphql_runtime_database_url=$(env_file_value GRAPHQL_RUNTIME_DATABASE_URL "$migration_env_file")
               fi
             fi
             test -n "$graphql_runtime_database_url"
-            graphql_runtime_database_password=$(env_file_value GRAPHQL_RUNTIME_DB_PASSWORD .env.migrate)
+            graphql_runtime_database_password=$(env_file_value GRAPHQL_RUNTIME_DB_PASSWORD "$migration_env_file")
             test -n "$graphql_runtime_database_password"
             graphql_runtime_database_url=$(GRAPHQL_RUNTIME_DATABASE_URL="$graphql_runtime_database_url" \
               GRAPHQL_RUNTIME_DATABASE_PASSWORD="$graphql_runtime_database_password" \
