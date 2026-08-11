@@ -123,10 +123,10 @@ jobs:
               echo "deploy preflight: DATA_RUNTIME_DB_PASSWORD missing from $migration_env_file"
               exit 1
             fi
-            data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "$env_file" \
+            data_runtime_database_url=$(sed -n 's/^DATA_RUNTIME_DATABASE_URL=//p' "$migration_env_file" \
               | sed -e 's/^"//' -e 's/"$//')
             if [ -z "$data_runtime_database_url" ]; then
-              echo "deploy preflight: DATABASE_URL missing from $env_file"
+              echo "deploy preflight: DATA_RUNTIME_DATABASE_URL missing from $migration_env_file"
               exit 1
             fi
             configured_data_runtime_password=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
