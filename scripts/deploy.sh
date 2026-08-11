@@ -57,6 +57,30 @@ restore_stopped_services() {
 deploy() {
   require_compose
   require_files
+  data_runtime_database_url=$(sed -n 's/^DATA_RUNTIME_DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  graphql_runtime_database_url=$(sed -n 's/^GRAPHQL_RUNTIME_DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  if [[ -z "${data_runtime_database_url}" || -z "${graphql_runtime_database_url}" ]]; then
+    log_error "Runtime database URLs are missing from ${MIGRATION_ENV_FILE}."
+    exit 1
+  fi
+  data_runtime_database_password=$(printf '%s' "${data_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
+  graphql_runtime_database_password=$(printf '%s' "${graphql_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
+  if [[ -z "${data_runtime_database_password}" || -z "${graphql_runtime_database_password}" ]]; then
+    log_error "Runtime database URL passwords are missing from ${MIGRATION_ENV_FILE}."
+    exit 1
+  fi
+  runtime_env_file=$(mktemp)
+  cp "${ENV_FILE}" "${runtime_env_file}"
+  escaped_data_runtime_database_url=$(printf '%s' "${data_runtime_database_url}" | sed 's/[&|\\]/\\&/g')
+  if grep -q '^DATABASE_URL=' "${runtime_env_file}"; then
+    sed -i.bak "s|^DATABASE_URL=.*$|DATABASE_URL=\"${escaped_data_runtime_database_url}\"|" "${runtime_env_file}"
+    rm -f "${runtime_env_file}.bak"
+  else
+    printf 'DATABASE_URL="%s"\n' "${data_runtime_database_url}" >>"${runtime_env_file}"
+  fi
+  export ENV_FILE="${runtime_env_file}"
+  cleanup_runtime_env() { rm -f "${runtime_env_file}" "${runtime_env_file}.bak"; }
+  trap cleanup_runtime_env EXIT
   if [[ -n "${APP_IMAGE:-}" ]]; then
     export APP_IMAGE
     log_info "Pulling the configured application image"
@@ -75,40 +99,10 @@ deploy() {
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
-  data_runtime_database_url=$(compose run --rm -T api \
-    bun scripts/read-runtime-database-url.ts)
-  if [[ -z "${data_runtime_database_url}" ]]; then
-    log_error "The API runtime DATABASE_URL is missing; services were not stopped."
-    exit 1
-  fi
-  data_runtime_database_password=$(printf '%s' "${data_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
-  if [[ -z "${data_runtime_database_password}" ]]; then
-    log_error "The API runtime DATABASE_URL password is missing; services were not stopped."
-    exit 1
-  fi
-  graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
-  graphql_container_count=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d' | wc -l | tr -d ' ')
-  if [[ "${graphql_container_count}" -gt 1 ]]; then
-    log_error "At most one running GraphQL container is allowed to validate its runtime DATABASE_URL."
-    exit 1
-  fi
-  if [[ "${graphql_container_count}" -eq 1 ]]; then
-    graphql_container=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d')
-    graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-      "${graphql_container}" | sed -n 's/^DATABASE_URL=//p')
-  else
-    log_warn "No running GraphQL container found; using GRAPHQL_RUNTIME_DATABASE_URL from ${MIGRATION_ENV_FILE}."
-    graphql_runtime_database_url=$(compose run --rm -T migration \
-      bun scripts/read-runtime-database-url.ts GRAPHQL_RUNTIME_DATABASE_URL)
-  fi
-  if [[ -z "${graphql_runtime_database_url}" ]]; then
-    log_error "The GraphQL runtime DATABASE_URL is missing; services were not stopped."
-    exit 1
-  fi
   log_info "Validating runtime LOGIN provisioning inputs before service shutdown"
   if ! compose run --rm -T \
     -e "DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}" \
-    -e "GRAPHQL_RUNTIME_DB_PASSWORD=$(printf '%s' "${graphql_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')" \
+    -e "GRAPHQL_RUNTIME_DB_PASSWORD=${graphql_runtime_database_password}" \
     -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
     -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
     bun run db:provision-runtime-logins --preflight; then
@@ -139,7 +133,7 @@ deploy() {
   compose run --rm -T migration bun run db:migrate:status
   if ! compose run --rm -T \
     -e "DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}" \
-    -e "GRAPHQL_RUNTIME_DB_PASSWORD=$(printf '%s' "${graphql_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')" \
+    -e "GRAPHQL_RUNTIME_DB_PASSWORD=${graphql_runtime_database_password}" \
     -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
     -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
     bun run db:provision-runtime-logins; then
