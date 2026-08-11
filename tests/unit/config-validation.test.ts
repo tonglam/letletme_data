@@ -43,9 +43,9 @@ describe('production environment preflight', () => {
       'bun run db:provision-runtime-logins --preflight',
     );
     const runtimeUrl = workflow.indexOf('process.env.DATABASE_URL');
-    const graphqlRuntimeUrlByLabel = workflow.indexOf('label=com.docker.compose.service=graphql');
-    const graphqlRuntimeUrlByCompose = workflow.indexOf('docker compose ps -q graphql');
-    const graphqlRuntimeUrl = Math.max(graphqlRuntimeUrlByLabel, graphqlRuntimeUrlByCompose);
+    const graphqlRuntimeUrl = workflow.indexOf(
+      'process.env.GRAPHQL_RUNTIME_DATABASE_URL',
+    );
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
@@ -71,7 +71,8 @@ describe('production environment preflight', () => {
     expect(canonicalContract).toBeGreaterThan(provision);
     expect(publishCore).toBeGreaterThan(canonicalContract);
     expect(replaceServices).toBeGreaterThan(publishCore);
-    expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(workflow).not.toContain('docker compose ps -q graphql');
+    expect(workflow).not.toContain('> "$HOME/.letletme-data-previous-image"');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
