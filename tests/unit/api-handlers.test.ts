@@ -14,36 +14,6 @@ mock.module('../../src/services/events.service', () => ({
   getNextEvent,
 }));
 
-class JobNotFoundError extends Error {
-  constructor(name: string) {
-    super(`Job '${name}' not found`);
-    this.name = 'JobNotFoundError';
-  }
-}
-
-const listTriggerableJobs = mock(() => [
-  { name: 'events-sync', description: 'Sync events from FPL API', schedule: 'Daily at 6:35 AM' },
-  {
-    name: 'player-prices',
-    description: 'Replay persisted price changes',
-    schedule: 'Daily at 9:40 AM',
-  },
-]);
-const triggerJob = mock(async (name: string, _input?: unknown) => {
-  if (name === 'events-sync') {
-    return { kind: 'enqueued' as const, jobId: 'job-events-1', message: 'Job triggered' };
-  }
-  if (name === 'player-prices') {
-    return { kind: 'enqueued' as const, jobId: 'job-player-prices-1', message: 'Job triggered' };
-  }
-  throw new JobNotFoundError(name);
-});
-mock.module('../../src/services/job-trigger.service', () => ({
-  JobNotFoundError,
-  listTriggerableJobs,
-  triggerJob,
-}));
-
 const enqueueEventsSyncJob = mock(async () => ({ id: 'events-job-1' }));
 const enqueueCoreSnapshotJob = mock(async () => ({ id: 'core-snapshot-job-1' }));
 const enqueuePlayersSyncJob = mock(async () => ({ id: 'players-job-1' }));
@@ -167,6 +137,30 @@ const { tournamentsAPI } = await import('../../src/api/tournaments.api');
 const { entryInfoAPI } = await import('../../src/api/entry-info.api');
 const { teamsAPI } = await import('../../src/api/teams.api');
 const { phasesAPI } = await import('../../src/api/phases.api');
+const jobTriggerServiceModule = await import('../../src/services/job-trigger.service');
+const listTriggerableJobs = spyOn(jobTriggerServiceModule, 'listTriggerableJobs').mockReturnValue([
+  {
+    name: 'core-snapshot-sync',
+    description: 'Atomically sync the current FPL core snapshot',
+    schedule: 'Daily at 06:35 UTC+8',
+  },
+  {
+    name: 'player-prices',
+    description: 'Replay persisted price changes',
+    schedule: 'Daily at 09:40 UTC+8',
+  },
+]);
+const triggerJob = spyOn(jobTriggerServiceModule, 'triggerJob').mockImplementation(
+  async (name: string) => {
+    if (name === 'core-snapshot-sync') {
+      return { kind: 'enqueued' as const, jobId: 'job-core-snapshot-1', message: 'Job triggered' };
+    }
+    if (name === 'player-prices') {
+      return { kind: 'enqueued' as const, jobId: 'job-player-prices-1', message: 'Job triggered' };
+    }
+    throw new jobTriggerServiceModule.JobNotFoundError(name);
+  },
+);
 
 describe('eventsAPI handlers', () => {
   beforeEach(() => {
@@ -234,13 +228,13 @@ describe('jobsAPI handlers', () => {
       jobs: Array<{ name: string }>;
     };
     expect(body.success).toBe(true);
-    expect(body.jobs.some((job) => job.name === 'events-sync')).toBe(true);
+    expect(body.jobs.some((job) => job.name === 'core-snapshot-sync')).toBe(true);
     expect(listTriggerableJobs).toHaveBeenCalledTimes(1);
   });
 
-  test('POST /jobs/events-sync/trigger enqueues the job', async () => {
+  test('POST /jobs/core-snapshot-sync/trigger enqueues the job', async () => {
     const response = await jobsAPI.handle(
-      new Request('http://localhost/jobs/events-sync/trigger', { method: 'POST' }),
+      new Request('http://localhost/jobs/core-snapshot-sync/trigger', { method: 'POST' }),
     );
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
@@ -249,8 +243,8 @@ describe('jobsAPI handlers', () => {
       message: string;
     };
     expect(body.success).toBe(true);
-    expect(body.jobId).toBe('job-events-1');
-    expect(triggerJob).toHaveBeenCalledWith('events-sync', undefined);
+    expect(body.jobId).toBe('job-core-snapshot-1');
+    expect(triggerJob).toHaveBeenCalledWith('core-snapshot-sync', undefined);
   });
 
   test('POST /jobs/player-prices/trigger forwards the required change date', async () => {
