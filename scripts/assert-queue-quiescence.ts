@@ -32,6 +32,43 @@ async function scan(redis: Redis, pattern: string): Promise<string[]> {
   return [...new Set(keys)].sort();
 }
 
+async function readDatabaseQuiescenceState(
+  database: postgres.Sql,
+): Promise<{ nonTerminalSyncRuns: number; stagingPublications: number }> {
+  const [catalog] = await database<
+    {
+      has_sync_runs: boolean;
+      has_dataset_publications: boolean;
+    }[]
+  >`
+    SELECT
+      to_regclass('ops.sync_runs') IS NOT NULL AS has_sync_runs,
+      to_regclass('ops.dataset_publications') IS NOT NULL AS has_dataset_publications
+  `;
+  if (!catalog) throw new Error('Could not inspect the sync-run quiescence state');
+
+  let nonTerminalSyncRuns = 0;
+  let stagingPublications = 0;
+  if (catalog.has_sync_runs) {
+    const [row] = await database<{ count: number }[]>`
+      SELECT count(*) FILTER (
+        WHERE status IN ('pending', 'running', 'ready_to_publish')
+      )::integer AS count
+      FROM ops.sync_runs
+    `;
+    nonTerminalSyncRuns = row?.count ?? 0;
+  }
+  if (catalog.has_dataset_publications) {
+    const [row] = await database<{ count: number }[]>`
+      SELECT count(*)::integer AS count
+      FROM ops.dataset_publications
+      WHERE status = 'staging'
+    `;
+    stagingPublications = row?.count ?? 0;
+  }
+  return { nonTerminalSyncRuns, stagingPublications };
+}
+
 async function main(): Promise<void> {
   if (process.argv.length !== 2) throw new Error('Queue quiescence check takes no arguments');
   const config = getConfig();
@@ -48,19 +85,8 @@ async function main(): Promise<void> {
 
   try {
     if (redis.status === 'wait' || redis.status === 'end') await redis.connect();
-    const [databaseRows, cascadeKeys, queueCountRows] = await Promise.all([
-      database<Array<{ non_terminal_sync_runs: number; staging_publications: number }>>`
-        SELECT
-          count(*) FILTER (
-            WHERE status IN ('pending', 'running', 'ready_to_publish')
-          )::integer AS non_terminal_sync_runs,
-          (
-            SELECT count(*)::integer
-            FROM ops.dataset_publications
-            WHERE status = 'staging'
-          ) AS staging_publications
-        FROM ops.sync_runs
-      `,
+    const [databaseState, cascadeKeys, queueCountRows] = await Promise.all([
+      readDatabaseQuiescenceState(database),
       scan(redis, CASCADE_PATTERN),
       Promise.all(
         queues.map(
@@ -68,12 +94,9 @@ async function main(): Promise<void> {
         ),
       ),
     ]);
-    const databaseState = databaseRows[0];
-    if (!databaseState) throw new Error('Could not read the sync-run quiescence state');
-
     const snapshot = {
-      nonTerminalSyncRuns: databaseState.non_terminal_sync_runs,
-      stagingPublications: databaseState.staging_publications,
+      nonTerminalSyncRuns: databaseState.nonTerminalSyncRuns,
+      stagingPublications: databaseState.stagingPublications,
       runnableQueues: Object.fromEntries(queueCountRows) as Record<string, RunnableQueueCounts>,
       unsettledCascadeIds: findUnsettledCascades(cascadeKeys),
     };

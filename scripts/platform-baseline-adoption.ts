@@ -143,14 +143,18 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
     'letletme_graphql_reader->letletme_graphql_runtime',
     'letletme_web_auth->letletme_web_runtime',
   ]);
+  const observed = new Set(rows.map((row) => `${row.granted_role}->${row.member_role}`));
   const unexpected = rows.filter(
     (row) => row.admin_option || !allowed.has(`${row.granted_role}->${row.member_role}`),
   );
-  if (unexpected.length > 0) {
+  const missing = [...allowed].filter((membership) => !observed.has(membership));
+  if (unexpected.length > 0 || missing.length > 0) {
     throw new Error(
-      `Unexpected capability role membership: ${unexpected
-        .map((row) => `${row.granted_role}->${row.member_role}`)
-        .join(', ')}`,
+      `Unexpected capability role membership: ${
+        unexpected.length > 0
+          ? unexpected.map((row) => `${row.granted_role}->${row.member_role}`).join(', ')
+          : 'none'
+      }${missing.length > 0 ? `; missing: ${missing.join(', ')}` : ''}`,
     );
   }
 }

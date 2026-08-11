@@ -335,6 +335,21 @@ WITH contract_rows AS (
   UNION ALL
 
   SELECT
+    'rule'::text,
+    namespace_row.nspname || '.' || relation_row.relname || '.' || rewrite_row.rulename,
+    jsonb_build_object(
+      'definition', pg_get_ruledef(rewrite_row.oid, true)
+    )::text
+  FROM pg_rewrite rewrite_row
+  JOIN pg_class relation_row ON relation_row.oid = rewrite_row.ev_class
+  JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+  WHERE namespace_row.nspname = ANY ($1::text[])
+    AND relation_row.relkind NOT IN ('v', 'm')
+    AND rewrite_row.rulename <> '_RETURN'
+
+  UNION ALL
+
+  SELECT
     'function'::text,
     namespace_row.nspname || '.' || function_row.proname || '(' ||
       pg_get_function_identity_arguments(function_row.oid) || ')',
