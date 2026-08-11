@@ -67,21 +67,17 @@ deploy() {
   fi
   data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   migration_database_url=$(sed -n 's/^DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  with_runtime_credentials() {
-    source_url=$1
-    runtime_user=$2
-    runtime_password=$3
-    source_suffix=${source_url#*@}
-    if [[ "${source_suffix}" == "${source_url}" ]]; then
-      log_error "Migration DATABASE_URL has no authority"
-      return 1
-    fi
-    source_prefix=${source_url%%://*}://
-    printf '%s%s:%s@%s' "${source_prefix}" "${runtime_user}" "${runtime_password}" "${source_suffix}"
-  }
   graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  data_runtime_database_url=$(with_runtime_credentials "${migration_database_url}" letletme_data_runtime "${data_runtime_database_password}")
-  graphql_runtime_database_url=$(with_runtime_credentials "${migration_database_url}" letletme_graphql_runtime "${graphql_runtime_database_password}")
+  data_runtime_database_url=$(compose run --rm -T \
+    -e "DATABASE_URL=${migration_database_url}" \
+    -e RUNTIME_DATABASE_USER=letletme_data_runtime \
+    -e "RUNTIME_DATABASE_PASSWORD=${data_runtime_database_password}" migration \
+    bun scripts/format-runtime-database-url.ts with-credentials)
+  graphql_runtime_database_url=$(compose run --rm -T \
+    -e "DATABASE_URL=${migration_database_url}" \
+    -e RUNTIME_DATABASE_USER=letletme_graphql_runtime \
+    -e "RUNTIME_DATABASE_PASSWORD=${graphql_runtime_database_password}" migration \
+    bun scripts/format-runtime-database-url.ts with-credentials)
   runtime_env_file=$(mktemp)
   awk '!/^DATABASE_URL=/' "${ENV_FILE}" >"${runtime_env_file}"
   printf 'DATABASE_URL="%s"\n' "${data_runtime_database_url}" >>"${runtime_env_file}"
