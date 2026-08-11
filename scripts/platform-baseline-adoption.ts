@@ -53,7 +53,15 @@ type RuntimeRoleRow = {
   inherit: boolean;
   replication: boolean;
   bypass_rls: boolean;
+  connection_limit: number;
+  valid_until_ok: boolean;
   role_settings: string[];
+};
+
+type RuntimeMembershipRow = {
+  login_role: string;
+  granted_role: string;
+  admin_option: boolean;
 };
 
 export type BaselineAdoptionExpectations = {
@@ -180,6 +188,8 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
       rolinherit AS inherit,
       rolreplication AS replication,
       rolbypassrls AS bypass_rls,
+      rolconnlimit AS connection_limit,
+      (rolvaliduntil IS NULL OR rolvaliduntil > CURRENT_TIMESTAMP) AS valid_until_ok,
       COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
     FROM pg_roles
     WHERE rolname = ANY(${[
@@ -202,6 +212,8 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
       !role.inherit ||
       role.replication ||
       role.bypass_rls ||
+      role.connection_limit === 0 ||
+      !role.valid_until_ok ||
       role.role_settings.length > 0,
   );
   const missingRuntimeRoles = [...expectedRuntimeRoles].filter(
@@ -212,6 +224,61 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
       `Required runtime LOGIN roles are missing or unsafe: ${[
         ...missingRuntimeRoles,
         ...unsafeRuntimeRoles.map((role) => role.role_name),
+      ].join(', ')}`,
+    );
+  }
+
+  const runtimeMemberships = await client<RuntimeMembershipRow[]>`
+    WITH RECURSIVE inherited(login_role, role_oid, granted_role, admin_option, path) AS (
+      SELECT
+        member_role.rolname,
+        granted_role.oid,
+        granted_role.rolname,
+        membership.admin_option,
+        ARRAY[member_role.oid, granted_role.oid]
+      FROM pg_auth_members membership
+      JOIN pg_roles member_role ON member_role.oid = membership.member
+      JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+      WHERE member_role.rolname = ANY(${[...expectedRuntimeRoles]}::text[])
+
+      UNION ALL
+
+      SELECT
+        inherited.login_role,
+        granted_role.oid,
+        granted_role.rolname,
+        membership.admin_option,
+        inherited.path || granted_role.oid
+      FROM inherited
+      JOIN pg_auth_members membership ON membership.member = inherited.role_oid
+      JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+      WHERE NOT granted_role.oid = ANY(inherited.path)
+    )
+    SELECT login_role, granted_role, bool_or(admin_option) AS admin_option
+    FROM inherited
+    GROUP BY login_role, granted_role
+    ORDER BY login_role, granted_role
+  `;
+  const expectedRuntimeMemberships = new Set([
+    'letletme_data_runtime->letletme_data_writer',
+    'letletme_graphql_runtime->letletme_graphql_reader',
+    'letletme_web_runtime->letletme_web_auth',
+  ]);
+  const observedRuntimeMemberships = new Set(
+    runtimeMemberships.map((row) => `${row.login_role}->${row.granted_role}`),
+  );
+  const unexpectedRuntimeMemberships = runtimeMemberships.filter(
+    (row) =>
+      row.admin_option || !expectedRuntimeMemberships.has(`${row.login_role}->${row.granted_role}`),
+  );
+  const missingRuntimeMemberships = [...expectedRuntimeMemberships].filter(
+    (membership) => !observedRuntimeMemberships.has(membership),
+  );
+  if (unexpectedRuntimeMemberships.length > 0 || missingRuntimeMemberships.length > 0) {
+    throw new Error(
+      `Unexpected runtime LOGIN membership: ${[
+        ...unexpectedRuntimeMemberships.map((row) => `${row.login_role}->${row.granted_role}`),
+        ...missingRuntimeMemberships.map((membership) => `missing ${membership}`),
       ].join(', ')}`,
     );
   }

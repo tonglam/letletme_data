@@ -75,6 +75,11 @@ deploy() {
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
+  log_info "Validating runtime LOGIN provisioning inputs before service shutdown"
+  if ! compose run --rm -T migration bun run db:provision-runtime-logins --preflight; then
+    log_error "Runtime LOGIN provisioning inputs failed; services were not stopped."
+    exit 1
+  fi
   log_info "Stopping services and waiting for workers to settle"
   if ! compose stop -t 45 api worker; then
     log_error "Services did not stop cleanly; migration was not started."

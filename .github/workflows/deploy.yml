@@ -104,6 +104,8 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/migration-login-contract.ts --preflight
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+              bun run db:provision-runtime-logins --preflight
 
             migration_started=false
             restore_before_migration() {

@@ -246,6 +246,32 @@ describe('canonical platform baseline adoption', () => {
         }),
       ).rejects.toThrow('Unexpected capability role membership');
       await expectCanonicalLedger();
+
+      await expect(
+        sql.begin(async (transaction) => {
+          await transaction`DELETE FROM ops.schema_migrations`;
+          await transaction.unsafe(productionLedgerFixture);
+          await transaction`GRANT adoption_runtime TO letletme_web_runtime`;
+          await adoptProductionPlatformBaseline(transaction, baselineFilename, baselineChecksum, {
+            ...PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS,
+            dataFingerprint,
+          });
+        }),
+      ).rejects.toThrow('Unexpected runtime LOGIN membership');
+      await expectCanonicalLedger();
+
+      await expect(
+        sql.begin(async (transaction) => {
+          await transaction`DELETE FROM ops.schema_migrations`;
+          await transaction.unsafe(productionLedgerFixture);
+          await transaction`ALTER ROLE letletme_web_runtime CONNECTION LIMIT 0`;
+          await adoptProductionPlatformBaseline(transaction, baselineFilename, baselineChecksum, {
+            ...PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS,
+            dataFingerprint,
+          });
+        }),
+      ).rejects.toThrow('Required runtime LOGIN roles are missing or unsafe');
+      await expectCanonicalLedger();
     },
     60_000,
   );

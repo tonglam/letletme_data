@@ -15,6 +15,8 @@ type RoleAttributes = {
   readonly inherit: boolean;
   readonly replication: boolean;
   readonly bypassRls: boolean;
+  readonly connectionLimit: number;
+  readonly validUntilOk: boolean;
   readonly settings: readonly string[];
 };
 
@@ -36,6 +38,8 @@ type RoleRow = {
   readonly rolinherit: boolean;
   readonly rolreplication: boolean;
   readonly rolbypassrls: boolean;
+  readonly rolconnlimit: number;
+  readonly valid_until_ok: boolean;
   readonly role_settings: string[];
 };
 
@@ -60,6 +64,34 @@ function requiredPassword(name: string): string {
   return value;
 }
 
+export function assertRuntimeDatabaseUrl(
+  value: string,
+  expectedRole: string,
+  expectedPassword: string,
+  variableName: string,
+): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${variableName} must be a valid PostgreSQL URL`);
+  }
+  if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+    throw new Error(`${variableName} must use the postgres or postgresql scheme`);
+  }
+  let username: string;
+  let password: string;
+  try {
+    username = decodeURIComponent(parsed.username);
+    password = decodeURIComponent(parsed.password);
+  } catch {
+    throw new Error(`${variableName} contains invalid URL encoding`);
+  }
+  if (!parsed.hostname || username !== expectedRole || password !== expectedPassword) {
+    throw new Error(`${variableName} must use ${expectedRole} and its configured password`);
+  }
+}
+
 function roleAttributes(row: RoleRow): RoleAttributes {
   return {
     roleName: row.role_name,
@@ -70,6 +102,8 @@ function roleAttributes(row: RoleRow): RoleAttributes {
     inherit: row.rolinherit,
     replication: row.rolreplication,
     bypassRls: row.rolbypassrls,
+    connectionLimit: row.rolconnlimit,
+    validUntilOk: row.valid_until_ok,
     settings: row.role_settings,
   };
 }
@@ -96,6 +130,8 @@ function isSafeLogin(role: RoleAttributes): boolean {
     role.inherit &&
     !role.replication &&
     !role.bypassRls &&
+    role.connectionLimit !== 0 &&
+    role.validUntilOk &&
     role.settings.length === 0
   );
 }
@@ -152,6 +188,8 @@ async function inspectRoles(client: QueryClient): Promise<RuntimeLoginProvisioni
         rolinherit,
         rolreplication,
         rolbypassrls,
+        rolconnlimit,
+        (rolvaliduntil IS NULL OR rolvaliduntil > CURRENT_TIMESTAMP) AS valid_until_ok,
         COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
       FROM pg_roles
       WHERE rolname = ANY(${roleNames}::text[])
@@ -263,11 +301,43 @@ async function provisionLogin(
 }
 
 async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const preflight = args.length === 1 && args[0] === '--preflight';
+  if (args.length > 0 && !preflight) {
+    throw new Error(`Runtime LOGIN provisioning does not accept arguments: ${args.join(' ')}`);
+  }
   const databaseUrl = requiredEnvironment('DATABASE_URL');
   const dataPassword = requiredPassword('DATA_RUNTIME_DB_PASSWORD');
   const graphqlPassword = requiredPassword('GRAPHQL_RUNTIME_DB_PASSWORD');
   if (dataPassword === graphqlPassword) {
     throw new Error('Data and GraphQL runtime passwords must be unique');
+  }
+  const dataRuntimeUrl = requiredEnvironment('DATA_RUNTIME_DATABASE_URL');
+  const graphqlRuntimeUrl = requiredEnvironment('GRAPHQL_RUNTIME_DATABASE_URL');
+  assertRuntimeDatabaseUrl(
+    dataRuntimeUrl,
+    DATA_RUNTIME_LOGIN,
+    dataPassword,
+    'DATA_RUNTIME_DATABASE_URL',
+  );
+  assertRuntimeDatabaseUrl(
+    graphqlRuntimeUrl,
+    GRAPHQL_RUNTIME_LOGIN,
+    graphqlPassword,
+    'GRAPHQL_RUNTIME_DATABASE_URL',
+  );
+  if (preflight) {
+    console.log(
+      JSON.stringify(
+        {
+          status: 'runtime_login_provisioning_preflight_passed',
+          runtimeLogins: [DATA_RUNTIME_LOGIN, GRAPHQL_RUNTIME_LOGIN],
+        },
+        null,
+        2,
+      ),
+    );
+    return;
   }
 
   const client = postgres(databaseUrl, { max: 1, prepare: false });

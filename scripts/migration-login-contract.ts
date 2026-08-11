@@ -102,7 +102,7 @@ async function main(): Promise<void> {
           SELECT count(*)::integer
           FROM pg_class relation_row
           WHERE relation_row.relnamespace = 'public'::regnamespace
-            AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S')
+            AND relation_row.relkind IN ('r', 'p', 'f', 'm', 'v', 'S')
         ) + (
           SELECT count(*)::integer
           FROM pg_proc function_row

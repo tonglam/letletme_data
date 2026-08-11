@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertRuntimeLoginProvisioningSnapshot,
+  assertRuntimeDatabaseUrl,
   DATA_RUNTIME_CAPABILITY,
   DATA_RUNTIME_LOGIN,
   GRAPHQL_RUNTIME_CAPABILITY,
@@ -18,6 +19,8 @@ const capability = (roleName: string) => ({
   inherit: false,
   replication: false,
   bypassRls: false,
+  connectionLimit: -1,
+  validUntilOk: true,
   settings: [],
 });
 
@@ -30,6 +33,8 @@ const login = (roleName: string) => ({
   inherit: true,
   replication: false,
   bypassRls: false,
+  connectionLimit: -1,
+  validUntilOk: true,
   settings: [],
 });
 
@@ -57,6 +62,45 @@ const accepted = (): RuntimeLoginProvisioningSnapshot => ({
 describe('production runtime LOGIN provisioning contract', () => {
   test('accepts two non-admin logins with exactly one locked capability each', () => {
     expect(() => assertRuntimeLoginProvisioningSnapshot(accepted())).not.toThrow();
+  });
+
+  test('rejects exhausted or expired runtime logins', () => {
+    const base = accepted();
+    expect(() =>
+      assertRuntimeLoginProvisioningSnapshot({
+        ...base,
+        roles: base.roles.map((role) =>
+          role.roleName === DATA_RUNTIME_LOGIN ? { ...role, connectionLimit: 0 } : role,
+        ),
+      }),
+    ).toThrow('missing or unsafe');
+    expect(() =>
+      assertRuntimeLoginProvisioningSnapshot({
+        ...base,
+        roles: base.roles.map((role) =>
+          role.roleName === GRAPHQL_RUNTIME_LOGIN ? { ...role, validUntilOk: false } : role,
+        ),
+      }),
+    ).toThrow('missing or unsafe');
+  });
+
+  test('requires runtime URLs to match the configured role passwords', () => {
+    expect(() =>
+      assertRuntimeDatabaseUrl(
+        'postgresql://letletme_data_runtime:password@db.example/postgres',
+        DATA_RUNTIME_LOGIN,
+        'password',
+        'DATA_RUNTIME_DATABASE_URL',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertRuntimeDatabaseUrl(
+        'postgresql://wrong:password@db.example/postgres',
+        DATA_RUNTIME_LOGIN,
+        'password',
+        'DATA_RUNTIME_DATABASE_URL',
+      ),
+    ).toThrow('must use letletme_data_runtime');
   });
 
   test('rejects elevated, missing, and multiply inherited runtime identities', () => {
