@@ -84,6 +84,9 @@ describe('production environment preflight', () => {
     expect(workflow).toContain('DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password');
     expect(workflow).toContain('GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password');
     expect(workflow).toContain('configured_data_runtime_password=$(APP_IMAGE="$IMAGE_REF"');
+    expect(workflow).toContain(
+      'data_runtime_database_url=$(sed -n \'s/^DATA_RUNTIME_DATABASE_URL=//p\' "$migration_env_file"',
+    );
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
   });
 
@@ -113,6 +116,9 @@ describe('production environment preflight', () => {
     );
     expect(deployScript).toContain('DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}');
     expect(deployScript).toContain('configured_data_runtime_password=$(compose run --rm -T');
+    expect(deployScript).toContain(
+      'data_runtime_database_url=$(sed -n \'s/^DATA_RUNTIME_DATABASE_URL=//p\' "${MIGRATION_ENV_FILE}"',
+    );
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
