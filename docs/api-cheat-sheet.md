@@ -120,10 +120,8 @@ curl -X POST "$DATA_URL/jobs/player-prices/trigger" \
   `entry-event-transfers-daily`, `entry-event-results-daily`;
 - `league-event-picks-sync`, `league-event-results-sync`;
 - `tournament-event-picks-sync`, `tournament-event-results-sync`,
-  `tournament-event-transfers-pre-sync`, `tournament-event-transfers-post-sync`,
-  `tournament-event-cup-results-sync`, `tournament-selection-stats-sync`,
-  `tournament-info-sync`, `tournament-points-race-results-sync`,
-  `tournament-battle-race-results-sync`, `tournament-knockout-results-sync`,
+  `tournament-event-transfers-pre-sync`, `tournament-selection-stats-sync`,
+  `tournament-info-sync`,
   `tournament-materialized-views-refresh`;
 - `live-snapshot`, `post-match-consolidation`, and `launch-monitor`.
 

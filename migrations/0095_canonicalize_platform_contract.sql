@@ -59,14 +59,14 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM competition.tournaments tournament
-    WHERE NOT EXISTS (
-      SELECT 1
+    WHERE (
+      SELECT count(*)
       FROM competition.tournament_entries entry_row
       WHERE entry_row.season_id = tournament.season_id
         AND entry_row.tournament_id = tournament.tournament_id
-    )
+    ) <> tournament.total_team_num
   ) THEN
-    RAISE EXCEPTION 'tournament without a persisted roster requires explicit repair';
+    RAISE EXCEPTION 'tournament roster cardinality requires explicit repair';
   END IF;
 
   SELECT

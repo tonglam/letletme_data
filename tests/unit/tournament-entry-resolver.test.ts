@@ -26,4 +26,12 @@ describe('tournament entry resolver', () => {
       }),
     ).rejects.toThrow('has no persisted roster');
   });
+
+  test('fails closed when the canonical roster cardinality is incomplete', async () => {
+    expect(
+      resolveTournamentEntryIds(TEST_SEASON, tournament, {
+        findStoredEntryIds: async () => [2],
+      }),
+    ).rejects.toThrow('persisted roster count 1 does not match expected 2');
+  });
 });

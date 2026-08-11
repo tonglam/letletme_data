@@ -22,5 +22,11 @@ export async function resolveTournamentEntryIds(
   if (entries.length === 0) {
     throw new Error(`Tournament ${tournament.id} has no persisted roster`);
   }
+  if (entries.length !== tournament.totalTeamNum) {
+    throw new Error(
+      `Tournament ${tournament.id} persisted roster count ${entries.length} ` +
+        `does not match expected ${tournament.totalTeamNum}`,
+    );
+  }
   return entries;
 }
