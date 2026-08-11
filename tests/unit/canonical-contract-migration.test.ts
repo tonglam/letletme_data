@@ -21,6 +21,12 @@ describe('canonical platform contract migration', () => {
     expect(migration).toMatch(/jsonb_build_object\('ruleId', 'understat-fpl-player-name'\)/);
     expect(migration).toMatch(/metadata - ARRAY\[\n  'legacy_cache_revision'/);
     expect(migration).toMatch(/normalized_payload \?\| ARRAY\['version'/);
+    expect(migration).toContain('normalized_payload = NULL');
+    expect(migration).toContain('source_hash = NULL');
+    expect(migration).toMatch(/item\.status IN \('completed', 'failed', 'skipped'\)/);
+    expect(migration).toContain(
+      'non-terminal sync-item payloads still require explicit canonicalization',
+    );
     expect(migration).toContain('manifest = jsonb_build_object(');
     expect(migration).toMatch(/count\(\*\)[\s\S]*<> tournament\.total_team_num/);
     expect(migration).toContain('tournament roster cardinality requires explicit repair');

@@ -82,10 +82,16 @@ BEGIN
   END IF;
 
   IF EXISTS (
-    SELECT 1 FROM ops.sync_items
-    WHERE normalized_payload ?| ARRAY['version', 'schemaVersion', 'planVersion', 'engineVersion']
+    SELECT 1
+    FROM ops.sync_items item
+    JOIN ops.sync_runs run ON run.run_id = item.run_id
+    WHERE item.normalized_payload ?| ARRAY['version', 'schemaVersion', 'planVersion', 'engineVersion']
+      AND (
+        run.provider <> 'understat'
+        OR item.status NOT IN ('completed', 'failed', 'skipped')
+      )
   ) THEN
-    RAISE EXCEPTION 'stored sync-item payloads still require explicit canonicalization';
+    RAISE EXCEPTION 'non-terminal sync-item payloads still require explicit canonicalization';
   END IF;
 
   SELECT count(*) INTO value_seed_count
@@ -160,6 +166,21 @@ END
 $canonical_contract_precondition$;
 
 SET LOCAL ROLE letletme_data_owner;
+
+-- Staged Understat payloads are operational retry state, not historical data.
+-- Terminal rows are no longer read by the worker; clear their retired envelope
+-- and hash so the canonical reader never needs a compatibility path. Any
+-- non-terminal legacy envelope was rejected above before this mutation.
+UPDATE ops.sync_items item
+SET
+  normalized_payload = NULL,
+  source_hash = NULL,
+  updated_at = now()
+FROM ops.sync_runs run
+WHERE run.run_id = item.run_id
+  AND run.provider = 'understat'
+  AND item.status IN ('completed', 'failed', 'skipped')
+  AND item.normalized_payload ?| ARRAY['version', 'schemaVersion', 'planVersion', 'engineVersion'];
 
 ALTER TABLE bridge.entity_links RENAME COLUMN rule_version TO rule_id;
 ALTER TABLE bridge.match_links RENAME COLUMN rule_version TO rule_id;
