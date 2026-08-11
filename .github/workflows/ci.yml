@@ -64,6 +64,7 @@ jobs:
         run: bun run build
 
   integration:
+    name: integration (${{ matrix.bun-version }}, ${{ matrix['catalog-mode'] }})
     runs-on: ubuntu-latest
     needs: test
     strategy:
@@ -106,117 +107,44 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Migrate database
+      - name: Stub Supabase client roles (plain Postgres CI)
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: bun run db:migrate
+        run: >-
+          bun -e 'import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          for (const role of ["anon", "authenticated", "service_role"])
+          await sql.unsafe("DO $$ BEGIN CREATE ROLE " + role + " NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$");
+          await sql.end();'
 
-      - name: Stub Supabase auth roles/schema (plain Postgres CI)
+      - name: Apply canonical baseline and verify repeatability
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: |
-          cat > /tmp/stub-auth.mjs <<'EOF'
-          import postgres from 'postgres';
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          // Supabase roles referenced by RLS policies in migrations/0026+0029
-          for (const role of ['anon', 'authenticated', 'service_role']) {
-            await sql.unsafe(`DO $$ BEGIN CREATE ROLE ${role} NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
-          }
-          await sql`CREATE SCHEMA IF NOT EXISTS auth`;
-          await sql.unsafe(
-            "CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $fn$ SELECT current_setting('request.jwt.claim.role', true) $fn$"
-          );
-          // Default claim so policies using auth.role() evaluate in CI
-          await sql.unsafe("SELECT set_config('request.jwt.claim.role', 'service_role', false)");
-          await sql.end();
-          console.log('[ci] supabase auth roles + auth.role() stub ready');
-          EOF
-          bun /tmp/stub-auth.mjs
-
-      - name: Apply SQL migrations through the GraphQL ledger boundary
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: >-
-          bun scripts/apply-sql-migrations.ts
-          --through 0079_create_v3_ops_and_roles.sql
-
-      - name: Install the historical GraphQL ledger fixture
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: >-
-          bun -e 'import postgres from "postgres";
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const ddl = await Bun.file("tests/fixtures/graphql-migration-ledger.sql").text();
-          await sql.unsafe(ddl);
-          await sql.end();'
-
-      - name: Apply SQL migrations through the production import boundary
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: >-
-          bun scripts/apply-sql-migrations.ts
-          --through 0089_prepare_v3_publications.sql
-
-      - name: Install the optional public-league source fixture
-        if: matrix.catalog-mode == 'present'
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: >-
-          bun -e 'import postgres from "postgres";
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const ddl = await Bun.file("tests/fixtures/public-league-trends-catalog.sql").text();
-          await sql.unsafe(ddl);
-          await sql.end();'
-
-      - name: Apply SQL migrations through the historical cutover boundary
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: >-
-          bun scripts/apply-sql-migrations.ts
-          --through 0090_zzzz_integrate_understat_runtime.sql
-
-      - name: Apply the historical approval-gated tail fixture
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: bun tests/helpers/apply-historical-cutover-tail.ts
-
-      - name: Install an active live publication migration fixture
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: >-
-          bun -e 'import postgres from "postgres";
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const ddl = await Bun.file("tests/fixtures/active-live-publication.sql").text();
-          await sql.unsafe(ddl);
-          await sql.end();'
-
-      - name: Apply canonical SQL migrations
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: bun run db:apply-sql
-
-      - name: Verify the active live publication migration fixture
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: >-
-          bun -e 'import postgres from "postgres";
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const ddl = await Bun.file("tests/fixtures/verify-canonical-live-publication.sql").text();
-          await sql.unsafe(ddl);
-          await sql.end();'
-
-      - name: Verify SQL migrations are idempotent and complete
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: |
-          bun run db:apply-sql
+          bun run db:migrate
+          bun run db:migrate
           bun run db:migrate:status
+
+      - name: Verify strict production baseline adoption
+        env:
+          RUN_INTEGRATION: 1
+          RUN_BASELINE_ADOPTION_INTEGRATION: 1
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          CACHE_REDIS_HOST: 127.0.0.1
+          CACHE_REDIS_PORT: '6379'
+          CACHE_REDIS_DB: '9'
+          QUEUE_REDIS_HOST: 127.0.0.1
+          QUEUE_REDIS_PORT: '6379'
+          QUEUE_REDIS_DB: '10'
+        run: bun test tests/integration/platform-baseline-adoption.test.ts
 
       - name: Provision and retry disposable production-shaped runtime logins
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           DATA_RUNTIME_DB_PASSWORD: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
           GRAPHQL_RUNTIME_DB_PASSWORD: gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
+          DATA_RUNTIME_DATABASE_URL: postgresql://letletme_data_runtime:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd@127.0.0.1:5432/ci
+          GRAPHQL_RUNTIME_DATABASE_URL: postgresql://letletme_graphql_runtime:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg@127.0.0.1:5432/ci
         run: |
           bun run db:provision-runtime-logins
           bun run db:provision-runtime-logins

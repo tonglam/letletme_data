@@ -35,39 +35,43 @@ describe('production environment preflight', () => {
 
   test('validates identity and quiescence before migration, then publishes before restart', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
-    const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
-    const preflight = deployScript.indexOf('bun run env:check');
-    const identityContract = deployScript.indexOf(
+    const preflight = workflow.indexOf('bun run env:check');
+    const identityContract = workflow.indexOf(
       'bun scripts/migration-login-contract.ts --preflight',
     );
-    const stopServices = deployScript.indexOf('compose stop -t 45 api worker');
-    const quiescence = deployScript.indexOf('inspectAndAssertDeploymentQueueQuiescence');
-    const migrate = deployScript.indexOf('bun run db:migrate');
-    const canonicalContract = deployScript.indexOf(
-      'bun scripts/migration-login-contract.ts',
-      migrate,
+    const provisioningPreflight = workflow.indexOf(
+      'bun run db:provision-runtime-logins --preflight',
     );
-    const publishCore = deployScript.indexOf('bun run cache:publish-core -- --execute');
-    const provisionRuntimeLogins = deployScript.indexOf('bun run db:provision-runtime-logins');
-    const publishLive = deployScript.indexOf('publishActiveLiveCachesForDeployment');
-    const migrateRedis = deployScript.indexOf('migrateRetiredRedisStateForDeployment');
-    const replaceServices = deployScript.indexOf('compose up -d', migrateRedis);
+    const runtimeUrl = workflow.indexOf('process.env.DATABASE_URL');
+    const graphqlRuntimeUrlV1 = workflow.indexOf('label=com.docker.compose.service=graphql');
+    const graphqlRuntimeUrlV2 = workflow.indexOf('docker compose ps -q graphql');
+    const graphqlRuntimeUrl = Math.max(graphqlRuntimeUrlV1, graphqlRuntimeUrlV2);
+    const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
+    const databaseQuiescence = workflow.indexOf(
+      'bun scripts/assert-queue-quiescence.ts --database-only',
+    );
+    const redisQuiescence = workflow.indexOf('bun scripts/assert-queue-quiescence.ts --redis-only');
+    const migrate = workflow.indexOf('bun run db:migrate');
+    const provision = workflow.indexOf('bun run db:provision-runtime-logins', migrate);
+    const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
+    const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute --allow-empty');
+    const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
 
     expect(preflight).toBeGreaterThan(0);
     expect(identityContract).toBeGreaterThan(preflight);
-    expect(stopServices).toBeGreaterThan(identityContract);
-    expect(quiescence).toBeGreaterThan(stopServices);
-    expect(migrate).toBeGreaterThan(quiescence);
-    expect(canonicalContract).toBeGreaterThan(migrate);
-    expect(provisionRuntimeLogins).toBeGreaterThan(canonicalContract);
+    expect(runtimeUrl).toBeGreaterThan(identityContract);
+    expect(graphqlRuntimeUrl).toBeGreaterThan(runtimeUrl);
+    expect(provisioningPreflight).toBeGreaterThan(identityContract);
+    expect(provisioningPreflight).toBeGreaterThan(graphqlRuntimeUrl);
+    expect(stopServices).toBeGreaterThan(provisioningPreflight);
+    expect(databaseQuiescence).toBeGreaterThan(stopServices);
+    expect(redisQuiescence).toBeGreaterThan(databaseQuiescence);
+    expect(migrate).toBeGreaterThan(redisQuiescence);
+    expect(provision).toBeGreaterThan(migrate);
+    expect(canonicalContract).toBeGreaterThan(provision);
     expect(publishCore).toBeGreaterThan(canonicalContract);
-    expect(publishCore).toBeGreaterThan(provisionRuntimeLogins);
-    expect(publishLive).toBeGreaterThan(publishCore);
-    expect(migrateRedis).toBeGreaterThan(publishLive);
-    expect(replaceServices).toBeGreaterThan(migrateRedis);
+    expect(replaceServices).toBeGreaterThan(publishCore);
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
-    expect(workflow).toContain('docker compose ps -aq api');
-    expect(workflow).toContain('APP_IMAGE="$IMAGE_REF" bash scripts/deploy.sh deploy');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
@@ -77,7 +81,19 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 api worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T migration bun -e '[\s\S]*?inspectAndAssertDeploymentQueueQuiescence[\s\S]*?then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+    );
+    expect(deployScript).toMatch(
+      /bun scripts\/migration-login-contract\.ts --preflight[\s\S]*?bun run db:provision-runtime-logins --preflight[\s\S]*?compose stop -t 45 api worker/,
+    );
+    expect(deployScript).toMatch(
+      /data_runtime_database_url=\$\(compose run --rm -T api bun -e[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$\{data_runtime_database_url\}/,
+    );
+    expect(deployScript).toMatch(
+      /(docker compose ps -q graphql|docker ps --filter label=com\.docker\.compose\.service=graphql)[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$\{graphql_runtime_database_url\}/,
+    );
+    expect(deployScript).toMatch(
+      /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?compose start api worker/);
   });

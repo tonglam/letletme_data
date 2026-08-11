@@ -100,7 +100,46 @@ jobs:
             test -n "$old_image"
             printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
 
-            APP_IMAGE="$IMAGE_REF" bash scripts/deploy.sh deploy
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+              bun scripts/migration-login-contract.ts --preflight
+            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun -e 'process.stdout.write(process.env.DATABASE_URL ?? "")')
+            test -n "$data_runtime_database_url"
+            graphql_containers=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)
+            graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
+            test "$graphql_container_count" -eq 1
+            graphql_container=$(printf '%s\n' "$graphql_containers" | sed '/^$/d')
+            graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+              "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
+            test -n "$graphql_runtime_database_url"
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
+              -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
+              bun run db:provision-runtime-logins --preflight
+
+            migration_started=false
+            restore_before_migration() {
+              if [ "$migration_started" = false ]; then
+                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
+              fi
+            }
+            trap restore_before_migration ERR
+
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+              bun scripts/assert-queue-quiescence.ts --database-only
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun scripts/assert-queue-quiescence.ts --redis-only
+            migration_started=true
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:provision-runtime-logins
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun run cache:publish-core -- --execute --allow-empty
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:3000/health >/dev/null \
@@ -109,7 +148,7 @@ jobs:
               fi
               if [ "$attempt" -eq 30 ]; then
                 docker compose ps
-                docker logs --tail 100 "$(docker compose ps -aq api)" || true
+                docker logs --tail 100 "$(docker compose ps -q api)" || true
                 exit 1
               fi
               sleep 2
@@ -130,5 +169,6 @@ jobs:
               sleep 2
             done
 
+            trap - ERR
             docker compose ps
             docker image prune --force

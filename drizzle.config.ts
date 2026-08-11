@@ -12,6 +12,8 @@ if (!databaseUrl) {
 export default defineConfig({
   dialect: 'postgresql',
   schema: './src/db/schemas/index.schema.ts',
+  // Drizzle is a typed mapping/export tool. Production DDL is owned by the
+  // canonical SQL migrator under migrations/.
   out: './migrations',
   dbCredentials: {
     url: databaseUrl,

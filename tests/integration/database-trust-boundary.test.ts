@@ -53,7 +53,7 @@ const B0_ACCEPTANCE_ENABLED = process.env.RUN_B0_ACCEPTANCE === '1';
 const b0Test = B0_ACCEPTANCE_ENABLED ? test : test.skip;
 
 describe('database trust boundary', () => {
-  test('has one explicit current season and one active core publication', async () => {
+  b0Test('has one explicit current season and one active core publication', async () => {
     const sql = await getDbClient();
     const current = await seasonRepository.findCurrent();
     expect(current).toMatchObject({

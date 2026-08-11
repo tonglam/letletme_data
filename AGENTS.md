@@ -12,7 +12,7 @@
 - `bun start` — run compiled app in production mode.
 - `bun test` / `bun run coverage` — run tests / with coverage.
 - Lint/format: `bun run lint`, `bun run lint:fix`, `bun run format:fix`.
-- Database (Drizzle): `bun run db:generate`, `bun run db:migrate`, `bun run db:studio`.
+- Database: `bun run db:migrate`, `bun run db:migrate:status`, `bun run db:studio`.
 
 ## Coding Style & Naming Conventions
 - Language: TypeScript (ESM). Indent 2 spaces; max line width 100; single quotes; semicolons.
@@ -31,4 +31,5 @@
 
 ## Security & Configuration Tips
 - Configure via `.env` (copy from `.env.example`); do not commit secrets. Required: `DATABASE_URL`, `REDIS_*`, `SUPABASE_*`, `PORT`.
-- Use `bun run db:migrate` before local runs; prefer `db:studio` to inspect schema.
+- Add schema changes as the next hand-written SQL migration and update the typed Drizzle mapping;
+  use `bun run db:migrate` before local runs and `db:studio` to inspect schema.

@@ -4,7 +4,7 @@ assertIntegrationEnv();
 
 import { createHash } from 'node:crypto';
 
-import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 
 import {
   dataPublicationItemKey,
@@ -27,6 +27,42 @@ const PUBLICATION_IDS = [
   '20000000-0000-4000-8000-000000000002',
   '20000000-0000-4000-8000-000000000003',
 ] as const;
+
+const TEST_SEASON_ID = 2096;
+const TEST_SEASON_CODE = '9697';
+
+async function seedSeason(): Promise<void> {
+  const sql = await getDbClient();
+  await sql`
+    INSERT INTO fpl.seasons (
+      season_id,
+      season_code,
+      display_name,
+      start_year,
+      end_year,
+      lifecycle_state,
+      is_current
+    )
+    VALUES (
+      ${TEST_SEASON_ID},
+      ${TEST_SEASON_CODE},
+      '2096/97 sync operations integration',
+      ${TEST_SEASON_ID},
+      ${TEST_SEASON_ID + 1},
+      'completed',
+      false
+    )
+  `;
+}
+
+async function cleanupSeason(): Promise<void> {
+  const sql = await getDbClient();
+  await sql`
+    DELETE FROM fpl.seasons
+    WHERE season_id = ${TEST_SEASON_ID}
+      AND season_code = ${TEST_SEASON_CODE}
+  `;
+}
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -103,12 +139,16 @@ async function startRun(runId: string, season: FplSeasonRef, lane = 'core'): Pro
   });
 }
 
+beforeAll(seedSeason);
 beforeEach(cleanup);
-afterAll(cleanup);
+afterAll(async () => {
+  await cleanup();
+  await cleanupSeason();
+});
 
 describe('ops sync state machine', () => {
   test('rejects a non-RFC publication identity before writing', async () => {
-    const season = await seasonRepository.requireByCode('2526');
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await startRun(RUN_IDS[0], season);
     await expectDatabaseErrorCode(
       syncOperationsRepository.preparePublication({
@@ -122,7 +162,7 @@ describe('ops sync state machine', () => {
   });
 
   test('makes run identity idempotent and rejects an immutable-identity conflict', async () => {
-    const season = await seasonRepository.requireByCode('2526');
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     expect(await startRun(RUN_IDS[0], season)).toBe(RUN_IDS[0]);
     expect(await startRun(RUN_IDS[0], season)).toBe(RUN_IDS[0]);
 
@@ -131,7 +171,7 @@ describe('ops sync state machine', () => {
 
   test('keeps the highest item attempt and its payload when a stale update arrives', async () => {
     const sql = await getDbClient();
-    const season = await seasonRepository.requireByCode('2526');
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await startRun(RUN_IDS[0], season);
 
     await syncOperationsRepository.upsertItems(RUN_IDS[0], [
@@ -182,7 +222,7 @@ describe('ops sync state machine', () => {
 
   test('keeps terminal run transitions idempotent and rejects a different terminal state', async () => {
     const sql = await getDbClient();
-    const season = await seasonRepository.requireByCode('2526');
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await startRun(RUN_IDS[0], season);
 
     await syncOperationsRepository.finishRun(RUN_IDS[0], {
@@ -216,7 +256,7 @@ describe('ops sync state machine', () => {
 
   test('atomically replaces the active publication and retires the prior revision', async () => {
     const sql = await getDbClient();
-    const season = await seasonRepository.requireByCode('2526');
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await startRun(RUN_IDS[0], season);
     await startRun(RUN_IDS[1], season);
 
@@ -333,7 +373,7 @@ describe('ops sync state machine', () => {
 
   test('fails a staging publication and its source run idempotently', async () => {
     const sql = await getDbClient();
-    const season = await seasonRepository.requireByCode('2526');
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await startRun(RUN_IDS[2], season);
     await syncOperationsRepository.preparePublication({
       publicationId: PUBLICATION_IDS[2],
