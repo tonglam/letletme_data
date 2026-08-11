@@ -139,9 +139,8 @@ jobs:
                 "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
             fi
             if [ -z "$graphql_runtime_database_url" ]; then
-              graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-                -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" api \
-                bun scripts/format-runtime-database-url.ts derive-graphql)
+              graphql_runtime_database_url=$(printf '%s' "$data_runtime_database_url" \
+                | sed 's#^\([^:]*://\)[^:@]*:#\1letletme_graphql_runtime:#')
             fi
             graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
               "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
