@@ -13,7 +13,6 @@ const baseEnv = {
   QUEUE_REDIS_PORT: '6379',
   QUEUE_REDIS_DB: '10',
 };
-const shellQuote = String.fromCharCode(39);
 
 async function runEnvCheck(dataApiKeyHashes: string): Promise<number> {
   const child = Bun.spawn(['bun', 'validate-env.ts'], {
@@ -43,12 +42,8 @@ describe('production environment preflight', () => {
     const provisioningPreflight = workflow.indexOf(
       'bun run db:provision-runtime-logins --preflight',
     );
-    const runtimeUrl = workflow.indexOf(
-      'data_runtime_database_url=$(sed -n ' + shellQuote + 's/^DATA_RUNTIME_DATABASE_URL=',
-    );
-    const graphqlRuntimeUrl = workflow.indexOf(
-      'graphql_runtime_database_url=$(sed -n ' + shellQuote + 's/^GRAPHQL_RUNTIME_DATABASE_URL=',
-    );
+    const runtimeUrl = workflow.indexOf('data_runtime_database_url=$(APP_IMAGE=');
+    const graphqlRuntimeUrl = workflow.indexOf('graphql_containers=');
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
@@ -99,12 +94,8 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(
       /bun scripts\/migration-login-contract\.ts --preflight[\s\S]*?bun run db:provision-runtime-logins --preflight[\s\S]*?compose stop -t 45 api worker/,
     );
-    const runtimeUrl = deployScript.indexOf(
-      'data_runtime_database_url=$(sed -n ' + shellQuote + 's/^DATA_RUNTIME_DATABASE_URL=',
-    );
-    const graphqlRuntimeUrl = deployScript.indexOf(
-      'graphql_runtime_database_url=$(sed -n ' + shellQuote + 's/^GRAPHQL_RUNTIME_DATABASE_URL=',
-    );
+    const runtimeUrl = deployScript.indexOf('data_runtime_database_url=$(compose run --rm -T api');
+    const graphqlRuntimeUrl = deployScript.indexOf('graphql_containers=');
     expect(runtimeUrl).toBeGreaterThan(0);
     expect(graphqlRuntimeUrl).toBeGreaterThan(runtimeUrl);
     expect(deployScript).toContain('runtime_env_file=$(mktemp)');

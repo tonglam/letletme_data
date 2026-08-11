@@ -99,16 +99,49 @@ jobs:
             test -f "$env_file"
             test -f "$migration_env_file"
 
-            data_runtime_database_url=$(sed -n 's/^DATA_RUNTIME_DATABASE_URL=//p' \
-              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
-            graphql_runtime_database_url=$(sed -n 's/^GRAPHQL_RUNTIME_DATABASE_URL=//p' \
-              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
+            old_container=$(docker compose ps -aq api | head -n 1)
+            old_image=""
+            if [ -n "$old_container" ]; then
+              old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
+              test -n "$old_image"
+              printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
+            fi
+
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
+            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun scripts/read-runtime-database-url.ts)
             test -n "$data_runtime_database_url"
-            test -n "$graphql_runtime_database_url"
-            data_runtime_database_password=$(printf '%s' "$data_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
-            graphql_runtime_database_password=$(printf '%s' "$graphql_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
+            data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' \
+              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
             test -n "$data_runtime_database_password"
+            replace_runtime_password() {
+              runtime_url=$1
+              runtime_password=$2
+              escaped_runtime_password=$(printf '%s' "$runtime_password" | sed 's/[&|\\]/\\&/g')
+              printf '%s' "$runtime_url" | sed "s|^\([^:]*://[^:]*:\)[^@]*\(@.*\)$|\1$escaped_runtime_password\2|"
+            }
+            data_runtime_database_url=$(replace_runtime_password \
+              "$data_runtime_database_url" "$data_runtime_database_password")
+            graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
+            graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
+            if [ "$graphql_container_count" = "1" ]; then
+              graphql_container=$(printf '%s\n' "$graphql_containers" | sed '/^$/d')
+              graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
+            else
+              graphql_runtime_database_url=$(sed -n 's/^GRAPHQL_RUNTIME_DATABASE_URL=//p' \
+                "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
+            fi
+            if [ -z "$graphql_runtime_database_url" ]; then
+              graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+                -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" api \
+                bun scripts/format-runtime-database-url.ts derive-graphql)
+            fi
+            graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
+              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
             test -n "$graphql_runtime_database_password"
+            graphql_runtime_database_url=$(replace_runtime_password \
+              "$graphql_runtime_database_url" "$graphql_runtime_database_password")
             runtime_env_file=$(mktemp)
             cp "$env_file" "$runtime_env_file"
             escaped_data_runtime_database_url=$(printf '%s' "$data_runtime_database_url" | sed 's/[&|\\]/\\&/g')
@@ -122,16 +155,6 @@ jobs:
             export ENV_FILE="$runtime_env_file"
             cleanup_runtime_env() { rm -f "$runtime_env_file" "$runtime_env_file.bak"; }
             trap cleanup_runtime_env EXIT
-
-            old_container=$(docker compose ps -aq api | head -n 1)
-            old_image=""
-            if [ -n "$old_container" ]; then
-              old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
-              test -n "$old_image"
-              printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
-            fi
-
-            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/migration-login-contract.ts --preflight
