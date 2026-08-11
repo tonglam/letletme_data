@@ -66,18 +66,19 @@ deploy() {
     compose build --pull
   fi
   data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
-  migration_database_url=$(sed -n 's/^DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "${ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   data_runtime_database_url=$(compose run --rm -T \
-    -e "DATABASE_URL=${migration_database_url}" \
-    -e RUNTIME_DATABASE_USER=letletme_data_runtime \
+    -e "DATABASE_URL=${data_runtime_database_url}" \
     -e "RUNTIME_DATABASE_PASSWORD=${data_runtime_database_password}" migration \
-    bun scripts/format-runtime-database-url.ts with-credentials)
+    bun scripts/format-runtime-database-url.ts replace-password)
   graphql_runtime_database_url=$(compose run --rm -T \
-    -e "DATABASE_URL=${migration_database_url}" \
-    -e RUNTIME_DATABASE_USER=letletme_graphql_runtime \
-    -e "RUNTIME_DATABASE_PASSWORD=${graphql_runtime_database_password}" migration \
-    bun scripts/format-runtime-database-url.ts with-credentials)
+    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" migration \
+    bun scripts/format-runtime-database-url.ts derive-graphql)
+  graphql_runtime_database_url=$(compose run --rm -T \
+    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" \
+    -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=${graphql_runtime_database_password}" migration \
+    bun scripts/format-runtime-database-url.ts with-password)
   runtime_env_file=$(mktemp)
   awk '!/^DATABASE_URL=/' "${ENV_FILE}" >"${runtime_env_file}"
   printf 'DATABASE_URL="%s"\n' "${data_runtime_database_url}" >>"${runtime_env_file}"
