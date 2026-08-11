@@ -88,6 +88,14 @@ export function assertImmutableLiveManifestMatch(
   databaseManifest: DataPublicationManifest,
   cachedManifest: DataPublicationManifest,
 ): void {
+  assertLiveManifestMatch(databaseManifest, cachedManifest, (key) => key);
+}
+
+function assertLiveManifestMatch(
+  databaseManifest: DataPublicationManifest,
+  candidateManifest: DataPublicationManifest,
+  normalizeKey: (key: string) => string,
+): void {
   const databaseItems = databaseManifest.items.map(({ name, key, type, count, bytes, sha256 }) => ({
     name,
     key,
@@ -96,27 +104,42 @@ export function assertImmutableLiveManifestMatch(
     bytes,
     sha256,
   }));
-  const cachedItems = cachedManifest.items.map(({ name, key, type, count, bytes, sha256 }) => ({
-    name,
-    key,
-    type,
-    count,
-    bytes,
-    sha256,
-  }));
+  const candidateItems = candidateManifest.items.map(
+    ({ name, key, type, count, bytes, sha256 }) => ({
+      name,
+      key: normalizeKey(key),
+      type,
+      count,
+      bytes,
+      sha256,
+    }),
+  );
   if (
-    databaseManifest.dataset !== cachedManifest.dataset ||
-    databaseManifest.seasonCode !== cachedManifest.seasonCode ||
-    databaseManifest.eventId !== cachedManifest.eventId ||
-    databaseManifest.revision !== cachedManifest.revision ||
-    databaseManifest.publicationId !== cachedManifest.publicationId ||
-    databaseManifest.state !== cachedManifest.state ||
-    JSON.stringify(databaseItems) !== JSON.stringify(cachedItems)
+    databaseManifest.dataset !== candidateManifest.dataset ||
+    databaseManifest.seasonCode !== candidateManifest.seasonCode ||
+    databaseManifest.eventId !== candidateManifest.eventId ||
+    databaseManifest.revision !== candidateManifest.revision ||
+    databaseManifest.publicationId !== candidateManifest.publicationId ||
+    databaseManifest.state !== candidateManifest.state ||
+    JSON.stringify(databaseItems) !== JSON.stringify(candidateItems)
   ) {
     throw new Error(
       `Canonical live cache manifest differs from PostgreSQL publication ${databaseManifest.publicationId}`,
     );
   }
+}
+
+function normalizeRetiredLiveItemKey(key: string): string {
+  const match = /^llm:v[^:]+:(.+)$/.exec(key);
+  if (!match?.[1]) throw new Error(`Retired live item key is not canonical: ${key}`);
+  return `llm:${match[1]}`;
+}
+
+export function assertRetiredLiveManifestMatch(
+  databaseManifest: DataPublicationManifest,
+  retiredManifest: DataPublicationManifest,
+): void {
+  assertLiveManifestMatch(databaseManifest, retiredManifest, normalizeRetiredLiveItemKey);
 }
 
 function toLivePayload(
@@ -250,6 +273,7 @@ export async function publishActiveLiveCachesForDeployment(execute: boolean): Pr
         await redis.get(activeKey),
         expected,
       );
+      assertRetiredLiveManifestMatch(databaseManifest, retiredManifest);
       const items = decodeRetiredDataPublicationItems(
         retiredManifest,
         await redis.mget(...retiredManifest.items.map((item) => item.key)),

@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { assertImmutableLiveManifestMatch } from '../../src/services/deployment-live-publication.service';
+import {
+  assertImmutableLiveManifestMatch,
+  assertRetiredLiveManifestMatch,
+} from '../../src/services/deployment-live-publication.service';
 import type { DataPublicationManifest } from '../../src/cache/data-publication';
 
 const baseManifest: DataPublicationManifest = {
@@ -49,6 +52,27 @@ describe('deployment live publication manifest fence', () => {
       assertImmutableLiveManifestMatch(baseManifest, {
         ...baseManifest,
         revision: 42,
+      }),
+    ).toThrow('differs from PostgreSQL publication');
+  });
+
+  test('normalizes retired item namespaces before comparing immutable descriptors', () => {
+    const retiredManifest = {
+      ...baseManifest,
+      sourceCheckedAt: '2026-08-10T22:00:00.000Z',
+      publishedAt: '2026-08-10T22:00:01.000Z',
+      items: [
+        {
+          ...baseManifest.items[0],
+          key: 'llm:v3:data:fpl:live:2627:3:41:eventLives',
+        },
+      ],
+    };
+    expect(() => assertRetiredLiveManifestMatch(baseManifest, retiredManifest)).not.toThrow();
+    expect(() =>
+      assertRetiredLiveManifestMatch(baseManifest, {
+        ...retiredManifest,
+        items: [{ ...retiredManifest.items[0], count: 2 }],
       }),
     ).toThrow('differs from PostgreSQL publication');
   });

@@ -105,6 +105,11 @@ deploy() {
     log_error "Migration LOGIN contract failed after migrations."
     exit 1
   fi
+  log_info "Provisioning the runtime LOGINs"
+  if ! compose run --rm -T migration bun run db:provision-runtime-logins; then
+    log_error "Runtime LOGIN provisioning failed; services remain stopped for a forward fix."
+    exit 1
+  fi
   log_info "Publishing and verifying the canonical core cache"
   if ! compose run --rm -T api bun run cache:publish-core -- --execute; then
     log_error "Core cache publication failed; services remain stopped for a forward fix."

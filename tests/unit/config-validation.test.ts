@@ -48,6 +48,7 @@ describe('production environment preflight', () => {
       migrate,
     );
     const publishCore = deployScript.indexOf('bun run cache:publish-core -- --execute');
+    const provisionRuntimeLogins = deployScript.indexOf('bun run db:provision-runtime-logins');
     const publishLive = deployScript.indexOf('publishActiveLiveCachesForDeployment');
     const migrateRedis = deployScript.indexOf('migrateRetiredRedisStateForDeployment');
     const replaceServices = deployScript.indexOf('compose up -d', migrateRedis);
@@ -58,11 +59,14 @@ describe('production environment preflight', () => {
     expect(quiescence).toBeGreaterThan(stopServices);
     expect(migrate).toBeGreaterThan(quiescence);
     expect(canonicalContract).toBeGreaterThan(migrate);
+    expect(provisionRuntimeLogins).toBeGreaterThan(canonicalContract);
     expect(publishCore).toBeGreaterThan(canonicalContract);
+    expect(publishCore).toBeGreaterThan(provisionRuntimeLogins);
     expect(publishLive).toBeGreaterThan(publishCore);
     expect(migrateRedis).toBeGreaterThan(publishLive);
     expect(replaceServices).toBeGreaterThan(migrateRedis);
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(workflow).toContain('docker compose ps -aq api');
     expect(workflow).toContain('APP_IMAGE="$IMAGE_REF" bash scripts/deploy.sh deploy');
   });
 

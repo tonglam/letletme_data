@@ -94,7 +94,7 @@ jobs:
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
             test -f .env.migrate
 
-            old_container=$(docker compose ps -q api)
+            old_container=$(docker compose ps -aq api)
             test -n "$old_container"
             old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
             test -n "$old_image"
@@ -109,7 +109,7 @@ jobs:
               fi
               if [ "$attempt" -eq 30 ]; then
                 docker compose ps
-                docker logs --tail 100 "$(docker compose ps -q api)" || true
+                docker logs --tail 100 "$(docker compose ps -aq api)" || true
                 exit 1
               fi
               sleep 2
