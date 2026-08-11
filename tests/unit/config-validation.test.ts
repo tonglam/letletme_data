@@ -78,6 +78,9 @@ describe('production environment preflight', () => {
     expect(workflow).toMatch(
       /bun run db:migrate:status[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$data_runtime_database_url[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$graphql_runtime_database_url[\s\S]*?bun run db:provision-runtime-logins(?! --preflight)/,
     );
+    expect(workflow).toMatch(
+      /DATABASE_URL=\$data_runtime_database_url[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
+    );
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
   });
 
