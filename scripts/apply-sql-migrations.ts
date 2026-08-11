@@ -239,6 +239,7 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
   await sql`SELECT pg_advisory_lock(${ADVISORY_LOCK_KEY})`;
   try {
     let state = await inspectDatabaseState();
+    let ledger: LedgerRow[];
     if (!state.hasLedger) {
       if (state.platformSchemas.length > 0) {
         throw new Error(
@@ -246,18 +247,19 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
         );
       }
       await applyFreshBaseline(baseline);
+      ledger = await loadLedger();
     } else {
-      let ledger = await loadLedger();
+      ledger = await loadLedger();
       if (ledger[0]?.filename !== BASELINE_FILENAME) {
         await adoptProductionBaseline(baseline);
         state = await inspectDatabaseState();
         if (!state.hasLedger) throw new Error('Baseline adoption removed the migration ledger');
         ledger = await loadLedger();
       }
-
-      const pending = assertCanonicalLedger(migrations, ledger, false);
-      for (const migration of pending) await applyPendingMigration(migration);
     }
+
+    const pending = assertCanonicalLedger(migrations, ledger, false);
+    for (const migration of pending) await applyPendingMigration(migration);
     console.log('[sql-migrate] up to date');
   } finally {
     await sql`SELECT pg_advisory_unlock(${ADVISORY_LOCK_KEY})`.catch((error) => {

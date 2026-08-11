@@ -109,6 +109,23 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
   if (!currentUser) throw new Error('Migration LOGIN identity is unavailable');
 
   const rows = await client<CapabilityMembershipRow[]>`
+    WITH RECURSIVE capability_roles AS (
+      SELECT oid
+      FROM pg_roles
+      WHERE rolname IN (
+        'letletme_data_owner',
+        'letletme_data_writer',
+        'letletme_graphql_reader',
+        'letletme_web_auth'
+      )
+    ),
+    reachable_roles(role_oid) AS (
+      SELECT oid FROM capability_roles
+      UNION
+      SELECT membership.member
+      FROM pg_auth_members membership
+      JOIN reachable_roles reachable ON reachable.role_oid = membership.roleid
+    )
     SELECT
       granted_role.rolname AS granted_role,
       member_role.rolname AS member_role,
@@ -116,18 +133,8 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
     FROM pg_auth_members membership
     JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
     JOIN pg_roles member_role ON member_role.oid = membership.member
-    WHERE granted_role.rolname IN (
-      'letletme_data_owner',
-      'letletme_data_writer',
-      'letletme_graphql_reader',
-      'letletme_web_auth'
-    )
-       OR member_role.rolname IN (
-      'letletme_data_owner',
-      'letletme_data_writer',
-      'letletme_graphql_reader',
-      'letletme_web_auth'
-    )
+    WHERE membership.roleid IN (SELECT role_oid FROM reachable_roles)
+       OR membership.member IN (SELECT oid FROM capability_roles)
     ORDER BY granted_role.rolname, member_role.rolname
   `;
   const allowed = new Set([

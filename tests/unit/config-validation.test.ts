@@ -36,7 +36,9 @@ describe('production environment preflight', () => {
   test('validates identity and quiescence before migration, then publishes before restart', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
     const preflight = workflow.indexOf('bun run env:check');
-    const identityContract = workflow.indexOf('bun run db:migration-contract');
+    const identityContract = workflow.indexOf(
+      'bun scripts/migration-login-contract.ts --preflight',
+    );
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const quiescence = workflow.indexOf('bun run ops:assert-queue-quiescence');
     const migrate = workflow.indexOf('bun run db:migrate');

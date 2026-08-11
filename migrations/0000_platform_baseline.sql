@@ -60,6 +60,37 @@ BEGIN
 END
 $roles$;
 
+DO $capability_memberships$
+DECLARE
+    unexpected_memberships text;
+BEGIN
+    SELECT string_agg(
+        format('%s->%s', granted_role.rolname, member_role.rolname),
+        ', ' ORDER BY granted_role.rolname, member_role.rolname
+    )
+    INTO unexpected_memberships
+    FROM pg_auth_members membership
+    JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+    JOIN pg_roles member_role ON member_role.oid = membership.member
+    WHERE granted_role.rolname IN (
+        'letletme_data_owner',
+        'letletme_data_writer',
+        'letletme_graphql_reader'
+    )
+       OR member_role.rolname IN (
+        'letletme_data_owner',
+        'letletme_data_writer',
+        'letletme_graphql_reader'
+    );
+
+    IF unexpected_memberships IS NOT NULL THEN
+        RAISE EXCEPTION
+            'capability roles have pre-existing memberships: %',
+            unexpected_memberships;
+    END IF;
+END
+$capability_memberships$;
+
 DO $migration_owner_grant$
 BEGIN
     EXECUTE format('GRANT %I TO %I', 'letletme_data_owner', current_user);

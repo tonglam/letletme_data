@@ -52,6 +52,15 @@ if (process.env.RUN_BASELINE_ADOPTION_INTEGRATION === '1') {
       END
       $$;
     `);
+    await sql.unsafe(`
+      DO $$
+      BEGIN
+        CREATE ROLE adoption_runtime NOLOGIN;
+      EXCEPTION WHEN duplicate_object THEN
+        NULL;
+      END
+      $$;
+    `);
     await sql`REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries`;
     await sql`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`;
     await sql`DROP INDEX IF EXISTS competition.tournament_knockouts_season_fk_idx`;
@@ -192,6 +201,20 @@ describe('canonical platform baseline adoption', () => {
           await transaction`DELETE FROM ops.schema_migrations`;
           await transaction.unsafe(productionLedgerFixture);
           await transaction`GRANT letletme_data_writer TO anon`;
+          await adoptProductionPlatformBaseline(transaction, baselineFilename, baselineChecksum, {
+            ...PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS,
+            dataFingerprint,
+          });
+        }),
+      ).rejects.toThrow('Unexpected capability role membership');
+      await expectCanonicalLedger();
+
+      await expect(
+        sql.begin(async (transaction) => {
+          await transaction`DELETE FROM ops.schema_migrations`;
+          await transaction.unsafe(productionLedgerFixture);
+          await transaction`GRANT letletme_data_writer TO adoption_runtime`;
+          await transaction`GRANT adoption_runtime TO anon`;
           await adoptProductionPlatformBaseline(transaction, baselineFilename, baselineChecksum, {
             ...PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS,
             dataFingerprint,
