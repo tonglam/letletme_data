@@ -70,8 +70,9 @@ describe('production environment preflight', () => {
     expect(replaceServices).toBeGreaterThan(publishCore);
     expect(workflow).toContain('runtime_env_file=$(mktemp)');
     expect(workflow).toContain('export ENV_FILE="$runtime_env_file"');
-    expect(workflow).toContain('using configured Data runtime URL');
-    expect(workflow).toContain('bun scripts/format-runtime-database-url.ts extract-password');
+    expect(workflow).toContain('rotating the Data runtime credential');
+    expect(workflow).toContain('openssl rand -base64 48');
+    expect(workflow).toContain('bun scripts/format-runtime-database-url.ts with-password');
     expect(workflow).toContain('DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password');
     expect(workflow).toContain('GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password');
     expect(workflow).toContain('RUNTIME_DATABASE');
@@ -80,6 +81,7 @@ describe('production environment preflight', () => {
       /DATABASE_URL=\$data_runtime_database_url[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
     );
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(workflow).toContain('mv "$runtime_env_file" "$env_file"');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
@@ -95,7 +97,8 @@ describe('production environment preflight', () => {
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(deployScript).toContain('bun run db:provision-runtime-logins --preflight');
     expect(deployScript).toContain('bun run db:provision-runtime-logins;');
-    expect(deployScript).toContain('bun scripts/format-runtime-database-url.ts extract-password');
+    expect(deployScript).toContain('openssl rand -base64 48');
+    expect(deployScript).toContain('bun scripts/format-runtime-database-url.ts with-password');
     expect(deployScript).toContain('sleep 60');
     expect(deployScript).toContain('runtime_env_file=$(mktemp)');
     expect(deployScript).toMatch(
