@@ -127,16 +127,24 @@ jobs:
               graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
                 "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
             else
+              echo "deploy preflight: no running GraphQL container; checking stopped container/env fallback"
               graphql_container=$(docker ps -aq --filter label=com.docker.compose.service=graphql | head -n 1)
+              if [ -n "$graphql_container" ]; then
+                echo "deploy preflight: stopped GraphQL container found"
+              else
+                echo "deploy preflight: no GraphQL container found"
+              fi
               if [ -n "$graphql_container" ]; then
                 graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
                   "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
               else
                 graphql_runtime_database_url=$(sed -n 's/^GRAPHQL_RUNTIME_DATABASE_URL=//p' \
                   "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
+                echo "deploy preflight: migration env GraphQL URL read"
               fi
             fi
             if [ -z "$graphql_runtime_database_url" ]; then
+              echo "deploy preflight: deriving GraphQL URL from Data URL"
               # Both runtime logins use the same database target. The URL may be
               # unavailable when the GraphQL container has not been deployed yet.
               graphql_runtime_database_url=$(DATA_RUNTIME_DATABASE_URL="$data_runtime_database_url" python3 - <<'PY'
@@ -155,6 +163,7 @@ jobs:
             print(urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)), end="")
             PY
               )
+              echo "deploy preflight: derived GraphQL URL"
             fi
             test -n "$graphql_runtime_database_url"
             echo "deploy preflight: GraphQL runtime URL present"
