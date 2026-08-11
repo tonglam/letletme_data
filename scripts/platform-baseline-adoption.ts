@@ -21,6 +21,9 @@ const EXPECTED_LEDGER_FINGERPRINT =
 export const EXPECTED_PLATFORM_SCHEMA_FINGERPRINT =
   '6f5eae07f8d7d4851ef3fbd4352a6d05d921e8661132c2e462e91653796324c9';
 
+const EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT =
+  '99d9f477cc4250cb661bf01bcfb2ff51dfaa48d51e667ad6e1e42025a24a0685';
+
 export const EXPECTED_PRODUCTION_DATA_FINGERPRINT = [
   '69f4cdb2748dd486',
   '797d62d80dd25194',
@@ -93,6 +96,63 @@ async function assertReportingViewsPopulated(client: QueryClient): Promise<void>
   }
 }
 
+async function repairProductionReportingContract(client: QueryClient): Promise<void> {
+  // The accepted production boundary predates these schema-only reporting repairs.
+  // Keep this allowlist narrow so any unrelated drift still fails closed.
+  await client`
+    CREATE INDEX IF NOT EXISTS tournament_knockouts_season_fk_idx
+      ON competition.tournament_knockouts USING btree (season_id)
+  `;
+  await client`
+    CREATE INDEX IF NOT EXISTS dataset_publications_season_fk_idx
+      ON ops.dataset_publications USING btree (season_id)
+  `;
+  await client.unsafe(`
+    CREATE OR REPLACE FUNCTION reporting.refresh_tournament_entry_event_summaries() RETURNS void
+        LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path TO 'pg_catalog'
+        AS $$
+DECLARE
+  populated boolean;
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(73001, 2);
+  SELECT ispopulated
+    INTO populated
+    FROM pg_matviews
+   WHERE schemaname = 'reporting'
+     AND matviewname = 'tournament_entry_event_summaries';
+  IF populated THEN
+    REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_entry_event_summaries;
+  ELSE
+    REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries;
+  END IF;
+END
+$$
+  `);
+  await client.unsafe(`
+    CREATE OR REPLACE FUNCTION reporting.refresh_tournament_selection_stats() RETURNS void
+        LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path TO 'pg_catalog'
+        AS $$
+DECLARE
+  populated boolean;
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(73001, 1);
+  SELECT ispopulated
+    INTO populated
+    FROM pg_matviews
+   WHERE schemaname = 'reporting'
+     AND matviewname = 'tournament_selection_stats';
+  IF populated THEN
+    REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_selection_stats;
+  ELSE
+    REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats;
+  END IF;
+END
+$$
+  `);
+}
+
 export async function adoptProductionPlatformBaseline(
   transaction: postgres.TransactionSql,
   baselineFilename: string,
@@ -109,7 +169,9 @@ export async function adoptProductionPlatformBaseline(
   await assertReportingViewsPopulated(transaction);
 
   const schemaBefore = fingerprintSchemaContract(await loadPlatformSchemaContract(transaction));
-  if (schemaBefore !== expectations.schemaFingerprint) {
+  if (schemaBefore === EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT) {
+    await repairProductionReportingContract(transaction);
+  } else if (schemaBefore !== expectations.schemaFingerprint) {
     throw new Error(
       `Platform schema fingerprint mismatch: expected=${expectations.schemaFingerprint} actual=${schemaBefore}`,
     );
@@ -138,8 +200,8 @@ export async function adoptProductionPlatformBaseline(
   }
 
   const schemaAfter = fingerprintSchemaContract(await loadPlatformSchemaContract(transaction));
-  if (schemaAfter !== schemaBefore) {
-    throw new Error('Schema changed while adopting the canonical baseline ledger');
+  if (schemaAfter !== expectations.schemaFingerprint) {
+    throw new Error('Schema did not converge to the canonical baseline while adopting the ledger');
   }
 
   const dataAfter = fingerprintPlatformDataManifest(await loadPlatformDataManifest(transaction));

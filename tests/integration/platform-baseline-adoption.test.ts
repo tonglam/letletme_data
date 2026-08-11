@@ -44,6 +44,34 @@ async function expectCanonicalLedger(): Promise<void> {
 beforeAll(async () => {
   await sql`REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries`;
   await sql`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`;
+  await sql`DROP INDEX IF EXISTS competition.tournament_knockouts_season_fk_idx`;
+  await sql`DROP INDEX IF EXISTS ops.dataset_publications_season_fk_idx`;
+  await sql.unsafe(`
+    CREATE OR REPLACE FUNCTION reporting.refresh_tournament_entry_event_summaries()
+    RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(73001, 2);
+  REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_entry_event_summaries;
+END
+$function$;
+  `);
+  await sql.unsafe(`
+    CREATE OR REPLACE FUNCTION reporting.refresh_tournament_selection_stats()
+    RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(73001, 1);
+  REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_selection_stats;
+END
+$function$;
+  `);
 });
 
 afterAll(async () => {
@@ -66,6 +94,19 @@ describe('canonical platform baseline adoption', () => {
 
       await expectCanonicalLedger();
       expect(await currentDataFingerprint()).toBe(dataFingerprint);
+      const indexes = await sql<{ name: string }[]>`
+        SELECT indexname AS name
+        FROM pg_indexes
+        WHERE (schemaname, indexname) IN (
+          ('competition', 'tournament_knockouts_season_fk_idx'),
+          ('ops', 'dataset_publications_season_fk_idx')
+        )
+        ORDER BY indexname
+      `;
+      expect(indexes.map(({ name }) => ({ name }))).toEqual([
+        { name: 'dataset_publications_season_fk_idx' },
+        { name: 'tournament_knockouts_season_fk_idx' },
+      ]);
     },
     60_000,
   );
