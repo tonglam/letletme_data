@@ -77,6 +77,7 @@ describe('production environment preflight', () => {
     expect(workflow).toContain('GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password');
     expect(workflow).toContain('RUNTIME_DATABASE');
     expect(workflow).toContain('sleep 60');
+    expect(workflow).toContain('waiting for the migration Pooler circuit breaker to clear');
     expect(workflow).toMatch(
       /DATABASE_URL=\$data_runtime_database_url[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
     );
@@ -100,6 +101,7 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('openssl rand -base64 48');
     expect(deployScript).toContain('bun scripts/format-runtime-database-url.ts replace-password');
     expect(deployScript).toContain('sleep 60');
+    expect(deployScript).toContain('Waiting for the migration Pooler circuit breaker to clear');
     expect(deployScript).toContain('runtime_env_file=$(mktemp)');
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,

@@ -110,6 +110,10 @@ deploy() {
     log_error "Application environment contract failed; services were not stopped."
     exit 1
   fi
+  log_info "Waiting for the migration Pooler circuit breaker to clear"
+  for _ in 1 2 3; do
+    sleep 60
+  done
   log_info "Validating the migration LOGIN before service shutdown"
   if ! compose run --rm -T migration bun scripts/migration-login-contract.ts --preflight; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
