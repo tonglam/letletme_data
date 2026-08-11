@@ -69,8 +69,8 @@ describe('production environment preflight', () => {
     expect(canonicalContract).toBeGreaterThan(provision);
     expect(publishCore).toBeGreaterThan(canonicalContract);
     expect(replaceServices).toBeGreaterThan(publishCore);
-    expect(workflow).not.toContain('docker compose ps -q graphql');
-    expect(workflow).not.toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(workflow).toContain('docker ps --filter label=com.docker.compose.service=graphql');
+    expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
