@@ -153,6 +153,10 @@ jobs:
             }
             trap cleanup_runtime_env EXIT
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            echo "deploy preflight: waiting for the migration Pooler circuit breaker to clear"
+            for _ in 1 2 3; do
+              sleep 60
+            done
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/migration-login-contract.ts --preflight
             echo "deploy preflight: data runtime URL present"
