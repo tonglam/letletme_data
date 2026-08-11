@@ -65,7 +65,7 @@ deploy() {
     log_info "Building containers"
     compose build --pull
   fi
-  data_runtime_database_url=$(compose run --rm -T api bun scripts/read-runtime-database-url.ts)
+  data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "${ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   replace_runtime_password() {
     runtime_url=$1
