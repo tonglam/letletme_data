@@ -99,6 +99,30 @@ jobs:
             test -f "$env_file"
             test -f "$migration_env_file"
 
+            data_runtime_database_url=$(sed -n 's/^DATA_RUNTIME_DATABASE_URL=//p' \
+              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
+            graphql_runtime_database_url=$(sed -n 's/^GRAPHQL_RUNTIME_DATABASE_URL=//p' \
+              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
+            test -n "$data_runtime_database_url"
+            test -n "$graphql_runtime_database_url"
+            data_runtime_database_password=$(printf '%s' "$data_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
+            graphql_runtime_database_password=$(printf '%s' "$graphql_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
+            test -n "$data_runtime_database_password"
+            test -n "$graphql_runtime_database_password"
+            runtime_env_file=$(mktemp)
+            cp "$env_file" "$runtime_env_file"
+            escaped_data_runtime_database_url=$(printf '%s' "$data_runtime_database_url" | sed 's/[&|\\]/\\&/g')
+            if grep -q '^DATABASE_URL=' "$runtime_env_file"; then
+              sed -i.bak "s|^DATABASE_URL=.*$|DATABASE_URL=\"$escaped_data_runtime_database_url\"|" \
+                "$runtime_env_file"
+              rm -f "$runtime_env_file.bak"
+            else
+              printf 'DATABASE_URL="%s"\n' "$data_runtime_database_url" >> "$runtime_env_file"
+            fi
+            export ENV_FILE="$runtime_env_file"
+            cleanup_runtime_env() { rm -f "$runtime_env_file" "$runtime_env_file.bak"; }
+            trap cleanup_runtime_env EXIT
+
             old_container=$(docker compose ps -aq api | head -n 1)
             old_image=""
             if [ -n "$old_container" ]; then
@@ -111,61 +135,11 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/migration-login-contract.ts --preflight
-            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun scripts/read-runtime-database-url.ts)
-            test -n "$data_runtime_database_url"
-            data_runtime_database_password=$(printf '%s' "$data_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
-            test -n "$data_runtime_database_password"
             echo "deploy preflight: data runtime URL present"
-            graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
-            graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
-            echo "deploy preflight: running GraphQL containers=$graphql_container_count"
-            if [ "$graphql_container_count" = "1" ]; then
-                graphql_container=$(printf '%s\n' "$graphql_containers" | sed '/^$/d')
-                graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-                  "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
-            elif [ "$graphql_container_count" = "0" ]; then
-              echo "deploy preflight: no running GraphQL container; checking stopped container/env fallback"
-              graphql_container=$(docker ps -aq --filter label=com.docker.compose.service=graphql | head -n 1)
-              if [ -n "$graphql_container" ]; then
-                echo "deploy preflight: stopped GraphQL container found"
-              else
-                echo "deploy preflight: no GraphQL container found"
-              fi
-              if [ -n "$graphql_container" ]; then
-                graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-                  "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
-              else
-                graphql_runtime_database_url=$(sed -n 's/^GRAPHQL_RUNTIME_DATABASE_URL=//p' \
-                  "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
-                echo "deploy preflight: migration env GraphQL URL read"
-              fi
-            else
-                echo "At most one running GraphQL container is allowed"
-                exit 1
-            fi
-            if [ -z "$graphql_runtime_database_url" ]; then
-              echo "deploy preflight: deriving GraphQL URL from Data URL"
-              # Both runtime logins use the same database target. The URL may be
-              # unavailable when the GraphQL container has not been deployed yet.
-              graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-                -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" api \
-                bun scripts/format-runtime-database-url.ts derive-graphql)
-              echo "deploy preflight: derived GraphQL URL"
-            fi
-            test -n "$graphql_runtime_database_url"
             echo "deploy preflight: GraphQL runtime URL present"
-            graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
-              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
-            test -n "$graphql_runtime_database_password"
-            echo "deploy preflight: GraphQL runtime password present"
-            graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" \
-              -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=$graphql_runtime_database_password" api \
-              bun scripts/format-runtime-database-url.ts with-password)
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
               -e "DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password" \
-              -e "GRAPHQL_RUNTIME_DB_PASSWORD=$(printf '%s' "$graphql_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')" \
+              -e "GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password" \
               -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
               -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
               bun run db:provision-runtime-logins --preflight
@@ -189,7 +163,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
               -e "DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password" \
-              -e "GRAPHQL_RUNTIME_DB_PASSWORD=$(printf '%s' "$graphql_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')" \
+              -e "GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password" \
               -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
               -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
               bun run db:provision-runtime-logins
