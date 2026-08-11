@@ -1,3 +1,5 @@
+export {};
+
 const mode = process.argv[2];
 
 function required(name: string): string {

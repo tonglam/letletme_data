@@ -1,3 +1,5 @@
+export {};
+
 const variableName = process.argv[2] ?? 'DATABASE_URL';
 const databaseUrl = process.env[variableName]?.trim();
 
