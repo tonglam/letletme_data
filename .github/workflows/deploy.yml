@@ -188,7 +188,7 @@ jobs:
               bun run db:provision-runtime-logins
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "DATABASE_URL=$data_runtime_database_url" api \
+              -e "DATABASE_URL=$migration_database_url" api \
               bun run cache:publish-core -- --execute --allow-empty
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
