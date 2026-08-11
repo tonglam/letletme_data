@@ -152,7 +152,7 @@ async function seed(): Promise<void> {
         ${TOURNAMENT_ID},
         ${SEASON_ID},
         'P5 500-entry reporting benchmark',
-        'p5-rehearsal',
+        'reporting-benchmark',
         ${FIRST_ENTRY_ID},
         ${LEAGUE_ID},
         'classic',

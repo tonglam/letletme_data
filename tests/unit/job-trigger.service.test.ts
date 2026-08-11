@@ -20,6 +20,21 @@ describe('job-trigger service', () => {
     await expect(triggerJob('not-a-real-job')).rejects.toThrow(JobNotFoundError);
   });
 
+  test('does not expose cascade-owned no-op jobs as manual triggers', async () => {
+    const removed = [
+      'tournament-event-transfers-post-sync',
+      'tournament-event-cup-results-sync',
+      'tournament-points-race-results-sync',
+      'tournament-battle-race-results-sync',
+      'tournament-knockout-results-sync',
+    ];
+    const triggerableNames = listTriggerableJobs().map((job) => job.name);
+    for (const name of removed) {
+      expect(triggerableNames).not.toContain(name);
+      await expect(triggerJob(name)).rejects.toThrow(JobNotFoundError);
+    }
+  });
+
   test('JobNotFoundError carries the job name', () => {
     const error = new JobNotFoundError('foo');
     expect(error.message).toContain('foo');
