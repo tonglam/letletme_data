@@ -214,6 +214,19 @@ describe('canonical platform baseline adoption', () => {
         sql.begin(async (transaction) => {
           await transaction`DELETE FROM ops.schema_migrations`;
           await transaction.unsafe(productionLedgerFixture);
+          await transaction.unsafe('ALTER TABLE fpl.seasons DISABLE TRIGGER ALL');
+          await adoptProductionPlatformBaseline(transaction, baselineFilename, baselineChecksum, {
+            ...PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS,
+            dataFingerprint,
+          });
+        }),
+      ).rejects.toThrow('schema fingerprint mismatch');
+      await expectCanonicalLedger();
+
+      await expect(
+        sql.begin(async (transaction) => {
+          await transaction`DELETE FROM ops.schema_migrations`;
+          await transaction.unsafe(productionLedgerFixture);
           await transaction`GRANT SELECT ON fpl.seasons TO anon`;
           await adoptProductionPlatformBaseline(transaction, baselineFilename, baselineChecksum, {
             ...PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS,

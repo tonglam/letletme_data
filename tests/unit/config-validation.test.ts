@@ -43,6 +43,7 @@ describe('production environment preflight', () => {
       'bun run db:provision-runtime-logins --preflight',
     );
     const runtimeUrl = workflow.indexOf('process.env.DATABASE_URL');
+    const graphqlRuntimeUrl = workflow.indexOf('label=com.docker.compose.service=graphql');
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
@@ -51,14 +52,15 @@ describe('production environment preflight', () => {
     const migrate = workflow.indexOf('bun run db:migrate');
     const provision = workflow.indexOf('bun run db:provision-runtime-logins', migrate);
     const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
-    const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute');
+    const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute --allow-empty');
     const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
 
     expect(preflight).toBeGreaterThan(0);
     expect(identityContract).toBeGreaterThan(preflight);
     expect(runtimeUrl).toBeGreaterThan(identityContract);
+    expect(graphqlRuntimeUrl).toBeGreaterThan(runtimeUrl);
     expect(provisioningPreflight).toBeGreaterThan(identityContract);
-    expect(provisioningPreflight).toBeGreaterThan(runtimeUrl);
+    expect(provisioningPreflight).toBeGreaterThan(graphqlRuntimeUrl);
     expect(stopServices).toBeGreaterThan(provisioningPreflight);
     expect(databaseQuiescence).toBeGreaterThan(stopServices);
     expect(redisQuiescence).toBeGreaterThan(databaseQuiescence);
@@ -84,6 +86,9 @@ describe('production environment preflight', () => {
     );
     expect(deployScript).toMatch(
       /data_runtime_database_url=\$\(compose run --rm -T api bun -e[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$\{data_runtime_database_url\}/,
+    );
+    expect(deployScript).toMatch(
+      /docker ps --filter label=com\.docker\.compose\.service=graphql[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$\{graphql_runtime_database_url\}/,
     );
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,

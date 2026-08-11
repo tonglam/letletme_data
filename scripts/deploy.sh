@@ -80,8 +80,23 @@ deploy() {
     log_error "The API runtime DATABASE_URL is missing; services were not stopped."
     exit 1
   fi
+  graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
+  graphql_container_count=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d' | wc -l | tr -d ' ')
+  if [[ "${graphql_container_count}" -ne 1 ]]; then
+    log_error "Exactly one running GraphQL container is required to validate its runtime DATABASE_URL."
+    exit 1
+  fi
+  graphql_container=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d')
+  graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    "${graphql_container}" | sed -n 's/^DATABASE_URL=//p')
+  if [[ -z "${graphql_runtime_database_url}" ]]; then
+    log_error "The GraphQL runtime DATABASE_URL is missing; services were not stopped."
+    exit 1
+  fi
   log_info "Validating runtime LOGIN provisioning inputs before service shutdown"
-  if ! compose run --rm -T -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" migration \
+  if ! compose run --rm -T \
+    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
+    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
     bun run db:provision-runtime-logins --preflight; then
     log_error "Runtime LOGIN provisioning inputs failed; services were not stopped."
     exit 1
@@ -117,7 +132,7 @@ deploy() {
     exit 1
   fi
   log_info "Publishing and verifying the canonical core cache"
-  if ! compose run --rm -T api bun run cache:publish-core -- --execute; then
+  if ! compose run --rm -T api bun run cache:publish-core -- --execute --allow-empty; then
     log_error "Core cache publication failed; services remain stopped for a forward fix."
     exit 1
   fi

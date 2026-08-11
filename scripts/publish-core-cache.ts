@@ -3,7 +3,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 
 import { publishCoreSnapshotCache, readCoreSnapshotCache } from '../src/cache/core-snapshot-cache';
 import { redisSingleton } from '../src/cache/singleton';
-import { datasetPublicationsInOps } from '../src/db/schemas/index.schema';
+import { datasetPublicationsInOps, seasonsInFpl } from '../src/db/schemas/index.schema';
 import { databaseSingleton, getDb, getDbClient } from '../src/db/singleton';
 import { assertDataRuntimeRole } from '../src/db/runtime-role-contract';
 import { eventRepository } from '../src/repositories/events';
@@ -23,13 +23,19 @@ type CoreCounts = {
   readonly fixtures: number;
 };
 
-function assertArguments(args: readonly string[]): boolean {
-  const unknown = args.find((argument) => argument !== '--execute');
+function assertArguments(args: readonly string[]): { execute: boolean; allowEmpty: boolean } {
+  const unknown = args.find((argument) => argument !== '--execute' && argument !== '--allow-empty');
   if (unknown) throw new Error(`Unknown core-cache argument: ${unknown}`);
   if (args.filter((argument) => argument === '--execute').length > 1) {
     throw new Error('--execute must not be repeated');
   }
-  return args.includes('--execute');
+  if (args.filter((argument) => argument === '--allow-empty').length > 1) {
+    throw new Error('--allow-empty must not be repeated');
+  }
+  const execute = args.includes('--execute');
+  const allowEmpty = args.includes('--allow-empty');
+  if (allowEmpty && !execute) throw new Error('--allow-empty requires --execute');
+  return { execute, allowEmpty };
 }
 
 function assertCoreCounts(counts: CoreCounts): void {
@@ -42,10 +48,29 @@ function assertCoreCounts(counts: CoreCounts): void {
 }
 
 async function main(): Promise<void> {
-  const execute = assertArguments(process.argv.slice(2));
+  const { execute, allowEmpty } = assertArguments(process.argv.slice(2));
   const config = getConfig();
   const db = await getDb();
   await assertDataRuntimeRole(await getDbClient());
+  const [existingSeason] = await db
+    .select({ seasonId: seasonsInFpl.seasonId })
+    .from(seasonsInFpl)
+    .limit(1);
+  if (!existingSeason && allowEmpty) {
+    console.log(
+      JSON.stringify(
+        {
+          operation: 'publish-core-cache',
+          executed: false,
+          skipped: 'empty_database_baseline',
+          cacheDatabase: config.CACHE_REDIS_DB,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
   const season = await seasonRepository.findCurrent();
   const publicationRows = await db
     .select({

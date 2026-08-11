@@ -87,7 +87,8 @@ export function assertRuntimeDatabaseUrl(
   } catch {
     throw new Error(`${variableName} contains invalid URL encoding`);
   }
-  if (!parsed.hostname || username !== expectedRole || password !== expectedPassword) {
+  const roleMatches = username === expectedRole || username.startsWith(`${expectedRole}.`);
+  if (!parsed.hostname || !roleMatches || password !== expectedPassword) {
     throw new Error(`${variableName} must use ${expectedRole} and its configured password`);
   }
 }

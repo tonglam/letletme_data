@@ -427,6 +427,25 @@ WITH contract_rows AS (
   UNION ALL
 
   SELECT
+    'constraint-trigger'::text,
+    namespace_row.nspname || '.' || relation_row.relname || '.' ||
+      constraint_row.conname || '.' || trigger_row.tgtype::text,
+    jsonb_build_object(
+      'enabled', trigger_row.tgenabled,
+      'constraint', pg_get_constraintdef(constraint_row.oid, true),
+      'constraintType', constraint_row.contype,
+      'eventType', trigger_row.tgtype
+    )::text
+  FROM pg_trigger trigger_row
+  JOIN pg_constraint constraint_row ON constraint_row.oid = trigger_row.tgconstraint
+  JOIN pg_class relation_row ON relation_row.oid = trigger_row.tgrelid
+  JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+  WHERE namespace_row.nspname = ANY ($1::text[])
+    AND trigger_row.tgisinternal
+
+  UNION ALL
+
+  SELECT
     'default-acl'::text,
     pg_get_userbyid(default_acl.defaclrole) || ':' ||
       COALESCE(namespace_row.nspname, '*') || ':' || default_acl.defaclobjtype::text,

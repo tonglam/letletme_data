@@ -107,8 +107,16 @@ jobs:
             data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun -e 'process.stdout.write(process.env.DATABASE_URL ?? "")')
             test -n "$data_runtime_database_url"
+            graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
+            graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
+            test "$graphql_container_count" -eq 1
+            graphql_container=$(printf '%s\n' "$graphql_containers" | sed '/^$/d')
+            graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+              "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
+            test -n "$graphql_runtime_database_url"
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" migration \
+              -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
+              -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
               bun run db:provision-runtime-logins --preflight
 
             migration_started=false
@@ -130,7 +138,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:provision-runtime-logins
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun run cache:publish-core -- --execute
+              bun run cache:publish-core -- --execute --allow-empty
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
             for attempt in $(seq 1 30); do

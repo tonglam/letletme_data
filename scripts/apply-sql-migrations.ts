@@ -9,7 +9,9 @@ import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
 
 import {
   adoptProductionPlatformBaseline,
-  EXPECTED_PLATFORM_SCHEMA_FINGERPRINT,
+  assertCanonicalCapabilityRoleMemberships,
+  EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT,
+  EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT,
 } from './platform-baseline-adoption';
 import {
   fingerprintSchemaContract,
@@ -106,9 +108,9 @@ async function assertFreshBaselineContract(transaction: postgres.TransactionSql)
   const schemaFingerprint = fingerprintSchemaContract(
     await loadPlatformSchemaContract(transaction),
   );
-  if (schemaFingerprint !== EXPECTED_PLATFORM_SCHEMA_FINGERPRINT) {
+  if (schemaFingerprint !== EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT) {
     throw new Error(
-      `Fresh baseline schema fingerprint mismatch: expected=${EXPECTED_PLATFORM_SCHEMA_FINGERPRINT} actual=${schemaFingerprint}`,
+      `Fresh baseline schema fingerprint mismatch: expected=${EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT} actual=${schemaFingerprint}`,
     );
   }
 
@@ -124,9 +126,9 @@ async function assertFreshBaselineContract(transaction: postgres.TransactionSql)
 
 async function assertCanonicalSchemaContract(): Promise<void> {
   const schemaFingerprint = fingerprintSchemaContract(await loadPlatformSchemaContract(sql));
-  if (schemaFingerprint !== EXPECTED_PLATFORM_SCHEMA_FINGERPRINT) {
+  if (schemaFingerprint !== EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT) {
     throw new Error(
-      `Current platform schema fingerprint mismatch: expected=${EXPECTED_PLATFORM_SCHEMA_FINGERPRINT} actual=${schemaFingerprint}`,
+      `Current platform schema fingerprint mismatch: expected=${EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT} actual=${schemaFingerprint}`,
     );
   }
 }
@@ -240,6 +242,7 @@ async function printStatus(migrations: readonly Migration[], state: DatabaseStat
 
   try {
     assertCanonicalLedger(migrations, ledger, true);
+    await assertCanonicalCapabilityRoleMemberships(sql);
     await assertCanonicalSchemaContract();
     for (const migration of migrations) console.log(`applied  ${migration.filename}`);
   } catch (error) {
@@ -275,6 +278,7 @@ async function migrate(migrations: readonly Migration[]): Promise<void> {
     }
 
     const pending = assertCanonicalLedger(migrations, ledger, false);
+    await assertCanonicalCapabilityRoleMemberships(sql);
     for (const migration of pending) await applyPendingMigration(migration);
     await assertCanonicalSchemaContract();
     console.log('[sql-migrate] up to date');

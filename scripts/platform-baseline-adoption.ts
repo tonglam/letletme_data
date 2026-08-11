@@ -18,11 +18,16 @@ const EXPECTED_LEDGER_LAST = '0095_canonicalize_platform_contract.sql';
 const EXPECTED_LEDGER_FINGERPRINT =
   '7e73ca4d98ecf3dbdf595eaa214c6ec609a7d538d57157f82f2fffed84842e27';
 
-export const EXPECTED_PLATFORM_SCHEMA_FINGERPRINT =
-  '378c6820b2c12ed6ca95ad198f31f9a702d2531594dc9427e9fdb3c6f33082fa';
+// The baseline fingerprint is immutable. Update only the current fingerprint when a
+// later hand-written migration changes the canonical schema contract.
+export const EXPECTED_BASELINE_PLATFORM_SCHEMA_FINGERPRINT =
+  '4ff91f41a6c402f68a3e82d2ced3dc91e662cb8bbc1117ae9ad2dfee9b3f9217';
+
+export const EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT =
+  '4ff91f41a6c402f68a3e82d2ced3dc91e662cb8bbc1117ae9ad2dfee9b3f9217';
 
 const EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT =
-  '3bbb0ffb8c2c4ed7ede747b1e73216d58ddbdf208d12de5eaa7993e5c870c945';
+  '3e69f992cd73e94af51436639d533abb2781678daefa5ab9704bcaa6f6140411';
 
 export const EXPECTED_PRODUCTION_DATA_FINGERPRINT = [
   '69f4cdb2748dd486',
@@ -72,7 +77,7 @@ export type BaselineAdoptionExpectations = {
 
 export const PRODUCTION_BASELINE_ADOPTION_EXPECTATIONS: BaselineAdoptionExpectations = {
   ledgerFingerprint: EXPECTED_LEDGER_FINGERPRINT,
-  schemaFingerprint: EXPECTED_PLATFORM_SCHEMA_FINGERPRINT,
+  schemaFingerprint: EXPECTED_CURRENT_PLATFORM_SCHEMA_FINGERPRINT,
   dataFingerprint: EXPECTED_PRODUCTION_DATA_FINGERPRINT,
 };
 
@@ -122,7 +127,10 @@ async function assertReportingViewsPopulated(client: QueryClient): Promise<void>
   }
 }
 
-async function assertCapabilityRoleMemberships(client: QueryClient): Promise<void> {
+export async function assertCanonicalCapabilityRoleMemberships(
+  client: QueryClient,
+  requireComplete = false,
+): Promise<void> {
   const [currentUser] = await client<{ role_name: string }[]>`
     SELECT current_user::text AS role_name
   `;
@@ -168,15 +176,19 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
     (row) => row.admin_option || !allowed.has(`${row.granted_role}->${row.member_role}`),
   );
   const missing = [...allowed].filter((membership) => !observed.has(membership));
-  if (unexpected.length > 0 || missing.length > 0) {
+  if (unexpected.length > 0 || (requireComplete && missing.length > 0)) {
     throw new Error(
       `Unexpected capability role membership: ${
         unexpected.length > 0
           ? unexpected.map((row) => `${row.granted_role}->${row.member_role}`).join(', ')
           : 'none'
-      }${missing.length > 0 ? `; missing: ${missing.join(', ')}` : ''}`,
+      }${requireComplete && missing.length > 0 ? `; missing: ${missing.join(', ')}` : ''}`,
     );
   }
+}
+
+async function assertCapabilityRoleMemberships(client: QueryClient): Promise<void> {
+  await assertCanonicalCapabilityRoleMemberships(client, true);
 
   const runtimeRoles = await client<RuntimeRoleRow[]>`
     SELECT

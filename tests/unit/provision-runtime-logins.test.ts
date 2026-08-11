@@ -95,6 +95,14 @@ describe('production runtime LOGIN provisioning contract', () => {
     ).not.toThrow();
     expect(() =>
       assertRuntimeDatabaseUrl(
+        'postgresql://letletme_graphql_runtime.projectref:password@db.example/postgres',
+        GRAPHQL_RUNTIME_LOGIN,
+        'password',
+        'GRAPHQL_RUNTIME_DATABASE_URL',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertRuntimeDatabaseUrl(
         'postgresql://wrong:password@db.example/postgres',
         DATA_RUNTIME_LOGIN,
         'password',
