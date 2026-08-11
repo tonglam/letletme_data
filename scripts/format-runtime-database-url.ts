@@ -12,9 +12,12 @@ if (
   mode !== 'derive-graphql' &&
   mode !== 'with-password' &&
   mode !== 'with-credentials' &&
-  mode !== 'replace-password'
+  mode !== 'replace-password' &&
+  mode !== 'extract-password'
 ) {
-  throw new Error('Expected derive-graphql, with-password, with-credentials, or replace-password');
+  throw new Error(
+    'Expected derive-graphql, with-password, with-credentials, replace-password, or extract-password',
+  );
 }
 
 const databaseUrl = new URL(
@@ -29,7 +32,10 @@ if (!databaseUrl.hostname || !databaseUrl.pathname || databaseUrl.pathname === '
   throw new Error('Runtime database URL must include a database target');
 }
 
-if (mode === 'derive-graphql') {
+if (mode === 'extract-password') {
+  if (!databaseUrl.password) throw new Error('Runtime database URL must include a password');
+  process.stdout.write(decodeURIComponent(databaseUrl.password));
+} else if (mode === 'derive-graphql') {
   const sourceUsername = databaseUrl.username;
   const projectSuffix = sourceUsername.includes('.')
     ? sourceUsername.slice(sourceUsername.indexOf('.'))
@@ -51,4 +57,4 @@ if (mode === 'derive-graphql') {
   databaseUrl.password = required('RUNTIME_DATABASE_PASSWORD');
 }
 
-process.stdout.write(databaseUrl.toString());
+if (mode !== 'extract-password') process.stdout.write(databaseUrl.toString());

@@ -68,6 +68,12 @@ deploy() {
   data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "${ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  configured_data_runtime_password=$(compose run --rm -T \
+    -e "DATABASE_URL=${data_runtime_database_url}" migration \
+    bun scripts/format-runtime-database-url.ts extract-password)
+  if [[ -n "${configured_data_runtime_password}" ]]; then
+    data_runtime_database_password=${configured_data_runtime_password}
+  fi
   data_runtime_database_url=$(compose run --rm -T \
     -e "DATABASE_URL=${data_runtime_database_url}" \
     -e "RUNTIME_DATABASE_PASSWORD=${data_runtime_database_password}" migration \

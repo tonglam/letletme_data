@@ -86,4 +86,13 @@ describe('runtime database URL formatter', () => {
       'postgresql://letletme_graphql_runtime.projectref@aws-0-region.pooler.supabase.com:5432/postgres',
     );
   });
+
+  test('extracts the configured runtime password without changing it', async () => {
+    const result = await runFormatter('extract-password', {
+      DATABASE_URL: 'postgresql://letletme_data_runtime:p%40ss%2Fword@db.example:5432/app',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('p@ss/word');
+  });
 });
