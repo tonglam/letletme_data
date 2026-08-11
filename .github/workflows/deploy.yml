@@ -120,8 +120,14 @@ jobs:
               graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
                 "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
             else
-              graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
-                bun -e 'process.stdout.write(process.env.GRAPHQL_RUNTIME_DATABASE_URL ?? "")')
+              graphql_container=$(docker ps -aq --filter label=com.docker.compose.service=graphql | head -n 1)
+              if [ -n "$graphql_container" ]; then
+                graphql_runtime_database_url=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                  "$graphql_container" | sed -n 's/^DATABASE_URL=//p')
+              else
+                graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+                  bun -e 'process.stdout.write(process.env.GRAPHQL_RUNTIME_DATABASE_URL ?? "")')
+              fi
             fi
             test -n "$graphql_runtime_database_url"
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
