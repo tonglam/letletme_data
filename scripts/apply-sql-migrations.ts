@@ -261,9 +261,10 @@ async function printStatus(migrations: readonly Migration[], state: DatabaseStat
 
   try {
     assertCanonicalLedger(migrations, ledger, true);
-    await assertCanonicalCapabilityRoleMemberships(sql, true);
     const runtimeData = await hasRuntimeData(sql);
-    if (runtimeData) {
+    const requireCompleteMemberships = runtimeData;
+    await assertCanonicalCapabilityRoleMemberships(sql, requireCompleteMemberships);
+    if (requireCompleteMemberships) {
       await assertCanonicalCapabilityRoleContract(sql);
       await assertCanonicalReportingState();
     }
