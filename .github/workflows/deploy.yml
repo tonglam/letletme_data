@@ -114,6 +114,8 @@ jobs:
             data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun scripts/read-runtime-database-url.ts)
             test -n "$data_runtime_database_url"
+            data_runtime_database_password=$(printf '%s' "$data_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
+            test -n "$data_runtime_database_password"
             echo "deploy preflight: data runtime URL present"
             graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
             graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
@@ -162,6 +164,8 @@ jobs:
               -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=$graphql_runtime_database_password" api \
               bun scripts/format-runtime-database-url.ts with-password)
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password" \
+              -e "GRAPHQL_RUNTIME_DB_PASSWORD=$(printf '%s' "$graphql_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')" \
               -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
               -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
               bun run db:provision-runtime-logins --preflight
@@ -184,6 +188,8 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password" \
+              -e "GRAPHQL_RUNTIME_DB_PASSWORD=$(printf '%s' "$graphql_runtime_database_url" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')" \
               -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
               -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
               bun run db:provision-runtime-logins

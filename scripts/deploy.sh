@@ -81,6 +81,11 @@ deploy() {
     log_error "The API runtime DATABASE_URL is missing; services were not stopped."
     exit 1
   fi
+  data_runtime_database_password=$(printf '%s' "${data_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')
+  if [[ -z "${data_runtime_database_password}" ]]; then
+    log_error "The API runtime DATABASE_URL password is missing; services were not stopped."
+    exit 1
+  fi
   graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
   graphql_container_count=$(printf '%s\n' "${graphql_containers}" | sed '/^$/d' | wc -l | tr -d ' ')
   if [[ "${graphql_container_count}" -gt 1 ]]; then
@@ -102,6 +107,8 @@ deploy() {
   fi
   log_info "Validating runtime LOGIN provisioning inputs before service shutdown"
   if ! compose run --rm -T \
+    -e "DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}" \
+    -e "GRAPHQL_RUNTIME_DB_PASSWORD=$(printf '%s' "${graphql_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')" \
     -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
     -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
     bun run db:provision-runtime-logins --preflight; then
@@ -131,6 +138,8 @@ deploy() {
   fi
   compose run --rm -T migration bun run db:migrate:status
   if ! compose run --rm -T \
+    -e "DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}" \
+    -e "GRAPHQL_RUNTIME_DB_PASSWORD=$(printf '%s' "${graphql_runtime_database_url}" | sed -n 's#^[^:]*://[^:]*:\([^@]*\)@.*#\1#p')" \
     -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
     -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
     bun run db:provision-runtime-logins; then
