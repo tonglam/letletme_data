@@ -19,10 +19,14 @@ const EXPECTED_LEDGER_FINGERPRINT =
   '7e73ca4d98ecf3dbdf595eaa214c6ec609a7d538d57157f82f2fffed84842e27';
 
 export const EXPECTED_PLATFORM_SCHEMA_FINGERPRINT =
-  'c96488fc64756b7e5456fafde47c467d3f66bf0eb01800fed5d92ebe9209c40b';
+  '6f5eae07f8d7d4851ef3fbd4352a6d05d921e8661132c2e462e91653796324c9';
 
-// Filled from the post-activation production manifest before this adopter is merged.
-export const EXPECTED_PRODUCTION_DATA_FINGERPRINT = 'PENDING_CANONICAL_ACTIVATION';
+export const EXPECTED_PRODUCTION_DATA_FINGERPRINT = [
+  '69f4cdb2748dd486',
+  '797d62d80dd25194',
+  'f54aead8245a8c41',
+  '37e1c068a2053a4',
+].join('');
 
 type QueryClient = postgres.Sql | postgres.TransactionSql;
 

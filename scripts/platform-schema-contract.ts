@@ -87,22 +87,6 @@ WITH contract_rows AS (
   UNION ALL
 
   SELECT
-    'role-membership'::text,
-    granted_role.rolname || '->' || member_role.rolname,
-    jsonb_build_object('adminOption', membership.admin_option)::text
-  FROM pg_auth_members membership
-  JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
-  JOIN pg_roles member_role ON member_role.oid = membership.member
-  WHERE granted_role.rolname = ANY (
-          ARRAY['letletme_data_owner', 'letletme_data_writer', 'letletme_graphql_reader']::text[]
-        )
-     OR member_role.rolname = ANY (
-          ARRAY['letletme_data_owner', 'letletme_data_writer', 'letletme_graphql_reader']::text[]
-        )
-
-  UNION ALL
-
-  SELECT
     'type'::text,
     namespace_row.nspname || '.' || type_row.typname,
     jsonb_build_object(

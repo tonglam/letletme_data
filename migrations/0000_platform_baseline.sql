@@ -300,9 +300,20 @@ CREATE FUNCTION reporting.refresh_tournament_entry_event_summaries() RETURNS voi
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog'
     AS $$
+DECLARE
+  populated boolean;
 BEGIN
   PERFORM pg_catalog.pg_advisory_xact_lock(73001, 2);
-  REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_entry_event_summaries;
+  SELECT ispopulated
+    INTO populated
+    FROM pg_matviews
+   WHERE schemaname = 'reporting'
+     AND matviewname = 'tournament_entry_event_summaries';
+  IF populated THEN
+    REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_entry_event_summaries;
+  ELSE
+    REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries;
+  END IF;
 END
 $$;
 
@@ -317,9 +328,20 @@ CREATE FUNCTION reporting.refresh_tournament_selection_stats() RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog'
     AS $$
+DECLARE
+  populated boolean;
 BEGIN
   PERFORM pg_catalog.pg_advisory_xact_lock(73001, 1);
-  REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_selection_stats;
+  SELECT ispopulated
+    INTO populated
+    FROM pg_matviews
+   WHERE schemaname = 'reporting'
+     AND matviewname = 'tournament_selection_stats';
+  IF populated THEN
+    REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_selection_stats;
+  ELSE
+    REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats;
+  END IF;
 END
 $$;
 
@@ -5594,4 +5616,3 @@ GRANT SELECT ON TABLE understat.teams TO letletme_graphql_reader;
 --
 -- PostgreSQL database dump complete
 --
-

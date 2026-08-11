@@ -94,7 +94,7 @@ jobs:
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
             test -f .env.migrate
 
-            old_container=$(docker compose ps -q api)
+            old_container=$(docker compose ps -aq api)
             test -n "$old_container"
             old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
             test -n "$old_image"
