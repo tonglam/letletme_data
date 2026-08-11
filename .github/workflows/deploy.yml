@@ -183,7 +183,10 @@ jobs:
             migration_started=true
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:provision-runtime-logins
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
+              -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
+              bun run db:provision-runtime-logins
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun run cache:publish-core -- --execute --allow-empty

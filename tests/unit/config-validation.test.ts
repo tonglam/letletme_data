@@ -75,6 +75,9 @@ describe('production environment preflight', () => {
     expect(workflow).toContain('Both runtime logins use the same database target');
     expect(workflow).toContain('bun scripts/format-runtime-database-url.ts derive-graphql');
     expect(workflow).toContain('bun scripts/format-runtime-database-url.ts with-password');
+    expect(workflow).toMatch(
+      /DATA_RUNTIME_DATABASE_URL=\$data_runtime_database_url[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$graphql_runtime_database_url[\s\S]*?bun run db:provision-runtime-logins/,
+    );
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
   });
 
@@ -95,6 +98,9 @@ describe('production environment preflight', () => {
     );
     expect(deployScript).toMatch(
       /(docker compose ps -q graphql|docker ps --filter label=com\.docker\.compose\.service=graphql)[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$\{graphql_runtime_database_url\}/,
+    );
+    expect(deployScript).toMatch(
+      /DATA_RUNTIME_DATABASE_URL=\$\{data_runtime_database_url\}[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$\{graphql_runtime_database_url\}[\s\S]*?bun run db:provision-runtime-logins/,
     );
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
