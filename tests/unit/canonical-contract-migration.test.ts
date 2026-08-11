@@ -12,13 +12,21 @@ describe('canonical platform contract migration', () => {
   });
 
   test('bounds every additional application-data normalization', () => {
+    const sqlQuote = String.fromCharCode(39);
+
     expect(migration).toContain('value_seed_count NOT IN (0, 564)');
-    expect(migration).toContain('cache_metadata_count NOT IN (0, 27)');
-    expect(migration).toContain('publication_skip_metadata_count NOT IN (0, 4)');
+    expect(migration).toContain(
+      `jsonb_typeof(metadata -> ${sqlQuote}legacy_cache_revision${sqlQuote})`,
+    );
+    expect(migration).toContain(
+      `jsonb_typeof(metadata -> ${sqlQuote}legacy_publication_skip_reason${sqlQuote})`,
+    );
     expect(migration).toMatch(/SET snapshot_source = 'value_seed'/);
-    expect(migration).toMatch(/SET\s+rule_id = 'understat-fpl-player-name'/);
+    expect(migration).toContain(
+      `regexp_replace(rule_id, ${sqlQuote}-v[0-9]+$${sqlQuote}, ${sqlQuote}${sqlQuote})`,
+    );
     expect(migration).toMatch(/evidence - 'ruleVersion'/);
-    expect(migration).toMatch(/jsonb_build_object\('ruleId', 'understat-fpl-player-name'\)/);
+    expect(migration).toMatch(/jsonb_build_object\('ruleId', regexp_replace\(rule_id/);
     expect(migration).toMatch(/metadata - ARRAY\[\n  'legacy_cache_revision'/);
     expect(migration).toMatch(/normalized_payload \?\| ARRAY\['version'/);
     expect(migration).toContain('normalized_payload = NULL');

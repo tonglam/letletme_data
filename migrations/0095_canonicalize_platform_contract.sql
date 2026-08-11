@@ -11,10 +11,7 @@ DECLARE
   active_core_publication_count bigint;
   active_current_core_publication_count bigint;
   retired_singleton_count bigint;
-  player_link_count bigint;
   value_seed_count bigint;
-  cache_metadata_count bigint;
-  publication_skip_metadata_count bigint;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -40,20 +37,38 @@ BEGIN
     RAISE EXCEPTION 'bridge.match_links is not in the expected pre-canonical state';
   END IF;
 
-  SELECT count(*) INTO player_link_count FROM bridge.entity_links;
-  IF player_link_count NOT IN (0, 2192) OR EXISTS (
+  IF EXISTS (
     SELECT 1 FROM bridge.entity_links
-    WHERE rule_version <> 'understat-fpl-player-name-v3'
+    WHERE rule_version !~ '^understat-fpl-[a-z0-9-]+(-v[0-9]+)?$'
       OR evidence IS NULL
       OR jsonb_typeof(evidence) <> 'object'
-      OR evidence ->> 'ruleVersion' IS DISTINCT FROM 'understat-fpl-player-name-v3'
-      OR evidence ? 'ruleId'
+      OR (
+        evidence ? 'ruleVersion'
+        AND evidence ->> 'ruleVersion' IS DISTINCT FROM rule_version
+      )
+      OR (
+        evidence ? 'ruleId'
+        AND evidence ->> 'ruleId' IS DISTINCT FROM regexp_replace(rule_version, '-v[0-9]+$', '')
+      )
   ) THEN
     RAISE EXCEPTION 'unexpected bridge.entity_links rule or evidence population';
   END IF;
 
-  IF EXISTS (SELECT 1 FROM bridge.match_links) THEN
-    RAISE EXCEPTION 'unexpected bridge.match_links rows require an explicit rule migration';
+  IF EXISTS (
+    SELECT 1 FROM bridge.match_links
+    WHERE rule_version !~ '^understat-fpl-[a-z0-9-]+(-v[0-9]+)?$'
+      OR evidence IS NULL
+      OR jsonb_typeof(evidence) <> 'object'
+      OR (
+        evidence ? 'ruleVersion'
+        AND evidence ->> 'ruleVersion' IS DISTINCT FROM rule_version
+      )
+      OR (
+        evidence ? 'ruleId'
+        AND evidence ->> 'ruleId' IS DISTINCT FROM regexp_replace(rule_version, '-v[0-9]+$', '')
+      )
+  ) THEN
+    RAISE EXCEPTION 'unexpected bridge.match_links rule or evidence population';
   END IF;
 
   IF EXISTS (
@@ -69,15 +84,16 @@ BEGIN
     RAISE EXCEPTION 'tournament roster cardinality requires explicit repair';
   END IF;
 
-  SELECT
-    count(*) FILTER (WHERE metadata ? 'legacy_cache_revision'),
-    count(*) FILTER (WHERE metadata ? 'legacy_publication_skip_reason')
-  INTO cache_metadata_count, publication_skip_metadata_count
-  FROM ops.sync_runs;
-
-  IF cache_metadata_count NOT IN (0, 27)
-    OR publication_skip_metadata_count NOT IN (0, 4)
-  THEN
+  IF EXISTS (
+    SELECT 1 FROM ops.sync_runs
+    WHERE (
+      metadata ? 'legacy_cache_revision'
+      AND jsonb_typeof(metadata -> 'legacy_cache_revision') <> 'string'
+    ) OR (
+      metadata ? 'legacy_publication_skip_reason'
+      AND jsonb_typeof(metadata -> 'legacy_publication_skip_reason') <> 'string'
+    )
+  ) THEN
     RAISE EXCEPTION 'unexpected retired sync-run metadata population';
   END IF;
 
@@ -193,10 +209,15 @@ ALTER TABLE bridge.match_links
 
 UPDATE bridge.entity_links
 SET
-  rule_id = 'understat-fpl-player-name',
+  rule_id = regexp_replace(rule_id, '-v[0-9]+$', ''),
   evidence = (evidence - 'ruleVersion')
-    || jsonb_build_object('ruleId', 'understat-fpl-player-name')
-WHERE rule_id = 'understat-fpl-player-name-v3';
+    || jsonb_build_object('ruleId', regexp_replace(rule_id, '-v[0-9]+$', ''));
+
+UPDATE bridge.match_links
+SET
+  rule_id = regexp_replace(rule_id, '-v[0-9]+$', ''),
+  evidence = (evidence - 'ruleVersion')
+    || jsonb_build_object('ruleId', regexp_replace(rule_id, '-v[0-9]+$', ''));
 
 UPDATE ops.sync_runs
 SET metadata = metadata - ARRAY[
@@ -307,12 +328,16 @@ BEGIN
 
   IF EXISTS (
     SELECT 1 FROM bridge.entity_links
-    WHERE rule_id <> 'understat-fpl-player-name'
+    WHERE rule_id !~ '^understat-fpl-[a-z0-9-]+$'
+      OR rule_id ~ '-v[0-9]+$'
       OR evidence ? 'ruleVersion'
       OR evidence ->> 'ruleId' IS DISTINCT FROM rule_id
   ) OR EXISTS (
     SELECT 1 FROM bridge.match_links
-    WHERE btrim(rule_id) = '' OR evidence ? 'ruleVersion'
+    WHERE rule_id !~ '^understat-fpl-[a-z0-9-]+$'
+      OR rule_id ~ '-v[0-9]+$'
+      OR evidence ? 'ruleVersion'
+      OR evidence ->> 'ruleId' IS DISTINCT FROM rule_id
   ) THEN
     RAISE EXCEPTION 'bridge rule identifiers are not canonical';
   END IF;

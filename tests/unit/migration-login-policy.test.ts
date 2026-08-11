@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  assertMigrationLoginPreflightSnapshot,
   assertMigrationLoginSnapshot,
   type MigrationLoginSnapshot,
 } from '../../scripts/migration-login-policy';
@@ -21,6 +22,20 @@ const accepted = (): MigrationLoginSnapshot => ({
 });
 
 describe('migration LOGIN contract', () => {
+  test('accepts the direct privileged login before the baseline exists', () => {
+    expect(() =>
+      assertMigrationLoginPreflightSnapshot({
+        roleName: 'postgres',
+        sessionUser: 'postgres',
+        serverMajor: 15,
+        canLogin: true,
+        createRole: true,
+        inherit: true,
+        bypassRls: true,
+      }),
+    ).not.toThrow();
+  });
+
   test('accepts the canonical PostgreSQL and ownership boundary', () => {
     expect(() => assertMigrationLoginSnapshot(accepted())).not.toThrow();
   });

@@ -28,6 +28,7 @@
     "db:migrate": "bunx drizzle-kit migrate",
     "db:check": "bunx drizzle-kit check",
     "db:studio": "bunx drizzle-kit studio",
+    "db:migration-login": "bun scripts/migration-login-contract.ts --preflight",
     "db:migration-contract": "bun scripts/migration-login-contract.ts",
     "db:provision-runtime-logins": "bun scripts/provision-runtime-logins.ts",
     "db:apply-sql": "bun scripts/apply-sql-migrations.ts",

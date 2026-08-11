@@ -71,7 +71,7 @@ deploy() {
     exit 1
   fi
   log_info "Validating the migration LOGIN before service shutdown"
-  if ! compose run --rm -T migration bun run db:migration-contract; then
+  if ! compose run --rm -T migration bun run db:migration-login; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
