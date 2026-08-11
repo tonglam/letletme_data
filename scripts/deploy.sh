@@ -164,7 +164,7 @@ deploy() {
     exit 1
   fi
   log_info "Waiting for Supavisor credentials to converge"
-  for _ in 1 2; do
+  for _ in 1 2 3 4 5; do
     sleep 60
   done
   log_info "Publishing and verifying the canonical core cache"
