@@ -8,7 +8,8 @@ SELECT pg_advisory_xact_lock(912883475);
 
 DO $canonical_contract_precondition$
 DECLARE
-  active_publication_count bigint;
+  active_core_publication_count bigint;
+  active_current_core_publication_count bigint;
   retired_singleton_count bigint;
   player_link_count bigint;
   value_seed_count bigint;
@@ -96,7 +97,7 @@ BEGIN
     RAISE EXCEPTION 'dataset publication history contains an invalid scope or manifest';
   END IF;
 
-  SELECT count(*) INTO active_publication_count
+  SELECT count(*) INTO active_current_core_publication_count
   FROM ops.dataset_publications publication
   JOIN fpl.seasons season ON season.season_id = publication.season_id
   WHERE publication.dataset = 'fpl:core'
@@ -104,15 +105,21 @@ BEGIN
     AND publication.status = 'active'
     AND season.is_current;
 
+  SELECT count(*) INTO active_core_publication_count
+  FROM ops.dataset_publications
+  WHERE dataset = 'fpl:core'
+    AND event_id IS NULL
+    AND status = 'active';
+
   SELECT count(*) INTO retired_singleton_count
   FROM ops.dataset_publications
   WHERE status = 'retired'
     AND source_run_id IS NULL
     AND manifest ? 'legacy_singleton_id';
 
-  IF active_publication_count <> 1
+  IF active_current_core_publication_count <> 1
+    OR active_core_publication_count <> 1
     OR retired_singleton_count NOT IN (0, 1)
-    OR (SELECT count(*) FROM ops.dataset_publications WHERE status = 'active') <> 1
     OR EXISTS (
       SELECT 1 FROM ops.dataset_publications
       WHERE manifest ? 'legacy_singleton_id'

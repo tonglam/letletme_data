@@ -54,6 +54,18 @@ describe('production environment preflight', () => {
     expect(replaceServices).toBeGreaterThan(publishCore);
   });
 
+  test('restores stopped services when a pre-migration deployment gate rejects', () => {
+    const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+
+    expect(deployScript).toMatch(
+      /if ! compose stop -t 45 api worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+    );
+    expect(deployScript).toMatch(
+      /if ! compose run --rm -T api bun run ops:assert-queue-quiescence; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+    );
+    expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?compose start api worker/);
+  });
+
   test('keeps migration credentials out of API and worker services', () => {
     const compose = readFileSync('docker-compose.yml', 'utf8');
     const migrationService = compose.indexOf('  migration:');

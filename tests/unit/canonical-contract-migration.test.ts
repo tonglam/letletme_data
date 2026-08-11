@@ -23,4 +23,12 @@ describe('canonical platform contract migration', () => {
     expect(migration).toMatch(/normalized_payload \?\| ARRAY\['version'/);
     expect(migration).toContain('manifest = jsonb_build_object(');
   });
+
+  test('requires one current core publication without rejecting active live scopes', () => {
+    expect(migration).toContain('active_current_core_publication_count <> 1');
+    expect(migration).toContain('active_core_publication_count <> 1');
+    expect(migration).not.toMatch(
+      /count\(\*\) FROM ops\.dataset_publications WHERE status = 'active'/,
+    );
+  });
 });

@@ -180,10 +180,30 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: bun tests/helpers/apply-historical-cutover-tail.ts
 
+      - name: Install an active live publication migration fixture
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: >-
+          bun -e 'import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          const ddl = await Bun.file("tests/fixtures/active-live-publication.sql").text();
+          await sql.unsafe(ddl);
+          await sql.end();'
+
       - name: Apply canonical SQL migrations
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: bun run db:apply-sql
+
+      - name: Verify the active live publication migration fixture
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: >-
+          bun -e 'import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          const ddl = await Bun.file("tests/fixtures/verify-canonical-live-publication.sql").text();
+          await sql.unsafe(ddl);
+          await sql.end();'
 
       - name: Verify SQL migrations are idempotent and complete
         env:

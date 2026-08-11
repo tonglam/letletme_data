@@ -47,6 +47,13 @@ compose() {
   (cd "${PROJECT_DIR}" && "${COMPOSE_CMD[@]}" -f "${COMPOSE_FILE}" "$@")
 }
 
+restore_stopped_services() {
+  log_warn "Restoring the existing API and worker because migration has not started"
+  if ! compose start api worker; then
+    log_error "The existing API and worker could not be restarted; manual recovery is required."
+  fi
+}
+
 deploy() {
   require_compose
   require_files
@@ -64,9 +71,14 @@ deploy() {
     exit 1
   fi
   log_info "Stopping services and waiting for workers to settle"
-  compose stop -t 45 api worker
+  if ! compose stop -t 45 api worker; then
+    log_error "Services did not stop cleanly; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
   if ! compose run --rm -T api bun run ops:assert-queue-quiescence; then
     log_error "Queue/database work is not quiescent; migration was not started."
+    restore_stopped_services
     exit 1
   fi
   log_info "Running migrations"
