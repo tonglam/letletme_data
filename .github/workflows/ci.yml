@@ -145,6 +145,12 @@ jobs:
           DATABASE_URL="$SCHEMA_EXPORT_DATABASE_URL" bun run db:export > /tmp/schema-export.sql
           bun -e 'import postgres from "postgres"; const db = postgres(process.env.SCHEMA_EXPORT_DATABASE_URL, { max: 1 }); const ddl = await Bun.file("/tmp/schema-export.sql").text(); await db.unsafe(ddl); await db.end();'
 
+      - name: Populate reporting materialized views for integration fixtures
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: |
+          bun -e 'import postgres from "postgres"; const db = postgres(process.env.DATABASE_URL, { max: 1 }); await db`REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries`; await db`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`; await db.end();'
+
       - name: Fresh-database integration tests
         env:
           RUN_INTEGRATION: 1
