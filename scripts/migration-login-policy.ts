@@ -25,7 +25,7 @@ export function assertMigrationLoginPreflightSnapshot(
     throw new Error('Platform migration requires PostgreSQL 15');
   }
   if (snapshot.roleName !== 'postgres' || snapshot.sessionUser !== snapshot.roleName) {
-    throw new Error('Production migration requires the direct Supabase postgres LOGIN');
+    throw new Error('Migration requires the direct Supabase postgres LOGIN');
   }
   if (!snapshot.canLogin || !snapshot.createRole || !snapshot.inherit || !snapshot.bypassRls) {
     throw new Error('Supabase postgres migration LOGIN capabilities are incomplete');
@@ -37,7 +37,7 @@ export function assertMigrationLoginSnapshot(snapshot: MigrationLoginSnapshot): 
     throw new Error('Platform migration requires PostgreSQL 15');
   }
   if (snapshot.roleName !== 'postgres' || snapshot.sessionUser !== snapshot.roleName) {
-    throw new Error('Production migration requires the direct Supabase postgres LOGIN');
+    throw new Error('Migration requires the direct Supabase postgres LOGIN');
   }
   if (!snapshot.canLogin || !snapshot.createRole || !snapshot.inherit || !snapshot.bypassRls) {
     throw new Error('Supabase postgres migration LOGIN capabilities are incomplete');

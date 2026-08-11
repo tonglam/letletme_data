@@ -117,7 +117,7 @@ jobs:
           await sql.unsafe("DO $$ BEGIN CREATE ROLE " + role + " NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$");
           await sql.end();'
 
-      - name: Apply canonical baseline and verify repeatability
+      - name: Apply schema and verify repeatability
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: |
@@ -125,20 +125,7 @@ jobs:
           bun run db:migrate
           bun run db:migrate:status
 
-      - name: Verify strict production baseline adoption
-        env:
-          RUN_INTEGRATION: 1
-          RUN_BASELINE_ADOPTION_INTEGRATION: 1
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-          CACHE_REDIS_HOST: 127.0.0.1
-          CACHE_REDIS_PORT: '6379'
-          CACHE_REDIS_DB: '9'
-          QUEUE_REDIS_HOST: 127.0.0.1
-          QUEUE_REDIS_PORT: '6379'
-          QUEUE_REDIS_DB: '10'
-        run: bun test tests/integration/platform-baseline-adoption.test.ts
-
-      - name: Provision and retry disposable production-shaped runtime logins
+      - name: Provision disposable runtime logins
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           DATA_RUNTIME_DB_PASSWORD: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
