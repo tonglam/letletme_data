@@ -123,6 +123,12 @@ jobs:
               echo "deploy preflight: DATABASE_URL missing from $env_file"
               exit 1
             fi
+            configured_data_runtime_password=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATABASE_URL=$data_runtime_database_url" migration \
+              bun scripts/format-runtime-database-url.ts extract-password)
+            if [ -n "$configured_data_runtime_password" ]; then
+              data_runtime_database_password=$configured_data_runtime_password
+            fi
             data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
               -e "DATABASE_URL=$data_runtime_database_url" \
               -e "RUNTIME_DATABASE_PASSWORD=$data_runtime_database_password" migration \
