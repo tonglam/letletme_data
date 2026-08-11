@@ -42,12 +42,8 @@ describe('production environment preflight', () => {
     const provisioningPreflight = workflow.indexOf(
       'bun run db:provision-runtime-logins --preflight',
     );
-    const runtimeUrl = workflow.indexOf(
-      'data_runtime_database_url=$(env_file_value DATABASE_URL "$env_file")',
-    );
-    const graphqlRuntimeUrl = workflow.search(
-      /graphql_runtime_database_url=\$\(env_file_value GRAPHQL_RUNTIME_DATABASE_URL "\$migration_env_file"\)/,
-    );
+    const runtimeUrl = workflow.search(/data_runtime_database_url=\$\(sed -n/);
+    const graphqlRuntimeUrl = workflow.search(/graphql_runtime_database_url=\$\(sed -n/);
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
