@@ -47,6 +47,8 @@ describe('queue quiescence gate', () => {
     expect(script).toMatch(/'paused'/);
     expect(script).toMatch(/'llm:queue:coordination:tournament-cascade:\*'/);
     expect(script).toMatch(/'llm:v\*:queue:coordination:tournament-cascade:\*'/);
+    expect(script).toMatch(/to_regclass\('ops\.sync_runs'\)/);
+    expect(script).toContain('Database quiescence tables are only partially initialized');
   });
 
   test('accepts a fully settled hard-cut boundary', () => {

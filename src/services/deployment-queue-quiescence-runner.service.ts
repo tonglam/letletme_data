@@ -50,8 +50,30 @@ export async function inspectAndAssertDeploymentQueueQuiescence(): Promise<Queue
 
   try {
     if (redis.status === 'wait' || redis.status === 'end') await redis.connect();
-    const [databaseRows, cascadeKeyGroups, queueCountRows] = await Promise.all([
-      database<Array<{ non_terminal_sync_runs: number; staging_publications: number }>>`
+    const [databaseContractRows, cascadeKeyGroups, queueCountRows] = await Promise.all([
+      database<Array<{ sync_runs_exists: boolean; publications_exists: boolean }>>`
+        SELECT
+          to_regclass('ops.sync_runs') IS NOT NULL AS sync_runs_exists,
+          to_regclass('ops.dataset_publications') IS NOT NULL AS publications_exists
+      `,
+      Promise.all(CASCADE_PATTERNS.map((pattern) => scan(redis, pattern))),
+      Promise.all(
+        queues.map(
+          async (queue) => [queue.name, await queue.getJobCounts(...RUNNABLE_JOB_TYPES)] as const,
+        ),
+      ),
+    ]);
+    const databaseContract = databaseContractRows[0];
+    if (!databaseContract) throw new Error('Could not read the database quiescence state');
+    if (databaseContract.sync_runs_exists !== databaseContract.publications_exists) {
+      throw new Error('Database quiescence tables are only partially initialized');
+    }
+
+    let databaseState = { nonTerminalSyncRuns: 0, stagingPublications: 0 };
+    if (databaseContract.sync_runs_exists) {
+      const databaseRows = await database<
+        Array<{ non_terminal_sync_runs: number; staging_publications: number }>
+      >`
         SELECT
           count(*) FILTER (
             WHERE status IN ('pending', 'running', 'ready_to_publish')
@@ -62,20 +84,18 @@ export async function inspectAndAssertDeploymentQueueQuiescence(): Promise<Queue
             WHERE status = 'staging'
           ) AS staging_publications
         FROM ops.sync_runs
-      `,
-      Promise.all(CASCADE_PATTERNS.map((pattern) => scan(redis, pattern))),
-      Promise.all(
-        queues.map(
-          async (queue) => [queue.name, await queue.getJobCounts(...RUNNABLE_JOB_TYPES)] as const,
-        ),
-      ),
-    ]);
-    const databaseState = databaseRows[0];
-    if (!databaseState) throw new Error('Could not read the sync-run quiescence state');
+      `;
+      const row = databaseRows[0];
+      if (!row) throw new Error('Could not read the sync-run quiescence state');
+      databaseState = {
+        nonTerminalSyncRuns: row.non_terminal_sync_runs,
+        stagingPublications: row.staging_publications,
+      };
+    }
 
     const snapshot = {
-      nonTerminalSyncRuns: databaseState.non_terminal_sync_runs,
-      stagingPublications: databaseState.staging_publications,
+      nonTerminalSyncRuns: databaseState.nonTerminalSyncRuns,
+      stagingPublications: databaseState.stagingPublications,
       runnableQueues: Object.fromEntries(queueCountRows) as Record<string, RunnableQueueCounts>,
       unsettledCascadeIds: findUnsettledCascades(cascadeKeyGroups.flat()),
     };

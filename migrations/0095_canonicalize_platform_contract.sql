@@ -104,6 +104,7 @@ BEGIN
     WHERE item.normalized_payload ?| ARRAY['version', 'schemaVersion', 'planVersion', 'engineVersion']
       AND (
         run.provider <> 'understat'
+        OR run.status NOT IN ('failed', 'completed', 'published', 'skipped')
         OR item.status NOT IN ('completed', 'failed', 'skipped')
       )
   ) THEN
@@ -195,6 +196,7 @@ SET
 FROM ops.sync_runs run
 WHERE run.run_id = item.run_id
   AND run.provider = 'understat'
+  AND run.status IN ('failed', 'completed', 'published', 'skipped')
   AND item.status IN ('completed', 'failed', 'skipped')
   AND item.normalized_payload ?| ARRAY['version', 'schemaVersion', 'planVersion', 'engineVersion'];
 
@@ -328,13 +330,13 @@ BEGIN
 
   IF EXISTS (
     SELECT 1 FROM bridge.entity_links
-    WHERE rule_id !~ '^understat-fpl-[a-z0-9-]+$'
+    WHERE rule_id !~ '^understat-fpl(-[a-z0-9]+(-[a-z0-9]+)*)?$'
       OR rule_id ~ '-v[0-9]+$'
       OR evidence ? 'ruleVersion'
       OR evidence ->> 'ruleId' IS DISTINCT FROM rule_id
   ) OR EXISTS (
     SELECT 1 FROM bridge.match_links
-    WHERE rule_id !~ '^understat-fpl-[a-z0-9-]+$'
+    WHERE rule_id !~ '^understat-fpl(-[a-z0-9]+(-[a-z0-9]+)*)?$'
       OR rule_id ~ '-v[0-9]+$'
       OR evidence ? 'ruleVersion'
       OR evidence ->> 'ruleId' IS DISTINCT FROM rule_id

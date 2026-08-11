@@ -37,11 +37,16 @@ describe('production environment preflight', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
     const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
     const preflight = deployScript.indexOf('bun run env:check');
-    const identityContract = deployScript.indexOf('bun run db:migration-login');
+    const identityContract = deployScript.indexOf(
+      'bun scripts/migration-login-contract.ts --preflight',
+    );
     const stopServices = deployScript.indexOf('compose stop -t 45 api worker');
     const quiescence = deployScript.indexOf('inspectAndAssertDeploymentQueueQuiescence');
     const migrate = deployScript.indexOf('bun run db:migrate');
-    const canonicalContract = deployScript.indexOf('bun run db:migration-contract', migrate);
+    const canonicalContract = deployScript.indexOf(
+      'bun scripts/migration-login-contract.ts',
+      migrate,
+    );
     const publishCore = deployScript.indexOf('bun run cache:publish-core -- --execute');
     const publishLive = deployScript.indexOf('publishActiveLiveCachesForDeployment');
     const migrateRedis = deployScript.indexOf('migrateRetiredRedisStateForDeployment');

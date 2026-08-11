@@ -27,11 +27,15 @@ describe('canonical platform contract migration', () => {
     );
     expect(migration).toMatch(/evidence - 'ruleVersion'/);
     expect(migration).toMatch(/jsonb_build_object\('ruleId', regexp_replace\(rule_id/);
+    expect(migration).toContain(
+      'rule_id !~ ' + sqlQuote + '^understat-fpl(-[a-z0-9]+(-[a-z0-9]+)*)?$' + sqlQuote,
+    );
     expect(migration).toMatch(/metadata - ARRAY\[\n  'legacy_cache_revision'/);
     expect(migration).toMatch(/normalized_payload \?\| ARRAY\['version'/);
     expect(migration).toContain('normalized_payload = NULL');
     expect(migration).toContain('source_hash = NULL');
     expect(migration).toMatch(/item\.status IN \('completed', 'failed', 'skipped'\)/);
+    expect(migration).toMatch(/run\.status IN \('failed', 'completed', 'published', 'skipped'\)/);
     expect(migration).toContain(
       'non-terminal sync-item payloads still require explicit canonicalization',
     );
