@@ -34,4 +34,17 @@ describe('runtime database URL formatter', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toBe('postgresql://graphql_runtime:p%40ss%2Fword@db.example:5432/app');
   });
+
+  test('sets runtime credentials while preserving the migration target query', async () => {
+    const result = await runFormatter('with-credentials', {
+      DATABASE_URL: 'postgresql://postgres:admin@db.example:5432/app?options=project%3Dabc',
+      RUNTIME_DATABASE_USER: 'letletme_data_runtime',
+      RUNTIME_DATABASE_PASSWORD: 'p@ss/word',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      'postgresql://letletme_data_runtime:p%40ss%2Fword@db.example:5432/app?options=project%3Dabc',
+    );
+  });
 });

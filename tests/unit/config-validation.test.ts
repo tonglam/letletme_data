@@ -42,9 +42,11 @@ describe('production environment preflight', () => {
     const provisioningPreflight = workflow.indexOf(
       'bun run db:provision-runtime-logins --preflight',
     );
-    const runtimeUrl = workflow.indexOf('data_runtime_database_url=$(with_runtime_credentials');
+    const runtimeUrl = workflow.indexOf(
+      'bun scripts/format-runtime-database-url.ts with-credentials',
+    );
     const graphqlRuntimeUrl = workflow.indexOf(
-      'graphql_runtime_database_url=$(with_runtime_credentials',
+      'graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run',
     );
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
@@ -96,9 +98,11 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(
       /bun scripts\/migration-login-contract\.ts --preflight[\s\S]*?bun run db:provision-runtime-logins --preflight[\s\S]*?compose stop -t 45 api worker/,
     );
-    const runtimeUrl = deployScript.indexOf('data_runtime_database_url=$(with_runtime_credentials');
+    const runtimeUrl = deployScript.indexOf(
+      'bun scripts/format-runtime-database-url.ts with-credentials',
+    );
     const graphqlRuntimeUrl = deployScript.indexOf(
-      'graphql_runtime_database_url=$(with_runtime_credentials',
+      'graphql_runtime_database_url=$(compose run --rm -T',
     );
     expect(runtimeUrl).toBeGreaterThan(0);
     expect(graphqlRuntimeUrl).toBeGreaterThan(runtimeUrl);
