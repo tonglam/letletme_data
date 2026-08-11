@@ -108,8 +108,7 @@ jobs:
             fi
 
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
-            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun scripts/read-runtime-database-url.ts)
+            data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "$env_file" | sed -e 's/^"//' -e 's/"$//')
             test -n "$data_runtime_database_url"
             data_runtime_database_password=$(sed -n 's/^DATA_RUNTIME_DB_PASSWORD=//p' \
               "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
