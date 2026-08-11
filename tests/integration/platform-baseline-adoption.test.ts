@@ -41,47 +41,49 @@ async function expectCanonicalLedger(): Promise<void> {
   ]);
 }
 
-beforeAll(async () => {
-  await sql.unsafe(`
-    DO $$
-    BEGIN
-      CREATE ROLE anon NOLOGIN;
-    EXCEPTION WHEN duplicate_object THEN
-      NULL;
-    END
-    $$;
-  `);
-  await sql`REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries`;
-  await sql`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`;
-  await sql`DROP INDEX IF EXISTS competition.tournament_knockouts_season_fk_idx`;
-  await sql`DROP INDEX IF EXISTS ops.dataset_publications_season_fk_idx`;
-  await sql.unsafe(`
-    CREATE OR REPLACE FUNCTION reporting.refresh_tournament_entry_event_summaries()
-    RETURNS void
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog
-    AS $function$
-BEGIN
-  PERFORM pg_catalog.pg_advisory_xact_lock(73001, 2);
-  REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_entry_event_summaries;
-END
-$function$;
-  `);
-  await sql.unsafe(`
-    CREATE OR REPLACE FUNCTION reporting.refresh_tournament_selection_stats()
-    RETURNS void
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog
-    AS $function$
-BEGIN
-  PERFORM pg_catalog.pg_advisory_xact_lock(73001, 1);
-  REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_selection_stats;
-END
-$function$;
-  `);
-});
+if (process.env.RUN_BASELINE_ADOPTION_INTEGRATION === '1') {
+  beforeAll(async () => {
+    await sql.unsafe(`
+      DO $$
+      BEGIN
+        CREATE ROLE anon NOLOGIN;
+      EXCEPTION WHEN duplicate_object THEN
+        NULL;
+      END
+      $$;
+    `);
+    await sql`REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries`;
+    await sql`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`;
+    await sql`DROP INDEX IF EXISTS competition.tournament_knockouts_season_fk_idx`;
+    await sql`DROP INDEX IF EXISTS ops.dataset_publications_season_fk_idx`;
+    await sql.unsafe(`
+      CREATE OR REPLACE FUNCTION reporting.refresh_tournament_entry_event_summaries()
+      RETURNS void
+      LANGUAGE plpgsql
+      SECURITY DEFINER
+      SET search_path = pg_catalog
+      AS $function$
+  BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(73001, 2);
+    REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_entry_event_summaries;
+  END
+  $function$;
+    `);
+    await sql.unsafe(`
+      CREATE OR REPLACE FUNCTION reporting.refresh_tournament_selection_stats()
+      RETURNS void
+      LANGUAGE plpgsql
+      SECURITY DEFINER
+      SET search_path = pg_catalog
+      AS $function$
+  BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(73001, 1);
+    REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.tournament_selection_stats;
+  END
+  $function$;
+    `);
+  });
+}
 
 afterAll(async () => {
   await sql.end();
