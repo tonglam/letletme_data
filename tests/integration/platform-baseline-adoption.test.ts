@@ -27,6 +27,14 @@ const baselineChecksum = createHash('sha256').update(baselineContents, 'utf8').d
 const productionLedgerFixture = await Bun.file(
   'tests/fixtures/platform-production-ledger.sql',
 ).text();
+const fixtureRoleNames = [
+  'adoption_runtime',
+  'letletme_data_runtime',
+  'letletme_graphql_runtime',
+  'letletme_web_auth',
+  'letletme_web_runtime',
+] as const;
+const createdFixtureRoles = new Set<string>();
 
 async function currentDataFingerprint(): Promise<string> {
   return fingerprintPlatformDataManifest(await loadPlatformDataManifest(sql));
@@ -52,45 +60,17 @@ if (process.env.RUN_BASELINE_ADOPTION_INTEGRATION === '1') {
       END
       $$;
     `);
-    await sql.unsafe(`
-      DO $$
-      BEGIN
-        CREATE ROLE adoption_runtime NOLOGIN;
-      EXCEPTION WHEN duplicate_object THEN
-        NULL;
-      END
-      $$;
-    `);
-    await sql.unsafe(`
-      DO $$
-      BEGIN
-        CREATE ROLE letletme_data_runtime NOLOGIN;
-      EXCEPTION WHEN duplicate_object THEN
-        NULL;
-      END
-      $$;
-      DO $$
-      BEGIN
-        CREATE ROLE letletme_graphql_runtime NOLOGIN;
-      EXCEPTION WHEN duplicate_object THEN
-        NULL;
-      END
-      $$;
-      DO $$
-      BEGIN
-        CREATE ROLE letletme_web_auth NOLOGIN;
-      EXCEPTION WHEN duplicate_object THEN
-        NULL;
-      END
-      $$;
-      DO $$
-      BEGIN
-        CREATE ROLE letletme_web_runtime NOLOGIN;
-      EXCEPTION WHEN duplicate_object THEN
-        NULL;
-      END
-      $$;
-    `);
+    const existingRoles = await sql<{ rolname: string }[]>`
+      SELECT rolname
+      FROM pg_roles
+      WHERE rolname = ANY(${fixtureRoleNames as unknown as string[]})
+    `;
+    const existingRoleNames = new Set(existingRoles.map(({ rolname }) => rolname));
+    for (const roleName of fixtureRoleNames) {
+      if (existingRoleNames.has(roleName)) continue;
+      await sql.unsafe(`CREATE ROLE "${roleName}" NOLOGIN`);
+      createdFixtureRoles.add(roleName);
+    }
     await sql`GRANT letletme_data_writer TO letletme_data_runtime`;
     await sql`GRANT letletme_graphql_reader TO letletme_graphql_runtime`;
     await sql`GRANT letletme_web_auth TO letletme_web_runtime`;
@@ -128,6 +108,9 @@ if (process.env.RUN_BASELINE_ADOPTION_INTEGRATION === '1') {
 }
 
 afterAll(async () => {
+  for (const roleName of [...createdFixtureRoles].reverse()) {
+    await sql.unsafe(`DROP ROLE IF EXISTS "${roleName}"`);
+  }
   await sql.end();
 });
 
