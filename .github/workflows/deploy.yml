@@ -107,7 +107,7 @@ jobs:
             data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun -e 'process.stdout.write(process.env.DATABASE_URL ?? "")')
             test -n "$data_runtime_database_url"
-            graphql_containers=$(docker ps --filter label=com.docker.compose.service=graphql --format '{{.ID}}')
+            graphql_containers=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)
             graphql_container_count=$(printf '%s\n' "$graphql_containers" | sed '/^$/d' | wc -l | tr -d ' ')
             test "$graphql_container_count" -eq 1
             graphql_container=$(printf '%s\n' "$graphql_containers" | sed '/^$/d')

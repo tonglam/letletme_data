@@ -96,6 +96,7 @@ export function assertRuntimeDatabaseUrl(
 type DatabaseTarget = {
   readonly databaseName: string;
   readonly hostname: string;
+  readonly port: number;
   readonly projectRef: string | null;
 };
 
@@ -126,6 +127,7 @@ function parseDatabaseTarget(value: string, variableName: string): DatabaseTarge
   return {
     databaseName,
     hostname: parsed.hostname.toLowerCase(),
+    port: parsed.port ? Number.parseInt(parsed.port, 10) : 5432,
     projectRef: directProject ?? usernameProject,
   };
 }
@@ -145,7 +147,8 @@ export function assertRuntimeDatabaseTarget(
     runtime.projectRef !== null &&
     migration.projectRef.toLowerCase() === runtime.projectRef.toLowerCase();
   const sameHost = migration.hostname === runtime.hostname;
-  if (!sameProject && !sameHost) {
+  const samePort = migration.port === runtime.port;
+  if (!sameProject && (!sameHost || !samePort)) {
     throw new Error(`${variableName} must target the same PostgreSQL project as DATABASE_URL`);
   }
 }

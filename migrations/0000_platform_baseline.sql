@@ -74,15 +74,27 @@ BEGIN
     FROM pg_auth_members membership
     JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
     JOIN pg_roles member_role ON member_role.oid = membership.member
-    WHERE granted_role.rolname IN (
-        'letletme_data_owner',
-        'letletme_data_writer',
-        'letletme_graphql_reader'
-    )
+    WHERE (
+        granted_role.rolname IN (
+            'letletme_data_owner',
+            'letletme_data_writer',
+            'letletme_graphql_reader'
+        )
        OR member_role.rolname IN (
-        'letletme_data_owner',
-        'letletme_data_writer',
-        'letletme_graphql_reader'
+            'letletme_data_owner',
+            'letletme_data_writer',
+            'letletme_graphql_reader'
+        )
+    )
+    AND NOT (
+       granted_role.rolname, member_role.rolname
+    ) IN (
+        ('letletme_data_owner', 'postgres'),
+        ('letletme_data_owner', current_user),
+        ('letletme_data_writer', 'postgres'),
+        ('letletme_data_writer', 'letletme_data_runtime'),
+        ('letletme_graphql_reader', 'postgres'),
+        ('letletme_graphql_reader', 'letletme_graphql_runtime')
     );
 
     IF unexpected_memberships IS NOT NULL THEN

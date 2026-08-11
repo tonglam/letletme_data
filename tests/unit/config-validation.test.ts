@@ -43,7 +43,9 @@ describe('production environment preflight', () => {
       'bun run db:provision-runtime-logins --preflight',
     );
     const runtimeUrl = workflow.indexOf('process.env.DATABASE_URL');
-    const graphqlRuntimeUrl = workflow.indexOf('label=com.docker.compose.service=graphql');
+    const graphqlRuntimeUrlV1 = workflow.indexOf('label=com.docker.compose.service=graphql');
+    const graphqlRuntimeUrlV2 = workflow.indexOf('docker compose ps -q graphql');
+    const graphqlRuntimeUrl = Math.max(graphqlRuntimeUrlV1, graphqlRuntimeUrlV2);
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
@@ -88,7 +90,7 @@ describe('production environment preflight', () => {
       /data_runtime_database_url=\$\(compose run --rm -T api bun -e[\s\S]*?DATA_RUNTIME_DATABASE_URL=\$\{data_runtime_database_url\}/,
     );
     expect(deployScript).toMatch(
-      /docker ps --filter label=com\.docker\.compose\.service=graphql[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$\{graphql_runtime_database_url\}/,
+      /(docker compose ps -q graphql|docker ps --filter label=com\.docker\.compose\.service=graphql)[\s\S]*?GRAPHQL_RUNTIME_DATABASE_URL=\$\{graphql_runtime_database_url\}/,
     );
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
