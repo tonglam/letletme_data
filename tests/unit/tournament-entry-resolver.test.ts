@@ -19,10 +19,11 @@ describe('tournament entry resolver', () => {
     expect(result).toEqual([3, 2]);
   });
 
-  test('returns an empty roster when no canonical memberships exist', async () => {
-    const result = await resolveTournamentEntryIds(TEST_SEASON, tournament, {
-      findStoredEntryIds: async () => [],
-    });
-    expect(result).toEqual([]);
+  test('fails closed when the canonical roster is missing', async () => {
+    expect(
+      resolveTournamentEntryIds(TEST_SEASON, tournament, {
+        findStoredEntryIds: async () => [],
+      }),
+    ).rejects.toThrow('has no persisted roster');
   });
 });

@@ -5,7 +5,7 @@ import {
   assertQueueQuiescence,
   cascadeId,
   findUnsettledCascades,
-} from '../../scripts/queue-quiescence-gate';
+} from '../../src/services/deployment-queue-quiescence.service';
 import { queueNames } from '../../src/queues/names';
 
 const accepted = () => ({
@@ -40,7 +40,10 @@ describe('queue quiescence gate', () => {
   });
 
   test('counts paused jobs and scans both sides of the one-time coordination transition', () => {
-    const script = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
+    const script = readFileSync(
+      'src/services/deployment-queue-quiescence-runner.service.ts',
+      'utf8',
+    );
     expect(script).toMatch(/'paused'/);
     expect(script).toMatch(/'llm:queue:coordination:tournament-cascade:\*'/);
     expect(script).toMatch(/'llm:v\*:queue:coordination:tournament-cascade:\*'/);

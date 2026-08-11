@@ -22,6 +22,7 @@ describe('canonical platform contract migration', () => {
     expect(migration).toMatch(/metadata - ARRAY\[\n  'legacy_cache_revision'/);
     expect(migration).toMatch(/normalized_payload \?\| ARRAY\['version'/);
     expect(migration).toContain('manifest = jsonb_build_object(');
+    expect(migration).toContain('tournament without a persisted roster requires explicit repair');
   });
 
   test('requires one current core publication without rejecting active live scopes', () => {

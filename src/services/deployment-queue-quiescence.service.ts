@@ -1,3 +1,4 @@
+/** Pure deployment quiescence rules shared by runtime checks and tests. */
 export type RunnableQueueCounts = Readonly<Record<string, number>>;
 
 export type QueueQuiescenceSnapshot = {

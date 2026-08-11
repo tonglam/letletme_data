@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 import { Queue, type JobType } from 'bullmq';
 import Redis from 'ioredis';
 import postgres from 'postgres';
@@ -6,10 +5,11 @@ import postgres from 'postgres';
 import {
   assertQueueQuiescence,
   findUnsettledCascades,
+  type QueueQuiescenceSnapshot,
   type RunnableQueueCounts,
-} from './queue-quiescence-gate';
-import { queueNames } from '../src/queues/names';
-import { getConfig, resolveQueueRedisConfig } from '../src/utils/config';
+} from './deployment-queue-quiescence.service';
+import { queueNames } from '../queues/names';
+import { getConfig, resolveQueueRedisConfig } from '../utils/config';
 
 const RUNNABLE_JOB_TYPES = [
   'waiting',
@@ -35,8 +35,7 @@ async function scan(redis: Redis, pattern: string): Promise<string[]> {
   return [...new Set(keys)].sort();
 }
 
-async function main(): Promise<void> {
-  if (process.argv.length !== 2) throw new Error('Queue quiescence check takes no arguments');
+export async function inspectAndAssertDeploymentQueueQuiescence(): Promise<QueueQuiescenceSnapshot> {
   const config = getConfig();
   const databaseUrl = config.DATABASE_URL.trim();
   const queueConnection = resolveQueueRedisConfig(config);
@@ -81,15 +80,10 @@ async function main(): Promise<void> {
       unsettledCascadeIds: findUnsettledCascades(cascadeKeyGroups.flat()),
     };
     assertQueueQuiescence(snapshot);
-    console.log(JSON.stringify({ status: 'queue_quiescence_passed', ...snapshot }, null, 2));
+    return snapshot;
   } finally {
     await Promise.allSettled(queues.map((queue) => queue.close()));
     redis.disconnect();
     await database.end();
   }
 }
-
-main().catch((error) => {
-  console.error('[queue-quiescence] failed', error);
-  process.exitCode = 1;
-});

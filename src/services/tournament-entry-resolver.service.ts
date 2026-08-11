@@ -18,5 +18,9 @@ export async function resolveTournamentEntryIds(
   tournament: TournamentInfoSummary,
   dependencies: TournamentEntryResolverDependencies = defaultDependencies,
 ): Promise<number[]> {
-  return uniqueNumbers(await dependencies.findStoredEntryIds(season, tournament.id));
+  const entries = uniqueNumbers(await dependencies.findStoredEntryIds(season, tournament.id));
+  if (entries.length === 0) {
+    throw new Error(`Tournament ${tournament.id} has no persisted roster`);
+  }
+  return entries;
 }

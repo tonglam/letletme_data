@@ -35,16 +35,17 @@ describe('production environment preflight', () => {
 
   test('validates identity and quiescence before migration, then publishes before restart', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
-    const preflight = workflow.indexOf('bun run env:check');
-    const identityContract = workflow.indexOf('bun run db:migration-contract');
-    const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
-    const quiescence = workflow.indexOf('bun run ops:assert-queue-quiescence');
-    const migrate = workflow.indexOf('bun run db:migrate');
-    const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
-    const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute');
-    const publishLive = workflow.indexOf('bun run cache:publish-live -- --execute');
-    const migrateRedis = workflow.indexOf('bun run ops:migrate-retired-redis -- --execute');
-    const replaceServices = workflow.indexOf('docker compose up -d', migrateRedis);
+    const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+    const preflight = deployScript.indexOf('bun run env:check');
+    const identityContract = deployScript.indexOf('bun run db:migration-contract');
+    const stopServices = deployScript.indexOf('compose stop -t 45 api worker');
+    const quiescence = deployScript.indexOf('inspectAndAssertDeploymentQueueQuiescence');
+    const migrate = deployScript.indexOf('bun run db:migrate');
+    const canonicalContract = deployScript.indexOf('bun run db:migration-contract', migrate);
+    const publishCore = deployScript.indexOf('bun run cache:publish-core -- --execute');
+    const publishLive = deployScript.indexOf('publishActiveLiveCachesForDeployment');
+    const migrateRedis = deployScript.indexOf('migrateRetiredRedisStateForDeployment');
+    const replaceServices = deployScript.indexOf('compose up -d', migrateRedis);
 
     expect(preflight).toBeGreaterThan(0);
     expect(identityContract).toBeGreaterThan(preflight);
@@ -57,6 +58,7 @@ describe('production environment preflight', () => {
     expect(migrateRedis).toBeGreaterThan(publishLive);
     expect(replaceServices).toBeGreaterThan(migrateRedis);
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(workflow).toContain('APP_IMAGE="$IMAGE_REF" bash scripts/deploy.sh deploy');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
@@ -66,7 +68,7 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 api worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T api bun run ops:assert-queue-quiescence; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T api bun -e '[\s\S]*?inspectAndAssertDeploymentQueueQuiescence[\s\S]*?then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?compose start api worker/);
   });

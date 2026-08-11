@@ -9,7 +9,7 @@ import { queueRedisSingleton } from '../../src/queues/redis';
 import {
   buildCoordinationMigrationPairs,
   moveCoordinationKeys,
-} from '../../scripts/migrate-retired-redis-state';
+} from '../../src/services/deployment-redis-transition.service';
 
 const CACHE_PROBE = 'llm:data:test:cache-client-probe';
 const QUEUE_PROBE = 'llm:queue:coordination:test:queue-client-probe';
@@ -44,10 +44,12 @@ describe('cache and queue Redis client separation', () => {
     await queue.set(RETIRED_COORDINATION_PROBE, 'preserved', 'PX', 60_000);
     const beforeTtl = await queue.pttl(RETIRED_COORDINATION_PROBE);
 
-    await moveCoordinationKeys(
-      queue,
-      buildCoordinationMigrationPairs([RETIRED_COORDINATION_PROBE]),
-    );
+    expect(
+      await moveCoordinationKeys(
+        queue,
+        buildCoordinationMigrationPairs([RETIRED_COORDINATION_PROBE]),
+      ),
+    ).toBe(1);
 
     expect(await queue.exists(RETIRED_COORDINATION_PROBE)).toBe(0);
     expect(await queue.get(CANONICAL_COORDINATION_PROBE)).toBe('preserved');
@@ -61,5 +63,14 @@ describe('cache and queue Redis client separation', () => {
     ).rejects.toThrow('target_exists');
     expect(await queue.get(RETIRED_COORDINATION_PROBE)).toBe('source');
     expect(await queue.get(CANONICAL_COORDINATION_PROBE)).toBe('preserved');
+
+    await queue.unlink(RETIRED_COORDINATION_PROBE, CANONICAL_COORDINATION_PROBE);
+    expect(
+      await moveCoordinationKeys(
+        queue,
+        buildCoordinationMigrationPairs([RETIRED_COORDINATION_PROBE]),
+      ),
+    ).toBe(0);
+    expect(await queue.exists(CANONICAL_COORDINATION_PROBE)).toBe(0);
   });
 });

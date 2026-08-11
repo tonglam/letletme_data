@@ -5,7 +5,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildCoordinationMigrationPairs,
   canonicalCoordinationKey,
-} from '../../scripts/migrate-retired-redis-state';
+} from '../../src/services/deployment-redis-transition.service';
 import {
   decodeRetiredDataPublicationItems,
   isRetiredDataKey,
@@ -13,7 +13,7 @@ import {
   parseRetiredDataPublicationManifest,
   retiredDataActivePattern,
   type ActivePublicationIdentity,
-} from '../../scripts/retired-data-publication';
+} from '../../src/services/retired-data-publication.service';
 
 const identity: ActivePublicationIdentity = {
   dataset: 'fpl:live',

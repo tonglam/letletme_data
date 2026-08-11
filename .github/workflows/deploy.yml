@@ -100,34 +100,7 @@ jobs:
             test -n "$old_image"
             printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
 
-            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
-              bun run db:migration-contract
-
-            migration_started=false
-            restore_before_migration() {
-              if [ "$migration_started" = false ]; then
-                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
-              fi
-            }
-            trap restore_before_migration ERR
-
-            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun run ops:assert-queue-quiescence
-            migration_started=true
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:apply-sql
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun run cache:publish-core -- --execute
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun run cache:publish-live -- --execute
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun run ops:migrate-retired-redis -- --execute
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
+            APP_IMAGE="$IMAGE_REF" bash scripts/deploy.sh deploy
 
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:3000/health >/dev/null \
@@ -157,6 +130,5 @@ jobs:
               sleep 2
             done
 
-            trap - ERR
             docker compose ps
             docker image prune --force

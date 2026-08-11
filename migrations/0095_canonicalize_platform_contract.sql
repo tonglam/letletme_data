@@ -56,6 +56,19 @@ BEGIN
     RAISE EXCEPTION 'unexpected bridge.match_links rows require an explicit rule migration';
   END IF;
 
+  IF EXISTS (
+    SELECT 1
+    FROM competition.tournaments tournament
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM competition.tournament_entries entry_row
+      WHERE entry_row.season_id = tournament.season_id
+        AND entry_row.tournament_id = tournament.tournament_id
+    )
+  ) THEN
+    RAISE EXCEPTION 'tournament without a persisted roster requires explicit repair';
+  END IF;
+
   SELECT
     count(*) FILTER (WHERE metadata ? 'legacy_cache_revision'),
     count(*) FILTER (WHERE metadata ? 'legacy_publication_skip_reason')

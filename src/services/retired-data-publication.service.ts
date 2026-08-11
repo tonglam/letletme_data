@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { DataPublicationDataset, DataPublicationState } from '../src/cache/data-publication';
+import type { DataPublicationDataset, DataPublicationState } from '../cache/data-publication';
 
 export interface ActivePublicationIdentity {
   readonly dataset: DataPublicationDataset;
