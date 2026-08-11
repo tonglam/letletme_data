@@ -141,6 +141,8 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           DATA_RUNTIME_DB_PASSWORD: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
           GRAPHQL_RUNTIME_DB_PASSWORD: gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
+          DATA_RUNTIME_DATABASE_URL: postgresql://letletme_data_runtime:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd@127.0.0.1:5432/ci
+          GRAPHQL_RUNTIME_DATABASE_URL: postgresql://letletme_graphql_runtime:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg@127.0.0.1:5432/ci
         run: |
           bun run db:provision-runtime-logins
           bun run db:provision-runtime-logins
