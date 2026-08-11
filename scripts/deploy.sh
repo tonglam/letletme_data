@@ -146,6 +146,10 @@ deploy() {
     log_error "Runtime LOGIN provisioning failed; services remain stopped for a forward fix."
     exit 1
   fi
+  log_info "Waiting for Supavisor credentials to converge"
+  for _ in 1 2; do
+    sleep 60
+  done
   if ! compose run --rm -T migration bun run db:migration-contract; then
     log_error "Migration LOGIN contract failed after migrations."
     exit 1
