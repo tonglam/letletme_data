@@ -77,9 +77,14 @@ deploy() {
   fi
   data_runtime_database_password=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '\n=')
   [[ "${data_runtime_database_password}" =~ ^[A-Za-z0-9_-]{64}$ ]]
+  runtime_database_project_ref=$(sed -n 's/^SUPABASE_URL=//p' "${ENV_FILE}" \
+    | sed -e 's/^"//' -e 's/"$//' \
+    | sed -n 's#^https\?://\([^.]*\)\.supabase\.co.*#\1#p')
+  runtime_database_project_ref=${runtime_database_project_ref:-gtwcfjoviibmtkevurjw}
   data_runtime_database_url=$(compose run --rm -T \
     -e "DATABASE_URL=${data_runtime_database_url}" \
     -e "RUNTIME_DATABASE_SOURCE_URL=${migration_database_url}" \
+    -e "RUNTIME_DATABASE_PROJECT_REF=${runtime_database_project_ref}" \
     -e "RUNTIME_DATABASE_PASSWORD=${data_runtime_database_password}" migration \
     bun scripts/format-runtime-database-url.ts replace-password)
   graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')

@@ -13,6 +13,13 @@ function projectSuffix(value: string, allowDirectHost: boolean): string {
   const username = decodeURIComponent(source.username);
   const separator = username.indexOf('.');
   if (separator >= 0) return username.slice(separator);
+  const explicitProject = process.env.RUNTIME_DATABASE_PROJECT_REF?.trim();
+  if (explicitProject) {
+    if (!/^[a-z0-9]+$/i.test(explicitProject)) {
+      throw new Error('RUNTIME_DATABASE_PROJECT_REF must be alphanumeric');
+    }
+    return `.${explicitProject}`;
+  }
   if (!allowDirectHost) return '';
   const directProject = source.hostname.match(/^db\.([^.]+)\.supabase\.co$/i)?.[1];
   return directProject ? `.${directProject}` : '';
