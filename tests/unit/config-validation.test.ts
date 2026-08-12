@@ -41,7 +41,7 @@ describe('production environment preflight', () => {
 
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '5' })).toBe(0);
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '0' })).not.toBe(0);
-    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '11' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '6' })).not.toBe(0);
   });
 
   test('validates identity and quiescence before migration, then publishes before restart', () => {
