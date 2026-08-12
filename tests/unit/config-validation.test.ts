@@ -70,8 +70,8 @@ describe('production environment preflight', () => {
     expect(replaceServices).toBeGreaterThan(publishCore);
     expect(workflow).toContain('runtime_env_file=$(mktemp)');
     expect(workflow).toContain('export ENV_FILE="$runtime_env_file"');
-    expect(workflow).toContain('rotating the Data runtime credential');
-    expect(workflow).toContain('openssl rand -base64 48');
+    expect(workflow).toContain('reusing the configured Data runtime credential');
+    expect(workflow).toContain('bun scripts/format-runtime-database-url.ts extract-password');
     expect(workflow).toContain('bun scripts/format-runtime-database-url.ts replace-password');
     expect(workflow).toContain('DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password');
     expect(workflow).toContain('GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password');
@@ -98,7 +98,7 @@ describe('production environment preflight', () => {
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(deployScript).toContain('bun run db:provision-runtime-logins --preflight');
     expect(deployScript).toContain('bun run db:provision-runtime-logins;');
-    expect(deployScript).toContain('openssl rand -base64 48');
+    expect(deployScript).toContain('bun scripts/format-runtime-database-url.ts extract-password');
     expect(deployScript).toContain('bun scripts/format-runtime-database-url.ts replace-password');
     expect(deployScript).toContain('sleep 60');
     expect(deployScript).toContain('Waiting for the migration Pooler circuit breaker to clear');
