@@ -73,6 +73,10 @@ describe('production environment preflight', () => {
     expect(workflow).toContain('reusing the configured Data runtime credential');
     expect(workflow).toContain('bun scripts/format-runtime-database-url.ts extract-password');
     expect(workflow).toContain('bun scripts/format-runtime-database-url.ts replace-password');
+    expect(workflow).toContain(
+      'GRAPHQL_RUNTIME_DB_PASSWORD: ${{ secrets.GRAPHQL_RUNTIME_DB_PASSWORD }}',
+    );
+    expect(workflow).toContain('VPS_WORKDIR,GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(workflow).toContain('DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password');
     expect(workflow).toContain('GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password');
     expect(workflow).toContain('RUNTIME_DATABASE');
