@@ -8,7 +8,9 @@ import {
   DATA_RUNTIME_LOGIN,
   GRAPHQL_RUNTIME_CAPABILITY,
   GRAPHQL_RUNTIME_LOGIN,
+  isRetryableRuntimeConnectionFailure,
   parseRuntimeLoginBootstrapArgs,
+  verifyRuntimeConnectionWithRetry,
   type RuntimeLoginSnapshot,
 } from '../../scripts/runtime-login-contract';
 
@@ -120,13 +122,14 @@ describe('production runtime LOGIN contract', () => {
   });
 
   test('requires a complete runtime URL for the selected role', () => {
+    const initialSecret = 'd'.repeat(64);
     expect(
       assertRuntimeDatabaseUrl(
-        'postgresql://letletme_data_runtime:initial-secret@db.example/postgres',
+        `postgresql://letletme_data_runtime:${initialSecret}@db.example/postgres`,
         DATA_RUNTIME_LOGIN,
         'RUNTIME_DATABASE_URL',
       ),
-    ).toEqual({ password: 'initial-secret' });
+    ).toEqual({ password: initialSecret });
     expect(() =>
       assertRuntimeDatabaseUrl(
         'postgresql://letletme_graphql_runtime.projectref@db.example/postgres',
@@ -141,6 +144,57 @@ describe('production runtime LOGIN contract', () => {
         'RUNTIME_DATABASE_URL',
       ),
     ).toThrow(`must include ${DATA_RUNTIME_LOGIN}`);
+    expect(() =>
+      assertRuntimeDatabaseUrl(
+        'postgresql://letletme_data_runtime:initial-secret@db.example/postgres',
+        DATA_RUNTIME_LOGIN,
+        'RUNTIME_DATABASE_URL',
+      ),
+    ).toThrow('exact 64-character base64url secret');
+  });
+
+  test('retries a newly created runtime login until pooler authentication propagates', async () => {
+    let attempts = 0;
+    const waits: number[] = [];
+    const result = await verifyRuntimeConnectionWithRetry(
+      async () => {
+        attempts += 1;
+        if (attempts < 3) {
+          throw Object.assign(new Error('password authentication failed'), { code: '28P01' });
+        }
+        return 'verified';
+      },
+      {
+        retryAuthentication: true,
+        retryDelaysMs: [0, 1, 2],
+        wait: async (milliseconds) => {
+          waits.push(milliseconds);
+        },
+      },
+    );
+    expect(result).toBe('verified');
+    expect(attempts).toBe(3);
+    expect(waits).toEqual([1, 2]);
+  });
+
+  test('fails stale existing credentials and configuration errors without retrying', async () => {
+    const authenticationError = Object.assign(new Error('password authentication failed'), {
+      code: '28P01',
+    });
+    expect(isRetryableRuntimeConnectionFailure(authenticationError, true)).toBe(true);
+    expect(isRetryableRuntimeConnectionFailure(authenticationError, false)).toBe(false);
+
+    let attempts = 0;
+    await expect(
+      verifyRuntimeConnectionWithRetry(
+        async () => {
+          attempts += 1;
+          throw new Error('runtime role has an unexpected membership');
+        },
+        { retryAuthentication: true, retryDelaysMs: [0, 1], wait: async () => undefined },
+      ),
+    ).rejects.toThrow('unexpected membership');
+    expect(attempts).toBe(1);
   });
 
   test('requires runtime URLs to target the migration database', () => {

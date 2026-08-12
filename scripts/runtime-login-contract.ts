@@ -78,6 +78,8 @@ type ParsedRuntimeDatabaseUrl = {
   readonly password: string;
 };
 
+const RUNTIME_PASSWORD_PATTERN = /^[A-Za-z0-9_-]{64}$/;
+
 export function assertRuntimeDatabaseUrl(
   value: string,
   expectedRole: string,
@@ -103,6 +105,9 @@ export function assertRuntimeDatabaseUrl(
   const roleMatches = username === expectedRole || username.startsWith(`${expectedRole}.`);
   if (!parsed.hostname || !roleMatches || !password) {
     throw new Error(`${variableName} must include ${expectedRole} and its initial password`);
+  }
+  if (!RUNTIME_PASSWORD_PATTERN.test(password)) {
+    throw new Error(`${variableName} password must be an exact 64-character base64url secret`);
   }
   return { password };
 }
@@ -383,6 +388,100 @@ export async function bootstrapRuntimeLogin(
   );
   assertRuntimeTargetSnapshot(await inspectRuntimeLogins(client), target, true);
   return true;
+}
+
+export type RuntimeConnectionVerificationOptions = {
+  readonly retryAuthentication: boolean;
+  readonly retryDelaysMs?: readonly number[];
+  readonly wait?: (milliseconds: number) => Promise<void>;
+};
+
+const DEFAULT_RUNTIME_CONNECTION_RETRY_DELAYS_MS = [
+  0, 1_000, 2_000, 5_000, 10_000, 15_000, 27_000,
+] as const;
+
+function errorText(error: unknown): string {
+  if (error instanceof Error) {
+    const code = 'code' in error ? String(error.code) : '';
+    return `${code} ${error.message}`;
+  }
+  return String(error);
+}
+
+export function isRetryableRuntimeConnectionFailure(
+  error: unknown,
+  retryAuthentication: boolean,
+): boolean {
+  const output = errorText(error);
+  if (/28P01|password authentication failed|invalid authorization specification/i.test(output)) {
+    return retryAuthentication;
+  }
+  return /ECIRCUITBREAKER|CONNECT_TIMEOUT|ETIMEDOUT|ECONN(?:RESET|REFUSED|ABORTED)|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|connection terminated unexpectedly|server closed the connection unexpectedly|cannot connect now|remaining connection slots|timeout expired/i.test(
+    output,
+  );
+}
+
+export async function verifyRuntimeConnectionWithRetry<T>(
+  verify: () => Promise<T>,
+  options: RuntimeConnectionVerificationOptions,
+): Promise<T> {
+  const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RUNTIME_CONNECTION_RETRY_DELAYS_MS;
+  if (
+    retryDelaysMs.length === 0 ||
+    retryDelaysMs.some((delay) => !Number.isInteger(delay) || delay < 0)
+  ) {
+    throw new TypeError('Runtime connection retry delays must be non-negative and non-empty');
+  }
+  const wait = options.wait ?? ((milliseconds: number) => Bun.sleep(milliseconds));
+  let lastError: unknown;
+  for (const retryDelayMs of retryDelaysMs) {
+    if (retryDelayMs > 0) await wait(retryDelayMs);
+    try {
+      return await verify();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableRuntimeConnectionFailure(error, options.retryAuthentication)) {
+        throw error;
+      }
+    }
+  }
+  throw new Error('Runtime LOGIN connection did not become ready within 60 seconds', {
+    cause: lastError,
+  });
+}
+
+export async function verifyRuntimeLoginConnection(
+  runtimeDatabaseUrl: string,
+  target: RuntimeLoginTarget,
+  retryAuthentication: boolean,
+): Promise<void> {
+  const contract = targetContracts[target];
+  await verifyRuntimeConnectionWithRetry(
+    async () => {
+      const client = postgres(runtimeDatabaseUrl, {
+        max: 1,
+        prepare: false,
+        connect_timeout: 5,
+        idle_timeout: 1,
+        connection: { statement_timeout: 5_000 },
+      });
+      try {
+        const [identity] = await client<Array<{ role_name: string; capability_member: boolean }>>`
+          SELECT
+            current_user AS role_name,
+            pg_has_role(current_user, ${contract.capability}, 'MEMBER') AS capability_member
+        `;
+        if (identity?.role_name !== contract.login || !identity.capability_member) {
+          throw new Error(
+            `Runtime connection must authenticate as ${contract.login} with ${contract.capability}`,
+          );
+        }
+      } finally {
+        await client.end({ timeout: 0 });
+      }
+    },
+    { retryAuthentication },
+  );
 }
 
 export function runtimeLoginContract(target: RuntimeLoginTarget): {

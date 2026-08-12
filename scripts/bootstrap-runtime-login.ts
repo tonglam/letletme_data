@@ -8,6 +8,7 @@ import {
   parseRuntimeLoginBootstrapArgs,
   requiredEnvironment,
   runtimeLoginContract,
+  verifyRuntimeLoginConnection,
 } from './runtime-login-contract';
 
 async function main(): Promise<void> {
@@ -27,6 +28,7 @@ async function main(): Promise<void> {
     const credentialMutated = await client.begin((transaction) =>
       bootstrapRuntimeLogin(transaction, target, password),
     );
+    await verifyRuntimeLoginConnection(runtimeDatabaseUrl, target, credentialMutated);
     console.log(
       JSON.stringify(
         {
@@ -34,6 +36,7 @@ async function main(): Promise<void> {
           target,
           runtimeLogin: contract.login,
           credentialMutated,
+          runtimeConnectionVerified: true,
           outcome: credentialMutated ? 'created' : 'verified-existing',
         },
         null,
