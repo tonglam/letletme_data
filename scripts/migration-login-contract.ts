@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
 
-  const sql = postgres(databaseUrl, { max: 1, prepare: false });
+  const sql = postgres(databaseUrl, { connect_timeout: 10, max: 1, prepare: false });
   try {
     if (preflight) {
       const rows = await sql<PreflightRow[]>`

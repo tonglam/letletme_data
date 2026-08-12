@@ -27,7 +27,8 @@
     "db:migrate": "bun scripts/apply-sql-migrations.ts",
     "db:studio": "bunx drizzle-kit studio",
     "db:migration-contract": "bun scripts/migration-login-contract.ts",
-    "db:provision-runtime-logins": "bun scripts/provision-runtime-logins.ts",
+    "db:verify-runtime-logins": "bun scripts/verify-runtime-logins.ts",
+    "db:bootstrap-runtime-login": "bun scripts/bootstrap-runtime-login.ts",
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
     "cache:publish-core": "bun scripts/publish-core-cache.ts",
     "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts"

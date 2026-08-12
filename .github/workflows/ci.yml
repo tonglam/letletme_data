@@ -125,16 +125,30 @@ jobs:
           bun run db:migrate
           bun run db:migrate:status
 
-      - name: Provision disposable runtime logins
+      - name: Bootstrap and verify disposable runtime logins
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-          DATA_RUNTIME_DB_PASSWORD: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-          GRAPHQL_RUNTIME_DB_PASSWORD: gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
           DATA_RUNTIME_DATABASE_URL: postgresql://letletme_data_runtime:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd@127.0.0.1:5432/ci
+          SHARED_GRAPHQL_RUNTIME_DATABASE_URL: postgresql://letletme_graphql_runtime:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd@127.0.0.1:5432/ci
           GRAPHQL_RUNTIME_DATABASE_URL: postgresql://letletme_graphql_runtime:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg@127.0.0.1:5432/ci
         run: |
-          bun run db:provision-runtime-logins
-          bun run db:provision-runtime-logins
+          RUNTIME_DATABASE_URL="$DATA_RUNTIME_DATABASE_URL" \
+            bun run db:bootstrap-runtime-login -- --target=data
+          if RUNTIME_DATABASE_URL="$SHARED_GRAPHQL_RUNTIME_DATABASE_URL" \
+            bun run db:bootstrap-runtime-login -- --target=graphql; then
+            echo "bootstrap accepted a password already used by the Data runtime login" >&2
+            exit 1
+          fi
+          RUNTIME_DATABASE_URL="$GRAPHQL_RUNTIME_DATABASE_URL" \
+            bun run db:bootstrap-runtime-login -- --target=graphql
+          RUNTIME_DATABASE_URL="$DATA_RUNTIME_DATABASE_URL" \
+            bun run db:bootstrap-runtime-login -- --target=data
+          RUNTIME_DATABASE_URL="$GRAPHQL_RUNTIME_DATABASE_URL" \
+            bun run db:bootstrap-runtime-login -- --target=graphql
+          password_hashes_before=$(bun -e 'import postgres from "postgres"; const sql = postgres(process.env.DATABASE_URL, { max: 1 }); const rows = await sql`SELECT rolname, rolpassword FROM pg_authid WHERE rolname = ANY(${["letletme_data_runtime", "letletme_graphql_runtime"]}::text[]) ORDER BY rolname`; process.stdout.write(JSON.stringify(rows)); await sql.end();')
+          bun run db:verify-runtime-logins
+          password_hashes_after=$(bun -e 'import postgres from "postgres"; const sql = postgres(process.env.DATABASE_URL, { max: 1 }); const rows = await sql`SELECT rolname, rolpassword FROM pg_authid WHERE rolname = ANY(${["letletme_data_runtime", "letletme_graphql_runtime"]}::text[]) ORDER BY rolname`; process.stdout.write(JSON.stringify(rows)); await sql.end();')
+          test "$password_hashes_before" = "$password_hashes_after"
 
       - name: Build disposable Drizzle schema export
         env:

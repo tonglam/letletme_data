@@ -21,6 +21,23 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+ACTIVE_DEPLOY_STAGE=''
+DEPLOY_STAGE_STARTED_AT=0
+
+start_stage() {
+  ACTIVE_DEPLOY_STAGE=$1
+  DEPLOY_STAGE_STARTED_AT=$(date +%s)
+}
+
+finish_stage() {
+  local finished_at duration_ms
+  finished_at=$(date +%s)
+  duration_ms=$(((finished_at - DEPLOY_STAGE_STARTED_AT) * 1000))
+  printf '{"event":"deploy_stage_timing","stage":"%s","outcome":"passed","durationMs":%s}\n' \
+    "${ACTIVE_DEPLOY_STAGE}" "${duration_ms}"
+  ACTIVE_DEPLOY_STAGE=''
+}
+
 require_compose() {
   if ! command -v "${COMPOSE_CMD[0]}" >/dev/null 2>&1; then
     log_error "${COMPOSE_BIN} is not available. Install Docker + compose plugin first."
@@ -57,6 +74,7 @@ restore_stopped_services() {
 deploy() {
   require_compose
   require_files
+  start_stage pull
   if [[ -n "${APP_IMAGE:-}" ]]; then
     export APP_IMAGE
     log_info "Pulling the configured application image"
@@ -65,6 +83,7 @@ deploy() {
     log_info "Building containers"
     compose build --pull
   fi
+  finish_stage
   migration_database_url=$(sed -n 's/^DATABASE_URL=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   if [[ -z "${migration_database_url}" ]]; then
     log_error "DATABASE_URL missing from ${MIGRATION_ENV_FILE}"
@@ -75,66 +94,20 @@ deploy() {
     log_error "DATABASE_URL missing from ${ENV_FILE}"
     exit 1
   fi
-  data_runtime_database_password=$(compose run --rm -T \
-    -e "DATABASE_URL=${data_runtime_database_url}" migration \
-    bun scripts/format-runtime-database-url.ts extract-password)
-  [[ "${data_runtime_database_password}" =~ ^[A-Za-z0-9_-]{64}$ ]]
-  runtime_database_project_ref=$(sed -n 's/^SUPABASE_URL=//p' "${ENV_FILE}" \
-    | sed -e 's/^"//' -e 's/"$//' \
-    | sed -n 's#^https\?://\([^.]*\)\.supabase\.co.*#\1#p')
-  runtime_database_project_ref=${runtime_database_project_ref:-gtwcfjoviibmtkevurjw}
-  data_runtime_database_url=$(compose run --rm -T \
-    -e "DATABASE_URL=${data_runtime_database_url}" \
-    -e "RUNTIME_DATABASE_SOURCE_URL=${migration_database_url}" \
-    -e "RUNTIME_DATABASE_PROJECT_REF=${runtime_database_project_ref}" \
-    -e "RUNTIME_DATABASE_PASSWORD=${data_runtime_database_password}" migration \
-    bun scripts/format-runtime-database-url.ts replace-password)
-  graphql_runtime_database_password=${GRAPHQL_RUNTIME_DB_PASSWORD:-$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')}
-  if [[ -z "${graphql_runtime_database_password}" ]]; then
-    log_error "GRAPHQL_RUNTIME_DB_PASSWORD missing from ${MIGRATION_ENV_FILE}"
-    exit 1
-  fi
-  graphql_runtime_database_url=$(compose run --rm -T \
-    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" migration \
-    bun scripts/format-runtime-database-url.ts derive-graphql)
-  graphql_runtime_database_url=$(compose run --rm -T \
-    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" \
-    -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=${graphql_runtime_database_password}" migration \
-    bun scripts/format-runtime-database-url.ts with-password)
-  runtime_env_file=$(mktemp)
-  configured_env_file="${ENV_FILE}"
-  awk '!/^DATABASE_URL=/' "${ENV_FILE}" >"${runtime_env_file}"
-  printf 'DATABASE_URL="%s"\n' "${data_runtime_database_url}" >>"${runtime_env_file}"
-  export ENV_FILE="${runtime_env_file}"
-  cleanup_runtime_env() {
-    if [[ -n "${runtime_env_file}" ]]; then
-      rm -f "${runtime_env_file}" "${runtime_env_file}.bak"
-    fi
-  }
-  trap cleanup_runtime_env EXIT
+  start_stage preflight
+  log_info "Using the configured Data runtime URL without rewriting it"
   log_info "Validating the application environment"
   if ! compose run --rm -T api bun run env:check; then
     log_error "Application environment contract failed; services were not stopped."
     exit 1
   fi
-  log_info "Waiting for the migration Pooler circuit breaker to clear"
-  for _ in 1 2 3; do
-    sleep 60
-  done
-  log_info "Validating the migration LOGIN before service shutdown"
-  if ! compose run --rm -T migration bun scripts/migration-login-contract.ts --preflight; then
+  log_info "Probing the migration LOGIN for at most 120 seconds"
+  if ! compose run --rm -T migration bun scripts/wait-for-migration-login.ts; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
-  if ! compose run --rm -T \
-    -e "DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}" \
-    -e "GRAPHQL_RUNTIME_DB_PASSWORD=${graphql_runtime_database_password}" \
-    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
-    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
-    bun run db:provision-runtime-logins --preflight; then
-    log_error "Runtime LOGIN provisioning inputs failed; services were not stopped."
-    exit 1
-  fi
+  finish_stage
+  start_stage quiescence
   log_info "Stopping services and waiting for workers to settle"
   if ! compose stop -t 45 api worker; then
     log_error "Services did not stop cleanly; migration was not started."
@@ -151,6 +124,8 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
+  finish_stage
+  start_stage migration
   log_info "Running migrations"
   if ! compose run --rm -T migration bun run db:migrate; then
     log_error "SQL migrations failed; aborting deploy before services start."
@@ -161,19 +136,14 @@ deploy() {
     log_error "Migration LOGIN contract failed after migrations."
     exit 1
   fi
-  if ! compose run --rm -T \
-    -e "DATA_RUNTIME_DB_PASSWORD=${data_runtime_database_password}" \
-    -e "GRAPHQL_RUNTIME_DB_PASSWORD=${graphql_runtime_database_password}" \
-    -e "DATA_RUNTIME_DATABASE_URL=${data_runtime_database_url}" \
-    -e "GRAPHQL_RUNTIME_DATABASE_URL=${graphql_runtime_database_url}" migration \
-    bun run db:provision-runtime-logins; then
-    log_error "Runtime LOGIN provisioning failed; services remain stopped for a forward fix."
+  finish_stage
+  start_stage roleVerify
+  if ! compose run --rm -T migration bun run db:verify-runtime-logins; then
+    log_error "Runtime LOGIN verification failed; services remain stopped for a forward fix."
     exit 1
   fi
-  log_info "Waiting for Supavisor credentials to converge"
-  for _ in 1 2 3 4 5; do
-    sleep 60
-  done
+  finish_stage
+  start_stage cachePublish
   log_info "Publishing and verifying the canonical core cache"
   if ! compose run --rm -T \
     -e "DATABASE_URL=${data_runtime_database_url}" api \
@@ -181,14 +151,13 @@ deploy() {
     log_error "Core cache publication failed; services remain stopped for a forward fix."
     exit 1
   fi
+  finish_stage
+  start_stage serviceReady
   log_info "Starting services"
   compose up -d --remove-orphans
-  chmod 600 "${runtime_env_file}"
-  mv "${runtime_env_file}" "${configured_env_file}"
-  runtime_env_file=''
-  export ENV_FILE="${configured_env_file}"
   log_info "Current service status"
   compose ps
+  finish_stage
 }
 
 update_repo() {
