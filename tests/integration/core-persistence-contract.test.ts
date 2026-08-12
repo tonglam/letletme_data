@@ -302,6 +302,49 @@ persistenceTest(
       }));
       await marketRepository.upsertCompleteDay(season, 3, laterMarketSnapshots, 2);
 
+      const valueChanges = await client<
+        Array<{
+          element_id: number;
+          snapshot_date: string;
+          value: number;
+          last_value: number;
+          change_type: string;
+          value_change: number;
+        }>
+      >`
+        SELECT
+          element_id,
+          snapshot_date::text,
+          value,
+          last_value,
+          change_type,
+          value_change
+        FROM reporting.player_value_changes
+        WHERE season_id = 2026
+          AND element_id IN ${client(marketSnapshots.map((snapshot) => snapshot.elementId))}
+        ORDER BY element_id, snapshot_date
+      `;
+      expect([...valueChanges]).toEqual(
+        marketSnapshots.flatMap((snapshot) => [
+          {
+            element_id: snapshot.elementId,
+            snapshot_date: snapshot.snapshotDate,
+            value: snapshot.price,
+            last_value: 0,
+            change_type: 'start',
+            value_change: snapshot.price,
+          },
+          {
+            element_id: snapshot.elementId,
+            snapshot_date: '2026-08-10',
+            value: snapshot.price + 1,
+            last_value: snapshot.price,
+            change_type: 'rise',
+            value_change: 1,
+          },
+        ]),
+      );
+
       const valuesRepository = createPlayerValuesRepository(db);
       const beforeLaterCapture = await valuesRepository.findLatestForPlayerIds(
         season,
