@@ -1,0 +1,53 @@
+/* eslint-disable no-console */
+import postgres from 'postgres';
+
+import {
+  assertRuntimeDatabaseTarget,
+  assertRuntimeDatabaseUrl,
+  bootstrapRuntimeLogin,
+  parseRuntimeLoginBootstrapArgs,
+  requiredEnvironment,
+  runtimeLoginContract,
+} from './runtime-login-contract';
+
+async function main(): Promise<void> {
+  const target = parseRuntimeLoginBootstrapArgs(process.argv.slice(2));
+  const databaseUrl = requiredEnvironment('DATABASE_URL');
+  const runtimeDatabaseUrl = requiredEnvironment('RUNTIME_DATABASE_URL');
+  const contract = runtimeLoginContract(target);
+  const { password } = assertRuntimeDatabaseUrl(
+    runtimeDatabaseUrl,
+    contract.login,
+    'RUNTIME_DATABASE_URL',
+  );
+  assertRuntimeDatabaseTarget(databaseUrl, runtimeDatabaseUrl, 'RUNTIME_DATABASE_URL');
+
+  const client = postgres(databaseUrl, { max: 1, prepare: false });
+  try {
+    const credentialMutated = await client.begin((transaction) =>
+      bootstrapRuntimeLogin(transaction, target, password),
+    );
+    console.log(
+      JSON.stringify(
+        {
+          operation: 'bootstrap-runtime-login',
+          target,
+          runtimeLogin: contract.login,
+          credentialMutated,
+          outcome: credentialMutated ? 'created' : 'verified-existing',
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    await client.end();
+  }
+}
+
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error('[bootstrap-runtime-login] failed', error);
+    process.exitCode = 1;
+  });
+}

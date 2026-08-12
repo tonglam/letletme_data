@@ -46,9 +46,23 @@ against the newer database contract.
 2. Clone the repository into `VPS_WORKDIR`.
 3. Create `.env.deploy` from `.env.deploy.example` and `.env.migrate` from
    `.env.migrate.example`.
-4. Run `bash scripts/deploy.sh deploy` once.
-5. Configure the GitHub variables and secret above.
-6. Terminate TLS at the reverse proxy and expose only the required service ports.
+4. Apply migrations with the migration environment: `docker compose run --rm -T migration bun run db:migrate`.
+5. Bootstrap each missing LOGIN exactly once, using a complete initial runtime URL each time:
+
+   ```bash
+   RUNTIME_DATABASE_URL='<complete Data runtime URL>' \
+     docker compose run --rm -T -e RUNTIME_DATABASE_URL migration \
+     bun run db:bootstrap-runtime-login -- --target=data
+   RUNTIME_DATABASE_URL='<complete GraphQL runtime URL>' \
+     docker compose run --rm -T -e RUNTIME_DATABASE_URL migration \
+     bun run db:bootstrap-runtime-login -- --target=graphql
+   ```
+
+6. Run `docker compose run --rm -T migration bun run db:verify-runtime-logins`, then run
+   `bash scripts/deploy.sh deploy`. Ordinary deployments only run this read-only verifier and must
+   never run either bootstrap command.
+7. Configure the GitHub variables and secret above.
+8. Terminate TLS at the reverse proxy and expose only the required service ports.
 
 ## Service-key rotation
 
@@ -57,19 +71,17 @@ digests in `DATA_API_KEY_HASHES`; the trusted Web server stores the plaintext ca
 Rotate by temporarily adding both digests, switching Web to the new credential, verifying mutations,
 and then removing the old digest.
 
-## Runtime database password rotation
+## Runtime database credentials
 
-Routine deployments reconcile runtime LOGIN attributes and memberships but preserve passwords for
-existing Data and GraphQL roles. Password changes are a coordinated control-plane operation: stop
-every Data and GraphQL client on the VPS, wait at least two minutes for Supavisor's authentication
-circuit breaker to clear, update the role and every corresponding runtime secret together, and only
-then restart clients.
+Routine deployment has no password input and no credential-mutation path. It checks the Data and
+GraphQL LOGIN attributes, locked capability roles, and exact memberships using the migration
+connection, and reports `credentialMutated: false`. The bootstrap command creates only a missing
+LOGIN; when the selected LOGIN already exists it validates the existing identity without DDL and
+without changing its password.
 
-The provisioning command rejects existing-password rotation unless both
-`--rotate-existing-passwords` and
-`RUNTIME_LOGIN_ROTATION_ACK=all-clients-stopped` are supplied. Never add either to the ordinary
-deployment workflow. After rotation, prove a fresh connection with each runtime role and watch the
-first scheduled Data jobs; process liveness alone is not credential evidence.
+This repository intentionally provides no password-rotation command. A future rotation must be
+designed as a separately reviewed control-plane operation that coordinates every client and proves
+fresh connections before traffic resumes.
 
 ## Operator commands
 
@@ -80,6 +92,7 @@ bash scripts/deploy.sh logs api
 docker compose logs --since 1h api worker
 docker compose run --rm -T migration bun run db:migrate:status
 docker compose run --rm -T migration bun run db:migration-contract
+docker compose run --rm -T migration bun run db:verify-runtime-logins
 ```
 
 `/health` proves process liveness. `/ready` also requires PostgreSQL, cache Redis, queue Redis, and

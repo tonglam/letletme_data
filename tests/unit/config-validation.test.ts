@@ -44,16 +44,11 @@ describe('production environment preflight', () => {
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '6' })).not.toBe(0);
   });
 
-  test('validates identity and quiescence before migration, then publishes before restart', () => {
+  test('uses bounded preflight, verifies roles read-only, and publishes before restart', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
     const preflight = workflow.indexOf('bun run env:check');
-    const identityContract = workflow.indexOf(
-      'bun scripts/migration-login-contract.ts --preflight',
-    );
+    const identityContract = workflow.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = workflow.indexOf('data_runtime_database_url=$(sed -n');
-    const provisioningPreflight = workflow.indexOf(
-      'bun run db:provision-runtime-logins --preflight',
-    );
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
@@ -61,7 +56,7 @@ describe('production environment preflight', () => {
     const redisQuiescence = workflow.indexOf('bun scripts/assert-queue-quiescence.ts --redis-only');
     const migrate = workflow.indexOf('bun run db:migrate');
     const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
-    const provision = workflow.indexOf('bun run db:provision-runtime-logins', migrate);
+    const roleVerify = workflow.indexOf('bun run db:verify-runtime-logins', migrate);
     const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute --allow-empty');
     const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
 
@@ -69,35 +64,35 @@ describe('production environment preflight', () => {
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(configuredRuntimeUrl).toBeLessThan(preflight);
     expect(identityContract).toBeGreaterThan(preflight);
-    expect(provisioningPreflight).toBeGreaterThan(identityContract);
     expect(stopServices).toBeGreaterThan(identityContract);
     expect(databaseQuiescence).toBeGreaterThan(stopServices);
     expect(redisQuiescence).toBeGreaterThan(databaseQuiescence);
     expect(migrate).toBeGreaterThan(redisQuiescence);
     expect(canonicalContract).toBeGreaterThan(migrate);
-    expect(provision).toBeGreaterThan(canonicalContract);
+    expect(roleVerify).toBeGreaterThan(canonicalContract);
     expect(publishCore).toBeGreaterThan(canonicalContract);
-    expect(publishCore).toBeGreaterThan(provision);
+    expect(publishCore).toBeGreaterThan(roleVerify);
     expect(replaceServices).toBeGreaterThan(publishCore);
-    expect(workflow).toContain('runtime_env_file=$(mktemp)');
-    expect(workflow).toContain('export ENV_FILE="$runtime_env_file"');
-    expect(workflow).toContain('reusing the configured Data runtime credential');
-    expect(workflow).toContain('bun scripts/format-runtime-database-url.ts extract-password');
-    expect(workflow).toContain('bun scripts/format-runtime-database-url.ts replace-password');
-    expect(workflow).toContain(
-      'GRAPHQL_RUNTIME_DB_PASSWORD: ${{ secrets.GRAPHQL_RUNTIME_DB_PASSWORD }}',
-    );
-    expect(workflow).toContain('VPS_WORKDIR,GRAPHQL_RUNTIME_DB_PASSWORD');
-    expect(workflow).toContain('DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password');
-    expect(workflow).toContain('GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password');
-    expect(workflow).toContain('RUNTIME_DATABASE');
-    expect(workflow).toContain('sleep 60');
-    expect(workflow).toContain('waiting for the migration Pooler circuit breaker to clear');
+    expect(workflow).toContain('using the configured Data runtime URL without rewriting it');
+    expect(workflow).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
+    expect(workflow).not.toContain('GRAPHQL_RUNTIME_DATABASE_URL');
+    expect(workflow).not.toContain('db:provision-runtime-logins');
+    expect(workflow).not.toContain('sleep 60');
+    for (const stage of [
+      'pull',
+      'preflight',
+      'quiescence',
+      'migration',
+      'roleVerify',
+      'cachePublish',
+      'serviceReady',
+    ]) {
+      expect(workflow).toContain(`start_stage ${stage}`);
+    }
     expect(workflow).toMatch(
       /DATABASE_URL=\$data_runtime_database_url[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
     );
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
-    expect(workflow).toContain('mv "$runtime_env_file" "$env_file"');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
@@ -111,17 +106,33 @@ describe('production environment preflight', () => {
     );
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
-    expect(deployScript).toContain('bun run db:provision-runtime-logins --preflight');
-    expect(deployScript).toContain('bun run db:provision-runtime-logins;');
-    expect(deployScript).toContain('bun scripts/format-runtime-database-url.ts extract-password');
-    expect(deployScript).toContain('bun scripts/format-runtime-database-url.ts replace-password');
-    expect(deployScript).toContain('sleep 60');
-    expect(deployScript).toContain('Waiting for the migration Pooler circuit breaker to clear');
-    expect(deployScript).toContain('runtime_env_file=$(mktemp)');
+    expect(deployScript).toContain('bun scripts/wait-for-migration-login.ts');
+    expect(deployScript).toContain('bun run db:verify-runtime-logins');
+    expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
+    expect(deployScript).not.toContain('db:provision-runtime-logins');
+    expect(deployScript).not.toContain('sleep 60');
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?compose start api worker/);
+  });
+
+  test('keeps ordinary workflows passwordless and proves verifier immutability in CI', () => {
+    const deployWorkflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
+    const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+    const runtimeScripts = [
+      readFileSync('scripts/runtime-login-contract.ts', 'utf8'),
+      readFileSync('scripts/verify-runtime-logins.ts', 'utf8'),
+      readFileSync('scripts/bootstrap-runtime-login.ts', 'utf8'),
+    ].join('\n');
+
+    expect(deployWorkflow).not.toContain('RUNTIME_DB_PASSWORD');
+    expect(runtimeScripts).not.toMatch(/ALTER\s+ROLE[\s\S]*PASSWORD/i);
+    expect(runtimeScripts).not.toContain('--rotate-existing-passwords');
+    expect(runtimeScripts).not.toContain('RUNTIME_LOGIN_ROTATION_ACK');
+    expect(ciWorkflow).toContain('password_hashes_before=');
+    expect(ciWorkflow).toContain('password_hashes_after=');
+    expect(ciWorkflow).toContain('test "$password_hashes_before" = "$password_hashes_after"');
   });
 
   test('keeps migration credentials out of API and worker services', () => {

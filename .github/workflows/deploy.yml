@@ -77,15 +77,28 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-          GRAPHQL_RUNTIME_DB_PASSWORD: ${{ secrets.GRAPHQL_RUNTIME_DB_PASSWORD }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_RUNTIME_DB_PASSWORD
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
+            active_stage=""
+            stage_started_at=0
+            start_stage() {
+              active_stage="$1"
+              stage_started_at=$(date +%s)
+            }
+            finish_stage() {
+              finished_at=$(date +%s)
+              duration_ms=$(( (finished_at - stage_started_at) * 1000 ))
+              printf '{"event":"deploy_stage_timing","stage":"%s","outcome":"passed","durationMs":%s}\n' \
+                "$active_stage" "$duration_ms"
+              active_stage=""
+            }
+            start_stage pull
             lower_user=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$lower_user" --password-stdin
             cd "$VPS_WORKDIR"
@@ -115,6 +128,8 @@ jobs:
             fi
 
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
+            finish_stage
+            start_stage preflight
             echo "deploy preflight: image pulled"
             data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "$env_file" \
               | sed -e 's/^"//' -e 's/"$//')
@@ -122,60 +137,11 @@ jobs:
               echo "deploy preflight: DATABASE_URL missing from $env_file"
               exit 1
             fi
-            echo "deploy preflight: reusing the configured Data runtime credential"
-            data_runtime_database_password=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "DATABASE_URL=$data_runtime_database_url" migration \
-              bun scripts/format-runtime-database-url.ts extract-password)
-            [[ "$data_runtime_database_password" =~ ^[A-Za-z0-9_-]{64}$ ]]
-            runtime_database_project_ref=$(sed -n 's/^SUPABASE_URL=//p' "$env_file" \
-              | sed -e 's/^"//' -e 's/"$//' \
-              | sed -n 's#^https\?://\([^.]*\)\.supabase\.co.*#\1#p')
-            runtime_database_project_ref=${runtime_database_project_ref:-gtwcfjoviibmtkevurjw}
-            data_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "DATABASE_URL=$data_runtime_database_url" \
-              -e "RUNTIME_DATABASE_SOURCE_URL=$migration_database_url" \
-              -e "RUNTIME_DATABASE_PROJECT_REF=$runtime_database_project_ref" \
-              -e "RUNTIME_DATABASE_PASSWORD=$data_runtime_database_password" migration \
-              bun scripts/format-runtime-database-url.ts replace-password)
-            graphql_runtime_database_password=${GRAPHQL_RUNTIME_DB_PASSWORD:-$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
-              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')}
-            if [ -z "$graphql_runtime_database_password" ]; then
-              echo "deploy preflight: GRAPHQL_RUNTIME_DB_PASSWORD missing from $migration_env_file"
-              exit 1
-            fi
-            graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" migration \
-              bun scripts/format-runtime-database-url.ts derive-graphql)
-            graphql_runtime_database_url=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" \
-              -e "GRAPHQL_RUNTIME_DATABASE_PASSWORD=$graphql_runtime_database_password" migration \
-              bun scripts/format-runtime-database-url.ts with-password)
-            runtime_env_file=$(mktemp)
-            awk '!/^DATABASE_URL=/' "$env_file" > "$runtime_env_file"
-            printf 'DATABASE_URL="%s"\n' "$data_runtime_database_url" >> "$runtime_env_file"
-            export ENV_FILE="$runtime_env_file"
-            cleanup_runtime_env() {
-              if [ -n "$runtime_env_file" ]; then
-                rm -f "$runtime_env_file" "$runtime_env_file.bak"
-              fi
-            }
-            trap cleanup_runtime_env EXIT
+            echo "deploy preflight: using the configured Data runtime URL without rewriting it"
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
-            echo "deploy preflight: waiting for the migration Pooler circuit breaker to clear"
-            for _ in 1 2 3; do
-              sleep 60
-            done
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
-              bun scripts/migration-login-contract.ts --preflight
-            echo "deploy preflight: data runtime URL present"
-            echo "deploy preflight: GraphQL runtime URL present"
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password" \
-              -e "GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password" \
-              -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
-              -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
-              bun run db:provision-runtime-logins --preflight
-            echo "deploy preflight: runtime login provisioning inputs passed"
+              bun scripts/wait-for-migration-login.ts
+            finish_stage
 
             migration_started=false
             restore_before_migration() {
@@ -185,28 +151,29 @@ jobs:
             }
             trap restore_before_migration ERR
 
+            start_stage quiescence
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/assert-queue-quiescence.ts --database-only
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun scripts/assert-queue-quiescence.ts --redis-only
+            finish_stage
             migration_started=true
+            start_stage migration
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e "DATA_RUNTIME_DB_PASSWORD=$data_runtime_database_password" \
-              -e "GRAPHQL_RUNTIME_DB_PASSWORD=$graphql_runtime_database_password" \
-              -e "DATA_RUNTIME_DATABASE_URL=$data_runtime_database_url" \
-              -e "GRAPHQL_RUNTIME_DATABASE_URL=$graphql_runtime_database_url" migration \
-              bun run db:provision-runtime-logins
-            echo "deploy: waiting for Supavisor credentials to converge"
-            for _ in 1 2 3 4 5; do
-              sleep 60
-            done
+            finish_stage
+            start_stage roleVerify
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+              bun run db:verify-runtime-logins
+            finish_stage
+            start_stage cachePublish
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
               -e "DATABASE_URL=$data_runtime_database_url" api \
               bun run cache:publish-core -- --execute --allow-empty
+            finish_stage
+            start_stage serviceReady
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
             for attempt in $(seq 1 30); do
@@ -221,11 +188,6 @@ jobs:
               fi
               sleep 2
             done
-
-            chmod 600 "$runtime_env_file"
-            mv "$runtime_env_file" "$env_file"
-            runtime_env_file=""
-            export ENV_FILE="$env_file"
 
             trap - ERR
             worker_container=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)
@@ -244,5 +206,6 @@ jobs:
             done
 
             trap - ERR
+            finish_stage
             docker compose ps
             docker image prune --force
