@@ -89,7 +89,7 @@ deploy() {
     -e "RUNTIME_DATABASE_PROJECT_REF=${runtime_database_project_ref}" \
     -e "RUNTIME_DATABASE_PASSWORD=${data_runtime_database_password}" migration \
     bun scripts/format-runtime-database-url.ts replace-password)
-  graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
+  graphql_runtime_database_password=${GRAPHQL_RUNTIME_DB_PASSWORD:-$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' "${MIGRATION_ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')}
   if [[ -z "${graphql_runtime_database_password}" ]]; then
     log_error "GRAPHQL_RUNTIME_DB_PASSWORD missing from ${MIGRATION_ENV_FILE}"
     exit 1

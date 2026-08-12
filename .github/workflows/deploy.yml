@@ -77,12 +77,13 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          GRAPHQL_RUNTIME_DB_PASSWORD: ${{ secrets.GRAPHQL_RUNTIME_DB_PASSWORD }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_RUNTIME_DB_PASSWORD
           script: |
             set -euo pipefail
             lower_user=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
@@ -136,8 +137,8 @@ jobs:
               -e "RUNTIME_DATABASE_PROJECT_REF=$runtime_database_project_ref" \
               -e "RUNTIME_DATABASE_PASSWORD=$data_runtime_database_password" migration \
               bun scripts/format-runtime-database-url.ts replace-password)
-            graphql_runtime_database_password=$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
-              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')
+            graphql_runtime_database_password=${GRAPHQL_RUNTIME_DB_PASSWORD:-$(sed -n 's/^GRAPHQL_RUNTIME_DB_PASSWORD=//p' \
+              "$migration_env_file" | sed -e 's/^"//' -e 's/"$//')}
             if [ -z "$graphql_runtime_database_password" ]; then
               echo "deploy preflight: GRAPHQL_RUNTIME_DB_PASSWORD missing from $migration_env_file"
               exit 1
