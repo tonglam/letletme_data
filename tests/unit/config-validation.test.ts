@@ -149,4 +149,28 @@ describe('production environment preflight', () => {
     expect(migrationEnv).toBeLessThan(apiService);
     expect(apiService).toBeLessThan(workerService);
   });
+
+  test('keeps the gated VPS cleanup exact, atomic, and value-blind', () => {
+    const workflow = readFileSync('.github/workflows/cleanup-legacy-runtime-secret.yml', 'utf8');
+
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toMatch(/if: github\.ref == 'refs\/heads\/main'/);
+    expect(workflow).toContain('group: deploy-main');
+    expect(workflow).toContain('permissions:\n  contents: read');
+    expect(workflow).toContain('appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2');
+    expect(workflow).toContain('expected_workdir=/home/workspace/letletme_data');
+    expect(workflow).toContain('target_file="$expected_workdir/.env.migrate"');
+    expect(workflow).toContain('test ! -L "$target_file"');
+    expect(workflow).toMatch(/stat -c '%h'/);
+    expect(workflow).toContain('case "$legacy_count" in');
+    expect(workflow).toContain('cleanup refused: multiple legacy assignments exist');
+    expect(workflow).toContain('mktemp "$expected_workdir/.env.migrate.cleanup.XXXXXX"');
+    expect(workflow).toContain('rm -f -- "$temporary_file"');
+    expect(workflow).toContain('mv --no-target-directory -- "$temporary_file" "$target_file"');
+    expect(workflow).toContain('test "$database_url_count" -eq 1');
+    expect(workflow).toContain('"credentialValueExposed":false');
+    expect(workflow).not.toContain('cat "$target_file"');
+    expect(workflow).not.toMatch(/cp\s+[^\n]*\$target_file/);
+    expect(workflow).not.toContain('ALTER ROLE');
+  });
 });
