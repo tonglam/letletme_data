@@ -57,6 +57,20 @@ digests in `DATA_API_KEY_HASHES`; the trusted Web server stores the plaintext ca
 Rotate by temporarily adding both digests, switching Web to the new credential, verifying mutations,
 and then removing the old digest.
 
+## Runtime database password rotation
+
+Routine deployments reconcile runtime LOGIN attributes and memberships but preserve passwords for
+existing Data and GraphQL roles. Password changes are a coordinated control-plane operation: stop
+every Data and GraphQL client on the VPS, wait at least two minutes for Supavisor's authentication
+circuit breaker to clear, update the role and every corresponding runtime secret together, and only
+then restart clients.
+
+The provisioning command rejects existing-password rotation unless both
+`--rotate-existing-passwords` and
+`RUNTIME_LOGIN_ROTATION_ACK=all-clients-stopped` are supplied. Never add either to the ordinary
+deployment workflow. After rotation, prove a fresh connection with each runtime role and watch the
+first scheduled Data jobs; process liveness alone is not credential evidence.
+
 ## Operator commands
 
 ```bash

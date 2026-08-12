@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  assertRuntimeLoginPasswordRotationAcknowledged,
   assertRuntimeLoginProvisioningSnapshot,
   assertRuntimeDatabaseUrl,
   assertRuntimeDatabaseTarget,
@@ -8,6 +9,8 @@ import {
   DATA_RUNTIME_LOGIN,
   GRAPHQL_RUNTIME_CAPABILITY,
   GRAPHQL_RUNTIME_LOGIN,
+  parseRuntimeLoginProvisioningArgs,
+  runtimeLoginPasswordOperation,
   type RuntimeLoginProvisioningSnapshot,
 } from '../../scripts/provision-runtime-logins';
 
@@ -61,6 +64,40 @@ const accepted = (): RuntimeLoginProvisioningSnapshot => ({
 });
 
 describe('production runtime LOGIN provisioning contract', () => {
+  test('preserves existing passwords unless rotation is explicitly requested', () => {
+    expect(parseRuntimeLoginProvisioningArgs([])).toEqual({
+      preflight: false,
+      rotateExistingPasswords: false,
+    });
+    expect(runtimeLoginPasswordOperation(true, false)).toBe('preserve');
+    expect(runtimeLoginPasswordOperation(false, false)).toBe('create');
+
+    expect(parseRuntimeLoginProvisioningArgs(['--rotate-existing-passwords'])).toEqual({
+      preflight: false,
+      rotateExistingPasswords: true,
+    });
+    expect(runtimeLoginPasswordOperation(true, true)).toBe('rotate');
+  });
+
+  test('rejects unknown or duplicate provisioning arguments', () => {
+    expect(() => parseRuntimeLoginProvisioningArgs(['--unknown'])).toThrow(
+      'does not accept arguments',
+    );
+    expect(() => parseRuntimeLoginProvisioningArgs(['--preflight', '--preflight'])).toThrow(
+      'does not accept arguments',
+    );
+  });
+
+  test('requires an explicit all-clients-stopped acknowledgement before rotation', () => {
+    expect(() => assertRuntimeLoginPasswordRotationAcknowledged(false)).not.toThrow();
+    expect(() => assertRuntimeLoginPasswordRotationAcknowledged(true)).toThrow(
+      'stopping Data and GraphQL clients',
+    );
+    expect(() =>
+      assertRuntimeLoginPasswordRotationAcknowledged(true, 'all-clients-stopped'),
+    ).not.toThrow();
+  });
+
   test('accepts two non-admin logins with exactly one locked capability each', () => {
     expect(() => assertRuntimeLoginProvisioningSnapshot(accepted())).not.toThrow();
   });

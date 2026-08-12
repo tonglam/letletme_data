@@ -14,10 +14,13 @@ const baseEnv = {
   QUEUE_REDIS_DB: '10',
 };
 
-async function runEnvCheck(dataApiKeyHashes: string): Promise<number> {
+async function runEnvCheck(
+  dataApiKeyHashes: string,
+  overrides: Record<string, string> = {},
+): Promise<number> {
   const child = Bun.spawn(['bun', 'validate-env.ts'], {
     cwd: process.cwd(),
-    env: { ...baseEnv, DATA_API_KEY_HASHES: dataApiKeyHashes },
+    env: { ...baseEnv, DATA_API_KEY_HASHES: dataApiKeyHashes, ...overrides },
     stderr: 'ignore',
     stdout: 'ignore',
   });
@@ -31,6 +34,14 @@ describe('production environment preflight', () => {
 
   test('accepts a valid SHA-256 API key digest', async () => {
     expect(await runEnvCheck('a'.repeat(64))).toBe(0);
+  });
+
+  test('keeps each process pool within the shared Supavisor session budget', async () => {
+    const digest = 'a'.repeat(64);
+
+    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '5' })).toBe(0);
+    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '0' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '6' })).not.toBe(0);
   });
 
   test('validates identity and quiescence before migration, then publishes before restart', () => {

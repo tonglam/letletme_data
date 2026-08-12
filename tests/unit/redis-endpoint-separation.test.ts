@@ -18,6 +18,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     QUEUE_REDIS_PORT: 6379,
     QUEUE_REDIS_DB: 0,
     DATABASE_URL: 'postgresql://localhost/test',
+    DATABASE_POOL_MAX: 5,
     PORT: 3000,
     LOG_LEVEL: 'error',
     ENABLE_AUTH: false,
