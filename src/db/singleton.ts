@@ -52,11 +52,12 @@ class DatabaseSingleton {
       this.isConnecting = true;
       logInfo('Initializing database connection...');
 
-      const connectionString = getConfig().DATABASE_URL;
+      const config = getConfig();
+      const connectionString = config.DATABASE_URL;
       const transactionPooler = isTransactionPoolerConnection(connectionString);
 
       this.client = postgres(connectionString, {
-        max: 10,
+        max: config.DATABASE_POOL_MAX,
         idle_timeout: 20,
         connect_timeout: 10,
         prepare: !transactionPooler,
@@ -66,7 +67,7 @@ class DatabaseSingleton {
       // dedicated least-privilege writer LOGIN, never the migration or owner
       // role. CLI and test connections validate their own narrower contracts.
       await this.client`SELECT 1`;
-      if (getConfig().NODE_ENV === 'production') {
+      if (config.NODE_ENV === 'production') {
         await assertDataRuntimeRole(this.client);
       }
 
@@ -74,6 +75,7 @@ class DatabaseSingleton {
       this.isConnected = true;
 
       logInfo('✅ Database connection established', {
+        poolMax: config.DATABASE_POOL_MAX,
         preparedStatements: !transactionPooler,
       });
     } catch (error) {

@@ -45,10 +45,56 @@ type RoleRow = {
 
 type QueryClient = postgres.Sql | postgres.TransactionSql;
 
+export type RuntimeLoginPasswordOperation = 'create' | 'preserve' | 'rotate';
+
+export type RuntimeLoginProvisioningOptions = {
+  readonly preflight: boolean;
+  readonly rotateExistingPasswords: boolean;
+};
+
 const expectedCapabilities = new Map([
   [DATA_RUNTIME_LOGIN, DATA_RUNTIME_CAPABILITY],
   [GRAPHQL_RUNTIME_LOGIN, GRAPHQL_RUNTIME_CAPABILITY],
 ] as const);
+
+export function parseRuntimeLoginProvisioningArgs(
+  args: readonly string[],
+): RuntimeLoginProvisioningOptions {
+  const supported = new Set(['--preflight', '--rotate-existing-passwords']);
+  const unexpected = args.filter((argument) => !supported.has(argument));
+  if (unexpected.length > 0 || new Set(args).size !== args.length) {
+    throw new Error(`Runtime LOGIN provisioning does not accept arguments: ${args.join(' ')}`);
+  }
+  return {
+    preflight: args.includes('--preflight'),
+    rotateExistingPasswords: args.includes('--rotate-existing-passwords'),
+  };
+}
+
+export function runtimeLoginPasswordOperation(
+  exists: boolean,
+  rotateExistingPasswords: boolean,
+): RuntimeLoginPasswordOperation {
+  if (!exists) return 'create';
+  return rotateExistingPasswords ? 'rotate' : 'preserve';
+}
+
+/**
+ * Existing runtime passwords are a cross-service control-plane contract, not
+ * routine deployment state. Rotating one while any VPS client is connected can
+ * keep Supavisor's authentication circuit breaker open indefinitely.
+ */
+export function assertRuntimeLoginPasswordRotationAcknowledged(
+  rotateExistingPasswords: boolean,
+  acknowledgement = process.env.RUNTIME_LOGIN_ROTATION_ACK,
+): void {
+  if (rotateExistingPasswords && acknowledgement !== 'all-clients-stopped') {
+    throw new Error(
+      'Password rotation requires stopping Data and GraphQL clients, waiting two minutes, ' +
+        'and setting RUNTIME_LOGIN_ROTATION_ACK=all-clients-stopped',
+    );
+  }
+}
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -343,6 +389,7 @@ async function provisionLogin(
   login: string,
   capability: string,
   password: string,
+  rotateExistingPasswords: boolean,
 ): Promise<void> {
   const before = await inspectRoles(client);
   const existing = before.roles.find((role) => role.roleName === login);
@@ -360,9 +407,13 @@ async function provisionLogin(
     throw new Error(`Existing runtime LOGIN ${login} has an unexpected membership`);
   }
 
-  if (!existing) {
+  const passwordOperation = runtimeLoginPasswordOperation(
+    Boolean(existing),
+    rotateExistingPasswords,
+  );
+  if (passwordOperation === 'create') {
     await client.unsafe(await formattedStatement(client, 'create', login, password));
-  } else {
+  } else if (passwordOperation === 'rotate') {
     await client.unsafe(await formattedStatement(client, 'password', login, password));
   }
   if (!existingMemberships.some((membership) => membership.grantedRole === capability)) {
@@ -371,11 +422,10 @@ async function provisionLogin(
 }
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const preflight = args.length === 1 && args[0] === '--preflight';
-  if (args.length > 0 && !preflight) {
-    throw new Error(`Runtime LOGIN provisioning does not accept arguments: ${args.join(' ')}`);
-  }
+  const { preflight, rotateExistingPasswords } = parseRuntimeLoginProvisioningArgs(
+    process.argv.slice(2),
+  );
+  assertRuntimeLoginPasswordRotationAcknowledged(rotateExistingPasswords);
   const databaseUrl = requiredEnvironment('DATABASE_URL');
   const dataPassword = requiredPassword('DATA_RUNTIME_DB_PASSWORD');
   const graphqlPassword = requiredPassword('GRAPHQL_RUNTIME_DB_PASSWORD');
@@ -404,6 +454,7 @@ async function main(): Promise<void> {
         {
           status: 'runtime_login_provisioning_preflight_passed',
           runtimeLogins: [DATA_RUNTIME_LOGIN, GRAPHQL_RUNTIME_LOGIN],
+          passwordMode: rotateExistingPasswords ? 'rotate-existing' : 'preserve-existing',
         },
         null,
         2,
@@ -422,12 +473,19 @@ async function main(): Promise<void> {
           throw new Error(`Runtime capability role ${capability} is missing or unsafe`);
         }
       }
-      await provisionLogin(transaction, DATA_RUNTIME_LOGIN, DATA_RUNTIME_CAPABILITY, dataPassword);
+      await provisionLogin(
+        transaction,
+        DATA_RUNTIME_LOGIN,
+        DATA_RUNTIME_CAPABILITY,
+        dataPassword,
+        rotateExistingPasswords,
+      );
       await provisionLogin(
         transaction,
         GRAPHQL_RUNTIME_LOGIN,
         GRAPHQL_RUNTIME_CAPABILITY,
         graphqlPassword,
+        rotateExistingPasswords,
       );
       assertRuntimeLoginProvisioningSnapshot(await inspectRoles(transaction));
     });
@@ -438,6 +496,7 @@ async function main(): Promise<void> {
       JSON.stringify(
         {
           operation: 'provision-runtime-logins',
+          passwordMode: rotateExistingPasswords ? 'rotate-existing' : 'preserve-existing',
           roles: verified.roles,
           memberships: verified.memberships,
         },

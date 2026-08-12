@@ -22,6 +22,9 @@ function integerEnv(defaultValue: number) {
 
 const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  // API and worker share one Supavisor session-pool login in production. Keep
+  // each process bounded so their combined pools leave room for deploy probes.
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(10).default(5),
   // Rebuildable Data publications only. Queue/coordination state must never use this client.
   CACHE_REDIS_HOST: z.string().default('localhost'),
   CACHE_REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),
@@ -153,6 +156,7 @@ export function getConfig(): AppConfig {
     cachedConfig = parsed;
     logInfo('Environment validated', {
       port: parsed.PORT,
+      databasePoolMax: parsed.DATABASE_POOL_MAX,
       cacheRedisHost: parsed.CACHE_REDIS_HOST,
       cacheRedisPort: parsed.CACHE_REDIS_PORT,
       cacheRedisDb: parsed.CACHE_REDIS_DB,
@@ -179,6 +183,7 @@ export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
     logInfo('[env] OK', {
       PORT: conf.PORT,
       DATABASE_URL: conf.DATABASE_URL ? 'set' : 'missing',
+      DATABASE_POOL_MAX: conf.DATABASE_POOL_MAX,
       CACHE_REDIS: `${conf.CACHE_REDIS_HOST}:${conf.CACHE_REDIS_PORT}/${conf.CACHE_REDIS_DB}`,
       QUEUE_REDIS: `${conf.QUEUE_REDIS_HOST}:${conf.QUEUE_REDIS_PORT}/${conf.QUEUE_REDIS_DB}`,
     });
