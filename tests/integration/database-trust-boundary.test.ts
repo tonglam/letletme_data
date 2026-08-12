@@ -49,6 +49,21 @@ const PLAYER_SEASON_SUMMARY_COLUMNS = [
   'dream_team_appearances',
 ] as const;
 
+const PLAYER_VALUE_CHANGE_COLUMNS = [
+  'season_id',
+  'season_code',
+  'snapshot_date',
+  'element_id',
+  'element_type',
+  'event_id',
+  'value',
+  'last_value',
+  'change_type',
+  'value_change',
+  'snapshot_source',
+  'source_value_id',
+] as const;
+
 const B0_ACCEPTANCE_ENABLED = process.env.RUN_B0_ACCEPTANCE === '1';
 const b0Test = B0_ACCEPTANCE_ENABLED ? test : test.skip;
 
@@ -139,6 +154,21 @@ describe('database trust boundary', () => {
     expect(columns.map((column) => column.name)).toEqual([...PLAYER_SEASON_SUMMARY_COLUMNS]);
     expect(columns.some((column) => column.name === 'event_id')).toBe(false);
     expect(columns.some((column) => column.name === 'team_id')).toBe(false);
+
+    const playerValueColumns = await sql<NamedFinding[]>`
+      SELECT attribute_row.attname AS name
+      FROM pg_class relation_row
+      JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+      JOIN pg_attribute attribute_row ON attribute_row.attrelid = relation_row.oid
+      WHERE namespace_row.nspname = 'reporting'
+        AND relation_row.relname = 'player_value_changes'
+        AND attribute_row.attnum > 0
+        AND NOT attribute_row.attisdropped
+      ORDER BY attribute_row.attnum
+    `;
+    expect(playerValueColumns.map((column) => column.name)).toEqual([
+      ...PLAYER_VALUE_CHANGE_COLUMNS,
+    ]);
 
     const physicalCopies = await sql<NamedFinding[]>`
       SELECT format('%I.%I', namespace.nspname, relation.relname) AS name
