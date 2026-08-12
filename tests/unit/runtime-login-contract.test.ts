@@ -151,6 +151,13 @@ describe('production runtime LOGIN contract', () => {
         'RUNTIME_DATABASE_URL',
       ),
     ).toThrow('exact 64-character base64url secret');
+    expect(() =>
+      assertRuntimeDatabaseUrl(
+        `postgresql://letletme_data_runtime.projectref:${initialSecret}@attacker.example/postgres`,
+        DATA_RUNTIME_LOGIN,
+        'RUNTIME_DATABASE_URL',
+      ),
+    ).toThrow(`must include ${DATA_RUNTIME_LOGIN}`);
   });
 
   test('retries a newly created runtime login until pooler authentication propagates', async () => {
@@ -212,5 +219,12 @@ describe('production runtime LOGIN contract', () => {
         'RUNTIME_DATABASE_URL',
       ),
     ).not.toThrow();
+    expect(() =>
+      assertRuntimeDatabaseTarget(
+        'postgresql://postgres:password@db.projectref.supabase.co:5432/postgres',
+        'postgresql://letletme_data_runtime.projectref:password@attacker.example:6543/postgres',
+        'RUNTIME_DATABASE_URL',
+      ),
+    ).toThrow('same PostgreSQL project');
   });
 });

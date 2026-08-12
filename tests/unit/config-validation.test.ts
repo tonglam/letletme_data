@@ -133,6 +133,8 @@ describe('production environment preflight', () => {
     expect(ciWorkflow).toContain('password_hashes_before=');
     expect(ciWorkflow).toContain('password_hashes_after=');
     expect(ciWorkflow).toContain('test "$password_hashes_before" = "$password_hashes_after"');
+    expect(ciWorkflow).toContain('SHARED_GRAPHQL_RUNTIME_DATABASE_URL');
+    expect(ciWorkflow).toContain('bootstrap accepted a password already used');
   });
 
   test('keeps migration credentials out of API and worker services', () => {

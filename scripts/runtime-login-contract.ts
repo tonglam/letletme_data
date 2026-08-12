@@ -80,6 +80,10 @@ type ParsedRuntimeDatabaseUrl = {
 
 const RUNTIME_PASSWORD_PATTERN = /^[A-Za-z0-9_-]{64}$/;
 
+function isSupabasePoolerHostname(hostname: string): boolean {
+  return /^[^.]+\.pooler\.supabase\.com$/i.test(hostname);
+}
+
 export function assertRuntimeDatabaseUrl(
   value: string,
   expectedRole: string,
@@ -102,7 +106,12 @@ export function assertRuntimeDatabaseUrl(
   } catch {
     throw new Error(`${variableName} contains invalid URL encoding`);
   }
-  const roleMatches = username === expectedRole || username.startsWith(`${expectedRole}.`);
+  const poolerRoleMatches =
+    isSupabasePoolerHostname(parsed.hostname) &&
+    username.startsWith(`${expectedRole}.`) &&
+    username.slice(expectedRole.length + 1).length > 0 &&
+    !username.slice(expectedRole.length + 1).includes('.');
+  const roleMatches = username === expectedRole || poolerRoleMatches;
   if (!parsed.hostname || !roleMatches || !password) {
     throw new Error(`${variableName} must include ${expectedRole} and its initial password`);
   }
@@ -140,9 +149,10 @@ function parseDatabaseTarget(value: string, variableName: string): DatabaseTarge
   } catch {
     throw new Error(`${variableName} contains invalid URL encoding`);
   }
-  const usernameProject = username.includes('.')
-    ? username.slice(username.lastIndexOf('.') + 1)
-    : null;
+  const usernameProject =
+    isSupabasePoolerHostname(parsed.hostname) && username.includes('.')
+      ? username.slice(username.lastIndexOf('.') + 1)
+      : null;
   return {
     databaseName,
     hostname: parsed.hostname.toLowerCase(),
@@ -388,6 +398,59 @@ export async function bootstrapRuntimeLogin(
   );
   assertRuntimeTargetSnapshot(await inspectRuntimeLogins(client), target, true);
   return true;
+}
+
+function runtimeUrlForLogin(
+  runtimeDatabaseUrl: string,
+  currentLogin: string,
+  replacementLogin: string,
+): string {
+  const parsed = new URL(runtimeDatabaseUrl);
+  const username = decodeURIComponent(parsed.username);
+  const suffix = username.slice(currentLogin.length);
+  parsed.username = `${replacementLogin}${suffix}`;
+  return parsed.toString();
+}
+
+function isPasswordRejection(error: unknown): boolean {
+  const output = errorText(error);
+  return /28P01|password authentication failed|invalid password/i.test(output);
+}
+
+export async function assertRuntimePasswordSeparated(
+  client: QueryClient,
+  runtimeDatabaseUrl: string,
+  target: RuntimeLoginTarget,
+): Promise<void> {
+  const otherTarget: RuntimeLoginTarget = target === 'data' ? 'graphql' : 'data';
+  const contract = targetContracts[target];
+  const otherContract = targetContracts[otherTarget];
+  const snapshot = await inspectRuntimeLogins(client);
+  if (!snapshot.roles.some((role) => role.roleName === otherContract.login)) return;
+
+  const otherRuntimeUrl = runtimeUrlForLogin(
+    runtimeDatabaseUrl,
+    contract.login,
+    otherContract.login,
+  );
+  const probe = postgres(otherRuntimeUrl, {
+    max: 1,
+    prepare: false,
+    connect_timeout: 5,
+    idle_timeout: 1,
+    connection: { statement_timeout: 5_000 },
+  });
+  try {
+    await probe`SELECT 1`;
+  } catch (error) {
+    if (isPasswordRejection(error)) return;
+    throw new Error(`Unable to verify password separation from ${otherContract.login}`, {
+      cause: error,
+    });
+  } finally {
+    await probe.end({ timeout: 0 });
+  }
+  throw new Error(`RUNTIME_DATABASE_URL password must not authenticate as ${otherContract.login}`);
 }
 
 export type RuntimeConnectionVerificationOptions = {

@@ -129,10 +129,16 @@ jobs:
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           DATA_RUNTIME_DATABASE_URL: postgresql://letletme_data_runtime:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd@127.0.0.1:5432/ci
+          SHARED_GRAPHQL_RUNTIME_DATABASE_URL: postgresql://letletme_graphql_runtime:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd@127.0.0.1:5432/ci
           GRAPHQL_RUNTIME_DATABASE_URL: postgresql://letletme_graphql_runtime:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg@127.0.0.1:5432/ci
         run: |
           RUNTIME_DATABASE_URL="$DATA_RUNTIME_DATABASE_URL" \
             bun run db:bootstrap-runtime-login -- --target=data
+          if RUNTIME_DATABASE_URL="$SHARED_GRAPHQL_RUNTIME_DATABASE_URL" \
+            bun run db:bootstrap-runtime-login -- --target=graphql; then
+            echo "bootstrap accepted a password already used by the Data runtime login" >&2
+            exit 1
+          fi
           RUNTIME_DATABASE_URL="$GRAPHQL_RUNTIME_DATABASE_URL" \
             bun run db:bootstrap-runtime-login -- --target=graphql
           RUNTIME_DATABASE_URL="$DATA_RUNTIME_DATABASE_URL" \

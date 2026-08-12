@@ -4,6 +4,7 @@ import postgres from 'postgres';
 import {
   assertRuntimeDatabaseTarget,
   assertRuntimeDatabaseUrl,
+  assertRuntimePasswordSeparated,
   bootstrapRuntimeLogin,
   parseRuntimeLoginBootstrapArgs,
   requiredEnvironment,
@@ -25,6 +26,7 @@ async function main(): Promise<void> {
 
   const client = postgres(databaseUrl, { max: 1, prepare: false });
   try {
+    await assertRuntimePasswordSeparated(client, runtimeDatabaseUrl, target);
     const credentialMutated = await client.begin((transaction) =>
       bootstrapRuntimeLogin(transaction, target, password),
     );
