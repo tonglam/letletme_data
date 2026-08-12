@@ -124,6 +124,22 @@ describe('runtime database URL formatter', () => {
     );
   });
 
+  test('uses an explicit project ref when the migration URL has a bare pooler user', async () => {
+    const result = await runFormatter('replace-password', {
+      DATABASE_URL:
+        'postgresql://letletme_data_runtime:old-secret@aws-0-region.pooler.supabase.com:5432/app',
+      RUNTIME_DATABASE_SOURCE_URL:
+        'postgresql://postgres:admin@aws-0-region.pooler.supabase.com:5432/app',
+      RUNTIME_DATABASE_PROJECT_REF: 'projectref',
+      RUNTIME_DATABASE_PASSWORD: 'runtime-secret',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      'postgresql://letletme_data_runtime.projectref:runtime-secret@aws-0-region.pooler.supabase.com:5432/app',
+    );
+  });
+
   test('derives the shared pooler project suffix from a direct Supabase migration host', async () => {
     const result = await runFormatter('replace-password', {
       DATABASE_URL:
