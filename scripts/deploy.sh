@@ -75,7 +75,9 @@ deploy() {
     log_error "DATABASE_URL missing from ${ENV_FILE}"
     exit 1
   fi
-  data_runtime_database_password=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '\n=')
+  data_runtime_database_password=$(compose run --rm -T \
+    -e "DATABASE_URL=${data_runtime_database_url}" migration \
+    bun scripts/format-runtime-database-url.ts extract-password)
   [[ "${data_runtime_database_password}" =~ ^[A-Za-z0-9_-]{64}$ ]]
   runtime_database_project_ref=$(sed -n 's/^SUPABASE_URL=//p' "${ENV_FILE}" \
     | sed -e 's/^"//' -e 's/"$//' \

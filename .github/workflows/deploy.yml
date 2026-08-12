@@ -121,8 +121,10 @@ jobs:
               echo "deploy preflight: DATABASE_URL missing from $env_file"
               exit 1
             fi
-            echo "deploy preflight: rotating the Data runtime credential"
-            data_runtime_database_password=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '\n=')
+            echo "deploy preflight: reusing the configured Data runtime credential"
+            data_runtime_database_password=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e "DATABASE_URL=$data_runtime_database_url" migration \
+              bun scripts/format-runtime-database-url.ts extract-password)
             [[ "$data_runtime_database_password" =~ ^[A-Za-z0-9_-]{64}$ ]]
             runtime_database_project_ref=$(sed -n 's/^SUPABASE_URL=//p' "$env_file" \
               | sed -e 's/^"//' -e 's/"$//' \
