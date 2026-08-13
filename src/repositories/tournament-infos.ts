@@ -1,4 +1,16 @@
-import { and, eq, getTableColumns, gte, inArray, isNotNull, lt, lte, ne, sql } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  getTableColumns,
+  gte,
+  inArray,
+  isNotNull,
+  lt,
+  lte,
+  ne,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import {
   entriesInCompetition,
@@ -34,16 +46,23 @@ export interface TournamentInfoSummary {
   seasonCode: string;
   leagueId: number;
   leagueType: LeagueType;
+  rosterMode: 'snapshot' | 'official_sync';
   totalTeamNum: number;
   groupMode: GroupMode;
   groupStartedEventId: number | null;
   groupEndedEventId: number | null;
   groupQualifyNum: number | null;
   knockoutMode: KnockoutMode;
+  knockoutTeamNum: number | null;
+  knockoutEventNum: number | null;
   knockoutStartedEventId: number | null;
   knockoutEndedEventId: number | null;
+  knockoutPlayAgainstNum: number | null;
   state: 'active' | 'inactive' | 'finished';
   standingsReadyAt: string | null;
+  officialScheduleHash: string | null;
+  officialScheduleSyncedAt: string | null;
+  officialScheduleLockedAt: string | null;
 }
 
 export interface TournamentInfoNameSummary {
@@ -99,16 +118,23 @@ function mapTournamentInfo(
     seasonCode: season.seasonCode,
     leagueId: row.leagueId,
     leagueType: row.leagueType,
+    rosterMode: row.rosterMode,
     totalTeamNum: row.totalTeamNum,
     groupMode: row.groupMode ?? 'no_group',
     groupStartedEventId: row.groupStartedEventId,
     groupEndedEventId: row.groupEndedEventId,
     groupQualifyNum: row.groupQualifyNum,
     knockoutMode: row.knockoutMode ?? 'no_knockout',
+    knockoutTeamNum: row.knockoutTeamNum,
+    knockoutEventNum: row.knockoutEventNum,
     knockoutStartedEventId: row.knockoutStartedEventId,
     knockoutEndedEventId: row.knockoutEndedEventId,
+    knockoutPlayAgainstNum: row.knockoutPlayAgainstNum,
     state: row.state,
     standingsReadyAt: exactTimestamp(row.standingsReadyAt),
+    officialScheduleHash: row.officialScheduleHash,
+    officialScheduleSyncedAt: exactTimestamp(row.officialScheduleSyncedAt),
+    officialScheduleLockedAt: exactTimestamp(row.officialScheduleLockedAt),
   };
 }
 
@@ -271,8 +297,18 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
             eq(tournamentsInCompetition.state, 'active'),
             isNotNull(tournamentsInCompetition.standingsReadyAt),
             eq(tournamentsInCompetition.groupMode, 'battle_races'),
-            lte(tournamentsInCompetition.groupStartedEventId, eventId),
-            gte(tournamentsInCompetition.groupEndedEventId, eventId),
+            or(
+              and(
+                lte(tournamentsInCompetition.groupStartedEventId, eventId),
+                gte(tournamentsInCompetition.groupEndedEventId, eventId),
+              ),
+              and(
+                eq(tournamentsInCompetition.leagueType, 'h2h'),
+                eq(tournamentsInCompetition.rosterMode, 'official_sync'),
+                lte(tournamentsInCompetition.knockoutStartedEventId, eventId),
+                gte(tournamentsInCompetition.knockoutEndedEventId, eventId),
+              ),
+            ),
           ),
         );
       return rows.map((row) => mapTournamentInfo(row, season));
@@ -292,6 +328,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
             eq(tournamentsInCompetition.state, 'active'),
             isNotNull(tournamentsInCompetition.standingsReadyAt),
             ne(tournamentsInCompetition.knockoutMode, 'no_knockout'),
+            sql`NOT (${tournamentsInCompetition.leagueType} = 'h2h' AND ${tournamentsInCompetition.rosterMode} = 'official_sync')`,
             lte(tournamentsInCompetition.knockoutStartedEventId, eventId),
             gte(tournamentsInCompetition.knockoutEndedEventId, eventId),
           ),
@@ -334,6 +371,9 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       const rows = await db
         .select({
           id: tournamentsInCompetition.tournamentId,
+          leagueId: tournamentsInCompetition.leagueId,
+          leagueType: tournamentsInCompetition.leagueType,
+          rosterMode: tournamentsInCompetition.rosterMode,
           totalTeamNum: tournamentsInCompetition.totalTeamNum,
           groupMode: tournamentsInCompetition.groupMode,
           groupNum: tournamentsInCompetition.groupNum,
@@ -597,7 +637,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
               groupNum: plan.groupNum,
               groupStartedEventId: plan.groupStartedEventId,
               groupEndedEventId: plan.groupEndedEventId,
-              groupAutoAverages: false,
+              groupAutoAverages: plan.groupAutoAverages,
               groupRounds: plan.groupRounds,
               groupPlayAgainstNum: null,
               groupQualifyNum: plan.groupQualifyNum,

@@ -374,7 +374,25 @@ export const PicksResponseSchema = z.object({
 });
 
 // League standings schemas
-const StandingsResultSchema = z.object({ entry: z.number() }).passthrough();
+const StandingsResultSchema = z
+  .object({
+    entry: z.number(),
+    entry_name: z.string().optional(),
+    player_name: z.string().optional(),
+    player_first_name: z.string().optional(),
+    player_last_name: z.string().optional(),
+    rank: z.number().nullable().optional(),
+    rank_sort: z.number().nullable().optional(),
+    total: z.number().nullable().optional(),
+    points_total: z.number().int().min(0).optional(),
+    division: z.number().nullable().optional(),
+    matches_drawn: z.number().int().min(0).optional(),
+    matches_lost: z.number().int().min(0).optional(),
+    matches_played: z.number().int().min(0).optional(),
+    matches_won: z.number().int().min(0).optional(),
+    points_for: z.number().int().optional(),
+  })
+  .passthrough();
 const StandingsSchema = z
   .object({
     has_next: z.boolean(),
@@ -387,6 +405,8 @@ const StandingsLeagueSchema = z
     name: z.string(),
     start_event: z.number().int().min(1).max(38).optional(),
     scoring: z.string().optional(),
+    admin_entry: z.number().int().positive().optional(),
+    ko_rounds: z.number().int().min(0).max(5).optional(),
   })
   .passthrough();
 export const LeagueStandingsSchema = z
@@ -394,6 +414,42 @@ export const LeagueStandingsSchema = z
     standings: StandingsSchema,
     new_entries: StandingsSchema.optional(),
     league: StandingsLeagueSchema.optional(),
+  })
+  .passthrough();
+
+export const LeagueH2HMatchSchema = z
+  .object({
+    id: z.number().int().positive(),
+    event: z.number().int().min(1).max(38),
+    entry_1_entry: z.number().int().positive().nullable(),
+    entry_1_name: z.string().nullable().optional(),
+    entry_1_player_name: z.string().nullable().optional(),
+    entry_1_points: z.number().int().nullable(),
+    entry_1_win: z.number().int().min(0).max(1).optional(),
+    entry_1_draw: z.number().int().min(0).max(1).optional(),
+    entry_1_loss: z.number().int().min(0).max(1).optional(),
+    entry_1_total: z.number().int().min(0).optional(),
+    entry_2_entry: z.number().int().positive().nullable(),
+    entry_2_name: z.string().nullable().optional(),
+    entry_2_player_name: z.string().nullable().optional(),
+    entry_2_points: z.number().int().nullable(),
+    entry_2_win: z.number().int().min(0).max(1).optional(),
+    entry_2_draw: z.number().int().min(0).max(1).optional(),
+    entry_2_loss: z.number().int().min(0).max(1).optional(),
+    entry_2_total: z.number().int().min(0).optional(),
+    winner: z.number().int().positive().nullable(),
+    is_knockout: z.boolean().optional(),
+    is_bye: z.boolean().optional(),
+    knockout_name: z.string().nullable().optional(),
+    tiebreak: z.unknown().nullable().optional(),
+  })
+  .passthrough();
+
+export const LeagueH2HMatchesPageSchema = z
+  .object({
+    has_next: z.boolean(),
+    page: z.number().int().positive().optional(),
+    results: z.array(LeagueH2HMatchSchema),
   })
   .passthrough();
 
@@ -483,6 +539,8 @@ export type RawFPLLeagueStandingsResult = z.infer<typeof StandingsResultSchema>;
 export type RawFPLLeagueStandings = z.infer<typeof StandingsSchema>;
 export type RawFPLLeagueInfo = z.infer<typeof StandingsLeagueSchema>;
 export type RawFPLLeagueStandingsResponse = z.infer<typeof LeagueStandingsSchema>;
+export type RawFPLLeagueH2HMatch = z.infer<typeof LeagueH2HMatchSchema>;
+export type RawFPLLeagueH2HMatchesPage = z.infer<typeof LeagueH2HMatchesPageSchema>;
 export type RawFPLEntryHistoryPastSeason = z.infer<typeof EntryHistoryPastSeasonSchema>;
 export type RawFPLEntryHistoryCurrentItem = z.infer<typeof EntryHistoryCurrentItemSchema>;
 export type RawFPLEntryHistoryResponse = z.infer<typeof EntryHistoryResponseSchema>;
@@ -955,6 +1013,38 @@ class FPLClient {
   ): Promise<RawFPLLeagueStandingsResponse> {
     const url = `${this.baseUrl}/leagues-h2h/${leagueId}/standings/?page_standings=${standingsPage}&page_new_entries=${newEntriesPage}`;
     return this.getLeagueStandings(url, leagueId, standingsPage, 'h2h');
+  }
+
+  async getLeagueH2HMatches(leagueId: number, page: number): Promise<RawFPLLeagueH2HMatchesPage> {
+    const url = `${this.baseUrl}/leagues-h2h-matches/league/${leagueId}/?page=${page}`;
+    try {
+      logDebug('Fetching league H2H matches', { leagueId, page, url });
+      const response = await this.request(url);
+      if (!response.ok) {
+        throw new FPLClientError(
+          `HTTP ${response.status}: ${response.statusText}`,
+          response.status,
+          'HTTP_ERROR',
+        );
+      }
+      return LeagueH2HMatchesPageSchema.parse(await response.json());
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw new FPLClientError(
+          'Invalid league H2H matches format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+      if (error instanceof FPLClientError) throw error;
+      throw new FPLClientError(
+        'Failed to fetch league H2H matches',
+        undefined,
+        'UNKNOWN_ERROR',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
   }
 
   async getEntryTransfers(entryId: number): Promise<RawFPLEntryTransfersResponse> {

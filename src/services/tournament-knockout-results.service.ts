@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { DbEventLive } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import type { TournamentSyncContext } from '../domain/tournament';
+import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/tournament';
 import type { RawFPLEntryEventPickItem } from '../types';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { eventLiveRepository } from '../repositories/event-lives';
@@ -499,6 +499,7 @@ export async function syncTournamentKnockoutResultsForTournamentId(
   }
 
   if (
+    isOfficialH2HTournament(tournament) ||
     tournament.knockoutMode === 'no_knockout' ||
     !tournament.knockoutStartedEventId ||
     !tournament.knockoutEndedEventId ||

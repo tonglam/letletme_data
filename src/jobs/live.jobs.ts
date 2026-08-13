@@ -7,9 +7,10 @@ import { seasonRepository } from '../repositories/seasons';
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isMatchDayTime } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logDebug, logInfo } from '../utils/logger';
+import { logDebug, logError, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
 import { enqueueLiveSnapshot } from './live-data.jobs';
+import { enqueueTournamentOfficialH2H } from './tournament-sync.jobs';
 
 export const LIVE_SNAPSHOT_SCHEDULES = {
   cache: {
@@ -61,6 +62,15 @@ export async function runLiveSnapshot(
       jobId: job.id,
       eventId: currentEvent.id,
       persistEventLives,
+    });
+  }
+  try {
+    await enqueueTournamentOfficialH2H(season, currentEvent.id, 'cron', {
+      jobId: `official-h2h-e${currentEvent.id}-${now.toISOString().slice(0, 16)}`,
+    });
+  } catch (error) {
+    logError('Failed to enqueue minute official H2H sync', error, {
+      eventId: currentEvent.id,
     });
   }
   return job;

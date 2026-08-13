@@ -134,9 +134,14 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         source.leagueId,
         source.leagueType,
         source.leagueName,
+        {
+          startEventId: source.startEventId,
+          knockoutRounds: source.knockoutRounds,
+        },
       );
       const plan =
         planned.rosterMode === 'official_sync' &&
+        planned.leagueType !== 'h2h' &&
         !getConfig().TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED
           ? { ...planned, rosterMode: 'snapshot' as const }
           : planned;

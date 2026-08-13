@@ -17,6 +17,7 @@ export type TournamentRosterRecord = TournamentConfig & {
   rosterMode: TournamentRosterMode;
   state: 'active' | 'inactive' | 'finished';
   standingsReadyAt: string | null;
+  officialScheduleLockedAt: string | null;
 };
 
 type RosterRow = TournamentRosterRecord;
@@ -61,6 +62,7 @@ export const tournamentRosterRepository = {
           roster_mode AS "rosterMode",
           state,
           standings_ready_at::text AS "standingsReadyAt",
+          official_schedule_locked_at::text AS "officialScheduleLockedAt",
           total_team_num AS "totalTeamNum",
           group_mode AS "groupMode",
           group_num AS "groupNum",
@@ -104,6 +106,7 @@ export const tournamentRosterRepository = {
           roster_mode AS "rosterMode",
           state,
           standings_ready_at::text AS "standingsReadyAt",
+          official_schedule_locked_at::text AS "officialScheduleLockedAt",
           total_team_num AS "totalTeamNum",
           group_mode AS "groupMode",
           group_num AS "groupNum",

@@ -119,6 +119,9 @@ export type RawStandingsResult = {
 
 export type TournamentConfig = {
   id: number;
+  leagueId?: number;
+  leagueType?: LeagueType;
+  rosterMode?: TournamentRosterMode;
   totalTeamNum: number;
   groupMode: GroupMode;
   groupNum: number | null;
@@ -141,14 +144,20 @@ export type TournamentConfig = {
  */
 export type TournamentSyncContext = {
   id: number;
+  leagueId?: number;
+  leagueType?: LeagueType;
+  rosterMode?: TournamentRosterMode;
   totalTeamNum: number;
   groupMode: GroupMode;
   groupStartedEventId: number | null;
   groupEndedEventId: number | null;
   groupQualifyNum: number | null;
   knockoutMode: KnockoutMode;
+  knockoutTeamNum?: number | null;
+  knockoutEventNum?: number | null;
   knockoutStartedEventId: number | null;
   knockoutEndedEventId: number | null;
+  knockoutPlayAgainstNum?: number | null;
 };
 
 /** Exact standings publication selected by one event-results cascade. */
@@ -249,6 +258,7 @@ export type TournamentStructurePlan = {
   groupMode: GroupMode;
   groupTeamNum: number;
   groupNum: number;
+  groupAutoAverages: boolean;
   groupStartedEventId: number;
   groupEndedEventId: number;
   groupRounds: number;
@@ -309,8 +319,10 @@ export const toOptionalPositiveInteger = (value?: string): number | null => {
 export const isPowerOfTwo = (value: number): boolean => value > 1 && (value & (value - 1)) === 0;
 
 const inferLeagueType = (segments: string[]): LeagueType => {
-  const standingsIndex = segments.findIndex((segment) => segment === 'standings');
-  const suffix = standingsIndex >= 0 ? segments[standingsIndex + 1] : null;
+  const typeSurfaceIndex = segments.findIndex(
+    (segment) => segment === 'standings' || segment === 'new-entries',
+  );
+  const suffix = typeSurfaceIndex >= 0 ? segments[typeSurfaceIndex + 1] : null;
   return suffix === 'h' || suffix === 'h2h' ? 'h2h' : 'classic';
 };
 
@@ -351,13 +363,16 @@ export const parseLeagueUrl = (rawUrl: string): { leagueId: number; leagueType: 
   }
 
   const surface = pathSegments[leaguesIndex + 2];
-  if (!['standings', 'admin', 'join'].includes(surface)) {
+  if (!['standings', 'new-entries', 'admin', 'join'].includes(surface)) {
     throw new ValidationError(
       'Unsupported league URL format.',
       'TOURNAMENT_LEAGUE_URL_FORMAT_INVALID',
     );
   }
-  const standingsSuffix = surface === 'standings' ? pathSegments[leaguesIndex + 3] : undefined;
+  const standingsSuffix =
+    surface === 'standings' || surface === 'new-entries'
+      ? pathSegments[leaguesIndex + 3]
+      : undefined;
   if (standingsSuffix && !['c', 'classic', 'h', 'h2h'].includes(standingsSuffix.toLowerCase())) {
     throw new ValidationError(
       'Unsupported league standings type.',
@@ -586,7 +601,7 @@ export function getTournamentBackfillWindow(
   currentEventId: number | null,
 ): TournamentBackfillWindow | null {
   const startEventId =
-    tournament.groupMode === 'points_races'
+    tournament.groupMode !== 'no_group'
       ? tournament.groupStartedEventId
       : (tournament.knockoutStartedEventId ?? tournament.groupStartedEventId);
   const configuredEndEventId =
@@ -612,6 +627,7 @@ export function planTournamentStructure(
   leagueId: number,
   leagueType: LeagueType,
   sourceLeagueName: string | null = null,
+  sourceConfig?: { startEventId?: number; knockoutRounds?: number },
 ): TournamentStructurePlan {
   if (selectedParticipants.length < 2) {
     throw new ValidationError(
@@ -635,6 +651,46 @@ export function planTournamentStructure(
       'Group stage gameweeks are invalid.',
       'TOURNAMENT_GROUP_GAMEWEEKS_INVALID',
     );
+  }
+
+  const isOfficialH2H = payload.participantSource === 'official' && leagueType === 'h2h';
+  if (isOfficialH2H) {
+    const officialStartEventId = sourceConfig?.startEventId ?? groupStartedEventId;
+    const officialKnockoutRounds = Math.max(0, Math.trunc(sourceConfig?.knockoutRounds ?? 0));
+    const officialGroupEndedEventId = 38 - officialKnockoutRounds;
+    if (officialStartEventId > officialGroupEndedEventId) {
+      throw new ValidationError(
+        'Official H2H league schedule window is invalid.',
+        'TOURNAMENT_H2H_WINDOW_INVALID',
+      );
+    }
+
+    const hasKnockout = officialKnockoutRounds > 0;
+    return {
+      leagueId,
+      leagueType,
+      sourceLeagueName,
+      rosterMode: 'official_sync',
+      tournamentName: normalizeTournamentName(payload.tournamentName),
+      creator: payload.creator.trim(),
+      adminEntryId,
+      selectedParticipants,
+      groupMode: 'battle_races',
+      groupTeamNum: selectedParticipants.length,
+      groupNum: 1,
+      groupAutoAverages: selectedParticipants.length % 2 === 1,
+      groupStartedEventId: officialStartEventId,
+      groupEndedEventId: officialGroupEndedEventId,
+      groupRounds: officialGroupEndedEventId - officialStartEventId + 1,
+      groupQualifyNum: null,
+      knockoutMode: hasKnockout ? 'head_to_head' : 'no_knockout',
+      knockoutTeamNum: hasKnockout ? 2 ** officialKnockoutRounds : null,
+      knockoutEventNum: hasKnockout ? officialKnockoutRounds : null,
+      knockoutRounds: hasKnockout ? officialKnockoutRounds : null,
+      knockoutStartedEventId: hasKnockout ? officialGroupEndedEventId + 1 : null,
+      knockoutEndedEventId: hasKnockout ? 38 : null,
+      knockoutPlayAgainstNum: hasKnockout ? 1 : null,
+    };
   }
 
   const groupNum = toOptionalPositiveInteger(payload.groupNum) ?? 1;
@@ -724,6 +780,7 @@ export function planTournamentStructure(
     groupMode: groupModeMap[payload.groupFormat],
     groupTeamNum,
     groupNum: payload.groupFormat === 'none' ? 1 : groupNum,
+    groupAutoAverages: false,
     groupStartedEventId,
     groupEndedEventId,
     groupRounds,
@@ -736,4 +793,14 @@ export function planTournamentStructure(
     knockoutEndedEventId,
     knockoutPlayAgainstNum,
   };
+}
+
+export function isOfficialH2HTournament(
+  tournament: Pick<TournamentSyncContext, 'leagueType' | 'rosterMode' | 'groupMode'>,
+): boolean {
+  return (
+    tournament.leagueType === 'h2h' &&
+    tournament.rosterMode === 'official_sync' &&
+    tournament.groupMode === 'battle_races'
+  );
 }

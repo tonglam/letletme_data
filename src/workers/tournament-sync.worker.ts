@@ -12,7 +12,10 @@ import {
 } from '../queues/tournament-sync.queue';
 import { syncTournamentEventResults } from '../services/tournament-event-results.service';
 import { syncTournamentPointsRaceResults } from '../services/tournament-points-race-results.service';
-import { syncTournamentBattleRaceResults } from '../services/tournament-battle-race-results.service';
+import {
+  syncOfficialH2HTournaments,
+  syncTournamentBattleRaceResults,
+} from '../services/tournament-battle-race-results.service';
 import { syncTournamentKnockoutResults } from '../services/tournament-knockout-results.service';
 import {
   syncTournamentEventTransfersPost,
@@ -321,6 +324,9 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 );
                 return battleResult;
               }
+
+              case TOURNAMENT_JOBS.OFFICIAL_H2H:
+                return syncOfficialH2HTournaments(season, eventId);
 
               case TOURNAMENT_JOBS.KNOCKOUT: {
                 const result = await syncTournamentKnockoutResults(season, eventId);

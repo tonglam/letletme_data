@@ -163,6 +163,7 @@ function buildTournamentPlan(entryIds: readonly number[]): TournamentStructurePl
     groupMode: 'points_races',
     groupTeamNum: entryIds.length,
     groupNum: 1,
+    groupAutoAverages: false,
     groupStartedEventId: 1,
     groupEndedEventId: 1,
     groupRounds: 1,

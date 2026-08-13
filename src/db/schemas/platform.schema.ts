@@ -406,6 +406,15 @@ export const tournamentsInCompetition = competition.table(
     rosterSyncStatus: tournamentSetupStatusInCompetition('roster_sync_status'),
     rosterLastSyncedAt: timestamp('roster_last_synced_at', { withTimezone: true, mode: 'date' }),
     rosterSyncError: text('roster_sync_error'),
+    officialScheduleHash: text('official_schedule_hash'),
+    officialScheduleSyncedAt: timestamp('official_schedule_synced_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    officialScheduleLockedAt: timestamp('official_schedule_locked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
     setupPhase: tournamentSetupPhaseInCompetition('setup_phase').default('queued').notNull(),
     setupCompletedUnits: integer('setup_completed_units').default(0).notNull(),
     setupTotalUnits: integer('setup_total_units').default(0).notNull(),
@@ -1597,15 +1606,21 @@ export const tournamentBattleGroupResultsInCompetition = competition.table(
     groupId: integer('group_id').notNull(),
     eventId: integer('event_id').notNull(),
     homeIndex: integer('home_index').notNull(),
-    homeEntryId: integer('home_entry_id').notNull(),
+    homeEntryId: integer('home_entry_id'),
     homeNetPoints: integer('home_net_points'),
     homeRank: integer('home_rank'),
     homeMatchPoints: integer('home_match_points'),
     awayIndex: integer('away_index').notNull(),
-    awayEntryId: integer('away_entry_id').notNull(),
+    awayEntryId: integer('away_entry_id'),
     awayNetPoints: integer('away_net_points'),
     awayRank: integer('away_rank'),
     awayMatchPoints: integer('away_match_points'),
+    officialMatchId: integer('official_match_id'),
+    sourceOrder: integer('source_order'),
+    homeIsAverage: boolean('home_is_average').default(false).notNull(),
+    awayIsAverage: boolean('away_is_average').default(false).notNull(),
+    isBye: boolean('is_bye').default(false).notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
@@ -1631,6 +1646,18 @@ export const tournamentBattleGroupResultsInCompetition = competition.table(
       table.seasonId.asc().nullsLast(),
       table.tournamentId.asc().nullsLast(),
     ),
+    uniqueIndex('tournament_battle_group_results_official_match_unique')
+      .using('btree', table.tournamentId.asc().nullsLast(), table.officialMatchId.asc().nullsLast())
+      .where(sql`official_match_id IS NOT NULL`),
+    index('tournament_battle_group_results_official_display_idx')
+      .using(
+        'btree',
+        table.tournamentId.asc().nullsLast(),
+        table.eventId.asc().nullsLast(),
+        table.sourceOrder.asc().nullsLast(),
+        table.officialMatchId.asc().nullsLast(),
+      )
+      .where(sql`official_match_id IS NOT NULL`),
     foreignKey({
       columns: [table.seasonId],
       foreignColumns: [seasonsInFpl.seasonId],
@@ -1667,10 +1694,21 @@ export const tournamentBattleGroupResultsInCompetition = competition.table(
       table.homeIndex,
       table.awayIndex,
     ),
-    check('tournament_battle_group_results_distinct_entries', sql`home_entry_id <> away_entry_id`),
+    check(
+      'tournament_battle_group_results_distinct_entries',
+      sql`home_entry_id IS NULL OR away_entry_id IS NULL OR home_entry_id <> away_entry_id`,
+    ),
     check(
       'tournament_battle_group_results_ids_positive',
-      sql`(source_result_id > 0) AND (tournament_id > 0) AND (group_id > 0) AND (event_id > 0) AND (home_entry_id > 0) AND (away_entry_id > 0)`,
+      sql`(source_result_id > 0) AND (tournament_id > 0) AND (group_id > 0) AND (event_id > 0) AND (official_match_id IS NULL OR official_match_id > 0) AND (source_order IS NULL OR source_order >= 0)`,
+    ),
+    check(
+      'tournament_battle_group_results_side_contract',
+      sql`((home_is_average AND home_entry_id IS NULL) OR (NOT home_is_average AND home_entry_id > 0)) AND ((away_is_average AND away_entry_id IS NULL) OR (NOT away_is_average AND away_entry_id > 0)) AND NOT (home_is_average AND away_is_average) AND (NOT (home_is_average OR away_is_average) OR official_match_id IS NOT NULL) AND (NOT is_bye OR official_match_id IS NOT NULL)`,
+    ),
+    check(
+      'tournament_battle_group_results_official_order_contract',
+      sql`(official_match_id IS NULL AND source_order IS NULL) OR (official_match_id IS NOT NULL AND source_order IS NOT NULL)`,
     ),
   ],
 );
@@ -1786,6 +1824,11 @@ export const tournamentKnockoutResultsInCompetition = competition.table(
     awayGoalsScored: integer('away_goals_scored'),
     awayGoalsConceded: integer('away_goals_conceded'),
     matchWinner: integer('match_winner'),
+    officialMatchId: integer('official_match_id'),
+    sourceOrder: integer('source_order'),
+    knockoutName: text('knockout_name'),
+    tiebreak: text(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
@@ -1816,6 +1859,18 @@ export const tournamentKnockoutResultsInCompetition = competition.table(
       table.seasonId.asc().nullsLast(),
       table.matchWinner.asc().nullsLast(),
     ),
+    uniqueIndex('tournament_knockout_results_official_match_unique')
+      .using('btree', table.tournamentId.asc().nullsLast(), table.officialMatchId.asc().nullsLast())
+      .where(sql`official_match_id IS NOT NULL`),
+    index('tournament_knockout_results_official_display_idx')
+      .using(
+        'btree',
+        table.tournamentId.asc().nullsLast(),
+        table.eventId.asc().nullsLast(),
+        table.sourceOrder.asc().nullsLast(),
+        table.officialMatchId.asc().nullsLast(),
+      )
+      .where(sql`official_match_id IS NOT NULL`),
     foreignKey({
       columns: [table.seasonId],
       foreignColumns: [seasonsInFpl.seasonId],
@@ -1863,6 +1918,10 @@ export const tournamentKnockoutResultsInCompetition = competition.table(
     check(
       'tournament_knockout_results_distinct_entries',
       sql`(home_entry_id IS NULL) OR (away_entry_id IS NULL) OR (home_entry_id <> away_entry_id)`,
+    ),
+    check(
+      'tournament_knockout_results_official_fields_valid',
+      sql`(official_match_id IS NULL OR official_match_id > 0) AND (source_order IS NULL OR source_order >= 0) AND ((official_match_id IS NULL AND source_order IS NULL) OR (official_match_id IS NOT NULL AND source_order IS NOT NULL))`,
     ),
   ],
 );
@@ -3383,7 +3442,7 @@ export const tournamentEventResultsInReporting = reporting
   })
   .with({ securityInvoker: true })
   .as(
-    sql`SELECT points.tournament_id, points.season_id, points.event_id, 'points_group'::text AS result_type, points.source_result_id, points.group_id, NULL::integer AS match_id, NULL::integer AS play_against_id, points.entry_id, NULL::integer AS opponent_entry_id, points.event_points, points.event_cost, points.event_net_points, points.event_rank, NULL::integer AS match_points, NULL::integer AS goals_for, NULL::integer AS goals_against, NULL::boolean AS is_winner, points.created_at, points.updated_at FROM competition.tournament_points_group_results points UNION ALL SELECT battle.tournament_id, battle.season_id, battle.event_id, 'battle_group'::text AS result_type, battle.source_result_id, battle.group_id, NULL::integer AS match_id, NULL::integer AS play_against_id, side.entry_id, side.opponent_entry_id, NULL::integer AS event_points, NULL::integer AS event_cost, side.net_points AS event_net_points, side.event_rank, side.match_points, NULL::integer AS goals_for, NULL::integer AS goals_against, CASE WHEN side.match_points IS NULL OR side.opponent_match_points IS NULL THEN NULL::boolean ELSE side.match_points > side.opponent_match_points END AS is_winner, battle.created_at, battle.updated_at FROM competition.tournament_battle_group_results battle CROSS JOIN LATERAL ( VALUES (battle.home_entry_id,battle.away_entry_id,battle.home_net_points,battle.home_rank,battle.home_match_points,battle.away_match_points), (battle.away_entry_id,battle.home_entry_id,battle.away_net_points,battle.away_rank,battle.away_match_points,battle.home_match_points)) side(entry_id, opponent_entry_id, net_points, event_rank, match_points, opponent_match_points) UNION ALL SELECT knockout.tournament_id, knockout.season_id, knockout.event_id, 'knockout'::text AS result_type, knockout.source_result_id, NULL::integer AS group_id, knockout.match_id, knockout.play_against_id, side.entry_id, side.opponent_entry_id, NULL::integer AS event_points, NULL::integer AS event_cost, side.net_points AS event_net_points, NULL::integer AS event_rank, NULL::integer AS match_points, side.goals_for, side.goals_against, CASE WHEN knockout.match_winner IS NULL OR side.entry_id IS NULL THEN NULL::boolean ELSE knockout.match_winner = side.entry_id END AS is_winner, knockout.created_at, knockout.updated_at FROM competition.tournament_knockout_results knockout CROSS JOIN LATERAL ( VALUES (knockout.home_entry_id,knockout.away_entry_id,knockout.home_net_points,knockout.home_goals_scored,knockout.home_goals_conceded), (knockout.away_entry_id,knockout.home_entry_id,knockout.away_net_points,knockout.away_goals_scored,knockout.away_goals_conceded)) side(entry_id, opponent_entry_id, net_points, goals_for, goals_against) WHERE side.entry_id IS NOT NULL`,
+    sql`SELECT points.tournament_id, points.season_id, points.event_id, 'points_group'::text AS result_type, points.source_result_id, points.group_id, NULL::integer AS match_id, NULL::integer AS play_against_id, points.entry_id, NULL::integer AS opponent_entry_id, points.event_points, points.event_cost, points.event_net_points, points.event_rank, NULL::integer AS match_points, NULL::integer AS goals_for, NULL::integer AS goals_against, NULL::boolean AS is_winner, points.created_at, points.updated_at FROM competition.tournament_points_group_results points UNION ALL SELECT battle.tournament_id, battle.season_id, battle.event_id, 'battle_group'::text AS result_type, battle.source_result_id, battle.group_id, NULL::integer AS match_id, NULL::integer AS play_against_id, side.entry_id, side.opponent_entry_id, NULL::integer AS event_points, NULL::integer AS event_cost, side.net_points AS event_net_points, side.event_rank, side.match_points, NULL::integer AS goals_for, NULL::integer AS goals_against, CASE WHEN side.match_points IS NULL OR side.opponent_match_points IS NULL THEN NULL::boolean ELSE side.match_points > side.opponent_match_points END AS is_winner, battle.created_at, battle.updated_at FROM competition.tournament_battle_group_results battle CROSS JOIN LATERAL ( VALUES (battle.home_entry_id,battle.away_entry_id,battle.home_net_points,battle.home_rank,battle.home_match_points,battle.away_match_points), (battle.away_entry_id,battle.home_entry_id,battle.away_net_points,battle.away_rank,battle.away_match_points,battle.home_match_points)) side(entry_id, opponent_entry_id, net_points, event_rank, match_points, opponent_match_points) WHERE side.entry_id IS NOT NULL UNION ALL SELECT knockout.tournament_id, knockout.season_id, knockout.event_id, 'knockout'::text AS result_type, knockout.source_result_id, NULL::integer AS group_id, knockout.match_id, knockout.play_against_id, side.entry_id, side.opponent_entry_id, NULL::integer AS event_points, NULL::integer AS event_cost, side.net_points AS event_net_points, NULL::integer AS event_rank, NULL::integer AS match_points, side.goals_for, side.goals_against, CASE WHEN knockout.match_winner IS NULL OR side.entry_id IS NULL THEN NULL::boolean ELSE knockout.match_winner = side.entry_id END AS is_winner, knockout.created_at, knockout.updated_at FROM competition.tournament_knockout_results knockout CROSS JOIN LATERAL ( VALUES (knockout.home_entry_id,knockout.away_entry_id,knockout.home_net_points,knockout.home_goals_scored,knockout.home_goals_conceded), (knockout.away_entry_id,knockout.home_entry_id,knockout.away_net_points,knockout.away_goals_scored,knockout.away_goals_conceded)) side(entry_id, opponent_entry_id, net_points, goals_for, goals_against) WHERE side.entry_id IS NOT NULL`,
   );
 
 export const tournamentSelectionStatsInReporting = reporting

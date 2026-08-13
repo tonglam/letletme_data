@@ -24,6 +24,7 @@ export const TOURNAMENT_JOBS = {
   // Info job (keep separate, low frequency)
   INFO: 'tournament-info',
   ROSTER_SYNC: 'tournament-roster-sync',
+  OFFICIAL_H2H: 'tournament-official-h2h',
 } as const;
 
 export type TournamentSyncJobName = (typeof TOURNAMENT_JOBS)[keyof typeof TOURNAMENT_JOBS];

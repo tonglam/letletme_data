@@ -8,7 +8,11 @@ import {
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
-import { diffTournamentRoster, getTournamentBackfillWindow } from '../domain/tournament';
+import {
+  diffTournamentRoster,
+  getTournamentBackfillWindow,
+  isOfficialH2HTournament,
+} from '../domain/tournament';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { ConflictError, NotFoundError, ValidationError } from '../utils/errors';
@@ -94,6 +98,16 @@ async function reconcileTournamentRosterUnlocked(
     const existingIds = await tournamentRosterRepository.findEntryIds(season, tournamentId);
     const sourceIds = source.participants.map((participant) => Number(participant.id));
     const { addedEntryIds, removedEntryIds } = diffTournamentRoster(existingIds, sourceIds);
+    if (
+      (addedEntryIds.length > 0 || removedEntryIds.length > 0) &&
+      isOfficialH2HTournament(tournament) &&
+      tournament.officialScheduleLockedAt
+    ) {
+      throw new ConflictError(
+        'Official H2H membership cannot change after the FPL schedule is locked.',
+        'TOURNAMENT_OFFICIAL_H2H_ROSTER_LOCKED',
+      );
+    }
     const finalizedEvent = await eventRepository.findLatestFinalized(season);
     const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
 

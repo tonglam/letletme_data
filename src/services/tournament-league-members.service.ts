@@ -22,6 +22,8 @@ export async function fetchLeagueParticipantsById(
   leagueId: number;
   leagueType: LeagueType;
   leagueName: string | null;
+  startEventId: number;
+  knockoutRounds: number;
   participants: TournamentParticipant[];
 }> {
   const participantMap = new Map<string, TournamentParticipant>();
@@ -30,6 +32,8 @@ export async function fetchLeagueParticipantsById(
   let readStandings = true;
   let readNewEntries = true;
   let leagueName: string | null = null;
+  let startEventId = 1;
+  let knockoutRounds = 0;
   let previousStandingsSignature: string | null = null;
   let previousNewEntriesSignature: string | null = null;
 
@@ -40,6 +44,8 @@ export async function fetchLeagueParticipantsById(
         : await client.getLeagueClassicStandings(leagueId, standingsPage, newEntriesPage);
 
     leagueName ??= response.league?.name?.trim() || null;
+    startEventId = response.league?.start_event ?? startEventId;
+    knockoutRounds = response.league?.ko_rounds ?? knockoutRounds;
 
     // Ranked standings are authoritative if an entry briefly appears in both
     // cursors because they carry current rank and points.
@@ -100,13 +106,22 @@ export async function fetchLeagueParticipantsById(
     );
   }
 
-  return { leagueId, leagueType, leagueName, participants };
+  return {
+    leagueId,
+    leagueType,
+    leagueName,
+    startEventId,
+    knockoutRounds,
+    participants,
+  };
 }
 
 export async function fetchLeagueParticipants(leagueUrl: string): Promise<{
   leagueId: number;
   leagueType: LeagueType;
   leagueName: string | null;
+  startEventId: number;
+  knockoutRounds: number;
   participants: TournamentParticipant[];
 }> {
   const { leagueId, leagueType } = parseLeagueUrl(leagueUrl);

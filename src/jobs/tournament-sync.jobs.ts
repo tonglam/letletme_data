@@ -337,6 +337,13 @@ export const enqueueTournamentBattleRace = (
   options?: TournamentSyncEnqueueOptions,
 ) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.BATTLE_RACE, season, eventId, source, options);
 
+export const enqueueTournamentOfficialH2H = (
+  season: FplSeasonRef,
+  eventId: number,
+  source?: TournamentSyncJobSource,
+  options?: TournamentSyncEnqueueOptions,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.OFFICIAL_H2H, season, eventId, source, options);
+
 export const enqueueTournamentKnockout = (
   season: FplSeasonRef,
   eventId: number,
