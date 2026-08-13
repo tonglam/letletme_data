@@ -85,7 +85,7 @@ SECURITY INVOKER
 SET search_path = pg_catalog, reporting, fpl
 AS $$
 DECLARE
-  refresh_time timestamptz := clock_timestamp();
+  refresh_time timestamptz;
   source_time timestamptz;
   refreshed_players integer;
   source_rows bigint;
@@ -100,6 +100,7 @@ BEGIN
   PERFORM pg_advisory_xact_lock(
     hashtextextended('reporting:player-season-summaries:' || requested_season_id::text, 0)
   );
+  refresh_time := clock_timestamp();
 
   SELECT GREATEST(
     COALESCE(max(player.updated_at), '-infinity'::timestamptz),
@@ -281,6 +282,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE
   ON reporting.player_season_summary_rows TO letletme_data_writer;
 GRANT SELECT, INSERT, UPDATE
   ON reporting.player_season_summary_refreshes TO letletme_data_writer;
+REVOKE EXECUTE
+  ON FUNCTION reporting.refresh_player_season_summaries(smallint) FROM PUBLIC;
 GRANT EXECUTE
   ON FUNCTION reporting.refresh_player_season_summaries(smallint) TO letletme_data_writer;
 GRANT SELECT ON reporting.player_season_summary_rows TO letletme_graphql_reader;
