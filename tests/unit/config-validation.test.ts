@@ -77,7 +77,8 @@ describe('production environment preflight', () => {
     expect(publishCore).toBeGreaterThan(roleVerify);
     expect(replaceServices).toBeGreaterThan(publishCore);
     expect(workflow).toContain('using the configured Data runtime URL without rewriting it');
-    expect(workflow).toContain('flock -w 300 9');
+    expect(workflow).not.toContain('letletme-vps-ops');
+    expect(workflow).not.toContain('flock -w 300 9');
     expect(workflow).toContain('deployment_started=true');
     expect(workflow).not.toContain('/usr/local/libexec/vps-maintenance');
     expect(workflow).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
