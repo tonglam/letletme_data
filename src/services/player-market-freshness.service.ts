@@ -1,9 +1,10 @@
+import { fplClient } from '../clients/fpl';
+import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   playerMarketSnapshotsRepository,
   type PlayerMarketDayCoverage,
 } from '../repositories/player-market-snapshots';
-import { playerRepository } from '../repositories/players';
 import { playerValuesRepository } from '../repositories/player-values';
 import { seasonRepository } from '../repositories/seasons';
 import type { PlayerValuesSettlement } from '../jobs/player-values-settlement';
@@ -15,7 +16,7 @@ import { resolvePlayerSyncEvent, type PlayerSyncEvent } from './player-sync-even
 export type PlayerMarketFreshnessDependencies = {
   findCurrentSeason: () => Promise<FplSeasonRef>;
   resolveSyncEvent: (season: FplSeasonRef, now: Date) => Promise<PlayerSyncEvent | null>;
-  countPublishedPlayers: (season: FplSeasonRef) => Promise<number>;
+  countCurrentUpstreamPlayers: (season: FplSeasonRef) => Promise<number>;
   getDayCoverage: (season: FplSeasonRef, snapshotDate: string) => Promise<PlayerMarketDayCoverage>;
   hasChangesForDate: (season: FplSeasonRef, snapshotDate: string) => Promise<boolean>;
   waitForPlayerValuesSettlement: (
@@ -28,7 +29,19 @@ export type PlayerMarketFreshnessDependencies = {
 const defaultDependencies: PlayerMarketFreshnessDependencies = {
   findCurrentSeason: () => seasonRepository.findCurrent(),
   resolveSyncEvent: (season, now) => resolvePlayerSyncEvent(season, now),
-  countPublishedPlayers: (season) => playerRepository.countPublished(season),
+  countCurrentUpstreamPlayers: async (season) => {
+    const bootstrap = await fplClient.getBootstrap();
+    const sourceSeason = deriveFplSeasonFromEvents(bootstrap.events);
+    if (sourceSeason !== season.seasonCode) {
+      throw new Error(
+        `Player market freshness source season mismatch: expected ${season.seasonCode}, received ${sourceSeason ?? 'unknown'}`,
+      );
+    }
+    if (bootstrap.elements.length === 0) {
+      throw new Error('Player market freshness bootstrap contains no players');
+    }
+    return bootstrap.elements.length;
+  },
   getDayCoverage: (season, snapshotDate) =>
     playerMarketSnapshotsRepository.getDayCoverage(season, snapshotDate),
   hasChangesForDate: (season, snapshotDate) =>
@@ -83,7 +96,10 @@ export async function checkPlayerMarketFreshness(
   // whether the daily snapshot is stale.
   const settlement = await dependencies.waitForPlayerValuesSettlement(season, snapshotDate);
   const [expectedCount, coverage, hasChanges] = await Promise.all([
-    dependencies.countPublishedPlayers(season),
+    // fpl.players is intentionally historical/accumulative. Compare against
+    // the current official bootstrap instead so removed players cannot inflate
+    // the watchdog's denominator forever.
+    dependencies.countCurrentUpstreamPlayers(season),
     dependencies.getDayCoverage(season, snapshotDate),
     dependencies.hasChangesForDate(season, snapshotDate),
   ]);

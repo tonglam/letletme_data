@@ -12,7 +12,7 @@ function dependencies(
   return {
     findCurrentSeason: async () => TEST_SEASON,
     resolveSyncEvent: async () => ({ event: { id: 1 }, phase: 'preseason' }) as never,
-    countPublishedPlayers: async () => 581,
+    countCurrentUpstreamPlayers: async () => 581,
     getDayCoverage: async () => ({
       snapshotCount: 581,
       captureCount: 1,
@@ -41,6 +41,22 @@ describe('09:36 player market freshness watchdog', () => {
       queueState: 'removed',
     });
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('uses the current bootstrap roster rather than the accumulated players table', async () => {
+    const result = await checkPlayerMarketFreshness(
+      now,
+      dependencies({
+        countCurrentUpstreamPlayers: async () => 580,
+        getDayCoverage: async () => ({
+          snapshotCount: 580,
+          captureCount: 1,
+          latestCapturedAt: new Date('2026-08-13T01:30:00.000Z'),
+        }),
+      }),
+    );
+
+    expect(result).toMatchObject({ status: 'ready', expectedCount: 580, snapshotCount: 580 });
   });
 
   test.each([
