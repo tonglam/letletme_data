@@ -93,6 +93,8 @@ jobs:
             deployment_committed=false
             migration_started=false
             services_start_attempted=false
+            data_api_service=api
+            data_worker_service=worker
             deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}"
             on_exit() {
               original_status=$?
@@ -101,7 +103,7 @@ jobs:
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
                 if [ "$services_start_attempted" = true ]; then
                   echo "Data deployment failed after starting the new services; stopping them for operator recovery" >&2
-                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker || true
+                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 "$data_api_service" "$data_worker_service" || true
                 fi
                 if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
                   echo "Data deployment failed before migration; restoring the previous API and worker image" >&2
