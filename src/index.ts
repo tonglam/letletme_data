@@ -209,6 +209,7 @@ logInfo('🚀 Elysia server started', {
     'launch-monitor',
     'player-values-window',
     'player-market-freshness-watchdog',
+    'player-season-summary-repair',
     'live-snapshot',
     'post-match-consolidation',
     'event-current-refresh',

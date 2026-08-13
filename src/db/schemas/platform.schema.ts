@@ -3364,6 +3364,92 @@ export const playerEventSnapshotsInFpl = fpl.table(
     ),
   ],
 );
+
+export const playerSeasonSummaryRowsInReporting = reporting.table(
+  'player_season_summary_rows',
+  {
+    seasonId: smallint('season_id').notNull(),
+    elementId: integer('element_id').notNull(),
+    elementType: integer('element_type').notNull(),
+    gameweeksAvailable: integer('gameweeks_available').notNull(),
+    gameweeksStarted: integer('gameweeks_started').notNull(),
+    minutes: integer().notNull(),
+    goalsScored: integer('goals_scored').notNull(),
+    assists: integer().notNull(),
+    cleanSheets: integer('clean_sheets').notNull(),
+    goalsConceded: integer('goals_conceded').notNull(),
+    ownGoals: integer('own_goals').notNull(),
+    penaltiesSaved: integer('penalties_saved').notNull(),
+    penaltiesMissed: integer('penalties_missed').notNull(),
+    yellowCards: integer('yellow_cards').notNull(),
+    redCards: integer('red_cards').notNull(),
+    saves: integer().notNull(),
+    bonus: integer().notNull(),
+    bps: integer().notNull(),
+    totalPoints: integer('total_points').notNull(),
+    defensiveContribution: integer('defensive_contribution').notNull(),
+    expectedGoals: numeric('expected_goals').notNull(),
+    expectedAssists: numeric('expected_assists').notNull(),
+    expectedGoalInvolvements: numeric('expected_goal_involvements').notNull(),
+    expectedGoalsConceded: numeric('expected_goals_conceded').notNull(),
+    dreamTeamAppearances: integer('dream_team_appearances').notNull(),
+    returnCount: integer('return_count').notNull(),
+    sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true, mode: 'date' }).notNull(),
+    refreshedAt: timestamp('refreshed_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index('player_season_summary_rows_cohort_idx').using(
+      'btree',
+      table.seasonId.asc().nullsLast(),
+      table.elementType.asc().nullsLast(),
+      table.elementId.asc().nullsLast(),
+    ),
+    foreignKey({
+      columns: [table.seasonId, table.elementId],
+      foreignColumns: [playersInFpl.seasonId, playersInFpl.elementId],
+      name: 'player_season_summary_rows_player_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId, table.elementId],
+      name: 'player_season_summary_rows_pkey',
+    }),
+    check(
+      'player_season_summary_rows_counts_nonnegative',
+      sql`(gameweeks_available >= 0) AND (gameweeks_started >= 0) AND (minutes >= 0) AND (goals_scored >= 0) AND (assists >= 0) AND (clean_sheets >= 0) AND (goals_conceded >= 0) AND (own_goals >= 0) AND (penalties_saved >= 0) AND (penalties_missed >= 0) AND (yellow_cards >= 0) AND (red_cards >= 0) AND (saves >= 0) AND (bonus >= 0) AND (defensive_contribution >= 0) AND (dream_team_appearances >= 0) AND (return_count >= 0)`,
+    ),
+  ],
+);
+
+export const playerSeasonSummaryRefreshesInReporting = reporting.table(
+  'player_season_summary_refreshes',
+  {
+    seasonId: smallint('season_id').notNull(),
+    revision: bigint({ mode: 'number' }).notNull(),
+    sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true, mode: 'date' }).notNull(),
+    refreshedAt: timestamp('refreshed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    playerCount: integer('player_count').notNull(),
+    statsRowCount: bigint('stats_row_count', { mode: 'number' }).notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'player_season_summary_refreshes_season_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId],
+      name: 'player_season_summary_refreshes_pkey',
+    }),
+    check('player_season_summary_refreshes_revision_positive', sql`revision > 0`),
+    check(
+      'player_season_summary_refreshes_counts_nonnegative',
+      sql`(player_count >= 0) AND (stats_row_count >= 0)`,
+    ),
+  ],
+);
+
 export const playerSeasonSummariesInReporting = reporting
   .view('player_season_summaries', {
     seasonId: smallint('season_id'),
@@ -3391,10 +3477,13 @@ export const playerSeasonSummariesInReporting = reporting
     expectedGoalInvolvements: numeric('expected_goal_involvements'),
     expectedGoalsConceded: numeric('expected_goals_conceded'),
     dreamTeamAppearances: integer('dream_team_appearances'),
+    returnCount: integer('return_count'),
+    sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true, mode: 'date' }),
+    refreshedAt: timestamp('refreshed_at', { withTimezone: true, mode: 'date' }),
   })
   .with({ securityInvoker: true })
   .as(
-    sql`SELECT player.season_id, player.element_id, player.element_type, count(stats.event_id)::integer AS gameweeks_available, count(*) FILTER (WHERE stats.starts IS TRUE)::integer AS gameweeks_started, COALESCE(sum(stats.minutes), 0::bigint)::integer AS minutes, COALESCE(sum(stats.goals_scored), 0::bigint)::integer AS goals_scored, COALESCE(sum(stats.assists), 0::bigint)::integer AS assists, COALESCE(sum(stats.clean_sheets), 0::bigint)::integer AS clean_sheets, COALESCE(sum(stats.goals_conceded), 0::bigint)::integer AS goals_conceded, COALESCE(sum(stats.own_goals), 0::bigint)::integer AS own_goals, COALESCE(sum(stats.penalties_saved), 0::bigint)::integer AS penalties_saved, COALESCE(sum(stats.penalties_missed), 0::bigint)::integer AS penalties_missed, COALESCE(sum(stats.yellow_cards), 0::bigint)::integer AS yellow_cards, COALESCE(sum(stats.red_cards), 0::bigint)::integer AS red_cards, COALESCE(sum(stats.saves), 0::bigint)::integer AS saves, COALESCE(sum(stats.bonus), 0::bigint)::integer AS bonus, COALESCE(sum(stats.bps), 0::bigint)::integer AS bps, COALESCE(sum(stats.total_points), 0::bigint)::integer AS total_points, COALESCE(sum(stats.defensive_contribution), 0::bigint)::integer AS defensive_contribution, COALESCE(sum(stats.expected_goals), 0::numeric) AS expected_goals, COALESCE(sum(stats.expected_assists), 0::numeric) AS expected_assists, COALESCE(sum(stats.expected_goal_involvements), 0::numeric) AS expected_goal_involvements, COALESCE(sum(stats.expected_goals_conceded), 0::numeric) AS expected_goals_conceded, count(*) FILTER (WHERE stats.in_dream_team IS TRUE)::integer AS dream_team_appearances FROM fpl.players player LEFT JOIN fpl.player_gameweek_stats stats ON stats.season_id = player.season_id AND stats.element_id = player.element_id GROUP BY player.season_id, player.element_id, player.element_type`,
+    sql`SELECT season_id, element_id, element_type, gameweeks_available, gameweeks_started, minutes, goals_scored, assists, clean_sheets, goals_conceded, own_goals, penalties_saved, penalties_missed, yellow_cards, red_cards, saves, bonus, bps, total_points, defensive_contribution, expected_goals, expected_assists, expected_goal_involvements, expected_goals_conceded, dream_team_appearances, return_count, source_updated_at, refreshed_at FROM reporting.player_season_summary_rows`,
   );
 
 export const playerValueChangesInReporting = reporting
