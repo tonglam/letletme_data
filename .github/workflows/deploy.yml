@@ -229,4 +229,4 @@ jobs:
             deployment_committed=true
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
               --mode=deploy --service=data || true
-            docker system df
+            docker system df || true
