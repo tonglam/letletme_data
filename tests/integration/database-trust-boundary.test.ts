@@ -47,6 +47,9 @@ const PLAYER_SEASON_SUMMARY_COLUMNS = [
   'expected_goal_involvements',
   'expected_goals_conceded',
   'dream_team_appearances',
+  'return_count',
+  'source_updated_at',
+  'refreshed_at',
 ] as const;
 
 const PLAYER_VALUE_CHANGE_COLUMNS = [

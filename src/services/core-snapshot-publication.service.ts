@@ -7,12 +7,13 @@ import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
 import { seasonRepository } from '../repositories/seasons';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { DatabaseError } from '../utils/errors';
-import { logInfo } from '../utils/logger';
+import { logError, logInfo } from '../utils/logger';
 import {
   persistCoreSnapshot,
   readCoreSnapshotOrderingTimestamp,
   type CoreSnapshotPersistenceResult,
 } from './core-snapshot-persistence.service';
+import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 
 import type { CoreSnapshot } from '../domain/core-snapshot';
 
@@ -37,6 +38,17 @@ export async function commitCoreSnapshotPublication(
 ): Promise<CoreSnapshotCommitResult> {
   const season = explicitSeasonRef(snapshot.season);
   const persisted = await persistCoreSnapshot(snapshot, context.sourceCheckedAt);
+  try {
+    // Core publications can change the roster or player positions before any
+    // live gameweek write occurs, so refresh the reporting read model here as
+    // well as on the live-write path.
+    await refreshPlayerSeasonSummaries(season);
+  } catch (error) {
+    logError('Player season summary refresh failed after core publication', error, {
+      season: season.seasonCode,
+      revision: context.revision,
+    });
+  }
   let cachePublished = false;
   try {
     const publication = await publishCoreSnapshotCache(persisted.snapshot, {

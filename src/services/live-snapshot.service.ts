@@ -25,7 +25,7 @@ import { syncOperationsRepository } from '../repositories/sync-operations';
 import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
 import { DatabaseError } from '../utils/errors';
-import { logInfo } from '../utils/logger';
+import { logError, logInfo } from '../utils/logger';
 import {
   persistPreparedEventLives,
   prepareEventLives,
@@ -38,6 +38,7 @@ import {
   type LiveFixtureTeamMaps,
 } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
+import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   readonly season: string;
@@ -337,7 +338,7 @@ export async function persistLiveSnapshotDurably(
     throw new DatabaseError('Final live publication requires durable event-live persistence');
   }
 
-  return withCoreSnapshotReadLock(season, async (transaction) => {
+  const result = await withCoreSnapshotReadLock(season, async (transaction) => {
     const fence = await claimLiveSnapshotFence(transaction, season, eventId, checkedAt);
     if (!fence.accepted) {
       return {
@@ -377,6 +378,22 @@ export async function persistLiveSnapshotDurably(
       persistedEventLives: request.persistEventLives,
     };
   });
+
+  if (result.persistedEventLives) {
+    try {
+      // Keep the reporting refresh outside the canonical live-write
+      // transaction. Its failure cannot roll back durable FPL facts and the
+      // hourly repair job will retry the missing revision.
+      await refreshPlayerSeasonSummaries(season);
+    } catch (error) {
+      logError('Player season summary refresh failed after durable live write', error, {
+        season: season.seasonCode,
+        eventId,
+      });
+    }
+  }
+
+  return result;
 }
 
 function toCachePayload(prepared: PreparedLiveSnapshot): LiveSnapshotCachePayload {

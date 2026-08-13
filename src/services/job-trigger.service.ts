@@ -24,6 +24,7 @@ import { getCurrentEvent } from './events.service';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
+import { repairPlayerSeasonSummaries } from './player-season-summaries.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
 import { logInfo } from '../utils/logger';
 import { ValidationError } from '../utils/errors';
@@ -78,6 +79,11 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     name: 'player-stats-sync',
     description: 'Sync player stats from FPL API',
     schedule: 'Daily at 09:40 UTC+8 (current event or preseason next event)',
+  },
+  {
+    name: 'player-season-summary-repair',
+    description: 'Repair stale physical player season summary read models',
+    schedule: 'Hourly at minute 17 and after every durable live write',
   },
   {
     name: 'player-values-sync',
@@ -192,6 +198,7 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       const season = await seasonRepository.findCurrent();
       return enqueuePlayerStatsSyncJob(season, 'manual');
     },
+    'player-season-summary-repair': repairPlayerSeasonSummaries,
     'player-values-sync': async () => {
       const season = await seasonRepository.findCurrent();
       return enqueuePlayerValuesSyncJob(season, 'manual');

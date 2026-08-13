@@ -53,6 +53,8 @@ type RelationCount = { relation: string; rows: number };
 
 async function clearFixtureSeason(client: postgres.Sql): Promise<void> {
   await client.begin(async (transaction) => {
+    await transaction`DELETE FROM reporting.player_season_summary_rows WHERE season_id = 2026`;
+    await transaction`DELETE FROM reporting.player_season_summary_refreshes WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.tournament_battle_group_results WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.tournament_points_group_results WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.tournament_knockout_results WHERE season_id = 2026`;
@@ -465,13 +467,24 @@ persistenceTest(
       await db.transaction((transaction) =>
         persistPreparedEventLives(season, preparedLive, transaction),
       );
+      // The declaration-parity database is generated from Drizzle declarations and
+      // intentionally does not include migration-owned PL/pgSQL functions. Exercise
+      // the refresh function when it is present, while still keeping this broad
+      // persistence contract valid against the declaration-only database.
+      const [refreshContract] = await client<{ procedure: string | null }[]>`
+        SELECT to_regprocedure('reporting.refresh_player_season_summaries(smallint)')::text
+          AS procedure
+      `;
+      if (refreshContract?.procedure) {
+        await client`SELECT * FROM reporting.refresh_player_season_summaries(2026::smallint)`;
+      }
       const [persistedLive] = await client<
         Array<{
           gameweek_rows: number;
           scoring_rows: number;
           fixture_rows: number;
           summary_rows: number;
-          summary_points: number;
+          summary_points: number | null;
         }>
       >`
         SELECT
@@ -490,8 +503,8 @@ persistenceTest(
         gameweek_rows: 2,
         scoring_rows: 8,
         fixture_rows: 2,
-        summary_rows: 2,
-        summary_points: 11,
+        summary_rows: refreshContract?.procedure ? 2 : 0,
+        summary_points: refreshContract?.procedure ? 11 : null,
       });
 
       const entryIds = [70_001, 70_002] as const;

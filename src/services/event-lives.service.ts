@@ -11,6 +11,7 @@ import { transformEventLiveExplains } from '../transformers/event-live-explains'
 import { transformEventLives } from '../transformers/event-lives';
 import { transformFplPlayerFixtureEvidence } from '../transformers/fpl-player-fixture-stats';
 import { logDebug, logError, logInfo } from '../utils/logger';
+import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 
 import type { RawFPLEventLiveElement } from '../types';
 
@@ -93,7 +94,19 @@ export async function persistPreparedEventLives(
     return persist(dbInstance);
   }
   const db = await getDb();
-  return db.transaction(persist);
+  const saved = await db.transaction(persist);
+  // Direct callers are also canonical gameweek writers. Keep the reporting
+  // read model current after their transaction commits; a failed refresh must
+  // not roll back the authoritative event-live facts.
+  try {
+    await refreshPlayerSeasonSummaries(season);
+  } catch (error) {
+    logError('Player season summary refresh failed after direct event-live write', error, {
+      season: season.seasonCode,
+      eventId,
+    });
+  }
+  return saved;
 }
 
 /**
