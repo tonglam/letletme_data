@@ -539,6 +539,33 @@ export async function verifyRuntimeLoginConnection(
             `Runtime connection must authenticate as ${contract.login} with ${contract.capability}`,
           );
         }
+        if (target === 'data') {
+          const [capabilities] = await client<
+            Array<{
+              can_read_player_value_changes: boolean;
+              can_use_market_snapshot_sequence: boolean;
+            }>
+          >`
+            SELECT
+              has_table_privilege(
+                current_user,
+                'reporting.player_value_changes',
+                'SELECT'
+              ) AS can_read_player_value_changes,
+              has_sequence_privilege(
+                current_user,
+                'fpl.player_market_snapshots_source_snapshot_id_seq',
+                'SELECT,USAGE'
+              ) AS can_use_market_snapshot_sequence
+          `;
+          if (
+            !capabilities?.can_read_player_value_changes ||
+            !capabilities.can_use_market_snapshot_sequence
+          ) {
+            throw new Error('Data runtime market capabilities are incomplete');
+          }
+          await client`SELECT 1 FROM reporting.player_value_changes LIMIT 0`;
+        }
       } finally {
         await client.end({ timeout: 0 });
       }

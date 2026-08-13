@@ -109,6 +109,25 @@ describe('data sync attempt reporting', () => {
       succeededUnits: 70,
       failedUnits: 5,
     });
+    expect(
+      inferDataSyncWorkSummary({
+        requiredUnits: 581,
+        succeededUnits: 581,
+        failedUnits: 0,
+        timings: {
+          bootstrap: 120.4,
+          snapshotWrite: 80.6,
+          derivedView: 15.2,
+          userControlledKey: 999,
+        },
+      }),
+    ).toEqual({
+      requiredUnits: 581,
+      reusedUnits: 0,
+      succeededUnits: 581,
+      failedUnits: 0,
+      timings: { bootstrap: 120, snapshotWrite: 81, derivedView: 15 },
+    });
   });
 
   test('emits one bounded report with inferred work and FPL metrics', async () => {
@@ -150,6 +169,10 @@ describe('data sync attempt reporting', () => {
       reusedUnits: 3,
       succeededUnits: 1,
       failedUnits: 1,
+      timings: {
+        queueWait: 15,
+        total: expect.any(Number),
+      },
       fpl: {
         logicalRequests: 1,
         attempts: 2,

@@ -17,6 +17,8 @@ const accepted = (): MigrationLoginSnapshot => ({
   canWriteMigrationLedger: true,
   canonicalSchemaOwnerCount: 6,
   publicApplicationObjectCount: 0,
+  dataWriterCanReadPlayerValueChanges: true,
+  dataWriterCanUseMarketSnapshotSequence: true,
   inheritedRoles: ['letletme_data_owner'],
 });
 
@@ -48,5 +50,20 @@ describe('migration LOGIN contract', () => {
     expect(() => assertMigrationLoginSnapshot({ ...accepted(), inheritedRoles: [] })).toThrow(
       'Data owner',
     );
+  });
+
+  test('rejects a migration state that cannot support the Data market sync', () => {
+    expect(() =>
+      assertMigrationLoginSnapshot({
+        ...accepted(),
+        dataWriterCanReadPlayerValueChanges: false,
+      }),
+    ).toThrow('player_value_changes');
+    expect(() =>
+      assertMigrationLoginSnapshot({
+        ...accepted(),
+        dataWriterCanUseMarketSnapshotSequence: false,
+      }),
+    ).toThrow('market snapshot sequence');
   });
 });

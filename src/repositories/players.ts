@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, count, eq, inArray, sql } from 'drizzle-orm';
 
 import { playersInFpl, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
@@ -26,6 +26,24 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    countPublished: async (season: FplSeasonRef): Promise<number> => {
+      try {
+        const db = await getDbInstance();
+        const [result] = await db
+          .select({ count: count() })
+          .from(playersInFpl)
+          .where(eq(playersInFpl.seasonId, season.seasonId));
+        return result?.count ?? 0;
+      } catch (error) {
+        logError('Failed to count published playersInFpl', error);
+        throw new DatabaseError(
+          'Failed to count published playersInFpl',
+          'COUNT_PUBLISHED_PLAYERS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findAll: async (
       season: FplSeasonRef,
       options: { lock?: boolean } = {},
