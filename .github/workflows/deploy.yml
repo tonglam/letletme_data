@@ -95,20 +95,23 @@ jobs:
             deployment_committed=false
             migration_started=false
             services_start_attempted=false
-            data_api_service=api
-            data_worker_service=worker
             deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}-${RUN_ATTEMPT:-1}"
+            maintenance_controller=/usr/local/libexec/vps-maintenance
+            if [ ! -x "$maintenance_controller" ]; then
+              echo "missing root-owned VPS maintenance controller: $maintenance_controller" >&2
+              exit 78
+            fi
             on_exit() {
               original_status=$?
               trap - EXIT
               set +e
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
                 if [ "$services_start_attempted" = true ]; then
-                  echo "Data deployment failed after starting the new services; stopping them for operator recovery" >&2
-                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 "$data_api_service" "$data_worker_service" || true
+                  echo "Data deployment failed after starting new services; stopping them for operator recovery" >&2
+                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker || true
                 fi
                 if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
-                  echo "Data deployment failed before migration; restoring the previous API and worker image" >&2
+                  echo "Data deployment failed before migration; restoring previous API and worker image" >&2
                   APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
                 elif [ "$migration_started" = true ]; then
                   echo "Data deployment failed after migration started; leaving services stopped for operator recovery" >&2
@@ -182,6 +185,14 @@ jobs:
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment begin \
               --service=data --run-id="$deployment_run_id" --old-image="$old_image" --new-image="$IMAGE_REF" >/dev/null
             deployment_started=true
+            migration_started=false
+            restore_before_migration() {
+              if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
+                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
+              fi
+            }
+            trap restore_before_migration ERR
+
             start_stage quiescence
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
@@ -189,8 +200,8 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun scripts/assert-queue-quiescence.ts --redis-only
             finish_stage
-            start_stage migration
             migration_started=true
+            start_stage migration
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract

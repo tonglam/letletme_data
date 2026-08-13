@@ -77,6 +77,8 @@ describe('production environment preflight', () => {
     expect(publishCore).toBeGreaterThan(roleVerify);
     expect(replaceServices).toBeGreaterThan(publishCore);
     expect(workflow).toContain('using the configured Data runtime URL without rewriting it');
+    expect(workflow).toContain('maintenance_controller=/usr/local/libexec/vps-maintenance');
+    expect(workflow).toContain('missing root-owned VPS maintenance controller');
     expect(workflow).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(workflow).not.toContain('GRAPHQL_RUNTIME_DATABASE_URL');
     expect(workflow).not.toContain('db:provision-runtime-logins');
