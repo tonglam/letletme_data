@@ -77,28 +77,32 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          RUN_ID: ${{ github.run_id }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,RUN_ID
           script: |
             set -euo pipefail
             exec 9>/run/letletme-vps-ops/maintenance.lock
-            flock -n 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
+            flock -w 300 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
             old_image=""
             deployment_started=false
             deployment_committed=false
-            deployment_run_id="${GITHUB_RUN_ID:-data-${DEPLOY_SHA}}"
+            migration_started=false
+            deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}"
             on_exit() {
               original_status=$?
               trap - EXIT
               set +e
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
-                echo "Data deployment failed; attempting to restore the previous API and worker image" >&2
-                if [ -n "$old_image" ]; then
+                if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
+                  echo "Data deployment failed before migration; restoring the previous API and worker image" >&2
                   APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
+                elif [ "$migration_started" = true ]; then
+                  echo "Data deployment failed after migration started; leaving services stopped for operator recovery" >&2
                 fi
                 VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
                   --service=data --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
@@ -135,7 +139,7 @@ jobs:
             test -f "$migration_env_file"
             APP_IMAGE="$IMAGE_REF" docker compose config --quiet
             APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-size: 20m'
-            APP_IMAGE="$IMAGE_REF" docker compose config | grep -q "max-file: \"5\"\|max-file: '5'\|max-file: 5"
+            APP_IMAGE="$IMAGE_REF" docker compose config | grep -Eq 'max-file: "5"$'
             migration_database_url=$(sed -n 's/^DATABASE_URL=//p' "$migration_env_file" \
               | sed -e 's/^"//' -e 's/"$//')
             if [ -z "$migration_database_url" ]; then
@@ -178,6 +182,7 @@ jobs:
               bun scripts/assert-queue-quiescence.ts --redis-only
             finish_stage
             start_stage migration
+            migration_started=true
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
