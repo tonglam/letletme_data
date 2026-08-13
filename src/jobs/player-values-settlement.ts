@@ -5,12 +5,13 @@ import { getExplicitDataSyncQueueJobId } from './data-sync-job-definition';
 
 const PLAYER_VALUES_SETTLEMENT_TIMEOUT_MS = 5 * 60_000;
 const PLAYER_VALUES_SETTLEMENT_POLL_MS = 2_000;
-export type ObservedPlayerValuesJobState = JobState | 'unknown' | 'removed';
-const SETTLED_STATES = new Set<ObservedPlayerValuesJobState>(['completed', 'failed', 'unknown']);
+export type ObservedPlayerValuesJobState = JobState | 'unknown' | 'missing';
+export type PlayerValuesSettlementState = JobState | 'unknown' | 'removed' | 'not-observed';
+const SETTLED_STATES = new Set<JobState | 'unknown'>(['completed', 'failed', 'unknown']);
 
 export type PlayerValuesSettlement = {
   readonly settled: boolean;
-  readonly state: ObservedPlayerValuesJobState;
+  readonly state: PlayerValuesSettlementState;
 };
 
 export function getPlayerValuesQueueJobId(season: FplSeasonRef, changeDate: string): string {
@@ -28,7 +29,7 @@ async function readPlayerValuesJobState(
 ): Promise<ObservedPlayerValuesJobState> {
   const { dataSyncQueue } = await import('../queues/data-sync.queue');
   const job = await dataSyncQueue.getJob(getPlayerValuesQueueJobId(season, changeDate));
-  return job ? job.getState() : 'removed';
+  return job ? job.getState() : 'missing';
 }
 
 /**
@@ -46,6 +47,8 @@ export async function waitForPlayerValuesSettlement(
     now?: () => number;
     sleep?: (durationMs: number) => Promise<void>;
     readState?: () => Promise<ObservedPlayerValuesJobState>;
+    /** Existing durable capture evidence proves an already-removed job settled. */
+    missingIsSettled?: boolean;
   } = {},
 ): Promise<PlayerValuesSettlement> {
   const timeoutMs = Math.max(0, options.timeoutMs ?? PLAYER_VALUES_SETTLEMENT_TIMEOUT_MS);
@@ -54,14 +57,25 @@ export async function waitForPlayerValuesSettlement(
   const sleep = options.sleep ?? wait;
   const readState = options.readState ?? (() => readPlayerValuesJobState(season, changeDate));
   const deadline = now() + timeoutMs;
+  let observedJob = false;
 
   while (true) {
     const state = await readState();
-    if (state === 'removed' || SETTLED_STATES.has(state)) {
-      return { settled: true, state };
+    if (state === 'missing') {
+      if (observedJob || options.missingIsSettled) {
+        return { settled: true, state: 'removed' };
+      }
+    } else {
+      observedJob = true;
+      if (SETTLED_STATES.has(state)) {
+        return { settled: true, state };
+      }
     }
     if (now() >= deadline) {
-      return { settled: false, state };
+      return {
+        settled: false,
+        state: state === 'missing' ? 'not-observed' : state,
+      };
     }
     await sleep(Math.min(pollMs, Math.max(1, deadline - now())));
   }

@@ -22,6 +22,7 @@ export type PlayerMarketFreshnessDependencies = {
   waitForPlayerValuesSettlement: (
     season: FplSeasonRef,
     snapshotDate: string,
+    options: { missingIsSettled: boolean },
   ) => Promise<PlayerValuesSettlement>;
   notify: (message: string) => Promise<void>;
 };
@@ -46,10 +47,10 @@ const defaultDependencies: PlayerMarketFreshnessDependencies = {
     playerMarketSnapshotsRepository.getDayCoverage(season, snapshotDate),
   hasChangesForDate: (season, snapshotDate) =>
     playerValuesRepository.hasChangesForDate(season, snapshotDate),
-  waitForPlayerValuesSettlement: async (season, snapshotDate) => {
+  waitForPlayerValuesSettlement: async (season, snapshotDate, options) => {
     // Keep Queue/Redis configuration out of pure service imports and unit tests.
     const { waitForPlayerValuesSettlement } = await import('../jobs/player-values-settlement');
-    return waitForPlayerValuesSettlement(season, snapshotDate);
+    return waitForPlayerValuesSettlement(season, snapshotDate, options);
   },
   notify: notifyTwoBots,
 };
@@ -91,10 +92,21 @@ export async function checkPlayerMarketFreshness(
   }
 
   const snapshotDate = formatCronDateKey(now);
+  const [initialCoverage, initialHasChanges] = await Promise.all([
+    dependencies.getDayCoverage(season, snapshotDate),
+    dependencies.hasChangesForDate(season, snapshotDate),
+  ]);
+  const initialFinalCaptureObserved =
+    syncEvent.phase === 'preseason' ||
+    initialHasChanges ||
+    isFinalWindowCapture(snapshotDate, initialCoverage.latestCapturedAt);
   // A 09:35 capture can legitimately be active or delayed by BullMQ backoff
-  // when this 09:36 check begins. Observe it to settlement before deciding
-  // whether the daily snapshot is stale.
-  const settlement = await dependencies.waitForPlayerValuesSettlement(season, snapshotDate);
+  // when this 09:36 check begins. A missing queue row is conclusive only when
+  // the final snapshot already proves completion; otherwise allow the producer
+  // its full enqueue/retry horizon and distinguish a never-observed job.
+  const settlement = await dependencies.waitForPlayerValuesSettlement(season, snapshotDate, {
+    missingIsSettled: initialFinalCaptureObserved,
+  });
   const [expectedCount, coverage, hasChanges] = await Promise.all([
     // fpl.players is intentionally historical/accumulative. Compare against
     // the current official bootstrap instead so removed players cannot inflate
@@ -109,7 +121,10 @@ export async function checkPlayerMarketFreshness(
     syncEvent.phase === 'preseason' ||
     hasChanges ||
     isFinalWindowCapture(snapshotDate, coverage.latestCapturedAt);
-  const status = !settlement.settled
+  // A fast job can enqueue, finish, and be removed between queue polls. The
+  // complete final capture is durable settlement evidence in that race.
+  const captureSettled = settlement.settled || (completeSnapshot && finalCaptureObserved);
+  const status = !captureSettled
     ? 'unsettled'
     : coverage.snapshotCount === 0
       ? 'missing'

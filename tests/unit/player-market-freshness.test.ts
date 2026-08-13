@@ -155,9 +155,46 @@ describe('09:36 player market freshness watchdog', () => {
       }),
     );
 
-    expect(order).toEqual(['settlement', 'coverage']);
+    expect(order).toEqual(['coverage', 'settlement', 'coverage']);
     expect(result).toMatchObject({ status: 'unsettled', queueState: 'delayed' });
     expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not treat a not-yet-enqueued 09:35 capture as settled', async () => {
+    let missingIsSettled: boolean | undefined;
+    const result = await checkPlayerMarketFreshness(
+      now,
+      dependencies({
+        resolveSyncEvent: async () => ({ event: { id: 1 }, phase: 'current' }) as never,
+        waitForPlayerValuesSettlement: async (_season, _date, options) => {
+          missingIsSettled = options.missingIsSettled;
+          return { settled: false, state: 'not-observed' };
+        },
+      }),
+    );
+
+    expect(missingIsSettled).toBe(false);
+    expect(result).toMatchObject({ status: 'unsettled', queueState: 'not-observed' });
+  });
+
+  test('accepts durable final-capture evidence when a fast queue job was never observed', async () => {
+    const result = await checkPlayerMarketFreshness(
+      now,
+      dependencies({
+        resolveSyncEvent: async () => ({ event: { id: 1 }, phase: 'current' }) as never,
+        getDayCoverage: async () => ({
+          snapshotCount: 581,
+          captureCount: 1,
+          latestCapturedAt: new Date('2026-08-13T01:35:00.000Z'),
+        }),
+        waitForPlayerValuesSettlement: async () => ({
+          settled: false,
+          state: 'not-observed',
+        }),
+      }),
+    );
+
+    expect(result).toMatchObject({ status: 'ready', queueState: 'not-observed' });
   });
 
   test('keeps freshness alerts best-effort and independent from readiness', async () => {
