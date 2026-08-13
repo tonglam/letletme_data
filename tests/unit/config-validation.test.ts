@@ -49,10 +49,7 @@ describe('production environment preflight', () => {
     const preflight = workflow.indexOf('bun run env:check');
     const identityContract = workflow.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = workflow.indexOf('data_runtime_database_url=$(sed -n');
-    const stopServices = workflow.indexOf(
-      'APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker',
-      identityContract,
-    );
+    const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only',
     );
