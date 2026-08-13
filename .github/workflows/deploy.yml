@@ -78,12 +78,13 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,RUN_ID
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,RUN_ID,RUN_ATTEMPT
           script: |
             set -euo pipefail
             exec 9>/run/letletme-vps-ops/maintenance.lock
@@ -95,7 +96,7 @@ jobs:
             services_start_attempted=false
             data_api_service=api
             data_worker_service=worker
-            deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}"
+            deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}-${RUN_ATTEMPT:-1}"
             on_exit() {
               original_status=$?
               trap - EXIT
@@ -159,7 +160,6 @@ jobs:
             if [ -n "$old_container" ]; then
               old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
               test -n "$old_image"
-              printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
             fi
 
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
@@ -240,6 +240,10 @@ jobs:
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment commit \
               --service=data --run-id="$deployment_run_id" >/dev/null
             deployment_committed=true
+            if [ -n "$old_image" ]; then
+              printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
+              chmod 600 "$HOME/.letletme-data-previous-image"
+            fi
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
               --mode=deploy --service=data || true
             docker system df || true
