@@ -264,15 +264,14 @@ jobs:
                 fi
               fi
             done
-            scoped_dangling_images=$(docker image ls --quiet \
-              --filter "reference=${image_name}:*" \
-              --filter dangling=true | sort -u)
-            while IFS= read -r dangling_image; do
-              if [ -n "$dangling_image" ]; then
+            scoped_images=$(docker image ls --no-trunc --format '{{.Repository}}|{{.ID}}' \
+              | awk -F '|' -v repository="$image_name" '$1 == repository { print $2 }' | sort -u)
+            while IFS= read -r scoped_image; do
+              if [ -n "$scoped_image" ]; then
                 case " $protected_image_ids " in
-                  *" $dangling_image "*) ;;
-                  *) docker image rm "$dangling_image" ;;
+                  *" $scoped_image "*) ;;
+                  *) docker image rm "$scoped_image" ;;
                 esac
               fi
-            done <<< "$scoped_dangling_images"
+            done <<< "$scoped_images"
             docker system df || true
