@@ -10,6 +10,8 @@ export type MigrationLoginSnapshot = {
   readonly canWriteMigrationLedger: boolean;
   readonly canonicalSchemaOwnerCount: number;
   readonly publicApplicationObjectCount: number;
+  readonly dataWriterCanReadPlayerValueChanges: boolean;
+  readonly dataWriterCanUseMarketSnapshotSequence: boolean;
   readonly inheritedRoles: readonly string[];
 };
 
@@ -50,6 +52,12 @@ export function assertMigrationLoginSnapshot(snapshot: MigrationLoginSnapshot): 
   }
   if (snapshot.publicApplicationObjectCount !== 0) {
     throw new Error('The public schema still contains application objects');
+  }
+  if (!snapshot.dataWriterCanReadPlayerValueChanges) {
+    throw new Error('Data writer cannot read reporting.player_value_changes');
+  }
+  if (!snapshot.dataWriterCanUseMarketSnapshotSequence) {
+    throw new Error('Data writer cannot use the player market snapshot sequence');
   }
   if (!snapshot.inheritedRoles.includes('letletme_data_owner')) {
     throw new Error('Migration LOGIN cannot SET ROLE to the Data owner');

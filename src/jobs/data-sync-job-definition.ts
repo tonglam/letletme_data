@@ -13,6 +13,10 @@ export interface DataSyncEnqueueOptions {
   removeOnSettle?: boolean;
 }
 
+export function getExplicitDataSyncQueueJobId(season: FplSeasonRef, jobId: string): string {
+  return `${season.seasonCode}-${jobId}`;
+}
+
 export function defaultDataSyncJobId(
   jobName: DataSyncJobName,
   season: FplSeasonRef,

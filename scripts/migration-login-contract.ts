@@ -20,6 +20,8 @@ type ContractRow = {
   can_write_migration_ledger: boolean;
   canonical_schema_owner_count: number;
   public_application_object_count: number;
+  data_writer_can_read_player_value_changes: boolean;
+  data_writer_can_use_market_snapshot_sequence: boolean;
 };
 
 type PreflightRow = Pick<
@@ -112,7 +114,21 @@ async function main(): Promise<void> {
           FROM pg_type type_row
           WHERE type_row.typnamespace = 'public'::regnamespace
             AND type_row.typtype IN ('d', 'e')
-        ) AS public_application_object_count
+        ) AS public_application_object_count,
+        has_table_privilege(
+          'letletme_data_writer',
+          'reporting.player_value_changes',
+          'SELECT'
+        ) AS data_writer_can_read_player_value_changes,
+        has_sequence_privilege(
+          'letletme_data_writer',
+          'fpl.player_market_snapshots_source_snapshot_id_seq',
+          'SELECT'
+        ) AND has_sequence_privilege(
+          'letletme_data_writer',
+          'fpl.player_market_snapshots_source_snapshot_id_seq',
+          'USAGE'
+        ) AS data_writer_can_use_market_snapshot_sequence
       FROM pg_roles role_row
       WHERE role_row.rolname = current_user
     `;
@@ -150,6 +166,8 @@ async function main(): Promise<void> {
       canWriteMigrationLedger: base.can_write_migration_ledger,
       canonicalSchemaOwnerCount: base.canonical_schema_owner_count,
       publicApplicationObjectCount: base.public_application_object_count,
+      dataWriterCanReadPlayerValueChanges: base.data_writer_can_read_player_value_changes,
+      dataWriterCanUseMarketSnapshotSequence: base.data_writer_can_use_market_snapshot_sequence,
       inheritedRoles: inheritedRows.map((row) => row.role_name),
     };
     assertMigrationLoginSnapshot(snapshot);

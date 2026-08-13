@@ -337,11 +337,32 @@ describe('database trust boundary', () => {
     expect(writerReportingBoundary).toEqual({
       schemaUsage: true,
       schemaCreate: false,
-      readableRelations: ['tournament_entry_event_summaries', 'tournament_selection_stats'],
+      readableRelations: [
+        'player_value_changes',
+        'tournament_entry_event_summaries',
+        'tournament_selection_stats',
+      ],
       writableRelations: [],
       refreshSelection: true,
       refreshEntryEvents: true,
     });
+
+    const [marketSnapshotSequenceBoundary] = await sql<
+      Array<{ selectable: boolean; usable: boolean }>
+    >`
+      SELECT
+        has_sequence_privilege(
+          'letletme_data_writer',
+          'fpl.player_market_snapshots_source_snapshot_id_seq',
+          'SELECT'
+        ) AS selectable,
+        has_sequence_privilege(
+          'letletme_data_writer',
+          'fpl.player_market_snapshots_source_snapshot_id_seq',
+          'USAGE'
+        ) AS usable
+    `;
+    expect(marketSnapshotSequenceBoundary).toEqual({ selectable: true, usable: true });
 
     const [publicLeagueBoundary] = await sql<
       Array<{ readable: boolean; writer_writable: boolean; reader_writable: boolean }>

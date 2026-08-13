@@ -34,7 +34,17 @@ export interface DataSyncWorkSummary {
   reusedUnits?: number;
   succeededUnits?: number;
   failedUnits?: number;
+  timings?: DataSyncPhaseTimings;
 }
+
+export type DataSyncPhaseTimings = Partial<
+  Record<'bootstrap' | 'snapshotWrite' | 'derivedView', number>
+>;
+
+export type DataSyncAttemptTimings = DataSyncPhaseTimings & {
+  queueWait: number;
+  total: number;
+};
 
 export function resolveDataSyncAttempt(
   source: string | undefined,
@@ -81,6 +91,7 @@ export interface DataSyncAttemptReport {
   reusedUnits: number;
   succeededUnits: number;
   failedUnits: number;
+  timings: DataSyncAttemptTimings;
   fpl: FplRequestMetricsSnapshot;
 }
 
@@ -115,6 +126,20 @@ function readOutcome(value: unknown): DataSyncAttemptOutcome | undefined {
     DATA_SYNC_ATTEMPT_OUTCOMES.includes(value as DataSyncAttemptOutcome)
     ? (value as DataSyncAttemptOutcome)
     : undefined;
+}
+
+const DATA_SYNC_PHASE_KEYS = ['bootstrap', 'snapshotWrite', 'derivedView'] as const;
+
+function readPhaseTimings(value: unknown): DataSyncPhaseTimings | undefined {
+  if (!isRecord(value)) return undefined;
+  const timings: DataSyncPhaseTimings = {};
+  for (const key of DATA_SYNC_PHASE_KEYS) {
+    const duration = value[key];
+    if (typeof duration === 'number' && Number.isFinite(duration) && duration >= 0) {
+      timings[key] = Math.round(duration);
+    }
+  }
+  return Object.keys(timings).length > 0 ? timings : undefined;
 }
 
 export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
@@ -157,6 +182,7 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
   const requiredUnits =
     explicitRequiredUnits ?? Math.max(0, succeededUnits + reusedUnits + failedUnits);
   const explicitOutcome = readOutcome(result.outcome);
+  const timings = readPhaseTimings(result.timings);
 
   return {
     ...(explicitOutcome ? { outcome: explicitOutcome } : {}),
@@ -164,6 +190,7 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
     reusedUnits,
     succeededUnits,
     failedUnits,
+    ...(timings ? { timings } : {}),
   };
 }
 
@@ -238,6 +265,11 @@ export async function runDataSyncAttempt<T>(
         reusedUnits: boundedUnit(summary.reusedUnits),
         succeededUnits: boundedUnit(summary.succeededUnits),
         failedUnits: boundedUnit(summary.failedUnits),
+        timings: {
+          queueWait: Math.max(0, Math.floor(context.queueWaitMs ?? 0)),
+          total: Math.max(0, Math.round(performance.now() - startedAt)),
+          ...summary.timings,
+        },
         fpl: getFplRequestMetricsSnapshot(),
       };
 

@@ -146,7 +146,15 @@ describe('complete daily market snapshot repository', () => {
         delete: () => ({ where: async () => undefined }),
         select: () => ({
           from: () => ({
-            where: async () => [{ count: rows.size }],
+            where: async () => [
+              {
+                count: rows.size,
+                snapshotCount: rows.size,
+                captureCount: new Set([...rows.values()].map((row) => String(row.capturedAt))).size,
+                latestCapturedAt:
+                  [...rows.values()].map((row) => row.capturedAt as Date).at(-1) ?? null,
+              },
+            ],
           }),
         }),
       },
@@ -185,5 +193,23 @@ describe('complete daily market snapshot repository', () => {
     await expect(repository.upsertCompleteDay(TEST_SEASON, 1, [first, second], 2)).rejects.toThrow(
       'Failed to persist complete player market snapshot',
     );
+  });
+
+  test('reports current-day snapshot coverage for the watchdog', async () => {
+    const memory = createMemoryDb();
+    const repository = createPlayerMarketSnapshotsRepository(memory.db as never);
+    expect(await repository.getDayCoverage(TEST_SEASON, '20260803')).toEqual({
+      snapshotCount: 0,
+      captureCount: 0,
+      latestCapturedAt: null,
+    });
+
+    const snapshot = createSnapshot();
+    await repository.upsertCompleteDay(TEST_SEASON, 1, [snapshot], 1);
+    expect(await repository.getDayCoverage(TEST_SEASON, '2026-08-03')).toEqual({
+      snapshotCount: 1,
+      captureCount: 1,
+      latestCapturedAt: snapshot.capturedAt,
+    });
   });
 });

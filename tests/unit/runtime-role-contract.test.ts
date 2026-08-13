@@ -35,6 +35,8 @@ const validSnapshot: DataRuntimeRoleSnapshot = {
   loginRole: runtimeLogin,
   capabilityRole: lockedCapability,
   inheritedRoles: [DATA_RUNTIME_CAPABILITY_ROLE],
+  canReadPlayerValueChanges: true,
+  canUseMarketSnapshotSequence: true,
 };
 
 describe('Data runtime database role contract', () => {
@@ -79,5 +81,20 @@ describe('Data runtime database role contract', () => {
         currentUser: DATA_RUNTIME_CAPABILITY_ROLE,
       }),
     ).toThrow('must not assume');
+  });
+
+  test('rejects a runtime LOGIN missing either market capability', () => {
+    expect(() =>
+      assertDataRuntimeRoleSnapshot({
+        ...validSnapshot,
+        canReadPlayerValueChanges: false,
+      }),
+    ).toThrow('player_value_changes');
+    expect(() =>
+      assertDataRuntimeRoleSnapshot({
+        ...validSnapshot,
+        canUseMarketSnapshotSequence: false,
+      }),
+    ).toThrow('market snapshot sequence');
   });
 });

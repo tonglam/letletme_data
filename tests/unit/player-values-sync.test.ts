@@ -101,10 +101,19 @@ describe('daily player market snapshot synchronization', () => {
       buildDependencies({ persistMarketSnapshot, enqueuePlayerPrices, notify }),
     );
 
-    await expect(sync(TEST_SEASON, changeDate)).resolves.toEqual({
+    const result = await sync(TEST_SEASON, changeDate);
+    expect(result).toMatchObject({
       count: 0,
       eventId: 1,
       marketSnapshotCount: 1,
+      requiredUnits: 1,
+      succeededUnits: 1,
+      failedUnits: 0,
+    });
+    expect(result.timings).toEqual({
+      bootstrap: expect.any(Number),
+      snapshotWrite: expect.any(Number),
+      derivedView: expect.any(Number),
     });
     expect(persistMarketSnapshot).toHaveBeenCalledTimes(1);
     expect(persistMarketSnapshot.mock.calls[0]?.[0]).toEqual(TEST_SEASON);
@@ -182,5 +191,30 @@ describe('daily player market snapshot synchronization', () => {
     );
 
     await expect(sync(TEST_SEASON, changeDate)).resolves.toMatchObject({ count: 1 });
+  });
+
+  test('attaches bounded work and completed phase evidence to a failed attempt', async () => {
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        persistMarketSnapshot: async () => {
+          throw new Error('write failed');
+        },
+      }),
+    );
+
+    try {
+      await sync(TEST_SEASON, changeDate);
+      throw new Error('expected sync failure');
+    } catch (error) {
+      expect(error).toMatchObject({
+        requiredUnits: 1,
+        succeededUnits: 0,
+        failedUnits: 1,
+        timings: {
+          bootstrap: expect.any(Number),
+          snapshotWrite: expect.any(Number),
+        },
+      });
+    }
   });
 });

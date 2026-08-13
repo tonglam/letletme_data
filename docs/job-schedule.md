@@ -36,12 +36,15 @@ process. All other synchronization work is queue-backed.
 | Job | Cron | Gate / behavior |
 |---|---|---|
 | `player-values-sync` | `25-35 9 * * *` | Before GW1 only 09:25 runs against the next event; once current, every minute until that UTC+8 date's Rise/Faller batch exists |
+| `player-market-freshness-watchdog` | `36 9 * * *` | Read-only final-capture check: waits up to five minutes for the deterministic 09:35 job's retries, then verifies current-day cardinality and end-of-window evidence; alerts without changing `/ready` |
 | `player-prices-sync` | `40 9 * * *` | Replays that UTC+8 date's persisted Rise/Faller rows into affected current players; skips cleanly when none exist |
 | `player-stats-sync` | `40 9 * * *` | Refreshes the current event, or the next event only when no current event exists |
 
 The window uses one deterministic daily job ID to prevent overlap. The data
 worker retries failures, and settled deterministic jobs are removed so another
-tick can enqueue when needed.
+tick can enqueue when needed. Snapshot upsert, stale-row removal, and final
+cardinality verification share one database transaction. Zero derived price
+changes remains a successful complete capture.
 
 ## Entry jobs
 

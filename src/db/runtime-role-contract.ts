@@ -17,6 +17,8 @@ export type DataRuntimeRoleSnapshot = {
   readonly loginRole: DatabaseRoleAttributes | undefined;
   readonly capabilityRole: DatabaseRoleAttributes | undefined;
   readonly inheritedRoles: readonly string[];
+  readonly canReadPlayerValueChanges: boolean;
+  readonly canUseMarketSnapshotSequence: boolean;
 };
 
 export const DATA_RUNTIME_CAPABILITY_ROLE = 'letletme_data_writer';
@@ -62,6 +64,13 @@ export function assertDataRuntimeRoleSnapshot(snapshot: DataRuntimeRoleSnapshot)
   ) {
     throw new Error('Data runtime capability role attributes are unsafe');
   }
+
+  if (!snapshot.canReadPlayerValueChanges) {
+    throw new Error('Data runtime cannot read reporting.player_value_changes');
+  }
+  if (!snapshot.canUseMarketSnapshotSequence) {
+    throw new Error('Data runtime cannot use the player market snapshot sequence');
+  }
 }
 
 type RoleRow = {
@@ -90,7 +99,7 @@ function roleAttributes(row: RoleRow | undefined): DatabaseRoleAttributes | unde
 }
 
 export async function assertDataRuntimeRole(client: postgres.Sql): Promise<void> {
-  const [identityRows, roleRows, inheritedRows] = await Promise.all([
+  const [identityRows, roleRows, inheritedRows, capabilityRows] = await Promise.all([
     client<Array<{ session_user: string; current_user: string }>>`
       SELECT session_user::text, current_user::text
     `,
@@ -128,10 +137,37 @@ export async function assertDataRuntimeRole(client: postgres.Sql): Promise<void>
       FROM inherited
       ORDER BY role_name
     `,
+    client<
+      Array<{
+        can_read_player_value_changes: boolean;
+        can_use_market_snapshot_sequence: boolean;
+      }>
+    >`
+      SELECT
+        has_table_privilege(
+          current_user,
+          'reporting.player_value_changes',
+          'SELECT'
+        ) AS can_read_player_value_changes,
+        has_sequence_privilege(
+          current_user,
+          'fpl.player_market_snapshots_source_snapshot_id_seq',
+          'SELECT'
+        ) AND has_sequence_privilege(
+          current_user,
+          'fpl.player_market_snapshots_source_snapshot_id_seq',
+          'USAGE'
+        ) AS can_use_market_snapshot_sequence
+    `,
+    // This is intentionally an actual query, not only an ACL lookup. A rebuilt
+    // security-invoker view must remain executable by the real runtime LOGIN.
+    client`SELECT 1 FROM reporting.player_value_changes LIMIT 0`,
   ]);
 
   const identity = identityRows[0];
   if (!identity) throw new Error('Data runtime database identity is unavailable');
+  const capabilities = capabilityRows[0];
+  if (!capabilities) throw new Error('Data runtime database capabilities are unavailable');
 
   assertDataRuntimeRoleSnapshot({
     sessionUser: identity.session_user,
@@ -141,5 +177,7 @@ export async function assertDataRuntimeRole(client: postgres.Sql): Promise<void>
       roleRows.find((row) => row.role_name === DATA_RUNTIME_CAPABILITY_ROLE),
     ),
     inheritedRoles: inheritedRows.map((row) => row.role_name),
+    canReadPlayerValueChanges: capabilities.can_read_player_value_changes,
+    canUseMarketSnapshotSequence: capabilities.can_use_market_snapshot_sequence,
   });
 }
