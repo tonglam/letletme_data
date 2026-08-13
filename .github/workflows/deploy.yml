@@ -83,13 +83,12 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 15m
           script_stop: true
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,RUN_ID,RUN_ATTEMPT
           script: |
             set -euo pipefail
-            maintenance_lock_dir="$HOME/.letletme-vps-ops"
-            mkdir -p "$maintenance_lock_dir"
-            exec 9>"$maintenance_lock_dir/maintenance.lock"
+            exec 9>/run/letletme-vps-ops/maintenance.lock
             flock -w 300 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
             old_image=""
             deployment_started=false
