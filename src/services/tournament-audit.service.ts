@@ -3,6 +3,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import {
   buildKnockoutRows,
+  isOfficialH2HTournament,
   type TournamentBackfillWindow,
   type TournamentConfig,
 } from '../domain/tournament';
@@ -133,7 +134,7 @@ export async function auditTournamentSetup(
     }
   }
 
-  if (tournament.knockoutMode !== 'no_knockout') {
+  if (tournament.knockoutMode !== 'no_knockout' && !isOfficialH2HTournament(tournament)) {
     const expectedKnockoutRows = buildKnockoutRows(tournament, null);
     const expectedMatchCount = expectedKnockoutRows.matches.length;
     const expectedResultCount = expectedKnockoutRows.results.length;
@@ -226,6 +227,7 @@ export async function auditTournamentSetup(
 
   if (
     tournament.knockoutMode !== 'no_knockout' &&
+    !isOfficialH2HTournament(tournament) &&
     tournament.knockoutStartedEventId &&
     tournament.knockoutEndedEventId
   ) {

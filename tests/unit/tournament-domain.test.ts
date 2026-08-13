@@ -47,6 +47,12 @@ describe('parseLeagueUrl', () => {
     });
   });
 
+  test('parses the official new-entries H2H URL', () => {
+    expect(
+      parseLeagueUrl('https://fantasy.premierleague.com/en/leagues/34879/new-entries/h'),
+    ).toEqual({ leagueId: 34879, leagueType: 'h2h' });
+  });
+
   test('rejects non-FPL hosts', () => {
     expect(() => parseLeagueUrl('https://example.com/leagues/1/standings/c')).toThrow(
       ValidationError,
@@ -169,7 +175,7 @@ describe('planTournamentStructure', () => {
     ).toThrow(ValidationError);
   });
 
-  test('enables official sync only for an authoritative one-group Classic points race', () => {
+  test('enables official sync for an authoritative one-group Classic points race', () => {
     const eligible = planTournamentStructure(
       {
         ...basePayload,
@@ -185,11 +191,7 @@ describe('planTournamentStructure', () => {
     );
     expect(eligible.rosterMode).toBe('official_sync');
 
-    const ineligible = [
-      { participantSource: 'custom' as const },
-      { groupNum: '2' },
-      { leagueType: 'h2h' as const },
-    ];
+    const ineligible = [{ participantSource: 'custom' as const }, { groupNum: '2' }];
     for (const variant of ineligible) {
       const plan = planTournamentStructure(
         {
@@ -202,10 +204,44 @@ describe('planTournamentStructure', () => {
         },
         participants([1, 2, 3, 4]),
         1,
-        variant.leagueType ?? 'classic',
+        'classic',
       );
       expect(plan.rosterMode).toBe('snapshot');
     }
+  });
+
+  test('plans an official H2H mirror as one battle group with Average and FPL knockout rounds', () => {
+    const plan = planTournamentStructure(
+      {
+        ...basePayload,
+        participantSource: 'official',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/34879/new-entries/h',
+        groupFormat: 'points',
+        groupNum: '1',
+        endGameweek: 'GW38',
+        knockoutFormat: 'none',
+      },
+      participants([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+      34879,
+      'h2h',
+      'Official H2H',
+      { startEventId: 1, knockoutRounds: 3 },
+    );
+
+    expect(plan).toMatchObject({
+      leagueType: 'h2h',
+      rosterMode: 'official_sync',
+      groupMode: 'battle_races',
+      groupNum: 1,
+      groupAutoAverages: true,
+      groupStartedEventId: 1,
+      groupEndedEventId: 35,
+      knockoutMode: 'head_to_head',
+      knockoutTeamNum: 8,
+      knockoutRounds: 3,
+      knockoutStartedEventId: 36,
+      knockoutEndedEventId: 38,
+    });
   });
 });
 

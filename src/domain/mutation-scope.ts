@@ -163,6 +163,7 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'tournament-points-race':
       case 'tournament-battle-race':
       case 'tournament-knockout':
+      case 'tournament-official-h2h':
         return [withEvent('tournament-structure', eventId), TOURNAMENT_STRUCTURE_GLOBAL_SCOPE];
       // Cup only upserts entry_event_cup_results (FPL HTTP heavy). It does not
       // mutate group/knockout structure tables, so it must NOT hold the global

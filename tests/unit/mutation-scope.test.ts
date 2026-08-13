@@ -103,18 +103,20 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toEqual(['tournament-event-mutations:event:35']);
   });
 
-  it.each(['tournament-points-race', 'tournament-battle-race', 'tournament-knockout'])(
-    'gives %s the shared global structure scope (FP-07)',
-    (jobName) => {
-      const scopes = resolveMutationScopes({
-        queueName: 'tournament-sync',
-        jobName,
-        eventId: 33,
-      });
-      expect(scopes).toContain('tournament-structure:global');
-      expect(scopes).toContain('tournament-structure:event:33');
-    },
-  );
+  it.each([
+    'tournament-points-race',
+    'tournament-battle-race',
+    'tournament-knockout',
+    'tournament-official-h2h',
+  ])('gives %s the shared global structure scope (FP-07)', (jobName) => {
+    const scopes = resolveMutationScopes({
+      queueName: 'tournament-sync',
+      jobName,
+      eventId: 33,
+    });
+    expect(scopes).toContain('tournament-structure:global');
+    expect(scopes).toContain('tournament-structure:event:33');
+  });
 
   it('narrows tournament event results to per-table entry scopes (FP-14h)', () => {
     const scopes = resolveMutationScopes({
@@ -145,6 +147,7 @@ describe('resolveMutationScopes', () => {
       'tournament-points-race',
       'tournament-battle-race',
       'tournament-knockout',
+      'tournament-official-h2h',
     ]) {
       const resultsScopes = resolveMutationScopes({
         queueName: 'tournament-sync',

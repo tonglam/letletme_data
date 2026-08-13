@@ -8,6 +8,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   buildGroupRows,
   buildKnockoutRows,
+  isOfficialH2HTournament,
   seedBracketEntries,
   sortEntrySeeds,
   type EntrySeed,
@@ -80,6 +81,7 @@ export async function rebuildTournamentStructure(
     homeEntryId: row.home_entry_id,
     awayEntryId: row.away_entry_id,
   }));
+  const publishedKnockoutResults = isOfficialH2HTournament(tournament) ? [] : knockoutResults;
 
   const db = await getDb();
   await db.transaction(async (tx) => {
@@ -97,6 +99,6 @@ export async function rebuildTournamentStructure(
 
     await groups.upsertBatch(season, groupRows);
     await knockouts.upsertBatch(season, knockoutMatches);
-    await knockoutResultsRepository.upsertBatch(season, knockoutResults);
+    await knockoutResultsRepository.upsertBatch(season, publishedKnockoutResults);
   });
 }

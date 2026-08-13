@@ -9,7 +9,8 @@ import { logError, logInfo, logWarn } from '../utils/logger';
 
 import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import type { TournamentSyncContext } from '../domain/tournament';
+import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/tournament';
+import { OfficialH2HStrategy } from './tournament-official-h2h.service';
 
 function groupRankKey(points: number, overallRank: number | null) {
   return `${points}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
@@ -96,6 +97,19 @@ export async function syncTournamentBattleRaceResultsForTournament(
   let skipped = 0;
   const scoredBattleResults = [];
   for (const result of battleResults) {
+    if (
+      result.officialMatchId != null ||
+      result.homeEntryId === null ||
+      result.awayEntryId === null
+    ) {
+      skipped += 1;
+      logWarn('Skipping non-local row in LocalBattleStrategy', {
+        tournamentId: tournament.id,
+        eventId,
+        officialMatchId: result.officialMatchId,
+      });
+      continue;
+    }
     const homeResult = eventResultMap.get(result.homeEntryId);
     const awayResult = eventResultMap.get(result.awayEntryId);
     if (!homeResult || !awayResult) {
@@ -202,6 +216,9 @@ export async function syncTournamentBattleRaceResultsForTournament(
     if (row.homeMatchPoints === null || row.awayMatchPoints === null) {
       continue; // unplayed or skipped matchup — no match points awarded yet
     }
+    if (row.homeEntryId === null || row.awayEntryId === null) {
+      continue;
+    }
     const groupCounters = countersByGroup.get(row.groupId) ?? new Map<number, Counter>();
     for (const [entryId, points] of [
       [row.homeEntryId, row.homeMatchPoints],
@@ -306,6 +323,45 @@ export async function syncTournamentBattleRaceResultsForTournament(
   return { updatedGroups: updatedGroupsCount, updatedResults: updatedResultsCount, skipped };
 }
 
+export const LocalBattleStrategy = {
+  sync: syncTournamentBattleRaceResultsForTournament,
+};
+
+export async function syncOfficialH2HTournaments(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<{ eventId: number; updatedGroups: number; updatedResults: number; skipped: number }> {
+  const tournaments = (
+    await tournamentInfoRepository.findBattleRaceByEvent(season, eventId)
+  ).filter(isOfficialH2HTournament);
+  let updatedGroups = 0;
+  let updatedResults = 0;
+  const failures: number[] = [];
+  const results = await mapWithConcurrency(tournaments, 5, async (tournament) => {
+    try {
+      return await OfficialH2HStrategy.sync(season, tournament, eventId);
+    } catch (error) {
+      failures.push(tournament.id);
+      logError('Official H2H strategy failed', error, { tournamentId: tournament.id, eventId });
+      return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
+    }
+  });
+  for (const result of results) {
+    updatedGroups += result.updatedGroups;
+    updatedResults += result.updatedResults;
+  }
+  if (failures.length > 0) {
+    throw new IncompleteDataSyncError(
+      'Official H2H mirrors did not converge',
+      tournaments.length,
+      0,
+      tournaments.length - failures.length,
+      failures.length,
+    );
+  }
+  return { eventId, updatedGroups, updatedResults, skipped: 0 };
+}
+
 export async function syncTournamentBattleRaceResults(
   season: FplSeasonRef,
   eventId: number,
@@ -324,7 +380,9 @@ export async function syncTournamentBattleRaceResults(
   const failedTournamentIds: number[] = [];
   const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
     try {
-      return await syncTournamentBattleRaceResultsForTournament(season, tournament, eventId);
+      return isOfficialH2HTournament(tournament)
+        ? await OfficialH2HStrategy.sync(season, tournament, eventId)
+        : await LocalBattleStrategy.sync(season, tournament, eventId);
     } catch (error) {
       logError('Failed to sync battle race results', error, {
         tournamentId: tournament.id,

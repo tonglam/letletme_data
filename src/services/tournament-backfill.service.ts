@@ -1,6 +1,10 @@
 import { tournamentSetupBackfillEventScopes } from '../domain/mutation-scope';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import type { TournamentBackfillWindow, TournamentConfig } from '../domain/tournament';
+import {
+  isOfficialH2HTournament,
+  type TournamentBackfillWindow,
+  type TournamentConfig,
+} from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import {
@@ -372,6 +376,7 @@ export async function calculateTournamentHistoryFromStoredResults(
 
     if (
       tournament.groupMode === 'battle_races' &&
+      !isOfficialH2HTournament(tournament) &&
       tournament.groupStartedEventId &&
       tournament.groupEndedEventId &&
       eventId >= tournament.groupStartedEventId &&
@@ -396,6 +401,7 @@ export async function calculateTournamentHistoryFromStoredResults(
 
     if (
       tournament.knockoutMode !== 'no_knockout' &&
+      !isOfficialH2HTournament(tournament) &&
       tournament.knockoutStartedEventId &&
       tournament.knockoutEndedEventId &&
       eventId >= tournament.knockoutStartedEventId &&
@@ -656,6 +662,7 @@ export async function runTournamentEventBackfill(
 
   if (
     tournament.groupMode === 'battle_races' &&
+    !isOfficialH2HTournament(tournament) &&
     tournament.groupStartedEventId &&
     tournament.groupEndedEventId &&
     eventId >= tournament.groupStartedEventId &&
@@ -687,6 +694,7 @@ export async function runTournamentEventBackfill(
 
   if (
     tournament.knockoutMode !== 'no_knockout' &&
+    !isOfficialH2HTournament(tournament) &&
     tournament.knockoutStartedEventId &&
     tournament.knockoutEndedEventId &&
     eventId >= tournament.knockoutStartedEventId &&

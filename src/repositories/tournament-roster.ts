@@ -17,6 +17,7 @@ export type TournamentRosterRecord = TournamentConfig & {
   rosterMode: TournamentRosterMode;
   state: 'active' | 'inactive' | 'finished';
   standingsReadyAt: string | null;
+  officialScheduleLockedAt: string | null;
 };
 
 type RosterRow = TournamentRosterRecord;
@@ -61,6 +62,7 @@ export const tournamentRosterRepository = {
           roster_mode AS "rosterMode",
           state,
           standings_ready_at::text AS "standingsReadyAt",
+          official_schedule_locked_at::text AS "officialScheduleLockedAt",
           total_team_num AS "totalTeamNum",
           group_mode AS "groupMode",
           group_num AS "groupNum",
@@ -104,6 +106,7 @@ export const tournamentRosterRepository = {
           roster_mode AS "rosterMode",
           state,
           standings_ready_at::text AS "standingsReadyAt",
+          official_schedule_locked_at::text AS "officialScheduleLockedAt",
           total_team_num AS "totalTeamNum",
           group_mode AS "groupMode",
           group_num AS "groupNum",
@@ -535,6 +538,19 @@ export const tournamentRosterRepository = {
                 AND result.tournament_id = tournament.tournament_id
                 AND result.event_id = tournament.knockout_ended_event_id
             )
+            AND (
+              tournament.league_type <> 'h2h'
+              OR tournament.roster_mode <> 'official_sync'
+              OR NOT EXISTS (
+                SELECT 1
+                FROM competition.tournament_knockout_results result
+                WHERE result.season_id = tournament.season_id
+                  AND result.tournament_id = tournament.tournament_id
+                  AND result.event_id = tournament.knockout_ended_event_id
+                  AND result.official_match_id IS NOT NULL
+                  AND (result.home_net_points IS NULL OR result.away_net_points IS NULL)
+              )
+            )
           ) OR (
             (
               tournament.knockout_mode = 'no_knockout'
@@ -562,6 +578,19 @@ export const tournamentRosterRepository = {
               WHERE result.season_id = tournament.season_id
                 AND result.tournament_id = tournament.tournament_id
                 AND result.event_id = tournament.group_ended_event_id
+            )
+            AND (
+              tournament.league_type <> 'h2h'
+              OR tournament.roster_mode <> 'official_sync'
+              OR NOT EXISTS (
+                SELECT 1
+                FROM competition.tournament_battle_group_results result
+                WHERE result.season_id = tournament.season_id
+                  AND result.tournament_id = tournament.tournament_id
+                  AND result.event_id = tournament.group_ended_event_id
+                  AND result.official_match_id IS NOT NULL
+                  AND (result.home_net_points IS NULL OR result.away_net_points IS NULL)
+              )
             )
           )
         )

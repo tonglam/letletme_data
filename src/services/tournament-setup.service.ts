@@ -3,7 +3,11 @@ import {
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { estimateTournamentSetupRequests, getTournamentBackfillWindow } from '../domain/tournament';
+import {
+  estimateTournamentSetupRequests,
+  getTournamentBackfillWindow,
+  isOfficialH2HTournament,
+} from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
@@ -28,6 +32,7 @@ import {
 } from './tournament-backfill.service';
 import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
 import { rebuildTournamentStructure } from './tournament-structure.service';
+import { syncOfficialH2HTournament } from './tournament-official-h2h.service';
 
 export { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
 
@@ -301,6 +306,10 @@ export async function setupTournamentStructure(
       entryCount: entrySeeds.length,
     });
 
+    if (isOfficialH2HTournament(tournament)) {
+      await syncOfficialH2HTournament(season, tournament);
+    }
+
     phaseStartedAtMs = performance.now();
     logInfo('Tournament setup request budget', {
       tournamentId,
@@ -340,6 +349,7 @@ export async function setupTournamentStructure(
         },
         {
           requirePicksForEvents:
+            !isOfficialH2HTournament(tournament) &&
             tournament.knockoutMode !== 'no_knockout' &&
             tournament.knockoutStartedEventId &&
             tournament.knockoutEndedEventId
