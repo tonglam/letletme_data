@@ -96,6 +96,11 @@ jobs:
             migration_started=false
             services_start_attempted=false
             deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}-${RUN_ATTEMPT:-1}"
+            maintenance_controller=/usr/local/libexec/vps-maintenance
+            if [ ! -x "$maintenance_controller" ]; then
+              echo "missing root-owned VPS maintenance controller: $maintenance_controller" >&2
+              exit 78
+            fi
             on_exit() {
               original_status=$?
               trap - EXIT
