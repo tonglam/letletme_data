@@ -1,7 +1,12 @@
 /* eslint-disable no-console */
 import { and, eq, isNull } from 'drizzle-orm';
 
+import {
+  assertCoreCacheRebuildCandidate,
+  decideCoreCacheDeployment,
+} from '../src/cache/core-cache-deployment';
 import { publishCoreSnapshotCache, readCoreSnapshotCache } from '../src/cache/core-snapshot-cache';
+import { parseDataPublicationManifest } from '../src/cache/data-publication';
 import { redisSingleton } from '../src/cache/singleton';
 import { datasetPublicationsInOps, seasonsInFpl } from '../src/db/schemas/index.schema';
 import { databaseSingleton, getDb, getDbClient } from '../src/db/singleton';
@@ -77,6 +82,7 @@ async function main(): Promise<void> {
       publicationId: datasetPublicationsInOps.publicationId,
       revision: datasetPublicationsInOps.revision,
       activatedAt: datasetPublicationsInOps.activatedAt,
+      manifest: datasetPublicationsInOps.manifest,
     })
     .from(datasetPublicationsInOps)
     .where(
@@ -91,6 +97,52 @@ async function main(): Promise<void> {
   const publication = publicationRows[0];
   if (publicationRows.length !== 1 || !publication?.activatedAt) {
     throw new Error('Exactly one activated current-season core database publication is required');
+  }
+
+  const canonicalManifest = parseDataPublicationManifest(JSON.stringify(publication.manifest));
+  if (
+    !canonicalManifest ||
+    canonicalManifest.dataset !== 'fpl:core' ||
+    canonicalManifest.seasonCode !== season.seasonCode ||
+    canonicalManifest.eventId !== null ||
+    canonicalManifest.publicationId !== publication.publicationId ||
+    canonicalManifest.revision !== publication.revision
+  ) {
+    throw new Error('Active core database publication has an invalid canonical manifest');
+  }
+
+  const cached = await readCoreSnapshotCache(season.seasonCode);
+  const cacheDecision = decideCoreCacheDeployment(canonicalManifest, cached?.manifest ?? null);
+  if (cacheDecision === 'reuse' && cached) {
+    const counts: CoreCounts = {
+      events: cached.events.length,
+      teams: cached.teams.length,
+      players: cached.players.length,
+      phases: cached.phases.length,
+      fixtures: cached.fixtures.length,
+    };
+    assertCoreCounts(counts);
+    console.log(
+      JSON.stringify(
+        {
+          operation: 'publish-core-cache',
+          executed: execute,
+          published: true,
+          cacheAction: 'verified_existing',
+          seasonCode: season.seasonCode,
+          publicationId: publication.publicationId,
+          revision: publication.revision,
+          sourceCheckedAt: canonicalManifest.sourceCheckedAt,
+          cacheDatabase: config.CACHE_REDIS_DB,
+          counts,
+          currentEventId: cached.currentEventId,
+          items: cached.manifest.items,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
   }
 
   const [events, teams, players, phases, fixtures] = await Promise.all([
@@ -115,7 +167,7 @@ async function main(): Promise<void> {
     seasonCode: season.seasonCode,
     publicationId: publication.publicationId,
     revision: publication.revision,
-    sourceCheckedAt: publication.activatedAt.toISOString(),
+    sourceCheckedAt: canonicalManifest.sourceCheckedAt,
     cacheDatabase: config.CACHE_REDIS_DB,
     counts,
   } as const;
@@ -136,7 +188,10 @@ async function main(): Promise<void> {
     {
       revision: publication.revision,
       publicationId: publication.publicationId,
-      sourceCheckedAt: publication.activatedAt,
+      sourceCheckedAt: new Date(canonicalManifest.sourceCheckedAt),
+      afterStage: async (candidate) => {
+        assertCoreCacheRebuildCandidate(canonicalManifest, candidate);
+      },
       beforeActivate: async () => {
         const [currentSeason, active] = await Promise.all([
           seasonRepository.findCurrent(),
