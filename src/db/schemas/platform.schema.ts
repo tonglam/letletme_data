@@ -406,15 +406,6 @@ export const tournamentsInCompetition = competition.table(
     rosterSyncStatus: tournamentSetupStatusInCompetition('roster_sync_status'),
     rosterLastSyncedAt: timestamp('roster_last_synced_at', { withTimezone: true, mode: 'date' }),
     rosterSyncError: text('roster_sync_error'),
-    officialScheduleHash: text('official_schedule_hash'),
-    officialScheduleSyncedAt: timestamp('official_schedule_synced_at', {
-      withTimezone: true,
-      mode: 'date',
-    }),
-    officialScheduleLockedAt: timestamp('official_schedule_locked_at', {
-      withTimezone: true,
-      mode: 'date',
-    }),
     setupPhase: tournamentSetupPhaseInCompetition('setup_phase').default('queued').notNull(),
     setupCompletedUnits: integer('setup_completed_units').default(0).notNull(),
     setupTotalUnits: integer('setup_total_units').default(0).notNull(),
@@ -426,6 +417,15 @@ export const tournamentsInCompetition = competition.table(
     setupWarningCount: integer('setup_warning_count').default(0).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    officialScheduleHash: text('official_schedule_hash'),
+    officialScheduleSyncedAt: timestamp('official_schedule_synced_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    officialScheduleLockedAt: timestamp('official_schedule_locked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
   },
   (table) => [
     index('tournaments_admin_entry_idx').using(
@@ -1615,14 +1615,14 @@ export const tournamentBattleGroupResultsInCompetition = competition.table(
     awayNetPoints: integer('away_net_points'),
     awayRank: integer('away_rank'),
     awayMatchPoints: integer('away_match_points'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     officialMatchId: integer('official_match_id'),
     sourceOrder: integer('source_order'),
     homeIsAverage: boolean('home_is_average').default(false).notNull(),
     awayIsAverage: boolean('away_is_average').default(false).notNull(),
     isBye: boolean('is_bye').default(false).notNull(),
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
     index('tournament_battle_group_results_event_idx').using(
@@ -1824,13 +1824,13 @@ export const tournamentKnockoutResultsInCompetition = competition.table(
     awayGoalsScored: integer('away_goals_scored'),
     awayGoalsConceded: integer('away_goals_conceded'),
     matchWinner: integer('match_winner'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     officialMatchId: integer('official_match_id'),
     sourceOrder: integer('source_order'),
     knockoutName: text('knockout_name'),
     tiebreak: text(),
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
     index('tournament_knockout_results_away_entry_fk_idx').using(
