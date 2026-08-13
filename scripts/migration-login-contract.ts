@@ -105,6 +105,12 @@ async function main(): Promise<void> {
           FROM pg_class relation_row
           WHERE relation_row.relnamespace = 'public'::regnamespace
             AND relation_row.relkind IN ('r', 'p', 'f', 'm', 'v', 'S')
+            -- Supabase may keep its own postgres-owned migration ledger in
+            -- public; it is platform metadata, not an application relation.
+            AND NOT (
+              relation_row.relname = 'sql_migrations'
+              AND pg_get_userbyid(relation_row.relowner) = 'postgres'
+            )
         ) + (
           SELECT count(*)::integer
           FROM pg_proc function_row
