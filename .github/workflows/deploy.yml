@@ -77,13 +77,15 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 15m
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,RUN_ID,RUN_ATTEMPT
           script: |
             set -euo pipefail
             exec 9>/run/letletme-vps-ops/maintenance.lock
@@ -95,6 +97,8 @@ jobs:
             services_start_attempted=false
             data_api_service=api
             data_worker_service=worker
+            deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}-${RUN_ATTEMPT:-1}"
+            maintenance_controller="$VPS_WORKDIR/scripts/vps-maintenance.sh"
             on_exit() {
               original_status=$?
               trap - EXIT
@@ -110,6 +114,8 @@ jobs:
                 elif [ "$migration_started" = true ]; then
                   echo "Data deployment failed after migration started; leaving services stopped for operator recovery" >&2
                 fi
+                VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" deployment fail \
+                  --service=data --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
               fi
               exit "$original_status"
             }
@@ -139,6 +145,7 @@ jobs:
             migration_env_file=${MIGRATION_ENV_FILE:-.env.migrate}
             export ENV_FILE="$env_file"
             export MIGRATION_ENV_FILE="$migration_env_file"
+            test -x "$maintenance_controller"
             test -f "$env_file"
             test -f "$migration_env_file"
             APP_IMAGE="$IMAGE_REF" docker compose config --quiet
@@ -174,6 +181,8 @@ jobs:
               bun scripts/wait-for-migration-login.ts
             finish_stage
 
+            VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" deployment begin \
+              --service=data --run-id="$deployment_run_id" --old-image="$old_image" --new-image="$IMAGE_REF" >/dev/null
             deployment_started=true
             start_stage quiescence
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
@@ -231,9 +240,13 @@ jobs:
 
             finish_stage
             docker compose ps
+            VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" deployment commit \
+              --service=data --run-id="$deployment_run_id" >/dev/null
             deployment_committed=true
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
               chmod 600 "$HOME/.letletme-data-previous-image"
             fi
+            VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" cleanup \
+              --mode=deploy --service=data || true
             docker system df || true
