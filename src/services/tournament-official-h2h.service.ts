@@ -184,12 +184,14 @@ export async function fetchOfficialH2HSourceSnapshot(
 export function projectOfficialH2HStandings(
   currentGroups: readonly DbTournamentGroup[],
   standings: readonly RawFPLLeagueStandingsResult[],
+  totalsByEntry?: ReadonlyMap<number, { totalPoints: number; totalTransfersCost: number }>,
 ): DbTournamentGroupInsert[] {
   const standingsByEntry = new Map(standings.map((standing) => [standing.entry, standing]));
   return currentGroups.map((group) => {
     const standing = standingsByEntry.get(group.entryId);
     const { id: _id, seasonId: _seasonId, sourceGroupRowId: _sourceGroupRowId, ...stored } = group;
     if (!standing) return stored;
+    const totals = totalsByEntry?.get(group.entryId);
     return {
       ...stored,
       groupPoints: nonNegativeInteger(standing.total ?? standing.points_total),
@@ -198,6 +200,9 @@ export function projectOfficialH2HStandings(
       won: nonNegativeInteger(standing.matches_won),
       drawn: nonNegativeInteger(standing.matches_drawn),
       lost: nonNegativeInteger(standing.matches_lost),
+      totalPoints: totalsByEntry === undefined ? stored.totalPoints : (totals?.totalPoints ?? 0),
+      totalTransfersCost:
+        totalsByEntry === undefined ? stored.totalTransfersCost : (totals?.totalTransfersCost ?? 0),
       totalNetPoints: integerOrZero(standing.points_for),
     };
   });
@@ -530,7 +535,14 @@ export async function syncOfficialH2HTournament(
   }
   const checkedAt = new Date();
   const officialRows = buildOfficialH2HRows(tournament, entryIdSet, snapshot, checkedAt);
-  const groupRows = projectOfficialH2HStandings(currentGroups, snapshot.standings);
+  const aggregateTotals = await entryEventResultsRepository.aggregateTotalsByEntry(
+    season,
+    entryIds,
+    tournament.groupStartedEventId ?? 1,
+    tournament.groupEndedEventId ?? reconcileEventId ?? 38,
+  );
+  const totalsByEntry = new Map(aggregateTotals.map((row) => [row.entryId, row] as const));
+  const groupRows = projectOfficialH2HStandings(currentGroups, snapshot.standings, totalsByEntry);
   const published = await tournamentOfficialH2HRepository.publish(season, tournament.id, {
     ...officialRows,
     checkedAt,
