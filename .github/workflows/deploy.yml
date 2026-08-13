@@ -87,6 +87,7 @@ jobs:
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,RUN_ID,RUN_ATTEMPT
           script: |
             set -euo pipefail
+            mkdir -p /run/letletme-vps-ops
             exec 9>/run/letletme-vps-ops/maintenance.lock
             flock -w 300 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
             old_image=""
