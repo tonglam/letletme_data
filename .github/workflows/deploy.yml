@@ -77,14 +77,47 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,RUN_ID,RUN_ATTEMPT
           script: |
             set -euo pipefail
+            exec 9>/run/letletme-vps-ops/maintenance.lock
+            flock -w 300 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
+            old_image=""
+            deployment_started=false
+            deployment_committed=false
+            migration_started=false
+            services_start_attempted=false
+            data_api_service=api
+            data_worker_service=worker
+            deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}-${RUN_ATTEMPT:-1}"
+            on_exit() {
+              original_status=$?
+              trap - EXIT
+              set +e
+              if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
+                if [ "$services_start_attempted" = true ]; then
+                  echo "Data deployment failed after starting the new services; stopping them for operator recovery" >&2
+                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 "$data_api_service" "$data_worker_service" || true
+                fi
+                if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
+                  echo "Data deployment failed before migration; restoring the previous API and worker image" >&2
+                  APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
+                elif [ "$migration_started" = true ]; then
+                  echo "Data deployment failed after migration started; leaving services stopped for operator recovery" >&2
+                fi
+                VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
+                  --service=data --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
+              fi
+              exit "$original_status"
+            }
+            trap on_exit EXIT
             active_stage=""
             stage_started_at=0
             start_stage() {
@@ -112,6 +145,9 @@ jobs:
             export MIGRATION_ENV_FILE="$migration_env_file"
             test -f "$env_file"
             test -f "$migration_env_file"
+            APP_IMAGE="$IMAGE_REF" docker compose config --quiet
+            APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-size: 20m'
+            APP_IMAGE="$IMAGE_REF" docker compose config | grep -Eq 'max-file: "5"$'
             migration_database_url=$(sed -n 's/^DATABASE_URL=//p' "$migration_env_file" \
               | sed -e 's/^"//' -e 's/"$//')
             if [ -z "$migration_database_url" ]; then
@@ -124,7 +160,6 @@ jobs:
             if [ -n "$old_container" ]; then
               old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
               test -n "$old_image"
-              printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
             fi
 
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
@@ -143,14 +178,9 @@ jobs:
               bun scripts/wait-for-migration-login.ts
             finish_stage
 
-            migration_started=false
-            restore_before_migration() {
-              if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
-                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
-              fi
-            }
-            trap restore_before_migration ERR
-
+            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment begin \
+              --service=data --run-id="$deployment_run_id" --old-image="$old_image" --new-image="$IMAGE_REF" >/dev/null
+            deployment_started=true
             start_stage quiescence
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
@@ -158,8 +188,8 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun scripts/assert-queue-quiescence.ts --redis-only
             finish_stage
-            migration_started=true
             start_stage migration
+            migration_started=true
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
@@ -174,6 +204,7 @@ jobs:
               bun run cache:publish-core -- --execute --allow-empty
             finish_stage
             start_stage serviceReady
+            services_start_attempted=true
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
             for attempt in $(seq 1 30); do
@@ -189,7 +220,6 @@ jobs:
               sleep 2
             done
 
-            trap - ERR
             worker_container=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)
             test -n "$worker_container"
             for attempt in $(seq 1 30); do
@@ -205,7 +235,15 @@ jobs:
               sleep 2
             done
 
-            trap - ERR
             finish_stage
             docker compose ps
-            docker image prune --force
+            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment commit \
+              --service=data --run-id="$deployment_run_id" >/dev/null
+            deployment_committed=true
+            if [ -n "$old_image" ]; then
+              printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
+              chmod 600 "$HOME/.letletme-data-previous-image"
+            fi
+            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
+              --mode=deploy --service=data || true
+            docker system df || true
