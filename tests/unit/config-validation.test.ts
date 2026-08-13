@@ -150,6 +150,25 @@ describe('production environment preflight', () => {
     expect(apiService).toBeLessThan(workerService);
   });
 
+  test('reuses the immutable active core cache before reading mutable database tables', () => {
+    const publishScript = readFileSync('scripts/publish-core-cache.ts', 'utf8');
+    const canonicalManifest = publishScript.indexOf('parseDataPublicationManifest');
+    const readActiveCache = publishScript.indexOf('readCoreSnapshotCache', canonicalManifest);
+    const decideDeployment = publishScript.indexOf('decideCoreCacheDeployment', readActiveCache);
+    const readMutableEvents = publishScript.indexOf('eventRepository.findAll', decideDeployment);
+    const validateRebuild = publishScript.indexOf(
+      'assertCoreCacheRebuildCandidate',
+      readMutableEvents,
+    );
+
+    expect(canonicalManifest).toBeGreaterThan(0);
+    expect(readActiveCache).toBeGreaterThan(canonicalManifest);
+    expect(decideDeployment).toBeGreaterThan(readActiveCache);
+    expect(readMutableEvents).toBeGreaterThan(decideDeployment);
+    expect(validateRebuild).toBeGreaterThan(readMutableEvents);
+    expect(publishScript).not.toContain('sourceCheckedAt: publication.activatedAt');
+  });
+
   test('keeps the gated VPS cleanup exact, atomic, and value-blind', () => {
     const workflow = readFileSync('.github/workflows/cleanup-legacy-runtime-secret.yml', 'utf8');
 
