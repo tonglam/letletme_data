@@ -31,7 +31,6 @@ import {
   persistPreparedEventLives,
   prepareEventLives,
 } from '../../src/services/event-lives.service';
-import { refreshPlayerSeasonSummaries } from '../../src/services/player-season-summaries.service';
 import { transformPlayerMarketSnapshots } from '../../src/transformers/player-market-snapshots';
 import { buildCoreSnapshotFixture } from '../fixtures/core-snapshot.fixtures';
 import { recordedEntrySummary } from '../fixtures/entry-info.fixtures';
@@ -468,7 +467,10 @@ persistenceTest(
       await db.transaction((transaction) =>
         persistPreparedEventLives(season, preparedLive, transaction),
       );
-      await refreshPlayerSeasonSummaries({ seasonId: 2026, seasonCode: '2627' });
+      // Use the disposable integration connection directly. The service singleton is
+      // intentionally bound to DATABASE_URL and would otherwise refresh a different
+      // database than SCHEMA_EXPORT_DATABASE_URL used by this contract test.
+      await client`SELECT * FROM reporting.refresh_player_season_summaries(2026::smallint)`;
       const [persistedLive] = await client<
         Array<{
           gameweek_rows: number;
