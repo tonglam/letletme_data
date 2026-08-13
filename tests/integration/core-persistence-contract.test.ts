@@ -31,6 +31,7 @@ import {
   persistPreparedEventLives,
   prepareEventLives,
 } from '../../src/services/event-lives.service';
+import { refreshPlayerSeasonSummaries } from '../../src/services/player-season-summaries.service';
 import { transformPlayerMarketSnapshots } from '../../src/transformers/player-market-snapshots';
 import { buildCoreSnapshotFixture } from '../fixtures/core-snapshot.fixtures';
 import { recordedEntrySummary } from '../fixtures/entry-info.fixtures';
@@ -53,6 +54,8 @@ type RelationCount = { relation: string; rows: number };
 
 async function clearFixtureSeason(client: postgres.Sql): Promise<void> {
   await client.begin(async (transaction) => {
+    await transaction`DELETE FROM reporting.player_season_summary_rows WHERE season_id = 2026`;
+    await transaction`DELETE FROM reporting.player_season_summary_refreshes WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.tournament_battle_group_results WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.tournament_points_group_results WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.tournament_knockout_results WHERE season_id = 2026`;
@@ -465,6 +468,7 @@ persistenceTest(
       await db.transaction((transaction) =>
         persistPreparedEventLives(season, preparedLive, transaction),
       );
+      await refreshPlayerSeasonSummaries({ seasonId: 2026, seasonCode: '2627' });
       const [persistedLive] = await client<
         Array<{
           gameweek_rows: number;
