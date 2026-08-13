@@ -555,7 +555,11 @@ export async function verifyRuntimeLoginConnection(
               has_sequence_privilege(
                 current_user,
                 'fpl.player_market_snapshots_source_snapshot_id_seq',
-                'SELECT,USAGE'
+                'SELECT'
+              ) AND has_sequence_privilege(
+                current_user,
+                'fpl.player_market_snapshots_source_snapshot_id_seq',
+                'USAGE'
               ) AS can_use_market_snapshot_sequence
           `;
           if (

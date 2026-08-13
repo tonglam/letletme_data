@@ -5,6 +5,7 @@ import { formatCronDateKey } from '../utils/timezone';
 import {
   createDataSyncJobData,
   defaultDataSyncJobId,
+  getExplicitDataSyncQueueJobId,
   type DataSyncEnqueueOptions,
   type DataSyncJobSource,
 } from './data-sync-job-definition';
@@ -32,7 +33,7 @@ async function enqueueDataSyncJob(
   try {
     const queue = dataSyncQueue;
     const jobId = options.jobId
-      ? `${season.seasonCode}-${options.jobId}`
+      ? getExplicitDataSyncQueueJobId(season, options.jobId)
       : defaultDataSyncJobId(jobName, season, source, options);
     const hasDeterministicId = jobId !== undefined;
     const removeOnSettle = options.removeOnSettle ?? hasDeterministicId;

@@ -4,7 +4,9 @@ import {
   type PlayerMarketDayCoverage,
 } from '../repositories/player-market-snapshots';
 import { playerRepository } from '../repositories/players';
+import { playerValuesRepository } from '../repositories/player-values';
 import { seasonRepository } from '../repositories/seasons';
+import type { PlayerValuesSettlement } from '../jobs/player-values-settlement';
 import { logError, logInfo } from '../utils/logger';
 import { notifyTwoBots } from '../utils/notify';
 import { formatCronDateKey } from '../utils/timezone';
@@ -15,6 +17,11 @@ export type PlayerMarketFreshnessDependencies = {
   resolveSyncEvent: (season: FplSeasonRef, now: Date) => Promise<PlayerSyncEvent | null>;
   countPublishedPlayers: (season: FplSeasonRef) => Promise<number>;
   getDayCoverage: (season: FplSeasonRef, snapshotDate: string) => Promise<PlayerMarketDayCoverage>;
+  hasChangesForDate: (season: FplSeasonRef, snapshotDate: string) => Promise<boolean>;
+  waitForPlayerValuesSettlement: (
+    season: FplSeasonRef,
+    snapshotDate: string,
+  ) => Promise<PlayerValuesSettlement>;
   notify: (message: string) => Promise<void>;
 };
 
@@ -24,20 +31,39 @@ const defaultDependencies: PlayerMarketFreshnessDependencies = {
   countPublishedPlayers: (season) => playerRepository.countPublished(season),
   getDayCoverage: (season, snapshotDate) =>
     playerMarketSnapshotsRepository.getDayCoverage(season, snapshotDate),
+  hasChangesForDate: (season, snapshotDate) =>
+    playerValuesRepository.hasChangesForDate(season, snapshotDate),
+  waitForPlayerValuesSettlement: async (season, snapshotDate) => {
+    // Keep Queue/Redis configuration out of pure service imports and unit tests.
+    const { waitForPlayerValuesSettlement } = await import('../jobs/player-values-settlement');
+    return waitForPlayerValuesSettlement(season, snapshotDate);
+  },
   notify: notifyTwoBots,
 };
 
 export type PlayerMarketFreshnessResult =
   | { readonly status: 'skipped'; readonly reason: 'no-current-or-next-event' }
   | {
-      readonly status: 'ready' | 'missing' | 'incomplete';
+      readonly status: 'ready' | 'missing' | 'incomplete' | 'stale' | 'unsettled';
       readonly snapshotDate: string;
       readonly eventId: number;
+      readonly phase: PlayerSyncEvent['phase'];
       readonly expectedCount: number;
       readonly snapshotCount: number;
       readonly captureCount: number;
       readonly latestCapturedAt: string | null;
+      readonly hasChanges: boolean;
+      readonly queueState: PlayerValuesSettlement['state'];
     };
+
+function isFinalWindowCapture(snapshotDate: string, capturedAt: Date | null): boolean {
+  if (!capturedAt || formatCronDateKey(capturedAt) !== snapshotDate) return false;
+  const year = Number(snapshotDate.slice(0, 4));
+  const month = Number(snapshotDate.slice(4, 6));
+  const day = Number(snapshotDate.slice(6, 8));
+  const finalWindowStart = Date.UTC(year, month - 1, day, 1, 35);
+  return capturedAt.getTime() >= finalWindowStart;
+}
 
 export async function checkPlayerMarketFreshness(
   now: Date = new Date(),
@@ -52,24 +78,41 @@ export async function checkPlayerMarketFreshness(
   }
 
   const snapshotDate = formatCronDateKey(now);
-  const [expectedCount, coverage] = await Promise.all([
+  // A 09:35 capture can legitimately be active or delayed by BullMQ backoff
+  // when this 09:36 check begins. Observe it to settlement before deciding
+  // whether the daily snapshot is stale.
+  const settlement = await dependencies.waitForPlayerValuesSettlement(season, snapshotDate);
+  const [expectedCount, coverage, hasChanges] = await Promise.all([
     dependencies.countPublishedPlayers(season),
     dependencies.getDayCoverage(season, snapshotDate),
+    dependencies.hasChangesForDate(season, snapshotDate),
   ]);
-  const status =
-    coverage.snapshotCount === 0
+  const completeSnapshot =
+    expectedCount > 0 && coverage.snapshotCount === expectedCount && coverage.captureCount === 1;
+  const finalCaptureObserved =
+    syncEvent.phase === 'preseason' ||
+    hasChanges ||
+    isFinalWindowCapture(snapshotDate, coverage.latestCapturedAt);
+  const status = !settlement.settled
+    ? 'unsettled'
+    : coverage.snapshotCount === 0
       ? 'missing'
-      : expectedCount > 0 && coverage.snapshotCount === expectedCount && coverage.captureCount === 1
+      : completeSnapshot && finalCaptureObserved
         ? 'ready'
-        : 'incomplete';
+        : completeSnapshot
+          ? 'stale'
+          : 'incomplete';
   const result = {
     status,
     snapshotDate,
     eventId: syncEvent.event.id,
+    phase: syncEvent.phase,
     expectedCount,
     snapshotCount: coverage.snapshotCount,
     captureCount: coverage.captureCount,
     latestCapturedAt: coverage.latestCapturedAt?.toISOString() ?? null,
+    hasChanges,
+    queueState: settlement.state,
   } as const;
 
   if (status === 'ready') {
@@ -87,6 +130,9 @@ export async function checkPlayerMarketFreshness(
         `Expected: ${expectedCount}`,
         `Observed: ${coverage.snapshotCount}`,
         `Capture revisions: ${coverage.captureCount}`,
+        `Latest capture: ${result.latestCapturedAt ?? 'none'}`,
+        `Price changes observed: ${hasChanges}`,
+        `Player-values queue: ${settlement.state}`,
       ].join('\n'),
     );
   } catch (error) {

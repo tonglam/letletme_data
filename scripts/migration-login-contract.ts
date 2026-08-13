@@ -123,7 +123,11 @@ async function main(): Promise<void> {
         has_sequence_privilege(
           'letletme_data_writer',
           'fpl.player_market_snapshots_source_snapshot_id_seq',
-          'SELECT,USAGE'
+          'SELECT'
+        ) AND has_sequence_privilege(
+          'letletme_data_writer',
+          'fpl.player_market_snapshots_source_snapshot_id_seq',
+          'USAGE'
         ) AS data_writer_can_use_market_snapshot_sequence
       FROM pg_roles role_row
       WHERE role_row.rolname = current_user

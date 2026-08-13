@@ -21,4 +21,18 @@ describe('player market runtime privilege migrations', () => {
     expect(migration).toContain('TO letletme_data_writer');
     expect(migration).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER)\b/i);
   });
+
+  test.each([
+    'src/db/runtime-role-contract.ts',
+    'scripts/runtime-login-contract.ts',
+    'scripts/migration-login-contract.ts',
+  ])('requires SELECT and USAGE independently in %s', (path) => {
+    const source = readFileSync(path, 'utf8');
+    const sequenceChecks = source.match(
+      /has_sequence_privilege\([\s\S]*?'SELECT'[\s\S]*?\)\s+AND\s+has_sequence_privilege\([\s\S]*?'USAGE'[\s\S]*?\)/,
+    );
+
+    expect(sequenceChecks).not.toBeNull();
+    expect(source).not.toMatch(/'SELECT,USAGE'/);
+  });
 });

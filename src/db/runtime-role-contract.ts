@@ -152,7 +152,11 @@ export async function assertDataRuntimeRole(client: postgres.Sql): Promise<void>
         has_sequence_privilege(
           current_user,
           'fpl.player_market_snapshots_source_snapshot_id_seq',
-          'SELECT,USAGE'
+          'SELECT'
+        ) AND has_sequence_privilege(
+          current_user,
+          'fpl.player_market_snapshots_source_snapshot_id_seq',
+          'USAGE'
         ) AS can_use_market_snapshot_sequence
     `,
     // This is intentionally an actual query, not only an ACL lookup. A rebuilt
