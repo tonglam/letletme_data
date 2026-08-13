@@ -92,12 +92,17 @@ jobs:
             deployment_started=false
             deployment_committed=false
             migration_started=false
+            services_start_attempted=false
             deployment_run_id="${RUN_ID:-data-${DEPLOY_SHA}}"
             on_exit() {
               original_status=$?
               trap - EXIT
               set +e
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
+                if [ "$services_start_attempted" = true ]; then
+                  echo "Data deployment failed after starting the new services; stopping them for operator recovery" >&2
+                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker || true
+                fi
                 if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
                   echo "Data deployment failed before migration; restoring the previous API and worker image" >&2
                   APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
@@ -171,9 +176,9 @@ jobs:
               bun scripts/wait-for-migration-login.ts
             finish_stage
 
-            deployment_started=true
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment begin \
               --service=data --run-id="$deployment_run_id" --old-image="$old_image" --new-image="$IMAGE_REF" >/dev/null
+            deployment_started=true
             start_stage quiescence
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
@@ -197,6 +202,7 @@ jobs:
               bun run cache:publish-core -- --execute --allow-empty
             finish_stage
             start_stage serviceReady
+            services_start_attempted=true
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
             for attempt in $(seq 1 30); do
