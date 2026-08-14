@@ -6,6 +6,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import type { PlayerMarketSnapshot } from '../domain/player-market-snapshots';
 import { enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
 import { playerMarketSnapshotsRepository } from '../repositories/player-market-snapshots';
+import { ensureMarketPublication } from './market-publication.service';
 import type { StoredPlayerValue } from '../repositories/player-values';
 import { playerValuesRepository } from '../repositories/player-values';
 import { transformPlayerMarketSnapshots } from '../transformers/player-market-snapshots';
@@ -20,6 +21,7 @@ export type PlayerValuesPhaseTimings = {
   bootstrap: number;
   snapshotWrite: number;
   derivedView: number;
+  publication?: number;
 };
 
 export type PlayerValuesSyncDependencies = {
@@ -34,6 +36,7 @@ export type PlayerValuesSyncDependencies = {
   findByChangeDate: (season: FplSeasonRef, changeDate: string) => Promise<StoredPlayerValue[]>;
   enqueuePlayerPrices: typeof enqueuePlayerPricesSyncJob;
   notify: typeof notifyTwoBots;
+  publishMarketPublication?: typeof ensureMarketPublication;
   getCurrentChangeDate: () => string;
   now: () => Date;
 };
@@ -47,6 +50,7 @@ const defaultDependencies: PlayerValuesSyncDependencies = {
     playerValuesRepository.findByChangeDate(season, changeDate),
   enqueuePlayerPrices: enqueuePlayerPricesSyncJob,
   notify: notifyTwoBots,
+  publishMarketPublication: ensureMarketPublication,
   getCurrentChangeDate: () => formatCronDateKey(),
   now: () => new Date(),
 };
@@ -190,6 +194,11 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
         dependencies.findByChangeDate(season, changeDate),
       );
       const changedRows = enrichChangedRows(derivedRows, bootstrap.elements, bootstrap.teams);
+      if (dependencies.publishMarketPublication) {
+        await measurePhase(timings, 'publication', () =>
+          dependencies.publishMarketPublication!(season),
+        );
+      }
       if (changedRows.length > 0) {
         await dependencies.enqueuePlayerPrices(season, 'cascade', {
           changeDate,

@@ -19,6 +19,8 @@ import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
 import { understatAPI } from './api/understat.api';
 import { databaseSingleton } from './db/singleton';
+import { seasonRepository } from './repositories/seasons';
+import { ensureMarketPublication } from './services/market-publication.service';
 
 // Import job registration functions
 import { registerDataJobs } from './jobs/data-jobs';
@@ -48,6 +50,13 @@ import { logDebug, logError, logInfo, logWarn } from './utils/logger';
 const config = getConfig();
 if (config.NODE_ENV === 'production') {
   await databaseSingleton.connect();
+  try {
+    await ensureMarketPublication(await seasonRepository.findCurrent());
+  } catch (error) {
+    logWarn('Market publication recovery deferred to the scheduled watchdog', {
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+  }
 }
 const { PORT: port } = config;
 const { CORS_ORIGINS, ENABLE_AUTH } = getAuthConfig();
