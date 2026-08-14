@@ -69,6 +69,7 @@ export interface LiveSnapshotDurablePersistenceRequest {
   readonly persistFixtures: boolean;
   readonly persistEventLives: boolean;
   readonly persistEventLivesIfMissing?: boolean;
+  readonly persistEventLivesIfStaleAt?: Date | null;
   readonly finalizeEvent?: boolean;
 }
 
@@ -364,7 +365,13 @@ export async function persistLiveSnapshotDurably(
       request.persistEventLives &&
       (!request.persistEventLivesIfMissing ||
         request.finalizeEvent === true ||
-        currentEvent[0]?.liveFactsPersistedAt === null);
+        currentEvent[0]?.liveFactsPersistedAt === null ||
+        (request.persistEventLivesIfStaleAt instanceof Date &&
+          Number.isFinite(request.persistEventLivesIfStaleAt.getTime()) &&
+          currentEvent[0]?.liveFactsPersistedAt !== null &&
+          currentEvent[0] !== undefined &&
+          currentEvent[0].liveFactsPersistedAt.getTime() <
+            request.persistEventLivesIfStaleAt.getTime()));
 
     if (request.persistFixtures) {
       await createFixtureRepository(transaction).upsertBatch(season, prepared.fixtures);
@@ -556,6 +563,9 @@ export async function syncLiveSnapshot(
         persistFixtures: true,
         persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
         persistEventLivesIfMissing: true,
+        persistEventLivesIfStaleAt: active?.manifest.sourceCheckedAt
+          ? new Date(active.manifest.sourceCheckedAt)
+          : null,
         finalizeEvent: options.finalizeEvent,
       });
       persistedFixtures = durable.persistedFixtures;

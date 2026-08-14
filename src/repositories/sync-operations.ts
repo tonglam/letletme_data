@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 
 import {
   datasetPublicationItemsInOps,
@@ -80,6 +80,7 @@ const NON_TERMINAL_RUN_STATUSES: readonly SyncRunStatus[] = [
   'running',
   'ready_to_publish',
 ];
+const EXPIRED_PUBLICATION_CLEANUP_BATCH_SIZE = 100;
 
 function nullableValue<T>(value: T | undefined): T | null {
   return value ?? null;
@@ -368,7 +369,12 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               inArray(datasetPublicationsInOps.status, ['retired', 'failed']),
             ),
           )
-          .for('update');
+          .orderBy(
+            asc(datasetPublicationsInOps.expiresAt),
+            asc(datasetPublicationsInOps.publicationId),
+          )
+          .limit(EXPIRED_PUBLICATION_CLEANUP_BATCH_SIZE)
+          .for('update', { skipLocked: true });
         if (expired.length === 0) return;
         const expiredIds = expired.map((row) => row.publicationId);
         await tx

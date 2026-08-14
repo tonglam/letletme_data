@@ -22,6 +22,7 @@ describe('live lifecycle decisions', () => {
       shouldFetchLive: true,
       shouldProbePicks: true,
       shouldSyncPicks: true,
+      recoverStaleFixtures: true,
       finalizeEvent: false,
     });
   });
