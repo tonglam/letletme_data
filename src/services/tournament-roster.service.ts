@@ -69,10 +69,37 @@ async function reconcileTournamentRosterUnlocked(
     resumeMarker?: string;
   },
 ): Promise<TournamentRosterReconcileResult> {
-  await assertPreGameweekBoundary(season);
   const tournament = await tournamentRosterRepository.findById(season, tournamentId);
   if (!tournament) {
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
+  }
+  try {
+    await assertPreGameweekBoundary(season);
+  } catch (error) {
+    // A resume can be accepted just before the gameweek boundary closes and
+    // only reach the worker after the gameweek becomes active. Settle that
+    // asynchronous intent instead of retrying a deterministic boundary error
+    // with pending roster/setup markers left behind.
+    if (
+      options?.resumeAfterSetup &&
+      error instanceof ConflictError &&
+      error.code === 'TOURNAMENT_ROSTER_FROZEN'
+    ) {
+      const message = error.message;
+      await Promise.allSettled([
+        tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
+        tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message),
+      ]);
+      return {
+        tournamentId,
+        changed: false,
+        addedEntryIds: [],
+        removedEntryIds: [],
+        participantCount: tournament.totalTeamNum,
+        automaticallyPaused: false,
+      };
+    }
+    throw error;
   }
   if (tournament.rosterMode !== 'official_sync') {
     throw new ValidationError(

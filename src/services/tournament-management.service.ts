@@ -196,11 +196,14 @@ export function createTournamentManagementService(
       if (current.state === payload.state && payload.state !== 'inactive') return current;
 
       if (payload.state === 'inactive') {
-        const paused = await repository.updateStateOwned(
-          season,
-          tournamentId,
-          payload.adminEntryId,
-          'inactive',
+        const paused = await withMutationConflictGuard(
+          {
+            queueName: 'tournament-management',
+            jobName: 'tournament-pause',
+            tournamentId,
+            scopes: [tournamentSetupLifecycleScope(tournamentId)],
+          },
+          () => repository.updateStateOwned(season, tournamentId, payload.adminEntryId, 'inactive'),
         );
         if (!paused) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
         return paused;
@@ -220,6 +223,32 @@ export function createTournamentManagementService(
           },
           async () => {
             await assertTournamentRosterPreGameweekBoundary(season);
+            const lockedCurrent = await repository.findById(season, tournamentId);
+            if (!lockedCurrent) {
+              throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
+            }
+            if (lockedCurrent.adminEntryId !== payload.adminEntryId) {
+              throw new ForbiddenError(
+                'Only the tournament administrator can manage this tournament.',
+                'TOURNAMENT_ADMIN_REQUIRED',
+              );
+            }
+            if (lockedCurrent.state !== 'inactive') {
+              throw new ConflictError(
+                'Tournament state changed while resume was waiting.',
+                'TOURNAMENT_STATE_CHANGED',
+              );
+            }
+            // updated_at is the existing lifecycle version. If another
+            // mutation (including a newer pause) completed while this request
+            // waited for the lock, do not publish a resume against that newer
+            // state; ask the caller to retry from the fresh state instead.
+            if (lockedCurrent.updatedAt !== current.updatedAt) {
+              throw new ConflictError(
+                'Tournament state changed while resume was waiting.',
+                'TOURNAMENT_STATE_CHANGED',
+              );
+            }
             // Publish the cancellable intent before queueing. A newer pause
             // changes this marker back to ready, so a queued worker can never
             // reactivate a tournament after the owner has paused it.
