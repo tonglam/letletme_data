@@ -9,6 +9,7 @@ async function hasSupersedingPendingJob(
   season: FplSeasonRef,
   eventId: number,
   persistEventLives: boolean,
+  finalizeEvent: boolean,
 ): Promise<boolean> {
   try {
     const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
@@ -17,7 +18,9 @@ async function hasSupersedingPendingJob(
         job.name === LIVE_JOBS.LIVE_SNAPSHOT &&
         job.data.seasonId === season.seasonId &&
         job.data.eventId === eventId &&
-        (!persistEventLives || job.data.persistEventLives === true),
+        (finalizeEvent
+          ? job.data.finalizeEvent === true
+          : !persistEventLives || job.data.persistEventLives === true),
     );
   } catch (error) {
     logError('Failed to check pending live-data jobs', error, {
@@ -50,7 +53,13 @@ export async function enqueueLiveSnapshot(
     const queue = liveDataQueue;
     if (
       source === 'cron' &&
-      (await hasSupersedingPendingJob(queue, season, eventId, persistEventLives))
+      (await hasSupersedingPendingJob(
+        queue,
+        season,
+        eventId,
+        persistEventLives,
+        options.finalizeEvent === true,
+      ))
     ) {
       logInfo('Live snapshot job already pending; skipping enqueue', {
         season: season.seasonCode,

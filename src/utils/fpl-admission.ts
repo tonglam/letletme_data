@@ -57,6 +57,18 @@ function canStart(priority: FplRequestPriority): boolean {
   return true;
 }
 
+function reserve(priority: FplRequestPriority): void {
+  inflight += 1;
+  if (priority === 'live') liveInflight += 1;
+  else bulkInflight += 1;
+}
+
+function release(priority: FplRequestPriority): void {
+  inflight -= 1;
+  if (priority === 'live') liveInflight -= 1;
+  else bulkInflight -= 1;
+}
+
 function maybeRecoverBulkLimit(now = Date.now()): void {
   if (
     adaptiveBulkLimit < BULK_MAX_INFLIGHT &&
@@ -92,18 +104,18 @@ function drain(): void {
     const waiter = waiters[index];
     if (!canStart(waiter.priority)) return;
     waiters.splice(index, 1);
+    reserve(waiter.priority);
     waiter.resolve();
   }
 }
 
 export async function acquireFplRequest(priority: FplRequestPriority): Promise<() => void> {
-  if (!canStart(priority)) {
+  if (canStart(priority)) {
+    reserve(priority);
+  } else {
     await new Promise<void>((resolve) => waiters.push({ priority, resolve }));
   }
   await waitForRateSlot();
-  inflight += 1;
-  if (priority === 'live') liveInflight += 1;
-  else bulkInflight += 1;
   logDebug('FPL request admitted', {
     priority,
     inflight,
@@ -114,9 +126,7 @@ export async function acquireFplRequest(priority: FplRequestPriority): Promise<(
   return () => {
     if (released) return;
     released = true;
-    inflight -= 1;
-    if (priority === 'live') liveInflight -= 1;
-    else bulkInflight -= 1;
+    release(priority);
     drain();
   };
 }

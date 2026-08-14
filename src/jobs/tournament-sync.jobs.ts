@@ -18,6 +18,24 @@ export type TournamentSyncEnqueueOptions = {
   finalizationTargets?: TournamentFinalizationTarget[];
 };
 
+async function hasPendingOfficialH2HJob(season: FplSeasonRef, eventId: number): Promise<boolean> {
+  try {
+    const jobs = await tournamentSyncQueue.getJobs(['waiting', 'delayed', 'active']);
+    return jobs.some(
+      (job) =>
+        job.name === TOURNAMENT_JOBS.OFFICIAL_H2H &&
+        job.data.seasonId === season.seasonId &&
+        job.data.eventId === eventId,
+    );
+  } catch (error) {
+    logError('Failed to check pending official H2H jobs', error, {
+      season: season.seasonCode,
+      eventId,
+    });
+    return false;
+  }
+}
+
 /** Cascade jobs that must finish before event publication can finish tournaments. */
 export const CASCADE_COMPLETION_BARRIER_JOBS = [
   TOURNAMENT_JOBS.POINTS_RACE,
@@ -337,12 +355,21 @@ export const enqueueTournamentBattleRace = (
   options?: TournamentSyncEnqueueOptions,
 ) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.BATTLE_RACE, season, eventId, source, options);
 
-export const enqueueTournamentOfficialH2H = (
+export const enqueueTournamentOfficialH2H = async (
   season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.OFFICIAL_H2H, season, eventId, source, options);
+) => {
+  if (source === 'cron' && (await hasPendingOfficialH2HJob(season, eventId))) {
+    logInfo('Official H2H job already pending; skipping enqueue', {
+      season: season.seasonCode,
+      eventId,
+    });
+    return null;
+  }
+  return enqueueTournamentSyncJob(TOURNAMENT_JOBS.OFFICIAL_H2H, season, eventId, source, options);
+};
 
 export const enqueueTournamentKnockout = (
   season: FplSeasonRef,

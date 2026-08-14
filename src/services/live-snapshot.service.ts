@@ -68,6 +68,8 @@ export interface LiveSnapshotDurablePersistenceRequest {
   readonly prepared: PreparedLiveSnapshot;
   readonly persistFixtures: boolean;
   readonly persistEventLives: boolean;
+  readonly persistEventLivesIfMissing?: boolean;
+  readonly persistEventLivesIfStaleAt?: Date | null;
   readonly finalizeEvent?: boolean;
 }
 
@@ -354,10 +356,27 @@ export async function persistLiveSnapshotDurably(
       };
     }
 
+    const currentEvent = await transaction
+      .select({ liveFactsPersistedAt: eventsInFpl.liveFactsPersistedAt })
+      .from(eventsInFpl)
+      .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)))
+      .limit(1);
+    const persistEventLives =
+      request.persistEventLives &&
+      (!request.persistEventLivesIfMissing ||
+        request.finalizeEvent === true ||
+        currentEvent[0]?.liveFactsPersistedAt === null ||
+        (request.persistEventLivesIfStaleAt instanceof Date &&
+          Number.isFinite(request.persistEventLivesIfStaleAt.getTime()) &&
+          currentEvent[0]?.liveFactsPersistedAt !== null &&
+          currentEvent[0] !== undefined &&
+          currentEvent[0].liveFactsPersistedAt.getTime() <
+            request.persistEventLivesIfStaleAt.getTime()));
+
     if (request.persistFixtures) {
       await createFixtureRepository(transaction).upsertBatch(season, prepared.fixtures);
     }
-    if (request.persistEventLives) {
+    if (persistEventLives) {
       await persistPreparedEventLives(season, prepared.eventLives, transaction);
       await transaction
         .update(eventsInFpl)
@@ -385,7 +404,7 @@ export async function persistLiveSnapshotDurably(
       accepted: true,
       winnerCheckedAt: fence.winnerCheckedAt,
       persistedFixtures: request.persistFixtures,
-      persistedEventLives: request.persistEventLives,
+      persistedEventLives: persistEventLives,
     };
   });
 
@@ -531,29 +550,34 @@ export async function syncLiveSnapshot(
     const changed = !snapshotContentMatches(active, payload);
 
     if (!changed) {
+      let persistedFixtures = false;
       let persistedEventLives = false;
-      // A stable upstream checksum is a no-op for the publication and for the
-      // durable facts tables.  DAY_SETTLING may request durable persistence,
-      // but repeating that write every minute would turn an unchanged poll
-      // into needless PostgreSQL traffic.  Finalization is the only explicit
-      // exception: it records the final authoritative snapshot even when the
-      // last live poll was unchanged.
-      if (options.finalizeEvent) {
-        const durable = await dependencies.persistDurably({
-          season,
-          eventId,
-          checkedAt,
-          prepared,
-          persistFixtures: false,
-          persistEventLives: true,
-          finalizeEvent: options.finalizeEvent,
-        });
-        persistedEventLives = durable.persistedEventLives;
-      }
+      // Fixture flags are the lifecycle source of truth even for cache-only
+      // polls. Persisting them independently of event-live durability prevents
+      // a stale database fixture from keeping the orchestrator in LIVE_ACTIVE.
+      const durable = await dependencies.persistDurably({
+        season,
+        eventId,
+        checkedAt,
+        prepared,
+        persistFixtures: true,
+        persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
+        persistEventLivesIfMissing: true,
+        persistEventLivesIfStaleAt: active?.manifest.sourceCheckedAt
+          ? new Date(active.manifest.sourceCheckedAt)
+          : null,
+        finalizeEvent: options.finalizeEvent,
+      });
+      persistedFixtures = durable.persistedFixtures;
+      persistedEventLives = durable.persistedEventLives;
       await syncOperationsRepository.finishRun(sourceRunId, {
         status: 'skipped',
-        completedItems: persistedEventLives ? prepared.eventLives.eventLives.length : 0,
-        skippedItems: prepared.eventLives.eventLives.length + prepared.fixtures.length,
+        completedItems:
+          (persistedEventLives ? prepared.eventLives.eventLives.length : 0) +
+          (persistedFixtures ? prepared.fixtures.length : 0),
+        skippedItems:
+          (persistedEventLives ? 0 : prepared.eventLives.eventLives.length) +
+          (persistedFixtures ? 0 : prepared.fixtures.length),
         dataChanged: false,
       });
       const result: LiveSnapshotSyncResult = {
@@ -567,7 +591,7 @@ export async function syncLiveSnapshot(
         fixtureCount: prepared.fixtures.length,
         fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
         bonusTeamCount: bonusTeamCount(),
-        persistedFixtures: false,
+        persistedFixtures,
         persistedEventLives,
       };
       logInfo('Live snapshot content unchanged', { ...result, durationMs: Date.now() - startedAt });
@@ -607,8 +631,8 @@ export async function syncLiveSnapshot(
           eventId,
           checkedAt,
           prepared,
-          persistFixtures: options.persistEventLives === true || options.finalizeEvent === true,
-          persistEventLives: options.persistEventLives === true,
+          persistFixtures: true,
+          persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
           finalizeEvent: options.finalizeEvent,
         });
         persistedFixtures = durable.persistedFixtures;
@@ -623,8 +647,12 @@ export async function syncLiveSnapshot(
       );
       await syncOperationsRepository.finishRun(sourceRunId, {
         status: 'skipped',
-        completedItems: persistedEventLives ? prepared.eventLives.eventLives.length : 0,
-        skippedItems: prepared.eventLives.eventLives.length + prepared.fixtures.length,
+        completedItems:
+          (persistedEventLives ? prepared.eventLives.eventLives.length : 0) +
+          (persistedFixtures ? prepared.fixtures.length : 0),
+        skippedItems:
+          (persistedEventLives ? 0 : prepared.eventLives.eventLives.length) +
+          (persistedFixtures ? 0 : prepared.fixtures.length),
         dataChanged: false,
       });
       return {
