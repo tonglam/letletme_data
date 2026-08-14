@@ -329,7 +329,7 @@ export function createTournamentManagementService(
             payload.rosterMode,
           );
           if (!updated) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
-          if (updated.state === 'active') {
+          if (updated.state === 'active' && updated.rosterMode === 'official_sync') {
             try {
               const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
               await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {

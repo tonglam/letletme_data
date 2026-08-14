@@ -88,6 +88,23 @@ async function reconcileTournamentRosterUnlocked(
     // A queued opt-in reconciliation can become stale when the owner pauses
     // before the worker starts. Settle that operation as a no-op instead of
     // retrying/alerting on an intentional pause, and clear its pending state.
+    if (options?.expectedProgressMarker !== undefined) {
+      const ownsInactiveState = await tournamentRosterRepository.markSyncProcessingIfMarker(
+        season,
+        tournamentId,
+        options.expectedProgressMarker,
+      );
+      if (!ownsInactiveState) {
+        return {
+          tournamentId,
+          changed: false,
+          addedEntryIds: [],
+          removedEntryIds: [],
+          participantCount: tournament.totalTeamNum,
+          automaticallyPaused: false,
+        };
+      }
+    }
     await tournamentRosterRepository.markSyncCanceled(season, tournamentId);
     return {
       tournamentId,
@@ -161,7 +178,16 @@ async function reconcileTournamentRosterUnlocked(
       await Promise.all([
         tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
         ...(options.resumeAfterSetup
-          ? [tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message)]
+          ? [
+              tournamentInfoRepository.markSetupResult(
+                season,
+                tournamentId,
+                'failed',
+                message,
+                0,
+                options.resumeMarker,
+              ),
+            ]
           : []),
       ]);
       return {
@@ -254,6 +280,9 @@ async function reconcileTournamentRosterUnlocked(
             allowInactive: options?.allowInactive,
             resumeAfterSetup: options?.resumeAfterSetup,
             resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
+            expectedProgressMarker: options?.resumeAfterSetup
+              ? undefined
+              : options?.expectedProgressMarker,
           },
         );
       },
@@ -315,25 +344,24 @@ async function reconcileTournamentRosterUnlocked(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Tournament roster sync failed.';
+    const failureMarker = options?.resumeAfterSetup
+      ? options.resumeMarker
+      : options?.expectedProgressMarker;
     await Promise.allSettled([
       tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
       ...(options?.resumeAfterSetup || setupEnqueueRequired
-        ? [tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message)]
+        ? [
+            tournamentInfoRepository.markSetupResult(
+              season,
+              tournamentId,
+              'failed',
+              message,
+              0,
+              failureMarker,
+            ),
+          ]
         : []),
     ]);
-    if (options?.resumeAfterSetup && options.resumeMarker) {
-      // markSetupResult records the failure timestamp, but the queue retry
-      // still owns the activation marker minted before this attempt. Restore
-      // it before releasing the lifecycle lock so the next BullMQ attempt can
-      // reclaim the same resume operation.
-      await tournamentRosterRepository
-        .restoreSetupProgressMarker(season, tournamentId, options.resumeMarker)
-        .catch((restoreError) => {
-          logError('Unable to restore resume marker after roster failure', restoreError, {
-            tournamentId,
-          });
-        });
-    }
     throw error;
   }
 }
@@ -392,7 +420,10 @@ export async function reconcileOfficialTournamentRosters(season: FplSeasonRef): 
           tournamentId: tournament.id,
           scopes: [tournamentSetupLifecycleScope(tournament.id)],
         },
-        () => reconcileTournamentRosterUnlocked(season, tournament.id),
+        () =>
+          reconcileTournamentRosterUnlocked(season, tournament.id, {
+            expectedProgressMarker: tournament.setupProgressUpdatedAt,
+          }),
       );
       if (result.changed) changed += 1;
     } catch (error) {

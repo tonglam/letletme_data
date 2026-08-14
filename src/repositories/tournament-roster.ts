@@ -108,6 +108,7 @@ export const tournamentRosterRepository = {
           roster_mode AS "rosterMode",
           state,
           standings_ready_at::text AS "standingsReadyAt",
+          setup_progress_updated_at::text AS "setupProgressUpdatedAt",
           official_schedule_locked_at::text AS "officialScheduleLockedAt",
           total_team_num AS "totalTeamNum",
           group_mode AS "groupMode",
@@ -195,29 +196,6 @@ export const tournamentRosterRepository = {
       RETURNING tournament_id AS "tournamentId"
     `;
     return rows.length === 1;
-  },
-
-  /**
-   * A resume setup worker owns the lifecycle marker for the duration of its
-   * attempt. Setup progress/error writes use their own timestamps, so restore
-   * the marker before BullMQ retries; otherwise the next attempt would look
-   * stale and silently abandon the retry.
-   */
-  restoreSetupProgressMarker: async (
-    season: FplSeasonRef,
-    tournamentId: number,
-    marker: string,
-  ): Promise<void> => {
-    const client = await getDbClient();
-    await client`
-      UPDATE competition.tournaments
-      SET setup_progress_updated_at = ${marker}::timestamptz,
-          updated_at = now()
-      WHERE season_id = ${season.seasonId}
-        AND tournament_id = ${tournamentId}
-        AND state = 'inactive'
-        AND setup_status IN ('pending', 'processing', 'failed')
-    `;
   },
 
   markSyncFailed: async (
@@ -348,6 +326,7 @@ export const tournamentRosterRepository = {
       allowInactive?: boolean;
       resumeAfterSetup?: boolean;
       resumeMarker?: string;
+      expectedProgressMarker?: string | null;
     },
   ): Promise<RosterPublicationResult> => {
     try {
@@ -441,6 +420,8 @@ export const tournamentRosterRepository = {
                 roster_sync_error = NULL,
                 roster_last_synced_at = now(),
                 setup_progress_updated_at = CASE
+                  WHEN ${options?.expectedProgressMarker !== undefined}
+                    THEN ${options?.expectedProgressMarker ?? null}::timestamptz
                   WHEN ${options?.resumeAfterSetup ? false : true} THEN now()
                   ELSE setup_progress_updated_at
                 END,
@@ -543,6 +524,8 @@ export const tournamentRosterRepository = {
               setup_progress_updated_at = CASE
                 WHEN ${options?.resumeAfterSetup ? Boolean(options.resumeMarker) : false}
                   THEN ${options?.resumeMarker ?? null}::timestamptz
+                WHEN ${options?.expectedProgressMarker !== undefined}
+                  THEN ${options?.expectedProgressMarker ?? null}::timestamptz
                 ELSE now()
               END,
               standings_ready_at = NULL,

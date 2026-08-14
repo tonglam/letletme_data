@@ -20,6 +20,12 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0
 `;
+const RENEW_FETCH_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+`;
 
 // A content-addressed snapshot can be shared by tokens with different
 // lifetimes. Set it only when missing, and extend (never shorten) an existing
@@ -218,6 +224,16 @@ export async function createTournamentPreview(input: {
       }
     }
 
+    const renewTimer = setInterval(
+      () => {
+        void redis
+          .eval(RENEW_FETCH_LOCK_SCRIPT, 1, lockKey, lockToken, PREVIEW_FETCH_LOCK_SECONDS)
+          .catch(() => undefined);
+      },
+      Math.max(1_000, Math.floor((PREVIEW_FETCH_LOCK_SECONDS * 1000) / 3)),
+    );
+    renewTimer.unref?.();
+
     try {
       const existingTokenHash = await redis.get(key);
       if (existingTokenHash) {
@@ -283,6 +299,7 @@ export async function createTournamentPreview(input: {
       });
       return { ...stored, previewToken };
     } finally {
+      clearInterval(renewTimer);
       if (lockOwner) {
         await redis.eval(RELEASE_FETCH_LOCK_SCRIPT, 1, lockKey, lockToken).catch(() => undefined);
       }

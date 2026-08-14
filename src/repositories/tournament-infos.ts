@@ -454,7 +454,11 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       return rows[0] ?? null;
     },
 
-    markSetupProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+    markSetupProcessing: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      progressMarker?: string | null,
+    ): Promise<void> => {
       const db = await getDbInstance();
       await db
         .update(tournamentsInCompetition)
@@ -464,7 +468,8 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupPhase: 'syncing_entries',
           setupCompletedUnits: 0,
           setupTotalUnits: 0,
-          setupProgressUpdatedAt: new Date(),
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           setupWarningCount: 0,
           setupStartedAt: new Date(),
           setupFinishedAt: null,
@@ -500,6 +505,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       phase: TournamentSetupPhase,
       completedUnits: number,
       totalUnits: number,
+      progressMarker?: string | null,
     ): Promise<void> => {
       const safeTotal = Math.max(0, Math.trunc(totalUnits));
       const safeCompleted = Math.min(safeTotal, Math.max(0, Math.trunc(completedUnits)));
@@ -510,19 +516,25 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupPhase: phase,
           setupCompletedUnits: safeCompleted,
           setupTotalUnits: safeTotal,
-          setupProgressUpdatedAt: new Date(),
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           updatedAt: new Date(),
         })
         .where(tournamentScope(season, tournamentId));
     },
 
-    markStandingsReady: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+    markStandingsReady: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      progressMarker?: string | null,
+    ): Promise<void> => {
       const db = await getDbInstance();
       const rows = await db
         .update(tournamentsInCompetition)
         .set({
           standingsReadyAt: sql`COALESCE(${tournamentsInCompetition.standingsReadyAt}, clock_timestamp())`,
-          setupProgressUpdatedAt: new Date(),
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           updatedAt: new Date(),
         })
         .where(tournamentScope(season, tournamentId))
@@ -536,6 +548,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       status: 'ready' | 'failed',
       error?: string | null,
       warningCount = status === 'ready' && error ? 1 : 0,
+      progressMarker?: string | null,
     ): Promise<void> => {
       const db = await getDbInstance();
       await db
@@ -545,7 +558,8 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupPhase: status,
           setupWarningCount: status === 'ready' ? Math.max(0, warningCount) : 0,
           setupError: error ?? null,
-          setupProgressUpdatedAt: new Date(),
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           setupFinishedAt: new Date(),
           updatedAt: new Date(),
         })
