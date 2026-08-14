@@ -188,6 +188,31 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
+    findLiveSnapshotFinalizedAt: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<Date | null> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select({ finalizedAt: eventsInFpl.liveSnapshotFinalizedAt })
+          .from(eventsInFpl)
+          .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)))
+          .limit(1);
+        return rows[0]?.finalizedAt ?? null;
+      } catch (error) {
+        logError('Failed to find live snapshot finalization marker', error, {
+          season: season.seasonCode,
+          eventId,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve live snapshot finalization marker',
+          'FIND_LIVE_SNAPSHOT_FINALIZATION_MARKER_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findCurrent: async (season: FplSeasonRef): Promise<DomainEvent | null> => {
       try {
         return await findCurrentInternal(season);

@@ -367,7 +367,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               lte(datasetPublicationsInOps.expiresAt, now),
               sql`${datasetPublicationsInOps.status} <> 'active'`,
             ),
-          );
+          )
+          .for('update');
         if (expired.length === 0) return;
         const expiredIds = expired.map((row) => row.publicationId);
         await tx
@@ -376,7 +377,13 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .where(inArray(syncRunsInOps.publicationId, expiredIds));
         await tx
           .delete(datasetPublicationsInOps)
-          .where(inArray(datasetPublicationsInOps.publicationId, expiredIds));
+          .where(
+            and(
+              inArray(datasetPublicationsInOps.publicationId, expiredIds),
+              lte(datasetPublicationsInOps.expiresAt, now),
+              sql`${datasetPublicationsInOps.status} <> 'active'`,
+            ),
+          );
       });
       const inserted = await db
         .insert(datasetPublicationsInOps)

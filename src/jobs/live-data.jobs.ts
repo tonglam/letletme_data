@@ -12,11 +12,7 @@ async function hasSupersedingPendingJob(
   finalizeEvent: boolean,
 ): Promise<boolean> {
   try {
-    const jobs = await queue.getJobs(
-      finalizeEvent
-        ? ['waiting', 'delayed', 'active', 'completed']
-        : ['waiting', 'delayed', 'active'],
-    );
+    const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
     return jobs.some(
       (job) =>
         job.name === LIVE_JOBS.LIVE_SNAPSHOT &&

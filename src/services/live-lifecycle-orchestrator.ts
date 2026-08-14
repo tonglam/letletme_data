@@ -6,6 +6,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { isCompleteEntryPicks } from '../domain/entry-picks';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
+import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
@@ -77,7 +78,6 @@ type PicksProbeState = {
 const picksProbeStates = new Map<string, PicksProbeState>();
 const daySettlingStates = new Map<string, { revision: number | null; unchangedSince: number }>();
 const picksFanoutClaims = new Map<string, Map<number, number>>();
-const finalizedEventKeys = new Set<string>();
 
 const firstKickoff = (fixtures: readonly Fixture[]): number | null => {
   const values = fixtures
@@ -348,11 +348,11 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
     });
   }
   if (decision.shouldFetchLive) {
-    const finalizationKey = `${season.seasonCode}:${currentEvent.id}`;
-    const shouldEnqueueFinalization =
-      decision.finalizeEvent && !finalizedEventKeys.has(finalizationKey);
+    const shouldEnqueueFinalization = decision.finalizeEvent
+      ? (await eventRepository.findLiveSnapshotFinalizedAt(season, currentEvent.id)) === null
+      : false;
     if (!decision.finalizeEvent || shouldEnqueueFinalization) {
-      const finalizationJob = await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
+      await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
         persistEventLives:
           decision.state === 'DAY_SETTLING' ||
           decision.state === 'GW_REVIEW' ||
@@ -360,7 +360,6 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         finalizeEvent: decision.finalizeEvent,
         now,
       });
-      if (decision.finalizeEvent && finalizationJob) finalizedEventKeys.add(finalizationKey);
     }
     if (isMatchDayTime(currentEvent, fixtures, now)) {
       await enqueueTournamentOfficialH2H(season, currentEvent.id, 'cron', {
