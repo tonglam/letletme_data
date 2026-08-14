@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { getDbClient } from '../db/singleton';
 import { seasonRepository } from '../repositories/seasons';
+import { ValidationError } from '../utils/errors';
 
 export async function getPublicTrendsCatalog(seasonCode: string) {
   const season = await seasonRepository.requireByCode(seasonCode);
@@ -24,9 +26,29 @@ export async function getPublicTrendsCatalog(seasonCode: string) {
       ) latest ON true
       WHERE catalog.season_id = ${season.seasonId}
       ORDER BY catalog.sort_order, catalog.tournament_id`;
+  const revision = createHash('sha256')
+    .update(
+      JSON.stringify(
+        rows.map((row) => ({
+          tournamentId: Number(row.tournament_id),
+          displayName: String(row.display_name),
+          sortOrder: Number(row.sort_order),
+          enabled: Boolean(row.enabled),
+          latestEventId: row.latest_event_id == null ? null : Number(row.latest_event_id),
+          publicationRevision: row.revision == null ? null : Number(row.revision),
+          publicationState: row.publication_state ?? 'NOT_YET_CAPTURED',
+          ownershipState: row.ownership_state ?? 'NOT_READY',
+          captaincyState: row.captaincy_state ?? 'NOT_READY',
+          viceCaptaincyState: row.vice_captaincy_state ?? 'NOT_READY',
+          transfersState: row.transfers_state ?? 'NOT_READY',
+          publishedAt: row.published_at == null ? null : String(row.published_at),
+        })),
+      ),
+    )
+    .digest('hex');
   return {
     season: season.seasonCode,
-    revision: rows.map((row) => `${row.tournament_id}:${row.revision ?? 'none'}`).join('|'),
+    revision,
     cohorts: rows.map((row) => ({
       id: `competition:${Number(row.tournament_id)}`,
       tournamentId: Number(row.tournament_id),
@@ -68,8 +90,12 @@ export async function updatePublicTrendsCatalog(
     WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
   `;
   const existing = current[0];
-  if (!existing && !values.displayName)
-    throw new Error('displayName is required for a new catalog entry');
+  if (!existing && !values.displayName) {
+    throw new ValidationError(
+      'displayName is required for a new catalog entry',
+      'TRENDS_CATALOG_DISPLAY_NAME_REQUIRED',
+    );
+  }
   const result = await client<
     Array<Record<string, unknown>>
   >`INSERT INTO competition.public_league_trends
@@ -80,5 +106,13 @@ export async function updatePublicTrendsCatalog(
        display_name = EXCLUDED.display_name, sort_order = EXCLUDED.sort_order,
        enabled = EXCLUDED.enabled, updated_at = now()
      RETURNING tournament_id, display_name, sort_order, enabled, updated_at`;
-  return result[0] ?? null;
+  const row = result[0];
+  if (!row) return null;
+  return {
+    tournamentId: Number(row.tournament_id),
+    displayName: String(row.display_name),
+    sortOrder: Number(row.sort_order),
+    enabled: Boolean(row.enabled),
+    updatedAt: row.updated_at == null ? null : String(row.updated_at),
+  };
 }

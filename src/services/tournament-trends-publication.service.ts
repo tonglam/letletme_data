@@ -54,7 +54,9 @@ export async function publishTournamentTrendScope(
   }
 
   const client = await getDbClient();
-  return client.begin(async (tx) => {
+  // Audit, checksum and row aggregation must observe one source snapshot. The
+  // advisory lock only serializes publishers; source writers do not take it.
+  return client.begin('isolation level repeatable read', async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`trends:${season.seasonId}:${tournamentId}:${eventId}`}, 0))`;
 
     const auditRows = await tx<ScopeAudit[]>`
@@ -94,12 +96,15 @@ export async function publishTournamentTrendScope(
     const picksReady = expectedEntries > 0 && completePickEntries === expectedEntries;
     const transfersReady = expectedEntries > 0 && transferCheckpointEntries === expectedEntries;
 
-    const sourceRows = await tx<Array<{ source_watermark: Date | null }>>`
-      SELECT GREATEST(
+    const sourceRows = await tx<
+      Array<{ source_watermark: Date | string | null; roster_checksum: string }>
+    >`
+      SELECT NULLIF(GREATEST(
         COALESCE(max(pick.source_updated_at), '-infinity'::timestamptz),
         COALESCE(max(entry.updated_at), '-infinity'::timestamptz),
         COALESCE(max(transfer.updated_at), '-infinity'::timestamptz)
-      ) AS source_watermark
+      ), '-infinity'::timestamptz) AS source_watermark,
+      md5(COALESCE(string_agg(roster.entry_id::text, ',' ORDER BY roster.entry_id), '')) AS roster_checksum
       FROM competition.tournament_entries roster
       JOIN competition.entries entry
         ON entry.season_id = roster.season_id AND entry.entry_id = roster.entry_id
@@ -115,9 +120,10 @@ export async function publishTournamentTrendScope(
     if (!Number.isFinite(sourceWatermark.getTime())) {
       throw new Error('Tournament Trends source watermark is invalid');
     }
+    const rosterChecksum = sourceRows[0]?.roster_checksum ?? 'd41d8cd98f00b204e9800998ecf8427e';
     const checksum = createHash('sha256')
       .update(
-        `${season.seasonId}:${tournamentId}:${eventId}:${expectedEntries}:${completePickEntries}:${transferCheckpointEntries}:${sourceWatermark.toISOString()}`,
+        `${season.seasonId}:${tournamentId}:${eventId}:${expectedEntries}:${completePickEntries}:${transferCheckpointEntries}:${sourceWatermark.toISOString()}:${rosterChecksum}`,
       )
       .digest('hex');
 
@@ -200,27 +206,42 @@ export async function publishTournamentTrendScope(
           SELECT element_id, sum(transfer_in_count)::int AS transfer_in_count,
             sum(transfer_out_count)::int AS transfer_out_count
           FROM transfer_counts GROUP BY element_id
+        ), pick_totals AS (
+          SELECT pick.element_id,
+            count(*)::int AS selected_count,
+            sum(pick.multiplier)::int AS effective_selection_count,
+            count(*) FILTER (WHERE pick.is_captain)::int AS captain_count,
+            count(*) FILTER (WHERE pick.is_vice_captain)::int AS vice_captain_count
+          FROM eligible
+          JOIN competition.entry_event_picks pick
+            ON pick.season_id = ${season.seasonId} AND pick.entry_id = eligible.entry_id AND pick.event_id = ${eventId}
+          GROUP BY pick.element_id
+        ), element_ids AS (
+          SELECT element_id FROM pick_totals
+          UNION
+          SELECT element_id FROM transfer_totals
         )
-        SELECT pick.element_id,
-          count(*)::int AS selected_count,
-          sum(pick.multiplier)::int AS effective_selection_count,
-          count(*) FILTER (WHERE pick.is_captain)::int AS captain_count,
-          count(*) FILTER (WHERE pick.is_vice_captain)::int AS vice_captain_count,
+        SELECT element_ids.element_id,
+          COALESCE(pick_totals.selected_count, 0)::int AS selected_count,
+          COALESCE(pick_totals.effective_selection_count, 0)::int AS effective_selection_count,
+          COALESCE(pick_totals.captain_count, 0)::int AS captain_count,
+          COALESCE(pick_totals.vice_captain_count, 0)::int AS vice_captain_count,
           CASE WHEN ${transfersReady} THEN COALESCE(max(transfer_totals.transfer_in_count), 0)::int ELSE NULL END AS transfer_in_count,
           CASE WHEN ${transfersReady} THEN COALESCE(max(transfer_totals.transfer_out_count), 0)::int ELSE NULL END AS transfer_out_count,
           COALESCE(NULLIF(concat_ws(' ', player.first_name, player.second_name), ''), player.web_name) AS player_name,
           player.element_type AS player_position,
           team.short_name AS team_short_name
-        FROM eligible
-        JOIN competition.entry_event_picks pick
-          ON pick.season_id = ${season.seasonId} AND pick.entry_id = eligible.entry_id AND pick.event_id = ${eventId}
+        FROM element_ids
+        LEFT JOIN pick_totals ON pick_totals.element_id = element_ids.element_id
         JOIN fpl.players player
-          ON player.season_id = pick.season_id AND player.element_id = pick.element_id
+          ON player.season_id = ${season.seasonId} AND player.element_id = element_ids.element_id
         JOIN fpl.teams team
           ON team.season_id = player.season_id AND team.team_id = player.team_id
-        LEFT JOIN transfer_totals ON transfer_totals.element_id = pick.element_id
-        GROUP BY pick.element_id, player.first_name, player.second_name, player.element_type, team.short_name
-        ORDER BY pick.element_id
+        LEFT JOIN transfer_totals ON transfer_totals.element_id = element_ids.element_id
+        GROUP BY element_ids.element_id, pick_totals.selected_count, pick_totals.effective_selection_count,
+          pick_totals.captain_count, pick_totals.vice_captain_count,
+          player.first_name, player.second_name, player.web_name, player.element_type, team.short_name
+        ORDER BY element_ids.element_id
       `;
       for (const row of trendRows) {
         await tx`
