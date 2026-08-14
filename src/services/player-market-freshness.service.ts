@@ -12,6 +12,7 @@ import { logError, logInfo } from '../utils/logger';
 import { notifyTwoBots } from '../utils/notify';
 import { formatCronDateKey } from '../utils/timezone';
 import { resolvePlayerSyncEvent, type PlayerSyncEvent } from './player-sync-event.service';
+import { ensureMarketPublication } from './market-publication.service';
 
 export type PlayerMarketFreshnessDependencies = {
   findCurrentSeason: () => Promise<FplSeasonRef>;
@@ -25,6 +26,7 @@ export type PlayerMarketFreshnessDependencies = {
     options: { missingIsSettled: boolean },
   ) => Promise<PlayerValuesSettlement>;
   notify: (message: string) => Promise<void>;
+  ensureMarketPublication?: typeof ensureMarketPublication;
 };
 
 const defaultDependencies: PlayerMarketFreshnessDependencies = {
@@ -53,6 +55,7 @@ const defaultDependencies: PlayerMarketFreshnessDependencies = {
     return waitForPlayerValuesSettlement(season, snapshotDate, options);
   },
   notify: notifyTwoBots,
+  ensureMarketPublication,
 };
 
 export type PlayerMarketFreshnessResult =
@@ -147,6 +150,9 @@ export async function checkPlayerMarketFreshness(
   } as const;
 
   if (status === 'ready') {
+    if (dependencies.ensureMarketPublication) {
+      await dependencies.ensureMarketPublication(season);
+    }
     logInfo('Player market freshness watchdog passed', result);
     return result;
   }

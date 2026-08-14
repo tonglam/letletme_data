@@ -27,10 +27,57 @@ export type PlayerMarketDayCoverage = {
   readonly latestCapturedAt: Date | null;
 };
 
+export type PlayerMarketPublicationSource = {
+  readonly snapshotDate: string;
+  readonly capturedAt: Date;
+  readonly sourceEventId: number;
+  readonly rowCount: number;
+};
+
 export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    getLatestCompleteSnapshot: async (
+      season: FplSeasonRef,
+    ): Promise<PlayerMarketPublicationSource | null> => {
+      const db = await getDbInstance();
+      const rows = await db.execute(sql`
+        SELECT
+          snapshot_date::text AS snapshot_date,
+          MAX(captured_at) AS captured_at,
+          MAX(source_event_id)::integer AS source_event_id,
+          COUNT(*)::integer AS row_count
+        FROM fpl.player_market_snapshots
+        WHERE season_id = ${season.seasonId}
+        GROUP BY snapshot_date
+        ORDER BY snapshot_date DESC
+        LIMIT 1
+      `);
+      const row = (
+        rows as unknown as Array<{
+          snapshot_date?: string;
+          captured_at?: string | Date;
+          source_event_id?: number | string;
+          row_count?: number | string;
+        }>
+      )[0];
+      if (!row?.snapshot_date || !row.captured_at) return null;
+      const capturedAt =
+        row.captured_at instanceof Date ? row.captured_at : new Date(row.captured_at);
+      const sourceEventId = Number(row.source_event_id);
+      const rowCount = Number(row.row_count);
+      if (
+        !Number.isFinite(capturedAt.getTime()) ||
+        !Number.isSafeInteger(sourceEventId) ||
+        sourceEventId <= 0 ||
+        !Number.isSafeInteger(rowCount) ||
+        rowCount <= 0
+      )
+        return null;
+      return { snapshotDate: row.snapshot_date.slice(0, 10), capturedAt, sourceEventId, rowCount };
+    },
+
     getDayCoverage: async (
       season: FplSeasonRef,
       snapshotDate: string,
@@ -79,11 +126,15 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
         validateCompleteMarketSnapshotBatch(snapshots, expectedCount);
 
         const snapshotDate = snapshots[0].snapshotDate;
+        // A daily publication has one capture timestamp. Retries may carry
+        // per-row timestamps from the upstream response; normalize them in
+        // the same transaction as the upsert so the day remains coherent.
+        const capturedAt = snapshots[0].capturedAt;
         const rows: DbPlayerMarketSnapshotInsert[] = snapshots.map((snapshot) => ({
           seasonId: season.seasonId,
           sourceEventId,
           snapshotDate: snapshot.snapshotDate,
-          capturedAt: snapshot.capturedAt,
+          capturedAt,
           elementId: snapshot.elementId,
           playerCode: snapshot.playerCode,
           webName: snapshot.webName,

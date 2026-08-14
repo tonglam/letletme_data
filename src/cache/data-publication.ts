@@ -16,7 +16,16 @@ export function isDataPublicationId(value: unknown): value is string {
   );
 }
 
-export type DataPublicationDataset = 'fpl:core' | 'fpl:live';
+export type DataPublicationDataset = 'fpl:core' | 'fpl:live' | 'fpl:market';
+export type MarketSnapshotContextPayload = {
+  readonly seasonCode: string;
+  readonly snapshotDate: string;
+  readonly capturedAt: string;
+  readonly latestMutationAt: string;
+  readonly sourceEventId: number;
+  readonly rowCount: number;
+  readonly expectedRowCount: number;
+};
 export type DataPublicationItemType = 'string';
 export type DataPublicationState = 'active' | 'scheduled' | 'live' | 'settled';
 
@@ -97,6 +106,7 @@ const MANIFEST_ITEM_FIELDS = ['name', 'key', 'type', 'count', 'bytes', 'sha256']
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
   'fpl:core': ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'],
   'fpl:live': ['eventLives', 'fixtures', 'liveFixtures', 'liveBonus'],
+  'fpl:market': ['context'],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -123,9 +133,8 @@ function isCanonicalState(
   dataset: DataPublicationDataset,
   state: unknown,
 ): state is DataPublicationState {
-  return dataset === 'fpl:core'
-    ? state === 'active'
-    : state === 'scheduled' || state === 'live' || state === 'settled';
+  if (dataset === 'fpl:core' || dataset === 'fpl:market') return state === 'active';
+  return state === 'scheduled' || state === 'live' || state === 'settled';
 }
 
 const ACTIVATE_REVISION_SCRIPT = `
@@ -357,7 +366,12 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
   try {
     const value = JSON.parse(raw) as unknown;
     if (!isRecord(value) || !hasExactFields(value, MANIFEST_FIELDS)) return null;
-    if (value.dataset !== 'fpl:core' && value.dataset !== 'fpl:live') return null;
+    if (
+      value.dataset !== 'fpl:core' &&
+      value.dataset !== 'fpl:live' &&
+      value.dataset !== 'fpl:market'
+    )
+      return null;
     const dataset = value.dataset;
     if (
       typeof value.seasonCode !== 'string' ||
@@ -376,7 +390,7 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
       return null;
     }
     if (
-      (dataset === 'fpl:core' && value.eventId !== null) ||
+      ((dataset === 'fpl:core' || dataset === 'fpl:market') && value.eventId !== null) ||
       (dataset === 'fpl:live' &&
         (typeof value.eventId !== 'number' ||
           !Number.isSafeInteger(value.eventId) ||
