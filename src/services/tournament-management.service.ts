@@ -331,8 +331,10 @@ export function createTournamentManagementService(
           if (!updated) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
           if (updated.state === 'active') {
             try {
+              const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
               await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
                 settleBoundaryFailure: true,
+                expectedProgressMarker: rosterState?.setupProgressUpdatedAt ?? null,
               });
             } catch (error) {
               await tournamentRosterRepository.markSyncFailed(
@@ -370,9 +372,11 @@ export function createTournamentManagementService(
         throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
       }
       await assertTournamentRosterPreGameweekBoundary(season);
+      const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
       const job = await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
         allowInactive: true,
         settleBoundaryFailure: true,
+        expectedProgressMarker: rosterState?.setupProgressUpdatedAt ?? null,
       });
       return {
         tournamentId,

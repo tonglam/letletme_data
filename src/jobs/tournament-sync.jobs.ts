@@ -21,6 +21,7 @@ export type TournamentSyncEnqueueOptions = {
   resumeMarker?: string;
   allowInactive?: boolean;
   settleBoundaryFailure?: boolean;
+  expectedProgressMarker?: string | null;
   operationId?: string;
 };
 
@@ -303,6 +304,9 @@ async function enqueueTournamentSyncJob(
       ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
       ...(options.allowInactive ? { allowInactive: true } : {}),
       ...(options.settleBoundaryFailure ? { settleBoundaryFailure: true } : {}),
+      ...(options.expectedProgressMarker !== undefined
+        ? { expectedProgressMarker: options.expectedProgressMarker }
+        : {}),
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.
@@ -461,6 +465,7 @@ export const enqueueTournamentRosterReconcile = async (
     resumeMarker?: string;
     allowInactive?: boolean;
     settleBoundaryFailure?: boolean;
+    expectedProgressMarker?: string | null;
     operationId?: string;
   },
 ) => {
@@ -498,6 +503,7 @@ export const enqueueTournamentRosterReconcile = async (
     resumeMarker: options?.resumeMarker,
     allowInactive: options?.allowInactive,
     settleBoundaryFailure: options?.settleBoundaryFailure,
+    expectedProgressMarker: options?.expectedProgressMarker,
     jobId: logicalJobId,
   });
 };

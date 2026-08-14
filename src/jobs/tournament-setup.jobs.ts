@@ -38,11 +38,15 @@ export type ExistingSetupJobAction =
 export function getTournamentSetupJobIds(
   season: FplSeasonRef,
   tournamentId: number,
+  resumeMarker?: string,
 ): {
   baseJobId: string;
   successorJobId: string;
 } {
-  const baseJobId = `tournament-setup-${season.seasonCode}-${tournamentId}`;
+  const markerSuffix = resumeMarker
+    ? `-resume-${resumeMarker.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+    : '';
+  const baseJobId = `tournament-setup-${season.seasonCode}-${tournamentId}${markerSuffix}`;
   return {
     baseJobId,
     successorJobId: `${baseJobId}-successor`,
@@ -132,7 +136,11 @@ async function enqueueTournamentSetupUnlocked(
       ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
     };
 
-    const { baseJobId, successorJobId } = getTournamentSetupJobIds(season, tournamentId);
+    const { baseJobId, successorJobId } = getTournamentSetupJobIds(
+      season,
+      tournamentId,
+      options.resumeMarker,
+    );
     // A lifecycle-locked caller can leave one durable successor behind an
     // active base job. Always inspect that stable slot first: otherwise later
     // reconciliations only see the base ID and can queue duplicate rebuilds.

@@ -54,6 +54,8 @@ export interface TournamentSyncJobData {
   allowInactive?: boolean;
   /** Settle a queued opt-in when the gameweek boundary closes before it runs. */
   settleBoundaryFailure?: boolean;
+  /** Progress marker observed when a non-resume retry was queued. */
+  expectedProgressMarker?: string | null;
 }
 
 export const tournamentSyncQueue = new Queue<TournamentSyncJobData>(tournamentSyncQueueName, {

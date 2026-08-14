@@ -68,6 +68,7 @@ async function reconcileTournamentRosterUnlocked(
     requireResumeMarker?: boolean;
     resumeMarker?: string;
     settleBoundaryFailure?: boolean;
+    expectedProgressMarker?: string | null;
   },
 ): Promise<TournamentRosterReconcileResult> {
   const tournament = await tournamentRosterRepository.findById(season, tournamentId);
@@ -155,7 +156,25 @@ async function reconcileTournamentRosterUnlocked(
   }
 
   if (!options?.resumeAfterSetup) {
-    await tournamentRosterRepository.markSyncProcessing(season, tournamentId);
+    if (options?.expectedProgressMarker !== undefined) {
+      const claimed = await tournamentRosterRepository.markSyncProcessingIfMarker(
+        season,
+        tournamentId,
+        options.expectedProgressMarker,
+      );
+      if (!claimed) {
+        return {
+          tournamentId,
+          changed: false,
+          addedEntryIds: [],
+          removedEntryIds: [],
+          participantCount: tournament.totalTeamNum,
+          automaticallyPaused: false,
+        };
+      }
+    } else {
+      await tournamentRosterRepository.markSyncProcessing(season, tournamentId);
+    }
   }
   let setupEnqueueRequired = false;
   try {
@@ -312,6 +331,7 @@ export async function reconcileTournamentRoster(
     requireResumeMarker?: boolean;
     resumeMarker?: string;
     settleBoundaryFailure?: boolean;
+    expectedProgressMarker?: string | null;
   },
 ): Promise<TournamentRosterReconcileResult> {
   // Serialize create/setup, delete, resume, and roster retry for this one

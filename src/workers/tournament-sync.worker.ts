@@ -423,6 +423,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                     resumeMarker: job.data.resumeMarker,
                     requireResumeMarker: job.data.resumeAfterSetup === true,
                     settleBoundaryFailure: job.data.settleBoundaryFailure === true,
+                    expectedProgressMarker: job.data.expectedProgressMarker,
                   });
                 } catch (error) {
                   // Deletion is authoritative. A reconcile accepted just before

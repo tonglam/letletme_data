@@ -17,6 +17,7 @@ export type TournamentRosterRecord = TournamentConfig & {
   rosterMode: TournamentRosterMode;
   state: 'active' | 'inactive' | 'finished';
   standingsReadyAt: string | null;
+  setupProgressUpdatedAt: string | null;
   officialScheduleLockedAt: string | null;
 };
 
@@ -62,6 +63,7 @@ export const tournamentRosterRepository = {
           roster_mode AS "rosterMode",
           state,
           standings_ready_at::text AS "standingsReadyAt",
+          setup_progress_updated_at::text AS "setupProgressUpdatedAt",
           official_schedule_locked_at::text AS "officialScheduleLockedAt",
           total_team_num AS "totalTeamNum",
           group_mode AS "groupMode",
@@ -170,6 +172,30 @@ export const tournamentRosterRepository = {
           updated_at = now()
       WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
     `;
+  },
+
+  markSyncProcessingIfMarker: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    expectedMarker: string | null,
+  ): Promise<boolean> => {
+    const client = await getDbClient();
+    const rows = await client<{ tournamentId: number }[]>`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'processing',
+          roster_sync_error = NULL,
+          setup_progress_updated_at = now(),
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND state <> 'finished'
+        AND (
+          (${expectedMarker}::timestamptz IS NULL AND setup_progress_updated_at IS NULL)
+          OR setup_progress_updated_at::text = ${expectedMarker}
+        )
+      RETURNING tournament_id AS "tournamentId"
+    `;
+    return rows.length === 1;
   },
 
   markSyncFailed: async (
@@ -282,9 +308,9 @@ export const tournamentRosterRepository = {
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
         AND state = 'inactive'
-        AND roster_sync_status = 'processing'
-        AND setup_status = 'pending'
-        AND setup_phase = 'queued'
+        AND roster_sync_status IN ('processing', 'failed')
+        AND setup_status IN ('pending', 'failed')
+        AND setup_phase IN ('queued', 'failed')
         ${marker ? client`AND setup_progress_updated_at::text = ${marker}` : client``}
       RETURNING tournament_id AS "tournamentId"
     `;
