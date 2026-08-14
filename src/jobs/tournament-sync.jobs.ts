@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import {
   tournamentSyncQueue,
   TOURNAMENT_JOBS,
@@ -453,7 +452,7 @@ export const enqueueTournamentRosterSync = (
     jobId: `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
   });
 
-export const enqueueTournamentRosterReconcile = (
+export const enqueueTournamentRosterReconcile = async (
   season: FplSeasonRef,
   tournamentId: number,
   source: TournamentSyncJobSource = 'manual',
@@ -464,17 +463,40 @@ export const enqueueTournamentRosterReconcile = (
     settleBoundaryFailure?: boolean;
     operationId?: string;
   },
-) =>
-  enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_RECONCILE, season, 0, source, {
+) => {
+  const stableJobId = `tournament-roster-reconcile-${season.seasonCode}-${tournamentId}`;
+  const jobId = options?.operationId
+    ? `tournament-roster-reconcile-${tournamentId}-${options.operationId}`
+    : stableJobId;
+
+  if (!options?.operationId) {
+    const existing = await tournamentSyncQueue.getJob(stableJobId);
+    if (existing) {
+      const state = await existing.getState();
+      if (['waiting', 'waiting-children', 'delayed', 'active', 'paused'].includes(state)) {
+        logInfo('Tournament roster reconcile already in flight; reusing existing', {
+          tournamentId,
+          jobId: existing.id,
+          state,
+          source,
+        });
+        return existing;
+      }
+      // Completed/failed jobs are retained for observability, but must not
+      // prevent a later explicit retry from reusing the stable in-flight slot.
+      await existing.remove();
+    }
+  }
+
+  return enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_RECONCILE, season, 0, source, {
     tournamentId,
     resumeAfterSetup: options?.resumeAfterSetup,
     resumeMarker: options?.resumeMarker,
     allowInactive: options?.allowInactive,
     settleBoundaryFailure: options?.settleBoundaryFailure,
-    // Completed jobs remain retained for observability; each reconciliation
-    // therefore needs a fresh id while the lifecycle lock provides dedupe.
-    jobId: `tournament-roster-reconcile-${tournamentId}-${options?.operationId ?? randomUUID()}`,
+    jobId,
   });
+};
 
 export async function cancelWaitingTournamentRosterReconcileJobs(
   tournamentId: number,

@@ -184,14 +184,14 @@ export const createTournamentManagementRepository = () => ({
             END,
             setup_status = CASE
               WHEN ${state} = 'inactive'
-                AND roster_sync_status IN ('pending', 'processing')
+                AND roster_sync_status = 'processing'
                 AND setup_status = 'pending'
                 THEN 'ready'::competition.tournament_setup_status
               ELSE setup_status
             END,
             setup_phase = CASE
               WHEN ${state} = 'inactive'
-                AND roster_sync_status IN ('pending', 'processing')
+                AND roster_sync_status = 'processing'
                 AND setup_status = 'pending'
                 THEN 'ready'::competition.tournament_setup_phase
               ELSE setup_phase

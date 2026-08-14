@@ -211,11 +211,13 @@ export const tournamentRosterRepository = {
       SET roster_sync_status = 'ready',
           roster_sync_error = NULL,
           setup_status = CASE
-            WHEN setup_status = 'pending' THEN 'ready'::competition.tournament_setup_status
+            WHEN roster_sync_status = 'processing' AND setup_status = 'pending'
+              THEN 'ready'::competition.tournament_setup_status
             ELSE setup_status
           END,
           setup_phase = CASE
-            WHEN setup_status = 'pending' THEN 'ready'::competition.tournament_setup_phase
+            WHEN roster_sync_status = 'processing' AND setup_status = 'pending'
+              THEN 'ready'::competition.tournament_setup_phase
             ELSE setup_phase
           END,
           updated_at = now()
@@ -245,7 +247,6 @@ export const tournamentRosterRepository = {
           setup_warning_count = 0,
           setup_completed_units = 0,
           setup_total_units = 0,
-          setup_progress_updated_at = now(),
           standings_ready_at = NULL,
           updated_at = now()
       WHERE season_id = ${season.seasonId}
