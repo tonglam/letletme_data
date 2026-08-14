@@ -3,6 +3,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { DatabaseError, IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { publishTournamentTrendScopes } from './tournament-trends-publication.service';
 
 type ScopeAudit = {
   tournamentId: number;
@@ -150,6 +151,18 @@ export async function syncTournamentSelectionStats(
       ? uniquePositiveIds(options.tournamentIds)
       : (await tournamentInfoRepository.findActive(season)).map((tournament) => tournament.id);
     if (tournamentIds.length === 0) return empty;
+
+    // The immutable per-scope read model is the new Trends path.  Keep the
+    // legacy MV best-effort during the compatibility window; a failed scope
+    // must not prevent other tournaments from publishing.
+    const publication = await publishTournamentTrendScopes(season, eventId, tournamentIds);
+    if (publication.failed > 0) {
+      logError('Some tournament Trends scopes failed to publish', undefined, {
+        season: season.seasonCode,
+        eventId,
+        failed: publication.failed,
+      });
+    }
 
     const audits = await auditSelectionSourceScopes(season, tournamentIds, eventId);
     if (audits.length !== tournamentIds.length) {

@@ -6,6 +6,7 @@ import { syncEntryEventPicks } from './entries.service';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { publishTournamentTrendScopes } from './tournament-trends-publication.service';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -117,6 +118,14 @@ export async function syncTournamentEventPicks(
       failedUnits,
     );
   }
+
+  // Publish ownership/captaincy as soon as durable picks converge. Transfer
+  // counts remain explicitly unavailable until the transfer checkpoint lands.
+  await publishTournamentTrendScopes(
+    season,
+    eventId,
+    tournaments.map((tournament) => tournament.id),
+  );
 
   return {
     eventId,
