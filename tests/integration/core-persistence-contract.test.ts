@@ -586,14 +586,29 @@ persistenceTest(
             entry_last_rank: 2,
             start_event: 1,
           },
+          {
+            id: 90_099,
+            name: 'Departed Runtime League',
+            entry_rank: 9,
+            entry_last_rank: 8,
+            start_event: 1,
+          },
         ],
-        h2h: [],
+        h2h: [
+          {
+            id: 90_001,
+            name: 'Same ID Runtime H2H',
+            entry_rank: 4,
+            entry_last_rank: 5,
+            start_event: 1,
+          },
+        ],
       });
       await leagueRepository.upsertFromLeagues(season, entryIds[0], {
         classic: [
           {
             id: 90_001,
-            name: 'Runtime Contract League',
+            name: 'Renamed Runtime Contract League',
             entry_rank: 1,
             entry_last_rank: 1,
             start_event: 1,
@@ -673,6 +688,8 @@ persistenceTest(
           historical_rows: number;
           historical_points: number;
           league_rows: number;
+          league_name: string;
+          league_type: string;
           cup_rows: number;
           league_result_rows: number;
           league_event_points: number;
@@ -685,6 +702,10 @@ persistenceTest(
             WHERE season_id = 2025 AND entry_id = ${entryIds[0]}) AS historical_points,
           (SELECT count(*)::integer FROM competition.entry_leagues
             WHERE season_id = 2026 AND entry_id = ${entryIds[0]}) AS league_rows,
+          (SELECT league_name FROM competition.entry_leagues
+            WHERE season_id = 2026 AND entry_id = ${entryIds[0]}) AS league_name,
+          (SELECT league_type::text FROM competition.entry_leagues
+            WHERE season_id = 2026 AND entry_id = ${entryIds[0]}) AS league_type,
           (SELECT count(*)::integer FROM competition.entry_event_cup_results
             WHERE season_id = 2026 AND event_id = 1) AS cup_rows,
           (SELECT count(*)::integer FROM competition.league_event_results
@@ -697,6 +718,8 @@ persistenceTest(
         historical_rows: 1,
         historical_points: 2_501,
         league_rows: 1,
+        league_name: 'Renamed Runtime Contract League',
+        league_type: 'classic',
         cup_rows: 2,
         league_result_rows: 1,
         league_event_points: 60,

@@ -58,7 +58,10 @@ export async function syncEntryInfo(
   client: EntryInfoClient = fplClient,
   targetEventId?: number,
 ) {
-  logInfo('Starting entry info sync', { entryId });
+  const startedAt = performance.now();
+  logInfo('Starting entry info sync', {
+    season: season.seasonCode,
+  });
   // Capture season authority before any upstream reads. A rollover during the
   // parallel FPL requests must fail the fenced commit rather than pairing old
   // payloads with the new season.
@@ -88,6 +91,7 @@ export async function syncEntryInfo(
   const lastEventId = currentEvent ? currentEvent.id - 1 : null;
 
   const db = await getDb();
+  const transactionStartedAt = performance.now();
   const saved = await db.transaction(async (tx) => {
     await acquireEntrySeasonWriteFence(tx, season, [entryId]);
 
@@ -113,6 +117,11 @@ export async function syncEntryInfo(
     return entry;
   });
 
-  logInfo('Entry info sync completed', { entryId });
+  logInfo('Entry info sync completed', {
+    season: season.seasonCode,
+    leaguesSourcePresent: summary.leagues !== undefined,
+    transactionDurationMs: Math.round(performance.now() - transactionStartedAt),
+    totalDurationMs: Math.round(performance.now() - startedAt),
+  });
   return saved;
 }
