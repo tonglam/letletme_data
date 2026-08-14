@@ -259,6 +259,7 @@ export function createTournamentManagementService(
                 season,
                 tournamentId,
                 true,
+                resumeMarker,
               ).catch(() => null);
               if (accepted) return;
               const message = error instanceof Error ? error.message : 'Unable to enqueue resume.';
