@@ -53,7 +53,7 @@ CREATE UNIQUE INDEX tournament_selection_stat_publications_active_scope_idx
 
 CREATE INDEX tournament_selection_stat_publications_catalog_idx
   ON reporting.tournament_selection_stat_publications
-    (season_id, tournament_id, event_id, publication_state, published_at DESC);
+    (season_id, tournament_id, event_id, publication_state, published_at DESC NULLS LAST);
 
 CREATE TABLE reporting.tournament_selection_stat_rows (
   publication_id bigint NOT NULL,
@@ -84,13 +84,13 @@ CREATE TABLE reporting.tournament_selection_stat_rows (
 );
 
 CREATE INDEX tournament_selection_stat_rows_ownership_idx
-  ON reporting.tournament_selection_stat_rows (publication_id, selected_count DESC, element_id);
+  ON reporting.tournament_selection_stat_rows (publication_id, selected_count DESC NULLS LAST, element_id);
 CREATE INDEX tournament_selection_stat_rows_effective_ownership_idx
-  ON reporting.tournament_selection_stat_rows (publication_id, effective_selection_count DESC, element_id);
+  ON reporting.tournament_selection_stat_rows (publication_id, effective_selection_count DESC NULLS LAST, element_id);
 CREATE INDEX tournament_selection_stat_rows_captaincy_idx
-  ON reporting.tournament_selection_stat_rows (publication_id, captain_count DESC, element_id);
+  ON reporting.tournament_selection_stat_rows (publication_id, captain_count DESC NULLS LAST, element_id);
 CREATE INDEX tournament_selection_stat_rows_vice_captaincy_idx
-  ON reporting.tournament_selection_stat_rows (publication_id, vice_captain_count DESC, element_id);
+  ON reporting.tournament_selection_stat_rows (publication_id, vice_captain_count DESC NULLS LAST, element_id);
 CREATE INDEX tournament_selection_stat_rows_transfer_in_idx
   ON reporting.tournament_selection_stat_rows (publication_id, transfer_in_count DESC NULLS LAST, element_id);
 CREATE INDEX tournament_selection_stat_rows_transfer_out_idx
