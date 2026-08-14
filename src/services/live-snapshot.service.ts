@@ -68,6 +68,7 @@ export interface LiveSnapshotDurablePersistenceRequest {
   readonly prepared: PreparedLiveSnapshot;
   readonly persistFixtures: boolean;
   readonly persistEventLives: boolean;
+  readonly persistEventLivesIfMissing?: boolean;
   readonly finalizeEvent?: boolean;
 }
 
@@ -354,10 +355,21 @@ export async function persistLiveSnapshotDurably(
       };
     }
 
+    const currentEvent = await transaction
+      .select({ liveFactsPersistedAt: eventsInFpl.liveFactsPersistedAt })
+      .from(eventsInFpl)
+      .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)))
+      .limit(1);
+    const persistEventLives =
+      request.persistEventLives &&
+      (!request.persistEventLivesIfMissing ||
+        request.finalizeEvent === true ||
+        currentEvent[0]?.liveFactsPersistedAt === null);
+
     if (request.persistFixtures) {
       await createFixtureRepository(transaction).upsertBatch(season, prepared.fixtures);
     }
-    if (request.persistEventLives) {
+    if (persistEventLives) {
       await persistPreparedEventLives(season, prepared.eventLives, transaction);
       await transaction
         .update(eventsInFpl)
@@ -385,7 +397,7 @@ export async function persistLiveSnapshotDurably(
       accepted: true,
       winnerCheckedAt: fence.winnerCheckedAt,
       persistedFixtures: request.persistFixtures,
-      persistedEventLives: request.persistEventLives,
+      persistedEventLives: persistEventLives,
     };
   });
 
@@ -543,6 +555,7 @@ export async function syncLiveSnapshot(
         prepared,
         persistFixtures: true,
         persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
+        persistEventLivesIfMissing: true,
         finalizeEvent: options.finalizeEvent,
       });
       persistedFixtures = durable.persistedFixtures;

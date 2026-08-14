@@ -64,6 +64,7 @@ export type LiveLifecycleDecision = {
   shouldFetchLive: boolean;
   shouldProbePicks: boolean;
   shouldSyncPicks: boolean;
+  recoverStaleFixtures: boolean;
   finalizeEvent: boolean;
   nextRetryAt: Date | null;
 };
@@ -119,6 +120,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldProbePicks: false,
       shouldSyncPicks: false,
+      recoverStaleFixtures: false,
       finalizeEvent: true,
       nextRetryAt: null,
     };
@@ -130,6 +132,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: afterLast < 24 * 60 * 60_000,
       shouldProbePicks: false,
       shouldSyncPicks: false,
+      recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
     };
@@ -140,6 +143,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldProbePicks: false,
       shouldSyncPicks: true,
+      recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
     };
@@ -150,6 +154,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldProbePicks: false,
       shouldSyncPicks: true,
+      recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
     };
@@ -160,6 +165,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: false,
       shouldProbePicks: false,
       shouldSyncPicks: false,
+      recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
     };
@@ -170,6 +176,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: false,
       shouldProbePicks: false,
       shouldSyncPicks: false,
+      recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: new Date(deadlineMs + PICKS_FIRST_PROBE_OFFSET_MS),
     };
@@ -180,6 +187,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: false,
       shouldProbePicks: true,
       shouldSyncPicks: false,
+      recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
     };
@@ -190,6 +198,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldProbePicks: true,
       shouldSyncPicks: true,
+      recoverStaleFixtures: true,
       finalizeEvent: false,
       nextRetryAt: null,
     };
@@ -199,6 +208,7 @@ export function decideLiveLifecycle(
     shouldFetchLive: false,
     shouldProbePicks: true,
     shouldSyncPicks: true,
+    recoverStaleFixtures: false,
     finalizeEvent: false,
     nextRetryAt: null,
   };
@@ -356,6 +366,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         persistEventLives:
           decision.state === 'DAY_SETTLING' ||
           decision.state === 'GW_REVIEW' ||
+          decision.recoverStaleFixtures ||
           decision.finalizeEvent,
         finalizeEvent: decision.finalizeEvent,
         now,
