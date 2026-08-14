@@ -353,9 +353,19 @@ export function createTournamentManagementService(
     retrySetup: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      await assertOwner(season, tournamentId, payload.adminEntryId);
-      const { requeueTournamentSetup } = await import('./tournament-setup.service');
-      return requeueTournamentSetup(season, tournamentId);
+      return withMutationConflictGuard(
+        {
+          queueName: 'tournament-management',
+          jobName: 'tournament-setup-retry',
+          tournamentId,
+          scopes: [tournamentSetupLifecycleScope(tournamentId)],
+        },
+        async () => {
+          await assertOwner(season, tournamentId, payload.adminEntryId);
+          const { requeueTournamentSetup } = await import('./tournament-setup.service');
+          return requeueTournamentSetup(season, tournamentId);
+        },
+      );
     },
 
     retryRoster: async (tournamentId: number, input: unknown) => {

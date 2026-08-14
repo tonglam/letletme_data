@@ -250,6 +250,27 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         // this preview token's single-writer claim. A fresh token with the
         // same mutable tournament name must not attach to an older tournament.
         if (preview && previewCreationBusy) {
+          // The original request may have published the final result just
+          // after this retry's wait ended. Prefer that authoritative Redis
+          // result before inspecting queued evidence or PostgreSQL names.
+          const finished = unwrapPreviewResult(
+            await getPreviewCreatedRecord(preview.tokenHash),
+            payloadFingerprint,
+          );
+          if (finished && typeof finished === 'object' && 'tournament' in finished) {
+            report('queued', 'pending', null);
+            return finished as {
+              tournament: {
+                id: number;
+                name: string;
+                creator: string;
+                adminEntryId: number;
+                leagueId: number;
+                participantCount: number;
+              };
+              setupStatus: TournamentSetupStatus;
+            };
+          }
           const queued = unwrapPreviewResult(
             await getPreviewQueuedRecord(preview.tokenHash),
             payloadFingerprint,
