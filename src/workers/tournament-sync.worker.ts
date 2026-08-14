@@ -31,6 +31,7 @@ import {
   reconcileOfficialTournamentRosters,
   reconcileTournamentRoster,
 } from '../services/tournament-roster.service';
+import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -433,6 +434,27 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                     error.code === 'TOURNAMENT_NOT_FOUND'
                   ) {
                     logInfo('Ignoring roster reconcile for deleted tournament', {
+                      tournamentId: job.data.tournamentId,
+                    });
+                    return {
+                      tournamentId: job.data.tournamentId,
+                      changed: false,
+                      addedEntryIds: [],
+                      removedEntryIds: [],
+                      participantCount: 0,
+                      automaticallyPaused: false,
+                    };
+                  }
+                  if (
+                    error instanceof Error &&
+                    'code' in error &&
+                    error.code === 'TOURNAMENT_FINISHED'
+                  ) {
+                    await tournamentRosterRepository.markSyncCanceled(
+                      season,
+                      job.data.tournamentId,
+                    );
+                    logInfo('Ignoring roster reconcile for finished tournament', {
                       tournamentId: job.data.tournamentId,
                     });
                     return {

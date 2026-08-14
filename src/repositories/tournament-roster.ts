@@ -223,7 +223,7 @@ export const tournamentRosterRepository = {
           updated_at = now()
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
-        AND state = 'inactive'
+        AND state IN ('inactive', 'finished')
         AND roster_sync_status IN ('pending', 'processing')
     `;
   },
@@ -247,6 +247,7 @@ export const tournamentRosterRepository = {
           setup_warning_count = 0,
           setup_completed_units = 0,
           setup_total_units = 0,
+          setup_progress_updated_at = now(),
           standings_ready_at = NULL,
           updated_at = now()
       WHERE season_id = ${season.seasonId}
@@ -276,7 +277,6 @@ export const tournamentRosterRepository = {
           setup_warning_count = 0,
           setup_completed_units = 0,
           setup_total_units = 0,
-          setup_progress_updated_at = now(),
           standings_ready_at = NULL,
           updated_at = now()
       WHERE season_id = ${season.seasonId}
