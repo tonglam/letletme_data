@@ -204,6 +204,28 @@ export const tournamentRosterRepository = {
     `;
   },
 
+  markSyncCanceled: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+    const client = await getDbClient();
+    await client`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'ready',
+          roster_sync_error = NULL,
+          setup_status = CASE
+            WHEN setup_status = 'pending' THEN 'ready'::competition.tournament_setup_status
+            ELSE setup_status
+          END,
+          setup_phase = CASE
+            WHEN setup_status = 'pending' THEN 'ready'::competition.tournament_setup_phase
+            ELSE setup_phase
+          END,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND state = 'inactive'
+        AND roster_sync_status IN ('pending', 'processing')
+    `;
+  },
+
   markResumeProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
     await tournamentRosterRepository.markResumeProcessingWithMarker(season, tournamentId);
   },

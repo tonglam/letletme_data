@@ -301,14 +301,22 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       // Redis preview bookkeeping is recoverable metadata. It must never turn
       // a successfully enqueued authoritative creation into a failed response.
       if (previewTokenHash) {
-        let resultCached = false;
+        let createdResultCached = false;
+        try {
+          await markPreviewCreatedResult(previewTokenHash, result);
+          createdResultCached = true;
+        } catch (error) {
+          logInfo('Unable to persist tournament preview created result', {
+            event: 'tournament_preview_created_result_cache_failed',
+            tournamentId: tournament.id,
+            error: error instanceof Error ? error.name : 'UnknownError',
+          });
+        }
         try {
           // Publish operation evidence only after the authoritative queue add
           // has succeeded. A concurrent retry must never infer success from a
           // PostgreSQL row whose setup job is still stalled or unpublished.
           await markPreviewQueuedResult(previewTokenHash, result);
-          await markPreviewCreatedResult(previewTokenHash, result);
-          resultCached = true;
         } catch (error) {
           logInfo('Unable to persist tournament preview idempotency result', {
             event: 'tournament_preview_result_cache_failed',
@@ -316,7 +324,10 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
             error: error instanceof Error ? error.name : 'UnknownError',
           });
         } finally {
-          if (previewClaimed && resultCached) {
+          // A final result is enough for a retry to return idempotently. If
+          // only queued evidence was written, retain the claim so recovery can
+          // repair the final-result key instead of creating a duplicate.
+          if (previewClaimed && createdResultCached) {
             try {
               await releasePreviewCreationClaim(previewTokenHash);
             } catch (error) {

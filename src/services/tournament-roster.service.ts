@@ -84,7 +84,18 @@ async function reconcileTournamentRosterUnlocked(
     throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
   }
   if (tournament.state === 'inactive' && !options?.allowInactive) {
-    throw new ConflictError('Paused tournaments are not synchronized.', 'TOURNAMENT_PAUSED');
+    // A queued opt-in reconciliation can become stale when the owner pauses
+    // before the worker starts. Settle that operation as a no-op instead of
+    // retrying/alerting on an intentional pause, and clear its pending state.
+    await tournamentRosterRepository.markSyncCanceled(season, tournamentId);
+    return {
+      tournamentId,
+      changed: false,
+      addedEntryIds: [],
+      removedEntryIds: [],
+      participantCount: tournament.totalTeamNum,
+      automaticallyPaused: false,
+    };
   }
 
   if (options?.resumeAfterSetup) {

@@ -173,13 +173,28 @@ export const createTournamentManagementRepository = () => ({
         UPDATE competition.tournaments
         SET state = ${state},
             roster_sync_status = CASE
-              WHEN ${state} = 'inactive' AND roster_sync_status = 'processing'
+              WHEN ${state} = 'inactive' AND roster_sync_status IN ('pending', 'processing')
                 THEN 'ready'::competition.tournament_setup_status
               ELSE roster_sync_status
             END,
             roster_sync_error = CASE
-              WHEN ${state} = 'inactive' AND roster_sync_status = 'processing' THEN NULL
+              WHEN ${state} = 'inactive' AND roster_sync_status IN ('pending', 'processing')
+                THEN NULL
               ELSE roster_sync_error
+            END,
+            setup_status = CASE
+              WHEN ${state} = 'inactive'
+                AND roster_sync_status IN ('pending', 'processing')
+                AND setup_status = 'pending'
+                THEN 'ready'::competition.tournament_setup_status
+              ELSE setup_status
+            END,
+            setup_phase = CASE
+              WHEN ${state} = 'inactive'
+                AND roster_sync_status IN ('pending', 'processing')
+                AND setup_status = 'pending'
+                THEN 'ready'::competition.tournament_setup_phase
+              ELSE setup_phase
             END,
             updated_at = now()
         WHERE season_id = ${season.seasonId}
