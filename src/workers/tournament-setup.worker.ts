@@ -103,9 +103,14 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                 if (
                   roster?.rosterMode === 'official_sync' &&
                   roster.state === 'inactive' &&
-                  roster.rosterSyncStatus === 'processing' &&
-                  roster.setupStatus === 'pending' &&
-                  roster.setupPhase === 'queued'
+                  (roster.rosterSyncStatus === 'processing' ||
+                    roster.rosterSyncStatus === 'failed') &&
+                  (roster.setupStatus === 'pending' ||
+                    roster.setupStatus === 'processing' ||
+                    roster.setupStatus === 'failed') &&
+                  (roster.setupPhase === 'queued' ||
+                    roster.setupPhase === 'failed' ||
+                    roster.setupStatus === 'processing')
                 ) {
                   logInfo('Ignoring unmarked setup job during official roster resume', {
                     tournamentId: job.data.tournamentId,

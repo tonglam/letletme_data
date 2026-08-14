@@ -469,7 +469,11 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       }
       return result;
     } catch (error) {
-      if (previewClaimed && previewTokenHash) {
+      // Once PostgreSQL has committed, the claim is the only durable
+      // operation ownership left if Redis result bookkeeping failed. Keep it
+      // until TTL so the next retry can recover the fingerprinted row instead
+      // of becoming an unrelated writer.
+      if (previewClaimed && previewTokenHash && tournamentId === null) {
         await releasePreviewCreationClaim(previewTokenHash).catch(() => undefined);
       }
       if (failedPhase && phaseDurationsMs[failedPhase] === 0) {
