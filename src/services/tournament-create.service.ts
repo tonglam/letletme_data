@@ -115,6 +115,19 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         fpl: getFplRequestMetricsSnapshot(),
       });
     };
+    const reportCachedResult = (value: unknown) => {
+      const setupStatus =
+        value &&
+        typeof value === 'object' &&
+        'setupStatus' in value &&
+        (value.setupStatus === 'pending' ||
+          value.setupStatus === 'processing' ||
+          value.setupStatus === 'ready' ||
+          value.setupStatus === 'failed')
+          ? value.setupStatus
+          : 'pending';
+      report(setupStatus === 'failed' ? 'enqueue_failed' : 'queued', setupStatus, null);
+    };
 
     try {
       // The API also validates this boundary, but this service has direct
@@ -146,7 +159,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           payloadFingerprint,
         );
         if (created && typeof created === 'object' && 'tournament' in created) {
-          report('queued', 'pending', null);
+          reportCachedResult(created);
           return created as {
             tournament: {
               id: number;
@@ -166,7 +179,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
             payloadFingerprint,
           );
           if (concurrent && typeof concurrent === 'object' && 'tournament' in concurrent) {
-            report('queued', 'pending', null);
+            reportCachedResult(concurrent);
             return concurrent as {
               tournament: {
                 id: number;
@@ -199,7 +212,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           ) {
             previewClaimed = false;
             await releasePreviewCreationClaim(preview.tokenHash).catch(() => undefined);
-            report('queued', 'pending', null);
+            reportCachedResult(claimedCreated);
             return claimedCreated as {
               tournament: {
                 id: number;
@@ -262,7 +275,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
             payloadFingerprint,
           );
           if (finished && typeof finished === 'object' && 'tournament' in finished) {
-            report('queued', 'pending', null);
+            reportCachedResult(finished);
             return finished as {
               tournament: {
                 id: number;
@@ -495,6 +508,12 @@ function previewPayloadFingerprint(payload: TournamentCreateInput): string {
     qualifiersPerGroup: payload.qualifiersPerGroup ?? '',
     knockoutFormat: payload.knockoutFormat,
     selectedParticipantIds: [...(payload.selectedParticipantIds ?? [])].sort(),
+    // Bind persisted recovery evidence to the preview operation itself. Two
+    // tokens can otherwise carry the same visible payload while referring to
+    // different participant snapshots.
+    previewTokenHash: payload.previewToken
+      ? createHash('sha256').update(payload.previewToken).digest('hex')
+      : null,
   };
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }

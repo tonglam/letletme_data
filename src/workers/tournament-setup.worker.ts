@@ -90,6 +90,29 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                   });
                   return;
                 }
+              } else {
+                // Official-sync activation owns the setup lifecycle through
+                // the roster reconciliation marker. A pre-existing manual or
+                // watchdog setup job has no marker and must not rebuild from
+                // the old roster while that authoritative reconciliation is
+                // pending, even if it was already active before activation.
+                const roster = await tournamentRosterRepository.findById(
+                  season,
+                  job.data.tournamentId,
+                );
+                if (
+                  roster?.rosterMode === 'official_sync' &&
+                  roster.state === 'inactive' &&
+                  roster.rosterSyncStatus === 'processing' &&
+                  roster.setupStatus === 'pending' &&
+                  roster.setupPhase === 'queued'
+                ) {
+                  logInfo('Ignoring unmarked setup job during official roster resume', {
+                    tournamentId: job.data.tournamentId,
+                    jobId: job.id,
+                  });
+                  return;
+                }
               }
               await job.updateProgress('running');
               try {
