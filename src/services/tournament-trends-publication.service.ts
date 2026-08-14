@@ -56,8 +56,10 @@ export async function publishTournamentTrendScope(
   const client = await getDbClient();
   // Audit, checksum and row aggregation must observe one source snapshot. The
   // advisory lock only serializes publishers; source writers do not take it.
-  return client.begin('isolation level repeatable read', async (tx) => {
+  return client.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`trends:${season.seasonId}:${tournamentId}:${eventId}`}, 0))`;
+    // Establish the repeatable-read snapshot only after the scope lock is held.
+    await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
 
     const auditRows = await tx<ScopeAudit[]>`
       SELECT
@@ -97,14 +99,56 @@ export async function publishTournamentTrendScope(
     const transfersReady = expectedEntries > 0 && transferCheckpointEntries === expectedEntries;
 
     const sourceRows = await tx<
-      Array<{ source_watermark: Date | string | null; roster_checksum: string }>
+      Array<{
+        source_watermark: Date | string | null;
+        roster_checksum: string;
+        player_metadata_checksum: string;
+      }>
     >`
       SELECT NULLIF(GREATEST(
         COALESCE(max(pick.source_updated_at), '-infinity'::timestamptz),
         COALESCE(max(entry.updated_at), '-infinity'::timestamptz),
         COALESCE(max(transfer.updated_at), '-infinity'::timestamptz)
       ), '-infinity'::timestamptz) AS source_watermark,
-      md5(COALESCE(string_agg(roster.entry_id::text, ',' ORDER BY roster.entry_id), '')) AS roster_checksum
+      md5(COALESCE(string_agg(roster.entry_id::text, ',' ORDER BY roster.entry_id), '')) AS roster_checksum,
+      md5(COALESCE((
+        SELECT string_agg(
+          format('%s:%s:%s:%s', metadata.element_id, metadata.player_name, metadata.player_position, metadata.team_short_name),
+          ',' ORDER BY metadata.element_id
+        )
+        FROM (
+          SELECT DISTINCT elements.element_id,
+            COALESCE(NULLIF(concat_ws(' ', player.first_name, player.second_name), ''), player.web_name) AS player_name,
+            player.element_type AS player_position,
+            team.short_name AS team_short_name
+          FROM (
+            SELECT pick.element_id
+            FROM competition.entry_event_picks pick
+            JOIN competition.tournament_entries pick_roster
+              ON pick_roster.season_id = pick.season_id AND pick_roster.entry_id = pick.entry_id
+            WHERE pick.season_id = ${season.seasonId} AND pick.event_id = ${eventId}
+              AND pick_roster.tournament_id = ${tournamentId}
+            UNION
+            SELECT transfer.element_in_id
+            FROM competition.entry_event_transfers transfer
+            JOIN competition.tournament_entries in_roster
+              ON in_roster.season_id = transfer.season_id AND in_roster.entry_id = transfer.entry_id
+            WHERE transfer.season_id = ${season.seasonId} AND transfer.event_id = ${eventId}
+              AND in_roster.tournament_id = ${tournamentId} AND transfer.element_in_id IS NOT NULL
+            UNION
+            SELECT transfer.element_out_id
+            FROM competition.entry_event_transfers transfer
+            JOIN competition.tournament_entries out_roster
+              ON out_roster.season_id = transfer.season_id AND out_roster.entry_id = transfer.entry_id
+            WHERE transfer.season_id = ${season.seasonId} AND transfer.event_id = ${eventId}
+              AND out_roster.tournament_id = ${tournamentId} AND transfer.element_out_id IS NOT NULL
+          ) elements
+          JOIN fpl.players player
+            ON player.season_id = ${season.seasonId} AND player.element_id = elements.element_id
+          JOIN fpl.teams team
+            ON team.season_id = player.season_id AND team.team_id = player.team_id
+        ) metadata
+      ), '')) AS player_metadata_checksum
       FROM competition.tournament_entries roster
       JOIN competition.entries entry
         ON entry.season_id = roster.season_id AND entry.entry_id = roster.entry_id
@@ -121,9 +165,11 @@ export async function publishTournamentTrendScope(
       throw new Error('Tournament Trends source watermark is invalid');
     }
     const rosterChecksum = sourceRows[0]?.roster_checksum ?? 'd41d8cd98f00b204e9800998ecf8427e';
+    const playerMetadataChecksum =
+      sourceRows[0]?.player_metadata_checksum ?? 'd41d8cd98f00b204e9800998ecf8427e';
     const checksum = createHash('sha256')
       .update(
-        `${season.seasonId}:${tournamentId}:${eventId}:${expectedEntries}:${completePickEntries}:${transferCheckpointEntries}:${sourceWatermark.toISOString()}:${rosterChecksum}`,
+        `${season.seasonId}:${tournamentId}:${eventId}:${expectedEntries}:${completePickEntries}:${transferCheckpointEntries}:${sourceWatermark.toISOString()}:${rosterChecksum}:${playerMetadataChecksum}`,
       )
       .digest('hex');
 
