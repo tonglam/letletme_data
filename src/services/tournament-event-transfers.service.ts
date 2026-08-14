@@ -12,6 +12,7 @@ import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { publishTournamentTrendScopes } from './tournament-trends-publication.service';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -177,6 +178,11 @@ export async function syncTournamentEventTransfersPost(
   );
   if (transfers.length === 0) {
     logInfo('No tournament transfers require post-event enrichment', { eventId });
+    await publishTournamentTrendScopes(
+      season,
+      eventId,
+      tournaments.map((tournament) => tournament.id),
+    );
     return {
       eventId,
       totalEntries: entryIds.length,
@@ -301,6 +307,12 @@ export async function syncTournamentEventTransfersPost(
       failedUnits,
     );
   }
+
+  await publishTournamentTrendScopes(
+    season,
+    eventId,
+    tournaments.map((tournament) => tournament.id),
+  );
 
   return {
     eventId,
@@ -449,6 +461,15 @@ export async function syncTournamentEventTransfersPre(
       failedUnits,
     );
   }
+
+  // Transfer history is now durably checkpointed for every active entry. The
+  // publisher will atomically promote transfers when picks are complete, or
+  // leave the capability explicitly unavailable while collecting picks.
+  await publishTournamentTrendScopes(
+    season,
+    eventId,
+    tournaments.map((tournament) => tournament.id),
+  );
 
   return {
     eventId,

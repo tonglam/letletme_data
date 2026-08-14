@@ -8,6 +8,7 @@ const SERVICE_ONLY_READ_PATHS = [
   /^\/tournaments\/[^/]+\/setup-status\/?$/,
   /^\/understat\/status\/[^/]+\/?$/,
   /^\/understat\/mappings\/[^/]+\/?$/,
+  /^\/trends\/public-catalog\/[^/]+\/?$/,
 ] as const;
 
 export function shouldRequireApiKey(method: string, path: string): boolean {

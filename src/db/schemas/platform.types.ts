@@ -16,6 +16,8 @@ import {
   playerMarketSnapshotsInFpl,
   playersInFpl,
   publicLeagueTrendsInCompetition,
+  tournamentSelectionStatPublicationsInReporting,
+  tournamentSelectionStatRowsInReporting,
   teamsInFpl,
   tournamentBattleGroupResultsInCompetition,
   tournamentGroupsInCompetition,
@@ -88,6 +90,18 @@ export type DbPlayerStatInsert = Readonly<typeof playerEventSnapshotsInFpl.$infe
 export type DbPublicLeagueTrend = Readonly<typeof publicLeagueTrendsInCompetition.$inferSelect>;
 export type DbPublicLeagueTrendInsert = Readonly<
   typeof publicLeagueTrendsInCompetition.$inferInsert
+>;
+export type DbTournamentSelectionStatPublication = Readonly<
+  typeof tournamentSelectionStatPublicationsInReporting.$inferSelect
+>;
+export type DbTournamentSelectionStatPublicationInsert = Readonly<
+  typeof tournamentSelectionStatPublicationsInReporting.$inferInsert
+>;
+export type DbTournamentSelectionStatRow = Readonly<
+  typeof tournamentSelectionStatRowsInReporting.$inferSelect
+>;
+export type DbTournamentSelectionStatRowInsert = Readonly<
+  typeof tournamentSelectionStatRowsInReporting.$inferInsert
 >;
 export type DbTeam = Readonly<typeof teamsInFpl.$inferSelect>;
 export type DbTeamInsert = Readonly<typeof teamsInFpl.$inferInsert>;

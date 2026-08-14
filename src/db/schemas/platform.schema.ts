@@ -561,6 +561,168 @@ export const publicLeagueTrendsInCompetition = competition.table(
   ],
 );
 
+export const tournamentSelectionStatPublicationsInReporting = reporting.table(
+  'tournament_selection_stat_publications',
+  {
+    publicationId: bigint('publication_id', { mode: 'number' })
+      .generatedAlwaysAsIdentity()
+      .primaryKey()
+      .notNull(),
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint({ mode: 'number' }).notNull(),
+    publicationState: text('publication_state').default('COLLECTING').notNull(),
+    isActive: boolean('is_active').default(false).notNull(),
+    methodKey: text('method_key').default('exact_prepared_competition').notNull(),
+    methodVersion: text('method_version').default('1').notNull(),
+    sourcePolicyVersion: text('source_policy_version').default('1').notNull(),
+    sourceWatermark: timestamp('source_watermark', { withTimezone: true, mode: 'date' }),
+    sourceChecksum: text('source_checksum'),
+    expectedEntries: integer('expected_entries').default(0).notNull(),
+    completePickEntries: integer('complete_pick_entries').default(0).notNull(),
+    transferCheckpointEntries: integer('transfer_checkpoint_entries').default(0).notNull(),
+    ownershipState: text('ownership_state').default('NOT_READY').notNull(),
+    captaincyState: text('captaincy_state').default('NOT_READY').notNull(),
+    viceCaptaincyState: text('vice_captaincy_state').default('NOT_READY').notNull(),
+    transfersState: text('transfers_state').default('NOT_READY').notNull(),
+    capturedAt: timestamp('captured_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique('tournament_selection_stat_publications_scope_revision_unique').on(
+      table.seasonId,
+      table.tournamentId,
+      table.eventId,
+      table.revision,
+    ),
+    index('tournament_selection_stat_publications_catalog_idx').using(
+      'btree',
+      table.seasonId.asc().nullsLast(),
+      table.tournamentId.asc().nullsLast(),
+      table.eventId.asc().nullsLast(),
+      table.publicationState.asc().nullsLast(),
+      table.publishedAt.desc().nullsLast(),
+    ),
+    uniqueIndex('tournament_selection_stat_publications_active_scope_idx')
+      .using(
+        'btree',
+        table.seasonId.asc().nullsLast(),
+        table.tournamentId.asc().nullsLast(),
+        table.eventId.asc().nullsLast(),
+      )
+      .where(sql`is_active`),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'tournament_selection_stat_publications_scope_fk',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'tournament_selection_stat_publications_event_fk',
+    }),
+    check(
+      'tournament_selection_stat_publications_ids_positive',
+      sql`(tournament_id > 0) AND (event_id BETWEEN 1 AND 38) AND (revision > 0)`,
+    ),
+    check(
+      'tournament_selection_stat_publications_counts_nonnegative',
+      sql`(expected_entries >= 0) AND (complete_pick_entries >= 0) AND (transfer_checkpoint_entries >= 0)`,
+    ),
+    check(
+      'tournament_selection_stat_publications_state_check',
+      sql`publication_state IN ('COLLECTING', 'READY', 'FAILED', 'UNSUPPORTED')`,
+    ),
+    check(
+      'tournament_selection_stat_publications_capability_state_check',
+      sql`(ownership_state IN ('READY', 'NOT_READY', 'FAILED', 'UNSUPPORTED'))
+        AND (captaincy_state IN ('READY', 'NOT_READY', 'FAILED', 'UNSUPPORTED'))
+        AND (vice_captaincy_state IN ('READY', 'NOT_READY', 'FAILED', 'UNSUPPORTED'))
+        AND (transfers_state IN ('READY', 'NOT_READY', 'FAILED', 'UNSUPPORTED'))`,
+    ),
+  ],
+);
+
+export const tournamentSelectionStatRowsInReporting = reporting.table(
+  'tournament_selection_stat_rows',
+  {
+    publicationId: bigint('publication_id', { mode: 'number' }).notNull(),
+    elementId: integer('element_id').notNull(),
+    selectedCount: integer('selected_count').default(0).notNull(),
+    effectiveSelectionCount: integer('effective_selection_count').default(0).notNull(),
+    captainCount: integer('captain_count').default(0).notNull(),
+    viceCaptainCount: integer('vice_captain_count').default(0).notNull(),
+    transferInCount: integer('transfer_in_count'),
+    transferOutCount: integer('transfer_out_count'),
+    playerName: text('player_name').notNull(),
+    playerPosition: integer('player_position').notNull(),
+    teamShortName: text('team_short_name').notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.publicationId, table.elementId],
+      name: 'tournament_selection_stat_rows_pkey',
+    }),
+    foreignKey({
+      columns: [table.publicationId],
+      foreignColumns: [tournamentSelectionStatPublicationsInReporting.publicationId],
+      name: 'tournament_selection_stat_rows_publication_fk',
+    }).onDelete('cascade'),
+    index('tournament_selection_stat_rows_ownership_idx').using(
+      'btree',
+      table.publicationId.asc().nullsLast(),
+      table.selectedCount.desc().nullsLast(),
+      table.elementId.asc().nullsLast(),
+    ),
+    index('tournament_selection_stat_rows_effective_ownership_idx').using(
+      'btree',
+      table.publicationId.asc().nullsLast(),
+      table.effectiveSelectionCount.desc().nullsLast(),
+      table.elementId.asc().nullsLast(),
+    ),
+    index('tournament_selection_stat_rows_captaincy_idx').using(
+      'btree',
+      table.publicationId.asc().nullsLast(),
+      table.captainCount.desc().nullsLast(),
+      table.elementId.asc().nullsLast(),
+    ),
+    index('tournament_selection_stat_rows_vice_captaincy_idx').using(
+      'btree',
+      table.publicationId.asc().nullsLast(),
+      table.viceCaptainCount.desc().nullsLast(),
+      table.elementId.asc().nullsLast(),
+    ),
+    index('tournament_selection_stat_rows_transfer_in_idx').using(
+      'btree',
+      table.publicationId.asc().nullsLast(),
+      table.transferInCount.desc().nullsLast(),
+      table.elementId.asc().nullsLast(),
+    ),
+    index('tournament_selection_stat_rows_transfer_out_idx').using(
+      'btree',
+      table.publicationId.asc().nullsLast(),
+      table.transferOutCount.desc().nullsLast(),
+      table.elementId.asc().nullsLast(),
+    ),
+    check('tournament_selection_stat_rows_element_id_positive', sql`element_id > 0`),
+    check(
+      'tournament_selection_stat_rows_counts_nonnegative',
+      sql`selected_count >= 0
+        AND effective_selection_count >= 0
+        AND captain_count >= 0
+        AND vice_captain_count >= 0
+        AND (transfer_in_count IS NULL OR transfer_in_count >= 0)
+        AND (transfer_out_count IS NULL OR transfer_out_count >= 0)`,
+    ),
+    check('tournament_selection_stat_rows_player_name_nonempty', sql`btrim(player_name) <> ''`),
+    check('tournament_selection_stat_rows_team_name_nonempty', sql`btrim(team_short_name) <> ''`),
+  ],
+);
+
 export const entityLinksInBridge = bridge.table(
   'entity_links',
   {
