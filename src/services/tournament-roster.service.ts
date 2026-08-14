@@ -321,6 +321,19 @@ async function reconcileTournamentRosterUnlocked(
         ? [tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message)]
         : []),
     ]);
+    if (options?.resumeAfterSetup && options.resumeMarker) {
+      // markSetupResult records the failure timestamp, but the queue retry
+      // still owns the activation marker minted before this attempt. Restore
+      // it before releasing the lifecycle lock so the next BullMQ attempt can
+      // reclaim the same resume operation.
+      await tournamentRosterRepository
+        .restoreSetupProgressMarker(season, tournamentId, options.resumeMarker)
+        .catch((restoreError) => {
+          logError('Unable to restore resume marker after roster failure', restoreError, {
+            tournamentId,
+          });
+        });
+    }
     throw error;
   }
 }
