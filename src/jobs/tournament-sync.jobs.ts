@@ -303,6 +303,7 @@ async function enqueueTournamentSyncJob(
       ...(options.resumeAfterSetup ? { resumeAfterSetup: true } : {}),
       ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
       ...(options.allowInactive ? { allowInactive: true } : {}),
+      ...(options.settleBoundaryFailure ? { settleBoundaryFailure: true } : {}),
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.

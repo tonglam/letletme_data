@@ -136,7 +136,7 @@ async function reconcileTournamentRosterUnlocked(
       error.code === 'TOURNAMENT_ROSTER_FROZEN'
     ) {
       const message = error.message;
-      await Promise.allSettled([
+      await Promise.all([
         tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
         ...(options.resumeAfterSetup
           ? [tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message)]
