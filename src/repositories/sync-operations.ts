@@ -365,7 +365,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .where(
             and(
               lte(datasetPublicationsInOps.expiresAt, now),
-              sql`${datasetPublicationsInOps.status} <> 'active'`,
+              inArray(datasetPublicationsInOps.status, ['retired', 'failed']),
             ),
           )
           .for('update');
@@ -381,7 +381,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             and(
               inArray(datasetPublicationsInOps.publicationId, expiredIds),
               lte(datasetPublicationsInOps.expiresAt, now),
-              sql`${datasetPublicationsInOps.status} <> 'active'`,
+              inArray(datasetPublicationsInOps.status, ['retired', 'failed']),
             ),
           );
       });
