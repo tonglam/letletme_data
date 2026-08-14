@@ -8,21 +8,36 @@ import {
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { logError, logInfo } from '../utils/logger';
+import type { RawFPLEntryEventPicksResponse } from '../types';
+
+export async function persistEntryEventPicksResponse(
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+  picks: RawFPLEntryEventPicksResponse,
+  syncedAt?: Date | string,
+) {
+  const sourceCheckedAt = syncedAt
+    ? new Date(syncedAt)
+    : (await readDatabaseOrderingTimestamp()).date;
+  await withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
+    await createEntryEventPicksRepository(tx).upsertFromPicks(
+      season,
+      entryId,
+      eventId,
+      picks,
+      sourceCheckedAt,
+    );
+  });
+  return { entryId, eventId };
+}
 
 export async function syncEntryEventPicks(season: FplSeasonRef, entryId: number, eventId: number) {
   try {
     logInfo('Starting entry event picks sync', { entryId, eventId });
     const picksSyncStartedAt = await readDatabaseOrderingTimestamp();
     const picks = await fplClient.getEntryEventPicks(entryId, eventId);
-    await withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
-      await createEntryEventPicksRepository(tx).upsertFromPicks(
-        season,
-        entryId,
-        eventId,
-        picks,
-        picksSyncStartedAt.exact,
-      );
-    });
+    await persistEntryEventPicksResponse(season, entryId, eventId, picks, picksSyncStartedAt.exact);
     logInfo('Entry event picks sync completed', { entryId, eventId });
     return { entryId, eventId };
   } catch (error) {

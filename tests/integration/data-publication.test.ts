@@ -121,7 +121,7 @@ describe('immutable Redis publication', () => {
     for (const item of result.manifest.items) await expectPermanent(redis, item.key);
   });
 
-  test('publishes exactly one canonical four-item live contract', async () => {
+  test('publishes exactly one canonical two-item live contract', async () => {
     const result = await publishLiveSnapshotCache(
       {
         season: LIVE_SCOPE.seasonCode,
@@ -129,33 +129,6 @@ describe('immutable Redis publication', () => {
         state: 'live',
         eventLives: [],
         fixtures: [],
-        liveFixtures: {
-          '1': {
-            Playing: [
-              {
-                fixtureId: 101,
-                teamId: 1,
-                teamName: 'One',
-                teamShortName: 'ONE',
-                teamScore: 1,
-                teamPosition: 1,
-                againstId: 2,
-                againstName: 'Two',
-                againstShortName: 'TWO',
-                againstTeamScore: 0,
-                againstTeamPosition: 2,
-                kickoffTime: '2026-08-09T01:00:00.000Z',
-                score: '1-0',
-                wasHome: true,
-                started: true,
-                finished: false,
-              },
-            ],
-            Not_Start: [],
-            Finished: [],
-          },
-        },
-        liveBonus: { '1': { '10': 5 } },
       },
       {
         redis,
@@ -165,17 +138,12 @@ describe('immutable Redis publication', () => {
       },
     );
 
-    expect(result.manifest.items.map((item) => item.name)).toEqual([
-      'eventLives',
-      'fixtures',
-      'liveFixtures',
-      'liveBonus',
-    ]);
+    expect(result.manifest.items.map((item) => item.name)).toEqual(['eventLive', 'fixtures']);
     expect(
       await readLiveSnapshotCache(LIVE_SCOPE.seasonCode, LIVE_SCOPE.eventId, redis),
     ).toMatchObject({
-      liveFixtures: { '1': { Playing: [{ fixtureId: 101 }] } },
-      liveBonus: { '1': { '10': 5 } },
+      eventLives: [],
+      fixtures: [],
     });
   });
 
@@ -282,10 +250,8 @@ describe('immutable Redis publication', () => {
         sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
         state: 'settled',
         items: [
-          { name: 'eventLives', value: [{ elementId: 1 }] },
+          { name: 'eventLive', value: [{ elementId: 1 }] },
           { name: 'fixtures', value: [] },
-          { name: 'liveFixtures', value: [] },
-          { name: 'liveBonus', value: [] },
         ],
       },
       { redis },

@@ -7,6 +7,11 @@ import {
   classifyFplResponseStatus,
 } from '../utils/fpl-request-metrics';
 import { logDebug } from '../utils/logger';
+import {
+  acquireFplRequest,
+  reportFplResponse,
+  type FplRequestPriority,
+} from '../utils/fpl-admission';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 /** Wall-clock budget for one logical request including retries/backoff. */
@@ -581,6 +586,11 @@ class FPLClient {
    *   bodies do not flip cup lookups to UNKNOWN_ERROR
    */
   private async request(url: string): Promise<Response> {
+    const priority: FplRequestPriority =
+      /\/event\/\d+\/live\/?$/.test(url) || /\/fixtures\/?(?:\?event=\d+)?$/.test(url)
+        ? 'live'
+        : 'bulk';
+    const releaseAdmission = await acquireFplRequest(priority);
     const requestMetric = beginFplLogicalRequest(url);
     try {
       let lastError: unknown = null;
@@ -628,6 +638,7 @@ class FPLClient {
             signal: AbortSignal.timeout(attemptTimeout),
             headers: { 'User-Agent': USER_AGENT },
           });
+          reportFplResponse(priority, response.status);
 
           if (isRetryableStatus(response.status)) {
             // Record status + Retry-After before consuming the body so a hung
@@ -676,6 +687,7 @@ class FPLClient {
           requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
           return buffered;
         } catch (error) {
+          if (!attemptRecorded) reportFplResponse(priority, null);
           if (!attemptRecorded) {
             requestMetric.recordAttempt(classifyFplRequestError(error));
           }
@@ -704,6 +716,7 @@ class FPLClient {
       throw lastError instanceof Error ? lastError : new Error(String(lastError));
     } finally {
       requestMetric.finish();
+      releaseAdmission();
     }
   }
 

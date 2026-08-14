@@ -4,21 +4,13 @@ import {
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
 } from '../jobs/data-sync-enqueue';
-import {
-  enqueueEntryInfoSyncJob,
-  enqueueEntryPicksSyncJob,
-  enqueueEntryResultsSyncJob,
-  enqueueEntryTransfersSyncJob,
-} from '../jobs/entry-sync-enqueue';
+import { enqueueEntryInfoSyncJob, enqueueEntryResultsSyncJob } from '../jobs/entry-sync-enqueue';
 import { runManualEventCurrentRefresh } from '../jobs/event-current-refresh.job';
-import { runLeagueEventPicksSync } from '../jobs/league-event-picks.jobs';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
 import { runLaunchMonitor } from '../jobs/launch.jobs';
 import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
-import { runTournamentEventPicksSync } from '../jobs/tournament-event-picks.jobs';
 import { runTournamentEventResultsSync } from '../jobs/tournament-event-results.jobs';
-import { runTournamentEventTransfersPreSync } from '../jobs/tournament-event-transfers.jobs';
 import { runTournamentInfoSync } from '../jobs/tournament-info.jobs';
 import { getCurrentEvent } from './events.service';
 import { eventRepository } from '../repositories/events';
@@ -96,24 +88,9 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     schedule: 'Daily at 10:30 AM',
   },
   {
-    name: 'entry-event-picks-daily',
-    description: 'Sync entry picks for current event',
-    schedule: 'Every 5 minutes during the selection publication window',
-  },
-  {
-    name: 'entry-event-transfers-daily',
-    description: 'Sync entry transfers for current event',
-    schedule: 'Daily at 10:40 AM (after-matchday window)',
-  },
-  {
     name: 'entry-event-results-daily',
     description: 'Sync entry results for current event',
     schedule: 'Daily at 10:45 AM',
-  },
-  {
-    name: 'league-event-picks-sync',
-    description: 'Sync league entry picks (per-tournament jobs)',
-    schedule: 'Every 5 minutes (selection window)',
   },
   {
     name: 'league-event-results-sync',
@@ -121,19 +98,9 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     schedule: 'Every 10 minutes in the 24-hour post-match result window',
   },
   {
-    name: 'tournament-event-picks-sync',
-    description: 'Sync tournament entry picks (background job)',
-    schedule: 'Every 5 minutes during select time',
-  },
-  {
     name: 'tournament-event-results-sync',
     description: 'Sync tournament results (triggers cascade)',
     schedule: 'Every 10 minutes in the 24-hour post-match result window',
-  },
-  {
-    name: 'tournament-event-transfers-pre-sync',
-    description: 'Track tournament transfers pre-deadline (background job)',
-    schedule: 'Every 5 minutes during select time',
   },
   {
     name: 'tournament-selection-stats-sync',
@@ -208,22 +175,6 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       const targetEventId = (await eventRepository.findLatestFinalized(season))?.id ?? 0;
       return enqueueEntryInfoSyncJob(season, 'manual', { eventId: targetEventId });
     },
-    'entry-event-picks-daily': async () => {
-      const season = await seasonRepository.findCurrent();
-      const currentEvent = await getCurrentEvent(season);
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      return enqueueEntryPicksSyncJob(season, 'manual', { eventId: currentEvent.id });
-    },
-    'entry-event-transfers-daily': async () => {
-      const season = await seasonRepository.findCurrent();
-      const currentEvent = await getCurrentEvent(season);
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      return enqueueEntryTransfersSyncJob(season, 'manual', { eventId: currentEvent.id });
-    },
     'entry-event-results-daily': async () => {
       const season = await seasonRepository.findCurrent();
       const currentEvent = await getCurrentEvent(season);
@@ -232,23 +183,14 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       }
       return enqueueEntryResultsSyncJob(season, 'manual', { eventId: currentEvent.id });
     },
-    'league-event-picks-sync': async () => {
-      await runLeagueEventPicksSync();
-    },
     'league-event-results-sync': async () => {
       await runLeagueEventResultsSync({
         source: 'manual',
         skipMatchWindowCheck: true,
       });
     },
-    'tournament-event-picks-sync': async () => {
-      await runTournamentEventPicksSync();
-    },
     'tournament-event-results-sync': async () => {
       await runTournamentEventResultsSync();
-    },
-    'tournament-event-transfers-pre-sync': async () => {
-      await runTournamentEventTransfersPreSync();
     },
     'tournament-selection-stats-sync': async () => {
       const season = await seasonRepository.findCurrent();
