@@ -11,6 +11,7 @@ const waitingJobs: Array<{
     seasonId: number;
     eventId: number;
     persistEventLives?: boolean;
+    finalizeEvent?: boolean;
   };
 }> = [];
 
@@ -87,6 +88,42 @@ describe('coherent live-snapshot enqueue', () => {
     });
     expect(job).not.toBeNull();
     expect(addCalls).toHaveLength(1);
+  });
+
+  test('does not let an ordinary durable job suppress finalization', async () => {
+    waitingJobs.push({
+      name: 'live-snapshot',
+      data: { seasonId: TEST_SEASON.seasonId, eventId: 12, persistEventLives: true },
+    });
+
+    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
+      persistEventLives: true,
+      finalizeEvent: true,
+    });
+
+    expect(job).not.toBeNull();
+    expect(addCalls).toHaveLength(1);
+    expect(addCalls[0]?.data.finalizeEvent).toBe(true);
+  });
+
+  test('suppresses a duplicate while finalization is pending', async () => {
+    waitingJobs.push({
+      name: 'live-snapshot',
+      data: {
+        seasonId: TEST_SEASON.seasonId,
+        eventId: 12,
+        persistEventLives: true,
+        finalizeEvent: true,
+      },
+    });
+
+    await expect(
+      enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
+        persistEventLives: true,
+        finalizeEvent: true,
+      }),
+    ).resolves.toBeNull();
+    expect(addCalls).toHaveLength(0);
   });
 
   test('uses a deterministic 30-second bucket and separates cache from durable work', async () => {

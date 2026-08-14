@@ -624,8 +624,12 @@ export async function syncLiveSnapshot(
       );
       await syncOperationsRepository.finishRun(sourceRunId, {
         status: 'skipped',
-        completedItems: persistedEventLives ? prepared.eventLives.eventLives.length : 0,
-        skippedItems: prepared.eventLives.eventLives.length + prepared.fixtures.length,
+        completedItems:
+          (persistedEventLives ? prepared.eventLives.eventLives.length : 0) +
+          (persistedFixtures ? prepared.fixtures.length : 0),
+        skippedItems:
+          (persistedEventLives ? 0 : prepared.eventLives.eventLives.length) +
+          (persistedFixtures ? 0 : prepared.fixtures.length),
         dataChanged: false,
       });
       return {

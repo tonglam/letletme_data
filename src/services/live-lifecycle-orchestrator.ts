@@ -206,6 +206,7 @@ export function decideLiveLifecycle(
 
 export async function resolveUniqueActiveTournamentEntryIds(
   season: FplSeasonRef,
+  eventId: number,
 ): Promise<number[]> {
   const [tournaments, knownEntries] = await Promise.all([
     tournamentInfoRepository.findActive(season),
@@ -214,9 +215,12 @@ export async function resolveUniqueActiveTournamentEntryIds(
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
     tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
-  return uniqueNumbers([...entryLists.flat(), ...knownEntries.map((entry) => entry.id)]).filter(
-    (entryId) => entryId > 0,
-  );
+  return uniqueNumbers([
+    ...entryLists.flat(),
+    ...knownEntries
+      .filter((entry) => entry.startedEvent === null || entry.startedEvent <= eventId)
+      .map((entry) => entry.id),
+  ]).filter((entryId) => entryId > 0);
 }
 
 function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: number): boolean {
@@ -236,7 +240,7 @@ export async function runPicksProbeAndSync(
     failedCanaryEntryIds: new Set<number>(),
   };
   if (now.getTime() < state.nextProbeAt) return { canaryCount: 0, synced: 0, pending: 0 };
-  const entryIds = await resolveUniqueActiveTournamentEntryIds(season);
+  const entryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
   if (entryIds.length === 0) return { canaryCount: 0, synced: 0, pending: 0 };
   const persisted = new Set(
     await entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds),
@@ -348,7 +352,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
     const shouldEnqueueFinalization =
       decision.finalizeEvent && !finalizedEventKeys.has(finalizationKey);
     if (!decision.finalizeEvent || shouldEnqueueFinalization) {
-      await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
+      const finalizationJob = await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
         persistEventLives:
           decision.state === 'DAY_SETTLING' ||
           decision.state === 'GW_REVIEW' ||
@@ -356,11 +360,11 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         finalizeEvent: decision.finalizeEvent,
         now,
       });
-      if (decision.finalizeEvent) finalizedEventKeys.add(finalizationKey);
+      if (decision.finalizeEvent && finalizationJob) finalizedEventKeys.add(finalizationKey);
     }
     if (isMatchDayTime(currentEvent, fixtures, now)) {
       await enqueueTournamentOfficialH2H(season, currentEvent.id, 'cron', {
-        jobId: `official-h2h-e${currentEvent.id}-${now.toISOString().slice(0, 16)}`,
+        jobId: `official-h2h-e${currentEvent.id}-${now.toISOString().slice(0, 16).replace(/\D/g, '')}`,
       }).catch((error) => {
         logError('Failed to enqueue live official H2H sync', error, {
           eventId: currentEvent.id,
