@@ -24,6 +24,8 @@ import {
   getPreviewCreatedResult,
   claimPreviewCreation,
   markPreviewCreatedResult,
+  getPreviewQueuedResult,
+  markPreviewQueuedResult,
   releasePreviewCreationClaim,
   resolveTournamentPreview,
   waitForPreviewCreatedResult,
@@ -210,39 +212,31 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         // this preview token's single-writer claim. A fresh token with the
         // same mutable tournament name must not attach to an older tournament.
         if (preview && previewCreationBusy) {
-          const existing = await tournamentInfoRepository.findCreatedByIdentity(season, {
-            name: plan.tournamentName,
-            adminEntryId: plan.adminEntryId,
-            leagueId: plan.leagueId,
-          });
-          const existingSetup = existing
-            ? await tournamentInfoRepository.findSetupStatus(season, existing.id)
-            : null;
-          if (existing && existingSetup) {
-            const recovered = {
-              tournament: {
-                id: existing.id,
-                name: existing.name,
-                creator: existing.creator,
-                adminEntryId: existing.adminEntryId,
-                leagueId: existing.leagueId,
-                participantCount: existing.totalTeamNum,
-              },
-              setupStatus: existingSetup.setupStatus,
-            };
+          const queued = await getPreviewQueuedResult(preview.tokenHash);
+          if (queued && typeof queued === 'object' && 'tournament' in queued) {
             try {
-              await markPreviewCreatedResult(preview.tokenHash, recovered);
+              await markPreviewCreatedResult(preview.tokenHash, queued);
             } catch (error) {
               logInfo('Unable to repair tournament preview idempotency result', {
                 event: 'tournament_preview_result_repair_failed',
-                tournamentId: existing.id,
                 error: error instanceof Error ? error.name : 'UnknownError',
               });
             } finally {
               previewClaimed = false;
               await releasePreviewCreationClaim(preview.tokenHash).catch(() => undefined);
             }
-            report('queued', existingSetup.setupStatus, null);
+            const recovered = queued as {
+              tournament: {
+                id: number;
+                name: string;
+                creator: string;
+                adminEntryId: number;
+                leagueId: number;
+                participantCount: number;
+              };
+              setupStatus: TournamentSetupStatus;
+            };
+            report('queued', recovered.setupStatus, null);
             return recovered;
           }
         }
@@ -302,6 +296,10 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       if (previewTokenHash) {
         let resultCached = false;
         try {
+          // Publish operation evidence only after the authoritative queue add
+          // has succeeded. A concurrent retry must never infer success from a
+          // PostgreSQL row whose setup job is still stalled or unpublished.
+          await markPreviewQueuedResult(previewTokenHash, result);
           await markPreviewCreatedResult(previewTokenHash, result);
           resultCached = true;
         } catch (error) {

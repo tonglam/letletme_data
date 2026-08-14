@@ -46,6 +46,10 @@ function createdKey(tokenHash: string): string {
   return `llm:tournament:preview:created:${tokenHash}`;
 }
 
+function queuedKey(tokenHash: string): string {
+  return `llm:tournament:preview:queued:${tokenHash}`;
+}
+
 function creationClaimKey(tokenHash: string): string {
   return `llm:tournament:preview:claim:${tokenHash}`;
 }
@@ -313,4 +317,26 @@ export async function releasePreviewCreationClaim(tokenHash: string): Promise<vo
 export async function markPreviewCreatedResult(tokenHash: string, result: unknown): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
   await redis.set(createdKey(tokenHash), JSON.stringify(result), 'EX', PREVIEW_TTL_SECONDS);
+}
+
+/**
+ * Durable-after-enqueue evidence for retries. It is intentionally separate
+ * from the final response cache: a retry may recover only after BullMQ has
+ * accepted the authoritative setup job.
+ */
+export async function getPreviewQueuedResult(tokenHash: string): Promise<unknown | null> {
+  const redis = await queueRedisSingleton.getClient();
+  const raw = await redis.get(queuedKey(tokenHash));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    await redis.del(queuedKey(tokenHash));
+    return null;
+  }
+}
+
+export async function markPreviewQueuedResult(tokenHash: string, result: unknown): Promise<void> {
+  const redis = await queueRedisSingleton.getClient();
+  await redis.set(queuedKey(tokenHash), JSON.stringify(result), 'EX', PREVIEW_TTL_SECONDS);
 }
