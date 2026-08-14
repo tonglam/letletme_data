@@ -361,30 +361,40 @@ export function createTournamentManagementService(
     retryRoster: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      const current = await assertOwner(season, tournamentId, payload.adminEntryId);
-      if (current.rosterMode !== 'official_sync') {
-        throw new ValidationError(
-          'Tournament roster is a fixed snapshot.',
-          'TOURNAMENT_ROSTER_SNAPSHOT',
-        );
-      }
-      if (current.state === 'finished') {
-        throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
-      }
-      await assertTournamentRosterPreGameweekBoundary(season);
-      const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
-      const job = await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
-        allowInactive: true,
-        settleBoundaryFailure: true,
-        expectedProgressMarker: rosterState?.setupProgressUpdatedAt ?? null,
-      });
-      return {
-        tournamentId,
-        changed: false,
-        queued: true,
-        operationId: job.id ?? null,
-        status: 'pending' as const,
-      };
+      return withMutationConflictGuard(
+        {
+          queueName: 'tournament-management',
+          jobName: 'tournament-roster-retry',
+          tournamentId,
+          scopes: [tournamentSetupLifecycleScope(tournamentId)],
+        },
+        async () => {
+          const current = await assertOwner(season, tournamentId, payload.adminEntryId);
+          if (current.rosterMode !== 'official_sync') {
+            throw new ValidationError(
+              'Tournament roster is a fixed snapshot.',
+              'TOURNAMENT_ROSTER_SNAPSHOT',
+            );
+          }
+          if (current.state === 'finished') {
+            throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
+          }
+          await assertTournamentRosterPreGameweekBoundary(season);
+          const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
+          const job = await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+            allowInactive: true,
+            settleBoundaryFailure: true,
+            expectedProgressMarker: rosterState?.setupProgressUpdatedAt ?? null,
+          });
+          return {
+            tournamentId,
+            changed: false,
+            queued: true,
+            operationId: job.id ?? null,
+            status: 'pending' as const,
+          };
+        },
+      );
     },
 
     deleteTournament: async (tournamentId: number, input: unknown) => {

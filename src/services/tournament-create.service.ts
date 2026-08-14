@@ -25,6 +25,7 @@ import { fetchLeagueParticipants } from './tournament-league-members.service';
 import {
   getPreviewCreatedRecord,
   claimPreviewCreation,
+  getPreviewCreationClaim,
   markPreviewCreatedResult,
   markPreviewQueuedResult,
   releasePreviewCreationClaim,
@@ -158,7 +159,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
             setupStatus: TournamentSetupStatus;
           };
         }
-        const claim = await claimPreviewCreation(preview.tokenHash);
+        const claim = await claimPreviewCreation(preview.tokenHash, payloadFingerprint);
         if (claim === 'busy') {
           const concurrent = unwrapPreviewResult(
             await waitForPreviewCreatedRecord(preview.tokenHash),
@@ -284,6 +285,55 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
               setupStatus: TournamentSetupStatus;
             };
             report('queued', recovered.setupStatus, null);
+            return recovered;
+          }
+
+          // The process may have committed PostgreSQL and died before writing
+          // queued/result evidence. A busy claim still carries the operation
+          // fingerprint and start time, so recover only a row created by this
+          // exact preview operation; an older same-name tournament is never
+          // treated as idempotent success.
+          const claimRecord = await getPreviewCreationClaim(preview.tokenHash);
+          const persisted = await tournamentInfoRepository.findCreatedByIdentity(season, {
+            name: plan.tournamentName,
+            adminEntryId: Number(payload.adminId),
+            leagueId: plan.leagueId,
+          });
+          const sameOperation =
+            claimRecord?.payloadFingerprint === payloadFingerprint &&
+            Boolean(persisted?.createdAt) &&
+            Date.parse(persisted!.createdAt!) >= Date.parse(claimRecord.startedAt);
+          if (sameOperation && persisted) {
+            await enqueueTournamentSetup(season, persisted.id, 'create');
+            const setupStatus =
+              (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
+              'pending';
+            const recovered = {
+              tournament: {
+                id: persisted.id,
+                name: persisted.name,
+                creator: persisted.creator,
+                adminEntryId: persisted.adminEntryId,
+                leagueId: persisted.leagueId,
+                participantCount: persisted.totalTeamNum,
+              },
+              setupStatus,
+            } as const;
+            let resultCached = false;
+            try {
+              await markPreviewCreatedResult(preview.tokenHash, recovered, payloadFingerprint);
+              await markPreviewQueuedResult(preview.tokenHash, recovered, payloadFingerprint);
+              resultCached = true;
+            } catch (error) {
+              logInfo('Unable to cache recovered tournament preview result', {
+                event: 'tournament_preview_recovery_cache_failed',
+                error: error instanceof Error ? error.name : 'UnknownError',
+              });
+            }
+            if (resultCached) {
+              await releasePreviewCreationClaim(preview.tokenHash).catch(() => undefined);
+            }
+            report('queued', setupStatus, null);
             return recovered;
           }
         }

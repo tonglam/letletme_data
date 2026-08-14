@@ -64,6 +64,11 @@ export type PreviewResultRecord = {
   result: unknown;
 };
 
+export type PreviewCreationClaim = {
+  payloadFingerprint: string | null;
+  startedAt: string;
+};
+
 export type TournamentPreview = Omit<HydratedPreview, 'tokenHash'> & {
   previewToken: string;
 };
@@ -390,17 +395,46 @@ export async function getPreviewCreatedResult(tokenHash: string): Promise<unknow
   return (await getPreviewCreatedRecord(tokenHash))?.result ?? null;
 }
 
-export async function claimPreviewCreation(tokenHash: string): Promise<'claimed' | 'busy'> {
+export async function claimPreviewCreation(
+  tokenHash: string,
+  payloadFingerprint?: string,
+): Promise<'claimed' | 'busy'> {
   const redis = await queueRedisSingleton.getClient();
   // NX makes the preview token the single-writer idempotency boundary.
   const claimed = await redis.set(
     creationClaimKey(tokenHash),
-    '1',
+    JSON.stringify({
+      payloadFingerprint: payloadFingerprint ?? null,
+      startedAt: new Date().toISOString(),
+    } satisfies PreviewCreationClaim),
     'EX',
     PREVIEW_TTL_SECONDS,
     'NX',
   );
   return claimed === 'OK' ? 'claimed' : 'busy';
+}
+
+export async function getPreviewCreationClaim(
+  tokenHash: string,
+): Promise<PreviewCreationClaim | null> {
+  const redis = await queueRedisSingleton.getClient();
+  const raw = await redis.get(creationClaimKey(tokenHash));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<PreviewCreationClaim>;
+    if (
+      typeof parsed.startedAt !== 'string' ||
+      (parsed.payloadFingerprint !== null && typeof parsed.payloadFingerprint !== 'string')
+    ) {
+      return null;
+    }
+    return {
+      startedAt: parsed.startedAt,
+      payloadFingerprint: parsed.payloadFingerprint ?? null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function waitForPreviewCreatedResult(

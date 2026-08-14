@@ -95,6 +95,7 @@ export interface TournamentCreatedRow {
   adminEntryId: number;
   leagueId: number;
   totalTeamNum: number;
+  createdAt?: string;
 }
 
 export interface StuckTournamentRow {
@@ -377,6 +378,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           adminEntryId: tournamentsInCompetition.adminEntryId,
           leagueId: tournamentsInCompetition.leagueId,
           totalTeamNum: tournamentsInCompetition.totalTeamNum,
+          createdAt: sql<string>`${tournamentsInCompetition.createdAt}::text`,
         })
         .from(tournamentsInCompetition)
         .where(

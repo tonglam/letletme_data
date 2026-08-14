@@ -307,10 +307,22 @@ export const tournamentRosterRepository = {
           updated_at = now()
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
-        AND state = 'inactive'
-        AND roster_sync_status IN ('processing', 'failed')
-        AND setup_status IN ('pending', 'failed')
-        AND setup_phase IN ('queued', 'failed')
+        AND (
+          (
+            state = 'inactive'
+            AND roster_sync_status IN ('processing', 'failed')
+            AND setup_status IN ('pending', 'failed')
+            AND setup_phase IN ('queued', 'failed')
+          )
+          OR (
+            -- The setup worker may die after the roster transition commits
+            -- but before setup_status becomes ready. The same resume marker
+            -- is still authoritative and may replay the setup to settle it.
+            state = 'active'
+            AND roster_sync_status = 'ready'
+            AND setup_status = 'processing'
+          )
+        )
         ${marker ? client`AND setup_progress_updated_at::text = ${marker}` : client``}
       RETURNING tournament_id AS "tournamentId"
     `;
