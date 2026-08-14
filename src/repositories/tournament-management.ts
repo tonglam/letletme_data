@@ -20,6 +20,8 @@ export interface TournamentManagementRecord {
   groupNum: number | null;
   knockoutMode: KnockoutMode;
   rosterMode: TournamentRosterMode;
+  rosterSyncStatus?: 'pending' | 'processing' | 'ready' | 'failed' | null;
+  rosterSyncError?: string | null;
   state: 'active' | 'inactive' | 'finished';
   createdAt: string;
   updatedAt: string;
@@ -64,6 +66,8 @@ export const createTournamentManagementRepository = () => ({
           group_num AS "groupNum",
           knockout_mode AS "knockoutMode",
           roster_mode AS "rosterMode",
+          roster_sync_status AS "rosterSyncStatus",
+          roster_sync_error AS "rosterSyncError",
           state,
           created_at::text AS "createdAt",
           updated_at::text AS "updatedAt"
@@ -135,6 +139,8 @@ export const createTournamentManagementRepository = () => ({
           group_num AS "groupNum",
           knockout_mode AS "knockoutMode",
           roster_mode AS "rosterMode",
+          roster_sync_status AS "rosterSyncStatus",
+          roster_sync_error AS "rosterSyncError",
           state,
           created_at::text AS "createdAt",
           updated_at::text AS "updatedAt"

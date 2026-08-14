@@ -19,6 +19,7 @@ export type TournamentSyncEnqueueOptions = {
   finalizationTargets?: TournamentFinalizationTarget[];
   tournamentId?: number;
   resumeAfterSetup?: boolean;
+  resumeMarker?: string;
   allowInactive?: boolean;
   operationId?: string;
 };
@@ -299,6 +300,7 @@ async function enqueueTournamentSyncJob(
         : {}),
       ...(options.tournamentId ? { tournamentId: options.tournamentId } : {}),
       ...(options.resumeAfterSetup ? { resumeAfterSetup: true } : {}),
+      ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
       ...(options.allowInactive ? { allowInactive: true } : {}),
     };
 
@@ -453,11 +455,17 @@ export const enqueueTournamentRosterReconcile = (
   season: FplSeasonRef,
   tournamentId: number,
   source: TournamentSyncJobSource = 'manual',
-  options?: { resumeAfterSetup?: boolean; allowInactive?: boolean; operationId?: string },
+  options?: {
+    resumeAfterSetup?: boolean;
+    resumeMarker?: string;
+    allowInactive?: boolean;
+    operationId?: string;
+  },
 ) =>
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_RECONCILE, season, 0, source, {
     tournamentId,
     resumeAfterSetup: options?.resumeAfterSetup,
+    resumeMarker: options?.resumeMarker,
     allowInactive: options?.allowInactive,
     // Completed jobs remain retained for observability; each reconciliation
     // therefore needs a fresh id while the lifecycle lock provides dedupe.

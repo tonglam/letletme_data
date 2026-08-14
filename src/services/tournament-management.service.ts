@@ -209,10 +209,14 @@ export function createTournamentManagementService(
         // Publish the cancellable intent before queueing. A newer pause changes
         // this marker back to ready, so a queued worker can never reactivate a
         // tournament after the owner has paused it.
-        await tournamentRosterRepository.markResumeProcessing(season, tournamentId);
+        const resumeMarker = await tournamentRosterRepository.markResumeProcessingWithMarker(
+          season,
+          tournamentId,
+        );
         try {
           await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
             resumeAfterSetup: true,
+            resumeMarker,
             allowInactive: true,
           });
         } catch (error) {
@@ -258,7 +262,8 @@ export function createTournamentManagementService(
           'TOURNAMENT_ROSTER_MODE_INELIGIBLE',
         );
       }
-      if (current.rosterMode === payload.rosterMode) return current;
+      if (current.rosterMode === payload.rosterMode && current.rosterSyncStatus !== 'failed')
+        return current;
       if (current.state === 'active') {
         // Do not persist an opt-in that cannot be reconciled at the current
         // gameweek boundary. The check happens before the mode mutation.
@@ -272,7 +277,16 @@ export function createTournamentManagementService(
       );
       if (!updated) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       if (updated.state === 'active') {
-        await enqueueTournamentRosterReconcile(season, tournamentId, 'manual');
+        try {
+          await enqueueTournamentRosterReconcile(season, tournamentId, 'manual');
+        } catch (error) {
+          await tournamentRosterRepository.markSyncFailed(
+            season,
+            tournamentId,
+            error instanceof Error ? error.message : 'Unable to enqueue roster reconciliation.',
+          );
+          throw error;
+        }
       }
       return (await repository.findById(season, tournamentId)) ?? updated;
     },
@@ -365,8 +379,6 @@ export const tournamentManagementService = createTournamentManagementService(
       );
       const { tournamentSetupLifecycleScope } = await import('../domain/mutation-scope');
       const { withMutationConflictGuard } = await import('../utils/mutation-lock');
-      await cancelWaitingTournamentSetupJobs(tournamentId);
-      await cancelWaitingTournamentRosterReconcileJobs(tournamentId);
       return withMutationConflictGuard(
         {
           queueName: 'tournament-management',
@@ -374,7 +386,14 @@ export const tournamentManagementService = createTournamentManagementService(
           tournamentId,
           scopes: [tournamentSetupLifecycleScope(tournamentId)],
         },
-        () => tournamentManagementRepository.deleteOwned(season, tournamentId, adminEntryId),
+        async () => {
+          // Cancel after acquiring the same lifecycle lock as enqueueing and
+          // deletion. A worker that already crossed this boundary is harmless
+          // because the worker treats an authoritative delete as a no-op.
+          await cancelWaitingTournamentSetupJobs(tournamentId);
+          await cancelWaitingTournamentRosterReconcileJobs(tournamentId);
+          return tournamentManagementRepository.deleteOwned(season, tournamentId, adminEntryId);
+        },
       );
     },
   },

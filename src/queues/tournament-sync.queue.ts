@@ -48,6 +48,8 @@ export interface TournamentSyncJobData {
   finalizationTargets?: TournamentFinalizationTarget[];
   tournamentId?: number;
   resumeAfterSetup?: boolean;
+  /** Database-clock marker written by the activation request. */
+  resumeMarker?: string;
   /** Reconcile inactive tournaments only for explicit resume/retry callers. */
   allowInactive?: boolean;
 }

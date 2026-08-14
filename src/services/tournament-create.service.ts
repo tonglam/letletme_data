@@ -206,7 +206,10 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       participantCount = plan.selectedParticipants.length;
       rosterMode = plan.rosterMode ?? 'snapshot';
       if (await tournamentInfoRepository.checkNameExists(season, plan.tournamentName)) {
-        if (preview) {
+        // PostgreSQL identity recovery is only safe for a retry that observed
+        // this preview token's single-writer claim. A fresh token with the
+        // same mutable tournament name must not attach to an older tournament.
+        if (preview && previewCreationBusy) {
           const existing = await tournamentInfoRepository.findCreatedByIdentity(season, {
             name: plan.tournamentName,
             adminEntryId: plan.adminEntryId,

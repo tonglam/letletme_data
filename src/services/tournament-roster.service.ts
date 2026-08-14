@@ -66,6 +66,7 @@ async function reconcileTournamentRosterUnlocked(
     allowInactive?: boolean;
     resumeAfterSetup?: boolean;
     requireResumeMarker?: boolean;
+    resumeMarker?: string;
   },
 ): Promise<TournamentRosterReconcileResult> {
   await assertPreGameweekBoundary(season);
@@ -94,9 +95,19 @@ async function reconcileTournamentRosterUnlocked(
       const claimed = await tournamentRosterRepository.markResumeProcessingIfPending(
         season,
         tournamentId,
+        options.resumeMarker,
       );
       if (!claimed) {
-        throw new ConflictError('Tournament resume was superseded.', 'TOURNAMENT_RESUME_CANCELLED');
+        // A newer pause or roster reconciliation superseded this queued resume.
+        // Treat it as a successful no-op so BullMQ does not retry or alert.
+        return {
+          tournamentId,
+          changed: false,
+          addedEntryIds: [],
+          removedEntryIds: [],
+          participantCount: tournament.totalTeamNum,
+          automaticallyPaused: false,
+        };
       }
     } else {
       // Direct callers establish the marker before reconciliation begins.
@@ -256,6 +267,7 @@ export async function reconcileTournamentRoster(
     allowInactive?: boolean;
     resumeAfterSetup?: boolean;
     requireResumeMarker?: boolean;
+    resumeMarker?: string;
   },
 ): Promise<TournamentRosterReconcileResult> {
   // Serialize create/setup, delete, resume, and roster retry for this one

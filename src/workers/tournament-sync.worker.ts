@@ -415,11 +415,36 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 if (!job.data.tournamentId) {
                   throw new Error('Roster reconcile job is missing tournamentId');
                 }
-                return reconcileTournamentRoster(season, job.data.tournamentId, {
-                  allowInactive: job.data.allowInactive === true,
-                  resumeAfterSetup: job.data.resumeAfterSetup === true,
-                  requireResumeMarker: job.data.resumeAfterSetup === true,
-                });
+                try {
+                  return await reconcileTournamentRoster(season, job.data.tournamentId, {
+                    allowInactive: job.data.allowInactive === true,
+                    resumeAfterSetup: job.data.resumeAfterSetup === true,
+                    resumeMarker: job.data.resumeMarker,
+                    requireResumeMarker: job.data.resumeAfterSetup === true,
+                  });
+                } catch (error) {
+                  // Deletion is authoritative. A reconcile accepted just before
+                  // delete must settle successfully, not retry and alert on a
+                  // deliberately missing tournament.
+                  if (
+                    error instanceof Error &&
+                    'code' in error &&
+                    error.code === 'TOURNAMENT_NOT_FOUND'
+                  ) {
+                    logInfo('Ignoring roster reconcile for deleted tournament', {
+                      tournamentId: job.data.tournamentId,
+                    });
+                    return {
+                      tournamentId: job.data.tournamentId,
+                      changed: false,
+                      addedEntryIds: [],
+                      removedEntryIds: [],
+                      participantCount: 0,
+                      automaticallyPaused: false,
+                    };
+                  }
+                  throw error;
+                }
               }
 
               default:

@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import type Redis from 'ioredis';
 
 import { parseLeagueUrl, type LeagueType, type TournamentParticipant } from '../domain/tournament';
 import { seasonRepository } from '../repositories/seasons';
@@ -19,12 +20,17 @@ type PreviewStored = {
   leagueName: string | null;
   startEventId: number;
   knockoutRounds: number;
-  participants: TournamentParticipant[];
+  participants?: TournamentParticipant[];
+  participantSnapshotKey?: string;
   sourceCheckedAt: string;
   expiresAt: string;
 };
 
-export type TournamentPreview = Omit<PreviewStored, 'tokenHash'> & {
+type HydratedPreview = Omit<PreviewStored, 'participants'> & {
+  participants: TournamentParticipant[];
+};
+
+export type TournamentPreview = Omit<HydratedPreview, 'tokenHash'> & {
   previewToken: string;
 };
 
@@ -53,6 +59,56 @@ function reuseKey(
   return `llm:tournament:preview:reuse:${seasonCode}:${ownerEntryId}:${leagueType}:${leagueId}`;
 }
 
+function participantSnapshotKey(
+  preview: Pick<HydratedPreview, 'seasonCode' | 'leagueId' | 'leagueType' | 'participants'>,
+): string {
+  const digest = createHash('sha256')
+    .update(
+      JSON.stringify({
+        seasonCode: preview.seasonCode,
+        leagueId: preview.leagueId,
+        leagueType: preview.leagueType,
+        participants: preview.participants,
+      }),
+    )
+    .digest('hex');
+  return `llm:tournament:preview:snapshot:${digest}`;
+}
+
+async function hydratePreview(redis: Redis, raw: PreviewStored): Promise<HydratedPreview | null> {
+  if (Array.isArray(raw.participants)) return raw as HydratedPreview;
+  if (!raw.participantSnapshotKey) return null;
+  const snapshot = await redis.get(raw.participantSnapshotKey);
+  if (!snapshot) return null;
+  try {
+    const participants = JSON.parse(snapshot) as unknown;
+    return Array.isArray(participants) ? ({ ...raw, participants } as HydratedPreview) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function persistPreviewToken(
+  redis: Redis,
+  preview: HydratedPreview,
+  tokenHash: string,
+  ttlSeconds: number,
+): Promise<void> {
+  const snapshotKey = preview.participantSnapshotKey ?? participantSnapshotKey(preview);
+  await redis.set(snapshotKey, JSON.stringify(preview.participants), 'EX', ttlSeconds);
+  const {
+    participants: _participants,
+    previewToken: _previewToken,
+    ...metadata
+  } = preview as HydratedPreview & { previewToken?: string };
+  await redis.set(
+    tokenKey(tokenHash),
+    JSON.stringify({ ...metadata, tokenHash, participantSnapshotKey: snapshotKey }),
+    'EX',
+    ttlSeconds,
+  );
+}
+
 function normalizeOwnerEntry(value: unknown): number {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value;
   if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) return Number(value);
@@ -74,10 +130,10 @@ async function mintPreviewTokenFromPreview(preview: TournamentPreview): Promise<
       'PREVIEW_EXPIRED',
     );
   }
-  await redis.set(
-    tokenKey(tokenHash),
-    JSON.stringify({ ...base, tokenHash } satisfies PreviewStored),
-    'EX',
+  await persistPreviewToken(
+    redis,
+    { ...base, tokenHash } as HydratedPreview,
+    tokenHash,
     remainingSeconds,
   );
   return { ...base, previewToken };
@@ -107,20 +163,25 @@ export async function createTournamentPreview(input: {
         } else {
           // The raw token is intentionally never persisted. Reissue an opaque
           // token while reusing the already fetched participant snapshot.
-          const previewToken = randomBytes(32).toString('base64url');
-          const tokenHash = hashToken(previewToken);
-          const refreshed = {
-            ...parsed,
-            tokenHash,
-            // Reuse never extends the original snapshot freshness deadline.
-            expiresAt: parsed.expiresAt,
-          };
-          await redis.set(tokenKey(tokenHash), JSON.stringify(refreshed), 'EX', remainingSeconds);
-          await redis.set(key, tokenHash, 'EX', remainingSeconds);
-          // Do not revoke the older token. Its caller may still be within the
-          // advertised five-minute lifetime; both payloads are independently
-          // expiring and remain bound to the same owner/league/season.
-          return { ...refreshed, previewToken };
+          const hydrated = await hydratePreview(redis, parsed);
+          if (!hydrated) {
+            await redis.del(tokenKey(existingTokenHash), key);
+          } else {
+            const previewToken = randomBytes(32).toString('base64url');
+            const tokenHash = hashToken(previewToken);
+            const refreshed = {
+              ...hydrated,
+              tokenHash,
+              // Reuse never extends the original snapshot freshness deadline.
+              expiresAt: parsed.expiresAt,
+            };
+            await persistPreviewToken(redis, refreshed, tokenHash, remainingSeconds);
+            await redis.set(key, tokenHash, 'EX', remainingSeconds);
+            // Do not revoke the older token. Its caller may still be within the
+            // advertised five-minute lifetime; both payloads are independently
+            // expiring and remain bound to the same owner/league/season.
+            return { ...refreshed, previewToken };
+          }
         }
       }
       await redis.del(key);
@@ -130,7 +191,7 @@ export async function createTournamentPreview(input: {
     const previewToken = randomBytes(32).toString('base64url');
     const tokenHash = hashToken(previewToken);
     const expiresAt = new Date(Date.now() + PREVIEW_TTL_SECONDS * 1000).toISOString();
-    const stored: PreviewStored = {
+    const stored: HydratedPreview = {
       tokenHash,
       ownerEntryId,
       seasonCode: season.seasonCode,
@@ -143,10 +204,9 @@ export async function createTournamentPreview(input: {
       sourceCheckedAt: new Date().toISOString(),
       expiresAt,
     };
-    const serialized = JSON.stringify(stored);
-    // Keep token and reuse pointer aligned. The pointer is only a convenience;
-    // the token payload remains the source of truth and is independently expiring.
-    await redis.set(tokenKey(tokenHash), serialized, 'EX', PREVIEW_TTL_SECONDS);
+    // Keep one immutable participant snapshot per source payload. Each opaque
+    // token stores only metadata and a pointer, avoiding a full roster copy.
+    await persistPreviewToken(redis, stored as HydratedPreview, tokenHash, PREVIEW_TTL_SECONDS);
     await redis.set(key, tokenHash, 'EX', PREVIEW_TTL_SECONDS);
     logInfo('Tournament preview ready', {
       event: 'tournament_preview',
@@ -167,7 +227,7 @@ export async function createTournamentPreview(input: {
 export async function resolveTournamentPreview(
   previewToken: string,
   expected: { ownerEntryId: number | string; leagueUrl: string },
-): Promise<PreviewStored> {
+): Promise<HydratedPreview> {
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(previewToken)) {
     throw new ConflictError(
       'Preview expired or invalid. Please preview the league again.',
@@ -185,7 +245,13 @@ export async function resolveTournamentPreview(
       'PREVIEW_EXPIRED',
     );
   }
-  const stored = JSON.parse(raw) as PreviewStored;
+  const stored = await hydratePreview(redis, JSON.parse(raw) as PreviewStored);
+  if (!stored) {
+    throw new ConflictError(
+      'Preview expired or invalid. Please preview the league again.',
+      'PREVIEW_EXPIRED',
+    );
+  }
   if (
     stored.ownerEntryId !== ownerEntryId ||
     stored.seasonCode !== (await seasonRepository.findCurrent()).seasonCode ||
