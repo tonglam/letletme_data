@@ -24,6 +24,8 @@ export interface EnqueueTournamentSetupOptions {
    * BullMQ recording the job as completed.
    */
   activeSettleTimeoutMs?: number;
+  /** Database marker for a resume-triggered setup operation. */
+  resumeMarker?: string;
 }
 
 export type ExistingSetupJobAction =
@@ -127,6 +129,7 @@ async function enqueueTournamentSetupUnlocked(
       tournamentId,
       source,
       triggeredAt: new Date().toISOString(),
+      ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
     };
 
     const { baseJobId, successorJobId } = getTournamentSetupJobIds(season, tournamentId);

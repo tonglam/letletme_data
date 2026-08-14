@@ -12,6 +12,7 @@ import {
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { seasonRepository } from '../repositories/seasons';
+import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { logError, logInfo } from '../utils/logger';
 import { runWithFplRequestMetrics } from '../utils/fpl-request-metrics';
 import { runTrackedJob } from '../utils/job-run-logger';
@@ -76,6 +77,20 @@ export function createTournamentSetupWorker(): WorkerRuntime {
               scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
             },
             async () => {
+              if (job.data.resumeMarker) {
+                const ownsResume = await tournamentRosterRepository.markResumeProcessingIfPending(
+                  season,
+                  job.data.tournamentId,
+                  job.data.resumeMarker,
+                );
+                if (!ownsResume) {
+                  logInfo('Ignoring stale tournament resume setup job', {
+                    tournamentId: job.data.tournamentId,
+                    jobId: job.id,
+                  });
+                  return;
+                }
+              }
               await job.updateProgress('running');
               try {
                 logInfo('Tournament setup worker started job');

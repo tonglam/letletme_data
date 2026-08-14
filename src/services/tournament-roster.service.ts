@@ -231,6 +231,7 @@ async function reconcileTournamentRosterUnlocked(
           {
             allowInactive: options?.allowInactive,
             resumeAfterSetup: options?.resumeAfterSetup,
+            resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
           },
         );
       },
@@ -269,6 +270,7 @@ async function reconcileTournamentRosterUnlocked(
           // reusing it would not prove that the newly published marker is read.
           ensureSuccessorOnActive: true,
           activeSettleTimeoutMs: 2_000,
+          resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
         },
       );
     }

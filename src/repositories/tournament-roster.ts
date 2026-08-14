@@ -296,7 +296,11 @@ export const tournamentRosterRepository = {
     tournament: TournamentRosterRecord,
     participants: TournamentParticipant[],
     sourceLeagueName: string | null,
-    options?: { allowInactive?: boolean; resumeAfterSetup?: boolean },
+    options?: {
+      allowInactive?: boolean;
+      resumeAfterSetup?: boolean;
+      resumeMarker?: string;
+    },
   ): Promise<RosterPublicationResult> => {
     try {
       const participantIds = uniqueParticipantIds(participants);
@@ -488,7 +492,11 @@ export const tournamentRosterRepository = {
               setup_warning_count = 0,
               setup_completed_units = 0,
               setup_total_units = 0,
-              setup_progress_updated_at = now(),
+              setup_progress_updated_at = CASE
+                WHEN ${options?.resumeAfterSetup ? Boolean(options.resumeMarker) : false}
+                  THEN ${options?.resumeMarker ?? null}::timestamptz
+                ELSE now()
+              END,
               standings_ready_at = NULL,
               updated_at = now()
           WHERE season_id = ${season.seasonId}

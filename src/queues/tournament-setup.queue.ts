@@ -11,6 +11,8 @@ export interface TournamentSetupJobData {
   tournamentId: number;
   source: 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
   triggeredAt: string;
+  /** Activation marker owned by a resume-triggered setup job. */
+  resumeMarker?: string;
 }
 
 export const tournamentSetupQueue = new Queue<TournamentSetupJobData>(tournamentSetupQueueName, {
