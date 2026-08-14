@@ -214,14 +214,21 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         if (preview && previewCreationBusy) {
           const queued = await getPreviewQueuedResult(preview.tokenHash);
           if (queued && typeof queued === 'object' && 'tournament' in queued) {
+            let resultRepaired = false;
             try {
               await markPreviewCreatedResult(preview.tokenHash, queued);
+              resultRepaired = true;
             } catch (error) {
               logInfo('Unable to repair tournament preview idempotency result', {
                 event: 'tournament_preview_result_repair_failed',
                 error: error instanceof Error ? error.name : 'UnknownError',
               });
-            } finally {
+            }
+            // This retry did not acquire the single-writer claim. If Redis
+            // still rejects the final-result repair, keep the original claim
+            // so a later retry remains on the queued-evidence path instead of
+            // starting a second creation attempt.
+            if (resultRepaired) {
               previewClaimed = false;
               await releasePreviewCreationClaim(preview.tokenHash).catch(() => undefined);
             }

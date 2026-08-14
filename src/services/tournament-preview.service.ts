@@ -11,6 +11,19 @@ import { fetchLeagueParticipantsById } from './tournament-league-members.service
 const PREVIEW_TTL_SECONDS = 5 * 60;
 const previewInflight = new Map<string, Promise<TournamentPreview>>();
 
+// A content-addressed snapshot can be shared by tokens with different
+// lifetimes. Set it only when missing, and extend (never shorten) an existing
+// expiry atomically so one older token cannot invalidate a newer token.
+const UPSERT_SNAPSHOT_SCRIPT = `
+local ttl = redis.call('TTL', KEYS[1])
+if ttl == -2 then
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+elseif ttl >= 0 and ttl < tonumber(ARGV[2]) then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return ttl
+`;
+
 type PreviewStored = {
   tokenHash: string;
   ownerEntryId: number;
@@ -99,7 +112,13 @@ async function persistPreviewToken(
   ttlSeconds: number,
 ): Promise<void> {
   const snapshotKey = preview.participantSnapshotKey ?? participantSnapshotKey(preview);
-  await redis.set(snapshotKey, JSON.stringify(preview.participants), 'EX', ttlSeconds);
+  await redis.eval(
+    UPSERT_SNAPSHOT_SCRIPT,
+    1,
+    snapshotKey,
+    JSON.stringify(preview.participants),
+    String(Math.max(1, ttlSeconds)),
+  );
   const {
     participants: _participants,
     previewToken: _previewToken,
