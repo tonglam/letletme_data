@@ -52,6 +52,8 @@ export interface TournamentSyncJobData {
   resumeMarker?: string;
   /** Reconcile inactive tournaments only for explicit resume/retry callers. */
   allowInactive?: boolean;
+  /** Settle a queued opt-in when the gameweek boundary closes before it runs. */
+  settleBoundaryFailure?: boolean;
 }
 
 export const tournamentSyncQueue = new Queue<TournamentSyncJobData>(tournamentSyncQueueName, {

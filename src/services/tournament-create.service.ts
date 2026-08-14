@@ -174,6 +174,31 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           previewCreationBusy = true;
         } else {
           previewClaimed = true;
+          // The result lookup and NX claim are intentionally separate Redis
+          // operations. Recheck after claiming so a retry that was suspended
+          // between them cannot become a second writer after the first request
+          // has already published its result and released the claim.
+          const claimedCreated = await getPreviewCreatedResult(preview.tokenHash);
+          if (
+            claimedCreated &&
+            typeof claimedCreated === 'object' &&
+            'tournament' in claimedCreated
+          ) {
+            previewClaimed = false;
+            await releasePreviewCreationClaim(preview.tokenHash).catch(() => undefined);
+            report('queued', 'pending', null);
+            return claimedCreated as {
+              tournament: {
+                id: number;
+                name: string;
+                creator: string;
+                adminEntryId: number;
+                leagueId: number;
+                participantCount: number;
+              };
+              setupStatus: TournamentSetupStatus;
+            };
+          }
         }
       }
       const source = preview ?? (await fetchLeagueParticipants(payload.leagueUrl));

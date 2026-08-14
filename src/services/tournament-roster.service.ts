@@ -67,39 +67,12 @@ async function reconcileTournamentRosterUnlocked(
     resumeAfterSetup?: boolean;
     requireResumeMarker?: boolean;
     resumeMarker?: string;
+    settleBoundaryFailure?: boolean;
   },
 ): Promise<TournamentRosterReconcileResult> {
   const tournament = await tournamentRosterRepository.findById(season, tournamentId);
   if (!tournament) {
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
-  }
-  try {
-    await assertPreGameweekBoundary(season);
-  } catch (error) {
-    // A resume can be accepted just before the gameweek boundary closes and
-    // only reach the worker after the gameweek becomes active. Settle that
-    // asynchronous intent instead of retrying a deterministic boundary error
-    // with pending roster/setup markers left behind.
-    if (
-      options?.resumeAfterSetup &&
-      error instanceof ConflictError &&
-      error.code === 'TOURNAMENT_ROSTER_FROZEN'
-    ) {
-      const message = error.message;
-      await Promise.allSettled([
-        tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
-        tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message),
-      ]);
-      return {
-        tournamentId,
-        changed: false,
-        addedEntryIds: [],
-        removedEntryIds: [],
-        participantCount: tournament.totalTeamNum,
-        automaticallyPaused: false,
-      };
-    }
-    throw error;
   }
   if (tournament.rosterMode !== 'official_sync') {
     throw new ValidationError(
@@ -125,19 +98,17 @@ async function reconcileTournamentRosterUnlocked(
     };
   }
 
+  // A queued resume must prove that it still owns the activation marker before
+  // any boundary failure can mutate status. This prevents a stale job from
+  // overwriting a newer pause's ready state.
   if (options?.resumeAfterSetup) {
     if (options.requireResumeMarker) {
-      // A queued resume consumes the marker written by the activation request.
-      // A pause changes the status back to ready, so this conditional update
-      // prevents a stale worker from recreating the canceled intent.
       const claimed = await tournamentRosterRepository.markResumeProcessingIfPending(
         season,
         tournamentId,
         options.resumeMarker,
       );
       if (!claimed) {
-        // A newer pause or roster reconciliation superseded this queued resume.
-        // Treat it as a successful no-op so BullMQ does not retry or alert.
         return {
           tournamentId,
           changed: false,
@@ -148,10 +119,42 @@ async function reconcileTournamentRosterUnlocked(
         };
       }
     } else {
-      // Direct callers establish the marker before reconciliation begins.
       await tournamentRosterRepository.markResumeProcessing(season, tournamentId);
     }
-  } else {
+  }
+
+  try {
+    await assertPreGameweekBoundary(season);
+  } catch (error) {
+    // A resume can be accepted just before the gameweek boundary closes and
+    // only reach the worker after the gameweek becomes active. Settle that
+    // asynchronous intent instead of retrying a deterministic boundary error
+    // with pending roster/setup markers left behind.
+    if (
+      (options?.resumeAfterSetup || options?.settleBoundaryFailure) &&
+      error instanceof ConflictError &&
+      error.code === 'TOURNAMENT_ROSTER_FROZEN'
+    ) {
+      const message = error.message;
+      await Promise.allSettled([
+        tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
+        ...(options.resumeAfterSetup
+          ? [tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message)]
+          : []),
+      ]);
+      return {
+        tournamentId,
+        changed: false,
+        addedEntryIds: [],
+        removedEntryIds: [],
+        participantCount: tournament.totalTeamNum,
+        automaticallyPaused: false,
+      };
+    }
+    throw error;
+  }
+
+  if (!options?.resumeAfterSetup) {
     await tournamentRosterRepository.markSyncProcessing(season, tournamentId);
   }
   let setupEnqueueRequired = false;
@@ -306,6 +309,7 @@ export async function reconcileTournamentRoster(
     resumeAfterSetup?: boolean;
     requireResumeMarker?: boolean;
     resumeMarker?: string;
+    settleBoundaryFailure?: boolean;
   },
 ): Promise<TournamentRosterReconcileResult> {
   // Serialize create/setup, delete, resume, and roster retry for this one

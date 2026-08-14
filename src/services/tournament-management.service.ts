@@ -323,7 +323,9 @@ export function createTournamentManagementService(
       if (!updated) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       if (updated.state === 'active') {
         try {
-          await enqueueTournamentRosterReconcile(season, tournamentId, 'manual');
+          await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+            settleBoundaryFailure: true,
+          });
         } catch (error) {
           await tournamentRosterRepository.markSyncFailed(
             season,

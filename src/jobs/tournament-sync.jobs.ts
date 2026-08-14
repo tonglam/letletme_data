@@ -21,6 +21,7 @@ export type TournamentSyncEnqueueOptions = {
   resumeAfterSetup?: boolean;
   resumeMarker?: string;
   allowInactive?: boolean;
+  settleBoundaryFailure?: boolean;
   operationId?: string;
 };
 
@@ -459,6 +460,7 @@ export const enqueueTournamentRosterReconcile = (
     resumeAfterSetup?: boolean;
     resumeMarker?: string;
     allowInactive?: boolean;
+    settleBoundaryFailure?: boolean;
     operationId?: string;
   },
 ) =>
@@ -467,6 +469,7 @@ export const enqueueTournamentRosterReconcile = (
     resumeAfterSetup: options?.resumeAfterSetup,
     resumeMarker: options?.resumeMarker,
     allowInactive: options?.allowInactive,
+    settleBoundaryFailure: options?.settleBoundaryFailure,
     // Completed jobs remain retained for observability; each reconciliation
     // therefore needs a fresh id while the lifecycle lock provides dedupe.
     jobId: `tournament-roster-reconcile-${tournamentId}-${options?.operationId ?? randomUUID()}`,
