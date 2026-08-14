@@ -95,6 +95,26 @@ export function createTournamentSetupWorker(): WorkerRuntime {
               try {
                 logInfo('Tournament setup worker started job');
                 await setupTournamentStructure(season, job.data.tournamentId);
+              } catch (error) {
+                if (job.data.resumeMarker) {
+                  await tournamentRosterRepository
+                    .restoreSetupProgressMarker(
+                      season,
+                      job.data.tournamentId,
+                      job.data.resumeMarker,
+                    )
+                    .catch((restoreError) => {
+                      logError(
+                        'Unable to restore tournament resume marker after setup failure',
+                        restoreError,
+                        {
+                          tournamentId: job.data.tournamentId,
+                          jobId: job.id,
+                        },
+                      );
+                    });
+                }
+                throw error;
               } finally {
                 // Written before the mandatory lifecycle lock is released, so
                 // an enqueuer that later acquires it can safely alternate slots.

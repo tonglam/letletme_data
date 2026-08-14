@@ -124,6 +124,27 @@ async function reconcileTournamentRosterUnlocked(
     }
   }
 
+  // Claim a pinned non-resume retry before checking the gameweek boundary.
+  // The marker is the lifecycle fence: a boundary failure must settle only
+  // this operation, and a stale job must not mutate a newer state.
+  if (!options?.resumeAfterSetup && options?.expectedProgressMarker !== undefined) {
+    const claimed = await tournamentRosterRepository.markSyncProcessingIfMarker(
+      season,
+      tournamentId,
+      options.expectedProgressMarker,
+    );
+    if (!claimed) {
+      return {
+        tournamentId,
+        changed: false,
+        addedEntryIds: [],
+        removedEntryIds: [],
+        participantCount: tournament.totalTeamNum,
+        automaticallyPaused: false,
+      };
+    }
+  }
+
   try {
     await assertPreGameweekBoundary(season);
   } catch (error) {
@@ -155,26 +176,8 @@ async function reconcileTournamentRosterUnlocked(
     throw error;
   }
 
-  if (!options?.resumeAfterSetup) {
-    if (options?.expectedProgressMarker !== undefined) {
-      const claimed = await tournamentRosterRepository.markSyncProcessingIfMarker(
-        season,
-        tournamentId,
-        options.expectedProgressMarker,
-      );
-      if (!claimed) {
-        return {
-          tournamentId,
-          changed: false,
-          addedEntryIds: [],
-          removedEntryIds: [],
-          participantCount: tournament.totalTeamNum,
-          automaticallyPaused: false,
-        };
-      }
-    } else {
-      await tournamentRosterRepository.markSyncProcessing(season, tournamentId);
-    }
+  if (!options?.resumeAfterSetup && options?.expectedProgressMarker === undefined) {
+    await tournamentRosterRepository.markSyncProcessing(season, tournamentId);
   }
   let setupEnqueueRequired = false;
   try {

@@ -9,7 +9,17 @@ import { queueRedisSingleton } from '../queues/redis';
 import { fetchLeagueParticipantsById } from './tournament-league-members.service';
 
 const PREVIEW_TTL_SECONDS = 5 * 60;
+const PREVIEW_FETCH_LOCK_SECONDS = 30;
+const PREVIEW_FETCH_WAIT_MS = 100;
+const PREVIEW_FETCH_WAIT_ATTEMPTS = 50;
 const previewInflight = new Map<string, Promise<TournamentPreview>>();
+
+const RELEASE_FETCH_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
 
 // A content-addressed snapshot can be shared by tokens with different
 // lifetimes. Set it only when missing, and extend (never shorten) an existing
@@ -43,6 +53,11 @@ type HydratedPreview = Omit<PreviewStored, 'participants'> & {
   participants: TournamentParticipant[];
 };
 
+export type PreviewResultRecord = {
+  payloadFingerprint: string | null;
+  result: unknown;
+};
+
 export type TournamentPreview = Omit<HydratedPreview, 'tokenHash'> & {
   previewToken: string;
 };
@@ -74,6 +89,11 @@ function reuseKey(
   leagueType: LeagueType,
 ): string {
   return `llm:tournament:preview:reuse:${seasonCode}:${ownerEntryId}:${leagueType}:${leagueId}`;
+}
+
+function fetchLockKey(reuseCacheKey: string): string {
+  const digest = createHash('sha256').update(reuseCacheKey).digest('hex');
+  return `llm:tournament:preview:fetch-lock:${digest}`;
 }
 
 function participantSnapshotKey(
@@ -175,69 +195,98 @@ export async function createTournamentPreview(input: {
 
   const promise = (async () => {
     const redis = await queueRedisSingleton.getClient();
-    const existingTokenHash = await redis.get(key);
-    if (existingTokenHash) {
-      const existing = await redis.get(tokenKey(existingTokenHash));
-      if (existing) {
-        const parsed = JSON.parse(existing) as PreviewStored;
-        const remainingSeconds = Math.ceil((Date.parse(parsed.expiresAt) - Date.now()) / 1000);
-        if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) {
-          await redis.del(tokenKey(existingTokenHash), key);
-        } else {
-          // The raw token is intentionally never persisted. Reissue an opaque
-          // token while reusing the already fetched participant snapshot.
-          const hydrated = await hydratePreview(redis, parsed);
-          if (!hydrated) {
-            await redis.del(tokenKey(existingTokenHash), key);
-          } else {
-            const previewToken = randomBytes(32).toString('base64url');
-            const tokenHash = hashToken(previewToken);
-            const refreshed = {
-              ...hydrated,
-              tokenHash,
-              // Reuse never extends the original snapshot freshness deadline.
-              expiresAt: parsed.expiresAt,
-            };
-            await persistPreviewToken(redis, refreshed, tokenHash, remainingSeconds);
-            await redis.set(key, tokenHash, 'EX', remainingSeconds);
-            // Do not revoke the older token. Its caller may still be within the
-            // advertised five-minute lifetime; both payloads are independently
-            // expiring and remain bound to the same owner/league/season.
-            return { ...refreshed, previewToken };
-          }
-        }
+    const lockKey = fetchLockKey(key);
+    const lockToken = randomBytes(16).toString('hex');
+    let lockOwner =
+      (await redis.set(lockKey, lockToken, 'EX', PREVIEW_FETCH_LOCK_SECONDS, 'NX')) === 'OK';
+    if (!lockOwner) {
+      // Another Web replica owns the upstream fetch. Wait for either its
+      // reusable snapshot or lease expiry, then take the lock and re-check
+      // Redis. This keeps the singleflight boundary shared across replicas.
+      for (let attempt = 0; attempt < PREVIEW_FETCH_WAIT_ATTEMPTS; attempt += 1) {
+        const [snapshotHash, activeLock] = await Promise.all([redis.get(key), redis.get(lockKey)]);
+        if (snapshotHash && !activeLock) break;
+        await new Promise((resolve) => setTimeout(resolve, PREVIEW_FETCH_WAIT_MS));
       }
-      await redis.del(key);
+      lockOwner =
+        (await redis.set(lockKey, lockToken, 'EX', PREVIEW_FETCH_LOCK_SECONDS, 'NX')) === 'OK';
+      if (!lockOwner) {
+        throw new ConflictError(
+          'A league preview is already being fetched. Please retry shortly.',
+          'TOURNAMENT_PREVIEW_IN_PROGRESS',
+        );
+      }
     }
 
-    const source = await fetchLeagueParticipantsById(leagueId, leagueType);
-    const previewToken = randomBytes(32).toString('base64url');
-    const tokenHash = hashToken(previewToken);
-    const expiresAt = new Date(Date.now() + PREVIEW_TTL_SECONDS * 1000).toISOString();
-    const stored: HydratedPreview = {
-      tokenHash,
-      ownerEntryId,
-      seasonCode: season.seasonCode,
-      leagueId: source.leagueId,
-      leagueType: source.leagueType,
-      leagueName: source.leagueName,
-      startEventId: source.startEventId,
-      knockoutRounds: source.knockoutRounds,
-      participants: source.participants,
-      sourceCheckedAt: new Date().toISOString(),
-      expiresAt,
-    };
-    // Keep one immutable participant snapshot per source payload. Each opaque
-    // token stores only metadata and a pointer, avoiding a full roster copy.
-    await persistPreviewToken(redis, stored as HydratedPreview, tokenHash, PREVIEW_TTL_SECONDS);
-    await redis.set(key, tokenHash, 'EX', PREVIEW_TTL_SECONDS);
-    logInfo('Tournament preview ready', {
-      event: 'tournament_preview',
-      outcome: 'ready',
-      participantCount: source.participants.length,
-      sourceCheckedAt: stored.sourceCheckedAt,
-    });
-    return { ...stored, previewToken };
+    try {
+      const existingTokenHash = await redis.get(key);
+      if (existingTokenHash) {
+        const existing = await redis.get(tokenKey(existingTokenHash));
+        if (existing) {
+          const parsed = JSON.parse(existing) as PreviewStored;
+          const remainingSeconds = Math.ceil((Date.parse(parsed.expiresAt) - Date.now()) / 1000);
+          if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) {
+            await redis.del(tokenKey(existingTokenHash), key);
+          } else {
+            // The raw token is intentionally never persisted. Reissue an opaque
+            // token while reusing the already fetched participant snapshot.
+            const hydrated = await hydratePreview(redis, parsed);
+            if (!hydrated) {
+              await redis.del(tokenKey(existingTokenHash), key);
+            } else {
+              const previewToken = randomBytes(32).toString('base64url');
+              const tokenHash = hashToken(previewToken);
+              const refreshed = {
+                ...hydrated,
+                tokenHash,
+                // Reuse never extends the original snapshot freshness deadline.
+                expiresAt: parsed.expiresAt,
+              };
+              await persistPreviewToken(redis, refreshed, tokenHash, remainingSeconds);
+              await redis.set(key, tokenHash, 'EX', remainingSeconds);
+              // Do not revoke the older token. Its caller may still be within the
+              // advertised five-minute lifetime; both payloads are independently
+              // expiring and remain bound to the same owner/league/season.
+              return { ...refreshed, previewToken };
+            }
+          }
+        }
+        await redis.del(key);
+      }
+
+      const source = await fetchLeagueParticipantsById(leagueId, leagueType);
+      const previewToken = randomBytes(32).toString('base64url');
+      const tokenHash = hashToken(previewToken);
+      const expiresAt = new Date(Date.now() + PREVIEW_TTL_SECONDS * 1000).toISOString();
+      const stored: HydratedPreview = {
+        tokenHash,
+        ownerEntryId,
+        seasonCode: season.seasonCode,
+        leagueId: source.leagueId,
+        leagueType: source.leagueType,
+        leagueName: source.leagueName,
+        startEventId: source.startEventId,
+        knockoutRounds: source.knockoutRounds,
+        participants: source.participants,
+        sourceCheckedAt: new Date().toISOString(),
+        expiresAt,
+      };
+      // Keep one immutable participant snapshot per source payload. Each opaque
+      // token stores only metadata and a pointer, avoiding a full roster copy.
+      await persistPreviewToken(redis, stored as HydratedPreview, tokenHash, PREVIEW_TTL_SECONDS);
+      await redis.set(key, tokenHash, 'EX', PREVIEW_TTL_SECONDS);
+      logInfo('Tournament preview ready', {
+        event: 'tournament_preview',
+        outcome: 'ready',
+        participantCount: source.participants.length,
+        sourceCheckedAt: stored.sourceCheckedAt,
+      });
+      return { ...stored, previewToken };
+    } finally {
+      if (lockOwner) {
+        await redis.eval(RELEASE_FETCH_LOCK_SCRIPT, 1, lockKey, lockToken).catch(() => undefined);
+      }
+    }
   })();
   previewInflight.set(key, promise);
   try {
@@ -290,16 +339,38 @@ export async function resolveTournamentPreview(
   return stored;
 }
 
-export async function getPreviewCreatedResult(tokenHash: string): Promise<unknown | null> {
+export async function getPreviewCreatedRecord(
+  tokenHash: string,
+): Promise<PreviewResultRecord | null> {
   const redis = await queueRedisSingleton.getClient();
   const raw = await redis.get(createdKey(tokenHash));
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as unknown;
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'result' in parsed &&
+      ('payloadFingerprint' in parsed || !('tournament' in parsed))
+    ) {
+      const record = parsed as { payloadFingerprint?: unknown; result: unknown };
+      return {
+        payloadFingerprint:
+          typeof record.payloadFingerprint === 'string' ? record.payloadFingerprint : null,
+        result: record.result,
+      };
+    }
+    // Rolling deployments may leave a short-lived legacy raw result. Expose
+    // it as an unbound record so create cannot reuse it for a changed payload.
+    return { payloadFingerprint: null, result: parsed };
   } catch {
     await redis.del(createdKey(tokenHash));
     return null;
   }
+}
+
+export async function getPreviewCreatedResult(tokenHash: string): Promise<unknown | null> {
+  return (await getPreviewCreatedRecord(tokenHash))?.result ?? null;
 }
 
 export async function claimPreviewCreation(tokenHash: string): Promise<'claimed' | 'busy'> {
@@ -328,14 +399,36 @@ export async function waitForPreviewCreatedResult(
   return getPreviewCreatedResult(tokenHash);
 }
 
+export async function waitForPreviewCreatedRecord(
+  tokenHash: string,
+  timeoutMs = 2_000,
+): Promise<PreviewResultRecord | null> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const result = await getPreviewCreatedRecord(tokenHash);
+    if (result) return result;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  return getPreviewCreatedRecord(tokenHash);
+}
+
 export async function releasePreviewCreationClaim(tokenHash: string): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
   await redis.del(creationClaimKey(tokenHash));
 }
 
-export async function markPreviewCreatedResult(tokenHash: string, result: unknown): Promise<void> {
+export async function markPreviewCreatedResult(
+  tokenHash: string,
+  result: unknown,
+  payloadFingerprint?: string,
+): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
-  await redis.set(createdKey(tokenHash), JSON.stringify(result), 'EX', PREVIEW_TTL_SECONDS);
+  await redis.set(
+    createdKey(tokenHash),
+    JSON.stringify({ payloadFingerprint: payloadFingerprint ?? null, result }),
+    'EX',
+    PREVIEW_TTL_SECONDS,
+  );
 }
 
 /**
@@ -344,18 +437,47 @@ export async function markPreviewCreatedResult(tokenHash: string, result: unknow
  * accepted the authoritative setup job.
  */
 export async function getPreviewQueuedResult(tokenHash: string): Promise<unknown | null> {
+  return (await getPreviewQueuedRecord(tokenHash))?.result ?? null;
+}
+
+export async function getPreviewQueuedRecord(
+  tokenHash: string,
+): Promise<PreviewResultRecord | null> {
   const redis = await queueRedisSingleton.getClient();
   const raw = await redis.get(queuedKey(tokenHash));
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as unknown;
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'result' in parsed &&
+      ('payloadFingerprint' in parsed || !('tournament' in parsed))
+    ) {
+      const record = parsed as { payloadFingerprint?: unknown; result: unknown };
+      return {
+        payloadFingerprint:
+          typeof record.payloadFingerprint === 'string' ? record.payloadFingerprint : null,
+        result: record.result,
+      };
+    }
+    return { payloadFingerprint: null, result: parsed };
   } catch {
     await redis.del(queuedKey(tokenHash));
     return null;
   }
 }
 
-export async function markPreviewQueuedResult(tokenHash: string, result: unknown): Promise<void> {
+export async function markPreviewQueuedResult(
+  tokenHash: string,
+  result: unknown,
+  payloadFingerprint?: string,
+): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
-  await redis.set(queuedKey(tokenHash), JSON.stringify(result), 'EX', PREVIEW_TTL_SECONDS);
+  await redis.set(
+    queuedKey(tokenHash),
+    JSON.stringify({ payloadFingerprint: payloadFingerprint ?? null, result }),
+    'EX',
+    PREVIEW_TTL_SECONDS,
+  );
 }

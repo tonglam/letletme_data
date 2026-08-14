@@ -184,7 +184,6 @@ export const tournamentRosterRepository = {
       UPDATE competition.tournaments
       SET roster_sync_status = 'processing',
           roster_sync_error = NULL,
-          setup_progress_updated_at = now(),
           updated_at = now()
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
@@ -196,6 +195,29 @@ export const tournamentRosterRepository = {
       RETURNING tournament_id AS "tournamentId"
     `;
     return rows.length === 1;
+  },
+
+  /**
+   * A resume setup worker owns the lifecycle marker for the duration of its
+   * attempt. Setup progress/error writes use their own timestamps, so restore
+   * the marker before BullMQ retries; otherwise the next attempt would look
+   * stale and silently abandon the retry.
+   */
+  restoreSetupProgressMarker: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    marker: string,
+  ): Promise<void> => {
+    const client = await getDbClient();
+    await client`
+      UPDATE competition.tournaments
+      SET setup_progress_updated_at = ${marker}::timestamptz,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND state = 'inactive'
+        AND setup_status IN ('pending', 'processing', 'failed')
+    `;
   },
 
   markSyncFailed: async (

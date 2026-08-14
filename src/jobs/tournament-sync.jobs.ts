@@ -475,6 +475,7 @@ export const enqueueTournamentRosterReconcile = async (
     options?.resumeMarker,
     options?.allowInactive,
     options?.operationId,
+    options?.expectedProgressMarker,
   );
   const stableJobId = `${season.seasonCode}-${logicalJobId}`;
 
@@ -513,12 +514,15 @@ export async function findTournamentRosterReconcileJob(
   tournamentId: number,
   resumeAfterSetup: boolean,
   resumeMarker?: string,
+  expectedProgressMarker?: string | null,
 ) {
   const logicalJobId = getTournamentRosterReconcileLogicalJobId(
     tournamentId,
     resumeAfterSetup,
     resumeMarker,
     undefined,
+    undefined,
+    expectedProgressMarker,
   );
   return tournamentSyncQueue.getJob(`${season.seasonCode}-${logicalJobId}`);
 }
@@ -529,9 +533,14 @@ function getTournamentRosterReconcileLogicalJobId(
   resumeMarker?: string,
   allowInactive?: boolean,
   operationId?: string,
+  expectedProgressMarker?: string | null,
 ): string {
   if (operationId) return `tournament-roster-reconcile-${tournamentId}-${operationId}`;
   if (!resumeAfterSetup) {
+    if (expectedProgressMarker !== undefined) {
+      const markerPart = (expectedProgressMarker ?? 'no-marker').replace(/[^a-zA-Z0-9_-]/g, '_');
+      return `tournament-roster-reconcile-sync-${allowInactive ? 'inactive' : 'active'}-${tournamentId}-${markerPart}`;
+    }
     return `tournament-roster-reconcile-sync-${allowInactive ? 'inactive' : 'active'}-${tournamentId}`;
   }
   const markerPart = (resumeMarker ?? 'missing-marker').replace(/[^a-zA-Z0-9_-]/g, '_');

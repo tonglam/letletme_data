@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   normalizeTournamentName,
   parseGameweek,
@@ -21,14 +23,14 @@ import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
 import { fetchLeagueParticipants } from './tournament-league-members.service';
 import {
-  getPreviewCreatedResult,
+  getPreviewCreatedRecord,
   claimPreviewCreation,
   markPreviewCreatedResult,
-  getPreviewQueuedResult,
   markPreviewQueuedResult,
   releasePreviewCreationClaim,
   resolveTournamentPreview,
-  waitForPreviewCreatedResult,
+  waitForPreviewCreatedRecord,
+  getPreviewQueuedRecord,
 } from './tournament-preview.service';
 
 export { tournamentCreateInputSchema, validateTournamentCreateInput };
@@ -125,6 +127,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           error,
         );
       }
+      const payloadFingerprint = previewPayloadFingerprint(payload);
       const startEventId = parseGameweek(payload.startGameweek);
       const endEventId = parseGameweek(payload.endGameweek);
       eventCount = startEventId && endEventId ? Math.max(0, endEventId - startEventId + 1) : 0;
@@ -137,7 +140,10 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         : null;
       previewTokenHash = preview?.tokenHash ?? null;
       if (preview) {
-        const created = await getPreviewCreatedResult(preview.tokenHash);
+        const created = unwrapPreviewResult(
+          await getPreviewCreatedRecord(preview.tokenHash),
+          payloadFingerprint,
+        );
         if (created && typeof created === 'object' && 'tournament' in created) {
           report('queued', 'pending', null);
           return created as {
@@ -154,7 +160,10 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         }
         const claim = await claimPreviewCreation(preview.tokenHash);
         if (claim === 'busy') {
-          const concurrent = await waitForPreviewCreatedResult(preview.tokenHash);
+          const concurrent = unwrapPreviewResult(
+            await waitForPreviewCreatedRecord(preview.tokenHash),
+            payloadFingerprint,
+          );
           if (concurrent && typeof concurrent === 'object' && 'tournament' in concurrent) {
             report('queued', 'pending', null);
             return concurrent as {
@@ -178,7 +187,10 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           // operations. Recheck after claiming so a retry that was suspended
           // between them cannot become a second writer after the first request
           // has already published its result and released the claim.
-          const claimedCreated = await getPreviewCreatedResult(preview.tokenHash);
+          const claimedCreated = unwrapPreviewResult(
+            await getPreviewCreatedRecord(preview.tokenHash),
+            payloadFingerprint,
+          );
           if (
             claimedCreated &&
             typeof claimedCreated === 'object' &&
@@ -237,11 +249,14 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         // this preview token's single-writer claim. A fresh token with the
         // same mutable tournament name must not attach to an older tournament.
         if (preview && previewCreationBusy) {
-          const queued = await getPreviewQueuedResult(preview.tokenHash);
+          const queued = unwrapPreviewResult(
+            await getPreviewQueuedRecord(preview.tokenHash),
+            payloadFingerprint,
+          );
           if (queued && typeof queued === 'object' && 'tournament' in queued) {
             let resultRepaired = false;
             try {
-              await markPreviewCreatedResult(preview.tokenHash, queued);
+              await markPreviewCreatedResult(preview.tokenHash, queued, payloadFingerprint);
               resultRepaired = true;
             } catch (error) {
               logInfo('Unable to repair tournament preview idempotency result', {
@@ -328,7 +343,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       if (previewTokenHash) {
         let createdResultCached = false;
         try {
-          await markPreviewCreatedResult(previewTokenHash, result);
+          await markPreviewCreatedResult(previewTokenHash, result, payloadFingerprint);
           createdResultCached = true;
         } catch (error) {
           logInfo('Unable to persist tournament preview created result', {
@@ -341,7 +356,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           // Publish operation evidence only after the authoritative queue add
           // has succeeded. A concurrent retry must never infer success from a
           // PostgreSQL row whose setup job is still stalled or unpublished.
-          await markPreviewQueuedResult(previewTokenHash, result);
+          await markPreviewQueuedResult(previewTokenHash, result, payloadFingerprint);
         } catch (error) {
           logInfo('Unable to persist tournament preview idempotency result', {
             event: 'tournament_preview_result_cache_failed',
@@ -389,4 +404,38 @@ function safeCreationErrorCode(error: unknown): string {
     return error.code;
   }
   return error instanceof Error ? error.name : 'UNKNOWN_ERROR';
+}
+
+function previewPayloadFingerprint(payload: TournamentCreateInput): string {
+  const canonical = {
+    tournamentName: payload.tournamentName,
+    adminId: payload.adminId,
+    creator: payload.creator,
+    participantSource: payload.participantSource,
+    tournamentType: payload.tournamentType ?? null,
+    leagueUrl: payload.leagueUrl,
+    groupFormat: payload.groupFormat,
+    startGameweek: payload.startGameweek.toUpperCase(),
+    endGameweek: payload.endGameweek.toUpperCase(),
+    groupNum: payload.groupNum ?? '',
+    qualifiersPerGroup: payload.qualifiersPerGroup ?? '',
+    knockoutFormat: payload.knockoutFormat,
+    selectedParticipantIds: [...(payload.selectedParticipantIds ?? [])].sort(),
+  };
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+function unwrapPreviewResult(
+  record: { payloadFingerprint: string | null; result: unknown } | null,
+  fingerprint: string,
+): unknown | null {
+  if (!record || !record.result || typeof record.result !== 'object') return null;
+  if (!('tournament' in record.result)) return null;
+  if (record.payloadFingerprint !== fingerprint) {
+    throw new ConflictError(
+      'This preview token was already used with a different tournament payload.',
+      'PREVIEW_PAYLOAD_MISMATCH',
+    );
+  }
+  return record.result;
 }
