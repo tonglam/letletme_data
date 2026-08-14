@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 
 import {
+  datasetPublicationItemsInOps,
   datasetPublicationsInOps,
   syncItemsInOps,
   syncRunsInOps,
@@ -65,6 +66,13 @@ export interface PreparedDatasetPublication {
   readonly publicationId: string;
   readonly revision: number;
   readonly status: string;
+}
+
+export interface DatasetPublicationItemInput {
+  readonly name: 'eventLive' | 'fixtures';
+  readonly payload: unknown;
+  readonly count: number;
+  readonly checksum: string;
 }
 
 const NON_TERMINAL_RUN_STATUSES: readonly SyncRunStatus[] = [
@@ -402,6 +410,73 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       };
     },
 
+    stagePublicationItems: async (
+      publicationId: string,
+      items: readonly DatasetPublicationItemInput[],
+    ): Promise<void> => {
+      if (items.length !== 2 || new Set(items.map((item) => item.name)).size !== 2) {
+        throw new DatabaseError(
+          'Live publication must stage exactly eventLive and fixtures',
+          'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
+        );
+      }
+      const db = await getDbInstance();
+      await db
+        .insert(datasetPublicationItemsInOps)
+        .values(
+          items.map((item) => ({
+            publicationId,
+            itemName: item.name,
+            payload: item.payload,
+            itemCount: item.count,
+            checksum: item.checksum,
+          })),
+        )
+        .onConflictDoUpdate({
+          target: [
+            datasetPublicationItemsInOps.publicationId,
+            datasetPublicationItemsInOps.itemName,
+          ],
+          set: {
+            payload: sql`excluded.payload`,
+            itemCount: sql`excluded.item_count`,
+            checksum: sql`excluded.checksum`,
+          },
+        });
+    },
+
+    assertPublicationItemsComplete: async (
+      publicationId: string,
+      expected: readonly DatasetPublicationItemInput[],
+    ): Promise<void> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          itemName: datasetPublicationItemsInOps.itemName,
+          itemCount: datasetPublicationItemsInOps.itemCount,
+          checksum: datasetPublicationItemsInOps.checksum,
+        })
+        .from(datasetPublicationItemsInOps)
+        .where(eq(datasetPublicationItemsInOps.publicationId, publicationId));
+      if (
+        rows.length !== expected.length ||
+        expected.some(
+          (item) =>
+            !rows.some(
+              (row) =>
+                row.itemName === item.name &&
+                row.itemCount === item.count &&
+                row.checksum === item.checksum,
+            ),
+        )
+      ) {
+        throw new DatabaseError(
+          `Publication ${publicationId} does not contain a complete live item set`,
+          'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
+        );
+      }
+    },
+
     activatePublication: async (input: {
       publicationId: string;
       dataset: DataPublicationDataset;
@@ -461,6 +536,36 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           eventId: input.eventId,
           revision: targetRow.revision,
         });
+
+        if (input.dataset === 'fpl:live') {
+          const itemRows = await tx
+            .select({
+              itemName: datasetPublicationItemsInOps.itemName,
+              itemCount: datasetPublicationItemsInOps.itemCount,
+              checksum: datasetPublicationItemsInOps.checksum,
+            })
+            .from(datasetPublicationItemsInOps)
+            .where(eq(datasetPublicationItemsInOps.publicationId, input.publicationId));
+          const manifestItems = input.manifest.items;
+          if (
+            itemRows.length !== 2 ||
+            manifestItems.length !== 2 ||
+            manifestItems.some(
+              (item) =>
+                !itemRows.some(
+                  (row) =>
+                    row.itemName === item.name &&
+                    row.itemCount === item.count &&
+                    row.checksum === item.sha256,
+                ),
+            )
+          ) {
+            throw new DatabaseError(
+              'Live publication item proof is incomplete',
+              'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
+            );
+          }
+        }
 
         const activeRows = await tx
           .select({

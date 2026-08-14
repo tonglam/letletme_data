@@ -29,7 +29,8 @@ async function hasSupersedingPendingJob(
 }
 
 export function liveSnapshotMinuteBucket(date: Date): string {
-  return date.toISOString().slice(0, 16).replace(/\D/g, '');
+  const seconds = Math.floor(date.getUTCSeconds() / 30) * 30;
+  return `${date.toISOString().slice(0, 16).replace(/\D/g, '')}${String(seconds).padStart(2, '0')}`;
 }
 
 export async function enqueueLiveSnapshot(

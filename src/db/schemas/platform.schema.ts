@@ -309,6 +309,40 @@ export const datasetPublicationsInOps = ops.table(
   ],
 );
 
+export const datasetPublicationItemsInOps = ops.table(
+  'dataset_publication_items',
+  {
+    publicationId: uuid('publication_id').notNull(),
+    itemName: text('item_name').notNull(),
+    payload: jsonb().notNull(),
+    itemCount: integer('item_count').notNull(),
+    checksum: text().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.publicationId, table.itemName] }),
+    foreignKey({
+      columns: [table.publicationId],
+      foreignColumns: [datasetPublicationsInOps.publicationId],
+      name: 'dataset_publication_items_publication_fk',
+    }).onDelete('cascade'),
+    index('dataset_publication_items_publication_idx').using(
+      'btree',
+      table.publicationId.asc().nullsLast(),
+    ),
+    check(
+      'dataset_publication_items_name_valid',
+      sql`item_name = ANY (ARRAY['eventLive'::text, 'fixtures'::text])`,
+    ),
+    check('dataset_publication_items_count_nonnegative', sql`item_count >= 0`),
+    check('dataset_publication_items_checksum_nonempty', sql`btrim(checksum) <> ''::text`),
+    check(
+      'dataset_publication_items_payload_shape',
+      sql`jsonb_typeof(payload) = ANY (ARRAY['array'::text, 'object'::text])`,
+    ),
+  ],
+);
+
 export const schemaMigrationsInOps = ops.table(
   'schema_migrations',
   {
@@ -3106,6 +3140,10 @@ export const eventsInFpl = fpl.table(
     dataCheckedAt: timestamp('data_checked_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    liveFactsPersistedAt: timestamp('live_facts_persisted_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
   },
   (table) => [
     index('events_current_flags_idx').using(

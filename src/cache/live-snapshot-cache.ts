@@ -1,8 +1,6 @@
 import type Redis from 'ioredis';
 
 import type { EventLive } from '../domain/event-lives';
-import type { LiveBonusByTeam } from '../domain/live-bonus';
-import type { LiveFixturesByTeam } from '../domain/live-fixtures';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
 import type { Fixture } from '../types';
 import {
@@ -19,8 +17,6 @@ export interface LiveSnapshotCachePayload {
   readonly state: LiveSnapshotState;
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
-  readonly liveFixtures: LiveFixturesByTeam;
-  readonly liveBonus: LiveBonusByTeam;
 }
 
 export interface LiveSnapshotCacheContents extends LiveSnapshotCachePayload {
@@ -56,10 +52,8 @@ export async function publishLiveSnapshotCache(
       sourceCheckedAt: options.sourceCheckedAt,
       state: payload.state,
       items: [
-        { name: 'eventLives', value: payload.eventLives },
+        { name: 'eventLive', value: payload.eventLives },
         { name: 'fixtures', value: payload.fixtures },
-        { name: 'liveFixtures', value: payload.liveFixtures },
-        { name: 'liveBonus', value: payload.liveBonus },
       ],
     },
     options,
@@ -85,12 +79,8 @@ export async function readLiveSnapshotCache(
   if (!publication) return null;
   const { items, manifest } = publication;
   if (
-    !Array.isArray(items.eventLives) ||
+    !Array.isArray(items.eventLive) ||
     !Array.isArray(items.fixtures) ||
-    !items.liveFixtures ||
-    typeof items.liveFixtures !== 'object' ||
-    !items.liveBonus ||
-    typeof items.liveBonus !== 'object' ||
     (manifest.state !== 'scheduled' && manifest.state !== 'live' && manifest.state !== 'settled')
   ) {
     return null;
@@ -101,10 +91,8 @@ export async function readLiveSnapshotCache(
     season,
     eventId,
     state: manifest.state,
-    eventLives: items.eventLives as EventLive[],
+    eventLives: items.eventLive as EventLive[],
     fixtures: items.fixtures as Fixture[],
-    liveFixtures: items.liveFixtures as LiveFixturesByTeam,
-    liveBonus: items.liveBonus as LiveBonusByTeam,
   };
 }
 

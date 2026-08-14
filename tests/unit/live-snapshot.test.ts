@@ -91,7 +91,7 @@ describe('live snapshot preparation', () => {
     );
   });
 
-  test('derives every live view and fixture-scoped bonus from one upstream pair', () => {
+  test('publishes only official event-live totals and fixtures from one upstream pair', () => {
     const prepared = prepareLiveSnapshot(
       1,
       mockEventLiveResponseFixture,
@@ -104,12 +104,10 @@ describe('live snapshot preparation', () => {
     expect(prepared.eventId).toBe(1);
     expect(prepared.state).toBe('live');
     expect(prepared.eventLives.eventLives).toHaveLength(3);
-    expect(prepared.liveFixtures['12'].Playing[0].fixtureId).toBe(1);
-    expect(prepared.liveFixtures['4'].Playing[0].againstId).toBe(12);
-    expect(prepared.liveBonus).toEqual({
-      '4': { '234': 2 },
-      '12': { '350': 3, '567': 1 },
-    });
+    expect(prepared.fixtures).toHaveLength(1);
+    expect(prepared.eventLives.eventLives.find((row) => row.elementId === 350)?.totalPoints).toBe(
+      15,
+    );
   });
 
   test('derives scheduled, live, and settled state only from the fixture batch', () => {

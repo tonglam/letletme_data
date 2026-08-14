@@ -93,37 +93,43 @@ describe('tournament league membership import', () => {
     ).rejects.toMatchObject({ code: 'TOURNAMENT_LEAGUE_EMPTY' });
   });
 
-  test('enforces the complete-roster 100-page safety bound', async () => {
-    let calls = 0;
-    globalThis.fetch = mock(async () => {
-      calls += 1;
-      return new Response(
-        JSON.stringify({
-          league: { id: 8863, name: 'Huge League', start_event: 1, scoring: 'c' },
-          standings: {
-            page: calls,
-            has_next: true,
-            results: [
-              {
-                entry: calls,
-                entry_name: `Team ${calls}`,
-                player_name: `Manager ${calls}`,
-                rank: calls,
-                total: 0,
-              },
-            ],
-          },
-          new_entries: { page: calls, has_next: false, results: [] },
-        }),
-        { status: 200 },
-      );
-    }) as unknown as typeof fetch;
+  test(
+    'enforces the complete-roster 100-page safety bound',
+    async () => {
+      let calls = 0;
+      globalThis.fetch = mock(async () => {
+        calls += 1;
+        return new Response(
+          JSON.stringify({
+            league: { id: 8863, name: 'Huge League', start_event: 1, scoring: 'c' },
+            standings: {
+              page: calls,
+              has_next: true,
+              results: [
+                {
+                  entry: calls,
+                  entry_name: `Team ${calls}`,
+                  player_name: `Manager ${calls}`,
+                  rank: calls,
+                  total: 0,
+                },
+              ],
+            },
+            new_entries: { page: calls, has_next: false, results: [] },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch;
 
-    await expect(
-      fetchLeagueParticipants('https://fantasy.premierleague.com/leagues/8863/standings/c'),
-    ).rejects.toBeInstanceOf(ValidationError);
-    expect(calls).toBe(100);
-  });
+      await expect(
+        fetchLeagueParticipants('https://fantasy.premierleague.com/leagues/8863/standings/c'),
+      ).rejects.toBeInstanceOf(ValidationError);
+      expect(calls).toBe(100);
+    },
+    // The production FPL admission gate intentionally spaces 100 sequential
+    // upstream pages at four requests per second.
+    { timeout: 35_000 },
+  );
 
   test('allows a duplicate-only page when its cursor content still advances', async () => {
     let calls = 0;

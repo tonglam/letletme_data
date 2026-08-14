@@ -136,7 +136,7 @@ describe('live-data manual job IDs', () => {
     });
 
     expect(job).not.toBeNull();
-    expect(job!.id).toBe('live-snapshot-2627-e10-202608091234-persist');
+    expect(job!.id).toBe('live-snapshot-2627-e10-20260809123400-persist');
     expect(job!.id).not.toBe('live-snapshot-2627-e10-manual-persist');
     // Cron jobs keep queue-level retention (no per-job cleanup override)
     expect(liveDataAddCalls[0].opts.removeOnComplete).toBeUndefined();

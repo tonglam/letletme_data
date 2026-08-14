@@ -89,16 +89,16 @@ describe('coherent live-snapshot enqueue', () => {
     expect(addCalls).toHaveLength(1);
   });
 
-  test('uses a deterministic minute bucket and separates cache from durable work', async () => {
+  test('uses a deterministic 30-second bucket and separates cache from durable work', async () => {
     const now = new Date('2026-08-09T12:34:56.000Z');
-    expect(liveSnapshotMinuteBucket(now)).toBe('202608091234');
+    expect(liveSnapshotMinuteBucket(now)).toBe('20260809123430');
 
     const cacheOnly = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', { now });
     const durable = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
       now,
       persistEventLives: true,
     });
-    expect(cacheOnly?.id).toBe('live-snapshot-2627-e12-202608091234-cache');
-    expect(durable?.id).toBe('live-snapshot-2627-e12-202608091234-persist');
+    expect(cacheOnly?.id).toBe('live-snapshot-2627-e12-20260809123430-cache');
+    expect(durable?.id).toBe('live-snapshot-2627-e12-20260809123430-persist');
   });
 });

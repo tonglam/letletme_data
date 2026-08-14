@@ -85,7 +85,9 @@ export function createLiveDataWorker(): WorkerRuntime {
   const connection = getQueueConnection();
   const worker = new Worker<LiveDataJobData>(liveDataQueueName, processLiveDataJob, {
     connection,
-    concurrency: 5,
+    // Publication persistence owns the small DB pool; FPL request admission
+    // separately caps the host at five and reserves live slots.
+    concurrency: 2,
     removeOnComplete: { count: 100 },
     removeOnFail: { count: 50 },
     lockDuration: 120_000,

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { and, eq, isNull, lte, or } from 'drizzle-orm';
 
@@ -15,8 +15,6 @@ import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import type { DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { computeFixtureSummedBonusByTeam, type LiveBonusByTeam } from '../domain/live-bonus';
-import type { LiveFixturesByTeam } from '../domain/live-fixtures';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
 import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
 import { createPlayerRepository } from '../repositories/players';
@@ -31,12 +29,7 @@ import {
   prepareEventLives,
   type PreparedEventLives,
 } from './event-lives.service';
-import { serializeBonusByTeam } from './live-bonus.service';
-import {
-  buildLiveFixturesByTeam,
-  createLiveFixtureTeamMaps,
-  type LiveFixtureTeamMaps,
-} from './live-fixtures.service';
+import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 
@@ -50,8 +43,6 @@ export interface PreparedLiveSnapshot {
   readonly eventId: number;
   readonly eventLives: PreparedEventLives;
   readonly fixtures: Fixture[];
-  readonly liveFixtures: LiveFixturesByTeam;
-  readonly liveBonus: LiveBonusByTeam;
   readonly state: LiveSnapshotState;
 }
 
@@ -87,6 +78,20 @@ export interface LiveSnapshotDurablePersistenceResult {
   readonly persistedEventLives: boolean;
 }
 
+function publicationItemProof(name: 'eventLive' | 'fixtures', payload: unknown) {
+  const serialized = JSON.stringify(payload);
+  return {
+    name,
+    payload,
+    count: Array.isArray(payload)
+      ? payload.length
+      : payload && typeof payload === 'object'
+        ? Object.keys(payload).length
+        : 1,
+    checksum: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+  } as const;
+}
+
 export interface LiveSnapshotDependencies {
   readonly getEventLive: (eventId: number) => Promise<RawFPLEventLiveResponse>;
   readonly getFixtures: (eventId: number) => Promise<RawFPLFixture[]>;
@@ -113,12 +118,14 @@ export interface LiveSnapshotSyncOptions {
   readonly dependencies?: LiveSnapshotDependencies;
 }
 
-function fixtureTeamCount(fixtures: LiveFixturesByTeam): number {
-  return Object.keys(fixtures).length;
+function fixtureTeamCount(fixtures: readonly Fixture[]): number {
+  return new Set(fixtures.flatMap((fixture) => [fixture.teamH, fixture.teamA])).size;
 }
 
-function bonusTeamCount(bonus: LiveBonusByTeam): number {
-  return Object.keys(bonus).length;
+function bonusTeamCount(): number {
+  // Official event-live totals already include projected/final bonus.  There is
+  // intentionally no locally calculated bonus publication anymore.
+  return 0;
 }
 
 export function buildCurrentSeasonPlayerTeamMap(
@@ -179,6 +186,7 @@ export async function loadLiveSnapshotReferenceData(
 }
 
 function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
+  if (fixtures.length === 0) return 'scheduled';
   if (
     fixtures.some(
       (fixture) => fixture.started === true && !fixture.finished && !fixture.finishedProvisional,
@@ -226,7 +234,7 @@ export function prepareLiveSnapshot(
     );
   }
 
-  if (!Array.isArray(rawFixtures) || rawFixtures.length === 0) {
+  if (!Array.isArray(rawFixtures)) {
     throw new Error('FPL fixtures response contains no fixtures');
   }
   const wrongEventFixture = rawFixtures.find(
@@ -237,10 +245,13 @@ export function prepareLiveSnapshot(
   }
   const rawFixtureIds = rawFixtures.map((fixture) => fixture.id);
   const expectedIds = [...expectedFixtureIds];
+  if (expectedIds.length === 0 && rawFixtureIds.length > 0) {
+    throw new Error(`Unexpected fixtures for blank gameweek event ${eventId}`);
+  }
   if (
-    expectedIds.length === 0 ||
-    new Set(rawFixtureIds).size !== rawFixtureIds.length ||
-    new Set(expectedIds).size !== expectedIds.length
+    expectedIds.length > 0 &&
+    (new Set(rawFixtureIds).size !== rawFixtureIds.length ||
+      new Set(expectedIds).size !== expectedIds.length)
   ) {
     throw new Error(`Invalid fixture identity baseline for live snapshot event ${eventId}`);
   }
@@ -274,16 +285,11 @@ export function prepareLiveSnapshot(
   ) {
     throw new Error(`Incomplete fixture transformation for live snapshot event ${eventId}`);
   }
-  const liveFixtures = buildLiveFixturesByTeam(fixtures, referenceData);
-  const liveBonus = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
-
   return {
     season: referenceData.season,
     eventId,
     eventLives,
     fixtures,
-    liveFixtures,
-    liveBonus,
     state: resolveSnapshotState(fixtures),
   };
 }
@@ -353,6 +359,10 @@ export async function persistLiveSnapshotDurably(
     }
     if (request.persistEventLives) {
       await persistPreparedEventLives(season, prepared.eventLives, transaction);
+      await transaction
+        .update(eventsInFpl)
+        .set({ liveFactsPersistedAt: checkedAt })
+        .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)));
     }
     if (request.finalizeEvent) {
       const finalized = await transaction
@@ -403,8 +413,6 @@ function toCachePayload(prepared: PreparedLiveSnapshot): LiveSnapshotCachePayloa
     state: prepared.state,
     eventLives: prepared.eventLives.eventLives,
     fixtures: prepared.fixtures,
-    liveFixtures: prepared.liveFixtures,
-    liveBonus: prepared.liveBonus,
   };
 }
 
@@ -420,9 +428,7 @@ function snapshotContentMatches(
     active &&
       active.state === candidate.state &&
       sameJson(active.eventLives, candidate.eventLives) &&
-      sameJson(active.fixtures, candidate.fixtures) &&
-      sameJson(active.liveFixtures, candidate.liveFixtures) &&
-      sameJson(active.liveBonus, candidate.liveBonus),
+      sameJson(active.fixtures, candidate.fixtures),
   );
 }
 
@@ -526,14 +532,20 @@ export async function syncLiveSnapshot(
 
     if (!changed) {
       let persistedEventLives = false;
-      if (options.persistEventLives || options.finalizeEvent) {
+      // A stable upstream checksum is a no-op for the publication and for the
+      // durable facts tables.  DAY_SETTLING may request durable persistence,
+      // but repeating that write every minute would turn an unchanged poll
+      // into needless PostgreSQL traffic.  Finalization is the only explicit
+      // exception: it records the final authoritative snapshot even when the
+      // last live poll was unchanged.
+      if (options.finalizeEvent) {
         const durable = await dependencies.persistDurably({
           season,
           eventId,
           checkedAt,
           prepared,
           persistFixtures: false,
-          persistEventLives: options.persistEventLives === true,
+          persistEventLives: true,
           finalizeEvent: options.finalizeEvent,
         });
         persistedEventLives = durable.persistedEventLives;
@@ -553,8 +565,8 @@ export async function syncLiveSnapshot(
         state: prepared.state,
         eventLiveCount: prepared.eventLives.eventLives.length,
         fixtureCount: prepared.fixtures.length,
-        fixtureTeamCount: fixtureTeamCount(prepared.liveFixtures),
-        bonusTeamCount: bonusTeamCount(prepared.liveBonus),
+        fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
+        bonusTeamCount: bonusTeamCount(),
         persistedFixtures: false,
         persistedEventLives,
       };
@@ -580,13 +592,22 @@ export async function syncLiveSnapshot(
       revision: staging.revision,
       publicationId: staging.publicationId,
       sourceCheckedAt: checkedAt,
+      afterStage: async (manifest) => {
+        await syncOperationsRepository.stagePublicationItems(staging.publicationId, [
+          publicationItemProof('eventLive', prepared.eventLives.eventLives),
+          publicationItemProof('fixtures', prepared.fixtures),
+        ]);
+        if (manifest.items.some((item) => item.name !== 'eventLive' && item.name !== 'fixtures')) {
+          throw new DatabaseError('Live publication contains unsupported items');
+        }
+      },
       beforeActivate: async () => {
         const durable = await dependencies.persistDurably({
           season,
           eventId,
           checkedAt,
           prepared,
-          persistFixtures: true,
+          persistFixtures: options.persistEventLives === true || options.finalizeEvent === true,
           persistEventLives: options.persistEventLives === true,
           finalizeEvent: options.finalizeEvent,
         });
@@ -615,8 +636,8 @@ export async function syncLiveSnapshot(
         state: prepared.state,
         eventLiveCount: prepared.eventLives.eventLives.length,
         fixtureCount: prepared.fixtures.length,
-        fixtureTeamCount: fixtureTeamCount(prepared.liveFixtures),
-        bonusTeamCount: bonusTeamCount(prepared.liveBonus),
+        fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
+        bonusTeamCount: bonusTeamCount(),
         persistedFixtures,
         persistedEventLives,
       };
@@ -640,8 +661,8 @@ export async function syncLiveSnapshot(
       state: prepared.state,
       eventLiveCount: prepared.eventLives.eventLives.length,
       fixtureCount: prepared.fixtures.length,
-      fixtureTeamCount: fixtureTeamCount(prepared.liveFixtures),
-      bonusTeamCount: bonusTeamCount(prepared.liveBonus),
+      fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
+      bonusTeamCount: bonusTeamCount(),
       persistedFixtures,
       persistedEventLives,
     };
