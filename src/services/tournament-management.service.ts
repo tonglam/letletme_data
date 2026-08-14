@@ -16,6 +16,8 @@ import {
 } from './tournament-materialized-views.service';
 import { refreshTournamentSelectionStatsMaterializedView } from './tournament-selection-stats.service';
 import { enqueueTournamentRosterReconcile } from '../jobs/tournament-sync.jobs';
+import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { assertTournamentRosterPreGameweekBoundary } from './tournament-roster.service';
 
 const updateTournamentSchema = z.object({
@@ -205,28 +207,42 @@ export function createTournamentManagementService(
       }
 
       if (current.rosterMode === 'official_sync') {
-        await assertTournamentRosterPreGameweekBoundary(season);
-        // Publish the cancellable intent before queueing. A newer pause changes
-        // this marker back to ready, so a queued worker can never reactivate a
-        // tournament after the owner has paused it.
-        const resumeMarker = await tournamentRosterRepository.markResumeProcessingWithMarker(
-          season,
-          tournamentId,
+        // Serialize marker publication with any older roster reconciliation.
+        // Otherwise that worker can finish after this activation and overwrite
+        // the new marker, causing the queued resume to skip and leaving the
+        // tournament inactive despite a successful activation.
+        await withMutationConflictGuard(
+          {
+            queueName: 'tournament-management',
+            jobName: 'tournament-resume',
+            tournamentId,
+            scopes: [tournamentSetupLifecycleScope(tournamentId)],
+          },
+          async () => {
+            await assertTournamentRosterPreGameweekBoundary(season);
+            // Publish the cancellable intent before queueing. A newer pause
+            // changes this marker back to ready, so a queued worker can never
+            // reactivate a tournament after the owner has paused it.
+            const resumeMarker = await tournamentRosterRepository.markResumeProcessingWithMarker(
+              season,
+              tournamentId,
+            );
+            try {
+              await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+                resumeAfterSetup: true,
+                resumeMarker,
+                allowInactive: true,
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : 'Unable to enqueue resume.';
+              await Promise.allSettled([
+                tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
+                tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message),
+              ]);
+              throw error;
+            }
+          },
         );
-        try {
-          await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
-            resumeAfterSetup: true,
-            resumeMarker,
-            allowInactive: true,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unable to enqueue resume.';
-          await Promise.allSettled([
-            tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
-            tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message),
-          ]);
-          throw error;
-        }
       } else {
         const { enqueueTournamentSetup } = await import('../jobs/tournament-setup.jobs');
         await requestSnapshotTournamentResume(tournamentId, {
