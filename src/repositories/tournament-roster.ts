@@ -221,6 +221,33 @@ export const tournamentRosterRepository = {
     `;
   },
 
+  markResumeProcessingIfPending: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+  ): Promise<boolean> => {
+    const client = await getDbClient();
+    const rows = await client<{ tournamentId: number }[]>`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'processing',
+          roster_sync_error = NULL,
+          setup_status = 'pending',
+          setup_phase = 'queued',
+          setup_error = NULL,
+          setup_warning_count = 0,
+          setup_completed_units = 0,
+          setup_total_units = 0,
+          setup_progress_updated_at = now(),
+          standings_ready_at = NULL,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND state = 'inactive'
+        AND roster_sync_status = 'processing'
+      RETURNING tournament_id AS "tournamentId"
+    `;
+    return rows.length === 1;
+  },
+
   publishAuthoritativeRoster: async (
     season: FplSeasonRef,
     tournament: TournamentRosterRecord,

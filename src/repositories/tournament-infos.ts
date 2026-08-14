@@ -363,6 +363,34 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       }
     },
 
+    findCreatedByIdentity: async (
+      season: FplSeasonRef,
+      input: { name: string; adminEntryId: number; leagueId: number },
+    ): Promise<TournamentCreatedRow | null> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          id: tournamentsInCompetition.tournamentId,
+          seasonId: tournamentsInCompetition.seasonId,
+          name: tournamentsInCompetition.name,
+          creator: tournamentsInCompetition.creator,
+          adminEntryId: tournamentsInCompetition.adminEntryId,
+          leagueId: tournamentsInCompetition.leagueId,
+          totalTeamNum: tournamentsInCompetition.totalTeamNum,
+        })
+        .from(tournamentsInCompetition)
+        .where(
+          and(
+            eq(tournamentsInCompetition.seasonId, season.seasonId),
+            eq(tournamentsInCompetition.name, input.name),
+            eq(tournamentsInCompetition.adminEntryId, input.adminEntryId),
+            eq(tournamentsInCompetition.leagueId, input.leagueId),
+          ),
+        )
+        .limit(1);
+      return rows[0] ?? null;
+    },
+
     findSetupConfig: async (
       season: FplSeasonRef,
       tournamentId: number,

@@ -205,6 +205,7 @@ export function createTournamentManagementService(
       }
 
       if (current.rosterMode === 'official_sync') {
+        await assertTournamentRosterPreGameweekBoundary(season);
         // Publish the cancellable intent before queueing. A newer pause changes
         // this marker back to ready, so a queued worker can never reactivate a
         // tournament after the owner has paused it.
@@ -216,7 +217,10 @@ export function createTournamentManagementService(
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unable to enqueue resume.';
-          await tournamentRosterRepository.markSyncFailed(season, tournamentId, message);
+          await Promise.allSettled([
+            tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
+            tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message),
+          ]);
           throw error;
         }
       } else {
@@ -356,9 +360,13 @@ export const tournamentManagementService = createTournamentManagementService(
     repairDeletedViews: repairDeletedTournamentMaterializedViews,
     deleteOwned: async (season, tournamentId, adminEntryId) => {
       const { cancelWaitingTournamentSetupJobs } = await import('../jobs/tournament-setup.jobs');
+      const { cancelWaitingTournamentRosterReconcileJobs } = await import(
+        '../jobs/tournament-sync.jobs'
+      );
       const { tournamentSetupLifecycleScope } = await import('../domain/mutation-scope');
       const { withMutationConflictGuard } = await import('../utils/mutation-lock');
       await cancelWaitingTournamentSetupJobs(tournamentId);
+      await cancelWaitingTournamentRosterReconcileJobs(tournamentId);
       return withMutationConflictGuard(
         {
           queueName: 'tournament-management',

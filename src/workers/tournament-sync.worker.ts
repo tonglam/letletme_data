@@ -418,6 +418,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 return reconcileTournamentRoster(season, job.data.tournamentId, {
                   allowInactive: job.data.allowInactive === true,
                   resumeAfterSetup: job.data.resumeAfterSetup === true,
+                  requireResumeMarker: job.data.resumeAfterSetup === true,
                 });
               }
 

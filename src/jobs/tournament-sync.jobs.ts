@@ -8,7 +8,7 @@ import {
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { queueRedisSingleton } from '../queues/redis';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 
 export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade';
 
@@ -463,3 +463,26 @@ export const enqueueTournamentRosterReconcile = (
     // therefore needs a fresh id while the lifecycle lock provides dedupe.
     jobId: `tournament-roster-reconcile-${tournamentId}-${options?.operationId ?? randomUUID()}`,
   });
+
+export async function cancelWaitingTournamentRosterReconcileJobs(
+  tournamentId: number,
+): Promise<number> {
+  let removed = 0;
+  const jobs = await tournamentSyncQueue.getJobs(['waiting', 'delayed', 'paused']);
+  for (const job of jobs) {
+    if (job.name !== TOURNAMENT_JOBS.ROSTER_RECONCILE || job.data.tournamentId !== tournamentId) {
+      continue;
+    }
+    try {
+      await job.remove();
+      removed += 1;
+    } catch (error) {
+      logWarn('Unable to remove waiting tournament roster reconcile job', {
+        tournamentId,
+        jobId: job.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return removed;
+}

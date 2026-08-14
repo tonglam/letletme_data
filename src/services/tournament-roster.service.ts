@@ -62,7 +62,11 @@ export type TournamentRosterReconcileResult = {
 async function reconcileTournamentRosterUnlocked(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: { allowInactive?: boolean; resumeAfterSetup?: boolean },
+  options?: {
+    allowInactive?: boolean;
+    resumeAfterSetup?: boolean;
+    requireResumeMarker?: boolean;
+  },
 ): Promise<TournamentRosterReconcileResult> {
   await assertPreGameweekBoundary(season);
   const tournament = await tournamentRosterRepository.findById(season, tournamentId);
@@ -83,10 +87,21 @@ async function reconcileTournamentRosterUnlocked(
   }
 
   if (options?.resumeAfterSetup) {
-    // This runs inside the per-tournament lifecycle lock. The resume marker is
-    // therefore written only after any prior setup attempt has finished its
-    // canonical transition, never before waiting on that worker.
-    await tournamentRosterRepository.markResumeProcessing(season, tournamentId);
+    if (options.requireResumeMarker) {
+      // A queued resume consumes the marker written by the activation request.
+      // A pause changes the status back to ready, so this conditional update
+      // prevents a stale worker from recreating the canceled intent.
+      const claimed = await tournamentRosterRepository.markResumeProcessingIfPending(
+        season,
+        tournamentId,
+      );
+      if (!claimed) {
+        throw new ConflictError('Tournament resume was superseded.', 'TOURNAMENT_RESUME_CANCELLED');
+      }
+    } else {
+      // Direct callers establish the marker before reconciliation begins.
+      await tournamentRosterRepository.markResumeProcessing(season, tournamentId);
+    }
   } else {
     await tournamentRosterRepository.markSyncProcessing(season, tournamentId);
   }
@@ -237,7 +252,11 @@ async function reconcileTournamentRosterUnlocked(
 export async function reconcileTournamentRoster(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: { allowInactive?: boolean; resumeAfterSetup?: boolean },
+  options?: {
+    allowInactive?: boolean;
+    resumeAfterSetup?: boolean;
+    requireResumeMarker?: boolean;
+  },
 ): Promise<TournamentRosterReconcileResult> {
   // Serialize create/setup, delete, resume, and roster retry for this one
   // tournament. This is deliberately not the global structure lock, so slow

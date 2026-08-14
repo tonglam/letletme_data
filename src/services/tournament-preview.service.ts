@@ -62,6 +62,27 @@ function normalizeOwnerEntry(value: unknown): number {
   );
 }
 
+async function mintPreviewTokenFromPreview(preview: TournamentPreview): Promise<TournamentPreview> {
+  const redis = await queueRedisSingleton.getClient();
+  const previewToken = randomBytes(32).toString('base64url');
+  const tokenHash = hashToken(previewToken);
+  const { previewToken: _originalToken, ...base } = preview;
+  const remainingSeconds = Math.ceil((Date.parse(base.expiresAt) - Date.now()) / 1000);
+  if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) {
+    throw new ConflictError(
+      'Preview expired or invalid. Please preview the league again.',
+      'PREVIEW_EXPIRED',
+    );
+  }
+  await redis.set(
+    tokenKey(tokenHash),
+    JSON.stringify({ ...base, tokenHash } satisfies PreviewStored),
+    'EX',
+    remainingSeconds,
+  );
+  return { ...base, previewToken };
+}
+
 export async function createTournamentPreview(input: {
   leagueUrl: string;
   ownerEntryId: number | string;
@@ -71,7 +92,7 @@ export async function createTournamentPreview(input: {
   const season = await seasonRepository.findCurrent();
   const key = reuseKey(ownerEntryId, season.seasonCode, leagueId, leagueType);
   const inflight = previewInflight.get(key);
-  if (inflight) return inflight;
+  if (inflight) return mintPreviewTokenFromPreview(await inflight);
 
   const promise = (async () => {
     const redis = await queueRedisSingleton.getClient();
@@ -80,21 +101,27 @@ export async function createTournamentPreview(input: {
       const existing = await redis.get(tokenKey(existingTokenHash));
       if (existing) {
         const parsed = JSON.parse(existing) as PreviewStored;
-        // The raw token is intentionally never persisted. Reissue an opaque
-        // token while reusing the already fetched participant snapshot.
-        const previewToken = randomBytes(32).toString('base64url');
-        const tokenHash = hashToken(previewToken);
-        const refreshed = {
-          ...parsed,
-          tokenHash,
-          expiresAt: new Date(Date.now() + PREVIEW_TTL_SECONDS * 1000).toISOString(),
-        };
-        await redis.set(tokenKey(tokenHash), JSON.stringify(refreshed), 'EX', PREVIEW_TTL_SECONDS);
-        await redis.set(key, tokenHash, 'EX', PREVIEW_TTL_SECONDS);
-        // Do not revoke the older token. Its caller may still be within the
-        // advertised five-minute lifetime; both payloads are independently
-        // expiring and remain bound to the same owner/league/season.
-        return { ...refreshed, previewToken };
+        const remainingSeconds = Math.ceil((Date.parse(parsed.expiresAt) - Date.now()) / 1000);
+        if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) {
+          await redis.del(tokenKey(existingTokenHash), key);
+        } else {
+          // The raw token is intentionally never persisted. Reissue an opaque
+          // token while reusing the already fetched participant snapshot.
+          const previewToken = randomBytes(32).toString('base64url');
+          const tokenHash = hashToken(previewToken);
+          const refreshed = {
+            ...parsed,
+            tokenHash,
+            // Reuse never extends the original snapshot freshness deadline.
+            expiresAt: parsed.expiresAt,
+          };
+          await redis.set(tokenKey(tokenHash), JSON.stringify(refreshed), 'EX', remainingSeconds);
+          await redis.set(key, tokenHash, 'EX', remainingSeconds);
+          // Do not revoke the older token. Its caller may still be within the
+          // advertised five-minute lifetime; both payloads are independently
+          // expiring and remain bound to the same owner/league/season.
+          return { ...refreshed, previewToken };
+        }
       }
       await redis.del(key);
     }
@@ -188,6 +215,7 @@ export async function getPreviewCreatedResult(tokenHash: string): Promise<unknow
 
 export async function claimPreviewCreation(tokenHash: string): Promise<'claimed' | 'busy'> {
   const redis = await queueRedisSingleton.getClient();
+  // NX makes the preview token the single-writer idempotency boundary.
   const claimed = await redis.set(
     creationClaimKey(tokenHash),
     '1',
