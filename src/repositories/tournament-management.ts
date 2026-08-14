@@ -179,28 +179,42 @@ export const createTournamentManagementRepository = () => ({
         UPDATE competition.tournaments
         SET state = ${state},
             roster_sync_status = CASE
-              WHEN ${state} = 'inactive' AND roster_sync_status IN ('pending', 'processing')
+              WHEN ${state} = 'inactive' AND roster_sync_status IN ('pending', 'processing', 'failed')
                 THEN 'ready'::competition.tournament_setup_status
               ELSE roster_sync_status
             END,
             roster_sync_error = CASE
-              WHEN ${state} = 'inactive' AND roster_sync_status IN ('pending', 'processing')
+              WHEN ${state} = 'inactive' AND roster_sync_status IN ('pending', 'processing', 'failed')
                 THEN NULL
               ELSE roster_sync_error
             END,
             setup_status = CASE
               WHEN ${state} = 'inactive'
-                AND roster_sync_status = 'processing'
-                AND setup_status = 'pending'
+                AND roster_sync_status IN ('processing', 'failed')
+                AND setup_status IN ('pending', 'processing', 'failed')
                 THEN 'ready'::competition.tournament_setup_status
               ELSE setup_status
             END,
             setup_phase = CASE
               WHEN ${state} = 'inactive'
-                AND roster_sync_status = 'processing'
-                AND setup_status = 'pending'
-                THEN 'ready'::competition.tournament_setup_phase
+                AND roster_sync_status IN ('processing', 'failed')
+                AND setup_status IN ('pending', 'processing', 'failed')
+              THEN 'ready'::competition.tournament_setup_phase
               ELSE setup_phase
+            END,
+            setup_error = CASE
+              WHEN ${state} = 'inactive'
+                AND roster_sync_status IN ('processing', 'failed')
+                AND setup_status IN ('pending', 'processing', 'failed')
+                THEN NULL
+              ELSE setup_error
+            END,
+            setup_progress_updated_at = CASE
+              WHEN ${state} = 'inactive'
+                AND roster_sync_status IN ('processing', 'failed')
+                AND setup_status IN ('pending', 'processing', 'failed')
+                THEN now()
+              ELSE setup_progress_updated_at
             END,
             updated_at = now()
         WHERE season_id = ${season.seasonId}
