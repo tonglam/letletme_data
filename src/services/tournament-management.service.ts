@@ -6,7 +6,7 @@ import {
 } from '../repositories/tournament-management';
 import { normalizeTournamentName } from '../domain/tournament';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../utils/errors';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { seasonRepository } from '../repositories/seasons';
@@ -15,6 +15,8 @@ import {
   repairDeletedTournamentMaterializedViews,
 } from './tournament-materialized-views.service';
 import { refreshTournamentSelectionStatsMaterializedView } from './tournament-selection-stats.service';
+import { enqueueTournamentRosterReconcile } from '../jobs/tournament-sync.jobs';
+import { assertTournamentRosterPreGameweekBoundary } from './tournament-roster.service';
 
 const updateTournamentSchema = z.object({
   name: z.string().trim().min(3).max(80),
@@ -203,11 +205,20 @@ export function createTournamentManagementService(
       }
 
       if (current.rosterMode === 'official_sync') {
-        const { reconcileTournamentRoster } = await import('./tournament-roster.service');
-        await reconcileTournamentRoster(season, tournamentId, {
-          allowInactive: true,
-          resumeAfterSetup: true,
-        });
+        // Publish the cancellable intent before queueing. A newer pause changes
+        // this marker back to ready, so a queued worker can never reactivate a
+        // tournament after the owner has paused it.
+        await tournamentRosterRepository.markResumeProcessing(season, tournamentId);
+        try {
+          await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+            resumeAfterSetup: true,
+            allowInactive: true,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unable to enqueue resume.';
+          await tournamentRosterRepository.markSyncFailed(season, tournamentId, message);
+          throw error;
+        }
       } else {
         const { enqueueTournamentSetup } = await import('../jobs/tournament-setup.jobs');
         await requestSnapshotTournamentResume(tournamentId, {
@@ -245,9 +256,6 @@ export function createTournamentManagementService(
       }
       if (current.rosterMode === payload.rosterMode) return current;
       if (current.state === 'active') {
-        const { assertTournamentRosterPreGameweekBoundary } = await import(
-          './tournament-roster.service'
-        );
         // Do not persist an opt-in that cannot be reconciled at the current
         // gameweek boundary. The check happens before the mode mutation.
         await assertTournamentRosterPreGameweekBoundary(season);
@@ -260,8 +268,7 @@ export function createTournamentManagementService(
       );
       if (!updated) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       if (updated.state === 'active') {
-        const { reconcileTournamentRoster } = await import('./tournament-roster.service');
-        await reconcileTournamentRoster(season, tournamentId);
+        await enqueueTournamentRosterReconcile(season, tournamentId, 'manual');
       }
       return (await repository.findById(season, tournamentId)) ?? updated;
     },
@@ -277,9 +284,27 @@ export function createTournamentManagementService(
     retryRoster: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      await assertOwner(season, tournamentId, payload.adminEntryId);
-      const { reconcileTournamentRoster } = await import('./tournament-roster.service');
-      return reconcileTournamentRoster(season, tournamentId, { allowInactive: true });
+      const current = await assertOwner(season, tournamentId, payload.adminEntryId);
+      if (current.rosterMode !== 'official_sync') {
+        throw new ValidationError(
+          'Tournament roster is a fixed snapshot.',
+          'TOURNAMENT_ROSTER_SNAPSHOT',
+        );
+      }
+      if (current.state === 'finished') {
+        throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
+      }
+      await assertTournamentRosterPreGameweekBoundary(season);
+      const job = await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+        allowInactive: true,
+      });
+      return {
+        tournamentId,
+        changed: false,
+        queued: true,
+        operationId: job.id ?? null,
+        status: 'pending' as const,
+      };
     },
 
     deleteTournament: async (tournamentId: number, input: unknown) => {

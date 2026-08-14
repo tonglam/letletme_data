@@ -20,6 +20,14 @@ import {
 import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
 import { fetchLeagueParticipants } from './tournament-league-members.service';
+import {
+  getPreviewCreatedResult,
+  claimPreviewCreation,
+  markPreviewCreatedResult,
+  releasePreviewCreationClaim,
+  resolveTournamentPreview,
+  waitForPreviewCreatedResult,
+} from './tournament-preview.service';
 
 export { tournamentCreateInputSchema, validateTournamentCreateInput };
 export type { TournamentCreateInput, TournamentSetupStatus };
@@ -75,6 +83,8 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
     let leagueType: 'classic' | 'h2h' | null = null;
     let reportEmitted = false;
     let eventCount = 0;
+    let previewTokenHash: string | null = null;
+    let previewClaimed = false;
 
     const report = (
       outcome: 'queued' | 'enqueue_failed' | 'rejected' | 'failed',
@@ -116,7 +126,54 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       const endEventId = parseGameweek(payload.endGameweek);
       eventCount = startEventId && endEventId ? Math.max(0, endEventId - startEventId + 1) : 0;
       const season = await seasonRepository.findCurrent();
-      const source = await fetchLeagueParticipants(payload.leagueUrl);
+      const preview = payload.previewToken
+        ? await resolveTournamentPreview(payload.previewToken, {
+            ownerEntryId: payload.adminId,
+            leagueUrl: payload.leagueUrl,
+          })
+        : null;
+      if (preview) {
+        const created = await getPreviewCreatedResult(preview.tokenHash);
+        if (created && typeof created === 'object' && 'tournament' in created) {
+          report('queued', 'pending', null);
+          return created as {
+            tournament: {
+              id: number;
+              name: string;
+              creator: string;
+              adminEntryId: number;
+              leagueId: number;
+              participantCount: number;
+            };
+            setupStatus: TournamentSetupStatus;
+          };
+        }
+        const claim = await claimPreviewCreation(preview.tokenHash);
+        if (claim === 'busy') {
+          const concurrent = await waitForPreviewCreatedResult(preview.tokenHash);
+          if (concurrent && typeof concurrent === 'object' && 'tournament' in concurrent) {
+            report('queued', 'pending', null);
+            return concurrent as {
+              tournament: {
+                id: number;
+                name: string;
+                creator: string;
+                adminEntryId: number;
+                leagueId: number;
+                participantCount: number;
+              };
+              setupStatus: TournamentSetupStatus;
+            };
+          }
+          throw new ConflictError(
+            'Tournament creation is already in progress. Please retry shortly.',
+            'TOURNAMENT_CREATE_IN_PROGRESS',
+          );
+        }
+        previewClaimed = true;
+      }
+      const source = preview ?? (await fetchLeagueParticipants(payload.leagueUrl));
+      previewTokenHash = preview?.tokenHash ?? null;
       phaseDurationsMs.authoritative_roster = Math.round(performance.now() - phaseStartedAtMs);
       leagueType = source.leagueType;
 
@@ -172,12 +229,13 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
 
       failedPhase = 'enqueue';
       phaseStartedAtMs = performance.now();
+      let result: ReturnType<typeof resultFor>;
       try {
         await enqueueTournamentSetup(season, tournament.id, 'create');
         phaseDurationsMs.enqueue = Math.round(performance.now() - phaseStartedAtMs);
         failedPhase = null;
         report('queued', 'pending', null);
-        return resultFor('pending');
+        result = resultFor('pending');
       } catch (error) {
         phaseDurationsMs.enqueue = Math.round(performance.now() - phaseStartedAtMs);
         const message =
@@ -190,9 +248,38 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           throw statusError;
         }
         report('enqueue_failed', 'failed', failureCode);
-        return resultFor('failed');
+        result = resultFor('failed');
       }
+      // Redis preview bookkeeping is recoverable metadata. It must never turn
+      // a successfully enqueued authoritative creation into a failed response.
+      if (previewTokenHash) {
+        try {
+          await markPreviewCreatedResult(previewTokenHash, result);
+        } catch (error) {
+          logInfo('Unable to persist tournament preview idempotency result', {
+            event: 'tournament_preview_result_cache_failed',
+            tournamentId: tournament.id,
+            error: error instanceof Error ? error.name : 'UnknownError',
+          });
+        } finally {
+          if (previewClaimed) {
+            try {
+              await releasePreviewCreationClaim(previewTokenHash);
+            } catch (error) {
+              logInfo('Unable to release tournament preview creation claim', {
+                event: 'tournament_preview_claim_release_failed',
+                tournamentId: tournament.id,
+                error: error instanceof Error ? error.name : 'UnknownError',
+              });
+            }
+          }
+        }
+      }
+      return result;
     } catch (error) {
+      if (previewClaimed && previewTokenHash) {
+        await releasePreviewCreationClaim(previewTokenHash).catch(() => undefined);
+      }
       if (failedPhase && phaseDurationsMs[failedPhase] === 0) {
         phaseDurationsMs[failedPhase] = Math.round(performance.now() - phaseStartedAtMs);
       }

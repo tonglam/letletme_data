@@ -29,6 +29,7 @@ import { syncTournamentSelectionStats } from '../services/tournament-selection-s
 import {
   finishTournamentsThroughEvent,
   reconcileOfficialTournamentRosters,
+  reconcileTournamentRoster,
 } from '../services/tournament-roster.service';
 import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { IncompleteDataSyncError } from '../utils/errors';
@@ -408,6 +409,16 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                   );
                 }
                 return result;
+              }
+
+              case TOURNAMENT_JOBS.ROSTER_RECONCILE: {
+                if (!job.data.tournamentId) {
+                  throw new Error('Roster reconcile job is missing tournamentId');
+                }
+                return reconcileTournamentRoster(season, job.data.tournamentId, {
+                  allowInactive: job.data.allowInactive === true,
+                  resumeAfterSetup: job.data.resumeAfterSetup === true,
+                });
               }
 
               default:

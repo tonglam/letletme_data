@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   tournamentSyncQueue,
   TOURNAMENT_JOBS,
@@ -16,6 +17,10 @@ export type TournamentSyncEnqueueOptions = {
   cascadeId?: string;
   jobId?: string;
   finalizationTargets?: TournamentFinalizationTarget[];
+  tournamentId?: number;
+  resumeAfterSetup?: boolean;
+  allowInactive?: boolean;
+  operationId?: string;
 };
 
 async function hasPendingOfficialH2HJob(season: FplSeasonRef, eventId: number): Promise<boolean> {
@@ -292,6 +297,9 @@ async function enqueueTournamentSyncJob(
             ],
           }
         : {}),
+      ...(options.tournamentId ? { tournamentId: options.tournamentId } : {}),
+      ...(options.resumeAfterSetup ? { resumeAfterSetup: true } : {}),
+      ...(options.allowInactive ? { allowInactive: true } : {}),
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.
@@ -439,4 +447,19 @@ export const enqueueTournamentRosterSync = (
 ) =>
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_SYNC, season, 0, source, {
     jobId: `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
+  });
+
+export const enqueueTournamentRosterReconcile = (
+  season: FplSeasonRef,
+  tournamentId: number,
+  source: TournamentSyncJobSource = 'manual',
+  options?: { resumeAfterSetup?: boolean; allowInactive?: boolean; operationId?: string },
+) =>
+  enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_RECONCILE, season, 0, source, {
+    tournamentId,
+    resumeAfterSetup: options?.resumeAfterSetup,
+    allowInactive: options?.allowInactive,
+    // Completed jobs remain retained for observability; each reconciliation
+    // therefore needs a fresh id while the lifecycle lock provides dedupe.
+    jobId: `tournament-roster-reconcile-${tournamentId}-${options?.operationId ?? randomUUID()}`,
   });

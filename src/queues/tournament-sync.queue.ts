@@ -24,6 +24,7 @@ export const TOURNAMENT_JOBS = {
   // Info job (keep separate, low frequency)
   INFO: 'tournament-info',
   ROSTER_SYNC: 'tournament-roster-sync',
+  ROSTER_RECONCILE: 'tournament-roster-reconcile',
   OFFICIAL_H2H: 'tournament-official-h2h',
 } as const;
 
@@ -45,6 +46,10 @@ export interface TournamentSyncJobData {
   cascadeId?: string;
   /** Exact standings publications selected by the base event-results job. */
   finalizationTargets?: TournamentFinalizationTarget[];
+  tournamentId?: number;
+  resumeAfterSetup?: boolean;
+  /** Reconcile inactive tournaments only for explicit resume/retry callers. */
+  allowInactive?: boolean;
 }
 
 export const tournamentSyncQueue = new Queue<TournamentSyncJobData>(tournamentSyncQueueName, {
