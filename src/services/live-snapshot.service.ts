@@ -531,29 +531,30 @@ export async function syncLiveSnapshot(
     const changed = !snapshotContentMatches(active, payload);
 
     if (!changed) {
+      let persistedFixtures = false;
       let persistedEventLives = false;
-      // A stable upstream checksum is a no-op for the publication and for the
-      // durable facts tables.  DAY_SETTLING may request durable persistence,
-      // but repeating that write every minute would turn an unchanged poll
-      // into needless PostgreSQL traffic.  Finalization is the only explicit
-      // exception: it records the final authoritative snapshot even when the
-      // last live poll was unchanged.
-      if (options.finalizeEvent) {
-        const durable = await dependencies.persistDurably({
-          season,
-          eventId,
-          checkedAt,
-          prepared,
-          persistFixtures: false,
-          persistEventLives: true,
-          finalizeEvent: options.finalizeEvent,
-        });
-        persistedEventLives = durable.persistedEventLives;
-      }
+      // Fixture flags are the lifecycle source of truth even for cache-only
+      // polls. Persisting them independently of event-live durability prevents
+      // a stale database fixture from keeping the orchestrator in LIVE_ACTIVE.
+      const durable = await dependencies.persistDurably({
+        season,
+        eventId,
+        checkedAt,
+        prepared,
+        persistFixtures: true,
+        persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
+        finalizeEvent: options.finalizeEvent,
+      });
+      persistedFixtures = durable.persistedFixtures;
+      persistedEventLives = durable.persistedEventLives;
       await syncOperationsRepository.finishRun(sourceRunId, {
         status: 'skipped',
-        completedItems: persistedEventLives ? prepared.eventLives.eventLives.length : 0,
-        skippedItems: prepared.eventLives.eventLives.length + prepared.fixtures.length,
+        completedItems:
+          (persistedEventLives ? prepared.eventLives.eventLives.length : 0) +
+          (persistedFixtures ? prepared.fixtures.length : 0),
+        skippedItems:
+          (persistedEventLives ? 0 : prepared.eventLives.eventLives.length) +
+          (persistedFixtures ? 0 : prepared.fixtures.length),
         dataChanged: false,
       });
       const result: LiveSnapshotSyncResult = {
@@ -567,7 +568,7 @@ export async function syncLiveSnapshot(
         fixtureCount: prepared.fixtures.length,
         fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
         bonusTeamCount: bonusTeamCount(),
-        persistedFixtures: false,
+        persistedFixtures,
         persistedEventLives,
       };
       logInfo('Live snapshot content unchanged', { ...result, durationMs: Date.now() - startedAt });
@@ -607,8 +608,8 @@ export async function syncLiveSnapshot(
           eventId,
           checkedAt,
           prepared,
-          persistFixtures: options.persistEventLives === true || options.finalizeEvent === true,
-          persistEventLives: options.persistEventLives === true,
+          persistFixtures: true,
+          persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
           finalizeEvent: options.finalizeEvent,
         });
         persistedFixtures = durable.persistedFixtures;

@@ -268,6 +268,9 @@ export const datasetPublicationsInOps = ops.table(
       table.status.asc().nullsLast(),
       table.createdAt.desc().nullsFirst(),
     ),
+    index('dataset_publications_expired_idx')
+      .using('btree', table.expiresAt.asc().nullsLast())
+      .where(sql`(expires_at IS NOT NULL) AND (status <> 'active'::text)`),
     foreignKey({
       columns: [table.seasonId, table.eventId],
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],

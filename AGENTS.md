@@ -29,6 +29,21 @@
 - Commits: short imperative summary (≤72 chars), optional scope (e.g., `db:`, `api:`). Example: `feat(api): add events next endpoint`.
 - PRs: include purpose, linked issues, test plan (`bun test` output), and any DB migration notes. Attach sample requests/responses for API changes (e.g., `curl /events/next`). Ensure lint and tests pass.
 
+## Review and Merge Gate
+- Keep a PR in draft state until the final intended commit has been pushed. Mark it ready for review only after the head SHA is stable.
+- Before requesting review, capture the full current head SHA. Request Codex review with an auditable marker tied to that SHA:
+  ```text
+  @codex review
+
+  Review gate head: `<full-sha>`
+  ```
+- After submitting a review request, allow 10–30 minutes for queueing and completion. During that window, poll the request and do not send duplicate `@codex review` comments. Re-request only after an explicit connector/authentication failure, a confirmed timeout with no request in progress, or a changed head SHA.
+- Do not merge on green CI, review silence, a generic acknowledgement, or a review of an older commit. Require an explicit clean/no-findings result for the unchanged current head, and inspect review threads for unresolved actionable findings.
+- Every P1/P2 finding must be fixed or justified with evidence, tested, replied to, and resolved before merge. Any later commit invalidates the prior review; capture the new SHA and request a fresh review.
+- Immediately before merge, recheck `headRefOid`, review state, unresolved threads, and required checks. Merge only the unchanged reviewed head, using a head guard such as `gh pr merge <number> --match-head-commit <full-sha>`.
+- If the PR is already merged or closed, stop the normal review loop. Treat it as unreviewed if no current-head clean gate exists, and do not report a post-merge audit as approval for the original PR.
+- If a qualified human reviewer is available, the GitHub ruleset should require at least one approving review plus required CI checks. If no qualified approver is available, do not configure an impossible approval gate or treat self-approval/Codex `COMMENTED` as approval; keep the approval count at 0 but require the exact-head Codex clean review, required CI, and resolved actionable threads, and record that the merge has no human approval.
+
 ## Security & Configuration Tips
 - Configure via `.env` (copy from `.env.example`); do not commit secrets. Required: `DATABASE_URL`, `REDIS_*`, `SUPABASE_*`, `PORT`.
 - Add schema changes as the next hand-written SQL migration and update the typed Drizzle mapping;

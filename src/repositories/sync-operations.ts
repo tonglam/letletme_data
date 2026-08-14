@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 
 import {
   datasetPublicationItemsInOps,
@@ -357,6 +357,27 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           'DATASET_PUBLICATION_ID_INVALID',
         );
       }
+      const now = new Date();
+      await db.transaction(async (tx) => {
+        const expired = await tx
+          .select({ publicationId: datasetPublicationsInOps.publicationId })
+          .from(datasetPublicationsInOps)
+          .where(
+            and(
+              lte(datasetPublicationsInOps.expiresAt, now),
+              sql`${datasetPublicationsInOps.status} <> 'active'`,
+            ),
+          );
+        if (expired.length === 0) return;
+        const expiredIds = expired.map((row) => row.publicationId);
+        await tx
+          .update(syncRunsInOps)
+          .set({ publicationId: null, updatedAt: now })
+          .where(inArray(syncRunsInOps.publicationId, expiredIds));
+        await tx
+          .delete(datasetPublicationsInOps)
+          .where(inArray(datasetPublicationsInOps.publicationId, expiredIds));
+      });
       const inserted = await db
         .insert(datasetPublicationsInOps)
         .values({

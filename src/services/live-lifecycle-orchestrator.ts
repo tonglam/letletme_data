@@ -11,10 +11,13 @@ import { seasonRepository } from '../repositories/seasons';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
+import { isMatchDayTime } from '../utils/conditions';
 import { logError, logInfo } from '../utils/logger';
 import { persistEntryEventPicksResponse } from './entries.service';
 import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
+import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
+import { entryInfoRepository } from '../repositories/entry-infos';
 import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
 
 export const LIVE_POLL_MS = Number(process.env.LIVE_POLL_MS ?? 30_000);
@@ -42,6 +45,7 @@ const GW_REVIEW_POLL_MS = Number(process.env.GW_REVIEW_POLL_MS ?? 10 * 60_000);
 const GW_REVIEW_FINALIZATION_POLL_MS = Number(
   process.env.GW_REVIEW_FINALIZATION_POLL_MS ?? 2 * 60_000,
 );
+const FINALIZED_POLL_MS = Number(process.env.FINALIZED_POLL_MS ?? 5 * 60_000);
 
 export type LiveLifecycleState =
   | 'PRE_DEADLINE'
@@ -59,6 +63,7 @@ export type LiveLifecycleDecision = {
   shouldFetchLive: boolean;
   shouldProbePicks: boolean;
   shouldSyncPicks: boolean;
+  finalizeEvent: boolean;
   nextRetryAt: Date | null;
 };
 
@@ -66,11 +71,13 @@ type PicksProbeState = {
   attempts: number;
   nextProbeAt: number;
   canarySucceeded: boolean;
+  failedCanaryEntryIds: Set<number>;
 };
 
 const picksProbeStates = new Map<string, PicksProbeState>();
 const daySettlingStates = new Map<string, { revision: number | null; unchangedSince: number }>();
 const picksFanoutClaims = new Map<string, Map<number, number>>();
+const finalizedEventKeys = new Set<string>();
 
 const firstKickoff = (fixtures: readonly Fixture[]): number | null => {
   const values = fixtures
@@ -109,9 +116,10 @@ export function decideLiveLifecycle(
   if (event.finished && event.dataChecked && allFinished) {
     return {
       state: 'FINALIZED',
-      shouldFetchLive: false,
+      shouldFetchLive: true,
       shouldProbePicks: false,
       shouldSyncPicks: false,
+      finalizeEvent: true,
       nextRetryAt: null,
     };
   }
@@ -122,6 +130,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: afterLast < 24 * 60 * 60_000,
       shouldProbePicks: false,
       shouldSyncPicks: false,
+      finalizeEvent: false,
       nextRetryAt: null,
     };
   }
@@ -131,6 +140,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldProbePicks: false,
       shouldSyncPicks: true,
+      finalizeEvent: false,
       nextRetryAt: null,
     };
   }
@@ -140,6 +150,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldProbePicks: false,
       shouldSyncPicks: true,
+      finalizeEvent: false,
       nextRetryAt: null,
     };
   }
@@ -149,6 +160,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: false,
       shouldProbePicks: false,
       shouldSyncPicks: false,
+      finalizeEvent: false,
       nextRetryAt: null,
     };
   }
@@ -158,6 +170,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: false,
       shouldProbePicks: false,
       shouldSyncPicks: false,
+      finalizeEvent: false,
       nextRetryAt: new Date(deadlineMs + PICKS_FIRST_PROBE_OFFSET_MS),
     };
   }
@@ -167,6 +180,17 @@ export function decideLiveLifecycle(
       shouldFetchLive: false,
       shouldProbePicks: true,
       shouldSyncPicks: false,
+      finalizeEvent: false,
+      nextRetryAt: null,
+    };
+  }
+  if (firstKickoffMs !== null && nowMs >= firstKickoffMs) {
+    return {
+      state: 'LIVE_ACTIVE',
+      shouldFetchLive: true,
+      shouldProbePicks: true,
+      shouldSyncPicks: true,
+      finalizeEvent: false,
       nextRetryAt: null,
     };
   }
@@ -175,6 +199,7 @@ export function decideLiveLifecycle(
     shouldFetchLive: false,
     shouldProbePicks: true,
     shouldSyncPicks: true,
+    finalizeEvent: false,
     nextRetryAt: null,
   };
 }
@@ -182,11 +207,16 @@ export function decideLiveLifecycle(
 export async function resolveUniqueActiveTournamentEntryIds(
   season: FplSeasonRef,
 ): Promise<number[]> {
-  const tournaments = await tournamentInfoRepository.findActive(season);
+  const [tournaments, knownEntries] = await Promise.all([
+    tournamentInfoRepository.findActive(season),
+    entryInfoRepository.findAll(season),
+  ]);
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
     tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
-  return uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
+  return uniqueNumbers([...entryLists.flat(), ...knownEntries.map((entry) => entry.id)]).filter(
+    (entryId) => entryId > 0,
+  );
 }
 
 function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: number): boolean {
@@ -203,6 +233,7 @@ export async function runPicksProbeAndSync(
     attempts: 0,
     nextProbeAt: 0,
     canarySucceeded: false,
+    failedCanaryEntryIds: new Set<number>(),
   };
   if (now.getTime() < state.nextProbeAt) return { canaryCount: 0, synced: 0, pending: 0 };
   const entryIds = await resolveUniqueActiveTournamentEntryIds(season);
@@ -220,7 +251,13 @@ export async function runPicksProbeAndSync(
   );
   if (pending.length === 0) return { canaryCount: 0, synced: 0, pending: 0 };
 
-  const canaries = state.canarySucceeded ? [] : pending.slice(0, 2);
+  let canaries = state.canarySucceeded
+    ? []
+    : pending.filter((entryId) => !state.failedCanaryEntryIds.has(entryId)).slice(0, 2);
+  if (!state.canarySucceeded && canaries.length === 0) {
+    state.failedCanaryEntryIds.clear();
+    canaries = pending.slice(0, 2);
+  }
   const canaryResults = await Promise.allSettled(
     canaries.map(async (entryId) => {
       const payload = await fplClient.getEntryEventPicks(entryId, eventId);
@@ -232,6 +269,12 @@ export async function runPicksProbeAndSync(
     }),
   );
   const canaryCount = canaryResults.filter((result) => result.status === 'fulfilled').length;
+  canaryResults.forEach((result, index) => {
+    const entryId = canaries[index];
+    if (entryId === undefined) return;
+    if (result.status === 'fulfilled') state.failedCanaryEntryIds.delete(entryId);
+    else state.failedCanaryEntryIds.add(entryId);
+  });
   if (!state.canarySucceeded && canaryCount === 0) {
     state.attempts += 1;
     const delay =
@@ -301,10 +344,29 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
     });
   }
   if (decision.shouldFetchLive) {
-    await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
-      persistEventLives: decision.state === 'DAY_SETTLING' || decision.state === 'GW_REVIEW',
-      now,
-    });
+    const finalizationKey = `${season.seasonCode}:${currentEvent.id}`;
+    const shouldEnqueueFinalization =
+      decision.finalizeEvent && !finalizedEventKeys.has(finalizationKey);
+    if (!decision.finalizeEvent || shouldEnqueueFinalization) {
+      await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
+        persistEventLives:
+          decision.state === 'DAY_SETTLING' ||
+          decision.state === 'GW_REVIEW' ||
+          decision.finalizeEvent,
+        finalizeEvent: decision.finalizeEvent,
+        now,
+      });
+      if (decision.finalizeEvent) finalizedEventKeys.add(finalizationKey);
+    }
+    if (isMatchDayTime(currentEvent, fixtures, now)) {
+      await enqueueTournamentOfficialH2H(season, currentEvent.id, 'cron', {
+        jobId: `official-h2h-e${currentEvent.id}-${now.toISOString().slice(0, 16)}`,
+      }).catch((error) => {
+        logError('Failed to enqueue live official H2H sync', error, {
+          eventId: currentEvent.id,
+        });
+      });
+    }
   }
   logInfo('Live lifecycle tick completed', {
     eventId: currentEvent.id,
@@ -333,7 +395,7 @@ function lifecycleDelay(
   eventId: number,
   now: Date,
 ): number | null {
-  if (decision.state === 'FINALIZED') return null;
+  if (decision.state === 'FINALIZED') return FINALIZED_POLL_MS;
   if (decision.nextRetryAt && decision.nextRetryAt.getTime() > now.getTime()) {
     return Math.max(1_000, decision.nextRetryAt.getTime() - now.getTime());
   }
