@@ -6,6 +6,8 @@ import type {
   TournamentFinalizationTarget,
   TournamentParticipant,
   TournamentRosterMode,
+  TournamentSetupPhase,
+  TournamentSetupStatus,
 } from '../domain/tournament';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -16,6 +18,9 @@ export type TournamentRosterRecord = TournamentConfig & {
   leagueType: LeagueType;
   rosterMode: TournamentRosterMode;
   state: 'active' | 'inactive' | 'finished';
+  rosterSyncStatus: TournamentSetupStatus | null;
+  setupStatus: TournamentSetupStatus;
+  setupPhase: TournamentSetupPhase;
   standingsReadyAt: string | null;
   setupProgressUpdatedAt: string | null;
   officialScheduleLockedAt: string | null;
@@ -62,6 +67,9 @@ export const tournamentRosterRepository = {
           league_type AS "leagueType",
           roster_mode AS "rosterMode",
           state,
+          roster_sync_status AS "rosterSyncStatus",
+          setup_status AS "setupStatus",
+          setup_phase AS "setupPhase",
           standings_ready_at::text AS "standingsReadyAt",
           setup_progress_updated_at::text AS "setupProgressUpdatedAt",
           official_schedule_locked_at::text AS "officialScheduleLockedAt",
@@ -311,8 +319,11 @@ export const tournamentRosterRepository = {
           (
             state = 'inactive'
             AND roster_sync_status IN ('processing', 'failed')
-            AND setup_status IN ('pending', 'failed')
-            AND setup_phase IN ('queued', 'failed')
+            AND setup_status IN ('pending', 'processing', 'failed')
+            AND (
+              setup_phase IN ('queued', 'failed')
+              OR setup_status = 'processing'
+            )
           )
           OR (
             -- The setup worker may die after the roster transition commits

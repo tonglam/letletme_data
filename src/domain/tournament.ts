@@ -274,6 +274,7 @@ export type TournamentStructurePlan = {
   knockoutStartedEventId: number | null;
   knockoutEndedEventId: number | null;
   knockoutPlayAgainstNum: number | null;
+  previewPayloadFingerprint?: string | null;
 };
 
 const groupModeMap = {

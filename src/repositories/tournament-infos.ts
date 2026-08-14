@@ -96,6 +96,7 @@ export interface TournamentCreatedRow {
   leagueId: number;
   totalTeamNum: number;
   createdAt?: string;
+  previewPayloadFingerprint?: string | null;
 }
 
 export interface StuckTournamentRow {
@@ -379,6 +380,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           leagueId: tournamentsInCompetition.leagueId,
           totalTeamNum: tournamentsInCompetition.totalTeamNum,
           createdAt: sql<string>`${tournamentsInCompetition.createdAt}::text`,
+          previewPayloadFingerprint: tournamentsInCompetition.previewPayloadFingerprint,
         })
         .from(tournamentsInCompetition)
         .where(
@@ -696,6 +698,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
               setupStatus: 'pending',
               setupPhase: 'queued',
               setupProgressUpdatedAt: new Date(),
+              previewPayloadFingerprint: plan.previewPayloadFingerprint ?? null,
             })
             .returning({
               id: tournamentsInCompetition.tournamentId,
@@ -705,6 +708,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
               adminEntryId: tournamentsInCompetition.adminEntryId,
               leagueId: tournamentsInCompetition.leagueId,
               totalTeamNum: tournamentsInCompetition.totalTeamNum,
+              previewPayloadFingerprint: tournamentsInCompetition.previewPayloadFingerprint,
             });
           const inserted = insertedTournament[0];
           if (!inserted) {

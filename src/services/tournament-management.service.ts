@@ -153,6 +153,21 @@ export function createTournamentManagementService(
     return tournament;
   };
 
+  const assertNoPendingOfficialResume = (tournament: TournamentManagementRecord) => {
+    if (
+      tournament.rosterMode === 'official_sync' &&
+      tournament.state === 'inactive' &&
+      tournament.rosterSyncStatus === 'processing' &&
+      tournament.setupStatus === 'pending' &&
+      tournament.setupPhase === 'queued'
+    ) {
+      throw new ConflictError(
+        'Tournament activation is already reconciling its authoritative roster.',
+        'TOURNAMENT_RESUME_PENDING',
+      );
+    }
+  };
+
   const repairMissingDeletion = async (tournamentId: number): Promise<void> => {
     try {
       const repaired = await lifecycle.repairDeletedViews?.(tournamentId);
@@ -361,7 +376,8 @@ export function createTournamentManagementService(
           scopes: [tournamentSetupLifecycleScope(tournamentId)],
         },
         async () => {
-          await assertOwner(season, tournamentId, payload.adminEntryId);
+          const current = await assertOwner(season, tournamentId, payload.adminEntryId);
+          assertNoPendingOfficialResume(current);
           const { requeueTournamentSetup } = await import('./tournament-setup.service');
           return requeueTournamentSetup(season, tournamentId);
         },
@@ -389,6 +405,7 @@ export function createTournamentManagementService(
           if (current.state === 'finished') {
             throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
           }
+          assertNoPendingOfficialResume(current);
           await assertTournamentRosterPreGameweekBoundary(season);
           const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
           const job = await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {

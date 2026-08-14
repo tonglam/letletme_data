@@ -237,12 +237,16 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           knockoutRounds: source.knockoutRounds,
         },
       );
-      const plan =
+      const plannedPlan =
         planned.rosterMode === 'official_sync' &&
         planned.leagueType !== 'h2h' &&
         !getConfig().TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED
           ? { ...planned, rosterMode: 'snapshot' as const }
           : planned;
+      const plan = {
+        ...plannedPlan,
+        previewPayloadFingerprint: preview ? payloadFingerprint : null,
+      };
       participantCount = plan.selectedParticipants.length;
       rosterMode = plan.rosterMode ?? 'snapshot';
       if (await tournamentInfoRepository.checkNameExists(season, plan.tournamentName)) {
@@ -322,8 +326,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           });
           const sameOperation =
             claimRecord?.payloadFingerprint === payloadFingerprint &&
-            Boolean(persisted?.createdAt) &&
-            Date.parse(persisted!.createdAt!) >= Date.parse(claimRecord.startedAt);
+            persisted?.previewPayloadFingerprint === payloadFingerprint;
           if (sameOperation && persisted) {
             await enqueueTournamentSetup(season, persisted.id, 'create');
             const setupStatus =

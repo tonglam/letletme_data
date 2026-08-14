@@ -5,6 +5,8 @@ import type {
   KnockoutMode,
   LeagueType,
   TournamentRosterMode,
+  TournamentSetupPhase,
+  TournamentSetupStatus,
 } from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -22,6 +24,8 @@ export interface TournamentManagementRecord {
   rosterMode: TournamentRosterMode;
   rosterSyncStatus?: 'pending' | 'processing' | 'ready' | 'failed' | null;
   rosterSyncError?: string | null;
+  setupStatus?: TournamentSetupStatus;
+  setupPhase?: TournamentSetupPhase;
   state: 'active' | 'inactive' | 'finished';
   createdAt: string;
   updatedAt: string;
@@ -68,6 +72,8 @@ export const createTournamentManagementRepository = () => ({
           roster_mode AS "rosterMode",
           roster_sync_status AS "rosterSyncStatus",
           roster_sync_error AS "rosterSyncError",
+          setup_status AS "setupStatus",
+          setup_phase AS "setupPhase",
           state,
           created_at::text AS "createdAt",
           updated_at::text AS "updatedAt"

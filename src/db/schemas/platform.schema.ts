@@ -465,6 +465,9 @@ export const tournamentsInCompetition = competition.table(
       withTimezone: true,
       mode: 'date',
     }),
+    // Preview-backed creates persist the idempotency fingerprint on the
+    // authoritative row so recovery cannot infer ownership from name/time.
+    previewPayloadFingerprint: text('preview_payload_fingerprint'),
   },
   (table) => [
     index('tournaments_admin_entry_idx').using(
