@@ -8,6 +8,7 @@ import {
   getTournamentBackfillWindow,
   isOfficialH2HTournament,
   type TournamentSetupPhase,
+  type TournamentSetupStatus,
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { eventRepository } from '../repositories/events';
@@ -518,6 +519,8 @@ export async function recoverStuckTournamentSetups(
     season: FplSeasonRef,
     tournamentId: number,
     resumeMarker: string,
+    setupStatus: TournamentSetupStatus,
+    setupPhase: TournamentSetupPhase,
   ) => Promise<void>,
 ): Promise<{ recovered: number[]; skippedActive: number[] }> {
   const stuck = await tournamentInfoRepository.findStuckProcessing(season, cutoffMinutes);
@@ -566,7 +569,13 @@ export async function recoverStuckTournamentSetups(
               });
               return;
             }
-            await recoverOfficialRoster(season, row.id, row.setupProgressUpdatedAt);
+            await recoverOfficialRoster(
+              season,
+              row.id,
+              row.setupProgressUpdatedAt,
+              row.setupStatus,
+              row.setupPhase,
+            );
             recovered.push(row.id);
             logInfo('Watchdog replayed stalled official roster resume', {
               tournamentId: row.id,

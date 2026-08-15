@@ -10,7 +10,7 @@ import {
   enqueueTournamentRosterReconcile,
   findTournamentRosterReconcileJob,
 } from '../jobs/tournament-sync.jobs';
-import { findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
+import { enqueueTournamentSetup, findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import {
   recoverStuckTournamentSetups,
   setupTournamentStructure,
@@ -258,7 +258,16 @@ async function runStartupWatchdog(): Promise<void> {
       season,
       STUCK_PROCESSING_CUTOFF_MINUTES,
       hasActiveSetupJob,
-      async (currentSeason, tournamentId, resumeMarker) => {
+      async (currentSeason, tournamentId, resumeMarker, setupStatus, setupPhase) => {
+        if (setupStatus === 'processing' && setupPhase !== 'queued') {
+          await enqueueTournamentSetup(currentSeason, tournamentId, 'resume', {
+            forceNew: true,
+            ensureSuccessorOnActive: true,
+            activeSettleTimeoutMs: 2_000,
+            resumeMarker,
+          });
+          return;
+        }
         await enqueueTournamentRosterReconcile(currentSeason, tournamentId, 'watchdog', {
           resumeAfterSetup: true,
           resumeMarker,

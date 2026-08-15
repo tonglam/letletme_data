@@ -65,6 +65,7 @@ export type TournamentManagementRepository = {
     tournamentId: number,
     adminEntryId: number,
     state: 'active' | 'inactive',
+    options?: { settleResume?: boolean },
   ): Promise<TournamentManagementRecord | null>;
   updateRosterModeOwned(
     season: FplSeasonRef,
@@ -239,7 +240,46 @@ export function createTournamentManagementService(
             tournamentId,
             scopes: [tournamentSetupLifecycleScope(tournamentId)],
           },
-          () => repository.updateStateOwned(season, tournamentId, payload.adminEntryId, 'inactive'),
+          async () => {
+            const lockedCurrent = await repository.findById(season, tournamentId);
+            if (!lockedCurrent) {
+              throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
+            }
+            if (lockedCurrent.adminEntryId !== payload.adminEntryId) {
+              throw new ForbiddenError(
+                'Only the tournament administrator can manage this tournament.',
+                'TOURNAMENT_ADMIN_REQUIRED',
+              );
+            }
+
+            let settleResume = false;
+            if (
+              lockedCurrent.rosterMode === 'official_sync' &&
+              lockedCurrent.state === 'inactive' &&
+              lockedCurrent.rosterSyncStatus === 'failed' &&
+              lockedCurrent.setupStatus === 'failed' &&
+              lockedCurrent.setupError != null
+            ) {
+              const [reconcileJob, setupJob] = await Promise.all([
+                findTournamentRosterReconcileJob(
+                  season,
+                  tournamentId,
+                  true,
+                  lockedCurrent.setupProgressUpdatedAt ?? undefined,
+                ),
+                findTournamentSetupJob(season, tournamentId, lockedCurrent.setupProgressUpdatedAt),
+              ]);
+              settleResume = Boolean(reconcileJob || setupJob);
+            }
+
+            return repository.updateStateOwned(
+              season,
+              tournamentId,
+              payload.adminEntryId,
+              'inactive',
+              { settleResume },
+            );
+          },
         );
         if (!paused) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
         return paused;
@@ -348,8 +388,44 @@ export function createTournamentManagementService(
               'TOURNAMENT_ROSTER_MODE_INELIGIBLE',
             );
           }
-          if (current.rosterMode === payload.rosterMode && current.rosterSyncStatus !== 'failed')
+          const ensureActiveRosterReconcile = async () => {
+            const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
+            const expectedProgressMarker = rosterState?.setupProgressUpdatedAt ?? null;
+            const existing = await findTournamentRosterReconcileJob(
+              season,
+              tournamentId,
+              false,
+              undefined,
+              expectedProgressMarker,
+            );
+            if (existing) return;
+            await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+              settleBoundaryFailure: true,
+              expectedProgressMarker,
+            });
+          };
+
+          if (current.rosterMode === payload.rosterMode && current.rosterSyncStatus !== 'failed') {
+            if (
+              current.state === 'active' &&
+              current.rosterMode === 'official_sync' &&
+              current.rosterSyncStatus === 'pending'
+            ) {
+              try {
+                await ensureActiveRosterReconcile();
+              } catch (error) {
+                await tournamentRosterRepository.markSyncFailed(
+                  season,
+                  tournamentId,
+                  error instanceof Error
+                    ? error.message
+                    : 'Unable to enqueue roster reconciliation.',
+                );
+                throw error;
+              }
+            }
             return current;
+          }
           if (current.state === 'active') {
             // Do not persist an opt-in that cannot be reconciled at the current
             // gameweek boundary. The check happens before the mode mutation.
@@ -364,11 +440,7 @@ export function createTournamentManagementService(
           if (!updated) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
           if (updated.state === 'active' && updated.rosterMode === 'official_sync') {
             try {
-              const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
-              await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
-                settleBoundaryFailure: true,
-                expectedProgressMarker: rosterState?.setupProgressUpdatedAt ?? null,
-              });
+              await ensureActiveRosterReconcile();
             } catch (error) {
               await tournamentRosterRepository.markSyncFailed(
                 season,

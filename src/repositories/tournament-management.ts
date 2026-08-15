@@ -176,6 +176,7 @@ export const createTournamentManagementRepository = () => ({
     tournamentId: number,
     adminEntryId: number,
     state: 'active' | 'inactive',
+    options?: { settleResume?: boolean },
   ): Promise<TournamentManagementRecord | null> => {
     try {
       const client = await getDbClient();
@@ -187,7 +188,8 @@ export const createTournamentManagementRepository = () => ({
                 AND (
                   roster_sync_status IN ('pending', 'processing')
                   OR (
-                    roster_sync_status = 'failed'
+                    ${options?.settleResume === true}
+                    AND roster_sync_status = 'failed'
                     AND (
                       setup_status IN ('pending', 'processing')
                       OR (setup_status = 'failed' AND setup_error IS NOT NULL)
@@ -202,7 +204,8 @@ export const createTournamentManagementRepository = () => ({
                 AND (
                   roster_sync_status IN ('pending', 'processing')
                   OR (
-                    roster_sync_status = 'failed'
+                    ${options?.settleResume === true}
+                    AND roster_sync_status = 'failed'
                     AND (
                       setup_status IN ('pending', 'processing')
                       OR (setup_status = 'failed' AND setup_error IS NOT NULL)
@@ -217,7 +220,11 @@ export const createTournamentManagementRepository = () => ({
                 AND roster_sync_status IN ('processing', 'failed')
                 AND (
                   setup_status IN ('pending', 'processing')
-                  OR (setup_status = 'failed' AND setup_error IS NOT NULL)
+                  OR (
+                    ${options?.settleResume === true}
+                    AND setup_status = 'failed'
+                    AND setup_error IS NOT NULL
+                  )
                 )
                 THEN 'ready'::competition.tournament_setup_status
               ELSE setup_status
@@ -227,7 +234,11 @@ export const createTournamentManagementRepository = () => ({
                 AND roster_sync_status IN ('processing', 'failed')
                 AND (
                   setup_status IN ('pending', 'processing')
-                  OR (setup_status = 'failed' AND setup_error IS NOT NULL)
+                  OR (
+                    ${options?.settleResume === true}
+                    AND setup_status = 'failed'
+                    AND setup_error IS NOT NULL
+                  )
                 )
                 THEN 'ready'::competition.tournament_setup_phase
               ELSE setup_phase
@@ -237,7 +248,11 @@ export const createTournamentManagementRepository = () => ({
                 AND roster_sync_status IN ('processing', 'failed')
                 AND (
                   setup_status IN ('pending', 'processing')
-                  OR (setup_status = 'failed' AND setup_error IS NOT NULL)
+                  OR (
+                    ${options?.settleResume === true}
+                    AND setup_status = 'failed'
+                    AND setup_error IS NOT NULL
+                  )
                 )
                 THEN NULL
               ELSE setup_error
