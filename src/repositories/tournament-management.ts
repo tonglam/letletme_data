@@ -27,6 +27,7 @@ export interface TournamentManagementRecord {
   setupStatus?: TournamentSetupStatus;
   setupPhase?: TournamentSetupPhase;
   setupError?: string | null;
+  setupProgressUpdatedAt?: string | null;
   state: 'active' | 'inactive' | 'finished';
   createdAt: string;
   updatedAt: string;
@@ -76,6 +77,7 @@ export const createTournamentManagementRepository = () => ({
           setup_status AS "setupStatus",
           setup_phase AS "setupPhase",
           setup_error AS "setupError",
+          setup_progress_updated_at::text AS "setupProgressUpdatedAt",
           state,
           created_at::text AS "createdAt",
           updated_at::text AS "updatedAt"

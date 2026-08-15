@@ -53,6 +53,28 @@ export function getTournamentSetupJobIds(
   };
 }
 
+export async function findTournamentSetupJob(
+  season: FplSeasonRef,
+  tournamentId: number,
+  resumeMarker?: string | null,
+) {
+  const { baseJobId, successorJobId } = getTournamentSetupJobIds(
+    season,
+    tournamentId,
+    resumeMarker ?? undefined,
+  );
+  const jobs = await Promise.all([
+    tournamentSetupQueue.getJob(baseJobId),
+    tournamentSetupQueue.getJob(successorJobId),
+  ]);
+  for (const job of jobs) {
+    if (!job) continue;
+    const state = await job.getState();
+    if (['waiting', 'waiting-children', 'delayed', 'active', 'paused'].includes(state)) return job;
+  }
+  return null;
+}
+
 export function decideExistingSetupSuccessorAction(
   state: string,
   progress?: unknown,

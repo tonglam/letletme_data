@@ -19,6 +19,7 @@ import {
   enqueueTournamentRosterReconcile,
   findTournamentRosterReconcileJob,
 } from '../jobs/tournament-sync.jobs';
+import { findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { assertTournamentRosterPreGameweekBoundary } from './tournament-roster.service';
@@ -153,7 +154,10 @@ export function createTournamentManagementService(
     return tournament;
   };
 
-  const assertNoPendingOfficialResume = (tournament: TournamentManagementRecord) => {
+  const assertNoPendingOfficialResume = async (
+    season: FplSeasonRef,
+    tournament: TournamentManagementRecord,
+  ) => {
     if (
       tournament.rosterMode === 'official_sync' &&
       tournament.state === 'inactive' &&
@@ -165,6 +169,16 @@ export function createTournamentManagementService(
         tournament.setupPhase === 'queued' ||
         tournament.setupPhase === 'failed')
     ) {
+      const [reconcileJob, setupJob] = await Promise.all([
+        findTournamentRosterReconcileJob(
+          season,
+          tournament.id,
+          true,
+          tournament.setupProgressUpdatedAt ?? undefined,
+        ),
+        findTournamentSetupJob(season, tournament.id, tournament.setupProgressUpdatedAt),
+      ]);
+      if (!reconcileJob && !setupJob) return;
       throw new ConflictError(
         'Tournament activation is already reconciling its authoritative roster.',
         'TOURNAMENT_RESUME_PENDING',
@@ -381,7 +395,7 @@ export function createTournamentManagementService(
         },
         async () => {
           const current = await assertOwner(season, tournamentId, payload.adminEntryId);
-          assertNoPendingOfficialResume(current);
+          await assertNoPendingOfficialResume(season, current);
           const { requeueTournamentSetup } = await import('./tournament-setup.service');
           return requeueTournamentSetup(season, tournamentId);
         },
@@ -409,7 +423,7 @@ export function createTournamentManagementService(
           if (current.state === 'finished') {
             throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
           }
-          assertNoPendingOfficialResume(current);
+          await assertNoPendingOfficialResume(season, current);
           await assertTournamentRosterPreGameweekBoundary(season);
           const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
           const job = await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
