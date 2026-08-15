@@ -529,15 +529,6 @@ export async function recoverStuckTournamentSetups(
   const skippedActive: number[] = [];
   for (const row of stuck) {
     try {
-      if (isActive && (await isActive(row.id))) {
-        skippedActive.push(row.id);
-        logInfo('Skipping recovery of setup with active worker job', {
-          tournamentId: row.id,
-          setupProgressUpdatedAt: row.setupProgressUpdatedAt,
-        });
-        continue;
-      }
-
       await withMutationConflictGuard(
         {
           queueName: 'tournament-setup-watchdog',

@@ -139,32 +139,35 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                     return;
                   }
 
-                  // A watchdog job is the explicit recovery path after the
-                  // marker-specific resume jobs have exhausted their retries.
-                  // Manual setup retries may proceed after those jobs are
-                  // terminal; legacy/other jobs remain fenced.
-                  let markerResumePending = true;
-                  if (job.data.source === 'manual') {
-                    const [reconcileJob, setupJob] = await Promise.all([
-                      findTournamentRosterReconcileJob(
-                        season,
-                        job.data.tournamentId,
-                        true,
-                        roster?.setupProgressUpdatedAt ?? undefined,
-                      ),
-                      findTournamentSetupJob(
-                        season,
-                        job.data.tournamentId,
-                        roster?.setupProgressUpdatedAt,
-                      ),
-                    ]);
-                    markerResumePending = Boolean(reconcileJob || setupJob);
-                  }
-                  if (markerResumePending) {
+                  if (job.data.source !== 'manual') {
                     logInfo('Ignoring unmarked setup job during official roster resume', {
                       tournamentId: job.data.tournamentId,
                       jobId: job.id,
                       source: job.data.source,
+                    });
+                    return;
+                  }
+
+                  // An explicit manual retry is allowed to recover a
+                  // terminal resume, but never while marker-owned work is
+                  // still live.
+                  const [reconcileJob, setupJob] = await Promise.all([
+                    findTournamentRosterReconcileJob(
+                      season,
+                      job.data.tournamentId,
+                      true,
+                      roster?.setupProgressUpdatedAt ?? undefined,
+                    ),
+                    findTournamentSetupJob(
+                      season,
+                      job.data.tournamentId,
+                      roster?.setupProgressUpdatedAt,
+                    ),
+                  ]);
+                  if (reconcileJob || setupJob) {
+                    logInfo('Ignoring manual setup retry during official roster resume', {
+                      tournamentId: job.data.tournamentId,
+                      jobId: job.id,
                     });
                     return;
                   }
