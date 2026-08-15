@@ -8,6 +8,7 @@ import {
   tournamentCreateInputSchema,
   uniqueParticipantIds,
   validateTournamentCreateInput,
+  parseLeagueUrl,
   type TournamentCreateInput,
   type TournamentSetupStatus,
 } from '../domain/tournament';
@@ -128,7 +129,6 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           : 'pending';
       report(setupStatus === 'failed' ? 'enqueue_failed' : 'queued', setupStatus, null);
     };
-
     try {
       // The API also validates this boundary, but this service has direct
       // callers. Reject malformed requests before database or upstream work.
@@ -146,6 +146,47 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       const endEventId = parseGameweek(payload.endGameweek);
       eventCount = startEventId && endEventId ? Math.max(0, endEventId - startEventId + 1) : 0;
       const season = await seasonRepository.findCurrent();
+      const recoverPersistedPreviewCreation = async (tokenHash: string) => {
+        const claimRecord = await getPreviewCreationClaim(tokenHash);
+        if (claimRecord?.payloadFingerprint !== payloadFingerprint) return null;
+        const { leagueId } = parseLeagueUrl(payload.leagueUrl);
+        const persisted = await tournamentInfoRepository.findCreatedByIdentity(season, {
+          name: normalizeTournamentName(payload.tournamentName),
+          adminEntryId: Number(payload.adminId),
+          leagueId,
+        });
+        if (!persisted || persisted.previewPayloadFingerprint !== payloadFingerprint) return null;
+
+        await enqueueTournamentSetup(season, persisted.id, 'create');
+        const setupStatus =
+          (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
+          'pending';
+        const recovered = {
+          tournament: {
+            id: persisted.id,
+            name: persisted.name,
+            creator: persisted.creator,
+            adminEntryId: persisted.adminEntryId,
+            leagueId: persisted.leagueId,
+            participantCount: persisted.totalTeamNum,
+          },
+          setupStatus,
+        } as const;
+        let resultCached = false;
+        try {
+          await markPreviewCreatedResult(tokenHash, recovered, payloadFingerprint);
+          await markPreviewQueuedResult(tokenHash, recovered, payloadFingerprint);
+          resultCached = true;
+        } catch (error) {
+          logInfo('Unable to cache recovered tournament preview result', {
+            event: 'tournament_preview_recovery_cache_failed',
+            error: error instanceof Error ? error.name : 'UnknownError',
+          });
+        }
+        if (resultCached) await releasePreviewCreationClaim(tokenHash).catch(() => undefined);
+        report('queued', setupStatus, null);
+        return recovered;
+      };
       const inputPreviewTokenHash = payload.previewToken
         ? createHash('sha256').update(payload.previewToken).digest('hex')
         : null;
@@ -175,6 +216,8 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
             setupStatus: TournamentSetupStatus;
           };
         }
+        const recoveredBeforePreview = await recoverPersistedPreviewCreation(inputPreviewTokenHash);
+        if (recoveredBeforePreview) return recoveredBeforePreview;
       }
       const preview = payload.previewToken
         ? await resolveTournamentPreview(payload.previewToken, {
