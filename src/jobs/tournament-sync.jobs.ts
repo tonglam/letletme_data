@@ -524,7 +524,16 @@ export async function findTournamentRosterReconcileJob(
     undefined,
     expectedProgressMarker,
   );
-  return tournamentSyncQueue.getJob(`${season.seasonCode}-${logicalJobId}`);
+  const job = await tournamentSyncQueue.getJob(`${season.seasonCode}-${logicalJobId}`);
+  if (!job) return null;
+
+  // BullMQ retains completed and failed jobs for observability.  A retained
+  // terminal job is not an in-flight resume and must not block a later retry
+  // or make an ambiguous enqueue look accepted.
+  const state = await job.getState();
+  return ['waiting', 'waiting-children', 'delayed', 'active', 'paused'].includes(state)
+    ? job
+    : null;
 }
 
 function getTournamentRosterReconcileLogicalJobId(

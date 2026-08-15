@@ -8,7 +8,6 @@ import {
   lt,
   lte,
   ne,
-  not,
   or,
   sql,
 } from 'drizzle-orm';
@@ -590,11 +589,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           and(
             eq(tournamentsInCompetition.seasonId, season.seasonId),
             inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
-            or(
-              ne(tournamentsInCompetition.state, 'inactive'),
-              ne(tournamentsInCompetition.rosterMode, 'official_sync'),
-              not(inArray(tournamentsInCompetition.rosterSyncStatus, ['processing', 'failed'])),
-            ),
             lt(
               sql`COALESCE(
                 ${tournamentsInCompetition.setupProgressUpdatedAt},

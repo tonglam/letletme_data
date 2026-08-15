@@ -5,6 +5,9 @@ import {
   tournamentSetupQueueName,
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
+import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
+import { findTournamentRosterReconcileJob } from '../jobs/tournament-sync.jobs';
+import { findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import {
   recoverStuckTournamentSetups,
   setupTournamentStructure,
@@ -28,8 +31,19 @@ const WATCHDOG_INTERVAL_MS = Number(process.env.TOURNAMENT_SETUP_WATCHDOG_INTERV
 
 async function hasActiveSetupJob(tournamentId: number): Promise<boolean> {
   try {
-    const activeJobs = await tournamentSetupQueue.getJobs(['active']);
-    return activeJobs.some((job) => job.data.tournamentId === tournamentId);
+    const [setupJobs, resumeJobs] = await Promise.all([
+      tournamentSetupQueue.getJobs(['waiting', 'waiting-children', 'delayed', 'active', 'paused']),
+      tournamentSyncQueue.getJobs(['waiting', 'waiting-children', 'delayed', 'active', 'paused']),
+    ]);
+    return (
+      setupJobs.some((job) => job.data.tournamentId === tournamentId) ||
+      resumeJobs.some(
+        (job) =>
+          job.name === 'tournament-roster-reconcile' &&
+          job.data.tournamentId === tournamentId &&
+          job.data.resumeAfterSetup === true,
+      )
+    );
   } catch (error) {
     logError('Failed to check active setup jobs', error, { tournamentId });
     // If we can't tell, be conservative and don't recover.
@@ -100,7 +114,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                   season,
                   job.data.tournamentId,
                 );
-                if (
+                const resumePending =
                   roster?.rosterMode === 'official_sync' &&
                   roster.state === 'inactive' &&
                   (roster.rosterSyncStatus === 'processing' ||
@@ -110,13 +124,39 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                     roster.setupStatus === 'failed') &&
                   (roster.setupPhase === 'queued' ||
                     roster.setupPhase === 'failed' ||
-                    roster.setupStatus === 'processing')
-                ) {
-                  logInfo('Ignoring unmarked setup job during official roster resume', {
-                    tournamentId: job.data.tournamentId,
-                    jobId: job.id,
-                  });
-                  return;
+                    roster.setupStatus === 'processing');
+
+                if (resumePending) {
+                  // A watchdog job is the explicit recovery path after the
+                  // marker-specific resume jobs have exhausted their retries.
+                  // It may proceed only once both marker-specific queues are
+                  // terminal; manual/legacy jobs remain fenced while resume
+                  // work is pending.
+                  let markerResumePending = true;
+                  if (job.data.source === 'watchdog') {
+                    const [reconcileJob, setupJob] = await Promise.all([
+                      findTournamentRosterReconcileJob(
+                        season,
+                        job.data.tournamentId,
+                        true,
+                        roster?.setupProgressUpdatedAt ?? undefined,
+                      ),
+                      findTournamentSetupJob(
+                        season,
+                        job.data.tournamentId,
+                        roster?.setupProgressUpdatedAt,
+                      ),
+                    ]);
+                    markerResumePending = Boolean(reconcileJob || setupJob);
+                  }
+                  if (markerResumePending) {
+                    logInfo('Ignoring unmarked setup job during official roster resume', {
+                      tournamentId: job.data.tournamentId,
+                      jobId: job.id,
+                      source: job.data.source,
+                    });
+                    return;
+                  }
                 }
               }
               await job.updateProgress('running');
