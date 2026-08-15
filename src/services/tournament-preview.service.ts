@@ -216,7 +216,10 @@ async function reuseStoredPreview(
 
 function normalizeOwnerEntry(value: unknown): number {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value;
-  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) return Number(value);
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) {
+    const parsed = Number(value);
+    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  }
   throw new ValidationError(
     'A valid verified Entry is required.',
     'TOURNAMENT_PREVIEW_ENTRY_INVALID',

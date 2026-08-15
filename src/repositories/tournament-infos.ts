@@ -102,6 +102,9 @@ export interface TournamentCreatedRow {
 export interface StuckTournamentRow {
   id: number;
   setupProgressUpdatedAt: string | null;
+  state: 'active' | 'inactive' | 'finished';
+  rosterMode: 'snapshot' | 'official_sync';
+  rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
 }
 
 function exactTimestamp(value: Date | string | null): string | null {
@@ -583,6 +586,9 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
             ${tournamentsInCompetition.setupProgressUpdatedAt},
             ${tournamentsInCompetition.setupStartedAt}
           )::text`,
+          state: tournamentsInCompetition.state,
+          rosterMode: tournamentsInCompetition.rosterMode,
+          rosterSyncStatus: tournamentsInCompetition.rosterSyncStatus,
         })
         .from(tournamentsInCompetition)
         .where(

@@ -9,7 +9,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { queueRedisSingleton } from '../queues/redis';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
-export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade';
+export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade' | 'watchdog';
 
 export type TournamentSyncEnqueueOptions = {
   delay?: number;

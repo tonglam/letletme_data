@@ -6,7 +6,10 @@ import {
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
 import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
-import { findTournamentRosterReconcileJob } from '../jobs/tournament-sync.jobs';
+import {
+  enqueueTournamentRosterReconcile,
+  findTournamentRosterReconcileJob,
+} from '../jobs/tournament-sync.jobs';
 import { findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import {
   recoverStuckTournamentSetups,
@@ -125,13 +128,23 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                     roster.setupStatus === 'processing');
 
                 if (resumePending) {
+                  if (job.data.source === 'watchdog') {
+                    // Watchdog recovery replays the marker-pinned roster
+                    // operation first; it must never rebuild from an old
+                    // roster while the authoritative publication is pending.
+                    logInfo('Ignoring watchdog setup job before roster resume', {
+                      tournamentId: job.data.tournamentId,
+                      jobId: job.id,
+                    });
+                    return;
+                  }
+
                   // A watchdog job is the explicit recovery path after the
                   // marker-specific resume jobs have exhausted their retries.
-                  // It may proceed only once both marker-specific queues are
-                  // terminal; manual/legacy jobs remain fenced while resume
-                  // work is pending.
+                  // Manual setup retries may proceed after those jobs are
+                  // terminal; legacy/other jobs remain fenced.
                   let markerResumePending = true;
-                  if (job.data.source === 'watchdog') {
+                  if (job.data.source === 'manual') {
                     const [reconcileJob, setupJob] = await Promise.all([
                       findTournamentRosterReconcileJob(
                         season,
@@ -242,6 +255,13 @@ async function runStartupWatchdog(): Promise<void> {
       season,
       STUCK_PROCESSING_CUTOFF_MINUTES,
       hasActiveSetupJob,
+      async (currentSeason, tournamentId, resumeMarker) => {
+        await enqueueTournamentRosterReconcile(currentSeason, tournamentId, 'watchdog', {
+          resumeAfterSetup: true,
+          resumeMarker,
+          allowInactive: true,
+        });
+      },
     );
     if (recovered.length > 0) {
       logInfo('Tournament setup watchdog recovered stuck setups', {

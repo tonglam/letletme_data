@@ -34,7 +34,7 @@ export interface TournamentSyncJobData {
   seasonId: number;
   seasonCode: string;
   eventId: number;
-  source: 'cron' | 'manual' | 'cascade';
+  source: 'cron' | 'manual' | 'cascade' | 'watchdog';
   triggeredAt: string;
   /** Stable database-clock reuse cutoff retained across BullMQ attempts. */
   freshAfter?: string;
