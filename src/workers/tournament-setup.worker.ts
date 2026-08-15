@@ -39,9 +39,7 @@ async function hasActiveSetupJob(tournamentId: number): Promise<boolean> {
       setupJobs.some((job) => job.data.tournamentId === tournamentId) ||
       resumeJobs.some(
         (job) =>
-          job.name === 'tournament-roster-reconcile' &&
-          job.data.tournamentId === tournamentId &&
-          job.data.resumeAfterSetup === true,
+          job.name === 'tournament-roster-reconcile' && job.data.tournamentId === tournamentId,
       )
     );
   } catch (error) {
