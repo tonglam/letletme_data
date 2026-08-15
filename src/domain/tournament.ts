@@ -37,6 +37,10 @@ export const tournamentCreateInputSchema = z
       .array(z.string().regex(/^[1-9]\d*$/))
       .max(5000)
       .optional(),
+    // Additive field used by the Web preview flow. Older clients may omit it
+    // during the rolling deployment window and keep the legacy synchronous
+    // roster fetch path.
+    previewToken: z.string().min(32).max(128).optional(),
   })
   .superRefine((values, context) => {
     const startGameweek = parseGameweek(values.startGameweek);
@@ -270,6 +274,7 @@ export type TournamentStructurePlan = {
   knockoutStartedEventId: number | null;
   knockoutEndedEventId: number | null;
   knockoutPlayAgainstNum: number | null;
+  previewPayloadFingerprint?: string | null;
 };
 
 const groupModeMap = {

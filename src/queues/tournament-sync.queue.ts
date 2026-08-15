@@ -24,6 +24,7 @@ export const TOURNAMENT_JOBS = {
   // Info job (keep separate, low frequency)
   INFO: 'tournament-info',
   ROSTER_SYNC: 'tournament-roster-sync',
+  ROSTER_RECONCILE: 'tournament-roster-reconcile',
   OFFICIAL_H2H: 'tournament-official-h2h',
 } as const;
 
@@ -33,7 +34,7 @@ export interface TournamentSyncJobData {
   seasonId: number;
   seasonCode: string;
   eventId: number;
-  source: 'cron' | 'manual' | 'cascade';
+  source: 'cron' | 'manual' | 'cascade' | 'watchdog';
   triggeredAt: string;
   /** Stable database-clock reuse cutoff retained across BullMQ attempts. */
   freshAfter?: string;
@@ -45,6 +46,16 @@ export interface TournamentSyncJobData {
   cascadeId?: string;
   /** Exact standings publications selected by the base event-results job. */
   finalizationTargets?: TournamentFinalizationTarget[];
+  tournamentId?: number;
+  resumeAfterSetup?: boolean;
+  /** Database-clock marker written by the activation request. */
+  resumeMarker?: string;
+  /** Reconcile inactive tournaments only for explicit resume/retry callers. */
+  allowInactive?: boolean;
+  /** Settle a queued opt-in when the gameweek boundary closes before it runs. */
+  settleBoundaryFailure?: boolean;
+  /** Progress marker observed when a non-resume retry was queued. */
+  expectedProgressMarker?: string | null;
 }
 
 export const tournamentSyncQueue = new Queue<TournamentSyncJobData>(tournamentSyncQueueName, {

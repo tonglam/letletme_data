@@ -29,7 +29,9 @@ import { syncTournamentSelectionStats } from '../services/tournament-selection-s
 import {
   finishTournamentsThroughEvent,
   reconcileOfficialTournamentRosters,
+  reconcileTournamentRoster,
 } from '../services/tournament-roster.service';
+import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -408,6 +410,65 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                   );
                 }
                 return result;
+              }
+
+              case TOURNAMENT_JOBS.ROSTER_RECONCILE: {
+                if (!job.data.tournamentId) {
+                  throw new Error('Roster reconcile job is missing tournamentId');
+                }
+                try {
+                  return await reconcileTournamentRoster(season, job.data.tournamentId, {
+                    allowInactive: job.data.allowInactive === true,
+                    resumeAfterSetup: job.data.resumeAfterSetup === true,
+                    resumeMarker: job.data.resumeMarker,
+                    requireResumeMarker: job.data.resumeAfterSetup === true,
+                    settleBoundaryFailure: job.data.settleBoundaryFailure === true,
+                    expectedProgressMarker: job.data.expectedProgressMarker,
+                  });
+                } catch (error) {
+                  // Deletion is authoritative. A reconcile accepted just before
+                  // delete must settle successfully, not retry and alert on a
+                  // deliberately missing tournament.
+                  if (
+                    error instanceof Error &&
+                    'code' in error &&
+                    error.code === 'TOURNAMENT_NOT_FOUND'
+                  ) {
+                    logInfo('Ignoring roster reconcile for deleted tournament', {
+                      tournamentId: job.data.tournamentId,
+                    });
+                    return {
+                      tournamentId: job.data.tournamentId,
+                      changed: false,
+                      addedEntryIds: [],
+                      removedEntryIds: [],
+                      participantCount: 0,
+                      automaticallyPaused: false,
+                    };
+                  }
+                  if (
+                    error instanceof Error &&
+                    'code' in error &&
+                    error.code === 'TOURNAMENT_FINISHED'
+                  ) {
+                    await tournamentRosterRepository.markSyncCanceled(
+                      season,
+                      job.data.tournamentId,
+                    );
+                    logInfo('Ignoring roster reconcile for finished tournament', {
+                      tournamentId: job.data.tournamentId,
+                    });
+                    return {
+                      tournamentId: job.data.tournamentId,
+                      changed: false,
+                      addedEntryIds: [],
+                      removedEntryIds: [],
+                      participantCount: 0,
+                      automaticallyPaused: false,
+                    };
+                  }
+                  throw error;
+                }
               }
 
               default:

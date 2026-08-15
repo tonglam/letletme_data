@@ -24,6 +24,8 @@ export interface EnqueueTournamentSetupOptions {
    * BullMQ recording the job as completed.
    */
   activeSettleTimeoutMs?: number;
+  /** Database marker for a resume-triggered setup operation. */
+  resumeMarker?: string;
 }
 
 export type ExistingSetupJobAction =
@@ -36,15 +38,41 @@ export type ExistingSetupJobAction =
 export function getTournamentSetupJobIds(
   season: FplSeasonRef,
   tournamentId: number,
+  resumeMarker?: string,
 ): {
   baseJobId: string;
   successorJobId: string;
 } {
-  const baseJobId = `tournament-setup-${season.seasonCode}-${tournamentId}`;
+  const markerSuffix = resumeMarker
+    ? `-resume-${resumeMarker.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+    : '';
+  const baseJobId = `tournament-setup-${season.seasonCode}-${tournamentId}${markerSuffix}`;
   return {
     baseJobId,
     successorJobId: `${baseJobId}-successor`,
   };
+}
+
+export async function findTournamentSetupJob(
+  season: FplSeasonRef,
+  tournamentId: number,
+  resumeMarker?: string | null,
+) {
+  const { baseJobId, successorJobId } = getTournamentSetupJobIds(
+    season,
+    tournamentId,
+    resumeMarker ?? undefined,
+  );
+  const jobs = await Promise.all([
+    tournamentSetupQueue.getJob(baseJobId),
+    tournamentSetupQueue.getJob(successorJobId),
+  ]);
+  for (const job of jobs) {
+    if (!job) continue;
+    const state = await job.getState();
+    if (['waiting', 'waiting-children', 'delayed', 'active', 'paused'].includes(state)) return job;
+  }
+  return null;
 }
 
 export function decideExistingSetupSuccessorAction(
@@ -127,9 +155,14 @@ async function enqueueTournamentSetupUnlocked(
       tournamentId,
       source,
       triggeredAt: new Date().toISOString(),
+      ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
     };
 
-    const { baseJobId, successorJobId } = getTournamentSetupJobIds(season, tournamentId);
+    const { baseJobId, successorJobId } = getTournamentSetupJobIds(
+      season,
+      tournamentId,
+      options.resumeMarker,
+    );
     // A lifecycle-locked caller can leave one durable successor behind an
     // active base job. Always inspect that stable slot first: otherwise later
     // reconciliations only see the base ID and can queue duplicate rebuilds.

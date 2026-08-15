@@ -95,11 +95,19 @@ export interface TournamentCreatedRow {
   adminEntryId: number;
   leagueId: number;
   totalTeamNum: number;
+  createdAt?: string;
+  previewPayloadFingerprint?: string | null;
 }
 
 export interface StuckTournamentRow {
   id: number;
   setupProgressUpdatedAt: string | null;
+  state: 'active' | 'inactive' | 'finished';
+  rosterMode: 'snapshot' | 'official_sync';
+  rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
+  rosterLastSyncedAt: string | null;
+  setupStatus: TournamentSetupStatus;
+  setupPhase: TournamentSetupPhase;
 }
 
 function exactTimestamp(value: Date | string | null): string | null {
@@ -363,6 +371,36 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       }
     },
 
+    findCreatedByIdentity: async (
+      season: FplSeasonRef,
+      input: { name: string; adminEntryId: number; leagueId: number },
+    ): Promise<TournamentCreatedRow | null> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          id: tournamentsInCompetition.tournamentId,
+          seasonId: tournamentsInCompetition.seasonId,
+          name: tournamentsInCompetition.name,
+          creator: tournamentsInCompetition.creator,
+          adminEntryId: tournamentsInCompetition.adminEntryId,
+          leagueId: tournamentsInCompetition.leagueId,
+          totalTeamNum: tournamentsInCompetition.totalTeamNum,
+          createdAt: sql<string>`${tournamentsInCompetition.createdAt}::text`,
+          previewPayloadFingerprint: tournamentsInCompetition.previewPayloadFingerprint,
+        })
+        .from(tournamentsInCompetition)
+        .where(
+          and(
+            eq(tournamentsInCompetition.seasonId, season.seasonId),
+            eq(tournamentsInCompetition.name, input.name),
+            eq(tournamentsInCompetition.adminEntryId, input.adminEntryId),
+            eq(tournamentsInCompetition.leagueId, input.leagueId),
+          ),
+        )
+        .limit(1);
+      return rows[0] ?? null;
+    },
+
     findSetupConfig: async (
       season: FplSeasonRef,
       tournamentId: number,
@@ -426,7 +464,11 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       return rows[0] ?? null;
     },
 
-    markSetupProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+    markSetupProcessing: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      progressMarker?: string | null,
+    ): Promise<void> => {
       const db = await getDbInstance();
       await db
         .update(tournamentsInCompetition)
@@ -436,7 +478,8 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupPhase: 'syncing_entries',
           setupCompletedUnits: 0,
           setupTotalUnits: 0,
-          setupProgressUpdatedAt: new Date(),
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           setupWarningCount: 0,
           setupStartedAt: new Date(),
           setupFinishedAt: null,
@@ -472,6 +515,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       phase: TournamentSetupPhase,
       completedUnits: number,
       totalUnits: number,
+      progressMarker?: string | null,
     ): Promise<void> => {
       const safeTotal = Math.max(0, Math.trunc(totalUnits));
       const safeCompleted = Math.min(safeTotal, Math.max(0, Math.trunc(completedUnits)));
@@ -482,19 +526,25 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupPhase: phase,
           setupCompletedUnits: safeCompleted,
           setupTotalUnits: safeTotal,
-          setupProgressUpdatedAt: new Date(),
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           updatedAt: new Date(),
         })
         .where(tournamentScope(season, tournamentId));
     },
 
-    markStandingsReady: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+    markStandingsReady: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      progressMarker?: string | null,
+    ): Promise<void> => {
       const db = await getDbInstance();
       const rows = await db
         .update(tournamentsInCompetition)
         .set({
           standingsReadyAt: sql`COALESCE(${tournamentsInCompetition.standingsReadyAt}, clock_timestamp())`,
-          setupProgressUpdatedAt: new Date(),
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           updatedAt: new Date(),
         })
         .where(tournamentScope(season, tournamentId))
@@ -508,6 +558,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       status: 'ready' | 'failed',
       error?: string | null,
       warningCount = status === 'ready' && error ? 1 : 0,
+      progressMarker?: string | null,
     ): Promise<void> => {
       const db = await getDbInstance();
       await db
@@ -517,7 +568,8 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupPhase: status,
           setupWarningCount: status === 'ready' ? Math.max(0, warningCount) : 0,
           setupError: error ?? null,
-          setupProgressUpdatedAt: new Date(),
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           setupFinishedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -537,6 +589,14 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
             ${tournamentsInCompetition.setupProgressUpdatedAt},
             ${tournamentsInCompetition.setupStartedAt}
           )::text`,
+          state: tournamentsInCompetition.state,
+          rosterMode: tournamentsInCompetition.rosterMode,
+          rosterSyncStatus: tournamentsInCompetition.rosterSyncStatus,
+          rosterLastSyncedAt: sql<
+            string | null
+          >`${tournamentsInCompetition.rosterLastSyncedAt}::text`,
+          setupStatus: tournamentsInCompetition.setupStatus,
+          setupPhase: tournamentsInCompetition.setupPhase,
         })
         .from(tournamentsInCompetition)
         .where(
@@ -652,6 +712,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
               setupStatus: 'pending',
               setupPhase: 'queued',
               setupProgressUpdatedAt: new Date(),
+              previewPayloadFingerprint: plan.previewPayloadFingerprint ?? null,
             })
             .returning({
               id: tournamentsInCompetition.tournamentId,
@@ -661,6 +722,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
               adminEntryId: tournamentsInCompetition.adminEntryId,
               leagueId: tournamentsInCompetition.leagueId,
               totalTeamNum: tournamentsInCompetition.totalTeamNum,
+              previewPayloadFingerprint: tournamentsInCompetition.previewPayloadFingerprint,
             });
           const inserted = insertedTournament[0];
           if (!inserted) {

@@ -7,6 +7,8 @@ import {
   estimateTournamentSetupRequests,
   getTournamentBackfillWindow,
   isOfficialH2HTournament,
+  type TournamentSetupPhase,
+  type TournamentSetupStatus,
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { eventRepository } from '../repositories/events';
@@ -120,6 +122,7 @@ export async function finalizePublishedTournamentSetup(
 export async function setupTournamentStructure(
   season: FplSeasonRef,
   tournamentId: number,
+  options?: { resumeMarker?: string },
 ): Promise<void> {
   const setupStartedAtMs = performance.now();
   const phaseDurationsMs = {
@@ -201,9 +204,23 @@ export async function setupTournamentStructure(
   // resume attempt into a warning. Only publication completed below makes
   // failures non-critical for this attempt.
   let standingsPublished = false;
+  const progressMarker = options?.resumeMarker;
+  const markSetupProgress = (
+    phase: TournamentSetupPhase,
+    completedUnits: number,
+    totalUnits: number,
+  ) =>
+    tournamentInfoRepository.markSetupProgress(
+      season,
+      tournamentId,
+      phase,
+      completedUnits,
+      totalUnits,
+      progressMarker,
+    );
 
   try {
-    await tournamentInfoRepository.markSetupProcessing(season, tournamentId);
+    await tournamentInfoRepository.markSetupProcessing(season, tournamentId, progressMarker);
     const setupIssues: TournamentSetupIssue[] = [];
     const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
       season,
@@ -230,22 +247,9 @@ export async function setupTournamentStructure(
           targetEventId,
           onPlan: async (plan) => {
             entryPlan = plan;
-            await tournamentInfoRepository.markSetupProgress(
-              season,
-              tournamentId,
-              'syncing_entries',
-              0,
-              plan.requestedEntries,
-            );
+            await markSetupProgress('syncing_entries', 0, plan.requestedEntries);
           },
-          onProgress: (completed, total) =>
-            tournamentInfoRepository.markSetupProgress(
-              season,
-              tournamentId,
-              'syncing_entries',
-              completed,
-              total,
-            ),
+          onProgress: (completed, total) => markSetupProgress('syncing_entries', completed, total),
         }),
     );
     setupIssues.push(...entrySyncIssues);
@@ -269,13 +273,7 @@ export async function setupTournamentStructure(
     }
 
     phaseStartedAtMs = performance.now();
-    await tournamentInfoRepository.markSetupProgress(
-      season,
-      tournamentId,
-      'building_structure',
-      0,
-      1,
-    );
+    await markSetupProgress('building_structure', 0, 1);
     const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(
       season,
       tournamentId,
@@ -291,13 +289,7 @@ export async function setupTournamentStructure(
       },
       () => rebuildTournamentStructure(season, tournament, entrySeeds),
     );
-    await tournamentInfoRepository.markSetupProgress(
-      season,
-      tournamentId,
-      'building_structure',
-      1,
-      1,
-    );
+    await markSetupProgress('building_structure', 1, 1);
     phaseDurationsMs.building_structure = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
       tournamentId,
@@ -317,35 +309,17 @@ export async function setupTournamentStructure(
       eventCount,
       ...estimateTournamentSetupRequests(entryIds.length, eventCount),
     });
-    await tournamentInfoRepository.markSetupProgress(
-      season,
-      tournamentId,
-      'calculating_standings',
-      0,
-      0,
-    );
+    await markSetupProgress('calculating_standings', 0, 0);
     if (window) {
       await ensureTournamentCoreResults(
         season,
         entryIds,
         window,
         (completed) =>
-          tournamentInfoRepository.markSetupProgress(
-            season,
-            tournamentId,
-            'calculating_standings',
-            completed,
-            corePlan.missingPairs + eventCount,
-          ),
+          markSetupProgress('calculating_standings', completed, corePlan.missingPairs + eventCount),
         async (plan) => {
           corePlan = plan;
-          await tournamentInfoRepository.markSetupProgress(
-            season,
-            tournamentId,
-            'calculating_standings',
-            0,
-            plan.missingPairs + eventCount,
-          );
+          await markSetupProgress('calculating_standings', 0, plan.missingPairs + eventCount);
         },
         {
           requirePicksForEvents:
@@ -375,9 +349,7 @@ export async function setupTournamentStructure(
       tournament,
       window,
       (completed) =>
-        tournamentInfoRepository.markSetupProgress(
-          season,
-          tournamentId,
+        markSetupProgress(
           'calculating_standings',
           corePlan.missingPairs + completed,
           corePlan.missingPairs + eventCount,
@@ -388,7 +360,7 @@ export async function setupTournamentStructure(
     if (blockingCoreIssues.length > 0) {
       throw new Error(`Core tournament audit failed: ${blockingCoreIssues.join('; ')}`);
     }
-    await tournamentInfoRepository.markStandingsReady(season, tournamentId);
+    await tournamentInfoRepository.markStandingsReady(season, tournamentId, progressMarker);
     standingsPublished = true;
     phaseDurationsMs.calculating_standings = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
@@ -400,26 +372,13 @@ export async function setupTournamentStructure(
     });
 
     phaseStartedAtMs = performance.now();
-    await tournamentInfoRepository.markSetupProgress(
-      season,
-      tournamentId,
-      'enriching_history',
-      0,
-      0,
-    );
+    await markSetupProgress('enriching_history', 0, 0);
     setupIssues.push(
       ...(await enrichTournamentHistory(season, tournamentId, entryIds, window, {
         onPlan: (plan) => {
           enrichmentPlan = plan;
         },
-        onProgress: (completed, total) =>
-          tournamentInfoRepository.markSetupProgress(
-            season,
-            tournamentId,
-            'enriching_history',
-            completed,
-            total,
-          ),
+        onProgress: (completed, total) => markSetupProgress('enriching_history', completed, total),
       })),
     );
     phaseDurationsMs.enriching_history = Math.round(performance.now() - phaseStartedAtMs);
@@ -431,7 +390,7 @@ export async function setupTournamentStructure(
     });
 
     phaseStartedAtMs = performance.now();
-    await tournamentInfoRepository.markSetupProgress(season, tournamentId, 'finalizing', 0, 1);
+    await markSetupProgress('finalizing', 0, 1);
     const audit = await auditTournamentSetup(season, tournament, window);
     setupIssues.push(
       ...audit.issues.map((message) => ({
@@ -440,7 +399,7 @@ export async function setupTournamentStructure(
       })),
     );
     await refreshTournamentMaterializedViews();
-    await tournamentInfoRepository.markSetupProgress(season, tournamentId, 'finalizing', 1, 1);
+    await markSetupProgress('finalizing', 1, 1);
     phaseDurationsMs.finalizing = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
       tournamentId,
@@ -479,7 +438,18 @@ export async function setupTournamentStructure(
       return;
     }
     outcome = 'failed_before_standings';
-    await tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message, 0);
+    if (progressMarker !== undefined) {
+      await tournamentInfoRepository.markSetupResult(
+        season,
+        tournamentId,
+        'failed',
+        message,
+        0,
+        progressMarker,
+      );
+    } else {
+      await tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message, 0);
+    }
     throw error;
   } finally {
     let terminalStatus = null;
@@ -545,6 +515,14 @@ export async function recoverStuckTournamentSetups(
   season: FplSeasonRef,
   cutoffMinutes: number,
   isActive?: (tournamentId: number) => Promise<boolean>,
+  recoverOfficialRoster?: (
+    season: FplSeasonRef,
+    tournamentId: number,
+    resumeMarker: string,
+    setupStatus: TournamentSetupStatus,
+    setupPhase: TournamentSetupPhase,
+    rosterLastSyncedAt: string | null,
+  ) => Promise<void>,
 ): Promise<{ recovered: number[]; skippedActive: number[] }> {
   const stuck = await tournamentInfoRepository.findStuckProcessing(season, cutoffMinutes);
   if (stuck.length === 0) {
@@ -555,15 +533,6 @@ export async function recoverStuckTournamentSetups(
   const skippedActive: number[] = [];
   for (const row of stuck) {
     try {
-      if (isActive && (await isActive(row.id))) {
-        skippedActive.push(row.id);
-        logInfo('Skipping recovery of setup with active worker job', {
-          tournamentId: row.id,
-          setupProgressUpdatedAt: row.setupProgressUpdatedAt,
-        });
-        continue;
-      }
-
       await withMutationConflictGuard(
         {
           queueName: 'tournament-setup-watchdog',
@@ -572,6 +541,51 @@ export async function recoverStuckTournamentSetups(
           scopes: [tournamentSetupLifecycleScope(row.id)],
         },
         async () => {
+          // The queue probe above is only a candidate. Recheck while holding
+          // the same lifecycle lock as roster/setup workers so a retry queued
+          // after the first probe cannot be invalidated by this watchdog.
+          if (isActive && (await isActive(row.id))) {
+            skippedActive.push(row.id);
+            logInfo('Skipping watchdog recovery after a live job appeared', {
+              tournamentId: row.id,
+              setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+            });
+            return;
+          }
+
+          // An inactive official-sync row with a pending/processing setup is
+          // resume-owned. Replaying setup directly would rebuild from the old
+          // roster and could activate the tournament without authoritative
+          // roster publication. Replay the marker-pinned roster operation
+          // first; the marked setup job will be enqueued by that operation.
+          if (
+            row.state === 'inactive' &&
+            row.rosterMode === 'official_sync' &&
+            (row.rosterSyncStatus === 'processing' || row.rosterSyncStatus === 'failed')
+          ) {
+            if (!recoverOfficialRoster || !row.setupProgressUpdatedAt) {
+              logInfo('Skipping watchdog recovery without an official resume marker', {
+                tournamentId: row.id,
+                setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+              });
+              return;
+            }
+            await recoverOfficialRoster(
+              season,
+              row.id,
+              row.setupProgressUpdatedAt,
+              row.setupStatus,
+              row.setupPhase,
+              row.rosterLastSyncedAt,
+            );
+            recovered.push(row.id);
+            logInfo('Watchdog replayed stalled official roster resume', {
+              tournamentId: row.id,
+              setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+            });
+            return;
+          }
+
           // The initial stale query and BullMQ probe are only candidates. A
           // worker may publish readiness or advance its heartbeat before this
           // lock is acquired, so compare-and-swap the exact observed heartbeat

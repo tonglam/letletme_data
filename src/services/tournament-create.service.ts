@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   normalizeTournamentName,
   parseGameweek,
@@ -6,6 +8,7 @@ import {
   tournamentCreateInputSchema,
   uniqueParticipantIds,
   validateTournamentCreateInput,
+  parseLeagueUrl,
   type TournamentCreateInput,
   type TournamentSetupStatus,
 } from '../domain/tournament';
@@ -20,6 +23,17 @@ import {
 import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
 import { fetchLeagueParticipants } from './tournament-league-members.service';
+import {
+  getPreviewCreatedRecord,
+  claimPreviewCreation,
+  getPreviewCreationClaim,
+  markPreviewCreatedResult,
+  markPreviewQueuedResult,
+  releasePreviewCreationClaim,
+  resolveTournamentPreview,
+  waitForPreviewCreatedRecord,
+  getPreviewQueuedRecord,
+} from './tournament-preview.service';
 
 export { tournamentCreateInputSchema, validateTournamentCreateInput };
 export type { TournamentCreateInput, TournamentSetupStatus };
@@ -75,6 +89,9 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
     let leagueType: 'classic' | 'h2h' | null = null;
     let reportEmitted = false;
     let eventCount = 0;
+    let previewTokenHash: string | null = null;
+    let previewClaimed = false;
+    let previewCreationBusy = false;
 
     const report = (
       outcome: 'queued' | 'enqueue_failed' | 'rejected' | 'failed',
@@ -99,7 +116,19 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         fpl: getFplRequestMetricsSnapshot(),
       });
     };
-
+    const reportCachedResult = (value: unknown) => {
+      const setupStatus =
+        value &&
+        typeof value === 'object' &&
+        'setupStatus' in value &&
+        (value.setupStatus === 'pending' ||
+          value.setupStatus === 'processing' ||
+          value.setupStatus === 'ready' ||
+          value.setupStatus === 'failed')
+          ? value.setupStatus
+          : 'pending';
+      report(setupStatus === 'failed' ? 'enqueue_failed' : 'queued', setupStatus, null);
+    };
     try {
       // The API also validates this boundary, but this service has direct
       // callers. Reject malformed requests before database or upstream work.
@@ -112,11 +141,171 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           error,
         );
       }
+      const payloadFingerprint = previewPayloadFingerprint(payload);
       const startEventId = parseGameweek(payload.startGameweek);
       const endEventId = parseGameweek(payload.endGameweek);
       eventCount = startEventId && endEventId ? Math.max(0, endEventId - startEventId + 1) : 0;
       const season = await seasonRepository.findCurrent();
-      const source = await fetchLeagueParticipants(payload.leagueUrl);
+      const recoverPersistedPreviewCreation = async (tokenHash: string) => {
+        const claimRecord = await getPreviewCreationClaim(tokenHash);
+        if (claimRecord?.payloadFingerprint !== payloadFingerprint) return null;
+        const { leagueId } = parseLeagueUrl(payload.leagueUrl);
+        const persisted = await tournamentInfoRepository.findCreatedByIdentity(season, {
+          name: normalizeTournamentName(payload.tournamentName),
+          adminEntryId: Number(payload.adminId),
+          leagueId,
+        });
+        if (!persisted || persisted.previewPayloadFingerprint !== payloadFingerprint) return null;
+
+        let setupStatus =
+          (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
+          'pending';
+        if (setupStatus !== 'ready') {
+          await enqueueTournamentSetup(season, persisted.id, 'create');
+          setupStatus =
+            (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
+            setupStatus;
+        }
+        const recovered = {
+          tournament: {
+            id: persisted.id,
+            name: persisted.name,
+            creator: persisted.creator,
+            adminEntryId: persisted.adminEntryId,
+            leagueId: persisted.leagueId,
+            participantCount: persisted.totalTeamNum,
+          },
+          setupStatus,
+        } as const;
+        let resultCached = false;
+        try {
+          await markPreviewCreatedResult(tokenHash, recovered, payloadFingerprint);
+          await markPreviewQueuedResult(tokenHash, recovered, payloadFingerprint);
+          resultCached = true;
+        } catch (error) {
+          logInfo('Unable to cache recovered tournament preview result', {
+            event: 'tournament_preview_recovery_cache_failed',
+            error: error instanceof Error ? error.name : 'UnknownError',
+          });
+        }
+        if (resultCached) await releasePreviewCreationClaim(tokenHash).catch(() => undefined);
+        report('queued', setupStatus, null);
+        return recovered;
+      };
+      const inputPreviewTokenHash = payload.previewToken
+        ? createHash('sha256').update(payload.previewToken).digest('hex')
+        : null;
+      if (inputPreviewTokenHash) {
+        // A successful create can outlive the five-minute preview metadata.
+        // Recover the fingerprint-bound result before resolving that metadata,
+        // so a lost-response retry remains idempotent after token expiry.
+        const createdBeforePreview = unwrapPreviewResult(
+          await getPreviewCreatedRecord(inputPreviewTokenHash),
+          payloadFingerprint,
+        );
+        if (
+          createdBeforePreview &&
+          typeof createdBeforePreview === 'object' &&
+          'tournament' in createdBeforePreview
+        ) {
+          reportCachedResult(createdBeforePreview);
+          return createdBeforePreview as {
+            tournament: {
+              id: number;
+              name: string;
+              creator: string;
+              adminEntryId: number;
+              leagueId: number;
+              participantCount: number;
+            };
+            setupStatus: TournamentSetupStatus;
+          };
+        }
+        const recoveredBeforePreview = await recoverPersistedPreviewCreation(inputPreviewTokenHash);
+        if (recoveredBeforePreview) return recoveredBeforePreview;
+      }
+      const preview = payload.previewToken
+        ? await resolveTournamentPreview(payload.previewToken, {
+            ownerEntryId: payload.adminId,
+            leagueUrl: payload.leagueUrl,
+          })
+        : null;
+      previewTokenHash = preview?.tokenHash ?? inputPreviewTokenHash;
+      if (preview) {
+        const created = unwrapPreviewResult(
+          await getPreviewCreatedRecord(preview.tokenHash),
+          payloadFingerprint,
+        );
+        if (created && typeof created === 'object' && 'tournament' in created) {
+          reportCachedResult(created);
+          return created as {
+            tournament: {
+              id: number;
+              name: string;
+              creator: string;
+              adminEntryId: number;
+              leagueId: number;
+              participantCount: number;
+            };
+            setupStatus: TournamentSetupStatus;
+          };
+        }
+        const claim = await claimPreviewCreation(preview.tokenHash, payloadFingerprint);
+        if (claim === 'busy') {
+          const concurrent = unwrapPreviewResult(
+            await waitForPreviewCreatedRecord(preview.tokenHash),
+            payloadFingerprint,
+          );
+          if (concurrent && typeof concurrent === 'object' && 'tournament' in concurrent) {
+            reportCachedResult(concurrent);
+            return concurrent as {
+              tournament: {
+                id: number;
+                name: string;
+                creator: string;
+                adminEntryId: number;
+                leagueId: number;
+                participantCount: number;
+              };
+              setupStatus: TournamentSetupStatus;
+            };
+          }
+          // Continue through planning so a completed PostgreSQL creation can
+          // repair a lost Redis result cache without creating a duplicate.
+          previewCreationBusy = true;
+        } else {
+          previewClaimed = true;
+          // The result lookup and NX claim are intentionally separate Redis
+          // operations. Recheck after claiming so a retry that was suspended
+          // between them cannot become a second writer after the first request
+          // has already published its result and released the claim.
+          const claimedCreated = unwrapPreviewResult(
+            await getPreviewCreatedRecord(preview.tokenHash),
+            payloadFingerprint,
+          );
+          if (
+            claimedCreated &&
+            typeof claimedCreated === 'object' &&
+            'tournament' in claimedCreated
+          ) {
+            previewClaimed = false;
+            await releasePreviewCreationClaim(preview.tokenHash).catch(() => undefined);
+            reportCachedResult(claimedCreated);
+            return claimedCreated as {
+              tournament: {
+                id: number;
+                name: string;
+                creator: string;
+                adminEntryId: number;
+                leagueId: number;
+                participantCount: number;
+              };
+              setupStatus: TournamentSetupStatus;
+            };
+          }
+        }
+      }
+      const source = preview ?? (await fetchLeagueParticipants(payload.leagueUrl));
       phaseDurationsMs.authoritative_roster = Math.round(performance.now() - phaseStartedAtMs);
       leagueType = source.leagueType;
 
@@ -139,16 +328,97 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           knockoutRounds: source.knockoutRounds,
         },
       );
-      const plan =
+      const plannedPlan =
         planned.rosterMode === 'official_sync' &&
         planned.leagueType !== 'h2h' &&
         !getConfig().TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED
           ? { ...planned, rosterMode: 'snapshot' as const }
           : planned;
+      const plan = {
+        ...plannedPlan,
+        previewPayloadFingerprint: preview ? payloadFingerprint : null,
+      };
       participantCount = plan.selectedParticipants.length;
       rosterMode = plan.rosterMode ?? 'snapshot';
       if (await tournamentInfoRepository.checkNameExists(season, plan.tournamentName)) {
+        // PostgreSQL identity recovery is only safe for a retry that observed
+        // this preview token's single-writer claim. A fresh token with the
+        // same mutable tournament name must not attach to an older tournament.
+        if (preview && previewCreationBusy) {
+          // The original request may have published the final result just
+          // after this retry's wait ended. Prefer that authoritative Redis
+          // result before inspecting queued evidence or PostgreSQL names.
+          const finished = unwrapPreviewResult(
+            await getPreviewCreatedRecord(preview.tokenHash),
+            payloadFingerprint,
+          );
+          if (finished && typeof finished === 'object' && 'tournament' in finished) {
+            reportCachedResult(finished);
+            return finished as {
+              tournament: {
+                id: number;
+                name: string;
+                creator: string;
+                adminEntryId: number;
+                leagueId: number;
+                participantCount: number;
+              };
+              setupStatus: TournamentSetupStatus;
+            };
+          }
+          const queued = unwrapPreviewResult(
+            await getPreviewQueuedRecord(preview.tokenHash),
+            payloadFingerprint,
+          );
+          if (queued && typeof queued === 'object' && 'tournament' in queued) {
+            let resultRepaired = false;
+            try {
+              await markPreviewCreatedResult(preview.tokenHash, queued, payloadFingerprint);
+              resultRepaired = true;
+            } catch (error) {
+              logInfo('Unable to repair tournament preview idempotency result', {
+                event: 'tournament_preview_result_repair_failed',
+                error: error instanceof Error ? error.name : 'UnknownError',
+              });
+            }
+            // This retry did not acquire the single-writer claim. If Redis
+            // still rejects the final-result repair, keep the original claim
+            // so a later retry remains on the queued-evidence path instead of
+            // starting a second creation attempt.
+            if (resultRepaired) {
+              previewClaimed = false;
+              await releasePreviewCreationClaim(preview.tokenHash).catch(() => undefined);
+            }
+            const recovered = queued as {
+              tournament: {
+                id: number;
+                name: string;
+                creator: string;
+                adminEntryId: number;
+                leagueId: number;
+                participantCount: number;
+              };
+              setupStatus: TournamentSetupStatus;
+            };
+            report('queued', recovered.setupStatus, null);
+            return recovered;
+          }
+
+          // The process may have committed PostgreSQL and died before writing
+          // queued/result evidence. A busy claim still carries the operation
+          // fingerprint and start time, so recover only a row created by this
+          // exact preview operation; an older same-name tournament is never
+          // treated as idempotent success.
+          const recovered = await recoverPersistedPreviewCreation(preview.tokenHash);
+          if (recovered) return recovered;
+        }
         throw new ConflictError('Tournament name already exists.', 'TOURNAMENT_NAME_EXISTS');
+      }
+      if (previewCreationBusy) {
+        throw new ConflictError(
+          'Tournament creation is already in progress. Please retry shortly.',
+          'TOURNAMENT_CREATE_IN_PROGRESS',
+        );
       }
       phaseDurationsMs.planning = Math.round(performance.now() - phaseStartedAtMs);
 
@@ -172,12 +442,13 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
 
       failedPhase = 'enqueue';
       phaseStartedAtMs = performance.now();
+      let result: ReturnType<typeof resultFor>;
       try {
         await enqueueTournamentSetup(season, tournament.id, 'create');
         phaseDurationsMs.enqueue = Math.round(performance.now() - phaseStartedAtMs);
         failedPhase = null;
         report('queued', 'pending', null);
-        return resultFor('pending');
+        result = resultFor('pending');
       } catch (error) {
         phaseDurationsMs.enqueue = Math.round(performance.now() - phaseStartedAtMs);
         const message =
@@ -190,9 +461,59 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           throw statusError;
         }
         report('enqueue_failed', 'failed', failureCode);
-        return resultFor('failed');
+        result = resultFor('failed');
       }
+      // Redis preview bookkeeping is recoverable metadata. It must never turn
+      // a successfully enqueued authoritative creation into a failed response.
+      if (previewTokenHash) {
+        let createdResultCached = false;
+        try {
+          await markPreviewCreatedResult(previewTokenHash, result, payloadFingerprint);
+          createdResultCached = true;
+        } catch (error) {
+          logInfo('Unable to persist tournament preview created result', {
+            event: 'tournament_preview_created_result_cache_failed',
+            tournamentId: tournament.id,
+            error: error instanceof Error ? error.name : 'UnknownError',
+          });
+        }
+        try {
+          // Publish operation evidence only after the authoritative queue add
+          // has succeeded. A concurrent retry must never infer success from a
+          // PostgreSQL row whose setup job is still stalled or unpublished.
+          await markPreviewQueuedResult(previewTokenHash, result, payloadFingerprint);
+        } catch (error) {
+          logInfo('Unable to persist tournament preview idempotency result', {
+            event: 'tournament_preview_result_cache_failed',
+            tournamentId: tournament.id,
+            error: error instanceof Error ? error.name : 'UnknownError',
+          });
+        } finally {
+          // A final result is enough for a retry to return idempotently. If
+          // only queued evidence was written, retain the claim so recovery can
+          // repair the final-result key instead of creating a duplicate.
+          if (previewClaimed && createdResultCached) {
+            try {
+              await releasePreviewCreationClaim(previewTokenHash);
+            } catch (error) {
+              logInfo('Unable to release tournament preview creation claim', {
+                event: 'tournament_preview_claim_release_failed',
+                tournamentId: tournament.id,
+                error: error instanceof Error ? error.name : 'UnknownError',
+              });
+            }
+          }
+        }
+      }
+      return result;
     } catch (error) {
+      // Once PostgreSQL has committed, the claim is the only durable
+      // operation ownership left if Redis result bookkeeping failed. Keep it
+      // until TTL so the next retry can recover the fingerprinted row instead
+      // of becoming an unrelated writer.
+      if (previewClaimed && previewTokenHash && tournamentId === null) {
+        await releasePreviewCreationClaim(previewTokenHash).catch(() => undefined);
+      }
       if (failedPhase && phaseDurationsMs[failedPhase] === 0) {
         phaseDurationsMs[failedPhase] = Math.round(performance.now() - phaseStartedAtMs);
       }
@@ -212,4 +533,44 @@ function safeCreationErrorCode(error: unknown): string {
     return error.code;
   }
   return error instanceof Error ? error.name : 'UNKNOWN_ERROR';
+}
+
+function previewPayloadFingerprint(payload: TournamentCreateInput): string {
+  const canonical = {
+    tournamentName: payload.tournamentName,
+    adminId: payload.adminId,
+    creator: payload.creator,
+    participantSource: payload.participantSource,
+    tournamentType: payload.tournamentType ?? null,
+    leagueUrl: payload.leagueUrl,
+    groupFormat: payload.groupFormat,
+    startGameweek: payload.startGameweek.toUpperCase(),
+    endGameweek: payload.endGameweek.toUpperCase(),
+    groupNum: payload.groupNum ?? '',
+    qualifiersPerGroup: payload.qualifiersPerGroup ?? '',
+    knockoutFormat: payload.knockoutFormat,
+    selectedParticipantIds: [...(payload.selectedParticipantIds ?? [])].sort(),
+    // Bind persisted recovery evidence to the preview operation itself. Two
+    // tokens can otherwise carry the same visible payload while referring to
+    // different participant snapshots.
+    previewTokenHash: payload.previewToken
+      ? createHash('sha256').update(payload.previewToken).digest('hex')
+      : null,
+  };
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+function unwrapPreviewResult(
+  record: { payloadFingerprint: string | null; result: unknown } | null,
+  fingerprint: string,
+): unknown | null {
+  if (!record || !record.result || typeof record.result !== 'object') return null;
+  if (!('tournament' in record.result)) return null;
+  if (record.payloadFingerprint !== fingerprint) {
+    throw new ConflictError(
+      'This preview token was already used with a different tournament payload.',
+      'PREVIEW_PAYLOAD_MISMATCH',
+    );
+  }
+  return record.result;
 }

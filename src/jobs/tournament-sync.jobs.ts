@@ -7,15 +7,22 @@ import {
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { queueRedisSingleton } from '../queues/redis';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 
-export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade';
+export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade' | 'watchdog';
 
 export type TournamentSyncEnqueueOptions = {
   delay?: number;
   cascadeId?: string;
   jobId?: string;
   finalizationTargets?: TournamentFinalizationTarget[];
+  tournamentId?: number;
+  resumeAfterSetup?: boolean;
+  resumeMarker?: string;
+  allowInactive?: boolean;
+  settleBoundaryFailure?: boolean;
+  expectedProgressMarker?: string | null;
+  operationId?: string;
 };
 
 async function hasPendingOfficialH2HJob(season: FplSeasonRef, eventId: number): Promise<boolean> {
@@ -292,6 +299,14 @@ async function enqueueTournamentSyncJob(
             ],
           }
         : {}),
+      ...(options.tournamentId ? { tournamentId: options.tournamentId } : {}),
+      ...(options.resumeAfterSetup ? { resumeAfterSetup: true } : {}),
+      ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
+      ...(options.allowInactive ? { allowInactive: true } : {}),
+      ...(options.settleBoundaryFailure ? { settleBoundaryFailure: true } : {}),
+      ...(options.expectedProgressMarker !== undefined
+        ? { expectedProgressMarker: options.expectedProgressMarker }
+        : {}),
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.
@@ -440,3 +455,126 @@ export const enqueueTournamentRosterSync = (
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_SYNC, season, 0, source, {
     jobId: `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
   });
+
+export const enqueueTournamentRosterReconcile = async (
+  season: FplSeasonRef,
+  tournamentId: number,
+  source: TournamentSyncJobSource = 'manual',
+  options?: {
+    resumeAfterSetup?: boolean;
+    resumeMarker?: string;
+    allowInactive?: boolean;
+    settleBoundaryFailure?: boolean;
+    expectedProgressMarker?: string | null;
+    operationId?: string;
+  },
+) => {
+  const logicalJobId = getTournamentRosterReconcileLogicalJobId(
+    tournamentId,
+    options?.resumeAfterSetup,
+    options?.resumeMarker,
+    options?.allowInactive,
+    options?.operationId,
+    options?.expectedProgressMarker,
+  );
+  const stableJobId = `${season.seasonCode}-${logicalJobId}`;
+
+  if (!options?.operationId) {
+    const existing = await tournamentSyncQueue.getJob(stableJobId);
+    if (existing) {
+      const state = await existing.getState();
+      if (['waiting', 'waiting-children', 'delayed', 'active', 'paused'].includes(state)) {
+        logInfo('Tournament roster reconcile already in flight; reusing existing', {
+          tournamentId,
+          jobId: existing.id,
+          state,
+          source,
+        });
+        return existing;
+      }
+      // Completed/failed jobs are retained for observability, but must not
+      // prevent a later explicit retry from reusing the stable in-flight slot.
+      await existing.remove();
+    }
+  }
+
+  return enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_RECONCILE, season, 0, source, {
+    tournamentId,
+    resumeAfterSetup: options?.resumeAfterSetup,
+    resumeMarker: options?.resumeMarker,
+    allowInactive: options?.allowInactive,
+    settleBoundaryFailure: options?.settleBoundaryFailure,
+    expectedProgressMarker: options?.expectedProgressMarker,
+    jobId: logicalJobId,
+  });
+};
+
+export async function findTournamentRosterReconcileJob(
+  season: FplSeasonRef,
+  tournamentId: number,
+  resumeAfterSetup: boolean,
+  resumeMarker?: string,
+  expectedProgressMarker?: string | null,
+) {
+  const logicalJobId = getTournamentRosterReconcileLogicalJobId(
+    tournamentId,
+    resumeAfterSetup,
+    resumeMarker,
+    undefined,
+    undefined,
+    expectedProgressMarker,
+  );
+  const job = await tournamentSyncQueue.getJob(`${season.seasonCode}-${logicalJobId}`);
+  if (!job) return null;
+
+  // BullMQ retains completed and failed jobs for observability.  A retained
+  // terminal job is not an in-flight resume and must not block a later retry
+  // or make an ambiguous enqueue look accepted.
+  const state = await job.getState();
+  return ['waiting', 'waiting-children', 'delayed', 'active', 'paused'].includes(state)
+    ? job
+    : null;
+}
+
+function getTournamentRosterReconcileLogicalJobId(
+  tournamentId: number,
+  resumeAfterSetup?: boolean,
+  resumeMarker?: string,
+  allowInactive?: boolean,
+  operationId?: string,
+  expectedProgressMarker?: string | null,
+): string {
+  if (operationId) return `tournament-roster-reconcile-${tournamentId}-${operationId}`;
+  if (!resumeAfterSetup) {
+    if (expectedProgressMarker !== undefined) {
+      const markerPart = (expectedProgressMarker ?? 'no-marker').replace(/[^a-zA-Z0-9_-]/g, '_');
+      return `tournament-roster-reconcile-sync-${allowInactive ? 'inactive' : 'active'}-${tournamentId}-${markerPart}`;
+    }
+    return `tournament-roster-reconcile-sync-${allowInactive ? 'inactive' : 'active'}-${tournamentId}`;
+  }
+  const markerPart = (resumeMarker ?? 'missing-marker').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `tournament-roster-reconcile-resume-${tournamentId}-${markerPart}`;
+}
+
+export async function cancelWaitingTournamentRosterReconcileJobs(
+  tournamentId: number,
+): Promise<number> {
+  let removed = 0;
+  const jobs = await tournamentSyncQueue.getJobs(['waiting', 'delayed', 'paused']);
+  for (const job of jobs) {
+    if (job.name !== TOURNAMENT_JOBS.ROSTER_RECONCILE || job.data.tournamentId !== tournamentId) {
+      continue;
+    }
+    try {
+      await job.remove();
+      removed += 1;
+    } catch (error) {
+      logWarn('Unable to remove waiting tournament roster reconcile job', {
+        tournamentId,
+        jobId: job.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return removed;
+}

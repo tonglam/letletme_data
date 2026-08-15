@@ -5,6 +5,12 @@ import {
   tournamentSetupQueueName,
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
+import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
+import {
+  enqueueTournamentRosterReconcile,
+  findTournamentRosterReconcileJob,
+} from '../jobs/tournament-sync.jobs';
+import { enqueueTournamentSetup, findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import {
   recoverStuckTournamentSetups,
   setupTournamentStructure,
@@ -12,6 +18,7 @@ import {
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { seasonRepository } from '../repositories/seasons';
+import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { logError, logInfo } from '../utils/logger';
 import { runWithFplRequestMetrics } from '../utils/fpl-request-metrics';
 import { runTrackedJob } from '../utils/job-run-logger';
@@ -27,8 +34,17 @@ const WATCHDOG_INTERVAL_MS = Number(process.env.TOURNAMENT_SETUP_WATCHDOG_INTERV
 
 async function hasActiveSetupJob(tournamentId: number): Promise<boolean> {
   try {
-    const activeJobs = await tournamentSetupQueue.getJobs(['active']);
-    return activeJobs.some((job) => job.data.tournamentId === tournamentId);
+    const [setupJobs, resumeJobs] = await Promise.all([
+      tournamentSetupQueue.getJobs(['waiting', 'waiting-children', 'delayed', 'active', 'paused']),
+      tournamentSyncQueue.getJobs(['waiting', 'waiting-children', 'delayed', 'active', 'paused']),
+    ]);
+    return (
+      setupJobs.some((job) => job.data.tournamentId === tournamentId) ||
+      resumeJobs.some(
+        (job) =>
+          job.name === 'tournament-roster-reconcile' && job.data.tournamentId === tournamentId,
+      )
+    );
   } catch (error) {
     logError('Failed to check active setup jobs', error, { tournamentId });
     // If we can't tell, be conservative and don't recover.
@@ -76,10 +92,93 @@ export function createTournamentSetupWorker(): WorkerRuntime {
               scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
             },
             async () => {
+              if (job.data.resumeMarker) {
+                const ownsResume = await tournamentRosterRepository.markResumeProcessingIfPending(
+                  season,
+                  job.data.tournamentId,
+                  job.data.resumeMarker,
+                );
+                if (!ownsResume) {
+                  logInfo('Ignoring stale tournament resume setup job', {
+                    tournamentId: job.data.tournamentId,
+                    jobId: job.id,
+                  });
+                  return;
+                }
+              } else {
+                // Official-sync activation owns the setup lifecycle through
+                // the roster reconciliation marker. A pre-existing manual or
+                // watchdog setup job has no marker and must not rebuild from
+                // the old roster while that authoritative reconciliation is
+                // pending, even if it was already active before activation.
+                const roster = await tournamentRosterRepository.findById(
+                  season,
+                  job.data.tournamentId,
+                );
+                const resumePending =
+                  roster?.rosterMode === 'official_sync' &&
+                  roster.state === 'inactive' &&
+                  (roster.rosterSyncStatus === 'processing' ||
+                    roster.rosterSyncStatus === 'failed') &&
+                  (roster.setupStatus === 'pending' ||
+                    roster.setupStatus === 'processing' ||
+                    roster.setupStatus === 'failed') &&
+                  (roster.setupPhase === 'queued' ||
+                    roster.setupPhase === 'failed' ||
+                    roster.setupStatus === 'processing');
+
+                if (resumePending) {
+                  if (job.data.source === 'watchdog') {
+                    // Watchdog recovery replays the marker-pinned roster
+                    // operation first; it must never rebuild from an old
+                    // roster while the authoritative publication is pending.
+                    logInfo('Ignoring watchdog setup job before roster resume', {
+                      tournamentId: job.data.tournamentId,
+                      jobId: job.id,
+                    });
+                    return;
+                  }
+
+                  if (job.data.source !== 'manual') {
+                    logInfo('Ignoring unmarked setup job during official roster resume', {
+                      tournamentId: job.data.tournamentId,
+                      jobId: job.id,
+                      source: job.data.source,
+                    });
+                    return;
+                  }
+
+                  // An explicit manual retry is allowed to recover a
+                  // terminal resume, but never while marker-owned work is
+                  // still live.
+                  const [reconcileJob, setupJob] = await Promise.all([
+                    findTournamentRosterReconcileJob(
+                      season,
+                      job.data.tournamentId,
+                      true,
+                      roster?.setupProgressUpdatedAt ?? undefined,
+                    ),
+                    findTournamentSetupJob(
+                      season,
+                      job.data.tournamentId,
+                      roster?.setupProgressUpdatedAt,
+                    ),
+                  ]);
+                  if (reconcileJob || setupJob) {
+                    logInfo('Ignoring manual setup retry during official roster resume', {
+                      tournamentId: job.data.tournamentId,
+                      jobId: job.id,
+                    });
+                    return;
+                  }
+                }
+              }
               await job.updateProgress('running');
               try {
                 logInfo('Tournament setup worker started job');
-                await setupTournamentStructure(season, job.data.tournamentId);
+                await setupTournamentStructure(season, job.data.tournamentId, {
+                  resumeMarker: job.data.resumeMarker,
+                });
               } finally {
                 // Written before the mandatory lifecycle lock is released, so
                 // an enqueuer that later acquires it can safely alternate slots.
@@ -159,6 +258,35 @@ async function runStartupWatchdog(): Promise<void> {
       season,
       STUCK_PROCESSING_CUTOFF_MINUTES,
       hasActiveSetupJob,
+      async (
+        currentSeason,
+        tournamentId,
+        resumeMarker,
+        setupStatus,
+        setupPhase,
+        rosterLastSyncedAt,
+      ) => {
+        const progressMs = Date.parse(resumeMarker);
+        const rosterSyncedMs = rosterLastSyncedAt ? Date.parse(rosterLastSyncedAt) : Number.NaN;
+        const rosterWasPublished =
+          Number.isFinite(progressMs) &&
+          Number.isFinite(rosterSyncedMs) &&
+          rosterSyncedMs >= progressMs;
+        if (setupStatus === 'processing' || rosterWasPublished) {
+          await enqueueTournamentSetup(currentSeason, tournamentId, 'resume', {
+            forceNew: true,
+            ensureSuccessorOnActive: true,
+            activeSettleTimeoutMs: 2_000,
+            resumeMarker,
+          });
+          return;
+        }
+        await enqueueTournamentRosterReconcile(currentSeason, tournamentId, 'watchdog', {
+          resumeAfterSetup: true,
+          resumeMarker,
+          allowInactive: true,
+        });
+      },
     );
     if (recovered.length > 0) {
       logInfo('Tournament setup watchdog recovered stuck setups', {

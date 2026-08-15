@@ -5,6 +5,8 @@ import type {
   KnockoutMode,
   LeagueType,
   TournamentRosterMode,
+  TournamentSetupPhase,
+  TournamentSetupStatus,
 } from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -20,6 +22,12 @@ export interface TournamentManagementRecord {
   groupNum: number | null;
   knockoutMode: KnockoutMode;
   rosterMode: TournamentRosterMode;
+  rosterSyncStatus?: 'pending' | 'processing' | 'ready' | 'failed' | null;
+  rosterSyncError?: string | null;
+  setupStatus?: TournamentSetupStatus;
+  setupPhase?: TournamentSetupPhase;
+  setupError?: string | null;
+  setupProgressUpdatedAt?: string | null;
   state: 'active' | 'inactive' | 'finished';
   createdAt: string;
   updatedAt: string;
@@ -64,6 +72,12 @@ export const createTournamentManagementRepository = () => ({
           group_num AS "groupNum",
           knockout_mode AS "knockoutMode",
           roster_mode AS "rosterMode",
+          roster_sync_status AS "rosterSyncStatus",
+          roster_sync_error AS "rosterSyncError",
+          setup_status AS "setupStatus",
+          setup_phase AS "setupPhase",
+          setup_error AS "setupError",
+          setup_progress_updated_at::text AS "setupProgressUpdatedAt",
           state,
           created_at::text AS "createdAt",
           updated_at::text AS "updatedAt"
@@ -135,6 +149,8 @@ export const createTournamentManagementRepository = () => ({
           group_num AS "groupNum",
           knockout_mode AS "knockoutMode",
           roster_mode AS "rosterMode",
+          roster_sync_status AS "rosterSyncStatus",
+          roster_sync_error AS "rosterSyncError",
           state,
           created_at::text AS "createdAt",
           updated_at::text AS "updatedAt"
@@ -160,6 +176,7 @@ export const createTournamentManagementRepository = () => ({
     tournamentId: number,
     adminEntryId: number,
     state: 'active' | 'inactive',
+    options?: { settleResume?: boolean },
   ): Promise<TournamentManagementRecord | null> => {
     try {
       const client = await getDbClient();
@@ -167,13 +184,88 @@ export const createTournamentManagementRepository = () => ({
         UPDATE competition.tournaments
         SET state = ${state},
             roster_sync_status = CASE
-              WHEN ${state} = 'inactive' AND roster_sync_status = 'processing'
+              WHEN ${state} = 'inactive'
+                AND (
+                  roster_sync_status IN ('pending', 'processing')
+                  OR (
+                    ${options?.settleResume === true}
+                    AND roster_sync_status = 'failed'
+                    AND (
+                      setup_status IN ('pending', 'processing')
+                      OR (setup_status = 'failed' AND setup_error IS NOT NULL)
+                    )
+                  )
+                )
                 THEN 'ready'::competition.tournament_setup_status
               ELSE roster_sync_status
             END,
             roster_sync_error = CASE
-              WHEN ${state} = 'inactive' AND roster_sync_status = 'processing' THEN NULL
+              WHEN ${state} = 'inactive'
+                AND (
+                  roster_sync_status IN ('pending', 'processing')
+                  OR (
+                    ${options?.settleResume === true}
+                    AND roster_sync_status = 'failed'
+                    AND (
+                      setup_status IN ('pending', 'processing')
+                      OR (setup_status = 'failed' AND setup_error IS NOT NULL)
+                    )
+                  )
+                )
+                THEN NULL
               ELSE roster_sync_error
+            END,
+            setup_status = CASE
+              WHEN ${state} = 'inactive'
+                AND roster_sync_status IN ('processing', 'failed')
+                AND (
+                  setup_status IN ('pending', 'processing')
+                  OR (
+                    ${options?.settleResume === true}
+                    AND setup_status = 'failed'
+                    AND setup_error IS NOT NULL
+                  )
+                )
+                THEN 'ready'::competition.tournament_setup_status
+              ELSE setup_status
+            END,
+            setup_phase = CASE
+              WHEN ${state} = 'inactive'
+                AND roster_sync_status IN ('processing', 'failed')
+                AND (
+                  setup_status IN ('pending', 'processing')
+                  OR (
+                    ${options?.settleResume === true}
+                    AND setup_status = 'failed'
+                    AND setup_error IS NOT NULL
+                  )
+                )
+                THEN 'ready'::competition.tournament_setup_phase
+              ELSE setup_phase
+            END,
+            setup_error = CASE
+              WHEN ${state} = 'inactive'
+                AND roster_sync_status IN ('processing', 'failed')
+                AND (
+                  setup_status IN ('pending', 'processing')
+                  OR (
+                    ${options?.settleResume === true}
+                    AND setup_status = 'failed'
+                    AND setup_error IS NOT NULL
+                  )
+                )
+                THEN NULL
+              ELSE setup_error
+            END,
+            setup_progress_updated_at = CASE
+              WHEN ${state} = 'inactive'
+                AND roster_sync_status IN ('processing', 'failed')
+                AND (
+                  setup_status IN ('pending', 'processing')
+                  OR (setup_status = 'failed' AND setup_error IS NOT NULL)
+                )
+                THEN now()
+              ELSE setup_progress_updated_at
             END,
             updated_at = now()
         WHERE season_id = ${season.seasonId}

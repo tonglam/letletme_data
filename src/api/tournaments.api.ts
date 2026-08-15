@@ -9,6 +9,7 @@ import {
 import { validateTournamentCreateInput } from '../domain/tournament';
 import { tournamentManagementService } from '../services/tournament-management.service';
 import { getErrorMessage, getHttpStatusFromError } from '../utils/errors';
+import { createTournamentPreview } from '../services/tournament-preview.service';
 
 function mapErrorToResponse(error: unknown): { status: number; message: string } {
   if (error instanceof ZodError) {
@@ -23,6 +24,39 @@ function mapErrorToResponse(error: unknown): { status: number; message: string }
 const positiveInteger = t.Number({ minimum: 1, multipleOf: 1 });
 
 export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
+  .post(
+    '/preview',
+    async ({ body, set }) => {
+      try {
+        const preview = await createTournamentPreview(body);
+        set.status = 200;
+        return {
+          success: true,
+          previewToken: preview.previewToken,
+          expiresAt: preview.expiresAt,
+          sourceCheckedAt: preview.sourceCheckedAt,
+          league: {
+            id: preview.leagueId,
+            type: preview.leagueType,
+            name: preview.leagueName,
+            startEventId: preview.startEventId,
+            knockoutRounds: preview.knockoutRounds,
+          },
+          participants: preview.participants,
+        };
+      } catch (error) {
+        const { status, message } = mapErrorToResponse(error);
+        set.status = status;
+        return { success: false, error: message };
+      }
+    },
+    {
+      body: t.Object({
+        leagueUrl: t.String({ minLength: 1, maxLength: 512 }),
+        ownerEntryId: t.Union([positiveInteger, t.String({ minLength: 1 })]),
+      }),
+    },
+  )
   .get('/check-name', async ({ query }) => checkTournamentNameAvailability(query.name), {
     query: t.Object({ name: t.String({ minLength: 1 }) }),
   })
@@ -84,7 +118,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
     async ({ params, body, set }) => {
       try {
         const result = await tournamentManagementService.retryRoster(params.tournamentId, body);
-        set.status = result.changed ? 202 : 200;
+        set.status = result.queued || result.changed ? 202 : 200;
         return { success: true, ...result };
       } catch (error) {
         const { status, message } = mapErrorToResponse(error);
@@ -178,6 +212,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         qualifiersPerGroup: t.Optional(t.String()),
         knockoutFormat: t.Union([t.Literal('none'), t.Literal('single'), t.Literal('double')]),
         selectedParticipantIds: t.Optional(t.Array(t.String(), { maxItems: 5000 })),
+        previewToken: t.Optional(t.String({ minLength: 32, maxLength: 128 })),
       }),
     },
   )

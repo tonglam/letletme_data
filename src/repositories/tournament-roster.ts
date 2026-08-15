@@ -6,6 +6,8 @@ import type {
   TournamentFinalizationTarget,
   TournamentParticipant,
   TournamentRosterMode,
+  TournamentSetupPhase,
+  TournamentSetupStatus,
 } from '../domain/tournament';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -16,7 +18,11 @@ export type TournamentRosterRecord = TournamentConfig & {
   leagueType: LeagueType;
   rosterMode: TournamentRosterMode;
   state: 'active' | 'inactive' | 'finished';
+  rosterSyncStatus: TournamentSetupStatus | null;
+  setupStatus: TournamentSetupStatus;
+  setupPhase: TournamentSetupPhase;
   standingsReadyAt: string | null;
+  setupProgressUpdatedAt: string | null;
   officialScheduleLockedAt: string | null;
 };
 
@@ -61,7 +67,11 @@ export const tournamentRosterRepository = {
           league_type AS "leagueType",
           roster_mode AS "rosterMode",
           state,
+          roster_sync_status AS "rosterSyncStatus",
+          setup_status AS "setupStatus",
+          setup_phase AS "setupPhase",
           standings_ready_at::text AS "standingsReadyAt",
+          setup_progress_updated_at::text AS "setupProgressUpdatedAt",
           official_schedule_locked_at::text AS "officialScheduleLockedAt",
           total_team_num AS "totalTeamNum",
           group_mode AS "groupMode",
@@ -106,6 +116,7 @@ export const tournamentRosterRepository = {
           roster_mode AS "rosterMode",
           state,
           standings_ready_at::text AS "standingsReadyAt",
+          setup_progress_updated_at::text AS "setupProgressUpdatedAt",
           official_schedule_locked_at::text AS "officialScheduleLockedAt",
           total_team_num AS "totalTeamNum",
           group_mode AS "groupMode",
@@ -163,9 +174,36 @@ export const tournamentRosterRepository = {
     const client = await getDbClient();
     await client`
       UPDATE competition.tournaments
-      SET roster_sync_status = 'processing', roster_sync_error = NULL, updated_at = now()
+      SET roster_sync_status = 'processing',
+          roster_sync_error = NULL,
+          -- Invalidate a queued resume marker from an older reconciliation.
+          setup_progress_updated_at = now(),
+          updated_at = now()
       WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
     `;
+  },
+
+  markSyncProcessingIfMarker: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    expectedMarker: string | null,
+  ): Promise<boolean> => {
+    const client = await getDbClient();
+    const rows = await client<{ tournamentId: number }[]>`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'processing',
+          roster_sync_error = NULL,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND state <> 'finished'
+        AND (
+          (${expectedMarker}::timestamptz IS NULL AND setup_progress_updated_at IS NULL)
+          OR setup_progress_updated_at::text = ${expectedMarker}
+        )
+      RETURNING tournament_id AS "tournamentId"
+    `;
+    return rows.length === 1;
   },
 
   markSyncFailed: async (
@@ -200,9 +238,40 @@ export const tournamentRosterRepository = {
     `;
   },
 
-  markResumeProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+  markSyncCanceled: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
     const client = await getDbClient();
     await client`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'ready',
+          roster_sync_error = NULL,
+          setup_status = CASE
+            WHEN roster_sync_status = 'processing' AND setup_status = 'pending'
+              THEN 'ready'::competition.tournament_setup_status
+            ELSE setup_status
+          END,
+          setup_phase = CASE
+            WHEN roster_sync_status = 'processing' AND setup_status = 'pending'
+              THEN 'ready'::competition.tournament_setup_phase
+            ELSE setup_phase
+          END,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND state IN ('inactive', 'finished')
+        AND roster_sync_status IN ('pending', 'processing')
+    `;
+  },
+
+  markResumeProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+    await tournamentRosterRepository.markResumeProcessingWithMarker(season, tournamentId);
+  },
+
+  markResumeProcessingWithMarker: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+  ): Promise<string> => {
+    const client = await getDbClient();
+    const rows = await client<{ marker: string }[]>`
       UPDATE competition.tournaments
       SET roster_sync_status = 'processing',
           roster_sync_error = NULL,
@@ -218,7 +287,57 @@ export const tournamentRosterRepository = {
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
         AND state = 'inactive'
+      RETURNING setup_progress_updated_at::text AS marker
     `;
+    if (rows.length !== 1 || !rows[0]?.marker) {
+      throw new DatabaseError('Tournament resume marker was not written.', 'TOURNAMENT_NOT_FOUND');
+    }
+    return rows[0].marker;
+  },
+
+  markResumeProcessingIfPending: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    marker?: string,
+  ): Promise<boolean> => {
+    const client = await getDbClient();
+    const rows = await client<{ tournamentId: number }[]>`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'processing',
+          roster_sync_error = NULL,
+          setup_status = 'pending',
+          setup_phase = 'queued',
+          setup_error = NULL,
+          setup_warning_count = 0,
+          setup_completed_units = 0,
+          setup_total_units = 0,
+          standings_ready_at = NULL,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND (
+          (
+            state = 'inactive'
+            AND roster_sync_status IN ('processing', 'failed')
+            AND setup_status IN ('pending', 'processing', 'failed')
+            AND (
+              setup_phase IN ('queued', 'failed')
+              OR setup_status = 'processing'
+            )
+          )
+          OR (
+            -- The setup worker may die after the roster transition commits
+            -- but before setup_status becomes ready. The same resume marker
+            -- is still authoritative and may replay the setup to settle it.
+            state = 'active'
+            AND roster_sync_status = 'ready'
+            AND setup_status = 'processing'
+          )
+        )
+        ${marker ? client`AND setup_progress_updated_at::text = ${marker}` : client``}
+      RETURNING tournament_id AS "tournamentId"
+    `;
+    return rows.length === 1;
   },
 
   publishAuthoritativeRoster: async (
@@ -226,7 +345,12 @@ export const tournamentRosterRepository = {
     tournament: TournamentRosterRecord,
     participants: TournamentParticipant[],
     sourceLeagueName: string | null,
-    options?: { allowInactive?: boolean; resumeAfterSetup?: boolean },
+    options?: {
+      allowInactive?: boolean;
+      resumeAfterSetup?: boolean;
+      resumeMarker?: string;
+      expectedProgressMarker?: string | null;
+    },
   ): Promise<RosterPublicationResult> => {
     try {
       const participantIds = uniqueParticipantIds(participants);
@@ -318,6 +442,12 @@ export const tournamentRosterRepository = {
             SET roster_sync_status = ${options?.resumeAfterSetup ? 'processing' : 'ready'},
                 roster_sync_error = NULL,
                 roster_last_synced_at = now(),
+                setup_progress_updated_at = CASE
+                  WHEN ${options?.expectedProgressMarker !== undefined}
+                    THEN ${options?.expectedProgressMarker ?? null}::timestamptz
+                  WHEN ${options?.resumeAfterSetup ? false : true} THEN now()
+                  ELSE setup_progress_updated_at
+                END,
                 source_league_name = coalesce(${sourceLeagueName}, source_league_name),
                 updated_at = now()
             WHERE season_id = ${season.seasonId}
@@ -414,7 +544,13 @@ export const tournamentRosterRepository = {
               setup_warning_count = 0,
               setup_completed_units = 0,
               setup_total_units = 0,
-              setup_progress_updated_at = now(),
+              setup_progress_updated_at = CASE
+                WHEN ${options?.resumeAfterSetup ? Boolean(options.resumeMarker) : false}
+                  THEN ${options?.resumeMarker ?? null}::timestamptz
+                WHEN ${options?.expectedProgressMarker !== undefined}
+                  THEN ${options?.expectedProgressMarker ?? null}::timestamptz
+                ELSE now()
+              END,
               standings_ready_at = NULL,
               updated_at = now()
           WHERE season_id = ${season.seasonId}
