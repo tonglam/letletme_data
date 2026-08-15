@@ -521,6 +521,7 @@ export async function recoverStuckTournamentSetups(
     resumeMarker: string,
     setupStatus: TournamentSetupStatus,
     setupPhase: TournamentSetupPhase,
+    rosterLastSyncedAt: string | null,
   ) => Promise<void>,
 ): Promise<{ recovered: number[]; skippedActive: number[] }> {
   const stuck = await tournamentInfoRepository.findStuckProcessing(season, cutoffMinutes);
@@ -575,6 +576,7 @@ export async function recoverStuckTournamentSetups(
               row.setupProgressUpdatedAt,
               row.setupStatus,
               row.setupPhase,
+              row.rosterLastSyncedAt,
             );
             recovered.push(row.id);
             logInfo('Watchdog replayed stalled official roster resume', {

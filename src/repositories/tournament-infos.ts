@@ -105,6 +105,7 @@ export interface StuckTournamentRow {
   state: 'active' | 'inactive' | 'finished';
   rosterMode: 'snapshot' | 'official_sync';
   rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
+  rosterLastSyncedAt: string | null;
   setupStatus: TournamentSetupStatus;
   setupPhase: TournamentSetupPhase;
 }
@@ -591,6 +592,9 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           state: tournamentsInCompetition.state,
           rosterMode: tournamentsInCompetition.rosterMode,
           rosterSyncStatus: tournamentsInCompetition.rosterSyncStatus,
+          rosterLastSyncedAt: sql<
+            string | null
+          >`${tournamentsInCompetition.rosterLastSyncedAt}::text`,
           setupStatus: tournamentsInCompetition.setupStatus,
           setupPhase: tournamentsInCompetition.setupPhase,
         })

@@ -258,8 +258,21 @@ async function runStartupWatchdog(): Promise<void> {
       season,
       STUCK_PROCESSING_CUTOFF_MINUTES,
       hasActiveSetupJob,
-      async (currentSeason, tournamentId, resumeMarker, setupStatus, setupPhase) => {
-        if (setupStatus === 'processing' && setupPhase !== 'queued') {
+      async (
+        currentSeason,
+        tournamentId,
+        resumeMarker,
+        setupStatus,
+        setupPhase,
+        rosterLastSyncedAt,
+      ) => {
+        const progressMs = Date.parse(resumeMarker);
+        const rosterSyncedMs = rosterLastSyncedAt ? Date.parse(rosterLastSyncedAt) : Number.NaN;
+        const rosterWasPublished =
+          Number.isFinite(progressMs) &&
+          Number.isFinite(rosterSyncedMs) &&
+          rosterSyncedMs >= progressMs;
+        if (setupStatus === 'processing' || rosterWasPublished) {
           await enqueueTournamentSetup(currentSeason, tournamentId, 'resume', {
             forceNew: true,
             ensureSuccessorOnActive: true,
