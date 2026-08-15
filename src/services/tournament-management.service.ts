@@ -161,7 +161,9 @@ export function createTournamentManagementService(
       (tournament.setupStatus === 'pending' ||
         tournament.setupStatus === 'processing' ||
         (tournament.setupStatus === 'failed' && tournament.setupError != null)) &&
-      (tournament.setupPhase === 'queued' || tournament.setupPhase === 'failed')
+      (tournament.setupStatus === 'processing' ||
+        tournament.setupPhase === 'queued' ||
+        tournament.setupPhase === 'failed')
     ) {
       throw new ConflictError(
         'Tournament activation is already reconciling its authoritative roster.',

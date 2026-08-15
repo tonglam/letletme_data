@@ -157,10 +157,15 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         });
         if (!persisted || persisted.previewPayloadFingerprint !== payloadFingerprint) return null;
 
-        await enqueueTournamentSetup(season, persisted.id, 'create');
-        const setupStatus =
+        let setupStatus =
           (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
           'pending';
+        if (setupStatus !== 'ready') {
+          await enqueueTournamentSetup(season, persisted.id, 'create');
+          setupStatus =
+            (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
+            setupStatus;
+        }
         const recovered = {
           tournament: {
             id: persisted.id,
@@ -404,48 +409,8 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           // fingerprint and start time, so recover only a row created by this
           // exact preview operation; an older same-name tournament is never
           // treated as idempotent success.
-          const claimRecord = await getPreviewCreationClaim(preview.tokenHash);
-          const persisted = await tournamentInfoRepository.findCreatedByIdentity(season, {
-            name: plan.tournamentName,
-            adminEntryId: Number(payload.adminId),
-            leagueId: plan.leagueId,
-          });
-          const sameOperation =
-            claimRecord?.payloadFingerprint === payloadFingerprint &&
-            persisted?.previewPayloadFingerprint === payloadFingerprint;
-          if (sameOperation && persisted) {
-            await enqueueTournamentSetup(season, persisted.id, 'create');
-            const setupStatus =
-              (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
-              'pending';
-            const recovered = {
-              tournament: {
-                id: persisted.id,
-                name: persisted.name,
-                creator: persisted.creator,
-                adminEntryId: persisted.adminEntryId,
-                leagueId: persisted.leagueId,
-                participantCount: persisted.totalTeamNum,
-              },
-              setupStatus,
-            } as const;
-            let resultCached = false;
-            try {
-              await markPreviewCreatedResult(preview.tokenHash, recovered, payloadFingerprint);
-              await markPreviewQueuedResult(preview.tokenHash, recovered, payloadFingerprint);
-              resultCached = true;
-            } catch (error) {
-              logInfo('Unable to cache recovered tournament preview result', {
-                event: 'tournament_preview_recovery_cache_failed',
-                error: error instanceof Error ? error.name : 'UnknownError',
-              });
-            }
-            if (resultCached) {
-              await releasePreviewCreationClaim(preview.tokenHash).catch(() => undefined);
-            }
-            report('queued', setupStatus, null);
-            return recovered;
-          }
+          const recovered = await recoverPersistedPreviewCreation(preview.tokenHash);
+          if (recovered) return recovered;
         }
         throw new ConflictError('Tournament name already exists.', 'TOURNAMENT_NAME_EXISTS');
       }
