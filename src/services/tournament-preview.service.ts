@@ -163,6 +163,57 @@ async function persistPreviewToken(
   );
 }
 
+async function reuseStoredPreview(
+  redis: Redis,
+  existingTokenHash: string,
+): Promise<TournamentPreview | null> {
+  const existing = await redis.get(tokenKey(existingTokenHash));
+  if (!existing) return null;
+
+  let parsed: PreviewStored;
+  try {
+    parsed = JSON.parse(existing) as PreviewStored;
+  } catch {
+    await redis.del(tokenKey(existingTokenHash));
+    return null;
+  }
+  const remainingSeconds = Math.ceil((Date.parse(parsed.expiresAt) - Date.now()) / 1000);
+  if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) {
+    await redis.del(tokenKey(existingTokenHash));
+    return null;
+  }
+
+  const hydrated = await hydratePreview(redis, parsed);
+  if (!hydrated) {
+    await redis.del(tokenKey(existingTokenHash));
+    return null;
+  }
+
+  // The raw token is intentionally never persisted. Reissue an opaque token
+  // while reusing the already fetched participant snapshot.
+  const previewToken = randomBytes(32).toString('base64url');
+  const tokenHash = hashToken(previewToken);
+  const refreshed: HydratedPreview = {
+    ...hydrated,
+    tokenHash,
+    // Reuse never extends the original snapshot freshness deadline.
+    expiresAt: parsed.expiresAt,
+  };
+  await persistPreviewToken(redis, refreshed, tokenHash, remainingSeconds);
+  await redis.set(
+    reuseKey(
+      refreshed.ownerEntryId,
+      refreshed.seasonCode,
+      refreshed.leagueId,
+      refreshed.leagueType,
+    ),
+    tokenHash,
+    'EX',
+    remainingSeconds,
+  );
+  return { ...refreshed, previewToken };
+}
+
 function normalizeOwnerEntry(value: unknown): number {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value;
   if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) return Number(value);
@@ -222,6 +273,14 @@ export async function createTournamentPreview(input: {
       lockOwner =
         (await redis.set(lockKey, lockToken, 'EX', PREVIEW_FETCH_LOCK_SECONDS, 'NX')) === 'OK';
       if (!lockOwner) {
+        // Another replica may have completed the fetch between our last poll
+        // and this NX attempt. Serve that reusable snapshot instead of turning
+        // coalesced callers into spurious IN_PROGRESS responses.
+        const existingTokenHash = await redis.get(key);
+        if (existingTokenHash) {
+          const reused = await reuseStoredPreview(redis, existingTokenHash);
+          if (reused) return reused;
+        }
         throw new ConflictError(
           'A league preview is already being fetched. Please retry shortly.',
           'TOURNAMENT_PREVIEW_IN_PROGRESS',
@@ -242,35 +301,12 @@ export async function createTournamentPreview(input: {
     try {
       const existingTokenHash = await redis.get(key);
       if (existingTokenHash) {
-        const existing = await redis.get(tokenKey(existingTokenHash));
-        if (existing) {
-          const parsed = JSON.parse(existing) as PreviewStored;
-          const remainingSeconds = Math.ceil((Date.parse(parsed.expiresAt) - Date.now()) / 1000);
-          if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) {
-            await redis.del(tokenKey(existingTokenHash), key);
-          } else {
-            // The raw token is intentionally never persisted. Reissue an opaque
-            // token while reusing the already fetched participant snapshot.
-            const hydrated = await hydratePreview(redis, parsed);
-            if (!hydrated) {
-              await redis.del(tokenKey(existingTokenHash), key);
-            } else {
-              const previewToken = randomBytes(32).toString('base64url');
-              const tokenHash = hashToken(previewToken);
-              const refreshed = {
-                ...hydrated,
-                tokenHash,
-                // Reuse never extends the original snapshot freshness deadline.
-                expiresAt: parsed.expiresAt,
-              };
-              await persistPreviewToken(redis, refreshed, tokenHash, remainingSeconds);
-              await redis.set(key, tokenHash, 'EX', remainingSeconds);
-              // Do not revoke the older token. Its caller may still be within the
-              // advertised five-minute lifetime; both payloads are independently
-              // expiring and remain bound to the same owner/league/season.
-              return { ...refreshed, previewToken };
-            }
-          }
+        const reused = await reuseStoredPreview(redis, existingTokenHash);
+        if (reused) {
+          // Do not revoke the older token. Its caller may still be within the
+          // advertised five-minute lifetime; both payloads are independently
+          // expiring and remain bound to the same owner/league/season.
+          return reused;
         }
         await redis.del(key);
       }

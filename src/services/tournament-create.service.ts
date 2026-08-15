@@ -146,13 +146,43 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       const endEventId = parseGameweek(payload.endGameweek);
       eventCount = startEventId && endEventId ? Math.max(0, endEventId - startEventId + 1) : 0;
       const season = await seasonRepository.findCurrent();
+      const inputPreviewTokenHash = payload.previewToken
+        ? createHash('sha256').update(payload.previewToken).digest('hex')
+        : null;
+      if (inputPreviewTokenHash) {
+        // A successful create can outlive the five-minute preview metadata.
+        // Recover the fingerprint-bound result before resolving that metadata,
+        // so a lost-response retry remains idempotent after token expiry.
+        const createdBeforePreview = unwrapPreviewResult(
+          await getPreviewCreatedRecord(inputPreviewTokenHash),
+          payloadFingerprint,
+        );
+        if (
+          createdBeforePreview &&
+          typeof createdBeforePreview === 'object' &&
+          'tournament' in createdBeforePreview
+        ) {
+          reportCachedResult(createdBeforePreview);
+          return createdBeforePreview as {
+            tournament: {
+              id: number;
+              name: string;
+              creator: string;
+              adminEntryId: number;
+              leagueId: number;
+              participantCount: number;
+            };
+            setupStatus: TournamentSetupStatus;
+          };
+        }
+      }
       const preview = payload.previewToken
         ? await resolveTournamentPreview(payload.previewToken, {
             ownerEntryId: payload.adminId,
             leagueUrl: payload.leagueUrl,
           })
         : null;
-      previewTokenHash = preview?.tokenHash ?? null;
+      previewTokenHash = preview?.tokenHash ?? inputPreviewTokenHash;
       if (preview) {
         const created = unwrapPreviewResult(
           await getPreviewCreatedRecord(preview.tokenHash),
