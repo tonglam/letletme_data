@@ -2,18 +2,15 @@ import { z } from 'zod';
 import { logError, logInfo } from './logger';
 
 function booleanEnv(defaultValue: boolean) {
-  return z
-    .union([z.boolean(), z.string()])
-    .optional()
-    .transform((value) => {
-      if (value === undefined) {
-        return defaultValue;
-      }
-      if (typeof value === 'boolean') {
-        return value;
-      }
-      return ['true', '1', 'yes', 'on'].includes(value.toLowerCase());
-    });
+  return z.preprocess((value) => {
+    if (value === undefined) return defaultValue;
+    if (typeof value === 'boolean') return value;
+    if (typeof value !== 'string') return value;
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    return value;
+  }, z.boolean());
 }
 
 function integerEnv(defaultValue: number) {
@@ -37,6 +34,8 @@ const EnvSchema = z.object({
   QUEUE_REDIS_DB: z.coerce.number().int().min(0).default(1),
   // Server
   PORT: z.coerce.number().default(3000),
+  WORKER_HEARTBEAT_PATH: z.string().optional(),
+  WORKER_HEARTBEAT_INTERVAL_MS: integerEnv(30_000),
   NODE_ENV: z.enum(['production', 'development', 'test']).optional(),
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
@@ -49,12 +48,42 @@ const EnvSchema = z.object({
   CORS_ORIGINS: z.string().optional(),
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
+  DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
+  PUBLICATION_RETENTION_MODE: z.enum(['report', 'apply']).default('report'),
   // Mutation conflict guard timing
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(false),
   MUTATION_LOCK_TTL_MS: integerEnv(30_000),
   MUTATION_LOCK_WAIT_TIMEOUT_MS: integerEnv(120_000),
   MUTATION_LOCK_RETRY_DELAY_MS: integerEnv(250),
   MUTATION_LOCK_HEARTBEAT_MS: integerEnv(10_000),
+  FPL_MAX_INFLIGHT: z.coerce.number().int().min(1).max(32).default(5),
+  FPL_REQUESTS_PER_SECOND: z.coerce.number().int().min(1).max(20).default(4),
+  FPL_BULK_MAX_INFLIGHT_DURING_LIVE: z.coerce.number().int().min(1).max(32).default(3),
+  FPL_ADMISSION_LEASE_MS: integerEnv(45_000),
+  FPL_REQUEST_TIMEOUT_MS: integerEnv(10_000),
+  FPL_REQUEST_DEADLINE_MS: integerEnv(40_000),
+  FPL_RETRY_BASE_DELAY_MS: integerEnv(500),
+  FPL_RETRY_MAX_DELAY_MS: integerEnv(5_000),
+  ENTRY_SYNC_CHUNK_SIZE: integerEnv(500),
+  ENTRY_SYNC_CONCURRENCY: integerEnv(5),
+  ENTRY_SYNC_THROTTLE_MS: integerEnv(200),
+  TOURNAMENT_SETUP_STUCK_CUTOFF_MINUTES: integerEnv(15),
+  TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS: integerEnv(300_000),
+  TOURNAMENT_EVENT_LIVE_TIMEOUT_MS: integerEnv(45_000),
+  TOURNAMENT_ENTRY_FETCH_TIMEOUT_MS: integerEnv(45_000),
+  TOURNAMENT_ENTRY_PERSIST_TIMEOUT_MS: integerEnv(60_000),
+  LIVE_POLL_MS: integerEnv(30_000),
+  PICKS_FIRST_PROBE_OFFSET_MS: integerEnv(90 * 60_000),
+  PICKS_RETRY_SCHEDULE_MS: z.string().default('120000,180000,300000,600000'),
+  BETWEEN_FIXTURES_POLL_MS: integerEnv(5 * 60_000),
+  DAY_SETTLING_INITIAL_POLL_MS: integerEnv(60_000),
+  DAY_SETTLING_STABLE_POLL_MS: integerEnv(5 * 60_000),
+  DAY_SETTLING_STABLE_AFTER_MS: integerEnv(10 * 60_000),
+  PICKS_PROBE_POLL_MS: integerEnv(120_000),
+  PRE_DEADLINE_POLL_MS: integerEnv(5 * 60_000),
+  GW_REVIEW_POLL_MS: integerEnv(10 * 60_000),
+  GW_REVIEW_FINALIZATION_POLL_MS: integerEnv(2 * 60_000),
+  FINALIZED_POLL_MS: integerEnv(5 * 60_000),
   PULSELIVE_COMP_SEASON: z.string().optional(),
   // Disabled until automated Understat access is explicitly approved.
   UNDERSTAT_ENABLED: booleanEnv(false),
@@ -69,6 +98,7 @@ const EnvSchema = z.object({
     .regex(/^\d{4}$/)
     .default('2627'),
   UNDERSTAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  UNDERSTAT_TOTAL_DEADLINE_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
   UNDERSTAT_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(4),
   // Telegram notifications (optional)
   TELEGRAM_BOT_TOKEN: z.string().optional(),
@@ -76,6 +106,7 @@ const EnvSchema = z.object({
   // Bot notification endpoints (optional)
   TELEGRAM_NOTIFICATION_URL: z.string().url().optional(),
   WECHAT_NOTIFICATION_URL: z.string().url().optional(),
+  WECHAT_NOTIFICATION_API_TOKEN: z.string().min(32).optional(),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;
@@ -94,6 +125,16 @@ export type AuthConfig = {
 };
 
 let cachedConfig: AppConfig | null = null;
+
+/** Test-only cache reset for suites that exercise environment preflight variants. */
+export function resetConfigForTests(): void {
+  cachedConfig = null;
+}
+
+/** Lightweight environment check for error/logging bootstrap paths. */
+export function isProductionEnvironment(): boolean {
+  return process.env.NODE_ENV === 'production';
+}
 
 function endpointIdentity(endpoint: RedisEndpointConfig): string {
   return `${endpoint.host.trim().toLowerCase()}:${endpoint.port}/${endpoint.db}`;
@@ -148,6 +189,30 @@ export function getConfig(): AppConfig {
   try {
     const parsed = EnvSchema.parse(process.env);
     assertRedisEndpointsSeparated(parsed);
+
+    if (parsed.NODE_ENV === 'production' && !parsed.ENABLE_AUTH) {
+      throw new Error('ENABLE_AUTH must be true in production');
+    }
+
+    if (
+      parsed.NODE_ENV === 'production' &&
+      parsed.WECHAT_NOTIFICATION_URL &&
+      !parsed.WECHAT_NOTIFICATION_API_TOKEN
+    ) {
+      throw new Error(
+        'WECHAT_NOTIFICATION_API_TOKEN is required when WECHAT_NOTIFICATION_URL is configured in production',
+      );
+    }
+
+    if (parsed.MUTATION_LOCK_HEARTBEAT_MS > parsed.MUTATION_LOCK_TTL_MS / 3) {
+      throw new Error('MUTATION_LOCK_HEARTBEAT_MS must be no greater than one third of TTL');
+    }
+
+    if (parsed.FPL_ADMISSION_LEASE_MS < parsed.FPL_REQUEST_DEADLINE_MS + 5_000) {
+      throw new Error('FPL_ADMISSION_LEASE_MS must exceed the FPL request deadline by 5 seconds');
+    }
+
+    resolveAuthConfig(parsed);
 
     if (Number(parsed.UNDERSTAT_MIN_SEASON) > Number(parsed.UNDERSTAT_SEASON)) {
       throw new Error('UNDERSTAT_MIN_SEASON cannot be newer than UNDERSTAT_SEASON');
