@@ -9,6 +9,14 @@ const ENV_KEYS = [
   'DATABASE_URL',
   'WECHAT_NOTIFICATION_URL',
   'WECHAT_NOTIFICATION_API_TOKEN',
+  'CACHE_REDIS_HOST',
+  'CACHE_REDIS_PORT',
+  'CACHE_REDIS_DB',
+  'QUEUE_REDIS_HOST',
+  'QUEUE_REDIS_PORT',
+  'QUEUE_REDIS_DB',
+  'ENABLE_AUTH',
+  'DATA_API_KEY_HASHES',
 ] as const;
 const savedEnv = new Map<string, string | undefined>();
 
