@@ -34,10 +34,23 @@ import { logError } from '../utils/logger';
 type TournamentStorage = typeof tournamentsInCompetition.$inferSelect;
 
 export const isTournamentNameConflict = (error: unknown): boolean => {
-  if (!error || typeof error !== 'object') return false;
-  const record = error as { code?: unknown; constraint_name?: unknown; constraint?: unknown };
-  const constraint = String(record.constraint_name ?? record.constraint ?? '');
-  return record.code === '23505' && constraint === 'tournaments_name_key';
+  let current = error;
+  const visited = new Set<object>();
+
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current);
+    const record = current as {
+      code?: unknown;
+      constraint_name?: unknown;
+      constraint?: unknown;
+      cause?: unknown;
+    };
+    const constraint = String(record.constraint_name ?? record.constraint ?? '');
+    if (record.code === '23505' && constraint === 'tournaments_name_key') return true;
+    current = record.cause;
+  }
+
+  return false;
 };
 
 export interface TournamentInfoSummary {
