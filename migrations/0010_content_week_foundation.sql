@@ -96,6 +96,24 @@ CREATE TABLE content.acquisition_runs (
   CONSTRAINT content_acquisition_runs_x_calls_check CHECK (x_call_count >= 0)
 );
 
+-- Tool-level evidence is metadata only. Never persist Grok prompts, sessions or
+-- credentials here; the verified hashes let an editor audit that a receipt was
+-- produced by the expected skill and adapter.
+CREATE TABLE content.acquisition_run_x_traces (
+  run_id uuid PRIMARY KEY REFERENCES content.acquisition_runs(run_id) ON DELETE CASCADE,
+  tool_name text NOT NULL,
+  skill_sha text NOT NULL,
+  adapter_version text NOT NULL,
+  request_hash text NOT NULL,
+  response_hash text,
+  call_count integer NOT NULL DEFAULT 0,
+  trace_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  verified boolean NOT NULL DEFAULT false,
+  captured_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT content_acquisition_run_x_traces_call_count_check CHECK (call_count >= 0),
+  CONSTRAINT content_acquisition_run_x_traces_metadata_object_check CHECK (jsonb_typeof(trace_metadata) = 'object')
+);
+
 CREATE TABLE content.source_receipts (
   receipt_id uuid PRIMARY KEY,
   run_id uuid NOT NULL REFERENCES content.acquisition_runs(run_id) ON DELETE CASCADE,
@@ -130,11 +148,13 @@ CREATE TABLE content.stories (
   story_id uuid PRIMARY KEY,
   version_group_id uuid NOT NULL,
   canonical_slug text NOT NULL UNIQUE,
+  story_revision integer NOT NULL DEFAULT 1,
   status text NOT NULL DEFAULT 'draft',
   expires_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT content_stories_status_check CHECK (status IN ('draft', 'ready', 'published', 'removed'))
+  CONSTRAINT content_stories_status_check CHECK (status IN ('draft', 'ready', 'published', 'removed')),
+  CONSTRAINT content_stories_revision_check CHECK (story_revision > 0)
 );
 
 CREATE TABLE content.story_localizations (
@@ -284,11 +304,50 @@ CREATE TABLE content.publication_outbox (
   CONSTRAINT content_publication_outbox_attempts_check CHECK (attempts >= 0)
 );
 
+CREATE TABLE content.acquisition_costs (
+  cost_id uuid PRIMARY KEY,
+  run_id uuid NOT NULL REFERENCES content.acquisition_runs(run_id) ON DELETE CASCADE,
+  provider text NOT NULL,
+  amount_micros bigint NOT NULL DEFAULT 0,
+  currency text NOT NULL DEFAULT 'USD',
+  units integer NOT NULL DEFAULT 0,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT content_acquisition_costs_amount_check CHECK (amount_micros >= 0),
+  CONSTRAINT content_acquisition_costs_units_check CHECK (units >= 0),
+  CONSTRAINT content_acquisition_costs_metadata_object_check CHECK (jsonb_typeof(metadata) = 'object')
+);
+
+CREATE TABLE content.publication_dependencies (
+  publication_id uuid NOT NULL REFERENCES content.publications(publication_id) ON DELETE CASCADE,
+  dependency_kind text NOT NULL,
+  dependency_key text NOT NULL,
+  dependency_revision text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (publication_id, dependency_kind, dependency_key)
+);
+
+CREATE TABLE content.editorial_actions (
+  action_id uuid PRIMARY KEY,
+  idempotency_key text NOT NULL UNIQUE,
+  actor_id text NOT NULL,
+  role text NOT NULL,
+  action_type text NOT NULL,
+  entity_type text NOT NULL,
+  entity_id uuid,
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT content_editorial_actions_payload_object_check CHECK (jsonb_typeof(payload) = 'object'),
+  CONSTRAINT content_editorial_actions_role_check CHECK (role IN ('content_editor', 'content_publisher'))
+);
+
 CREATE INDEX content_source_group_members_source_idx ON content.source_group_members (source_id);
 CREATE INDEX content_acquisition_checkpoints_updated_idx ON content.acquisition_checkpoints (updated_at DESC);
 CREATE INDEX content_acquisition_budgets_date_idx ON content.acquisition_budgets (budget_date DESC);
 CREATE INDEX content_acquisition_runs_group_created_idx ON content.acquisition_runs (group_id, created_at DESC);
+CREATE INDEX content_acquisition_run_x_traces_verified_idx ON content.acquisition_run_x_traces (verified, captured_at DESC);
 CREATE INDEX content_source_receipts_run_idx ON content.source_receipts (run_id, captured_at DESC);
+CREATE INDEX content_acquisition_costs_run_idx ON content.acquisition_costs (run_id, created_at DESC);
 CREATE INDEX content_stories_version_group_idx ON content.stories (version_group_id);
 CREATE INDEX content_story_entities_entity_idx ON content.story_entities (entity_id);
 CREATE INDEX content_claims_story_idx ON content.claims (story_id, updated_at DESC);
@@ -298,6 +357,8 @@ CREATE INDEX content_week_edition_items_placement_idx ON content.week_edition_it
 CREATE INDEX content_publications_active_lookup_idx ON content.publications (scope_key, status, servable, revision DESC);
 CREATE INDEX content_publication_outbox_pending_idx ON content.publication_outbox (created_at)
   WHERE delivered_at IS NULL;
+CREATE INDEX content_publication_dependencies_key_idx ON content.publication_dependencies (dependency_kind, dependency_key);
+CREATE INDEX content_editorial_actions_entity_idx ON content.editorial_actions (entity_type, entity_id, created_at DESC);
 
 CREATE VIEW content.briefing_active_publication AS
 SELECT

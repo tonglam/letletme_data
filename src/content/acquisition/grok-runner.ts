@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { assertWeekPublication, type WeekLocale } from '../contracts/week-publication';
 
@@ -22,6 +23,14 @@ export type GrokRunResult = Readonly<{
   receipts: readonly Record<string, unknown>[];
   error?: string;
   skillSha: string;
+  toolName?: string;
+  adapterVersion?: string;
+  requestHash?: string;
+  responseHash?: string;
+  traceMetadata?: Record<string, unknown>;
+  costMicros?: number;
+  costCurrency?: string;
+  costUnits?: number;
 }>;
 
 export interface GrokRunner {
@@ -31,6 +40,7 @@ export interface GrokRunner {
 export const MONITOR_FPL_X_SOURCES_SKILL = 'monitor-fpl-x-sources';
 export const MONITOR_FPL_X_SOURCES_SKILL_SHA =
   'b23dc3dcf7ab79c7d13fd40a2a08d298ad4740940f71aa44988954b5690d3519';
+const fixtureHash = createHash('sha256').update('fixture-grok-v1', 'utf8').digest('hex');
 
 export class FixtureGrokRunner implements GrokRunner {
   async run(_input: GrokRunInput): Promise<GrokRunResult> {
@@ -40,6 +50,11 @@ export class FixtureGrokRunner implements GrokRunner {
       xCallCount: 0,
       receipts: [],
       skillSha: MONITOR_FPL_X_SOURCES_SKILL_SHA,
+      toolName: 'fixture',
+      adapterVersion: 'fixture-v1',
+      requestHash: fixtureHash,
+      responseHash: fixtureHash,
+      traceMetadata: { trace: 'fixture', calls: [] },
     };
   }
 }
@@ -78,6 +93,8 @@ export class CliGrokRunner implements GrokRunner {
             receipts: [],
             error: stderr.slice(-500),
             skillSha: '',
+            toolName: 'grok',
+            adapterVersion: 'cli-v1',
           });
           return;
         }
@@ -90,6 +107,17 @@ export class CliGrokRunner implements GrokRunner {
             xCallCount: Number.isSafeInteger(parsed.xCallCount) ? parsed.xCallCount : 0,
             receipts: Array.isArray(parsed.receipts) ? parsed.receipts : [],
             skillSha: typeof parsed.skillSha === 'string' ? parsed.skillSha : '',
+            toolName: 'grok',
+            adapterVersion: 'cli-v1',
+            requestHash: typeof parsed.requestHash === 'string' ? parsed.requestHash : undefined,
+            responseHash: typeof parsed.responseHash === 'string' ? parsed.responseHash : undefined,
+            traceMetadata:
+              parsed.traceMetadata && typeof parsed.traceMetadata === 'object'
+                ? parsed.traceMetadata
+                : undefined,
+            costMicros: Number.isSafeInteger(parsed.costMicros) ? parsed.costMicros : undefined,
+            costCurrency: typeof parsed.costCurrency === 'string' ? parsed.costCurrency : undefined,
+            costUnits: Number.isSafeInteger(parsed.costUnits) ? parsed.costUnits : undefined,
           });
         } catch {
           resolve({
@@ -99,6 +127,8 @@ export class CliGrokRunner implements GrokRunner {
             receipts: [],
             error: 'Invalid Grok JSON output',
             skillSha: '',
+            toolName: 'grok',
+            adapterVersion: 'cli-v1',
           });
         }
       });

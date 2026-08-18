@@ -1,11 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 
 import { getDb } from '../../db/singleton';
 import {
   contentAcquisitionBudgets,
   contentAcquisitionCheckpoints,
+  contentAcquisitionCosts,
   contentAcquisitionRuns,
+  contentAcquisitionRunXTraces,
   contentSourceReceipts,
 } from '../../db/schemas/content.schema';
 import type { GrokRunResult } from './grok-runner';
@@ -42,6 +44,8 @@ const asJsonObject = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+
+const sha256 = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
 
 function resultState(result: GrokRunResult): AcquisitionRunState {
   if (result.status === 'EMPTY') return 'empty';
@@ -186,11 +190,50 @@ export async function finishAcquisitionRun(input: {
         xCallCount: input.result.xCallCount,
         traceVerified: input.result.traceVerified,
         skillSha: input.result.skillSha || null,
+        adapterVersion: input.result.adapterVersion ?? null,
         errorSummary: input.result.error ?? null,
         checkpointAdvanced,
         completedAt: now,
       })
       .where(eq(contentAcquisitionRuns.runId, input.run.runId));
+    await tx
+      .insert(contentAcquisitionRunXTraces)
+      .values({
+        runId: input.run.runId,
+        toolName: input.result.toolName ?? 'unknown',
+        skillSha: input.result.skillSha || 'unknown',
+        adapterVersion: input.result.adapterVersion ?? 'unknown',
+        requestHash: input.result.requestHash ?? sha256(input.run.idempotencyKey),
+        responseHash: input.result.responseHash ?? null,
+        callCount: input.result.xCallCount,
+        traceMetadata: input.result.traceMetadata ?? {},
+        verified: input.result.traceVerified === true,
+      })
+      .onConflictDoUpdate({
+        target: contentAcquisitionRunXTraces.runId,
+        set: {
+          toolName: input.result.toolName ?? 'unknown',
+          skillSha: input.result.skillSha || 'unknown',
+          adapterVersion: input.result.adapterVersion ?? 'unknown',
+          requestHash: input.result.requestHash ?? sha256(input.run.idempotencyKey),
+          responseHash: input.result.responseHash ?? null,
+          callCount: input.result.xCallCount,
+          traceMetadata: input.result.traceMetadata ?? {},
+          verified: input.result.traceVerified === true,
+          capturedAt: now,
+        },
+      });
+    if (input.result.costMicros !== undefined || input.result.costUnits !== undefined) {
+      await tx.insert(contentAcquisitionCosts).values({
+        costId: randomUUID(),
+        runId: input.run.runId,
+        provider: input.result.toolName ?? 'grok',
+        amountMicros: input.result.costMicros ?? 0,
+        currency: input.result.costCurrency ?? 'USD',
+        units: input.result.costUnits ?? input.result.xCallCount,
+        metadata: { skillSha: input.result.skillSha || null },
+      });
+    }
     if (checkpointAdvanced) {
       await tx
         .insert(contentAcquisitionCheckpoints)

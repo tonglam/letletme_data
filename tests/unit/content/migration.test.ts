@@ -11,7 +11,11 @@ describe('Briefing content migration contract', () => {
     expect(sql).toContain('CREATE SCHEMA content');
     expect(sql).toContain('CREATE TABLE content.acquisition_checkpoints');
     expect(sql).toContain('CREATE TABLE content.acquisition_budgets');
+    expect(sql).toContain('CREATE TABLE content.acquisition_run_x_traces');
+    expect(sql).toContain('CREATE TABLE content.acquisition_costs');
     expect(sql).toContain('CREATE TABLE content.claims');
+    expect(sql).toContain('CREATE TABLE content.publication_dependencies');
+    expect(sql).toContain('CREATE TABLE content.editorial_actions');
     expect(sql).toContain(
       'GRANT SELECT ON content.briefing_active_publication TO letletme_graphql_reader',
     );

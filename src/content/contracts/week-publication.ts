@@ -198,6 +198,7 @@ export function validateWeekLocalePair(
     JSON.stringify(english.event) === JSON.stringify(chinese.event),
     'Week locales must share event',
   );
+  assert(english.validUntil === chinese.validUntil, 'Week locales must share validUntil');
   const ids = (value: WeekPublicationEnvelope): string[] => [
     ...value.featured.map((item) => `featured:${item.id}:${item.storyRevision}`),
     ...value.sections.flatMap((section) =>
@@ -208,6 +209,17 @@ export function validateWeekLocalePair(
     JSON.stringify(ids(english)) === JSON.stringify(ids(chinese)),
     'Week locales must share story order',
   );
+  const storyKeys = (value: WeekPublicationEnvelope): string[] => [
+    ...value.featured.map((item) => `${item.id}:${item.storyRevision}`),
+    ...value.sections.flatMap((section) =>
+      section.items.map((item) => `${item.id}:${item.storyRevision}`),
+    ),
+  ];
+  const seen = new Set<string>();
+  for (const key of storyKeys(english)) {
+    assert(!seen.has(key), `Week publication contains duplicate story ${key}`);
+    seen.add(key);
+  }
 }
 
 export function isWeekPublicationSha256(value: unknown): value is string {

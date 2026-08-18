@@ -31,6 +31,41 @@ describe('Week publication contract', () => {
     );
   });
 
+  test('rejects locale validity drift and duplicate placements', () => {
+    expect(() => validateWeekLocalePair(english, { ...chinese, validUntil: null })).toThrow(
+      'Week locales must share validUntil',
+    );
+    const duplicateItems = {
+      featured: [
+        {
+          id: 'story-1',
+          slug: 'duplicate',
+          storyRevision: 1,
+          title: 'Duplicate',
+          summary: 'Duplicate',
+        },
+      ],
+      sections: [
+        {
+          key: 'injury',
+          title: 'Injury',
+          items: [
+            {
+              id: 'story-1',
+              slug: 'duplicate',
+              storyRevision: 1,
+              title: 'Duplicate',
+              summary: 'Duplicate',
+            },
+          ],
+        },
+      ],
+    } as const;
+    expect(() =>
+      validateWeekLocalePair({ ...english, ...duplicateItems }, { ...chinese, ...duplicateItems }),
+    ).toThrow('Week publication contains duplicate story');
+  });
+
   test('rejects a validUntil after the target deadline', () => {
     expect(() =>
       assertWeekPublication({

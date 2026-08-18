@@ -128,6 +128,27 @@ export const contentAcquisitionRuns = content.table(
   ],
 );
 
+export const contentAcquisitionRunXTraces = content.table(
+  'acquisition_run_x_traces',
+  {
+    runId: uuid('run_id').primaryKey().notNull(),
+    toolName: text('tool_name').notNull(),
+    skillSha: text('skill_sha').notNull(),
+    adapterVersion: text('adapter_version').notNull(),
+    requestHash: text('request_hash').notNull(),
+    responseHash: text('response_hash'),
+    callCount: integer('call_count').default(0).notNull(),
+    traceMetadata: jsonb('trace_metadata').default({}).notNull(),
+    verified: boolean().default(false).notNull(),
+    capturedAt: timestamp('captured_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index('content_acquisition_run_x_traces_verified_idx').on(table.verified, table.capturedAt),
+  ],
+);
+
 export const contentSourceReceipts = content.table(
   'source_receipts',
   {
@@ -166,6 +187,7 @@ export const contentStories = content.table(
     storyId: uuid('story_id').primaryKey().notNull(),
     versionGroupId: uuid('version_group_id').notNull(),
     canonicalSlug: text('canonical_slug').notNull(),
+    storyRevision: integer('story_revision').default(1).notNull(),
     status: text().default('draft').notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
@@ -361,6 +383,55 @@ export const contentPublicationOutbox = content.table(
   (table) => [
     unique('content_publication_outbox_idempotency_key').on(table.idempotencyKey),
     index('content_publication_outbox_pending_idx').on(table.createdAt),
+  ],
+);
+
+export const contentAcquisitionCosts = content.table('acquisition_costs', {
+  costId: uuid('cost_id').primaryKey().notNull(),
+  runId: uuid('run_id').notNull(),
+  provider: text().notNull(),
+  amountMicros: bigint('amount_micros', { mode: 'number' }).default(0).notNull(),
+  currency: text().default('USD').notNull(),
+  units: integer().default(0).notNull(),
+  metadata: jsonb().default({}).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+});
+
+export const contentPublicationDependencies = content.table(
+  'publication_dependencies',
+  {
+    publicationId: uuid('publication_id').notNull(),
+    dependencyKind: text('dependency_kind').notNull(),
+    dependencyKey: text('dependency_key').notNull(),
+    dependencyRevision: text('dependency_revision'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.publicationId, table.dependencyKind, table.dependencyKey] }),
+    index('content_publication_dependencies_key_idx').on(table.dependencyKind, table.dependencyKey),
+  ],
+);
+
+export const contentEditorialActions = content.table(
+  'editorial_actions',
+  {
+    actionId: uuid('action_id').primaryKey().notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    actorId: text('actor_id').notNull(),
+    role: text().notNull(),
+    actionType: text('action_type').notNull(),
+    entityType: text('entity_type').notNull(),
+    entityId: uuid('entity_id'),
+    payload: jsonb().default({}).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique('content_editorial_actions_idempotency_key').on(table.idempotencyKey),
+    index('content_editorial_actions_entity_idx').on(
+      table.entityType,
+      table.entityId,
+      table.createdAt,
+    ),
   ],
 );
 
