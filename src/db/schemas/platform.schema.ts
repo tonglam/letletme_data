@@ -57,6 +57,11 @@ export const knockoutModeInCompetition = competition.enum('knockout_mode', [
   'head_to_head',
 ]);
 export const leagueTypeInCompetition = competition.enum('league_type', ['classic', 'h2h']);
+export const officialLeagueKindInCompetition = competition.enum('official_league_kind', [
+  's',
+  'x',
+  'c',
+]);
 export const tournamentModeInCompetition = competition.enum('tournament_mode', ['normal']);
 export const tournamentRosterModeInCompetition = competition.enum('tournament_roster_mode', [
   'snapshot',
@@ -1500,6 +1505,8 @@ export const entryLeaguesInCompetition = competition.table(
       })
       .notNull(),
     leagueName: text('league_name').notNull(),
+    officialKind: officialLeagueKindInCompetition('official_kind'),
+    shortName: text('short_name'),
     startedEvent: integer('started_event'),
     entryRank: integer('entry_rank'),
     entryLastRank: integer('entry_last_rank'),
@@ -1533,6 +1540,10 @@ export const entryLeaguesInCompetition = competition.table(
       sql`(entry_id > 0) AND (league_id > 0) AND (source_entry_league_id > 0)`,
     ),
     check('entry_leagues_name_nonempty', sql`btrim(league_name) <> ''::text`),
+    check(
+      'entry_leagues_short_name_nonempty',
+      sql`(short_name IS NULL) OR (btrim(short_name) <> ''::text)`,
+    ),
     check(
       'entry_leagues_started_event_positive',
       sql`(started_event IS NULL) OR (started_event > 0)`,

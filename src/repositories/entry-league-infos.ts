@@ -7,6 +7,15 @@ import type { RawFPLEntryLeagues } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
+const mapOfficialKind = (value: string | null | undefined): 's' | 'x' | 'c' | null => {
+  return value === 's' || value === 'x' || value === 'c' ? value : null;
+};
+
+const mapShortName = (value: string | null | undefined): string | null => {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+};
+
 export const createEntryLeagueInfoRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
@@ -39,6 +48,8 @@ export const createEntryLeagueInfoRepository = (dbInstance?: DbOrTransaction) =>
           leagueId: item.id,
           leagueName: item.name,
           leagueType,
+          officialKind: mapOfficialKind(item.league_type),
+          shortName: mapShortName(item.short_name),
           startedEvent: item.start_event ?? null,
           entryRank: item.entry_rank ?? null,
           entryLastRank: item.entry_last_rank ?? null,
@@ -57,6 +68,8 @@ export const createEntryLeagueInfoRepository = (dbInstance?: DbOrTransaction) =>
               ],
               set: {
                 leagueName: sql`excluded.league_name`,
+                officialKind: sql`excluded.official_kind`,
+                shortName: sql`excluded.short_name`,
                 startedEvent: sql`excluded.started_event`,
                 entryRank: sql`excluded.entry_rank`,
                 entryLastRank: sql`excluded.entry_last_rank`,
