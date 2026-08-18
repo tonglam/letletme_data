@@ -328,6 +328,15 @@ export const nextPowerOfTwo = (value: number): number => {
   return 2 ** Math.ceil(Math.log2(value));
 };
 
+const buildBracketSeedOrder = (bracketSize: number): number[] => {
+  let seedOrder = [1, 2];
+  for (let size = 2; size < bracketSize; size *= 2) {
+    const nextSize = size * 2;
+    seedOrder = seedOrder.flatMap((seed) => [seed, nextSize + 1 - seed]);
+  }
+  return seedOrder;
+};
+
 const inferLeagueType = (segments: string[]): LeagueType => {
   const typeSurfaceIndex = segments.findIndex(
     (segment) => segment === 'standings' || segment === 'new-entries',
@@ -492,12 +501,15 @@ export const seedBracketEntries = (entries: readonly number[], teamCount: number
 
   const bracketSize = nextPowerOfTwo(teamCount);
   const normalized = entries.slice(0, teamCount);
+  const seedOrder = buildBracketSeedOrder(bracketSize);
   const pairs: SeedPair[] = [];
 
   for (let index = 0; index < bracketSize / 2; index += 1) {
+    const homeSeed = seedOrder[index * 2];
+    const awaySeed = seedOrder[index * 2 + 1];
     pairs.push({
-      homeEntryId: normalized[index] ?? null,
-      awayEntryId: normalized[bracketSize - index - 1] ?? null,
+      homeEntryId: homeSeed <= teamCount ? (normalized[homeSeed - 1] ?? null) : null,
+      awayEntryId: awaySeed <= teamCount ? (normalized[awaySeed - 1] ?? null) : null,
     });
   }
 

@@ -92,9 +92,9 @@ describe('seedBracketEntries', () => {
     expect(nextPowerOfTwo(93)).toBe(128);
     expect(seedBracketEntries([1, 2, 3, 4, 5, 6], 6)).toEqual([
       { homeEntryId: 1, awayEntryId: null },
+      { homeEntryId: 4, awayEntryId: 5 },
       { homeEntryId: 2, awayEntryId: null },
       { homeEntryId: 3, awayEntryId: 6 },
-      { homeEntryId: 4, awayEntryId: 5 },
     ]);
   });
 });
