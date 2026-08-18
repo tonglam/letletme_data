@@ -133,7 +133,11 @@ function calcEntryWinningNum(
   for (const result of results) {
     const homeNet = result.homeNetPoints ?? 0;
     const awayNet = result.awayNetPoints ?? 0;
-    if (result.homeEntryId === entryId && homeNet > awayNet) {
+    if (result.homeEntryId === entryId && result.awayEntryId === null) {
+      winningNum += 1;
+    } else if (result.awayEntryId === entryId && result.homeEntryId === null) {
+      winningNum += 1;
+    } else if (result.homeEntryId === entryId && homeNet > awayNet) {
       winningNum += 1;
     } else if (result.awayEntryId === entryId && awayNet > homeNet) {
       winningNum += 1;
@@ -261,7 +265,7 @@ export async function syncKnockoutForTournament(
   }
 
   const unseededFixture = knockoutResults.find(
-    (result) => result.homeEntryId === null || result.awayEntryId === null,
+    (result) => result.homeEntryId === null && result.awayEntryId === null,
   );
   if (unseededFixture) {
     throw new Error(
