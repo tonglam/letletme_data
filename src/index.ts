@@ -4,6 +4,7 @@ import { Elysia } from 'elysia';
 // Import API route groups
 import { registerMutationAuthGuard } from './api/auth.guard';
 import { entryInfoAPI } from './api/entry-info.api';
+import { contentAPI } from './content/api/content.api';
 import { entrySyncAPI } from './api/entry-sync.api';
 import { eventLivesAPI } from './api/event-lives.api';
 import { eventsAPI } from './api/events.api';
@@ -166,6 +167,7 @@ const app = new Elysia()
   .use(tournamentsAPI)
   .use(understatAPI)
   .use(trendsAPI)
+  .use(contentAPI)
 
   // ================================
   // Cron Job Registration
