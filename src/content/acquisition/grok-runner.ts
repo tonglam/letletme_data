@@ -76,14 +76,36 @@ export class CliGrokRunner implements GrokRunner {
       const child = spawn(this.binary, args, { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
-      const timeout = setTimeout(() => child.kill('SIGTERM'), this.timeoutMs);
+      let settled = false;
+      const fail = (error: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve({
+          status: 'FAILED',
+          traceVerified: false,
+          xCallCount: 0,
+          receipts: [],
+          error,
+          skillSha: '',
+          toolName: 'grok',
+          adapterVersion: 'cli-v1',
+        });
+      };
+      const timeout = setTimeout(() => {
+        child.kill('SIGTERM');
+        fail(`Grok timed out after ${this.timeoutMs}ms`);
+      }, this.timeoutMs);
       child.stdout.on('data', (chunk: Buffer) => {
         stdout += chunk.toString('utf8');
       });
       child.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf8');
       });
+      child.on('error', (error) => fail(error.message));
       child.on('close', (code) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
         if (code !== 0) {
           resolve({
