@@ -4,6 +4,7 @@ import {
   buildKnockoutRows,
   estimateTournamentSetupRequests,
   getTournamentBackfillWindow,
+  nextPowerOfTwo,
   parseLeagueUrl,
   planTournamentStructure,
   seedBracketEntries,
@@ -86,6 +87,16 @@ describe('seedBracketEntries', () => {
       { homeEntryId: 20, awayEntryId: null },
     ]);
   });
+
+  test('uses first-round byes when the field is not a power of two', () => {
+    expect(nextPowerOfTwo(93)).toBe(128);
+    expect(seedBracketEntries([1, 2, 3, 4, 5, 6], 6)).toEqual([
+      { homeEntryId: 1, awayEntryId: null },
+      { homeEntryId: 4, awayEntryId: 5 },
+      { homeEntryId: 2, awayEntryId: null },
+      { homeEntryId: 3, awayEntryId: 6 },
+    ]);
+  });
 });
 
 describe('buildKnockoutRows', () => {
@@ -132,6 +143,27 @@ describe('buildKnockoutRows', () => {
       results: [],
     });
   });
+
+  test('builds an integer bracket and preserves byes for a non-power-of-two field', () => {
+    const sixTeamTournament: TournamentConfig = {
+      ...tournament,
+      knockoutTeamNum: 6,
+      knockoutEventNum: 3,
+      knockoutStartedEventId: 1,
+      knockoutEndedEventId: 3,
+    };
+    const { matches, results } = buildKnockoutRows(
+      sixTeamTournament,
+      seedBracketEntries([1, 2, 3, 4, 5, 6], 6),
+    );
+
+    expect(matches).toHaveLength(7);
+    expect(matches.filter((match) => match.round === 1)).toHaveLength(4);
+    expect(results.filter((result) => result.event_id === 1)).toHaveLength(4);
+    expect(
+      results.filter((result) => result.event_id === 1 && result.away_entry_id === null),
+    ).toHaveLength(2);
+  });
 });
 
 describe('planTournamentStructure', () => {
@@ -155,7 +187,21 @@ describe('planTournamentStructure', () => {
     expect(plan.leagueType).toBe('classic');
     expect(plan.knockoutTeamNum).toBe(4);
     expect(plan.knockoutEventNum).toBe(2);
-    expect(plan.knockoutStartedEventId).toBe(2);
+    expect(plan.knockoutStartedEventId).toBe(1);
+
+    const withGroup = planTournamentStructure(
+      {
+        ...basePayload,
+        groupFormat: 'points',
+        endGameweek: 'GW5',
+        groupNum: '1',
+        qualifiersPerGroup: '4',
+      },
+      participants([1, 2, 3, 4]),
+      1,
+      'classic',
+    );
+    expect(withGroup.knockoutStartedEventId).toBe(6);
   });
 
   test('rejects when admin is not a participant', () => {
@@ -169,10 +215,12 @@ describe('planTournamentStructure', () => {
     ).toThrow(ValidationError);
   });
 
-  test('rejects knockout team counts that are not a power of two', () => {
-    expect(() =>
-      planTournamentStructure(basePayload, participants([1, 2, 3]), 1, 'classic'),
-    ).toThrow(ValidationError);
+  test('accepts knockout team counts that are not a power of two with byes', () => {
+    const plan = planTournamentStructure(basePayload, participants([1, 2, 3]), 1, 'classic');
+
+    expect(plan.knockoutTeamNum).toBe(3);
+    expect(plan.knockoutEventNum).toBe(2);
+    expect(plan.knockoutEndedEventId).toBe(2);
   });
 
   test('enables official sync for an authoritative one-group Classic points race', () => {

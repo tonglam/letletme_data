@@ -321,7 +321,21 @@ export const toOptionalPositiveInteger = (value?: string): number | null => {
   return parsed;
 };
 
-export const isPowerOfTwo = (value: number): boolean => value > 1 && (value & (value - 1)) === 0;
+export const nextPowerOfTwo = (value: number): number => {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return 2 ** Math.ceil(Math.log2(value));
+};
+
+const buildBracketSeedOrder = (bracketSize: number): number[] => {
+  let seedOrder = [1, 2];
+  for (let size = 2; size < bracketSize; size *= 2) {
+    const nextSize = size * 2;
+    seedOrder = seedOrder.flatMap((seed) => [seed, nextSize + 1 - seed]);
+  }
+  return seedOrder;
+};
 
 const inferLeagueType = (segments: string[]): LeagueType => {
   const typeSurfaceIndex = segments.findIndex(
@@ -481,13 +495,21 @@ export const sortQualifiedEntries = (entries: readonly QualifiedEntry[]): Qualif
   });
 
 export const seedBracketEntries = (entries: readonly number[], teamCount: number): SeedPair[] => {
+  if (teamCount < 2) {
+    return [];
+  }
+
+  const bracketSize = nextPowerOfTwo(teamCount);
   const normalized = entries.slice(0, teamCount);
+  const seedOrder = buildBracketSeedOrder(bracketSize);
   const pairs: SeedPair[] = [];
 
-  for (let index = 0; index < teamCount / 2; index += 1) {
+  for (let index = 0; index < bracketSize / 2; index += 1) {
+    const homeSeed = seedOrder[index * 2];
+    const awaySeed = seedOrder[index * 2 + 1];
     pairs.push({
-      homeEntryId: normalized[index] ?? null,
-      awayEntryId: normalized[teamCount - index - 1] ?? null,
+      homeEntryId: homeSeed <= teamCount ? (normalized[homeSeed - 1] ?? null) : null,
+      awayEntryId: awaySeed <= teamCount ? (normalized[awaySeed - 1] ?? null) : null,
     });
   }
 
@@ -551,19 +573,20 @@ export function buildKnockoutRows(
     return { matches: [], results: [] };
   }
 
+  const bracketSize = nextPowerOfTwo(teamCount);
   const roundStartIds: number[] = [];
   let nextMatchId = 1;
 
   for (let round = 1; round <= eventNum; round += 1) {
     roundStartIds.push(nextMatchId);
-    nextMatchId += teamCount / 2 ** round;
+    nextMatchId += bracketSize / 2 ** round;
   }
 
   const matches: KnockoutMatchRow[] = [];
   const results: KnockoutResultRow[] = [];
 
   for (let round = 1; round <= eventNum; round += 1) {
-    const matchesInRound = teamCount / 2 ** round;
+    const matchesInRound = bracketSize / 2 ** round;
     const roundStart = roundStartIds[round - 1];
     const nextRoundStart = round < eventNum ? roundStartIds[round] : null;
     const startedEventId = knockoutStart + (round - 1) * playAgainstNum;
@@ -721,7 +744,12 @@ export function planTournamentStructure(
       : payload.knockoutFormat === 'double'
         ? (knockoutEventNum ?? 0) * 2
         : knockoutEventNum;
-  const knockoutStartedEventId = payload.knockoutFormat === 'none' ? null : groupEndedEventId + 1;
+  const knockoutStartedEventId =
+    payload.knockoutFormat === 'none'
+      ? null
+      : payload.groupFormat === 'none'
+        ? groupStartedEventId
+        : groupEndedEventId + 1;
   const knockoutEndedEventId =
     payload.knockoutFormat === 'none' || !knockoutStartedEventId || !knockoutRounds
       ? null
@@ -752,13 +780,6 @@ export function planTournamentStructure(
     throw new ValidationError(
       'Knockout stage settings are incomplete or invalid.',
       'TOURNAMENT_KNOCKOUT_INVALID',
-    );
-  }
-
-  if (payload.knockoutFormat !== 'none' && !isPowerOfTwo(knockoutTeamNum ?? 0)) {
-    throw new ValidationError(
-      'Knockout team count must be a power of 2.',
-      'TOURNAMENT_KNOCKOUT_TEAM_COUNT_INVALID',
     );
   }
 
