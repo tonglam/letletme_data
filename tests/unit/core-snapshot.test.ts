@@ -25,14 +25,16 @@ describe('core snapshot validation', () => {
       squad_min_play: [1, 3, 2, 1][id - 1],
       squad_max_play: [1, 5, 5, 3][id - 1],
     }));
-    input.bootstrap.chips = [{
-      id: 1,
-      name: 'wildcard',
-      number: 1,
-      start_event: 2,
-      stop_event: 19,
-      chip_type: 'transfer',
-    }];
+    input.bootstrap.chips = [
+      {
+        id: 1,
+        name: 'wildcard',
+        number: 1,
+        start_event: 2,
+        stop_event: 19,
+        chip_type: 'transfer',
+      },
+    ];
 
     expect(normalizeSelectionRules(input.bootstrap)).toMatchObject({
       squadSize: 15,

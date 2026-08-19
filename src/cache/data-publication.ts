@@ -116,7 +116,14 @@ const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
   'fpl:live': ['eventLive', 'fixtures'],
   'fpl:market': ['context'],
 };
-const LEGACY_CORE_ITEM_NAMES = ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'];
+const LEGACY_CORE_ITEM_NAMES = [
+  'events',
+  'teams',
+  'players',
+  'phases',
+  'fixtures',
+  'currentEventId',
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -141,7 +148,9 @@ function hasExactItemNames(dataset: DataPublicationDataset, names: readonly stri
 function hasExactNames(names: readonly string[], expectedNames: readonly string[]): boolean {
   const actual = [...names].sort();
   const expected = [...expectedNames].sort();
-  return actual.length === expected.length && actual.every((name, index) => name === expected[index]);
+  return (
+    actual.length === expected.length && actual.every((name, index) => name === expected[index])
+  );
 }
 
 function hasAcceptedItemNames(dataset: DataPublicationDataset, names: readonly string[]): boolean {

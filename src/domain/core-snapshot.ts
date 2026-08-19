@@ -109,7 +109,8 @@ export function normalizeSelectionRules(bootstrap: FPLBootstrapResponse): Select
     ) {
       return [];
     }
-    const name = typeof position.singular_name === 'string' ? position.singular_name : `Position ${id}`;
+    const name =
+      typeof position.singular_name === 'string' ? position.singular_name : `Position ${id}`;
     const shortName =
       typeof position.singular_name_short === 'string' ? position.singular_name_short : name;
     return [{ id, name, shortName, squadSelect, minPlay, maxPlay }];
@@ -117,7 +118,12 @@ export function normalizeSelectionRules(bootstrap: FPLBootstrapResponse): Select
   const chips = bootstrap.chips.flatMap((chip) => {
     const id = asFiniteNumber(chip.id);
     const number = asFiniteNumber(chip.number);
-    if (id === null || number === null || chip.start_event < 1 || chip.stop_event < chip.start_event) {
+    if (
+      id === null ||
+      number === null ||
+      chip.start_event < 1 ||
+      chip.stop_event < chip.start_event
+    ) {
       return [];
     }
     return [
@@ -332,7 +338,8 @@ export function prepareCoreSnapshot(
 
   const selectionRules = normalizeSelectionRules(bootstrap);
   const hasRulePayload =
-    (asRecord(bootstrap.game_settings) && Object.keys(asRecord(bootstrap.game_settings) ?? {}).length > 0) ||
+    (asRecord(bootstrap.game_settings) &&
+      Object.keys(asRecord(bootstrap.game_settings) ?? {}).length > 0) ||
     bootstrap.element_types.length > 0 ||
     bootstrap.chips.length > 0;
   if (!selectionRules && hasRulePayload) reject('official selection rules are incomplete');
