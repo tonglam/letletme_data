@@ -41,7 +41,9 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       return row;
     } catch (error) {
       logError('Failed to insert bug report', error);
-      throw error instanceof DatabaseError ? error : new DatabaseError('Failed to store bug report');
+      throw error instanceof DatabaseError
+        ? error
+        : new DatabaseError('Failed to store bug report');
     }
   };
 
