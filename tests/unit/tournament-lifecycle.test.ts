@@ -182,6 +182,11 @@ describe('tournament lifecycle invariants', () => {
     expect(isTournamentNameConflict({ code: '23505', constraint: 'tournaments_name_key' })).toBe(
       true,
     );
+    expect(
+      isTournamentNameConflict({
+        cause: { code: '23505', constraint_name: 'tournaments_name_key' },
+      }),
+    ).toBe(true);
     expect(isTournamentNameConflict({ code: '23505', constraint: 'another_unique_index' })).toBe(
       false,
     );

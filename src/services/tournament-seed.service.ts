@@ -81,7 +81,7 @@ export async function ensureKnockoutRoundOneSeeded(
   }
 
   const alreadySeeded = roundOne.every(
-    (row) => row.homeEntryId !== null && row.awayEntryId !== null,
+    (row) => row.homeEntryId !== null || row.awayEntryId !== null,
   );
   if (alreadySeeded) {
     return;

@@ -247,7 +247,7 @@ export async function auditTournamentSetup(
           event_id as "eventId",
           count(*)::int as "rowCount",
           count(*) filter (
-            where home_entry_id is null or away_entry_id is null or match_winner is null
+            where (home_entry_id is null and away_entry_id is null) or match_winner is null
           )::int as "invalidCount"
         FROM competition.tournament_knockout_results
         WHERE season_id = ${season.seasonId}
