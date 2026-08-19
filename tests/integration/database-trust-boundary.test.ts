@@ -274,6 +274,7 @@ describe('database trust boundary', () => {
       ORDER BY relation.relname
     `;
     expect(opsTables.map((table) => table.name)).toEqual([
+      'bug_reports',
       'dataset_publication_items',
       'dataset_publications',
       'schema_migrations',

@@ -29,7 +29,6 @@ CREATE INDEX bug_reports_user_created_idx ON ops.bug_reports USING btree (user_i
     WHERE user_id IS NOT NULL;
 
 GRANT SELECT,INSERT,UPDATE ON TABLE ops.bug_reports TO letletme_data_writer;
-GRANT SELECT ON TABLE ops.bug_reports TO letletme_graphql_reader;
 
 COMMENT ON TABLE ops.bug_reports IS
     'End-user problem reports. body is the user-written description; client_meta is silent diagnostics.';

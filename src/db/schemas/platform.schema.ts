@@ -378,6 +378,9 @@ export const bugReportsInOps = ops.table(
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
     index('bug_reports_created_idx').on(table.createdAt.desc()),
+    index('bug_reports_user_created_idx')
+      .on(table.userId, table.createdAt.desc())
+      .where(sql`user_id IS NOT NULL`),
     check('bug_reports_public_id_format', sql`public_id ~ '^LL-[0-9A-F]{6}$'::text`),
     check(
       'bug_reports_source_known',
