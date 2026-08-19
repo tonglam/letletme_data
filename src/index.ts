@@ -2,6 +2,7 @@ import { cors } from '@elysiajs/cors';
 import { Elysia } from 'elysia';
 
 // Import API route groups
+import { bugReportsAPI } from './api/bug-reports.api';
 import { registerMutationAuthGuard } from './api/auth.guard';
 import { entryInfoAPI } from './api/entry-info.api';
 import { contentAPI } from './content/api/content.api';
@@ -167,6 +168,7 @@ const app = new Elysia()
   .use(entrySyncAPI)
   .use(jobsAPI)
   .use(tournamentsAPI)
+  .use(bugReportsAPI)
   .use(understatAPI)
   .use(trendsAPI)
   .use(contentAPI)
