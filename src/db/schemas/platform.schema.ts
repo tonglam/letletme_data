@@ -1505,13 +1505,13 @@ export const entryLeaguesInCompetition = competition.table(
       })
       .notNull(),
     leagueName: text('league_name').notNull(),
-    officialKind: officialLeagueKindInCompetition('official_kind'),
-    shortName: text('short_name'),
     startedEvent: integer('started_event'),
     entryRank: integer('entry_rank'),
     entryLastRank: integer('entry_last_rank'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    officialKind: officialLeagueKindInCompetition('official_kind'),
+    shortName: text('short_name'),
   },
   (table) => [
     index('entry_leagues_league_idx').using(
