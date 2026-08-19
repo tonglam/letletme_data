@@ -127,6 +127,32 @@ async function persistCoreSnapshotRows(
   requirePersistedCount('phases', savedPhases.length, snapshot.phases.length);
   requirePersistedCount('fixtures', savedFixtures.length, snapshot.fixtures.length);
 
+  // Keep the normalized official selection rules beside the season authority
+  // so the GraphQL PostgreSQL fallback can expose the same contract as Redis.
+  // This uses the existing source_metadata JSON column; no second rule store
+  // or separate synchronization lane is introduced.
+  const seasonRows = await db
+    .select({ sourceMetadata: seasonsInFpl.sourceMetadata })
+    .from(seasonsInFpl)
+    .where(eq(seasonsInFpl.seasonId, season.seasonId))
+    .limit(1);
+  const existingMetadata =
+    seasonRows[0]?.sourceMetadata &&
+    typeof seasonRows[0].sourceMetadata === 'object' &&
+    !Array.isArray(seasonRows[0].sourceMetadata)
+      ? (seasonRows[0].sourceMetadata as Record<string, unknown>)
+      : {};
+  await db
+    .update(seasonsInFpl)
+    .set({
+      sourceMetadata: {
+        ...existingMetadata,
+        selectionRules: snapshot.selectionRules,
+      },
+      updatedAt: new Date(),
+    })
+    .where(eq(seasonsInFpl.seasonId, season.seasonId));
+
   return {
     events: savedEvents.length,
     teams: savedTeams.length,

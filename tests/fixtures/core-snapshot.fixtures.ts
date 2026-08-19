@@ -123,6 +123,7 @@ export function buildCoreSnapshotFixture(options?: { playerCount?: number }): {
       game_settings: {},
       element_stats: [],
       element_types: [],
+      chips: [],
     },
     fixtures: buildFixtures(),
   };

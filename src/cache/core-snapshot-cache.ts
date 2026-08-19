@@ -7,7 +7,7 @@ import {
   type PublishDataRevisionOptions,
 } from './data-publication';
 
-import type { CoreSnapshot } from '../domain/core-snapshot';
+import type { CoreSnapshot, SelectionRules } from '../domain/core-snapshot';
 import type { Event, Fixture, Phase, Player, Team } from '../types';
 
 export interface CoreSnapshotCachePublication {
@@ -25,6 +25,7 @@ export interface CoreSnapshotCacheContents {
   readonly phases: Phase[];
   readonly fixtures: Fixture[];
   readonly currentEventId: number | null;
+  readonly selectionRules: SelectionRules | null;
 }
 
 export interface CoreSnapshotCachePublishOptions
@@ -71,6 +72,7 @@ export async function publishCoreSnapshotCache(
           name: 'currentEventId',
           value: selectCurrentEventIdByDeadline(snapshot.events, options.sourceCheckedAt),
         },
+        { name: 'selectionRules', value: snapshot.selectionRules ?? null },
       ],
     },
     {
@@ -100,6 +102,9 @@ export async function readCoreSnapshotCache(
     !Array.isArray(items.players) ||
     !Array.isArray(items.phases) ||
     !Array.isArray(items.fixtures) ||
+    (items.selectionRules !== undefined &&
+      items.selectionRules !== null &&
+      (typeof items.selectionRules !== 'object' || Array.isArray(items.selectionRules))) ||
     (items.currentEventId !== null && !Number.isInteger(items.currentEventId))
   ) {
     return null;
@@ -112,5 +117,6 @@ export async function readCoreSnapshotCache(
     phases: items.phases as Phase[],
     fixtures: items.fixtures as Fixture[],
     currentEventId: items.currentEventId as number | null,
+    selectionRules: (items.selectionRules ?? null) as SelectionRules | null,
   };
 }

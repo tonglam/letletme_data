@@ -104,10 +104,19 @@ const MANIFEST_FIELDS = [
 ] as const;
 const MANIFEST_ITEM_FIELDS = ['name', 'key', 'type', 'count', 'bytes', 'sha256'] as const;
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
-  'fpl:core': ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'],
+  'fpl:core': [
+    'events',
+    'teams',
+    'players',
+    'phases',
+    'fixtures',
+    'currentEventId',
+    'selectionRules',
+  ],
   'fpl:live': ['eventLive', 'fixtures'],
   'fpl:market': ['context'],
 };
+const LEGACY_CORE_ITEM_NAMES = ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -126,6 +135,19 @@ function hasExactItemNames(dataset: DataPublicationDataset, names: readonly stri
   const expected = [...DATASET_ITEM_NAMES[dataset]].sort();
   return (
     actual.length === expected.length && actual.every((name, index) => name === expected[index])
+  );
+}
+
+function hasExactNames(names: readonly string[], expectedNames: readonly string[]): boolean {
+  const actual = [...names].sort();
+  const expected = [...expectedNames].sort();
+  return actual.length === expected.length && actual.every((name, index) => name === expected[index]);
+}
+
+function hasAcceptedItemNames(dataset: DataPublicationDataset, names: readonly string[]): boolean {
+  return (
+    hasExactItemNames(dataset, names) ||
+    (dataset === 'fpl:core' && hasExactNames(names, LEGACY_CORE_ITEM_NAMES))
   );
 }
 
@@ -429,7 +451,7 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
       }
       names.add(item.name);
     }
-    if (!hasExactItemNames(dataset, [...names])) return null;
+    if (!hasAcceptedItemNames(dataset, [...names])) return null;
     return value as unknown as DataPublicationManifest;
   } catch {
     return null;
