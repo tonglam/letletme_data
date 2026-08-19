@@ -53,10 +53,7 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
   }
 
   const entryId = input.entryId ?? null;
-  if (
-    entryId !== null &&
-    (!Number.isInteger(entryId) || entryId <= 0 || entryId > PG_INT_MAX)
-  ) {
+  if (entryId !== null && (!Number.isInteger(entryId) || entryId <= 0 || entryId > PG_INT_MAX)) {
     throw new ValidationError('Invalid entry id.');
   }
 
