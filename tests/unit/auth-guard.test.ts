@@ -41,6 +41,13 @@ describe('mutation auth policy', () => {
     expect(shouldRequireApiKey('PATCH', '/players/sync')).toBe(true);
     expect(shouldRequireApiKey('POST', '/api/auth/api-key/verify')).toBe(true);
   });
+
+  test('lets content role hashes authenticate briefing mutations', () => {
+    expect(shouldRequireApiKey('POST', '/content/sources')).toBe(false);
+    expect(shouldRequireApiKey('POST', '/content/briefing/week/publish')).toBe(false);
+    expect(shouldRequireApiKey('POST', '/content/editorial/candidates')).toBe(false);
+    expect(shouldRequireApiKey('GET', '/content/briefing/week/active')).toBe(false);
+  });
 });
 
 describe('service API key verification', () => {

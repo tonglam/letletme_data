@@ -11,7 +11,17 @@ const SERVICE_ONLY_READ_PATHS = [
   /^\/trends\/public-catalog\/[^/]+\/?$/,
 ] as const;
 
+function isContentApiPath(path: string): boolean {
+  return path === '/content' || path.startsWith('/content/');
+}
+
 export function shouldRequireApiKey(method: string, path: string): boolean {
+  // Briefing content mutations authenticate with editor/publisher hashes, not
+  // DATA_API_KEY_HASHES. The global guard must not 401 those keys first.
+  if (isContentApiPath(path)) {
+    return false;
+  }
+
   if (
     method.toUpperCase() === 'GET' &&
     SERVICE_ONLY_READ_PATHS.some((pattern) => pattern.test(path))
