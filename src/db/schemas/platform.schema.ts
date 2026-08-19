@@ -361,6 +361,44 @@ export const schemaMigrationsInOps = ops.table(
   ],
 );
 
+export const bugReportsInOps = ops.table(
+  'bug_reports',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    source: text().notNull(),
+    userId: text('user_id'),
+    entryId: integer('entry_id'),
+    body: text().notNull(),
+    screenshotUrl: text('screenshot_url'),
+    clientMeta: jsonb('client_meta').default({}).notNull(),
+    status: text().default('open').notNull(),
+  },
+  (table) => [
+    uniqueIndex('bug_reports_public_id_key').on(table.publicId),
+    index('bug_reports_created_idx').on(table.createdAt.desc()),
+    check('bug_reports_public_id_format', sql`public_id ~ '^LL-[0-9A-F]{6}$'::text`),
+    check(
+      'bug_reports_source_known',
+      sql`source = ANY (ARRAY['website'::text, 'wechat_miniprogram'::text])`,
+    ),
+    check(
+      'bug_reports_status_known',
+      sql`status = ANY (ARRAY['open'::text, 'ack'::text, 'closed'::text])`,
+    ),
+    check(
+      'bug_reports_body_nonempty',
+      sql`(char_length(btrim(body)) >= 8) AND (char_length(body) <= 500)`,
+    ),
+    check('bug_reports_entry_id_positive', sql`(entry_id IS NULL) OR (entry_id > 0)`),
+    check(
+      'bug_reports_screenshot_https',
+      sql`(screenshot_url IS NULL) OR (screenshot_url ~ '^https://'::text)`,
+    ),
+  ],
+);
+
 export const seasonsInFpl = fpl.table(
   'seasons',
   {
