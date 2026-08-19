@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
 import { getContentRuntimeFlags, assertContentRuntimeFlags } from '../config';
-import { CliGrokRunner, FixtureGrokRunner, MONITOR_FPL_X_SOURCES_SKILL_SHA, type GrokRunner } from '../acquisition/grok-runner';
+import {
+  CliGrokRunner,
+  FixtureGrokRunner,
+  MONITOR_FPL_X_SOURCES_SKILL_SHA,
+  type GrokRunner,
+} from '../acquisition/grok-runner';
 import { buildSourceSnapshot } from '../acquisition/source-registry';
 import {
   beginAcquisitionRun,
