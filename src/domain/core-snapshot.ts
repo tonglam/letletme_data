@@ -16,6 +16,34 @@ import type {
   Team,
 } from '../types';
 
+export interface SelectionRulePosition {
+  id: number;
+  name: string;
+  shortName: string;
+  squadSelect: number;
+  minPlay: number;
+  maxPlay: number;
+}
+
+export interface SelectionRuleChipWindow {
+  id: number;
+  name: string;
+  number: number;
+  startEvent: number;
+  stopEvent: number;
+  chipType: string;
+}
+
+export interface SelectionRules {
+  squadSize: number;
+  startingSize: number;
+  budget: number;
+  maxPlayersPerTeam: number;
+  currencyMultiplier: number;
+  positions: SelectionRulePosition[];
+  chips: SelectionRuleChipWindow[];
+}
+
 export const CORE_SNAPSHOT_EXPECTED_EVENTS = 38;
 export const CORE_SNAPSHOT_EXPECTED_TEAMS = 20;
 export const CORE_SNAPSHOT_EXPECTED_FIXTURES = 380;
@@ -39,6 +67,98 @@ export interface CoreSnapshot {
   players: Player[];
   phases: Phase[];
   fixtures: Fixture[];
+  selectionRules?: SelectionRules | null;
+}
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const asFiniteNumber = (value: unknown): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return null;
+};
+
+/** Normalize official bootstrap rules into the cross-service public contract. */
+export function normalizeSelectionRules(bootstrap: FPLBootstrapResponse): SelectionRules | null {
+  const settings = asRecord(bootstrap.game_settings);
+  const squadSize = asFiniteNumber(settings?.squad_squadsize);
+  const startingSize = asFiniteNumber(settings?.squad_squadplay);
+  const budget = asFiniteNumber(settings?.squad_total_spend);
+  const maxPlayersPerTeam = asFiniteNumber(settings?.squad_team_limit);
+  const currencyMultiplier = asFiniteNumber(settings?.ui_currency_multiplier);
+  const rawPositions = bootstrap.element_types
+    .map(asRecord)
+    .filter((value): value is Record<string, unknown> => value !== null);
+  const positions = rawPositions.flatMap((position) => {
+    const id = asFiniteNumber(position.id);
+    const squadSelect = asFiniteNumber(position.squad_select);
+    const minPlay = asFiniteNumber(position.squad_min_play);
+    const maxPlay = asFiniteNumber(position.squad_max_play);
+    if (
+      id === null ||
+      squadSelect === null ||
+      minPlay === null ||
+      maxPlay === null ||
+      id <= 0 ||
+      minPlay > maxPlay
+    ) {
+      return [];
+    }
+    const name =
+      typeof position.singular_name === 'string' ? position.singular_name : `Position ${id}`;
+    const shortName =
+      typeof position.singular_name_short === 'string' ? position.singular_name_short : name;
+    return [{ id, name, shortName, squadSelect, minPlay, maxPlay }];
+  });
+  const chips = bootstrap.chips.flatMap((chip) => {
+    const id = asFiniteNumber(chip.id);
+    const number = asFiniteNumber(chip.number);
+    if (
+      id === null ||
+      number === null ||
+      chip.start_event < 1 ||
+      chip.stop_event < chip.start_event
+    ) {
+      return [];
+    }
+    return [
+      {
+        id,
+        name: chip.name,
+        number,
+        startEvent: chip.start_event,
+        stopEvent: chip.stop_event,
+        chipType: chip.chip_type,
+      },
+    ];
+  });
+  if (
+    squadSize === null ||
+    startingSize === null ||
+    budget === null ||
+    maxPlayersPerTeam === null ||
+    currencyMultiplier === null ||
+    positions.length !== rawPositions.length ||
+    positions.length === 0 ||
+    new Set(positions.map((position) => position.id)).size !== positions.length ||
+    chips.length !== bootstrap.chips.length
+  ) {
+    return null;
+  }
+  return {
+    squadSize,
+    startingSize,
+    budget,
+    maxPlayersPerTeam,
+    currencyMultiplier,
+    positions,
+    chips,
+  };
 }
 
 function reject(reason: string, details?: Record<string, number>): never {
@@ -216,5 +336,21 @@ export function prepareCoreSnapshot(
   if (!eventSeason || !fixtureSeason) reject('season cannot be derived from both sources');
   if (eventSeason !== fixtureSeason) reject('event and fixture seasons disagree');
 
-  return { season: eventSeason, events, teams, players, phases, fixtures };
+  const selectionRules = normalizeSelectionRules(bootstrap);
+  const hasRulePayload =
+    (asRecord(bootstrap.game_settings) &&
+      Object.keys(asRecord(bootstrap.game_settings) ?? {}).length > 0) ||
+    bootstrap.element_types.length > 0 ||
+    bootstrap.chips.length > 0;
+  if (!selectionRules && hasRulePayload) reject('official selection rules are incomplete');
+
+  return {
+    season: eventSeason,
+    events,
+    teams,
+    players,
+    phases,
+    fixtures,
+    selectionRules,
+  };
 }

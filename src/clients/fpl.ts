@@ -209,6 +209,18 @@ export const PhaseSchema = z.object({
   highest_score: z.number().nullable(),
 });
 
+export const ChipSchema = z
+  .object({
+    id: z.number(),
+    name: z.string(),
+    number: z.number(),
+    start_event: z.number(),
+    stop_event: z.number(),
+    chip_type: z.string(),
+    overrides: z.unknown().optional(),
+  })
+  .passthrough();
+
 export const FixtureStatSchema = z.object({
   identifier: z.string(),
   a: z.array(
@@ -254,6 +266,8 @@ export const BootstrapResponseSchema = z.object({
   total_players: z.number(),
   element_stats: z.array(z.unknown()),
   element_types: z.array(z.unknown()),
+  // Keep older test fixtures valid while exposing the live chip windows.
+  chips: z.array(ChipSchema).default([]),
 });
 
 // Event Live schemas

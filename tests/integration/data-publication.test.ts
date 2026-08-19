@@ -73,6 +73,7 @@ function input(
       { name: 'phases', value: [] },
       { name: 'fixtures', value: [] },
       { name: 'currentEventId', value: null },
+      { name: 'selectionRules', value: null },
     ],
   };
 }
