@@ -15,6 +15,7 @@ export async function runPlayerMarketFreshnessWatchdog(now: Date = new Date()) {
     logError('Player market freshness watchdog failed', error);
     await notifyTwoBots(
       '[player-market-freshness] check failed before a complete snapshot could be verified',
+      { idempotencyKey: `player-market-freshness:${now.toISOString().slice(0, 16)}` },
     );
     throw error;
   }

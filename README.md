@@ -138,8 +138,20 @@ bun run db:migrate:status
 At minimum, configure `DATABASE_URL`, `CACHE_REDIS_*`, and `QUEUE_REDIS_*`.
 Cache and queue settings must not resolve to the same host/port/database tuple;
 production requires both sets explicitly. Supabase and notification variables
-are optional runtime integrations. Production must use `ENABLE_AUTH=true` with
-at least one SHA-256 digest in `DATA_API_KEY_HASHES`.
+are optional runtime integrations. When `WECHAT_NOTIFICATION_URL` is configured
+in production, `WECHAT_NOTIFICATION_API_TOKEN` is mandatory and is sent as a
+Bearer header. Production must use `ENABLE_AUTH=true` with at least one
+SHA-256 digest in `DATA_API_KEY_HASHES`.
+
+### WeChat notification contract
+
+`src/utils/notify.ts` sends a bounded 10-second request with a stable
+`Idempotency-Key`. A caller can supply a key through `notifyTwoBots`; the
+player-market freshness watchdog uses
+`player-market-freshness:<scheduled-run-UTC-minute>` and reuses it for retries.
+The caller logs only status/category/request ID. It never logs the token,
+notification body, or provider response body. `401`, `409`, `429`, `5xx`,
+timeouts, and network failures are classified separately for operations.
 
 Start the two processes in separate terminals:
 

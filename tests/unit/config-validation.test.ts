@@ -36,6 +36,27 @@ describe('production environment preflight', () => {
     expect(await runEnvCheck('a'.repeat(64))).toBe(0);
   });
 
+  test('treats blank WeChat token as unset and still fail-closes production URL without token', async () => {
+    const digest = 'a'.repeat(64);
+    const wechatUrl = 'https://bot.example.test/notification';
+
+    expect(
+      await runEnvCheck('', {
+        NODE_ENV: 'test',
+        ENABLE_AUTH: 'false',
+        WECHAT_NOTIFICATION_URL: wechatUrl,
+        WECHAT_NOTIFICATION_API_TOKEN: '',
+      }),
+    ).toBe(0);
+
+    expect(
+      await runEnvCheck(digest, {
+        WECHAT_NOTIFICATION_URL: wechatUrl,
+        WECHAT_NOTIFICATION_API_TOKEN: '',
+      }),
+    ).not.toBe(0);
+  });
+
   test('keeps each process pool within the shared Supavisor session budget', async () => {
     const digest = 'a'.repeat(64);
 

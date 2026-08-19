@@ -14,6 +14,8 @@ import { formatCronDateKey } from '../utils/timezone';
 import { resolvePlayerSyncEvent, type PlayerSyncEvent } from './player-sync-event.service';
 import { ensureMarketPublication } from './market-publication.service';
 
+type NotificationOptions = { idempotencyKey?: string };
+
 export type PlayerMarketFreshnessDependencies = {
   findCurrentSeason: () => Promise<FplSeasonRef>;
   resolveSyncEvent: (season: FplSeasonRef, now: Date) => Promise<PlayerSyncEvent | null>;
@@ -25,7 +27,7 @@ export type PlayerMarketFreshnessDependencies = {
     snapshotDate: string,
     options: { missingIsSettled: boolean },
   ) => Promise<PlayerValuesSettlement>;
-  notify: (message: string) => Promise<void>;
+  notify: (message: string, options?: NotificationOptions) => Promise<void>;
   ensureMarketPublication?: typeof ensureMarketPublication;
 };
 
@@ -171,10 +173,15 @@ export async function checkPlayerMarketFreshness(
         `Price changes observed: ${hasChanges}`,
         `Player-values queue: ${settlement.state}`,
       ].join('\n'),
+      { idempotencyKey: `player-market-freshness:${scheduledRunUtcMinute(now)}` },
     );
   } catch (error) {
     // The notification fan-out is best effort and must not mutate readiness.
     logError('Failed to send player market freshness alert', error, result);
   }
   return result;
+}
+
+function scheduledRunUtcMinute(now: Date): string {
+  return now.toISOString().slice(0, 16);
 }
