@@ -24,8 +24,8 @@ CREATE TABLE ops.bug_reports (
 ALTER TABLE ops.bug_reports OWNER TO letletme_data_owner;
 
 CREATE UNIQUE INDEX bug_reports_public_id_key ON ops.bug_reports USING btree (public_id);
-CREATE INDEX bug_reports_created_idx ON ops.bug_reports USING btree (created_at DESC);
-CREATE INDEX bug_reports_user_created_idx ON ops.bug_reports USING btree (user_id, created_at DESC)
+CREATE INDEX bug_reports_created_idx ON ops.bug_reports USING btree (created_at DESC NULLS LAST);
+CREATE INDEX bug_reports_user_created_idx ON ops.bug_reports USING btree (user_id, created_at DESC NULLS LAST)
     WHERE user_id IS NOT NULL;
 
 GRANT SELECT,INSERT,UPDATE ON TABLE ops.bug_reports TO letletme_data_writer;
