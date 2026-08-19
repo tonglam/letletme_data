@@ -17,6 +17,15 @@ function integerEnv(defaultValue: number) {
   return z.coerce.number().int().default(defaultValue);
 }
 
+/** dotenv turns `KEY=` into `""`; treat that as unset for optional secrets/URLs. */
+function optionalEnv(schema: z.ZodType<string | undefined>) {
+  return z.preprocess((value) => {
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    return trimmed.length === 0 ? undefined : trimmed;
+  }, schema);
+}
+
 const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   // API and worker share one Supavisor session-pool login in production. Keep
@@ -104,9 +113,9 @@ const EnvSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
   // Bot notification endpoints (optional)
-  TELEGRAM_NOTIFICATION_URL: z.string().url().optional(),
-  WECHAT_NOTIFICATION_URL: z.string().url().optional(),
-  WECHAT_NOTIFICATION_API_TOKEN: z.string().min(32).optional(),
+  TELEGRAM_NOTIFICATION_URL: optionalEnv(z.string().url().optional()),
+  WECHAT_NOTIFICATION_URL: optionalEnv(z.string().url().optional()),
+  WECHAT_NOTIFICATION_API_TOKEN: optionalEnv(z.string().min(32).optional()),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;

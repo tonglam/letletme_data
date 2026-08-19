@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 
-import { resetConfigForTests } from '../../src/utils/config';
+import { getConfig, resetConfigForTests } from '../../src/utils/config';
 import { sendWeChatBotNotification, WeChatNotificationError } from '../../src/utils/notify';
 
 const originalFetch = globalThis.fetch;
@@ -82,9 +82,25 @@ describe('WeChat notification caller', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  test('treats a blank WeChat token as unset so local example env can boot', async () => {
+    process.env.WECHAT_NOTIFICATION_API_TOKEN = '';
+    process.env.WECHAT_NOTIFICATION_URL = '';
+    process.env.ENABLE_AUTH = 'false';
+    resetConfigForTests();
+
+    const config = getConfig();
+    expect(config.WECHAT_NOTIFICATION_API_TOKEN).toBeUndefined();
+    expect(config.WECHAT_NOTIFICATION_URL).toBeUndefined();
+
+    const fetchMock = mock(async () => new Response('{}', { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await sendWeChatBotNotification('alert', ['self']);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test('fails closed when production has a URL but no token', async () => {
     process.env.NODE_ENV = 'production';
-    delete process.env.WECHAT_NOTIFICATION_API_TOKEN;
+    process.env.WECHAT_NOTIFICATION_API_TOKEN = '';
     process.env.CACHE_REDIS_HOST = 'cache.example.test';
     process.env.CACHE_REDIS_PORT = '6379';
     process.env.CACHE_REDIS_DB = '0';
