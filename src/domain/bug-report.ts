@@ -8,6 +8,9 @@ export type BugReportSource = (typeof BUG_REPORT_SOURCES)[number];
 export const BUG_REPORT_BODY_MIN = 8;
 export const BUG_REPORT_BODY_MAX = 500;
 const CLIENT_META_MAX_BYTES = 16 * 1024;
+const PG_INT_MAX = 2_147_483_647;
+
+const codePointLength = (value: string): number => [...value].length;
 
 export type BugReportInsert = {
   id: string;
@@ -41,15 +44,19 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
   }
 
   const body = input.body.trim();
-  if (body.length < BUG_REPORT_BODY_MIN) {
+  const bodyLength = codePointLength(body);
+  if (bodyLength < BUG_REPORT_BODY_MIN) {
     throw new ValidationError('Please write a little more about what happened.');
   }
-  if (body.length > BUG_REPORT_BODY_MAX) {
+  if (bodyLength > BUG_REPORT_BODY_MAX) {
     throw new ValidationError('Please keep the description under 500 characters.');
   }
 
   const entryId = input.entryId ?? null;
-  if (entryId !== null && (!Number.isInteger(entryId) || entryId <= 0)) {
+  if (
+    entryId !== null &&
+    (!Number.isInteger(entryId) || entryId <= 0 || entryId > PG_INT_MAX)
+  ) {
     throw new ValidationError('Invalid entry id.');
   }
 

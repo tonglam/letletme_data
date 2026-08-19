@@ -26,6 +26,25 @@ describe('bug report validation', () => {
     ).toThrow(ValidationError);
   });
 
+  it('counts body length in Unicode code points', () => {
+    expect(() =>
+      validateBugReportCreateInput({
+        source: 'website',
+        body: '😀😀😀😀',
+      }),
+    ).toThrow(ValidationError);
+  });
+
+  it('rejects entry ids outside the PostgreSQL integer range', () => {
+    expect(() =>
+      validateBugReportCreateInput({
+        source: 'website',
+        body: '实时积分对不上显示',
+        entryId: 2_147_483_648,
+      }),
+    ).toThrow(ValidationError);
+  });
+
   it('rejects http screenshot URLs', () => {
     expect(() =>
       validateBugReportCreateInput({
