@@ -54,6 +54,8 @@ describe('entry league snapshot replacement', () => {
         {
           id: 7,
           name: 'Renamed Classic',
+          league_type: 'x',
+          short_name: null,
           entry_rank: 3,
           entry_last_rank: 5,
           start_event: 1,
@@ -63,6 +65,8 @@ describe('entry league snapshot replacement', () => {
         {
           id: 7,
           name: 'Same ID H2H',
+          league_type: 'x',
+          short_name: null,
           entry_rank: null,
           entry_last_rank: null,
           start_event: 2,
@@ -78,6 +82,8 @@ describe('entry league snapshot replacement', () => {
         leagueId: 7,
         leagueName: 'Renamed Classic',
         leagueType: 'classic',
+        officialKind: 'x',
+        shortName: null,
         startedEvent: 1,
         entryRank: 3,
         entryLastRank: 5,
@@ -88,6 +94,8 @@ describe('entry league snapshot replacement', () => {
         leagueId: 7,
         leagueName: 'Same ID H2H',
         leagueType: 'h2h',
+        officialKind: 'x',
+        shortName: null,
         startedEvent: 2,
         entryRank: null,
         entryLastRank: null,
@@ -95,5 +103,61 @@ describe('entry league snapshot replacement', () => {
     ]);
     expect(fake.onConflictDoUpdate).toHaveBeenCalledTimes(1);
     expect(fake.deleteRows).toHaveBeenCalledTimes(1);
+  });
+
+  it('stores FPL system short_name and official kind without conflating scoring type', async () => {
+    const fake = createFakeDatabase();
+    const repository = createEntryLeagueInfoRepository(fake.db as never);
+
+    await repository.upsertFromLeagues(TEST_SEASON, 42, {
+      classic: [
+        {
+          id: 314,
+          name: 'Overall',
+          league_type: 's',
+          short_name: 'overall',
+          entry_rank: 12_580,
+          entry_last_rank: 12_600,
+          start_event: 1,
+        },
+        {
+          id: 317,
+          name: 'Sky Sports League',
+          league_type: 's',
+          short_name: 'brd-skysports',
+          entry_rank: 80,
+          entry_last_rank: 90,
+          start_event: 1,
+        },
+      ],
+      h2h: [],
+    });
+
+    expect(fake.values.mock.calls[0]?.[0]).toEqual([
+      {
+        seasonId: TEST_SEASON.seasonId,
+        entryId: 42,
+        leagueId: 314,
+        leagueName: 'Overall',
+        leagueType: 'classic',
+        officialKind: 's',
+        shortName: 'overall',
+        startedEvent: 1,
+        entryRank: 12_580,
+        entryLastRank: 12_600,
+      },
+      {
+        seasonId: TEST_SEASON.seasonId,
+        entryId: 42,
+        leagueId: 317,
+        leagueName: 'Sky Sports League',
+        leagueType: 'classic',
+        officialKind: 's',
+        shortName: 'brd-skysports',
+        startedEvent: 1,
+        entryRank: 80,
+        entryLastRank: 90,
+      },
+    ]);
   });
 });

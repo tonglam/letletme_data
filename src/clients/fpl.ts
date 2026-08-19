@@ -305,6 +305,7 @@ const EntryLeagueItemSchema = z.object({
   name: z.string(),
   short_name: z.string().nullable().optional(),
   created: z.string().optional(),
+  league_type: z.string().nullable().optional(),
   entry_rank: z.number().nullable(),
   entry_last_rank: z.number().nullable(),
   start_event: z.number().nullable().optional(),
