@@ -18,6 +18,7 @@ import {
   type WeekLocale,
   type WeekPublicationEnvelope,
 } from '../contracts/week-publication';
+import { dispatchPublicationOutbox } from './revalidation';
 
 export const WEEK_ACTIVE_POINTER_KEY = 'llm:content:briefing:week:active';
 
@@ -222,22 +223,30 @@ export async function publishWeekPublication(
     const redis = await redisSingleton.getClient();
     await redis.set(weekPayloadKey(english.revision, 'en'), englishSerialized);
     await redis.set(weekPayloadKey(english.revision, 'zh-CN'), chineseSerialized);
-    await redis.set(
-      WEEK_ACTIVE_POINTER_KEY,
-      JSON.stringify({
-        schemaVersion: english.schemaVersion,
-        publicationId: english.publicationId,
-        revision: english.revision,
-        state: english.state,
-        locales: ['en', 'zh-CN'],
-        hashes: { en: englishHash, 'zh-CN': chineseHash },
-      }),
-    );
+    if (activeState) {
+      await redis.set(
+        WEEK_ACTIVE_POINTER_KEY,
+        JSON.stringify({
+          schemaVersion: english.schemaVersion,
+          publicationId: english.publicationId,
+          revision: english.revision,
+          state: english.state,
+          locales: ['en', 'zh-CN'],
+          hashes: { en: englishHash, 'zh-CN': chineseHash },
+        }),
+      );
+    }
     redisPublished = true;
   } catch {
     // PostgreSQL activation is durable. GraphQL must use its same-revision PG
     // fallback when Redis cannot be staged or switched.
     redisPublished = false;
+  }
+
+  try {
+    await dispatchPublicationOutbox();
+  } catch {
+    // Outbox rows remain pending for a later dispatcher pass.
   }
 
   return {
@@ -279,5 +288,6 @@ export async function readActiveWeekPublication(
   assertWeekPublication(payload);
   if (payload.publicationId !== active.publicationId || payload.revision !== active.revision)
     return null;
+  if (payload.validUntil && Date.parse(payload.validUntil) <= Date.now()) return null;
   return payload;
 }

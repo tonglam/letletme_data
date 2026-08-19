@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { getContentRuntimeFlags, assertContentRuntimeFlags } from '../config';
-import { CliGrokRunner, FixtureGrokRunner, type GrokRunner } from '../acquisition/grok-runner';
+import { CliGrokRunner, FixtureGrokRunner, MONITOR_FPL_X_SOURCES_SKILL_SHA, type GrokRunner } from '../acquisition/grok-runner';
 import { buildSourceSnapshot } from '../acquisition/source-registry';
 import {
   beginAcquisitionRun,
@@ -41,7 +41,7 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
   const windowStart =
     input.windowStart ?? new Date(Date.parse(windowEnd) - 30 * 60_000).toISOString();
   const snapshot = await buildSourceSnapshot(groupKey);
-  const idempotencyKey = `briefing:x:${groupKey}:${partitionKey}:${windowEnd}`;
+  const idempotencyKey = `briefing:x:${groupKey}:${partitionKey}:${mode}:${windowEnd}`;
   const run: AcquisitionRunInput = {
     runId: randomUUID(),
     groupId: snapshot.groupId,
@@ -89,11 +89,17 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
     maxXCalls: flags.pollMaxXCalls,
   });
   const normalized =
-    result.xCallCount > flags.pollMaxXCalls || !result.traceVerified
+    result.xCallCount > flags.pollMaxXCalls ||
+    !result.traceVerified ||
+    (flags.realGrokEnabled && result.skillSha !== MONITOR_FPL_X_SOURCES_SKILL_SHA)
       ? {
           ...result,
           status: 'FAILED' as const,
-          error: result.error ?? 'Missing verified X tool trace',
+          error:
+            result.error ??
+            (flags.realGrokEnabled && result.skillSha !== MONITOR_FPL_X_SOURCES_SKILL_SHA
+              ? 'Unexpected Grok skill SHA'
+              : 'Missing verified X tool trace'),
         }
       : result;
   const finished = await finishAcquisitionRun({ run, result: normalized });

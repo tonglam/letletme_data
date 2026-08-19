@@ -61,6 +61,11 @@ function requireActor(request: Request, role: EditorialActor['role'], set: { sta
 
 export const contentAPI = new Elysia({ prefix: '/content' })
   .get('/briefing/week/active', async ({ query, set }) => {
+    const flags = getContentRuntimeFlags();
+    if (!flags.briefingPublicEnabled) {
+      set.status = 404;
+      return { success: false, error: 'Briefing Week is not publicly enabled' };
+    }
     const locale = query.locale === 'zh-CN' ? 'zh-CN' : 'en';
     const publication = await readActiveWeekPublication(locale);
     if (!publication) {

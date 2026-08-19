@@ -33,6 +33,7 @@ import { registerLiveJobs } from './jobs/live.jobs';
 import { registerTournamentJobs } from './jobs/tournament-jobs';
 
 // Import utilities
+import { assertContentRuntimeFlags, getContentRuntimeFlags } from './content/config';
 import { getAuthConfig, getConfig } from './utils/config';
 import { getErrorMessage, getHttpStatusFromError, getPublicErrorMessage } from './utils/errors';
 import { getHttpErrorLogLevel, getHttpRequestLogContext } from './utils/http-logging';
@@ -50,6 +51,7 @@ import { logDebug, logError, logInfo, logWarn } from './utils/logger';
 
 // Validate environment and resolve config
 const config = getConfig();
+assertContentRuntimeFlags(getContentRuntimeFlags());
 if (config.NODE_ENV === 'production') {
   await databaseSingleton.connect();
   try {

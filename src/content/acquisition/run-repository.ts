@@ -141,10 +141,10 @@ export async function finishAcquisitionRun(input: {
   checkpointCursor?: string | null;
 }): Promise<{ status: AcquisitionRunState; checkpointAdvanced: boolean; receiptCount: number }> {
   const state = resultState(input.result);
-  const checkpointAdvanced =
-    input.result.traceVerified === true &&
-    (input.result.status === 'EMPTY' || input.result.status === 'COMPLETED');
   const sourceIds = new Set(input.run.sourceSnapshot.map((source) => source.sourceId));
+  const rightsBySourceId = new Map(
+    input.run.sourceSnapshot.map((source) => [source.sourceId, source.rightsPolicy ?? {}]),
+  );
   const now = new Date();
 
   const db = await getDb();
@@ -156,6 +156,7 @@ export async function finishAcquisitionRun(input: {
     if (!sourceId || !sourceIds.has(sourceId) || !externalId || !canonicalUrl) return [];
     const capturedAt =
       typeof receipt.capturedAt === 'string' ? Date.parse(receipt.capturedAt) : NaN;
+    if (!Number.isFinite(capturedAt)) return [];
     const publishedAt =
       typeof receipt.publishedAt === 'string' ? Date.parse(receipt.publishedAt) : NaN;
     return [
@@ -165,14 +166,20 @@ export async function finishAcquisitionRun(input: {
         sourceId,
         externalId,
         canonicalUrl,
-        capturedAt: Number.isFinite(capturedAt) ? new Date(capturedAt) : now,
+        capturedAt: new Date(capturedAt),
         publishedAt: Number.isFinite(publishedAt) ? new Date(publishedAt) : null,
         payload: asJsonObject(receipt.payload),
         canonicalHash: typeof receipt.canonicalHash === 'string' ? receipt.canonicalHash : '',
-        rightsPolicy: asJsonObject(receipt.rightsPolicy),
+        rightsPolicy: rightsBySourceId.get(sourceId) ?? {},
       },
     ];
   });
+  const checkpointAdvanced =
+    input.result.traceVerified === true &&
+    ((input.result.status === 'EMPTY' && input.result.receipts.length === 0) ||
+      (input.result.status === 'COMPLETED' &&
+        receiptValues.length === input.result.receipts.length &&
+        receiptValues.length > 0));
 
   await db.transaction(async (tx) => {
     if (receiptValues.length > 0) {
