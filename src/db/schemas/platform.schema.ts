@@ -621,6 +621,10 @@ export const tournamentsInCompetition = competition.table(
       sql`(setup_completed_units >= 0) AND (setup_total_units >= 0) AND (setup_completed_units <= setup_total_units) AND (setup_warning_count >= 0)`,
     ),
     check(
+      'tournaments_setup_attempts_valid',
+      sql`setup_attempt >= 0 AND setup_max_attempts >= 1 AND setup_attempt <= setup_max_attempts`,
+    ),
+    check(
       'tournaments_group_event_order',
       sql`(group_ended_event_id IS NULL) OR (group_started_event_id IS NULL) OR (group_ended_event_id >= group_started_event_id)`,
     ),
@@ -709,6 +713,10 @@ export const tournamentSetupIssuesInCompetition = competition.table(
     check(
       'tournament_setup_issues_category_valid',
       sql`category = ANY (ARRAY['profiles'::text, 'insights'::text, 'results'::text])`,
+    ),
+    check(
+      'tournament_setup_issues_code_valid',
+      sql`code = ANY (ARRAY['ENTRY_PROFILE_INCOMPLETE'::text, 'ENTRY_HISTORY_INCOMPLETE'::text, 'LEAGUE_INSIGHTS_INCOMPLETE'::text, 'SELECTION_INSIGHTS_INCOMPLETE'::text, 'TOURNAMENT_RESULTS_INCOMPLETE'::text, 'STRUCTURE_INTEGRITY_FAILED'::text])`,
     ),
     check(
       'tournament_setup_issues_severity_valid',
