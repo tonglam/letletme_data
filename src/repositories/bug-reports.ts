@@ -686,6 +686,15 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
           .returning({ id: bugReportsInOps.id });
         if (!deleted[0]) throw new ReportNoLongerExpiredError();
+
+        // The backup is needed only until the live row is gone and any
+        // screenshot delete has been confirmed. Keep a minimal locator
+        // tombstone for insert/race protection, but never retain the report
+        // body, client metadata, entry, or user identifiers indefinitely.
+        await tx
+          .update(bugReportRetentionBackupsInOps)
+          .set({ snapshot: screenshotUrl ? { screenshotUrl } : {} })
+          .where(eq(bugReportRetentionBackupsInOps.id, reportId));
       });
       return true;
     } catch (error) {
