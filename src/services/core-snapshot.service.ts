@@ -9,7 +9,7 @@ import {
 import { seasonRepository } from '../repositories/seasons';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { syncOperationsRepository } from '../repositories/sync-operations';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import {
   persistCoreSnapshotPublication,
   publishCoreSnapshotPublication,
@@ -144,7 +144,7 @@ export async function syncCoreSnapshot(
       },
     });
 
-    const persisted = await withMutationConflictGuard(
+    const persisted = await withMutationScopes(
       {
         queueName: 'data-sync',
         jobName: 'core-snapshot',

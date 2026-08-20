@@ -30,7 +30,6 @@ import type {
 } from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError } from '../utils/logger';
-import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 type TournamentStorage = typeof tournamentsInCompetition.$inferSelect;
 
@@ -499,7 +498,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       tournamentId: number,
       progressMarker?: string | null,
     ): Promise<void> => {
-      assertMutationLockHealthy();
       const db = await getDbInstance();
       await db
         .update(tournamentsInCompetition)
@@ -528,7 +526,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
     },
 
     markSetupRetryQueued: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
-      assertMutationLockHealthy();
       const db = await getDbInstance();
       await db
         .update(tournamentsInCompetition)
@@ -567,7 +564,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       const safeTotal = Math.max(0, Math.trunc(totalUnits));
       const safeCompleted = Math.min(safeTotal, Math.max(0, Math.trunc(completedUnits)));
       const db = await getDbInstance();
-      assertMutationLockHealthy();
       await db
         .update(tournamentsInCompetition)
         .set({
@@ -587,7 +583,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       tournamentId: number,
       progressMarker?: string | null,
     ): Promise<void> => {
-      assertMutationLockHealthy();
       const db = await getDbInstance();
       const rows = await db
         .update(tournamentsInCompetition)
@@ -612,7 +607,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       lastErrorCode?: string | null,
     ): Promise<void> => {
       const db = await getDbInstance();
-      assertMutationLockHealthy();
       await db
         .update(tournamentsInCompetition)
         .set({
@@ -645,7 +639,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       expectedSetupAttempt: number,
     ): Promise<boolean> => {
       const db = await getDbInstance();
-      assertMutationLockHealthy();
       const rows = await db
         .update(tournamentsInCompetition)
         .set({
@@ -679,7 +672,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       nextRetryAt: Date | null,
     ): Promise<void> => {
       const db = await getDbInstance();
-      assertMutationLockHealthy();
       await db
         .update(tournamentsInCompetition)
         .set({
@@ -703,7 +695,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       expectedSetupAttempt: number,
     ): Promise<boolean> => {
       const db = await getDbInstance();
-      assertMutationLockHealthy();
       const rows = await db
         .update(tournamentsInCompetition)
         .set({
@@ -786,7 +777,6 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       expectedProgressUpdatedAt: string | null,
     ): Promise<boolean> => {
       const db = await getDbInstance();
-      assertMutationLockHealthy();
       const now = new Date();
       const rows = await db
         .update(tournamentsInCompetition)

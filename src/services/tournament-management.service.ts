@@ -21,7 +21,7 @@ import {
 } from '../jobs/tournament-sync.jobs';
 import { findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { assertTournamentRosterPreGameweekBoundary } from './tournament-roster.service';
 
 const updateTournamentSchema = z.object({
@@ -92,12 +92,12 @@ export type TournamentManagementLifecycle = {
   ) => ReturnType<TournamentManagementRepository['deleteOwned']>;
   refreshViews?: () => Promise<unknown>;
   repairDeletedViews?: (tournamentId: number) => Promise<boolean>;
-  /** Injectable for hermetic service tests; production keeps the DB guard. */
-  withMutationConflictGuard?: MutationConflictGuard;
+  /** Injectable for hermetic service tests; production keeps the DB scopes. */
+  withMutationScopes?: MutationScopeRunner;
 };
 
-type MutationConflictGuard = <T>(
-  input: Parameters<typeof withMutationConflictGuard>[0],
+type MutationScopeRunner = <T>(
+  input: Parameters<typeof withMutationScopes>[0],
   operation: () => Promise<T>,
 ) => Promise<T>;
 
@@ -148,7 +148,7 @@ export function createTournamentManagementService(
   lifecycle: TournamentManagementLifecycle = {},
   getSeason: () => Promise<FplSeasonRef> = () => seasonRepository.findCurrent(),
 ) {
-  const guard = lifecycle.withMutationConflictGuard ?? withMutationConflictGuard;
+  const scopeRunner = lifecycle.withMutationScopes ?? withMutationScopes;
 
   const assertOwner = async (season: FplSeasonRef, tournamentId: number, adminEntryId: number) => {
     const tournament = await repository.findById(season, tournamentId);
@@ -242,7 +242,7 @@ export function createTournamentManagementService(
       if (current.state === payload.state && payload.state !== 'inactive') return current;
 
       if (payload.state === 'inactive') {
-        const paused = await guard(
+        const paused = await scopeRunner(
           {
             queueName: 'tournament-management',
             jobName: 'tournament-pause',
@@ -294,7 +294,7 @@ export function createTournamentManagementService(
         return paused;
       }
 
-      await guard(
+      await scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-resume',
@@ -371,7 +371,7 @@ export function createTournamentManagementService(
     setRosterMode: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = rosterModeSchema.parse(input);
-      return guard(
+      return scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-roster-mode',
@@ -467,7 +467,7 @@ export function createTournamentManagementService(
     retrySetup: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      return guard(
+      return scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-setup-retry',
@@ -486,7 +486,7 @@ export function createTournamentManagementService(
     retryRoster: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      return guard(
+      return scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-roster-retry',
@@ -576,8 +576,8 @@ export const tournamentManagementService = createTournamentManagementService(
         '../jobs/tournament-sync.jobs'
       );
       const { tournamentSetupLifecycleScope } = await import('../domain/mutation-scope');
-      const { withMutationConflictGuard } = await import('../utils/mutation-lock');
-      return withMutationConflictGuard(
+      const { withMutationScopes } = await import('../utils/mutation-scopes');
+      return withMutationScopes(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-delete',

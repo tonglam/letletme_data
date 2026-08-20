@@ -38,7 +38,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
 import {
   createCascadeId,
@@ -60,7 +60,7 @@ import type { TournamentFinalizationTarget } from '../domain/tournament';
 
 type PostCommitIntent = () => Promise<void>;
 
-type GuardedTournamentJobResult = {
+type ScopedTournamentJobResult = {
   value: unknown;
   afterCommit?: PostCommitIntent;
 };
@@ -285,13 +285,13 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           eventId,
         };
 
-        // The event-results write owns the parent scope.  Commit that guarded
+        // The event-results write owns the parent scope.  Commit that scoped
         // canonical work before adding dependent structure jobs; otherwise a
         // worker can dequeue a cascade job while the parent transaction is
         // still uncommitted and read stale rows.
         if (job.name === TOURNAMENT_JOBS.EVENT_RESULTS) {
           const freshAfter = await resolveJobFreshAfter(job);
-          const result = await withMutationConflictGuard(mutationInput, async () => {
+          const result = await withMutationScopes(mutationInput, async () => {
             const synced = await syncTournamentEventResults(season, eventId, {
               freshAfter,
             });
@@ -315,7 +315,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           return result;
         }
 
-        const runMutation = async (): Promise<GuardedTournamentJobResult> => {
+        const runMutation = async (): Promise<ScopedTournamentJobResult> => {
           switch (job.name) {
             case TOURNAMENT_JOBS.POINTS_RACE: {
               const result = await syncTournamentPointsRaceResults(season, eventId);
@@ -527,9 +527,9 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           return (await runMutation()).value;
         }
 
-        const guarded = await withMutationConflictGuard(mutationInput, runMutation);
-        if (guarded.afterCommit) await guarded.afterCommit();
-        return guarded.value;
+        const scoped = await withMutationScopes(mutationInput, runMutation);
+        if (scoped.afterCommit) await scoped.afterCommit();
+        return scoped.value;
       }),
   );
 }

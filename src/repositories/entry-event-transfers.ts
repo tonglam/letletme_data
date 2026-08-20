@@ -11,7 +11,6 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryTransfersResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 export const ENTRY_SEASON_SYNC_LOCK_NAMESPACE = 1_102_204_716;
 
@@ -78,9 +77,7 @@ export async function withEntrySeasonSyncTransaction<T>(
   operation: (tx: TransactionHandle) => Promise<T>,
 ): Promise<T> {
   const db = await getDb();
-  assertMutationLockHealthy();
   return db.transaction(async (tx) => {
-    assertMutationLockHealthy();
     await lockEntry(tx, season, entryId);
     return operation(tx);
   });
@@ -224,7 +221,6 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
     ): Promise<boolean> => {
       try {
         const db = await getDbInstance();
-        assertMutationLockHealthy();
         const checkpointThroughEventId = options?.checkpointThroughEventId ?? eventId;
         if (
           !Number.isInteger(checkpointThroughEventId) ||
@@ -244,7 +240,6 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
         }
 
         const accepted = await db.transaction(async (tx) => {
-          assertMutationLockHealthy();
           await lockEntry(tx, season, entryId);
           const [sourceOrder] = await tx
             .select({ sourceCheckedAt: entriesInCompetition.transfersSourceCheckedAt })

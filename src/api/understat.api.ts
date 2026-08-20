@@ -10,7 +10,7 @@ import {
 import { getUnderstatStatus } from '../services/understat-status.service';
 import { assertUnderstatSyncAllowed } from '../services/understat-sync.service';
 import { repairPlayerStateSeasons } from '../services/player-season-summaries.service';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 const TeamSyncBody = t.Object({
   season: t.String({ pattern: '^\\d{4}$' }),
@@ -82,7 +82,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
     '/mappings/team',
     async ({ body }) => {
       assertUnderstatSyncAllowed(body.season);
-      const link = await withMutationConflictGuard(
+      const link = await withMutationScopes(
         {
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-team',
@@ -105,7 +105,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
     '/mappings/reconcile',
     async ({ body }) => {
       assertUnderstatSyncAllowed(body.season);
-      const mappings = await withMutationConflictGuard(
+      const mappings = await withMutationScopes(
         {
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-reconcile',
@@ -154,7 +154,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
       if (body.status === 'manual_verified' && !body.reviewedBy) {
         throw new Error('reviewedBy is required for manual verification');
       }
-      const link = await withMutationConflictGuard(
+      const link = await withMutationScopes(
         {
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-entity-review',
@@ -184,7 +184,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
       if (body.status === 'manual_verified' && !body.reviewedBy) {
         throw new Error('reviewedBy is required for manual verification');
       }
-      const link = await withMutationConflictGuard(
+      const link = await withMutationScopes(
         {
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-match-review',

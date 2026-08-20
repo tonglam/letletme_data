@@ -15,7 +15,7 @@ import {
 } from './content/workers/content-x.queue';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { logError, logInfo } from './utils/logger';
-import { withMutationConflictGuard } from './utils/mutation-lock';
+import { withMutationScopes } from './utils/mutation-scopes';
 import { computePollWindow, isPollDue, pollBudget, resolvePollPhase } from './content/poll-policy';
 import {
   confirmAcquisitionRunEnqueued,
@@ -69,7 +69,7 @@ async function scheduleFromDatabase(): Promise<void> {
     .where(eq(contentSourceGroups.status, 'active'));
   const now = new Date();
   for (const group of groups) {
-    const reservation = await withMutationConflictGuard(
+    const reservation = await withMutationScopes(
       {
         queueName: 'content-x-scheduler',
         jobName: 'content-x-poll',

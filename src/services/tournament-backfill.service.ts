@@ -29,7 +29,7 @@ import { entryInfoRepository } from '../repositories/entry-infos';
 import { uniqueNumbers } from '../utils/async';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo, logWarn } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 import { syncEntryInfo } from './entry-info.service';
 import { syncTournamentBattleRaceResultsForTournament } from './tournament-battle-race-results.service';
@@ -395,7 +395,7 @@ export async function ensureTournamentCoreResults(
   });
 
   for (const [eventId, missingEntryIds] of missing) {
-    await withMutationConflictGuard(
+    await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'entry-event-results',
@@ -447,7 +447,7 @@ export async function calculateTournamentHistoryFromStoredResults(
       eventId >= tournament.groupStartedEventId &&
       eventId <= tournament.groupEndedEventId
     ) {
-      const result = await withMutationConflictGuard(
+      const result = await withMutationScopes(
         {
           queueName: 'tournament-setup',
           jobName: 'tournament-setup',
@@ -472,7 +472,7 @@ export async function calculateTournamentHistoryFromStoredResults(
       eventId >= tournament.groupStartedEventId &&
       eventId <= tournament.groupEndedEventId
     ) {
-      const result = await withMutationConflictGuard(
+      const result = await withMutationScopes(
         {
           queueName: 'tournament-setup',
           jobName: 'tournament-setup',
@@ -498,7 +498,7 @@ export async function calculateTournamentHistoryFromStoredResults(
       eventId <= tournament.knockoutEndedEventId
     ) {
       const { syncKnockoutForTournament } = await import('./tournament-knockout-results.service');
-      const result = await withMutationConflictGuard(
+      const result = await withMutationScopes(
         {
           queueName: 'tournament-setup',
           jobName: 'tournament-setup',
@@ -578,7 +578,7 @@ export async function enrichTournamentHistory(
   });
 
   if (transferEntryIds.length > 0) {
-    const transferResult = await withMutationConflictGuard(
+    const transferResult = await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'entry-transfer-history',
@@ -607,7 +607,7 @@ export async function enrichTournamentHistory(
     const missingEntryIds = missing.get(eventId) ?? [];
     try {
       if (missingEntryIds.length > 0) {
-        await withMutationConflictGuard(
+        await withMutationScopes(
           {
             queueName: 'tournament-setup',
             jobName: 'entry-event-results',
@@ -620,7 +620,7 @@ export async function enrichTournamentHistory(
             }),
         );
       }
-      const leagueResult = await withMutationConflictGuard(
+      const leagueResult = await withMutationScopes(
         {
           queueName: 'tournament-setup',
           jobName: 'league-event-results',
@@ -644,7 +644,7 @@ export async function enrichTournamentHistory(
         });
       }
 
-      const selectionResult = await withMutationConflictGuard(
+      const selectionResult = await withMutationScopes(
         {
           queueName: 'tournament-setup',
           jobName: 'tournament-selection-stats',
@@ -701,7 +701,7 @@ export async function runTournamentEventBackfill(
   eventId: number,
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
-  const eventResults = await withMutationConflictGuard(
+  const eventResults = await withMutationScopes(
     {
       queueName: 'tournament-setup',
       jobName: 'entry-event-results',
@@ -738,7 +738,7 @@ export async function runTournamentEventBackfill(
     });
   }
 
-  const leagueEventResults = await withMutationConflictGuard(
+  const leagueEventResults = await withMutationScopes(
     {
       queueName: 'tournament-setup',
       jobName: 'league-event-results',
@@ -783,7 +783,7 @@ export async function runTournamentEventBackfill(
     eventId >= tournament.groupStartedEventId &&
     eventId <= tournament.groupEndedEventId
   ) {
-    const pointsRaceResult = await withMutationConflictGuard(
+    const pointsRaceResult = await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',
@@ -816,7 +816,7 @@ export async function runTournamentEventBackfill(
     eventId >= tournament.groupStartedEventId &&
     eventId <= tournament.groupEndedEventId
   ) {
-    const battleRaceResult = await withMutationConflictGuard(
+    const battleRaceResult = await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',
@@ -850,7 +850,7 @@ export async function runTournamentEventBackfill(
     eventId <= tournament.knockoutEndedEventId
   ) {
     const { syncKnockoutForTournament } = await import('./tournament-knockout-results.service');
-    const knockoutResult = await withMutationConflictGuard(
+    const knockoutResult = await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',

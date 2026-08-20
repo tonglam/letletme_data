@@ -8,7 +8,6 @@ import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 const mapResult = (
   row: typeof tournamentPointsGroupResultsInCompetition.$inferSelect,
@@ -74,7 +73,6 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTr
     deleteByTournament: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
-        assertMutationLockHealthy();
         await db
           .delete(tournamentPointsGroupResultsInCompetition)
           .where(
@@ -103,7 +101,6 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTr
 
       try {
         const db = await getDbInstance();
-        assertMutationLockHealthy();
         await db
           .insert(tournamentPointsGroupResultsInCompetition)
           .values(results.map((result) => ({ ...result, seasonId: season.seasonId })))

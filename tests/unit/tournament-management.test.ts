@@ -50,7 +50,7 @@ function createTestService(
   return createServiceUnderTest(
     repository,
     {
-      withMutationConflictGuard: async (_input, operation) => operation(),
+      withMutationScopes: async (_input, operation) => operation(),
       ...lifecycle,
     },
     async () => TEST_SEASON,

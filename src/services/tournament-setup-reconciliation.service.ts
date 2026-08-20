@@ -12,12 +12,12 @@ import {
   tournamentSetupIssueFromAuditMessage,
 } from './tournament-backfill.service';
 import { logInfo } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 export async function reconcileReadyTournamentWarnings(season: FplSeasonRef): Promise<void> {
   const tournamentIds = await tournamentInfoRepository.findReadyWithWarnings(season);
   for (const tournamentId of tournamentIds) {
-    await withMutationConflictGuard(
+    await withMutationScopes(
       {
         queueName: 'tournament-repair',
         jobName: 'reconcile-ready-tournament',

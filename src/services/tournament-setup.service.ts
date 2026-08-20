@@ -22,7 +22,7 @@ import { NotFoundError } from '../utils/errors';
 import { getFplRequestMetricsSnapshot } from '../utils/fpl-request-metrics';
 import { getJobLogContext } from '../utils/job-log-context';
 import { logError, logInfo } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 import { auditTournamentSetup } from './tournament-audit.service';
 import {
@@ -222,7 +222,7 @@ export async function setupTournamentStructure(
 
     // Entry FPL sync: entry-core only — do NOT hold tournament-structure:global
     // across potentially long external HTTP (FP-07 Codex P1).
-    const entrySyncIssues = await withMutationConflictGuard(
+    const entrySyncIssues = await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',
@@ -267,7 +267,7 @@ export async function setupTournamentStructure(
     );
 
     // Structure rebuild: per-tournament + global (C4 mutual exclusion with results).
-    await withMutationConflictGuard(
+    await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',
@@ -528,7 +528,7 @@ export async function recoverStuckTournamentSetups(
   const skippedActive: number[] = [];
   for (const row of stuck) {
     try {
-      await withMutationConflictGuard(
+      await withMutationScopes(
         {
           queueName: 'tournament-setup-watchdog',
           jobName: 'recover-stuck-setup',

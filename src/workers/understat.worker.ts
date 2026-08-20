@@ -29,7 +29,7 @@ import { understatSyncRepository } from '../repositories/understat-sync';
 import { getConfig } from '../utils/config';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { alertOnFinalFailure } from '../utils/notify';
 import { getQueueConnection } from '../utils/queue';
 import { isTerminalJobFailure } from '../utils/worker-failure';
@@ -79,7 +79,7 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
     attempt: job.attemptsMade + 1,
   };
   logJobTriggered(context);
-  await withMutationConflictGuard(
+  await withMutationScopes(
     {
       queueName: job.queueName,
       jobName: job.name,
@@ -114,7 +114,7 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
     attempt: job.attemptsMade + 1,
   };
   logJobTriggered(context);
-  await withMutationConflictGuard(
+  await withMutationScopes(
     {
       queueName: job.queueName,
       jobName: job.name,

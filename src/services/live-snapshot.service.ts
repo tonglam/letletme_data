@@ -33,7 +33,7 @@ import {
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   readonly season: string;
@@ -517,7 +517,7 @@ export async function syncLiveSnapshot(
   const persistDurably = async (request: LiveSnapshotDurablePersistenceRequest) => {
     const scopes = options.mutationScopes ?? [];
     if (scopes.length === 0) return dependencies.persistDurably(request);
-    return withMutationConflictGuard(
+    return withMutationScopes(
       {
         queueName: 'live-data',
         jobName: 'live-snapshot',
