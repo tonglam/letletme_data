@@ -222,12 +222,29 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .from(bugReportRetentionBackupsInOps)
         .where(eq(bugReportRetentionBackupsInOps.id, current.id))
         .limit(1);
-      const screenshotUrl = claim
-        ? claim.screenshotDeletedAt
-          ? null
-          : screenshotUrlFromSnapshot(claim.snapshot)
-        : current.screenshotUrl;
-      if (claim && !claim.screenshotDeletedAt) {
+      let screenshotUrl = current.screenshotUrl;
+      let removeClaim = false;
+      const claimedLocator = claim ? screenshotUrlFromSnapshot(claim.snapshot) : null;
+      if (claim && claimedLocator) {
+        // A status update may race with storage migration. Serialise on the
+        // same locator fence, then prefer the migration target when the source
+        // has already been deleted; never restore a retired source URL.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${claimedLocator}))`);
+        const [migration] = await tx
+          .select({ targetLocator: bugReportStorageMigrationsInOps.targetLocator })
+          .from(bugReportStorageMigrationsInOps)
+          .where(
+            and(
+              eq(bugReportStorageMigrationsInOps.sourceLocator, claimedLocator),
+              isNotNull(bugReportStorageMigrationsInOps.deletedAt),
+            ),
+          )
+          .limit(1);
+        screenshotUrl =
+          migration?.targetLocator ?? (claim.screenshotDeletedAt ? null : claimedLocator);
+        removeClaim = !claim.screenshotDeletedAt || Boolean(migration);
+      }
+      if (claim && removeClaim) {
         await tx
           .delete(bugReportRetentionBackupsInOps)
           .where(eq(bugReportRetentionBackupsInOps.id, current.id));

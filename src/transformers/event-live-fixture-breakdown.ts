@@ -6,23 +6,6 @@ import type {
 } from '../domain/event-lives';
 import type { RawFPLEventLiveElement } from '../types';
 
-const SUPPORTED_IDENTIFIERS = new Set([
-  'minutes',
-  'starts',
-  'goals_scored',
-  'assists',
-  'clean_sheets',
-  'goals_conceded',
-  'own_goals',
-  'penalties_saved',
-  'penalties_missed',
-  'yellow_cards',
-  'red_cards',
-  'saves',
-  'bonus',
-  'defensive_contribution',
-]);
-
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -47,9 +30,9 @@ function normalizeFixtureBreakdown(
       const identifiers = new Set<string>();
       const stats: EventLiveFixtureBreakdownStat[] = fixture.stats.map((stat) => {
         const identifier = stat.identifier.trim();
-        if (!SUPPORTED_IDENTIFIERS.has(identifier)) {
+        if (!identifier) {
           throw new Error(
-            `Unsupported live fixture stat: event=${eventId} fixture=${fixture.fixture} element=${element.id} identifier=${identifier}`,
+            `Empty live fixture stat: event=${eventId} fixture=${fixture.fixture} element=${element.id}`,
           );
         }
         if (identifiers.has(identifier)) {

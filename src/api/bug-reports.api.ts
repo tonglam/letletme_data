@@ -1,7 +1,7 @@
 import { Elysia, t } from 'elysia';
 
 import { createBugReport, updateBugReportStatus } from '../services/bug-report.service';
-import { getErrorMessage, getHttpStatusFromError } from '../utils/errors';
+import { getErrorMessage, getHttpStatusFromError, getPublicErrorMessage } from '../utils/errors';
 
 const optionalPositiveInteger = t.Union([t.Number({ minimum: 1, multipleOf: 1 }), t.Null()]);
 
@@ -58,8 +58,9 @@ export const bugReportsStatusAPI = new Elysia({ prefix: '/bug-reports' }).patch(
         expiresAt: result.expiresAt.toISOString(),
       };
     } catch (error) {
-      set.status = getHttpStatusFromError(error);
-      return { success: false, error: getErrorMessage(error) };
+      const status = getHttpStatusFromError(error);
+      set.status = status;
+      return { success: false, error: getPublicErrorMessage(error, status) };
     }
   },
   {
