@@ -686,6 +686,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .select({
           snapshot: bugReportRetentionBackupsInOps.snapshot,
           screenshotObjectKey: bugReportRetentionBackupsInOps.screenshotObjectKey,
+          screenshotCreatedAt: bugReportRetentionBackupsInOps.screenshotCreatedAt,
           screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
         })
         .from(bugReportRetentionBackupsInOps)
@@ -703,7 +704,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         ) {
           throw new DatabaseError('Bug report screenshot inventory key conflict');
         }
-        if (existingClaim && !existingClaim.screenshotObjectKey) {
+        if (
+          existingClaim &&
+          (!existingClaim.screenshotObjectKey || !existingClaim.screenshotCreatedAt)
+        ) {
           await tx
             .update(bugReportRetentionBackupsInOps)
             .set({
