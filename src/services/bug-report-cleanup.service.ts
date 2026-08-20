@@ -68,9 +68,11 @@ export async function runBugReportCleanup(now = new Date()): Promise<BugReportCl
           report.id,
           now,
           async () => {
-            if (!claim.screenshotUrl) return;
+            if (!claim.screenshotUrl) return false;
             const references = await bugReportRepository.listByScreenshotUrl(claim.screenshotUrl);
-            if (references.length === 0) await deleteScreenshot(claim.screenshotUrl);
+            if (references.length > 0) return false;
+            await deleteScreenshot(claim.screenshotUrl);
+            return true;
           },
         );
         if (removed !== false) deleted += 1;

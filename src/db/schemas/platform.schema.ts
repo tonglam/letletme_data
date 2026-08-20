@@ -432,6 +432,7 @@ export const bugReportRetentionBackupsInOps = ops.table(
       .defaultNow()
       .notNull(),
     snapshot: jsonb().notNull(),
+    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     index('bug_report_retention_backups_public_id_idx').on(table.publicId),

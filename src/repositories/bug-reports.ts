@@ -71,7 +71,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             .select({ id: bugReportRetentionBackupsInOps.id })
             .from(bugReportRetentionBackupsInOps)
             .where(
-              sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrl' = ${report.screenshotUrl}`,
+              and(
+                sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrl' = ${report.screenshotUrl}`,
+                isNotNull(bugReportRetentionBackupsInOps.screenshotDeletedAt),
+              ),
             )
             .limit(1);
           if (retiredByRetention) {
@@ -212,14 +215,18 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       if (!current) return null;
 
       const [claim] = await tx
-        .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+        .select({
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+        })
         .from(bugReportRetentionBackupsInOps)
         .where(eq(bugReportRetentionBackupsInOps.id, current.id))
         .limit(1);
-      const screenshotUrl = claim
-        ? screenshotUrlFromSnapshot(claim.snapshot)
-        : current.screenshotUrl;
-      if (claim) {
+      const screenshotUrl =
+        claim && !claim.screenshotDeletedAt
+          ? screenshotUrlFromSnapshot(claim.snapshot)
+          : current.screenshotUrl;
+      if (claim && !claim.screenshotDeletedAt) {
         await tx
           .delete(bugReportRetentionBackupsInOps)
           .where(eq(bugReportRetentionBackupsInOps.id, current.id));
@@ -374,6 +381,62 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     return rows;
   };
 
+  const migrateAndDeleteStorageLocator = async (
+    sourceLocator: string,
+    targetLocator: string,
+    deleteSource: () => Promise<void>,
+    now = new Date(),
+  ): Promise<void> => {
+    const db = await getDbInstance();
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${sourceLocator}))`);
+      const [migration] = await tx
+        .select({
+          id: bugReportStorageMigrationsInOps.id,
+          targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+          deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+        })
+        .from(bugReportStorageMigrationsInOps)
+        .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
+        .for('update')
+        .limit(1);
+      if (!migration) throw new DatabaseError('Storage migration record is missing');
+      if (migration.targetLocator !== targetLocator) {
+        throw new DatabaseError('Storage migration target locator conflict');
+      }
+      if (migration.deletedAt) return;
+
+      await tx
+        .update(bugReportsInOps)
+        .set({ screenshotUrl: targetLocator })
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator));
+      const remaining = await tx
+        .select({ id: bugReportsInOps.id })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+        .limit(1);
+      if (remaining.length > 0) {
+        throw new DatabaseError('Storage migration compare-and-swap lost');
+      }
+
+      // Keep the locator lock until remote deletion and the durable completion
+      // marker commit. Inserts either happen first (and are migrated above) or
+      // see deleted_at and reject the retired locator after this transaction.
+      await deleteSource();
+      const [marked] = await tx
+        .update(bugReportStorageMigrationsInOps)
+        .set({ deletedAt: now })
+        .where(
+          and(
+            eq(bugReportStorageMigrationsInOps.id, migration.id),
+            isNull(bugReportStorageMigrationsInOps.deletedAt),
+          ),
+        )
+        .returning({ id: bugReportStorageMigrationsInOps.id });
+      if (!marked) throw new DatabaseError('Storage migration completion marker was lost');
+    });
+  };
+
   const recordStorageMigration = async (
     publicId: string,
     sourceLocator: string,
@@ -496,13 +559,17 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       if (!current) return null;
 
       const [existingClaim] = await tx
-        .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+        .select({
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+        })
         .from(bugReportRetentionBackupsInOps)
         .where(eq(bugReportRetentionBackupsInOps.id, current.id))
         .limit(1);
-      const screenshotUrl = existingClaim
-        ? screenshotUrlFromSnapshot(existingClaim.snapshot)
-        : current.screenshotUrl;
+      const screenshotUrl =
+        existingClaim && !existingClaim.screenshotDeletedAt
+          ? screenshotUrlFromSnapshot(existingClaim.snapshot)
+          : current.screenshotUrl;
       if (!existingClaim) {
         await tx
           .insert(bugReportRetentionBackupsInOps)
@@ -529,7 +596,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const finalizeClaimedDeletion = async (
     reportId: string,
     now = new Date(),
-    beforeDelete?: () => Promise<void>,
+    beforeDelete?: () => Promise<boolean>,
   ): Promise<boolean> => {
     const db = await getDbInstance();
     try {
@@ -542,23 +609,30 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           .limit(1);
         if (!current) throw new ReportNoLongerExpiredError();
         const [claim] = await tx
-          .select({ id: bugReportRetentionBackupsInOps.id })
+          .select({
+            id: bugReportRetentionBackupsInOps.id,
+            snapshot: bugReportRetentionBackupsInOps.snapshot,
+            screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+          })
           .from(bugReportRetentionBackupsInOps)
           .where(eq(bugReportRetentionBackupsInOps.id, reportId))
           .limit(1);
         if (!claim) throw new ReportNoLongerExpiredError();
-        if (claim && reportId) {
-          const snapshot = await tx
-            .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
-            .from(bugReportRetentionBackupsInOps)
-            .where(eq(bugReportRetentionBackupsInOps.id, reportId))
-            .limit(1);
-          const screenshotUrl = screenshotUrlFromSnapshot(snapshot[0]?.snapshot);
-          if (screenshotUrl) {
-            await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
-          }
+        const screenshotUrl = screenshotUrlFromSnapshot(claim.snapshot);
+        if (screenshotUrl) {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
         }
-        await beforeDelete?.();
+        const screenshotDeleted = claim.screenshotDeletedAt
+          ? true
+          : screenshotUrl
+            ? (await beforeDelete?.()) === true
+            : false;
+        if (screenshotDeleted && screenshotUrl && !claim.screenshotDeletedAt) {
+          await tx
+            .update(bugReportRetentionBackupsInOps)
+            .set({ screenshotDeletedAt: now })
+            .where(eq(bugReportRetentionBackupsInOps.id, reportId));
+        }
         const deleted = await tx
           .delete(bugReportsInOps)
           .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
@@ -581,6 +655,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     listByScreenshotUrl,
     updateScreenshotUrl,
     updateScreenshotUrls,
+    migrateAndDeleteStorageLocator,
     recordStorageMigration,
     listPendingStorageDeletes,
     markStorageDeleted,

@@ -28,8 +28,12 @@ CREATE TABLE IF NOT EXISTS ops.bug_report_retention_backups (
   id uuid PRIMARY KEY,
   public_id text NOT NULL,
   backed_up_at timestamptz NOT NULL DEFAULT now(),
-  snapshot jsonb NOT NULL
+  snapshot jsonb NOT NULL,
+  screenshot_deleted_at timestamptz
 );
+
+ALTER TABLE ops.bug_report_retention_backups
+  ADD COLUMN IF NOT EXISTS screenshot_deleted_at timestamptz;
 
 DROP INDEX IF EXISTS ops.bug_report_retention_backups_public_id_key;
 

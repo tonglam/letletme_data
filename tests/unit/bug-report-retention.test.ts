@@ -37,4 +37,24 @@ describe('bug report retention and diagnostics', () => {
       operations: [{ operation: 'Live', requestId: 'r1', message: '[url]' }],
     });
   });
+
+  test('redacts values after sensitive diagnostic field names', () => {
+    expect(
+      sanitizeBugReportClientMeta({
+        operations: [
+          {
+            operation: 'submit',
+            message: 'Authorization: Bearer super-secret deviceId: abc-123 entryId=987',
+          },
+        ],
+      }),
+    ).toEqual({
+      operations: [
+        {
+          operation: 'submit',
+          message: '[redacted] [redacted] [redacted]',
+        },
+      ],
+    });
+  });
 });

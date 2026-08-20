@@ -175,15 +175,12 @@ export async function runBugReportStorageMigration(
     if (pendingDeletes.length === 0) break;
     for (const pending of pendingDeletes) {
       try {
-        const references = await repository.listByScreenshotUrl(pending.sourceLocator);
-        if (references.length > 0) {
-          await repository.updateScreenshotUrls(pending.sourceLocator, pending.targetLocator);
-          if ((await repository.listByScreenshotUrl(pending.sourceLocator)).length > 0) {
-            throw new Error('Storage migration compare-and-swap lost');
-          }
-        }
-        await callStorage('delete', pending.sourceLocator);
-        await repository.markStorageDeleted(pending.sourceLocator, options.now);
+        await repository.migrateAndDeleteStorageLocator(
+          pending.sourceLocator,
+          pending.targetLocator,
+          () => callStorage('delete', pending.sourceLocator).then(() => undefined),
+          options.now,
+        );
         candidateReportsBySource.delete(pending.sourceLocator);
         result.deletedRetried += 1;
       } catch (error) {
@@ -209,12 +206,12 @@ export async function runBugReportStorageMigration(
         migratedLocator,
       );
       const targetLocator = migration?.targetLocator ?? migratedLocator;
-      await repository.updateScreenshotUrls(sourceLocator, targetLocator);
-      if ((await repository.listByScreenshotUrl(sourceLocator)).length > 0) {
-        throw new Error('Storage migration compare-and-swap lost');
-      }
-      await callStorage('delete', sourceLocator);
-      await repository.markStorageDeleted(sourceLocator, options.now);
+      await repository.migrateAndDeleteStorageLocator(
+        sourceLocator,
+        targetLocator,
+        () => callStorage('delete', sourceLocator).then(() => undefined),
+        options.now,
+      );
       result.migrated += report.count;
     } catch (error) {
       result.failed += 1;
