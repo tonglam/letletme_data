@@ -123,6 +123,11 @@ const EnvSchema = z.object({
   TELEGRAM_NOTIFICATION_URL: optionalEnv(z.string().url().optional()),
   WECHAT_NOTIFICATION_URL: optionalEnv(z.string().url().optional()),
   WECHAT_NOTIFICATION_API_TOKEN: optionalEnv(z.string().min(32).optional()),
+  // Bug-report screenshot cleanup is a production dependency. The legacy
+  // origin is validated only by the one-time storage migration command.
+  BUG_REPORT_STORAGE_INTERNAL_URL: optionalEnv(z.string().url().optional()),
+  BUG_REPORT_CLEANUP_SECRET: optionalEnv(z.string().min(32).optional()),
+  BUG_REPORT_STORAGE_LEGACY_ORIGIN: optionalEnv(z.string().url().optional()),
 });
 
 type BugReportScreenshotConfigKeys =
@@ -258,6 +263,15 @@ export function getConfig(): AppConfig {
     ) {
       throw new Error(
         'WECHAT_NOTIFICATION_API_TOKEN is required when WECHAT_NOTIFICATION_URL is configured in production',
+      );
+    }
+
+    if (
+      parsed.NODE_ENV === 'production' &&
+      (!parsed.BUG_REPORT_STORAGE_INTERNAL_URL || !parsed.BUG_REPORT_CLEANUP_SECRET)
+    ) {
+      throw new Error(
+        'BUG_REPORT_STORAGE_INTERNAL_URL and BUG_REPORT_CLEANUP_SECRET are required in production',
       );
     }
 

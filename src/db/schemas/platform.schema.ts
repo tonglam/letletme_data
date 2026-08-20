@@ -382,6 +382,9 @@ export const bugReportsInOps = ops.table(
     submissionId: uuid('submission_id'),
     screenshotObjectKey: text('screenshot_object_key'),
     screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    closedAt: timestamp('closed_at', { withTimezone: true, mode: 'date' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+    scrubbedAt: timestamp('scrubbed_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
@@ -393,6 +396,7 @@ export const bugReportsInOps = ops.table(
     index('bug_reports_user_created_idx')
       .on(table.userId, table.createdAt.desc())
       .where(sql`user_id IS NOT NULL`),
+    index('bug_reports_expiry_idx').on(table.expiresAt.asc()),
     check('bug_reports_public_id_format', sql`public_id ~ '^LL-[0-9A-F]{6}$'::text`),
     check(
       'bug_reports_source_known',
@@ -419,6 +423,67 @@ export const bugReportsInOps = ops.table(
       'bug_reports_screenshot_https',
       sql`(screenshot_url IS NULL) OR (screenshot_url ~ '^https://'::text)`,
     ),
+    check('bug_reports_expiry_after_created', sql`expires_at >= created_at`),
+  ],
+);
+
+export const bugReportRetentionBackupsInOps = ops.table(
+  'bug_report_retention_backups',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    backedUpAt: timestamp('backed_up_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    snapshot: jsonb().notNull(),
+    screenshotDeleteStartedAt: timestamp('screenshot_delete_started_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    screenshotObjectKey: text('screenshot_object_key'),
+    screenshotCreatedAt: timestamp('screenshot_created_at', { withTimezone: true, mode: 'date' }),
+    submissionId: uuid('submission_id'),
+  },
+  (table) => [
+    uniqueIndex('bug_report_retention_backups_public_id_key').on(table.publicId),
+    index('bug_report_retention_backups_created_idx').on(table.backedUpAt.desc()),
+    index('bug_report_retention_backups_screenshot_tombstone_idx')
+      .using('btree', sql`((snapshot->>'screenshotUrl'))`)
+      .where(sql`screenshot_delete_started_at IS NOT NULL OR screenshot_deleted_at IS NOT NULL`),
+    index('bug_report_retention_backups_private_key_idx')
+      .on(table.screenshotObjectKey)
+      .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
+    index('bug_report_retention_backups_screenshot_hash_idx')
+      .using('btree', sql`((snapshot->>'screenshotUrlHash'))`)
+      .where(sql`(snapshot->>'screenshotUrlHash') IS NOT NULL`),
+    uniqueIndex('bug_report_retention_backups_submission_id_key')
+      .on(table.submissionId)
+      .where(sql`submission_id IS NOT NULL`),
+    index('bug_report_retention_backups_private_screenshot_idx')
+      .on(table.backedUpAt.asc())
+      .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
+  ],
+);
+
+export const bugReportStorageMigrationsInOps = ops.table(
+  'bug_report_storage_migrations',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    sourceLocator: text('source_locator').notNull(),
+    targetLocator: text('target_locator').notNull(),
+    migratedAt: timestamp('migrated_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    deleteStartedAt: timestamp('delete_started_at', { withTimezone: true, mode: 'date' }),
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    uniqueIndex('bug_report_storage_migrations_source_key').on(table.sourceLocator),
+    index('bug_report_storage_migrations_pending_idx').on(table.deletedAt, table.migratedAt),
+    check('bug_report_storage_migrations_source_https', sql`source_locator ~ '^https://'::text`),
+    check('bug_report_storage_migrations_target_https', sql`target_locator ~ '^https://'::text`),
   ],
 );
 
