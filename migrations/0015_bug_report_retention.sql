@@ -17,6 +17,10 @@ WHERE expires_at IS NULL;
 ALTER TABLE ops.bug_reports
   ALTER COLUMN expires_at SET NOT NULL;
 
+ALTER TABLE ops.bug_reports
+  ADD CONSTRAINT bug_reports_expiry_after_created
+  CHECK (expires_at >= created_at);
+
 CREATE INDEX IF NOT EXISTS bug_reports_expiry_idx
   ON ops.bug_reports (expires_at ASC);
 
