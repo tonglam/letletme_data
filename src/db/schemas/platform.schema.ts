@@ -391,9 +391,9 @@ export const bugReportsInOps = ops.table(
     clientMeta: jsonb('client_meta').default({}).notNull(),
     status: text().default('open').notNull(),
     submissionId: uuid('submission_id'),
-    submissionRequestHash: text('submission_request_hash'),
     screenshotObjectKey: text('screenshot_object_key'),
     screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    submissionRequestHash: text('submission_request_hash'),
   },
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),

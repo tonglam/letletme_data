@@ -1,5 +1,5 @@
 import { resolveMutationScopes } from '../domain/mutation-scope';
-import { getDbClient, runInDatabaseTransaction } from '../db/singleton';
+import { getDb, runInDatabaseTransaction } from '../db/singleton';
 import { logInfo } from './logger';
 import type postgres from 'postgres';
 
@@ -58,16 +58,25 @@ async function withDatabaseMutationScopes<T>(
   const normalizedScopes = [...new Set(scopes.map((scope) => scope.trim()).filter(Boolean))].sort();
   if (normalizedScopes.length === 0) return operation();
 
-  const client = await getDbClient();
-  // postgres.js unwraps array-returning callbacks in its generic signature;
-  // this callback returns the caller's value unchanged, so retain the
-  // guard's `Promise<T>` contract explicitly.
+  const db = await getDb();
+  // Use Drizzle's transaction API so the repository handle and raw postgres.js
+  // client are pinned to the same connection. The raw client is an internal
+  // property of PostgresJsTransaction, exposed here only for legacy raw SQL
+  // callers that already participate in the guarded operation.
   try {
-    return (await client.begin(async (transaction) => {
+    return (await db.transaction(async (drizzleTransaction) => {
+      const transaction = (
+        drizzleTransaction as unknown as {
+          session?: { client?: postgres.TransactionSql };
+        }
+      ).session?.client;
+      if (!transaction) {
+        throw new Error('Drizzle transaction did not expose its pinned postgres client');
+      }
       await transaction`SELECT set_config('lock_timeout', ${`${WAIT_TIMEOUT_MS}ms`}, true)`;
       await acquireMutationScopes(transaction, normalizedScopes);
-      return runInDatabaseTransaction(transaction, operation);
-    })) as unknown as Promise<T>;
+      return runInDatabaseTransaction(transaction, operation, drizzleTransaction);
+    })) as T;
   } catch (error) {
     // Some legacy unit suites point at a disposable pre-0015 database.  Keep
     // those isolated tests useful without ever weakening a production guard:

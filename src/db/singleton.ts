@@ -16,7 +16,7 @@ import * as schema from './schemas/index.schema';
  */
 type DatabaseTransactionContext = {
   raw: postgres.TransactionSql;
-  db: ReturnType<typeof drizzle>;
+  db: ReturnType<typeof drizzle> | TransactionHandle;
 };
 
 export const databaseTransactionStorage = new AsyncLocalStorage<DatabaseTransactionContext>();
@@ -109,7 +109,7 @@ class DatabaseSingleton {
    */
   public async getDb(): Promise<ReturnType<typeof drizzle>> {
     const transaction = databaseTransactionStorage.getStore();
-    if (transaction) return transaction.db;
+    if (transaction) return transaction.db as ReturnType<typeof drizzle>;
     if (!this.isConnected) {
       await this.connect();
     }
@@ -202,11 +202,8 @@ export const getDbClient = () => databaseSingleton.getClient();
 export const runInDatabaseTransaction = <T>(
   transaction: postgres.TransactionSql,
   operation: () => Promise<T>,
-): Promise<T> =>
-  databaseTransactionStorage.run(
-    { raw: transaction, db: drizzle(transaction as unknown as postgres.Sql, { schema }) },
-    operation,
-  );
+  db: ReturnType<typeof drizzle> | TransactionHandle,
+): Promise<T> => databaseTransactionStorage.run({ raw: transaction, db }, operation);
 
 /**
  * Database handle, or an active transaction scoped to it. Repository factories
