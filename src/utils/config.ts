@@ -55,6 +55,13 @@ const EnvSchema = z.object({
   ENABLE_AUTH: booleanEnv(process.env.NODE_ENV === 'production'),
   DATA_API_KEY_HASHES: z.string().optional(),
   CORS_ORIGINS: z.string().optional(),
+  // Private bug-report screenshot lifecycle. Keep disabled until the bucket
+  // and expanded database migration are deployed together.
+  BUG_REPORT_SCREENSHOT_STORAGE_ENABLED: booleanEnv(false),
+  BUG_REPORT_SCREENSHOT_SUPABASE_URL: optionalEnv(z.string().url().optional()),
+  BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY: optionalEnv(z.string().min(1).optional()),
+  BUG_REPORT_SCREENSHOT_BUCKET: z.string().min(1).default('bug-report-screenshots'),
+  BUG_REPORT_SCREENSHOT_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
@@ -118,7 +125,15 @@ const EnvSchema = z.object({
   WECHAT_NOTIFICATION_API_TOKEN: optionalEnv(z.string().min(32).optional()),
 });
 
-export type AppConfig = z.infer<typeof EnvSchema>;
+type BugReportScreenshotConfigKeys =
+  | 'BUG_REPORT_SCREENSHOT_STORAGE_ENABLED'
+  | 'BUG_REPORT_SCREENSHOT_SUPABASE_URL'
+  | 'BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY'
+  | 'BUG_REPORT_SCREENSHOT_BUCKET'
+  | 'BUG_REPORT_SCREENSHOT_RETENTION_DAYS';
+
+export type AppConfig = Omit<z.infer<typeof EnvSchema>, BugReportScreenshotConfigKeys> &
+  Partial<Pick<z.infer<typeof EnvSchema>, BugReportScreenshotConfigKeys>>;
 
 export type RedisEndpointConfig = {
   readonly host: string;
@@ -201,6 +216,17 @@ export function getConfig(): AppConfig {
 
     if (parsed.NODE_ENV === 'production' && !parsed.ENABLE_AUTH) {
       throw new Error('ENABLE_AUTH must be true in production');
+    }
+
+    if (
+      parsed.NODE_ENV === 'production' &&
+      parsed.BUG_REPORT_SCREENSHOT_STORAGE_ENABLED &&
+      (!parsed.BUG_REPORT_SCREENSHOT_SUPABASE_URL ||
+        !parsed.BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY)
+    ) {
+      throw new Error(
+        'BUG_REPORT_SCREENSHOT_SUPABASE_URL and BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY are required when screenshot storage is enabled',
+      );
     }
 
     if (

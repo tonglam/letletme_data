@@ -6,6 +6,7 @@ import { registerPlayerValuesWindowJobs } from './player-values-window.jobs';
 import { registerPlayerMarketFreshnessJobs } from './player-market-freshness.jobs';
 import { registerPlayerSeasonSummaryJobs } from './player-season-summary.jobs';
 import { registerTournamentTrendsRepairJobs } from './tournament-trends-repair.jobs';
+import { registerBugReportScreenshotRetentionJobs } from './bug-report-screenshot-retention.jobs';
 
 export function registerDataJobs(app: Elysia) {
   return app
@@ -14,5 +15,6 @@ export function registerDataJobs(app: Elysia) {
     .use(registerPlayerMarketFreshnessJobs)
     .use(registerPlayerSeasonSummaryJobs)
     .use(registerEventCurrentRefreshJobs)
-    .use(registerTournamentTrendsRepairJobs);
+    .use(registerTournamentTrendsRepairJobs)
+    .use(registerBugReportScreenshotRetentionJobs);
 }

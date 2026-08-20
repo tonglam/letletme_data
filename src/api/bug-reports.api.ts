@@ -14,6 +14,8 @@ export const bugReportsAPI = new Elysia({ prefix: '/bug-reports' }).post(
         userId: body.userId,
         entryId: body.entryId,
         body: body.body,
+        submissionId: body.submissionId,
+        screenshotObjectKey: body.screenshotObjectKey,
         screenshotUrl: body.screenshotUrl,
         clientMeta: body.clientMeta,
       });
@@ -31,6 +33,8 @@ export const bugReportsAPI = new Elysia({ prefix: '/bug-reports' }).post(
       userId: t.Optional(t.Union([t.String(), t.Null()])),
       entryId: t.Optional(optionalPositiveInteger),
       body: t.String({ minLength: 1, maxLength: 500 }),
+      submissionId: t.Optional(t.Union([t.String(), t.Null()])),
+      screenshotObjectKey: t.Optional(t.Union([t.String(), t.Null()])),
       screenshotUrl: t.Optional(t.Union([t.String(), t.Null()])),
       clientMeta: t.Optional(t.Object({}, { additionalProperties: true })),
     }),

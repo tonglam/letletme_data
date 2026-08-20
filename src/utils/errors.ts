@@ -17,6 +17,7 @@ export class DatabaseError extends Error implements APIError {
     message: string,
     public code?: string,
     public cause?: Error,
+    public constraint?: string,
   ) {
     super(message);
     this.name = 'DatabaseError';

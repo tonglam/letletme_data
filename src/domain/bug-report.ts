@@ -9,6 +9,10 @@ export const BUG_REPORT_BODY_MIN = 8;
 export const BUG_REPORT_BODY_MAX = 500;
 const CLIENT_META_MAX_BYTES = 16 * 1024;
 const PG_INT_MAX = 2_147_483_647;
+const SUBMISSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SCREENSHOT_OBJECT_KEY_PATTERN =
+  /^bug-reports\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|png|webp|gif)$/i;
 
 const codePointLength = (value: string): number => [...value].length;
 
@@ -19,6 +23,9 @@ export type BugReportInsert = {
   userId: string | null;
   entryId: number | null;
   body: string;
+  submissionId: string | null;
+  screenshotObjectKey: string | null;
+  screenshotDeletedAt?: Date | null;
   screenshotUrl: string | null;
   clientMeta: Record<string, unknown>;
 };
@@ -28,6 +35,8 @@ export type BugReportCreateInput = {
   userId?: string | null;
   entryId?: number | null;
   body: string;
+  submissionId?: string | null;
+  screenshotObjectKey?: string | null;
   screenshotUrl?: string | null;
   clientMeta?: unknown;
 };
@@ -58,7 +67,33 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
   }
 
   const userId = input.userId?.trim() || null;
+  const submissionId = input.submissionId?.trim() || null;
+  if (submissionId && !SUBMISSION_ID_PATTERN.test(submissionId)) {
+    throw new ValidationError('Invalid submission id.');
+  }
+
+  const screenshotObjectKey = input.screenshotObjectKey?.trim() || null;
+  const screenshotObjectKeyMatch = screenshotObjectKey
+    ? SCREENSHOT_OBJECT_KEY_PATTERN.exec(screenshotObjectKey)
+    : null;
+  if (screenshotObjectKey && !screenshotObjectKeyMatch) {
+    throw new ValidationError('Invalid screenshot object key.');
+  }
+
   const screenshotUrl = input.screenshotUrl?.trim() || null;
+  if (screenshotObjectKey && screenshotUrl) {
+    throw new ValidationError('Screenshot URL and object key cannot both be provided.');
+  }
+  if (screenshotObjectKey && !submissionId) {
+    throw new ValidationError('Screenshot object key requires a submission id.');
+  }
+  if (
+    screenshotObjectKey &&
+    submissionId &&
+    screenshotObjectKeyMatch?.[1].toLowerCase() !== submissionId.toLowerCase()
+  ) {
+    throw new ValidationError('Screenshot object key does not belong to the submission.');
+  }
   if (screenshotUrl && !screenshotUrl.startsWith('https://')) {
     throw new ValidationError('Screenshot URL must be https.');
   }
@@ -75,6 +110,8 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
     userId,
     entryId,
     body,
+    submissionId,
+    screenshotObjectKey,
     screenshotUrl,
     clientMeta,
   };

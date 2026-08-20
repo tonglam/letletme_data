@@ -55,6 +55,61 @@ describe('bug report validation', () => {
     ).toThrow(ValidationError);
   });
 
+  it('accepts a private screenshot object key and rejects ambiguous screenshot inputs', () => {
+    const submissionId = '550e8400-e29b-41d4-a716-446655440000';
+    const report = validateBugReportCreateInput({
+      source: 'website',
+      body: '截图上传后无法查看',
+      submissionId,
+      screenshotObjectKey: `bug-reports/${submissionId}.png`,
+    });
+    expect(report.submissionId).toBe(submissionId);
+    expect(report.screenshotObjectKey).toBe(`bug-reports/${submissionId}.png`);
+    expect(report.screenshotUrl).toBeNull();
+
+    const uppercaseReport = validateBugReportCreateInput({
+      source: 'website',
+      body: '大小写对象键仍应绑定提交',
+      submissionId: submissionId.toUpperCase(),
+      screenshotObjectKey: `bug-reports/${submissionId.toUpperCase()}.PNG`,
+    });
+    expect(uppercaseReport.screenshotObjectKey).toBe(
+      `bug-reports/${submissionId.toUpperCase()}.PNG`,
+    );
+
+    expect(() =>
+      validateBugReportCreateInput({
+        source: 'website',
+        body: '截图字段不能同时使用',
+        submissionId,
+        screenshotObjectKey: `bug-reports/${submissionId}.png`,
+        screenshotUrl: 'https://example.com/shot.png',
+      }),
+    ).toThrow(ValidationError);
+  });
+
+  it('rejects object keys outside the strict private screenshot path', () => {
+    expect(() =>
+      validateBugReportCreateInput({
+        source: 'website',
+        body: '对象键格式不正确',
+        submissionId: '550e8400-e29b-41d4-a716-446655440000',
+        screenshotObjectKey: 'bug-reports/not-a-uuid.svg',
+      }),
+    ).toThrow(ValidationError);
+  });
+
+  it('rejects a screenshot object key owned by another submission', () => {
+    expect(() =>
+      validateBugReportCreateInput({
+        source: 'website',
+        body: '截图对象必须绑定当前提交',
+        submissionId: '550e8400-e29b-41d4-a716-446655440000',
+        screenshotObjectKey: 'bug-reports/650e8400-e29b-41d4-a716-446655440000.png',
+      }),
+    ).toThrow(ValidationError);
+  });
+
   it('creates public ids in the LL-XXXXXX shape', () => {
     expect(createPublicBugReportId()).toMatch(/^LL-[0-9A-F]{6}$/);
   });
