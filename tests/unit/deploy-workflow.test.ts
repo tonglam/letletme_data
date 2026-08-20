@@ -33,6 +33,7 @@ describe('release workflow gates', () => {
     );
     expect(workflow).toContain('.status == "completed" and .conclusion == "success"');
     expect(workflow).toContain('test "$ci_success_count" -gt 0');
+    expect(workflow).not.toContain('script_stop:');
   });
 
   test('scans the immutable digest before promotion and SSH deployment', () => {
