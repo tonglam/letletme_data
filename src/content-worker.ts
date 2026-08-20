@@ -22,6 +22,7 @@ import {
   reservePendingAcquisitionRun,
 } from './content/acquisition/run-repository';
 import { buildSourceSnapshot } from './content/acquisition/source-registry';
+import { dispatchPublicationOutbox } from './content/publication/revalidation';
 
 const flags = getContentRuntimeFlags();
 const partitionKey = process.env.CONTENT_PARTITION_KEY?.trim() || 'week';
@@ -30,6 +31,29 @@ const stopHeartbeat = startWorkerHeartbeat({
   path: process.env.WORKER_HEARTBEAT_PATH ?? '/tmp/content-worker-heartbeat',
 });
 let scheduler: ReturnType<typeof setInterval> | null = null;
+let publicationOutboxDispatcher: ReturnType<typeof setInterval> | null = null;
+let publicationOutboxDispatchInFlight: Promise<void> | null = null;
+
+const PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS = 30_000;
+
+async function dispatchPendingPublicationOutbox(): Promise<void> {
+  if (publicationOutboxDispatchInFlight) return publicationOutboxDispatchInFlight;
+
+  const dispatch = dispatchPublicationOutbox()
+    .then((delivered) => {
+      if (delivered > 0) {
+        logInfo('Publication outbox rows delivered', { delivered });
+      }
+    })
+    .catch((error) => {
+      logError('Publication outbox dispatch pass failed; rows remain pending', error);
+    })
+    .finally(() => {
+      publicationOutboxDispatchInFlight = null;
+    });
+  publicationOutboxDispatchInFlight = dispatch;
+  return dispatch;
+}
 
 async function scheduleFromDatabase(): Promise<void> {
   if (!flags.pipelineEnabled) return;
@@ -152,11 +176,23 @@ if (flags.pipelineEnabled) {
   scheduler.unref?.();
 }
 
+// Publication revalidation is an independent delivery concern. Keep retrying
+// pending rows even when no new edition is published; the content worker is a
+// long-running service in every environment and the dispatcher is a no-op
+// until the revalidation URL and secret are configured.
+void dispatchPendingPublicationOutbox();
+publicationOutboxDispatcher = setInterval(() => {
+  void dispatchPendingPublicationOutbox();
+}, PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS);
+publicationOutboxDispatcher.unref?.();
+
 async function shutdown(signal: string): Promise<void> {
   logInfo('Content worker shutting down', { signal });
   if (scheduler) clearInterval(scheduler);
+  if (publicationOutboxDispatcher) clearInterval(publicationOutboxDispatcher);
   stopHeartbeat();
   await Promise.allSettled([
+    publicationOutboxDispatchInFlight,
     runtime.worker.close(),
     runtime.queueEvents.close(),
     closeContentXQueue(),
