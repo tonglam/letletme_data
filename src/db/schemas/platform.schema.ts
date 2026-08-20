@@ -377,12 +377,19 @@ export const bugReportsInOps = ops.table(
     entryId: integer('entry_id'),
     body: text().notNull(),
     screenshotUrl: text('screenshot_url'),
+    submissionId: uuid('submission_id'),
+    screenshotObjectKey: text('screenshot_object_key'),
+    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
     clientMeta: jsonb('client_meta').default({}).notNull(),
     status: text().default('open').notNull(),
   },
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
+    uniqueIndex('bug_reports_submission_id_key').on(table.submissionId),
     index('bug_reports_created_idx').on(table.createdAt.desc()),
+    index('bug_reports_screenshot_retention_idx')
+      .on(table.createdAt.asc())
+      .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
     index('bug_reports_user_created_idx')
       .on(table.userId, table.createdAt.desc())
       .where(sql`user_id IS NOT NULL`),
@@ -400,6 +407,14 @@ export const bugReportsInOps = ops.table(
       sql`(char_length(btrim(body)) >= 8) AND (char_length(body) <= 500)`,
     ),
     check('bug_reports_entry_id_positive', sql`(entry_id IS NULL) OR (entry_id > 0)`),
+    check(
+      'bug_reports_screenshot_input_exclusive',
+      sql`NOT (screenshot_url IS NOT NULL AND screenshot_object_key IS NOT NULL)`,
+    ),
+    check(
+      'bug_reports_screenshot_object_key_format',
+      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND (screenshot_object_key ~* '^bug-reports/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.(jpg|png|webp|gif)$'::text))`,
+    ),
     check(
       'bug_reports_screenshot_https',
       sql`(screenshot_url IS NULL) OR (screenshot_url ~ '^https://'::text)`,
