@@ -161,6 +161,31 @@ jobs:
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
             env_file=${ENV_FILE:-.env.deploy}
             migration_env_file=${MIGRATION_ENV_FILE:-.env.migrate}
+            read_env_setting() {
+              key=$1
+              file=$2
+              value=$(awk -v key="$key" '
+                $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+                  sub("^[[:space:]]*" key "[[:space:]]*=", "", $0)
+                  print
+                  exit
+                }
+              ' "$file")
+              value=${value#\"}
+              value=${value%\"}
+              value=${value#\'}
+              value=${value%\'}
+              printf '%s' "$value"
+            }
+            if [ -z "${DATABASE_BACKUP_DIR:-}" ]; then
+              DATABASE_BACKUP_DIR=$(read_env_setting DATABASE_BACKUP_DIR "$env_file")
+            fi
+            if [ -z "${DATABASE_BACKUP_KEEP:-}" ]; then
+              DATABASE_BACKUP_KEEP=$(read_env_setting DATABASE_BACKUP_KEEP "$env_file")
+            fi
+            if [ -z "${DATABASE_BACKUP_PG_MAJOR:-}" ]; then
+              DATABASE_BACKUP_PG_MAJOR=$(read_env_setting DATABASE_BACKUP_PG_MAJOR "$env_file")
+            fi
             export DATABASE_BACKUP_DIR=${DATABASE_BACKUP_DIR:-/var/backups/letletme-data}
             export DATABASE_BACKUP_KEEP=${DATABASE_BACKUP_KEEP:-7}
             export DATABASE_BACKUP_PG_MAJOR=${DATABASE_BACKUP_PG_MAJOR:-15}

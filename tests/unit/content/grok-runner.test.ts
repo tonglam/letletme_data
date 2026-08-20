@@ -51,6 +51,15 @@ describe('headless Grok runner', () => {
     expect(result.xCallCount).toBe(0);
   });
 
+  test('fails closed when a receipt does not satisfy the canonical schema', async () => {
+    const result = await runFixture('invalid-receipt');
+    expect(result.status).toBe('FAILED');
+    expect(result.traceVerified).toBe(false);
+    expect(result.xCallCount).toBe(1);
+    expect(result.receipts).toEqual([]);
+    expect(result.error).toBe('Invalid Grok receipt schema');
+  });
+
   test('handles auth expiry, invalid JSON, timeout and oversized output', async () => {
     const expired = await runFixture('auth-expired');
     expect(expired.status).toBe('FAILED');

@@ -31,7 +31,7 @@ export class FplAdmissionUnavailableError extends FPLClientError {
   }
 }
 
-const ACQUIRE_SCRIPT = `
+export const ACQUIRE_SCRIPT = `
 local nowParts = redis.call('TIME')
 local now = tonumber(nowParts[1]) * 1000 + math.floor(tonumber(nowParts[2]) / 1000)
 local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now)
@@ -47,11 +47,16 @@ redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
 local inflight = tonumber(redis.call('HGET', KEYS[1], 'inflight') or '0')
 local live = tonumber(redis.call('HGET', KEYS[1], 'live') or '0')
 local bulk = tonumber(redis.call('HGET', KEYS[1], 'bulk') or '0')
-local bulkLimit = tonumber(redis.call('HGET', KEYS[1], 'bulkLimit') or ARGV[3])
+local configuredBulkLimit = tonumber(ARGV[3])
+local bulkLimit = tonumber(redis.call('HGET', KEYS[1], 'bulkLimit') or configuredBulkLimit)
+if bulkLimit > configuredBulkLimit then
+  bulkLimit = configuredBulkLimit
+  redis.call('HSET', KEYS[1], 'bulkLimit', bulkLimit)
+end
 local lastError = tonumber(redis.call('HGET', KEYS[1], 'lastBulkErrorMs') or '0')
-if bulkLimit < tonumber(ARGV[3]) and lastError > 0 and now - lastError >= 300000 then
-  bulkLimit = math.min(tonumber(ARGV[3]), bulkLimit + 1)
-  redis.call('HSET', KEYS[1], 'bulkLimit', bulkLimit, 'lastBulkErrorMs', bulkLimit < tonumber(ARGV[3]) and now or 0)
+if bulkLimit < configuredBulkLimit and lastError > 0 and now - lastError >= 300000 then
+  bulkLimit = math.min(configuredBulkLimit, bulkLimit + 1)
+  redis.call('HSET', KEYS[1], 'bulkLimit', bulkLimit, 'lastBulkErrorMs', bulkLimit < configuredBulkLimit and now or 0)
 end
 if ARGV[1] == 'bulk' and bulk >= bulkLimit then return {'wait', 'capacity', '100'} end
 if inflight >= tonumber(ARGV[4]) then return {'wait', 'capacity', '100'} end

@@ -12,6 +12,9 @@ case "${FAKE_GROK_MODE:-normal}" in
   false-positive)
     printf '%s\n' '{"type":"assistant","content":"completed an x_search call"}' '{"type":"tool_call","tool":"bash"}' '{"status":"COMPLETED","receipts":[]}'
     ;;
+  invalid-receipt)
+    printf '%s\n' '{"type":"tool_call","tool":"x_search"}' '{"status":"COMPLETED","receipts":[{"sourceId":"550e8400-e29b-41d4-a716-446655440000","externalId":"post-1","canonicalUrl":"https://example.com/post-1","capturedAt":"2026-08-20T09:00:00.000Z","canonicalHash":"not-a-sha"}]}'
+    ;;
   invalid-json)
     printf '%s\n' 'not-json'
     ;;

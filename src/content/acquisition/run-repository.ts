@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { getDb } from '../../db/singleton';
 import {
@@ -10,7 +10,7 @@ import {
   contentAcquisitionRunXTraces,
   contentSourceReceipts,
 } from '../../db/schemas/content.schema';
-import type { GrokRunResult } from './grok-runner';
+import { isValidGrokReceipt, type GrokRunResult } from './grok-runner';
 import type { SourceSnapshotItem } from './source-registry';
 
 export type AcquisitionRunInput = Readonly<{
@@ -33,6 +33,58 @@ export type AcquisitionRunState =
   | 'partial'
   | 'failed'
   | 'completed';
+
+export const ACQUISITION_RUN_STALE_AFTER_MS = 5 * 60_000;
+
+export function isAcquisitionRunStale(input: {
+  startedAt?: Date | null;
+  createdAt: Date;
+  now?: Date;
+  staleAfterMs?: number;
+}): boolean {
+  const now = (input.now ?? new Date()).getTime();
+  const anchor = (input.startedAt ?? input.createdAt).getTime();
+  const staleAfterMs = input.staleAfterMs ?? ACQUISITION_RUN_STALE_AFTER_MS;
+  return Number.isFinite(anchor) && now >= anchor && now - anchor >= staleAfterMs;
+}
+
+export async function reclaimStaleAcquisitionRuns(input: {
+  groupId: string;
+  partitionKey: string;
+  mode: 'poll' | 'enrich' | 'compose';
+  now?: Date;
+  staleAfterMs?: number;
+}): Promise<number> {
+  const now = input.now ?? new Date();
+  const cutoff = new Date(now.getTime() - (input.staleAfterMs ?? ACQUISITION_RUN_STALE_AFTER_MS));
+  const db = await getDb();
+  const reclaimed = await db
+    .update(contentAcquisitionRuns)
+    .set({
+      status: 'failed',
+      traceVerified: false,
+      checkpointAdvanced: false,
+      errorSummary: 'Acquisition run lease expired; reclaimed by scheduler',
+      completedAt: now,
+    })
+    .where(
+      and(
+        eq(contentAcquisitionRuns.groupId, input.groupId),
+        eq(contentAcquisitionRuns.partitionKey, input.partitionKey),
+        eq(contentAcquisitionRuns.mode, input.mode),
+        inArray(contentAcquisitionRuns.status, ['pending', 'running']),
+        or(
+          lt(contentAcquisitionRuns.startedAt, cutoff),
+          and(
+            isNull(contentAcquisitionRuns.startedAt),
+            lt(contentAcquisitionRuns.createdAt, cutoff),
+          ),
+        ),
+      ),
+    )
+    .returning({ runId: contentAcquisitionRuns.runId });
+  return reclaimed.length;
+}
 
 const asJsonObject = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -90,13 +142,17 @@ export async function reserveXCallBudget(input: {
   windowStart: string;
   dailyBudget: number;
   requestedXCalls: number;
+  budgetScope?: 'daily' | 'final90';
+  phaseBudget?: number | null;
 }): Promise<boolean> {
+  const budgetScope = input.budgetScope ?? 'daily';
+  const budgetLimit = budgetScope === 'final90' ? (input.phaseBudget ?? 0) : input.dailyBudget;
   if (
-    !Number.isSafeInteger(input.dailyBudget) ||
-    input.dailyBudget < 1 ||
+    !Number.isSafeInteger(budgetLimit) ||
+    budgetLimit < 1 ||
     !Number.isSafeInteger(input.requestedXCalls) ||
     input.requestedXCalls < 1 ||
-    input.requestedXCalls > input.dailyBudget
+    input.requestedXCalls > budgetLimit
   )
     return false;
   const db = await getDb();
@@ -115,11 +171,17 @@ export async function reserveXCallBudget(input: {
       budgetId: randomUUID(),
       groupId: input.groupId,
       budgetDate,
-      maxXCalls: input.dailyBudget,
+      budgetScope,
+      maxXCalls: budgetLimit,
       usedXCalls: 0,
     })
-    .onConflictDoNothing({
-      target: [contentAcquisitionBudgets.groupId, contentAcquisitionBudgets.budgetDate],
+    .onConflictDoUpdate({
+      target: [
+        contentAcquisitionBudgets.groupId,
+        contentAcquisitionBudgets.budgetDate,
+        contentAcquisitionBudgets.budgetScope,
+      ],
+      set: { maxXCalls: budgetLimit, updatedAt: new Date() },
     });
   const updated = await db
     .update(contentAcquisitionBudgets)
@@ -131,6 +193,7 @@ export async function reserveXCallBudget(input: {
       and(
         eq(contentAcquisitionBudgets.groupId, input.groupId),
         eq(contentAcquisitionBudgets.budgetDate, budgetDate),
+        eq(contentAcquisitionBudgets.budgetScope, budgetScope),
         sql`${contentAcquisitionBudgets.usedXCalls} + ${input.requestedXCalls} <= ${contentAcquisitionBudgets.maxXCalls}`,
       ),
     )
@@ -143,7 +206,8 @@ export async function finishAcquisitionRun(input: {
   result: GrokRunResult;
   checkpointCursor?: string | null;
 }): Promise<{ status: AcquisitionRunState; checkpointAdvanced: boolean; receiptCount: number }> {
-  const state = resultState(input.result);
+  const receiptsSchemaValid = input.result.receipts.every((receipt) => isValidGrokReceipt(receipt));
+  const state = receiptsSchemaValid ? resultState(input.result) : 'failed';
   const sourceIds = new Set(input.run.sourceSnapshot.map((source) => source.sourceId));
   const rightsBySourceId = new Map(
     input.run.sourceSnapshot.map((source) => [source.sourceId, source.rightsPolicy ?? {}]),
@@ -152,6 +216,7 @@ export async function finishAcquisitionRun(input: {
 
   const db = await getDb();
   const receiptValues = input.result.receipts.flatMap((value) => {
+    if (!receiptsSchemaValid) return [];
     const receipt = asJsonObject(value);
     const sourceId = typeof receipt.sourceId === 'string' ? receipt.sourceId : null;
     const externalId = typeof receipt.externalId === 'string' ? receipt.externalId : null;
@@ -178,6 +243,7 @@ export async function finishAcquisitionRun(input: {
     ];
   });
   const checkpointAdvanced =
+    receiptsSchemaValid &&
     input.result.traceVerified === true &&
     ((input.result.status === 'EMPTY' && input.result.receipts.length === 0) ||
       (input.result.status === 'COMPLETED' &&
@@ -188,7 +254,30 @@ export async function finishAcquisitionRun(input: {
         receiptValues.length === input.result.receipts.length &&
         receiptValues.length > 0));
 
-  await db.transaction(async (tx) => {
+  const finished = await db.transaction(async (tx) => {
+    const claimed = await tx
+      .update(contentAcquisitionRuns)
+      .set({
+        status: state,
+        xCallCount: input.result.xCallCount,
+        traceVerified: input.result.traceVerified && receiptsSchemaValid,
+        skillSha: input.result.skillSha || null,
+        adapterVersion: input.result.adapterVersion ?? null,
+        errorSummary:
+          input.result.error ?? (receiptsSchemaValid ? null : 'Invalid Grok receipt schema'),
+        checkpointAdvanced,
+        completedAt: now,
+      })
+      .where(
+        and(
+          eq(contentAcquisitionRuns.runId, input.run.runId),
+          inArray(contentAcquisitionRuns.status, ['pending', 'running']),
+        ),
+      )
+      .returning({ runId: contentAcquisitionRuns.runId });
+    if (claimed.length === 0)
+      return { status: 'failed' as const, checkpointAdvanced: false, receiptCount: 0 };
+
     if (receiptValues.length > 0) {
       await tx
         .insert(contentSourceReceipts)
@@ -197,19 +286,6 @@ export async function finishAcquisitionRun(input: {
           target: [contentSourceReceipts.sourceId, contentSourceReceipts.externalId],
         });
     }
-    await tx
-      .update(contentAcquisitionRuns)
-      .set({
-        status: state,
-        xCallCount: input.result.xCallCount,
-        traceVerified: input.result.traceVerified,
-        skillSha: input.result.skillSha || null,
-        adapterVersion: input.result.adapterVersion ?? null,
-        errorSummary: input.result.error ?? null,
-        checkpointAdvanced,
-        completedAt: now,
-      })
-      .where(eq(contentAcquisitionRuns.runId, input.run.runId));
     await tx
       .insert(contentAcquisitionRunXTraces)
       .values({
@@ -274,7 +350,8 @@ export async function finishAcquisitionRun(input: {
           where: sql`${contentAcquisitionCheckpoints.windowEnd} < EXCLUDED.window_end`,
         });
     }
+    return { status: state, checkpointAdvanced, receiptCount: receiptValues.length };
   });
 
-  return { status: state, checkpointAdvanced, receiptCount: receiptValues.length };
+  return finished;
 }

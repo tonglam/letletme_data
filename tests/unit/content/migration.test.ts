@@ -54,12 +54,34 @@ describe('Briefing content migration contract', () => {
     expect(sql).toContain('The legacy screenshot_url column remains');
   });
 
+  test('binds screenshot object ownership to submission ids and prevents duplicate keys', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0020_bug_report_screenshot_ownership.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('DROP CONSTRAINT IF EXISTS bug_reports_screenshot_object_key_format');
+    expect(sql).toContain('submission_id::text');
+    expect(sql).toContain('jpg|png|webp|gif');
+    expect(sql).toContain(
+      'CREATE UNIQUE INDEX IF NOT EXISTS bug_reports_screenshot_object_key_key',
+    );
+  });
+
   test('binds submission-id replays to a canonical request hash', async () => {
     const sql = await Bun.file(
       new URL('../../../migrations/0018_bug_report_submission_request_hash.sql', import.meta.url),
     ).text();
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS submission_request_hash');
     expect(sql).toContain('bug_reports_submission_request_hash_format');
+  });
+
+  test('keeps FINAL_90 calls in a separate phase budget ledger', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0019_content_acquisition_phase_budgets.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS budget_scope');
+    expect(sql).toContain('content_acquisition_budgets_scope_check');
+    expect(sql).toContain('content_acquisition_budgets_unique_scope_day');
+    expect(sql).toContain('final90');
   });
 
   test('makes active publication unique by scope and revisioned', async () => {

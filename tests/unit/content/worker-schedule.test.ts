@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
-import { computePollWindow, isPollDue, resolvePollPhase } from '../../../src/content/poll-policy';
+import {
+  computePollWindow,
+  isPollDue,
+  pollBudget,
+  resolvePollPhase,
+} from '../../../src/content/poll-policy';
+import { isAcquisitionRunStale } from '../../../src/content/acquisition/run-repository';
 
 const now = new Date('2026-08-20T10:00:00.000Z');
 
@@ -27,16 +33,47 @@ describe('content worker poll policy', () => {
 
   test('does not enqueue again before the phase-specific cadence elapses', () => {
     const checkpointEnd = new Date('2026-08-20T09:45:00.000Z');
-    const policy = { normalMinutes: 30, approachingMinutes: 10 };
+    const policy = { normalMinutes: 30, approachingMinutes: 10, safetyLagMinutes: 2 };
     expect(isPollDue({ policy, phase: 'NORMAL', now, checkpointEnd })).toBe(false);
     expect(
       isPollDue({
         policy,
         phase: 'NORMAL',
-        now: new Date('2026-08-20T10:15:00.000Z'),
+        now: new Date('2026-08-20T10:17:00.000Z'),
         checkpointEnd,
       }),
     ).toBe(true);
     expect(isPollDue({ policy, phase: 'APPROACHING', now, checkpointEnd })).toBe(true);
+  });
+
+  test('returns a phase budget only for an enabled FINAL_90 policy', () => {
+    expect(pollBudget({ final90Budget: 3 }, 'NORMAL')).toBeNull();
+    expect(pollBudget({ final90Budget: 3 }, 'FINAL_90')).toBe(3);
+    expect(pollBudget({ final90Budget: 0 }, 'FINAL_90')).toBeNull();
+  });
+
+  test('reclaims only acquisition runs whose lease anchor is stale', () => {
+    const now = new Date('2026-08-20T10:00:00.000Z');
+    expect(
+      isAcquisitionRunStale({
+        startedAt: new Date('2026-08-20T09:55:00.001Z'),
+        createdAt: now,
+        now,
+      }),
+    ).toBe(false);
+    expect(
+      isAcquisitionRunStale({
+        startedAt: new Date('2026-08-20T09:55:00.000Z'),
+        createdAt: now,
+        now,
+      }),
+    ).toBe(true);
+    expect(
+      isAcquisitionRunStale({
+        startedAt: null,
+        createdAt: new Date('2026-08-20T09:55:00.001Z'),
+        now,
+      }),
+    ).toBe(false);
   });
 });

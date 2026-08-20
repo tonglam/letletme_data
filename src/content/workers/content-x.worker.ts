@@ -28,6 +28,7 @@ export type ContentXWorkerInput = Readonly<{
   partitionKey?: string;
   mode?: 'poll' | 'enrich' | 'compose';
   pollPhase?: 'NORMAL' | 'APPROACHING' | 'FINAL_90';
+  phaseBudget?: number | null;
   windowStart?: string;
   windowEnd?: string;
 }>;
@@ -68,6 +69,8 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
       groupId: snapshot.groupId,
       windowStart,
       dailyBudget: flags.dailyXCallBudget,
+      budgetScope: pollPhase === 'FINAL_90' ? 'final90' : 'daily',
+      phaseBudget: input.phaseBudget,
       requestedXCalls: flags.pollMaxXCalls,
     }))
   ) {

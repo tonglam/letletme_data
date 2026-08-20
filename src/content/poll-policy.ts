@@ -35,6 +35,13 @@ export function pollPeriodMinutes(policyValue: unknown, phase: PollPhase): numbe
       : policyNumber(policy, 'normalMinutes', 30);
 }
 
+export function pollBudget(policyValue: unknown, phase: PollPhase): number | null {
+  if (phase !== 'FINAL_90') return null;
+  const policy = policyObject(policyValue);
+  const budget = Number(policy.final90Budget);
+  return Number.isSafeInteger(budget) && budget > 0 ? budget : null;
+}
+
 export function isPollDue(input: {
   policy: unknown;
   phase: PollPhase;
@@ -43,8 +50,11 @@ export function isPollDue(input: {
 }): boolean {
   if (!input.checkpointEnd) return true;
   const now = (input.now ?? new Date()).getTime();
+  const policy = policyObject(input.policy);
+  const safetyLagMinutes = policyNumber(policy, 'safetyLagMinutes', 2);
   return (
-    now - input.checkpointEnd.getTime() >= pollPeriodMinutes(input.policy, input.phase) * 60_000
+    now - input.checkpointEnd.getTime() >=
+    (pollPeriodMinutes(policy, input.phase) + safetyLagMinutes) * 60_000
   );
 }
 
@@ -58,7 +68,7 @@ export function resolvePollPhase(policyValue: unknown, now = new Date()): PollPh
     minutesToDeadline > 0 &&
     minutesToDeadline <= 90 &&
     policy.final90Enabled === true &&
-    Number(policy.final90Budget) > 0 &&
+    pollBudget(policy, 'FINAL_90') !== null &&
     Number.isFinite(onDutyUntil) &&
     onDutyUntil > now.getTime()
   )

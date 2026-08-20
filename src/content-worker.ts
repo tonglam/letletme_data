@@ -14,7 +14,8 @@ import {
 } from './content/workers/content-x.queue';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { logError, logInfo } from './utils/logger';
-import { computePollWindow, isPollDue, resolvePollPhase } from './content/poll-policy';
+import { computePollWindow, isPollDue, pollBudget, resolvePollPhase } from './content/poll-policy';
+import { reclaimStaleAcquisitionRuns } from './content/acquisition/run-repository';
 
 const flags = getContentRuntimeFlags();
 const runtime = createContentXWorkerRuntime();
@@ -37,6 +38,12 @@ async function scheduleFromDatabase(): Promise<void> {
   const now = new Date();
   for (const group of groups) {
     const phase = resolvePollPhase(group.pollPolicy, now);
+    await reclaimStaleAcquisitionRuns({
+      groupId: group.groupId,
+      partitionKey: 'week',
+      mode: 'poll',
+      now,
+    });
     const [checkpoints, activeRuns] = await Promise.all([
       db
         .select({ windowEnd: contentAcquisitionCheckpoints.windowEnd })
@@ -80,6 +87,7 @@ async function scheduleFromDatabase(): Promise<void> {
       partitionKey: 'week',
       mode: 'poll',
       pollPhase: phase,
+      phaseBudget: pollBudget(group.pollPolicy, phase),
       windowStart: start,
       windowEnd: end,
     });

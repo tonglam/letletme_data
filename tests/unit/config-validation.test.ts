@@ -121,6 +121,8 @@ describe('production environment preflight', () => {
       /DATABASE_URL=\$data_runtime_database_url[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
     );
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(workflow).toContain('read_env_setting DATABASE_BACKUP_DIR "$env_file"');
+    expect(workflow).toContain('export DATABASE_BACKUP_KEEP=${DATABASE_BACKUP_KEEP:-7}');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
@@ -148,6 +150,8 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(
       /restore_stopped_services\(\)[\s\S]*?compose start api worker content-worker/,
     );
+    expect(deployScript).toContain('load_backup_settings');
+    expect(deployScript).toContain('read_env_setting DATABASE_BACKUP_DIR "$ENV_FILE"');
   });
 
   test('keeps ordinary workflows passwordless and proves verifier immutability in CI', () => {

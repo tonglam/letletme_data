@@ -58,6 +58,52 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
     ? (value as Record<string, unknown>)
     : null;
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DATE_TIME_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const RECEIPT_KEYS = new Set([
+  'sourceId',
+  'externalId',
+  'canonicalUrl',
+  'capturedAt',
+  'publishedAt',
+  'canonicalHash',
+  'payload',
+]);
+
+const isDateTime = (value: unknown): value is string =>
+  typeof value === 'string' && DATE_TIME_PATTERN.test(value) && Number.isFinite(Date.parse(value));
+
+export function isValidGrokReceipt(value: unknown): value is Record<string, unknown> {
+  const receipt = asRecord(value);
+  if (!receipt || Object.keys(receipt).some((key) => !RECEIPT_KEYS.has(key))) return false;
+  if (typeof receipt.sourceId !== 'string' || !UUID_PATTERN.test(receipt.sourceId)) return false;
+  if (
+    typeof receipt.externalId !== 'string' ||
+    [...receipt.externalId].length < 1 ||
+    [...receipt.externalId].length > 256
+  )
+    return false;
+  if (typeof receipt.canonicalUrl !== 'string' || !receipt.canonicalUrl.startsWith('https://'))
+    return false;
+  try {
+    if (new URL(receipt.canonicalUrl).protocol !== 'https:') return false;
+  } catch {
+    return false;
+  }
+  if (!isDateTime(receipt.capturedAt)) return false;
+  if (
+    receipt.publishedAt !== undefined &&
+    receipt.publishedAt !== null &&
+    !isDateTime(receipt.publishedAt)
+  )
+    return false;
+  if (typeof receipt.canonicalHash !== 'string' || !/^[0-9a-f]{64}$/.test(receipt.canonicalHash))
+    return false;
+  if (receipt.payload !== undefined && asRecord(receipt.payload) === null) return false;
+  return true;
+}
+
 function findJsonResult(value: unknown): Record<string, unknown> | null {
   const record = asRecord(value);
   if (!record) return null;
@@ -214,29 +260,37 @@ export class CliGrokRunner implements GrokRunner {
       )
         ? (String(modelResult.status) as GrokRunResult['status'])
         : 'FAILED';
-      const receipts = Array.isArray(modelResult.receipts)
-        ? modelResult.receipts.filter(
-            (item): item is Record<string, unknown> => asRecord(item) !== null,
-          )
-        : [];
+      const rawReceipts = modelResult.receipts;
+      const receiptsValid =
+        Array.isArray(rawReceipts) && rawReceipts.every((item) => isValidGrokReceipt(item));
+      const receipts = receiptsValid
+        ? (rawReceipts as Record<string, unknown>[])
+        : ([] as Record<string, unknown>[]);
+      const receiptError = receiptsValid ? undefined : 'Invalid Grok receipt schema';
+      const finalStatus = receiptError ? 'FAILED' : status;
       const response = {
-        status,
+        status: finalStatus,
         receipts,
         modelResult,
         xCallCount: parsed.xCallCount,
       };
       return {
-        status,
-        traceVerified: parsed.xCallCount > 0 && status !== 'FAILED',
+        status: finalStatus,
+        traceVerified: parsed.xCallCount > 0 && finalStatus !== 'FAILED',
         xCallCount: parsed.xCallCount,
         receipts,
-        error: typeof modelResult.error === 'string' ? modelResult.error : undefined,
+        error:
+          receiptError ?? (typeof modelResult.error === 'string' ? modelResult.error : undefined),
         skillSha: expectedSkillSha,
         toolName: 'grok.x',
         adapterVersion: ADAPTER_VERSION,
         requestHash,
         responseHash: sha256(JSON.stringify(response)),
-        traceMetadata: { eventCount: parsed.eventCount, xToolCalls: parsed.xCallCount },
+        traceMetadata: {
+          eventCount: parsed.eventCount,
+          xToolCalls: parsed.xCallCount,
+          receiptSchemaValid: receiptsValid,
+        },
         costMicros: Number.isSafeInteger(modelResult.costMicros)
           ? Number(modelResult.costMicros)
           : undefined,

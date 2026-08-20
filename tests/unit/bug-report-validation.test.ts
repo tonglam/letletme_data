@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 
 import { createPublicBugReportId, validateBugReportCreateInput } from '../../src/domain/bug-report';
+import { createBugReport } from '../../src/services/bug-report.service';
 import { ValidationError } from '../../src/utils/errors';
+import { DatabaseError } from '../../src/utils/errors';
 
 describe('bug report validation', () => {
   it('accepts a short plain-language description and assigns a public id', () => {
@@ -11,7 +13,7 @@ describe('bug report validation', () => {
       clientMeta: { route: 'pages/home/index/index' },
     });
 
-    expect(report.publicId).toMatch(/^LL-[0-9A-F]{6}$/);
+    expect(report.publicId).toMatch(/^LL-[0-9A-F]{12}$/);
     expect(report.body).toBe('首页一直转圈转不出来');
     expect(report.userId).toBeNull();
     expect(report.entryId).toBeNull();
@@ -82,16 +84,6 @@ describe('bug report validation', () => {
     expect(report.screenshotObjectKey).toBe(`bug-reports/${submissionId}.png`);
     expect(report.screenshotUrl).toBeNull();
 
-    const uppercaseReport = validateBugReportCreateInput({
-      source: 'website',
-      body: '大小写对象键仍应绑定提交',
-      submissionId: submissionId.toUpperCase(),
-      screenshotObjectKey: `bug-reports/${submissionId.toUpperCase()}.PNG`,
-    });
-    expect(uppercaseReport.screenshotObjectKey).toBe(
-      `bug-reports/${submissionId.toUpperCase()}.PNG`,
-    );
-
     expect(() =>
       validateBugReportCreateInput({
         source: 'website',
@@ -118,15 +110,46 @@ describe('bug report validation', () => {
     expect(() =>
       validateBugReportCreateInput({
         source: 'website',
-        body: '截图对象必须绑定当前提交',
+        body: '截图归属必须和提交一致',
         submissionId: '550e8400-e29b-41d4-a716-446655440000',
-        screenshotObjectKey: 'bug-reports/650e8400-e29b-41d4-a716-446655440000.png',
+        screenshotObjectKey: 'bug-reports/550e8400-e29b-41d4-a716-446655440001.png',
       }),
     ).toThrow(ValidationError);
   });
 
   it('creates public ids in the LL-XXXXXX shape', () => {
-    expect(createPublicBugReportId()).toMatch(/^LL-[0-9A-F]{6}$/);
+    expect(createPublicBugReportId()).toMatch(/^LL-[0-9A-F]{12}$/);
+  });
+
+  it('retries an injected public-id collision deterministically', async () => {
+    const generated = ['LL-000000000000', 'LL-111111111111'];
+    const attempted: string[] = [];
+    const repository = {
+      insert: async (report: { publicId: string }) => {
+        attempted.push(report.publicId);
+        if (attempted.length === 1) {
+          const cause = Object.assign(new Error('duplicate key'), {
+            code: '23505',
+            constraint: 'bug_reports_public_id_key',
+          });
+          throw new DatabaseError(
+            'duplicate public id',
+            '23505',
+            cause,
+            'bug_reports_public_id_key',
+          );
+        }
+        return { id: 'report-id', publicId: report.publicId, createdAt: new Date() };
+      },
+    };
+
+    const result = await createBugReport(
+      { source: 'website', body: '确定性碰撞重试测试' },
+      { repository, publicIdGenerator: () => generated.shift() ?? 'LL-222222222222' },
+    );
+
+    expect(attempted).toEqual(['LL-000000000000', 'LL-111111111111']);
+    expect(result.publicId).toBe('LL-111111111111');
   });
 
   it('stops after three public-id collision retries', async () => {

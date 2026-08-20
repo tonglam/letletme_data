@@ -87,6 +87,7 @@ export const contentAcquisitionBudgets = content.table(
     budgetId: uuid('budget_id').primaryKey().notNull(),
     groupId: uuid('group_id').notNull(),
     budgetDate: date('budget_date', { mode: 'string' }).notNull(),
+    budgetScope: text('budget_scope').default('daily').notNull(),
     maxXCalls: integer('max_x_calls').notNull(),
     usedXCalls: integer('used_x_calls').default(0).notNull(),
     maxCostMicros: bigint('max_cost_micros', { mode: 'number' }),
@@ -95,7 +96,12 @@ export const contentAcquisitionBudgets = content.table(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
-    unique('content_acquisition_budgets_unique_day').on(table.groupId, table.budgetDate),
+    unique('content_acquisition_budgets_unique_scope_day').on(
+      table.groupId,
+      table.budgetDate,
+      table.budgetScope,
+    ),
+    check('content_acquisition_budgets_scope_check', sql`budget_scope IN ('daily', 'final90')`),
     index('content_acquisition_budgets_date_idx').on(table.budgetDate),
   ],
 );
