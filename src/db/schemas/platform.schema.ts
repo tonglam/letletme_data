@@ -393,6 +393,9 @@ export const bugReportsInOps = ops.table(
     submissionId: uuid('submission_id'),
     screenshotObjectKey: text('screenshot_object_key'),
     screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    closedAt: timestamp('closed_at', { withTimezone: true, mode: 'date' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+    scrubbedAt: timestamp('scrubbed_at', { withTimezone: true, mode: 'date' }),
     submissionRequestHash: text('submission_request_hash'),
   },
   (table) => [
@@ -402,15 +405,16 @@ export const bugReportsInOps = ops.table(
       .on(table.screenshotObjectKey)
       .where(sql`screenshot_object_key IS NOT NULL`),
     index('bug_reports_created_idx').on(table.createdAt.desc()),
-    index('bug_reports_submission_request_hash_idx')
-      .on(table.submissionRequestHash)
-      .where(sql`submission_request_hash IS NOT NULL`),
     index('bug_reports_screenshot_retention_idx')
       .on(table.createdAt.asc())
       .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
     index('bug_reports_user_created_idx')
       .on(table.userId, table.createdAt.desc())
       .where(sql`user_id IS NOT NULL`),
+    index('bug_reports_expiry_idx').on(table.expiresAt.asc()),
+    index('bug_reports_submission_request_hash_idx')
+      .on(table.submissionRequestHash)
+      .where(sql`submission_request_hash IS NOT NULL`),
     check('bug_reports_public_id_format', sql`public_id ~ '^LL-([0-9A-F]{6}|[0-9A-F]{12})$'::text`),
     check(
       'bug_reports_source_known',
@@ -426,21 +430,82 @@ export const bugReportsInOps = ops.table(
     ),
     check('bug_reports_entry_id_positive', sql`(entry_id IS NULL) OR (entry_id > 0)`),
     check(
-      'bug_reports_submission_request_hash_format',
-      sql`(submission_request_hash IS NULL) OR (submission_request_hash ~ '^[0-9a-f]{64}$'::text)`,
-    ),
-    check(
       'bug_reports_screenshot_input_exclusive',
       sql`NOT (screenshot_url IS NOT NULL AND screenshot_object_key IS NOT NULL)`,
     ),
     check(
       'bug_reports_screenshot_object_key_format',
-      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND (screenshot_object_key ~* ('^bug-reports/' || submission_id::text || '\\.(jpg|png|webp|gif)$'::text)))`,
+      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND COALESCE(substring(lower(screenshot_object_key) FROM '^bug-reports/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.(jpg|png|webp|gif)$'::text) = lower(submission_id::text), false))`,
     ),
     check(
       'bug_reports_screenshot_https',
       sql`(screenshot_url IS NULL) OR (screenshot_url ~ '^https://'::text)`,
     ),
+    check('bug_reports_expiry_after_created', sql`expires_at >= created_at`),
+    check(
+      'bug_reports_submission_request_hash_format',
+      sql`(submission_request_hash IS NULL) OR (submission_request_hash ~ '^[0-9a-f]{64}$'::text)`,
+    ),
+  ],
+);
+
+export const bugReportRetentionBackupsInOps = ops.table(
+  'bug_report_retention_backups',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    backedUpAt: timestamp('backed_up_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    snapshot: jsonb().notNull(),
+    screenshotDeleteStartedAt: timestamp('screenshot_delete_started_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    screenshotObjectKey: text('screenshot_object_key'),
+    screenshotCreatedAt: timestamp('screenshot_created_at', { withTimezone: true, mode: 'date' }),
+    submissionId: uuid('submission_id'),
+  },
+  (table) => [
+    uniqueIndex('bug_report_retention_backups_public_id_key').on(table.publicId),
+    index('bug_report_retention_backups_created_idx').on(table.backedUpAt.desc()),
+    index('bug_report_retention_backups_screenshot_tombstone_idx')
+      .using('btree', sql`((snapshot->>'screenshotUrl'))`)
+      .where(sql`screenshot_delete_started_at IS NOT NULL OR screenshot_deleted_at IS NOT NULL`),
+    index('bug_report_retention_backups_private_key_idx')
+      .on(table.screenshotObjectKey)
+      .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
+    index('bug_report_retention_backups_screenshot_hash_idx')
+      .using('btree', sql`((snapshot->>'screenshotUrlHash'))`)
+      .where(sql`(snapshot->>'screenshotUrlHash') IS NOT NULL`),
+    uniqueIndex('bug_report_retention_backups_submission_id_key')
+      .on(table.submissionId)
+      .where(sql`submission_id IS NOT NULL`),
+    index('bug_report_retention_backups_private_screenshot_idx')
+      .on(table.backedUpAt.asc())
+      .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
+  ],
+);
+
+export const bugReportStorageMigrationsInOps = ops.table(
+  'bug_report_storage_migrations',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    sourceLocator: text('source_locator').notNull(),
+    targetLocator: text('target_locator').notNull(),
+    migratedAt: timestamp('migrated_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    deleteStartedAt: timestamp('delete_started_at', { withTimezone: true, mode: 'date' }),
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    uniqueIndex('bug_report_storage_migrations_source_key').on(table.sourceLocator),
+    index('bug_report_storage_migrations_pending_idx').on(table.deletedAt, table.migratedAt),
+    check('bug_report_storage_migrations_source_https', sql`source_locator ~ '^https://'::text`),
+    check('bug_report_storage_migrations_target_https', sql`target_locator ~ '^https://'::text`),
   ],
 );
 

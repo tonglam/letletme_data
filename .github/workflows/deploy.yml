@@ -224,6 +224,8 @@ jobs:
             fi
             echo "deploy preflight: using the configured Data runtime URL without rewriting it"
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun validate-env.ts --probe-bug-report-storage
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/wait-for-migration-login.ts
             finish_stage

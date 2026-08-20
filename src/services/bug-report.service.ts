@@ -1,11 +1,18 @@
-import { validateBugReportCreateInput, type BugReportCreateInput } from '../domain/bug-report';
+import {
+  validateBugReportCreateInput,
+  type BugReportInsert,
+  type BugReportCreateInput,
+  type BugReportStatus,
+} from '../domain/bug-report';
 import { bugReportRepository } from '../repositories/bug-reports';
 import { DatabaseError } from '../utils/errors';
 
 // One initial allocation plus at most three deterministic collision retries.
 const MAX_PUBLIC_ID_ATTEMPTS = 4;
 
-type BugReportRepository = Pick<typeof bugReportRepository, 'insert'>;
+type BugReportRepository = {
+  insert(report: BugReportInsert): Promise<{ publicId: string }>;
+};
 
 export type BugReportServiceDependencies = Readonly<{
   repository?: BugReportRepository;
@@ -24,10 +31,12 @@ function isPublicIdCollision(error: unknown): boolean {
     };
     if (
       record.code === '23505' &&
-      (record.constraint ?? record.constraint_name) === 'bug_reports_public_id_key'
-    ) {
+      (record.constraint ?? record.constraint_name) &&
+      ['bug_reports_public_id_key', 'bug_report_retention_backups_public_id_key'].includes(
+        String(record.constraint ?? record.constraint_name),
+      )
+    )
       return true;
-    }
     current = record.cause;
   }
   return false;
@@ -55,3 +64,9 @@ export const createBugReport = async (
 
   throw new DatabaseError('Could not allocate a report id');
 };
+
+export const updateBugReportStatus = async (
+  publicId: string,
+  status: BugReportStatus,
+  now = new Date(),
+) => bugReportRepository.updateStatus(publicId, status, now);

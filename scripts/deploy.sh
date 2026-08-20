@@ -142,6 +142,11 @@ deploy() {
     log_error "Application environment contract failed; services were not stopped."
     exit 1
   fi
+  log_info "Probing the private bug-report screenshot bucket"
+  if ! compose run --rm -T api bun validate-env.ts --probe-bug-report-storage; then
+    log_error "Bug-report screenshot storage contract failed; services were not stopped."
+    exit 1
+  fi
   log_info "Probing the migration LOGIN for at most 120 seconds"
   if ! compose run --rm -T migration bun scripts/wait-for-migration-login.ts; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
