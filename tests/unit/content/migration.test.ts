@@ -54,6 +54,14 @@ describe('Briefing content migration contract', () => {
     expect(sql).toContain('The legacy screenshot_url column remains');
   });
 
+  test('binds submission-id replays to a canonical request hash', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0018_bug_report_submission_request_hash.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS submission_request_hash');
+    expect(sql).toContain('bug_reports_submission_request_hash_format');
+  });
+
   test('makes active publication unique by scope and revisioned', async () => {
     const sql = await Bun.file(migrationPath).text();
     expect(sql).toContain('UNIQUE (scope_key, revision)');

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { ValidationError } from '../utils/errors';
 
@@ -24,11 +24,24 @@ export type BugReportInsert = {
   entryId: number | null;
   body: string;
   submissionId: string | null;
+  submissionRequestHash: string;
   screenshotObjectKey: string | null;
   screenshotDeletedAt?: Date | null;
   screenshotUrl: string | null;
   clientMeta: Record<string, unknown>;
 };
+
+type BugReportRequestIdentity = Pick<
+  BugReportInsert,
+  | 'source'
+  | 'userId'
+  | 'entryId'
+  | 'body'
+  | 'submissionId'
+  | 'screenshotObjectKey'
+  | 'screenshotUrl'
+  | 'clientMeta'
+>;
 
 export type BugReportCreateInput = {
   source: string;
@@ -43,6 +56,21 @@ export type BugReportCreateInput = {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalize(value[key])]),
+  );
+};
+
+export const bugReportRequestHash = (input: BugReportRequestIdentity): string =>
+  createHash('sha256')
+    .update(JSON.stringify(canonicalize({ version: 1, ...input })), 'utf8')
+    .digest('hex');
 
 export const createPublicBugReportId = (): string =>
   `LL-${randomBytes(6).toString('hex').toUpperCase()}`;
@@ -114,6 +142,16 @@ export const validateBugReportCreateInput = (
     entryId,
     body,
     submissionId,
+    submissionRequestHash: bugReportRequestHash({
+      source: input.source,
+      userId,
+      entryId,
+      body,
+      submissionId,
+      screenshotObjectKey,
+      screenshotUrl,
+      clientMeta,
+    }),
     screenshotObjectKey,
     screenshotUrl,
     clientMeta,

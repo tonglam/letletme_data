@@ -15,6 +15,7 @@ describe('bug report validation', () => {
     expect(report.body).toBe('首页一直转圈转不出来');
     expect(report.userId).toBeNull();
     expect(report.entryId).toBeNull();
+    expect(report.submissionRequestHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('rejects descriptions that are too short', () => {
@@ -24,6 +25,20 @@ describe('bug report validation', () => {
         body: '坏了',
       }),
     ).toThrow(ValidationError);
+  });
+
+  it('hashes the normalized submission request deterministically', () => {
+    const first = validateBugReportCreateInput({
+      source: 'website',
+      body: '确定性请求指纹测试',
+      clientMeta: { b: 2, a: { y: true, x: 'one' } },
+    });
+    const second = validateBugReportCreateInput({
+      source: 'website',
+      body: '确定性请求指纹测试',
+      clientMeta: { a: { x: 'one', y: true }, b: 2 },
+    });
+    expect(first.submissionRequestHash).toBe(second.submissionRequestHash);
   });
 
   it('counts body length in Unicode code points', () => {

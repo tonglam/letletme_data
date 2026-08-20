@@ -14,7 +14,12 @@ import * as schema from './schemas/index.schema';
  * contracts while canonical writes execute on the same connection as the
  * mutation-scope row lock.
  */
-export const databaseTransactionStorage = new AsyncLocalStorage<postgres.TransactionSql>();
+type DatabaseTransactionContext = {
+  raw: postgres.TransactionSql;
+  db: ReturnType<typeof drizzle>;
+};
+
+export const databaseTransactionStorage = new AsyncLocalStorage<DatabaseTransactionContext>();
 
 /**
  * Database Singleton
@@ -104,7 +109,7 @@ class DatabaseSingleton {
    */
   public async getDb(): Promise<ReturnType<typeof drizzle>> {
     const transaction = databaseTransactionStorage.getStore();
-    if (transaction) return transaction as unknown as ReturnType<typeof drizzle>;
+    if (transaction) return transaction.db;
     if (!this.isConnected) {
       await this.connect();
     }
@@ -121,7 +126,7 @@ class DatabaseSingleton {
    */
   public async getClient(): Promise<postgres.Sql> {
     const transaction = databaseTransactionStorage.getStore();
-    if (transaction) return transaction as unknown as postgres.Sql;
+    if (transaction) return transaction.raw as unknown as postgres.Sql;
     if (!this.isConnected) {
       await this.connect();
     }
@@ -197,7 +202,11 @@ export const getDbClient = () => databaseSingleton.getClient();
 export const runInDatabaseTransaction = <T>(
   transaction: postgres.TransactionSql,
   operation: () => Promise<T>,
-): Promise<T> => databaseTransactionStorage.run(transaction, operation);
+): Promise<T> =>
+  databaseTransactionStorage.run(
+    { raw: transaction, db: drizzle(transaction as unknown as postgres.Sql, { schema }) },
+    operation,
+  );
 
 /**
  * Database handle, or an active transaction scoped to it. Repository factories

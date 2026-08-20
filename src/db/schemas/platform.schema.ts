@@ -391,6 +391,7 @@ export const bugReportsInOps = ops.table(
     clientMeta: jsonb('client_meta').default({}).notNull(),
     status: text().default('open').notNull(),
     submissionId: uuid('submission_id'),
+    submissionRequestHash: text('submission_request_hash'),
     screenshotObjectKey: text('screenshot_object_key'),
     screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
   },
@@ -418,6 +419,10 @@ export const bugReportsInOps = ops.table(
       sql`(char_length(btrim(body)) >= 8) AND (char_length(body) <= 500)`,
     ),
     check('bug_reports_entry_id_positive', sql`(entry_id IS NULL) OR (entry_id > 0)`),
+    check(
+      'bug_reports_submission_request_hash_format',
+      sql`(submission_request_hash IS NULL) OR (submission_request_hash ~ '^[0-9a-f]{64}$'::text)`,
+    ),
     check(
       'bug_reports_screenshot_input_exclusive',
       sql`NOT (screenshot_url IS NOT NULL AND screenshot_object_key IS NOT NULL)`,

@@ -1,7 +1,11 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 
 import { databaseSingleton, getDb } from './db/singleton';
-import { contentAcquisitionCheckpoints, contentSourceGroups } from './db/schemas/content.schema';
+import {
+  contentAcquisitionCheckpoints,
+  contentAcquisitionRuns,
+  contentSourceGroups,
+} from './db/schemas/content.schema';
 import { getContentRuntimeFlags } from './content/config';
 import {
   enqueueContentXScan,
@@ -10,7 +14,7 @@ import {
 } from './content/workers/content-x.queue';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { logError, logInfo } from './utils/logger';
-import { computePollWindow, resolvePollPhase } from './content/poll-policy';
+import { computePollWindow, isPollDue, resolvePollPhase } from './content/poll-policy';
 
 const flags = getContentRuntimeFlags();
 const runtime = createContentXWorkerRuntime();
@@ -33,21 +37,41 @@ async function scheduleFromDatabase(): Promise<void> {
   const now = new Date();
   for (const group of groups) {
     const phase = resolvePollPhase(group.pollPolicy, now);
-    const checkpoints = await db
-      .select({ windowEnd: contentAcquisitionCheckpoints.windowEnd })
-      .from(contentAcquisitionCheckpoints)
-      .where(
-        and(
-          eq(contentAcquisitionCheckpoints.groupId, group.groupId),
-          eq(contentAcquisitionCheckpoints.partitionKey, 'week'),
-        ),
-      )
-      .limit(1);
+    const [checkpoints, activeRuns] = await Promise.all([
+      db
+        .select({ windowEnd: contentAcquisitionCheckpoints.windowEnd })
+        .from(contentAcquisitionCheckpoints)
+        .where(
+          and(
+            eq(contentAcquisitionCheckpoints.groupId, group.groupId),
+            eq(contentAcquisitionCheckpoints.partitionKey, 'week'),
+          ),
+        )
+        .limit(1),
+      db
+        .select({ runId: contentAcquisitionRuns.runId })
+        .from(contentAcquisitionRuns)
+        .where(
+          and(
+            eq(contentAcquisitionRuns.groupId, group.groupId),
+            eq(contentAcquisitionRuns.partitionKey, 'week'),
+            eq(contentAcquisitionRuns.mode, 'poll'),
+            inArray(contentAcquisitionRuns.status, ['pending', 'running']),
+          ),
+        )
+        .limit(1),
+    ]);
+    const checkpointEnd = checkpoints[0]?.windowEnd ?? null;
+    if (
+      activeRuns.length > 0 ||
+      !isPollDue({ policy: group.pollPolicy, phase, now, checkpointEnd })
+    )
+      continue;
     const window = computePollWindow({
       policy: group.pollPolicy,
       phase,
       now,
-      checkpointEnd: checkpoints[0]?.windowEnd ?? null,
+      checkpointEnd,
     });
     const end = window.windowEnd.toISOString();
     const start = window.windowStart.toISOString();

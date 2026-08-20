@@ -26,6 +26,28 @@ function policyNumber(policy: unknown, key: keyof PollPolicy, fallback: number):
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+export function pollPeriodMinutes(policyValue: unknown, phase: PollPhase): number {
+  const policy = policyObject(policyValue);
+  return phase === 'FINAL_90'
+    ? policyNumber(policy, 'final90Minutes', 5)
+    : phase === 'APPROACHING'
+      ? policyNumber(policy, 'approachingMinutes', 10)
+      : policyNumber(policy, 'normalMinutes', 30);
+}
+
+export function isPollDue(input: {
+  policy: unknown;
+  phase: PollPhase;
+  now?: Date;
+  checkpointEnd?: Date | null;
+}): boolean {
+  if (!input.checkpointEnd) return true;
+  const now = (input.now ?? new Date()).getTime();
+  return (
+    now - input.checkpointEnd.getTime() >= pollPeriodMinutes(input.policy, input.phase) * 60_000
+  );
+}
+
 export function resolvePollPhase(policyValue: unknown, now = new Date()): PollPhase {
   const policy = policyObject(policyValue);
   const deadline = Date.parse(policy.deadlineAt ?? '');
@@ -60,12 +82,7 @@ export function computePollWindow(input: {
   const lagMinutes = policyNumber(policy, 'safetyLagMinutes', 2);
   const overlapMinutes = policyNumber(policy, 'overlapMinutes', 5);
   const maxCatchupMinutes = policyNumber(policy, 'maxCatchupMinutes', 360);
-  const periodMinutes =
-    input.phase === 'FINAL_90'
-      ? policyNumber(policy, 'final90Minutes', 5)
-      : input.phase === 'APPROACHING'
-        ? policyNumber(policy, 'approachingMinutes', 10)
-        : policyNumber(policy, 'normalMinutes', 30);
+  const periodMinutes = pollPeriodMinutes(policy, input.phase);
   const windowEnd = new Date(now.getTime() - lagMinutes * 60_000);
   const earliest = new Date(windowEnd.getTime() - maxCatchupMinutes * 60_000);
   const checkpointStart = input.checkpointEnd

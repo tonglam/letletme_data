@@ -16,7 +16,8 @@ const LEASE_MS = Math.max(5_000, Number(process.env.FPL_ADMISSION_LEASE_MS ?? 45
 const STATE_KEY = 'llm:fpl:admission:state';
 const LEASES_KEY = 'llm:fpl:admission:leases';
 const LEASE_KEY_PREFIX = 'llm:fpl:admission:lease:';
-const ADMISSION_SCRIPT_VERSION = 'v2';
+const LEASE_META_KEY = 'llm:fpl:admission:lease-meta';
+const ADMISSION_SCRIPT_VERSION = 'v3';
 
 export class FplAdmissionUnavailableError extends FPLClientError {
   constructor(cause?: unknown) {
@@ -35,11 +36,12 @@ local nowParts = redis.call('TIME')
 local now = tonumber(nowParts[1]) * 1000 + math.floor(tonumber(nowParts[2]) / 1000)
 local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now)
 for _, token in ipairs(expired) do
-  local priority = redis.call('GET', KEYS[3] .. token)
+  local priority = redis.call('HGET', KEYS[4], token)
   if priority == 'live' then redis.call('HINCRBY', KEYS[1], 'live', -1) end
   if priority == 'bulk' then redis.call('HINCRBY', KEYS[1], 'bulk', -1) end
   if priority == 'live' or priority == 'bulk' then redis.call('HINCRBY', KEYS[1], 'inflight', -1) end
   redis.call('DEL', KEYS[3] .. token)
+  redis.call('HDEL', KEYS[4], token)
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
 local inflight = tonumber(redis.call('HGET', KEYS[1], 'inflight') or '0')
@@ -70,14 +72,16 @@ redis.call('HSET', KEYS[1], 'tokens', tokens, 'lastRefillMs', now, 'bulkLimit', 
 redis.call('HINCRBY', KEYS[1], 'inflight', 1)
 if ARGV[1] == 'live' then redis.call('HINCRBY', KEYS[1], 'live', 1) else redis.call('HINCRBY', KEYS[1], 'bulk', 1) end
 redis.call('SET', KEYS[3] .. token, ARGV[1], 'PX', ARGV[6])
+redis.call('HSET', KEYS[4], token, ARGV[1])
 redis.call('ZADD', KEYS[2], now + tonumber(ARGV[6]), token)
 return {'granted', token}
 `;
 
 const RELEASE_SCRIPT = `
-local priority = redis.call('GET', KEYS[3] .. ARGV[1])
+local priority = redis.call('HGET', KEYS[4], ARGV[1])
 if not priority then return 0 end
 redis.call('DEL', KEYS[3] .. ARGV[1])
+redis.call('HDEL', KEYS[4], ARGV[1])
 redis.call('ZREM', KEYS[2], ARGV[1])
 redis.call('HINCRBY', KEYS[1], 'inflight', -1)
 if priority == 'live' then redis.call('HINCRBY', KEYS[1], 'live', -1) end
@@ -175,10 +179,11 @@ async function distributedAcquire(priority: FplRequestPriority): Promise<() => v
     try {
       result = (await redis.eval(
         ACQUIRE_SCRIPT,
-        3,
+        4,
         STATE_KEY,
         LEASES_KEY,
         LEASE_KEY_PREFIX,
+        LEASE_META_KEY,
         priority,
         token,
         BULK_MAX_INFLIGHT,
@@ -199,7 +204,15 @@ async function distributedAcquire(priority: FplRequestPriority): Promise<() => v
         if (released) return;
         released = true;
         try {
-          await redis.eval(RELEASE_SCRIPT, 3, STATE_KEY, LEASES_KEY, LEASE_KEY_PREFIX, token);
+          await redis.eval(
+            RELEASE_SCRIPT,
+            4,
+            STATE_KEY,
+            LEASES_KEY,
+            LEASE_KEY_PREFIX,
+            LEASE_META_KEY,
+            token,
+          );
         } catch {
           // The lease TTL is the safety net when Redis disappears during release.
         }

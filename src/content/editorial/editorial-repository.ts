@@ -12,6 +12,7 @@ import {
   contentStoryEvidence,
   contentStoryLocalizations,
   contentPublications,
+  contentPublicationPayloads,
   contentWeekEditionItems,
   contentWeekEditions,
   contentWeekEditionSnapshots,
@@ -112,6 +113,22 @@ async function reserveCommand(
     entityId,
     payload,
   });
+  const inserted = await tx
+    .insert(contentEditorialActions)
+    .values({
+      actionId: randomUUID(),
+      idempotencyKey: actor.idempotencyKey,
+      actorId: actor.actorId,
+      role: actor.role,
+      actionType,
+      entityType,
+      entityId,
+      payload,
+      requestHash: hash,
+    })
+    .onConflictDoNothing({ target: contentEditorialActions.idempotencyKey })
+    .returning({ actionId: contentEditorialActions.actionId });
+  if (inserted[0]) return { replay: false, result: null };
   const existing = await tx
     .select({
       actorId: contentEditorialActions.actorId,
@@ -148,18 +165,7 @@ async function reserveCommand(
       'EDITORIAL_COMMAND_IN_PROGRESS',
     );
   }
-  await tx.insert(contentEditorialActions).values({
-    actionId: randomUUID(),
-    idempotencyKey: actor.idempotencyKey,
-    actorId: actor.actorId,
-    role: actor.role,
-    actionType,
-    entityType,
-    entityId,
-    payload,
-    requestHash: hash,
-  });
-  return { replay: false, result: null };
+  throw new ConflictError('Editorial command reservation disappeared', 'EDITORIAL_COMMAND_RACE');
 }
 
 const requireUuid = (value: string, field: string): void => {
@@ -666,6 +672,7 @@ export async function markWeekEditionReady(
         runRevision: contentAcquisitionRuns.sourceSnapshotRevision,
         status: contentAcquisitionRuns.status,
         traceVerified: contentAcquisitionRuns.traceVerified,
+        checkpointAdvanced: contentAcquisitionRuns.checkpointAdvanced,
         completedAt: contentAcquisitionRuns.completedAt,
       })
       .from(contentWeekEditionSourceRuns)
@@ -680,6 +687,7 @@ export async function markWeekEditionReady(
         (run) =>
           run.status !== 'completed' ||
           run.traceVerified !== true ||
+          run.checkpointAdvanced !== true ||
           !run.completedAt ||
           run.linkedRevision !== edition[0].sourceSnapshotRevision ||
           run.runRevision !== edition[0].sourceSnapshotRevision,
@@ -1321,8 +1329,33 @@ export async function publishFrozenWeekEdition(input: {
       pair,
     } as const;
   });
-  if (publication.replayed)
-    return { ...(publication.result as unknown as WeekPublicationResult), replayed: true };
+  if (publication.replayed) {
+    const replayedResult = publication.result as unknown as WeekPublicationResult;
+    const payloadRows = await db
+      .select({
+        locale: contentPublicationPayloads.locale,
+        payload: contentPublicationPayloads.payload,
+      })
+      .from(contentPublicationPayloads)
+      .where(eq(contentPublicationPayloads.publicationId, replayedResult.publicationId));
+    const pair = {
+      en: payloadRows.find((row) => row.locale === 'en')?.payload,
+      'zh-CN': payloadRows.find((row) => row.locale === 'zh-CN')?.payload,
+    };
+    if (!pair.en || !pair['zh-CN'])
+      throw new Error('Persisted Week publication payload pair is incomplete');
+    assertWeekPublication(pair.en);
+    assertWeekPublication(pair['zh-CN']);
+    if (
+      pair.en.publicationId !== replayedResult.publicationId ||
+      pair['zh-CN'].publicationId !== replayedResult.publicationId ||
+      pair.en.revision !== replayedResult.revision ||
+      pair['zh-CN'].revision !== replayedResult.revision
+    )
+      throw new Error('Persisted Week publication payload pair is inconsistent');
+    const staged = await stageWeekPublication(pair.en, pair['zh-CN'], replayedResult);
+    return { ...staged, replayed: true };
+  }
   const staged = await stageWeekPublication(
     publication.pair.en,
     publication.pair['zh-CN'],

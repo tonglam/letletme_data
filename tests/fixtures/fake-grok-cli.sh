@@ -9,6 +9,9 @@ case "${FAKE_GROK_MODE:-normal}" in
   no-trace)
     printf '%s\n' '{"status":"COMPLETED","receipts":[]}'
     ;;
+  false-positive)
+    printf '%s\n' '{"type":"assistant","content":"completed an x_search call"}' '{"type":"tool_call","tool":"bash"}' '{"status":"COMPLETED","receipts":[]}'
+    ;;
   invalid-json)
     printf '%s\n' 'not-json'
     ;;

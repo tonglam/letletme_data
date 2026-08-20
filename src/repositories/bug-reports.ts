@@ -2,8 +2,8 @@ import { and, asc, eq, isNotNull, lte, sql } from 'drizzle-orm';
 
 import { bugReportsInOps } from '../db/schemas/platform.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
-import type { BugReportInsert } from '../domain/bug-report';
-import { DatabaseError } from '../utils/errors';
+import { bugReportRequestHash, type BugReportInsert } from '../domain/bug-report';
+import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError } from '../utils/logger';
 
 export type StoredBugReport = {
@@ -37,6 +37,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           screenshotObjectKey: report.screenshotObjectKey,
           screenshotUrl: report.screenshotUrl,
           clientMeta: report.clientMeta,
+          submissionRequestHash: report.submissionRequestHash,
           status: 'open',
         })
         .onConflictDoNothing({ target: bugReportsInOps.submissionId })
@@ -53,17 +54,53 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             id: bugReportsInOps.id,
             publicId: bugReportsInOps.publicId,
             createdAt: bugReportsInOps.createdAt,
+            source: bugReportsInOps.source,
+            userId: bugReportsInOps.userId,
+            entryId: bugReportsInOps.entryId,
+            body: bugReportsInOps.body,
+            submissionId: bugReportsInOps.submissionId,
+            screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+            screenshotUrl: bugReportsInOps.screenshotUrl,
+            clientMeta: bugReportsInOps.clientMeta,
+            submissionRequestHash: bugReportsInOps.submissionRequestHash,
           })
           .from(bugReportsInOps)
           .where(eq(bugReportsInOps.submissionId, report.submissionId))
           .limit(1);
         if (!existing) throw new DatabaseError('Bug report insert returned no row');
-        return existing;
+        const existingHash =
+          existing.submissionRequestHash ??
+          bugReportRequestHash({
+            source: existing.source as BugReportInsert['source'],
+            userId: existing.userId,
+            entryId: existing.entryId,
+            body: existing.body,
+            submissionId: existing.submissionId,
+            screenshotObjectKey: existing.screenshotObjectKey,
+            screenshotUrl: existing.screenshotUrl,
+            clientMeta: (existing.clientMeta ?? {}) as Record<string, unknown>,
+          });
+        if (existingHash !== report.submissionRequestHash)
+          throw new ConflictError(
+            'Submission ID was already used for a different bug report',
+            'BUG_REPORT_SUBMISSION_ID_REUSED',
+          );
+        if (!existing.submissionRequestHash) {
+          await db
+            .update(bugReportsInOps)
+            .set({ submissionRequestHash: report.submissionRequestHash })
+            .where(eq(bugReportsInOps.id, existing.id));
+        }
+        return {
+          id: existing.id,
+          publicId: existing.publicId,
+          createdAt: existing.createdAt,
+        };
       }
       return row;
     } catch (error) {
       logError('Failed to insert bug report', error);
-      if (error instanceof DatabaseError) throw error;
+      if (error instanceof DatabaseError || error instanceof ConflictError) throw error;
       const databaseError = error as {
         code?: unknown;
         constraint?: unknown;

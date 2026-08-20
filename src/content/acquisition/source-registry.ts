@@ -87,6 +87,29 @@ async function sourceCommand<T>(input: {
   });
   const db = await getDb();
   return db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(contentEditorialActions)
+      .values({
+        actionId: randomUUID(),
+        idempotencyKey: input.actor.idempotencyKey,
+        actorId: input.actor.actorId,
+        role: input.actor.role,
+        actionType: input.actionType,
+        entityType: 'content_source',
+        entityId: null,
+        payload: input.payload,
+        requestHash: hash,
+      })
+      .onConflictDoNothing({ target: contentEditorialActions.idempotencyKey })
+      .returning({ actionId: contentEditorialActions.actionId });
+    if (inserted[0]) {
+      const value = await input.operation(tx);
+      await tx
+        .update(contentEditorialActions)
+        .set({ resultPayload: { value: value ?? null }, completedAt: new Date() })
+        .where(eq(contentEditorialActions.idempotencyKey, input.actor.idempotencyKey));
+      return value;
+    }
     const existing = await tx
       .select({
         actorId: contentEditorialActions.actorId,
@@ -118,23 +141,10 @@ async function sourceCommand<T>(input: {
         'EDITORIAL_COMMAND_IN_PROGRESS',
       );
     }
-    await tx.insert(contentEditorialActions).values({
-      actionId: randomUUID(),
-      idempotencyKey: input.actor.idempotencyKey,
-      actorId: input.actor.actorId,
-      role: input.actor.role,
-      actionType: input.actionType,
-      entityType: 'content_source',
-      entityId: null,
-      payload: input.payload,
-      requestHash: hash,
-    });
-    const value = await input.operation(tx);
-    await tx
-      .update(contentEditorialActions)
-      .set({ resultPayload: { value: value ?? null }, completedAt: new Date() })
-      .where(eq(contentEditorialActions.idempotencyKey, input.actor.idempotencyKey));
-    return value;
+    throw new ConflictError(
+      'Content source command reservation disappeared',
+      'EDITORIAL_COMMAND_RACE',
+    );
   });
 }
 

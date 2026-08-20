@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 
 import { getQueueConnection } from '../../utils/queue';
@@ -5,6 +7,17 @@ import { logError, logInfo } from '../../utils/logger';
 import { runContentXWorker, type ContentXWorkerInput } from './content-x.worker';
 
 export const contentXScanQueueName = 'content-x-scan';
+
+function contentXScanJobId(
+  group: string,
+  partition: string,
+  mode: string,
+  phase: string,
+  end: string,
+): string {
+  const key = [group, partition, mode, phase, end].join('\u001f');
+  return `content-x-${createHash('sha256').update(key, 'utf8').digest('hex')}`;
+}
 
 export const contentXScanQueue = new Queue<ContentXWorkerInput>(contentXScanQueueName, {
   connection: getQueueConnection(),
@@ -25,7 +38,7 @@ export async function enqueueContentXScan(
   const mode = input.mode ?? 'poll';
   const phase = input.pollPhase ?? 'NORMAL';
   return contentXScanQueue.add('content-x-scan', input, {
-    jobId: `content-x:${group}:${partition}:${mode}:${phase}:${end}`,
+    jobId: contentXScanJobId(group, partition, mode, phase, end),
   });
 }
 

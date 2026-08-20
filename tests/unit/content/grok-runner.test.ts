@@ -44,6 +44,13 @@ describe('headless Grok runner', () => {
     expect(result.xCallCount).toBe(0);
   });
 
+  test('does not infer an X trace from assistant text or another tool', async () => {
+    const result = await runFixture('false-positive');
+    expect(result.status).toBe('COMPLETED');
+    expect(result.traceVerified).toBe(false);
+    expect(result.xCallCount).toBe(0);
+  });
+
   test('handles auth expiry, invalid JSON, timeout and oversized output', async () => {
     const expired = await runFixture('auth-expired');
     expect(expired.status).toBe('FAILED');

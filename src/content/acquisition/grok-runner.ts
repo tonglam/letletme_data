@@ -76,17 +76,18 @@ function findJsonResult(value: unknown): Record<string, unknown> | null {
 function isXToolEvent(value: unknown): boolean {
   const record = asRecord(value);
   if (!record) return false;
-  const type = Object.values(record)
-    .filter((item) => typeof item === 'string')
-    .join(' ')
-    .toLowerCase();
-  return (
-    (type.includes('tool') || type.includes('call')) &&
-    (type.includes('x_search') ||
-      type.includes('x-search') ||
-      type.includes('native x') ||
-      type.includes(' x '))
-  );
+  const eventType = record.type;
+  if (
+    eventType !== 'tool_call' &&
+    eventType !== 'tool_use' &&
+    eventType !== 'tool_call_start' &&
+    eventType !== 'tool_invocation'
+  )
+    return false;
+  const tool = record.tool ?? record.toolName ?? record.tool_name ?? record.name;
+  if (typeof tool === 'string') return tool === 'x_search';
+  const nestedTool = asRecord(tool);
+  return nestedTool?.name === 'x_search';
 }
 
 function parseStreamingOutput(output: string): {

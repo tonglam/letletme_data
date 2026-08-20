@@ -73,6 +73,9 @@ AS $$
 DECLARE
   edition_status text;
 BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.edition_id IS DISTINCT FROM OLD.edition_id THEN
+    RAISE EXCEPTION 'Week edition item parent cannot change' USING ERRCODE = '55000';
+  END IF;
   SELECT status INTO edition_status
   FROM content.week_editions
   WHERE edition_id = COALESCE(NEW.edition_id, OLD.edition_id);
@@ -97,6 +100,9 @@ DECLARE
   story_status text;
   version_group uuid := COALESCE(NEW.version_group_id, OLD.version_group_id);
 BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.version_group_id IS DISTINCT FROM OLD.version_group_id THEN
+    RAISE EXCEPTION 'Story localization parent cannot change' USING ERRCODE = '55000';
+  END IF;
   SELECT status INTO story_status
   FROM content.stories
   WHERE version_group_id = version_group
@@ -123,6 +129,9 @@ DECLARE
   story_status text;
   story_key uuid := COALESCE(NEW.story_id, OLD.story_id);
 BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.story_id IS DISTINCT FROM OLD.story_id THEN
+    RAISE EXCEPTION 'Story evidence parent cannot change' USING ERRCODE = '55000';
+  END IF;
   SELECT status INTO story_status FROM content.stories WHERE story_id = story_key;
   IF story_status IS DISTINCT FROM 'draft' THEN
     RAISE EXCEPTION 'Story evidence is immutable after READY' USING ERRCODE = '55000';
@@ -164,8 +173,11 @@ GRANT SELECT, INSERT ON content.week_edition_source_runs TO letletme_data_writer
 GRANT SELECT, INSERT ON content.week_edition_snapshots TO letletme_data_writer;
 REVOKE UPDATE, DELETE ON content.week_edition_source_runs FROM letletme_data_writer;
 REVOKE UPDATE, DELETE ON content.week_edition_snapshots FROM letletme_data_writer;
-GRANT SELECT ON content.week_edition_snapshots TO letletme_graphql_reader;
-GRANT SELECT ON content.publications TO letletme_graphql_reader;
+-- GraphQL reads only the narrow active-publication view and compiled payloads
+-- granted by the foundation migration.  Frozen editorial projections contain
+-- unpublished evidence/localization and remain writer-only.
+REVOKE ALL ON content.week_edition_snapshots FROM letletme_graphql_reader;
+REVOKE ALL ON content.publications FROM letletme_graphql_reader;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE letletme_data_owner IN SCHEMA content
   GRANT SELECT, INSERT ON TABLES TO letletme_data_writer;
