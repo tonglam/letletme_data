@@ -51,6 +51,24 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     try {
       const db = await getDbInstance();
       const insertRow = async (connection: DbOrTransaction) => {
+        // Retention backups are the durable registry for public IDs after the
+        // live report row is removed. Reject a generated ID that already
+        // belongs to a retired report so the status endpoint can never point
+        // an old reference at a newer report.
+        const [retiredPublicId] = await connection
+          .select({ id: bugReportRetentionBackupsInOps.id })
+          .from(bugReportRetentionBackupsInOps)
+          .where(eq(bugReportRetentionBackupsInOps.publicId, report.publicId))
+          .limit(1);
+        if (retiredPublicId) {
+          throw new DatabaseError(
+            'Bug report public id has already been retired',
+            '23505',
+            undefined,
+            'bug_report_retention_backups_public_id_key',
+          );
+        }
+
         if (report.screenshotUrl) {
           await connection.execute(
             sql`SELECT pg_advisory_xact_lock(hashtext(${report.screenshotUrl}))`,
