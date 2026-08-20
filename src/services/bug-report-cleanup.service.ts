@@ -75,9 +75,9 @@ function shouldAttemptRemoteDelete(locator: string): boolean {
   // The legacy-origin guard is deliberately required before classifying a
   // locator as managed. If the deployment is missing that setting, keep the
   // existing retry behaviour rather than silently leaking an object.
-  const originsConfigured = configuredStorageOrigins().size > 0;
+  const legacyOriginConfigured = Boolean(process.env.BUG_REPORT_STORAGE_LEGACY_ORIGIN?.trim());
   return (
-    !originsConfigured ||
+    !legacyOriginConfigured ||
     isLegacyBugReportStorageLocator(locator) ||
     isPrivateBugReportStorageLocator(locator)
   );
