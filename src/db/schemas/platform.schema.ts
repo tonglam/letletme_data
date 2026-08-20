@@ -3749,10 +3749,6 @@ export const playerStateSeasonRowsInReporting = reporting.table(
     elementType: integer('element_type').notNull(),
     fplMinutes: integer('fpl_minutes').default(0).notNull(),
     fplGameweeks: integer('fpl_gameweeks').default(0).notNull(),
-    fplTotalPoints: integer('fpl_total_points').default(0).notNull(),
-    fplStarts: integer('fpl_starts').default(0).notNull(),
-    fplCleanSheets: integer('fpl_clean_sheets').default(0).notNull(),
-    fplSaves: integer('fpl_saves').default(0).notNull(),
     fplPointsPer90: numeric('fpl_points_per_90'),
     fplReturnRate: numeric('fpl_return_rate'),
     fplBonusPer90: numeric('fpl_bonus_per_90'),
@@ -3790,6 +3786,10 @@ export const playerStateSeasonRowsInReporting = reporting.table(
     refreshedAt: timestamp('refreshed_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
+    fplTotalPoints: integer('fpl_total_points').default(0).notNull(),
+    fplStarts: integer('fpl_starts').default(0).notNull(),
+    fplCleanSheets: integer('fpl_clean_sheets').default(0).notNull(),
+    fplSaves: integer('fpl_saves').default(0).notNull(),
   },
   (table) => [
     index('player_state_season_rows_player_idx').using(
