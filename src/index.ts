@@ -116,7 +116,7 @@ const app = new Elysia()
       method: request.method,
       pathname: new URL(request.url).pathname,
     };
-    const logContext = { code, ...requestContext };
+    const logContext = { ...requestContext, requestId, code };
 
     switch (getHttpErrorLogLevel(code)) {
       case 'debug':

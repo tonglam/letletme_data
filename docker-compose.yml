@@ -23,7 +23,7 @@ services:
     restart: 'no'
 
   backup:
-    image: postgres:15
+    image: postgres:${DATABASE_BACKUP_PG_MAJOR:-15}
     profiles: ['migration']
     env_file:
       - path: ${MIGRATION_ENV_FILE:-.env.migrate}

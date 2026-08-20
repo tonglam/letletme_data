@@ -263,7 +263,6 @@ export async function buildSourceSnapshot(
   if (!groupId) throw new Error(`No active content source group: ${groupKey}`);
   const rows = await db
     .select({
-      groupId: contentSourceGroups.groupId,
       sourceId: contentSources.sourceId,
       platform: contentSources.platform,
       externalId: contentSources.externalId,
@@ -287,8 +286,17 @@ export async function buildSourceSnapshot(
       ),
     )
     .orderBy(asc(contentSourceGroupMembers.priority), asc(contentSources.displayName));
-  const items = rows.map((row) => ({
-    ...row,
+  // Keep the persisted group identifier out of each generated source object.
+  // The Grok input schema intentionally accepts only the public source fields;
+  // groupId belongs to the enclosing snapshot metadata, not an item.
+  const items: SourceSnapshotItem[] = rows.map((row) => ({
+    sourceId: row.sourceId,
+    platform: row.platform,
+    externalId: row.externalId,
+    handle: row.handle,
+    displayName: row.displayName,
+    sourceType: row.sourceType,
+    reportingFamily: row.reportingFamily,
     rightsPolicy: (row.rightsPolicy ?? {}) as Record<string, unknown>,
   }));
   return { groupId, revision: sourceSnapshotRevision(items), items };

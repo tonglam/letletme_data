@@ -36,7 +36,7 @@ export type WeekPublicationResult = Readonly<{
   outboxId: string;
 }>;
 
-const WEEK_PUBLICATION_MUTATION_SCOPE = 'content-publication:week';
+export const WEEK_PUBLICATION_MUTATION_SCOPE = 'content-publication:week';
 
 const ACTIVE_POINTER_CAS_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
@@ -74,7 +74,7 @@ async function compareAndSetWeekPointer(
   return result === 'tombstoned' ? 'tombstoned' : result === 'stale' ? 'stale' : 'activated';
 }
 
-async function lockWeekPublicationScope(tx: DbOrTransaction): Promise<void> {
+export async function lockWeekPublicationScope(tx: DbOrTransaction): Promise<void> {
   await tx
     .insert(mutationScopesInOps)
     .values({ scopeKey: WEEK_PUBLICATION_MUTATION_SCOPE, lastUsedAt: new Date() })

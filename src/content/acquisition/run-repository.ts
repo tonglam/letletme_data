@@ -181,7 +181,14 @@ export async function reserveXCallBudget(input: {
         contentAcquisitionBudgets.budgetDate,
         contentAcquisitionBudgets.budgetScope,
       ],
-      set: { maxXCalls: budgetLimit, updatedAt: new Date() },
+      // A retry or a phase-policy change may lower the configured budget after
+      // calls have already been consumed. Preserve the check constraint and
+      // let the reservation predicate naturally deny any further calls when
+      // usedXCalls has reached the lower effective limit.
+      set: {
+        maxXCalls: sql`GREATEST(${contentAcquisitionBudgets.usedXCalls}, ${budgetLimit})`,
+        updatedAt: new Date(),
+      },
     });
   const updated = await db
     .update(contentAcquisitionBudgets)

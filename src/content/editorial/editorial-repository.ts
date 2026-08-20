@@ -26,6 +26,7 @@ import {
 } from '../contracts/week-publication';
 import { ConflictError } from '../../utils/errors';
 import {
+  lockWeekPublicationScope,
   persistWeekPublication,
   stageWeekPublication,
   type WeekPublicationResult,
@@ -680,7 +681,8 @@ export async function markWeekEditionReady(
         contentAcquisitionRuns,
         eq(contentAcquisitionRuns.runId, contentWeekEditionSourceRuns.runId),
       )
-      .where(eq(contentWeekEditionSourceRuns.editionId, editionId));
+      .where(eq(contentWeekEditionSourceRuns.editionId, editionId))
+      .for('update');
     if (!sourceRuns.length) throw new Error('Week edition requires source runs');
     if (
       sourceRuns.some(
@@ -742,6 +744,7 @@ export async function markWeekEditionReady(
             storyId: contentStoryEvidence.storyId,
             receiptId: contentStoryEvidence.receiptId,
             evidenceRole: contentStoryEvidence.evidenceRole,
+            runId: contentSourceReceipts.runId,
             canonicalUrl: contentSourceReceipts.canonicalUrl,
             capturedAt: contentSourceReceipts.capturedAt,
             rightsPolicy: contentSourceReceipts.rightsPolicy,
@@ -756,6 +759,7 @@ export async function markWeekEditionReady(
           .innerJoin(contentSources, eq(contentSources.sourceId, contentSourceReceipts.sourceId))
           .where(inArray(contentStoryEvidence.storyId, storyIds))
       : [];
+    const verifiedRunIds = new Set(sourceRuns.map((run) => run.runId));
     const localizationsByVersion = new Map<string, Record<string, unknown>>();
     for (const localization of localizations) {
       const row = localizationsByVersion.get(localization.versionGroupId) ?? {};
@@ -769,6 +773,8 @@ export async function markWeekEditionReady(
     }
     const evidenceByStory = new Map<string, Record<string, unknown>[]>();
     for (const row of evidence) {
+      if (!verifiedRunIds.has(row.runId))
+        throw new Error('Every Story evidence receipt must belong to a verified source run');
       if (!rightsAllowPublic(row.rightsPolicy))
         throw new Error('Every Story evidence receipt needs explicit public rights');
       if (!/^https?:\/\//i.test(row.canonicalUrl))
@@ -1280,6 +1286,10 @@ export async function publishFrozenWeekEdition(input: {
       throw new Error('Week edition must be READY before publish');
     if (edition.frozenSha256 !== input.expectedFrozenSha256)
       throw new ConflictError('Frozen Week hash does not match', 'FROZEN_HASH_MISMATCH');
+    // Allocate the next revision only after taking the same PostgreSQL scope
+    // lock used by publication persistence. Otherwise concurrent publishers
+    // can both observe the same MAX(revision) and race into a unique-key error.
+    await lockWeekPublicationScope(tx);
     const latest = await tx
       .select({ revision: sql<number>`COALESCE(MAX(${contentPublications.revision}), 0)` })
       .from(contentPublications)

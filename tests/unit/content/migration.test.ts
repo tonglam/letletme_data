@@ -66,6 +66,16 @@ describe('Briefing content migration contract', () => {
     );
   });
 
+  test('locks freeze parents while checking draft-only child writes', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0021_content_freeze_parent_locks.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION content.assert_draft_week_edition_items()');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION content.assert_draft_story_localization()');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION content.assert_draft_story_evidence()');
+    expect(sql.match(/FOR UPDATE/g)?.length).toBe(3);
+  });
+
   test('binds submission-id replays to a canonical request hash', async () => {
     const sql = await Bun.file(
       new URL('../../../migrations/0018_bug_report_submission_request_hash.sql', import.meta.url),

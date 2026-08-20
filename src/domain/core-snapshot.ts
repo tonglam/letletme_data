@@ -167,8 +167,7 @@ export function normalizeSelectionRules(bootstrap: FPLBootstrapResponse): Select
     positions.reduce((sum, position) => sum + position.squadSelect, 0) !== squadSize ||
     positions.reduce((sum, position) => sum + position.minPlay, 0) > startingSize ||
     positions.reduce((sum, position) => sum + position.maxPlay, 0) < startingSize ||
-    new Set(chips.map((chip) => chip.id)).size !== chips.length ||
-    new Set(chips.map((chip) => chip.chipType)).size !== chips.length
+    new Set(chips.map((chip) => chip.id)).size !== chips.length
   ) {
     return null;
   }
