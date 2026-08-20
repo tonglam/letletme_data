@@ -113,4 +113,29 @@ describe('bug report validation', () => {
   it('creates public ids in the LL-XXXXXX shape', () => {
     expect(createPublicBugReportId()).toMatch(/^LL-[0-9A-F]{6}$/);
   });
+
+  it('stops after three public-id collision retries', async () => {
+    const attempted: string[] = [];
+    const repository = {
+      insert: async (report: { publicId: string }) => {
+        attempted.push(report.publicId);
+        const cause = Object.assign(new Error('duplicate key'), {
+          code: '23505',
+          constraint: 'bug_reports_public_id_key',
+        });
+        throw new DatabaseError('duplicate public id', '23505', cause, 'bug_reports_public_id_key');
+      },
+    };
+
+    await expect(
+      createBugReport(
+        { source: 'website', body: '超过次数后应停止重试' },
+        {
+          repository,
+          publicIdGenerator: () => `LL-${attempted.length.toString(16).padStart(12, '0')}`,
+        },
+      ),
+    ).rejects.toMatchObject({ code: '23505', constraint: 'bug_reports_public_id_key' });
+    expect(attempted).toHaveLength(4);
+  });
 });

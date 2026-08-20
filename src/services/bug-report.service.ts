@@ -2,7 +2,8 @@ import { validateBugReportCreateInput, type BugReportCreateInput } from '../doma
 import { bugReportRepository } from '../repositories/bug-reports';
 import { DatabaseError } from '../utils/errors';
 
-const MAX_PUBLIC_ID_ATTEMPTS = 5;
+// One initial allocation plus at most three deterministic collision retries.
+const MAX_PUBLIC_ID_ATTEMPTS = 4;
 
 type BugReportRepository = Pick<typeof bugReportRepository, 'insert'>;
 
