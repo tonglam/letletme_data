@@ -98,7 +98,7 @@ export function assertPrivateBugReportScreenshotBucket(
   bucket: BugReportScreenshotBucket,
   expectedName = 'bug-report-screenshots',
 ): void {
-  if (bucket.name && bucket.name !== expectedName) {
+  if (bucket.name !== expectedName) {
     throw new Error('Bug-report screenshot storage returned an unexpected bucket');
   }
   if (bucket.public !== false) {
@@ -212,7 +212,10 @@ export async function runBugReportScreenshotRetention(
   const repository = options.repository ?? bugReportRepository;
   // Verify bucket/endpoint availability before mutating any database rows. A
   // missing bucket must not be mistaken for an absent object and clear refs.
-  assertPrivateBugReportScreenshotBucket(await storage.getBucket());
+  assertPrivateBugReportScreenshotBucket(
+    await storage.getBucket(),
+    config.BUG_REPORT_SCREENSHOT_BUCKET,
+  );
   await storage.list('bug-reports/', 1, 0);
   const expired: ExpiredBugReportScreenshot[] = [];
   for (let offset = 0; offset < RETENTION_MAX_DELETES; offset += RETENTION_BATCH_SIZE) {

@@ -156,6 +156,36 @@ describe('bug-report screenshot retention', () => {
     ).rejects.toThrow(/must be private/);
   });
 
+  it('validates retention metadata against the configured bucket name', async () => {
+    const storage: BugReportScreenshotStorage = {
+      async getBucket() {
+        return { name: 'custom-screenshot-bucket', public: false };
+      },
+      async list() {
+        return [];
+      },
+      async remove() {
+        return 'deleted';
+      },
+    };
+
+    await expect(
+      runBugReportScreenshotRetention({
+        config: { ...config, BUG_REPORT_SCREENSHOT_BUCKET: 'custom-screenshot-bucket' },
+        storage,
+        repository: {
+          async listExpiredScreenshots() {
+            return [];
+          },
+          async listActiveScreenshotKeys() {
+            return [];
+          },
+          async markScreenshotDeleted() {},
+        },
+      }),
+    ).resolves.toMatchObject({ databaseScanned: 0, deleteAttempts: 0 });
+  });
+
   it('bounds bucket metadata and list requests with an abort signal', async () => {
     const calls: Array<{ url: string; signal?: AbortSignal }> = [];
     const storage = createBugReportScreenshotStorage(config, (async (
