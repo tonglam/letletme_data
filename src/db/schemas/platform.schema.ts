@@ -432,7 +432,7 @@ export const bugReportsInOps = ops.table(
     ),
     check(
       'bug_reports_screenshot_object_key_format',
-      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND COALESCE(substring(lower(screenshot_object_key) FROM '^bug-reports/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.(jpg|png|webp|gif)$'::text) = lower(submission_id::text), false))`,
+      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND (screenshot_object_key ~* ('^bug-reports/' || submission_id::text || '\\.(jpg|png|webp|gif)$'::text)))`,
     ),
     check(
       'bug_reports_screenshot_https',
