@@ -8,6 +8,7 @@ import { createEventLiveExplainsRepository } from '../repositories/event-live-ex
 import { createEventLiveRepository, eventLiveRepository } from '../repositories/event-lives';
 import { createFplPlayerFixtureStatsRepository } from '../repositories/fpl-player-fixture-stats';
 import { transformEventLiveExplains } from '../transformers/event-live-explains';
+import { attachEventLiveFixtureBreakdowns } from '../transformers/event-live-fixture-breakdown';
 import { transformEventLives } from '../transformers/event-lives';
 import { transformFplPlayerFixtureEvidence } from '../transformers/fpl-player-fixture-stats';
 import { logDebug, logError, logInfo } from '../utils/logger';
@@ -38,7 +39,11 @@ export function prepareEventLives(
   eventId: number,
   elements: RawFPLEventLiveElement[],
 ): PreparedEventLives {
-  const eventLives = transformEventLives(eventId, elements);
+  const eventLives = attachEventLiveFixtureBreakdowns(
+    eventId,
+    transformEventLives(eventId, elements),
+    elements,
+  );
   const explains = transformEventLiveExplains(eventId, elements);
   const fixtureEvidence = transformFplPlayerFixtureEvidence(eventId, elements);
   return {

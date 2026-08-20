@@ -1,4 +1,8 @@
-import { validateBugReportCreateInput, type BugReportCreateInput } from '../domain/bug-report';
+import {
+  validateBugReportCreateInput,
+  type BugReportCreateInput,
+  type BugReportStatus,
+} from '../domain/bug-report';
 import { bugReportRepository } from '../repositories/bug-reports';
 import { DatabaseError } from '../utils/errors';
 
@@ -28,3 +32,9 @@ export const createBugReport = async (input: BugReportCreateInput) => {
 
   throw new DatabaseError('Could not allocate a report id');
 };
+
+export const updateBugReportStatus = async (
+  publicId: string,
+  status: BugReportStatus,
+  now = new Date(),
+) => bugReportRepository.updateStatus(publicId, status, now);

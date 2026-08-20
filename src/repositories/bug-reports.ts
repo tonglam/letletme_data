@@ -1,8 +1,17 @@
-import { and, asc, eq, isNotNull, lte, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
 
-import { bugReportsInOps } from '../db/schemas/platform.schema';
+import { and, asc, eq, isNotNull, isNull, lte } from 'drizzle-orm';
+import {
+  bugReportRetentionBackupsInOps,
+  bugReportStorageMigrationsInOps,
+  bugReportsInOps,
+} from '../db/schemas/platform.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
-import type { BugReportInsert } from '../domain/bug-report';
+import {
+  retentionDeadline,
+  type BugReportInsert,
+  type BugReportStatus,
+} from '../domain/bug-report';
 import { DatabaseError } from '../utils/errors';
 import { logError } from '../utils/logger';
 
@@ -10,6 +19,15 @@ export type StoredBugReport = {
   id: string;
   publicId: string;
   createdAt: Date;
+  status: BugReportStatus;
+  closedAt: Date | null;
+  expiresAt: Date;
+  screenshotUrl: string | null;
+  body: string;
+  clientMeta: Record<string, unknown>;
+  source: string;
+  userId: string | null;
+  entryId: number | null;
 };
 
 export type ExpiredBugReportScreenshot = {
@@ -38,12 +56,23 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           screenshotUrl: report.screenshotUrl,
           clientMeta: report.clientMeta,
           status: 'open',
+          closedAt: report.closedAt,
+          expiresAt: report.expiresAt,
         })
         .onConflictDoNothing({ target: bugReportsInOps.submissionId })
         .returning({
           id: bugReportsInOps.id,
           publicId: bugReportsInOps.publicId,
           createdAt: bugReportsInOps.createdAt,
+          status: bugReportsInOps.status,
+          closedAt: bugReportsInOps.closedAt,
+          expiresAt: bugReportsInOps.expiresAt,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+          body: bugReportsInOps.body,
+          clientMeta: bugReportsInOps.clientMeta,
+          source: bugReportsInOps.source,
+          userId: bugReportsInOps.userId,
+          entryId: bugReportsInOps.entryId,
         });
 
       if (!row) {
@@ -60,7 +89,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         if (!existing) throw new DatabaseError('Bug report insert returned no row');
         return existing;
       }
-      return row;
+      return row as StoredBugReport;
     } catch (error) {
       logError('Failed to insert bug report', error);
       if (error instanceof DatabaseError) throw error;
@@ -79,57 +108,215 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     }
   };
 
-  const listExpiredScreenshots = async (
-    cutoff: Date,
-    limit: number,
-    offset = 0,
-  ): Promise<ExpiredBugReportScreenshot[]> => {
+  const findByPublicId = async (publicId: string) => {
     const db = await getDbInstance();
-    return db
+    const [row] = await db
       .select({
         id: bugReportsInOps.id,
-        screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+        publicId: bugReportsInOps.publicId,
         createdAt: bugReportsInOps.createdAt,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+        body: bugReportsInOps.body,
+        clientMeta: bugReportsInOps.clientMeta,
+        source: bugReportsInOps.source,
+        userId: bugReportsInOps.userId,
+        entryId: bugReportsInOps.entryId,
       })
       .from(bugReportsInOps)
-      .where(
-        and(
-          lte(bugReportsInOps.createdAt, cutoff),
-          isNotNull(bugReportsInOps.screenshotObjectKey),
-          sql`${bugReportsInOps.screenshotDeletedAt} IS NULL`,
-        ),
-      )
-      .orderBy(asc(bugReportsInOps.createdAt))
-      .limit(limit)
-      .offset(offset) as Promise<ExpiredBugReportScreenshot[]>;
+      .where(eq(bugReportsInOps.publicId, publicId))
+      .limit(1);
+    return row as StoredBugReport | undefined;
   };
 
-  const listActiveScreenshotKeys = async (limit: number, offset = 0): Promise<string[]> => {
-    const db = await getDbInstance();
-    const rows = await db
-      .select({ screenshotObjectKey: bugReportsInOps.screenshotObjectKey })
+  const updateStatus = async (publicId: string, status: BugReportStatus, now: Date) => {
+    const current = await findByPublicId(publicId);
+    if (!current) return null;
+    const closedAt = status === 'closed' ? (current.closedAt ?? now) : null;
+    const expiresAt = retentionDeadline(current.createdAt, status, closedAt);
+    const [row] = await (await getDbInstance())
+      .update(bugReportsInOps)
+      .set({ status, closedAt, expiresAt })
+      .where(eq(bugReportsInOps.publicId, publicId))
+      .returning({
+        publicId: bugReportsInOps.publicId,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+      });
+    return row ?? null;
+  };
+
+  const listExpired = async (now: Date, limit: number) => {
+    const rows = await (
+      await getDbInstance()
+    )
+      .select({
+        id: bugReportsInOps.id,
+        publicId: bugReportsInOps.publicId,
+        createdAt: bugReportsInOps.createdAt,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+        body: bugReportsInOps.body,
+        clientMeta: bugReportsInOps.clientMeta,
+        source: bugReportsInOps.source,
+        userId: bugReportsInOps.userId,
+        entryId: bugReportsInOps.entryId,
+      })
       .from(bugReportsInOps)
-      .where(
-        and(
-          isNotNull(bugReportsInOps.screenshotObjectKey),
-          sql`${bugReportsInOps.screenshotDeletedAt} IS NULL`,
-        ),
-      )
-      .orderBy(asc(bugReportsInOps.createdAt))
-      .limit(limit)
-      .offset(offset);
-    return rows.flatMap((row) => (row.screenshotObjectKey ? [row.screenshotObjectKey] : []));
+      .where(lte(bugReportsInOps.expiresAt, now))
+      .orderBy(asc(bugReportsInOps.expiresAt))
+      .limit(Math.min(Math.max(limit, 1), 100));
+    return rows as StoredBugReport[];
   };
 
-  const markScreenshotDeleted = async (id: string, deletedAt: Date): Promise<void> => {
+  const listWithScreenshots = async (limit: number) => {
+    const rows = await (
+      await getDbInstance()
+    )
+      .select({
+        id: bugReportsInOps.id,
+        publicId: bugReportsInOps.publicId,
+        createdAt: bugReportsInOps.createdAt,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+        body: bugReportsInOps.body,
+        clientMeta: bugReportsInOps.clientMeta,
+        source: bugReportsInOps.source,
+        userId: bugReportsInOps.userId,
+        entryId: bugReportsInOps.entryId,
+      })
+      .from(bugReportsInOps)
+      .where(isNotNull(bugReportsInOps.screenshotUrl))
+      .orderBy(asc(bugReportsInOps.createdAt))
+      .limit(Math.min(Math.max(limit, 1), 100));
+    return rows as StoredBugReport[];
+  };
+
+  const updateScreenshotUrl = async (
+    publicId: string,
+    sourceLocator: string,
+    targetLocator: string,
+  ) => {
+    const [row] = await (
+      await getDbInstance()
+    )
+      .update(bugReportsInOps)
+      .set({ screenshotUrl: targetLocator })
+      .where(
+        and(
+          eq(bugReportsInOps.publicId, publicId),
+          eq(bugReportsInOps.screenshotUrl, sourceLocator),
+        ),
+      )
+      .returning({
+        publicId: bugReportsInOps.publicId,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+      });
+    return row ?? null;
+  };
+
+  const recordStorageMigration = async (
+    publicId: string,
+    sourceLocator: string,
+    targetLocator: string,
+  ) => {
+    const [row] = await (
+      await getDbInstance()
+    )
+      .insert(bugReportStorageMigrationsInOps)
+      .values({
+        id: randomUUID(),
+        publicId,
+        sourceLocator,
+        targetLocator,
+      })
+      .onConflictDoNothing({ target: bugReportStorageMigrationsInOps.sourceLocator })
+      .returning({
+        publicId: bugReportStorageMigrationsInOps.publicId,
+        sourceLocator: bugReportStorageMigrationsInOps.sourceLocator,
+        targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+        deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+      });
+    if (row) return row;
+    const [existing] = await (
+      await getDbInstance()
+    )
+      .select({
+        publicId: bugReportStorageMigrationsInOps.publicId,
+        sourceLocator: bugReportStorageMigrationsInOps.sourceLocator,
+        targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+        deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+      })
+      .from(bugReportStorageMigrationsInOps)
+      .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
+      .limit(1);
+    return existing ?? null;
+  };
+
+  const listPendingStorageDeletes = async (limit: number) =>
+    (await (
+      await getDbInstance()
+    )
+      .select({
+        publicId: bugReportStorageMigrationsInOps.publicId,
+        sourceLocator: bugReportStorageMigrationsInOps.sourceLocator,
+        targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+      })
+      .from(bugReportStorageMigrationsInOps)
+      .where(isNull(bugReportStorageMigrationsInOps.deletedAt))
+      .orderBy(asc(bugReportStorageMigrationsInOps.migratedAt))
+      .limit(Math.min(Math.max(limit, 1), 100))) as Array<{
+      publicId: string;
+      sourceLocator: string;
+      targetLocator: string;
+    }>;
+
+  const markStorageDeleted = async (sourceLocator: string, now = new Date()) => {
+    await (
+      await getDbInstance()
+    )
+      .update(bugReportStorageMigrationsInOps)
+      .set({ deletedAt: now })
+      .where(
+        and(
+          eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator),
+          isNull(bugReportStorageMigrationsInOps.deletedAt),
+        ),
+      );
+  };
+
+  const backupAndDelete = async (report: StoredBugReport) => {
     const db = await getDbInstance();
     await db
-      .update(bugReportsInOps)
-      .set({ screenshotObjectKey: null, screenshotDeletedAt: deletedAt })
-      .where(eq(bugReportsInOps.id, id));
+      .insert(bugReportRetentionBackupsInOps)
+      .values({
+        id: randomUUID(),
+        publicId: report.publicId,
+        snapshot: report,
+      })
+      .onConflictDoNothing({ target: bugReportRetentionBackupsInOps.publicId });
+    await db.delete(bugReportsInOps).where(eq(bugReportsInOps.id, report.id));
   };
 
-  return { insert, listExpiredScreenshots, listActiveScreenshotKeys, markScreenshotDeleted };
+  return {
+    insert,
+    findByPublicId,
+    updateStatus,
+    listExpired,
+    listWithScreenshots,
+    updateScreenshotUrl,
+    recordStorageMigration,
+    listPendingStorageDeletes,
+    markStorageDeleted,
+    backupAndDelete,
+  };
 };
 
 export const bugReportRepository = createBugReportRepository();

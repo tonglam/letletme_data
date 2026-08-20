@@ -379,9 +379,8 @@ export const bugReportsInOps = ops.table(
     screenshotUrl: text('screenshot_url'),
     clientMeta: jsonb('client_meta').default({}).notNull(),
     status: text().default('open').notNull(),
-    submissionId: uuid('submission_id'),
-    screenshotObjectKey: text('screenshot_object_key'),
-    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    closedAt: timestamp('closed_at', { withTimezone: true, mode: 'date' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
   },
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
@@ -393,6 +392,7 @@ export const bugReportsInOps = ops.table(
     index('bug_reports_user_created_idx')
       .on(table.userId, table.createdAt.desc())
       .where(sql`user_id IS NOT NULL`),
+    index('bug_reports_expiry_idx').on(table.expiresAt.asc()),
     check('bug_reports_public_id_format', sql`public_id ~ '^LL-[0-9A-F]{6}$'::text`),
     check(
       'bug_reports_source_known',
@@ -419,6 +419,43 @@ export const bugReportsInOps = ops.table(
       'bug_reports_screenshot_https',
       sql`(screenshot_url IS NULL) OR (screenshot_url ~ '^https://'::text)`,
     ),
+    check('bug_reports_expiry_after_created', sql`expires_at >= created_at`),
+  ],
+);
+
+export const bugReportRetentionBackupsInOps = ops.table(
+  'bug_report_retention_backups',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    backedUpAt: timestamp('backed_up_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    snapshot: jsonb().notNull(),
+  },
+  (table) => [
+    uniqueIndex('bug_report_retention_backups_public_id_key').on(table.publicId),
+    index('bug_report_retention_backups_created_idx').on(table.backedUpAt.desc()),
+  ],
+);
+
+export const bugReportStorageMigrationsInOps = ops.table(
+  'bug_report_storage_migrations',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    sourceLocator: text('source_locator').notNull(),
+    targetLocator: text('target_locator').notNull(),
+    migratedAt: timestamp('migrated_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    uniqueIndex('bug_report_storage_migrations_source_key').on(table.sourceLocator),
+    index('bug_report_storage_migrations_pending_idx').on(table.deletedAt, table.migratedAt),
+    check('bug_report_storage_migrations_source_https', sql`source_locator ~ '^https://'::text`),
+    check('bug_report_storage_migrations_target_https', sql`target_locator ~ '^https://'::text`),
   ],
 );
 

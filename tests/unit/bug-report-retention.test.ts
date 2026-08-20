@@ -1,0 +1,40 @@
+import { describe, expect, test } from 'bun:test';
+
+import { retentionDeadline, sanitizeBugReportClientMeta } from '../../src/domain/bug-report';
+
+describe('bug report retention and diagnostics', () => {
+  const created = new Date('2026-01-01T00:00:00.000Z');
+
+  test('open and acknowledged reports keep the created-plus-180-day hard limit', () => {
+    expect(retentionDeadline(created, 'open', null).toISOString()).toBe('2026-06-30T00:00:00.000Z');
+    expect(retentionDeadline(created, 'ack', null).toISOString()).toBe('2026-06-30T00:00:00.000Z');
+  });
+
+  test('closed reports use the earlier of the hard limit and close-plus-30 days', () => {
+    expect(
+      retentionDeadline(created, 'closed', new Date('2026-02-01T00:00:00.000Z')).toISOString(),
+    ).toBe('2026-03-03T00:00:00.000Z');
+    expect(
+      retentionDeadline(created, 'closed', new Date('2026-06-15T00:00:00.000Z')).toISOString(),
+    ).toBe('2026-06-30T00:00:00.000Z');
+  });
+
+  test('reopening clears the close deadline and diagnostics stay allowlisted', () => {
+    expect(
+      retentionDeadline(created, 'open', new Date('2026-02-01T00:00:00.000Z')).toISOString(),
+    ).toBe('2026-06-30T00:00:00.000Z');
+    expect(
+      sanitizeBugReportClientMeta({
+        route: 'pages/home/index/index',
+        entryId: 123,
+        deviceId: 'secret-device',
+        operations: [
+          { operation: 'Live', requestId: 'r1', message: 'https://example.com?token=x' },
+        ],
+      }),
+    ).toEqual({
+      route: 'pages/home/index/index',
+      operations: [{ operation: 'Live', requestId: 'r1', message: '[url]' }],
+    });
+  });
+});
