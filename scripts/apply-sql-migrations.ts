@@ -16,6 +16,16 @@ const INITIAL_MIGRATION = '0000_platform_baseline.sql';
 const PLATFORM_SCHEMAS = ['bridge', 'competition', 'fpl', 'ops', 'reporting', 'understat'];
 const ADVISORY_LOCK_KEY = 912_883_471;
 const STATUS_ONLY = process.argv.includes('--status');
+// These additive migrations were introduced by a branch merge after the
+// production ledger had already recorded 0020. They are explicitly reviewed
+// as safe lexical backfills; any future out-of-order migration must be added
+// here deliberately instead of silently broadening the exception.
+const APPROVED_BACKDATED_MIGRATIONS = new Set([
+  '0016_tournament_setup_reliability.sql',
+  '0017_core_mutation_safety.sql',
+  '0018_content_publication_freeze.sql',
+  '0019_bug_report_submission_request_hash.sql',
+]);
 const STORAGE_MIGRATION = process.argv.includes('--storage-migration');
 const STORAGE_MIGRATION_APPLY = process.argv.includes('--apply');
 
@@ -117,14 +127,18 @@ function pendingMigrations(
 
   const latestApplied = ledger.at(-1)?.filename;
   const pending = migrations.filter((migration) => !applied.has(migration.filename));
-  const backdated = latestApplied
-    ? pending.filter((migration) => migration.filename < latestApplied)
+  const disallowedBackdated = latestApplied
+    ? pending.filter(
+        (migration) =>
+          migration.filename < latestApplied &&
+          !APPROVED_BACKDATED_MIGRATIONS.has(migration.filename),
+      )
     : [];
-  if (backdated.length > 0) {
+  if (disallowedBackdated.length > 0) {
     throw new Error(
-      `Pending migrations sort before applied tail ${latestApplied}: ${backdated
+      `Pending migrations sort before applied tail ${latestApplied}: ${disallowedBackdated
         .map((migration) => migration.filename)
-        .join(', ')}`,
+        .join(', ')}; review and allowlist additive backfills explicitly`,
     );
   }
   if (requireComplete && pending.length > 0) {
