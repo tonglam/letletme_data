@@ -47,10 +47,18 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     return typeof value === 'string' ? value : null;
   };
 
+  const lockPublicId = async (connection: DbOrTransaction, publicId: string): Promise<void> => {
+    await connection.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${publicId}))`);
+  };
+
   const insert = async (report: BugReportInsert): Promise<StoredBugReport> => {
     try {
       const db = await getDbInstance();
       const insertRow = async (connection: DbOrTransaction) => {
+        // Allocation and retirement use the same transaction-scoped lock so
+        // a new row cannot pass the registry check while cleanup is creating
+        // its durable retired-ID record.
+        await lockPublicId(connection, report.publicId);
         // Retention backups are the durable registry for public IDs after the
         // live report row is removed. Reject a generated ID that already
         // belongs to a retired report so the status endpoint can never point
@@ -210,6 +218,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const updateStatus = async (publicId: string, status: BugReportStatus, now: Date) => {
     const db = await getDbInstance();
     return db.transaction(async (tx) => {
+      await lockPublicId(tx, publicId);
       const [current] = await tx
         .select({
           id: bugReportsInOps.id,
@@ -234,6 +243,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       const [claim] = await tx
         .select({
           snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotDeleteStartedAt: bugReportRetentionBackupsInOps.screenshotDeleteStartedAt,
           screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
         })
         .from(bugReportRetentionBackupsInOps)
@@ -260,9 +270,17 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             ),
           )
           .limit(1);
-        screenshotUrl =
-          migration?.targetLocator ?? (claim.screenshotDeletedAt ? null : claimedLocator);
-        removeClaim = !claim.screenshotDeletedAt || Boolean(migration);
+        if (claim.screenshotDeleteStartedAt && !claim.screenshotDeletedAt) {
+          // The remote delete is already fenced. Keep the locator retired and
+          // leave the claim for completion/retry; never restore a URL that may
+          // be removed after this status transaction commits.
+          screenshotUrl = null;
+          removeClaim = false;
+        } else {
+          screenshotUrl =
+            migration?.targetLocator ?? (claim.screenshotDeletedAt ? null : claimedLocator);
+          removeClaim = !claim.screenshotDeletedAt || Boolean(migration);
+        }
       }
       if (claim && removeClaim) {
         await tx
@@ -598,6 +616,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   ): Promise<BugReportDeletionClaim | null> => {
     const db = await getDbInstance();
     return db.transaction(async (tx) => {
+      // Keep the public-ID allocation lock before taking the live-row lock;
+      // insert and retirement therefore share one lock order and cannot race
+      // a generated ID through the deletion window.
+      await lockPublicId(tx, report.publicId);
       const [current] = await tx
         .select({
           id: bugReportsInOps.id,
@@ -656,7 +678,6 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   };
 
   type BugReportDeletionPreparation =
-    | { kind: 'blocked' }
     | { kind: 'delete'; screenshotUrl: string }
     | { kind: 'complete' };
 
@@ -677,6 +698,14 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   ): Promise<BugReportDeletionPreparation | null> => {
     const db = await getDbInstance();
     return db.transaction(async (tx) => {
+      const [candidate] = await tx
+        .select({ id: bugReportsInOps.id, publicId: bugReportsInOps.publicId })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .limit(1);
+      if (!candidate) return null;
+      await lockPublicId(tx, candidate.publicId);
+
       const [current] = await tx
         .select({ id: bugReportsInOps.id })
         .from(bugReportsInOps)
@@ -719,7 +748,17 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .from(bugReportsInOps)
         .where(eq(bugReportsInOps.screenshotUrl, screenshotUrl))
         .limit(1);
-      if (reference) return { kind: 'blocked' };
+      if (reference) {
+        const [deleted] = await tx
+          .delete(bugReportsInOps)
+          .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+          .returning({ id: bugReportsInOps.id });
+        if (!deleted) return null;
+        // The object remains protected by the other live report; scrub this
+        // expired report's backup without creating a deletion tombstone.
+        await scrubRetentionBackup(tx, reportId, null);
+        return { kind: 'complete' };
+      }
 
       await tx
         .update(bugReportRetentionBackupsInOps)
@@ -732,6 +771,14 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const completeClaimedDeletion = async (reportId: string, now = new Date()): Promise<boolean> => {
     const db = await getDbInstance();
     return db.transaction(async (tx) => {
+      const [candidate] = await tx
+        .select({ publicId: bugReportsInOps.publicId })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .limit(1);
+      if (!candidate) return false;
+      await lockPublicId(tx, candidate.publicId);
+
       const [current] = await tx
         .select({ id: bugReportsInOps.id })
         .from(bugReportsInOps)
@@ -779,7 +826,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   ): Promise<boolean> => {
     const prepared = await prepareClaimedDeletion(reportId, now);
     if (!prepared) return false;
-    if (prepared.kind === 'blocked' || prepared.kind === 'complete') {
+    if (prepared.kind === 'complete') {
       return prepared.kind === 'complete';
     }
     if (!beforeDelete || !(await beforeDelete())) return false;
