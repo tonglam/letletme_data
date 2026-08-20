@@ -23,6 +23,9 @@ describe('bug-report screenshot retention', () => {
     const marked: string[] = [];
     const removed: string[] = [];
     const storage: BugReportScreenshotStorage = {
+      async getBucket() {
+        return { name: 'bug-report-screenshots', public: false };
+      },
       async list() {
         return [
           { name: key, created_at: '2026-01-01T00:00:00.000Z' },
@@ -70,6 +73,9 @@ describe('bug-report screenshot retention', () => {
     const result = await runBugReportScreenshotRetention({
       config: { ...config, BUG_REPORT_SCREENSHOT_STORAGE_ENABLED: false },
       storage: {
+        async getBucket() {
+          return { name: 'bug-report-screenshots', public: false };
+        },
         async list() {
           calls += 1;
           return [];
@@ -118,5 +124,222 @@ describe('bug-report screenshot retention', () => {
         })) as unknown as typeof fetch,
     );
     await expect(objectStorage.remove(key)).resolves.toBe('missing');
+  });
+
+  it('rejects a public bucket even when authenticated Storage calls work', async () => {
+    const storage: BugReportScreenshotStorage = {
+      async getBucket() {
+        return { name: 'bug-report-screenshots', public: true };
+      },
+      async list() {
+        throw new Error('list should not run');
+      },
+      async remove() {
+        throw new Error('remove should not run');
+      },
+    };
+
+    await expect(
+      runBugReportScreenshotRetention({
+        config,
+        storage,
+        repository: {
+          async listExpiredScreenshots() {
+            return [];
+          },
+          async listActiveScreenshotKeys() {
+            return [];
+          },
+          async markScreenshotDeleted() {},
+        },
+      }),
+    ).rejects.toThrow(/must be private/);
+  });
+
+  it('validates retention metadata against the configured bucket name', async () => {
+    const storage: BugReportScreenshotStorage = {
+      async getBucket() {
+        return { name: 'custom-screenshot-bucket', public: false };
+      },
+      async list() {
+        return [];
+      },
+      async remove() {
+        return 'deleted';
+      },
+    };
+
+    await expect(
+      runBugReportScreenshotRetention({
+        config: { ...config, BUG_REPORT_SCREENSHOT_BUCKET: 'custom-screenshot-bucket' },
+        storage,
+        repository: {
+          async listExpiredScreenshots() {
+            return [];
+          },
+          async listActiveScreenshotKeys() {
+            return [];
+          },
+          async markScreenshotDeleted() {},
+        },
+      }),
+    ).resolves.toMatchObject({ databaseScanned: 0, deleteAttempts: 0 });
+  });
+
+  it('bounds bucket metadata and list requests with an abort signal', async () => {
+    const calls: Array<{ url: string; signal?: AbortSignal }> = [];
+    const storage = createBugReportScreenshotStorage(config, (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      calls.push({ url: String(input), signal: init?.signal ?? undefined });
+      return new Response(JSON.stringify({ name: 'bug-report-screenshots', public: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch);
+
+    await storage.getBucket();
+    await expect(storage.list('bug-reports/', 1, 0)).rejects.toThrow(/invalid response/);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.signal)).toBe(true);
+  });
+
+  it('shares the 1,000-delete budget across database failures and orphan cleanup', async () => {
+    let removeCalls = 0;
+    const storage: BugReportScreenshotStorage = {
+      async getBucket() {
+        return { name: 'bug-report-screenshots', public: false };
+      },
+      async list() {
+        return [
+          {
+            name: 'bug-reports/650e8400-e29b-41d4-a716-446655440000.jpg',
+            created_at: '2026-01-01T00:00:00.000Z',
+          },
+        ];
+      },
+      async remove() {
+        removeCalls += 1;
+        throw new Error('storage unavailable');
+      },
+    };
+    const result = await runBugReportScreenshotRetention({
+      now: new Date('2026-08-20T00:00:00.000Z'),
+      config,
+      storage,
+      repository: {
+        async listExpiredScreenshots(_cutoff, _limit, offset) {
+          const start = offset ?? 0;
+          if (start >= 1_000) return [];
+          return Array.from({ length: 100 }, (_, index) => ({
+            id: `report-${start + index}`,
+            screenshotObjectKey: `bug-reports/${String(start + index).padStart(8, '0')}-e29b-41d4-a716-446655440000.jpg`,
+            createdAt: new Date('2026-01-01'),
+          }));
+        },
+        async listActiveScreenshotKeys() {
+          return [];
+        },
+        async markScreenshotDeleted() {
+          throw new Error('should not mark failed deletes');
+        },
+      },
+    });
+
+    expect(result.deleteAttempts).toBe(1_000);
+    expect(result.failed).toBe(1_000);
+    expect(result.orphanScanned).toBe(0);
+    expect(removeCalls).toBe(1_000);
+  });
+
+  it('counts successful, missing, and failed deletes in the same budget', async () => {
+    const removed: string[] = [];
+    let listCalls = 0;
+    const orphanKey = 'bug-reports/750e8400-e29b-41d4-a716-446655440000.gif';
+    const storage: BugReportScreenshotStorage = {
+      async getBucket() {
+        return { name: 'bug-report-screenshots', public: false };
+      },
+      async list() {
+        listCalls += 1;
+        return listCalls === 1 ? [] : [{ name: orphanKey, created_at: '2026-01-01T00:00:00.000Z' }];
+      },
+      async remove(objectKey) {
+        removed.push(objectKey);
+        if (objectKey.endsWith('.png')) throw new Error('temporary failure');
+        if (objectKey.endsWith('.jpg')) return 'missing';
+        return 'deleted';
+      },
+    };
+    const result = await runBugReportScreenshotRetention({
+      now: new Date('2026-08-20T00:00:00.000Z'),
+      config,
+      storage,
+      repository: {
+        async listExpiredScreenshots() {
+          return [
+            {
+              id: 'failed',
+              screenshotObjectKey: 'bug-reports/failed.png',
+              createdAt: new Date('2026-01-01'),
+            },
+            {
+              id: 'missing',
+              screenshotObjectKey: 'bug-reports/missing.jpg',
+              createdAt: new Date('2026-01-01'),
+            },
+          ];
+        },
+        async listActiveScreenshotKeys() {
+          return [];
+        },
+        async markScreenshotDeleted() {},
+      },
+    });
+
+    expect(result.deleteAttempts).toBe(3);
+    expect(result.failed).toBe(1);
+    expect(result.missing).toBe(1);
+    expect(result.orphanDeleted).toBe(1);
+    expect(removed).toEqual(['bug-reports/failed.png', 'bug-reports/missing.jpg', orphanKey]);
+  });
+
+  it('treats an orphan created exactly at the 90-day cutoff as eligible', async () => {
+    const cutoffObject = 'bug-reports/850e8400-e29b-41d4-a716-446655440000.webp';
+    let listCalls = 0;
+    const removed: string[] = [];
+    const storage: BugReportScreenshotStorage = {
+      async getBucket() {
+        return { name: 'bug-report-screenshots', public: false };
+      },
+      async list() {
+        listCalls += 1;
+        return listCalls === 1
+          ? []
+          : [{ name: cutoffObject, created_at: '2026-05-22T00:00:00.000Z' }];
+      },
+      async remove(objectKey) {
+        removed.push(objectKey);
+        return 'deleted';
+      },
+    };
+    const result = await runBugReportScreenshotRetention({
+      now: new Date('2026-08-20T00:00:00.000Z'),
+      config,
+      storage,
+      repository: {
+        async listExpiredScreenshots() {
+          return [];
+        },
+        async listActiveScreenshotKeys() {
+          return [];
+        },
+        async markScreenshotDeleted() {},
+      },
+    });
+
+    expect(result.orphanDeleted).toBe(1);
+    expect(removed).toEqual([cutoffObject]);
   });
 });

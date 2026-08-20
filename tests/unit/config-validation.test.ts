@@ -12,6 +12,11 @@ const baseEnv = {
   QUEUE_REDIS_HOST: '127.0.0.1',
   QUEUE_REDIS_PORT: '6379',
   QUEUE_REDIS_DB: '10',
+  BUG_REPORT_SCREENSHOT_STORAGE_ENABLED: 'true',
+  BUG_REPORT_SCREENSHOT_SUPABASE_URL: 'https://example.supabase.co',
+  BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY: 'test-secret',
+  BUG_REPORT_SCREENSHOT_BUCKET: 'bug-report-screenshots',
+  BUG_REPORT_SCREENSHOT_RETENTION_DAYS: '90',
 };
 
 async function runEnvCheck(
@@ -30,6 +35,19 @@ async function runEnvCheck(
 describe('production environment preflight', () => {
   test('rejects enabled API auth without a configured key digest', async () => {
     expect(await runEnvCheck('')).not.toBe(0);
+  });
+
+  test('rejects production when private screenshot retention is not configured', async () => {
+    expect(
+      await runEnvCheck('a'.repeat(64), {
+        BUG_REPORT_SCREENSHOT_STORAGE_ENABLED: 'false',
+      }),
+    ).not.toBe(0);
+    expect(
+      await runEnvCheck('a'.repeat(64), {
+        BUG_REPORT_SCREENSHOT_BUCKET: 'public-bucket',
+      }),
+    ).not.toBe(0);
   });
 
   test('accepts a valid SHA-256 API key digest', async () => {
@@ -68,6 +86,7 @@ describe('production environment preflight', () => {
   test('uses bounded preflight, verifies roles read-only, and publishes before restart', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
     const preflight = workflow.indexOf('bun run env:check');
+    const screenshotProbe = workflow.indexOf('--probe-bug-report-storage');
     const identityContract = workflow.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = workflow.indexOf('data_runtime_database_url=$(sed -n');
     const stopServices = workflow.indexOf(
@@ -85,6 +104,8 @@ describe('production environment preflight', () => {
     const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
 
     expect(preflight).toBeGreaterThan(0);
+    expect(screenshotProbe).toBeGreaterThan(preflight);
+    expect(screenshotProbe).toBeLessThan(identityContract);
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(configuredRuntimeUrl).toBeLessThan(preflight);
     expect(identityContract).toBeGreaterThan(preflight);
@@ -135,6 +156,7 @@ describe('production environment preflight', () => {
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(deployScript).toContain('bun scripts/wait-for-migration-login.ts');
+    expect(deployScript).toContain('bun validate-env.ts --probe-bug-report-storage');
     expect(deployScript).toContain('bun run db:verify-runtime-logins');
     expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(deployScript).not.toContain('db:provision-runtime-logins');
