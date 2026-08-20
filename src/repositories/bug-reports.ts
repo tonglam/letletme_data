@@ -64,11 +64,17 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     } catch (error) {
       logError('Failed to insert bug report', error);
       if (error instanceof DatabaseError) throw error;
-      const databaseError = error as { code?: unknown; constraint?: unknown };
+      const databaseError = error as {
+        code?: unknown;
+        constraint?: unknown;
+        constraint_name?: unknown;
+      };
+      const constraint = databaseError.constraint ?? databaseError.constraint_name;
       throw new DatabaseError(
         'Failed to store bug report',
         typeof databaseError.code === 'string' ? databaseError.code : undefined,
         error instanceof Error ? error : undefined,
+        typeof constraint === 'string' ? constraint : undefined,
       );
     }
   };
