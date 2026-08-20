@@ -395,8 +395,8 @@ export const bugReportsInOps = ops.table(
     screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
     closedAt: timestamp('closed_at', { withTimezone: true, mode: 'date' }),
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
-    scrubbedAt: timestamp('scrubbed_at', { withTimezone: true, mode: 'date' }),
     submissionRequestHash: text('submission_request_hash'),
+    scrubbedAt: timestamp('scrubbed_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
