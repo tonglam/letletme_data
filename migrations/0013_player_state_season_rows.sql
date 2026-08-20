@@ -71,7 +71,7 @@ CREATE TABLE reporting.player_state_season_rows (
 );
 
 CREATE INDEX player_state_season_rows_player_idx
-  ON reporting.player_state_season_rows (player_code, season_id DESC);
+  ON reporting.player_state_season_rows (player_code, season_id DESC NULLS LAST);
 
 CREATE INDEX player_state_season_rows_season_position_idx
   ON reporting.player_state_season_rows (season_id, element_type, player_code);
