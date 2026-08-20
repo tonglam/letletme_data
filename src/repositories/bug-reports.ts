@@ -62,6 +62,41 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           await connection.execute(
             sql`SELECT pg_advisory_xact_lock(hashtext(${report.screenshotUrl}))`,
           );
+
+          // A retention claim is a durable tombstone for its original object
+          // locator. Checking it after the advisory lock means an insert that
+          // started while cleanup was deleting the object cannot resurrect the
+          // now-missing locator after the delete commits.
+          const [retiredByRetention] = await connection
+            .select({ id: bugReportRetentionBackupsInOps.id })
+            .from(bugReportRetentionBackupsInOps)
+            .where(
+              sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrl' = ${report.screenshotUrl}`,
+            )
+            .limit(1);
+          if (retiredByRetention) {
+            throw new DatabaseError(
+              'Screenshot locator has already been retired',
+              'BUG_REPORT_SCREENSHOT_LOCATOR_RETIRED',
+            );
+          }
+
+          const [retiredByMigration] = await connection
+            .select({ id: bugReportStorageMigrationsInOps.id })
+            .from(bugReportStorageMigrationsInOps)
+            .where(
+              and(
+                eq(bugReportStorageMigrationsInOps.sourceLocator, report.screenshotUrl),
+                isNotNull(bugReportStorageMigrationsInOps.deletedAt),
+              ),
+            )
+            .limit(1);
+          if (retiredByMigration) {
+            throw new DatabaseError(
+              'Screenshot locator has already been migrated and deleted',
+              'BUG_REPORT_SCREENSHOT_LOCATOR_RETIRED',
+            );
+          }
         }
         const [row] = await connection
           .insert(bugReportsInOps)

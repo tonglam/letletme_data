@@ -437,7 +437,11 @@ function toCachePayload(prepared: PreparedLiveSnapshot): LiveSnapshotCachePayloa
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  try {
+    return postgresJsonbCanonicalJson(left) === postgresJsonbCanonicalJson(right);
+  } catch {
+    return false;
+  }
 }
 
 function snapshotContentMatches(
