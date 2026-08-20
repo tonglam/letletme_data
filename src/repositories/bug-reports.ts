@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, gt, isNotNull, isNull, lte, or } from 'drizzle-orm';
+import { and, asc, eq, gt, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import {
   bugReportRetentionBackupsInOps,
   bugReportStorageMigrationsInOps,
@@ -57,38 +57,44 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const insert = async (report: BugReportInsert): Promise<StoredBugReport> => {
     try {
       const db = await getDbInstance();
-      const [row] = await db
-        .insert(bugReportsInOps)
-        .values({
-          id: report.id,
-          publicId: report.publicId,
-          source: report.source,
-          userId: report.userId,
-          entryId: report.entryId,
-          body: report.body,
-          submissionId: report.submissionId,
-          screenshotObjectKey: report.screenshotObjectKey,
-          screenshotUrl: report.screenshotUrl,
-          clientMeta: report.clientMeta,
-          status: 'open',
-          closedAt: report.closedAt,
-          expiresAt: report.expiresAt,
-        })
-        .onConflictDoNothing({ target: bugReportsInOps.submissionId })
-        .returning({
-          id: bugReportsInOps.id,
-          publicId: bugReportsInOps.publicId,
-          createdAt: bugReportsInOps.createdAt,
-          status: bugReportsInOps.status,
-          closedAt: bugReportsInOps.closedAt,
-          expiresAt: bugReportsInOps.expiresAt,
-          screenshotUrl: bugReportsInOps.screenshotUrl,
-          body: bugReportsInOps.body,
-          clientMeta: bugReportsInOps.clientMeta,
-          source: bugReportsInOps.source,
-          userId: bugReportsInOps.userId,
-          entryId: bugReportsInOps.entryId,
-        });
+      const insertRow = async (connection: DbOrTransaction) => {
+        if (report.screenshotUrl) {
+          await connection.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtext(${report.screenshotUrl}))`,
+          );
+        }
+        const [row] = await connection
+          .insert(bugReportsInOps)
+          .values({
+            id: report.id,
+            publicId: report.publicId,
+            source: report.source,
+            userId: report.userId,
+            entryId: report.entryId,
+            body: report.body,
+            screenshotUrl: report.screenshotUrl,
+            clientMeta: report.clientMeta,
+            status: 'open',
+            closedAt: report.closedAt,
+            expiresAt: report.expiresAt,
+          })
+          .returning({
+            id: bugReportsInOps.id,
+            publicId: bugReportsInOps.publicId,
+            createdAt: bugReportsInOps.createdAt,
+            status: bugReportsInOps.status,
+            closedAt: bugReportsInOps.closedAt,
+            expiresAt: bugReportsInOps.expiresAt,
+            screenshotUrl: bugReportsInOps.screenshotUrl,
+            body: bugReportsInOps.body,
+            clientMeta: bugReportsInOps.clientMeta,
+            source: bugReportsInOps.source,
+            userId: bugReportsInOps.userId,
+            entryId: bugReportsInOps.entryId,
+          });
+        return row;
+      };
+      const row = report.screenshotUrl ? await db.transaction(insertRow) : await insertRow(db);
 
       if (!row) {
         if (!report.submissionId) throw new DatabaseError('Bug report insert returned no row');
@@ -506,6 +512,17 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           .where(eq(bugReportRetentionBackupsInOps.id, reportId))
           .limit(1);
         if (!claim) throw new ReportNoLongerExpiredError();
+        if (claim && reportId) {
+          const snapshot = await tx
+            .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+            .from(bugReportRetentionBackupsInOps)
+            .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+            .limit(1);
+          const screenshotUrl = screenshotUrlFromSnapshot(snapshot[0]?.snapshot);
+          if (screenshotUrl) {
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
+          }
+        }
         await beforeDelete?.();
         const deleted = await tx
           .delete(bugReportsInOps)

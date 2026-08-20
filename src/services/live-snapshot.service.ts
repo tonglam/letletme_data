@@ -22,7 +22,7 @@ import { createTeamRepository } from '../repositories/teams';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
-import { canonicalJson } from '../utils/content-hash';
+import { postgresJsonbCanonicalJson } from '../utils/content-hash';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import {
@@ -82,7 +82,7 @@ export interface LiveSnapshotDurablePersistenceResult {
 }
 
 function publicationItemProof(name: 'eventLive' | 'fixtures', payload: unknown) {
-  const serialized = canonicalJson(payload);
+  const serialized = postgresJsonbCanonicalJson(payload);
   return {
     name,
     payload,

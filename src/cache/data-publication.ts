@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import type Redis from 'ioredis';
 
-import { canonicalJson } from '../utils/content-hash';
+import { canonicalJson, postgresJsonbCanonicalJson } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
 import { redisSingleton } from './singleton';
 
@@ -337,7 +337,10 @@ function serializeItems(input: PublishDataRevisionInput): SerializedItem[] {
     names.add(item.name);
     let payload: string;
     try {
-      payload = canonicalJson(item.value);
+      payload =
+        input.dataset === 'fpl:live'
+          ? postgresJsonbCanonicalJson(item.value)
+          : canonicalJson(item.value);
     } catch {
       throw new CacheError(
         `Publication item ${item.name} is not JSON serializable`,

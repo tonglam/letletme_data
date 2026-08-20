@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { and, asc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 
@@ -16,7 +16,11 @@ import {
 } from '../cache/data-publication';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { contentHash } from '../utils/content-hash';
+import {
+  contentHash,
+  postgresJsonbContentHash,
+  postgresJsonbCanonicalJson,
+} from '../utils/content-hash';
 import { DatabaseError } from '../utils/errors';
 
 export type SyncRunStatus =
@@ -132,11 +136,17 @@ function publicationItemCount(value: unknown): number {
   return value === null || value === undefined ? 0 : 1;
 }
 
-function publicationPayloadChecksum(value: unknown): string | null {
+function publicationPayloadChecksums(value: unknown): readonly string[] {
   try {
-    return contentHash(value);
+    const canonical = postgresJsonbCanonicalJson(value);
+    const legacy = JSON.stringify(value);
+    const checksums = [postgresJsonbContentHash(value), contentHash(value)];
+    if (legacy !== canonical) {
+      checksums.push(createHash('sha256').update(legacy, 'utf8').digest('hex'));
+    }
+    return checksums;
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -903,7 +913,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           !manifestItem ||
           manifestItem.count !== row.itemCount ||
           manifestItem.sha256 !== row.checksum ||
-          publicationPayloadChecksum(row.payload) !== row.checksum ||
+          !publicationPayloadChecksums(row.payload).includes(row.checksum) ||
           publicationItemCount(row.payload) !== row.itemCount
         ) {
           return null;
