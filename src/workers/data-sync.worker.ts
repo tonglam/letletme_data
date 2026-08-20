@@ -16,7 +16,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { formatCronDateKey } from '../utils/timezone';
 import type { WorkerRuntime } from './worker-runtime';
 
@@ -59,7 +59,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     if (job.name === 'player-values') {
       return runTrackedJob(context, async () => {
         const changeDate = job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt));
-        const result = await withMutationConflictGuard(mutationInput, () =>
+        const result = await withMutationScopes(mutationInput, () =>
           syncCurrentPlayerValues(season, changeDate, {
             onTargetEventResolved: recordResolvedTarget,
             deferPriceSyncEnqueue: true,
@@ -104,7 +104,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     // Core aliases perform upstream reads before acquiring their own short
     // multi-table persistence/publication lock.
     if (job.name === 'core-snapshot') return execute();
-    return withMutationConflictGuard(mutationInput, execute);
+    return withMutationScopes(mutationInput, execute);
   });
 };
 

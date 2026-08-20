@@ -11,7 +11,6 @@ import {
   type TournamentSetupIssueInput,
   type TournamentSetupIssueRecord,
 } from '../domain/tournament-setup-issue';
-import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 const table = tournamentSetupIssuesInCompetition;
 
@@ -102,7 +101,6 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
       }));
 
       for (const issue of normalized) {
-        assertMutationLockHealthy();
         await db.execute(sql`
           INSERT INTO competition.tournament_setup_issues (
             season_id,
@@ -175,7 +173,6 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
         ]),
       ];
       if (keys.length === 0) {
-        assertMutationLockHealthy();
         await db.execute(sql`
           UPDATE competition.tournament_setup_issues
           SET resolved_at = ${now},
@@ -186,7 +183,6 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
             AND resolved_at IS NULL
         `);
       } else {
-        assertMutationLockHealthy();
         await db.execute(sql`
           UPDATE competition.tournament_setup_issues
           SET resolved_at = ${now},
@@ -198,8 +194,6 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
             AND NOT (issue_key = ANY(${keys}::text[]))
         `);
       }
-
-      assertMutationLockHealthy();
       const [counts] = await db.execute<{ warningCount: number; unresolvedCount: number }>(sql`
         SELECT
           count(*) FILTER (WHERE resolved_at IS NULL AND severity = 'warning')::int AS "warningCount",
@@ -210,8 +204,6 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
       `);
       const warningCount = Number(counts?.warningCount ?? 0);
       const unresolvedCount = Number(counts?.unresolvedCount ?? 0);
-
-      assertMutationLockHealthy();
       await db.execute(sql`
         UPDATE competition.tournaments t
         SET

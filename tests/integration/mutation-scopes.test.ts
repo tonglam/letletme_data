@@ -2,41 +2,37 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
 
-import { afterAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 
 import { tournamentSetupRebuildScopes } from '../../src/domain/mutation-scope';
-import { closeLockClient, withMutationConflictGuard } from '../../src/utils/mutation-lock';
+import { withMutationScopes } from '../../src/utils/mutation-scopes';
 
-afterAll(async () => {
-  await closeLockClient();
-});
-
-type GuardRun = {
+type ScopeRun = {
   label: string;
   start: number;
   end: number;
 };
 
-async function runGuarded(
+async function runScoped(
   label: string,
-  input: Parameters<typeof withMutationConflictGuard>[0],
+  input: Parameters<typeof withMutationScopes>[0],
   holdMs: number,
-  runs: GuardRun[],
+  runs: ScopeRun[],
 ): Promise<void> {
-  await withMutationConflictGuard(input, async () => {
+  await withMutationScopes(input, async () => {
     const start = Date.now();
     await new Promise((resolve) => setTimeout(resolve, holdMs));
     runs.push({ label, start, end: Date.now() });
   });
 }
 
-describe('mutation lock serialization (FP-07)', () => {
+describe('mutation scope serialization (FP-07)', () => {
   test(
     'tournament setup and battle-race results never run concurrently (C4)',
     async () => {
-      const runs: GuardRun[] = [];
+      const runs: ScopeRun[] = [];
       await Promise.all([
-        runGuarded(
+        runScoped(
           'setup-rebuild',
           {
             queueName: 'tournament-setup',
@@ -49,7 +45,7 @@ describe('mutation lock serialization (FP-07)', () => {
           400,
           runs,
         ),
-        runGuarded(
+        runScoped(
           'battle-race',
           { queueName: 'tournament-sync', jobName: 'tournament-battle-race', eventId: 33 },
           400,
@@ -69,15 +65,15 @@ describe('mutation lock serialization (FP-07)', () => {
   test(
     'results jobs on different events serialize on the shared scope',
     async () => {
-      const runs: GuardRun[] = [];
+      const runs: ScopeRun[] = [];
       await Promise.all([
-        runGuarded(
+        runScoped(
           'points-race-gw33',
           { queueName: 'tournament-sync', jobName: 'tournament-points-race', eventId: 33 },
           300,
           runs,
         ),
-        runGuarded(
+        runScoped(
           'knockout-gw34',
           { queueName: 'tournament-sync', jobName: 'tournament-knockout', eventId: 34 },
           300,

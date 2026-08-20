@@ -11,7 +11,6 @@ import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
-import { closeLockClient } from './utils/mutation-lock';
 import { closeUnderstatPermitClient } from './utils/understat-rate-limit';
 import type { WorkerRuntime } from './workers/worker-runtime';
 
@@ -59,7 +58,6 @@ async function shutdown(signal: string) {
   const closeAll = Promise.allSettled([
     ...allWorkers.map((worker) => worker.close()),
     ...allQueueEvents.map((events) => events.close()),
-    closeLockClient(),
     closeUnderstatPermitClient(),
   ]);
 

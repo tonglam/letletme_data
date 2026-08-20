@@ -25,7 +25,7 @@ import { syncTournamentSelectionStats } from './tournament-selection-stats.servi
 import { rebuildTournamentStructure } from './tournament-structure.service';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 function scopedEntryIds(allEntryIds: number[], affectedEntryIds: number[]): number[] {
   const allowed = new Set(allEntryIds);
@@ -80,7 +80,7 @@ async function repairTournamentSetupIssueUnlocked(
   switch (issue.code) {
     case 'ENTRY_PROFILE_INCOMPLETE': {
       if (targetEntryIds.length === 0) break;
-      const entryIssues = await withMutationConflictGuard(
+      const entryIssues = await withMutationScopes(
         {
           queueName: 'tournament-repair',
           jobName: 'entry-profile',
@@ -99,7 +99,7 @@ async function repairTournamentSetupIssueUnlocked(
 
     case 'ENTRY_HISTORY_INCOMPLETE': {
       if (targetEntryIds.length === 0 || eventId === null) break;
-      const transferResult = await withMutationConflictGuard(
+      const transferResult = await withMutationScopes(
         {
           queueName: 'tournament-repair',
           jobName: 'entry-transfer-history',
@@ -159,7 +159,7 @@ async function repairTournamentSetupIssueUnlocked(
     case 'SELECTION_INSIGHTS_INCOMPLETE': {
       if (eventId === null) break;
       try {
-        const result = await withMutationConflictGuard(
+        const result = await withMutationScopes(
           {
             queueName: 'tournament-repair',
             jobName: 'selection-insights',
@@ -200,7 +200,7 @@ async function repairTournamentSetupIssueUnlocked(
         season,
         issue.tournamentId,
       );
-      await withMutationConflictGuard(
+      await withMutationScopes(
         {
           queueName: 'tournament-repair',
           jobName: 'structure',
@@ -278,7 +278,7 @@ export async function repairTournamentSetupIssue(
   const candidate = await tournamentSetupIssueRepository.findUnresolvedById(season, issueId);
   if (!candidate) return;
 
-  await withMutationConflictGuard(
+  await withMutationScopes(
     {
       queueName: 'tournament-repair',
       jobName: 'repair-issue',

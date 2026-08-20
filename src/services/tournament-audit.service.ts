@@ -11,7 +11,7 @@ import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo, logWarn } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 import {
   backfillTournamentHistory,
@@ -312,7 +312,7 @@ export async function runTournamentAuditAndFixup(
   ]);
   if (missingEntryIds.length > 0) {
     // Entry FPL only — no structure global (same as primary setup path).
-    const entrySyncIssues = await withMutationConflictGuard(
+    const entrySyncIssues = await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',
@@ -334,7 +334,7 @@ export async function runTournamentAuditAndFixup(
     );
     // C4: audit rebuild must hold structure global (setup worker no longer
     // wraps the whole job — FP-07 Codex P1).
-    await withMutationConflictGuard(
+    await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',

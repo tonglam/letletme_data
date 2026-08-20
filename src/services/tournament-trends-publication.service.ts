@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { logError, logInfo } from '../utils/logger';
-import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 type ScopeAudit = {
   expected_entries: number;
@@ -55,11 +54,9 @@ export async function publishTournamentTrendScope(
   }
 
   const client = await getDbClient();
-  assertMutationLockHealthy();
   // Audit, checksum and row aggregation must observe one source snapshot. The
   // advisory lock only serializes publishers; source writers do not take it.
   return client.begin(async (tx) => {
-    assertMutationLockHealthy();
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`trends:${season.seasonId}:${tournamentId}:${eventId}`}, 0))`;
     // Establish the repeatable-read snapshot only after the scope lock is held.
     await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
@@ -213,7 +210,6 @@ export async function publishTournamentTrendScope(
     const publicationState = picksReady ? 'READY' : 'COLLECTING';
     const ownershipState = picksReady ? 'READY' : 'NOT_READY';
     const transfersState = transfersReady ? 'READY' : 'NOT_READY';
-    assertMutationLockHealthy();
     const inserted = await tx<Array<{ publication_id: number }>>`
       INSERT INTO reporting.tournament_selection_stat_publications (
         season_id, tournament_id, event_id, revision, publication_state, is_active,
@@ -294,7 +290,6 @@ export async function publishTournamentTrendScope(
         ORDER BY element_ids.element_id
       `;
       for (const row of trendRows) {
-        assertMutationLockHealthy();
         await tx`
           INSERT INTO reporting.tournament_selection_stat_rows (
             publication_id, element_id, selected_count, effective_selection_count,
@@ -308,7 +303,6 @@ export async function publishTournamentTrendScope(
         `;
         rows += 1;
       }
-      assertMutationLockHealthy();
       await tx`
         UPDATE reporting.tournament_selection_stat_publications
         SET is_active = false

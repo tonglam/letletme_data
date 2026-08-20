@@ -206,7 +206,7 @@ Allowed Redis state is limited to `QUEUE_REDIS_*`:
 
 Cross-process mutation coordination is PostgreSQL-owned. Writers acquire the sorted
 `ops.mutation_scopes` rows inside the same transaction as their canonical writes; no Redis
-mutation-lock key is authoritative.
+mutation coordination key is authoritative.
 
 GraphQL may later add a bounded, revision-aware query cache for the few Understat pages, but that
 cache is GraphQL-owned and cannot become a Data ingestion dependency.

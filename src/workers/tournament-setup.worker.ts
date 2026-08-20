@@ -24,7 +24,7 @@ import { logError, logInfo } from '../utils/logger';
 import { runWithFplRequestMetrics } from '../utils/fpl-request-metrics';
 import { runTrackedJob } from '../utils/job-run-logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { getQueueConnection } from '../utils/queue';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
@@ -85,7 +85,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
       // points/knockout writes inside setup phases (FP-07 Codex P2).
       await runWithFplRequestMetrics(() =>
         runTrackedJob(context, () =>
-          withMutationConflictGuard(
+          withMutationScopes(
             {
               queueName: job.queueName,
               jobName: job.name,
@@ -225,7 +225,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
             : err instanceof Error
               ? err.name
               : 'SETUP_FAILED';
-        await withMutationConflictGuard(
+        await withMutationScopes(
           {
             queueName: tournamentSetupQueueName,
             jobName: 'persist-failed-state',

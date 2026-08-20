@@ -11,7 +11,6 @@ import type {
 } from '../domain/tournament';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 export type TournamentRosterRecord = TournamentConfig & {
   adminEntryId: number;
@@ -271,7 +270,6 @@ export const tournamentRosterRepository = {
     season: FplSeasonRef,
     tournamentId: number,
   ): Promise<string> => {
-    assertMutationLockHealthy();
     const client = await getDbClient();
     const rows = await client<{ marker: string }[]>`
       UPDATE competition.tournaments
@@ -309,7 +307,6 @@ export const tournamentRosterRepository = {
     tournamentId: number,
     marker?: string,
   ): Promise<boolean> => {
-    assertMutationLockHealthy();
     const client = await getDbClient();
     const rows = await client<{ tournamentId: number }[]>`
       UPDATE competition.tournaments

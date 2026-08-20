@@ -65,12 +65,7 @@ const EnvSchema = z.object({
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
-  // Mutation conflict guard timing
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(false),
-  MUTATION_LOCK_TTL_MS: integerEnv(30_000),
-  MUTATION_LOCK_WAIT_TIMEOUT_MS: integerEnv(120_000),
-  MUTATION_LOCK_RETRY_DELAY_MS: integerEnv(250),
-  MUTATION_LOCK_HEARTBEAT_MS: integerEnv(10_000),
   FPL_MAX_INFLIGHT: z.coerce.number().int().min(1).max(32).default(5),
   FPL_REQUESTS_PER_SECOND: z.coerce.number().int().min(1).max(20).default(4),
   FPL_BULK_MAX_INFLIGHT_DURING_LIVE: z.coerce.number().int().min(1).max(32).default(3),
@@ -270,10 +265,6 @@ export function getConfig(): AppConfig {
       throw new Error(
         'BUG_REPORT_STORAGE_INTERNAL_URL and BUG_REPORT_CLEANUP_SECRET are required in production',
       );
-    }
-
-    if (parsed.MUTATION_LOCK_HEARTBEAT_MS > parsed.MUTATION_LOCK_TTL_MS / 3) {
-      throw new Error('MUTATION_LOCK_HEARTBEAT_MS must be no greater than one third of TTL');
     }
 
     if (parsed.FPL_ADMISSION_LEASE_MS < parsed.FPL_REQUEST_DEADLINE_MS + 5_000) {

@@ -3,7 +3,7 @@ import { getDb, runInDatabaseTransaction } from '../db/singleton';
 import { logInfo } from './logger';
 import type postgres from 'postgres';
 
-type MutationLockInput = {
+type MutationScopeInput = {
   queueName: string;
   jobName: string;
   jobId?: string;
@@ -17,10 +17,10 @@ type MutationLockInput = {
   scopes?: string[];
 };
 
-const WAIT_TIMEOUT_MS = 120_000;
+const MUTATION_SCOPE_WAIT_TIMEOUT_MS = 120_000;
 
 /** Acquire all scopes in lexical order on the caller's PostgreSQL transaction.
- * Every canonical write guarded by this helper must run before the transaction
+ * Every canonical write using these scopes must run before the transaction
  * callback returns, so commit/rollback/process death releases the locks. */
 export async function acquireMutationScopes(
   transaction: postgres.TransactionSql,
@@ -44,12 +44,9 @@ export async function acquireMutationScopes(
 }
 
 /**
- * The old implementation held Redis leases while arbitrary DB work ran.  A
- * missed heartbeat could silently expire the lease while the operation kept
- * mutating canonical data.  Keep the existing call-site contract, but hold
- * deterministic PostgreSQL row locks for the complete guarded operation.
+ * Hold deterministic PostgreSQL row locks for the complete canonical write.
  * `postgres.Sql.begin` pins one transaction even when DATABASE_URL points at a
- * transaction pooler; the lock therefore has no process-local ownership gap.
+ * transaction pooler; the scope therefore has no process-local ownership gap.
  */
 async function withDatabaseMutationScopes<T>(
   scopes: readonly string[],
@@ -61,8 +58,8 @@ async function withDatabaseMutationScopes<T>(
   const db = await getDb();
   // Use Drizzle's transaction API so the repository handle and raw postgres.js
   // client are pinned to the same connection. The raw client is an internal
-  // property of PostgresJsTransaction, exposed here only for legacy raw SQL
-  // callers that already participate in the guarded operation.
+  // property of PostgresJsTransaction, exposed here for raw SQL callers that
+  // participate in the same scoped operation.
   try {
     return (await db.transaction(async (drizzleTransaction) => {
       const transaction = (
@@ -73,7 +70,7 @@ async function withDatabaseMutationScopes<T>(
       if (!transaction) {
         throw new Error('Drizzle transaction did not expose its pinned postgres client');
       }
-      await transaction`SELECT set_config('lock_timeout', ${`${WAIT_TIMEOUT_MS}ms`}, true)`;
+      await transaction`SELECT set_config('lock_timeout', ${`${MUTATION_SCOPE_WAIT_TIMEOUT_MS}ms`}, true)`;
       await acquireMutationScopes(transaction, normalizedScopes);
       return runInDatabaseTransaction(transaction, operation, drizzleTransaction);
     })) as T;
@@ -94,24 +91,8 @@ async function withDatabaseMutationScopes<T>(
   }
 }
 
-/** Kept as a compatibility name while callers migrate to DB coordination. */
-export async function closeLockClient(): Promise<void> {
-  // No Redis lock client remains.  Database connections are owned by the
-  // singleton and are closed by the normal worker shutdown path.
-}
-
-/**
- * Compatibility assertion for repositories that also participate in guarded
- * mutations. PostgreSQL row locks are held by the transaction opened by
- * `withMutationConflictGuard`, so there is no independent expiring lease to
- * re-check here.
- */
-export function assertMutationLockHealthy(): void {
-  // The transaction-scoped mutation lock is the health fence.
-}
-
-export async function withMutationConflictGuard<T>(
-  input: MutationLockInput,
+export async function withMutationScopes<T>(
+  input: MutationScopeInput,
   operation: () => Promise<T>,
 ): Promise<T> {
   const scopes =

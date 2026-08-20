@@ -10,7 +10,6 @@ import { eventRepository } from '../repositories/events';
 import type { RawFPLEntryHistoryCurrentItem } from '../types';
 import { ValidationError } from '../utils/errors';
 import { logInfo } from '../utils/logger';
-import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 export type EntryInfoClient = Pick<typeof fplClient, 'getEntrySummary' | 'getEntryHistory'>;
 
@@ -93,9 +92,7 @@ export async function syncEntryInfo(
 
   const db = await getDb();
   const transactionStartedAt = performance.now();
-  assertMutationLockHealthy();
   const saved = await db.transaction(async (tx) => {
-    assertMutationLockHealthy();
     await acquireEntrySeasonWriteFence(tx, season, [entryId]);
 
     const entryInfoRepository = createEntryInfoRepository(tx);

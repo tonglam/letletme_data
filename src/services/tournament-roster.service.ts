@@ -15,7 +15,7 @@ import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { ConflictError, NotFoundError, ValidationError } from '../utils/errors';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 import {
   ensureTournamentCoreResults,
@@ -225,7 +225,7 @@ async function reconcileTournamentRosterUnlocked(
 
     if (addedEntryIds.length > 0) {
       const targetEventId = window?.endEventId ?? 0;
-      const entryIssues = await withMutationConflictGuard(
+      const entryIssues = await withMutationScopes(
         {
           queueName: 'tournament-roster',
           jobName: 'entry-profile',
@@ -250,7 +250,7 @@ async function reconcileTournamentRosterUnlocked(
         addedEntryIds,
         targetEventId,
       );
-      const transfers = await withMutationConflictGuard(
+      const transfers = await withMutationScopes(
         {
           queueName: 'tournament-roster',
           jobName: 'entry-transfer-history',
@@ -272,7 +272,7 @@ async function reconcileTournamentRosterUnlocked(
     // The authoritative fetch and entrant backfills above intentionally happen
     // without the global structure lock. Hold it only for the short roster
     // publication transaction, which replaces tournament-owned structure rows.
-    const publication = await withMutationConflictGuard(
+    const publication = await withMutationScopes(
       {
         queueName: 'tournament-roster',
         jobName: 'publish-authoritative-roster',

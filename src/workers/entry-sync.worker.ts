@@ -58,7 +58,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { IncompleteDataSyncError } from '../utils/errors';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { getQueueConnection } from '../utils/queue';
 import type { WorkerRuntime } from './worker-runtime';
 
@@ -619,7 +619,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
         }
       };
       return runTrackedJob(context, async () => {
-        const guarded = await withMutationConflictGuard(
+        const scoped = await withMutationScopes(
           {
             queueName: job.queueName,
             jobName: job.name,
@@ -629,8 +629,8 @@ export function createEntrySyncWorker(): WorkerRuntime {
           },
           runMutation,
         );
-        if (guarded.afterCommit) await guarded.afterCommit();
-        return guarded.value;
+        if (scoped.afterCommit) await scoped.afterCommit();
+        return scoped.value;
       });
     });
   };
