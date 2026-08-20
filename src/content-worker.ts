@@ -175,7 +175,6 @@ if (flags.pipelineEnabled) {
   scheduler = setInterval(() => {
     void scheduleFromDatabase().catch((error) => logError('Content scheduler pass failed', error));
   }, 30_000);
-  scheduler.unref?.();
 }
 
 // Publication revalidation is an independent delivery concern. Keep retrying
@@ -186,7 +185,6 @@ void dispatchPendingPublicationOutbox();
 publicationOutboxDispatcher = setInterval(() => {
   void dispatchPendingPublicationOutbox();
 }, PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS);
-publicationOutboxDispatcher.unref?.();
 
 async function shutdown(signal: string): Promise<void> {
   logInfo('Content worker shutting down', { signal });

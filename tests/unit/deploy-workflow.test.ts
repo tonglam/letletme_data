@@ -5,9 +5,16 @@ const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const securityWorkflow = readFileSync('.github/workflows/security.yml', 'utf8');
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
+const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
 const quote = String.fromCharCode(39);
 
 describe('release workflow gates', () => {
+  test('keeps the content worker alive when the pipeline is disabled', () => {
+    expect(contentWorker).toContain('publicationOutboxDispatcher = setInterval');
+    expect(contentWorker).not.toContain('publicationOutboxDispatcher.unref?.()');
+    expect(contentWorker).not.toContain('scheduler.unref?.()');
+  });
+
   test('allows only session-mode pooler connections for the external backup', () => {
     expect(backupScript).toContain('*pgbouncer=true*|*:6543/*');
     expect(backupScript).not.toContain('*pooler.supabase.com*');
