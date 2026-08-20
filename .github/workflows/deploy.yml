@@ -16,27 +16,39 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
       packages: write
     env:
       REGISTRY: ghcr.io
     steps:
-      - name: Resolve protected main
+      - name: Resolve protected main and CI gate
         id: target
         env:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          test "$main_sha" = "${WORKFLOW_SHA:-$main_sha}"
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            test -n "${WORKFLOW_SHA:-}"
+            test "$WORKFLOW_EVENT" = "push"
+            test "$main_sha" = "$WORKFLOW_SHA"
+          else
+            ci_runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$main_sha&per_page=20")
+            ci_success_count=$(printf '%s' "$ci_runs" | jq --arg sha "$main_sha" '[.workflow_runs[] | select(.head_sha == $sha and .status == "completed" and .conclusion == "success")] | length')
+            test "$ci_success_count" -gt 0
+          fi
           echo "sha=$main_sha" >> "$GITHUB_OUTPUT"
 
       - name: Checkout protected main commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.target.outputs.sha }}
 
@@ -47,30 +59,46 @@ jobs:
           echo "IMAGE_NAME=$image_name" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push once
+      - name: Build and push immutable SHA image
         run: |
           set -euo pipefail
           docker buildx build \
             --platform linux/amd64 \
             --tag "${IMAGE_NAME}:${{ steps.target.outputs.sha }}" \
-            --tag "${IMAGE_NAME}:latest" \
             --metadata-file build-metadata.json \
             --push .
           digest=$(jq -r '.["containerimage.digest"]' build-metadata.json)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "IMAGE_REF=${IMAGE_NAME}@${digest}" >> "$GITHUB_ENV"
 
+      - name: Scan immutable image digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_REF }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: 'false'
+          severity: HIGH,CRITICAL
+
+      - name: Promote scanned digest to latest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_REF}"
+          expected_digest="${IMAGE_REF##*@}"
+          latest_digest=$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" | awk '/^Digest:/ { print $2; exit }')
+          test "$latest_digest" = "$expected_digest"
+
       - name: Deploy exact image digest
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           DEPLOY_SHA: ${{ steps.target.outputs.sha }}
           IMAGE_REF: ${{ env.IMAGE_REF }}

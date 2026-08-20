@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # Pinned to the exact Bun version CI tests against (package.json#packageManager).
-FROM oven/bun:1.3.3 AS base
+FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS base
 WORKDIR /app
+
+RUN apk upgrade --no-cache libcrypto3 libssl3
 
 # Install dependencies separately for caching
 FROM base AS deps
@@ -25,9 +27,11 @@ COPY . ./
 RUN bun run build
 
 # Final runtime image
-FROM oven/bun:1.3.3 AS runner
+FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+
+RUN apk upgrade --no-cache libcrypto3 libssl3
 
 # Copy runtime files
 COPY --from=build /app/package.json ./
@@ -41,8 +45,8 @@ COPY --from=build /app/drizzle.config.ts ./
 COPY --from=build /app/validate-env.ts ./
 COPY --from=build /app/tsconfig.json ./
 
-RUN groupadd -g 1001 appuser \
-    && useradd -r -u 1001 -g appuser appuser \
+RUN addgroup -S -g 1001 appuser \
+    && adduser -S -D -H -u 1001 -G appuser appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
