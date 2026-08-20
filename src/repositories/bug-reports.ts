@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { and, asc, eq, gt, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import {
@@ -46,6 +46,14 @@ export type ExpiredBugReportScreenshot = {
   screenshotObjectKey: string;
   createdAt: Date;
 };
+
+/**
+ * Retention tombstones must not preserve a completed screenshot URL. A plain
+ * SHA-256 digest is stable for idempotent reuse checks while removing bearer
+ * tokens, credentials, and query-string secrets from the durable snapshot.
+ */
+export const hashBugReportScreenshotLocator = (locator: string): string =>
+  createHash('sha256').update(locator, 'utf8').digest('hex');
 
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
@@ -182,7 +190,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             .from(bugReportRetentionBackupsInOps)
             .where(
               and(
-                sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrl' = ${report.screenshotUrl}`,
+                or(
+                  sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrl' = ${report.screenshotUrl}`,
+                  sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrlHash' = ${hashBugReportScreenshotLocator(report.screenshotUrl)}`,
+                ),
                 or(
                   isNotNull(bugReportRetentionBackupsInOps.screenshotDeleteStartedAt),
                   isNotNull(bugReportRetentionBackupsInOps.screenshotDeletedAt),
@@ -879,15 +890,34 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           .values({
             id: current.id,
             publicId: current.publicId,
-            snapshot: current,
+            // The report body and diagnostics are not part of the deletion
+            // retry contract. Keep only the exact locator until the remote
+            // delete is confirmed, then scrub it to a digest below.
+            snapshot: current.screenshotUrl ? { screenshotUrl: current.screenshotUrl } : {},
             submissionId: current.submissionId,
           })
           .onConflictDoNothing();
       }
+      if (screenshotUrl) {
+        await tx
+          .update(bugReportRetentionBackupsInOps)
+          .set({ snapshot: { screenshotUrl } })
+          .where(eq(bugReportRetentionBackupsInOps.id, current.id));
+      }
       if (current.screenshotUrl !== null) {
         await tx
           .update(bugReportsInOps)
-          .set({ screenshotUrl: null })
+          .set({
+            // The remote delete may be unavailable for an extended period.
+            // Keep only the minimum row needed to drive the retry cursor;
+            // report text, identity, entry, and diagnostics must not remain
+            // past their retention deadline while storage is failing.
+            body: 'Screenshot cleanup pending.',
+            userId: null,
+            entryId: null,
+            clientMeta: {},
+            screenshotUrl: null,
+          })
           .where(eq(bugReportsInOps.id, current.id));
       }
       return {
@@ -909,7 +939,11 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   ) => {
     await tx
       .update(bugReportRetentionBackupsInOps)
-      .set({ snapshot: screenshotUrl ? { screenshotUrl } : {} })
+      .set({
+        snapshot: screenshotUrl
+          ? { screenshotUrlHash: hashBugReportScreenshotLocator(screenshotUrl) }
+          : {},
+      })
       .where(eq(bugReportRetentionBackupsInOps.id, reportId));
   };
 

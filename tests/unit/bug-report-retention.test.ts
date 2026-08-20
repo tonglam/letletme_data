@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { retentionDeadline, sanitizeBugReportClientMeta } from '../../src/domain/bug-report';
+import { hashBugReportScreenshotLocator } from '../../src/repositories/bug-reports';
 
 describe('bug report retention and diagnostics', () => {
   const created = new Date('2026-01-01T00:00:00.000Z');
@@ -78,5 +79,16 @@ describe('bug report retention and diagnostics', () => {
     expect(quotedMessage).not.toContain('super-secret');
     expect(quotedMessage).not.toContain('abc');
     expect(quotedMessage).toContain('[redacted]');
+  });
+
+  test('retention tombstones hash completed screenshot locators', () => {
+    const locator =
+      'https://legacy.example.test/avatar/bug.png?signature=secret-token&expires=9999999999';
+    const digest = hashBugReportScreenshotLocator(locator);
+
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(digest).not.toContain('secret-token');
+    expect(hashBugReportScreenshotLocator(locator)).toBe(digest);
+    expect(hashBugReportScreenshotLocator(`${locator}&retry=1`)).not.toBe(digest);
   });
 });
