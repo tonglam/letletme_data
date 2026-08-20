@@ -44,7 +44,7 @@ export interface GrokRunner {
 
 export const MONITOR_FPL_X_SOURCES_SKILL = 'monitor-fpl-x-sources';
 export const MONITOR_FPL_X_SOURCES_SKILL_SHA =
-  'b09551b5a252f2b7fa4ecd3502028bf6a0e890dd4f627d312427cd0b19fff93f';
+  '59756e06e085c09899315e059977df10d70c62eba388e7dafbda694377b65429';
 const ADAPTER_VERSION = 'cli-v2';
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const fixtureHash = createHash('sha256').update('fixture-grok-v1', 'utf8').digest('hex');
