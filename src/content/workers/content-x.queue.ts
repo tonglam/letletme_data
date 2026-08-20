@@ -4,6 +4,7 @@ import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 
 import { getQueueConnection } from '../../utils/queue';
 import { logError, logInfo } from '../../utils/logger';
+import { assertContentRuntimeFlags, getContentRuntimeFlags } from '../config';
 import { runContentXWorker, type ContentXWorkerInput } from './content-x.worker';
 
 export const contentXScanQueueName = 'content-x-scan';
@@ -44,10 +45,12 @@ export async function enqueueContentXScan(
 
 export function createContentXWorkerRuntime() {
   const connection = getQueueConnection();
+  const flags = getContentRuntimeFlags();
+  assertContentRuntimeFlags(flags);
   const worker = new Worker<ContentXWorkerInput>(
     contentXScanQueueName,
     async (job) => runContentXWorker(job.data),
-    { connection, concurrency: 1 },
+    { connection, concurrency: flags.grokConcurrency },
   );
   const queueEvents = new QueueEvents(contentXScanQueueName, { connection });
   worker.on('completed', (job) => logInfo('Content X scan job completed', { jobId: job.id }));

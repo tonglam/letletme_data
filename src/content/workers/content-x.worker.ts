@@ -24,6 +24,8 @@ export function createContentXRunner(): GrokRunner {
 }
 
 export type ContentXWorkerInput = Readonly<{
+  runId?: string;
+  idempotencyKey?: string;
   groupKey?: string;
   partitionKey?: string;
   mode?: 'poll' | 'enrich' | 'compose';
@@ -49,9 +51,21 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
   const windowStart =
     input.windowStart ?? new Date(Date.parse(windowEnd) - 30 * 60_000).toISOString();
   const snapshot = await buildSourceSnapshot(groupKey);
-  const idempotencyKey = `briefing:x:${groupKey}:${partitionKey}:${mode}:${pollPhase}:${windowEnd}`;
+  if (snapshot.items.length === 0) {
+    logInfo('Content X acquisition skipped because source snapshot is empty', {
+      groupKey,
+      partitionKey,
+      mode,
+      pollPhase,
+    });
+    return { status: 'EMPTY' };
+  }
+  const runId = input.runId ?? randomUUID();
+  const idempotencyKey =
+    input.idempotencyKey ??
+    `briefing:x:${groupKey}:${partitionKey}:${mode}:${pollPhase}:${windowEnd}`;
   const run: AcquisitionRunInput = {
-    runId: randomUUID(),
+    runId,
     groupId: snapshot.groupId,
     partitionKey,
     mode,

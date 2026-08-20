@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { and, eq, inArray } from 'drizzle-orm';
 
 import { databaseSingleton, getDb } from './db/singleton';
@@ -15,9 +16,14 @@ import {
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { logError, logInfo } from './utils/logger';
 import { computePollWindow, isPollDue, pollBudget, resolvePollPhase } from './content/poll-policy';
-import { reclaimStaleAcquisitionRuns } from './content/acquisition/run-repository';
+import {
+  reclaimStaleAcquisitionRuns,
+  reservePendingAcquisitionRun,
+} from './content/acquisition/run-repository';
+import { buildSourceSnapshot } from './content/acquisition/source-registry';
 
 const flags = getContentRuntimeFlags();
+const partitionKey = process.env.CONTENT_PARTITION_KEY?.trim() || 'week';
 const runtime = createContentXWorkerRuntime();
 const stopHeartbeat = startWorkerHeartbeat({
   path: process.env.WORKER_HEARTBEAT_PATH ?? '/tmp/content-worker-heartbeat',
@@ -40,7 +46,7 @@ async function scheduleFromDatabase(): Promise<void> {
     const phase = resolvePollPhase(group.pollPolicy, now);
     await reclaimStaleAcquisitionRuns({
       groupId: group.groupId,
-      partitionKey: 'week',
+      partitionKey,
       mode: 'poll',
       now,
     });
@@ -51,7 +57,7 @@ async function scheduleFromDatabase(): Promise<void> {
         .where(
           and(
             eq(contentAcquisitionCheckpoints.groupId, group.groupId),
-            eq(contentAcquisitionCheckpoints.partitionKey, 'week'),
+            eq(contentAcquisitionCheckpoints.partitionKey, partitionKey),
           ),
         )
         .limit(1),
@@ -61,7 +67,7 @@ async function scheduleFromDatabase(): Promise<void> {
         .where(
           and(
             eq(contentAcquisitionRuns.groupId, group.groupId),
-            eq(contentAcquisitionRuns.partitionKey, 'week'),
+            eq(contentAcquisitionRuns.partitionKey, partitionKey),
             eq(contentAcquisitionRuns.mode, 'poll'),
             inArray(contentAcquisitionRuns.status, ['pending', 'running']),
           ),
@@ -82,15 +88,45 @@ async function scheduleFromDatabase(): Promise<void> {
     });
     const end = window.windowEnd.toISOString();
     const start = window.windowStart.toISOString();
-    await enqueueContentXScan({
-      groupKey: group.groupKey,
-      partitionKey: 'week',
+    const snapshot = await buildSourceSnapshot(group.groupKey);
+    if (snapshot.items.length === 0) {
+      logInfo('Content scheduler skipped empty source group', {
+        groupKey: group.groupKey,
+        partitionKey,
+      });
+      continue;
+    }
+    const runId = randomUUID();
+    const idempotencyKey = `briefing:x:${group.groupKey}:${partitionKey}:poll:${phase}:${end}`;
+    const reservation = await reservePendingAcquisitionRun({
+      runId,
+      groupId: group.groupId,
+      partitionKey,
       mode: 'poll',
-      pollPhase: phase,
-      phaseBudget: pollBudget(group.pollPolicy, phase),
       windowStart: start,
       windowEnd: end,
+      idempotencyKey,
     });
+    if (reservation.reused) continue;
+    try {
+      await enqueueContentXScan({
+        runId,
+        idempotencyKey,
+        groupKey: group.groupKey,
+        partitionKey,
+        mode: 'poll',
+        pollPhase: phase,
+        phaseBudget: pollBudget(group.pollPolicy, phase),
+        windowStart: start,
+        windowEnd: end,
+      });
+    } catch (error) {
+      logError('Content scheduler enqueue failed; pending run will be reclaimed', error, {
+        runId,
+        groupKey: group.groupKey,
+        partitionKey,
+      });
+    }
   }
 }
 
@@ -123,6 +159,6 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 logInfo('Content X worker ready', {
   pipelineEnabled: flags.pipelineEnabled,
   realGrokEnabled: flags.realGrokEnabled,
-  concurrency: 1,
+  concurrency: flags.grokConcurrency,
   queue: 'content-x-scan',
 });

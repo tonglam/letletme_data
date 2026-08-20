@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import type { WeekLocale } from '../contracts/week-publication';
@@ -43,13 +43,38 @@ export interface GrokRunner {
 
 export const MONITOR_FPL_X_SOURCES_SKILL = 'monitor-fpl-x-sources';
 export const MONITOR_FPL_X_SOURCES_SKILL_SHA =
-  'b23dc3dcf7ab79c7d13fd40a2a08d298ad4740940f71aa44988954b5690d3519';
+  'b09551b5a252f2b7fa4ecd3502028bf6a0e890dd4f627d312427cd0b19fff93f';
 const ADAPTER_VERSION = 'cli-v2';
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const fixtureHash = createHash('sha256').update('fixture-grok-v1', 'utf8').digest('hex');
 
 const skillPath = (): string =>
   resolve(process.env.GROK_SKILL_PATH ?? '.grok/skills/monitor-fpl-x-sources/SKILL.md');
+
+async function listSkillFiles(root: string, current = root): Promise<string[]> {
+  const entries = await readdir(current, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const absolute = join(current, entry.name);
+    if (entry.isDirectory()) files.push(...(await listSkillFiles(root, absolute)));
+    else if (entry.isFile()) files.push(relative(root, absolute).split(sep).join('/'));
+  }
+  return files;
+}
+
+async function skillBundleSha(): Promise<string> {
+  const entry = skillPath();
+  const root = resolve(entry, '..');
+  const files = await listSkillFiles(root);
+  const hash = createHash('sha256');
+  for (const file of files) {
+    hash.update(file, 'utf8');
+    hash.update('\0', 'utf8');
+    hash.update(await readFile(join(root, file)));
+    hash.update('\0', 'utf8');
+  }
+  return hash.digest('hex');
+}
 
 const sha256 = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 
@@ -221,7 +246,7 @@ export class CliGrokRunner implements GrokRunner {
     let runDir = '';
     let expectedSkillSha = '';
     try {
-      expectedSkillSha = sha256(await readFile(skillPath()));
+      expectedSkillSha = await skillBundleSha();
       if (expectedSkillSha !== MONITOR_FPL_X_SOURCES_SKILL_SHA)
         throw new Error('Grok skill SHA mismatch');
       await mkdir(this.runRoot, { recursive: true, mode: 0o700 });
@@ -336,20 +361,32 @@ export class CliGrokRunner implements GrokRunner {
       let stderr = '';
       let outputBytes = 0;
       let settled = false;
+      let termination: 'timeout' | 'oversized' | null = null;
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
       const finish = (callback: () => void) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
         callback();
       };
-      const timeout = setTimeout(() => {
+      const terminate = () => {
         child.kill('SIGTERM');
-        finish(() => reject(new Error(`Grok timed out after ${this.timeoutMs}ms`)));
+        killTimer = setTimeout(() => {
+          if (!settled) child.kill('SIGKILL');
+        }, 1_000);
+      };
+      const timeout = setTimeout(() => {
+        termination = 'timeout';
+        terminate();
       }, this.timeoutMs);
       child.stdout.on('data', (chunk: Buffer) => {
         outputBytes += chunk.byteLength;
         if (outputBytes <= MAX_OUTPUT_BYTES) stdout += chunk.toString('utf8');
-        else child.kill('SIGTERM');
+        else if (termination === null) {
+          termination = 'oversized';
+          terminate();
+        }
       });
       child.stderr.on('data', (chunk: Buffer) => {
         stderr = `${stderr}${chunk.toString('utf8')}`.slice(-2_000);
@@ -357,7 +394,9 @@ export class CliGrokRunner implements GrokRunner {
       child.on('error', (error) => finish(() => reject(error)));
       child.on('close', (code) =>
         finish(() => {
-          if (outputBytes > MAX_OUTPUT_BYTES) reject(new Error('Grok output exceeded 2 MiB'));
+          if (termination === 'oversized') reject(new Error('Grok output exceeded 2 MiB'));
+          else if (termination === 'timeout')
+            reject(new Error(`Grok timed out after ${this.timeoutMs}ms`));
           else if (code !== 0) reject(new Error(stderr || `Grok exited with code ${code}`));
           else resolveOutput(stdout);
         }),

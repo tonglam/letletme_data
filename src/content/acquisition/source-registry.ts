@@ -8,7 +8,7 @@ import {
   contentSourceGroups,
   contentSources,
 } from '../../db/schemas/content.schema';
-import { ConflictError } from '../../utils/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../utils/errors';
 
 export type ContentSourceCommandActor = Readonly<{
   actorId: string;
@@ -77,8 +77,12 @@ async function sourceCommand<T>(input: {
   operation: (tx: DbOrTransaction) => Promise<T>;
 }): Promise<T> {
   if (!input.actor.actorId.trim() || !input.actor.idempotencyKey.trim())
-    throw new Error('Content editor actor and Idempotency-Key are required');
-  if (input.actor.role !== 'content_editor') throw new Error('content_editor role required');
+    throw new ValidationError(
+      'Content editor actor and Idempotency-Key are required',
+      'EDITORIAL_ACTOR_REQUIRED',
+    );
+  if (input.actor.role !== 'content_editor')
+    throw new ForbiddenError('content_editor role required', 'EDITORIAL_ROLE_REQUIRED');
   const hash = requestHash({
     actorId: input.actor.actorId,
     role: input.actor.role,
@@ -236,7 +240,11 @@ export async function addSourceToGroup(
         .where(eq(contentSourceGroups.groupKey, groupKey))
         .limit(1);
       const groupId = groups[0]?.groupId;
-      if (!groupId) throw new Error(`Content source group not found: ${groupKey}`);
+      if (!groupId)
+        throw new NotFoundError(
+          `Content source group not found: ${groupKey}`,
+          'EDITORIAL_SOURCE_GROUP_NOT_FOUND',
+        );
       await tx
         .insert(contentSourceGroupMembers)
         .values({ groupId, sourceId, priority })
@@ -260,7 +268,11 @@ export async function buildSourceSnapshot(
     )
     .limit(1);
   const groupId = groupRows[0]?.groupId;
-  if (!groupId) throw new Error(`No active content source group: ${groupKey}`);
+  if (!groupId)
+    throw new NotFoundError(
+      `No active content source group: ${groupKey}`,
+      'EDITORIAL_SOURCE_GROUP_NOT_FOUND',
+    );
   const rows = await db
     .select({
       sourceId: contentSources.sourceId,

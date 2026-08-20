@@ -48,6 +48,60 @@ export function isAcquisitionRunStale(input: {
   return Number.isFinite(anchor) && now >= anchor && now - anchor >= staleAfterMs;
 }
 
+export type PendingAcquisitionRunInput = Readonly<{
+  runId: string;
+  groupId: string;
+  partitionKey: string;
+  mode: 'poll' | 'enrich' | 'compose';
+  windowStart: string;
+  windowEnd: string;
+  idempotencyKey: string;
+}>;
+
+/**
+ * Reserve a scheduler submission before it is handed to BullMQ.  A waiting
+ * BullMQ job has not entered the worker yet, so relying on the worker-created
+ * acquisition row lets every scheduler tick enqueue another copy.  The
+ * pending row is durable and is promoted by beginAcquisitionRun when the
+ * worker actually starts; an enqueue failure is reclaimed by the normal stale
+ * run lease instead of silently disappearing.
+ */
+export async function reservePendingAcquisitionRun(input: PendingAcquisitionRunInput): Promise<{
+  runId: string;
+  status: AcquisitionRunState;
+  reused: boolean;
+}> {
+  const db = await getDb();
+  const inserted = await db
+    .insert(contentAcquisitionRuns)
+    .values({
+      runId: input.runId,
+      groupId: input.groupId,
+      mode: input.mode,
+      partitionKey: input.partitionKey,
+      windowStart: new Date(input.windowStart),
+      windowEnd: new Date(input.windowEnd),
+      idempotencyKey: input.idempotencyKey,
+      status: 'pending',
+      sourceSnapshot: [],
+      sourceSnapshotRevision: null,
+    })
+    .onConflictDoNothing({ target: contentAcquisitionRuns.idempotencyKey })
+    .returning({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status });
+  if (inserted[0]) {
+    return { ...inserted[0], status: inserted[0].status as AcquisitionRunState, reused: false };
+  }
+
+  const existing = await db
+    .select({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.idempotencyKey, input.idempotencyKey))
+    .limit(1);
+  const row = existing[0];
+  if (!row) throw new Error('Pending acquisition reservation disappeared');
+  return { ...row, status: row.status as AcquisitionRunState, reused: true };
+}
+
 export async function reclaimStaleAcquisitionRuns(input: {
   groupId: string;
   partitionKey: string;
@@ -127,14 +181,47 @@ export async function beginAcquisitionRun(input: AcquisitionRunInput): Promise<{
   if (inserted[0])
     return { ...inserted[0], status: inserted[0].status as AcquisitionRunState, reused: false };
 
-  const existing = await db
-    .select({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status })
-    .from(contentAcquisitionRuns)
-    .where(eq(contentAcquisitionRuns.idempotencyKey, input.idempotencyKey))
-    .limit(1);
-  const row = existing[0];
-  if (!row) throw new Error('Acquisition run disappeared after idempotency conflict');
-  return { ...row, status: row.status as AcquisitionRunState, reused: true };
+  const existing = await db.transaction(async (tx) => {
+    const rows = await tx
+      .select({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status })
+      .from(contentAcquisitionRuns)
+      .where(eq(contentAcquisitionRuns.idempotencyKey, input.idempotencyKey))
+      .for('update')
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    if (row.status === 'pending' && row.runId === input.runId) {
+      const promoted = await tx
+        .update(contentAcquisitionRuns)
+        .set({
+          groupId: input.groupId,
+          mode: input.mode,
+          partitionKey: input.partitionKey,
+          windowStart: new Date(input.windowStart),
+          windowEnd: new Date(input.windowEnd),
+          sourceSnapshot: input.sourceSnapshot,
+          sourceSnapshotRevision: input.sourceSnapshotRevision,
+          skillSha: input.skillSha ?? null,
+          status: 'running',
+          startedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(contentAcquisitionRuns.runId, input.runId),
+            eq(contentAcquisitionRuns.status, 'pending'),
+          ),
+        )
+        .returning({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status });
+      return promoted[0] ? { row: promoted[0], reused: false } : { row, reused: true };
+    }
+    return { row, reused: true };
+  });
+  if (!existing) throw new Error('Acquisition run disappeared after idempotency conflict');
+  return {
+    ...existing.row,
+    status: existing.row.status as AcquisitionRunState,
+    reused: existing.reused,
+  };
 }
 
 export async function reserveXCallBudget(input: {

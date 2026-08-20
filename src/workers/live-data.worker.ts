@@ -20,7 +20,6 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
 import type { WorkerRuntime } from './worker-runtime';
 
 /**
@@ -45,40 +44,32 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
 
   logJobTriggered(context);
 
-  return withMutationConflictGuard(
-    {
-      queueName: job.queueName,
-      jobName: job.name,
-      jobId: String(job.id),
-      eventId,
-    },
-    () =>
-      runTrackedJob(context, async () => {
-        if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
-          throw new Error(`Unknown job name: ${job.name}`);
-        }
-        const persistEventLives = job.data.persistEventLives ?? false;
-        if (source === 'cron') {
-          const windowOpen = await isLiveMatchWindowForEvent(season, eventId);
-          if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
-            logInfo('Skipping cache-only live snapshot job - not match time', {
-              season: season.seasonCode,
-              eventId,
-            });
-            return;
-          }
-        }
-        const snapshot = await syncLiveSnapshot(season, eventId, {
-          persistEventLives,
-          finalizeEvent: job.data.finalizeEvent === true,
-          trigger: source,
+  return runTrackedJob(context, async () => {
+    if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
+      throw new Error(`Unknown job name: ${job.name}`);
+    }
+    const persistEventLives = job.data.persistEventLives ?? false;
+    if (source === 'cron') {
+      const windowOpen = await isLiveMatchWindowForEvent(season, eventId);
+      if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
+        logInfo('Skipping cache-only live snapshot job - not match time', {
+          season: season.seasonCode,
+          eventId,
         });
-        if (shouldCascadePersistedLiveSnapshot(snapshot)) {
-          await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
-        }
-        return snapshot;
-      }),
-  );
+        return;
+      }
+    }
+    const snapshot = await syncLiveSnapshot(season, eventId, {
+      persistEventLives,
+      finalizeEvent: job.data.finalizeEvent === true,
+      trigger: source,
+      mutationScopes: ['data-core:fixtures', `live-snapshot:event:${eventId}`],
+    });
+    if (shouldCascadePersistedLiveSnapshot(snapshot)) {
+      await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
+    }
+    return snapshot;
+  });
 }
 
 export function createLiveDataWorker(): WorkerRuntime {

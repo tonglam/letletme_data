@@ -24,7 +24,7 @@ import {
   type WeekLocale,
   type WeekPublicationEnvelope,
 } from '../contracts/week-publication';
-import { ConflictError } from '../../utils/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../utils/errors';
 import {
   lockWeekPublicationScope,
   persistWeekPublication,
@@ -70,13 +70,16 @@ const requestHash = (value: unknown): string =>
     .digest('hex');
 
 const assertActor = (actor: EditorialActor): void => {
-  if (!actor.actorId.trim()) throw new Error('Editorial actor is required');
-  if (!actor.idempotencyKey.trim()) throw new Error('Editorial idempotency key is required');
+  if (!actor.actorId.trim())
+    throw new ValidationError('Editorial actor is required', 'EDITORIAL_ACTOR_REQUIRED');
+  if (!actor.idempotencyKey.trim())
+    throw new ValidationError('Editorial idempotency key is required', 'IDEMPOTENCY_KEY_REQUIRED');
 };
 
 const requireRole = (actor: EditorialActor, role: EditorialRole): void => {
   assertActor(actor);
-  if (actor.role !== role) throw new Error(`${role} role required`);
+  if (actor.role !== role)
+    throw new ForbiddenError(`${role} role required`, 'EDITORIAL_ROLE_REQUIRED');
 };
 
 async function audit(
@@ -171,12 +174,12 @@ async function reserveCommand(
 
 const requireUuid = (value: string, field: string): void => {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value))
-    throw new Error(`${field} must be a UUID`);
+    throw new ValidationError(`${field} must be a UUID`, 'EDITORIAL_INVALID_UUID');
 };
 
 const requireText = (value: string, field: string): string => {
   const text = value.trim();
-  if (!text) throw new Error(`${field} is required`);
+  if (!text) throw new ValidationError(`${field} is required`, 'EDITORIAL_REQUIRED_FIELD');
   return text;
 };
 
@@ -189,7 +192,8 @@ export async function createCandidateFromReceipts(input: {
 }): Promise<string> {
   requireRole(input.actor, 'content_editor');
   requireUuid(input.runId, 'runId');
-  if (!input.receiptIds.length) throw new Error('At least one receipt is required');
+  if (!input.receiptIds.length)
+    throw new ValidationError('At least one receipt is required', 'EDITORIAL_RECEIPTS_REQUIRED');
   input.receiptIds.forEach((receiptId) => requireUuid(receiptId, 'receiptId'));
   const candidateId = randomUUID();
   const db = await getDb();
@@ -221,7 +225,8 @@ export async function createCandidateFromReceipts(input: {
           inArray(contentSourceReceipts.receiptId, [...input.receiptIds]),
         ),
       );
-    if (receipts.length !== input.receiptIds.length) throw new Error('Receipt is not in the run');
+    if (receipts.length !== input.receiptIds.length)
+      throw new NotFoundError('Receipt is not in the run', 'EDITORIAL_RECEIPT_NOT_FOUND');
     await tx.insert(contentCandidateClusters).values({
       candidateId,
       runId: input.runId,
@@ -258,14 +263,29 @@ export async function acceptCandidate(candidateId: string, actor: EditorialActor
       .select({ status: contentCandidateClusters.status })
       .from(contentCandidateClusters)
       .where(eq(contentCandidateClusters.candidateId, candidateId))
+      .for('update')
       .limit(1);
-    if (!rows[0]) throw new Error('Candidate not found');
+    if (!rows[0]) throw new NotFoundError('Candidate not found', 'EDITORIAL_CANDIDATE_NOT_FOUND');
     if (rows[0].status === 'merged' || rows[0].status === 'rejected')
-      throw new Error('Candidate cannot be accepted from its current state');
-    await tx
+      throw new ConflictError(
+        'Candidate cannot be accepted from its current state',
+        'EDITORIAL_STATE_CONFLICT',
+      );
+    const updated = await tx
       .update(contentCandidateClusters)
       .set({ status: 'accepted', updatedAt: new Date() })
-      .where(eq(contentCandidateClusters.candidateId, candidateId));
+      .where(
+        and(
+          eq(contentCandidateClusters.candidateId, candidateId),
+          inArray(contentCandidateClusters.status, ['new', 'accepted']),
+        ),
+      )
+      .returning({ candidateId: contentCandidateClusters.candidateId });
+    if (!updated[0])
+      throw new ConflictError(
+        'Candidate cannot be accepted from its current state',
+        'EDITORIAL_STATE_CONFLICT',
+      );
     await audit(tx, actor, 'candidate.accept', 'candidate', candidateId, {});
   });
 }
@@ -279,7 +299,11 @@ export async function mergeCandidates(
   requireUuid(targetCandidateId, 'targetCandidateId');
   const sourceIds = [...new Set(sourceCandidateIds)].filter((id) => id !== targetCandidateId);
   sourceIds.forEach((id) => requireUuid(id, 'sourceCandidateId'));
-  if (!sourceIds.length) throw new Error('At least one source candidate is required');
+  if (!sourceIds.length)
+    throw new ValidationError(
+      'At least one source candidate is required',
+      'EDITORIAL_SOURCE_CANDIDATES_REQUIRED',
+    );
   const db = await getDb();
   await db.transaction(async (tx) => {
     const reservation = await reserveCommand(
@@ -308,9 +332,13 @@ export async function mergeCandidates(
       // into different targets.
       .orderBy(asc(contentCandidateClusters.candidateId))
       .for('update');
-    if (rows.length !== ids.length) throw new Error('Candidate not found');
+    if (rows.length !== ids.length)
+      throw new NotFoundError('Candidate not found', 'EDITORIAL_CANDIDATE_NOT_FOUND');
     if (rows.some((row) => row.status === 'rejected' || row.status === 'merged'))
-      throw new Error('Rejected or already merged candidate cannot be merged');
+      throw new ConflictError(
+        'Rejected or already merged candidate cannot be merged',
+        'EDITORIAL_STATE_CONFLICT',
+      );
     const receiptIds = [
       ...new Set(rows.flatMap((row) => (Array.isArray(row.receiptIds) ? row.receiptIds : []))),
     ];
@@ -340,7 +368,10 @@ export async function createDraftStory(input: {
   const slug = requireText(input.slug, 'slug');
   const locales = new Set(input.localizations.map((localization) => localization.locale));
   if (locales.size !== 2 || !locales.has('en') || !locales.has('zh-CN'))
-    throw new Error('A draft Story requires en and zh-CN localizations');
+    throw new ValidationError(
+      'A draft Story requires en and zh-CN localizations',
+      'EDITORIAL_LOCALES_REQUIRED',
+    );
   const storyId = randomUUID();
   const versionGroupId = randomUUID();
   const db = await getDb();
@@ -361,8 +392,13 @@ export async function createDraftStory(input: {
       .from(contentCandidateClusters)
       .where(eq(contentCandidateClusters.candidateId, input.candidateId))
       .limit(1);
-    if (!candidate[0] || candidate[0].status !== 'accepted')
-      throw new Error('Candidate must be accepted before creating a Story');
+    if (!candidate[0])
+      throw new NotFoundError('Candidate not found', 'EDITORIAL_CANDIDATE_NOT_FOUND');
+    if (candidate[0].status !== 'accepted')
+      throw new ConflictError(
+        'Candidate must be accepted before creating a Story',
+        'EDITORIAL_STATE_CONFLICT',
+      );
     await tx.insert(contentStories).values({
       storyId,
       versionGroupId,
@@ -399,7 +435,8 @@ export async function attachStoryEvidence(
 ): Promise<number> {
   requireRole(actor, 'content_editor');
   requireUuid(storyId, 'storyId');
-  if (!receiptIds.length) throw new Error('At least one receipt is required');
+  if (!receiptIds.length)
+    throw new ValidationError('At least one receipt is required', 'EDITORIAL_RECEIPTS_REQUIRED');
   receiptIds.forEach((receiptId) => requireUuid(receiptId, 'receiptId'));
   const db = await getDb();
   let inserted = 0;
@@ -416,12 +453,13 @@ export async function attachStoryEvidence(
       .from(contentStories)
       .where(eq(contentStories.storyId, storyId))
       .limit(1);
-    if (!story[0]) throw new Error('Story not found');
+    if (!story[0]) throw new NotFoundError('Story not found', 'EDITORIAL_STORY_NOT_FOUND');
     const receipts = await tx
       .select({ receiptId: contentSourceReceipts.receiptId })
       .from(contentSourceReceipts)
       .where(inArray(contentSourceReceipts.receiptId, [...new Set(receiptIds)]));
-    if (receipts.length !== new Set(receiptIds).size) throw new Error('Receipt not found');
+    if (receipts.length !== new Set(receiptIds).size)
+      throw new NotFoundError('Receipt not found', 'EDITORIAL_RECEIPT_NOT_FOUND');
     const rows = await tx
       .insert(contentStoryEvidence)
       .values(
@@ -462,15 +500,19 @@ export async function markStoryReady(storyId: string, actor: EditorialActor): Pr
       .from(contentStories)
       .where(eq(contentStories.storyId, storyId))
       .limit(1);
-    if (!story[0]) throw new Error('Story not found');
-    if (story[0].status === 'removed') throw new Error('Removed Story cannot be made ready');
+    if (!story[0]) throw new NotFoundError('Story not found', 'EDITORIAL_STORY_NOT_FOUND');
+    if (story[0].status === 'removed')
+      throw new ConflictError('Removed Story cannot be made ready', 'EDITORIAL_STATE_CONFLICT');
     const localizations = await tx
       .select({ locale: contentStoryLocalizations.locale })
       .from(contentStoryLocalizations)
       .where(eq(contentStoryLocalizations.versionGroupId, story[0].versionGroupId));
     const locales = new Set(localizations.map((row) => row.locale));
     if (!locales.has('en') || !locales.has('zh-CN'))
-      throw new Error('Story requires en and zh-CN localizations');
+      throw new ValidationError(
+        'Story requires en and zh-CN localizations',
+        'EDITORIAL_LOCALES_REQUIRED',
+      );
     const evidence = await tx
       .select({
         rightsPolicy: contentSourceReceipts.rightsPolicy,
@@ -482,11 +524,15 @@ export async function markStoryReady(storyId: string, actor: EditorialActor): Pr
         eq(contentSourceReceipts.receiptId, contentStoryEvidence.receiptId),
       )
       .where(eq(contentStoryEvidence.storyId, storyId));
-    if (!evidence.length) throw new Error('Story requires evidence');
+    if (!evidence.length)
+      throw new ValidationError('Story requires evidence', 'EDITORIAL_EVIDENCE_REQUIRED');
     if (evidence.some((row) => !rightsAllowPublic(row.rightsPolicy)))
-      throw new Error('Every Story evidence receipt needs explicit public rights');
+      throw new ValidationError(
+        'Every Story evidence receipt needs explicit public rights',
+        'EDITORIAL_RIGHTS_REQUIRED',
+      );
     if (evidence.some((row) => !/^https?:\/\//i.test(row.canonicalUrl)))
-      throw new Error('Story evidence URL must be http(s)');
+      throw new ValidationError('Story evidence URL must be http(s)', 'EDITORIAL_URL_INVALID');
     await tx
       .update(contentStories)
       .set({ status: 'ready', updatedAt: new Date() })
@@ -505,11 +551,16 @@ export async function createWeekEdition(input: {
   actor: EditorialActor;
 }): Promise<string> {
   requireRole(input.actor, 'content_editor');
-  if (!/^\d{4}$/.test(input.seasonCode)) throw new Error('seasonCode is invalid');
+  if (!/^\d{4}$/.test(input.seasonCode))
+    throw new ValidationError('seasonCode is invalid', 'EDITORIAL_SEASON_INVALID');
   if (!Number.isSafeInteger(input.eventId) || input.eventId <= 0)
-    throw new Error('eventId is invalid');
+    throw new ValidationError('eventId is invalid', 'EDITORIAL_EVENT_INVALID');
   const sourceRunIds = [...new Set(input.sourceRunIds)];
-  if (!sourceRunIds.length) throw new Error('At least one sourceRunId is required');
+  if (!sourceRunIds.length)
+    throw new ValidationError(
+      'At least one sourceRunId is required',
+      'EDITORIAL_SOURCE_RUNS_REQUIRED',
+    );
   sourceRunIds.forEach((runId) => requireUuid(runId, 'sourceRunId'));
   const editionId = randomUUID();
   const db = await getDb();
@@ -538,7 +589,8 @@ export async function createWeekEdition(input: {
       .select({ runId: contentAcquisitionRuns.runId })
       .from(contentAcquisitionRuns)
       .where(inArray(contentAcquisitionRuns.runId, sourceRunIds));
-    if (runs.length !== sourceRunIds.length) throw new Error('Source run not found');
+    if (runs.length !== sourceRunIds.length)
+      throw new NotFoundError('Source run not found', 'EDITORIAL_SOURCE_RUN_NOT_FOUND');
     await tx.insert(contentWeekEditions).values({
       editionId,
       seasonCode: input.seasonCode,
@@ -577,7 +629,7 @@ export async function addWeekEditionItem(input: {
   requireUuid(input.editionId, 'editionId');
   requireUuid(input.storyId, 'storyId');
   if (!Number.isSafeInteger(input.position) || input.position < 0)
-    throw new Error('position is invalid');
+    throw new ValidationError('position is invalid', 'EDITORIAL_POSITION_INVALID');
   const db = await getDb();
   await db.transaction(async (tx) => {
     const reservation = await reserveCommand(
@@ -606,9 +658,14 @@ export async function addWeekEditionItem(input: {
         .where(eq(contentStories.storyId, input.storyId))
         .limit(1),
     ]);
-    if (!edition[0]) throw new Error('Week edition not found');
-    if (!story[0] || story[0].status !== 'ready')
-      throw new Error('Only ready Stories can enter a Week edition');
+    if (!edition[0])
+      throw new NotFoundError('Week edition not found', 'EDITORIAL_EDITION_NOT_FOUND');
+    if (!story[0]) throw new NotFoundError('Story not found', 'EDITORIAL_STORY_NOT_FOUND');
+    if (story[0].status !== 'ready')
+      throw new ConflictError(
+        'Only ready Stories can enter a Week edition',
+        'EDITORIAL_STATE_CONFLICT',
+      );
     await tx
       .insert(contentWeekEditionItems)
       .values({
@@ -670,8 +727,13 @@ export async function markWeekEditionReady(
       .where(eq(contentWeekEditions.editionId, editionId))
       .for('update')
       .limit(1);
-    if (!edition[0]) throw new Error('Week edition not found');
-    if (edition[0].status !== 'draft') throw new Error('Only draft Week editions can become READY');
+    if (!edition[0])
+      throw new NotFoundError('Week edition not found', 'EDITORIAL_EDITION_NOT_FOUND');
+    if (edition[0].status !== 'draft')
+      throw new ConflictError(
+        'Only draft Week editions can become READY',
+        'EDITORIAL_STATE_CONFLICT',
+      );
     const sourceRuns = await tx
       .select({
         runId: contentWeekEditionSourceRuns.runId,
@@ -688,8 +750,12 @@ export async function markWeekEditionReady(
         eq(contentAcquisitionRuns.runId, contentWeekEditionSourceRuns.runId),
       )
       .where(eq(contentWeekEditionSourceRuns.editionId, editionId))
-      .for('update');
-    if (!sourceRuns.length) throw new Error('Week edition requires source runs');
+      .for('update', { of: contentAcquisitionRuns });
+    if (!sourceRuns.length)
+      throw new ValidationError(
+        'Week edition requires source runs',
+        'EDITORIAL_SOURCE_RUNS_REQUIRED',
+      );
     if (
       sourceRuns.some(
         (run) =>
@@ -701,7 +767,10 @@ export async function markWeekEditionReady(
           run.runRevision !== edition[0].sourceSnapshotRevision,
       )
     )
-      throw new Error('Week edition source runs are incomplete or stale');
+      throw new ConflictError(
+        'Week edition source runs are incomplete or stale',
+        'EDITORIAL_STATE_CONFLICT',
+      );
     const items = await tx
       .select({
         storyId: contentWeekEditionItems.storyId,
@@ -718,11 +787,15 @@ export async function markWeekEditionReady(
       .innerJoin(contentStories, eq(contentStories.storyId, contentWeekEditionItems.storyId))
       .where(eq(contentWeekEditionItems.editionId, editionId));
     if (items.some((item) => item.status !== 'ready' && item.status !== 'published'))
-      throw new Error('Week edition contains a Story that is not ready');
+      throw new ConflictError(
+        'Week edition contains a Story that is not ready',
+        'EDITORIAL_STATE_CONFLICT',
+      );
     const positions = new Set<string>();
     for (const item of items) {
       const key = `${item.sectionKey}:${item.position}`;
-      if (positions.has(key)) throw new Error(`Duplicate Week position ${key}`);
+      if (positions.has(key))
+        throw new ValidationError(`Duplicate Week position ${key}`, 'EDITORIAL_DUPLICATE_POSITION');
       positions.add(key);
     }
     const storyIds = items.map((item) => item.storyId);
@@ -780,11 +853,17 @@ export async function markWeekEditionReady(
     const evidenceByStory = new Map<string, Record<string, unknown>[]>();
     for (const row of evidence) {
       if (!verifiedRunIds.has(row.runId))
-        throw new Error('Every Story evidence receipt must belong to a verified source run');
+        throw new ValidationError(
+          'Every Story evidence receipt must belong to a verified source run',
+          'EDITORIAL_EVIDENCE_UNVERIFIED',
+        );
       if (!rightsAllowPublic(row.rightsPolicy))
-        throw new Error('Every Story evidence receipt needs explicit public rights');
+        throw new ValidationError(
+          'Every Story evidence receipt needs explicit public rights',
+          'EDITORIAL_RIGHTS_REQUIRED',
+        );
       if (!/^https?:\/\//i.test(row.canonicalUrl))
-        throw new Error('Story evidence URL must be http(s)');
+        throw new ValidationError('Story evidence URL must be http(s)', 'EDITORIAL_URL_INVALID');
       const list = evidenceByStory.get(row.storyId) ?? [];
       list.push({
         receiptId: row.receiptId,
@@ -800,9 +879,16 @@ export async function markWeekEditionReady(
     const itemProjection = items.map((item) => {
       const translations = localizationsByVersion.get(item.versionGroupId);
       if (!translations?.en || !translations['zh-CN'])
-        throw new Error(`Story ${item.storyId} is missing a locale`);
+        throw new ValidationError(
+          `Story ${item.storyId} is missing a locale`,
+          'EDITORIAL_LOCALES_REQUIRED',
+        );
       const storyEvidence = evidenceByStory.get(item.storyId) ?? [];
-      if (!storyEvidence.length) throw new Error(`Story ${item.storyId} requires evidence`);
+      if (!storyEvidence.length)
+        throw new ValidationError(
+          `Story ${item.storyId} requires evidence`,
+          'EDITORIAL_EVIDENCE_REQUIRED',
+        );
       return {
         storyId: item.storyId,
         storyRevision: item.storyRevision,
@@ -878,7 +964,7 @@ export async function compileWeekEdition(input: {
   requireUuid(input.editionId, 'editionId');
   requireUuid(input.publicationId, 'publicationId');
   if (!Number.isSafeInteger(input.revision) || input.revision <= 0)
-    throw new Error('revision is invalid');
+    throw new ValidationError('revision is invalid', 'EDITORIAL_REVISION_INVALID');
   const db = await getDb();
   const edition = await db
     .select({
@@ -892,8 +978,12 @@ export async function compileWeekEdition(input: {
     .where(eq(contentWeekEditions.editionId, input.editionId))
     .limit(1);
   const editionRow = edition[0];
-  if (!editionRow || editionRow.status !== 'ready')
-    throw new Error('Week edition must be ready before compile');
+  if (!editionRow) throw new NotFoundError('Week edition not found', 'EDITORIAL_EDITION_NOT_FOUND');
+  if (editionRow.status !== 'ready')
+    throw new ConflictError(
+      'Week edition must be ready before compile',
+      'EDITORIAL_STATE_CONFLICT',
+    );
   const itemRows = await db
     .select({
       storyId: contentWeekEditionItems.storyId,
@@ -912,7 +1002,10 @@ export async function compileWeekEdition(input: {
     .orderBy(asc(contentWeekEditionItems.position), asc(contentWeekEditionItems.sectionKey));
   const storyIds = itemRows.map((row) => row.storyId);
   if (itemRows.some((row) => row.storyStatus !== 'ready' && row.storyStatus !== 'published'))
-    throw new Error('Week edition contains invalid Story revision');
+    throw new ConflictError(
+      'Week edition contains invalid Story revision',
+      'EDITORIAL_STATE_CONFLICT',
+    );
   const localizations = storyIds.length
     ? await db
         .select({
@@ -958,7 +1051,10 @@ export async function compileWeekEdition(input: {
   const stories: CompiledStory[] = itemRows.map((row) => {
     const translations = localizationMap.get(row.versionGroupId);
     if (!translations?.has('en') || !translations.has('zh-CN'))
-      throw new Error(`Story ${row.storyId} is missing a locale`);
+      throw new ValidationError(
+        `Story ${row.storyId} is missing a locale`,
+        'EDITORIAL_LOCALES_REQUIRED',
+      );
     const source = evidenceMap.get(row.storyId);
     return {
       storyId: row.storyId,
@@ -978,12 +1074,12 @@ export async function compileWeekEdition(input: {
   const publishedAt = new Date(input.publishedAt);
   const validUntil = input.validUntil ? new Date(input.validUntil) : null;
   if (!Number.isFinite(sourceCheckedAt.getTime()) || !Number.isFinite(publishedAt.getTime()))
-    throw new Error('Publication timestamps are invalid');
+    throw new ValidationError('Publication timestamps are invalid', 'EDITORIAL_TIMESTAMP_INVALID');
   if (
     validUntil &&
     (!Number.isFinite(validUntil.getTime()) || validUntil > editionRow.deadlineTime)
   )
-    throw new Error('validUntil exceeds deadline');
+    throw new ValidationError('validUntil exceeds deadline', 'EDITORIAL_VALID_UNTIL_INVALID');
   const event = {
     seasonCode: editionRow.seasonCode,
     eventId: editionRow.eventId,
@@ -1068,7 +1164,11 @@ type FrozenEditionRow = Readonly<{
 }>;
 
 function frozenItems(value: unknown): FrozenEditionRow[] {
-  if (!Array.isArray(value)) throw new Error('Frozen Week snapshot items are invalid');
+  if (!Array.isArray(value))
+    throw new ValidationError(
+      'Frozen Week snapshot items are invalid',
+      'EDITORIAL_SNAPSHOT_INVALID',
+    );
   return value.map((item) => {
     const row = jsonObject(item);
     const localizations = jsonObject(row.localizations) as Record<
@@ -1085,7 +1185,10 @@ function frozenItems(value: unknown): FrozenEditionRow[] {
       !jsonObject(localizations.en).title ||
       !jsonObject(localizations['zh-CN']).title
     )
-      throw new Error('Frozen Week snapshot Story is invalid');
+      throw new ValidationError(
+        'Frozen Week snapshot Story is invalid',
+        'EDITORIAL_SNAPSHOT_INVALID',
+      );
     return {
       storyId: row.storyId,
       storyRevision: Number(row.storyRevision),
@@ -1115,7 +1218,7 @@ export async function compileFrozenWeekEdition(input: {
   requireUuid(input.editionId, 'editionId');
   requireUuid(input.publicationId, 'publicationId');
   if (!/^[0-9a-f]{64}$/i.test(input.expectedFrozenSha256))
-    throw new Error('expectedFrozenSha256 is invalid');
+    throw new ValidationError('expectedFrozenSha256 is invalid', 'EDITORIAL_FROZEN_HASH_INVALID');
   const db = input.database ?? (await getDb());
   const rows = await db
     .select({
@@ -1130,8 +1233,12 @@ export async function compileFrozenWeekEdition(input: {
     .where(eq(contentWeekEditions.editionId, input.editionId))
     .limit(1);
   const edition = rows[0];
-  if (!edition || edition.status !== 'ready')
-    throw new Error('Week edition must be READY before publish');
+  if (!edition) throw new NotFoundError('Week edition not found', 'EDITORIAL_EDITION_NOT_FOUND');
+  if (edition.status !== 'ready')
+    throw new ConflictError(
+      'Week edition must be READY before publish',
+      'EDITORIAL_STATE_CONFLICT',
+    );
   if (!edition.frozenSha256 || edition.frozenSha256 !== input.expectedFrozenSha256)
     throw new ConflictError('Frozen Week hash does not match', 'FROZEN_HASH_MISMATCH');
   const snapshotRows = await db
@@ -1162,9 +1269,10 @@ export async function compileFrozenWeekEdition(input: {
   const items = frozenItems(snapshot.itemsProjection);
   const publishedAt = new Date(input.publishedAt);
   const validUntil = input.validUntil ? new Date(input.validUntil) : null;
-  if (!Number.isFinite(publishedAt.getTime())) throw new Error('publishedAt is invalid');
+  if (!Number.isFinite(publishedAt.getTime()))
+    throw new ValidationError('publishedAt is invalid', 'EDITORIAL_TIMESTAMP_INVALID');
   if (validUntil && (!Number.isFinite(validUntil.getTime()) || validUntil > edition.deadlineTime))
-    throw new Error('validUntil exceeds deadline');
+    throw new ValidationError('validUntil exceeds deadline', 'EDITORIAL_VALID_UNTIL_INVALID');
   const evidenceSourceCheckedAt = items
     .flatMap((item) =>
       item.evidence.map((evidence) =>
@@ -1190,7 +1298,10 @@ export async function compileFrozenWeekEdition(input: {
       .map((item) => {
         const localization = item.localizations[locale];
         if (!localization?.title || !localization.summary)
-          throw new Error(`Frozen Story ${item.storyId} is missing ${locale}`);
+          throw new ValidationError(
+            `Frozen Story ${item.storyId} is missing ${locale}`,
+            'EDITORIAL_LOCALES_REQUIRED',
+          );
         const source = item.evidence[0] ?? {};
         return {
           id: item.storyId,
@@ -1288,8 +1399,12 @@ export async function publishFrozenWeekEdition(input: {
       .for('update')
       .limit(1);
     const edition = editionRows[0];
-    if (!edition || edition.status !== 'ready')
-      throw new Error('Week edition must be READY before publish');
+    if (!edition) throw new NotFoundError('Week edition not found', 'EDITORIAL_EDITION_NOT_FOUND');
+    if (edition.status !== 'ready')
+      throw new ConflictError(
+        'Week edition must be READY before publish',
+        'EDITORIAL_STATE_CONFLICT',
+      );
     if (edition.frozenSha256 !== input.expectedFrozenSha256)
       throw new ConflictError('Frozen Week hash does not match', 'FROZEN_HASH_MISMATCH');
     // Allocate the next revision only after taking the same PostgreSQL scope
@@ -1359,7 +1474,10 @@ export async function publishFrozenWeekEdition(input: {
       'zh-CN': payloadRows.find((row) => row.locale === 'zh-CN')?.payload,
     };
     if (!pair.en || !pair['zh-CN'])
-      throw new Error('Persisted Week publication payload pair is incomplete');
+      throw new NotFoundError(
+        'Persisted Week publication payload pair is incomplete',
+        'EDITORIAL_PUBLICATION_PAYLOAD_NOT_FOUND',
+      );
     assertWeekPublication(pair.en);
     assertWeekPublication(pair['zh-CN']);
     if (
@@ -1368,7 +1486,10 @@ export async function publishFrozenWeekEdition(input: {
       pair.en.revision !== replayedResult.revision ||
       pair['zh-CN'].revision !== replayedResult.revision
     )
-      throw new Error('Persisted Week publication payload pair is inconsistent');
+      throw new ConflictError(
+        'Persisted Week publication payload pair is inconsistent',
+        'EDITORIAL_PUBLICATION_PAYLOAD_CONFLICT',
+      );
     const staged = await stageWeekPublication(pair.en, pair['zh-CN'], replayedResult);
     return { ...staged, replayed: true };
   }
