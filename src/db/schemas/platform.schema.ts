@@ -515,14 +515,6 @@ export const tournamentsInCompetition = competition.table(
     }),
     standingsReadyAt: timestamp('standings_ready_at', { withTimezone: true, mode: 'date' }),
     setupWarningCount: integer('setup_warning_count').default(0).notNull(),
-    setupAttempt: integer('setup_attempt').default(0).notNull(),
-    setupMaxAttempts: integer('setup_max_attempts').default(3).notNull(),
-    setupNextRetryAt: timestamp('setup_next_retry_at', { withTimezone: true, mode: 'date' }),
-    setupLastErrorCode: text('setup_last_error_code'),
-    setupLastErrorAt: timestamp('setup_last_error_at', { withTimezone: true, mode: 'date' }),
-    setupProgressIndeterminate: boolean('setup_progress_indeterminate').default(false).notNull(),
-    profilesReadyAt: timestamp('profiles_ready_at', { withTimezone: true, mode: 'date' }),
-    insightsReadyAt: timestamp('insights_ready_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     officialScheduleHash: text('official_schedule_hash'),
@@ -537,6 +529,14 @@ export const tournamentsInCompetition = competition.table(
     // Preview-backed creates persist the idempotency fingerprint on the
     // authoritative row so recovery cannot infer ownership from name/time.
     previewPayloadFingerprint: text('preview_payload_fingerprint'),
+    setupAttempt: integer('setup_attempt').default(0).notNull(),
+    setupMaxAttempts: integer('setup_max_attempts').default(3).notNull(),
+    setupNextRetryAt: timestamp('setup_next_retry_at', { withTimezone: true, mode: 'date' }),
+    setupLastErrorCode: text('setup_last_error_code'),
+    setupLastErrorAt: timestamp('setup_last_error_at', { withTimezone: true, mode: 'date' }),
+    setupProgressIndeterminate: boolean('setup_progress_indeterminate').default(false).notNull(),
+    profilesReadyAt: timestamp('profiles_ready_at', { withTimezone: true, mode: 'date' }),
+    insightsReadyAt: timestamp('insights_ready_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     index('tournaments_admin_entry_idx').using(
