@@ -13,7 +13,11 @@ import {
   type TournamentSetupStatus,
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
-import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import {
+  tournamentInfoRepository,
+  type TournamentSetupStatusRow,
+} from '../repositories/tournament-infos';
+import { tournamentSetupIssueRepository } from '../repositories/tournament-setup-issues';
 import { seasonRepository } from '../repositories/seasons';
 import { ConflictError, getHttpStatusFromError, ValidationError } from '../utils/errors';
 import {
@@ -56,9 +60,29 @@ export async function checkTournamentNameAvailability(name: string) {
   };
 }
 
-export async function getTournamentSetupStatus(tournamentId: number) {
+export type PublicTournamentSetupStatus = TournamentSetupStatusRow & {
+  warningSummaries?: Array<{
+    category: 'profiles' | 'insights' | 'results';
+    affectedCount: number;
+  }>;
+};
+
+export async function getTournamentSetupStatus(
+  tournamentId: number,
+): Promise<PublicTournamentSetupStatus | null> {
   const season = await seasonRepository.findCurrent();
-  return tournamentInfoRepository.findSetupStatus(season, tournamentId);
+  const status = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+  if (!status) return null;
+  const issues = await tournamentSetupIssueRepository.listUnresolved(season, tournamentId);
+  const warningSummaries = (['profiles', 'insights', 'results'] as const)
+    .map((category) => ({
+      category,
+      affectedCount: issues
+        .filter((issue) => issue.category === category && issue.severity === 'warning')
+        .reduce((total, issue) => total + issue.affectedEntryCount, 0),
+    }))
+    .filter((summary) => summary.affectedCount > 0);
+  return { ...status, warningSummaries };
 }
 
 export async function createTournament(payload: TournamentCreateInput): Promise<{

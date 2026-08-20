@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import Redis from 'ioredis';
 
 import { resolveMutationScopes } from '../domain/mutation-scope';
@@ -10,6 +11,16 @@ const DEFAULT_LOCK_TTL_MS = config.MUTATION_LOCK_TTL_MS;
 const DEFAULT_WAIT_TIMEOUT_MS = config.MUTATION_LOCK_WAIT_TIMEOUT_MS;
 const DEFAULT_RETRY_DELAY_MS = config.MUTATION_LOCK_RETRY_DELAY_MS;
 const DEFAULT_HEARTBEAT_MS = config.MUTATION_LOCK_HEARTBEAT_MS;
+
+export class MutationLockLostError extends Error {
+  constructor(scope: string) {
+    super(`Mutation lock lease lost before write completion (${scope})`);
+    this.name = 'MutationLockLostError';
+  }
+}
+
+type MutationLease = { assertHealthy: () => void };
+const leaseStorage = new AsyncLocalStorage<MutationLease>();
 
 type MutationLockInput = {
   queueName: string;
@@ -89,8 +100,8 @@ async function heartbeatLock(
   key: string,
   token: string,
   ttlMs: number,
-): Promise<void> {
-  await client.eval(
+): Promise<boolean> {
+  const result = await client.eval(
     `
       if redis.call("GET", KEYS[1]) == ARGV[1] then
         return redis.call("PEXPIRE", KEYS[1], ARGV[2])
@@ -102,6 +113,12 @@ async function heartbeatLock(
     token,
     String(ttlMs),
   );
+  return Number(result) === 1;
+}
+
+/** Call immediately before entering a transaction that writes shared data. */
+export function assertMutationLockHealthy(): void {
+  leaseStorage.getStore()?.assertHealthy();
 }
 
 export async function withMutationConflictGuard<T>(
@@ -122,6 +139,14 @@ export async function withMutationConflictGuard<T>(
   const acquiredKeys: string[] = [];
   const startedAt = Date.now();
   let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let lostError: MutationLockLostError | null = null;
+  let rejectLost: ((error: MutationLockLostError) => void) | null = null;
+  const lostPromise = new Promise<never>((_, reject) => {
+    rejectLost = reject;
+  });
+  const assertHealthy = () => {
+    if (lostError) throw lostError;
+  };
 
   try {
     while (acquiredKeys.length < lockKeys.length) {
@@ -155,18 +180,33 @@ export async function withMutationConflictGuard<T>(
 
     heartbeat = setInterval(() => {
       void Promise.all(
-        acquiredKeys.map((key) => heartbeatLock(client, key, token, DEFAULT_LOCK_TTL_MS)),
-      ).catch((error) => {
-        logWarn('Mutation lock heartbeat failed', {
-          queueName: input.queueName,
-          jobName: input.jobName,
-          error: error instanceof Error ? error.message : String(error),
+        acquiredKeys.map(async (key) => ({
+          key,
+          healthy: await heartbeatLock(client, key, token, DEFAULT_LOCK_TTL_MS),
+        })),
+      )
+        .then((results) => {
+          const lost = results.find((result) => !result.healthy);
+          if (!lost || lostError) return;
+          lostError = new MutationLockLostError(lost.key);
+          rejectLost?.(lostError);
+        })
+        .catch((error) => {
+          if (lostError) return;
+          lostError = new MutationLockLostError(lockKeys.join(','));
+          rejectLost?.(lostError);
+          logWarn('Mutation lock heartbeat failed closed', {
+            queueName: input.queueName,
+            jobName: input.jobName,
+            error: error instanceof Error ? error.message : String(error),
+          });
         });
-      });
     }, DEFAULT_HEARTBEAT_MS);
     heartbeat.unref?.();
 
-    return await operation();
+    return await leaseStorage.run({ assertHealthy }, () =>
+      Promise.race([operation(), lostPromise]),
+    );
   } catch (error) {
     // Don't label operation failures as guard failures; the guard held locks.
     logInfo('Mutation conflict guard releasing locks after operation error', {

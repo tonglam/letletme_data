@@ -53,6 +53,7 @@ import {
   runDataSyncAttempt,
   type DataSyncAttemptContext,
 } from '../utils/data-sync-attempt';
+import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
@@ -403,12 +404,20 @@ export function createEntrySyncWorker(): WorkerRuntime {
         targetEventId !== undefined ? { ...job.data, eventId: targetEventId } : job.data;
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
+      const entryInfoScopes =
+        job.name === 'entry-info'
+          ? tournamentEntryCoreScopes(
+              season.seasonId,
+              (await loadEntryIdsForSync(season, effectiveJobData)).entryIds,
+            )
+          : undefined;
       return withMutationConflictGuard(
         {
           queueName: job.queueName,
           jobName: job.name,
           jobId,
           eventId: targetEventId,
+          scopes: entryInfoScopes,
         },
         () =>
           runTrackedJob(context, async () => {

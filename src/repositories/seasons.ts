@@ -54,8 +54,28 @@ export const createSeasonRepository = (dbInstance?: DbOrTransaction) => {
     }
   };
 
+  const findById = async (seasonId: number): Promise<FplSeasonRecord | null> => {
+    try {
+      const db = await getDbInstance();
+      const rows = await db
+        .select()
+        .from(seasonsInFpl)
+        .where(eq(seasonsInFpl.seasonId, seasonId))
+        .limit(1);
+      return rows[0] ? mapSeason(rows[0]) : null;
+    } catch (error) {
+      logError('Failed to retrieve FPL season by id', error, { seasonId });
+      throw new DatabaseError(
+        'Failed to retrieve FPL season by id',
+        'FIND_SEASON_BY_ID_ERROR',
+        error instanceof Error ? error : undefined,
+      );
+    }
+  };
+
   return {
     findByCode,
+    findById,
 
     requireByCode: async (seasonCode: string): Promise<FplSeasonRecord> => {
       const season = await findByCode(seasonCode);

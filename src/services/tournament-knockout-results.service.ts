@@ -17,6 +17,7 @@ import { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 type KnockoutRoundSummary = {
   matchId: number;
@@ -331,7 +332,9 @@ export async function syncKnockoutForTournament(
   // chain: every read below must see this sync's own upserts, and a failure
   // anywhere must not leave a half-advanced bracket — single transaction.
   const db = await getDb();
+  assertMutationLockHealthy();
   return await db.transaction(async (tx) => {
+    assertMutationLockHealthy();
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtextextended(${`competition:knockout:${season.seasonId}:${tournament.id}`}, 0))`,
     );

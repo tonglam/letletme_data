@@ -580,6 +580,8 @@ export const tournamentManagementService = createTournamentManagementService(
           // deletion. A worker that already crossed this boundary is harmless
           // because the worker treats an authoritative delete as a no-op.
           await cancelWaitingTournamentSetupJobs(tournamentId);
+          const { cancelTournamentRepairJobs } = await import('../jobs/tournament-repair.jobs');
+          await cancelTournamentRepairJobs(tournamentId);
           await cancelWaitingTournamentRosterReconcileJobs(tournamentId);
           return tournamentManagementRepository.deleteOwned(season, tournamentId, adminEntryId);
         },

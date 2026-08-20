@@ -10,6 +10,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import type { SeedPair } from '../domain/tournament';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
@@ -145,6 +146,7 @@ export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTrans
     deleteByTournament: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
+        assertMutationLockHealthy();
         await db
           .delete(tournamentKnockoutResultsInCompetition)
           .where(
@@ -173,6 +175,7 @@ export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTrans
 
       try {
         const db = await getDbInstance();
+        assertMutationLockHealthy();
         await db
           .insert(tournamentKnockoutResultsInCompetition)
           .values(

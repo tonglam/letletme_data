@@ -515,6 +515,14 @@ export const tournamentsInCompetition = competition.table(
     }),
     standingsReadyAt: timestamp('standings_ready_at', { withTimezone: true, mode: 'date' }),
     setupWarningCount: integer('setup_warning_count').default(0).notNull(),
+    setupAttempt: integer('setup_attempt').default(0).notNull(),
+    setupMaxAttempts: integer('setup_max_attempts').default(3).notNull(),
+    setupNextRetryAt: timestamp('setup_next_retry_at', { withTimezone: true, mode: 'date' }),
+    setupLastErrorCode: text('setup_last_error_code'),
+    setupLastErrorAt: timestamp('setup_last_error_at', { withTimezone: true, mode: 'date' }),
+    setupProgressIndeterminate: boolean('setup_progress_indeterminate').default(false).notNull(),
+    profilesReadyAt: timestamp('profiles_ready_at', { withTimezone: true, mode: 'date' }),
+    insightsReadyAt: timestamp('insights_ready_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     officialScheduleHash: text('official_schedule_hash'),
@@ -623,6 +631,96 @@ export const tournamentsInCompetition = competition.table(
     check(
       'tournaments_setup_time_order',
       sql`(setup_finished_at IS NULL) OR (setup_started_at IS NULL) OR (setup_finished_at >= setup_started_at)`,
+    ),
+  ],
+);
+
+export const tournamentSetupIssuesInCompetition = competition.table(
+  'tournament_setup_issues',
+  {
+    issueId: bigint('issue_id', { mode: 'number' })
+      .generatedByDefaultAsIdentity({ name: 'tournament_setup_issues_issue_id_seq' })
+      .primaryKey(),
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    issueKey: text('issue_key').notNull(),
+    code: text().notNull(),
+    category: text().notNull(),
+    severity: text().notNull(),
+    eventId: integer('event_id'),
+    affectedEntryIds: integer('affected_entry_ids')
+      .array()
+      .default(sql`'{}'::integer[]`)
+      .notNull(),
+    affectedEntryCount: integer('affected_entry_count').default(0).notNull(),
+    diagnosticCode: text('diagnostic_code'),
+    internalMessage: text('internal_message'),
+    repairAttempts: integer('repair_attempts').default(0).notNull(),
+    nextRepairAt: timestamp('next_repair_at', { withTimezone: true, mode: 'date' }),
+    repairExhaustedAt: timestamp('repair_exhausted_at', { withTimezone: true, mode: 'date' }),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'tournament_setup_issues_tournament_fk',
+    }).onDelete('cascade'),
+    unique('tournament_setup_issues_scope_unique').on(
+      table.seasonId,
+      table.tournamentId,
+      table.issueKey,
+    ),
+    index('tournament_setup_issues_unresolved_idx')
+      .using(
+        'btree',
+        table.seasonId.asc().nullsLast(),
+        table.tournamentId.asc().nullsLast(),
+        table.category.asc().nullsLast(),
+        table.severity.asc().nullsLast(),
+      )
+      .where(sql`resolved_at IS NULL`),
+    index('tournament_setup_issues_repair_due_idx')
+      .using(
+        'btree',
+        table.nextRepairAt.asc().nullsLast(),
+        table.seasonId.asc().nullsLast(),
+        table.tournamentId.asc().nullsLast(),
+      )
+      .where(
+        sql`resolved_at IS NULL AND repair_exhausted_at IS NULL AND next_repair_at IS NOT NULL`,
+      ),
+    index('tournament_setup_issues_event_idx')
+      .using(
+        'btree',
+        table.seasonId.asc().nullsLast(),
+        table.tournamentId.asc().nullsLast(),
+        table.eventId.asc().nullsLast(),
+      )
+      .where(sql`resolved_at IS NULL AND event_id IS NOT NULL`),
+    check(
+      'tournament_setup_issues_category_valid',
+      sql`category = ANY (ARRAY['profiles'::text, 'insights'::text, 'results'::text])`,
+    ),
+    check(
+      'tournament_setup_issues_severity_valid',
+      sql`severity = ANY (ARRAY['warning'::text, 'blocking'::text])`,
+    ),
+    check(
+      'tournament_setup_issues_key_nonempty',
+      sql`btrim(issue_key) <> '' AND btrim(code) <> ''`,
+    ),
+    check(
+      'tournament_setup_issues_counts_valid',
+      sql`affected_entry_count >= 0 AND repair_attempts >= 0 AND affected_entry_count = cardinality(affected_entry_ids)`,
     ),
   ],
 );

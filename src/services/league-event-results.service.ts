@@ -350,6 +350,7 @@ export async function syncLeagueEventResultsByTournament(
   options?: {
     concurrency?: number;
     freshAfter?: Date | string;
+    entryIds?: number[];
   },
 ): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
@@ -376,9 +377,15 @@ export async function syncLeagueEventResultsByTournament(
   const requiredRichFreshAfter = latestFreshnessTimestamp(freshAfter, finalizationCutoff);
 
   const resolvedEntryIds = await resolveTournamentEntryIds(season, tournament);
-  const entryInfos = await entryInfoRepository.findByIds(season, resolvedEntryIds);
+  const requestedEntryIds = options?.entryIds
+    ? new Set(uniqueNumbers(options.entryIds))
+    : null;
+  const scopedEntryIds = requestedEntryIds
+    ? resolvedEntryIds.filter((entryId) => requestedEntryIds.has(entryId))
+    : resolvedEntryIds;
+  const entryInfos = await entryInfoRepository.findByIds(season, scopedEntryIds);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
-  const entryIds = findEventEligibleEntryIds(resolvedEntryIds, entryInfos, eventId);
+  const entryIds = findEventEligibleEntryIds(scopedEntryIds, entryInfos, eventId);
   if (entryIds.length === 0) {
     return {
       tournamentId,

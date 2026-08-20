@@ -4,6 +4,7 @@ import { createLiveDataWorker } from './workers/live-data.worker';
 import { createLeagueSyncWorker } from './workers/league-sync.worker';
 import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
 import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
+import { createTournamentRepairWorker } from './workers/tournament-repair.worker';
 import { createUnderstatWorker } from './workers/understat.worker';
 import { databaseSingleton } from './db/singleton';
 import { getConfig } from './utils/config';
@@ -34,6 +35,7 @@ const runtimes: WorkerRuntime[] = [
   createLeagueSyncWorker(),
   createTournamentSyncWorker(),
   createTournamentSetupWorker(),
+  createTournamentRepairWorker(),
   createUnderstatWorker(),
 ];
 

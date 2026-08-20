@@ -49,6 +49,21 @@ export function tournamentSetupLifecycleScope(tournamentId: number): string {
     : 'tournament-setup:all';
 }
 
+/**
+ * Tournament entry-profile work is independent per season/entry. Keeping the
+ * lock key at that granularity lets a 20-team setup proceed while a large
+ * tournament is fetching its own entry snapshots.
+ */
+export function tournamentEntryCoreScopes(seasonId: number, entryIds: number[]): string[] {
+  return [
+    ...new Set(
+      entryIds
+        .filter((entryId) => Number.isInteger(entryId) && entryId > 0)
+        .map((entryId) => `entry-core:${seasonId}:${entryId}`),
+    ),
+  ].sort();
+}
+
 /** Serializes the queue check, canonical preparation, and deterministic add. */
 export function tournamentSetupEnqueueScope(tournamentId: number): string {
   return Number.isFinite(tournamentId)
@@ -91,7 +106,11 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   if (queue === 'entry-sync') {
     switch (jobName) {
       case 'entry-info':
-        return ['entry-core:all'];
+        // The entry-info worker resolves its concrete chunk and supplies one
+        // entry-core:{season}:{entryId} scope per entry.  Keeping a fallback
+        // global lock here would serialize every table scan and defeat the
+        // per-entry setup/repair concurrency guarantee.
+        return [];
       case 'entry-picks':
         return [withEvent('entry-event-picks', eventId)];
       case 'entry-transfers':

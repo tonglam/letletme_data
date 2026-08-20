@@ -80,8 +80,18 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         setupCompletedUnits: status.setupCompletedUnits,
         setupTotalUnits: status.setupTotalUnits,
         setupProgressUpdatedAt: status.setupProgressUpdatedAt,
+        setupProgressMode: status.setupProgressIndeterminate ? 'INDETERMINATE' : 'DETERMINATE',
+        // Keep the short name for clients that consumed the first additive
+        // status payload before the GraphQL field naming was finalized.
+        progressMode: status.setupProgressIndeterminate ? 'INDETERMINATE' : 'DETERMINATE',
+        setupAttempt: status.setupAttempt ?? 0,
+        setupMaxAttempts: status.setupMaxAttempts ?? 3,
+        nextRetryAt: status.setupNextRetryAt,
         standingsReadyAt: status.standingsReadyAt,
         setupHasWarnings: status.setupWarningCount > 0,
+        warningSummaries: status.warningSummaries ?? [],
+        profilesReadyAt: status.profilesReadyAt,
+        insightsReadyAt: status.insightsReadyAt,
         setupStartedAt: status.setupStartedAt,
         setupFinishedAt: status.setupFinishedAt,
       };
