@@ -1,0 +1,10 @@
+title = "LetLetMe Data secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Explicit placeholder values used by tracked environment examples"
+regexes = [
+  '''(?i)^(?:replace(?:_with)?_.*|your_.*|.*example.*|pass(?:word)?|secret|\[.*\])$''',
+]
