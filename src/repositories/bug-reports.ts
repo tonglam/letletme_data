@@ -38,6 +38,7 @@ export type BugReportStorageDeletionCursor = { migratedAt: Date; id: string };
 export type BugReportDeletionClaim = {
   report: StoredBugReport;
   screenshotUrl: string | null;
+  completed?: boolean;
 };
 
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
@@ -187,7 +188,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           });
         return row;
       };
-      const row = report.screenshotUrl ? await db.transaction(insertRow) : await insertRow(db);
+      const row = 'transaction' in db ? await db.transaction(insertRow) : await insertRow(db);
 
       if (!row) {
         if (!report.submissionId) throw new DatabaseError('Bug report insert returned no row');
@@ -681,19 +682,60 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .limit(1);
       if (!current) return null;
 
-      // The private screenshot job owns object-key deletion. Keep the report
-      // and its key reference until that job confirms removal; otherwise the
-      // exact-key retry would lose its database inventory at row retention.
-      if (current.screenshotObjectKey && !current.screenshotDeletedAt) return null;
-
       const [existingClaim] = await tx
         .select({
           snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotObjectKey: bugReportRetentionBackupsInOps.screenshotObjectKey,
           screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
         })
         .from(bugReportRetentionBackupsInOps)
         .where(eq(bugReportRetentionBackupsInOps.id, current.id))
         .limit(1);
+
+      if (current.screenshotObjectKey && !current.screenshotDeletedAt) {
+        // Move the exact private key into a scrubbed durable inventory before
+        // deleting the report row. The private screenshot worker can then
+        // retry the object independently of report-body retention.
+        const inventoryKey = existingClaim?.screenshotObjectKey ?? current.screenshotObjectKey;
+        if (
+          existingClaim?.screenshotObjectKey &&
+          existingClaim.screenshotObjectKey !== inventoryKey
+        ) {
+          throw new DatabaseError('Bug report screenshot inventory key conflict');
+        }
+        if (existingClaim && !existingClaim.screenshotObjectKey) {
+          await tx
+            .update(bugReportRetentionBackupsInOps)
+            .set({
+              snapshot: { screenshotObjectKey: inventoryKey },
+              screenshotObjectKey: inventoryKey,
+              screenshotCreatedAt: current.createdAt,
+            })
+            .where(eq(bugReportRetentionBackupsInOps.id, current.id));
+        } else if (!existingClaim) {
+          await tx
+            .insert(bugReportRetentionBackupsInOps)
+            .values({
+              id: current.id,
+              publicId: current.publicId,
+              snapshot: { screenshotObjectKey: inventoryKey },
+              screenshotObjectKey: inventoryKey,
+              screenshotCreatedAt: current.createdAt,
+            })
+            .onConflictDoNothing();
+        }
+        const [deleted] = await tx
+          .delete(bugReportsInOps)
+          .where(and(eq(bugReportsInOps.id, current.id), lte(bugReportsInOps.expiresAt, now)))
+          .returning({ id: bugReportsInOps.id });
+        if (!deleted) return null;
+        return {
+          report: { ...(current as StoredBugReport), screenshotUrl: null },
+          screenshotUrl: null,
+          completed: true,
+        };
+      }
+
       const screenshotUrl = existingClaim
         ? existingClaim.screenshotDeletedAt
           ? null
@@ -887,6 +929,141 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     }
     if (!beforeDelete || !(await beforeDelete())) return false;
     return completeClaimedDeletion(reportId, now);
+  };
+
+  const listExpiredScreenshots = async (
+    cutoff: Date,
+    limit: number,
+    offset = 0,
+  ): Promise<ExpiredBugReportScreenshot[]> => {
+    const db = await getDbInstance();
+    const scanLimit = Math.min(Math.max(offset + limit, limit), 1_100);
+    const [liveRows, backupRows] = await Promise.all([
+      db
+        .select({
+          id: bugReportsInOps.id,
+          screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+          createdAt: bugReportsInOps.createdAt,
+        })
+        .from(bugReportsInOps)
+        .where(
+          and(
+            lte(bugReportsInOps.createdAt, cutoff),
+            isNotNull(bugReportsInOps.screenshotObjectKey),
+            sql`${bugReportsInOps.screenshotDeletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(asc(bugReportsInOps.createdAt), asc(bugReportsInOps.id))
+        .limit(scanLimit),
+      db
+        .select({
+          id: bugReportRetentionBackupsInOps.id,
+          screenshotObjectKey: bugReportRetentionBackupsInOps.screenshotObjectKey,
+          createdAt: bugReportRetentionBackupsInOps.screenshotCreatedAt,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(
+          and(
+            lte(bugReportRetentionBackupsInOps.screenshotCreatedAt, cutoff),
+            isNotNull(bugReportRetentionBackupsInOps.screenshotObjectKey),
+            sql`${bugReportRetentionBackupsInOps.screenshotDeletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(
+          asc(bugReportRetentionBackupsInOps.screenshotCreatedAt),
+          asc(bugReportRetentionBackupsInOps.id),
+        )
+        .limit(scanLimit),
+    ]);
+    return [...liveRows, ...backupRows]
+      .flatMap((row) =>
+        row.screenshotObjectKey && row.createdAt
+          ? [{ id: row.id, screenshotObjectKey: row.screenshotObjectKey, createdAt: row.createdAt }]
+          : [],
+      )
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      )
+      .slice(offset, offset + limit);
+  };
+
+  const listActiveScreenshotKeys = async (limit: number, offset = 0): Promise<string[]> => {
+    const db = await getDbInstance();
+    const scanLimit = Math.min(Math.max(offset + limit, limit), 1_100);
+    const [liveRows, backupRows] = await Promise.all([
+      db
+        .select({
+          screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+          createdAt: bugReportsInOps.createdAt,
+          id: bugReportsInOps.id,
+        })
+        .from(bugReportsInOps)
+        .where(
+          and(
+            isNotNull(bugReportsInOps.screenshotObjectKey),
+            sql`${bugReportsInOps.screenshotDeletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(asc(bugReportsInOps.createdAt), asc(bugReportsInOps.id))
+        .limit(scanLimit),
+      db
+        .select({
+          screenshotObjectKey: bugReportRetentionBackupsInOps.screenshotObjectKey,
+          createdAt: bugReportRetentionBackupsInOps.screenshotCreatedAt,
+          id: bugReportRetentionBackupsInOps.id,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(
+          and(
+            isNotNull(bugReportRetentionBackupsInOps.screenshotObjectKey),
+            sql`${bugReportRetentionBackupsInOps.screenshotDeletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(
+          asc(bugReportRetentionBackupsInOps.screenshotCreatedAt),
+          asc(bugReportRetentionBackupsInOps.id),
+        )
+        .limit(scanLimit),
+    ]);
+    const keys = [...liveRows, ...backupRows]
+      .flatMap((row) =>
+        row.screenshotObjectKey && row.createdAt
+          ? [{ id: row.id, screenshotObjectKey: row.screenshotObjectKey, createdAt: row.createdAt }]
+          : [],
+      )
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      )
+      .map((row) => row.screenshotObjectKey);
+    return [...new Set(keys)].slice(offset, offset + limit);
+  };
+
+  const markScreenshotDeleted = async (id: string, deletedAt: Date): Promise<void> => {
+    const db = await getDbInstance();
+    const mark = async (connection: DbOrTransaction) => {
+      await connection
+        .update(bugReportsInOps)
+        .set({ screenshotObjectKey: null, screenshotDeletedAt: deletedAt })
+        .where(eq(bugReportsInOps.id, id));
+      await connection
+        .update(bugReportRetentionBackupsInOps)
+        .set({
+          screenshotObjectKey: null,
+          screenshotCreatedAt: null,
+          screenshotDeletedAt: deletedAt,
+          snapshot: {},
+        })
+        .where(
+          and(
+            eq(bugReportRetentionBackupsInOps.id, id),
+            isNotNull(bugReportRetentionBackupsInOps.screenshotObjectKey),
+          ),
+        );
+    };
+    if ('transaction' in db) await db.transaction(mark);
+    else await mark(db);
   };
 
   return {

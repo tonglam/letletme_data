@@ -63,6 +63,14 @@ const redactDiagnosticText = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
   const cleaned = value
     .replace(/https?:\/\/[^\s]+/gi, '[url]')
+    .replace(
+      /(["']?)\b(?:authorization|token)\b\1\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9_-]*\s+)?(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi,
+      '[redacted]',
+    )
+    .replace(
+      /(["']?)\b(?:cookie|deviceId|entryId)\b\1\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi,
+      '[redacted]',
+    )
     .replace(/\bauthorization\b\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[^\s,;&]+/gi, '[redacted]')
     .replace(/\btoken\b\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[^\s,;&]+/gi, '[redacted]')
     .replace(/\b(?:cookie|deviceId|entryId)\b\s*[:=]\s*[^\s,;&]+(?:;\s*[^\s,;&]+)*/gi, '[redacted]')

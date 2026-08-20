@@ -82,6 +82,10 @@ export async function runBugReportCleanup(now = new Date()): Promise<BugReportCl
       try {
         const claim = await bugReportRepository.claimForDeletion(report, now);
         if (!claim) continue;
+        if (claim.completed) {
+          deleted += 1;
+          continue;
+        }
         const removed = await bugReportRepository.finalizeClaimedDeletion(
           report.id,
           now,

@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS ops.bug_report_retention_backups (
 
 ALTER TABLE ops.bug_report_retention_backups
   ADD COLUMN IF NOT EXISTS screenshot_delete_started_at timestamptz,
+  ADD COLUMN IF NOT EXISTS screenshot_object_key text,
+  ADD COLUMN IF NOT EXISTS screenshot_created_at timestamptz,
   ADD COLUMN IF NOT EXISTS screenshot_deleted_at timestamptz;
 
 DROP INDEX IF EXISTS ops.bug_report_retention_backups_public_id_idx;
@@ -49,6 +51,10 @@ CREATE INDEX IF NOT EXISTS bug_report_retention_backups_created_idx
 CREATE INDEX IF NOT EXISTS bug_report_retention_backups_screenshot_tombstone_idx
   ON ops.bug_report_retention_backups ((snapshot->>'screenshotUrl'))
   WHERE screenshot_deleted_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS bug_report_retention_backups_private_screenshot_idx
+  ON ops.bug_report_retention_backups (backed_up_at ASC)
+  WHERE screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS ops.bug_report_storage_migrations (
   id uuid PRIMARY KEY,

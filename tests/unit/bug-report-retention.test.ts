@@ -65,5 +65,18 @@ describe('bug report retention and diagnostics', () => {
     ).toEqual({
       operations: [{ operation: 'submit', message: '[redacted]' }],
     });
+
+    const quoted = sanitizeBugReportClientMeta({
+      operations: [
+        {
+          operation: 'submit',
+          message: '{"Authorization":"Bearer super-secret","deviceId":"abc"}',
+        },
+      ],
+    });
+    const quotedMessage = (quoted.operations as Array<{ message?: string }>)[0]?.message ?? '';
+    expect(quotedMessage).not.toContain('super-secret');
+    expect(quotedMessage).not.toContain('abc');
+    expect(quotedMessage).toContain('[redacted]');
   });
 });
