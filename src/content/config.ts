@@ -12,6 +12,9 @@ export type ContentRuntimeFlags = Readonly<{
   publisherApiKeyHashes: readonly string[];
 }>;
 
+// Keep runtime requests within the tracked Grok input schema's ceiling.
+export const CONTENT_POLL_MAX_X_CALLS_LIMIT = 20;
+
 const apiKeyHashes = (value: string | undefined): readonly string[] =>
   (value ?? '')
     .split(',')
@@ -52,8 +55,14 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   if (!Number.isSafeInteger(flags.grokConcurrency) || flags.grokConcurrency < 1) {
     throw new Error('CONTENT_GROK_CONCURRENCY must be a positive integer');
   }
-  if (!Number.isSafeInteger(flags.pollMaxXCalls) || flags.pollMaxXCalls < 1) {
-    throw new Error('CONTENT_POLL_MAX_X_CALLS must be a positive integer');
+  if (
+    !Number.isSafeInteger(flags.pollMaxXCalls) ||
+    flags.pollMaxXCalls < 1 ||
+    flags.pollMaxXCalls > CONTENT_POLL_MAX_X_CALLS_LIMIT
+  ) {
+    throw new Error(
+      `CONTENT_POLL_MAX_X_CALLS must be an integer from 1 to ${CONTENT_POLL_MAX_X_CALLS_LIMIT}`,
+    );
   }
   if (
     !Number.isSafeInteger(flags.dailyXCallBudget) ||

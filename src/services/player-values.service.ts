@@ -141,7 +141,10 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
   return async function syncForDate(
     season: FplSeasonRef,
     changeDate: string = dependencies.getCurrentChangeDate(),
-    options?: { onTargetEventResolved?: (eventId: number) => void },
+    options?: {
+      onTargetEventResolved?: (eventId: number) => void;
+      deferPriceSyncEnqueue?: boolean;
+    },
   ): Promise<{
     count: number;
     eventId?: number;
@@ -200,11 +203,13 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
         );
       }
       if (changedRows.length > 0) {
-        await dependencies.enqueuePlayerPrices(season, 'cascade', {
-          changeDate,
-          jobId: `player-prices-${changeDate}-immediate`,
-          removeOnSettle: true,
-        });
+        if (!options?.deferPriceSyncEnqueue) {
+          await dependencies.enqueuePlayerPrices(season, 'cascade', {
+            changeDate,
+            jobId: `player-prices-${changeDate}-immediate`,
+            removeOnSettle: true,
+          });
+        }
         try {
           await dependencies.notify(formatPlayerValuesNotification(changeDate, changedRows));
         } catch (error) {

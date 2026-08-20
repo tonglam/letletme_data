@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -227,6 +227,13 @@ export class CliGrokRunner implements GrokRunner {
       await mkdir(this.runRoot, { recursive: true, mode: 0o700 });
       runDir = await mkdtemp(join(this.runRoot, `${input.runId}-`));
       await writeFile(join(runDir, 'input.json'), requestJson, { mode: 0o600 });
+      // Grok resolves slash-prefixed skills from the active cwd. Keep the
+      // tracked skill (including schemas and taxonomy references) inside this
+      // isolated run directory instead of relying on the image-level copy
+      // while the CLI is pointed at a fresh temporary cwd.
+      const runSkillDir = join(runDir, '.grok', 'skills', MONITOR_FPL_X_SOURCES_SKILL);
+      await mkdir(resolve(runSkillDir, '..'), { recursive: true, mode: 0o700 });
+      await cp(resolve(skillPath(), '..'), runSkillDir, { recursive: true });
       const prompt = `/${MONITOR_FPL_X_SOURCES_SKILL} input=input.json format=json`;
       const args = [
         '--disable-web-search',

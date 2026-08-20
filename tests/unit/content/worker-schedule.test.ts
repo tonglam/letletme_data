@@ -7,10 +7,28 @@ import {
   resolvePollPhase,
 } from '../../../src/content/poll-policy';
 import { isAcquisitionRunStale } from '../../../src/content/acquisition/run-repository';
+import { assertContentRuntimeFlags, type ContentRuntimeFlags } from '../../../src/content/config';
 
 const now = new Date('2026-08-20T10:00:00.000Z');
 
 describe('content worker poll policy', () => {
+  test('rejects a per-run X-call ceiling above the tracked Grok schema limit', () => {
+    const flags: ContentRuntimeFlags = {
+      pipelineEnabled: true,
+      realGrokEnabled: false,
+      publicationEnabled: false,
+      briefingPublicEnabled: false,
+      grokConcurrency: 1,
+      pollMaxXCalls: 21,
+      dailyXCallBudget: 24,
+      revalidationUrl: null,
+      revalidationSecret: null,
+      editorApiKeyHashes: [],
+      publisherApiKeyHashes: [],
+    };
+    expect(() => assertContentRuntimeFlags(flags)).toThrow('from 1 to 20');
+  });
+
   test('keeps FINAL_90 disabled unless a future duty window and budget are recorded', () => {
     const deadlineAt = '2026-08-20T11:00:00.000Z';
     const base = { deadlineAt, final90Enabled: true, final90Budget: 2 };

@@ -28,6 +28,13 @@ async function runFixture(mode: string, timeoutMs = 1_000) {
 }
 
 describe('headless Grok runner', () => {
+  test('makes the tracked skill and references available from the isolated cwd', async () => {
+    const result = await runFixture('require-skill');
+    expect(result.status).toBe('COMPLETED');
+    expect(result.traceVerified).toBe(true);
+    expect(result.xCallCount).toBe(1);
+  });
+
   test('counts a real X tool event independently of the model result', async () => {
     const result = await runFixture('normal');
     expect(result.status).toBe('COMPLETED');

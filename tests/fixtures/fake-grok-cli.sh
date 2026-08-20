@@ -3,6 +3,12 @@
 set -eu
 
 case "${FAKE_GROK_MODE:-normal}" in
+  require-skill)
+    test -f .grok/skills/monitor-fpl-x-sources/SKILL.md
+    test -f .grok/skills/monitor-fpl-x-sources/schemas/input.schema.json
+    test -f .grok/skills/monitor-fpl-x-sources/references/taxonomy.md
+    printf '%s\n' '{"type":"tool_call","tool":"x_search"}' '{"status":"COMPLETED","receipts":[]}'
+    ;;
   normal)
     printf '%s\n' '{"type":"tool_call","tool":"x_search"}' '{"status":"COMPLETED","receipts":[]}'
     ;;

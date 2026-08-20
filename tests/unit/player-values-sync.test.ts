@@ -149,6 +149,21 @@ describe('daily player market snapshot synchronization', () => {
     expect(notify.mock.calls[0]?.[0]).toContain('Haaland (MCI)');
   });
 
+  test('can defer the dependent price enqueue until the parent transaction commits', async () => {
+    const enqueuePlayerPrices = mock(async () => ({ id: 'prices' }) as never);
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        findByChangeDate: async () => [storedValue('Rise')],
+        enqueuePlayerPrices,
+      }),
+    );
+
+    await expect(
+      sync(TEST_SEASON, changeDate, { deferPriceSyncEnqueue: true }),
+    ).resolves.toMatchObject({ count: 1 });
+    expect(enqueuePlayerPrices).not.toHaveBeenCalled();
+  });
+
   test('does not treat Start rows as a price change', async () => {
     const enqueuePlayerPrices = mock(async () => ({ id: 'unexpected' }) as never);
     const sync = createPlayerValuesSync(
