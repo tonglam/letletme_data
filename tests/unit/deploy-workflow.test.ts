@@ -4,9 +4,17 @@ import { readFileSync } from 'node:fs';
 const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const securityWorkflow = readFileSync('.github/workflows/security.yml', 'utf8');
+const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const quote = String.fromCharCode(39);
 
 describe('release workflow gates', () => {
+  test('allows only session-mode pooler connections for the external backup', () => {
+    expect(backupScript).toContain('*pgbouncer=true*|*:6543/*');
+    expect(backupScript).not.toContain('*pooler.supabase.com*');
+    expect(backupScript).toContain('Supabase session pooler on port 5432');
+    expect(backupScript).toContain('--dbname="$DATABASE_URL"');
+  });
+
   test('pins all actions and aligns CI with the production Bun version', () => {
     const mutableAction = /uses:\s+[^@\n]+@(v\d|main|master|latest)(?:\s|$)/;
     expect(workflow).not.toMatch(mutableAction);

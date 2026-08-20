@@ -26,8 +26,9 @@ capability:
   refresh privileges through `letletme_data_writer`.
 - GraphQL runtime receives schema usage and SELECT-only access through
   `letletme_graphql_reader`.
-- Migration runs use the direct PostgreSQL 15 `postgres` LOGIN, which can assume the owner role and
-  update `ops.schema_migrations`.
+- Migration runs use the direct PostgreSQL 15 `postgres` LOGIN, or the equivalent Supavisor
+  session-mode endpoint on port 5432 when the host is IPv4-only. Both preserve one session so the
+  LOGIN can assume the owner role and update `ops.schema_migrations`; transaction mode is not valid.
 
 Passwords and runtime LOGIN definitions are never stored in the baseline.
 

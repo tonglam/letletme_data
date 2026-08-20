@@ -95,7 +95,7 @@ require_files() {
     exit 1
   fi
   if [[ ! -f "${MIGRATION_ENV_FILE}" ]]; then
-    log_error "${MIGRATION_ENV_FILE} not found. Copy .env.migrate.example and add the direct Supabase postgres URL."
+    log_error "${MIGRATION_ENV_FILE} not found. Copy .env.migrate.example and add a direct or session-mode Supabase postgres URL."
     exit 1
   fi
   load_backup_settings

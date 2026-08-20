@@ -8,9 +8,10 @@ keep_count=${DATABASE_BACKUP_KEEP:-7}
 expected_major=${DATABASE_BACKUP_PG_MAJOR:-15}
 deploy_sha=${DEPLOY_SHA:-unknown}
 
-case "$DATABASE_URL" in
-  *pgbouncer=true*|*pooler.supabase.com*|*:6543/*)
-    echo 'DATABASE_URL must be the direct PostgreSQL migration connection, not a pooler' >&2
+database_url_lower=$(printf '%s' "$DATABASE_URL" | tr '[:upper:]' '[:lower:]')
+case "$database_url_lower" in
+  *pgbouncer=true*|*:6543/*)
+    echo 'DATABASE_URL must use direct PostgreSQL or a Supabase session pooler on port 5432; transaction poolers are not supported' >&2
     exit 1
     ;;
 esac
