@@ -15,6 +15,7 @@ import {
 } from './content/workers/content-x.queue';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { logError, logInfo } from './utils/logger';
+import { withMutationConflictGuard } from './utils/mutation-lock';
 import { computePollWindow, isPollDue, pollBudget, resolvePollPhase } from './content/poll-policy';
 import {
   reclaimStaleAcquisitionRuns,
@@ -43,86 +44,97 @@ async function scheduleFromDatabase(): Promise<void> {
     .where(eq(contentSourceGroups.status, 'active'));
   const now = new Date();
   for (const group of groups) {
-    const phase = resolvePollPhase(group.pollPolicy, now);
-    await reclaimStaleAcquisitionRuns({
-      groupId: group.groupId,
-      partitionKey,
-      mode: 'poll',
-      now,
-    });
-    const [checkpoints, activeRuns] = await Promise.all([
-      db
-        .select({ windowEnd: contentAcquisitionCheckpoints.windowEnd })
-        .from(contentAcquisitionCheckpoints)
-        .where(
-          and(
-            eq(contentAcquisitionCheckpoints.groupId, group.groupId),
-            eq(contentAcquisitionCheckpoints.partitionKey, partitionKey),
-          ),
+    const reservation = await withMutationConflictGuard(
+      {
+        queueName: 'content-x-scheduler',
+        jobName: 'content-x-poll',
+        scopes: [`content-x-poll:${group.groupId}:${partitionKey}`],
+      },
+      async () => {
+        const transactionDb = await getDb();
+        const phase = resolvePollPhase(group.pollPolicy, now);
+        await reclaimStaleAcquisitionRuns({
+          groupId: group.groupId,
+          partitionKey,
+          mode: 'poll',
+          now,
+        });
+        const [checkpoints, activeRuns] = await Promise.all([
+          transactionDb
+            .select({ windowEnd: contentAcquisitionCheckpoints.windowEnd })
+            .from(contentAcquisitionCheckpoints)
+            .where(
+              and(
+                eq(contentAcquisitionCheckpoints.groupId, group.groupId),
+                eq(contentAcquisitionCheckpoints.partitionKey, partitionKey),
+              ),
+            )
+            .limit(1),
+          transactionDb
+            .select({ runId: contentAcquisitionRuns.runId })
+            .from(contentAcquisitionRuns)
+            .where(
+              and(
+                eq(contentAcquisitionRuns.groupId, group.groupId),
+                eq(contentAcquisitionRuns.partitionKey, partitionKey),
+                eq(contentAcquisitionRuns.mode, 'poll'),
+                inArray(contentAcquisitionRuns.status, ['pending', 'running']),
+              ),
+            )
+            .limit(1),
+        ]);
+        const checkpointEnd = checkpoints[0]?.windowEnd ?? null;
+        if (
+          activeRuns.length > 0 ||
+          !isPollDue({ policy: group.pollPolicy, phase, now, checkpointEnd })
         )
-        .limit(1),
-      db
-        .select({ runId: contentAcquisitionRuns.runId })
-        .from(contentAcquisitionRuns)
-        .where(
-          and(
-            eq(contentAcquisitionRuns.groupId, group.groupId),
-            eq(contentAcquisitionRuns.partitionKey, partitionKey),
-            eq(contentAcquisitionRuns.mode, 'poll'),
-            inArray(contentAcquisitionRuns.status, ['pending', 'running']),
-          ),
-        )
-        .limit(1),
-    ]);
-    const checkpointEnd = checkpoints[0]?.windowEnd ?? null;
-    if (
-      activeRuns.length > 0 ||
-      !isPollDue({ policy: group.pollPolicy, phase, now, checkpointEnd })
-    )
-      continue;
-    const window = computePollWindow({
-      policy: group.pollPolicy,
-      phase,
-      now,
-      checkpointEnd,
-    });
-    const end = window.windowEnd.toISOString();
-    const start = window.windowStart.toISOString();
-    const snapshot = await buildSourceSnapshot(group.groupKey);
-    if (snapshot.items.length === 0) {
-      logInfo('Content scheduler skipped empty source group', {
-        groupKey: group.groupKey,
-        partitionKey,
-      });
-      continue;
-    }
-    const runId = randomUUID();
-    const idempotencyKey = `briefing:x:${group.groupKey}:${partitionKey}:poll:${phase}:${end}`;
-    const reservation = await reservePendingAcquisitionRun({
-      runId,
-      groupId: group.groupId,
-      partitionKey,
-      mode: 'poll',
-      windowStart: start,
-      windowEnd: end,
-      idempotencyKey,
-    });
-    if (reservation.reused) continue;
+          return null;
+        const window = computePollWindow({
+          policy: group.pollPolicy,
+          phase,
+          now,
+          checkpointEnd,
+        });
+        const end = window.windowEnd.toISOString();
+        const start = window.windowStart.toISOString();
+        const snapshot = await buildSourceSnapshot(group.groupKey);
+        if (snapshot.items.length === 0) {
+          logInfo('Content scheduler skipped empty source group', {
+            groupKey: group.groupKey,
+            partitionKey,
+          });
+          return null;
+        }
+        const runId = randomUUID();
+        const idempotencyKey = `briefing:x:${group.groupKey}:${partitionKey}:poll:${phase}:${end}`;
+        const pending = await reservePendingAcquisitionRun({
+          runId,
+          groupId: group.groupId,
+          partitionKey,
+          mode: 'poll',
+          windowStart: start,
+          windowEnd: end,
+          idempotencyKey,
+        });
+        return { pending, runId, phase, start, end, idempotencyKey };
+      },
+    );
+    if (!reservation || reservation.pending.reused) continue;
     try {
       await enqueueContentXScan({
-        runId,
-        idempotencyKey,
+        runId: reservation.runId,
+        idempotencyKey: reservation.idempotencyKey,
         groupKey: group.groupKey,
         partitionKey,
         mode: 'poll',
-        pollPhase: phase,
-        phaseBudget: pollBudget(group.pollPolicy, phase),
-        windowStart: start,
-        windowEnd: end,
+        pollPhase: reservation.phase,
+        phaseBudget: pollBudget(group.pollPolicy, reservation.phase),
+        windowStart: reservation.start,
+        windowEnd: reservation.end,
       });
     } catch (error) {
       logError('Content scheduler enqueue failed; pending run will be reclaimed', error, {
-        runId,
+        runId: reservation.runId,
         groupKey: group.groupKey,
         partitionKey,
       });

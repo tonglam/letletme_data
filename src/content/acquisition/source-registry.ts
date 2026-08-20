@@ -43,6 +43,26 @@ export type SourceSnapshotItem = Readonly<{
   rightsPolicy: Record<string, unknown>;
 }>;
 
+function assertSourceSnapshotContract(item: SourceSnapshotItem): void {
+  const limits: Readonly<Record<string, number>> = {
+    platform: 32,
+    externalId: 128,
+    handle: 128,
+    displayName: 200,
+    sourceType: 64,
+    reportingFamily: 64,
+  };
+  for (const [field, maximum] of Object.entries(limits)) {
+    const value = item[field as keyof SourceSnapshotItem];
+    if (typeof value === 'string' && (value.length < 1 || value.length > maximum)) {
+      throw new ValidationError(
+        `Content source ${field} exceeds the Grok input schema limit`,
+        'EDITORIAL_SOURCE_CONTRACT_INVALID',
+      );
+    }
+  }
+}
+
 export function sourceSnapshotRevision(snapshot: readonly SourceSnapshotItem[]): string {
   const canonical = JSON.stringify(
     snapshot.map((item) => ({ ...item, rightsPolicy: item.rightsPolicy })),
@@ -157,6 +177,16 @@ export async function upsertContentSource(
   actor: ContentSourceCommandActor,
 ): Promise<string> {
   const sourceId = randomUUID();
+  assertSourceSnapshotContract({
+    sourceId,
+    platform: input.platform,
+    externalId: input.externalId,
+    handle: input.handle ?? null,
+    displayName: input.displayName,
+    sourceType: input.sourceType,
+    reportingFamily: input.reportingFamily,
+    rightsPolicy: input.rightsPolicy ?? {},
+  });
   return sourceCommand({
     actor,
     actionType: 'source.upsert',
@@ -311,5 +341,6 @@ export async function buildSourceSnapshot(
     reportingFamily: row.reportingFamily,
     rightsPolicy: (row.rightsPolicy ?? {}) as Record<string, unknown>,
   }));
+  items.forEach(assertSourceSnapshotContract);
   return { groupId, revision: sourceSnapshotRevision(items), items };
 }

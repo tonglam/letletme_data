@@ -336,7 +336,7 @@ export async function finishAcquisitionRun(input: {
       },
     ];
   });
-  const checkpointAdvanced =
+  const checkpointEligible =
     receiptsSchemaValid &&
     input.result.traceVerified === true &&
     ((input.result.status === 'EMPTY' && input.result.receipts.length === 0) ||
@@ -359,7 +359,7 @@ export async function finishAcquisitionRun(input: {
         adapterVersion: input.result.adapterVersion ?? null,
         errorSummary:
           input.result.error ?? (receiptsSchemaValid ? null : 'Invalid Grok receipt schema'),
-        checkpointAdvanced,
+        checkpointAdvanced: false,
         completedAt: now,
       })
       .where(
@@ -418,8 +418,9 @@ export async function finishAcquisitionRun(input: {
         metadata: { skillSha: input.result.skillSha || null },
       });
     }
-    if (checkpointAdvanced) {
-      await tx
+    let checkpointAdvanced = false;
+    if (checkpointEligible) {
+      const checkpointWrite = await tx
         .insert(contentAcquisitionCheckpoints)
         .values({
           groupId: input.run.groupId,
@@ -442,7 +443,13 @@ export async function finishAcquisitionRun(input: {
           },
           // A late/overlapping run must never move a checkpoint backwards.
           where: sql`${contentAcquisitionCheckpoints.windowEnd} < EXCLUDED.window_end`,
-        });
+        })
+        .returning({ windowEnd: contentAcquisitionCheckpoints.windowEnd });
+      checkpointAdvanced = checkpointWrite.length === 1;
+      await tx
+        .update(contentAcquisitionRuns)
+        .set({ checkpointAdvanced })
+        .where(eq(contentAcquisitionRuns.runId, input.run.runId));
     }
     return { status: state, checkpointAdvanced, receiptCount: receiptValues.length };
   });

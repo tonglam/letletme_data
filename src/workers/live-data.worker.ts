@@ -65,7 +65,14 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       trigger: source,
       mutationScopes: ['data-core:fixtures', `live-snapshot:event:${eventId}`],
     });
-    if (shouldCascadePersistedLiveSnapshot(snapshot)) {
+    // A failed downstream enqueue causes BullMQ to retry this parent after the
+    // canonical live write has already committed. On that retry the unchanged
+    // snapshot path correctly reports `persistedEventLives: false`; the durable
+    // job intent still makes the idempotent cascade eligible.
+    if (
+      shouldCascadePersistedLiveSnapshot(snapshot) ||
+      (job.attemptsMade > 0 && persistEventLives)
+    ) {
       await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
     }
     return snapshot;

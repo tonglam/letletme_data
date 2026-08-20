@@ -113,10 +113,10 @@ const sourceGroupBody = t.Object({
   pollPolicy: t.Optional(t.Object({}, { additionalProperties: true })),
 });
 const sourceBody = t.Object({
-  platform: t.String({ minLength: 1, maxLength: 64 }),
-  externalId: t.String({ minLength: 1, maxLength: 256 }),
-  handle: t.Optional(t.Union([t.String({ maxLength: 256 }), t.Null()])),
-  displayName: t.String({ minLength: 1, maxLength: 240 }),
+  platform: t.String({ minLength: 1, maxLength: 32 }),
+  externalId: t.String({ minLength: 1, maxLength: 128 }),
+  handle: t.Optional(t.Union([t.String({ maxLength: 128 }), t.Null()])),
+  displayName: t.String({ minLength: 1, maxLength: 200 }),
   sourceType: t.String({ minLength: 1, maxLength: 64 }),
   reportingFamily: t.String({ minLength: 1, maxLength: 64 }),
   rightsPolicy: t.Optional(t.Object({}, { additionalProperties: true })),
