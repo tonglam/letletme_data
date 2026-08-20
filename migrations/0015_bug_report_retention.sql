@@ -73,6 +73,11 @@ ALTER TABLE ops.bug_report_storage_migrations
 CREATE INDEX IF NOT EXISTS bug_report_storage_migrations_pending_idx
   ON ops.bug_report_storage_migrations (deleted_at, migrated_at);
 
+-- The migration LOGIN may be postgres, but application-owned retention tables
+-- must remain under the canonical Data owner boundary.
+ALTER TABLE ops.bug_report_retention_backups OWNER TO letletme_data_owner;
+ALTER TABLE ops.bug_report_storage_migrations OWNER TO letletme_data_owner;
+
 -- The cleanup job must be able to remove a row only after its screenshot has
 -- been deleted, and must retain a durable inventory of migrated objects.
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE ops.bug_reports TO letletme_data_writer;

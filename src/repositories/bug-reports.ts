@@ -23,6 +23,8 @@ export type StoredBugReport = {
   closedAt: Date | null;
   expiresAt: Date;
   screenshotUrl: string | null;
+  screenshotObjectKey: string | null;
+  screenshotDeletedAt: Date | null;
   body: string;
   clientMeta: Record<string, unknown>;
   source: string;
@@ -47,6 +49,18 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     return typeof value === 'string' ? value : null;
   };
 
+  const screenshotObjectKeyFromSnapshot = (snapshot: unknown): string | null => {
+    if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+    const value = (snapshot as Record<string, unknown>).screenshotObjectKey;
+    return typeof value === 'string' ? value : null;
+  };
+
+  const screenshotWasDeletedInSnapshot = (snapshot: unknown): boolean => {
+    if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+    const value = (snapshot as Record<string, unknown>).screenshotDeletedAt;
+    return value !== null && value !== undefined;
+  };
+
   const lockPublicId = async (connection: DbOrTransaction, publicId: string): Promise<void> => {
     await connection.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${publicId}))`);
   };
@@ -55,6 +69,22 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     try {
       const db = await getDbInstance();
       const insertRow = async (connection: DbOrTransaction) => {
+        // A retry of a committed submission is idempotent even if its original
+        // locator has since been retired or migrated. Resolve it before any
+        // new-report locator checks.
+        if (report.submissionId) {
+          const [existingSubmission] = await connection
+            .select({
+              id: bugReportsInOps.id,
+              publicId: bugReportsInOps.publicId,
+              createdAt: bugReportsInOps.createdAt,
+            })
+            .from(bugReportsInOps)
+            .where(eq(bugReportsInOps.submissionId, report.submissionId))
+            .limit(1);
+          if (existingSubmission) return existingSubmission;
+        }
+
         // Allocation and retirement use the same transaction-scoped lock so
         // a new row cannot pass the registry check while cleanup is creating
         // its durable retired-ID record.
@@ -203,6 +233,8 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         closedAt: bugReportsInOps.closedAt,
         expiresAt: bugReportsInOps.expiresAt,
         screenshotUrl: bugReportsInOps.screenshotUrl,
+        screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+        screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
         body: bugReportsInOps.body,
         clientMeta: bugReportsInOps.clientMeta,
         source: bugReportsInOps.source,
@@ -228,6 +260,8 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           closedAt: bugReportsInOps.closedAt,
           expiresAt: bugReportsInOps.expiresAt,
           screenshotUrl: bugReportsInOps.screenshotUrl,
+          screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+          screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
           body: bugReportsInOps.body,
           clientMeta: bugReportsInOps.clientMeta,
           source: bugReportsInOps.source,
@@ -327,6 +361,8 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         closedAt: bugReportsInOps.closedAt,
         expiresAt: bugReportsInOps.expiresAt,
         screenshotUrl: bugReportsInOps.screenshotUrl,
+        screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+        screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
         body: bugReportsInOps.body,
         clientMeta: bugReportsInOps.clientMeta,
         source: bugReportsInOps.source,
@@ -362,6 +398,8 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         closedAt: bugReportsInOps.closedAt,
         expiresAt: bugReportsInOps.expiresAt,
         screenshotUrl: bugReportsInOps.screenshotUrl,
+        screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+        screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
         body: bugReportsInOps.body,
         clientMeta: bugReportsInOps.clientMeta,
         source: bugReportsInOps.source,
@@ -629,6 +667,8 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           closedAt: bugReportsInOps.closedAt,
           expiresAt: bugReportsInOps.expiresAt,
           screenshotUrl: bugReportsInOps.screenshotUrl,
+          screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+          screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
           body: bugReportsInOps.body,
           clientMeta: bugReportsInOps.clientMeta,
           source: bugReportsInOps.source,
@@ -640,6 +680,11 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .for('update')
         .limit(1);
       if (!current) return null;
+
+      // The private screenshot job owns object-key deletion. Keep the report
+      // and its key reference until that job confirms removal; otherwise the
+      // exact-key retry would lose its database inventory at row retention.
+      if (current.screenshotObjectKey && !current.screenshotDeletedAt) return null;
 
       const [existingClaim] = await tx
         .select({
@@ -678,6 +723,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   };
 
   type BugReportDeletionPreparation =
+    | { kind: 'pending' }
     | { kind: 'delete'; screenshotUrl: string }
     | { kind: 'complete' };
 
@@ -725,6 +771,13 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .for('update')
         .limit(1);
       if (!claim) return null;
+
+      const privateScreenshotKey = screenshotObjectKeyFromSnapshot(claim.snapshot);
+      if (privateScreenshotKey && !screenshotWasDeletedInSnapshot(claim.snapshot)) {
+        // The private screenshot retention worker still owns this object. Do
+        // not remove the report row or its exact-key inventory yet.
+        return { kind: 'pending' };
+      }
 
       const screenshotUrl = screenshotUrlFromSnapshot(claim.snapshot);
       if (screenshotUrl) {
@@ -798,6 +851,8 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .for('update')
         .limit(1);
       if (!claim) return false;
+      const privateScreenshotKey = screenshotObjectKeyFromSnapshot(claim.snapshot);
+      if (privateScreenshotKey && !screenshotWasDeletedInSnapshot(claim.snapshot)) return false;
       const screenshotUrl = screenshotUrlFromSnapshot(claim.snapshot);
       if (screenshotUrl) {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
@@ -826,6 +881,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   ): Promise<boolean> => {
     const prepared = await prepareClaimedDeletion(reportId, now);
     if (!prepared) return false;
+    if (prepared.kind === 'pending') return false;
     if (prepared.kind === 'complete') {
       return prepared.kind === 'complete';
     }
