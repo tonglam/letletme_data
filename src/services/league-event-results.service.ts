@@ -377,9 +377,7 @@ export async function syncLeagueEventResultsByTournament(
   const requiredRichFreshAfter = latestFreshnessTimestamp(freshAfter, finalizationCutoff);
 
   const resolvedEntryIds = await resolveTournamentEntryIds(season, tournament);
-  const requestedEntryIds = options?.entryIds
-    ? new Set(uniqueNumbers(options.entryIds))
-    : null;
+  const requestedEntryIds = options?.entryIds ? new Set(uniqueNumbers(options.entryIds)) : null;
   const scopedEntryIds = requestedEntryIds
     ? resolvedEntryIds.filter((entryId) => requestedEntryIds.has(entryId))
     : resolvedEntryIds;
