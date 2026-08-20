@@ -2,7 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["profile", "mode", "runId", "sourceSnapshotRevision", "windowStart", "windowEnd", "sources", "maxXCalls"],
+  "required": [
+    "profile",
+    "mode",
+    "runId",
+    "sourceSnapshotRevision",
+    "windowStart",
+    "windowEnd",
+    "sources",
+    "maxXCalls"
+  ],
   "properties": {
     "profile": { "const": "week" },
     "mode": { "enum": ["poll", "enrich", "compose"] },
@@ -16,7 +25,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sourceId", "platform", "externalId", "displayName", "sourceType", "reportingFamily", "rightsPolicy"],
+        "required": [
+          "sourceId",
+          "platform",
+          "externalId",
+          "displayName",
+          "sourceType",
+          "reportingFamily",
+          "rightsPolicy"
+        ],
         "properties": {
           "sourceId": { "type": "string", "format": "uuid" },
           "platform": { "type": "string", "minLength": 1, "maxLength": 32 },
