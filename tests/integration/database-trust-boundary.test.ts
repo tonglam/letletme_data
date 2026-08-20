@@ -12,6 +12,7 @@ import { seasonRepository } from '../../src/repositories/seasons';
 import { teamRepository } from '../../src/repositories/teams';
 
 type NamedFinding = { name: string };
+type TrigramIndexFinding = { index_name: string; operator_class: string; operator_schema: string };
 
 const REPORTING_RELATIONS = [
   { name: 'player_season_summaries', kind: 'v' },
@@ -490,17 +491,54 @@ describe('database trust boundary', () => {
       { name: 'entry_event_transfers_business_unique', nulls_not_distinct: true },
     ]);
 
-    const nonDefaultOperatorClasses = await sql<NamedFinding[]>`
-      SELECT DISTINCT operator_class.opcname AS name
+    const trigramIndexes = await sql<TrigramIndexFinding[]>`
+      SELECT
+        index_relation.relname AS index_name,
+        operator_class.opcname AS operator_class,
+        operator_namespace.nspname AS operator_schema
       FROM pg_index index_row
+      JOIN pg_class relation ON relation.oid = index_row.indrelid
       JOIN pg_class index_relation ON index_relation.oid = index_row.indexrelid
       JOIN pg_namespace namespace ON namespace.oid = index_relation.relnamespace
       CROSS JOIN LATERAL unnest(index_row.indclass) class_oid(operator_class_oid)
       JOIN pg_opclass operator_class ON operator_class.oid = class_oid.operator_class_oid
+      JOIN pg_namespace operator_namespace ON operator_namespace.oid = operator_class.opcnamespace
+      WHERE namespace.nspname = 'competition'
+        AND relation.relname = 'entries'
+        AND index_relation.relname IN ('entries_entry_name_trgm_idx', 'entries_player_name_trgm_idx')
+      ORDER BY index_name
+    `;
+    expect([...trigramIndexes]).toEqual([
+      {
+        index_name: 'entries_entry_name_trgm_idx',
+        operator_class: 'gin_trgm_ops',
+        operator_schema: 'extensions',
+      },
+      {
+        index_name: 'entries_player_name_trgm_idx',
+        operator_class: 'gin_trgm_ops',
+        operator_schema: 'extensions',
+      },
+    ]);
+
+    const unexpectedNonDefaultOperatorClasses = await sql<NamedFinding[]>`
+      SELECT DISTINCT operator_class.opcname AS name
+      FROM pg_index index_row
+      JOIN pg_class relation ON relation.oid = index_row.indrelid
+      JOIN pg_class index_relation ON index_relation.oid = index_row.indexrelid
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      CROSS JOIN LATERAL unnest(index_row.indclass) class_oid(operator_class_oid)
+      JOIN pg_opclass operator_class ON operator_class.oid = class_oid.operator_class_oid
       WHERE namespace.nspname IN ('ops', 'fpl', 'competition', 'understat', 'bridge', 'reporting')
         AND NOT operator_class.opcdefault
+        AND NOT (
+          namespace.nspname = 'competition'
+          AND relation.relname = 'entries'
+          AND index_relation.relname IN ('entries_entry_name_trgm_idx', 'entries_player_name_trgm_idx')
+          AND operator_class.opcname = 'gin_trgm_ops'
+        )
     `;
-    expect(nonDefaultOperatorClasses).toHaveLength(0);
+    expect(unexpectedNonDefaultOperatorClasses).toHaveLength(0);
   });
 });
 
