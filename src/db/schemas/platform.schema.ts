@@ -377,11 +377,11 @@ export const bugReportsInOps = ops.table(
     entryId: integer('entry_id'),
     body: text().notNull(),
     screenshotUrl: text('screenshot_url'),
+    clientMeta: jsonb('client_meta').default({}).notNull(),
+    status: text().default('open').notNull(),
     submissionId: uuid('submission_id'),
     screenshotObjectKey: text('screenshot_object_key'),
     screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
-    clientMeta: jsonb('client_meta').default({}).notNull(),
-    status: text().default('open').notNull(),
   },
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
