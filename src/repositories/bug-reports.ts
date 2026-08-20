@@ -375,6 +375,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           status: bugReportsInOps.status,
           closedAt: bugReportsInOps.closedAt,
           expiresAt: bugReportsInOps.expiresAt,
+          scrubbedAt: bugReportsInOps.scrubbedAt,
           screenshotUrl: bugReportsInOps.screenshotUrl,
           screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
           screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
@@ -405,7 +406,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       // a misleading live report with irreversible data loss and could also
       // detach the locator reservation from its deletion retry. Keep the
       // terminal state idempotent and reject any attempted transition.
-      if (current.body === SCRUBBED_BUG_REPORT_BODY) {
+      if (current.scrubbedAt) {
         if (status !== current.status) {
           throw new ConflictError(
             'Expired bug report has been scrubbed and cannot change status.',
@@ -814,6 +815,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           status: bugReportsInOps.status,
           closedAt: bugReportsInOps.closedAt,
           expiresAt: bugReportsInOps.expiresAt,
+          scrubbedAt: bugReportsInOps.scrubbedAt,
           screenshotUrl: bugReportsInOps.screenshotUrl,
           screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
           screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
@@ -939,6 +941,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             entryId: null,
             clientMeta: {},
             screenshotUrl: null,
+            scrubbedAt: now,
           })
           .where(eq(bugReportsInOps.id, current.id));
       }
