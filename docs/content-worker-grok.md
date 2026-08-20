@@ -1,8 +1,9 @@
 # Content worker Grok operations
 
 The content worker uses the pinned `@xai-official/grok@1.0.5` binary from the
-runtime image. `GROK_BIN` is intentionally unsupported; the worker verifies the
-tracked skill SHA before every real run and fails closed on a mismatch.
+runtime image. No alternate executable override is supported; the worker
+verifies the tracked skill SHA before every real run and fails closed on a
+mismatch.
 
 Content flags remain disabled until a separately approved rollout:
 
