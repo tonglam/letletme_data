@@ -46,11 +46,11 @@ CREATE TABLE IF NOT EXISTS competition.tournament_setup_issues (
     repair_attempts integer NOT NULL DEFAULT 0,
     next_repair_at timestamp with time zone,
     repair_exhausted_at timestamp with time zone,
-    first_seen_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
-    last_seen_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
+    first_seen_at timestamp with time zone NOT NULL DEFAULT now(),
+    last_seen_at timestamp with time zone NOT NULL DEFAULT now(),
     resolved_at timestamp with time zone,
-    created_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
-    updated_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    updated_at timestamp with time zone NOT NULL DEFAULT now(),
     CONSTRAINT tournament_setup_issues_tournament_fk
         FOREIGN KEY (season_id, tournament_id)
         REFERENCES competition.tournaments (season_id, tournament_id)
