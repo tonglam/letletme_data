@@ -57,7 +57,7 @@ CREATE TABLE reporting.player_state_season_rows (
     CHECK (lifecycle_state IN ('reference_only', 'completed', 'preseason', 'active', 'closed')),
   CONSTRAINT player_state_season_rows_mapping_check
     CHECK (understat_mapping_status IN ('VERIFIED', 'UNVERIFIED', 'AMBIGUOUS', 'QUARANTINED', 'UNAVAILABLE')),
-  CONSTRAINT player_state_season_rows_counts_check
+  CONSTRAINT player_state_season_rows_counts_nonnegative
     CHECK (fpl_minutes >= 0 AND fpl_gameweeks >= 0 AND fpl_peer_count >= 0 AND understat_peer_count >= 0),
   CONSTRAINT player_state_season_rows_fpl_hash_check
     CHECK (btrim(fpl_source_hash) <> ''),
@@ -88,8 +88,8 @@ CREATE TABLE reporting.player_state_season_refreshes (
   understat_player_count integer NOT NULL,
   CONSTRAINT player_state_season_refreshes_season_fk
     FOREIGN KEY (season_id) REFERENCES fpl.seasons (season_id),
-  CONSTRAINT player_state_season_refreshes_revision_check CHECK (revision > 0),
-  CONSTRAINT player_state_season_refreshes_counts_check
+  CONSTRAINT player_state_season_refreshes_revision_positive CHECK (revision > 0),
+  CONSTRAINT player_state_season_refreshes_counts_nonnegative
     CHECK (player_count >= 0 AND understat_player_count >= 0)
 );
 
@@ -100,7 +100,7 @@ CREATE TABLE reporting.player_state_dataset_metadata (
   source_updated_at timestamptz NOT NULL,
   refreshed_at timestamptz NOT NULL,
   CONSTRAINT player_state_dataset_metadata_key_check CHECK (dataset_key = 'player_state'),
-  CONSTRAINT player_state_dataset_metadata_revision_check CHECK (revision > 0),
+  CONSTRAINT player_state_dataset_metadata_revision_positive CHECK (revision > 0),
   CONSTRAINT player_state_dataset_metadata_method_check CHECK (btrim(method_version) <> '')
 );
 
