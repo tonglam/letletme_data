@@ -34,7 +34,7 @@ if (!databaseUrl) {
 
 if (isTransactionPoolerConnection(databaseUrl)) {
   throw new Error(
-    'The migration runner requires a direct PostgreSQL connection; transaction poolers cannot hold its advisory lock',
+    'The migration runner requires direct PostgreSQL or a session-mode pooler connection; transaction poolers cannot hold its advisory lock',
   );
 }
 

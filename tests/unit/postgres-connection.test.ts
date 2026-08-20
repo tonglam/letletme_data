@@ -12,6 +12,11 @@ describe('Postgres connection mode', () => {
     expect(
       isTransactionPoolerConnection('postgresql://postgres:secret@localhost:5432/postgres'),
     ).toBe(false);
+    expect(
+      isTransactionPoolerConnection(
+        'postgresql://postgres.project:secret@aws-0-region.pooler.supabase.com:5432/postgres',
+      ),
+    ).toBe(false);
   });
 
   test('recognizes an explicit pgbouncer transaction hint', () => {

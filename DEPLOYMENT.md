@@ -17,7 +17,8 @@ GitHub's `GITHUB_TOKEN` authenticates the workflow to GHCR. The VPS keeps two un
 files:
 
 - `.env.deploy` for API/worker runtime configuration;
-- `.env.migrate` for the direct Supabase `postgres` migration login.
+- `.env.migrate` for the direct Supabase `postgres` migration login, or the
+  Supavisor session-mode equivalent on port 5432 when the host has no IPv6 route.
 
 Never commit either file. Runtime and migration passwords must remain separate. Explicitly configure
 `CACHE_REDIS_*` and `QUEUE_REDIS_*`; startup rejects identical cache and queue endpoints.
@@ -46,7 +47,10 @@ against the newer database contract.
 1. Install Docker Engine and the Compose plugin, then grant the deploy user Docker access.
 2. Clone the repository into `VPS_WORKDIR`.
 3. Create `.env.deploy` from `.env.deploy.example` and `.env.migrate` from
-   `.env.migrate.example`.
+   `.env.migrate.example`. Prefer the direct endpoint; on an IPv4-only host use
+   the Supavisor session endpoint (`*.pooler.supabase.com:5432`) with the
+   `postgres.<project-ref>` user. Do not use transaction mode (`:6543`) or
+   `pgbouncer=true`.
 4. Apply migrations with the migration environment: `docker compose run --rm -T migration bun run db:migrate`.
 5. Bootstrap each missing LOGIN exactly once, using a complete initial runtime URL each time:
 
