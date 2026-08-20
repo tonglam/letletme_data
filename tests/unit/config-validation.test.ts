@@ -17,6 +17,8 @@ const baseEnv = {
   BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY: 'test-secret',
   BUG_REPORT_SCREENSHOT_BUCKET: 'bug-report-screenshots',
   BUG_REPORT_SCREENSHOT_RETENTION_DAYS: '90',
+  BUG_REPORT_STORAGE_INTERNAL_URL: 'https://web.example.test/api/internal/bug-report-storage',
+  BUG_REPORT_CLEANUP_SECRET: 'c'.repeat(64),
 };
 
 async function runEnvCheck(

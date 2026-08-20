@@ -1,4 +1,5 @@
 export const CRON_TIMEZONE = 'Asia/Shanghai';
+export const BUG_REPORT_CLEANUP_TIMEZONE = 'Australia/Perth';
 
 const utc8Formatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Shanghai',

@@ -1,4 +1,8 @@
-import { validateBugReportCreateInput, type BugReportCreateInput } from '../domain/bug-report';
+import {
+  validateBugReportCreateInput,
+  type BugReportCreateInput,
+  type BugReportStatus,
+} from '../domain/bug-report';
 import { bugReportRepository } from '../repositories/bug-reports';
 import { DatabaseError } from '../utils/errors';
 
@@ -9,7 +13,10 @@ function isPublicIdCollision(error: unknown): boolean {
   const record = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown };
   if (record.code !== '23505') return false;
   const constraint = record.constraint ?? record.constraint_name;
-  return constraint === 'bug_reports_public_id_key';
+  return (
+    constraint === 'bug_reports_public_id_key' ||
+    constraint === 'bug_report_retention_backups_public_id_key'
+  );
 }
 
 export const createBugReport = async (input: BugReportCreateInput) => {
@@ -28,3 +35,9 @@ export const createBugReport = async (input: BugReportCreateInput) => {
 
   throw new DatabaseError('Could not allocate a report id');
 };
+
+export const updateBugReportStatus = async (
+  publicId: string,
+  status: BugReportStatus,
+  now = new Date(),
+) => bugReportRepository.updateStatus(publicId, status, now);
