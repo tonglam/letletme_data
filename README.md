@@ -121,7 +121,7 @@ and staged update matrix in the
 
 Prerequisites:
 
-- Bun `1.3.3` (the version pinned in `package.json`)
+- Bun `1.3.14` (the version pinned in `package.json`)
 - PostgreSQL
 - Redis with distinct cache-publication and BullMQ/coordination endpoints or databases
 

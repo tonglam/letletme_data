@@ -1,5 +1,6 @@
 import { understatClient } from '../clients/understat';
 import { getDb } from '../db/singleton';
+import { explicitSeasonRef } from '../domain/fpl-season';
 import {
   enqueueUnderstatPlayerMatch,
   enqueueUnderstatPlayerFinalize,
@@ -47,6 +48,7 @@ import {
   understatStagingHash,
 } from './understat-staging';
 import { enqueueUnderstatFanout, selectUnsettledUnderstatFanoutIds } from './understat-fanout';
+import { refreshPlayerStateSeason } from './player-season-summaries.service';
 
 const LEAGUE_RESOURCE_TYPE = 'league';
 const TEAM_RESOURCE_TYPE = 'team-participants';
@@ -463,6 +465,14 @@ export async function finalizeUnderstatPlayerRun(job: UnderstatPlayerJobData): P
       { finalized: true, storage: 'postgresql', counts: result.counts },
       result.changed,
     );
+    try {
+      await refreshPlayerStateSeason(explicitSeasonRef(job.season));
+    } catch (error) {
+      logWarn('Player State refresh after Understat finalize failed; repair will retry', {
+        season: job.season,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   } catch (error) {
     if (error instanceof IncompleteUnderstatPlayerSnapshotError) {
       await understatSyncRepository.markRunSkipped(job.runId, error.message);

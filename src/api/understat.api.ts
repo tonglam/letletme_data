@@ -9,6 +9,7 @@ import {
 } from '../services/provider-matcher.service';
 import { getUnderstatStatus } from '../services/understat-status.service';
 import { assertUnderstatSyncAllowed } from '../services/understat-sync.service';
+import { repairPlayerStateSeasons } from '../services/player-season-summaries.service';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 
 const TeamSyncBody = t.Object({
@@ -112,6 +113,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
         },
         () => reconcileProviderMappings(body.season),
       );
+      await repairPlayerStateSeasons();
       return { success: true, ...mappings };
     },
     { body: t.Object({ season: t.String({ pattern: '^\\d{4}$' }) }) },
@@ -165,6 +167,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
         set.status = 404;
         return { success: false, error: 'Provider entity link not found' };
       }
+      await repairPlayerStateSeasons();
       return { success: true, link };
     },
     {

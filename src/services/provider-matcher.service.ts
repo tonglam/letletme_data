@@ -153,6 +153,15 @@ export function providerTeamConfirmedForSeason(link: ProviderEntityLink, season:
   );
 }
 
+function confirmedPlayerSeasons(link: ProviderEntityLink | undefined, season: string): string[] {
+  const prior = Array.isArray(link?.evidence.confirmedSeasons)
+    ? link.evidence.confirmedSeasons.filter(
+        (value): value is string => typeof value === 'string' && /^\d{4}$/.test(value),
+      )
+    : [];
+  return [...new Set([...prior, season])].sort();
+}
+
 function verifiedTeamMap(links: ProviderEntityLink[], season: string): Map<number, number> {
   return new Map(
     links
@@ -487,6 +496,14 @@ export async function reconcileProviderPlayers(season: string) {
     const fpl = normalizedFpl.find((row) => row.playerCode === playerCode);
     const understat = understatRows.find((row) => row.playerId === playerId);
     if (!fpl || !understat) continue;
+    const existingLink = entityLinks.find(
+      (link) =>
+        link.entityType === 'player' &&
+        link.leftProvider === 'understat' &&
+        link.leftEntityId === String(playerId) &&
+        link.rightProvider === 'fpl' &&
+        link.rightEntityId === String(playerCode),
+    );
     await providerIdentityRepository.upsertEntityLink({
       entityType: 'player',
       leftProvider: 'understat',
@@ -502,6 +519,7 @@ export async function reconcileProviderPlayers(season: string) {
         fplName: fpl.name,
         observedMatches: observationsByPair.get(`${playerCode}:${playerId}`)?.size ?? 0,
         playerEvidenceRows: evidenceCount.get(playerCode) ?? 0,
+        confirmedSeasons: confirmedPlayerSeasons(existingLink, season),
       },
     });
     await providerIdentityRepository.upsertAlias({
