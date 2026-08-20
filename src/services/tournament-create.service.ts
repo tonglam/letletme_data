@@ -64,6 +64,7 @@ export type PublicTournamentSetupStatus = TournamentSetupStatusRow & {
   warningSummaries?: Array<{
     category: 'profiles' | 'insights' | 'results';
     affectedCount: number;
+    repairExhausted: boolean;
   }>;
 };
 
@@ -75,12 +76,18 @@ export async function getTournamentSetupStatus(
   if (!status) return null;
   const issues = await tournamentSetupIssueRepository.listUnresolved(season, tournamentId);
   const warningSummaries = (['profiles', 'insights', 'results'] as const)
-    .map((category) => ({
-      category,
-      affectedCount: issues
-        .filter((issue) => issue.category === category && issue.severity === 'warning')
-        .reduce((total, issue) => total + issue.affectedEntryCount, 0),
-    }))
+    .map((category) => {
+      const categoryIssues = issues.filter(
+        (issue) => issue.category === category && issue.severity === 'warning',
+      );
+      return {
+        category,
+        affectedCount: categoryIssues.reduce((total, issue) => total + issue.affectedEntryCount, 0),
+        repairExhausted:
+          categoryIssues.length > 0 &&
+          categoryIssues.every((issue) => issue.repairExhaustedAt !== null),
+      };
+    })
     .filter((summary) => summary.affectedCount > 0);
   return { ...status, warningSummaries };
 }
