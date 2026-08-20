@@ -58,6 +58,13 @@ import {
 import type { WorkerRuntime } from './worker-runtime';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 
+type PostCommitIntent = () => Promise<void>;
+
+type GuardedTournamentJobResult = {
+  value: unknown;
+  afterCommit?: PostCommitIntent;
+};
+
 /**
  * Enqueue cascade jobs after tournament-event-results completes.
  * These jobs depend on fresh tournament event results.
@@ -270,212 +277,260 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
       queueWaitMs: resolveBullMqAttemptQueueWaitMs(job),
     },
     () =>
-      withMutationConflictGuard(
-        {
+      runTrackedJob(context, async () => {
+        const mutationInput = {
           queueName: job.queueName,
           jobName: job.name,
           jobId: String(job.id),
           eventId,
-        },
-        () =>
-          runTrackedJob(context, async () => {
-            switch (job.name) {
-              case TOURNAMENT_JOBS.EVENT_RESULTS: {
-                const freshAfter = await resolveJobFreshAfter(job);
-                const result = await syncTournamentEventResults(season, eventId, {
-                  freshAfter,
-                });
-                if (!shouldEnqueueTournamentCascade(result)) {
-                  logInfo('Skipping tournament cascade - no active tournament entries', {
+        };
+
+        // The event-results write owns the parent scope.  Commit that guarded
+        // canonical work before adding dependent structure jobs; otherwise a
+        // worker can dequeue a cascade job while the parent transaction is
+        // still uncommitted and read stale rows.
+        if (job.name === TOURNAMENT_JOBS.EVENT_RESULTS) {
+          const freshAfter = await resolveJobFreshAfter(job);
+          const result = await withMutationConflictGuard(mutationInput, async () => {
+            const synced = await syncTournamentEventResults(season, eventId, {
+              freshAfter,
+            });
+            if (!shouldEnqueueTournamentCascade(synced)) {
+              logInfo('Skipping tournament cascade - no active tournament entries', {
+                eventId,
+              });
+            }
+            return synced;
+          });
+          if (shouldEnqueueTournamentCascade(result)) {
+            await enqueueTournamentCascade(season, eventId, result.finalizationTargets);
+          } else {
+            await finalizeTournamentEventLifecycle(eventId, {
+              ...tournamentEventFinalizationDependencies(season, []),
+              // Recover a prior terminal write followed by a failed
+              // derived-view refresh or cache invalidation.
+              refreshAlways: true,
+            });
+          }
+          return result;
+        }
+
+        const runMutation = async (): Promise<GuardedTournamentJobResult> => {
+          switch (job.name) {
+            case TOURNAMENT_JOBS.POINTS_RACE: {
+              const result = await syncTournamentPointsRaceResults(season, eventId);
+              assertTournamentStructureSyncComplete(result, eventId, job.name);
+              return {
+                value: result,
+                afterCommit: () =>
+                  afterCascadeStructureJob(
+                    season,
                     eventId,
+                    cascadeId,
+                    job.name,
+                    finalizationTargets,
+                  ),
+              };
+            }
+
+            case TOURNAMENT_JOBS.BATTLE_RACE: {
+              const battleResult = await syncTournamentBattleRaceResults(season, eventId);
+              assertTournamentStructureSyncComplete(battleResult, eventId, job.name);
+              return {
+                value: battleResult,
+                afterCommit: () =>
+                  afterCascadeStructureJob(
+                    season,
+                    eventId,
+                    cascadeId,
+                    job.name,
+                    finalizationTargets,
+                  ),
+              };
+            }
+
+            case TOURNAMENT_JOBS.OFFICIAL_H2H:
+              return { value: await syncOfficialH2HTournaments(season, eventId) };
+
+            case TOURNAMENT_JOBS.KNOCKOUT: {
+              const result = await syncTournamentKnockoutResults(season, eventId);
+              assertTournamentStructureSyncComplete(result, eventId, job.name);
+              return {
+                value: result,
+                afterCommit: () =>
+                  afterCascadeStructureJob(
+                    season,
+                    eventId,
+                    cascadeId,
+                    job.name,
+                    finalizationTargets,
+                  ),
+              };
+            }
+
+            case TOURNAMENT_JOBS.TRANSFERS_POST: {
+              const result = await syncTournamentEventTransfersPost(season, eventId);
+              return {
+                value: result,
+                afterCommit: async () => {
+                  await enqueueTournamentSelectionStats(season, eventId, 'cascade', {
+                    cascadeId,
+                    finalizationTargets,
                   });
-                  await finalizeTournamentEventLifecycle(eventId, {
-                    ...tournamentEventFinalizationDependencies(season, []),
-                    // Recover a prior terminal write followed by a failed
-                    // derived-view refresh or cache invalidation.
-                    refreshAlways: true,
-                  });
-                  return result;
-                }
-                await enqueueTournamentCascade(season, eventId, result.finalizationTargets);
-                return result;
-              }
+                  await afterCascadeStructureJob(
+                    season,
+                    eventId,
+                    cascadeId,
+                    job.name,
+                    finalizationTargets,
+                  );
+                },
+              };
+            }
 
-              case TOURNAMENT_JOBS.POINTS_RACE: {
-                const result = await syncTournamentPointsRaceResults(season, eventId);
-                assertTournamentStructureSyncComplete(result, eventId, job.name);
-                await afterCascadeStructureJob(
-                  season,
-                  eventId,
-                  cascadeId,
-                  job.name,
-                  finalizationTargets,
-                );
-                return result;
-              }
+            case TOURNAMENT_JOBS.CUP_RESULTS: {
+              const result = await syncTournamentEventCupResults(season, eventId);
+              return {
+                value: result,
+                afterCommit: () =>
+                  afterCascadeStructureJob(
+                    season,
+                    eventId,
+                    cascadeId,
+                    job.name,
+                    finalizationTargets,
+                  ),
+              };
+            }
 
-              case TOURNAMENT_JOBS.BATTLE_RACE: {
-                const battleResult = await syncTournamentBattleRaceResults(season, eventId);
-                assertTournamentStructureSyncComplete(battleResult, eventId, job.name);
-                await afterCascadeStructureJob(
-                  season,
-                  eventId,
-                  cascadeId,
-                  job.name,
-                  finalizationTargets,
-                );
-                return battleResult;
-              }
+            case TOURNAMENT_JOBS.SELECTION_STATS: {
+              const result = await syncTournamentSelectionStats(season, eventId);
+              return {
+                value: result,
+                afterCommit: () =>
+                  afterCascadeStructureJob(
+                    season,
+                    eventId,
+                    cascadeId,
+                    job.name,
+                    finalizationTargets,
+                  ),
+              };
+            }
 
-              case TOURNAMENT_JOBS.OFFICIAL_H2H:
-                return syncOfficialH2HTournaments(season, eventId);
+            case TOURNAMENT_JOBS.EVENT_PICKS:
+              return { value: await syncTournamentEventPicks(season, eventId) };
 
-              case TOURNAMENT_JOBS.KNOCKOUT: {
-                const result = await syncTournamentKnockoutResults(season, eventId);
-                assertTournamentStructureSyncComplete(result, eventId, job.name);
-                await afterCascadeStructureJob(
-                  season,
-                  eventId,
-                  cascadeId,
-                  job.name,
-                  finalizationTargets,
-                );
-                return result;
-              }
+            case TOURNAMENT_JOBS.TRANSFERS_PRE:
+              return { value: await syncTournamentEventTransfersPre(season, eventId) };
 
-              case TOURNAMENT_JOBS.TRANSFERS_POST: {
-                const result = await syncTournamentEventTransfersPost(season, eventId);
-                await enqueueTournamentSelectionStats(season, eventId, 'cascade', {
-                  cascadeId,
-                  finalizationTargets,
-                });
-                await afterCascadeStructureJob(
-                  season,
-                  eventId,
-                  cascadeId,
-                  job.name,
-                  finalizationTargets,
-                );
-                return result;
-              }
-
-              case TOURNAMENT_JOBS.CUP_RESULTS: {
-                const result = await syncTournamentEventCupResults(season, eventId);
-                await afterCascadeStructureJob(
-                  season,
-                  eventId,
-                  cascadeId,
-                  job.name,
-                  finalizationTargets,
-                );
-                return result;
-              }
-
-              case TOURNAMENT_JOBS.SELECTION_STATS: {
-                const result = await syncTournamentSelectionStats(season, eventId);
-                await afterCascadeStructureJob(
-                  season,
-                  eventId,
-                  cascadeId,
-                  job.name,
-                  finalizationTargets,
-                );
-                return result;
-              }
-
-              case TOURNAMENT_JOBS.EVENT_PICKS:
-                return syncTournamentEventPicks(season, eventId);
-
-              case TOURNAMENT_JOBS.TRANSFERS_PRE:
-                return syncTournamentEventTransfersPre(season, eventId);
-
-              case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
-                return finalizeTournamentEventLifecycle(eventId, {
+            case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
+              return {
+                value: await finalizeTournamentEventLifecycle(eventId, {
                   ...tournamentEventFinalizationDependencies(season, finalizationTargets),
                   refreshAlways: true,
-                });
+                }),
+              };
 
-              case TOURNAMENT_JOBS.INFO:
-                return syncTournamentInfo(season);
+            case TOURNAMENT_JOBS.INFO:
+              return { value: await syncTournamentInfo(season) };
 
-              case TOURNAMENT_JOBS.ROSTER_SYNC: {
-                const result = await reconcileOfficialTournamentRosters(season);
-                if (result.errors > 0) {
-                  throw new IncompleteDataSyncError(
-                    'Official tournament roster synchronization did not converge',
-                    result.total,
-                    result.skipped,
-                    result.changed,
-                    result.errors,
-                  );
-                }
-                return result;
+            case TOURNAMENT_JOBS.ROSTER_SYNC: {
+              const result = await reconcileOfficialTournamentRosters(season);
+              if (result.errors > 0) {
+                throw new IncompleteDataSyncError(
+                  'Official tournament roster synchronization did not converge',
+                  result.total,
+                  result.skipped,
+                  result.changed,
+                  result.errors,
+                );
               }
+              return { value: result };
+            }
 
-              case TOURNAMENT_JOBS.ROSTER_RECONCILE: {
-                if (!job.data.tournamentId) {
-                  throw new Error('Roster reconcile job is missing tournamentId');
-                }
-                try {
-                  return await reconcileTournamentRoster(season, job.data.tournamentId, {
+            case TOURNAMENT_JOBS.ROSTER_RECONCILE: {
+              if (!job.data.tournamentId) {
+                throw new Error('Roster reconcile job is missing tournamentId');
+              }
+              try {
+                return {
+                  value: await reconcileTournamentRoster(season, job.data.tournamentId, {
                     allowInactive: job.data.allowInactive === true,
                     resumeAfterSetup: job.data.resumeAfterSetup === true,
                     resumeMarker: job.data.resumeMarker,
                     requireResumeMarker: job.data.resumeAfterSetup === true,
                     settleBoundaryFailure: job.data.settleBoundaryFailure === true,
                     expectedProgressMarker: job.data.expectedProgressMarker,
+                  }),
+                };
+              } catch (error) {
+                // Deletion is authoritative. A reconcile accepted just before
+                // delete must settle successfully, not retry and alert on a
+                // deliberately missing tournament.
+                if (
+                  error instanceof Error &&
+                  'code' in error &&
+                  error.code === 'TOURNAMENT_NOT_FOUND'
+                ) {
+                  logInfo('Ignoring roster reconcile for deleted tournament', {
+                    tournamentId: job.data.tournamentId,
                   });
-                } catch (error) {
-                  // Deletion is authoritative. A reconcile accepted just before
-                  // delete must settle successfully, not retry and alert on a
-                  // deliberately missing tournament.
-                  if (
-                    error instanceof Error &&
-                    'code' in error &&
-                    error.code === 'TOURNAMENT_NOT_FOUND'
-                  ) {
-                    logInfo('Ignoring roster reconcile for deleted tournament', {
-                      tournamentId: job.data.tournamentId,
-                    });
-                    return {
+                  return {
+                    value: {
                       tournamentId: job.data.tournamentId,
                       changed: false,
                       addedEntryIds: [],
                       removedEntryIds: [],
                       participantCount: 0,
                       automaticallyPaused: false,
-                    };
-                  }
-                  if (
-                    error instanceof Error &&
-                    'code' in error &&
-                    error.code === 'TOURNAMENT_FINISHED'
-                  ) {
-                    await tournamentRosterRepository.markSyncCanceled(
-                      season,
-                      job.data.tournamentId,
-                    );
-                    logInfo('Ignoring roster reconcile for finished tournament', {
-                      tournamentId: job.data.tournamentId,
-                    });
-                    return {
-                      tournamentId: job.data.tournamentId,
-                      changed: false,
-                      addedEntryIds: [],
-                      removedEntryIds: [],
-                      participantCount: 0,
-                      automaticallyPaused: false,
-                    };
-                  }
-                  throw error;
+                    },
+                  };
                 }
+                if (
+                  error instanceof Error &&
+                  'code' in error &&
+                  error.code === 'TOURNAMENT_FINISHED'
+                ) {
+                  await tournamentRosterRepository.markSyncCanceled(season, job.data.tournamentId);
+                  logInfo('Ignoring roster reconcile for finished tournament', {
+                    tournamentId: job.data.tournamentId,
+                  });
+                  return {
+                    value: {
+                      tournamentId: job.data.tournamentId,
+                      changed: false,
+                      addedEntryIds: [],
+                      removedEntryIds: [],
+                      participantCount: 0,
+                      automaticallyPaused: false,
+                    },
+                  };
+                }
+                throw error;
               }
-
-              default:
-                throw new Error(`Unknown job name: ${job.name}`);
             }
-          }),
-      ),
+
+            default:
+              throw new Error(`Unknown job name: ${job.name}`);
+          }
+        };
+
+        // Roster reconciliation owns its own short publication scope and
+        // performs setup enqueueing after that commit. Do not wrap it in a
+        // second outer transaction that would hold the scope through the queue
+        // handoff.
+        if (
+          job.name === TOURNAMENT_JOBS.ROSTER_SYNC ||
+          job.name === TOURNAMENT_JOBS.ROSTER_RECONCILE
+        ) {
+          return (await runMutation()).value;
+        }
+
+        const guarded = await withMutationConflictGuard(mutationInput, runMutation);
+        if (guarded.afterCommit) await guarded.afterCommit();
+        return guarded.value;
+      }),
   );
 }
 

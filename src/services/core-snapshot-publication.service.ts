@@ -30,12 +30,22 @@ export interface CoreSnapshotCommitResult {
   readonly publication: CoreSnapshotCachePublication;
 }
 
+export type CoreSnapshotPersistedResult = Readonly<{
+  snapshot: CoreSnapshot;
+  persistence: CoreSnapshotPersistenceResult;
+}>;
+
 export { readCoreSnapshotOrderingTimestamp };
 
-export async function commitCoreSnapshotPublication(
+/**
+ * Persist only canonical PostgreSQL facts and reporting projections. Cache and
+ * ops-publication handoffs intentionally happen in a separate phase after the
+ * caller's mutation transaction has committed.
+ */
+export async function persistCoreSnapshotPublication(
   snapshot: CoreSnapshot,
   context: CoreSnapshotPublicationContext,
-): Promise<CoreSnapshotCommitResult> {
+): Promise<CoreSnapshotPersistedResult> {
   const season = explicitSeasonRef(snapshot.season);
   const persisted = await persistCoreSnapshot(snapshot, context.sourceCheckedAt);
   try {
@@ -49,7 +59,15 @@ export async function commitCoreSnapshotPublication(
       revision: context.revision,
     });
   }
-  let cachePublished = false;
+  return persisted;
+}
+
+/** Publish a previously committed canonical snapshot to Redis and ops. */
+export async function publishCoreSnapshotPublication(
+  persisted: CoreSnapshotPersistedResult,
+  context: CoreSnapshotPublicationContext,
+): Promise<CoreSnapshotCommitResult> {
+  const season = explicitSeasonRef(persisted.snapshot.season);
   try {
     const publication = await publishCoreSnapshotCache(persisted.snapshot, {
       revision: context.revision,
@@ -78,7 +96,6 @@ export async function commitCoreSnapshotPublication(
       });
       return { status: 'stale', persistence: persisted.persistence, publication };
     }
-    cachePublished = true;
     await syncOperationsRepository.activatePublication({
       publicationId: context.publicationId,
       dataset: 'fpl:core',
@@ -88,13 +105,21 @@ export async function commitCoreSnapshotPublication(
     });
     return { status: 'committed', persistence: persisted.persistence, publication };
   } catch (error) {
-    // Once the atomic pointer moved, keep the ops row staging. Startup recovery can safely
-    // activate it from the complete cache manifest; marking it failed would lose that evidence.
-    if (!cachePublished) {
-      await syncOperationsRepository.failPublication(context.publicationId, error);
-    }
+    // Canonical PostgreSQL persistence already committed before this phase.
+    // Leave the ops row staging so recovery can retry or reconcile the cache
+    // handoff instead of reporting a durable snapshot as failed.
     throw error;
   }
+}
+
+/** Backward-compatible combined helper for callers that do not need a
+ * mutation-scope boundary around the canonical and cache phases separately. */
+export async function commitCoreSnapshotPublication(
+  snapshot: CoreSnapshot,
+  context: CoreSnapshotPublicationContext,
+): Promise<CoreSnapshotCommitResult> {
+  const persisted = await persistCoreSnapshotPublication(snapshot, context);
+  return publishCoreSnapshotPublication(persisted, context);
 }
 
 export async function recoverPendingCoreSnapshotPublication(

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { ValidationError } from '../utils/errors';
 
@@ -43,6 +43,7 @@ export type BugReportInsert = {
   screenshotDeletedAt?: Date | null;
   screenshotUrl: string | null;
   clientMeta: Record<string, unknown>;
+  submissionRequestHash: string;
   closedAt: Date | null;
   expiresAt: Date;
 };
@@ -62,6 +63,33 @@ export type BugReportStatus = 'open' | 'ack' | 'closed';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalize(value[key])]),
+  );
+};
+
+type BugReportRequestIdentity = Pick<
+  BugReportInsert,
+  | 'source'
+  | 'userId'
+  | 'entryId'
+  | 'body'
+  | 'submissionId'
+  | 'screenshotObjectKey'
+  | 'screenshotUrl'
+  | 'clientMeta'
+>;
+
+export const bugReportRequestHash = (input: BugReportRequestIdentity): string =>
+  createHash('sha256')
+    .update(JSON.stringify(canonicalize({ version: 1, ...input })), 'utf8')
+    .digest('hex');
 
 const redactDiagnosticText = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
@@ -134,9 +162,12 @@ export function retentionDeadline(
 }
 
 export const createPublicBugReportId = (): string =>
-  `LL-${randomBytes(3).toString('hex').toUpperCase()}`;
+  `LL-${randomBytes(6).toString('hex').toUpperCase()}`;
 
-export const validateBugReportCreateInput = (input: BugReportCreateInput): BugReportInsert => {
+export const validateBugReportCreateInput = (
+  input: BugReportCreateInput,
+  options: { publicIdGenerator?: () => string } = {},
+): BugReportInsert => {
   if (input.source !== 'website' && input.source !== 'wechat_miniprogram') {
     throw new ValidationError('Unknown report source.');
   }
@@ -192,7 +223,6 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
 
   return {
     id: randomUUID(),
-    publicId: createPublicBugReportId(),
     source: input.source,
     userId,
     entryId,
@@ -201,6 +231,17 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
     screenshotObjectKey,
     screenshotUrl,
     clientMeta,
+    submissionRequestHash: bugReportRequestHash({
+      source: input.source as BugReportSource,
+      userId,
+      entryId,
+      body,
+      submissionId,
+      screenshotObjectKey,
+      screenshotUrl,
+      clientMeta,
+    }),
+    publicId: (options.publicIdGenerator ?? createPublicBugReportId)(),
     closedAt: null,
     expiresAt: retentionDeadline(createdAt, 'open', null),
   };

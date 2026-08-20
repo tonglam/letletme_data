@@ -8,17 +8,42 @@ import {
 } from '../services/tournament-create.service';
 import { validateTournamentCreateInput } from '../domain/tournament';
 import { tournamentManagementService } from '../services/tournament-management.service';
-import { getErrorMessage, getHttpStatusFromError } from '../utils/errors';
+import {
+  getHttpStatusFromError,
+  getOrCreateRequestId,
+  getPublicErrorCode,
+  getPublicErrorMessage,
+} from '../utils/errors';
+import { logError } from '../utils/logger';
 import { createTournamentPreview } from '../services/tournament-preview.service';
 
-function mapErrorToResponse(error: unknown): { status: number; message: string } {
+function mapErrorToResponse(
+  error: unknown,
+  request: Request,
+  set: { headers: Record<string, string | number>; status?: unknown },
+): { status: number; body: { success: false; error: string; code?: string; requestId?: string } } {
+  let status: number;
+  let message: string;
   if (error instanceof ZodError) {
-    return {
-      status: 400,
-      message: error.issues.map((issue) => issue.message).join('; ') || 'Invalid request payload.',
-    };
+    status = 400;
+    message = error.issues.map((issue) => issue.message).join('; ') || 'Invalid request payload.';
+  } else {
+    status = getHttpStatusFromError(error);
+    message = getPublicErrorMessage(error, status);
   }
-  return { status: getHttpStatusFromError(error), message: getErrorMessage(error) };
+  const requestId = getOrCreateRequestId(request);
+  logError('Tournament request failed', error, { requestId });
+  set.headers['x-request-id'] = requestId;
+  const code = getPublicErrorCode(error, status);
+  return {
+    status,
+    body: {
+      success: false,
+      error: message,
+      ...(code ? { code } : {}),
+      ...(status >= 500 && process.env.NODE_ENV === 'production' ? { requestId } : {}),
+    },
+  };
 }
 
 const positiveInteger = t.Number({ minimum: 1, multipleOf: 1 });
@@ -26,7 +51,7 @@ const positiveInteger = t.Number({ minimum: 1, multipleOf: 1 });
 export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   .post(
     '/preview',
-    async ({ body, set }) => {
+    async ({ body, request, set }) => {
       try {
         const preview = await createTournamentPreview(body);
         set.status = 200;
@@ -45,9 +70,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
           participants: preview.participants,
         };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
-        set.status = status;
-        return { success: false, error: message };
+        const mapped = mapErrorToResponse(error, request, set);
+        set.status = mapped.status;
+        return mapped.body;
       }
     },
     {
@@ -92,7 +117,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   )
   .post(
     '/:tournamentId/setup',
-    async ({ params, body, set }) => {
+    async ({ params, body, request, set }) => {
       try {
         const job = await tournamentManagementService.retrySetup(params.tournamentId, body);
         set.status = 202;
@@ -103,9 +128,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
           setupStatus: 'pending',
         };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
-        set.status = status;
-        return { success: false, error: message };
+        const mapped = mapErrorToResponse(error, request, set);
+        set.status = mapped.status;
+        return mapped.body;
       }
     },
     {
@@ -115,15 +140,15 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   )
   .post(
     '/:tournamentId/roster-sync',
-    async ({ params, body, set }) => {
+    async ({ params, body, request, set }) => {
       try {
         const result = await tournamentManagementService.retryRoster(params.tournamentId, body);
         set.status = result.queued || result.changed ? 202 : 200;
         return { success: true, ...result };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
-        set.status = status;
-        return { success: false, error: message };
+        const mapped = mapErrorToResponse(error, request, set);
+        set.status = mapped.status;
+        return mapped.body;
       }
     },
     {
@@ -133,7 +158,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   )
   .patch(
     '/:tournamentId/roster-mode',
-    async ({ params, body, set }) => {
+    async ({ params, body, request, set }) => {
       try {
         const tournament = await tournamentManagementService.setRosterMode(
           params.tournamentId,
@@ -142,9 +167,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         set.status = 202;
         return { success: true, tournament };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
-        set.status = status;
-        return { success: false, error: message };
+        const mapped = mapErrorToResponse(error, request, set);
+        set.status = mapped.status;
+        return mapped.body;
       }
     },
     {
@@ -157,7 +182,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   )
   .patch(
     '/:tournamentId/state',
-    async ({ params, body, set }) => {
+    async ({ params, body, request, set }) => {
       try {
         const tournament = await tournamentManagementService.setTournamentState(
           params.tournamentId,
@@ -166,9 +191,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         if (body.state === 'active' && tournament.state !== 'active') set.status = 202;
         return { success: true, tournament };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
-        set.status = status;
-        return { success: false, error: message };
+        const mapped = mapErrorToResponse(error, request, set);
+        set.status = mapped.status;
+        return mapped.body;
       }
     },
     {
@@ -181,7 +206,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   )
   .post(
     '/',
-    async ({ body, set }) => {
+    async ({ body, request, set }) => {
       try {
         const payload = validateTournamentCreateInput(body);
         const result = await createTournament(payload);
@@ -192,9 +217,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
           setupStatus: result.setupStatus,
         };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
-        set.status = status;
-        return { success: false, error: message };
+        const mapped = mapErrorToResponse(error, request, set);
+        set.status = mapped.status;
+        return mapped.body;
       }
     },
     {
@@ -218,7 +243,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   )
   .patch(
     '/:tournamentId',
-    async ({ params, body, set }) => {
+    async ({ params, body, request, set }) => {
       try {
         const tournament = await tournamentManagementService.updateTournament(
           params.tournamentId,
@@ -226,9 +251,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         );
         return { success: true, tournament };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
-        set.status = status;
-        return { success: false, error: message };
+        const mapped = mapErrorToResponse(error, request, set);
+        set.status = mapped.status;
+        return mapped.body;
       }
     },
     {
@@ -241,7 +266,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   )
   .delete(
     '/:tournamentId',
-    async ({ params, body, set }) => {
+    async ({ params, body, request, set }) => {
       try {
         const tournament = await tournamentManagementService.deleteTournament(
           params.tournamentId,
@@ -253,9 +278,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
           deletedName: tournament.name,
         };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
-        set.status = status;
-        return { success: false, error: message };
+        const mapped = mapErrorToResponse(error, request, set);
+        set.status = mapped.status;
+        return mapped.body;
       }
     },
     {

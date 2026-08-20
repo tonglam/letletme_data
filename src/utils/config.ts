@@ -65,7 +65,6 @@ const EnvSchema = z.object({
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
-  PUBLICATION_RETENTION_MODE: z.enum(['report', 'apply']).default('report'),
   // Mutation conflict guard timing
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(false),
   MUTATION_LOCK_TTL_MS: integerEnv(30_000),
@@ -100,7 +99,6 @@ const EnvSchema = z.object({
   GW_REVIEW_POLL_MS: integerEnv(10 * 60_000),
   GW_REVIEW_FINALIZATION_POLL_MS: integerEnv(2 * 60_000),
   FINALIZED_POLL_MS: integerEnv(5 * 60_000),
-  PULSELIVE_COMP_SEASON: z.string().optional(),
   // Disabled until automated Understat access is explicitly approved.
   UNDERSTAT_ENABLED: booleanEnv(false),
   UNDERSTAT_BASE_URL: z.string().url().default('https://understat.com'),
@@ -114,7 +112,6 @@ const EnvSchema = z.object({
     .regex(/^\d{4}$/)
     .default('2627'),
   UNDERSTAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
-  UNDERSTAT_TOTAL_DEADLINE_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
   UNDERSTAT_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(4),
   // Telegram notifications (optional)
   TELEGRAM_BOT_TOKEN: z.string().optional(),

@@ -93,7 +93,7 @@ Non-BullMQ state uses:
 llm:queue:coordination:<purpose>
 ```
 
-Purposes include mutation locks, Understat request permits, tournament cascade barriers, daily
+Purposes include queue admission, Understat request permits, tournament cascade barriers, daily
 entry-sync markers, and launch-notification deduplication. Coordination keys must use the queue
 client and carry a purpose-specific bounded TTL or documented durable-marker lifecycle.
 

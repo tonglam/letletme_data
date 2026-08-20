@@ -1,6 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
 import { type DataSyncJobData, dataSyncQueue, dataSyncQueueName } from '../queues/data-sync.queue';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
@@ -46,6 +47,35 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
   logJobTriggered(context);
 
   return runDataSyncAttempt(attemptContext, () => {
+    const mutationInput = {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: String(job.id),
+    };
+
+    // The player-values snapshot is the parent write for the price-sync job.
+    // Commit it under the database scope before exposing the dependent job to
+    // another worker; otherwise the child can read the previous snapshot.
+    if (job.name === 'player-values') {
+      return runTrackedJob(context, async () => {
+        const changeDate = job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt));
+        const result = await withMutationConflictGuard(mutationInput, () =>
+          syncCurrentPlayerValues(season, changeDate, {
+            onTargetEventResolved: recordResolvedTarget,
+            deferPriceSyncEnqueue: true,
+          }),
+        );
+        if (result.count > 0) {
+          await enqueuePlayerPricesSyncJob(season, 'cascade', {
+            changeDate,
+            jobId: `player-prices-${changeDate}-immediate`,
+            removeOnSettle: true,
+          });
+        }
+        return result;
+      });
+    }
+
     const execute = () =>
       runTrackedJob(context, async () => {
         switch (job.name) {
@@ -74,14 +104,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     // Core aliases perform upstream reads before acquiring their own short
     // multi-table persistence/publication lock.
     if (job.name === 'core-snapshot') return execute();
-    return withMutationConflictGuard(
-      {
-        queueName: job.queueName,
-        jobName: job.name,
-        jobId: String(job.id),
-      },
-      execute,
-    );
+    return withMutationConflictGuard(mutationInput, execute);
   });
 };
 

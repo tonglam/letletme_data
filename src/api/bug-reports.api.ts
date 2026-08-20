@@ -1,13 +1,19 @@
 import { Elysia, t } from 'elysia';
 
 import { createBugReport, updateBugReportStatus } from '../services/bug-report.service';
-import { getErrorMessage, getHttpStatusFromError, getPublicErrorMessage } from '../utils/errors';
+import {
+  getHttpStatusFromError,
+  getOrCreateRequestId,
+  getPublicErrorCode,
+  getPublicErrorMessage,
+} from '../utils/errors';
+import { logError } from '../utils/logger';
 
 const optionalPositiveInteger = t.Union([t.Number({ minimum: 1, multipleOf: 1 }), t.Null()]);
 
 export const bugReportsAPI = new Elysia({ prefix: '/bug-reports' }).post(
   '/',
-  async ({ body, set }) => {
+  async ({ body, request, set }) => {
     try {
       const result = await createBugReport({
         source: body.source,
@@ -24,7 +30,16 @@ export const bugReportsAPI = new Elysia({ prefix: '/bug-reports' }).post(
     } catch (error) {
       const status = getHttpStatusFromError(error);
       set.status = status;
-      return { success: false, error: getErrorMessage(error) };
+      const requestId = getOrCreateRequestId(request);
+      logError('Bug report request failed', error, { requestId });
+      set.headers['x-request-id'] = requestId;
+      const code = getPublicErrorCode(error, status);
+      return {
+        success: false,
+        error: getPublicErrorMessage(error, status),
+        ...(code ? { code } : {}),
+        ...(status >= 500 && process.env.NODE_ENV === 'production' ? { requestId } : {}),
+      };
     }
   },
   {
@@ -43,7 +58,7 @@ export const bugReportsAPI = new Elysia({ prefix: '/bug-reports' }).post(
 
 export const bugReportsStatusAPI = new Elysia({ prefix: '/bug-reports' }).patch(
   '/:publicId/status',
-  async ({ params, body, set }) => {
+  async ({ params, body, request, set }) => {
     try {
       const result = await updateBugReportStatus(params.publicId, body.status);
       if (!result) {
@@ -60,11 +75,20 @@ export const bugReportsStatusAPI = new Elysia({ prefix: '/bug-reports' }).patch(
     } catch (error) {
       const status = getHttpStatusFromError(error);
       set.status = status;
-      return { success: false, error: getPublicErrorMessage(error, status) };
+      const requestId = getOrCreateRequestId(request);
+      logError('Bug report status request failed', error, { requestId });
+      set.headers['x-request-id'] = requestId;
+      const code = getPublicErrorCode(error, status);
+      return {
+        success: false,
+        error: getPublicErrorMessage(error, status),
+        ...(code ? { code } : {}),
+        ...(status >= 500 && process.env.NODE_ENV === 'production' ? { requestId } : {}),
+      };
     }
   },
   {
-    params: t.Object({ publicId: t.String({ pattern: '^LL-[0-9A-F]{6}$' }) }),
+    params: t.Object({ publicId: t.String({ pattern: '^LL-([0-9A-F]{6}|[0-9A-F]{12})$' }) }),
     body: t.Object({
       status: t.Union([t.Literal('open'), t.Literal('ack'), t.Literal('closed')]),
     }),

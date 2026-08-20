@@ -1,7 +1,12 @@
 import { Elysia } from 'elysia';
 
 import { JobNotFoundError, listTriggerableJobs, triggerJob } from '../services/job-trigger.service';
-import { getHttpStatusFromError, getPublicErrorMessage } from '../utils/errors';
+import {
+  getHttpStatusFromError,
+  getOrCreateRequestId,
+  getPublicErrorCode,
+  getPublicErrorMessage,
+} from '../utils/errors';
 import { logError } from '../utils/logger';
 
 /**
@@ -17,7 +22,7 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
     return { success: true, jobs, count: jobs.length };
   })
 
-  .post('/:name/trigger', async ({ params, body, set }) => {
+  .post('/:name/trigger', async ({ params, body, request, set }) => {
     const { name } = params;
 
     try {
@@ -49,9 +54,17 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         return { success: false, error: error.message };
       }
 
-      logError(`Manual job failed: ${name}`, error);
+      const requestId = getOrCreateRequestId(request);
+      logError(`Manual job failed: ${name}`, error, { requestId });
       const status = getHttpStatusFromError(error);
       set.status = status;
-      return { success: false, error: getPublicErrorMessage(error, status) };
+      set.headers['x-request-id'] = requestId;
+      const code = getPublicErrorCode(error, status);
+      return {
+        success: false,
+        error: getPublicErrorMessage(error, status),
+        ...(code ? { code } : {}),
+        ...(status >= 500 && process.env.NODE_ENV === 'production' ? { requestId } : {}),
+      };
     }
   });

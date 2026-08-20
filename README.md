@@ -47,7 +47,8 @@ FPL request or validation error fails the sync without replacing the last
 accepted canonical state.
 
 Understat is deliberately PostgreSQL-only at the business-data layer. Its workers use the queue
-Redis endpoint only for BullMQ, mutation locks, and short-lived request permits.
+Redis endpoint only for BullMQ, host-wide FPL admission, and short-lived request permits;
+PostgreSQL owns mutation serialization.
 
 ## Multi-season and preseason provider boundaries
 
@@ -121,7 +122,7 @@ and staged update matrix in the
 
 Prerequisites:
 
-- Bun `1.3.14` (the version pinned in `package.json`)
+- Bun `1.3.3` (the version pinned in `package.json`)
 - PostgreSQL
 - Redis with distinct cache-publication and BullMQ/coordination endpoints or databases
 

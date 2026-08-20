@@ -47,7 +47,14 @@ function createTestService(
   repository: TournamentManagementRepository,
   lifecycle: Parameters<typeof createServiceUnderTest>[1] = {},
 ) {
-  return createServiceUnderTest(repository, lifecycle, async () => TEST_SEASON);
+  return createServiceUnderTest(
+    repository,
+    {
+      withMutationConflictGuard: async (_input, operation) => operation(),
+      ...lifecycle,
+    },
+    async () => TEST_SEASON,
+  );
 }
 
 describe('tournament management service', () => {

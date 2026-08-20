@@ -8,6 +8,7 @@ import {
 } from '../db/schemas/platform.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
+  bugReportRequestHash,
   retentionDeadline,
   type BugReportInsert,
   type BugReportStatus,
@@ -116,11 +117,49 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
               id: bugReportsInOps.id,
               publicId: bugReportsInOps.publicId,
               createdAt: bugReportsInOps.createdAt,
+              source: bugReportsInOps.source,
+              userId: bugReportsInOps.userId,
+              entryId: bugReportsInOps.entryId,
+              body: bugReportsInOps.body,
+              submissionId: bugReportsInOps.submissionId,
+              screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+              screenshotUrl: bugReportsInOps.screenshotUrl,
+              clientMeta: bugReportsInOps.clientMeta,
+              submissionRequestHash: bugReportsInOps.submissionRequestHash,
             })
             .from(bugReportsInOps)
             .where(eq(bugReportsInOps.submissionId, report.submissionId))
             .limit(1);
-          if (existingSubmission) return existingSubmission;
+          if (existingSubmission) {
+            const existingHash =
+              existingSubmission.submissionRequestHash ??
+              bugReportRequestHash({
+                source: existingSubmission.source as BugReportInsert['source'],
+                userId: existingSubmission.userId,
+                entryId: existingSubmission.entryId,
+                body: existingSubmission.body,
+                submissionId: existingSubmission.submissionId,
+                screenshotObjectKey: existingSubmission.screenshotObjectKey,
+                screenshotUrl: existingSubmission.screenshotUrl,
+                clientMeta: (existingSubmission.clientMeta ?? {}) as Record<string, unknown>,
+              });
+            if (existingHash !== report.submissionRequestHash)
+              throw new ConflictError(
+                'Submission ID was already used for a different bug report',
+                'BUG_REPORT_SUBMISSION_ID_REUSED',
+              );
+            if (!existingSubmission.submissionRequestHash) {
+              await connection
+                .update(bugReportsInOps)
+                .set({ submissionRequestHash: report.submissionRequestHash })
+                .where(eq(bugReportsInOps.id, existingSubmission.id));
+            }
+            return {
+              id: existingSubmission.id,
+              publicId: existingSubmission.publicId,
+              createdAt: existingSubmission.createdAt,
+            };
+          }
         }
 
         // Allocation and retirement use the same transaction-scoped lock so
@@ -243,6 +282,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             screenshotObjectKey: report.screenshotObjectKey,
             screenshotUrl: report.screenshotUrl,
             clientMeta: report.clientMeta,
+            submissionRequestHash: report.submissionRequestHash,
             status: 'open',
             closedAt: report.closedAt,
             expiresAt: report.expiresAt,
@@ -264,6 +304,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             source: bugReportsInOps.source,
             userId: bugReportsInOps.userId,
             entryId: bugReportsInOps.entryId,
+            submissionRequestHash: bugReportsInOps.submissionRequestHash,
           });
         return row;
       };
@@ -280,16 +321,43 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             closedAt: bugReportsInOps.closedAt,
             expiresAt: bugReportsInOps.expiresAt,
             screenshotUrl: bugReportsInOps.screenshotUrl,
+            screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+            screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
             body: bugReportsInOps.body,
             clientMeta: bugReportsInOps.clientMeta,
             source: bugReportsInOps.source,
             userId: bugReportsInOps.userId,
             entryId: bugReportsInOps.entryId,
+            submissionId: bugReportsInOps.submissionId,
+            submissionRequestHash: bugReportsInOps.submissionRequestHash,
           })
           .from(bugReportsInOps)
           .where(eq(bugReportsInOps.submissionId, report.submissionId))
           .limit(1);
         if (!existing) throw new DatabaseError('Bug report insert returned no row');
+        const existingHash =
+          existing.submissionRequestHash ??
+          bugReportRequestHash({
+            source: existing.source as BugReportInsert['source'],
+            userId: existing.userId,
+            entryId: existing.entryId,
+            body: existing.body,
+            submissionId: existing.submissionId,
+            screenshotObjectKey: existing.screenshotObjectKey,
+            screenshotUrl: existing.screenshotUrl,
+            clientMeta: (existing.clientMeta ?? {}) as Record<string, unknown>,
+          });
+        if (existingHash !== report.submissionRequestHash)
+          throw new ConflictError(
+            'Submission ID was already used for a different bug report',
+            'BUG_REPORT_SUBMISSION_ID_REUSED',
+          );
+        if (!existing.submissionRequestHash) {
+          await db
+            .update(bugReportsInOps)
+            .set({ submissionRequestHash: report.submissionRequestHash })
+            .where(eq(bugReportsInOps.id, existing.id));
+        }
         return existing as StoredBugReport;
       }
       return row as StoredBugReport;

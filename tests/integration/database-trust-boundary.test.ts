@@ -280,6 +280,7 @@ describe('database trust boundary', () => {
       'bug_reports',
       'dataset_publication_items',
       'dataset_publications',
+      'mutation_scopes',
       'schema_migrations',
       'season_imports',
       'sync_items',

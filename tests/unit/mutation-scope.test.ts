@@ -194,4 +194,22 @@ describe('resolveMutationScopes', () => {
     });
     expect(refreshScopes.filter((scope) => cupScopes.includes(scope))).toEqual([]);
   });
+
+  it('protects Understat review commands and bridge writers with durable scopes', () => {
+    expect(
+      resolveMutationScopes({
+        queueName: 'understat-mappings',
+        jobName: 'understat-mappings-reconcile',
+      }),
+    ).toEqual(['understat:reference:all']);
+    expect(
+      resolveMutationScopes({
+        queueName: 'understat-player-sync',
+        jobName: 'understat-player-detail',
+      }),
+    ).toEqual(['understat:reference:all']);
+    expect(resolveMutationScopes({ queueName: 'bridge', jobName: 'entity-link' })).toEqual([
+      'bridge:all',
+    ]);
+  });
 });

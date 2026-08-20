@@ -232,7 +232,7 @@ export async function runDataSyncAttempt<T>(
     try {
       const result = await runner();
       // Some unscoped workers resolve their canonical event inside the runner
-      // immediately before taking mutation locks. The context is shared by
+      // immediately before taking database mutation scopes. The context is shared by
       // reference, so adopt that resolution before falling back to the result.
       targetEventId ??= context.targetEventId;
       if (targetEventId === undefined && isRecord(result)) {

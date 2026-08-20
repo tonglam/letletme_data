@@ -366,6 +366,17 @@ export const schemaMigrationsInOps = ops.table(
   ],
 );
 
+export const mutationScopesInOps = ops.table(
+  'mutation_scopes',
+  {
+    scopeKey: text('scope_key').primaryKey().notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (_table) => [check('mutation_scopes_key_nonempty', sql`btrim(scope_key) <> ''::text`)],
+);
+
 export const bugReportsInOps = ops.table(
   'bug_reports',
   {
@@ -384,11 +395,15 @@ export const bugReportsInOps = ops.table(
     screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
     closedAt: timestamp('closed_at', { withTimezone: true, mode: 'date' }),
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+    submissionRequestHash: text('submission_request_hash'),
     scrubbedAt: timestamp('scrubbed_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
     uniqueIndex('bug_reports_submission_id_key').on(table.submissionId),
+    uniqueIndex('bug_reports_screenshot_object_key_key')
+      .on(table.screenshotObjectKey)
+      .where(sql`screenshot_object_key IS NOT NULL`),
     index('bug_reports_created_idx').on(table.createdAt.desc()),
     index('bug_reports_screenshot_retention_idx')
       .on(table.createdAt.asc())
@@ -397,7 +412,10 @@ export const bugReportsInOps = ops.table(
       .on(table.userId, table.createdAt.desc())
       .where(sql`user_id IS NOT NULL`),
     index('bug_reports_expiry_idx').on(table.expiresAt.asc()),
-    check('bug_reports_public_id_format', sql`public_id ~ '^LL-[0-9A-F]{6}$'::text`),
+    index('bug_reports_submission_request_hash_idx')
+      .on(table.submissionRequestHash)
+      .where(sql`submission_request_hash IS NOT NULL`),
+    check('bug_reports_public_id_format', sql`public_id ~ '^LL-([0-9A-F]{6}|[0-9A-F]{12})$'::text`),
     check(
       'bug_reports_source_known',
       sql`source = ANY (ARRAY['website'::text, 'wechat_miniprogram'::text])`,
@@ -417,13 +435,17 @@ export const bugReportsInOps = ops.table(
     ),
     check(
       'bug_reports_screenshot_object_key_format',
-      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND COALESCE(substring(lower(screenshot_object_key) FROM '^bug-reports/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.(jpg|png|webp|gif)$'::text) = lower(submission_id::text), false))`,
+      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND (screenshot_object_key ~* ('^bug-reports/' || submission_id::text || '\\.(jpg|png|webp|gif)$'::text)))`,
     ),
     check(
       'bug_reports_screenshot_https',
       sql`(screenshot_url IS NULL) OR (screenshot_url ~ '^https://'::text)`,
     ),
     check('bug_reports_expiry_after_created', sql`expires_at >= created_at`),
+    check(
+      'bug_reports_submission_request_hash_format',
+      sql`(submission_request_hash IS NULL) OR (submission_request_hash ~ '^[0-9a-f]{64}$'::text)`,
+    ),
   ],
 );
 
