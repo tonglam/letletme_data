@@ -24,6 +24,10 @@ const DIAGNOSTIC_KEYS = new Set([
   'viewportBucket',
   'operations',
 ]);
+const SUBMISSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SCREENSHOT_OBJECT_KEY_PATTERN =
+  /^bug-reports\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|png|webp|gif)$/i;
 
 const codePointLength = (value: string): number => [...value].length;
 

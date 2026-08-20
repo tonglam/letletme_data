@@ -41,6 +41,12 @@ export type BugReportDeletionClaim = {
   completed?: boolean;
 };
 
+export type ExpiredBugReportScreenshot = {
+  id: string;
+  screenshotObjectKey: string;
+  createdAt: Date;
+};
+
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
@@ -220,12 +226,15 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             userId: report.userId,
             entryId: report.entryId,
             body: report.body,
+            submissionId: report.submissionId,
+            screenshotObjectKey: report.screenshotObjectKey,
             screenshotUrl: report.screenshotUrl,
             clientMeta: report.clientMeta,
             status: 'open',
             closedAt: report.closedAt,
             expiresAt: report.expiresAt,
           })
+          .onConflictDoNothing({ target: bugReportsInOps.submissionId })
           .returning({
             id: bugReportsInOps.id,
             publicId: bugReportsInOps.publicId,
@@ -233,6 +242,9 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             status: bugReportsInOps.status,
             closedAt: bugReportsInOps.closedAt,
             expiresAt: bugReportsInOps.expiresAt,
+            submissionId: bugReportsInOps.submissionId,
+            screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+            screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
             screenshotUrl: bugReportsInOps.screenshotUrl,
             body: bugReportsInOps.body,
             clientMeta: bugReportsInOps.clientMeta,
@@ -251,12 +263,21 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             id: bugReportsInOps.id,
             publicId: bugReportsInOps.publicId,
             createdAt: bugReportsInOps.createdAt,
+            status: bugReportsInOps.status,
+            closedAt: bugReportsInOps.closedAt,
+            expiresAt: bugReportsInOps.expiresAt,
+            screenshotUrl: bugReportsInOps.screenshotUrl,
+            body: bugReportsInOps.body,
+            clientMeta: bugReportsInOps.clientMeta,
+            source: bugReportsInOps.source,
+            userId: bugReportsInOps.userId,
+            entryId: bugReportsInOps.entryId,
           })
           .from(bugReportsInOps)
           .where(eq(bugReportsInOps.submissionId, report.submissionId))
           .limit(1);
         if (!existing) throw new DatabaseError('Bug report insert returned no row');
-        return existing;
+        return existing as StoredBugReport;
       }
       return row as StoredBugReport;
     } catch (error) {
@@ -1220,6 +1241,9 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     markStorageDeleted,
     claimForDeletion,
     finalizeClaimedDeletion,
+    listExpiredScreenshots,
+    listActiveScreenshotKeys,
+    markScreenshotDeleted,
   };
 };
 
