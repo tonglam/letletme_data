@@ -33,6 +33,7 @@ import {
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   readonly season: string;
@@ -118,6 +119,7 @@ export interface LiveSnapshotSyncOptions {
   readonly persistEventLives?: boolean;
   readonly finalizeEvent?: boolean;
   readonly trigger?: 'cron' | 'manual' | 'cascade' | 'queue';
+  readonly mutationScopes?: readonly string[];
   readonly dependencies?: LiveSnapshotDependencies;
 }
 
@@ -512,6 +514,19 @@ export async function syncLiveSnapshot(
     throw new Error(`Invalid live snapshot event ID: ${eventId}`);
   }
   const dependencies = options.dependencies ?? defaultDependencies;
+  const persistDurably = async (request: LiveSnapshotDurablePersistenceRequest) => {
+    const scopes = options.mutationScopes ?? [];
+    if (scopes.length === 0) return dependencies.persistDurably(request);
+    return withMutationConflictGuard(
+      {
+        queueName: 'live-data',
+        jobName: 'live-snapshot',
+        eventId,
+        scopes: [...scopes],
+      },
+      () => dependencies.persistDurably(request),
+    );
+  };
   const startedAt = Date.now();
   if (!options.dependencies) {
     await recoverPendingLiveSnapshotPublication(season, eventId);
@@ -560,7 +575,7 @@ export async function syncLiveSnapshot(
       // Fixture flags are the lifecycle source of truth even for cache-only
       // polls. Persisting them independently of event-live durability prevents
       // a stale database fixture from keeping the orchestrator in LIVE_ACTIVE.
-      const durable = await dependencies.persistDurably({
+      const durable = await persistDurably({
         season,
         eventId,
         checkedAt,
@@ -631,7 +646,7 @@ export async function syncLiveSnapshot(
         }
       },
       beforeActivate: async () => {
-        const durable = await dependencies.persistDurably({
+        const durable = await persistDurably({
           season,
           eventId,
           checkedAt,

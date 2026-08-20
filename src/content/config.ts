@@ -3,7 +3,6 @@ export type ContentRuntimeFlags = Readonly<{
   realGrokEnabled: boolean;
   publicationEnabled: boolean;
   briefingPublicEnabled: boolean;
-  grokBin: string | null;
   grokConcurrency: number;
   pollMaxXCalls: number;
   dailyXCallBudget: number;
@@ -12,6 +11,9 @@ export type ContentRuntimeFlags = Readonly<{
   editorApiKeyHashes: readonly string[];
   publisherApiKeyHashes: readonly string[];
 }>;
+
+// Keep runtime requests within the tracked Grok input schema's ceiling.
+export const CONTENT_POLL_MAX_X_CALLS_LIMIT = 20;
 
 const apiKeyHashes = (value: string | undefined): readonly string[] =>
   (value ?? '')
@@ -30,7 +32,6 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
     realGrokEnabled: booleanEnv(process.env.CONTENT_REAL_GROK_ENABLED, false),
     publicationEnabled: booleanEnv(process.env.CONTENT_PUBLICATION_ENABLED, false),
     briefingPublicEnabled: booleanEnv(process.env.BRIEFING_PUBLIC_ENABLED, false),
-    grokBin: process.env.GROK_BIN?.trim() || null,
     grokConcurrency: Math.max(1, Number(process.env.CONTENT_GROK_CONCURRENCY ?? 1)),
     pollMaxXCalls: Math.max(1, Number(process.env.CONTENT_POLL_MAX_X_CALLS ?? 2)),
     dailyXCallBudget: Math.max(1, Number(process.env.CONTENT_DAILY_X_CALL_BUDGET ?? 24)),
@@ -51,14 +52,17 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   if (flags.briefingPublicEnabled && !flags.publicationEnabled) {
     throw new Error('BRIEFING_PUBLIC_ENABLED requires CONTENT_PUBLICATION_ENABLED');
   }
-  if (flags.realGrokEnabled && !flags.grokBin) {
-    throw new Error('CONTENT_REAL_GROK_ENABLED requires GROK_BIN');
-  }
   if (!Number.isSafeInteger(flags.grokConcurrency) || flags.grokConcurrency < 1) {
     throw new Error('CONTENT_GROK_CONCURRENCY must be a positive integer');
   }
-  if (!Number.isSafeInteger(flags.pollMaxXCalls) || flags.pollMaxXCalls < 1) {
-    throw new Error('CONTENT_POLL_MAX_X_CALLS must be a positive integer');
+  if (
+    !Number.isSafeInteger(flags.pollMaxXCalls) ||
+    flags.pollMaxXCalls < 1 ||
+    flags.pollMaxXCalls > CONTENT_POLL_MAX_X_CALLS_LIMIT
+  ) {
+    throw new Error(
+      `CONTENT_POLL_MAX_X_CALLS must be an integer from 1 to ${CONTENT_POLL_MAX_X_CALLS_LIMIT}`,
+    );
   }
   if (
     !Number.isSafeInteger(flags.dailyXCallBudget) ||

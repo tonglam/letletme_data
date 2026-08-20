@@ -731,7 +731,7 @@ class FPLClient {
       throw lastError instanceof Error ? lastError : new Error(String(lastError));
     } finally {
       requestMetric.finish();
-      releaseAdmission();
+      await releaseAdmission();
     }
   }
 

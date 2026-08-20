@@ -1,12 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  ACQUIRE_SCRIPT,
   acquireFplRequest,
   getFplAdmissionStats,
   resetFplAdmissionForTests,
 } from '../../src/utils/fpl-admission';
 
 describe('FPL admission reservations', () => {
+  test('clamps a persisted bulk limit to the current configured ceiling', () => {
+    expect(ACQUIRE_SCRIPT).toContain('if bulkLimit > configuredBulkLimit then');
+    expect(ACQUIRE_SCRIPT).toContain('bulkLimit');
+  });
+
   test('reserves capacity before rate-gate waits', async () => {
     resetFplAdmissionForTests();
     const capacity = getFplAdmissionStats().bulkMaxInflight;

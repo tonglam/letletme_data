@@ -30,11 +30,12 @@ The `Deploy` workflow:
 2. builds and pushes one `linux/amd64` image, then resolves its digest;
 3. records the currently running image as the one retained rollback digest;
 4. pulls the new digest and validates runtime environment plus migration-login capabilities;
-5. stops API and worker, then requires database and queue work to be quiescent;
-6. applies the migration chain and verifies its checksums/status;
-7. verifies the database ownership and login contract;
-8. rebuilds the active FPL core publication from PostgreSQL;
-9. starts API and worker and verifies `/health`, `/ready`, and worker health.
+5. stops API, worker, and content-worker, then requires database and queue work to be quiescent;
+6. creates and validates an external custom-format PostgreSQL backup before migration;
+7. applies the migration chain and verifies its checksums/status;
+8. verifies the database ownership and login contract;
+9. rebuilds the active FPL core publication from PostgreSQL;
+10. starts API, worker, and content-worker and verifies `/health`, `/ready`, and all heartbeats.
 
 Failure before migration starts restores the prior image. Once a destructive migration commits,
 production moves forward with a correcting migration; an older application image must not be started
@@ -101,6 +102,10 @@ docker compose run --rm -T migration bun run db:verify-runtime-logins
 exactly one current `fpl.seasons` row. Publication integrity is verified independently by the deploy
 workflow and the season-readiness procedure in
 [docs/fpl-season-readiness.md](docs/fpl-season-readiness.md).
+
+Before the first production schema change, restore the newest retained dump into a disposable
+PostgreSQL 15 instance and run `scripts/verify-backup-restore.sh`; repeat this round-trip at least
+quarterly. The restore target must be disposable and must never be the production database.
 
 Production logs are structured JSON on container stdout. Docker retains bounded rotated files; use
 `docker compose logs` rather than creating workspace log files.

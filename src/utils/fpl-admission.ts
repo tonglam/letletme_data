@@ -1,157 +1,285 @@
+import { randomUUID } from 'node:crypto';
+
+import { queueRedisSingleton } from '../queues/redis';
+import { FPLClientError } from './errors';
 import { logDebug } from './logger';
 
 export type FplRequestPriority = 'live' | 'bulk';
 
-const MAX_INFLIGHT = Math.max(1, Number(process.env.FPL_MAX_INFLIGHT ?? 5));
-const LIVE_RESERVED = Math.min(2, MAX_INFLIGHT);
-const BULK_MAX_INFLIGHT = Math.max(1, Math.min(MAX_INFLIGHT - LIVE_RESERVED, 3));
-const MIN_INTERVAL_MS = Math.ceil(
-  1_000 / Math.max(1, Number(process.env.FPL_REQUESTS_PER_SECOND ?? 4)),
+const MAX_INFLIGHT = Math.min(5, Math.max(1, Number(process.env.FPL_MAX_INFLIGHT ?? 5)));
+const BULK_MAX_INFLIGHT = Math.max(1, Math.min(MAX_INFLIGHT - Math.min(2, MAX_INFLIGHT), 3));
+const REQUESTS_PER_SECOND = Math.min(
+  4,
+  Math.max(1, Number(process.env.FPL_REQUESTS_PER_SECOND ?? 4)),
 );
-const RATE_BURST_SIZE = Math.max(1, Math.floor(Number(process.env.FPL_REQUESTS_PER_SECOND ?? 4)));
+const LEASE_MS = Math.max(5_000, Number(process.env.FPL_ADMISSION_LEASE_MS ?? 45_000));
+const STATE_KEY = 'llm:fpl:admission:state';
+const LEASES_KEY = 'llm:fpl:admission:leases';
+const LEASE_KEY_PREFIX = 'llm:fpl:admission:lease:';
+const LEASE_META_KEY = 'llm:fpl:admission:lease-meta';
+const ADMISSION_SCRIPT_VERSION = 'v3';
 
-type Waiter = {
-  priority: FplRequestPriority;
-  resolve: () => void;
-};
-
-let inflight = 0;
-let liveInflight = 0;
-let bulkInflight = 0;
-let lastStartedAt = 0;
-let burstRemaining = RATE_BURST_SIZE;
-const waiters: Waiter[] = [];
-let rateGate: Promise<void> = Promise.resolve();
-let adaptiveBulkLimit = BULK_MAX_INFLIGHT;
-let lastBulkErrorAt = 0;
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-async function waitForRateSlot(): Promise<void> {
-  let release!: () => void;
-  const previous = rateGate;
-  rateGate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  await previous;
-  try {
-    if (burstRemaining > 0) {
-      burstRemaining -= 1;
-      lastStartedAt = Date.now();
-      return;
-    }
-    const spacing = Math.max(0, MIN_INTERVAL_MS - (Date.now() - lastStartedAt));
-    if (spacing > 0) await sleep(spacing);
-    lastStartedAt = Date.now();
-  } finally {
-    release();
+export class FplAdmissionUnavailableError extends FPLClientError {
+  constructor(cause?: unknown) {
+    super(
+      'FPL upstream admission is temporarily unavailable; retry later',
+      503,
+      'FPL_ADMISSION_UNAVAILABLE',
+      cause instanceof Error ? cause : undefined,
+    );
+    this.name = 'FplAdmissionUnavailableError';
   }
 }
 
-function canStart(priority: FplRequestPriority): boolean {
-  if (inflight >= MAX_INFLIGHT) return false;
-  if (priority === 'bulk') {
-    maybeRecoverBulkLimit();
-    if (bulkInflight >= adaptiveBulkLimit) return false;
-  }
+export const ACQUIRE_SCRIPT = `
+local nowParts = redis.call('TIME')
+local now = tonumber(nowParts[1]) * 1000 + math.floor(tonumber(nowParts[2]) / 1000)
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now)
+for _, token in ipairs(expired) do
+  local priority = redis.call('HGET', KEYS[4], token)
+  if priority == 'live' then redis.call('HINCRBY', KEYS[1], 'live', -1) end
+  if priority == 'bulk' then redis.call('HINCRBY', KEYS[1], 'bulk', -1) end
+  if priority == 'live' or priority == 'bulk' then redis.call('HINCRBY', KEYS[1], 'inflight', -1) end
+  redis.call('DEL', KEYS[3] .. token)
+  redis.call('HDEL', KEYS[4], token)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
+local inflight = tonumber(redis.call('HGET', KEYS[1], 'inflight') or '0')
+local live = tonumber(redis.call('HGET', KEYS[1], 'live') or '0')
+local bulk = tonumber(redis.call('HGET', KEYS[1], 'bulk') or '0')
+local configuredBulkLimit = tonumber(ARGV[3])
+local bulkLimit = tonumber(redis.call('HGET', KEYS[1], 'bulkLimit') or configuredBulkLimit)
+if bulkLimit > configuredBulkLimit then
+  bulkLimit = configuredBulkLimit
+  redis.call('HSET', KEYS[1], 'bulkLimit', bulkLimit)
+end
+local lastError = tonumber(redis.call('HGET', KEYS[1], 'lastBulkErrorMs') or '0')
+if bulkLimit < configuredBulkLimit and lastError > 0 and now - lastError >= 300000 then
+  bulkLimit = math.min(configuredBulkLimit, bulkLimit + 1)
+  redis.call('HSET', KEYS[1], 'bulkLimit', bulkLimit, 'lastBulkErrorMs', bulkLimit < configuredBulkLimit and now or 0)
+end
+if ARGV[1] == 'bulk' and bulk >= bulkLimit then return {'wait', 'capacity', '100'} end
+if inflight >= tonumber(ARGV[4]) then return {'wait', 'capacity', '100'} end
+local lastRefill = tonumber(redis.call('HGET', KEYS[1], 'lastRefillMs') or now)
+-- The token bucket capacity is the shared request rate, not the bulk
+-- concurrency cap.  Keeping these separate preserves a full 4-request
+-- burst while still reserving two of the five in-flight leases for live.
+local tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens') or ARGV[5])
+local elapsed = math.max(0, now - lastRefill)
+tokens = math.min(tonumber(ARGV[5]), tokens + elapsed * tonumber(ARGV[5]) / 1000)
+if tokens < 1 then
+  redis.call('HSET', KEYS[1], 'tokens', tokens, 'lastRefillMs', now, 'bulkLimit', bulkLimit)
+  return {'wait', 'rate', tostring(math.ceil((1 - tokens) * 1000 / tonumber(ARGV[5])))}
+end
+tokens = tokens - 1
+local token = ARGV[2]
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'lastRefillMs', now, 'bulkLimit', bulkLimit)
+redis.call('HINCRBY', KEYS[1], 'inflight', 1)
+if ARGV[1] == 'live' then redis.call('HINCRBY', KEYS[1], 'live', 1) else redis.call('HINCRBY', KEYS[1], 'bulk', 1) end
+redis.call('SET', KEYS[3] .. token, ARGV[1], 'PX', ARGV[6])
+redis.call('HSET', KEYS[4], token, ARGV[1])
+redis.call('ZADD', KEYS[2], now + tonumber(ARGV[6]), token)
+return {'granted', token}
+`;
+
+const RELEASE_SCRIPT = `
+local priority = redis.call('HGET', KEYS[4], ARGV[1])
+if not priority then return 0 end
+redis.call('DEL', KEYS[3] .. ARGV[1])
+redis.call('HDEL', KEYS[4], ARGV[1])
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('HINCRBY', KEYS[1], 'inflight', -1)
+if priority == 'live' then redis.call('HINCRBY', KEYS[1], 'live', -1) end
+if priority == 'bulk' then redis.call('HINCRBY', KEYS[1], 'bulk', -1) end
+return 1
+`;
+
+const REPORT_SCRIPT = `
+local nowParts = redis.call('TIME')
+local now = tonumber(nowParts[1]) * 1000 + math.floor(tonumber(nowParts[2]) / 1000)
+local limit = tonumber(redis.call('HGET', KEYS[1], 'bulkLimit') or ARGV[2])
+if ARGV[1] == '429' or tonumber(ARGV[1]) >= 500 then
+  limit = math.max(1, limit - 1)
+  redis.call('HSET', KEYS[1], 'bulkLimit', limit, 'lastBulkErrorMs', now)
+elseif limit < tonumber(ARGV[2]) then
+  local last = tonumber(redis.call('HGET', KEYS[1], 'lastBulkErrorMs') or '0')
+  if last > 0 and now - last >= 300000 then
+    limit = math.min(tonumber(ARGV[2]), limit + 1)
+    redis.call('HSET', KEYS[1], 'bulkLimit', limit, 'lastBulkErrorMs', limit < tonumber(ARGV[2]) and now or 0)
+  end
+end
+return limit
+`;
+
+type LocalWaiter = { priority: FplRequestPriority; resolve: () => void };
+let localInflight = 0;
+let localLive = 0;
+let localBulk = 0;
+let localBulkLimit = BULK_MAX_INFLIGHT;
+let localLastError = 0;
+const localWaiters: LocalWaiter[] = [];
+
+function useLocalTestScheduler(): boolean {
+  return process.env.NODE_ENV === 'test' || process.env.FPL_ADMISSION_TEST_MODE === '1';
+}
+
+function localCanStart(priority: FplRequestPriority): boolean {
+  if (localInflight >= MAX_INFLIGHT) return false;
+  if (priority === 'bulk' && localBulk >= localBulkLimit) return false;
   return true;
 }
 
-function reserve(priority: FplRequestPriority): void {
-  inflight += 1;
-  if (priority === 'live') liveInflight += 1;
-  else bulkInflight += 1;
-}
-
-function release(priority: FplRequestPriority): void {
-  inflight -= 1;
-  if (priority === 'live') liveInflight -= 1;
-  else bulkInflight -= 1;
-}
-
-function maybeRecoverBulkLimit(now = Date.now()): void {
-  if (
-    adaptiveBulkLimit < BULK_MAX_INFLIGHT &&
-    lastBulkErrorAt > 0 &&
-    now - lastBulkErrorAt >= 5 * 60_000
-  ) {
-    adaptiveBulkLimit += 1;
-    lastBulkErrorAt = adaptiveBulkLimit < BULK_MAX_INFLIGHT ? now : 0;
+function localDrain(): void {
+  while (localWaiters.length) {
+    const liveIndex = localWaiters.findIndex((item) => item.priority === 'live');
+    const index = liveIndex >= 0 ? liveIndex : 0;
+    const selected = localWaiters[index];
+    if (!selected || !localCanStart(selected.priority)) return;
+    localWaiters.splice(index, 1);
+    localInflight += 1;
+    if (selected.priority === 'live') localLive += 1;
+    else localBulk += 1;
+    selected.resolve();
   }
 }
 
-/** Feed upstream health back into the shared scheduler without changing its
- * hard host-wide five-request ceiling.  Repeated 429/5xx responses shrink the
- * bulk lane from 3 to 2 to 1; five quiet minutes recover one slot at a time. */
+function localAcquire(priority: FplRequestPriority): Promise<() => void> {
+  if (!localCanStart(priority)) {
+    return new Promise<void>((resolve) => localWaiters.push({ priority, resolve })).then(() => {
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        localInflight -= 1;
+        if (priority === 'live') localLive -= 1;
+        else localBulk -= 1;
+        localDrain();
+      };
+    });
+  }
+  localInflight += 1;
+  if (priority === 'live') localLive += 1;
+  else localBulk += 1;
+  let released = false;
+  return Promise.resolve(() => {
+    if (released) return;
+    released = true;
+    localInflight -= 1;
+    if (priority === 'live') localLive -= 1;
+    else localBulk -= 1;
+    localDrain();
+  });
+}
+
+async function distributedAcquire(priority: FplRequestPriority): Promise<() => void> {
+  const token = randomUUID();
+  let redis: Awaited<ReturnType<typeof queueRedisSingleton.getClient>>;
+  try {
+    redis = await queueRedisSingleton.getClient();
+  } catch (error) {
+    throw new FplAdmissionUnavailableError(error);
+  }
+  for (;;) {
+    let result: string[];
+    try {
+      result = (await redis.eval(
+        ACQUIRE_SCRIPT,
+        4,
+        STATE_KEY,
+        LEASES_KEY,
+        LEASE_KEY_PREFIX,
+        LEASE_META_KEY,
+        priority,
+        token,
+        BULK_MAX_INFLIGHT,
+        MAX_INFLIGHT,
+        REQUESTS_PER_SECOND,
+        LEASE_MS,
+      )) as string[];
+    } catch (error) {
+      throw new FplAdmissionUnavailableError(error);
+    }
+    if (result[0] === 'granted') {
+      logDebug('FPL request admitted by Redis lease', {
+        priority,
+        admissionVersion: ADMISSION_SCRIPT_VERSION,
+      });
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        try {
+          await redis.eval(
+            RELEASE_SCRIPT,
+            4,
+            STATE_KEY,
+            LEASES_KEY,
+            LEASE_KEY_PREFIX,
+            LEASE_META_KEY,
+            token,
+          );
+        } catch {
+          // The lease TTL is the safety net when Redis disappears during release.
+        }
+      };
+    }
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.max(10, Math.min(1_000, Number(result[2] ?? 100)))),
+    );
+  }
+}
+
+export async function acquireFplRequest(priority: FplRequestPriority): Promise<() => void> {
+  if (useLocalTestScheduler()) return localAcquire(priority);
+  return distributedAcquire(priority);
+}
+
 export function reportFplResponse(
   priority: FplRequestPriority,
   status: number | null,
   now = Date.now(),
 ): void {
   if (priority !== 'bulk') return;
-  if (status === 429 || (status !== null && status >= 500)) {
-    adaptiveBulkLimit = Math.max(1, adaptiveBulkLimit - 1);
-    lastBulkErrorAt = now;
+  if (useLocalTestScheduler()) {
+    if (status === 429 || (status !== null && status >= 500)) {
+      localBulkLimit = Math.max(1, localBulkLimit - 1);
+      localLastError = now;
+    } else if (
+      localBulkLimit < BULK_MAX_INFLIGHT &&
+      localLastError &&
+      now - localLastError >= 300_000
+    ) {
+      localBulkLimit += 1;
+      localLastError = localBulkLimit < BULK_MAX_INFLIGHT ? now : 0;
+    }
     return;
   }
-  maybeRecoverBulkLimit(now);
-}
-
-function drain(): void {
-  while (waiters.length > 0) {
-    const liveIndex = waiters.findIndex((waiter) => waiter.priority === 'live');
-    const index = liveIndex >= 0 ? liveIndex : 0;
-    const waiter = waiters[index];
-    if (!canStart(waiter.priority)) return;
-    waiters.splice(index, 1);
-    reserve(waiter.priority);
-    waiter.resolve();
-  }
-}
-
-export async function acquireFplRequest(priority: FplRequestPriority): Promise<() => void> {
-  if (canStart(priority)) {
-    reserve(priority);
-  } else {
-    await new Promise<void>((resolve) => waiters.push({ priority, resolve }));
-  }
-  await waitForRateSlot();
-  logDebug('FPL request admitted', {
-    priority,
-    inflight,
-    liveInflight,
-    bulkInflight,
-  });
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    release(priority);
-    drain();
-  };
+  void queueRedisSingleton
+    .getClient()
+    .then((redis) =>
+      redis.eval(REPORT_SCRIPT, 1, STATE_KEY, status === null ? 0 : status, BULK_MAX_INFLIGHT),
+    )
+    .catch(() => undefined);
 }
 
 export function getFplAdmissionStats() {
-  maybeRecoverBulkLimit();
   return {
-    inflight,
-    liveInflight,
-    bulkInflight,
-    queued: waiters.length,
+    inflight: localInflight,
+    liveInflight: localLive,
+    bulkInflight: localBulk,
+    queued: localWaiters.length,
     maxInflight: MAX_INFLIGHT,
-    bulkMaxInflight: adaptiveBulkLimit,
-    requestsPerSecond: 1_000 / MIN_INTERVAL_MS,
+    bulkMaxInflight: localBulkLimit,
+    requestsPerSecond: REQUESTS_PER_SECOND,
+    distributed: !useLocalTestScheduler(),
   };
 }
 
 export function resetFplAdmissionForTests(): void {
-  inflight = 0;
-  liveInflight = 0;
-  bulkInflight = 0;
-  lastStartedAt = 0;
-  burstRemaining = RATE_BURST_SIZE;
-  rateGate = Promise.resolve();
-  adaptiveBulkLimit = BULK_MAX_INFLIGHT;
-  lastBulkErrorAt = 0;
-  waiters.splice(0);
+  localInflight = 0;
+  localLive = 0;
+  localBulk = 0;
+  localBulkLimit = BULK_MAX_INFLIGHT;
+  localLastError = 0;
+  localWaiters.splice(0);
 }

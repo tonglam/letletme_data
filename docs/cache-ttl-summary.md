@@ -25,7 +25,7 @@ revision cannot replace the active pointer.
 | Key family | Retention |
 | --- | --- |
 | `bull:{queue}:*` | BullMQ job/queue retention settings |
-| `llm:queue:coordination:mutation-lock:*` | Millisecond TTL from `MUTATION_LOCK_TTL_MS` |
+| `llm:fpl:admission:*` | Lease TTL is `FPL_ADMISSION_LEASE_MS`; expired leases are reclaimed atomically |
 | `llm:queue:coordination:tournament-cascade:*` | 24 hours; refresh lease 120 seconds |
 | `llm:queue:coordination:entry-info-sync:daily:*` | Through the next UTC midnight, minimum 60 seconds |
 | `llm:queue:coordination:launch-notification:*` | Durable completion marker plus bounded delivery lease |

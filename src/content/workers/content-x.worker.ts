@@ -20,13 +20,17 @@ export function createContentXRunner(): GrokRunner {
   const flags = getContentRuntimeFlags();
   assertContentRuntimeFlags(flags);
   if (!flags.realGrokEnabled) return new FixtureGrokRunner();
-  return new CliGrokRunner(flags.grokBin as string);
+  return new CliGrokRunner();
 }
 
 export type ContentXWorkerInput = Readonly<{
+  runId?: string;
+  idempotencyKey?: string;
   groupKey?: string;
   partitionKey?: string;
   mode?: 'poll' | 'enrich' | 'compose';
+  pollPhase?: 'NORMAL' | 'APPROACHING' | 'FINAL_90';
+  phaseBudget?: number | null;
   windowStart?: string;
   windowEnd?: string;
 }>;
@@ -42,13 +46,17 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
   const groupKey = input.groupKey ?? process.env.CONTENT_SOURCE_GROUP_KEY ?? 'fpl-week';
   const partitionKey = input.partitionKey ?? process.env.CONTENT_PARTITION_KEY ?? 'week';
   const mode = input.mode ?? 'poll';
+  const pollPhase = input.pollPhase ?? 'NORMAL';
   const windowEnd = input.windowEnd ?? new Date().toISOString();
   const windowStart =
     input.windowStart ?? new Date(Date.parse(windowEnd) - 30 * 60_000).toISOString();
   const snapshot = await buildSourceSnapshot(groupKey);
-  const idempotencyKey = `briefing:x:${groupKey}:${partitionKey}:${mode}:${windowEnd}`;
+  const runId = input.runId ?? randomUUID();
+  const idempotencyKey =
+    input.idempotencyKey ??
+    `briefing:x:${groupKey}:${partitionKey}:${mode}:${pollPhase}:${windowEnd}`;
   const run: AcquisitionRunInput = {
-    runId: randomUUID(),
+    runId,
     groupId: snapshot.groupId,
     partitionKey,
     mode,
@@ -58,6 +66,32 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
     sourceSnapshotRevision: snapshot.revision,
     sourceSnapshot: snapshot.items,
   };
+  if (snapshot.items.length === 0) {
+    logInfo('Content X acquisition skipped because source snapshot is empty', {
+      groupKey,
+      partitionKey,
+      mode,
+      pollPhase,
+    });
+    const finished = await finishAcquisitionRun({
+      run,
+      result: {
+        status: 'EMPTY',
+        // The scheduler can reserve a run while a source group is still
+        // active, then the last source can be paused before this worker
+        // starts.  No X request was made in that race, so this terminal
+        // result must not be eligible to advance the acquisition checkpoint.
+        traceVerified: false,
+        xCallCount: 0,
+        receipts: [],
+        error: 'Source snapshot empty; no X query executed',
+        skillSha: MONITOR_FPL_X_SOURCES_SKILL_SHA,
+        toolName: 'content-source-snapshot',
+        adapterVersion: 'empty-v1',
+      },
+    });
+    return { status: finished.status.toUpperCase() as 'EMPTY' | 'FAILED', runId: run.runId };
+  }
   const started = await beginAcquisitionRun(run);
   if (started.reused) return { status: 'REUSED', runId: started.runId };
 
@@ -66,6 +100,8 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
       groupId: snapshot.groupId,
       windowStart,
       dailyBudget: flags.dailyXCallBudget,
+      budgetScope: pollPhase === 'FINAL_90' ? 'final90' : 'daily',
+      phaseBudget: input.phaseBudget,
       requestedXCalls: flags.pollMaxXCalls,
     }))
   ) {

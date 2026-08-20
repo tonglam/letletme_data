@@ -82,15 +82,17 @@ jobs:
           QUEUE_REDIS_DB: '10'
         run: bun run build
 
+      - name: Production dependency audit
+        run: bun audit --production
+
   integration:
-    name: integration (${{ matrix.bun-version }}, ${{ matrix['catalog-mode'] }})
+    name: integration (${{ matrix.bun-version }})
     runs-on: ubuntu-latest
     needs: test
     strategy:
       fail-fast: false
       matrix:
         bun-version: ['1.3.14']
-        catalog-mode: ['absent', 'present']
     services:
       postgres:
         image: postgres:15

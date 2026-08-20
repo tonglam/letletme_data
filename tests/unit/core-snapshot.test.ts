@@ -51,6 +51,46 @@ describe('core snapshot validation', () => {
     });
   });
 
+  test('accepts distinct chips that share an official chip type', () => {
+    const input = buildCoreSnapshotFixture();
+    input.bootstrap.game_settings = {
+      squad_squadsize: 15,
+      squad_squadplay: 11,
+      squad_total_spend: 1000,
+      squad_team_limit: 3,
+      ui_currency_multiplier: 10,
+    };
+    input.bootstrap.element_types = [1, 2, 3, 4].map((id) => ({
+      id,
+      singular_name: ['Goalkeeper', 'Defender', 'Midfielder', 'Forward'][id - 1],
+      singular_name_short: ['GKP', 'DEF', 'MID', 'FWD'][id - 1],
+      squad_select: [2, 5, 5, 3][id - 1],
+      squad_min_play: [1, 3, 2, 1][id - 1],
+      squad_max_play: [1, 5, 5, 3][id - 1],
+    }));
+    input.bootstrap.chips = [
+      {
+        id: 1,
+        name: 'wildcard',
+        number: 1,
+        start_event: 2,
+        stop_event: 19,
+        chip_type: 'transfer',
+      },
+      {
+        id: 2,
+        name: 'free_hit',
+        number: 1,
+        start_event: 20,
+        stop_event: 38,
+        chip_type: 'transfer',
+      },
+    ];
+
+    const rules = normalizeSelectionRules(input.bootstrap);
+    expect(rules?.chips.map((chip) => chip.id)).toEqual([1, 2]);
+  });
+
   test('accepts one complete 38/20/players/phases/380 snapshot', () => {
     const input = buildCoreSnapshotFixture();
     const snapshot = prepareCoreSnapshot(input.bootstrap, input.fixtures);

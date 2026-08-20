@@ -208,5 +208,21 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
     return [];
   }
 
+  // Provider-identity writes and their API review/reconcile commands share the
+  // same reference scope as the Understat workers.  This prevents a manual
+  // mapping correction from racing a discovery/finalize transaction.
+  if (
+    queue === 'understat-mappings' ||
+    queue === 'understat-team-sync' ||
+    queue === 'understat-player-sync'
+  ) {
+    return ['understat:reference:all'];
+  }
+
+  // Bridge tables are canonical cross-provider links. Keep a durable shared
+  // scope ready for bridge writers even when the current API does not enqueue
+  // a dedicated bridge queue yet.
+  if (queue === 'bridge') return ['bridge:all'];
+
   return [];
 }

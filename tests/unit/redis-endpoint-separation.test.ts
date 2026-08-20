@@ -25,7 +25,6 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     ENABLE_AUTH: false,
     RATE_LIMIT_MUTATIONS_PER_MINUTE: 60,
     DATA_SYNC_ATTEMPT_REPORTING_ENABLED: true,
-    PUBLICATION_RETENTION_MODE: 'report',
     TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: false,
     MUTATION_LOCK_TTL_MS: 30_000,
     MUTATION_LOCK_WAIT_TIMEOUT_MS: 120_000,
@@ -65,7 +64,6 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     UNDERSTAT_MIN_SEASON: '2526',
     UNDERSTAT_SEASON: '2627',
     UNDERSTAT_TIMEOUT_MS: 10_000,
-    UNDERSTAT_TOTAL_DEADLINE_MS: 30_000,
     UNDERSTAT_MAX_CONCURRENCY: 4,
   };
   return Object.assign(base, overrides);

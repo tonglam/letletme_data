@@ -83,6 +83,11 @@ const asFiniteNumber = (value: unknown): number | null => {
   return null;
 };
 
+const asPositiveInteger = (value: unknown): number | null => {
+  const number = asFiniteNumber(value);
+  return number !== null && Number.isSafeInteger(number) && number > 0 ? number : null;
+};
+
 /** Normalize official bootstrap rules into the cross-service public contract. */
 export function normalizeSelectionRules(bootstrap: FPLBootstrapResponse): SelectionRules | null {
   const settings = asRecord(bootstrap.game_settings);
@@ -95,10 +100,10 @@ export function normalizeSelectionRules(bootstrap: FPLBootstrapResponse): Select
     .map(asRecord)
     .filter((value): value is Record<string, unknown> => value !== null);
   const positions = rawPositions.flatMap((position) => {
-    const id = asFiniteNumber(position.id);
-    const squadSelect = asFiniteNumber(position.squad_select);
-    const minPlay = asFiniteNumber(position.squad_min_play);
-    const maxPlay = asFiniteNumber(position.squad_max_play);
+    const id = asPositiveInteger(position.id);
+    const squadSelect = asPositiveInteger(position.squad_select);
+    const minPlay = asPositiveInteger(position.squad_min_play);
+    const maxPlay = asPositiveInteger(position.squad_max_play);
     if (
       id === null ||
       squadSelect === null ||
@@ -116,8 +121,8 @@ export function normalizeSelectionRules(bootstrap: FPLBootstrapResponse): Select
     return [{ id, name, shortName, squadSelect, minPlay, maxPlay }];
   });
   const chips = bootstrap.chips.flatMap((chip) => {
-    const id = asFiniteNumber(chip.id);
-    const number = asFiniteNumber(chip.number);
+    const id = asPositiveInteger(chip.id);
+    const number = asPositiveInteger(chip.number);
     if (
       id === null ||
       number === null ||
@@ -146,7 +151,23 @@ export function normalizeSelectionRules(bootstrap: FPLBootstrapResponse): Select
     positions.length !== rawPositions.length ||
     positions.length === 0 ||
     new Set(positions.map((position) => position.id)).size !== positions.length ||
-    chips.length !== bootstrap.chips.length
+    chips.length !== bootstrap.chips.length ||
+    !Number.isSafeInteger(squadSize) ||
+    !Number.isSafeInteger(startingSize) ||
+    !Number.isSafeInteger(budget) ||
+    !Number.isSafeInteger(maxPlayersPerTeam) ||
+    !Number.isSafeInteger(currencyMultiplier) ||
+    squadSize <= 0 ||
+    startingSize <= 0 ||
+    startingSize > squadSize ||
+    budget <= 0 ||
+    maxPlayersPerTeam <= 0 ||
+    maxPlayersPerTeam > squadSize ||
+    currencyMultiplier <= 0 ||
+    positions.reduce((sum, position) => sum + position.squadSelect, 0) !== squadSize ||
+    positions.reduce((sum, position) => sum + position.minPlay, 0) > startingSize ||
+    positions.reduce((sum, position) => sum + position.maxPlay, 0) < startingSize ||
+    new Set(chips.map((chip) => chip.id)).size !== chips.length
   ) {
     return null;
   }
