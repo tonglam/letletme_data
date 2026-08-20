@@ -44,7 +44,8 @@ describe('bug report retention and diagnostics', () => {
         operations: [
           {
             operation: 'submit',
-            message: 'Authorization: Bearer super-secret deviceId: abc-123 entryId=987',
+            message:
+              'Authorization: Bearer super-secret token: Bearer token-secret deviceId: abc-123 entryId=987',
           },
         ],
       }),
@@ -52,7 +53,7 @@ describe('bug report retention and diagnostics', () => {
       operations: [
         {
           operation: 'submit',
-          message: '[redacted] [redacted] [redacted]',
+          message: '[redacted] [redacted] [redacted] [redacted]',
         },
       ],
     });

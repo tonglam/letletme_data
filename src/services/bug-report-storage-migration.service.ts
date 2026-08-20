@@ -111,7 +111,13 @@ async function callStorage(
     body,
     signal: AbortSignal.timeout(STORAGE_REQUEST_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`Storage ${operation} failed: ${response.status}`);
+  // DELETE is intentionally idempotent: an earlier attempt may have removed
+  // the object before the database completion marker was committed. Treat a
+  // provider 404 as the desired terminal state so the retry can mark it done.
+  if (!response.ok) {
+    if (operation === 'delete' && response.status === 404) return null;
+    throw new Error(`Storage ${operation} failed: ${response.status}`);
+  }
   const result = (await response.json()) as { success?: boolean; locator?: unknown };
   if (!result.success) throw new Error(`Storage ${operation} rejected`);
   return operation === 'migrate' && typeof result.locator === 'string' ? result.locator : null;

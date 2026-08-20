@@ -38,7 +38,13 @@ async function deleteScreenshot(locator: string): Promise<void> {
     body,
     signal: AbortSignal.timeout(STORAGE_REQUEST_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`Screenshot delete failed: ${response.status}`);
+  // A prior cleanup attempt may have removed the object before the row was
+  // deleted. The provider's not-found response is therefore a confirmed
+  // terminal state for this idempotent delete operation.
+  if (!response.ok) {
+    if (response.status === 404) return;
+    throw new Error(`Screenshot delete failed: ${response.status}`);
+  }
   const result = (await response.json().catch(() => null)) as { success?: unknown } | null;
   if (result?.success !== true) throw new Error('Screenshot delete was not confirmed');
 }
