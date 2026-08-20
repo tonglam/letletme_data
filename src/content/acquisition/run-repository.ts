@@ -297,7 +297,7 @@ export async function finishAcquisitionRun(input: {
         responseHash: input.result.responseHash ?? null,
         callCount: input.result.xCallCount,
         traceMetadata: input.result.traceMetadata ?? {},
-        verified: input.result.traceVerified === true,
+        verified: input.result.traceVerified === true && receiptsSchemaValid,
       })
       .onConflictDoUpdate({
         target: contentAcquisitionRunXTraces.runId,
@@ -309,7 +309,7 @@ export async function finishAcquisitionRun(input: {
           responseHash: input.result.responseHash ?? null,
           callCount: input.result.xCallCount,
           traceMetadata: input.result.traceMetadata ?? {},
-          verified: input.result.traceVerified === true,
+          verified: input.result.traceVerified === true && receiptsSchemaValid,
           capturedAt: now,
         },
       });
