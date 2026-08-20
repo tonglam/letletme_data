@@ -62,9 +62,17 @@ export async function runBugReportCleanup(now = new Date()): Promise<BugReportCl
 
     for (const report of expired) {
       try {
-        const removed = await bugReportRepository.backupAndDelete(report, now, async (current) => {
-          if (current.screenshotUrl) await deleteScreenshot(current.screenshotUrl);
-        });
+        const claim = await bugReportRepository.claimForDeletion(report, now);
+        if (!claim) continue;
+        const removed = await bugReportRepository.finalizeClaimedDeletion(
+          report.id,
+          now,
+          async () => {
+            if (!claim.screenshotUrl) return;
+            const references = await bugReportRepository.listByScreenshotUrl(claim.screenshotUrl);
+            if (references.length === 0) await deleteScreenshot(claim.screenshotUrl);
+          },
+        );
         if (removed !== false) deleted += 1;
       } catch (error) {
         retried += 1;

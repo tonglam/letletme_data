@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import { and, asc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 
@@ -16,6 +16,7 @@ import {
 } from '../cache/data-publication';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { contentHash } from '../utils/content-hash';
 import { DatabaseError } from '../utils/errors';
 
 export type SyncRunStatus =
@@ -132,10 +133,11 @@ function publicationItemCount(value: unknown): number {
 }
 
 function publicationPayloadChecksum(value: unknown): string | null {
-  const serialized = JSON.stringify(value);
-  return typeof serialized === 'string'
-    ? createHash('sha256').update(serialized, 'utf8').digest('hex')
-    : null;
+  try {
+    return contentHash(value);
+  } catch {
+    return null;
+  }
 }
 
 export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => {

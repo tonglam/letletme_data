@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import type Redis from 'ioredis';
 
+import { canonicalJson } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
 import { redisSingleton } from './singleton';
 
@@ -334,8 +335,10 @@ function serializeItems(input: PublishDataRevisionInput): SerializedItem[] {
       );
     }
     names.add(item.name);
-    const payload = JSON.stringify(item.value);
-    if (payload === undefined) {
+    let payload: string;
+    try {
+      payload = canonicalJson(item.value);
+    } catch {
       throw new CacheError(
         `Publication item ${item.name} is not JSON serializable`,
         'DATA_PUBLICATION_ITEM_INVALID',

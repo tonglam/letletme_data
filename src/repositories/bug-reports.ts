@@ -33,6 +33,10 @@ export type StoredBugReport = {
 export type BugReportExpiryCursor = Pick<StoredBugReport, 'expiresAt' | 'id'>;
 export type BugReportScreenshotCursor = Pick<StoredBugReport, 'createdAt' | 'id'>;
 export type BugReportStorageDeletionCursor = { migratedAt: Date; id: string };
+export type BugReportDeletionClaim = {
+  report: StoredBugReport;
+  screenshotUrl: string | null;
+};
 
 class ReportNoLongerExpiredError extends Error {
   constructor() {
@@ -43,6 +47,12 @@ class ReportNoLongerExpiredError extends Error {
 
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
+
+  const screenshotUrlFromSnapshot = (snapshot: unknown): string | null => {
+    if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+    const value = (snapshot as Record<string, unknown>).screenshotUrl;
+    return typeof value === 'string' ? value : null;
+  };
 
   const insert = async (report: BugReportInsert): Promise<StoredBugReport> => {
     try {
@@ -137,21 +147,62 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   };
 
   const updateStatus = async (publicId: string, status: BugReportStatus, now: Date) => {
-    const current = await findByPublicId(publicId);
-    if (!current) return null;
-    const closedAt = status === 'closed' ? (current.closedAt ?? now) : null;
-    const expiresAt = retentionDeadline(current.createdAt, status, closedAt);
-    const [row] = await (await getDbInstance())
-      .update(bugReportsInOps)
-      .set({ status, closedAt, expiresAt })
-      .where(eq(bugReportsInOps.publicId, publicId))
-      .returning({
-        publicId: bugReportsInOps.publicId,
-        status: bugReportsInOps.status,
-        closedAt: bugReportsInOps.closedAt,
-        expiresAt: bugReportsInOps.expiresAt,
-      });
-    return row ?? null;
+    const db = await getDbInstance();
+    return db.transaction(async (tx) => {
+      const [current] = await tx
+        .select({
+          id: bugReportsInOps.id,
+          publicId: bugReportsInOps.publicId,
+          createdAt: bugReportsInOps.createdAt,
+          status: bugReportsInOps.status,
+          closedAt: bugReportsInOps.closedAt,
+          expiresAt: bugReportsInOps.expiresAt,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+          body: bugReportsInOps.body,
+          clientMeta: bugReportsInOps.clientMeta,
+          source: bugReportsInOps.source,
+          userId: bugReportsInOps.userId,
+          entryId: bugReportsInOps.entryId,
+        })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.publicId, publicId))
+        .for('update')
+        .limit(1);
+      if (!current) return null;
+
+      const [claim] = await tx
+        .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, current.id))
+        .limit(1);
+      const screenshotUrl = claim
+        ? screenshotUrlFromSnapshot(claim.snapshot)
+        : current.screenshotUrl;
+      if (claim) {
+        await tx
+          .delete(bugReportRetentionBackupsInOps)
+          .where(eq(bugReportRetentionBackupsInOps.id, current.id));
+      }
+
+      const closedAt =
+        status === 'closed'
+          ? current.status === 'closed'
+            ? (current.closedAt ?? now)
+            : now
+          : null;
+      const expiresAt = retentionDeadline(current.createdAt, status, closedAt);
+      const [row] = await tx
+        .update(bugReportsInOps)
+        .set({ status, closedAt, expiresAt, screenshotUrl })
+        .where(eq(bugReportsInOps.id, current.id))
+        .returning({
+          publicId: bugReportsInOps.publicId,
+          status: bugReportsInOps.status,
+          closedAt: bugReportsInOps.closedAt,
+          expiresAt: bugReportsInOps.expiresAt,
+        });
+      return row ?? null;
+    });
   };
 
   const listExpired = async (now: Date, limit: number, after?: BugReportExpiryCursor) => {
@@ -376,49 +427,89 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       );
   };
 
-  const backupAndDelete = async (
+  const claimForDeletion = async (
     report: StoredBugReport,
     now = new Date(),
-    beforeDelete?: (current: StoredBugReport) => Promise<void>,
-  ) => {
+  ): Promise<BugReportDeletionClaim | null> => {
+    const db = await getDbInstance();
+    return db.transaction(async (tx) => {
+      const [current] = await tx
+        .select({
+          id: bugReportsInOps.id,
+          publicId: bugReportsInOps.publicId,
+          createdAt: bugReportsInOps.createdAt,
+          status: bugReportsInOps.status,
+          closedAt: bugReportsInOps.closedAt,
+          expiresAt: bugReportsInOps.expiresAt,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+          body: bugReportsInOps.body,
+          clientMeta: bugReportsInOps.clientMeta,
+          source: bugReportsInOps.source,
+          userId: bugReportsInOps.userId,
+          entryId: bugReportsInOps.entryId,
+        })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, report.id), lte(bugReportsInOps.expiresAt, now)))
+        .for('update')
+        .limit(1);
+      if (!current) return null;
+
+      const [existingClaim] = await tx
+        .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, current.id))
+        .limit(1);
+      const screenshotUrl = existingClaim
+        ? screenshotUrlFromSnapshot(existingClaim.snapshot)
+        : current.screenshotUrl;
+      if (!existingClaim) {
+        await tx
+          .insert(bugReportRetentionBackupsInOps)
+          .values({
+            id: current.id,
+            publicId: current.publicId,
+            snapshot: current,
+          })
+          .onConflictDoNothing();
+      }
+      if (current.screenshotUrl !== null) {
+        await tx
+          .update(bugReportsInOps)
+          .set({ screenshotUrl: null })
+          .where(eq(bugReportsInOps.id, current.id));
+      }
+      return {
+        report: { ...(current as StoredBugReport), screenshotUrl: null },
+        screenshotUrl,
+      };
+    });
+  };
+
+  const finalizeClaimedDeletion = async (
+    reportId: string,
+    now = new Date(),
+    beforeDelete?: () => Promise<void>,
+  ): Promise<boolean> => {
     const db = await getDbInstance();
     try {
       await db.transaction(async (tx) => {
         const [current] = await tx
-          .select({
-            id: bugReportsInOps.id,
-            publicId: bugReportsInOps.publicId,
-            createdAt: bugReportsInOps.createdAt,
-            status: bugReportsInOps.status,
-            closedAt: bugReportsInOps.closedAt,
-            expiresAt: bugReportsInOps.expiresAt,
-            screenshotUrl: bugReportsInOps.screenshotUrl,
-            body: bugReportsInOps.body,
-            clientMeta: bugReportsInOps.clientMeta,
-            source: bugReportsInOps.source,
-            userId: bugReportsInOps.userId,
-            entryId: bugReportsInOps.entryId,
-          })
+          .select({ id: bugReportsInOps.id })
           .from(bugReportsInOps)
-          .where(and(eq(bugReportsInOps.id, report.id), lte(bugReportsInOps.expiresAt, now)))
+          .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
           .for('update')
           .limit(1);
-
         if (!current) throw new ReportNoLongerExpiredError();
-        const currentReport = current as StoredBugReport;
-        await beforeDelete?.(currentReport);
-        await tx
-          .insert(bugReportRetentionBackupsInOps)
-          .values({
-            id: currentReport.id,
-            publicId: currentReport.publicId,
-            snapshot: currentReport,
-          })
-          .onConflictDoNothing();
-
+        const [claim] = await tx
+          .select({ id: bugReportRetentionBackupsInOps.id })
+          .from(bugReportRetentionBackupsInOps)
+          .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+          .limit(1);
+        if (!claim) throw new ReportNoLongerExpiredError();
+        await beforeDelete?.();
         const deleted = await tx
           .delete(bugReportsInOps)
-          .where(and(eq(bugReportsInOps.id, currentReport.id), lte(bugReportsInOps.expiresAt, now)))
+          .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
           .returning({ id: bugReportsInOps.id });
         if (!deleted[0]) throw new ReportNoLongerExpiredError();
       });
@@ -441,7 +532,8 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     recordStorageMigration,
     listPendingStorageDeletes,
     markStorageDeleted,
-    backupAndDelete,
+    claimForDeletion,
+    finalizeClaimedDeletion,
   };
 };
 

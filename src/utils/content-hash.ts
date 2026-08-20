@@ -21,9 +21,13 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
+export function canonicalJson(value: unknown): string {
+  const serialized = JSON.stringify(canonicalize(value));
+  if (serialized === undefined) throw new TypeError('Value is not JSON serializable');
+  return serialized;
+}
+
 /** Cryptographic hash for normalized source payloads and persistence fences. */
 export function contentHash(value: unknown): string {
-  return createHash('sha256')
-    .update(JSON.stringify(canonicalize(value)))
-    .digest('hex');
+  return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
 }

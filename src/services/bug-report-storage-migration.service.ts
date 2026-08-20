@@ -184,6 +184,7 @@ export async function runBugReportStorageMigration(
         }
         await callStorage('delete', pending.sourceLocator);
         await repository.markStorageDeleted(pending.sourceLocator, options.now);
+        candidateReportsBySource.delete(pending.sourceLocator);
         result.deletedRetried += 1;
       } catch (error) {
         result.failed += 1;
