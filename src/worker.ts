@@ -20,13 +20,6 @@ const config = getConfig();
 if (config.NODE_ENV === 'production') {
   await databaseSingleton.connect();
 }
-const mutationLockConfig = {
-  ttlMs: config.MUTATION_LOCK_TTL_MS,
-  waitTimeoutMs: config.MUTATION_LOCK_WAIT_TIMEOUT_MS,
-  retryDelayMs: config.MUTATION_LOCK_RETRY_DELAY_MS,
-  heartbeatMs: config.MUTATION_LOCK_HEARTBEAT_MS,
-};
-
 const runtimes: WorkerRuntime[] = [
   createDataSyncWorker(),
   createEntrySyncWorker(),
@@ -86,5 +79,5 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
 logInfo('Background worker started', {
-  mutationLockConfig,
+  mutationCoordination: 'postgresql-transaction-scoped',
 });

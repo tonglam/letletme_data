@@ -45,9 +45,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 export const createPublicBugReportId = (): string =>
-  `LL-${randomBytes(3).toString('hex').toUpperCase()}`;
+  `LL-${randomBytes(6).toString('hex').toUpperCase()}`;
 
-export const validateBugReportCreateInput = (input: BugReportCreateInput): BugReportInsert => {
+export const validateBugReportCreateInput = (
+  input: BugReportCreateInput,
+  options: { publicIdGenerator?: () => string } = {},
+): BugReportInsert => {
   if (input.source !== 'website' && input.source !== 'wechat_miniprogram') {
     throw new ValidationError('Unknown report source.');
   }
@@ -105,7 +108,7 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
 
   return {
     id: randomUUID(),
-    publicId: createPublicBugReportId(),
+    publicId: (options.publicIdGenerator ?? createPublicBugReportId)(),
     source: input.source,
     userId,
     entryId,

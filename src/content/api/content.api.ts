@@ -10,24 +10,21 @@ import {
   type ContentSourceGroupInput,
   type ContentSourceInput,
 } from '../acquisition/source-registry';
-import { readActiveWeekPublication, publishWeekPublication } from '../publication/week-publication';
-import { assertWeekPublication, type WeekPublicationEnvelope } from '../contracts/week-publication';
+import { readActiveWeekPublication } from '../publication/week-publication';
 import {
   acceptCandidate,
   addWeekEditionItem,
   attachStoryEvidence,
-  compileWeekEdition,
   createCandidateFromReceipts,
   createDraftStory,
   createWeekEdition,
   markStoryReady,
   markWeekEditionReady,
   mergeCandidates,
+  publishFrozenWeekEdition,
   type EditorialActor,
   type StoryLocalizationInput,
 } from '../editorial/editorial-repository';
-
-type PublishBody = { en?: unknown; 'zh-CN'?: unknown };
 
 function hasContentRole(request: Request, role: 'editor' | 'publisher'): boolean {
   if (process.env.NODE_ENV !== 'production' && !getAuthConfig().ENABLE_AUTH) return true;
@@ -42,9 +39,10 @@ function editorialActor(request: Request, role: EditorialActor['role']): Editori
   const idempotencyKey =
     request.headers.get('idempotency-key')?.trim() ||
     request.headers.get('x-idempotency-key')?.trim();
-  if (!idempotencyKey) return null;
+  const actorId = request.headers.get('x-actor-id')?.trim();
+  if (!idempotencyKey || !actorId) return null;
   return {
-    actorId: request.headers.get('x-actor-id')?.trim() || 'content-api-key',
+    actorId,
     role,
     idempotencyKey,
   };
@@ -79,12 +77,14 @@ export const contentAPI = new Elysia({ prefix: '/content' })
       set.status = 403;
       return { success: false, error: 'Content editor role required' };
     }
+    const actor = requireActor(request, 'content_editor', set);
+    if (!actor) return { success: false, error: 'Idempotency-Key is required' };
     const value = body as ContentSourceGroupInput;
     if (!value.groupKey || !value.displayName) {
       set.status = 400;
       return { success: false, error: 'groupKey and displayName are required' };
     }
-    const groupId = await upsertContentSourceGroup(value);
+    const groupId = await upsertContentSourceGroup(value, actor);
     return { success: true, data: { groupId } };
   })
   .post('/sources', async ({ body, request, set }) => {
@@ -92,6 +92,8 @@ export const contentAPI = new Elysia({ prefix: '/content' })
       set.status = 403;
       return { success: false, error: 'Content editor role required' };
     }
+    const actor = requireActor(request, 'content_editor', set);
+    if (!actor) return { success: false, error: 'Idempotency-Key is required' };
     const value = body as ContentSourceInput;
     if (
       !value.platform ||
@@ -106,7 +108,7 @@ export const contentAPI = new Elysia({ prefix: '/content' })
         error: 'platform, externalId, displayName, sourceType and reportingFamily are required',
       };
     }
-    const sourceId = await upsertContentSource(value);
+    const sourceId = await upsertContentSource(value, actor);
     return { success: true, data: { sourceId } };
   })
   .post('/sources/groups/:groupKey/members/:sourceId', async ({ params, request, set }) => {
@@ -114,30 +116,10 @@ export const contentAPI = new Elysia({ prefix: '/content' })
       set.status = 403;
       return { success: false, error: 'Content editor role required' };
     }
-    await addSourceToGroup(params.groupKey, params.sourceId);
-    return { success: true };
-  })
-  .post('/briefing/week/publish', async ({ body, request, set }) => {
-    if (!hasContentRole(request, 'publisher')) {
-      set.status = 403;
-      return { success: false, error: 'Content publisher role required' };
-    }
-    if (!getContentRuntimeFlags().publicationEnabled) {
-      set.status = 409;
-      return { success: false, error: 'Content publication is disabled' };
-    }
-    const actor = requireActor(request, 'content_publisher', set);
+    const actor = requireActor(request, 'content_editor', set);
     if (!actor) return { success: false, error: 'Idempotency-Key is required' };
-    void actor;
-    const value = body as PublishBody;
-    assertWeekPublication(value.en);
-    assertWeekPublication(value['zh-CN']);
-    const result = await publishWeekPublication(
-      value.en as WeekPublicationEnvelope,
-      value['zh-CN'] as WeekPublicationEnvelope,
-    );
-    set.status = 201;
-    return { success: true, data: result };
+    await addSourceToGroup(params.groupKey, params.sourceId, 100, actor);
+    return { success: true };
   })
   .post('/editorial/candidates', async ({ body, request, set }) => {
     if (!hasContentRole(request, 'editor')) {
@@ -240,6 +222,7 @@ export const contentAPI = new Elysia({ prefix: '/content' })
       eventName?: string;
       deadlineTime?: string;
       sourceSnapshotRevision?: string;
+      sourceRunIds?: string[];
     };
     const editionId = await createWeekEdition({
       seasonCode: value.seasonCode ?? '',
@@ -247,6 +230,7 @@ export const contentAPI = new Elysia({ prefix: '/content' })
       eventName: value.eventName ?? '',
       deadlineTime: value.deadlineTime ?? '',
       sourceSnapshotRevision: value.sourceSnapshotRevision ?? '',
+      sourceRunIds: value.sourceRunIds ?? [],
       actor,
     });
     set.status = 201;
@@ -282,8 +266,16 @@ export const contentAPI = new Elysia({ prefix: '/content' })
     }
     const actor = requireActor(request, 'content_editor', set);
     if (!actor) return { success: false, error: 'Idempotency-Key is required' };
-    await markWeekEditionReady(params.editionId, actor);
-    return { success: true };
+    const ready = await markWeekEditionReady(params.editionId, actor);
+    return {
+      success: true,
+      data: {
+        editionId: params.editionId,
+        status: 'ready',
+        frozenSha256: ready.frozenSha256,
+        replayed: ready.replayed,
+      },
+    };
   })
   .post('/briefing/week/editions/:editionId/publish', async ({ params, body, request, set }) => {
     if (!hasContentRole(request, 'publisher')) {
@@ -297,22 +289,17 @@ export const contentAPI = new Elysia({ prefix: '/content' })
     const actor = requireActor(request, 'content_publisher', set);
     if (!actor) return { success: false, error: 'Idempotency-Key is required' };
     const value = body as {
-      revision?: number;
-      publicationId?: string;
-      sourceCheckedAt?: string;
-      publishedAt?: string;
+      reason?: string;
+      expectedFrozenSha256?: string;
       validUntil?: string | null;
     };
-    const pair = await compileWeekEdition({
+    const result = await publishFrozenWeekEdition({
       editionId: params.editionId,
-      revision: value.revision ?? 0,
-      publicationId: value.publicationId ?? '',
-      sourceCheckedAt: value.sourceCheckedAt ?? '',
-      publishedAt: value.publishedAt ?? '',
+      reason: value.reason ?? '',
+      expectedFrozenSha256: value.expectedFrozenSha256 ?? '',
       validUntil: value.validUntil,
       actor,
     });
-    const result = await publishWeekPublication(pair.en, pair['zh-CN']);
-    set.status = 201;
+    set.status = result.replayed ? 200 : 201;
     return { success: true, data: result };
   });

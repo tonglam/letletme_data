@@ -130,6 +130,9 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 api worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
+      /if ! compose stop -t 45 content-worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+    );
+    expect(deployScript).toMatch(
       /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
@@ -142,7 +145,9 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
-    expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?compose start api worker/);
+    expect(deployScript).toMatch(
+      /restore_stopped_services\(\)[\s\S]*?compose start api worker content-worker/,
+    );
   });
 
   test('keeps ordinary workflows passwordless and proves verifier immutability in CI', () => {
@@ -170,7 +175,7 @@ describe('production environment preflight', () => {
     const migrationService = compose.indexOf('  migration:');
     const apiService = compose.indexOf('  api:');
     const workerService = compose.indexOf('  worker:');
-    const migrationEnv = compose.indexOf('${MIGRATION_ENV_FILE:-.env.migrate}');
+    const migrationEnv = compose.indexOf('${MIGRATION_ENV_FILE:-.env.migrate}', migrationService);
 
     expect(migrationService).toBeGreaterThan(0);
     expect(migrationEnv).toBeGreaterThan(migrationService);

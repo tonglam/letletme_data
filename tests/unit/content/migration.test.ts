@@ -27,6 +27,33 @@ describe('Briefing content migration contract', () => {
     );
   });
 
+  test('moves mutation coordination and frozen publication state into PostgreSQL', async () => {
+    const safety = await Bun.file(
+      new URL('../../../migrations/0015_core_mutation_safety.sql', import.meta.url),
+    ).text();
+    const freeze = await Bun.file(
+      new URL('../../../migrations/0016_content_publication_freeze.sql', import.meta.url),
+    ).text();
+    expect(safety).toContain('CREATE TABLE ops.mutation_scopes');
+    expect(safety).toContain('GRANT SELECT, INSERT, UPDATE ON TABLE ops.mutation_scopes');
+    expect(safety).toContain(String.raw`'^LL-([0-9A-F]{6}|[0-9A-F]{12})$'`);
+    expect(freeze).toContain('CREATE TABLE content.week_edition_snapshots');
+    expect(freeze).toContain('CREATE TABLE content.week_edition_source_runs');
+    expect(freeze).toContain('content_week_edition_snapshots_immutable');
+    expect(freeze).toContain('content_week_edition_items_draft_only');
+    expect(freeze).toContain('REVOKE UPDATE, DELETE ON content.week_edition_snapshots');
+  });
+
+  test('keeps private screenshot migration additive and key-only', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0017_bug_report_private_screenshots.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS screenshot_object_key');
+    expect(sql).toContain('bug_reports_submission_id_key');
+    expect(sql).toContain('bug_reports_screenshot_object_key_format');
+    expect(sql).toContain('The legacy screenshot_url column remains');
+  });
+
   test('makes active publication unique by scope and revisioned', async () => {
     const sql = await Bun.file(migrationPath).text();
     expect(sql).toContain('UNIQUE (scope_key, revision)');

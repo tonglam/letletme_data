@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { assertWeekPublication, type WeekLocale } from '../contracts/week-publication';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+
+import type { WeekLocale } from '../contracts/week-publication';
 
 export type GrokRunMode = 'poll' | 'enrich' | 'compose';
 
@@ -40,7 +44,92 @@ export interface GrokRunner {
 export const MONITOR_FPL_X_SOURCES_SKILL = 'monitor-fpl-x-sources';
 export const MONITOR_FPL_X_SOURCES_SKILL_SHA =
   'b23dc3dcf7ab79c7d13fd40a2a08d298ad4740940f71aa44988954b5690d3519';
+const ADAPTER_VERSION = 'cli-v2';
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const fixtureHash = createHash('sha256').update('fixture-grok-v1', 'utf8').digest('hex');
+
+const skillPath = (): string =>
+  resolve(process.env.GROK_SKILL_PATH ?? '.grok/skills/monitor-fpl-x-sources/SKILL.md');
+
+const sha256 = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+function findJsonResult(value: unknown): Record<string, unknown> | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  if (
+    typeof record.status === 'string' &&
+    ['EMPTY', 'PARTIAL', 'COMPLETED', 'FAILED'].includes(record.status)
+  )
+    return record;
+  for (const child of Object.values(record)) {
+    const found = findJsonResult(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+function isXToolEvent(value: unknown): boolean {
+  const record = asRecord(value);
+  if (!record) return false;
+  const type = Object.values(record)
+    .filter((item) => typeof item === 'string')
+    .join(' ')
+    .toLowerCase();
+  return (
+    (type.includes('tool') || type.includes('call')) &&
+    (type.includes('x_search') ||
+      type.includes('x-search') ||
+      type.includes('native x') ||
+      type.includes(' x '))
+  );
+}
+
+function parseStreamingOutput(output: string): {
+  result: Record<string, unknown> | null;
+  xCallCount: number;
+  eventCount: number;
+  text: string;
+} {
+  let xCallCount = 0;
+  let eventCount = 0;
+  const textParts: string[] = [];
+  let result: Record<string, unknown> | null = null;
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    eventCount += 1;
+    if (isXToolEvent(event)) xCallCount += 1;
+    const eventRecord = asRecord(event);
+    if (!eventRecord) continue;
+    const candidate = findJsonResult(event);
+    if (candidate) result = candidate;
+    for (const key of ['text', 'content', 'delta']) {
+      const value = eventRecord[key];
+      if (typeof value === 'string') textParts.push(value);
+      const nested = asRecord(value);
+      if (nested && typeof nested.text === 'string') textParts.push(nested.text);
+    }
+  }
+  if (!result) {
+    try {
+      result = findJsonResult(JSON.parse(output));
+    } catch {
+      result = null;
+    }
+  }
+  return { result, xCallCount, eventCount, text: textParts.join('') };
+}
 
 export class FixtureGrokRunner implements GrokRunner {
   async run(_input: GrokRunInput): Promise<GrokRunResult> {
@@ -60,101 +149,157 @@ export class FixtureGrokRunner implements GrokRunner {
 }
 
 /**
- * The production adapter deliberately accepts an argv array and shell:false.
- * The Grok skill owns X search semantics; this adapter only transports a JSON
- * request and validates that the final response is a real Week contract.
+ * Production headless adapter for the official Grok CLI.  It never accepts a
+ * shell command string or arbitrary executable from runtime configuration;
+ * tests may inject a fixture path through the constructor.
  */
 export class CliGrokRunner implements GrokRunner {
+  private readonly binary: string;
+  private readonly timeoutMs: number;
+  private readonly runRoot: string;
+
   constructor(
-    private readonly binary: string,
-    private readonly timeoutMs = 90_000,
-  ) {}
+    binary = resolve(process.cwd(), 'node_modules/.bin/grok'),
+    timeoutMs = 90_000,
+    runRoot = join(tmpdir(), 'letletme-content-x'),
+  ) {
+    this.binary = binary;
+    this.timeoutMs = timeoutMs;
+    this.runRoot = runRoot;
+  }
 
   async run(input: GrokRunInput): Promise<GrokRunResult> {
-    const args = ['run', '--skill', MONITOR_FPL_X_SOURCES_SKILL, '--format', 'json'];
-    return new Promise((resolve) => {
-      const child = spawn(this.binary, args, { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    const requestJson = JSON.stringify(input);
+    const requestHash = sha256(requestJson);
+    let runDir = '';
+    let expectedSkillSha = '';
+    try {
+      expectedSkillSha = sha256(await readFile(skillPath()));
+      if (expectedSkillSha !== MONITOR_FPL_X_SOURCES_SKILL_SHA)
+        throw new Error('Grok skill SHA mismatch');
+      await mkdir(this.runRoot, { recursive: true, mode: 0o700 });
+      runDir = await mkdtemp(join(this.runRoot, `${input.runId}-`));
+      await writeFile(join(runDir, 'input.json'), requestJson, { mode: 0o600 });
+      const prompt = `/${MONITOR_FPL_X_SOURCES_SKILL} input=input.json format=json`;
+      const args = [
+        '--disable-web-search',
+        '--output-format',
+        'streaming-json',
+        '--no-auto-update',
+        '--no-subagents',
+        '--disallowed-tools',
+        'Bash,Edit,Write,Agent',
+        '--permission-mode',
+        'dontAsk',
+        '--cwd',
+        runDir,
+        '-p',
+        prompt,
+      ];
+      const output = await this.spawn(args, runDir);
+      const parsed = parseStreamingOutput(output);
+      const modelResult =
+        parsed.result ??
+        (() => {
+          try {
+            return asRecord(JSON.parse(parsed.text));
+          } catch {
+            return null;
+          }
+        })();
+      if (!modelResult) throw new Error('Invalid Grok streaming JSON output');
+      const status = ['EMPTY', 'PARTIAL', 'COMPLETED', 'FAILED'].includes(
+        String(modelResult.status),
+      )
+        ? (String(modelResult.status) as GrokRunResult['status'])
+        : 'FAILED';
+      const receipts = Array.isArray(modelResult.receipts)
+        ? modelResult.receipts.filter(
+            (item): item is Record<string, unknown> => asRecord(item) !== null,
+          )
+        : [];
+      const response = {
+        status,
+        receipts,
+        modelResult,
+        xCallCount: parsed.xCallCount,
+      };
+      return {
+        status,
+        traceVerified: parsed.xCallCount > 0 && status !== 'FAILED',
+        xCallCount: parsed.xCallCount,
+        receipts,
+        error: typeof modelResult.error === 'string' ? modelResult.error : undefined,
+        skillSha: expectedSkillSha,
+        toolName: 'grok.x',
+        adapterVersion: ADAPTER_VERSION,
+        requestHash,
+        responseHash: sha256(JSON.stringify(response)),
+        traceMetadata: { eventCount: parsed.eventCount, xToolCalls: parsed.xCallCount },
+        costMicros: Number.isSafeInteger(modelResult.costMicros)
+          ? Number(modelResult.costMicros)
+          : undefined,
+        costCurrency:
+          typeof modelResult.costCurrency === 'string' ? modelResult.costCurrency : undefined,
+        costUnits: Number.isSafeInteger(modelResult.costUnits)
+          ? Number(modelResult.costUnits)
+          : undefined,
+      };
+    } catch (error) {
+      return {
+        status: 'FAILED',
+        traceVerified: false,
+        xCallCount: 0,
+        receipts: [],
+        error: error instanceof Error ? error.message : String(error),
+        skillSha: expectedSkillSha,
+        toolName: 'grok.x',
+        adapterVersion: ADAPTER_VERSION,
+        requestHash,
+      };
+    } finally {
+      if (runDir) await rm(runDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private spawn(args: readonly string[], cwd: string): Promise<string> {
+    return new Promise((resolveOutput, reject) => {
+      const child = spawn(this.binary, [...args], {
+        cwd,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, GROK_NO_AUTO_UPDATE: '1' },
+      });
       let stdout = '';
       let stderr = '';
+      let outputBytes = 0;
       let settled = false;
-      const fail = (error: string) => {
+      const finish = (callback: () => void) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        resolve({
-          status: 'FAILED',
-          traceVerified: false,
-          xCallCount: 0,
-          receipts: [],
-          error,
-          skillSha: '',
-          toolName: 'grok',
-          adapterVersion: 'cli-v1',
-        });
+        callback();
       };
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        fail(`Grok timed out after ${this.timeoutMs}ms`);
+        finish(() => reject(new Error(`Grok timed out after ${this.timeoutMs}ms`)));
       }, this.timeoutMs);
       child.stdout.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString('utf8');
+        outputBytes += chunk.byteLength;
+        if (outputBytes <= MAX_OUTPUT_BYTES) stdout += chunk.toString('utf8');
+        else child.kill('SIGTERM');
       });
       child.stderr.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString('utf8');
+        stderr = `${stderr}${chunk.toString('utf8')}`.slice(-2_000);
       });
-      child.on('error', (error) => fail(error.message));
-      child.on('close', (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        if (code !== 0) {
-          resolve({
-            status: 'FAILED',
-            traceVerified: false,
-            xCallCount: 0,
-            receipts: [],
-            error: stderr.slice(-500),
-            skillSha: '',
-            toolName: 'grok',
-            adapterVersion: 'cli-v1',
-          });
-          return;
-        }
-        try {
-          const parsed = JSON.parse(stdout) as GrokRunResult & { publication?: unknown };
-          if (parsed.publication) assertWeekPublication(parsed.publication);
-          resolve({
-            status: parsed.status,
-            traceVerified: parsed.traceVerified === true,
-            xCallCount: Number.isSafeInteger(parsed.xCallCount) ? parsed.xCallCount : 0,
-            receipts: Array.isArray(parsed.receipts) ? parsed.receipts : [],
-            skillSha: typeof parsed.skillSha === 'string' ? parsed.skillSha : '',
-            toolName: 'grok',
-            adapterVersion: 'cli-v1',
-            requestHash: typeof parsed.requestHash === 'string' ? parsed.requestHash : undefined,
-            responseHash: typeof parsed.responseHash === 'string' ? parsed.responseHash : undefined,
-            traceMetadata:
-              parsed.traceMetadata && typeof parsed.traceMetadata === 'object'
-                ? parsed.traceMetadata
-                : undefined,
-            costMicros: Number.isSafeInteger(parsed.costMicros) ? parsed.costMicros : undefined,
-            costCurrency: typeof parsed.costCurrency === 'string' ? parsed.costCurrency : undefined,
-            costUnits: Number.isSafeInteger(parsed.costUnits) ? parsed.costUnits : undefined,
-          });
-        } catch {
-          resolve({
-            status: 'FAILED',
-            traceVerified: false,
-            xCallCount: 0,
-            receipts: [],
-            error: 'Invalid Grok JSON output',
-            skillSha: '',
-            toolName: 'grok',
-            adapterVersion: 'cli-v1',
-          });
-        }
-      });
-      child.stdin.end(JSON.stringify(input));
+      child.on('error', (error) => finish(() => reject(error)));
+      child.on('close', (code) =>
+        finish(() => {
+          if (outputBytes > MAX_OUTPUT_BYTES) reject(new Error('Grok output exceeded 2 MiB'));
+          else if (code !== 0) reject(new Error(stderr || `Grok exited with code ${code}`));
+          else resolveOutput(stdout);
+        }),
+      );
     });
   }
 }

@@ -13,7 +13,12 @@ COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml}
 ENV_FILE=${ENV_FILE:-.env.deploy}
 MIGRATION_ENV_FILE=${MIGRATION_ENV_FILE:-.env.migrate}
 PROJECT_DIR=${PROJECT_DIR:-$(pwd)}
+DATABASE_BACKUP_DIR=${DATABASE_BACKUP_DIR:-/var/backups/letletme-data}
+DATABASE_BACKUP_KEEP=${DATABASE_BACKUP_KEEP:-7}
+DATABASE_BACKUP_PG_MAJOR=${DATABASE_BACKUP_PG_MAJOR:-15}
+DEPLOY_SHA=${DEPLOY_SHA:-$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)}
 export MIGRATION_ENV_FILE
+export DATABASE_BACKUP_DIR DATABASE_BACKUP_KEEP DATABASE_BACKUP_PG_MAJOR DEPLOY_SHA
 
 IFS=' ' read -r -a COMPOSE_CMD <<<"${COMPOSE_BIN}"
 
@@ -65,9 +70,9 @@ compose() {
 }
 
 restore_stopped_services() {
-  log_warn "Restoring the existing API and worker because migration has not started"
-  if ! compose start api worker; then
-    log_error "The existing API and worker could not be restarted; manual recovery is required."
+  log_warn "Restoring existing services because migration has not started"
+  if ! compose start api worker content-worker; then
+    log_error "Existing services could not be restarted; manual recovery is required."
   fi
 }
 
@@ -78,7 +83,7 @@ deploy() {
   if [[ -n "${APP_IMAGE:-}" ]]; then
     export APP_IMAGE
     log_info "Pulling the configured application image"
-    compose pull api worker migration
+    compose --profile migration pull api worker content-worker migration backup
   else
     log_info "Building containers"
     compose build --pull
@@ -114,6 +119,11 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
+  if ! compose stop -t 45 content-worker; then
+    log_error "Content worker did not stop cleanly; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
   if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only; then
     log_error "Database work is not quiescent; migration was not started."
     restore_stopped_services
@@ -121,6 +131,12 @@ deploy() {
   fi
   if ! compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only; then
     log_error "Queue work is not quiescent; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  log_info "Creating and validating the pre-migration PostgreSQL dump"
+  if ! compose --profile migration run --rm -T backup; then
+    log_error "Pre-migration backup failed; migration was not started."
     restore_stopped_services
     exit 1
   fi
@@ -157,6 +173,11 @@ deploy() {
   compose up -d --remove-orphans
   log_info "Current service status"
   compose ps
+  if ! PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
+    scripts/verify-runtime-health.sh; then
+    log_error "Runtime health verification failed."
+    exit 1
+  fi
   finish_stage
 }
 

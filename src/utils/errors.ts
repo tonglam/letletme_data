@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { APIError } from '../types';
 
 export class FPLClientError extends Error implements APIError {
@@ -145,4 +147,17 @@ export function getPublicErrorMessage(error: unknown, status: number): string {
     return 'Internal server error';
   }
   return getErrorMessage(error);
+}
+
+/** Return only stable, client-actionable business codes. Database, Redis and
+ * provider internals never become public error codes in production. */
+export function getPublicErrorCode(error: unknown, status: number): string | undefined {
+  if (status >= 500 || !isAPIError(error) || typeof error.code !== 'string') return undefined;
+  return /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : undefined;
+}
+
+/** Accept a caller-provided request id only when it is a bounded safe token. */
+export function getOrCreateRequestId(request: Request): string {
+  const supplied = request.headers.get('x-request-id')?.trim();
+  return supplied && /^[A-Za-z0-9._-]{1,128}$/.test(supplied) ? supplied : randomUUID();
 }

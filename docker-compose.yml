@@ -22,6 +22,23 @@ services:
     logging: *default-logging
     restart: 'no'
 
+  backup:
+    image: postgres:15
+    profiles: ['migration']
+    env_file:
+      - path: ${MIGRATION_ENV_FILE:-.env.migrate}
+        required: true
+    environment:
+      - DATABASE_BACKUP_DIR=/var/backups/letletme-data
+      - DATABASE_BACKUP_PG_MAJOR=${DATABASE_BACKUP_PG_MAJOR:-15}
+      - DATABASE_BACKUP_KEEP=${DATABASE_BACKUP_KEEP:-7}
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
+    volumes:
+      - ${DATABASE_BACKUP_DIR:-/var/backups/letletme-data}:/var/backups/letletme-data
+      - ./scripts:/app/scripts:ro
+    command: ['bash', '/app/scripts/pre-migration-backup.sh']
+    restart: 'no'
+
   api:
     image: *app-image
     build:
@@ -76,3 +93,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  content-worker:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    command: bun dist/content-worker.js
+    env_file:
+      - path: ${ENV_FILE:-.env.deploy}
+        required: false
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+      - WORKER_HEARTBEAT_PATH=/tmp/content-worker-heartbeat
+      - GROK_HOME=/home/appuser/.grok
+    volumes:
+      - grok-home:/home/appuser/.grok
+    logging: *default-logging
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'test -n "$$(find /tmp/content-worker-heartbeat -mmin -2 2>/dev/null)"']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  grok-home:

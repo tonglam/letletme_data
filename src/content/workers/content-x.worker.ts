@@ -20,13 +20,14 @@ export function createContentXRunner(): GrokRunner {
   const flags = getContentRuntimeFlags();
   assertContentRuntimeFlags(flags);
   if (!flags.realGrokEnabled) return new FixtureGrokRunner();
-  return new CliGrokRunner(flags.grokBin as string);
+  return new CliGrokRunner();
 }
 
 export type ContentXWorkerInput = Readonly<{
   groupKey?: string;
   partitionKey?: string;
   mode?: 'poll' | 'enrich' | 'compose';
+  pollPhase?: 'NORMAL' | 'APPROACHING' | 'FINAL_90';
   windowStart?: string;
   windowEnd?: string;
 }>;
@@ -42,11 +43,12 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
   const groupKey = input.groupKey ?? process.env.CONTENT_SOURCE_GROUP_KEY ?? 'fpl-week';
   const partitionKey = input.partitionKey ?? process.env.CONTENT_PARTITION_KEY ?? 'week';
   const mode = input.mode ?? 'poll';
+  const pollPhase = input.pollPhase ?? 'NORMAL';
   const windowEnd = input.windowEnd ?? new Date().toISOString();
   const windowStart =
     input.windowStart ?? new Date(Date.parse(windowEnd) - 30 * 60_000).toISOString();
   const snapshot = await buildSourceSnapshot(groupKey);
-  const idempotencyKey = `briefing:x:${groupKey}:${partitionKey}:${mode}:${windowEnd}`;
+  const idempotencyKey = `briefing:x:${groupKey}:${partitionKey}:${mode}:${pollPhase}:${windowEnd}`;
   const run: AcquisitionRunInput = {
     runId: randomUUID(),
     groupId: snapshot.groupId,

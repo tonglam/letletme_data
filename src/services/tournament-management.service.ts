@@ -92,7 +92,14 @@ export type TournamentManagementLifecycle = {
   ) => ReturnType<TournamentManagementRepository['deleteOwned']>;
   refreshViews?: () => Promise<unknown>;
   repairDeletedViews?: (tournamentId: number) => Promise<boolean>;
+  /** Injectable for hermetic service tests; production keeps the DB guard. */
+  withMutationConflictGuard?: MutationConflictGuard;
 };
+
+type MutationConflictGuard = <T>(
+  input: Parameters<typeof withMutationConflictGuard>[0],
+  operation: () => Promise<T>,
+) => Promise<T>;
 
 type SnapshotResumeDependencies = {
   enqueue: (
@@ -141,6 +148,8 @@ export function createTournamentManagementService(
   lifecycle: TournamentManagementLifecycle = {},
   getSeason: () => Promise<FplSeasonRef> = () => seasonRepository.findCurrent(),
 ) {
+  const guard = lifecycle.withMutationConflictGuard ?? withMutationConflictGuard;
+
   const assertOwner = async (season: FplSeasonRef, tournamentId: number, adminEntryId: number) => {
     const tournament = await repository.findById(season, tournamentId);
     if (!tournament) {
@@ -233,7 +242,7 @@ export function createTournamentManagementService(
       if (current.state === payload.state && payload.state !== 'inactive') return current;
 
       if (payload.state === 'inactive') {
-        const paused = await withMutationConflictGuard(
+        const paused = await guard(
           {
             queueName: 'tournament-management',
             jobName: 'tournament-pause',
@@ -285,7 +294,7 @@ export function createTournamentManagementService(
         return paused;
       }
 
-      await withMutationConflictGuard(
+      await guard(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-resume',
@@ -362,7 +371,7 @@ export function createTournamentManagementService(
     setRosterMode: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = rosterModeSchema.parse(input);
-      return withMutationConflictGuard(
+      return guard(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-roster-mode',
@@ -458,7 +467,7 @@ export function createTournamentManagementService(
     retrySetup: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      return withMutationConflictGuard(
+      return guard(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-setup-retry',
@@ -477,7 +486,7 @@ export function createTournamentManagementService(
     retryRoster: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      return withMutationConflictGuard(
+      return guard(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-roster-retry',

@@ -1,17 +1,21 @@
-import { randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { createHash, randomUUID } from 'node:crypto';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { getDb, type DbOrTransaction } from '../../db/singleton';
 import {
   contentCandidateClusters,
+  contentAcquisitionRuns,
   contentEditorialActions,
   contentSourceReceipts,
   contentSources,
   contentStories,
   contentStoryEvidence,
   contentStoryLocalizations,
+  contentPublications,
   contentWeekEditionItems,
   contentWeekEditions,
+  contentWeekEditionSnapshots,
+  contentWeekEditionSourceRuns,
 } from '../../db/schemas/content.schema';
 import {
   assertWeekPublication,
@@ -19,6 +23,12 @@ import {
   type WeekLocale,
   type WeekPublicationEnvelope,
 } from '../contracts/week-publication';
+import { ConflictError } from '../../utils/errors';
+import {
+  persistWeekPublication,
+  stageWeekPublication,
+  type WeekPublicationResult,
+} from '../publication/week-publication';
 
 export type EditorialRole = 'content_editor' | 'content_publisher';
 
@@ -42,6 +52,21 @@ const jsonObject = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => [key, canonicalize((value as Record<string, unknown>)[key])]),
+  );
+};
+
+const requestHash = (value: unknown): string =>
+  createHash('sha256')
+    .update(JSON.stringify(canonicalize(value)), 'utf8')
+    .digest('hex');
+
 const assertActor = (actor: EditorialActor): void => {
   if (!actor.actorId.trim()) throw new Error('Editorial actor is required');
   if (!actor.idempotencyKey.trim()) throw new Error('Editorial idempotency key is required');
@@ -61,18 +86,80 @@ async function audit(
   payload: Record<string, unknown>,
 ): Promise<void> {
   await tx
-    .insert(contentEditorialActions)
-    .values({
-      actionId: randomUUID(),
-      idempotencyKey: actor.idempotencyKey,
-      actorId: actor.actorId,
-      role: actor.role,
-      actionType,
-      entityType,
-      entityId,
-      payload,
+    .update(contentEditorialActions)
+    .set({ payload, resultPayload: { success: true, ...payload }, completedAt: new Date() })
+    .where(eq(contentEditorialActions.idempotencyKey, actor.idempotencyKey));
+}
+
+type CommandReservation = Readonly<{ replay: boolean; result: Record<string, unknown> | null }>;
+
+/** Reserve the idempotency key before any mutation.  A key is a tuple of the
+ * actor, role, command and canonical request body; reusing it for a different
+ * command is a conflict rather than a silently ignored INSERT. */
+async function reserveCommand(
+  tx: DbOrTransaction,
+  actor: EditorialActor,
+  actionType: string,
+  entityType: string,
+  entityId: string | null,
+  payload: Record<string, unknown>,
+): Promise<CommandReservation> {
+  const hash = requestHash({
+    actorId: actor.actorId,
+    role: actor.role,
+    actionType,
+    entityType,
+    entityId,
+    payload,
+  });
+  const existing = await tx
+    .select({
+      actorId: contentEditorialActions.actorId,
+      role: contentEditorialActions.role,
+      actionType: contentEditorialActions.actionType,
+      entityType: contentEditorialActions.entityType,
+      entityId: contentEditorialActions.entityId,
+      requestHash: contentEditorialActions.requestHash,
+      resultPayload: contentEditorialActions.resultPayload,
+      completedAt: contentEditorialActions.completedAt,
     })
-    .onConflictDoNothing({ target: contentEditorialActions.idempotencyKey });
+    .from(contentEditorialActions)
+    .where(eq(contentEditorialActions.idempotencyKey, actor.idempotencyKey))
+    .for('update')
+    .limit(1);
+  if (existing[0]) {
+    const row = existing[0];
+    if (
+      row.actorId !== actor.actorId ||
+      row.role !== actor.role ||
+      row.actionType !== actionType ||
+      row.entityType !== entityType ||
+      row.entityId !== entityId ||
+      row.requestHash !== hash
+    ) {
+      throw new ConflictError(
+        'Idempotency-Key was already used for a different command',
+        'IDEMPOTENCY_KEY_REUSED',
+      );
+    }
+    if (row.completedAt) return { replay: true, result: jsonObject(row.resultPayload) };
+    throw new ConflictError(
+      'The same editorial command is already in progress',
+      'EDITORIAL_COMMAND_IN_PROGRESS',
+    );
+  }
+  await tx.insert(contentEditorialActions).values({
+    actionId: randomUUID(),
+    idempotencyKey: actor.idempotencyKey,
+    actorId: actor.actorId,
+    role: actor.role,
+    actionType,
+    entityType,
+    entityId,
+    payload,
+    requestHash: hash,
+  });
+  return { replay: false, result: null };
 }
 
 const requireUuid = (value: string, field: string): void => {
@@ -99,7 +186,25 @@ export async function createCandidateFromReceipts(input: {
   input.receiptIds.forEach((receiptId) => requireUuid(receiptId, 'receiptId'));
   const candidateId = randomUUID();
   const db = await getDb();
+  let replayResult: Record<string, unknown> | null = null;
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(
+      tx,
+      input.actor,
+      'candidate.create',
+      'candidate',
+      null,
+      {
+        runId: input.runId,
+        canonicalHash: input.canonicalHash,
+        materiality: input.materiality ?? 'unknown',
+        receiptIds: [...input.receiptIds],
+      },
+    );
+    if (reservation.replay) {
+      replayResult = reservation.result;
+      return;
+    }
     const receipts = await tx
       .select({ receiptId: contentSourceReceipts.receiptId })
       .from(contentSourceReceipts)
@@ -118,10 +223,12 @@ export async function createCandidateFromReceipts(input: {
       receiptIds: [...new Set(input.receiptIds)],
     });
     await audit(tx, input.actor, 'candidate.create', 'candidate', candidateId, {
+      candidateId,
       receiptCount: input.receiptIds.length,
     });
   });
-  return candidateId;
+  const replayCandidateId = replayResult ? replayResult['candidateId'] : undefined;
+  return typeof replayCandidateId === 'string' ? replayCandidateId : candidateId;
 }
 
 export async function acceptCandidate(candidateId: string, actor: EditorialActor): Promise<void> {
@@ -129,6 +236,17 @@ export async function acceptCandidate(candidateId: string, actor: EditorialActor
   requireUuid(candidateId, 'candidateId');
   const db = await getDb();
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(
+      tx,
+      actor,
+      'candidate.accept',
+      'candidate',
+      candidateId,
+      {},
+    );
+    if (reservation.replay) {
+      return;
+    }
     const rows = await tx
       .select({ status: contentCandidateClusters.status })
       .from(contentCandidateClusters)
@@ -157,6 +275,17 @@ export async function mergeCandidates(
   if (!sourceIds.length) throw new Error('At least one source candidate is required');
   const db = await getDb();
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(
+      tx,
+      actor,
+      'candidate.merge',
+      'candidate',
+      targetCandidateId,
+      {
+        sourceCandidateIds: sourceIds,
+      },
+    );
+    if (reservation.replay) return;
     const ids = [targetCandidateId, ...sourceIds];
     const rows = await tx
       .select({
@@ -202,7 +331,18 @@ export async function createDraftStory(input: {
   const storyId = randomUUID();
   const versionGroupId = randomUUID();
   const db = await getDb();
+  let replayResult: Record<string, unknown> | null = null;
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(tx, input.actor, 'story.create', 'story', null, {
+      candidateId: input.candidateId,
+      slug,
+      expiresAt: input.expiresAt ?? null,
+      localizations: input.localizations,
+    });
+    if (reservation.replay) {
+      replayResult = reservation.result;
+      return;
+    }
     const candidate = await tx
       .select({ status: contentCandidateClusters.status })
       .from(contentCandidateClusters)
@@ -231,10 +371,12 @@ export async function createDraftStory(input: {
       })),
     );
     await audit(tx, input.actor, 'story.create', 'story', storyId, {
+      storyId,
       candidateId: input.candidateId,
     });
   });
-  return storyId;
+  const replayStoryId = replayResult ? replayResult['storyId'] : undefined;
+  return typeof replayStoryId === 'string' ? replayStoryId : storyId;
 }
 
 export async function attachStoryEvidence(
@@ -249,6 +391,13 @@ export async function attachStoryEvidence(
   const db = await getDb();
   let inserted = 0;
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(tx, actor, 'story.evidence.attach', 'story', storyId, {
+      receiptIds: [...new Set(receiptIds)],
+    });
+    if (reservation.replay) {
+      inserted = Number(reservation.result?.inserted ?? 0);
+      return;
+    }
     const story = await tx
       .select({ storyId: contentStories.storyId })
       .from(contentStories)
@@ -273,6 +422,10 @@ export async function attachStoryEvidence(
       .returning({ storyId: contentStoryEvidence.storyId });
     inserted = rows.length;
     await audit(tx, actor, 'story.evidence.attach', 'story', storyId, { receiptCount: inserted });
+    await tx
+      .update(contentEditorialActions)
+      .set({ resultPayload: { success: true, inserted } })
+      .where(eq(contentEditorialActions.idempotencyKey, actor.idempotencyKey));
   });
   return inserted;
 }
@@ -289,6 +442,8 @@ export async function markStoryReady(storyId: string, actor: EditorialActor): Pr
   requireUuid(storyId, 'storyId');
   const db = await getDb();
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(tx, actor, 'story.ready', 'story', storyId, {});
+    if (reservation.replay) return;
     const story = await tx
       .select({ versionGroupId: contentStories.versionGroupId, status: contentStories.status })
       .from(contentStories)
@@ -333,15 +488,44 @@ export async function createWeekEdition(input: {
   eventName: string;
   deadlineTime: string;
   sourceSnapshotRevision: string;
+  sourceRunIds: readonly string[];
   actor: EditorialActor;
 }): Promise<string> {
   requireRole(input.actor, 'content_editor');
   if (!/^\d{4}$/.test(input.seasonCode)) throw new Error('seasonCode is invalid');
   if (!Number.isSafeInteger(input.eventId) || input.eventId <= 0)
     throw new Error('eventId is invalid');
+  const sourceRunIds = [...new Set(input.sourceRunIds)];
+  if (!sourceRunIds.length) throw new Error('At least one sourceRunId is required');
+  sourceRunIds.forEach((runId) => requireUuid(runId, 'sourceRunId'));
   const editionId = randomUUID();
   const db = await getDb();
+  let replayResult: Record<string, unknown> | null = null;
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(
+      tx,
+      input.actor,
+      'week-edition.create',
+      'week_edition',
+      null,
+      {
+        seasonCode: input.seasonCode,
+        eventId: input.eventId,
+        eventName: input.eventName,
+        deadlineTime: input.deadlineTime,
+        sourceSnapshotRevision: input.sourceSnapshotRevision,
+        sourceRunIds,
+      },
+    );
+    if (reservation.replay) {
+      replayResult = reservation.result;
+      return;
+    }
+    const runs = await tx
+      .select({ runId: contentAcquisitionRuns.runId })
+      .from(contentAcquisitionRuns)
+      .where(inArray(contentAcquisitionRuns.runId, sourceRunIds));
+    if (runs.length !== sourceRunIds.length) throw new Error('Source run not found');
     await tx.insert(contentWeekEditions).values({
       editionId,
       seasonCode: input.seasonCode,
@@ -351,11 +535,21 @@ export async function createWeekEdition(input: {
       sourceSnapshotRevision: requireText(input.sourceSnapshotRevision, 'sourceSnapshotRevision'),
       status: 'draft',
     });
+    await tx.insert(contentWeekEditionSourceRuns).values(
+      sourceRunIds.map((runId) => ({
+        editionId,
+        runId,
+        sourceSnapshotRevision: input.sourceSnapshotRevision,
+      })),
+    );
     await audit(tx, input.actor, 'week-edition.create', 'week_edition', editionId, {
+      editionId,
       eventId: input.eventId,
+      sourceRunIds,
     });
   });
-  return editionId;
+  const replayEditionId = replayResult ? replayResult['editionId'] : undefined;
+  return typeof replayEditionId === 'string' ? replayEditionId : editionId;
 }
 
 export async function addWeekEditionItem(input: {
@@ -373,6 +567,20 @@ export async function addWeekEditionItem(input: {
     throw new Error('position is invalid');
   const db = await getDb();
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(
+      tx,
+      input.actor,
+      'week-edition.item.upsert',
+      'week_edition',
+      input.editionId,
+      {
+        storyId: input.storyId,
+        sectionKey: input.sectionKey,
+        placement: input.placement ?? 'standard',
+        position: input.position,
+      },
+    );
+    if (reservation.replay) return;
     const [edition, story] = await Promise.all([
       tx
         .select({ editionId: contentWeekEditions.editionId })
@@ -414,23 +622,81 @@ export async function addWeekEditionItem(input: {
 export async function markWeekEditionReady(
   editionId: string,
   actor: EditorialActor,
-): Promise<void> {
+): Promise<{ frozenSha256: string; replayed: boolean }> {
   requireRole(actor, 'content_editor');
   requireUuid(editionId, 'editionId');
   const db = await getDb();
+  let frozenSha256 = '';
+  let replayed = false;
   await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(
+      tx,
+      actor,
+      'week-edition.ready',
+      'week_edition',
+      editionId,
+      {},
+    );
+    if (reservation.replay) {
+      replayed = true;
+      frozenSha256 =
+        typeof reservation.result?.frozenSha256 === 'string' ? reservation.result.frozenSha256 : '';
+      return;
+    }
     const edition = await tx
-      .select({ editionId: contentWeekEditions.editionId })
+      .select({
+        editionId: contentWeekEditions.editionId,
+        seasonCode: contentWeekEditions.seasonCode,
+        eventId: contentWeekEditions.eventId,
+        eventName: contentWeekEditions.eventName,
+        deadlineTime: contentWeekEditions.deadlineTime,
+        sourceSnapshotRevision: contentWeekEditions.sourceSnapshotRevision,
+        status: contentWeekEditions.status,
+      })
       .from(contentWeekEditions)
       .where(eq(contentWeekEditions.editionId, editionId))
+      .for('update')
       .limit(1);
     if (!edition[0]) throw new Error('Week edition not found');
+    if (edition[0].status !== 'draft') throw new Error('Only draft Week editions can become READY');
+    const sourceRuns = await tx
+      .select({
+        runId: contentWeekEditionSourceRuns.runId,
+        linkedRevision: contentWeekEditionSourceRuns.sourceSnapshotRevision,
+        runRevision: contentAcquisitionRuns.sourceSnapshotRevision,
+        status: contentAcquisitionRuns.status,
+        traceVerified: contentAcquisitionRuns.traceVerified,
+        completedAt: contentAcquisitionRuns.completedAt,
+      })
+      .from(contentWeekEditionSourceRuns)
+      .innerJoin(
+        contentAcquisitionRuns,
+        eq(contentAcquisitionRuns.runId, contentWeekEditionSourceRuns.runId),
+      )
+      .where(eq(contentWeekEditionSourceRuns.editionId, editionId));
+    if (!sourceRuns.length) throw new Error('Week edition requires source runs');
+    if (
+      sourceRuns.some(
+        (run) =>
+          run.status !== 'completed' ||
+          run.traceVerified !== true ||
+          !run.completedAt ||
+          run.linkedRevision !== edition[0].sourceSnapshotRevision ||
+          run.runRevision !== edition[0].sourceSnapshotRevision,
+      )
+    )
+      throw new Error('Week edition source runs are incomplete or stale');
     const items = await tx
       .select({
         storyId: contentWeekEditionItems.storyId,
         sectionKey: contentWeekEditionItems.sectionKey,
+        placement: contentWeekEditionItems.placement,
         position: contentWeekEditionItems.position,
         status: contentStories.status,
+        storyRevision: contentStories.storyRevision,
+        slug: contentStories.canonicalSlug,
+        expiresAt: contentStories.expiresAt,
+        versionGroupId: contentStories.versionGroupId,
       })
       .from(contentWeekEditionItems)
       .innerJoin(contentStories, eq(contentStories.storyId, contentWeekEditionItems.storyId))
@@ -443,14 +709,126 @@ export async function markWeekEditionReady(
       if (positions.has(key)) throw new Error(`Duplicate Week position ${key}`);
       positions.add(key);
     }
+    const storyIds = items.map((item) => item.storyId);
+    const localizations = storyIds.length
+      ? await tx
+          .select({
+            versionGroupId: contentStoryLocalizations.versionGroupId,
+            locale: contentStoryLocalizations.locale,
+            title: contentStoryLocalizations.title,
+            summary: contentStoryLocalizations.summary,
+            body: contentStoryLocalizations.body,
+            sourceAttribution: contentStoryLocalizations.sourceAttribution,
+          })
+          .from(contentStoryLocalizations)
+          .where(
+            inArray(
+              contentStoryLocalizations.versionGroupId,
+              items.map((item) => item.versionGroupId),
+            ),
+          )
+      : [];
+    const evidence = storyIds.length
+      ? await tx
+          .select({
+            storyId: contentStoryEvidence.storyId,
+            receiptId: contentStoryEvidence.receiptId,
+            evidenceRole: contentStoryEvidence.evidenceRole,
+            canonicalUrl: contentSourceReceipts.canonicalUrl,
+            capturedAt: contentSourceReceipts.capturedAt,
+            rightsPolicy: contentSourceReceipts.rightsPolicy,
+            sourceId: contentSourceReceipts.sourceId,
+            sourceName: contentSources.displayName,
+          })
+          .from(contentStoryEvidence)
+          .innerJoin(
+            contentSourceReceipts,
+            eq(contentSourceReceipts.receiptId, contentStoryEvidence.receiptId),
+          )
+          .innerJoin(contentSources, eq(contentSources.sourceId, contentSourceReceipts.sourceId))
+          .where(inArray(contentStoryEvidence.storyId, storyIds))
+      : [];
+    const localizationsByVersion = new Map<string, Record<string, unknown>>();
+    for (const localization of localizations) {
+      const row = localizationsByVersion.get(localization.versionGroupId) ?? {};
+      row[localization.locale] = {
+        title: localization.title,
+        summary: localization.summary,
+        body: localization.body,
+        sourceAttribution: localization.sourceAttribution,
+      };
+      localizationsByVersion.set(localization.versionGroupId, row);
+    }
+    const evidenceByStory = new Map<string, Record<string, unknown>[]>();
+    for (const row of evidence) {
+      if (!rightsAllowPublic(row.rightsPolicy))
+        throw new Error('Every Story evidence receipt needs explicit public rights');
+      if (!/^https?:\/\//i.test(row.canonicalUrl))
+        throw new Error('Story evidence URL must be http(s)');
+      const list = evidenceByStory.get(row.storyId) ?? [];
+      list.push({
+        receiptId: row.receiptId,
+        evidenceRole: row.evidenceRole,
+        canonicalUrl: row.canonicalUrl,
+        capturedAt: row.capturedAt.toISOString(),
+        rightsPolicy: row.rightsPolicy,
+        sourceId: row.sourceId,
+        sourceName: row.sourceName,
+      });
+      evidenceByStory.set(row.storyId, list);
+    }
+    const itemProjection = items.map((item) => {
+      const translations = localizationsByVersion.get(item.versionGroupId);
+      if (!translations?.en || !translations['zh-CN'])
+        throw new Error(`Story ${item.storyId} is missing a locale`);
+      const storyEvidence = evidenceByStory.get(item.storyId) ?? [];
+      if (!storyEvidence.length) throw new Error(`Story ${item.storyId} requires evidence`);
+      return {
+        storyId: item.storyId,
+        storyRevision: item.storyRevision,
+        slug: item.slug,
+        expiresAt: item.expiresAt?.toISOString() ?? null,
+        sectionKey: item.sectionKey,
+        placement: item.placement,
+        position: item.position,
+        localizations: translations,
+        evidence: storyEvidence,
+      };
+    });
+    const snapshotPayload = {
+      sourceRunIds: sourceRuns.map((run) => run.runId).sort(),
+      sourceSnapshotRevision: edition[0].sourceSnapshotRevision,
+      event: {
+        seasonCode: edition[0].seasonCode,
+        eventId: edition[0].eventId,
+        name: edition[0].eventName,
+        deadlineTime: edition[0].deadlineTime.toISOString(),
+        sourceCheckedAt: new Date(
+          Math.max(...sourceRuns.map((run) => run.completedAt?.getTime() ?? 0)),
+        ).toISOString(),
+      },
+      items: itemProjection,
+    };
+    frozenSha256 = requestHash(snapshotPayload);
+    await tx.insert(contentWeekEditionSnapshots).values({
+      snapshotId: randomUUID(),
+      editionId,
+      sourceRunIds: snapshotPayload.sourceRunIds,
+      sourceSnapshotRevision: snapshotPayload.sourceSnapshotRevision,
+      eventProjection: snapshotPayload.event,
+      itemsProjection: snapshotPayload.items,
+      frozenSha256,
+    });
     await tx
       .update(contentWeekEditions)
-      .set({ status: 'ready', updatedAt: new Date() })
+      .set({ status: 'ready', readyAt: new Date(), frozenSha256, updatedAt: new Date() })
       .where(eq(contentWeekEditions.editionId, editionId));
     await audit(tx, actor, 'week-edition.ready', 'week_edition', editionId, {
       itemCount: items.length,
+      frozenSha256,
     });
   });
+  return { frozenSha256, replayed };
 }
 
 type CompiledStory = {
@@ -564,12 +942,12 @@ export async function compileWeekEdition(input: {
     const source = evidenceMap.get(row.storyId);
     return {
       storyId: row.storyId,
-      storyRevision: row.storyRevision,
+      storyRevision: Number(row.storyRevision),
       slug: row.slug,
       expiresAt: row.expiresAt,
       sectionKey: row.sectionKey,
       placement: row.placement,
-      position: row.position,
+      position: Number(row.position),
       sourceName: source?.sourceName ?? null,
       sourceUrl: source?.sourceUrl ?? null,
       sourceCheckedAt: source?.sourceCheckedAt ?? null,
@@ -655,4 +1033,300 @@ export async function compileWeekEdition(input: {
     });
   });
   return pair;
+}
+
+type FrozenEditionRow = Readonly<{
+  storyId: string;
+  storyRevision: number;
+  slug: string;
+  expiresAt: string | null;
+  sectionKey: string;
+  placement: string;
+  position: number;
+  localizations: Record<string, { title: string; summary: string }>;
+  evidence: readonly Record<string, unknown>[];
+}>;
+
+function frozenItems(value: unknown): FrozenEditionRow[] {
+  if (!Array.isArray(value)) throw new Error('Frozen Week snapshot items are invalid');
+  return value.map((item) => {
+    const row = jsonObject(item);
+    const localizations = jsonObject(row.localizations) as Record<
+      string,
+      { title: string; summary: string }
+    >;
+    if (
+      typeof row.storyId !== 'string' ||
+      !Number.isSafeInteger(row.storyRevision) ||
+      typeof row.slug !== 'string' ||
+      typeof row.sectionKey !== 'string' ||
+      typeof row.placement !== 'string' ||
+      !Number.isSafeInteger(row.position) ||
+      !jsonObject(localizations.en).title ||
+      !jsonObject(localizations['zh-CN']).title
+    )
+      throw new Error('Frozen Week snapshot Story is invalid');
+    return {
+      storyId: row.storyId,
+      storyRevision: Number(row.storyRevision),
+      slug: row.slug,
+      expiresAt: typeof row.expiresAt === 'string' ? row.expiresAt : null,
+      sectionKey: row.sectionKey,
+      placement: row.placement,
+      position: Number(row.position),
+      localizations: localizations as FrozenEditionRow['localizations'],
+      evidence: Array.isArray(row.evidence) ? (row.evidence as Record<string, unknown>[]) : [],
+    };
+  });
+}
+
+/** Compile only from the immutable READY snapshot.  This is the reader used
+ * by the new publisher command; the older compile helper remains for callers
+ * that are still migrating to the frozen contract. */
+export async function compileFrozenWeekEdition(input: {
+  editionId: string;
+  revision: number;
+  publicationId: string;
+  publishedAt: string;
+  validUntil?: string | null;
+  expectedFrozenSha256: string;
+  database?: DbOrTransaction;
+}): Promise<{ en: WeekPublicationEnvelope; 'zh-CN': WeekPublicationEnvelope }> {
+  requireUuid(input.editionId, 'editionId');
+  requireUuid(input.publicationId, 'publicationId');
+  if (!/^[0-9a-f]{64}$/i.test(input.expectedFrozenSha256))
+    throw new Error('expectedFrozenSha256 is invalid');
+  const db = input.database ?? (await getDb());
+  const rows = await db
+    .select({
+      seasonCode: contentWeekEditions.seasonCode,
+      eventId: contentWeekEditions.eventId,
+      eventName: contentWeekEditions.eventName,
+      deadlineTime: contentWeekEditions.deadlineTime,
+      status: contentWeekEditions.status,
+      frozenSha256: contentWeekEditions.frozenSha256,
+    })
+    .from(contentWeekEditions)
+    .where(eq(contentWeekEditions.editionId, input.editionId))
+    .limit(1);
+  const edition = rows[0];
+  if (!edition || edition.status !== 'ready')
+    throw new Error('Week edition must be READY before publish');
+  if (!edition.frozenSha256 || edition.frozenSha256 !== input.expectedFrozenSha256)
+    throw new ConflictError('Frozen Week hash does not match', 'FROZEN_HASH_MISMATCH');
+  const snapshotRows = await db
+    .select({
+      eventProjection: contentWeekEditionSnapshots.eventProjection,
+      itemsProjection: contentWeekEditionSnapshots.itemsProjection,
+      frozenSha256: contentWeekEditionSnapshots.frozenSha256,
+    })
+    .from(contentWeekEditionSnapshots)
+    .where(eq(contentWeekEditionSnapshots.editionId, input.editionId))
+    .limit(1);
+  const snapshot = snapshotRows[0];
+  if (!snapshot || snapshot.frozenSha256 !== input.expectedFrozenSha256)
+    throw new ConflictError('Frozen Week snapshot is unavailable', 'FROZEN_SNAPSHOT_UNAVAILABLE');
+  const eventProjection = jsonObject(snapshot.eventProjection);
+  const event = {
+    seasonCode:
+      typeof eventProjection.seasonCode === 'string'
+        ? eventProjection.seasonCode
+        : edition.seasonCode,
+    eventId: Number(eventProjection.eventId ?? edition.eventId),
+    name: typeof eventProjection.name === 'string' ? eventProjection.name : edition.eventName,
+    deadlineTime:
+      typeof eventProjection.deadlineTime === 'string'
+        ? eventProjection.deadlineTime
+        : edition.deadlineTime.toISOString(),
+  };
+  const items = frozenItems(snapshot.itemsProjection);
+  const publishedAt = new Date(input.publishedAt);
+  const validUntil = input.validUntil ? new Date(input.validUntil) : null;
+  if (!Number.isFinite(publishedAt.getTime())) throw new Error('publishedAt is invalid');
+  if (validUntil && (!Number.isFinite(validUntil.getTime()) || validUntil > edition.deadlineTime))
+    throw new Error('validUntil exceeds deadline');
+  const evidenceSourceCheckedAt = items
+    .flatMap((item) =>
+      item.evidence.map((evidence) =>
+        typeof evidence.capturedAt === 'string' ? Date.parse(evidence.capturedAt) : NaN,
+      ),
+    )
+    .filter(Number.isFinite)
+    .reduce((latest, value) => Math.max(latest, value), publishedAt.getTime());
+  const projectedSourceCheckedAt =
+    typeof eventProjection.sourceCheckedAt === 'string'
+      ? Date.parse(eventProjection.sourceCheckedAt)
+      : NaN;
+  const sourceCheckedAt = Number.isFinite(projectedSourceCheckedAt)
+    ? projectedSourceCheckedAt
+    : evidenceSourceCheckedAt;
+  const build = (locale: WeekLocale): WeekPublicationEnvelope => {
+    const cards = items
+      .slice()
+      .sort(
+        (left, right) =>
+          left.position - right.position || left.sectionKey.localeCompare(right.sectionKey),
+      )
+      .map((item) => {
+        const localization = item.localizations[locale];
+        if (!localization?.title || !localization.summary)
+          throw new Error(`Frozen Story ${item.storyId} is missing ${locale}`);
+        const source = item.evidence[0] ?? {};
+        return {
+          id: item.storyId,
+          slug: item.slug,
+          storyRevision: item.storyRevision,
+          title: localization.title,
+          summary: localization.summary,
+          sourceName: typeof source.sourceName === 'string' ? source.sourceName : null,
+          sourceUrl: typeof source.canonicalUrl === 'string' ? source.canonicalUrl : null,
+          sourceCheckedAt: typeof source.capturedAt === 'string' ? source.capturedAt : null,
+          expiresAt: item.expiresAt,
+          sectionKey: item.sectionKey,
+          placement: item.placement,
+          position: item.position,
+        };
+      });
+    const featured = cards
+      .filter((card) => card.placement === 'featured')
+      .map(
+        ({ sectionKey: _sectionKey, placement: _placement, position: _position, ...card }) => card,
+      );
+    const sections = [...new Set(cards.map((card) => card.sectionKey))]
+      .map((key) => ({
+        key,
+        title: key,
+        items: cards
+          .filter((card) => card.sectionKey === key && card.placement !== 'featured')
+          .map(
+            ({ sectionKey: _sectionKey, placement: _placement, position: _position, ...card }) =>
+              card,
+          ),
+      }))
+      .filter((section) => section.items.length);
+    const envelope: WeekPublicationEnvelope = {
+      schemaVersion: 1,
+      scopeKind: 'SURFACE',
+      scopeKey: 'week',
+      revision: input.revision,
+      publicationId: input.publicationId,
+      state: cards.length ? 'READY' : 'EMPTY',
+      locale,
+      publishedAt: publishedAt.toISOString(),
+      sourceCheckedAt: new Date(sourceCheckedAt).toISOString(),
+      validUntil: validUntil?.toISOString() ?? null,
+      event,
+      featured,
+      sections,
+    };
+    assertWeekPublication(envelope);
+    return envelope;
+  };
+  const pair = { en: build('en'), 'zh-CN': build('zh-CN') };
+  validateWeekLocalePair(pair.en, pair['zh-CN']);
+  return pair;
+}
+
+export async function publishFrozenWeekEdition(input: {
+  editionId: string;
+  expectedFrozenSha256: string;
+  reason: string;
+  validUntil?: string | null;
+  actor: EditorialActor;
+}): Promise<WeekPublicationResult & { replayed: boolean }> {
+  requireRole(input.actor, 'content_publisher');
+  requireUuid(input.editionId, 'editionId');
+  const reason = requireText(input.reason, 'reason');
+  const db = await getDb();
+  const publication = await db.transaction(async (tx) => {
+    const reservation = await reserveCommand(
+      tx,
+      input.actor,
+      'week-edition.publish',
+      'week_edition',
+      input.editionId,
+      {
+        expectedFrozenSha256: input.expectedFrozenSha256,
+        reason,
+        validUntil: input.validUntil ?? null,
+      },
+    );
+    if (reservation.replay)
+      return { replayed: true, result: jsonObject(reservation.result) } as const;
+    const editionRows = await tx
+      .select({
+        editionId: contentWeekEditions.editionId,
+        seasonCode: contentWeekEditions.seasonCode,
+        eventId: contentWeekEditions.eventId,
+        eventName: contentWeekEditions.eventName,
+        deadlineTime: contentWeekEditions.deadlineTime,
+        status: contentWeekEditions.status,
+        frozenSha256: contentWeekEditions.frozenSha256,
+      })
+      .from(contentWeekEditions)
+      .where(eq(contentWeekEditions.editionId, input.editionId))
+      .for('update')
+      .limit(1);
+    const edition = editionRows[0];
+    if (!edition || edition.status !== 'ready')
+      throw new Error('Week edition must be READY before publish');
+    if (edition.frozenSha256 !== input.expectedFrozenSha256)
+      throw new ConflictError('Frozen Week hash does not match', 'FROZEN_HASH_MISMATCH');
+    const latest = await tx
+      .select({ revision: sql<number>`COALESCE(MAX(${contentPublications.revision}), 0)` })
+      .from(contentPublications)
+      .where(eq(contentPublications.scopeKey, 'week'));
+    const revision = Number(latest[0]?.revision ?? 0) + 1;
+    const publicationId = randomUUID();
+    const publishedAt = new Date().toISOString();
+    const pair = await compileFrozenWeekEdition({
+      editionId: input.editionId,
+      revision,
+      publicationId,
+      publishedAt,
+      validUntil: input.validUntil,
+      expectedFrozenSha256: input.expectedFrozenSha256,
+      database: tx,
+    });
+    const result = await persistWeekPublication(tx, pair.en, pair['zh-CN']);
+    await tx
+      .update(contentWeekEditions)
+      .set({
+        status: 'published',
+        publishedAt: new Date(publishedAt),
+        publishedPublicationId: result.publicationId,
+        updatedAt: new Date(),
+      })
+      .where(eq(contentWeekEditions.editionId, input.editionId));
+    await audit(tx, input.actor, 'week-edition.publish', 'week_edition', input.editionId, {
+      reason,
+      publicationId: result.publicationId,
+      revision: result.revision,
+    });
+    await tx
+      .update(contentEditorialActions)
+      .set({
+        resultPayload: {
+          publicationId: result.publicationId,
+          revision: result.revision,
+          state: result.state,
+          redisPublished: result.redisPublished,
+          outboxId: result.outboxId,
+        },
+      })
+      .where(eq(contentEditorialActions.idempotencyKey, input.actor.idempotencyKey));
+    return {
+      replayed: false,
+      result,
+      pair,
+    } as const;
+  });
+  if (publication.replayed)
+    return { ...(publication.result as unknown as WeekPublicationResult), replayed: true };
+  const staged = await stageWeekPublication(
+    publication.pair.en,
+    publication.pair['zh-CN'],
+    publication.result,
+  );
+  return { ...staged, replayed: false };
 }

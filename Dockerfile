@@ -44,10 +44,12 @@ COPY --from=build /app/migrations ./migrations
 COPY --from=build /app/drizzle.config.ts ./
 COPY --from=build /app/validate-env.ts ./
 COPY --from=build /app/tsconfig.json ./
+COPY --from=build /app/.grok ./.grok
 
 RUN addgroup -S -g 1001 appuser \
     && adduser -S -D -H -u 1001 -G appuser appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p /home/appuser/.grok /tmp \
+    && chown -R appuser:appuser /app /home/appuser
 USER appuser
 
 EXPOSE 3000

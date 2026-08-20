@@ -112,6 +112,7 @@ export const contentAcquisitionRuns = content.table(
     idempotencyKey: text('idempotency_key').notNull(),
     status: text().default('pending').notNull(),
     sourceSnapshot: jsonb('source_snapshot').default([]).notNull(),
+    sourceSnapshotRevision: text('source_snapshot_revision'),
     skillSha: text('skill_sha'),
     adapterVersion: text('adapter_version'),
     xCallCount: integer('x_call_count').default(0).notNull(),
@@ -297,9 +298,39 @@ export const contentWeekEditions = content.table('week_editions', {
   deadlineTime: timestamp('deadline_time', { withTimezone: true, mode: 'date' }).notNull(),
   sourceSnapshotRevision: text('source_snapshot_revision').notNull(),
   status: text().default('draft').notNull(),
+  readyAt: timestamp('ready_at', { withTimezone: true, mode: 'date' }),
+  publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }),
+  publishedPublicationId: uuid('published_publication_id'),
+  frozenSha256: text('frozen_sha256'),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
 });
+
+export const contentWeekEditionSourceRuns = content.table(
+  'week_edition_source_runs',
+  {
+    editionId: uuid('edition_id').notNull(),
+    runId: uuid('run_id').notNull(),
+    sourceSnapshotRevision: text('source_snapshot_revision').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.editionId, table.runId] })],
+);
+
+export const contentWeekEditionSnapshots = content.table(
+  'week_edition_snapshots',
+  {
+    snapshotId: uuid('snapshot_id').primaryKey().notNull(),
+    editionId: uuid('edition_id').notNull(),
+    sourceRunIds: jsonb('source_run_ids').notNull(),
+    sourceSnapshotRevision: text('source_snapshot_revision').notNull(),
+    eventProjection: jsonb('event_projection').notNull(),
+    itemsProjection: jsonb('items_projection').notNull(),
+    frozenSha256: text('frozen_sha256').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [unique('content_week_edition_snapshots_edition_key').on(table.editionId)],
+);
 
 export const contentWeekEditionItems = content.table(
   'week_edition_items',
@@ -423,6 +454,9 @@ export const contentEditorialActions = content.table(
     entityType: text('entity_type').notNull(),
     entityId: uuid('entity_id'),
     payload: jsonb().default({}).notNull(),
+    requestHash: text('request_hash'),
+    resultPayload: jsonb('result_payload').default({}).notNull(),
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [

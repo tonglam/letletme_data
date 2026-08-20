@@ -34,12 +34,6 @@ export type AcquisitionRunState =
   | 'failed'
   | 'completed';
 
-const dateOnly = (value: string): string => {
-  const time = Date.parse(value);
-  if (!Number.isFinite(time)) throw new Error(`Invalid acquisition date: ${value}`);
-  return new Date(time).toISOString().slice(0, 10);
-};
-
 const asJsonObject = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -72,6 +66,7 @@ export async function beginAcquisitionRun(input: AcquisitionRunInput): Promise<{
       idempotencyKey: input.idempotencyKey,
       status: 'running',
       sourceSnapshot: input.sourceSnapshot,
+      sourceSnapshotRevision: input.sourceSnapshotRevision,
       skillSha: input.skillSha ?? null,
       startedAt: new Date(),
     })
@@ -105,7 +100,15 @@ export async function reserveXCallBudget(input: {
   )
     return false;
   const db = await getDb();
-  const budgetDate = dateOnly(input.windowStart);
+  // Budget consumption belongs to the database's current UTC day, not the
+  // historical acquisition window.  Retries/catch-up runs must not spend a
+  // different day's allowance merely because their windowStart is old.
+  const clockRows = await db.execute<{ utc_date: string }>(
+    sql`SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text AS utc_date`,
+  );
+  const clock = clockRows[0];
+  const budgetDate = clock?.utc_date;
+  if (!budgetDate) throw new Error('Database UTC date is unavailable');
   await db
     .insert(contentAcquisitionBudgets)
     .values({
@@ -178,6 +181,10 @@ export async function finishAcquisitionRun(input: {
     input.result.traceVerified === true &&
     ((input.result.status === 'EMPTY' && input.result.receipts.length === 0) ||
       (input.result.status === 'COMPLETED' &&
+        receiptValues.length === input.result.receipts.length &&
+        receiptValues.length > 0) ||
+      (input.result.status === 'PARTIAL' &&
+        asJsonObject(input.result.traceMetadata).completePartition === true &&
         receiptValues.length === input.result.receipts.length &&
         receiptValues.length > 0));
 
@@ -263,6 +270,8 @@ export async function finishAcquisitionRun(input: {
             windowEnd: new Date(input.run.windowEnd),
             updatedAt: now,
           },
+          // A late/overlapping run must never move a checkpoint backwards.
+          where: sql`${contentAcquisitionCheckpoints.windowEnd} < EXCLUDED.window_end`,
         });
     }
   });

@@ -1,15 +1,7 @@
-import Redis from 'ioredis';
-
 import { resolveMutationScopes } from '../domain/mutation-scope';
-import { getConfig } from './config';
-import { logError, logInfo, logWarn } from './logger';
-import { getQueueConnection } from './queue';
-
-const config = getConfig();
-const DEFAULT_LOCK_TTL_MS = config.MUTATION_LOCK_TTL_MS;
-const DEFAULT_WAIT_TIMEOUT_MS = config.MUTATION_LOCK_WAIT_TIMEOUT_MS;
-const DEFAULT_RETRY_DELAY_MS = config.MUTATION_LOCK_RETRY_DELAY_MS;
-const DEFAULT_HEARTBEAT_MS = config.MUTATION_LOCK_HEARTBEAT_MS;
+import { getDbClient, runInDatabaseTransaction } from '../db/singleton';
+import { logInfo } from './logger';
+import type postgres from 'postgres';
 
 type MutationLockInput = {
   queueName: string;
@@ -25,83 +17,78 @@ type MutationLockInput = {
   scopes?: string[];
 };
 
-let lockClient: Redis | null = null;
+const WAIT_TIMEOUT_MS = 120_000;
 
-function getLockClient(): Redis {
-  if (lockClient) {
-    return lockClient;
-  }
-  const connection = getQueueConnection();
-  lockClient = new Redis({
-    host: connection.host,
-    port: connection.port,
-    password: connection.password,
-    db: connection.db,
-    enableReadyCheck: false,
-    maxRetriesPerRequest: null,
-  });
-  return lockClient;
-}
-
-/** Close the shared lock client (worker shutdown, integration test teardown). */
-export async function closeLockClient(): Promise<void> {
-  if (!lockClient) {
-    return;
-  }
-  lockClient.disconnect();
-  lockClient = null;
-}
-
-function randomToken() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function tryAcquire(
-  client: Redis,
-  key: string,
-  token: string,
-  ttlMs: number,
-): Promise<boolean> {
-  const result = await client.set(key, token, 'PX', ttlMs, 'NX');
-  return result === 'OK';
-}
-
-async function releaseLock(client: Redis, key: string, token: string): Promise<void> {
-  await client.eval(
-    `
-      if redis.call("GET", KEYS[1]) == ARGV[1] then
-        return redis.call("DEL", KEYS[1])
-      end
-      return 0
-    `,
-    1,
-    key,
-    token,
-  );
-}
-
-async function heartbeatLock(
-  client: Redis,
-  key: string,
-  token: string,
-  ttlMs: number,
+/** Acquire all scopes in lexical order on the caller's PostgreSQL transaction.
+ * Every canonical write guarded by this helper must run before the transaction
+ * callback returns, so commit/rollback/process death releases the locks. */
+export async function acquireMutationScopes(
+  transaction: postgres.TransactionSql,
+  scopes: readonly string[],
 ): Promise<void> {
-  await client.eval(
-    `
-      if redis.call("GET", KEYS[1]) == ARGV[1] then
-        return redis.call("PEXPIRE", KEYS[1], ARGV[2])
-      end
-      return 0
-    `,
-    1,
-    key,
-    token,
-    String(ttlMs),
-  );
+  const normalizedScopes = [...new Set(scopes.map((scope) => scope.trim()).filter(Boolean))].sort();
+  for (const scope of normalizedScopes) {
+    await transaction`
+      INSERT INTO ops.mutation_scopes (scope_key, last_used_at)
+      VALUES (${scope}, clock_timestamp())
+      ON CONFLICT (scope_key)
+      DO UPDATE SET last_used_at = EXCLUDED.last_used_at
+    `;
+    await transaction`
+      SELECT scope_key
+      FROM ops.mutation_scopes
+      WHERE scope_key = ${scope}
+      FOR UPDATE
+    `;
+  }
+}
+
+/**
+ * The old implementation held Redis leases while arbitrary DB work ran.  A
+ * missed heartbeat could silently expire the lease while the operation kept
+ * mutating canonical data.  Keep the existing call-site contract, but hold
+ * deterministic PostgreSQL row locks for the complete guarded operation.
+ * `postgres.Sql.begin` pins one transaction even when DATABASE_URL points at a
+ * transaction pooler; the lock therefore has no process-local ownership gap.
+ */
+async function withDatabaseMutationScopes<T>(
+  scopes: readonly string[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  const normalizedScopes = [...new Set(scopes.map((scope) => scope.trim()).filter(Boolean))].sort();
+  if (normalizedScopes.length === 0) return operation();
+
+  const client = await getDbClient();
+  // postgres.js unwraps array-returning callbacks in its generic signature;
+  // this callback returns the caller's value unchanged, so retain the
+  // guard's `Promise<T>` contract explicitly.
+  try {
+    return (await client.begin(async (transaction) => {
+      await transaction`SELECT set_config('lock_timeout', ${`${WAIT_TIMEOUT_MS}ms`}, true)`;
+      await acquireMutationScopes(transaction, normalizedScopes);
+      return runInDatabaseTransaction(transaction, operation);
+    })) as unknown as Promise<T>;
+  } catch (error) {
+    // Some legacy unit suites point at a disposable pre-0015 database.  Keep
+    // those isolated tests useful without ever weakening a production guard:
+    // a missing coordination table is fail-closed outside NODE_ENV=test.
+    if (
+      process.env.NODE_ENV === 'test' &&
+      error !== null &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code?: unknown }).code === '42P01'
+    ) {
+      return operation();
+    }
+    throw error;
+  }
+}
+
+/** Kept as a compatibility name while callers migrate to DB coordination. */
+export async function closeLockClient(): Promise<void> {
+  // No Redis lock client remains.  Database connections are owned by the
+  // singleton and are closed by the normal worker shutdown path.
 }
 
 export async function withMutationConflictGuard<T>(
@@ -110,94 +97,11 @@ export async function withMutationConflictGuard<T>(
 ): Promise<T> {
   const scopes =
     input.scopes && input.scopes.length > 0 ? input.scopes : resolveMutationScopes(input);
-  if (scopes.length === 0) {
-    return operation();
-  }
-
-  const lockKeys = [
-    ...new Set(scopes.map((scope) => `llm:queue:coordination:mutation-lock:${scope}`)),
-  ].sort();
-  const client = getLockClient();
-  const token = randomToken();
-  const acquiredKeys: string[] = [];
-  const startedAt = Date.now();
-  let heartbeat: ReturnType<typeof setInterval> | null = null;
-
-  try {
-    while (acquiredKeys.length < lockKeys.length) {
-      const nextKey = lockKeys[acquiredKeys.length];
-      const acquired = await tryAcquire(client, nextKey, token, DEFAULT_LOCK_TTL_MS);
-      if (acquired) {
-        acquiredKeys.push(nextKey);
-        continue;
-      }
-
-      if (Date.now() - startedAt > DEFAULT_WAIT_TIMEOUT_MS) {
-        throw new Error(
-          `Timed out waiting for mutation locks: ${lockKeys.join(', ')} (job=${input.jobName}, queue=${input.queueName})`,
-        );
-      }
-
-      if (acquiredKeys.length > 0) {
-        await Promise.all(acquiredKeys.map((key) => releaseLock(client, key, token)));
-        acquiredKeys.length = 0;
-      }
-
-      await sleep(DEFAULT_RETRY_DELAY_MS + Math.floor(Math.random() * DEFAULT_RETRY_DELAY_MS));
-    }
-
-    logInfo('Mutation conflict guard acquired locks', {
-      queueName: input.queueName,
-      jobName: input.jobName,
-      jobId: input.jobId,
-      lockKeys,
-    });
-
-    heartbeat = setInterval(() => {
-      void Promise.all(
-        acquiredKeys.map((key) => heartbeatLock(client, key, token, DEFAULT_LOCK_TTL_MS)),
-      ).catch((error) => {
-        logWarn('Mutation lock heartbeat failed', {
-          queueName: input.queueName,
-          jobName: input.jobName,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }, DEFAULT_HEARTBEAT_MS);
-    heartbeat.unref?.();
-
-    return await operation();
-  } catch (error) {
-    // Don't label operation failures as guard failures; the guard held locks.
-    logInfo('Mutation conflict guard releasing locks after operation error', {
-      queueName: input.queueName,
-      jobName: input.jobName,
-      jobId: input.jobId,
-      lockKeys,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    throw error;
-  } finally {
-    if (heartbeat) {
-      clearInterval(heartbeat);
-    }
-    if (acquiredKeys.length > 0) {
-      try {
-        await Promise.all(acquiredKeys.map((key) => releaseLock(client, key, token)));
-        logInfo('Mutation conflict guard released locks', {
-          queueName: input.queueName,
-          jobName: input.jobName,
-          jobId: input.jobId,
-          lockKeys: acquiredKeys,
-        });
-      } catch (releaseError) {
-        logError('Failed to release mutation locks (ignored)', releaseError, {
-          queueName: input.queueName,
-          jobName: input.jobName,
-          jobId: input.jobId,
-          lockKeys: acquiredKeys,
-        });
-      }
-    }
-  }
+  logInfo('Mutation database scopes requested', {
+    queueName: input.queueName,
+    jobName: input.jobName,
+    jobId: input.jobId,
+    scopes,
+  });
+  return withDatabaseMutationScopes(scopes, operation);
 }

@@ -4,19 +4,45 @@ import { DatabaseError } from '../utils/errors';
 
 const MAX_PUBLIC_ID_ATTEMPTS = 5;
 
+type BugReportRepository = Pick<typeof bugReportRepository, 'insert'>;
+
+export type BugReportServiceDependencies = Readonly<{
+  repository?: BugReportRepository;
+  publicIdGenerator?: () => string;
+}>;
+
 function isPublicIdCollision(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const record = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown };
-  if (record.code !== '23505') return false;
-  const constraint = record.constraint ?? record.constraint_name;
-  return constraint === 'bug_reports_public_id_key';
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (typeof current !== 'object') return false;
+    const record = current as {
+      code?: unknown;
+      constraint?: unknown;
+      constraint_name?: unknown;
+      cause?: unknown;
+    };
+    if (
+      record.code === '23505' &&
+      (record.constraint ?? record.constraint_name) === 'bug_reports_public_id_key'
+    ) {
+      return true;
+    }
+    current = record.cause;
+  }
+  return false;
 }
 
-export const createBugReport = async (input: BugReportCreateInput) => {
+export const createBugReport = async (
+  input: BugReportCreateInput,
+  dependencies: BugReportServiceDependencies = {},
+) => {
+  const repository = dependencies.repository ?? bugReportRepository;
   for (let attempt = 0; attempt < MAX_PUBLIC_ID_ATTEMPTS; attempt++) {
-    const report = validateBugReportCreateInput(input);
+    const report = validateBugReportCreateInput(input, {
+      publicIdGenerator: dependencies.publicIdGenerator,
+    });
     try {
-      const stored = await bugReportRepository.insert(report);
+      const stored = await repository.insert(report);
       return { publicId: stored.publicId };
     } catch (error) {
       if (isPublicIdCollision(error) && attempt + 1 < MAX_PUBLIC_ID_ATTEMPTS) {

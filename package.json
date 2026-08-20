@@ -68,7 +68,8 @@
   "dependencies": {
     "@elysiajs/cors": "1.4.2",
     "@elysiajs/cron": "1.4.2",
-    "bullmq": "^5.65.0",
+    "@xai-official/grok": "1.0.5",
+    "bullmq": "5.81.3",
     "date-fns": "^4.1.0",
     "dotenv": "^16.5.0",
     "drizzle-orm": "^0.45.2",
