@@ -13,7 +13,10 @@ function isPublicIdCollision(error: unknown): boolean {
   const record = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown };
   if (record.code !== '23505') return false;
   const constraint = record.constraint ?? record.constraint_name;
-  return constraint === 'bug_reports_public_id_key';
+  return (
+    constraint === 'bug_reports_public_id_key' ||
+    constraint === 'bug_report_retention_backups_public_id_key'
+  );
 }
 
 export const createBugReport = async (input: BugReportCreateInput) => {

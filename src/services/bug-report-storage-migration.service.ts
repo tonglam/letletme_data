@@ -9,6 +9,7 @@ import { logError, logInfo, logWarn } from '../utils/logger';
 
 const BATCH_SIZE = 100;
 const STORAGE_REQUEST_TIMEOUT_MS = 15_000;
+const STORAGE_OBJECT_MISSING_CODE = 'BUG_REPORT_STORAGE_OBJECT_MISSING';
 const LEGACY_BUCKET = 'letletme';
 const LEGACY_PREFIX = `/storage/v1/object/public/${LEGACY_BUCKET}/bug-reports/`;
 
@@ -111,15 +112,29 @@ async function callStorage(
     body,
     signal: AbortSignal.timeout(STORAGE_REQUEST_TIMEOUT_MS),
   });
+  const result = (await response.json().catch(() => null)) as {
+    success?: boolean;
+    locator?: unknown;
+    code?: unknown;
+    objectMissing?: unknown;
+  } | null;
   // DELETE is intentionally idempotent: an earlier attempt may have removed
-  // the object before the database completion marker was committed. Treat a
-  // provider 404 as the desired terminal state so the retry can mark it done.
+  // the object before the database completion marker was committed. Only the
+  // internal endpoint's explicit object-missing contract counts as success;
+  // a generic route 404 is fatal.
   if (!response.ok) {
-    if (operation === 'delete' && response.status === 404) return null;
+    if (
+      operation === 'delete' &&
+      response.status === 404 &&
+      result?.success === true &&
+      result.code === STORAGE_OBJECT_MISSING_CODE &&
+      result.objectMissing === true
+    ) {
+      return null;
+    }
     throw new Error(`Storage ${operation} failed: ${response.status}`);
   }
-  const result = (await response.json()) as { success?: boolean; locator?: unknown };
-  if (!result.success) throw new Error(`Storage ${operation} rejected`);
+  if (result?.success !== true) throw new Error(`Storage ${operation} rejected`);
   return operation === 'migrate' && typeof result.locator === 'string' ? result.locator : null;
 }
 
@@ -180,6 +195,9 @@ export async function runBugReportStorageMigration(
     const pendingDeletes = await repository.listPendingStorageDeletes(limit, pendingCursor);
     if (pendingDeletes.length === 0) break;
     for (const pending of pendingDeletes) {
+      // This source already has a durable target. Whether the remote delete
+      // succeeds or remains retryable, never run /migrate again in this pass.
+      candidateReportsBySource.delete(pending.sourceLocator);
       try {
         await repository.migrateAndDeleteStorageLocator(
           pending.sourceLocator,
@@ -187,7 +205,6 @@ export async function runBugReportStorageMigration(
           () => callStorage('delete', pending.sourceLocator).then(() => undefined),
           options.now,
         );
-        candidateReportsBySource.delete(pending.sourceLocator);
         result.deletedRetried += 1;
       } catch (error) {
         result.failed += 1;

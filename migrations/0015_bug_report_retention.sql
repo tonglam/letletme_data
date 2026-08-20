@@ -29,19 +29,26 @@ CREATE TABLE IF NOT EXISTS ops.bug_report_retention_backups (
   public_id text NOT NULL,
   backed_up_at timestamptz NOT NULL DEFAULT now(),
   snapshot jsonb NOT NULL,
+  screenshot_delete_started_at timestamptz,
   screenshot_deleted_at timestamptz
 );
 
 ALTER TABLE ops.bug_report_retention_backups
+  ADD COLUMN IF NOT EXISTS screenshot_delete_started_at timestamptz,
   ADD COLUMN IF NOT EXISTS screenshot_deleted_at timestamptz;
 
+DROP INDEX IF EXISTS ops.bug_report_retention_backups_public_id_idx;
 DROP INDEX IF EXISTS ops.bug_report_retention_backups_public_id_key;
 
-CREATE INDEX IF NOT EXISTS bug_report_retention_backups_public_id_idx
+CREATE UNIQUE INDEX IF NOT EXISTS bug_report_retention_backups_public_id_key
   ON ops.bug_report_retention_backups (public_id);
 
 CREATE INDEX IF NOT EXISTS bug_report_retention_backups_created_idx
   ON ops.bug_report_retention_backups (backed_up_at DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS bug_report_retention_backups_screenshot_tombstone_idx
+  ON ops.bug_report_retention_backups ((snapshot->>'screenshotUrl'))
+  WHERE screenshot_deleted_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS ops.bug_report_storage_migrations (
   id uuid PRIMARY KEY,

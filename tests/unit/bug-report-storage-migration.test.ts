@@ -64,7 +64,15 @@ describe('bug report storage migration locator gate', () => {
     const originalSecret = process.env.BUG_REPORT_CLEANUP_SECRET;
     process.env.BUG_REPORT_STORAGE_INTERNAL_URL = 'https://web.example.test/internal/storage';
     process.env.BUG_REPORT_CLEANUP_SECRET = 's'.repeat(64);
-    globalThis.fetch = (async () => new Response(null, { status: 404 })) as unknown as typeof fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          code: 'BUG_REPORT_STORAGE_OBJECT_MISSING',
+          objectMissing: true,
+        }),
+        { status: 404, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch;
 
     const repository = {
       listWithScreenshots: async () => [],

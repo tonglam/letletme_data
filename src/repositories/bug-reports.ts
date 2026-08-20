@@ -38,13 +38,6 @@ export type BugReportDeletionClaim = {
   screenshotUrl: string | null;
 };
 
-class ReportNoLongerExpiredError extends Error {
-  constructor() {
-    super('Bug report is no longer expired');
-    this.name = 'ReportNoLongerExpiredError';
-  }
-}
-
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
@@ -73,7 +66,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             .where(
               and(
                 sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrl' = ${report.screenshotUrl}`,
-                isNotNull(bugReportRetentionBackupsInOps.screenshotDeletedAt),
+                or(
+                  isNotNull(bugReportRetentionBackupsInOps.screenshotDeleteStartedAt),
+                  isNotNull(bugReportRetentionBackupsInOps.screenshotDeletedAt),
+                ),
               ),
             )
             .limit(1);
@@ -641,66 +637,135 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     });
   };
 
-  const finalizeClaimedDeletion = async (
+  type BugReportDeletionPreparation =
+    | { kind: 'blocked' }
+    | { kind: 'delete'; screenshotUrl: string }
+    | { kind: 'complete' };
+
+  const scrubRetentionBackup = async (
+    tx: DbOrTransaction,
+    reportId: string,
+    screenshotUrl: string | null,
+  ) => {
+    await tx
+      .update(bugReportRetentionBackupsInOps)
+      .set({ snapshot: screenshotUrl ? { screenshotUrl } : {} })
+      .where(eq(bugReportRetentionBackupsInOps.id, reportId));
+  };
+
+  const prepareClaimedDeletion = async (
     reportId: string,
     now = new Date(),
-    beforeDelete?: () => Promise<boolean>,
-  ): Promise<boolean> => {
+  ): Promise<BugReportDeletionPreparation | null> => {
     const db = await getDbInstance();
-    try {
-      await db.transaction(async (tx) => {
-        const [current] = await tx
-          .select({ id: bugReportsInOps.id })
-          .from(bugReportsInOps)
+    return db.transaction(async (tx) => {
+      const [current] = await tx
+        .select({ id: bugReportsInOps.id })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .for('update')
+        .limit(1);
+      if (!current) return null;
+      const [claim] = await tx
+        .select({
+          id: bugReportRetentionBackupsInOps.id,
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotDeleteStartedAt: bugReportRetentionBackupsInOps.screenshotDeleteStartedAt,
+          screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+        .for('update')
+        .limit(1);
+      if (!claim) return null;
+
+      const screenshotUrl = screenshotUrlFromSnapshot(claim.snapshot);
+      if (screenshotUrl) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
+      }
+
+      if (claim.screenshotDeletedAt || !screenshotUrl) {
+        const [deleted] = await tx
+          .delete(bugReportsInOps)
           .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
-          .for('update')
-          .limit(1);
-        if (!current) throw new ReportNoLongerExpiredError();
-        const [claim] = await tx
-          .select({
-            id: bugReportRetentionBackupsInOps.id,
-            snapshot: bugReportRetentionBackupsInOps.snapshot,
-            screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
-          })
-          .from(bugReportRetentionBackupsInOps)
-          .where(eq(bugReportRetentionBackupsInOps.id, reportId))
-          .limit(1);
-        if (!claim) throw new ReportNoLongerExpiredError();
-        const screenshotUrl = screenshotUrlFromSnapshot(claim.snapshot);
-        if (screenshotUrl) {
-          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
-        }
-        const screenshotDeleted = claim.screenshotDeletedAt
-          ? true
-          : screenshotUrl
-            ? (await beforeDelete?.()) === true
-            : false;
-        if (screenshotDeleted && screenshotUrl && !claim.screenshotDeletedAt) {
+          .returning({ id: bugReportsInOps.id });
+        if (!deleted) return null;
+        await scrubRetentionBackup(tx, reportId, screenshotUrl);
+        return { kind: 'complete' };
+      }
+
+      if (claim.screenshotDeleteStartedAt) return { kind: 'delete', screenshotUrl };
+
+      const [reference] = await tx
+        .select({ id: bugReportsInOps.id })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, screenshotUrl))
+        .limit(1);
+      if (reference) return { kind: 'blocked' };
+
+      await tx
+        .update(bugReportRetentionBackupsInOps)
+        .set({ screenshotDeleteStartedAt: now })
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId));
+      return { kind: 'delete', screenshotUrl };
+    });
+  };
+
+  const completeClaimedDeletion = async (reportId: string, now = new Date()): Promise<boolean> => {
+    const db = await getDbInstance();
+    return db.transaction(async (tx) => {
+      const [current] = await tx
+        .select({ id: bugReportsInOps.id })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .for('update')
+        .limit(1);
+      if (!current) return false;
+      const [claim] = await tx
+        .select({
+          id: bugReportRetentionBackupsInOps.id,
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotDeleteStartedAt: bugReportRetentionBackupsInOps.screenshotDeleteStartedAt,
+          screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+        .for('update')
+        .limit(1);
+      if (!claim) return false;
+      const screenshotUrl = screenshotUrlFromSnapshot(claim.snapshot);
+      if (screenshotUrl) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
+        if (!claim.screenshotDeletedAt && !claim.screenshotDeleteStartedAt) return false;
+        if (!claim.screenshotDeletedAt) {
           await tx
             .update(bugReportRetentionBackupsInOps)
             .set({ screenshotDeletedAt: now })
             .where(eq(bugReportRetentionBackupsInOps.id, reportId));
         }
-        const deleted = await tx
-          .delete(bugReportsInOps)
-          .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
-          .returning({ id: bugReportsInOps.id });
-        if (!deleted[0]) throw new ReportNoLongerExpiredError();
-
-        // The backup is needed only until the live row is gone and any
-        // screenshot delete has been confirmed. Keep a minimal locator
-        // tombstone for insert/race protection, but never retain the report
-        // body, client metadata, entry, or user identifiers indefinitely.
-        await tx
-          .update(bugReportRetentionBackupsInOps)
-          .set({ snapshot: screenshotUrl ? { screenshotUrl } : {} })
-          .where(eq(bugReportRetentionBackupsInOps.id, reportId));
-      });
+      }
+      const [deleted] = await tx
+        .delete(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .returning({ id: bugReportsInOps.id });
+      if (!deleted) return false;
+      await scrubRetentionBackup(tx, reportId, screenshotUrl);
       return true;
-    } catch (error) {
-      if (error instanceof ReportNoLongerExpiredError) return false;
-      throw error;
+    });
+  };
+
+  const finalizeClaimedDeletion = async (
+    reportId: string,
+    now = new Date(),
+    beforeDelete?: () => Promise<boolean>,
+  ): Promise<boolean> => {
+    const prepared = await prepareClaimedDeletion(reportId, now);
+    if (!prepared) return false;
+    if (prepared.kind === 'blocked' || prepared.kind === 'complete') {
+      return prepared.kind === 'complete';
     }
+    if (!beforeDelete || !(await beforeDelete())) return false;
+    return completeClaimedDeletion(reportId, now);
   };
 
   return {

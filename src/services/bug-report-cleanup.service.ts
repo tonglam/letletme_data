@@ -9,6 +9,7 @@ import { logError, logInfo } from '../utils/logger';
 
 const BATCH_SIZE = 100;
 const STORAGE_REQUEST_TIMEOUT_MS = 15_000;
+const STORAGE_OBJECT_MISSING_CODE = 'BUG_REPORT_STORAGE_OBJECT_MISSING';
 
 function storageEndpoint(): string {
   const value = process.env.BUG_REPORT_STORAGE_INTERNAL_URL?.trim();
@@ -38,14 +39,25 @@ async function deleteScreenshot(locator: string): Promise<void> {
     body,
     signal: AbortSignal.timeout(STORAGE_REQUEST_TIMEOUT_MS),
   });
+  const result = (await response.json().catch(() => null)) as {
+    success?: unknown;
+    code?: unknown;
+    objectMissing?: unknown;
+  } | null;
   // A prior cleanup attempt may have removed the object before the row was
-  // deleted. The provider's not-found response is therefore a confirmed
-  // terminal state for this idempotent delete operation.
+  // deleted. Only the internal endpoint's explicit object-missing contract
+  // is a confirmed terminal state; a generic route 404 remains retryable.
   if (!response.ok) {
-    if (response.status === 404) return;
+    if (
+      response.status === 404 &&
+      result?.success === true &&
+      result.code === STORAGE_OBJECT_MISSING_CODE &&
+      result.objectMissing === true
+    ) {
+      return;
+    }
     throw new Error(`Screenshot delete failed: ${response.status}`);
   }
-  const result = (await response.json().catch(() => null)) as { success?: unknown } | null;
   if (result?.success !== true) throw new Error('Screenshot delete was not confirmed');
 }
 
@@ -75,8 +87,6 @@ export async function runBugReportCleanup(now = new Date()): Promise<BugReportCl
           now,
           async () => {
             if (!claim.screenshotUrl) return false;
-            const references = await bugReportRepository.listByScreenshotUrl(claim.screenshotUrl);
-            if (references.length > 0) return false;
             await deleteScreenshot(claim.screenshotUrl);
             return true;
           },
