@@ -12,7 +12,7 @@ import {
   type BugReportInsert,
   type BugReportStatus,
 } from '../domain/bug-report';
-import { DatabaseError } from '../utils/errors';
+import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError } from '../utils/logger';
 
 export type StoredBugReport = {
@@ -54,6 +54,8 @@ export type ExpiredBugReportScreenshot = {
  */
 export const hashBugReportScreenshotLocator = (locator: string): string =>
   createHash('sha256').update(locator, 'utf8').digest('hex');
+
+const SCRUBBED_BUG_REPORT_BODY = 'Screenshot cleanup pending.';
 
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
@@ -398,6 +400,26 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .where(eq(bugReportRetentionBackupsInOps.id, current.id))
         .for('update')
         .limit(1);
+
+      // Once cleanup has scrubbed the report body, reopening it would create
+      // a misleading live report with irreversible data loss and could also
+      // detach the locator reservation from its deletion retry. Keep the
+      // terminal state idempotent and reject any attempted transition.
+      if (current.body === SCRUBBED_BUG_REPORT_BODY) {
+        if (status !== current.status) {
+          throw new ConflictError(
+            'Expired bug report has been scrubbed and cannot change status.',
+            'BUG_REPORT_RETENTION_FINALIZED',
+          );
+        }
+        return {
+          publicId: current.publicId,
+          status: current.status,
+          closedAt: current.closedAt,
+          expiresAt: current.expiresAt,
+        };
+      }
+
       let screenshotUrl = current.screenshotUrl;
       let removeClaim = false;
       const claimedLocator = claim ? screenshotUrlFromSnapshot(claim.snapshot) : null;
@@ -912,7 +934,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             // Keep only the minimum row needed to drive the retry cursor;
             // report text, identity, entry, and diagnostics must not remain
             // past their retention deadline while storage is failing.
-            body: 'Screenshot cleanup pending.',
+            body: SCRUBBED_BUG_REPORT_BODY,
             userId: null,
             entryId: null,
             clientMeta: {},

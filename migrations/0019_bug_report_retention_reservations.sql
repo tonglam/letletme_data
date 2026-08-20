@@ -24,6 +24,10 @@ CREATE INDEX IF NOT EXISTS bug_report_retention_backups_private_key_idx
   ON ops.bug_report_retention_backups (screenshot_object_key)
   WHERE screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL;
 
+CREATE INDEX IF NOT EXISTS bug_report_retention_backups_screenshot_hash_idx
+  ON ops.bug_report_retention_backups ((snapshot->>'screenshotUrlHash'))
+  WHERE snapshot->>'screenshotUrlHash' IS NOT NULL;
+
 DROP INDEX IF EXISTS ops.bug_report_retention_backups_screenshot_tombstone_idx;
 
 CREATE INDEX IF NOT EXISTS bug_report_retention_backups_screenshot_tombstone_idx

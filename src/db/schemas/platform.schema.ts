@@ -453,6 +453,9 @@ export const bugReportRetentionBackupsInOps = ops.table(
     index('bug_report_retention_backups_private_key_idx')
       .on(table.screenshotObjectKey)
       .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
+    index('bug_report_retention_backups_screenshot_hash_idx')
+      .using('btree', sql`((snapshot->>'screenshotUrlHash'))`)
+      .where(sql`(snapshot->>'screenshotUrlHash') IS NOT NULL`),
     uniqueIndex('bug_report_retention_backups_submission_id_key')
       .on(table.submissionId)
       .where(sql`submission_id IS NOT NULL`),
