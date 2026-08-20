@@ -160,6 +160,24 @@ export function isProductionEnvironment(): boolean {
   return process.env.NODE_ENV === 'production';
 }
 
+export function isBugReportScreenshotStorageConfigured(config: AppConfig): boolean {
+  return (
+    config.BUG_REPORT_SCREENSHOT_STORAGE_ENABLED === true &&
+    Boolean(config.BUG_REPORT_SCREENSHOT_SUPABASE_URL) &&
+    Boolean(config.BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY) &&
+    config.BUG_REPORT_SCREENSHOT_BUCKET === 'bug-report-screenshots' &&
+    config.BUG_REPORT_SCREENSHOT_RETENTION_DAYS === 90
+  );
+}
+
+export function assertBugReportScreenshotStorageConfigured(config: AppConfig): void {
+  if (!isBugReportScreenshotStorageConfigured(config)) {
+    throw new Error(
+      'Production bug-report screenshot storage must be enabled with the private bucket and 90-day retention',
+    );
+  }
+}
+
 function endpointIdentity(endpoint: RedisEndpointConfig): string {
   return `${endpoint.host.trim().toLowerCase()}:${endpoint.port}/${endpoint.db}`;
 }
@@ -280,6 +298,9 @@ export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
   try {
     const conf = getConfig();
     resolveAuthConfig(conf);
+    if (conf.NODE_ENV === 'production') {
+      assertBugReportScreenshotStorageConfigured(conf);
+    }
     logInfo('[env] OK', {
       PORT: conf.PORT,
       DATABASE_URL: conf.DATABASE_URL ? 'set' : 'missing',

@@ -119,4 +119,133 @@ describe('bug-report screenshot retention', () => {
     );
     await expect(objectStorage.remove(key)).resolves.toBe('missing');
   });
+
+  it('shares the 1,000-delete budget across database failures and orphan cleanup', async () => {
+    let removeCalls = 0;
+    const storage: BugReportScreenshotStorage = {
+      async list() {
+        return [
+          {
+            name: 'bug-reports/650e8400-e29b-41d4-a716-446655440000.jpg',
+            created_at: '2026-01-01T00:00:00.000Z',
+          },
+        ];
+      },
+      async remove() {
+        removeCalls += 1;
+        throw new Error('storage unavailable');
+      },
+    };
+    const result = await runBugReportScreenshotRetention({
+      now: new Date('2026-08-20T00:00:00.000Z'),
+      config,
+      storage,
+      repository: {
+        async listExpiredScreenshots(_cutoff, _limit, offset) {
+          const start = offset ?? 0;
+          if (start >= 1_000) return [];
+          return Array.from({ length: 100 }, (_, index) => ({
+            id: `report-${start + index}`,
+            screenshotObjectKey: `bug-reports/${String(start + index).padStart(8, '0')}-e29b-41d4-a716-446655440000.jpg`,
+            createdAt: new Date('2026-01-01'),
+          }));
+        },
+        async listActiveScreenshotKeys() {
+          return [];
+        },
+        async markScreenshotDeleted() {
+          throw new Error('should not mark failed deletes');
+        },
+      },
+    });
+
+    expect(result.deleteAttempts).toBe(1_000);
+    expect(result.failed).toBe(1_000);
+    expect(result.orphanScanned).toBe(0);
+    expect(removeCalls).toBe(1_000);
+  });
+
+  it('counts successful, missing, and failed deletes in the same budget', async () => {
+    const removed: string[] = [];
+    let listCalls = 0;
+    const orphanKey = 'bug-reports/750e8400-e29b-41d4-a716-446655440000.gif';
+    const storage: BugReportScreenshotStorage = {
+      async list() {
+        listCalls += 1;
+        return listCalls === 1 ? [] : [{ name: orphanKey, created_at: '2026-01-01T00:00:00.000Z' }];
+      },
+      async remove(objectKey) {
+        removed.push(objectKey);
+        if (objectKey.endsWith('.png')) throw new Error('temporary failure');
+        if (objectKey.endsWith('.jpg')) return 'missing';
+        return 'deleted';
+      },
+    };
+    const result = await runBugReportScreenshotRetention({
+      now: new Date('2026-08-20T00:00:00.000Z'),
+      config,
+      storage,
+      repository: {
+        async listExpiredScreenshots() {
+          return [
+            {
+              id: 'failed',
+              screenshotObjectKey: 'bug-reports/failed.png',
+              createdAt: new Date('2026-01-01'),
+            },
+            {
+              id: 'missing',
+              screenshotObjectKey: 'bug-reports/missing.jpg',
+              createdAt: new Date('2026-01-01'),
+            },
+          ];
+        },
+        async listActiveScreenshotKeys() {
+          return [];
+        },
+        async markScreenshotDeleted() {},
+      },
+    });
+
+    expect(result.deleteAttempts).toBe(3);
+    expect(result.failed).toBe(1);
+    expect(result.missing).toBe(1);
+    expect(result.orphanDeleted).toBe(1);
+    expect(removed).toEqual(['bug-reports/failed.png', 'bug-reports/missing.jpg', orphanKey]);
+  });
+
+  it('treats an orphan created exactly at the 90-day cutoff as eligible', async () => {
+    const cutoffObject = 'bug-reports/850e8400-e29b-41d4-a716-446655440000.webp';
+    let listCalls = 0;
+    const removed: string[] = [];
+    const storage: BugReportScreenshotStorage = {
+      async list() {
+        listCalls += 1;
+        return listCalls === 1
+          ? []
+          : [{ name: cutoffObject, created_at: '2026-05-22T00:00:00.000Z' }];
+      },
+      async remove(objectKey) {
+        removed.push(objectKey);
+        return 'deleted';
+      },
+    };
+    const result = await runBugReportScreenshotRetention({
+      now: new Date('2026-08-20T00:00:00.000Z'),
+      config,
+      storage,
+      repository: {
+        async listExpiredScreenshots() {
+          return [];
+        },
+        async listActiveScreenshotKeys() {
+          return [];
+        },
+        async markScreenshotDeleted() {},
+      },
+    });
+
+    expect(result.orphanDeleted).toBe(1);
+    expect(removed).toEqual([cutoffObject]);
+  });
 });

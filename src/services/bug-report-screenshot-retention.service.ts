@@ -30,6 +30,7 @@ export type BugReportScreenshotRetentionResult = {
   disabled: boolean;
   cutoff: Date;
   databaseScanned: number;
+  deleteAttempts: number;
   deleted: number;
   missing: number;
   orphanScanned: number;
@@ -136,6 +137,7 @@ export async function runBugReportScreenshotRetention(
     disabled: config.BUG_REPORT_SCREENSHOT_STORAGE_ENABLED !== true,
     cutoff,
     databaseScanned: 0,
+    deleteAttempts: 0,
     deleted: 0,
     missing: 0,
     orphanScanned: 0,
@@ -172,8 +174,9 @@ export async function runBugReportScreenshotRetention(
   }
 
   for (const report of expired) {
-    if (baseResult.deleted + baseResult.missing >= RETENTION_MAX_DELETES) break;
+    if (baseResult.deleteAttempts >= RETENTION_MAX_DELETES) break;
     try {
+      baseResult.deleteAttempts += 1;
       const outcome = await storage.remove(report.screenshotObjectKey);
       await repository.markScreenshotDeleted(report.id, now);
       if (outcome === 'missing') baseResult.missing += 1;
@@ -188,8 +191,7 @@ export async function runBugReportScreenshotRetention(
     }
   }
 
-  const orphanBudget = RETENTION_MAX_DELETES - baseResult.deleted - baseResult.missing;
-  if (orphanBudget > 0 && protectedScanComplete) {
+  if (baseResult.deleteAttempts < RETENTION_MAX_DELETES && protectedScanComplete) {
     const orphanCandidates: string[] = [];
     for (let offset = 0; offset < RETENTION_MAX_DELETES; offset += STORAGE_SCAN_PAGE_SIZE) {
       const page = await storage.list('bug-reports/', STORAGE_SCAN_PAGE_SIZE, offset);
@@ -204,7 +206,7 @@ export async function runBugReportScreenshotRetention(
           !createdAt ||
           createdAt > cutoff ||
           protectedKeys.has(objectKey) ||
-          orphanCandidates.length >= orphanBudget
+          orphanCandidates.length >= RETENTION_MAX_DELETES
         ) {
           continue;
         }
@@ -214,7 +216,9 @@ export async function runBugReportScreenshotRetention(
         break;
     }
     for (const objectKey of orphanCandidates) {
+      if (baseResult.deleteAttempts >= RETENTION_MAX_DELETES) break;
       try {
+        baseResult.deleteAttempts += 1;
         await storage.remove(objectKey);
         baseResult.orphanDeleted += 1;
       } catch (error) {
@@ -225,13 +229,14 @@ export async function runBugReportScreenshotRetention(
         });
       }
     }
-  } else if (orphanBudget > 0) {
+  } else if (baseResult.deleteAttempts < RETENTION_MAX_DELETES) {
     logWarn('Skipping orphan screenshot scan because active database keys exceeded the scan cap');
   }
 
   logInfo('Bug-report screenshot retention completed', {
     cutoff: cutoff.toISOString(),
     databaseScanned: baseResult.databaseScanned,
+    deleteAttempts: baseResult.deleteAttempts,
     deleted: baseResult.deleted,
     missing: baseResult.missing,
     orphanScanned: baseResult.orphanScanned,
