@@ -379,6 +379,9 @@ export const bugReportsInOps = ops.table(
     screenshotUrl: text('screenshot_url'),
     clientMeta: jsonb('client_meta').default({}).notNull(),
     status: text().default('open').notNull(),
+    submissionId: uuid('submission_id'),
+    screenshotObjectKey: text('screenshot_object_key'),
+    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
     closedAt: timestamp('closed_at', { withTimezone: true, mode: 'date' }),
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
   },
@@ -432,14 +435,14 @@ export const bugReportRetentionBackupsInOps = ops.table(
       .defaultNow()
       .notNull(),
     snapshot: jsonb().notNull(),
-    submissionId: uuid('submission_id'),
     screenshotDeleteStartedAt: timestamp('screenshot_delete_started_at', {
       withTimezone: true,
       mode: 'date',
     }),
+    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
     screenshotObjectKey: text('screenshot_object_key'),
     screenshotCreatedAt: timestamp('screenshot_created_at', { withTimezone: true, mode: 'date' }),
-    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    submissionId: uuid('submission_id'),
   },
   (table) => [
     uniqueIndex('bug_report_retention_backups_public_id_key').on(table.publicId),
