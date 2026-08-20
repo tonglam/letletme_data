@@ -22,7 +22,10 @@ ALTER TABLE ops.bug_reports
     CHECK (
         screenshot_object_key IS NULL OR (
             submission_id IS NOT NULL AND
-            screenshot_object_key ~* '^bug-reports/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(jpg|png|webp|gif)$'
+            COALESCE(
+                lower(substring(screenshot_object_key FROM '^bug-reports/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(jpg|png|webp|gif)$')) = lower(submission_id::text),
+                false
+            )
         )
     );
 

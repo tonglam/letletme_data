@@ -89,6 +89,17 @@ describe('bug report validation', () => {
     ).toThrow(ValidationError);
   });
 
+  it('rejects a screenshot object key owned by another submission', () => {
+    expect(() =>
+      validateBugReportCreateInput({
+        source: 'website',
+        body: '截图对象必须绑定当前提交',
+        submissionId: '550e8400-e29b-41d4-a716-446655440000',
+        screenshotObjectKey: 'bug-reports/650e8400-e29b-41d4-a716-446655440000.png',
+      }),
+    ).toThrow(ValidationError);
+  });
+
   it('creates public ids in the LL-XXXXXX shape', () => {
     expect(createPublicBugReportId()).toMatch(/^LL-[0-9A-F]{6}$/);
   });

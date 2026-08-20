@@ -8,6 +8,8 @@ const STORAGE_SCAN_PAGE_SIZE = 100;
 const STORAGE_OBJECT_KEY_PATTERN =
   /^bug-reports\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp|gif)$/i;
 
+class StorageFatalError extends Error {}
+
 function normalizeStorageObjectKey(prefix: string, name: string): string {
   const normalizedPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
   return name.startsWith(normalizedPrefix) ? name : `${normalizedPrefix}${name}`;
@@ -92,7 +94,15 @@ export function createBugReportScreenshotStorage(
         method: 'DELETE',
         headers,
       });
-      if (response.status === 404) return 'missing';
+      if (response.status === 404) {
+        const responseBody = (await response.clone().text()).toLowerCase();
+        const objectMissing =
+          /object[\s_-]+not[\s_-]+found/.test(responseBody) ||
+          /["']error["']\s*:\s*["']not_found["']/.test(responseBody);
+        const bucketMissing = /bucket[\s_-]+not[\s_-]+found/.test(responseBody);
+        if (objectMissing && !bucketMissing) return 'missing';
+        throw new StorageFatalError('Storage delete returned an ambiguous not-found response');
+      }
       if (!response.ok) throw new Error(`Storage delete failed with ${response.status}`);
       return 'deleted';
     },
@@ -139,6 +149,9 @@ export async function runBugReportScreenshotRetention(
 
   const storage = options.storage ?? createBugReportScreenshotStorage(config);
   const repository = options.repository ?? bugReportRepository;
+  // Verify bucket/endpoint availability before mutating any database rows. A
+  // missing bucket must not be mistaken for an absent object and clear refs.
+  await storage.list('bug-reports/', 1, 0);
   const expired: ExpiredBugReportScreenshot[] = [];
   for (let offset = 0; offset < RETENTION_MAX_DELETES; offset += RETENTION_BATCH_SIZE) {
     const page = await repository.listExpiredScreenshots(cutoff, RETENTION_BATCH_SIZE, offset);
@@ -166,6 +179,7 @@ export async function runBugReportScreenshotRetention(
       if (outcome === 'missing') baseResult.missing += 1;
       else baseResult.deleted += 1;
     } catch (error) {
+      if (error instanceof StorageFatalError) throw error;
       baseResult.failed += 1;
       logWarn('Bug-report screenshot deletion failed; will retry', {
         id: report.id,
@@ -204,6 +218,7 @@ export async function runBugReportScreenshotRetention(
         await storage.remove(objectKey);
         baseResult.orphanDeleted += 1;
       } catch (error) {
+        if (error instanceof StorageFatalError) throw error;
         baseResult.failed += 1;
         logWarn('Orphan bug-report screenshot deletion failed; will retry', {
           error: error instanceof Error ? error.name : 'unknown',

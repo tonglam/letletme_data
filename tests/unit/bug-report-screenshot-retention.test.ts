@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  createBugReportScreenshotStorage,
   runBugReportScreenshotRetention,
   type BugReportScreenshotStorage,
 } from '../../src/services/bug-report-screenshot-retention.service';
@@ -94,5 +95,28 @@ describe('bug-report screenshot retention', () => {
     });
     expect(result.disabled).toBe(true);
     expect(calls).toBe(0);
+  });
+
+  it('does not classify a bucket-level 404 as a missing object', async () => {
+    const storage = createBugReportScreenshotStorage(
+      config,
+      (async () =>
+        new Response(JSON.stringify({ message: 'Bucket not found' }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        })) as unknown as typeof fetch,
+    );
+
+    await expect(storage.remove(key)).rejects.toThrow(/ambiguous not-found/);
+
+    const objectStorage = createBugReportScreenshotStorage(
+      config,
+      (async () =>
+        new Response(JSON.stringify({ error: 'not_found', message: 'Object not found' }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        })) as unknown as typeof fetch,
+    );
+    await expect(objectStorage.remove(key)).resolves.toBe('missing');
   });
 });

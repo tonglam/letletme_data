@@ -12,7 +12,7 @@ const PG_INT_MAX = 2_147_483_647;
 const SUBMISSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SCREENSHOT_OBJECT_KEY_PATTERN =
-  /^bug-reports\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp|gif)$/i;
+  /^bug-reports\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|png|webp|gif)$/i;
 
 const codePointLength = (value: string): number => [...value].length;
 
@@ -73,7 +73,10 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
   }
 
   const screenshotObjectKey = input.screenshotObjectKey?.trim() || null;
-  if (screenshotObjectKey && !SCREENSHOT_OBJECT_KEY_PATTERN.test(screenshotObjectKey)) {
+  const screenshotObjectKeyMatch = screenshotObjectKey
+    ? SCREENSHOT_OBJECT_KEY_PATTERN.exec(screenshotObjectKey)
+    : null;
+  if (screenshotObjectKey && !screenshotObjectKeyMatch) {
     throw new ValidationError('Invalid screenshot object key.');
   }
 
@@ -83,6 +86,13 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
   }
   if (screenshotObjectKey && !submissionId) {
     throw new ValidationError('Screenshot object key requires a submission id.');
+  }
+  if (
+    screenshotObjectKey &&
+    submissionId &&
+    screenshotObjectKeyMatch?.[1].toLowerCase() !== submissionId.toLowerCase()
+  ) {
+    throw new ValidationError('Screenshot object key does not belong to the submission.');
   }
   if (screenshotUrl && !screenshotUrl.startsWith('https://')) {
     throw new ValidationError('Screenshot URL must be https.');
