@@ -2898,6 +2898,14 @@ export const entriesInCompetition = competition.table(
       table.entryId.asc().nullsLast(),
       table.seasonId.desc().nullsFirst(),
     ),
+    index('entries_entry_name_trgm_idx').using(
+      'gin',
+      sql`${table.entryName} extensions.gin_trgm_ops`,
+    ),
+    index('entries_player_name_trgm_idx').using(
+      'gin',
+      sql`${table.playerName} extensions.gin_trgm_ops`,
+    ),
     foreignKey({
       columns: [table.seasonId],
       foreignColumns: [seasonsInFpl.seasonId],

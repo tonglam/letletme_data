@@ -156,6 +156,7 @@ jobs:
           SCHEMA_EXPORT_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/schema_export_test
         run: |
           bun -e 'import postgres from "postgres"; const db = postgres(process.env.DATABASE_URL, { max: 1 }); await db.unsafe("CREATE DATABASE schema_export_test"); await db.end();'
+          bun -e 'import postgres from "postgres"; const db = postgres(process.env.SCHEMA_EXPORT_DATABASE_URL, { max: 1 }); await db.unsafe("CREATE SCHEMA IF NOT EXISTS extensions"); await db.unsafe("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA extensions"); await db.end();'
           DATABASE_URL="$SCHEMA_EXPORT_DATABASE_URL" bun run db:export > /tmp/schema-export.sql
           bun -e 'import postgres from "postgres"; const db = postgres(process.env.SCHEMA_EXPORT_DATABASE_URL, { max: 1 }); const ddl = await Bun.file("/tmp/schema-export.sql").text(); await db.unsafe(ddl); await db.end();'
 
