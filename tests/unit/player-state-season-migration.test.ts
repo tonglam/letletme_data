@@ -41,6 +41,10 @@ describe('Player State season read model', () => {
     expect(timelineMigration).toContain('fpl_starts integer NOT NULL DEFAULT 0');
     expect(timelineMigration).toContain('fpl_clean_sheets integer NOT NULL DEFAULT 0');
     expect(timelineMigration).toContain('fpl_saves integer NOT NULL DEFAULT 0');
+    expect(timelineMigration).not.toContain('fpl_total_points >= 0');
+    expect(timelineMigration).toContain('fpl_starts >= 0');
+    expect(timelineMigration).toContain('fpl_clean_sheets >= 0');
+    expect(timelineMigration).toContain('fpl_saves >= 0');
     expect(timelineMigration).toContain('refresh_player_state_season_base');
     expect(timelineMigration).toContain('summary.total_points');
     expect(timelineMigration).toContain('summary.gameweeks_started');

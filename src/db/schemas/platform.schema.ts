@@ -3828,7 +3828,7 @@ export const playerStateSeasonRowsInReporting = reporting.table(
     ),
     check(
       'player_state_season_rows_fpl_summary_counts_nonnegative',
-      sql`(fpl_total_points >= 0) AND (fpl_starts >= 0) AND (fpl_clean_sheets >= 0) AND (fpl_saves >= 0)`,
+      sql`(fpl_starts >= 0) AND (fpl_clean_sheets >= 0) AND (fpl_saves >= 0)`,
     ),
     check(
       'player_state_season_rows_mapping_check',

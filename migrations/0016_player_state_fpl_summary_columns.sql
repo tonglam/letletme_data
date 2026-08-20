@@ -13,8 +13,7 @@ ALTER TABLE reporting.player_state_season_rows
 ALTER TABLE reporting.player_state_season_rows
   ADD CONSTRAINT player_state_season_rows_fpl_summary_counts_nonnegative
   CHECK (
-    fpl_total_points >= 0
-    AND fpl_starts >= 0
+    fpl_starts >= 0
     AND fpl_clean_sheets >= 0
     AND fpl_saves >= 0
   );
