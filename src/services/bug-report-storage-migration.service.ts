@@ -221,21 +221,17 @@ export async function runBugReportStorageMigration(
 
   for (const [sourceLocator, report] of candidateReportsBySource) {
     try {
-      const migratedLocator = await callStorage('migrate', sourceLocator);
-      if (!migratedLocator) throw new Error('Storage migration returned no locator');
-      const migration = await repository.recordStorageMigration(
-        report.publicId,
+      const migrated = await repository.migrateAndDeleteStorageLocator(
         sourceLocator,
-        migratedLocator,
-      );
-      const targetLocator = migration?.targetLocator ?? migratedLocator;
-      await repository.migrateAndDeleteStorageLocator(
-        sourceLocator,
-        targetLocator,
+        async () => {
+          const migratedLocator = await callStorage('migrate', sourceLocator);
+          if (!migratedLocator) throw new Error('Storage migration returned no locator');
+          return migratedLocator;
+        },
         () => callStorage('delete', sourceLocator).then(() => undefined),
         options.now,
       );
-      result.migrated += report.count;
+      if (migrated) result.migrated += report.count;
     } catch (error) {
       result.failed += 1;
       logError('Bug report storage migration item failed', error, {

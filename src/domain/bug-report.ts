@@ -66,7 +66,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const redactDiagnosticText = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
   const cleaned = value
-    .replace(/https?:\/\/[^\s]+/gi, '[url]')
+    // Stop at JSON delimiters so a URL immediately before a sensitive field
+    // cannot consume the field name and leave its value behind.
+    .replace(/https?:\/\/[^\s"'<>，、；;},\]]+/gi, '[url]')
     .replace(
       /(["']?)\b(?:authorization|token)\b\1\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9_-]*\s+)?(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi,
       '[redacted]',

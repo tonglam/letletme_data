@@ -614,10 +614,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
 
   const migrateAndDeleteStorageLocator = async (
     sourceLocator: string,
-    targetLocator: string,
+    targetLocator: string | (() => Promise<string>),
     deleteSource: () => Promise<void>,
     now = new Date(),
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const db = await getDbInstance();
     const prepared = await db.transaction(async (tx) => {
       // Status, retention, and insertion paths all fence a report public id
@@ -629,10 +629,42 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .from(bugReportsInOps)
         .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
         .orderBy(asc(bugReportsInOps.publicId));
+      const lockedPublicIds = new Set<string>();
       for (const report of affectedReports) {
         await lockPublicId(tx, report.publicId);
+        lockedPublicIds.add(report.publicId);
+      }
+      // Pick up reports that committed after the inventory scan but before the
+      // locator fence. Lock them in the same public-id-before-locator order;
+      // any later insert must wait on the locator and will be rejected after
+      // this migration commits.
+      const preSourceReports = await tx
+        .select({ publicId: bugReportsInOps.publicId })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+        .orderBy(asc(bugReportsInOps.publicId));
+      for (const report of preSourceReports) {
+        if (lockedPublicIds.has(report.publicId)) continue;
+        await lockPublicId(tx, report.publicId);
+        lockedPublicIds.add(report.publicId);
       }
       await lockScreenshotLocators(tx, [sourceLocator]);
+      // Re-read after every shared fence is held. Cleanup may have removed the
+      // row that was visible in the initial inventory scan while migration was
+      // waiting on its public-id lock; never create a target for that stale
+      // candidate.
+      const liveReports = await tx
+        .select({ publicId: bugReportsInOps.publicId })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+        .orderBy(asc(bugReportsInOps.publicId));
+      if (
+        typeof targetLocator === 'function' &&
+        (liveReports.length === 0 ||
+          liveReports.some((report) => !lockedPublicIds.has(report.publicId)))
+      ) {
+        return false;
+      }
       const [migration] = await tx
         .select({
           id: bugReportStorageMigrationsInOps.id,
@@ -644,15 +676,62 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
         .for('update')
         .limit(1);
-      if (!migration) throw new DatabaseError('Storage migration record is missing');
-      if (migration.targetLocator !== targetLocator) {
+      if (migration?.deletedAt) return false;
+      if (!migration && liveReports.length === 0) {
+        throw new DatabaseError('Storage migration record is missing');
+      }
+
+      // For a first attempt, keep the public-id and source-locator fences held
+      // while the internal endpoint copies the object. A retry with an
+      // existing migration record reuses its durable target and never copies
+      // the source a second time.
+      let effectiveTargetLocator = migration?.targetLocator;
+      if (!effectiveTargetLocator) {
+        effectiveTargetLocator =
+          typeof targetLocator === 'function' ? await targetLocator() : targetLocator;
+        if (!/^https:\/\//i.test(effectiveTargetLocator)) {
+          throw new DatabaseError('Storage migration returned an invalid target locator');
+        }
+      } else if (typeof targetLocator === 'string' && migration.targetLocator !== targetLocator) {
         throw new DatabaseError('Storage migration target locator conflict');
       }
-      if (migration.deletedAt) return false;
+
+      let migrationId = migration?.id;
+      if (!migrationId) {
+        const [created] = await tx
+          .insert(bugReportStorageMigrationsInOps)
+          .values({
+            id: randomUUID(),
+            publicId: liveReports[0]?.publicId ?? affectedReports[0]?.publicId ?? 'unknown',
+            sourceLocator,
+            targetLocator: effectiveTargetLocator,
+          })
+          .onConflictDoNothing({ target: bugReportStorageMigrationsInOps.sourceLocator })
+          .returning({ id: bugReportStorageMigrationsInOps.id });
+        if (created) {
+          migrationId = created.id;
+        } else {
+          const [existing] = await tx
+            .select({
+              id: bugReportStorageMigrationsInOps.id,
+              targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+              deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+            })
+            .from(bugReportStorageMigrationsInOps)
+            .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
+            .for('update')
+            .limit(1);
+          if (!existing || existing.deletedAt) return false;
+          if (existing.targetLocator !== effectiveTargetLocator) {
+            throw new DatabaseError('Storage migration target locator conflict');
+          }
+          migrationId = existing.id;
+        }
+      }
 
       await tx
         .update(bugReportsInOps)
-        .set({ screenshotUrl: targetLocator })
+        .set({ screenshotUrl: effectiveTargetLocator })
         .where(eq(bugReportsInOps.screenshotUrl, sourceLocator));
       const remaining = await tx
         .select({ id: bugReportsInOps.id })
@@ -663,16 +742,16 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         throw new DatabaseError('Storage migration compare-and-swap lost');
       }
 
-      // Commit a durable pending-delete fence before the remote call. Inserts
-      // reject both this state and the final deleted marker, while a failed or
-      // interrupted remote call remains visible to the retry scan.
+      // Commit the target rewrite and durable pending-delete fence together.
+      // A failed or interrupted remote delete remains visible to the retry
+      // scan, while cleanup cannot claim the old locator in the gap.
       await tx
         .update(bugReportStorageMigrationsInOps)
-        .set({ deleteStartedAt: migration.deleteStartedAt ?? now })
-        .where(eq(bugReportStorageMigrationsInOps.id, migration.id));
+        .set({ deleteStartedAt: migration?.deleteStartedAt ?? now })
+        .where(eq(bugReportStorageMigrationsInOps.id, migrationId));
       return true;
     });
-    if (!prepared) return;
+    if (!prepared) return false;
 
     await deleteSource();
 
@@ -701,6 +780,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .returning({ id: bugReportStorageMigrationsInOps.id });
       if (!marked) throw new DatabaseError('Storage migration completion marker was lost');
     });
+    return true;
   };
 
   const recordStorageMigration = async (

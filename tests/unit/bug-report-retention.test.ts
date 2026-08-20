@@ -79,6 +79,19 @@ describe('bug report retention and diagnostics', () => {
     expect(quotedMessage).not.toContain('super-secret');
     expect(quotedMessage).not.toContain('abc');
     expect(quotedMessage).toContain('[redacted]');
+
+    const urlBeforeQuotedSecret = sanitizeBugReportClientMeta({
+      operations: [
+        {
+          operation: 'submit',
+          message: '{"url":"https://example.test","Authorization":"Bearer super-secret"}',
+        },
+      ],
+    });
+    const urlBeforeQuotedSecretMessage =
+      (urlBeforeQuotedSecret.operations as Array<{ message?: string }>)[0]?.message ?? '';
+    expect(urlBeforeQuotedSecretMessage).not.toContain('super-secret');
+    expect(urlBeforeQuotedSecretMessage).toContain('[url]');
   });
 
   test('retention tombstones hash completed screenshot locators', () => {
