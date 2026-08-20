@@ -398,6 +398,9 @@ export const bugReportsInOps = ops.table(
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
     uniqueIndex('bug_reports_submission_id_key').on(table.submissionId),
+    uniqueIndex('bug_reports_screenshot_object_key_key')
+      .on(table.screenshotObjectKey)
+      .where(sql`screenshot_object_key IS NOT NULL`),
     index('bug_reports_created_idx').on(table.createdAt.desc()),
     index('bug_reports_submission_request_hash_idx')
       .on(table.submissionRequestHash)
