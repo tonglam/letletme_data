@@ -221,17 +221,31 @@ export async function runBugReportStorageMigration(
 
   for (const [sourceLocator, report] of candidateReportsBySource) {
     try {
-      const migrated = await repository.migrateAndDeleteStorageLocator(
-        sourceLocator,
-        async () => {
-          const migratedLocator = await callStorage('migrate', sourceLocator);
-          if (!migratedLocator) throw new Error('Storage migration returned no locator');
-          return migratedLocator;
-        },
-        () => callStorage('delete', sourceLocator).then(() => undefined),
-        options.now,
-      );
+      const migrateCandidate = () =>
+        repository.migrateAndDeleteStorageLocator(
+          sourceLocator,
+          async () => {
+            const migratedLocator = await callStorage('migrate', sourceLocator);
+            if (!migratedLocator) throw new Error('Storage migration returned no locator');
+            return migratedLocator;
+          },
+          () => callStorage('delete', sourceLocator).then(() => undefined),
+          options.now,
+        );
+      let migrated = await migrateCandidate();
+      if (!migrated) {
+        // A report can commit after the inventory scan but before the
+        // repository's second fence. Retry once so the apply command cannot
+        // silently leave a live legacy locator without a durable migration.
+        migrated = await migrateCandidate();
+      }
       if (migrated) result.migrated += report.count;
+      else if ((await repository.listByScreenshotUrl(sourceLocator)).length > 0) {
+        result.failed += 1;
+        logWarn('Bug report storage migration candidate remained live after retry', {
+          code: 'BUG_REPORT_STORAGE_MIGRATION_RACE',
+        });
+      }
     } catch (error) {
       result.failed += 1;
       logError('Bug report storage migration item failed', error, {
