@@ -18,6 +18,7 @@ import {
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { seasonRepository } from '../repositories/seasons';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { logError, logInfo } from '../utils/logger';
 import { runWithFplRequestMetrics } from '../utils/fpl-request-metrics';
@@ -25,6 +26,7 @@ import { runTrackedJob } from '../utils/job-run-logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { getQueueConnection } from '../utils/queue';
+import { isTerminalJobFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
 
 const STUCK_PROCESSING_CUTOFF_MINUTES = Number(
@@ -213,6 +215,58 @@ export function createTournamentSetupWorker(): WorkerRuntime {
       tournamentId: job?.data.tournamentId,
     });
     if (job) {
+      void (async () => {
+        const season = await seasonRepository.findByCode(job.data.seasonCode);
+        if (!season) return;
+        const terminal = isTerminalJobFailure(job, err);
+        const errorCode =
+          err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
+            ? err.code
+            : err instanceof Error
+              ? err.name
+              : 'SETUP_FAILED';
+        await withMutationConflictGuard(
+          {
+            queueName: tournamentSetupQueueName,
+            jobName: 'persist-failed-state',
+            jobId: String(job.id),
+            tournamentId: job.data.tournamentId,
+            scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
+          },
+          async () => {
+            const changed = terminal
+              ? await tournamentInfoRepository.markSetupResultIfAttempt(
+                  season,
+                  job.data.tournamentId,
+                  'failed',
+                  'Tournament setup did not complete after automatic retries.',
+                  0,
+                  undefined,
+                  'SETUP_AUTOMATIC_RETRIES_EXHAUSTED',
+                  job.attemptsMade,
+                )
+              : await tournamentInfoRepository.markSetupRetryingIfAttempt(
+                  season,
+                  job.data.tournamentId,
+                  errorCode,
+                  new Date(60_000 * 2 ** Math.max(0, job.attemptsMade - 1) + Date.now()),
+                  job.attemptsMade,
+                );
+            if (!changed) {
+              logInfo('Ignoring stale tournament setup failed-state callback', {
+                tournamentId: job.data.tournamentId,
+                jobId: job.id,
+                attempt: job.attemptsMade,
+              });
+            }
+          },
+        );
+      })().catch((stateError) => {
+        logError('Failed to persist tournament setup retry state', stateError, {
+          tournamentId: job.data.tournamentId,
+          jobId: job.id,
+        });
+      });
       void alertOnFinalFailure(job, err);
     }
   });

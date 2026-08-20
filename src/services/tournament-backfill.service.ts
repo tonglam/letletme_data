@@ -1,5 +1,15 @@
-import { tournamentSetupBackfillEventScopes } from '../domain/mutation-scope';
+import {
+  tournamentEntryCoreScopes,
+  tournamentSetupBackfillEventScopes,
+} from '../domain/mutation-scope';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import {
+  setupIssueKey,
+  type TournamentSetupIssueCategory,
+  type TournamentSetupIssueCode,
+  type TournamentSetupIssueInput,
+  type TournamentSetupIssueSeverity,
+} from '../domain/tournament-setup-issue';
 import {
   isOfficialH2HTournament,
   type TournamentBackfillWindow,
@@ -35,6 +45,7 @@ export type TournamentSetupIssueScope =
   | 'entry-info'
   | 'event-results'
   | 'league-event-results'
+  | 'selection-insights'
   | 'points-race'
   | 'battle-race'
   | 'knockout';
@@ -45,6 +56,78 @@ export interface TournamentSetupIssue {
   eventId?: number;
   failedEntries?: number[];
   blocksStandings?: boolean;
+  issueKey?: string;
+  code?: TournamentSetupIssueCode;
+  category?: TournamentSetupIssueCategory;
+  severity?: TournamentSetupIssueSeverity;
+  diagnosticCode?: string | null;
+  nextRepairAt?: Date | null;
+}
+
+const issueDefaults: Record<
+  TournamentSetupIssueScope,
+  { code: TournamentSetupIssueCode; category: TournamentSetupIssueCategory }
+> = {
+  'entry-info': { code: 'ENTRY_PROFILE_INCOMPLETE', category: 'profiles' },
+  'event-results': { code: 'TOURNAMENT_RESULTS_INCOMPLETE', category: 'results' },
+  'league-event-results': { code: 'LEAGUE_INSIGHTS_INCOMPLETE', category: 'insights' },
+  'selection-insights': { code: 'SELECTION_INSIGHTS_INCOMPLETE', category: 'insights' },
+  'points-race': { code: 'TOURNAMENT_RESULTS_INCOMPLETE', category: 'results' },
+  'battle-race': { code: 'TOURNAMENT_RESULTS_INCOMPLETE', category: 'results' },
+  knockout: { code: 'TOURNAMENT_RESULTS_INCOMPLETE', category: 'results' },
+};
+
+export function normalizeTournamentSetupIssue(
+  issue: TournamentSetupIssue,
+): TournamentSetupIssueInput {
+  const defaults = issueDefaults[issue.scope];
+  const code = issue.code ?? defaults.code;
+  const category = issue.category ?? defaults.category;
+  const severity = issue.severity ?? (issue.blocksStandings ? 'blocking' : 'warning');
+  return {
+    issueKey: issue.issueKey ?? setupIssueKey(code, issue.eventId),
+    code,
+    category,
+    severity,
+    eventId: issue.eventId ?? null,
+    affectedEntryIds: issue.failedEntries ?? [],
+    diagnosticCode: issue.diagnosticCode ?? null,
+    internalMessage: issue.message,
+    nextRepairAt: issue.nextRepairAt ?? new Date(Date.now() + 5 * 60_000),
+  };
+}
+
+export function tournamentSetupIssueFromAuditMessage(
+  message: string,
+  options: { eventId?: number; affectedEntryIds?: number[] } = {},
+): TournamentSetupIssue {
+  const comparableMessage = message.startsWith('Audit: ') ? message.slice(7) : message;
+  const parsedEventId = comparableMessage.match(/\bevent (\d+)\b/)?.[1];
+  const eventId = options.eventId ?? (parsedEventId ? Number(parsedEventId) : undefined);
+  const isProfileIssue =
+    comparableMessage.startsWith('missing entry_infos') ||
+    comparableMessage.startsWith('missing entry_league_infos') ||
+    comparableMessage.startsWith('Current-season entry snapshot') ||
+    comparableMessage.startsWith('Failed to refresh detailed entry info');
+  const blocksStandings =
+    comparableMessage.startsWith('tournament_entries count ') ||
+    comparableMessage.startsWith('tournament_groups count ') ||
+    comparableMessage.startsWith('invalid group_index sequence') ||
+    comparableMessage.startsWith('knockout structure mismatch');
+  return {
+    scope: isProfileIssue ? 'entry-info' : 'event-results',
+    message,
+    eventId,
+    failedEntries: options.affectedEntryIds ?? [],
+    blocksStandings,
+    code: isProfileIssue
+      ? 'ENTRY_PROFILE_INCOMPLETE'
+      : blocksStandings
+        ? 'STRUCTURE_INTEGRITY_FAILED'
+        : 'TOURNAMENT_RESULTS_INCOMPLETE',
+    category: isProfileIssue ? 'profiles' : 'results',
+    severity: blocksStandings ? 'blocking' : 'warning',
+  };
 }
 
 export type TournamentEntrySyncPlan = {
@@ -99,6 +182,7 @@ export async function syncTournamentEntryDetails(
   entryIds: number[],
   options?: {
     targetEventId?: number;
+    forceSnapshotRefresh?: boolean;
     onPlan?: (plan: TournamentEntrySyncPlan) => void | Promise<void>;
     onProgress?: (completed: number, total: number) => Promise<void>;
   },
@@ -110,11 +194,9 @@ export async function syncTournamentEntryDetails(
   }
 
   const targetEventId = options?.targetEventId ?? 0;
-  const requestedEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
-    season,
-    sanitized,
-    targetEventId,
-  );
+  const requestedEntryIds = options?.forceSnapshotRefresh
+    ? sanitized
+    : await entryInfoRepository.findIdsNeedingSnapshotSync(season, sanitized, targetEventId);
   const plan = {
     totalEntries: sanitized.length,
     requestedEntries: requestedEntryIds.length,
@@ -313,10 +395,18 @@ export async function ensureTournamentCoreResults(
   });
 
   for (const [eventId, missingEntryIds] of missing) {
-    await syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
-      concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-      skipTransfers: true,
-    });
+    await withMutationConflictGuard(
+      {
+        queueName: 'tournament-setup',
+        jobName: 'entry-event-results',
+        scopes: tournamentEntryCoreScopes(season.seasonId, missingEntryIds),
+      },
+      () =>
+        syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
+          concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+          skipTransfers: true,
+        }),
+    );
     completed += missingEntryIds.length;
     await onProgress?.(completed, total);
   }
@@ -488,19 +578,25 @@ export async function enrichTournamentHistory(
   });
 
   if (transferEntryIds.length > 0) {
-    const transferResult = await syncEntryTransferHistories(
-      season,
-      transferEntryIds,
-      targetEventId,
+    const transferResult = await withMutationConflictGuard(
       {
-        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        queueName: 'tournament-setup',
+        jobName: 'entry-transfer-history',
+        tournamentId,
+        scopes: tournamentEntryCoreScopes(season.seasonId, transferEntryIds),
       },
+      () =>
+        syncEntryTransferHistories(season, transferEntryIds, targetEventId, {
+          concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        }),
     );
     completed += transferEntryIds.length;
     await options?.onProgress?.(completed, total);
     if (transferResult.errors > 0) {
       issues.push({
         scope: 'event-results',
+        code: 'ENTRY_HISTORY_INCOMPLETE',
+        category: 'insights',
         message: `Failed to sync transfer history for ${transferResult.errors} entries`,
         failedEntries: transferResult.failedEntryIds,
       });
@@ -511,30 +607,61 @@ export async function enrichTournamentHistory(
     const missingEntryIds = missing.get(eventId) ?? [];
     try {
       if (missingEntryIds.length > 0) {
-        await syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
-          concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-          skipTransfers: true,
-        });
+        await withMutationConflictGuard(
+          {
+            queueName: 'tournament-setup',
+            jobName: 'entry-event-results',
+            scopes: tournamentEntryCoreScopes(season.seasonId, missingEntryIds),
+          },
+          () =>
+            syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
+              concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+              skipTransfers: true,
+            }),
+        );
       }
-      const leagueResult = await syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
-        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-      });
+      const leagueResult = await withMutationConflictGuard(
+        {
+          queueName: 'tournament-setup',
+          jobName: 'league-event-results',
+          tournamentId,
+          eventId,
+          scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
+        },
+        () =>
+          syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
+            concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+            entryIds,
+          }),
+      );
       if (leagueResult.failedUnits > 0 || leagueResult.skipped > 0) {
         const convergedEntries = leagueResult.reusedUnits + leagueResult.succeededUnits;
         issues.push({
           scope: 'league-event-results',
           eventId,
+          failedEntries: entryIds,
           message: `League insights incomplete for event ${eventId}: ${convergedEntries}/${leagueResult.totalEntries}`,
         });
       }
 
-      const selectionResult = await syncTournamentSelectionStats(season, eventId, {
-        tournamentIds: [tournamentId],
-      });
+      const selectionResult = await withMutationConflictGuard(
+        {
+          queueName: 'tournament-setup',
+          jobName: 'tournament-selection-stats',
+          tournamentId,
+          eventId,
+          scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
+        },
+        () =>
+          syncTournamentSelectionStats(season, eventId, {
+            tournamentIds: [tournamentId],
+          }),
+      );
       if (entryIds.length > 0 && selectionResult.rows === 0) {
         issues.push({
-          scope: 'event-results',
+          scope: 'selection-insights',
           eventId,
+          failedEntries: entryIds,
           message: `Selection insights are incomplete for event ${eventId}`,
         });
       }
@@ -544,7 +671,7 @@ export async function enrichTournamentHistory(
         scope: 'event-results',
         eventId,
         message,
-        failedEntries: missingEntryIds,
+        failedEntries: missingEntryIds.length > 0 ? missingEntryIds : entryIds,
       });
       logError('Tournament history enrichment failed for event', error, {
         tournamentId,
@@ -574,9 +701,19 @@ export async function runTournamentEventBackfill(
   eventId: number,
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
-  const eventResults = await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
-    concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-  });
+  const eventResults = await withMutationConflictGuard(
+    {
+      queueName: 'tournament-setup',
+      jobName: 'entry-event-results',
+      tournamentId,
+      eventId,
+      scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
+    },
+    () =>
+      syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+      }),
+  );
   logInfo('Tournament event results sync completed for tournament', {
     tournamentId,
     eventId,
@@ -590,6 +727,7 @@ export async function runTournamentEventBackfill(
       scope: 'event-results',
       eventId,
       message,
+      failedEntries: entryIds,
     });
     logWarn('Tournament event backfill completed with warnings', {
       tournamentId,
@@ -600,11 +738,19 @@ export async function runTournamentEventBackfill(
     });
   }
 
-  const leagueEventResults = await syncLeagueEventResultsByTournament(
-    season,
-    tournamentId,
-    eventId,
-    { concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY },
+  const leagueEventResults = await withMutationConflictGuard(
+    {
+      queueName: 'tournament-setup',
+      jobName: 'league-event-results',
+      tournamentId,
+      eventId,
+      scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
+    },
+    () =>
+      syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        entryIds,
+      }),
   );
   if (
     leagueEventResults.skipped > 0 ||
@@ -615,6 +761,7 @@ export async function runTournamentEventBackfill(
       scope: 'league-event-results',
       eventId,
       message,
+      failedEntries: entryIds,
     });
     logWarn('League event results backfill completed with warnings', {
       tournamentId,
@@ -651,6 +798,7 @@ export async function runTournamentEventBackfill(
         scope: 'points-race',
         eventId,
         message: `Tournament points race sync incomplete for event ${eventId}: skipped ${pointsRaceResult.skipped}`,
+        failedEntries: entryIds,
       });
       logWarn('Tournament points race sync completed with warnings', {
         tournamentId,
@@ -683,6 +831,7 @@ export async function runTournamentEventBackfill(
         scope: 'battle-race',
         eventId,
         message: `Tournament battle race sync incomplete for event ${eventId}: skipped ${battleRaceResult.skipped}`,
+        failedEntries: entryIds,
       });
       logWarn('Tournament battle race sync completed with warnings', {
         tournamentId,
@@ -716,6 +865,7 @@ export async function runTournamentEventBackfill(
         scope: 'knockout',
         eventId,
         message: `Tournament knockout sync incomplete for event ${eventId}: skipped ${knockoutResult.skipped}`,
+        failedEntries: entryIds,
       });
       logWarn('Tournament knockout sync completed with warnings', {
         tournamentId,

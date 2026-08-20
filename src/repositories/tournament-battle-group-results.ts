@@ -8,6 +8,7 @@ import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 const mapResult = (
   row: typeof tournamentBattleGroupResultsInCompetition.$inferSelect,
@@ -139,6 +140,7 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
     deleteByTournament: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
+        assertMutationLockHealthy();
         await db
           .delete(tournamentBattleGroupResultsInCompetition)
           .where(
@@ -167,6 +169,7 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
 
       try {
         const db = await getDbInstance();
+        assertMutationLockHealthy();
         // Drop identity `id` when re-upserting rows loaded from a prior SELECT;
         // GENERATED ALWAYS (and some drivers) reject explicit id values.
         const rows = results.map((row) => {

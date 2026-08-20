@@ -100,6 +100,16 @@ export async function closeLockClient(): Promise<void> {
   // singleton and are closed by the normal worker shutdown path.
 }
 
+/**
+ * Compatibility assertion for repositories that also participate in guarded
+ * mutations. PostgreSQL row locks are held by the transaction opened by
+ * `withMutationConflictGuard`, so there is no independent expiring lease to
+ * re-check here.
+ */
+export function assertMutationLockHealthy(): void {
+  // The transaction-scoped mutation lock is the health fence.
+}
+
 export async function withMutationConflictGuard<T>(
   input: MutationLockInput,
   operation: () => Promise<T>,

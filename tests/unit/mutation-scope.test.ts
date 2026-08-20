@@ -82,6 +82,15 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toEqual([]);
   });
 
+  it('does not reintroduce the global entry-info lock', () => {
+    expect(
+      resolveMutationScopes({
+        queueName: 'entry-sync',
+        jobName: 'entry-info',
+      }),
+    ).toEqual([]);
+  });
+
   it('exposes rebuild, backfill, and lifecycle scopes for setup phases', () => {
     expect(tournamentSetupRebuildScopes(789)).toEqual([
       'tournament-structure:tournament:789',

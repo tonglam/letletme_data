@@ -19,6 +19,7 @@ import { createTournamentGroupRepository } from '../repositories/tournament-grou
 import { createTournamentKnockoutResultsRepository } from '../repositories/tournament-knockout-results';
 import { createTournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
 import { createTournamentPointsGroupResultsRepository } from '../repositories/tournament-points-group-results';
+import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 function groupInsert(row: Record<string, number | string | null>): DbTournamentGroupInsert {
   return {
@@ -84,7 +85,9 @@ export async function rebuildTournamentStructure(
   const publishedKnockoutResults = isOfficialH2HTournament(tournament) ? [] : knockoutResults;
 
   const db = await getDb();
+  assertMutationLockHealthy();
   await db.transaction(async (tx) => {
+    assertMutationLockHealthy();
     const groups = createTournamentGroupRepository(tx);
     const points = createTournamentPointsGroupResultsRepository(tx);
     const battles = createTournamentBattleGroupResultsRepository(tx);

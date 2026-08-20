@@ -11,6 +11,7 @@ import type {
 } from '../domain/tournament';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 export type TournamentRosterRecord = TournamentConfig & {
   adminEntryId: number;
@@ -270,6 +271,7 @@ export const tournamentRosterRepository = {
     season: FplSeasonRef,
     tournamentId: number,
   ): Promise<string> => {
+    assertMutationLockHealthy();
     const client = await getDbClient();
     const rows = await client<{ marker: string }[]>`
       UPDATE competition.tournaments
@@ -281,8 +283,15 @@ export const tournamentRosterRepository = {
           setup_warning_count = 0,
           setup_completed_units = 0,
           setup_total_units = 0,
+          setup_attempt = 0,
+          setup_next_retry_at = NULL,
+          setup_last_error_code = NULL,
+          setup_last_error_at = NULL,
+          setup_progress_indeterminate = false,
           setup_progress_updated_at = now(),
           standings_ready_at = NULL,
+          profiles_ready_at = NULL,
+          insights_ready_at = NULL,
           updated_at = now()
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
@@ -300,6 +309,7 @@ export const tournamentRosterRepository = {
     tournamentId: number,
     marker?: string,
   ): Promise<boolean> => {
+    assertMutationLockHealthy();
     const client = await getDbClient();
     const rows = await client<{ tournamentId: number }[]>`
       UPDATE competition.tournaments
@@ -311,7 +321,14 @@ export const tournamentRosterRepository = {
           setup_warning_count = 0,
           setup_completed_units = 0,
           setup_total_units = 0,
+          setup_attempt = 0,
+          setup_next_retry_at = NULL,
+          setup_last_error_code = NULL,
+          setup_last_error_at = NULL,
+          setup_progress_indeterminate = false,
           standings_ready_at = NULL,
+          profiles_ready_at = NULL,
+          insights_ready_at = NULL,
           updated_at = now()
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
@@ -544,6 +561,11 @@ export const tournamentRosterRepository = {
               setup_warning_count = 0,
               setup_completed_units = 0,
               setup_total_units = 0,
+              setup_attempt = 0,
+              setup_next_retry_at = NULL,
+              setup_last_error_code = NULL,
+              setup_last_error_at = NULL,
+              setup_progress_indeterminate = false,
               setup_progress_updated_at = CASE
                 WHEN ${options?.resumeAfterSetup ? Boolean(options.resumeMarker) : false}
                   THEN ${options?.resumeMarker ?? null}::timestamptz
@@ -552,6 +574,8 @@ export const tournamentRosterRepository = {
                 ELSE now()
               END,
               standings_ready_at = NULL,
+              profiles_ready_at = NULL,
+              insights_ready_at = NULL,
               updated_at = now()
           WHERE season_id = ${season.seasonId}
             AND tournament_id = ${tournament.id}

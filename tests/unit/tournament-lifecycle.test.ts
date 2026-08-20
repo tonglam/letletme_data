@@ -132,6 +132,44 @@ describe('tournament lifecycle invariants', () => {
     ]);
   });
 
+  test('normalizes audit causes into stable, capability-scoped issue codes', async () => {
+    process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
+    process.env.REDIS_HOST ??= '127.0.0.1';
+    process.env.REDIS_PORT ??= '6379';
+    const { tournamentSetupIssueFromAuditMessage } = await import(
+      '../../src/services/tournament-backfill.service'
+    );
+
+    expect(
+      tournamentSetupIssueFromAuditMessage('missing entry_league_infos for 2 entries', {
+        affectedEntryIds: [300, 200, 300],
+      }),
+    ).toMatchObject({
+      code: 'ENTRY_PROFILE_INCOMPLETE',
+      category: 'profiles',
+      severity: 'warning',
+      failedEntries: [300, 200, 300],
+    });
+    expect(
+      tournamentSetupIssueFromAuditMessage('missing entry_event_results rows for event 7', {
+        affectedEntryIds: [101, 102],
+      }),
+    ).toMatchObject({
+      code: 'TOURNAMENT_RESULTS_INCOMPLETE',
+      category: 'results',
+      eventId: 7,
+      severity: 'warning',
+    });
+    expect(
+      tournamentSetupIssueFromAuditMessage(
+        'tournament_groups count 3 does not match participant count 4',
+      ),
+    ).toMatchObject({
+      code: 'STRUCTURE_INTEGRITY_FAILED',
+      severity: 'blocking',
+    });
+  });
+
   test('resumes before terminalizing a post-publication warning', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
     process.env.REDIS_HOST ??= '127.0.0.1';
@@ -154,7 +192,7 @@ describe('tournament lifecycle invariants', () => {
       TEST_SEASON,
       900_122,
       'ready',
-      'enrichment failed',
+      null,
       1,
     );
   });
@@ -256,13 +294,7 @@ describe('tournament lifecycle invariants', () => {
       await expect(setupTournamentStructure(TEST_SEASON, 900_124)).rejects.toThrow(
         'resume preparation failed',
       );
-      expect(resultSpy).toHaveBeenCalledWith(
-        TEST_SEASON,
-        900_124,
-        'failed',
-        'resume preparation failed',
-        0,
-      );
+      expect(resultSpy).not.toHaveBeenCalled();
     } finally {
       process.env.DATABASE_URL = originalDatabaseUrl;
     }

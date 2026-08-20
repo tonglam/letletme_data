@@ -3,6 +3,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { DatabaseError, IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { assertMutationLockHealthy } from '../utils/mutation-lock';
 import { publishTournamentTrendScopes } from './tournament-trends-publication.service';
 
 type ScopeAudit = {
@@ -92,6 +93,7 @@ async function auditSelectionSourceScopes(
 
 export async function refreshTournamentSelectionStatsMaterializedView(): Promise<void> {
   const client = await getDbClient();
+  assertMutationLockHealthy();
   await client`SELECT reporting.refresh_tournament_selection_stats()`;
 }
 
