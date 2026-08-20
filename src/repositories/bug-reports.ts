@@ -222,10 +222,11 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .from(bugReportRetentionBackupsInOps)
         .where(eq(bugReportRetentionBackupsInOps.id, current.id))
         .limit(1);
-      const screenshotUrl =
-        claim && !claim.screenshotDeletedAt
-          ? screenshotUrlFromSnapshot(claim.snapshot)
-          : current.screenshotUrl;
+      const screenshotUrl = claim
+        ? claim.screenshotDeletedAt
+          ? null
+          : screenshotUrlFromSnapshot(claim.snapshot)
+        : current.screenshotUrl;
       if (claim && !claim.screenshotDeletedAt) {
         await tx
           .delete(bugReportRetentionBackupsInOps)
@@ -566,10 +567,11 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         .from(bugReportRetentionBackupsInOps)
         .where(eq(bugReportRetentionBackupsInOps.id, current.id))
         .limit(1);
-      const screenshotUrl =
-        existingClaim && !existingClaim.screenshotDeletedAt
-          ? screenshotUrlFromSnapshot(existingClaim.snapshot)
-          : current.screenshotUrl;
+      const screenshotUrl = existingClaim
+        ? existingClaim.screenshotDeletedAt
+          ? null
+          : screenshotUrlFromSnapshot(existingClaim.snapshot)
+        : current.screenshotUrl;
       if (!existingClaim) {
         await tx
           .insert(bugReportRetentionBackupsInOps)
