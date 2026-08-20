@@ -301,7 +301,13 @@ export async function mergeCandidates(
         receiptIds: contentCandidateClusters.receiptIds,
       })
       .from(contentCandidateClusters)
-      .where(inArray(contentCandidateClusters.candidateId, ids));
+      .where(inArray(contentCandidateClusters.candidateId, ids))
+      // A source candidate is consumable by only one merge. Lock every
+      // participating row in a deterministic order before checking status so
+      // concurrent merges cannot both observe `accepted` and copy its receipts
+      // into different targets.
+      .orderBy(asc(contentCandidateClusters.candidateId))
+      .for('update');
     if (rows.length !== ids.length) throw new Error('Candidate not found');
     if (rows.some((row) => row.status === 'rejected' || row.status === 'merged'))
       throw new Error('Rejected or already merged candidate cannot be merged');
