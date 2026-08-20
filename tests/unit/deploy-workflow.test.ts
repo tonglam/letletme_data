@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const securityWorkflow = readFileSync('.github/workflows/security.yml', 'utf8');
+const cleanupWorkflow = readFileSync('.github/workflows/cleanup-legacy-runtime-secret.yml', 'utf8');
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
 const quote = String.fromCharCode(39);
@@ -41,6 +42,13 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('.status == "completed" and .conclusion == "success"');
     expect(workflow).toContain('test "$ci_success_count" -gt 0');
     expect(workflow).not.toContain('script_stop:');
+  });
+
+  test('repairs malformed migration env line endings without exposing values', () => {
+    expect(cleanupWorkflow).toContain(['grep -Fq ', quote, '\\n', quote].join(''));
+    expect(cleanupWorkflow).toContain('lineEndingsNormalized');
+    expect(cleanupWorkflow).toContain('credentialValueExposed":false');
+    expect(cleanupWorkflow).not.toContain('script_stop:');
   });
 
   test('scans the immutable digest before promotion and SSH deployment', () => {
