@@ -67,6 +67,16 @@ describe('bug report validation', () => {
     expect(report.screenshotObjectKey).toBe(`bug-reports/${submissionId}.png`);
     expect(report.screenshotUrl).toBeNull();
 
+    const uppercaseReport = validateBugReportCreateInput({
+      source: 'website',
+      body: '大小写对象键仍应绑定提交',
+      submissionId: submissionId.toUpperCase(),
+      screenshotObjectKey: `bug-reports/${submissionId.toUpperCase()}.PNG`,
+    });
+    expect(uppercaseReport.screenshotObjectKey).toBe(
+      `bug-reports/${submissionId.toUpperCase()}.PNG`,
+    );
+
     expect(() =>
       validateBugReportCreateInput({
         source: 'website',
