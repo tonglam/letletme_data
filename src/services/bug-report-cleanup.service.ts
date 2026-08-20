@@ -8,6 +8,7 @@ import {
 import { logError, logInfo } from '../utils/logger';
 
 const BATCH_SIZE = 100;
+const STORAGE_REQUEST_TIMEOUT_MS = 15_000;
 
 function storageEndpoint(): string {
   const value = process.env.BUG_REPORT_STORAGE_INTERNAL_URL?.trim();
@@ -35,8 +36,11 @@ async function deleteScreenshot(locator: string): Promise<void> {
       'x-bug-report-signature': signature,
     },
     body,
+    signal: AbortSignal.timeout(STORAGE_REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Screenshot delete failed: ${response.status}`);
+  const result = (await response.json().catch(() => null)) as { success?: unknown } | null;
+  if (result?.success !== true) throw new Error('Screenshot delete was not confirmed');
 }
 
 export type BugReportCleanupResult = {
@@ -58,8 +62,9 @@ export async function runBugReportCleanup(now = new Date()): Promise<BugReportCl
 
     for (const report of expired) {
       try {
-        if (report.screenshotUrl) await deleteScreenshot(report.screenshotUrl);
-        const removed = await bugReportRepository.backupAndDelete(report, now);
+        const removed = await bugReportRepository.backupAndDelete(report, now, async (current) => {
+          if (current.screenshotUrl) await deleteScreenshot(current.screenshotUrl);
+        });
         if (removed !== false) deleted += 1;
       } catch (error) {
         retried += 1;

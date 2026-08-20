@@ -14,6 +14,7 @@ import {
   type DataPublicationDataset,
   type DataPublicationManifest,
 } from '../cache/data-publication';
+import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 
@@ -118,6 +119,16 @@ function publicationScope(dataset: DataPublicationDataset, season: FplSeasonRef,
       ? isNull(datasetPublicationsInOps.eventId)
       : eq(datasetPublicationsInOps.eventId, eventId),
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function publicationItemCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === 'object') return Object.keys(value).length;
+  return value === null || value === undefined ? 0 : 1;
 }
 
 export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => {
@@ -828,6 +839,71 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         )
         .limit(1);
       return rows[0] ?? null;
+    },
+
+    findActiveLiveEventLives: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<readonly EventLive[] | null> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          publicationId: datasetPublicationsInOps.publicationId,
+          revision: datasetPublicationsInOps.revision,
+          manifest: datasetPublicationsInOps.manifest,
+          itemName: datasetPublicationItemsInOps.itemName,
+          itemCount: datasetPublicationItemsInOps.itemCount,
+          checksum: datasetPublicationItemsInOps.checksum,
+          payload: datasetPublicationItemsInOps.payload,
+        })
+        .from(datasetPublicationsInOps)
+        .innerJoin(
+          datasetPublicationItemsInOps,
+          eq(datasetPublicationItemsInOps.publicationId, datasetPublicationsInOps.publicationId),
+        )
+        .where(
+          and(
+            publicationScope('fpl:live', season, eventId),
+            eq(datasetPublicationsInOps.status, 'active'),
+          ),
+        );
+      if (rows.length !== 2) return null;
+
+      const first = rows[0];
+      if (!first || !isDataPublicationId(first.publicationId)) return null;
+      const manifest = first.manifest;
+      if (
+        !isRecord(manifest) ||
+        manifest.dataset !== 'fpl:live' ||
+        manifest.seasonCode !== season.seasonCode ||
+        manifest.eventId !== eventId ||
+        manifest.revision !== first.revision ||
+        manifest.publicationId !== first.publicationId ||
+        !['scheduled', 'live', 'settled'].includes(String(manifest.state)) ||
+        !Array.isArray(manifest.items) ||
+        manifest.items.length !== 2
+      ) {
+        return null;
+      }
+
+      for (const row of rows) {
+        const manifestItem = manifest.items.find(
+          (candidate) => isRecord(candidate) && candidate.name === row.itemName,
+        );
+        if (
+          !manifestItem ||
+          manifestItem.count !== row.itemCount ||
+          manifestItem.sha256 !== row.checksum ||
+          publicationItemCount(row.payload) !== row.itemCount
+        ) {
+          return null;
+        }
+      }
+
+      const eventLivePayload = rows.find((row) => row.itemName === 'eventLive')?.payload;
+      const fixturesPayload = rows.find((row) => row.itemName === 'fixtures')?.payload;
+      if (!Array.isArray(eventLivePayload) || !Array.isArray(fixturesPayload)) return null;
+      return eventLivePayload as EventLive[];
     },
 
     findPublicationById: async (

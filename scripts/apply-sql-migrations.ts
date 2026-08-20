@@ -233,6 +233,11 @@ async function main(): Promise<void> {
       repository: createBugReportRepository(migrationDb),
     });
     console.log(`[storage-migrate] ${JSON.stringify(result)}`);
+    if (STORAGE_MIGRATION_APPLY && result.failed > 0) {
+      throw new Error(
+        `Storage migration completed with ${result.failed} failed item(s); rerun after remediation`,
+      );
+    }
   }
 }
 

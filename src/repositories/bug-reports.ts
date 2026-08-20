@@ -32,6 +32,7 @@ export type StoredBugReport = {
 
 export type BugReportExpiryCursor = Pick<StoredBugReport, 'expiresAt' | 'id'>;
 export type BugReportScreenshotCursor = Pick<StoredBugReport, 'createdAt' | 'id'>;
+export type BugReportStorageDeletionCursor = { migratedAt: Date; id: string };
 
 class ReportNoLongerExpiredError extends Error {
   constructor() {
@@ -319,23 +320,47 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     return existing ?? null;
   };
 
-  const listPendingStorageDeletes = async (limit: number) =>
-    (await (
+  const listPendingStorageDeletes = async (
+    limit: number,
+    after?: BugReportStorageDeletionCursor,
+  ) => {
+    const cursor = after
+      ? or(
+          gt(bugReportStorageMigrationsInOps.migratedAt, after.migratedAt),
+          and(
+            eq(bugReportStorageMigrationsInOps.migratedAt, after.migratedAt),
+            gt(bugReportStorageMigrationsInOps.id, after.id),
+          ),
+        )
+      : undefined;
+    return (await (
       await getDbInstance()
     )
       .select({
+        id: bugReportStorageMigrationsInOps.id,
         publicId: bugReportStorageMigrationsInOps.publicId,
         sourceLocator: bugReportStorageMigrationsInOps.sourceLocator,
         targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+        migratedAt: bugReportStorageMigrationsInOps.migratedAt,
       })
       .from(bugReportStorageMigrationsInOps)
-      .where(isNull(bugReportStorageMigrationsInOps.deletedAt))
-      .orderBy(asc(bugReportStorageMigrationsInOps.migratedAt))
+      .where(
+        cursor
+          ? and(isNull(bugReportStorageMigrationsInOps.deletedAt), cursor)
+          : isNull(bugReportStorageMigrationsInOps.deletedAt),
+      )
+      .orderBy(
+        asc(bugReportStorageMigrationsInOps.migratedAt),
+        asc(bugReportStorageMigrationsInOps.id),
+      )
       .limit(Math.min(Math.max(limit, 1), 100))) as Array<{
+      id: string;
       publicId: string;
       sourceLocator: string;
       targetLocator: string;
+      migratedAt: Date;
     }>;
+  };
 
   const markStorageDeleted = async (sourceLocator: string, now = new Date()) => {
     await (
@@ -351,7 +376,11 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       );
   };
 
-  const backupAndDelete = async (report: StoredBugReport, now = new Date()) => {
+  const backupAndDelete = async (
+    report: StoredBugReport,
+    now = new Date(),
+    beforeDelete?: (current: StoredBugReport) => Promise<void>,
+  ) => {
     const db = await getDbInstance();
     try {
       await db.transaction(async (tx) => {
@@ -377,6 +406,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
 
         if (!current) throw new ReportNoLongerExpiredError();
         const currentReport = current as StoredBugReport;
+        await beforeDelete?.(currentReport);
         await tx
           .insert(bugReportRetentionBackupsInOps)
           .values({

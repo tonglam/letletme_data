@@ -165,25 +165,33 @@ export async function runBugReportStorageMigration(
     return result;
   }
 
-  const pendingDeletes = await repository.listPendingStorageDeletes(limit);
-  for (const pending of pendingDeletes) {
-    try {
-      const references = await repository.listByScreenshotUrl(pending.sourceLocator);
-      if (references.length > 0) {
-        await repository.updateScreenshotUrls(pending.sourceLocator, pending.targetLocator);
-        if ((await repository.listByScreenshotUrl(pending.sourceLocator)).length > 0) {
-          throw new Error('Storage migration compare-and-swap lost');
+  let pendingCursor: { migratedAt: Date; id: string } | undefined;
+  while (true) {
+    const pendingDeletes = await repository.listPendingStorageDeletes(limit, pendingCursor);
+    if (pendingDeletes.length === 0) break;
+    for (const pending of pendingDeletes) {
+      try {
+        const references = await repository.listByScreenshotUrl(pending.sourceLocator);
+        if (references.length > 0) {
+          await repository.updateScreenshotUrls(pending.sourceLocator, pending.targetLocator);
+          if ((await repository.listByScreenshotUrl(pending.sourceLocator)).length > 0) {
+            throw new Error('Storage migration compare-and-swap lost');
+          }
         }
+        await callStorage('delete', pending.sourceLocator);
+        await repository.markStorageDeleted(pending.sourceLocator, options.now);
+        result.deletedRetried += 1;
+      } catch (error) {
+        result.failed += 1;
+        logWarn('Bug report storage delete retry failed', {
+          code: error instanceof Error ? error.name : 'unknown',
+        });
       }
-      await callStorage('delete', pending.sourceLocator);
-      await repository.markStorageDeleted(pending.sourceLocator, options.now);
-      result.deletedRetried += 1;
-    } catch (error) {
-      result.failed += 1;
-      logWarn('Bug report storage delete retry failed', {
-        code: error instanceof Error ? error.name : 'unknown',
-      });
     }
+    if (pendingDeletes.length < limit) break;
+    const last = pendingDeletes.at(-1);
+    if (!last) break;
+    pendingCursor = { migratedAt: last.migratedAt, id: last.id };
   }
 
   for (const [sourceLocator, reports] of candidateReportsBySource) {
