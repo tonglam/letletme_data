@@ -35,7 +35,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS bug_report_retention_backups_public_id_key
   ON ops.bug_report_retention_backups (public_id);
 
 CREATE INDEX IF NOT EXISTS bug_report_retention_backups_created_idx
-  ON ops.bug_report_retention_backups (backed_up_at DESC);
+  ON ops.bug_report_retention_backups (backed_up_at DESC NULLS LAST);
 
 CREATE TABLE IF NOT EXISTS ops.bug_report_storage_migrations (
   id uuid PRIMARY KEY,
