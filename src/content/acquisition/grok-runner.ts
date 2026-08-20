@@ -145,21 +145,90 @@ function findJsonResult(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
-function isXToolEvent(value: unknown): boolean {
+const TOOL_INVOCATION_EVENT_TYPES = new Set([
+  'tool_call',
+  'tool_use',
+  'tool_call_start',
+  'tool_invocation',
+  'tool_invocation_start',
+]);
+
+const TOOL_COMPLETION_EVENT_TYPES = new Set([
+  'tool_result',
+  'tool_call_end',
+  'tool_call_result',
+  'tool_invocation_end',
+  'tool_invocation_result',
+  'tool_use_result',
+  'tool_output',
+  'tool_return',
+]);
+
+function getToolName(value: unknown): string | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  for (const key of ['tool', 'toolName', 'tool_name', 'name']) {
+    const tool = record[key];
+    if (typeof tool === 'string') return tool;
+    const nestedTool = asRecord(tool);
+    if (typeof nestedTool?.name === 'string') return nestedTool.name;
+  }
+  for (const key of ['tool_call', 'toolCall', 'invocation', 'call']) {
+    const nestedName = getToolName(record[key]);
+    if (nestedName) return nestedName;
+  }
+  return undefined;
+}
+
+function getToolCallId(value: unknown): string | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  for (const key of ['tool_call_id', 'toolCallId', 'call_id', 'callId', 'id']) {
+    const id = record[key];
+    if (typeof id === 'string' && id.length > 0) return id;
+    if (typeof id === 'number' && Number.isSafeInteger(id)) return String(id);
+  }
+  for (const key of ['tool_call', 'toolCall', 'invocation', 'call']) {
+    const nestedId = getToolCallId(record[key]);
+    if (nestedId) return nestedId;
+  }
+  return undefined;
+}
+
+function isToolFailure(value: unknown): boolean {
   const record = asRecord(value);
   if (!record) return false;
-  const eventType = record.type;
-  if (
-    eventType !== 'tool_call' &&
-    eventType !== 'tool_use' &&
-    eventType !== 'tool_call_start' &&
-    eventType !== 'tool_invocation'
-  )
-    return false;
-  const tool = record.tool ?? record.toolName ?? record.tool_name ?? record.name;
-  if (typeof tool === 'string') return tool === 'x_search';
-  const nestedTool = asRecord(tool);
-  return nestedTool?.name === 'x_search';
+  if (record.success === false || record.ok === false) return true;
+  for (const key of ['status', 'state']) {
+    const status = record[key];
+    if (
+      typeof status === 'string' &&
+      /^(?:failed|failure|error|errored|cancelled|canceled|rejected|timeout|timed_out)$/i.test(
+        status.trim(),
+      )
+    )
+      return true;
+  }
+  if (record.error !== undefined && record.error !== null) return true;
+  for (const key of ['result', 'output', 'data']) {
+    const nested = asRecord(record[key]);
+    if (nested && isToolFailure(nested)) return true;
+  }
+  return false;
+}
+
+function isXToolInvocation(value: unknown): boolean {
+  const record = asRecord(value);
+  return (
+    !!record &&
+    TOOL_INVOCATION_EVENT_TYPES.has(String(record.type)) &&
+    getToolName(record) === 'x_search'
+  );
+}
+
+function isXToolCompletion(value: unknown): boolean {
+  const record = asRecord(value);
+  return !!record && TOOL_COMPLETION_EVENT_TYPES.has(String(record.type));
 }
 
 function parseStreamingOutput(output: string): {
@@ -169,6 +238,8 @@ function parseStreamingOutput(output: string): {
   text: string;
 } {
   let xCallCount = 0;
+  let anonymousPendingXCalls = 0;
+  const pendingXCalls = new Map<string, number>();
   let eventCount = 0;
   const textParts: string[] = [];
   let result: Record<string, unknown> | null = null;
@@ -182,7 +253,39 @@ function parseStreamingOutput(output: string): {
       continue;
     }
     eventCount += 1;
-    if (isXToolEvent(event)) xCallCount += 1;
+    if (isXToolInvocation(event)) {
+      const callId = getToolCallId(event);
+      if (callId) pendingXCalls.set(callId, (pendingXCalls.get(callId) ?? 0) + 1);
+      else anonymousPendingXCalls += 1;
+    } else if (isXToolCompletion(event) && !isToolFailure(event)) {
+      const eventTool = getToolName(event);
+      const callId = getToolCallId(event);
+      const matchesXCall = eventTool === 'x_search' || (eventTool === undefined && !!callId);
+      if (matchesXCall) {
+        if (callId) {
+          const pending = pendingXCalls.get(callId) ?? 0;
+          if (pending > 0) {
+            xCallCount += 1;
+            if (pending === 1) pendingXCalls.delete(callId);
+            else pendingXCalls.set(callId, pending - 1);
+          }
+        } else if (anonymousPendingXCalls > 0) {
+          xCallCount += 1;
+          anonymousPendingXCalls -= 1;
+        }
+      }
+    } else if (isXToolCompletion(event)) {
+      // Consume failed completions so a later duplicate result cannot be
+      // mistaken for a successful X call.
+      const callId = getToolCallId(event);
+      if (callId) {
+        const pending = pendingXCalls.get(callId) ?? 0;
+        if (pending <= 1) pendingXCalls.delete(callId);
+        else pendingXCalls.set(callId, pending - 1);
+      } else if (anonymousPendingXCalls > 0) {
+        anonymousPendingXCalls -= 1;
+      }
+    }
     const eventRecord = asRecord(event);
     if (!eventRecord) continue;
     const candidate = findJsonResult(event);

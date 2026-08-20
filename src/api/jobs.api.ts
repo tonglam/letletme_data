@@ -54,10 +54,10 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         return { success: false, error: error.message };
       }
 
-      logError(`Manual job failed: ${name}`, error);
+      const requestId = getOrCreateRequestId(request);
+      logError(`Manual job failed: ${name}`, error, { requestId });
       const status = getHttpStatusFromError(error);
       set.status = status;
-      const requestId = getOrCreateRequestId(request);
       set.headers['x-request-id'] = requestId;
       const code = getPublicErrorCode(error, status);
       return {

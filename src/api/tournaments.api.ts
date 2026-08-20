@@ -14,6 +14,7 @@ import {
   getPublicErrorCode,
   getPublicErrorMessage,
 } from '../utils/errors';
+import { logError } from '../utils/logger';
 import { createTournamentPreview } from '../services/tournament-preview.service';
 
 function mapErrorToResponse(
@@ -31,6 +32,7 @@ function mapErrorToResponse(
     message = getPublicErrorMessage(error, status);
   }
   const requestId = getOrCreateRequestId(request);
+  logError('Tournament request failed', error, { requestId });
   set.headers['x-request-id'] = requestId;
   const code = getPublicErrorCode(error, status);
   return {

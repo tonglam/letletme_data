@@ -65,6 +65,13 @@ describe('headless Grok runner', () => {
     expect(result.xCallCount).toBe(0);
   });
 
+  test('does not count an X invocation whose completion fails', async () => {
+    const result = await runFixture('failed-x');
+    expect(result.status).toBe('COMPLETED');
+    expect(result.traceVerified).toBe(false);
+    expect(result.xCallCount).toBe(0);
+  });
+
   test('fails closed when a receipt does not satisfy the canonical schema', async () => {
     const result = await runFixture('invalid-receipt');
     expect(result.status).toBe('FAILED');

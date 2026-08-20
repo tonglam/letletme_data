@@ -157,7 +157,13 @@ export function getPublicErrorCode(error: unknown, status: number): string | und
 }
 
 /** Accept a caller-provided request id only when it is a bounded safe token. */
+const requestIds = new WeakMap<Request, string>();
+
 export function getOrCreateRequestId(request: Request): string {
+  const existing = requestIds.get(request);
+  if (existing) return existing;
   const supplied = request.headers.get('x-request-id')?.trim();
-  return supplied && /^[A-Za-z0-9._-]{1,128}$/.test(supplied) ? supplied : randomUUID();
+  const requestId = supplied && /^[A-Za-z0-9._-]{1,128}$/.test(supplied) ? supplied : randomUUID();
+  requestIds.set(request, requestId);
+  return requestId;
 }

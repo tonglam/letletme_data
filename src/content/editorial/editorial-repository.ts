@@ -510,6 +510,7 @@ export async function markStoryReady(storyId: string, actor: EditorialActor): Pr
       .select({ versionGroupId: contentStories.versionGroupId, status: contentStories.status })
       .from(contentStories)
       .where(eq(contentStories.storyId, storyId))
+      .for('update')
       .limit(1);
     if (!story[0]) throw new NotFoundError('Story not found', 'EDITORIAL_STORY_NOT_FOUND');
     if (story[0].status === 'removed')

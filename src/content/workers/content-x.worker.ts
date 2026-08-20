@@ -51,15 +51,6 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
   const windowStart =
     input.windowStart ?? new Date(Date.parse(windowEnd) - 30 * 60_000).toISOString();
   const snapshot = await buildSourceSnapshot(groupKey);
-  if (snapshot.items.length === 0) {
-    logInfo('Content X acquisition skipped because source snapshot is empty', {
-      groupKey,
-      partitionKey,
-      mode,
-      pollPhase,
-    });
-    return { status: 'EMPTY' };
-  }
   const runId = input.runId ?? randomUUID();
   const idempotencyKey =
     input.idempotencyKey ??
@@ -75,6 +66,27 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
     sourceSnapshotRevision: snapshot.revision,
     sourceSnapshot: snapshot.items,
   };
+  if (snapshot.items.length === 0) {
+    logInfo('Content X acquisition skipped because source snapshot is empty', {
+      groupKey,
+      partitionKey,
+      mode,
+      pollPhase,
+    });
+    const finished = await finishAcquisitionRun({
+      run,
+      result: {
+        status: 'EMPTY',
+        traceVerified: true,
+        xCallCount: 0,
+        receipts: [],
+        skillSha: MONITOR_FPL_X_SOURCES_SKILL_SHA,
+        toolName: 'content-source-snapshot',
+        adapterVersion: 'empty-v1',
+      },
+    });
+    return { status: finished.status.toUpperCase() as 'EMPTY' | 'FAILED', runId: run.runId };
+  }
   const started = await beginAcquisitionRun(run);
   if (started.reused) return { status: 'REUSED', runId: started.runId };
 

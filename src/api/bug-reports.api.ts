@@ -7,6 +7,7 @@ import {
   getPublicErrorCode,
   getPublicErrorMessage,
 } from '../utils/errors';
+import { logError } from '../utils/logger';
 
 const optionalPositiveInteger = t.Union([t.Number({ minimum: 1, multipleOf: 1 }), t.Null()]);
 
@@ -30,6 +31,7 @@ export const bugReportsAPI = new Elysia({ prefix: '/bug-reports' }).post(
       const status = getHttpStatusFromError(error);
       set.status = status;
       const requestId = getOrCreateRequestId(request);
+      logError('Bug report request failed', error, { requestId });
       set.headers['x-request-id'] = requestId;
       const code = getPublicErrorCode(error, status);
       return {
