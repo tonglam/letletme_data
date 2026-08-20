@@ -4,7 +4,8 @@ import { bugReportRepository } from '../repositories/bug-reports';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
 const BATCH_SIZE = 100;
-const LEGACY_PREFIX = '/storage/v1/object/public/letletme/bug-reports/';
+const LEGACY_BUCKET = 'letletme';
+const LEGACY_PREFIX = `/storage/v1/object/public/${LEGACY_BUCKET}/bug-reports/`;
 
 export type BugReportStorageMigrationResult = {
   scanned: number;
@@ -21,14 +22,51 @@ function storageEndpoint(): string {
   return value.replace(/\/$/, '');
 }
 
-/** Only old public objects in the historical avatar bucket are candidates. */
+function configuredLegacyOrigin(): string | null {
+  const configuredOrigin = process.env.BUG_REPORT_STORAGE_LEGACY_ORIGIN?.trim();
+  if (!configuredOrigin) return null;
+  try {
+    const parsed = new URL(configuredOrigin);
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== '/' ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+/** Only old public objects in the configured Supabase project's avatar bucket are candidates. */
 export function isLegacyBugReportStorageLocator(locator: string): boolean {
   try {
     const parsed = new URL(locator);
-    const configuredOrigin = process.env.BUG_REPORT_STORAGE_LEGACY_ORIGIN?.trim();
-    if (configuredOrigin && parsed.origin !== configuredOrigin) return false;
+    const expectedOrigin = configuredLegacyOrigin();
+    if (
+      !expectedOrigin ||
+      parsed.protocol !== 'https:' ||
+      parsed.origin !== expectedOrigin ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return false;
+    }
+    const decodedPath = decodeURIComponent(parsed.pathname);
+    if (!decodedPath.startsWith(LEGACY_PREFIX)) return false;
+    const objectPath = decodedPath.slice(LEGACY_PREFIX.length);
     return (
-      parsed.pathname.startsWith(LEGACY_PREFIX) && parsed.pathname.length > LEGACY_PREFIX.length
+      objectPath.length > 0 &&
+      !objectPath
+        .split('/')
+        .some((segment) => segment.length === 0 || segment === '.' || segment === '..')
     );
   } catch {
     return false;

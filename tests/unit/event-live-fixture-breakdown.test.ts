@@ -11,11 +11,11 @@ describe('revision-pinned fixture breakdown', () => {
       {
         fixtureId: 401,
         stats: [
-          { identifier: 'minutes', value: 90, points: 2, pointsModification: -1 },
-          { identifier: 'goals_scored', value: 1, points: 4, pointsModification: null },
           { identifier: 'assists', value: 1, points: 3, pointsModification: null },
-          { identifier: 'defensive_contribution', value: 10, points: 2, pointsModification: null },
           { identifier: 'bonus', value: 0, points: 1, pointsModification: 1 },
+          { identifier: 'defensive_contribution', value: 10, points: 2, pointsModification: null },
+          { identifier: 'goals_scored', value: 1, points: 4, pointsModification: null },
+          { identifier: 'minutes', value: 90, points: 2, pointsModification: -1 },
         ],
       },
       {

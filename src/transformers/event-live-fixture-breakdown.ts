@@ -22,6 +22,10 @@ const SUPPORTED_IDENTIFIERS = new Set([
   'defensive_contribution',
 ]);
 
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function normalizeFixtureBreakdown(
   eventId: number,
   element: RawFPLEventLiveElement,
@@ -29,39 +33,42 @@ function normalizeFixtureBreakdown(
   if (!Array.isArray(element.explain)) return [];
 
   const fixtureIds = new Set<number>();
-  return element.explain.map((candidate) => {
-    const fixture = EventExplainFixtureSchema.parse(candidate);
-    if (fixtureIds.has(fixture.fixture)) {
-      throw new Error(
-        `Duplicate live fixture breakdown: event=${eventId} fixture=${fixture.fixture} element=${element.id}`,
-      );
-    }
-    fixtureIds.add(fixture.fixture);
-
-    const identifiers = new Set<string>();
-    const stats: EventLiveFixtureBreakdownStat[] = fixture.stats.map((stat) => {
-      const identifier = stat.identifier.trim();
-      if (!SUPPORTED_IDENTIFIERS.has(identifier)) {
+  return element.explain
+    .map((candidate) => {
+      const fixture = EventExplainFixtureSchema.parse(candidate);
+      if (fixtureIds.has(fixture.fixture)) {
         throw new Error(
-          `Unsupported live fixture stat: event=${eventId} fixture=${fixture.fixture} element=${element.id} identifier=${identifier}`,
+          `Duplicate live fixture breakdown: event=${eventId} fixture=${fixture.fixture} element=${element.id}`,
         );
       }
-      if (identifiers.has(identifier)) {
-        throw new Error(
-          `Duplicate live fixture stat: event=${eventId} fixture=${fixture.fixture} element=${element.id} identifier=${identifier}`,
-        );
-      }
-      identifiers.add(identifier);
-      return {
-        identifier,
-        value: stat.value,
-        points: stat.points,
-        pointsModification: stat.points_modification ?? null,
-      };
-    });
+      fixtureIds.add(fixture.fixture);
 
-    return { fixtureId: fixture.fixture, stats };
-  });
+      const identifiers = new Set<string>();
+      const stats: EventLiveFixtureBreakdownStat[] = fixture.stats.map((stat) => {
+        const identifier = stat.identifier.trim();
+        if (!SUPPORTED_IDENTIFIERS.has(identifier)) {
+          throw new Error(
+            `Unsupported live fixture stat: event=${eventId} fixture=${fixture.fixture} element=${element.id} identifier=${identifier}`,
+          );
+        }
+        if (identifiers.has(identifier)) {
+          throw new Error(
+            `Duplicate live fixture stat: event=${eventId} fixture=${fixture.fixture} element=${element.id} identifier=${identifier}`,
+          );
+        }
+        identifiers.add(identifier);
+        return {
+          identifier,
+          value: stat.value,
+          points: stat.points,
+          pointsModification: stat.points_modification ?? null,
+        };
+      });
+
+      stats.sort((left, right) => compareStrings(left.identifier, right.identifier));
+      return { fixtureId: fixture.fixture, stats };
+    })
+    .sort((left, right) => left.fixtureId - right.fixtureId);
 }
 
 export function attachEventLiveFixtureBreakdowns(

@@ -22,10 +22,13 @@ CREATE INDEX IF NOT EXISTS bug_reports_expiry_idx
 
 CREATE TABLE IF NOT EXISTS ops.bug_report_retention_backups (
   id uuid PRIMARY KEY,
-  public_id text NOT NULL UNIQUE,
+  public_id text NOT NULL,
   backed_up_at timestamptz NOT NULL DEFAULT now(),
   snapshot jsonb NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS bug_report_retention_backups_public_id_key
+  ON ops.bug_report_retention_backups (public_id);
 
 CREATE INDEX IF NOT EXISTS bug_report_retention_backups_created_idx
   ON ops.bug_report_retention_backups (backed_up_at DESC);
