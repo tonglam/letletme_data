@@ -90,7 +90,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             .where(
               and(
                 eq(bugReportStorageMigrationsInOps.sourceLocator, report.screenshotUrl),
-                isNotNull(bugReportStorageMigrationsInOps.deletedAt),
+                or(
+                  isNotNull(bugReportStorageMigrationsInOps.deleteStartedAt),
+                  isNotNull(bugReportStorageMigrationsInOps.deletedAt),
+                ),
               ),
             )
             .limit(1);
@@ -236,7 +239,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           .where(
             and(
               eq(bugReportStorageMigrationsInOps.sourceLocator, claimedLocator),
-              isNotNull(bugReportStorageMigrationsInOps.deletedAt),
+              or(
+                isNotNull(bugReportStorageMigrationsInOps.deleteStartedAt),
+                isNotNull(bugReportStorageMigrationsInOps.deletedAt),
+              ),
             ),
           )
           .limit(1);
@@ -406,12 +412,13 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     now = new Date(),
   ): Promise<void> => {
     const db = await getDbInstance();
-    await db.transaction(async (tx) => {
+    const prepared = await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${sourceLocator}))`);
       const [migration] = await tx
         .select({
           id: bugReportStorageMigrationsInOps.id,
           targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+          deleteStartedAt: bugReportStorageMigrationsInOps.deleteStartedAt,
           deletedAt: bugReportStorageMigrationsInOps.deletedAt,
         })
         .from(bugReportStorageMigrationsInOps)
@@ -422,7 +429,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       if (migration.targetLocator !== targetLocator) {
         throw new DatabaseError('Storage migration target locator conflict');
       }
-      if (migration.deletedAt) return;
+      if (migration.deletedAt) return false;
 
       await tx
         .update(bugReportsInOps)
@@ -437,16 +444,38 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         throw new DatabaseError('Storage migration compare-and-swap lost');
       }
 
-      // Keep the locator lock until remote deletion and the durable completion
-      // marker commit. Inserts either happen first (and are migrated above) or
-      // see deleted_at and reject the retired locator after this transaction.
-      await deleteSource();
+      // Commit a durable pending-delete fence before the remote call. Inserts
+      // reject both this state and the final deleted marker, while a failed or
+      // interrupted remote call remains visible to the retry scan.
+      await tx
+        .update(bugReportStorageMigrationsInOps)
+        .set({ deleteStartedAt: migration.deleteStartedAt ?? now })
+        .where(eq(bugReportStorageMigrationsInOps.id, migration.id));
+      return true;
+    });
+    if (!prepared) return;
+
+    await deleteSource();
+
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${sourceLocator}))`);
+      const [migration] = await tx
+        .select({
+          id: bugReportStorageMigrationsInOps.id,
+          deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+        })
+        .from(bugReportStorageMigrationsInOps)
+        .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
+        .for('update')
+        .limit(1);
+      if (!migration || migration.deletedAt) return;
       const [marked] = await tx
         .update(bugReportStorageMigrationsInOps)
         .set({ deletedAt: now })
         .where(
           and(
             eq(bugReportStorageMigrationsInOps.id, migration.id),
+            isNotNull(bugReportStorageMigrationsInOps.deleteStartedAt),
             isNull(bugReportStorageMigrationsInOps.deletedAt),
           ),
         )

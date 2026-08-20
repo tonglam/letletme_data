@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS ops.bug_report_storage_migrations (
   source_locator text NOT NULL,
   target_locator text NOT NULL,
   migrated_at timestamptz NOT NULL DEFAULT now(),
+  delete_started_at timestamptz,
   deleted_at timestamptz,
   CONSTRAINT bug_report_storage_migrations_source_https
     CHECK (source_locator ~ '^https://'::text),
@@ -58,6 +59,9 @@ CREATE TABLE IF NOT EXISTS ops.bug_report_storage_migrations (
 
 CREATE UNIQUE INDEX IF NOT EXISTS bug_report_storage_migrations_source_key
   ON ops.bug_report_storage_migrations (source_locator);
+
+ALTER TABLE ops.bug_report_storage_migrations
+  ADD COLUMN IF NOT EXISTS delete_started_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS bug_report_storage_migrations_pending_idx
   ON ops.bug_report_storage_migrations (deleted_at, migrated_at);

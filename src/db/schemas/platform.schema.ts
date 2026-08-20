@@ -450,6 +450,7 @@ export const bugReportStorageMigrationsInOps = ops.table(
     migratedAt: timestamp('migrated_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
+    deleteStartedAt: timestamp('delete_started_at', { withTimezone: true, mode: 'date' }),
     deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [

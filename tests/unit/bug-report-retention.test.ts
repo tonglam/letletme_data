@@ -56,5 +56,13 @@ describe('bug report retention and diagnostics', () => {
         },
       ],
     });
+
+    expect(
+      sanitizeBugReportClientMeta({
+        operations: [{ operation: 'submit', message: 'Authorization: Basic dXNlcjpwYXNz' }],
+      }),
+    ).toEqual({
+      operations: [{ operation: 'submit', message: '[redacted]' }],
+    });
   });
 });
