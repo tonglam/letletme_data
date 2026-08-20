@@ -29,10 +29,10 @@ describe('Briefing content migration contract', () => {
 
   test('moves mutation coordination and frozen publication state into PostgreSQL', async () => {
     const safety = await Bun.file(
-      new URL('../../../migrations/0015_core_mutation_safety.sql', import.meta.url),
+      new URL('../../../migrations/0017_core_mutation_safety.sql', import.meta.url),
     ).text();
     const freeze = await Bun.file(
-      new URL('../../../migrations/0016_content_publication_freeze.sql', import.meta.url),
+      new URL('../../../migrations/0018_content_publication_freeze.sql', import.meta.url),
     ).text();
     expect(safety).toContain('CREATE TABLE ops.mutation_scopes');
     expect(safety).toContain('GRANT SELECT, INSERT, UPDATE ON TABLE ops.mutation_scopes');
@@ -46,7 +46,7 @@ describe('Briefing content migration contract', () => {
 
   test('keeps private screenshot migration additive and key-only', async () => {
     const sql = await Bun.file(
-      new URL('../../../migrations/0017_bug_report_private_screenshots.sql', import.meta.url),
+      new URL('../../../migrations/0015_bug_report_private_screenshots.sql', import.meta.url),
     ).text();
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS screenshot_object_key');
     expect(sql).toContain('bug_reports_submission_id_key');
@@ -56,7 +56,7 @@ describe('Briefing content migration contract', () => {
 
   test('binds screenshot object ownership to submission ids and prevents duplicate keys', async () => {
     const sql = await Bun.file(
-      new URL('../../../migrations/0020_bug_report_screenshot_ownership.sql', import.meta.url),
+      new URL('../../../migrations/0021_bug_report_screenshot_ownership.sql', import.meta.url),
     ).text();
     expect(sql).toContain('DROP CONSTRAINT IF EXISTS bug_reports_screenshot_object_key_format');
     expect(sql).toContain('submission_id::text');
@@ -68,7 +68,7 @@ describe('Briefing content migration contract', () => {
 
   test('locks freeze parents while checking draft-only child writes', async () => {
     const sql = await Bun.file(
-      new URL('../../../migrations/0021_content_freeze_parent_locks.sql', import.meta.url),
+      new URL('../../../migrations/0022_content_freeze_parent_locks.sql', import.meta.url),
     ).text();
     expect(sql).toContain('CREATE OR REPLACE FUNCTION content.assert_draft_week_edition_items()');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION content.assert_draft_story_localization()');
@@ -78,7 +78,7 @@ describe('Briefing content migration contract', () => {
 
   test('binds submission-id replays to a canonical request hash', async () => {
     const sql = await Bun.file(
-      new URL('../../../migrations/0018_bug_report_submission_request_hash.sql', import.meta.url),
+      new URL('../../../migrations/0019_bug_report_submission_request_hash.sql', import.meta.url),
     ).text();
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS submission_request_hash');
     expect(sql).toContain('bug_reports_submission_request_hash_format');
@@ -86,7 +86,7 @@ describe('Briefing content migration contract', () => {
 
   test('keeps FINAL_90 calls in a separate phase budget ledger', async () => {
     const sql = await Bun.file(
-      new URL('../../../migrations/0019_content_acquisition_phase_budgets.sql', import.meta.url),
+      new URL('../../../migrations/0020_content_acquisition_phase_budgets.sql', import.meta.url),
     ).text();
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS budget_scope');
     expect(sql).toContain('content_acquisition_budgets_scope_check');
@@ -97,7 +97,7 @@ describe('Briefing content migration contract', () => {
   test('distinguishes confirmed queued acquisition reservations from enqueue failures', async () => {
     const sql = await Bun.file(
       new URL(
-        '../../../migrations/0022_content_acquisition_enqueue_confirmation.sql',
+        '../../../migrations/0023_content_acquisition_enqueue_confirmation.sql',
         import.meta.url,
       ),
     ).text();
