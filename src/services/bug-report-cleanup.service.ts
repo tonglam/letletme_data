@@ -6,10 +6,19 @@ import {
   type StoredBugReport,
 } from '../repositories/bug-reports';
 import { logError, logInfo } from '../utils/logger';
+import { isLegacyBugReportStorageLocator } from './bug-report-storage-migration.service';
 
 const BATCH_SIZE = 100;
 const STORAGE_REQUEST_TIMEOUT_MS = 15_000;
 const STORAGE_OBJECT_MISSING_CODE = 'BUG_REPORT_STORAGE_OBJECT_MISSING';
+
+function shouldAttemptRemoteDelete(locator: string): boolean {
+  // The legacy-origin guard is deliberately required before classifying a
+  // locator as managed. If the deployment is missing that setting, keep the
+  // existing retry behaviour rather than silently leaking an object.
+  const legacyOriginConfigured = Boolean(process.env.BUG_REPORT_STORAGE_LEGACY_ORIGIN?.trim());
+  return !legacyOriginConfigured || isLegacyBugReportStorageLocator(locator);
+}
 
 function storageEndpoint(): string {
   const value = process.env.BUG_REPORT_STORAGE_INTERNAL_URL?.trim();
@@ -91,6 +100,16 @@ export async function runBugReportCleanup(now = new Date()): Promise<BugReportCl
           now,
           async () => {
             if (!claim.screenshotUrl) return false;
+            if (!shouldAttemptRemoteDelete(claim.screenshotUrl)) {
+              // The locator is outside the configured project/bucket. The
+              // retention backup already contains the exact locator as a
+              // scrubbed tombstone; retire the report without sending an
+              // unmanageable URL to the internal storage endpoint.
+              logInfo('Bug report screenshot locator retired without remote delete', {
+                publicId: report.publicId,
+              });
+              return true;
+            }
             await deleteScreenshot(claim.screenshotUrl);
             return true;
           },
@@ -113,5 +132,7 @@ export async function runBugReportCleanup(now = new Date()): Promise<BugReportCl
 }
 
 export async function deleteBugReportScreenshotForCleanup(report: StoredBugReport): Promise<void> {
-  if (report.screenshotUrl) await deleteScreenshot(report.screenshotUrl);
+  if (report.screenshotUrl && shouldAttemptRemoteDelete(report.screenshotUrl)) {
+    await deleteScreenshot(report.screenshotUrl);
+  }
 }

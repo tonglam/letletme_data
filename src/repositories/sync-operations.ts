@@ -130,6 +130,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function hasFixtureBreakdownEvidence(value: unknown): value is EventLive {
+  if (!isRecord(value) || !Array.isArray(value.fixtureBreakdown)) return false;
+  const fixtureIds = new Set<number>();
+  return value.fixtureBreakdown.every((fixture) => {
+    if (
+      !isRecord(fixture) ||
+      !Number.isInteger(fixture.fixtureId) ||
+      Number(fixture.fixtureId) <= 0 ||
+      fixtureIds.has(Number(fixture.fixtureId)) ||
+      !Array.isArray(fixture.stats)
+    ) {
+      return false;
+    }
+    fixtureIds.add(Number(fixture.fixtureId));
+    const identifiers = new Set<string>();
+    return fixture.stats.every((stat) => {
+      if (
+        !isRecord(stat) ||
+        typeof stat.identifier !== 'string' ||
+        stat.identifier.length === 0 ||
+        identifiers.has(stat.identifier) ||
+        typeof stat.value !== 'number' ||
+        !Number.isFinite(stat.value) ||
+        typeof stat.points !== 'number' ||
+        !Number.isFinite(stat.points) ||
+        (stat.pointsModification !== null &&
+          (typeof stat.pointsModification !== 'number' ||
+            !Number.isFinite(stat.pointsModification)))
+      ) {
+        return false;
+      }
+      identifiers.add(stat.identifier);
+      return true;
+    });
+  });
+}
+
 function publicationItemCount(value: unknown): number {
   if (Array.isArray(value)) return value.length;
   if (value && typeof value === 'object') return Object.keys(value).length;
@@ -923,6 +960,11 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const eventLivePayload = rows.find((row) => row.itemName === 'eventLive')?.payload;
       const fixturesPayload = rows.find((row) => row.itemName === 'fixtures')?.payload;
       if (!Array.isArray(eventLivePayload) || !Array.isArray(fixturesPayload)) return null;
+      // Every live revision after the fixture-grain rollout carries an
+      // immutable per-fixture explanation on every player row. A retired
+      // revision may still have a valid checksum after migration 0017, but
+      // it is not safe to serve its legacy payload after a cache miss.
+      if (!eventLivePayload.every(hasFixtureBreakdownEvidence)) return null;
       return eventLivePayload as EventLive[];
     },
 

@@ -66,6 +66,18 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     await connection.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${publicId}))`);
   };
 
+  const lockScreenshotLocators = async (
+    connection: DbOrTransaction,
+    locators: readonly (string | null | undefined)[],
+  ): Promise<void> => {
+    const uniqueLocators = [
+      ...new Set(locators.filter((locator): locator is string => Boolean(locator))),
+    ].sort();
+    for (const locator of uniqueLocators) {
+      await connection.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${locator}))`);
+    }
+  };
+
   const insert = async (report: BugReportInsert): Promise<StoredBugReport> => {
     try {
       const db = await getDbInstance();
@@ -252,6 +264,33 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     const db = await getDbInstance();
     return db.transaction(async (tx) => {
       await lockPublicId(tx, publicId);
+      // Inspect locators without a row lock first. All mutation paths acquire
+      // the public-id fence before the locator fence; locking the locator
+      // before FOR UPDATE keeps status changes and storage migration in the
+      // same order and avoids a row-lock/advisory-lock deadlock.
+      const [observed] = await tx
+        .select({
+          id: bugReportsInOps.id,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+        })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.publicId, publicId))
+        .limit(1);
+      if (!observed) return null;
+
+      const [observedClaim] = await tx
+        .select({
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, observed.id))
+        .limit(1);
+
+      await lockScreenshotLocators(tx, [
+        observed.screenshotUrl,
+        observedClaim ? screenshotUrlFromSnapshot(observedClaim.snapshot) : null,
+      ]);
+
       const [current] = await tx
         .select({
           id: bugReportsInOps.id,
@@ -283,15 +322,15 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         })
         .from(bugReportRetentionBackupsInOps)
         .where(eq(bugReportRetentionBackupsInOps.id, current.id))
+        .for('update')
         .limit(1);
       let screenshotUrl = current.screenshotUrl;
       let removeClaim = false;
       const claimedLocator = claim ? screenshotUrlFromSnapshot(claim.snapshot) : null;
       if (claim && claimedLocator) {
         // A status update may race with storage migration. Serialise on the
-        // same locator fence, then prefer the migration target when the source
+        // same locator fence (acquired before the row lock), then prefer the migration target when the source
         // has already been deleted; never restore a retired source URL.
-        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${claimedLocator}))`);
         const [migration] = await tx
           .select({ targetLocator: bugReportStorageMigrationsInOps.targetLocator })
           .from(bugReportStorageMigrationsInOps)
@@ -484,7 +523,19 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   ): Promise<void> => {
     const db = await getDbInstance();
     const prepared = await db.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${sourceLocator}))`);
+      // Status, retention, and insertion paths all fence a report public id
+      // before taking the screenshot-locator fence. Lock every affected id in
+      // a stable order before the locator so a shared legacy object cannot
+      // deadlock migration with a concurrent status update.
+      const affectedReports = await tx
+        .select({ publicId: bugReportsInOps.publicId })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+        .orderBy(asc(bugReportsInOps.publicId));
+      for (const report of affectedReports) {
+        await lockPublicId(tx, report.publicId);
+      }
+      await lockScreenshotLocators(tx, [sourceLocator]);
       const [migration] = await tx
         .select({
           id: bugReportStorageMigrationsInOps.id,
@@ -791,12 +842,26 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     const db = await getDbInstance();
     return db.transaction(async (tx) => {
       const [candidate] = await tx
-        .select({ id: bugReportsInOps.id, publicId: bugReportsInOps.publicId })
+        .select({
+          id: bugReportsInOps.id,
+          publicId: bugReportsInOps.publicId,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+        })
         .from(bugReportsInOps)
         .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
         .limit(1);
       if (!candidate) return null;
       await lockPublicId(tx, candidate.publicId);
+
+      const [observedClaim] = await tx
+        .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+        .limit(1);
+      await lockScreenshotLocators(tx, [
+        candidate.screenshotUrl,
+        observedClaim ? screenshotUrlFromSnapshot(observedClaim.snapshot) : null,
+      ]);
 
       const [current] = await tx
         .select({ id: bugReportsInOps.id })
@@ -871,12 +936,25 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     const db = await getDbInstance();
     return db.transaction(async (tx) => {
       const [candidate] = await tx
-        .select({ publicId: bugReportsInOps.publicId })
+        .select({
+          publicId: bugReportsInOps.publicId,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+        })
         .from(bugReportsInOps)
         .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
         .limit(1);
       if (!candidate) return false;
       await lockPublicId(tx, candidate.publicId);
+
+      const [observedClaim] = await tx
+        .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+        .limit(1);
+      await lockScreenshotLocators(tx, [
+        candidate.screenshotUrl,
+        observedClaim ? screenshotUrlFromSnapshot(observedClaim.snapshot) : null,
+      ]);
 
       const [current] = await tx
         .select({ id: bugReportsInOps.id })
