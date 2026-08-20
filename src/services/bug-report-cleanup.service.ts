@@ -96,8 +96,9 @@ async function deleteScreenshot(locator: string): Promise<void> {
   const timestamp = String(Date.now());
   const nonce = randomUUID();
   const bodyHash = createHash('sha256').update(body).digest('hex');
+  const routePath = new URL(`${storageEndpoint()}/delete`).pathname;
   const signature = createHmac('sha256', secret)
-    .update(`${timestamp}.${nonce}.${bodyHash}`)
+    .update(`POST.${routePath}.${timestamp}.${nonce}.${bodyHash}`)
     .digest('hex');
   const response = await fetch(`${storageEndpoint()}/delete`, {
     method: 'POST',
