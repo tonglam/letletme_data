@@ -12,6 +12,14 @@ case "${FAKE_GROK_MODE:-normal}" in
   normal)
     printf '%s\n' '{"type":"tool_call","tool":"x_search"}' '{"status":"COMPLETED","receipts":[]}'
     ;;
+  utf8-split)
+    printf '%s\n' '{"type":"tool_call","tool":"x_search"}'
+    printf '%s' '{"status":"COMPLETED","receipts":[{"sourceId":"550e8400-e29b-41d4-a716-446655440000","externalId":"post-utf8","canonicalUrl":"https://example.com/post-utf8","capturedAt":"2026-08-20T09:00:00.000Z","canonicalHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"headline":"'
+    printf '\360'
+    sleep 0.01
+    printf '\237\230\200'
+    printf '%s\n' '"}}]}'
+    ;;
   no-trace)
     printf '%s\n' '{"status":"COMPLETED","receipts":[]}'
     ;;

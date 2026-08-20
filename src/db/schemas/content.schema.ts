@@ -126,6 +126,7 @@ export const contentAcquisitionRuns = content.table(
     checkpointAdvanced: boolean('checkpoint_advanced').default(false).notNull(),
     errorSummary: text('error_summary'),
     startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
+    enqueueConfirmedAt: timestamp('enqueue_confirmed_at', { withTimezone: true, mode: 'date' }),
     completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },

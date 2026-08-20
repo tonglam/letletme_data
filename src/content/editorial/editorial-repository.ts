@@ -183,6 +183,16 @@ const requireText = (value: string, field: string): string => {
   return text;
 };
 
+const requireSha256 = (value: string, field: string): string => {
+  const hash = value.trim();
+  if (!/^[0-9a-f]{64}$/.test(hash))
+    throw new ValidationError(
+      `${field} must be a lowercase SHA-256 hash`,
+      'EDITORIAL_HASH_INVALID',
+    );
+  return hash;
+};
+
 export async function createCandidateFromReceipts(input: {
   runId: string;
   canonicalHash: string;
@@ -192,6 +202,7 @@ export async function createCandidateFromReceipts(input: {
 }): Promise<string> {
   requireRole(input.actor, 'content_editor');
   requireUuid(input.runId, 'runId');
+  const canonicalHash = requireSha256(input.canonicalHash, 'canonicalHash');
   if (!input.receiptIds.length)
     throw new ValidationError('At least one receipt is required', 'EDITORIAL_RECEIPTS_REQUIRED');
   input.receiptIds.forEach((receiptId) => requireUuid(receiptId, 'receiptId'));
@@ -207,7 +218,7 @@ export async function createCandidateFromReceipts(input: {
       null,
       {
         runId: input.runId,
-        canonicalHash: input.canonicalHash,
+        canonicalHash,
         materiality: input.materiality ?? 'unknown',
         receiptIds: [...input.receiptIds],
       },
@@ -230,7 +241,7 @@ export async function createCandidateFromReceipts(input: {
     await tx.insert(contentCandidateClusters).values({
       candidateId,
       runId: input.runId,
-      canonicalHash: requireText(input.canonicalHash, 'canonicalHash'),
+      canonicalHash,
       materiality: input.materiality?.trim() || 'unknown',
       receiptIds: [...new Set(input.receiptIds)],
     });
@@ -555,6 +566,10 @@ export async function createWeekEdition(input: {
     throw new ValidationError('seasonCode is invalid', 'EDITORIAL_SEASON_INVALID');
   if (!Number.isSafeInteger(input.eventId) || input.eventId <= 0)
     throw new ValidationError('eventId is invalid', 'EDITORIAL_EVENT_INVALID');
+  const sourceSnapshotRevision = requireSha256(
+    input.sourceSnapshotRevision,
+    'sourceSnapshotRevision',
+  );
   const sourceRunIds = [...new Set(input.sourceRunIds)];
   if (!sourceRunIds.length)
     throw new ValidationError(
@@ -577,7 +592,7 @@ export async function createWeekEdition(input: {
         eventId: input.eventId,
         eventName: input.eventName,
         deadlineTime: input.deadlineTime,
-        sourceSnapshotRevision: input.sourceSnapshotRevision,
+        sourceSnapshotRevision,
         sourceRunIds,
       },
     );
@@ -597,14 +612,14 @@ export async function createWeekEdition(input: {
       eventId: input.eventId,
       eventName: requireText(input.eventName, 'eventName'),
       deadlineTime: new Date(input.deadlineTime),
-      sourceSnapshotRevision: requireText(input.sourceSnapshotRevision, 'sourceSnapshotRevision'),
+      sourceSnapshotRevision,
       status: 'draft',
     });
     await tx.insert(contentWeekEditionSourceRuns).values(
       sourceRunIds.map((runId) => ({
         editionId,
         runId,
-        sourceSnapshotRevision: input.sourceSnapshotRevision,
+        sourceSnapshotRevision,
       })),
     );
     await audit(tx, input.actor, 'week-edition.create', 'week_edition', editionId, {
@@ -759,7 +774,7 @@ export async function markWeekEditionReady(
     if (
       sourceRuns.some(
         (run) =>
-          run.status !== 'completed' ||
+          !['completed', 'empty', 'partial'].includes(run.status) ||
           run.traceVerified !== true ||
           run.checkpointAdvanced !== true ||
           !run.completedAt ||
@@ -1217,8 +1232,7 @@ export async function compileFrozenWeekEdition(input: {
 }): Promise<{ en: WeekPublicationEnvelope; 'zh-CN': WeekPublicationEnvelope }> {
   requireUuid(input.editionId, 'editionId');
   requireUuid(input.publicationId, 'publicationId');
-  if (!/^[0-9a-f]{64}$/i.test(input.expectedFrozenSha256))
-    throw new ValidationError('expectedFrozenSha256 is invalid', 'EDITORIAL_FROZEN_HASH_INVALID');
+  const expectedFrozenSha256 = requireSha256(input.expectedFrozenSha256, 'expectedFrozenSha256');
   const db = input.database ?? (await getDb());
   const rows = await db
     .select({
@@ -1239,7 +1253,7 @@ export async function compileFrozenWeekEdition(input: {
       'Week edition must be READY before publish',
       'EDITORIAL_STATE_CONFLICT',
     );
-  if (!edition.frozenSha256 || edition.frozenSha256 !== input.expectedFrozenSha256)
+  if (!edition.frozenSha256 || edition.frozenSha256 !== expectedFrozenSha256)
     throw new ConflictError('Frozen Week hash does not match', 'FROZEN_HASH_MISMATCH');
   const snapshotRows = await db
     .select({
@@ -1251,7 +1265,7 @@ export async function compileFrozenWeekEdition(input: {
     .where(eq(contentWeekEditionSnapshots.editionId, input.editionId))
     .limit(1);
   const snapshot = snapshotRows[0];
-  if (!snapshot || snapshot.frozenSha256 !== input.expectedFrozenSha256)
+  if (!snapshot || snapshot.frozenSha256 !== expectedFrozenSha256)
     throw new ConflictError('Frozen Week snapshot is unavailable', 'FROZEN_SNAPSHOT_UNAVAILABLE');
   const eventProjection = jsonObject(snapshot.eventProjection);
   const event = {
@@ -1367,6 +1381,7 @@ export async function publishFrozenWeekEdition(input: {
 }): Promise<WeekPublicationResult & { replayed: boolean }> {
   requireRole(input.actor, 'content_publisher');
   requireUuid(input.editionId, 'editionId');
+  const expectedFrozenSha256 = requireSha256(input.expectedFrozenSha256, 'expectedFrozenSha256');
   const reason = requireText(input.reason, 'reason');
   const db = await getDb();
   const publication = await db.transaction(async (tx) => {
@@ -1377,7 +1392,7 @@ export async function publishFrozenWeekEdition(input: {
       'week_edition',
       input.editionId,
       {
-        expectedFrozenSha256: input.expectedFrozenSha256,
+        expectedFrozenSha256,
         reason,
         validUntil: input.validUntil ?? null,
       },
@@ -1405,7 +1420,7 @@ export async function publishFrozenWeekEdition(input: {
         'Week edition must be READY before publish',
         'EDITORIAL_STATE_CONFLICT',
       );
-    if (edition.frozenSha256 !== input.expectedFrozenSha256)
+    if (edition.frozenSha256 !== expectedFrozenSha256)
       throw new ConflictError('Frozen Week hash does not match', 'FROZEN_HASH_MISMATCH');
     // Allocate the next revision only after taking the same PostgreSQL scope
     // lock used by publication persistence. Otherwise concurrent publishers
@@ -1424,7 +1439,7 @@ export async function publishFrozenWeekEdition(input: {
       publicationId,
       publishedAt,
       validUntil: input.validUntil,
-      expectedFrozenSha256: input.expectedFrozenSha256,
+      expectedFrozenSha256,
       database: tx,
     });
     const result = await persistWeekPublication(tx, pair.en, pair['zh-CN']);

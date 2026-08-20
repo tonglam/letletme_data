@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+import { StringDecoder } from 'node:string_decoder';
 
 import type { WeekLocale } from '../contracts/week-publication';
 
@@ -359,6 +360,7 @@ export class CliGrokRunner implements GrokRunner {
       });
       let stdout = '';
       let stderr = '';
+      const stdoutDecoder = new StringDecoder('utf8');
       let outputBytes = 0;
       let settled = false;
       let termination: 'timeout' | 'oversized' | null = null;
@@ -382,7 +384,7 @@ export class CliGrokRunner implements GrokRunner {
       }, this.timeoutMs);
       child.stdout.on('data', (chunk: Buffer) => {
         outputBytes += chunk.byteLength;
-        if (outputBytes <= MAX_OUTPUT_BYTES) stdout += chunk.toString('utf8');
+        if (outputBytes <= MAX_OUTPUT_BYTES) stdout += stdoutDecoder.write(chunk);
         else if (termination === null) {
           termination = 'oversized';
           terminate();
@@ -394,6 +396,7 @@ export class CliGrokRunner implements GrokRunner {
       child.on('error', (error) => finish(() => reject(error)));
       child.on('close', (code) =>
         finish(() => {
+          if (outputBytes <= MAX_OUTPUT_BYTES) stdout += stdoutDecoder.end();
           if (termination === 'oversized') reject(new Error('Grok output exceeded 2 MiB'));
           else if (termination === 'timeout')
             reject(new Error(`Grok timed out after ${this.timeoutMs}ms`));

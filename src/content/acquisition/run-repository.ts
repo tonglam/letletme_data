@@ -131,6 +131,7 @@ export async function reclaimStaleAcquisitionRuns(input: {
           lt(contentAcquisitionRuns.startedAt, cutoff),
           and(
             isNull(contentAcquisitionRuns.startedAt),
+            isNull(contentAcquisitionRuns.enqueueConfirmedAt),
             lt(contentAcquisitionRuns.createdAt, cutoff),
           ),
         ),
@@ -138,6 +139,27 @@ export async function reclaimStaleAcquisitionRuns(input: {
     )
     .returning({ runId: contentAcquisitionRuns.runId });
   return reclaimed.length;
+}
+
+/** Record that the deterministic BullMQ job was accepted after the durable
+ * pending reservation committed.  Pending rows with this confirmation must
+ * not be reclaimed merely because they waited in BullMQ longer than the
+ * worker's execution lease; only an unconfirmed enqueue may be reclaimed.
+ */
+export async function confirmAcquisitionRunEnqueued(runId: string): Promise<boolean> {
+  const db = await getDb();
+  const updated = await db
+    .update(contentAcquisitionRuns)
+    .set({ enqueueConfirmedAt: new Date() })
+    .where(
+      and(
+        eq(contentAcquisitionRuns.runId, runId),
+        eq(contentAcquisitionRuns.status, 'pending'),
+        isNull(contentAcquisitionRuns.enqueueConfirmedAt),
+      ),
+    )
+    .returning({ runId: contentAcquisitionRuns.runId });
+  return updated.length === 1;
 }
 
 const asJsonObject = (value: unknown): Record<string, unknown> =>

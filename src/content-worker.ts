@@ -18,6 +18,7 @@ import { logError, logInfo } from './utils/logger';
 import { withMutationConflictGuard } from './utils/mutation-lock';
 import { computePollWindow, isPollDue, pollBudget, resolvePollPhase } from './content/poll-policy';
 import {
+  confirmAcquisitionRunEnqueued,
   reclaimStaleAcquisitionRuns,
   reservePendingAcquisitionRun,
 } from './content/acquisition/run-repository';
@@ -156,6 +157,7 @@ async function scheduleFromDatabase(): Promise<void> {
         windowStart: reservation.start,
         windowEnd: reservation.end,
       });
+      await confirmAcquisitionRunEnqueued(reservation.runId);
     } catch (error) {
       logError('Content scheduler enqueue failed; pending run will be reclaimed', error, {
         runId: reservation.runId,

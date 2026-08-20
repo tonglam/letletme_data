@@ -94,6 +94,16 @@ describe('Briefing content migration contract', () => {
     expect(sql).toContain('final90');
   });
 
+  test('distinguishes confirmed queued acquisition reservations from enqueue failures', async () => {
+    const sql = await Bun.file(
+      new URL(
+        '../../../migrations/0022_content_acquisition_enqueue_confirmation.sql',
+        import.meta.url,
+      ),
+    ).text();
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS enqueue_confirmed_at');
+  });
+
   test('makes active publication unique by scope and revisioned', async () => {
     const sql = await Bun.file(migrationPath).text();
     expect(sql).toContain('UNIQUE (scope_key, revision)');

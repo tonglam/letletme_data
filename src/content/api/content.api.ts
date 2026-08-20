@@ -58,7 +58,10 @@ function requireActor(request: Request, role: EditorialActor['role'], set: { sta
 }
 
 const uuid = t.String({ format: 'uuid' });
-const sha256 = t.String({ pattern: '^[0-9a-fA-F]{64}$' });
+// Hashes are persisted and compared byte-for-byte throughout the editorial
+// state machine. Reject uppercase at the HTTP boundary so an accepted request
+// can never create a revision that later fails a case-sensitive comparison.
+const sha256 = t.String({ pattern: '^[0-9a-f]{64}$' });
 const dateTime = t.String({ format: 'date-time' });
 const locale = t.Union([t.Literal('en'), t.Literal('zh-CN')]);
 const localization = t.Object({

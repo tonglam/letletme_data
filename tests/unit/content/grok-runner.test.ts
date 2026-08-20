@@ -44,6 +44,13 @@ describe('headless Grok runner', () => {
     expect(result.responseHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  test('preserves UTF-8 characters split across stdout chunks', async () => {
+    const result = await runFixture('utf8-split');
+    expect(result.status).toBe('COMPLETED');
+    expect(result.traceVerified).toBe(true);
+    expect(result.receipts[0]?.payload).toEqual({ headline: '😀' });
+  });
+
   test('fails closed when a completed response has no X trace', async () => {
     const result = await runFixture('no-trace');
     expect(result.status).toBe('COMPLETED');
