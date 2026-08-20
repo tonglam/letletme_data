@@ -36,6 +36,12 @@ describe('content worker poll policy', () => {
     expect(resolvePollPhase({ ...base, editorOnDutyUntil: '2026-08-20T10:30:00.000Z' }, now)).toBe(
       'FINAL_90',
     );
+    expect(
+      resolvePollPhase(
+        { ...base, final90Budget: 1, editorOnDutyUntil: '2026-08-20T10:30:00.000Z' },
+        now,
+      ),
+    ).toBe('APPROACHING');
   });
 
   test('uses safety lag, overlap and a bounded catch-up window', () => {
@@ -68,6 +74,8 @@ describe('content worker poll policy', () => {
     expect(pollBudget({ final90Budget: 3 }, 'NORMAL')).toBeNull();
     expect(pollBudget({ final90Budget: 3 }, 'FINAL_90')).toBe(3);
     expect(pollBudget({ final90Budget: 0 }, 'FINAL_90')).toBeNull();
+    expect(pollBudget({ final90Budget: 1 }, 'FINAL_90')).toBeNull();
+    expect(pollBudget({ final90Budget: 1 }, 'FINAL_90', 1)).toBe(1);
   });
 
   test('reclaims only acquisition runs whose lease anchor is stale', () => {

@@ -77,7 +77,7 @@ async function scheduleFromDatabase(): Promise<void> {
       },
       async () => {
         const transactionDb = await getDb();
-        const phase = resolvePollPhase(group.pollPolicy, now);
+        const phase = resolvePollPhase(group.pollPolicy, now, flags.pollMaxXCalls);
         await reclaimStaleAcquisitionRuns({
           groupId: group.groupId,
           partitionKey,
@@ -153,7 +153,7 @@ async function scheduleFromDatabase(): Promise<void> {
         partitionKey,
         mode: 'poll',
         pollPhase: reservation.phase,
-        phaseBudget: pollBudget(group.pollPolicy, reservation.phase),
+        phaseBudget: pollBudget(group.pollPolicy, reservation.phase, flags.pollMaxXCalls),
         windowStart: reservation.start,
         windowEnd: reservation.end,
       });

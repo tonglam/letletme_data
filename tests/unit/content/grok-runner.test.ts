@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { resolve } from 'node:path';
 
-import { CliGrokRunner, type GrokRunInput } from '../../../src/content/acquisition/grok-runner';
+import {
+  CliGrokRunner,
+  isValidGrokReceipt,
+  type GrokRunInput,
+} from '../../../src/content/acquisition/grok-runner';
 
 const fixtureBinary = resolve(process.cwd(), 'tests/fixtures/fake-grok-cli.sh');
 const input: GrokRunInput = {
@@ -79,6 +83,17 @@ describe('headless Grok runner', () => {
     expect(result.xCallCount).toBe(1);
     expect(result.receipts).toEqual([]);
     expect(result.error).toBe('Invalid Grok receipt schema');
+  });
+
+  test('rejects calendar-invalid receipt timestamps', () => {
+    const receipt = {
+      sourceId: input.runId,
+      externalId: 'post-invalid-date',
+      canonicalUrl: 'https://example.com/post-invalid-date',
+      capturedAt: '2026-02-30T09:00:00Z',
+      canonicalHash: 'a'.repeat(64),
+    };
+    expect(isValidGrokReceipt(receipt)).toBe(false);
   });
 
   test('handles auth expiry, invalid JSON, timeout and oversized output', async () => {

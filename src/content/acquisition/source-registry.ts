@@ -327,7 +327,11 @@ export async function buildSourceSnapshot(
         eq(contentSources.status, 'active'),
       ),
     )
-    .orderBy(asc(contentSourceGroupMembers.priority), asc(contentSources.displayName));
+    .orderBy(
+      asc(contentSourceGroupMembers.priority),
+      asc(contentSources.displayName),
+      asc(contentSources.sourceId),
+    );
   // Keep the persisted group identifier out of each generated source object.
   // The Grok input schema intentionally accepts only the public source fields;
   // groupId belongs to the enclosing snapshot metadata, not an item.

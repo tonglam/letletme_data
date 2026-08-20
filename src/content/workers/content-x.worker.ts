@@ -77,9 +77,14 @@ export async function runContentXWorker(input: ContentXWorkerInput = {}): Promis
       run,
       result: {
         status: 'EMPTY',
-        traceVerified: true,
+        // The scheduler can reserve a run while a source group is still
+        // active, then the last source can be paused before this worker
+        // starts.  No X request was made in that race, so this terminal
+        // result must not be eligible to advance the acquisition checkpoint.
+        traceVerified: false,
         xCallCount: 0,
         receipts: [],
+        error: 'Source snapshot empty; no X query executed',
         skillSha: MONITOR_FPL_X_SOURCES_SKILL_SHA,
         toolName: 'content-source-snapshot',
         adapterVersion: 'empty-v1',
