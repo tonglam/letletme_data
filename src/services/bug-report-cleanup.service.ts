@@ -12,12 +12,75 @@ const BATCH_SIZE = 100;
 const STORAGE_REQUEST_TIMEOUT_MS = 15_000;
 const STORAGE_OBJECT_MISSING_CODE = 'BUG_REPORT_STORAGE_OBJECT_MISSING';
 
+function configuredStorageOrigins(): ReadonlySet<string> {
+  const origins = new Set<string>();
+  for (const value of [
+    process.env.BUG_REPORT_STORAGE_LEGACY_ORIGIN,
+    process.env.BUG_REPORT_SCREENSHOT_SUPABASE_URL,
+  ]) {
+    if (!value?.trim()) continue;
+    try {
+      const parsed = new URL(value.trim());
+      if (parsed.protocol === 'https:' && !parsed.username && !parsed.password) {
+        origins.add(parsed.origin);
+      }
+    } catch {
+      // Configuration validation reports malformed values; cleanup treats the
+      // locator as unknown and keeps the existing retry behaviour below.
+    }
+  }
+  return origins;
+}
+
+function isPrivateBugReportStorageLocator(locator: string): boolean {
+  const origins = configuredStorageOrigins();
+  if (origins.size === 0) return false;
+  const buckets = new Set(
+    [
+      process.env.BUG_REPORT_SCREENSHOT_BUCKET?.trim(),
+      process.env.SUPABASE_BUG_REPORT_BUCKET?.trim(),
+      'bug-report-screenshots',
+      'bug-reports',
+    ].filter((value): value is string => Boolean(value)),
+  );
+  try {
+    const parsed = new URL(locator);
+    if (
+      parsed.protocol !== 'https:' ||
+      !origins.has(parsed.origin) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return false;
+    }
+    const decodedPath = decodeURIComponent(parsed.pathname);
+    for (const bucket of buckets) {
+      const prefix = `/storage/v1/object/${encodeURIComponent(bucket)}/`;
+      if (!decodedPath.startsWith(prefix)) continue;
+      const objectPath = decodedPath.slice(prefix.length);
+      if (!objectPath.startsWith('bug-reports/')) return false;
+      return objectPath
+        .split('/')
+        .every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function shouldAttemptRemoteDelete(locator: string): boolean {
   // The legacy-origin guard is deliberately required before classifying a
   // locator as managed. If the deployment is missing that setting, keep the
   // existing retry behaviour rather than silently leaking an object.
-  const legacyOriginConfigured = Boolean(process.env.BUG_REPORT_STORAGE_LEGACY_ORIGIN?.trim());
-  return !legacyOriginConfigured || isLegacyBugReportStorageLocator(locator);
+  const originsConfigured = configuredStorageOrigins().size > 0;
+  return (
+    !originsConfigured ||
+    isLegacyBugReportStorageLocator(locator) ||
+    isPrivateBugReportStorageLocator(locator)
+  );
 }
 
 function storageEndpoint(): string {

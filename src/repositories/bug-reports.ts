@@ -56,6 +56,15 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     return typeof value === 'string' ? value : null;
   };
 
+  const submissionIdFromScreenshotObjectKey = (objectKey: string | null): string | null => {
+    if (!objectKey) return null;
+    const match =
+      /^bug-reports\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|png|webp|gif)$/i.exec(
+        objectKey,
+      );
+    return match?.[1] ?? null;
+  };
+
   const screenshotWasDeletedInSnapshot = (snapshot: unknown): boolean => {
     if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
     const value = (snapshot as Record<string, unknown>).screenshotDeletedAt;
@@ -118,6 +127,39 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             undefined,
             'bug_report_retention_backups_public_id_key',
           );
+        }
+
+        if (report.submissionId) {
+          const [retiredSubmission] = await connection
+            .select({ id: bugReportRetentionBackupsInOps.id })
+            .from(bugReportRetentionBackupsInOps)
+            .where(eq(bugReportRetentionBackupsInOps.submissionId, report.submissionId))
+            .limit(1);
+          if (retiredSubmission) {
+            throw new DatabaseError(
+              'Bug report submission has already been retired',
+              'BUG_REPORT_SUBMISSION_RETIRED',
+            );
+          }
+        }
+
+        if (report.screenshotObjectKey) {
+          const [retiredPrivateKey] = await connection
+            .select({ id: bugReportRetentionBackupsInOps.id })
+            .from(bugReportRetentionBackupsInOps)
+            .where(
+              and(
+                eq(bugReportRetentionBackupsInOps.screenshotObjectKey, report.screenshotObjectKey),
+                isNull(bugReportRetentionBackupsInOps.screenshotDeletedAt),
+              ),
+            )
+            .limit(1);
+          if (retiredPrivateKey) {
+            throw new DatabaseError(
+              'Bug report screenshot object key has already been reserved',
+              'BUG_REPORT_SCREENSHOT_KEY_RETIRED',
+            );
+          }
         }
 
         if (report.screenshotUrl) {
@@ -726,6 +768,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           source: bugReportsInOps.source,
           userId: bugReportsInOps.userId,
           entryId: bugReportsInOps.entryId,
+          submissionId: bugReportsInOps.submissionId,
         })
         .from(bugReportsInOps)
         .where(and(eq(bugReportsInOps.id, report.id), lte(bugReportsInOps.expiresAt, now)))
@@ -736,6 +779,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       const [existingClaim] = await tx
         .select({
           snapshot: bugReportRetentionBackupsInOps.snapshot,
+          submissionId: bugReportRetentionBackupsInOps.submissionId,
           screenshotObjectKey: bugReportRetentionBackupsInOps.screenshotObjectKey,
           screenshotCreatedAt: bugReportRetentionBackupsInOps.screenshotCreatedAt,
           screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
@@ -749,6 +793,10 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         // deleting the report row. The private screenshot worker can then
         // retry the object independently of report-body retention.
         const inventoryKey = existingClaim?.screenshotObjectKey ?? current.screenshotObjectKey;
+        const inventorySubmissionId =
+          existingClaim?.submissionId ??
+          current.submissionId ??
+          submissionIdFromScreenshotObjectKey(inventoryKey);
         if (
           existingClaim?.screenshotObjectKey &&
           existingClaim.screenshotObjectKey !== inventoryKey
@@ -763,6 +811,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             .update(bugReportRetentionBackupsInOps)
             .set({
               snapshot: { screenshotObjectKey: inventoryKey },
+              submissionId: inventorySubmissionId,
               screenshotObjectKey: inventoryKey,
               screenshotCreatedAt: current.createdAt,
             })
@@ -774,6 +823,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
               id: current.id,
               publicId: current.publicId,
               snapshot: { screenshotObjectKey: inventoryKey },
+              submissionId: inventorySubmissionId,
               screenshotObjectKey: inventoryKey,
               screenshotCreatedAt: current.createdAt,
             })
@@ -796,6 +846,12 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           ? null
           : screenshotUrlFromSnapshot(existingClaim.snapshot)
         : current.screenshotUrl;
+      if (existingClaim && !existingClaim.submissionId && current.submissionId) {
+        await tx
+          .update(bugReportRetentionBackupsInOps)
+          .set({ submissionId: current.submissionId })
+          .where(eq(bugReportRetentionBackupsInOps.id, current.id));
+      }
       if (!existingClaim) {
         await tx
           .insert(bugReportRetentionBackupsInOps)
@@ -803,6 +859,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             id: current.id,
             publicId: current.publicId,
             snapshot: current,
+            submissionId: current.submissionId,
           })
           .onConflictDoNothing();
       }

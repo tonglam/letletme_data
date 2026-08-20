@@ -432,6 +432,7 @@ export const bugReportRetentionBackupsInOps = ops.table(
       .defaultNow()
       .notNull(),
     snapshot: jsonb().notNull(),
+    submissionId: uuid('submission_id'),
     screenshotDeleteStartedAt: timestamp('screenshot_delete_started_at', {
       withTimezone: true,
       mode: 'date',
@@ -445,7 +446,13 @@ export const bugReportRetentionBackupsInOps = ops.table(
     index('bug_report_retention_backups_created_idx').on(table.backedUpAt.desc()),
     index('bug_report_retention_backups_screenshot_tombstone_idx')
       .using('btree', sql`((snapshot->>'screenshotUrl'))`)
-      .where(sql`screenshot_deleted_at IS NOT NULL`),
+      .where(sql`screenshot_delete_started_at IS NOT NULL OR screenshot_deleted_at IS NOT NULL`),
+    index('bug_report_retention_backups_private_key_idx')
+      .on(table.screenshotObjectKey)
+      .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
+    uniqueIndex('bug_report_retention_backups_submission_id_key')
+      .on(table.submissionId)
+      .where(sql`submission_id IS NOT NULL`),
     index('bug_report_retention_backups_private_screenshot_idx')
       .on(table.backedUpAt.asc())
       .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
