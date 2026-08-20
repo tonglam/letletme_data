@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS ops.bug_report_retention_backups (
   snapshot jsonb NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS bug_report_retention_backups_public_id_key
+DROP INDEX IF EXISTS ops.bug_report_retention_backups_public_id_key;
+
+CREATE INDEX IF NOT EXISTS bug_report_retention_backups_public_id_idx
   ON ops.bug_report_retention_backups (public_id);
 
 CREATE INDEX IF NOT EXISTS bug_report_retention_backups_created_idx

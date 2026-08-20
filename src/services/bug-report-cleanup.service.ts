@@ -1,6 +1,10 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 
-import { bugReportRepository, type StoredBugReport } from '../repositories/bug-reports';
+import {
+  bugReportRepository,
+  type BugReportExpiryCursor,
+  type StoredBugReport,
+} from '../repositories/bug-reports';
 import { logError, logInfo } from '../utils/logger';
 
 const BATCH_SIZE = 100;
@@ -42,21 +46,35 @@ export type BugReportCleanupResult = {
 };
 
 export async function runBugReportCleanup(now = new Date()): Promise<BugReportCleanupResult> {
-  const expired = await bugReportRepository.listExpired(now, BATCH_SIZE);
   let deleted = 0;
   let retried = 0;
-  for (const report of expired) {
-    try {
-      if (report.screenshotUrl) await deleteScreenshot(report.screenshotUrl);
-      await bugReportRepository.backupAndDelete(report);
-      deleted += 1;
-    } catch (error) {
-      retried += 1;
-      logError('Bug report cleanup item failed', error, { publicId: report.publicId });
+  let scanned = 0;
+  let cursor: BugReportExpiryCursor | undefined;
+
+  while (true) {
+    const expired = await bugReportRepository.listExpired(now, BATCH_SIZE, cursor);
+    if (expired.length === 0) break;
+    scanned += expired.length;
+
+    for (const report of expired) {
+      try {
+        if (report.screenshotUrl) await deleteScreenshot(report.screenshotUrl);
+        const removed = await bugReportRepository.backupAndDelete(report, now);
+        if (removed !== false) deleted += 1;
+      } catch (error) {
+        retried += 1;
+        logError('Bug report cleanup item failed', error, { publicId: report.publicId });
+      }
     }
+
+    if (expired.length < BATCH_SIZE) break;
+    const last = expired.at(-1);
+    if (!last) break;
+    cursor = { expiresAt: last.expiresAt, id: last.id };
   }
-  logInfo('Bug report cleanup completed', { scanned: expired.length, deleted, retried });
-  return { scanned: expired.length, deleted, retried };
+
+  logInfo('Bug report cleanup completed', { scanned, deleted, retried });
+  return { scanned, deleted, retried };
 }
 
 export async function deleteBugReportScreenshotForCleanup(report: StoredBugReport): Promise<void> {

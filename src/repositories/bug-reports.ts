@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, isNotNull, isNull, lte } from 'drizzle-orm';
+import { and, asc, eq, gt, isNotNull, isNull, lte, or } from 'drizzle-orm';
 import {
   bugReportRetentionBackupsInOps,
   bugReportStorageMigrationsInOps,
@@ -30,11 +30,15 @@ export type StoredBugReport = {
   entryId: number | null;
 };
 
-export type ExpiredBugReportScreenshot = {
-  id: string;
-  screenshotObjectKey: string;
-  createdAt: Date;
-};
+export type BugReportExpiryCursor = Pick<StoredBugReport, 'expiresAt' | 'id'>;
+export type BugReportScreenshotCursor = Pick<StoredBugReport, 'createdAt' | 'id'>;
+
+class ReportNoLongerExpiredError extends Error {
+  constructor() {
+    super('Bug report is no longer expired');
+    this.name = 'ReportNoLongerExpiredError';
+  }
+}
 
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
@@ -149,7 +153,13 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     return row ?? null;
   };
 
-  const listExpired = async (now: Date, limit: number) => {
+  const listExpired = async (now: Date, limit: number, after?: BugReportExpiryCursor) => {
+    const cursor = after
+      ? or(
+          gt(bugReportsInOps.expiresAt, after.expiresAt),
+          and(eq(bugReportsInOps.expiresAt, after.expiresAt), gt(bugReportsInOps.id, after.id)),
+        )
+      : undefined;
     const rows = await (
       await getDbInstance()
     )
@@ -168,13 +178,23 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         entryId: bugReportsInOps.entryId,
       })
       .from(bugReportsInOps)
-      .where(lte(bugReportsInOps.expiresAt, now))
-      .orderBy(asc(bugReportsInOps.expiresAt))
+      .where(
+        cursor
+          ? and(lte(bugReportsInOps.expiresAt, now), cursor)
+          : lte(bugReportsInOps.expiresAt, now),
+      )
+      .orderBy(asc(bugReportsInOps.expiresAt), asc(bugReportsInOps.id))
       .limit(Math.min(Math.max(limit, 1), 100));
     return rows as StoredBugReport[];
   };
 
-  const listWithScreenshots = async (limit: number) => {
+  const listWithScreenshots = async (limit: number, after?: BugReportScreenshotCursor) => {
+    const cursor = after
+      ? or(
+          gt(bugReportsInOps.createdAt, after.createdAt),
+          and(eq(bugReportsInOps.createdAt, after.createdAt), gt(bugReportsInOps.id, after.id)),
+        )
+      : undefined;
     const rows = await (
       await getDbInstance()
     )
@@ -193,9 +213,36 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         entryId: bugReportsInOps.entryId,
       })
       .from(bugReportsInOps)
-      .where(isNotNull(bugReportsInOps.screenshotUrl))
-      .orderBy(asc(bugReportsInOps.createdAt))
+      .where(
+        cursor
+          ? and(isNotNull(bugReportsInOps.screenshotUrl), cursor)
+          : isNotNull(bugReportsInOps.screenshotUrl),
+      )
+      .orderBy(asc(bugReportsInOps.createdAt), asc(bugReportsInOps.id))
       .limit(Math.min(Math.max(limit, 1), 100));
+    return rows as StoredBugReport[];
+  };
+
+  const listByScreenshotUrl = async (sourceLocator: string) => {
+    const rows = await (
+      await getDbInstance()
+    )
+      .select({
+        id: bugReportsInOps.id,
+        publicId: bugReportsInOps.publicId,
+        createdAt: bugReportsInOps.createdAt,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+        body: bugReportsInOps.body,
+        clientMeta: bugReportsInOps.clientMeta,
+        source: bugReportsInOps.source,
+        userId: bugReportsInOps.userId,
+        entryId: bugReportsInOps.entryId,
+      })
+      .from(bugReportsInOps)
+      .where(eq(bugReportsInOps.screenshotUrl, sourceLocator));
     return rows as StoredBugReport[];
   };
 
@@ -220,6 +267,18 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
         screenshotUrl: bugReportsInOps.screenshotUrl,
       });
     return row ?? null;
+  };
+
+  const updateScreenshotUrls = async (sourceLocator: string, targetLocator: string) => {
+    const rows = await (await getDbInstance())
+      .update(bugReportsInOps)
+      .set({ screenshotUrl: targetLocator })
+      .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+      .returning({
+        publicId: bugReportsInOps.publicId,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+      });
+    return rows;
   };
 
   const recordStorageMigration = async (
@@ -292,17 +351,52 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
       );
   };
 
-  const backupAndDelete = async (report: StoredBugReport) => {
+  const backupAndDelete = async (report: StoredBugReport, now = new Date()) => {
     const db = await getDbInstance();
-    await db
-      .insert(bugReportRetentionBackupsInOps)
-      .values({
-        id: randomUUID(),
-        publicId: report.publicId,
-        snapshot: report,
-      })
-      .onConflictDoNothing({ target: bugReportRetentionBackupsInOps.publicId });
-    await db.delete(bugReportsInOps).where(eq(bugReportsInOps.id, report.id));
+    try {
+      await db.transaction(async (tx) => {
+        const [current] = await tx
+          .select({
+            id: bugReportsInOps.id,
+            publicId: bugReportsInOps.publicId,
+            createdAt: bugReportsInOps.createdAt,
+            status: bugReportsInOps.status,
+            closedAt: bugReportsInOps.closedAt,
+            expiresAt: bugReportsInOps.expiresAt,
+            screenshotUrl: bugReportsInOps.screenshotUrl,
+            body: bugReportsInOps.body,
+            clientMeta: bugReportsInOps.clientMeta,
+            source: bugReportsInOps.source,
+            userId: bugReportsInOps.userId,
+            entryId: bugReportsInOps.entryId,
+          })
+          .from(bugReportsInOps)
+          .where(and(eq(bugReportsInOps.id, report.id), lte(bugReportsInOps.expiresAt, now)))
+          .for('update')
+          .limit(1);
+
+        if (!current) throw new ReportNoLongerExpiredError();
+        const currentReport = current as StoredBugReport;
+        await tx
+          .insert(bugReportRetentionBackupsInOps)
+          .values({
+            id: currentReport.id,
+            publicId: currentReport.publicId,
+            snapshot: currentReport,
+          })
+          .onConflictDoNothing();
+
+        const deleted = await tx
+          .delete(bugReportsInOps)
+          .where(and(eq(bugReportsInOps.id, currentReport.id), lte(bugReportsInOps.expiresAt, now)))
+          .returning({ id: bugReportsInOps.id });
+        if (!deleted[0]) throw new ReportNoLongerExpiredError();
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof ReportNoLongerExpiredError) return false;
+      throw error;
+    }
   };
 
   return {
@@ -311,7 +405,9 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     updateStatus,
     listExpired,
     listWithScreenshots,
+    listByScreenshotUrl,
     updateScreenshotUrl,
+    updateScreenshotUrls,
     recordStorageMigration,
     listPendingStorageDeletes,
     markStorageDeleted,
@@ -320,3 +416,5 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
 };
 
 export const bugReportRepository = createBugReportRepository();
+
+export type BugReportRepository = ReturnType<typeof createBugReportRepository>;

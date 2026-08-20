@@ -25,6 +25,22 @@ describe('revision-pinned fixture breakdown', () => {
     ]);
   });
 
+  test('accepts the FPL starts fixture statistic', () => {
+    const withStarts = structuredClone(rawExplainElementsFixture[0]);
+    if (!Array.isArray(withStarts.explain)) throw new Error('fixture is invalid');
+    const firstFixture = withStarts.explain[0] as { stats?: unknown } | undefined;
+    if (!firstFixture || !Array.isArray(firstFixture.stats)) throw new Error('fixture is invalid');
+    firstFixture.stats.push({ identifier: 'starts', value: 1, points: 0 });
+
+    const prepared = prepareEventLives(99, [withStarts]);
+    expect(prepared.eventLives[0]?.fixtureBreakdown?.[0]?.stats).toContainEqual({
+      identifier: 'starts',
+      value: 1,
+      points: 0,
+      pointsModification: null,
+    });
+  });
+
   test('rejects duplicate fixture facts instead of silently merging them', () => {
     const duplicate = structuredClone(rawExplainElementsFixture[0]);
     if (!Array.isArray(duplicate.explain)) throw new Error('fixture is invalid');

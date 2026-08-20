@@ -21,7 +21,6 @@
     "test:all": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "coverage": "bun test --coverage",
-    "bug-reports:storage-migrate": "bun scripts/migrate-bug-report-storage.ts",
     "lint": "bunx eslint . --ext .ts,.tsx --cache --config eslint.config.mjs",
     "lint:fix": "bunx eslint . --ext .ts,.tsx --cache --fix --config eslint.config.mjs",
     "format:check": "bunx prettier --check .",

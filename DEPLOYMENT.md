@@ -91,6 +91,8 @@ bash scripts/deploy.sh status
 bash scripts/deploy.sh logs api
 docker compose logs --since 1h api worker
 docker compose run --rm -T migration bun run db:migrate:status
+docker compose run --rm -T migration bun run db:migrate -- --storage-migration
+docker compose run --rm -T migration bun run db:migrate -- --storage-migration --apply
 docker compose run --rm -T migration bun run db:migration-contract
 docker compose run --rm -T migration bun run db:verify-runtime-logins
 ```

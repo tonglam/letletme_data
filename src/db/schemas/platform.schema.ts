@@ -434,7 +434,7 @@ export const bugReportRetentionBackupsInOps = ops.table(
     snapshot: jsonb().notNull(),
   },
   (table) => [
-    uniqueIndex('bug_report_retention_backups_public_id_key').on(table.publicId),
+    index('bug_report_retention_backups_public_id_idx').on(table.publicId),
     index('bug_report_retention_backups_created_idx').on(table.backedUpAt.desc()),
   ],
 );

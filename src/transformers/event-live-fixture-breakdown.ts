@@ -8,6 +8,7 @@ import type { RawFPLEventLiveElement } from '../types';
 
 const SUPPORTED_IDENTIFIERS = new Set([
   'minutes',
+  'starts',
   'goals_scored',
   'assists',
   'clean_sheets',

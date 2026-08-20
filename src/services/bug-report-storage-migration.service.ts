@@ -1,6 +1,11 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 
-import { bugReportRepository } from '../repositories/bug-reports';
+import {
+  bugReportRepository,
+  type BugReportScreenshotCursor,
+  type BugReportRepository,
+  type StoredBugReport,
+} from '../repositories/bug-reports';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
 const BATCH_SIZE = 100;
@@ -41,6 +46,14 @@ function configuredLegacyOrigin(): string | null {
   } catch {
     return null;
   }
+}
+
+export function assertLegacyBugReportStorageConfig(): string {
+  const origin = configuredLegacyOrigin();
+  if (!origin) {
+    throw new Error('BUG_REPORT_STORAGE_LEGACY_ORIGIN is not set or is not a valid HTTPS origin');
+  }
+  return origin;
 }
 
 /** Only old public objects in the configured Supabase project's avatar bucket are candidates. */
@@ -108,22 +121,41 @@ export async function runBugReportStorageMigration(
     dryRun?: boolean;
     limit?: number;
     now?: Date;
+    repository?: BugReportRepository;
   } = {},
 ): Promise<BugReportStorageMigrationResult> {
   const dryRun = options.dryRun ?? true;
   const limit = Math.min(Math.max(options.limit ?? BATCH_SIZE, 1), BATCH_SIZE);
-  const reports = await bugReportRepository.listWithScreenshots(limit);
-  const candidates = reports.filter(
-    (report) => report.screenshotUrl && isLegacyBugReportStorageLocator(report.screenshotUrl),
-  );
+  const repository = options.repository ?? bugReportRepository;
+  assertLegacyBugReportStorageConfig();
   const result: BugReportStorageMigrationResult = {
-    scanned: reports.length,
-    candidates: candidates.length,
+    scanned: 0,
+    candidates: 0,
     migrated: 0,
     deletedRetried: 0,
     failed: 0,
     dryRun,
   };
+
+  const candidateReportsBySource = new Map<string, StoredBugReport[]>();
+  let cursor: BugReportScreenshotCursor | undefined;
+  while (true) {
+    const reports = await repository.listWithScreenshots(limit, cursor);
+    if (reports.length === 0) break;
+    result.scanned += reports.length;
+    for (const report of reports) {
+      const sourceLocator = report.screenshotUrl;
+      if (!sourceLocator || !isLegacyBugReportStorageLocator(sourceLocator)) continue;
+      result.candidates += 1;
+      const sourceReports = candidateReportsBySource.get(sourceLocator) ?? [];
+      sourceReports.push(report);
+      candidateReportsBySource.set(sourceLocator, sourceReports);
+    }
+    if (reports.length < limit) break;
+    const last = reports.at(-1);
+    if (!last) break;
+    cursor = { createdAt: last.createdAt, id: last.id };
+  }
 
   if (dryRun) {
     logInfo('Bug report storage migration dry-run completed', {
@@ -133,11 +165,18 @@ export async function runBugReportStorageMigration(
     return result;
   }
 
-  const pendingDeletes = await bugReportRepository.listPendingStorageDeletes(limit);
+  const pendingDeletes = await repository.listPendingStorageDeletes(limit);
   for (const pending of pendingDeletes) {
     try {
+      const references = await repository.listByScreenshotUrl(pending.sourceLocator);
+      if (references.length > 0) {
+        await repository.updateScreenshotUrls(pending.sourceLocator, pending.targetLocator);
+        if ((await repository.listByScreenshotUrl(pending.sourceLocator)).length > 0) {
+          throw new Error('Storage migration compare-and-swap lost');
+        }
+      }
       await callStorage('delete', pending.sourceLocator);
-      await bugReportRepository.markStorageDeleted(pending.sourceLocator, options.now);
+      await repository.markStorageDeleted(pending.sourceLocator, options.now);
       result.deletedRetried += 1;
     } catch (error) {
       result.failed += 1;
@@ -147,32 +186,23 @@ export async function runBugReportStorageMigration(
     }
   }
 
-  for (const report of candidates) {
-    const sourceLocator = report.screenshotUrl;
-    if (!sourceLocator) continue;
+  for (const [sourceLocator, reports] of candidateReportsBySource) {
     try {
       const migratedLocator = await callStorage('migrate', sourceLocator);
       if (!migratedLocator) throw new Error('Storage migration returned no locator');
-      const migration = await bugReportRepository.recordStorageMigration(
-        report.publicId,
+      const migration = await repository.recordStorageMigration(
+        reports[0]?.publicId ?? 'unknown',
         sourceLocator,
         migratedLocator,
       );
       const targetLocator = migration?.targetLocator ?? migratedLocator;
-      const updated = await bugReportRepository.updateScreenshotUrl(
-        report.publicId,
-        sourceLocator,
-        targetLocator,
-      );
-      if (!updated) {
-        const current = await bugReportRepository.findByPublicId(report.publicId);
-        if (current?.screenshotUrl !== targetLocator) {
-          throw new Error('Storage migration compare-and-swap lost');
-        }
+      await repository.updateScreenshotUrls(sourceLocator, targetLocator);
+      if ((await repository.listByScreenshotUrl(sourceLocator)).length > 0) {
+        throw new Error('Storage migration compare-and-swap lost');
       }
       await callStorage('delete', sourceLocator);
-      await bugReportRepository.markStorageDeleted(sourceLocator, options.now);
-      result.migrated += 1;
+      await repository.markStorageDeleted(sourceLocator, options.now);
+      result.migrated += reports.length;
     } catch (error) {
       result.failed += 1;
       logError('Bug report storage migration item failed', error, {

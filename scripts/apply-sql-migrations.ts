@@ -3,15 +3,28 @@ import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
+import * as schema from '../src/db/schemas/index.schema';
 import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
+import { createBugReportRepository } from '../src/repositories/bug-reports';
+import { runBugReportStorageMigration } from '../src/services/bug-report-storage-migration.service';
 
 const MIGRATIONS_DIR = process.env.MIGRATIONS_DIR ?? 'migrations';
 const INITIAL_MIGRATION = '0000_platform_baseline.sql';
 const PLATFORM_SCHEMAS = ['bridge', 'competition', 'fpl', 'ops', 'reporting', 'understat'];
 const ADVISORY_LOCK_KEY = 912_883_471;
 const STATUS_ONLY = process.argv.includes('--status');
+const STORAGE_MIGRATION = process.argv.includes('--storage-migration');
+const STORAGE_MIGRATION_APPLY = process.argv.includes('--apply');
+
+if (STORAGE_MIGRATION_APPLY && !STORAGE_MIGRATION) {
+  throw new Error('--apply is only valid together with --storage-migration');
+}
+if (STATUS_ONLY && STORAGE_MIGRATION) {
+  throw new Error('--status cannot be combined with --storage-migration');
+}
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -212,6 +225,15 @@ async function main(): Promise<void> {
     return;
   }
   await migrate(migrations);
+
+  if (STORAGE_MIGRATION) {
+    const migrationDb = drizzle(sql, { schema });
+    const result = await runBugReportStorageMigration({
+      dryRun: !STORAGE_MIGRATION_APPLY,
+      repository: createBugReportRepository(migrationDb),
+    });
+    console.log(`[storage-migrate] ${JSON.stringify(result)}`);
+  }
 }
 
 main()
