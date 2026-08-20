@@ -3710,6 +3710,169 @@ export const playerSeasonSummaryRefreshesInReporting = reporting.table(
   ],
 );
 
+/**
+ * Materialized Player State projection.  The SQL migration owns the exact
+ * refresh function and grants; these declarations keep the writer's schema
+ * contract and generated query types in lockstep with that projection.
+ */
+export const playerStateSeasonRowsInReporting = reporting.table(
+  'player_state_season_rows',
+  {
+    seasonId: smallint('season_id').notNull(),
+    seasonCode: text('season_code').notNull(),
+    lifecycleState: text('lifecycle_state').notNull(),
+    playerCode: integer('player_code').notNull(),
+    elementId: integer('element_id').notNull(),
+    elementType: integer('element_type').notNull(),
+    fplMinutes: integer('fpl_minutes').default(0).notNull(),
+    fplGameweeks: integer('fpl_gameweeks').default(0).notNull(),
+    fplPointsPer90: numeric('fpl_points_per_90'),
+    fplReturnRate: numeric('fpl_return_rate'),
+    fplBonusPer90: numeric('fpl_bonus_per_90'),
+    fplPositionPercentile: numeric('fpl_position_percentile'),
+    fplPeerCount: integer('fpl_peer_count').default(0).notNull(),
+    expectedMetricsAvailable: boolean('expected_metrics_available').notNull(),
+    fplSourceHash: text('fpl_source_hash').notNull(),
+    fplSourceUpdatedAt: timestamp('fpl_source_updated_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    understatMappingStatus: text('understat_mapping_status').notNull(),
+    understatPlayerId: integer('understat_player_id'),
+    understatSeasonState: text('understat_season_state'),
+    understatMinutes: integer('understat_minutes'),
+    understatNpxgPer90: numeric('understat_npxg_per_90'),
+    understatXaPer90: numeric('understat_xa_per_90'),
+    understatShotsPer90: numeric('understat_shots_per_90'),
+    understatKeyPassesPer90: numeric('understat_key_passes_per_90'),
+    understatXgChainPer90: numeric('understat_xg_chain_per_90'),
+    understatXgBuildupPer90: numeric('understat_xg_buildup_per_90'),
+    understatNpxgPercentile: numeric('understat_npxg_percentile'),
+    understatXaPercentile: numeric('understat_xa_percentile'),
+    understatShotsPercentile: numeric('understat_shots_percentile'),
+    understatKeyPassesPercentile: numeric('understat_key_passes_percentile'),
+    understatXgChainPercentile: numeric('understat_xg_chain_percentile'),
+    understatXgBuildupPercentile: numeric('understat_xg_buildup_percentile'),
+    understatProcessPercentile: numeric('understat_process_percentile'),
+    understatPeerCount: integer('understat_peer_count').default(0).notNull(),
+    understatSourceHash: text('understat_source_hash'),
+    understatSourceUpdatedAt: timestamp('understat_source_updated_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    refreshedAt: timestamp('refreshed_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index('player_state_season_rows_player_idx').using(
+      'btree',
+      table.playerCode.asc().nullsLast(),
+      table.seasonId.desc().nullsLast(),
+    ),
+    index('player_state_season_rows_season_position_idx').using(
+      'btree',
+      table.seasonId.asc().nullsLast(),
+      table.elementType.asc().nullsLast(),
+      table.playerCode.asc().nullsLast(),
+    ),
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'player_state_season_rows_season_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.elementId],
+      foreignColumns: [playersInFpl.seasonId, playersInFpl.elementId],
+      name: 'player_state_season_rows_player_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonCode, table.understatPlayerId],
+      foreignColumns: [playerSeasonsInUnderstat.seasonCode, playerSeasonsInUnderstat.playerId],
+      name: 'player_state_season_rows_understat_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId, table.playerCode],
+      name: 'player_state_season_rows_pkey',
+    }),
+    check(
+      'player_state_season_rows_counts_nonnegative',
+      sql`(fpl_minutes >= 0) AND (fpl_gameweeks >= 0) AND (fpl_peer_count >= 0) AND (understat_peer_count >= 0)`,
+    ),
+    check(
+      'player_state_season_rows_mapping_check',
+      sql`understat_mapping_status = ANY (ARRAY['VERIFIED'::text, 'UNVERIFIED'::text, 'AMBIGUOUS'::text, 'QUARANTINED'::text, 'UNAVAILABLE'::text])`,
+    ),
+    check('player_state_season_rows_season_code_check', sql`season_code ~ '^[0-9]{4}$'::text`),
+    check(
+      'player_state_season_rows_lifecycle_check',
+      sql`lifecycle_state = ANY (ARRAY['reference_only'::text, 'completed'::text, 'preseason'::text, 'active'::text, 'closed'::text])`,
+    ),
+    check('player_state_season_rows_fpl_hash_check', sql`btrim(fpl_source_hash) <> ''::text`),
+    check(
+      'player_state_season_rows_understat_counts_check',
+      sql`(understat_minutes IS NULL) OR (understat_minutes >= 0)`,
+    ),
+    check(
+      'player_state_season_rows_percentiles_check',
+      sql`((fpl_position_percentile IS NULL) OR ((fpl_position_percentile >= 0) AND (fpl_position_percentile <= 100))) AND ((understat_process_percentile IS NULL) OR ((understat_process_percentile >= 0) AND (understat_process_percentile <= 100)))`,
+    ),
+  ],
+);
+
+export const playerStateSeasonRefreshesInReporting = reporting.table(
+  'player_state_season_refreshes',
+  {
+    seasonId: smallint('season_id').notNull(),
+    revision: bigint({ mode: 'number' }).notNull(),
+    fplSourceUpdatedAt: timestamp('fpl_source_updated_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    understatSourceUpdatedAt: timestamp('understat_source_updated_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    bridgeSourceUpdatedAt: timestamp('bridge_source_updated_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true, mode: 'date' }).notNull(),
+    refreshedAt: timestamp('refreshed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    playerCount: integer('player_count').notNull(),
+    understatPlayerCount: integer('understat_player_count').notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'player_state_season_refreshes_season_fk',
+    }),
+    primaryKey({ columns: [table.seasonId], name: 'player_state_season_refreshes_pkey' }),
+    check('player_state_season_refreshes_revision_positive', sql`revision > 0`),
+    check(
+      'player_state_season_refreshes_counts_nonnegative',
+      sql`(player_count >= 0) AND (understat_player_count >= 0)`,
+    ),
+  ],
+);
+
+export const playerStateDatasetMetadataInReporting = reporting.table(
+  'player_state_dataset_metadata',
+  {
+    datasetKey: text('dataset_key').primaryKey().notNull(),
+    revision: bigint({ mode: 'number' }).notNull(),
+    methodVersion: text('method_version').notNull(),
+    sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true, mode: 'date' }).notNull(),
+    refreshedAt: timestamp('refreshed_at', { withTimezone: true, mode: 'date' }).notNull(),
+  },
+  (_table) => [
+    check('player_state_dataset_metadata_key_check', sql`dataset_key = 'player_state'`),
+    check('player_state_dataset_metadata_revision_positive', sql`revision > 0`),
+    check('player_state_dataset_metadata_method_check', sql`btrim(method_version) <> ''::text`),
+  ],
+);
+
 export const playerSeasonSummariesInReporting = reporting
   .view('player_season_summaries', {
     seasonId: smallint('season_id'),
