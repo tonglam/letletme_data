@@ -4,11 +4,11 @@ import {
   bugReportRepository,
   type BugReportScreenshotCursor,
   type BugReportRepository,
-  type StoredBugReport,
 } from '../repositories/bug-reports';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
 const BATCH_SIZE = 100;
+const STORAGE_REQUEST_TIMEOUT_MS = 15_000;
 const LEGACY_BUCKET = 'letletme';
 const LEGACY_PREFIX = `/storage/v1/object/public/${LEGACY_BUCKET}/bug-reports/`;
 
@@ -109,6 +109,7 @@ async function callStorage(
       'x-bug-report-signature': signature,
     },
     body,
+    signal: AbortSignal.timeout(STORAGE_REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Storage ${operation} failed: ${response.status}`);
   const result = (await response.json()) as { success?: boolean; locator?: unknown };
@@ -137,7 +138,7 @@ export async function runBugReportStorageMigration(
     dryRun,
   };
 
-  const candidateReportsBySource = new Map<string, StoredBugReport[]>();
+  const candidateReportsBySource = new Map<string, { publicId: string; count: number }>();
   let cursor: BugReportScreenshotCursor | undefined;
   while (true) {
     const reports = await repository.listWithScreenshots(limit, cursor);
@@ -147,9 +148,12 @@ export async function runBugReportStorageMigration(
       const sourceLocator = report.screenshotUrl;
       if (!sourceLocator || !isLegacyBugReportStorageLocator(sourceLocator)) continue;
       result.candidates += 1;
-      const sourceReports = candidateReportsBySource.get(sourceLocator) ?? [];
-      sourceReports.push(report);
-      candidateReportsBySource.set(sourceLocator, sourceReports);
+      const sourceReport = candidateReportsBySource.get(sourceLocator);
+      if (sourceReport) {
+        sourceReport.count += 1;
+      } else {
+        candidateReportsBySource.set(sourceLocator, { publicId: report.publicId, count: 1 });
+      }
     }
     if (reports.length < limit) break;
     const last = reports.at(-1);
@@ -194,12 +198,12 @@ export async function runBugReportStorageMigration(
     pendingCursor = { migratedAt: last.migratedAt, id: last.id };
   }
 
-  for (const [sourceLocator, reports] of candidateReportsBySource) {
+  for (const [sourceLocator, report] of candidateReportsBySource) {
     try {
       const migratedLocator = await callStorage('migrate', sourceLocator);
       if (!migratedLocator) throw new Error('Storage migration returned no locator');
       const migration = await repository.recordStorageMigration(
-        reports[0]?.publicId ?? 'unknown',
+        report.publicId,
         sourceLocator,
         migratedLocator,
       );
@@ -210,7 +214,7 @@ export async function runBugReportStorageMigration(
       }
       await callStorage('delete', sourceLocator);
       await repository.markStorageDeleted(sourceLocator, options.now);
-      result.migrated += reports.length;
+      result.migrated += report.count;
     } catch (error) {
       result.failed += 1;
       logError('Bug report storage migration item failed', error, {

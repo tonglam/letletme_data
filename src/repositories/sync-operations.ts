@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { and, asc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 
@@ -129,6 +129,13 @@ function publicationItemCount(value: unknown): number {
   if (Array.isArray(value)) return value.length;
   if (value && typeof value === 'object') return Object.keys(value).length;
   return value === null || value === undefined ? 0 : 1;
+}
+
+function publicationPayloadChecksum(value: unknown): string | null {
+  const serialized = JSON.stringify(value);
+  return typeof serialized === 'string'
+    ? createHash('sha256').update(serialized, 'utf8').digest('hex')
+    : null;
 }
 
 export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => {
@@ -894,6 +901,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           !manifestItem ||
           manifestItem.count !== row.itemCount ||
           manifestItem.sha256 !== row.checksum ||
+          publicationPayloadChecksum(row.payload) !== row.checksum ||
           publicationItemCount(row.payload) !== row.itemCount
         ) {
           return null;
