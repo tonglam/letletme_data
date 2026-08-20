@@ -156,6 +156,7 @@ describe('production environment preflight', () => {
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(deployScript).toContain('bun scripts/wait-for-migration-login.ts');
+    expect(deployScript).toContain('bun validate-env.ts --probe-bug-report-storage');
     expect(deployScript).toContain('bun run db:verify-runtime-logins');
     expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(deployScript).not.toContain('db:provision-runtime-logins');

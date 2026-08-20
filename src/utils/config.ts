@@ -236,6 +236,10 @@ export function getConfig(): AppConfig {
       throw new Error('ENABLE_AUTH must be true in production');
     }
 
+    if (parsed.NODE_ENV === 'production') {
+      assertBugReportScreenshotStorageConfigured(parsed);
+    }
+
     if (
       parsed.NODE_ENV === 'production' &&
       parsed.BUG_REPORT_SCREENSHOT_STORAGE_ENABLED &&

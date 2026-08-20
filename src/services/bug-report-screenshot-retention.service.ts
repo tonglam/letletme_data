@@ -5,6 +5,7 @@ import { logInfo, logWarn } from '../utils/logger';
 const RETENTION_BATCH_SIZE = 100;
 const RETENTION_MAX_DELETES = 1_000;
 const STORAGE_SCAN_PAGE_SIZE = 100;
+const STORAGE_REQUEST_TIMEOUT_MS = 10_000;
 const STORAGE_OBJECT_KEY_PATTERN =
   /^bug-reports\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp|gif)$/i;
 
@@ -21,7 +22,16 @@ export type BugReportStorageObject = {
   createdAt?: string;
 };
 
+export type BugReportScreenshotBucket = {
+  id?: string;
+  name?: string;
+  public?: boolean;
+  file_size_limit?: number | string | null;
+  allowed_mime_types?: string[] | null;
+};
+
 export interface BugReportScreenshotStorage {
+  getBucket(): Promise<BugReportScreenshotBucket>;
   list(prefix: string, limit: number, offset: number): Promise<BugReportStorageObject[]>;
   remove(objectKey: string): Promise<'deleted' | 'missing'>;
 }
@@ -63,17 +73,63 @@ function storagePath(config: AppConfig, objectKey?: string): string {
   return `${storageBaseUrl(config)}/storage/v1/object/${bucket}${suffix}`;
 }
 
+async function storageRequest<T>(
+  url: string,
+  init: RequestInit,
+  fetchImpl: typeof fetch,
+  parse: (response: Response) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), STORAGE_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    return await parse(response);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function parseJsonResponse(response: Response, operation: string): Promise<unknown> {
+  if (!response.ok) throw new Error(`Storage ${operation} failed with ${response.status}`);
+  return response.json();
+}
+
+export function assertPrivateBugReportScreenshotBucket(
+  bucket: BugReportScreenshotBucket,
+  expectedName = 'bug-report-screenshots',
+): void {
+  if (bucket.name && bucket.name !== expectedName) {
+    throw new Error('Bug-report screenshot storage returned an unexpected bucket');
+  }
+  if (bucket.public !== false) {
+    throw new Error('Bug-report screenshot bucket must be private');
+  }
+}
+
 export function createBugReportScreenshotStorage(
   config: AppConfig = getConfig(),
   fetchImpl: typeof fetch = fetch,
 ): BugReportScreenshotStorage {
   const headers = storageHeaders(config);
+  const bucketName = config.BUG_REPORT_SCREENSHOT_BUCKET ?? 'bug-report-screenshots';
   return {
+    async getBucket() {
+      const payload = await storageRequest(
+        `${storageBaseUrl(config)}/storage/v1/bucket/${encodeURIComponent(bucketName)}`,
+        { method: 'GET', headers },
+        fetchImpl,
+        (response) => parseJsonResponse(response, 'bucket lookup'),
+      );
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('Storage bucket lookup returned an invalid response');
+      }
+      return payload as BugReportScreenshotBucket;
+    },
     async list(prefix, limit, offset) {
       const listHeaders = new Headers(headers);
       listHeaders.set('content-type', 'application/json');
-      const response = await fetchImpl(
-        `${storageBaseUrl(config)}/storage/v1/object/list/${encodeURIComponent(config.BUG_REPORT_SCREENSHOT_BUCKET ?? 'bug-report-screenshots')}`,
+      const payload = await storageRequest(
+        `${storageBaseUrl(config)}/storage/v1/object/list/${encodeURIComponent(bucketName)}`,
         {
           method: 'POST',
           headers: listHeaders,
@@ -84,28 +140,31 @@ export function createBugReportScreenshotStorage(
             sortBy: { column: 'created_at', order: 'asc' },
           }),
         },
+        fetchImpl,
+        (response) => parseJsonResponse(response, 'list'),
       );
-      if (!response.ok) throw new Error(`Storage list failed with ${response.status}`);
-      const payload = (await response.json()) as unknown;
       if (!Array.isArray(payload)) throw new Error('Storage list returned an invalid response');
       return payload as BugReportStorageObject[];
     },
     async remove(objectKey) {
-      const response = await fetchImpl(storagePath(config, objectKey), {
-        method: 'DELETE',
-        headers,
-      });
-      if (response.status === 404) {
-        const responseBody = (await response.clone().text()).toLowerCase();
-        const objectMissing =
-          /object[\s_-]+not[\s_-]+found/.test(responseBody) ||
-          /["']error["']\s*:\s*["']not_found["']/.test(responseBody);
-        const bucketMissing = /bucket[\s_-]+not[\s_-]+found/.test(responseBody);
-        if (objectMissing && !bucketMissing) return 'missing';
-        throw new StorageFatalError('Storage delete returned an ambiguous not-found response');
-      }
-      if (!response.ok) throw new Error(`Storage delete failed with ${response.status}`);
-      return 'deleted';
+      return storageRequest(
+        storagePath(config, objectKey),
+        { method: 'DELETE', headers },
+        fetchImpl,
+        async (response) => {
+          if (response.status === 404) {
+            const responseBody = (await response.clone().text()).toLowerCase();
+            const objectMissing =
+              /object[\s_-]+not[\s_-]+found/.test(responseBody) ||
+              /["']error["']\s*:\s*["']not_found["']/.test(responseBody);
+            const bucketMissing = /bucket[\s_-]+not[\s_-]+found/.test(responseBody);
+            if (objectMissing && !bucketMissing) return 'missing';
+            throw new StorageFatalError('Storage delete returned an ambiguous not-found response');
+          }
+          if (!response.ok) throw new Error(`Storage delete failed with ${response.status}`);
+          return 'deleted';
+        },
+      );
     },
   };
 }
@@ -153,6 +212,7 @@ export async function runBugReportScreenshotRetention(
   const repository = options.repository ?? bugReportRepository;
   // Verify bucket/endpoint availability before mutating any database rows. A
   // missing bucket must not be mistaken for an absent object and clear refs.
+  assertPrivateBugReportScreenshotBucket(await storage.getBucket());
   await storage.list('bug-reports/', 1, 0);
   const expired: ExpiredBugReportScreenshot[] = [];
   for (let offset = 0; offset < RETENTION_MAX_DELETES; offset += RETENTION_BATCH_SIZE) {

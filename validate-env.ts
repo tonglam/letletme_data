@@ -1,5 +1,8 @@
 import 'dotenv/config';
-import { createBugReportScreenshotStorage } from './src/services/bug-report-screenshot-retention.service';
+import {
+  assertPrivateBugReportScreenshotBucket,
+  createBugReportScreenshotStorage,
+} from './src/services/bug-report-screenshot-retention.service';
 import { getConfig, validateEnvForCli } from './src/utils/config';
 import { logInfo } from './src/utils/logger';
 
@@ -11,7 +14,12 @@ if (!result.ok) {
 if (process.argv.includes('--probe-bug-report-storage')) {
   try {
     const config = getConfig();
-    await createBugReportScreenshotStorage(config).list('bug-reports/', 1, 0);
+    const storage = createBugReportScreenshotStorage(config);
+    assertPrivateBugReportScreenshotBucket(
+      await storage.getBucket(),
+      config.BUG_REPORT_SCREENSHOT_BUCKET,
+    );
+    await storage.list('bug-reports/', 1, 0);
     logInfo('[env] bug-report screenshot storage probe OK', {
       bucket: config.BUG_REPORT_SCREENSHOT_BUCKET,
       retentionDays: config.BUG_REPORT_SCREENSHOT_RETENTION_DAYS,
