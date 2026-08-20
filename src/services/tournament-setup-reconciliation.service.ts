@@ -27,6 +27,7 @@ export async function reconcileReadyTournamentWarnings(season: FplSeasonRef): Pr
       async () => {
         const tournament = await tournamentInfoRepository.findSetupConfig(season, tournamentId);
         if (!tournament) return;
+        const currentStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
         const finalizedEvent = await eventRepository.findLatestFinalized(season);
         const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
         const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
@@ -45,6 +46,13 @@ export async function reconcileReadyTournamentWarnings(season: FplSeasonRef): Pr
             }),
           ),
         );
+        if (issues.length === 0 && (currentStatus?.setupWarningCount ?? 0) > 0) {
+          logInfo('Preserving legacy ready tournament warning without verifiable issue', {
+            tournamentId,
+            warningCount: currentStatus?.setupWarningCount ?? 0,
+          });
+          return;
+        }
         await tournamentSetupIssueRepository.sync(season, tournamentId, issues);
         const unresolved = await tournamentSetupIssueRepository.listUnresolved(
           season,

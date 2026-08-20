@@ -182,6 +182,7 @@ export async function syncTournamentEntryDetails(
   entryIds: number[],
   options?: {
     targetEventId?: number;
+    forceSnapshotRefresh?: boolean;
     onPlan?: (plan: TournamentEntrySyncPlan) => void | Promise<void>;
     onProgress?: (completed: number, total: number) => Promise<void>;
   },
@@ -193,11 +194,9 @@ export async function syncTournamentEntryDetails(
   }
 
   const targetEventId = options?.targetEventId ?? 0;
-  const requestedEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
-    season,
-    sanitized,
-    targetEventId,
-  );
+  const requestedEntryIds = options?.forceSnapshotRefresh
+    ? sanitized
+    : await entryInfoRepository.findIdsNeedingSnapshotSync(season, sanitized, targetEventId);
   const plan = {
     totalEntries: sanitized.length,
     requestedEntries: requestedEntryIds.length,

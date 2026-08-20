@@ -140,6 +140,7 @@ export async function withMutationConflictGuard<T>(
   const startedAt = Date.now();
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let lostError: MutationLockLostError | null = null;
+  let operationPromise: Promise<T> | null = null;
   let rejectLost: ((error: MutationLockLostError) => void) | null = null;
   const lostPromise = new Promise<never>((_, reject) => {
     rejectLost = reject;
@@ -204,9 +205,10 @@ export async function withMutationConflictGuard<T>(
     }, DEFAULT_HEARTBEAT_MS);
     heartbeat.unref?.();
 
-    return await leaseStorage.run({ assertHealthy }, () =>
-      Promise.race([operation(), lostPromise]),
-    );
+    return await leaseStorage.run({ assertHealthy }, () => {
+      operationPromise = Promise.resolve().then(operation);
+      return Promise.race([operationPromise, lostPromise]);
+    });
   } catch (error) {
     // Don't label operation failures as guard failures; the guard held locks.
     logInfo('Mutation conflict guard releasing locks after operation error', {
@@ -220,6 +222,9 @@ export async function withMutationConflictGuard<T>(
   } finally {
     if (heartbeat) {
       clearInterval(heartbeat);
+    }
+    if (lostError && operationPromise) {
+      await Promise.allSettled([operationPromise]);
     }
     if (acquiredKeys.length > 0) {
       try {

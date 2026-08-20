@@ -30,6 +30,7 @@ import type {
 } from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError } from '../utils/logger';
+import { assertMutationLockHealthy } from '../utils/mutation-lock';
 
 type TournamentStorage = typeof tournamentsInCompetition.$inferSelect;
 
@@ -498,6 +499,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       tournamentId: number,
       progressMarker?: string | null,
     ): Promise<void> => {
+      assertMutationLockHealthy();
       const db = await getDbInstance();
       await db
         .update(tournamentsInCompetition)
@@ -526,6 +528,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
     },
 
     markSetupRetryQueued: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+      assertMutationLockHealthy();
       const db = await getDbInstance();
       await db
         .update(tournamentsInCompetition)
@@ -564,6 +567,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       const safeTotal = Math.max(0, Math.trunc(totalUnits));
       const safeCompleted = Math.min(safeTotal, Math.max(0, Math.trunc(completedUnits)));
       const db = await getDbInstance();
+      assertMutationLockHealthy();
       await db
         .update(tournamentsInCompetition)
         .set({
@@ -583,6 +587,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       tournamentId: number,
       progressMarker?: string | null,
     ): Promise<void> => {
+      assertMutationLockHealthy();
       const db = await getDbInstance();
       const rows = await db
         .update(tournamentsInCompetition)
@@ -607,6 +612,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       lastErrorCode?: string | null,
     ): Promise<void> => {
       const db = await getDbInstance();
+      assertMutationLockHealthy();
       await db
         .update(tournamentsInCompetition)
         .set({
@@ -628,6 +634,44 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
         .where(tournamentScope(season, tournamentId));
     },
 
+    markSetupResultIfAttempt: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      status: 'ready' | 'failed',
+      error: string | null,
+      warningCount: number,
+      progressMarker: string | null | undefined,
+      lastErrorCode: string | null | undefined,
+      expectedSetupAttempt: number,
+    ): Promise<boolean> => {
+      const db = await getDbInstance();
+      assertMutationLockHealthy();
+      const rows = await db
+        .update(tournamentsInCompetition)
+        .set({
+          setupStatus: status,
+          setupPhase: status,
+          setupWarningCount: status === 'ready' ? Math.max(0, warningCount) : 0,
+          setupError: status === 'ready' ? null : 'Tournament setup failed.',
+          setupNextRetryAt: null,
+          setupLastErrorCode: status === 'failed' ? (lastErrorCode ?? 'SETUP_FAILED') : null,
+          setupLastErrorAt: status === 'failed' ? new Date() : null,
+          setupProgressIndeterminate: false,
+          setupProgressUpdatedAt:
+            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
+          setupFinishedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            eq(tournamentsInCompetition.setupAttempt, expectedSetupAttempt),
+          ),
+        )
+        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
+      return rows.length === 1;
+    },
+
     markSetupRetrying: async (
       season: FplSeasonRef,
       tournamentId: number,
@@ -635,6 +679,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       nextRetryAt: Date | null,
     ): Promise<void> => {
       const db = await getDbInstance();
+      assertMutationLockHealthy();
       await db
         .update(tournamentsInCompetition)
         .set({
@@ -648,6 +693,37 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           updatedAt: new Date(),
         })
         .where(tournamentScope(season, tournamentId));
+    },
+
+    markSetupRetryingIfAttempt: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      errorCode: string,
+      nextRetryAt: Date | null,
+      expectedSetupAttempt: number,
+    ): Promise<boolean> => {
+      const db = await getDbInstance();
+      assertMutationLockHealthy();
+      const rows = await db
+        .update(tournamentsInCompetition)
+        .set({
+          setupStatus: 'processing',
+          setupPhase: 'queued',
+          setupError: null,
+          setupNextRetryAt: nextRetryAt,
+          setupLastErrorCode: errorCode,
+          setupLastErrorAt: new Date(),
+          setupFinishedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            eq(tournamentsInCompetition.setupAttempt, expectedSetupAttempt),
+          ),
+        )
+        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
+      return rows.length === 1;
     },
 
     findStuckProcessing: async (
@@ -710,6 +786,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       expectedProgressUpdatedAt: string | null,
     ): Promise<boolean> => {
       const db = await getDbInstance();
+      assertMutationLockHealthy();
       const now = new Date();
       const rows = await db
         .update(tournamentsInCompetition)

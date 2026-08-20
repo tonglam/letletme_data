@@ -225,25 +225,42 @@ export function createTournamentSetupWorker(): WorkerRuntime {
             : err instanceof Error
               ? err.name
               : 'SETUP_FAILED';
-        if (terminal) {
-          await tournamentInfoRepository.markSetupResult(
-            season,
-            job.data.tournamentId,
-            'failed',
-            'Tournament setup did not complete after automatic retries.',
-            0,
-            undefined,
-            'SETUP_AUTOMATIC_RETRIES_EXHAUSTED',
-          );
-        } else {
-          const retryDelayMs = 60_000 * 2 ** Math.max(0, job.attemptsMade - 1);
-          await tournamentInfoRepository.markSetupRetrying(
-            season,
-            job.data.tournamentId,
-            errorCode,
-            new Date(Date.now() + retryDelayMs),
-          );
-        }
+        await withMutationConflictGuard(
+          {
+            queueName: tournamentSetupQueueName,
+            jobName: 'persist-failed-state',
+            jobId: String(job.id),
+            tournamentId: job.data.tournamentId,
+            scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
+          },
+          async () => {
+            const changed = terminal
+              ? await tournamentInfoRepository.markSetupResultIfAttempt(
+                  season,
+                  job.data.tournamentId,
+                  'failed',
+                  'Tournament setup did not complete after automatic retries.',
+                  0,
+                  undefined,
+                  'SETUP_AUTOMATIC_RETRIES_EXHAUSTED',
+                  job.attemptsMade,
+                )
+              : await tournamentInfoRepository.markSetupRetryingIfAttempt(
+                  season,
+                  job.data.tournamentId,
+                  errorCode,
+                  new Date(60_000 * 2 ** Math.max(0, job.attemptsMade - 1) + Date.now()),
+                  job.attemptsMade,
+                );
+            if (!changed) {
+              logInfo('Ignoring stale tournament setup failed-state callback', {
+                tournamentId: job.data.tournamentId,
+                jobId: job.id,
+                attempt: job.attemptsMade,
+              });
+            }
+          },
+        );
       })().catch((stateError) => {
         logError('Failed to persist tournament setup retry state', stateError, {
           tournamentId: job.data.tournamentId,

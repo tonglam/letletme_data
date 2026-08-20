@@ -6,6 +6,7 @@ import {
 } from '../domain/mutation-scope';
 import { getTournamentBackfillWindow } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
+import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -89,6 +90,7 @@ async function repairTournamentSetupIssueUnlocked(
         () =>
           syncTournamentEntryDetails(season, targetEntryIds, {
             targetEventId: window?.endEventId ?? 0,
+            forceSnapshotRefresh: true,
           }),
       );
       repairIssues.push(...entryIssues);
@@ -236,15 +238,32 @@ async function repairTournamentSetupIssueUnlocked(
     }),
   );
   const persisted = dedupeIssues([...repairIssues, ...auditIssues]);
-  await tournamentSetupIssueRepository.sync(season, issue.tournamentId, persisted);
+  const existingUnresolved = await tournamentSetupIssueRepository.listUnresolved(
+    season,
+    issue.tournamentId,
+  );
+  await tournamentSetupIssueRepository.sync(season, issue.tournamentId, persisted, {
+    preserveUnresolvedIssueKeys: existingUnresolved
+      .filter((existing) => existing.issueId !== issueId)
+      .map((existing) => existing.issueKey),
+  });
+  const remainingIssues = await tournamentSetupIssueRepository.listUnresolved(
+    season,
+    issue.tournamentId,
+  );
+  await Promise.all(
+    remainingIssues.map((remaining) =>
+      enqueueTournamentRepair(season, remaining, 'reconciliation'),
+    ),
+  );
   logInfo('Tournament setup issue repair completed', {
     tournamentId: issue.tournamentId,
     issueId,
     repairedEntryCount: targetEntryIds.length,
     eventId,
-    remainingIssues: persisted.length,
+    remainingIssues: remainingIssues.length,
   });
-  if (persisted.length > 0) {
+  if (remainingIssues.some((remaining) => remaining.issueId === issueId)) {
     // Keep the BullMQ attempt budget active for a still-open issue. Returning
     // successfully here would consume the deterministic job while the issue
     // only became eligible for the six-attempt/5-minute retry policy.
