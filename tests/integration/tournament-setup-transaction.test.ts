@@ -157,14 +157,13 @@ async function runDatabaseFailure(
 }
 
 describe('tournament setup transaction recovery', () => {
-  test('starts repeatable-read before the Trends advisory-lock query', async () => {
-    const result = await publishTournamentTrendScope(
-      explicitSeasonRef(SEASON_CODE),
-      SUCCESS_TOURNAMENT_ID,
-      1,
-    );
+  test('starts repeatable-read safely and converges concurrent Trends publishers', async () => {
+    const [first, second] = await Promise.all([
+      publishTournamentTrendScope(explicitSeasonRef(SEASON_CODE), SUCCESS_TOURNAMENT_ID, 1),
+      publishTournamentTrendScope(explicitSeasonRef(SEASON_CODE), SUCCESS_TOURNAMENT_ID, 1),
+    ]);
 
-    expect(result).toMatchObject({
+    expect(first).toMatchObject({
       tournamentId: SUCCESS_TOURNAMENT_ID,
       eventId: 1,
       state: 'COLLECTING',
@@ -172,7 +171,16 @@ describe('tournament setup transaction recovery', () => {
       transfersState: 'NOT_READY',
       rows: 0,
     });
-    expect(result.publicationId).toBeNumber();
+    expect(second).toMatchObject({
+      tournamentId: SUCCESS_TOURNAMENT_ID,
+      eventId: 1,
+      state: 'REUSED',
+      ownershipState: 'NOT_READY',
+      transfersState: 'NOT_READY',
+      rows: 0,
+    });
+    expect(first.publicationId).toBeNumber();
+    expect(second.publicationId).toBe(first.publicationId);
   });
 
   test('rolls back a database statement error to the savepoint and persists retry state', async () => {
