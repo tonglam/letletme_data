@@ -17,6 +17,9 @@ export const tournamentCreateInputSchema = z
     tournamentName: z.string().trim().min(3).max(80),
     adminId: z.string().regex(/^\d+$/),
     creator: z.string().trim().min(1).max(80),
+    // Service-attested account role. The public browser never writes this
+    // field directly; authenticated Web commands default to false.
+    platformAdmin: z.boolean().optional(),
     participantSource: z.enum(['official', 'custom']),
     tournamentType: z.literal('standard').optional(),
     leagueUrl: z
@@ -258,6 +261,9 @@ export type TournamentStructurePlan = {
   tournamentName: string;
   creator: string;
   adminEntryId: number;
+  /** Canonical FPL snapshot used only to satisfy the administrator FK when
+   * the platform administrator is not part of the tournament roster. */
+  administratorEntry?: TournamentParticipant;
   selectedParticipants: TournamentParticipant[];
   groupMode: GroupMode;
   groupTeamNum: number;
@@ -665,7 +671,10 @@ export function planTournamentStructure(
   }
 
   const adminEntryId = Number(payload.adminId);
-  if (!selectedParticipants.some((participant) => Number(participant.id) === adminEntryId)) {
+  if (
+    payload.platformAdmin !== true &&
+    !selectedParticipants.some((participant) => Number(participant.id) === adminEntryId)
+  ) {
     throw new ValidationError(
       'Admin ID must be included in the tournament participant set.',
       'TOURNAMENT_ADMIN_NOT_PARTICIPANT',

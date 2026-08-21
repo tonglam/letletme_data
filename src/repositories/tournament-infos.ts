@@ -26,12 +26,29 @@ import type {
   TournamentConfig,
   TournamentSetupPhase,
   TournamentSetupStatus,
+  TournamentParticipant,
   TournamentStructurePlan,
 } from '../domain/tournament';
-import { ConflictError, DatabaseError } from '../utils/errors';
+import { ConflictError, DatabaseError, ValidationError } from '../utils/errors';
 import { logError } from '../utils/logger';
 
 type TournamentStorage = typeof tournamentsInCompetition.$inferSelect;
+
+export function resolveTournamentEntrySeeds(
+  plan: TournamentStructurePlan,
+): TournamentParticipant[] {
+  const selected = [...plan.selectedParticipants];
+  if (selected.some((participant) => Number(participant.id) === plan.adminEntryId)) {
+    return selected;
+  }
+  if (!plan.administratorEntry || Number(plan.administratorEntry.id) !== plan.adminEntryId) {
+    throw new ValidationError(
+      'The tournament administrator could not be persisted.',
+      'TOURNAMENT_ADMIN_ENTRY_UNAVAILABLE',
+    );
+  }
+  return [...selected, plan.administratorEntry];
+}
 
 export const isTournamentNameConflict = (error: unknown): boolean => {
   let current = error;
@@ -816,14 +833,15 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       season: FplSeasonRef,
       plan: TournamentStructurePlan,
     ): Promise<TournamentCreatedRow> => {
+      const entrySeeds = resolveTournamentEntrySeeds(plan);
       try {
         const db = await getDbInstance();
         return await db.transaction(async (tx) => {
-          if (plan.selectedParticipants.length > 0) {
+          if (entrySeeds.length > 0) {
             await tx
               .insert(entriesInCompetition)
               .values(
-                plan.selectedParticipants.map((participant) => ({
+                entrySeeds.map((participant) => ({
                   seasonId: season.seasonId,
                   entryId: Number(participant.id),
                   entryName: participant.team,

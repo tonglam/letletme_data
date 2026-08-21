@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  MAX_RANK,
   normalizeTournamentName,
   parseGameweek,
   planTournamentStructure,
@@ -10,8 +11,10 @@ import {
   validateTournamentCreateInput,
   parseLeagueUrl,
   type TournamentCreateInput,
+  type TournamentParticipant,
   type TournamentSetupStatus,
 } from '../domain/tournament';
+import { fplClient } from '../clients/fpl';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import {
   tournamentInfoRepository,
@@ -41,6 +44,30 @@ import {
 
 export { tournamentCreateInputSchema, validateTournamentCreateInput };
 export type { TournamentCreateInput, TournamentSetupStatus };
+
+async function fetchAdministratorEntry(entryId: number): Promise<TournamentParticipant> {
+  try {
+    const summary = await fplClient.getEntrySummary(entryId);
+    const team = summary.name.trim();
+    const manager = `${summary.player_first_name} ${summary.player_last_name}`.trim();
+    if (summary.id !== entryId || !team || !manager) {
+      throw new Error('FPL administrator identity is incomplete');
+    }
+    return {
+      id: String(summary.id),
+      team,
+      manager,
+      overallRank: summary.summary_overall_rank ?? MAX_RANK,
+      totalPoints: summary.summary_overall_points ?? 0,
+    };
+  } catch (error) {
+    throw new ValidationError(
+      'Unable to verify the tournament administrator with FPL.',
+      'TOURNAMENT_ADMIN_ENTRY_UNAVAILABLE',
+      error instanceof Error ? error : undefined,
+    );
+  }
+}
 
 export async function checkTournamentNameAvailability(name: string) {
   const normalizedName = normalizeTournamentName(name);
@@ -455,7 +482,14 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
 
       failedPhase = 'persistence';
       phaseStartedAtMs = performance.now();
-      const tournament = await tournamentInfoRepository.createTournamentWithEntries(season, plan);
+      const administratorEntry =
+        plan.selectedParticipants.find(
+          (participant) => Number(participant.id) === plan.adminEntryId,
+        ) ?? (payload.platformAdmin ? await fetchAdministratorEntry(plan.adminEntryId) : undefined);
+      const tournament = await tournamentInfoRepository.createTournamentWithEntries(season, {
+        ...plan,
+        administratorEntry,
+      });
       tournamentId = tournament.id;
       phaseDurationsMs.persistence = Math.round(performance.now() - phaseStartedAtMs);
 

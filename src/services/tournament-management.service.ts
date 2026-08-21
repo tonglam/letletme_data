@@ -27,25 +27,35 @@ import { assertTournamentRosterPreGameweekBoundary } from './tournament-roster.s
 const updateTournamentSchema = z.object({
   name: z.string().trim().min(3).max(80),
   adminEntryId: z.number().int().positive(),
+  platformAdmin: z.boolean().optional().default(false),
 });
 
 const deleteTournamentSchema = z.object({
   adminEntryId: z.number().int().positive(),
+  platformAdmin: z.boolean().optional().default(false),
 });
 
 const tournamentStateSchema = z.object({
   adminEntryId: z.number().int().positive(),
+  platformAdmin: z.boolean().optional().default(false),
   state: z.enum(['active', 'inactive']),
 });
 
 const tournamentOwnerSchema = z.object({
   adminEntryId: z.number().int().positive(),
+  platformAdmin: z.boolean().optional().default(false),
 });
 
 const rosterModeSchema = z.object({
   adminEntryId: z.number().int().positive(),
+  platformAdmin: z.boolean().optional().default(false),
   rosterMode: z.literal('official_sync'),
 });
+
+type TournamentManagementActor = {
+  adminEntryId: number;
+  platformAdmin: boolean;
+};
 
 export type TournamentManagementRepository = {
   findById(season: FplSeasonRef, tournamentId: number): Promise<TournamentManagementRecord | null>;
@@ -150,12 +160,21 @@ export function createTournamentManagementService(
 ) {
   const scopeRunner = lifecycle.withMutationScopes ?? withMutationScopes;
 
-  const assertOwner = async (season: FplSeasonRef, tournamentId: number, adminEntryId: number) => {
+  const canManage = (
+    tournament: TournamentManagementRecord,
+    actor: TournamentManagementActor,
+  ): boolean => actor.platformAdmin || tournament.adminEntryId === actor.adminEntryId;
+
+  const assertCanManage = async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    actor: TournamentManagementActor,
+  ) => {
     const tournament = await repository.findById(season, tournamentId);
     if (!tournament) {
       throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
     }
-    if (tournament.adminEntryId !== adminEntryId) {
+    if (!canManage(tournament, actor)) {
       throw new ForbiddenError(
         'Only the tournament administrator can manage this tournament.',
         'TOURNAMENT_ADMIN_REQUIRED',
@@ -209,7 +228,7 @@ export function createTournamentManagementService(
     updateTournament: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = updateTournamentSchema.parse(input);
-      const current = await assertOwner(season, tournamentId, payload.adminEntryId);
+      const current = await assertCanManage(season, tournamentId, payload);
       const name = normalizeTournamentName(payload.name);
       if (current.name === name) {
         return current;
@@ -220,7 +239,7 @@ export function createTournamentManagementService(
       const updated = await repository.updateNameOwned(
         season,
         tournamentId,
-        payload.adminEntryId,
+        current.adminEntryId,
         name,
       );
       if (!updated) {
@@ -232,7 +251,7 @@ export function createTournamentManagementService(
     setTournamentState: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentStateSchema.parse(input);
-      const current = await assertOwner(season, tournamentId, payload.adminEntryId);
+      const current = await assertCanManage(season, tournamentId, payload);
       if (current.state === 'finished') {
         throw new ConflictError('Finished tournaments cannot be resumed.', 'TOURNAMENT_FINISHED');
       }
@@ -254,7 +273,7 @@ export function createTournamentManagementService(
             if (!lockedCurrent) {
               throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
             }
-            if (lockedCurrent.adminEntryId !== payload.adminEntryId) {
+            if (!canManage(lockedCurrent, payload)) {
               throw new ForbiddenError(
                 'Only the tournament administrator can manage this tournament.',
                 'TOURNAMENT_ADMIN_REQUIRED',
@@ -284,7 +303,7 @@ export function createTournamentManagementService(
             return repository.updateStateOwned(
               season,
               tournamentId,
-              payload.adminEntryId,
+              lockedCurrent.adminEntryId,
               'inactive',
               { settleResume },
             );
@@ -306,7 +325,7 @@ export function createTournamentManagementService(
           if (!lockedCurrent) {
             throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
           }
-          if (lockedCurrent.adminEntryId !== payload.adminEntryId) {
+          if (!canManage(lockedCurrent, payload)) {
             throw new ForbiddenError(
               'Only the tournament administrator can manage this tournament.',
               'TOURNAMENT_ADMIN_REQUIRED',
@@ -379,7 +398,7 @@ export function createTournamentManagementService(
           scopes: [tournamentSetupLifecycleScope(tournamentId)],
         },
         async () => {
-          const current = await assertOwner(season, tournamentId, payload.adminEntryId);
+          const current = await assertCanManage(season, tournamentId, payload);
           if (current.state === 'finished') {
             throw new ConflictError(
               'Finished tournaments cannot enable roster synchronization.',
@@ -443,7 +462,7 @@ export function createTournamentManagementService(
           const updated = await repository.updateRosterModeOwned(
             season,
             tournamentId,
-            payload.adminEntryId,
+            current.adminEntryId,
             payload.rosterMode,
           );
           if (!updated) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
@@ -475,7 +494,7 @@ export function createTournamentManagementService(
           scopes: [tournamentSetupLifecycleScope(tournamentId)],
         },
         async () => {
-          const current = await assertOwner(season, tournamentId, payload.adminEntryId);
+          const current = await assertCanManage(season, tournamentId, payload);
           await assertNoPendingOfficialResume(season, current);
           const { requeueTournamentSetup } = await import('./tournament-setup.service');
           return requeueTournamentSetup(season, tournamentId);
@@ -494,7 +513,7 @@ export function createTournamentManagementService(
           scopes: [tournamentSetupLifecycleScope(tournamentId)],
         },
         async () => {
-          const current = await assertOwner(season, tournamentId, payload.adminEntryId);
+          const current = await assertCanManage(season, tournamentId, payload);
           if (current.rosterMode !== 'official_sync') {
             throw new ValidationError(
               'Tournament roster is a fixed snapshot.',
@@ -531,15 +550,15 @@ export function createTournamentManagementService(
         await repairMissingDeletion(tournamentId);
         throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       }
-      if (current.adminEntryId !== payload.adminEntryId) {
+      if (!canManage(current, payload)) {
         throw new ForbiddenError(
           'Only the tournament administrator can delete this tournament.',
           'TOURNAMENT_ADMIN_REQUIRED',
         );
       }
       const result = lifecycle.deleteOwned
-        ? await lifecycle.deleteOwned(season, tournamentId, payload.adminEntryId)
-        : await repository.deleteOwned(season, tournamentId, payload.adminEntryId);
+        ? await lifecycle.deleteOwned(season, tournamentId, current.adminEntryId)
+        : await repository.deleteOwned(season, tournamentId, current.adminEntryId);
       if (result.status === 'not_found') {
         await repairMissingDeletion(tournamentId);
         throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
