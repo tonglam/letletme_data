@@ -21,6 +21,7 @@ export type TournamentSyncEnqueueOptions = {
   resumeMarker?: string;
   allowInactive?: boolean;
   settleBoundaryFailure?: boolean;
+  allowUnlockedOfficialH2HRecovery?: boolean;
   expectedProgressMarker?: string | null;
   operationId?: string;
 };
@@ -304,6 +305,9 @@ async function enqueueTournamentSyncJob(
       ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
       ...(options.allowInactive ? { allowInactive: true } : {}),
       ...(options.settleBoundaryFailure ? { settleBoundaryFailure: true } : {}),
+      ...(options.allowUnlockedOfficialH2HRecovery
+        ? { allowUnlockedOfficialH2HRecovery: true }
+        : {}),
       ...(options.expectedProgressMarker !== undefined
         ? { expectedProgressMarker: options.expectedProgressMarker }
         : {}),
@@ -465,6 +469,7 @@ export const enqueueTournamentRosterReconcile = async (
     resumeMarker?: string;
     allowInactive?: boolean;
     settleBoundaryFailure?: boolean;
+    allowUnlockedOfficialH2HRecovery?: boolean;
     expectedProgressMarker?: string | null;
     operationId?: string;
   },
@@ -476,6 +481,7 @@ export const enqueueTournamentRosterReconcile = async (
     options?.allowInactive,
     options?.operationId,
     options?.expectedProgressMarker,
+    options?.allowUnlockedOfficialH2HRecovery,
   );
   const stableJobId = `${season.seasonCode}-${logicalJobId}`;
 
@@ -504,6 +510,7 @@ export const enqueueTournamentRosterReconcile = async (
     resumeMarker: options?.resumeMarker,
     allowInactive: options?.allowInactive,
     settleBoundaryFailure: options?.settleBoundaryFailure,
+    allowUnlockedOfficialH2HRecovery: options?.allowUnlockedOfficialH2HRecovery,
     expectedProgressMarker: options?.expectedProgressMarker,
     jobId: logicalJobId,
   });
@@ -543,14 +550,16 @@ function getTournamentRosterReconcileLogicalJobId(
   allowInactive?: boolean,
   operationId?: string,
   expectedProgressMarker?: string | null,
+  allowUnlockedOfficialH2HRecovery?: boolean,
 ): string {
   if (operationId) return `tournament-roster-reconcile-${tournamentId}-${operationId}`;
   if (!resumeAfterSetup) {
+    const recoveryPart = allowUnlockedOfficialH2HRecovery ? '-unlocked-h2h-recovery' : '';
     if (expectedProgressMarker !== undefined) {
       const markerPart = (expectedProgressMarker ?? 'no-marker').replace(/[^a-zA-Z0-9_-]/g, '_');
-      return `tournament-roster-reconcile-sync-${allowInactive ? 'inactive' : 'active'}-${tournamentId}-${markerPart}`;
+      return `tournament-roster-reconcile-sync-${allowInactive ? 'inactive' : 'active'}${recoveryPart}-${tournamentId}-${markerPart}`;
     }
-    return `tournament-roster-reconcile-sync-${allowInactive ? 'inactive' : 'active'}-${tournamentId}`;
+    return `tournament-roster-reconcile-sync-${allowInactive ? 'inactive' : 'active'}${recoveryPart}-${tournamentId}`;
   }
   const markerPart = (resumeMarker ?? 'missing-marker').replace(/[^a-zA-Z0-9_-]/g, '_');
   return `tournament-roster-reconcile-resume-${tournamentId}-${markerPart}`;

@@ -1,6 +1,7 @@
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type {
+  GroupMode,
   LeagueType,
   TournamentConfig,
   TournamentFinalizationTarget,
@@ -9,7 +10,11 @@ import type {
   TournamentSetupPhase,
   TournamentSetupStatus,
 } from '../domain/tournament';
-import { DatabaseError } from '../utils/errors';
+import {
+  isAdditiveTournamentRosterRecovery,
+  isUnlockedOfficialH2HRosterRecoveryState,
+} from '../domain/tournament';
+import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 export type TournamentRosterRecord = TournamentConfig & {
@@ -51,6 +56,9 @@ function uniqueParticipantIds(participants: TournamentParticipant[]): number[] {
   }
   return ids;
 }
+
+const UNLOCKED_OFFICIAL_H2H_RECOVERY_ERROR =
+  'Official H2H standings do not cover the complete roster.';
 
 export const tournamentRosterRepository = {
   findById: async (
@@ -168,6 +176,93 @@ export const tournamentRosterRepository = {
         error instanceof Error ? error : undefined,
       );
     }
+  },
+
+  prepareUnlockedOfficialH2HRecovery: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+  ): Promise<string | null> => {
+    const client = await getDbClient();
+    const rows = await client<Array<{ marker: string }>>`
+      UPDATE competition.tournaments AS tournament
+      SET roster_sync_status = 'failed',
+          roster_sync_error = ${UNLOCKED_OFFICIAL_H2H_RECOVERY_ERROR},
+          setup_progress_updated_at = CASE
+            WHEN roster_sync_status = 'failed'
+              AND roster_sync_error = ${UNLOCKED_OFFICIAL_H2H_RECOVERY_ERROR}
+              AND setup_progress_updated_at IS NOT NULL
+              THEN setup_progress_updated_at
+            ELSE now()
+          END,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND league_type = 'h2h'
+        AND roster_mode = 'official_sync'
+        AND group_mode = 'battle_races'
+        AND state = 'active'
+        AND roster_sync_status IN ('ready', 'failed')
+        AND official_schedule_locked_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.tournament_battle_group_results battle
+          WHERE battle.season_id = tournament.season_id
+            AND battle.tournament_id = tournament.tournament_id
+          UNION ALL
+          SELECT 1
+          FROM competition.tournament_knockout_results knockout
+          WHERE knockout.season_id = tournament.season_id
+            AND knockout.tournament_id = tournament.tournament_id
+          UNION ALL
+          SELECT 1
+          FROM competition.tournament_points_group_results points
+          WHERE points.season_id = tournament.season_id
+            AND points.tournament_id = tournament.tournament_id
+        )
+      RETURNING setup_progress_updated_at::text AS marker
+    `;
+    return rows[0]?.marker ?? null;
+  },
+
+  claimUnlockedOfficialH2HRecovery: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    expectedMarker: string,
+  ): Promise<boolean> => {
+    const client = await getDbClient();
+    const rows = await client<Array<{ tournamentId: number }>>`
+      UPDATE competition.tournaments AS tournament
+      SET roster_sync_status = 'processing',
+          roster_sync_error = NULL,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND league_type = 'h2h'
+        AND roster_mode = 'official_sync'
+        AND group_mode = 'battle_races'
+        AND state = 'active'
+        AND roster_sync_status = 'failed'
+        AND official_schedule_locked_at IS NULL
+        AND setup_progress_updated_at::text = ${expectedMarker}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.tournament_battle_group_results battle
+          WHERE battle.season_id = tournament.season_id
+            AND battle.tournament_id = tournament.tournament_id
+          UNION ALL
+          SELECT 1
+          FROM competition.tournament_knockout_results knockout
+          WHERE knockout.season_id = tournament.season_id
+            AND knockout.tournament_id = tournament.tournament_id
+          UNION ALL
+          SELECT 1
+          FROM competition.tournament_points_group_results points
+          WHERE points.season_id = tournament.season_id
+            AND points.tournament_id = tournament.tournament_id
+        )
+      RETURNING tournament_id AS "tournamentId"
+    `;
+    return rows.length === 1;
   },
 
   markSyncProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
@@ -364,6 +459,7 @@ export const tournamentRosterRepository = {
       resumeAfterSetup?: boolean;
       resumeMarker?: string;
       expectedProgressMarker?: string | null;
+      guardUnlockedOfficialH2HRecovery?: boolean;
     },
   ): Promise<RosterPublicationResult> => {
     try {
@@ -385,16 +481,24 @@ export const tournamentRosterRepository = {
           Array<{
             id: number;
             state: 'active' | 'inactive' | 'finished';
+            leagueType: LeagueType;
             rosterMode: TournamentRosterMode;
             rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
+            groupMode: GroupMode;
+            setupProgressUpdatedAt: string | null;
+            officialScheduleLockedAt: string | null;
             totalTeamNum: number;
           }>
         >`
           SELECT
             tournament_id AS id,
             state,
+            league_type AS "leagueType",
             roster_mode AS "rosterMode",
             roster_sync_status AS "rosterSyncStatus",
+            group_mode AS "groupMode",
+            setup_progress_updated_at::text AS "setupProgressUpdatedAt",
+            official_schedule_locked_at::text AS "officialScheduleLockedAt",
             total_team_num AS "totalTeamNum"
           FROM competition.tournaments
           WHERE season_id = ${season.seasonId}
@@ -446,6 +550,45 @@ export const tournamentRosterRepository = {
           ORDER BY entry_id
         `;
         const existingIds = existingRows.map((row) => Number(row.entryId));
+        if (options?.guardUnlockedOfficialH2HRecovery) {
+          const resultRows = await tx<Array<{ exists: boolean }>>`
+            SELECT EXISTS (
+              SELECT 1
+              FROM competition.tournament_battle_group_results
+              WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
+              UNION ALL
+              SELECT 1
+              FROM competition.tournament_knockout_results
+              WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
+              UNION ALL
+              SELECT 1
+              FROM competition.tournament_points_group_results
+              WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
+            ) AS exists
+          `;
+          const markerMatches =
+            options.expectedProgressMarker !== undefined &&
+            current.setupProgressUpdatedAt === options.expectedProgressMarker;
+          if (
+            !markerMatches ||
+            !isUnlockedOfficialH2HRosterRecoveryState(
+              current,
+              'processing',
+              resultRows[0]?.exists === true,
+            )
+          ) {
+            throw new ConflictError(
+              'Official H2H roster recovery is unsafe after schedule publication.',
+              'TOURNAMENT_OFFICIAL_H2H_RECOVERY_UNSAFE',
+            );
+          }
+          if (!isAdditiveTournamentRosterRecovery(existingIds, sortedParticipantIds)) {
+            throw new ConflictError(
+              'Official H2H live recovery cannot remove tournament entries.',
+              'TOURNAMENT_OFFICIAL_H2H_RECOVERY_NOT_ADDITIVE',
+            );
+          }
+        }
         const changed =
           existingIds.length !== sortedParticipantIds.length ||
           existingIds.some((entryId, index) => entryId !== sortedParticipantIds[index]);
@@ -586,6 +729,7 @@ export const tournamentRosterRepository = {
         };
       });
     } catch (error) {
+      if (error instanceof ConflictError || error instanceof DatabaseError) throw error;
       logError('Failed to publish authoritative tournament roster', error, {
         season: season.seasonCode,
         tournamentId: tournament.id,

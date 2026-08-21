@@ -13,6 +13,8 @@ import {
 import { syncTournamentEventResults } from '../services/tournament-event-results.service';
 import { syncTournamentPointsRaceResults } from '../services/tournament-points-race-results.service';
 import {
+  enqueueOfficialH2HRosterRecoveries,
+  getOfficialH2HRecoveryTargets,
   syncOfficialH2HTournaments,
   syncTournamentBattleRaceResults,
 } from '../services/tournament-battle-race-results.service';
@@ -461,6 +463,8 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                     resumeMarker: job.data.resumeMarker,
                     requireResumeMarker: job.data.resumeAfterSetup === true,
                     settleBoundaryFailure: job.data.settleBoundaryFailure === true,
+                    allowUnlockedOfficialH2HRecovery:
+                      job.data.allowUnlockedOfficialH2HRecovery === true,
                     expectedProgressMarker: job.data.expectedProgressMarker,
                   }),
                 };
@@ -527,9 +531,21 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           return (await runMutation()).value;
         }
 
-        const scoped = await withMutationScopes(mutationInput, runMutation);
-        if (scoped.afterCommit) await scoped.afterCommit();
-        return scoped.value;
+        try {
+          const scoped = await withMutationScopes(mutationInput, runMutation);
+          if (scoped.afterCommit) await scoped.afterCommit();
+          return scoped.value;
+        } catch (error) {
+          const recoveryTargets =
+            job.name === TOURNAMENT_JOBS.OFFICIAL_H2H ? getOfficialH2HRecoveryTargets(error) : [];
+          if (recoveryTargets.length > 0) {
+            // The official-H2H mutation transaction has rolled back and
+            // released its structure locks. Persist the recovery fence before
+            // publishing the Redis job so the worker can claim it reliably.
+            await enqueueOfficialH2HRosterRecoveries(season, eventId, recoveryTargets);
+          }
+          throw error;
+        }
       }),
   );
 }
