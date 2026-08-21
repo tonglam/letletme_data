@@ -23,7 +23,7 @@ import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
 
 export const LIVE_POLL_MS = Number(process.env.LIVE_POLL_MS ?? 30_000);
 export const PICKS_FIRST_PROBE_OFFSET_MS = Number(
-  process.env.PICKS_FIRST_PROBE_OFFSET_MS ?? 90 * 60_000,
+  process.env.PICKS_FIRST_PROBE_OFFSET_MS ?? 60 * 60_000,
 );
 export const PICKS_RETRY_SCHEDULE_MS = (
   process.env.PICKS_RETRY_SCHEDULE_MS ?? '120000,180000,300000,600000'

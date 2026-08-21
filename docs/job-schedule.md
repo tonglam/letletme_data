@@ -140,7 +140,9 @@ since that same job began and fetches only the remaining entry/event units.
   open up to +6h for delayed FPL finish flags.
 - `isAfterMatchDay`: event is finished or now is later than the final kickoff
   +2h.
-- `isSelectTime`: match day and 30–90 minutes after the event deadline.
+- `isSelectTime`: match day and 30–90 minutes after the event deadline. The live
+  lifecycle's first upstream picks probe starts at deadline +60 minutes, but the
+  downstream publication window remains open for late cron ticks and retries.
 - Post-match result slot: later than final kickoff +2h but earlier than 24
   hours after that expected end.
 
