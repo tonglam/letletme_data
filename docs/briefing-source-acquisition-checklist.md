@@ -5,6 +5,9 @@
 > 当前仓库仍只有 X/Grok acquisition 相关 runner。RSS/Atom、Substack、公开网页、
 > Podcast 和 YouTube 尚未接入 scheduler、PostgreSQL、outbox 或生产容器。本轮没有实现
 > 代码、migration 或页面，只验证每类来源至少一个真实案例，并锁定实施 gate。
+>
+> 目标实施顺序、schema 和 rollout gates 见
+> [Briefing 第一层：多来源采集实施计划](./briefing-source-acquisition-layer-implementation-plan.md)。
 
 ## 1. 范围与结论
 
@@ -35,7 +38,7 @@ Instagram 和 TikTok 明确不做。六个案例验证的是 adapter 能力，�
 | Substack | SantiSignals | `PASS` | `PASS` | `PASS` | `N/A` | `PASS` | feed 自带 20 条 item 和正文 HTML；不能假定每个付费源都给全文 |
 | 公开网页 | AllAboutFPL 文章 | `PASS` | `PASS` | `PASS` | `N/A` | `PASS` | robots 允许，Readability 可稳定提取正文和 metadata |
 | Podcast | FML FPL | `PASS` | `PASS` | `PASS` | `BOUNDED_PASS` | `BOUNDED_PASS` | RSS 与音频可在 VPS 获取；Hermes 已转录真实 60 秒样本 |
-| YouTube | FPL Focal | `PASS` | `PARTIAL` | `PASS` | `BOUNDED_PASS` | `FAIL` | feed 可取；住宅网络字幕/音频可取，VPS 被 YouTube 拦截 |
+| YouTube | FPL Focal | `PASS` | `BOUNDED_PASS` | `PASS` | `PARTIAL` | `FAIL` | feed 与 provider native 已验证；VPS 直取被拦，generated job terminal 未验收 |
 
 不能把 `PARTIAL` 或 `FAIL` 写成“无新内容”。尤其是 X provider gate、YouTube 媒体获取
 失败，只能形成失败/延后记录，不能产生空 Receipt 或推进内容 checkpoint。
@@ -104,7 +107,9 @@ type AcquisitionBatchV1 = {
 type AcquisitionItemV1 = {
   endpointKey: string;
   externalItemId: string;
-  canonicalUrl: string;
+  canonicalUrl: string | null;
+  sourceUrl: string | null;
+  linkAvailability: 'DIRECT' | 'SOURCE_LANDING' | 'MISSING';
   publishedAt: string | null;
   updatedAt: string | null;
   title: string | null;
@@ -117,7 +122,14 @@ type AcquisitionItemV1 = {
     durationSeconds: number | null;
   }>;
   transcript: {
-    status: 'NOT_NEEDED' | 'PROVIDED' | 'GENERATED' | 'FAILED';
+    status:
+      | 'NOT_APPLICABLE'
+      | 'PROVIDED'
+      | 'GENERATED'
+      | 'PENDING'
+      | 'UNAVAILABLE'
+      | 'DEFERRED'
+      | 'FAILED';
     language: string | null;
     segments: Array<{ startMs: number; endMs: number; text: string }>;
   };
@@ -132,7 +144,7 @@ type AcquisitionItemV1 = {
 共同 gates：
 
 - [x] 稳定外部 ID，不用标题或 URL query 当身份。
-- [x] canonical URL 只由确定性 adapter 生成。
+- [x] canonical/source URL 只由确定性 adapter 生成；缺失时显式 `MISSING`，不从标题猜 URL。
 - [x] 正文、字幕和媒体 hash 在 Data 侧计算。
 - [x] 相同 hash 不创建新 revision，不重复转录。
 - [x] feed 成功且零条才是空；HTTP/provider/parser 失败不是空。
@@ -147,6 +159,11 @@ type AcquisitionItemV1 = {
 segment ID 固定包含 `media hash + STT engine/model revision + startMs + endMs + normalized text`。
 相同输入与固定版本重跑应得到相同 segment hash；model/options/chunk scheme 变化则创建新的
 transcript revision，不能在原 revision 上改写。
+
+目标 Canonical Transcript Segment V1 固定为 key-sorted UTF-8 JSON 的
+`{startMs,endMs,text}` array：毫秒使用 JavaScript `Math.round`；text 执行 NFC、全部 Unicode
+whitespace 折叠为单个 ASCII space、trim。provider-native `{text,offset,duration}` hash 只用来验证
+transport 等价，不能直接控制 transcript revision。
 
 ## 3. X 案例：OfficialFPL
 
@@ -176,6 +193,26 @@ transcript revision，不能在原 revision 上改写。
 因此该案例只能记为 `shadow transport PASS / production FAIL`。生产修复顺序是先验证容器内
 1.0.5、安装并验证 bubblewrap、再重新采集四种 X tool 的 trace fixtures；不能把宿主机
 `--sandbox none` 的诊断调用接入 scheduler。
+
+### 3.2 Grok Build 1.0.5 本机 shadow
+
+在 `2026-08-21T19:31:59Z` 附近又执行了两次有界验证：
+
+- 本机 Grok Build 1.0.5，strict sandbox，OfficialFPL 同日窗口，limit 10。
+- 第一次 20.2 秒返回 10 条，时间范围 `17:01:00Z–19:27:05Z`；10 个 ID 唯一，作者、窗口、
+  canonical URL、非空正文与 Snowflake 推导时间全部通过，最大时间差低于 1 秒。
+- 该 run 达到 10 条，应为 `SATURATED`；内部报告成本约 USD 0.01479。
+- 第二次用 `streaming-messages-json` 和 limit 2 验证输出合同，10.8 秒，内部报告成本约
+  USD 0.01772；final 是严格 JSON。
+- 两种 streaming 格式都只在 `tool_result` 暴露实际 `name/query/mode/limit`，不暴露原始帖子
+  payload。因此无法实现“final 帖子逐条绑定 raw tool result”。
+
+生产合同据此改为 `GROK_ATTESTED_FINAL`：single-tool/exact-request trace 加 strict whole-result JSON，
+再执行本地 identity、Snowflake、window、URL、schema 和 conflict gates。它是明确的 provider
+信任边界，不得标成 raw-result verified。若产品以后要求 raw payload，只能更换接口。
+
+本轮 VPS SSH 连接超时，所以没有把本机 1.0.5 结果外推为 VPS production pass；旧的
+1.0.3/bubblewrap/container 缺口仍需在实际部署路径修复。
 
 ## 4. RSS/Atom 案例：Fantasy Football Scout
 
@@ -276,11 +313,16 @@ transcript revision，不能在原 revision 上改写。
 - feed response：200，`application/xml; charset=utf-8`
 - VPS 同样取得 200、2,082,821 bytes，transport SHA-256 与本机一致。
 - episode 数：590
+- feed 历史范围从 `2015-07-29T02:53:55Z` 到 `2026-08-19T04:18:00Z`；证明首次启用必须有
+  lookback/item/content-job 三重上限，不能将十年历史全部入库或转录。
 - 最新 episode：`GW1: The Point of No Return`
 - GUID：`cda20434-9b82-11f1-959e-2712338872b2`
 - `pubDate`：`Wed, 19 Aug 2026 04:18:00 -0000`
 - duration：6,178 秒
 - enclosure：公开 MP3，可由 VPS ffmpeg 读取。
+- 最新 item 没有 item-level `<link>`；只有稳定 GUID、channel landing 和 enclosure。目标合同必须
+  允许 `canonicalUrl=null`，并单独记录 `SOURCE_LANDING/MISSING`，不能把动态 tracking/signed
+  media redirect 作为 canonical URL。
 - `<podcast:transcript>`：0 个。
 - validator：Last-Modified；携带该值重取返回 304。
 
@@ -328,14 +370,20 @@ Podcasting 2.0 的 [`<podcast:transcript>`](https://podcasting2.org/docs/podcast
   完全一致。YouTube feed 中的可变统计字段不能进入 canonical item hash。
 - feed 最新条目是 deadline live stream，探测时 duration 为 0；必须先 gate
   `UPCOMING / LIVE / FINISHED`，不能立即转录。
+- 最近 15 个 feed item 中，14 个完成视频已有可读 caption track；唯一无 caption item 是仍在
+ 直播的最新条目。该单频道样本只说明 native-first 有成本价值，不能外推全部 Creator coverage。
 - 选用完成视频 ID：`Xef37ImWz3M`
 - title：`FINAL FPL YOUTUBERS Team | DATA FROM 25 TEAMS! 🚀`
 - published：`2026-08-21T09:40:37+00:00`
 - duration：668 秒，playability `OK`。
 - 住宅网络可取得人工 `en-GB` 和自动 `en` 字幕。
-- 选用人工字幕：105 segments，0.88 秒至约 665.04 秒，9,704 chars。
+- 选用人工字幕：105 segments，0.88 秒至约 665.04 秒，规范化拼接后 9,399 chars。
 - caption text SHA-256：
-  `e70708b6fc4839078fc6a45cc33812845bd83209702d6f4cdbc6c91c91cb2b36`
+  `4bafab0d1150daed41b213ab19ffff581e5cf8056a4c2f18614e224308140c1c`
+- provider-native `{text,offset,duration}` segments SHA-256：
+  `dc791256343356d7a1ad5bb6e93e15e54cbfe07430c181379580b1006269b782`
+- 转换到目标 Canonical Transcript Segment V1 后 SHA-256：
+  `fb159a11abccf8304b6ff224f180f562450f3d8d84390855e5544dbbf88e6266`
 
 ### 8.2 Hermes 音频 fallback 样本
 
@@ -352,7 +400,46 @@ Podcasting 2.0 的 [`<podcast:transcript>`](https://podcasting2.org/docs/podcast
 - 相同 input/model/options 第二次重跑仍为 14 segments 和同一 segments SHA-256。
 - warm transcription wall time：约 17 秒。
 
-### 8.3 未通过的生产 gate
+### 8.3 Supadata provider probe
+
+在不注册账号的官方 Playground 中，对同一完成视频执行 `mode=native`：
+
+- 返回 `lang=en`、`availableLangs=[en]` 和 105 个 timestamped segments。
+- text、offset、duration 的 canonical segments SHA-256 为
+  `dc791256343356d7a1ad5bb6e93e15e54cbfe07430c181379580b1006269b782`，与本机直接读取
+  YouTube 人工 `en-GB` track 完全一致。
+- Supadata 把人工 `en-GB` 和自动 `en` track 折叠为 `en`，也不返回 `is_generated`；生产数据
+  不能据此声称 `MANUAL` 或 `AUTO`，只能保存 `trackKind=UNKNOWN`。
+
+为了把 ASR 本身与 YouTube media transport 分开，另用公开 11 秒 WAV 执行 `mode=generate`：
+
+- 返回 2 segments，0ms 至 10,340ms，规范化后 108 chars。
+- transcript SHA-256 为
+  `37d003a932256f11d07e00d0c1478443140ea5e87d817b0f8bc577c1d2aa2e1b`，与该标准语音的
+  reference text 完全一致。
+
+无字幕 YouTube fallback 使用一个 119 秒、已结束且公开的 FPL team-selection 视频
+`yA8S_bMekDU`：
+
+- 本机 `youtube-transcript-api` 明确返回 `TranscriptsDisabled`。
+- Supadata `native` 返回 `transcript-unavailable`，没有制造空 transcript。
+- Supadata `auto` 约 37 秒后返回异步 `jobId`。
+- 匿名 Playground 不提供 job polling；直接请求官方 job-status endpoint 返回 401，因为缺少
+  API key。
+- 对同一视频再次执行 `auto` 会生成新的 job ID，证明生产必须持久化并轮询首次 job，不能靠
+  重提请求恢复。
+
+两个已有字幕的 YouTube 视频在匿名 Playground 强制 `generate` 时分别出现空 transcript 和
+`invalid-request`。这不能作为生产 `generate` 能力证据。当前可记为
+`native exact BOUNDED_PASS / file ASR PASS / YouTube async submission PASS / async terminal
+UNVERIFIED`。
+
+Supadata 官方合同允许 `native / auto / generate`，长请求可以返回异步 job ID；生产仍需用
+API key 在 VPS 验证 job terminal、segments、latency 和 `x-billable-requests`，见
+[Transcript API](https://docs.supadata.ai/api-reference/endpoint/transcript/transcript) 和
+[transcript guide](https://docs.supadata.ai/get-transcript)。
+
+### 8.4 未通过的生产 gate
 
 在 VPS 上：
 
@@ -360,20 +447,29 @@ Podcasting 2.0 的 [`<podcast:transcript>`](https://podcasting2.org/docs/podcast
 - `yt-dlp` 返回 `Sign in to confirm you’re not a bot`。
 - 不接受导入个人 cookies；这既需要人工维护，也有账号封禁风险。
 
-因此当前只能记为 `discovery PASS / transcript capability BOUNDED_PASS / VPS media transport
-FAIL`。官方 YouTube captions download 也不能作为第三方公开视频的通用替代：下载接口要求
+因此当前只能记为 `discovery PASS / native provider BOUNDED_PASS / generated provider PARTIAL /
+direct VPS media transport FAIL`。官方 YouTube captions download 也不能作为第三方公开视频的
+通用替代：下载接口要求
 调用者具有编辑该视频的权限，见
 [YouTube captions.download](https://developers.google.com/youtube/v3/docs/captions/download)。
 
-上线前必须选择并实测一个无人值守内容入口：
+上线前必须完成一个无人值守内容入口：
 
-1. 有明确 SLA、价格和使用条款的 transcript/media provider；或
-2. 独立、允许 YouTube 获取的 acquisition runner，由它只回传字幕/音频 hash 与受控内容。
+1. 首选候选是 Supadata：使用真实 API key 从 VPS 重跑 native exact case，并将无字幕 Auto job
+   轮询至 `completed/failed`；或
+2. 如果要让 Hermes 处理 YouTube ASR，先提供独立、合规、允许 YouTube 获取的 media
+   acquisition runner。Hermes 本身不能代替 media transport。
 
 未选定前仍可启用 YouTube feed discovery，但新视频只能停在 `CONTENT_DEFERRED`，不能发布
 “已检查无内容”。频道通知可后续采用 YouTube 官方
 [WebSub push notifications](https://developers.google.com/youtube/v3/guides/push_notifications)，
 同时保留 feed poll 作为恢复路径。
+
+同一 feed 在 2026-08-22 shadow 中立即重取时 raw XML bytes 已变化，但 15 个
+`videoId/title/published` canonical item 完全一致。这是 transport body hash 不能控制 Receipt
+revision 的直接证据。最新 deadline stream 当时仍为 `is_live` 且 captions disabled，正确结果是
+metadata accepted + transcript `DEFERRED`；上一条 668 秒完成视频仍取得人工 `en-GB` 105
+segments。
 
 ## 9. 增量、触发与调用效率
 
@@ -384,7 +480,7 @@ FAIL`。官方 YouTube captions download 也不能作为第三方公开视频的
 | Substack | GUID/canonical post URL | weak ETag + item IDs | 复用 feed poll | 无 |
 | Web article | canonical URL + content hash | ETag/Last-Modified/content hash | 仅由新 link 触发 | 无 |
 | Podcast | episode GUID + enclosure hash | feed validator + episode IDs | feed 新 episode 触发 | 仅无 publisher transcript 且 media hash 新时 STT |
-| YouTube | channel ID + video ID | feed entry IDs；max-age 900 | WebSub/poll；完成后取内容 | captions 优先；缺失时一次 STT |
+| YouTube | channel ID + video ID | feed entry IDs；max-age 900；不能假设 ETag | WebSub/poll；完成后取内容 | provider native 优先；缺失时持久化一次 async ASR job |
 
 效率规则：
 
@@ -394,6 +490,8 @@ FAIL`。官方 YouTube captions download 也不能作为第三方公开视频的
 - ETag/Last-Modified 304 记为 `CHECKED_NO_CHANGE`，不进入模型。
 - transcript 先按 publisher-provided、generated captions、Hermes STT 的顺序复用。
 - 第二层理解可以批量消费多个新 Receipt；采集器不调用内容理解模型。
+- 首次启用必须先按 profile lookback 过滤，再限制 metadata item 和 triggered content job 数。
+  `BOOTSTRAP_OUT_OF_SCOPE` 不是 provider failure 或 gap，也不得触发历史 transcript。
 
 ## 10. 无人工运营的列表维护
 
@@ -468,12 +566,16 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 - [ ] 定义 Receipt raw-content retention 与访问权限。
 - [ ] 为每个 adapter 加 deterministic fixtures、live opt-in probes 和 failure classes。
 - [ ] 所有 adapter 统一写 Observation、ReceiptRevision 和 outbox。
+- [ ] 锁定并测试 bootstrap lookback/item/content-job 上限；Podcast 长 feed 不得无界回灌。
+- [ ] 实现 Canonicalization V1 golden fixtures，区分 provider-native evidence hash 与 revision hash。
+- [ ] 允许 Podcast item link 缺失，并阻止 `MISSING` link 进入可发布 surface。
 
 ### 12.2 X
 
 - [ ] 在实际 production content-worker 中验证 Grok 1.0.5、auth 和四种 X tools。
 - [ ] 安装/验证 bubblewrap，严格 sandbox 下重新通过 single-tool trace gate。
-- [ ] 修复 final output 结构 gate 并保存脱敏 fixture。
+- [ ] 使用 `streaming-messages-json`、strict whole-result JSON 与 `GROK_ATTESTED_FINAL` evidence
+  mode 保存脱敏 fixture；不得再要求 CLI 不提供的 raw post payload。
 
 ### 12.3 Feed / Web
 
@@ -484,7 +586,9 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 ### 12.4 Media
 
 - [ ] Podcast 完整长音频分块、恢复、资源和吞吐测试。
-- [ ] YouTube 选择可无人值守的内容入口，并在 VPS/目标 runner 重跑同一案例。
+- [ ] 用 Supadata API key 从 VPS 重跑 native exact case，并轮询无字幕 Auto job 至 terminal。
+- [ ] 记录 Supadata actual billable units、async latency、empty/lang-none 和 job failure mapping。
+- [ ] 若改用 Hermes 处理 YouTube，先实现并验证独立 media transport；当前 VPS 直取路径不得上线。
 - [ ] live/upcoming/finished gate，避免直播开始前生成假 transcript。
 - [ ] transcript segment schema、chunk merge、hash reuse 和失败状态。
 - [ ] 为 Hermes STT 增加保留原生 timestamps 的稳定 wrapper；不得使用当前只返回字符串的
@@ -496,12 +600,17 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 - [x] RSS、Substack、公开网页和 Podcast 在目标 VPS 路径具备可实施 transport。
 - [x] Podcast 与 YouTube 各有一段真实媒体通过 Hermes local STT。
 - [x] YouTube 完整人工字幕可在非数据中心网络获取并形成稳定 segment/hash。
+- [x] Supadata native segments 与本机人工字幕逐段 hash 一致；公开文件 generated ASR 文字正确。
 - [x] 所有摘要证据只记录 metadata、长度和 hash，不在 repo 复制原文。
 - [x] X 和 YouTube 的生产失败已显式保留，没有写成 `EMPTY` 或 `PASS`。
+- [x] 额外 shadow 证明 X raw-result binding 不可用、Podcast bootstrap 必须有界、YouTube
+  transport hash 不能控制 item revision。
 - [x] Instagram/TikTok 不在范围内。
+- [ ] Supadata 无字幕 YouTube async job 尚未用 API key 轮询至 terminal。
 - [ ] 尚不能宣布多来源第一层 production ready。
 
 本轮环境：macOS acquisition probe、VPS `VM-12-6-ubuntu`、Hermes Agent `0.20.0`、
 Grok host CLI `1.0.3`、`@mozilla/readability@0.6.0`、`jsdom@26.1.0`、
-`youtube-transcript-api@1.2.4`、`yt-dlp@2026.8.19`。证据采集时间为
-`2026-08-21T18:17:41Z` 附近。
+本机 Grok Build 1.0.5、`youtube-transcript-api@1.2.4`、`yt-dlp@2026.8.19`。首次证据采集时间为
+`2026-08-21T18:17:41Z` 附近，Supadata/YouTube 补充验证完成于 `2026-08-21T19:08:13Z`
+附近，第二轮完整 shadow 完成于 `2026-08-21T19:35Z` 附近。
