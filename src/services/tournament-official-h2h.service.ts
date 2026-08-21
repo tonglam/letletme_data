@@ -22,10 +22,18 @@ const MAX_H2H_PAGES = 100;
 
 type OfficialH2HClient = Pick<typeof fplClient, 'getLeagueH2HStandings' | 'getLeagueH2HMatches'>;
 
+export type OfficialH2HStanding = RawFPLLeagueStandingsResult & { entry: number };
+
 export type OfficialH2HSourceSnapshot = {
-  standings: RawFPLLeagueStandingsResult[];
+  standings: OfficialH2HStanding[];
   matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
 };
+
+function isRealOfficialH2HStanding(
+  standing: RawFPLLeagueStandingsResult,
+): standing is OfficialH2HStanding {
+  return Number.isInteger(standing.entry) && Number(standing.entry) > 0;
+}
 
 function nonNegativeInteger(value: number | null | undefined): number {
   return Number.isInteger(value) && (value ?? -1) >= 0 ? Number(value) : 0;
@@ -100,12 +108,15 @@ export async function fetchOfficialH2HSourceSnapshot(
   leagueId: number,
   client: OfficialH2HClient = fplClient,
 ): Promise<OfficialH2HSourceSnapshot> {
-  const standings: RawFPLLeagueStandingsResult[] = [];
+  const standings: OfficialH2HStanding[] = [];
   let standingsPage = 1;
   let previousStandingsSignature: string | null = null;
   while (true) {
     const response = await client.getLeagueH2HStandings(leagueId, standingsPage, 1);
-    standings.push(...response.standings.results);
+    // FPL represents the synthetic Average Team as a standings row whose
+    // entry is null. It can be a match side, but it is not part of the real
+    // tournament roster and must not participate in coverage checks.
+    standings.push(...response.standings.results.filter(isRealOfficialH2HStanding));
     const signature = response.standings.results.map((row) => row.entry).join(',');
     if (
       response.standings.has_next &&
@@ -183,7 +194,7 @@ export async function fetchOfficialH2HSourceSnapshot(
 
 export function projectOfficialH2HStandings(
   currentGroups: readonly DbTournamentGroup[],
-  standings: readonly RawFPLLeagueStandingsResult[],
+  standings: readonly OfficialH2HStanding[],
   totalsByEntry?: ReadonlyMap<number, { totalPoints: number; totalTransfersCost: number }>,
 ): DbTournamentGroupInsert[] {
   const standingsByEntry = new Map(standings.map((standing) => [standing.entry, standing]));
