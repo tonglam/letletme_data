@@ -261,6 +261,9 @@ export type TournamentStructurePlan = {
   tournamentName: string;
   creator: string;
   adminEntryId: number;
+  /** Canonical FPL snapshot used only to satisfy the administrator FK when
+   * the platform administrator is not part of the tournament roster. */
+  administratorEntry?: TournamentParticipant;
   selectedParticipants: TournamentParticipant[];
   groupMode: GroupMode;
   groupTeamNum: number;
