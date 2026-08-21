@@ -52,7 +52,7 @@ changes remains a successful complete capture.
 |---|---|---|
 | `entry-info-daily` | `30 10 * * *` | `isFPLSeason`; once per UTC date marker |
 | `entry-event-picks-window` | `*/5 * * * *` | `isFPLSeason`, current event, selection publication window |
-| `entry-event-transfers-daily` | `40 10 * * *` | `isFPLSeason`, current event, `isAfterMatchDay` |
+| `entry-event-transfers-daily` | `*/5 * * * *` | `isFPLSeason`, current event, same selection publication window as picks |
 | `entry-event-results-daily` | `45 10 * * *` | `isFPLSeason` and current event |
 
 Entry jobs operate only on known `competition.entries`; core season bootstrap does not
