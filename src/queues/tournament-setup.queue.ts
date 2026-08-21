@@ -5,6 +5,13 @@ import { tournamentSetupQueueName } from './names';
 
 export { tournamentSetupQueueName } from './names';
 
+export const TOURNAMENT_SETUP_MAX_ATTEMPTS = 3;
+export const TOURNAMENT_SETUP_BACKOFF_DELAY_MS = 60_000;
+
+export function getTournamentSetupRetryDelayMs(attempt: number): number {
+  return TOURNAMENT_SETUP_BACKOFF_DELAY_MS * 2 ** Math.max(0, Math.trunc(attempt) - 1);
+}
+
 export interface TournamentSetupJobData {
   seasonId: number;
   seasonCode: string;
@@ -18,10 +25,10 @@ export interface TournamentSetupJobData {
 export const tournamentSetupQueue = new Queue<TournamentSetupJobData>(tournamentSetupQueueName, {
   connection: getQueueConnection(),
   defaultJobOptions: {
-    attempts: 3,
+    attempts: TOURNAMENT_SETUP_MAX_ATTEMPTS,
     backoff: {
       type: 'exponential',
-      delay: 60_000,
+      delay: TOURNAMENT_SETUP_BACKOFF_DELAY_MS,
     },
     removeOnComplete: {
       age: 86400,

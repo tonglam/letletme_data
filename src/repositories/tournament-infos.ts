@@ -125,6 +125,14 @@ export interface TournamentSetupStatusRow {
   insightsReadyAt?: string | null;
 }
 
+export interface TournamentSetupAttemptFailure {
+  attempt: number;
+  terminal: boolean;
+  errorCode: string;
+  nextRetryAt: Date | null;
+  startedAt: Date;
+}
+
 export interface TournamentCreatedRow {
   id: number;
   seasonId: number;
@@ -514,8 +522,10 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
       season: FplSeasonRef,
       tournamentId: number,
       progressMarker?: string | null,
+      attempt?: number,
     ): Promise<void> => {
       const db = await getDbInstance();
+      const safeAttempt = attempt === undefined ? null : Math.max(1, Math.trunc(attempt));
       await db
         .update(tournamentsInCompetition)
         .set({
@@ -527,7 +537,10 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupProgressUpdatedAt:
             progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
           setupWarningCount: 0,
-          setupAttempt: sql`${tournamentsInCompetition.setupAttempt} + 1`,
+          setupAttempt:
+            safeAttempt === null
+              ? sql`${tournamentsInCompetition.setupAttempt} + 1`
+              : sql`LEAST(${tournamentsInCompetition.setupMaxAttempts}, ${safeAttempt})`,
           setupNextRetryAt: null,
           setupLastErrorCode: null,
           setupLastErrorAt: null,
@@ -645,89 +658,45 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
         .where(tournamentScope(season, tournamentId));
     },
 
-    markSetupResultIfAttempt: async (
+    markSetupAttemptFailure: async (
       season: FplSeasonRef,
       tournamentId: number,
-      status: 'ready' | 'failed',
-      error: string | null,
-      warningCount: number,
-      progressMarker: string | null | undefined,
-      lastErrorCode: string | null | undefined,
-      expectedSetupAttempt: number,
+      failure: TournamentSetupAttemptFailure,
     ): Promise<boolean> => {
       const db = await getDbInstance();
+      const now = new Date();
+      const attempt = Math.max(1, Math.trunc(failure.attempt));
       const rows = await db
         .update(tournamentsInCompetition)
         .set({
-          setupStatus: status,
-          setupPhase: status,
-          setupWarningCount: status === 'ready' ? Math.max(0, warningCount) : 0,
-          setupError: status === 'ready' ? null : 'Tournament setup failed.',
-          setupNextRetryAt: null,
-          setupLastErrorCode: status === 'failed' ? (lastErrorCode ?? 'SETUP_FAILED') : null,
-          setupLastErrorAt: status === 'failed' ? new Date() : null,
+          setupStatus: failure.terminal ? 'failed' : 'processing',
+          setupPhase: failure.terminal ? 'failed' : 'queued',
+          setupCompletedUnits: 0,
+          setupTotalUnits: 0,
+          setupWarningCount: 0,
+          setupError: failure.terminal ? 'Tournament setup failed.' : null,
+          setupNextRetryAt: failure.terminal ? null : failure.nextRetryAt,
+          setupAttempt: sql`LEAST(${tournamentsInCompetition.setupMaxAttempts}, ${attempt})`,
+          setupLastErrorCode: failure.errorCode,
+          setupLastErrorAt: now,
           setupProgressIndeterminate: false,
-          setupProgressUpdatedAt:
-            progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
-          setupFinishedAt: new Date(),
+          setupProgressUpdatedAt: now,
+          setupStartedAt: sql`COALESCE(
+            ${tournamentsInCompetition.setupStartedAt},
+            ${failure.startedAt.toISOString()}::timestamptz
+          )`,
+          setupFinishedAt: failure.terminal ? now : null,
+          standingsReadyAt: null,
+          profilesReadyAt: null,
+          insightsReadyAt: null,
           updatedAt: new Date(),
         })
         .where(
           and(
             tournamentScope(season, tournamentId),
-            eq(tournamentsInCompetition.setupAttempt, expectedSetupAttempt),
-          ),
-        )
-        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
-      return rows.length === 1;
-    },
-
-    markSetupRetrying: async (
-      season: FplSeasonRef,
-      tournamentId: number,
-      errorCode: string,
-      nextRetryAt: Date | null,
-    ): Promise<void> => {
-      const db = await getDbInstance();
-      await db
-        .update(tournamentsInCompetition)
-        .set({
-          setupStatus: 'processing',
-          setupPhase: 'queued',
-          setupError: null,
-          setupNextRetryAt: nextRetryAt,
-          setupLastErrorCode: errorCode,
-          setupLastErrorAt: new Date(),
-          setupFinishedAt: null,
-          updatedAt: new Date(),
-        })
-        .where(tournamentScope(season, tournamentId));
-    },
-
-    markSetupRetryingIfAttempt: async (
-      season: FplSeasonRef,
-      tournamentId: number,
-      errorCode: string,
-      nextRetryAt: Date | null,
-      expectedSetupAttempt: number,
-    ): Promise<boolean> => {
-      const db = await getDbInstance();
-      const rows = await db
-        .update(tournamentsInCompetition)
-        .set({
-          setupStatus: 'processing',
-          setupPhase: 'queued',
-          setupError: null,
-          setupNextRetryAt: nextRetryAt,
-          setupLastErrorCode: errorCode,
-          setupLastErrorAt: new Date(),
-          setupFinishedAt: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            tournamentScope(season, tournamentId),
-            eq(tournamentsInCompetition.setupAttempt, expectedSetupAttempt),
+            inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
+            sql`${tournamentsInCompetition.setupFinishedAt} IS NULL`,
+            lt(tournamentsInCompetition.setupAttempt, attempt),
           ),
         )
         .returning({ tournamentId: tournamentsInCompetition.tournamentId });

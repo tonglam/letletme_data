@@ -213,3 +213,29 @@ export const runInDatabaseTransaction = <T>(
 export type DbHandle = Awaited<ReturnType<typeof getDb>>;
 export type TransactionHandle = Parameters<Parameters<DbHandle['transaction']>[0]>[0];
 export type DbOrTransaction = DbHandle | TransactionHandle;
+
+/**
+ * Run an operation inside a PostgreSQL savepoint owned by the current
+ * mutation transaction. Repositories resolve the nested Drizzle transaction
+ * through AsyncLocalStorage, so a statement error can be rolled back without
+ * poisoning the outer lifecycle transaction that records the failure state.
+ */
+export async function withDatabaseSavepoint<T>(operation: () => Promise<T>): Promise<T> {
+  const context = databaseTransactionStorage.getStore();
+  if (!context) {
+    throw new Error('Database savepoint requires an active database transaction');
+  }
+
+  const transaction = context.db as TransactionHandle;
+  return transaction.transaction(async (nestedTransaction) => {
+    const raw = (
+      nestedTransaction as unknown as {
+        session?: { client?: postgres.TransactionSql };
+      }
+    ).session?.client;
+    if (!raw) {
+      throw new Error('Database savepoint did not expose its pinned postgres client');
+    }
+    return runInDatabaseTransaction(raw, operation, nestedTransaction);
+  });
+}
