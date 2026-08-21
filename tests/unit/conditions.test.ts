@@ -124,11 +124,11 @@ describe('pick publication window', () => {
   const event = buildEvent({ deadlineTime: '2026-08-21T17:30:00.000Z' });
   const fixtures = [buildFixture('2026-08-21T19:00:00.000Z', 401)];
 
-  it('covers the 30-to-90-minute interval after the deadline', () => {
+  it('covers the 30-to-60-minute interval after the deadline', () => {
     expect(isSelectTime(event, fixtures, new Date('2026-08-21T17:59:59.999Z'))).toBe(false);
     expect(isSelectTime(event, fixtures, new Date('2026-08-21T18:00:00.000Z'))).toBe(true);
-    expect(isSelectTime(event, fixtures, new Date('2026-08-21T19:00:00.000Z'))).toBe(true);
-    expect(isSelectTime(event, fixtures, new Date('2026-08-21T19:00:00.001Z'))).toBe(false);
+    expect(isSelectTime(event, fixtures, new Date('2026-08-21T18:30:00.000Z'))).toBe(true);
+    expect(isSelectTime(event, fixtures, new Date('2026-08-21T18:30:00.001Z'))).toBe(false);
   });
 
   it('polls every five minutes instead of relying on a fixed daily time', () => {

@@ -88,7 +88,7 @@ The following poll every five minutes:
 - `tournament-event-transfers-pre-trigger`
 
 They require `isFPLSeason`, a current event, and `isSelectTime`. Selection time
-is the UTC match date from 30 through 90 minutes after the FPL deadline. It is
+is the UTC match date from 30 through 60 minutes after the FPL deadline. It is
 the post-deadline publication window for immutable picks and pre-event transfer tracking.
 
 ## Post-match league and tournament results
@@ -140,7 +140,7 @@ since that same job began and fetches only the remaining entry/event units.
   open up to +6h for delayed FPL finish flags.
 - `isAfterMatchDay`: event is finished or now is later than the final kickoff
   +2h.
-- `isSelectTime`: match day and 30–90 minutes after the event deadline.
+- `isSelectTime`: match day and 30–60 minutes after the event deadline.
 - Post-match result slot: later than final kickoff +2h but earlier than 24
   hours after that expected end.
 

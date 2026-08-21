@@ -1,8 +1,36 @@
 import { describe, expect, test } from 'bun:test';
 
-import { decideLiveLifecycle } from '../../src/services/live-lifecycle-orchestrator';
+import {
+  decideLiveLifecycle,
+  PICKS_FIRST_PROBE_OFFSET_MS,
+} from '../../src/services/live-lifecycle-orchestrator';
 
 describe('live lifecycle decisions', () => {
+  test('starts the first picks probe 60 minutes after the deadline', () => {
+    expect(PICKS_FIRST_PROBE_OFFSET_MS).toBe(60 * 60_000);
+
+    const event = {
+      deadlineTime: '2026-08-15T10:00:00.000Z',
+      finished: false,
+      dataChecked: false,
+    };
+    const fixtures = [
+      {
+        started: false,
+        finished: false,
+        finishedProvisional: false,
+        kickoffTime: new Date('2026-08-15T12:00:00.000Z'),
+      },
+    ];
+
+    expect(decideLiveLifecycle(event, fixtures, new Date('2026-08-15T10:59:59.999Z')).state).toBe(
+      'PICKS_WAIT',
+    );
+    expect(decideLiveLifecycle(event, fixtures, new Date('2026-08-15T11:00:00.000Z')).state).toBe(
+      'PICKS_PROBE',
+    );
+  });
+
   test('starts live polling at kickoff when persisted fixture flags still lag', () => {
     const decision = decideLiveLifecycle(
       { deadlineTime: '2026-08-15T10:00:00.000Z', finished: false, dataChecked: false },
