@@ -2,7 +2,9 @@ import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
+import { coreSnapshotRefreshReason } from '../domain/core-snapshot-refresh';
 import { eventRepository } from '../repositories/events';
+import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
@@ -15,21 +17,28 @@ export type ManualEventCurrentRefreshResult = {
   eventsSyncJobId?: string;
 };
 
+async function readCurrentLifecycle() {
+  const season = await seasonRepository.findCurrent();
+  const current = await eventRepository.findCurrent(season);
+  const [currentFixtures, publication] = await Promise.all([
+    current ? fixtureRepository.findByEvent(season, current.id) : Promise.resolve([]),
+    readCoreSnapshotCache(season.seasonCode),
+  ]);
+  return { season, current, currentFixtures, publication };
+}
+
 /**
  * HTTP / ops trigger: compares the database-derived current event with the active
  * immutable core publication. A mismatch enqueues a complete core rebuild.
  */
 export async function runManualEventCurrentRefresh(): Promise<ManualEventCurrentRefreshResult> {
-  const season = await seasonRepository.findCurrent();
-  const [current, publication] = await Promise.all([
-    eventRepository.findCurrent(season),
-    readCoreSnapshotCache(season.seasonCode),
-  ]);
-  if (publication?.currentEventId === (current?.id ?? null)) {
+  const { season, current, currentFixtures, publication } = await readCurrentLifecycle();
+  const reason = coreSnapshotRefreshReason(current, currentFixtures, publication);
+  if (!reason) {
     return { refreshed: false };
   }
 
-  logInfo('Manual event-current-refresh: gameweek id changed, enqueuing core snapshot');
+  logInfo('Manual event-current-refresh: stale core lifecycle detected', { reason });
   try {
     const job = await enqueueCoreSnapshotJob(season, 'manual');
     logInfo('Core snapshot job enqueued after current-event publication check', { jobId: job.id });
@@ -42,17 +51,14 @@ export async function runManualEventCurrentRefresh(): Promise<ManualEventCurrent
 
 export async function runEventCurrentRefresh() {
   const now = new Date();
-  const season = await seasonRepository.findCurrent();
+  const { season, current, currentFixtures, publication } = await readCurrentLifecycle();
   if (!(await isFPLSeason(season, now))) {
     return;
   }
 
-  const [current, publication] = await Promise.all([
-    eventRepository.findCurrent(season),
-    readCoreSnapshotCache(season.seasonCode),
-  ]);
-  if (publication?.currentEventId !== (current?.id ?? null)) {
-    logInfo('Gameweek transition detected - triggering core snapshot');
+  const reason = coreSnapshotRefreshReason(current, currentFixtures, publication, now);
+  if (reason) {
+    logInfo('Gameweek lifecycle transition detected - triggering core snapshot', { reason });
     try {
       const job = await enqueueCoreSnapshotJob(season, 'event-transition');
       logInfo('Core snapshot job enqueued (transition)', { jobId: job.id });

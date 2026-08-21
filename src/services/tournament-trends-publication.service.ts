@@ -57,9 +57,10 @@ export async function publishTournamentTrendScope(
   // Audit, checksum and row aggregation must observe one source snapshot. The
   // advisory lock only serializes publishers; source writers do not take it.
   return client.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`trends:${season.seasonId}:${tournamentId}:${eventId}`}, 0))`;
-    // Establish the repeatable-read snapshot only after the scope lock is held.
+    // PostgreSQL requires SET TRANSACTION before every other statement in the
+    // transaction. The snapshot is established by the first query below.
     await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`trends:${season.seasonId}:${tournamentId}:${eventId}`}, 0))`;
 
     const auditRows = await tx<ScopeAudit[]>`
       SELECT
@@ -210,6 +211,7 @@ export async function publishTournamentTrendScope(
     const publicationState = picksReady ? 'READY' : 'COLLECTING';
     const ownershipState = picksReady ? 'READY' : 'NOT_READY';
     const transfersState = transfersReady ? 'READY' : 'NOT_READY';
+    const publishedAt = picksReady ? new Date().toISOString() : null;
     const inserted = await tx<Array<{ publication_id: number }>>`
       INSERT INTO reporting.tournament_selection_stat_publications (
         season_id, tournament_id, event_id, revision, publication_state, is_active,
@@ -218,9 +220,9 @@ export async function publishTournamentTrendScope(
         vice_captaincy_state, transfers_state, published_at
       ) VALUES (
         ${season.seasonId}, ${tournamentId}, ${eventId}, ${revision}, ${publicationState}, false,
-        ${sourceWatermark}, ${checksum}, ${expectedEntries}, ${completePickEntries},
+        ${sourceWatermark.toISOString()}::timestamptz, ${checksum}, ${expectedEntries}, ${completePickEntries},
         ${transferCheckpointEntries}, ${ownershipState}, ${ownershipState},
-        ${ownershipState}, ${transfersState}, ${picksReady ? new Date() : null}
+        ${ownershipState}, ${transfersState}, ${publishedAt}::timestamptz
       ) RETURNING publication_id
     `;
     const publicationId = Number(inserted[0].publication_id);
