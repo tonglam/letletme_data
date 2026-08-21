@@ -12,3 +12,6 @@ export const PLAYER_PRICES_REPLAY_CRON_PATTERN = '40 9 * * *';
 
 /** Daily transfer/popularity statistics refresh for the current or preseason next event. */
 export const PLAYER_STATS_CRON_PATTERN = '40 9 * * *';
+
+/** One-minute coordinator; the job backs off to five minutes outside live windows. */
+export const PLAYER_STATS_ACTIVE_CRON_PATTERN = '* * * * *';

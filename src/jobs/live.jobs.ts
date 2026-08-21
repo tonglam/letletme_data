@@ -10,10 +10,11 @@ import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
 import { enqueueLiveSnapshot } from './live-data.jobs';
-import { registerLiveLifecycleTimer } from '../services/live-lifecycle-orchestrator';
+import { enqueuePlayerStatsSyncJob } from './data-sync-enqueue';
+import { LIVE_POLL_MS, registerLiveLifecycleTimer } from '../services/live-lifecycle-orchestrator';
 
 export const LIVE_SNAPSHOT_SCHEDULES = {
-  lifecycle: { name: 'live-lifecycle', intervalMs: Number(process.env.LIVE_POLL_MS ?? 30_000) },
+  lifecycle: { name: 'live-lifecycle', intervalMs: LIVE_POLL_MS },
 } as const;
 
 /**
@@ -83,6 +84,20 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
       eventId: currentEvent.id,
       resultSlot,
     });
+  }
+  if (resultSlot.startsWith('final-')) {
+    const playerStatsJob = await enqueuePlayerStatsSyncJob(season, 'cascade', {
+      eventId: currentEvent.id,
+      jobId: `player-stats-final-e${currentEvent.id}-${resultSlot}`,
+      removeOnSettle: true,
+    });
+    if (playerStatsJob) {
+      logInfo('Final player stats repair enqueued', {
+        jobId: playerStatsJob.id,
+        eventId: currentEvent.id,
+        resultSlot,
+      });
+    }
   }
   return job;
 }

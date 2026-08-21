@@ -3841,6 +3841,56 @@ export const playerEventSnapshotsInFpl = fpl.table(
   ],
 );
 
+export const playerEventSnapshotPublicationsInFpl = fpl.table(
+  'player_event_snapshot_publications',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' })
+      .default(sql`nextval('fpl.player_event_snapshot_publication_revision_seq'::regclass)`)
+      .notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    rowCount: integer('row_count').notNull(),
+    expectedRowCount: integer('expected_row_count').notNull(),
+    contentSha256: text('content_sha256').notNull(),
+    baselineVerifiedAt: timestamp('baseline_verified_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'player_event_snapshot_publications_season_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'player_event_snapshot_publications_event_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId, table.eventId],
+      name: 'player_event_snapshot_publications_pkey',
+    }),
+    check('player_event_snapshot_publications_revision_positive', sql`revision > 0`),
+    check(
+      'player_event_snapshot_publications_counts_positive',
+      sql`row_count > 0 AND expected_row_count > 0`,
+    ),
+    check(
+      'player_event_snapshot_publications_counts_complete',
+      sql`row_count = expected_row_count`,
+    ),
+    check(
+      'player_event_snapshot_publications_hash_valid',
+      sql`content_sha256 ~ '^[0-9a-f]{64}$'::text`,
+    ),
+  ],
+);
+
 export const playerSeasonSummaryRowsInReporting = reporting.table(
   'player_season_summary_rows',
   {

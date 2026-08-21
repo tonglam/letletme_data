@@ -8,6 +8,7 @@ import { createEventRepository } from '../repositories/events';
 import { createFixtureRepository } from '../repositories/fixtures';
 import { createPhaseRepository } from '../repositories/phases';
 import { createPlayerRepository } from '../repositories/players';
+import { createSeasonRepository } from '../repositories/seasons';
 import { createTeamRepository } from '../repositories/teams';
 import { DatabaseError } from '../utils/errors';
 
@@ -104,6 +105,7 @@ async function persistCoreSnapshotRows(
   db: DbOrTransaction,
   sourceCheckedAt?: Date,
 ): Promise<CoreSnapshotPersistenceResult> {
+  await createSeasonRepository(db).advanceLifecycle(season, snapshot.events);
   const savedEvents = await createEventRepository(db).upsertBatch(season, snapshot.events);
   const savedTeams = await createTeamRepository(db).upsertBatch(season, snapshot.teams);
   const savedPlayers = await createPlayerRepository(db).upsertBatch(

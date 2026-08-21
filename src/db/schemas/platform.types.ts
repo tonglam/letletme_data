@@ -10,6 +10,7 @@ import {
   leagueEventResultsInCompetition,
   phasesInFpl,
   playerEventSnapshotsInFpl,
+  playerEventSnapshotPublicationsInFpl,
   playerFixtureStatsInFpl,
   playerGameweekScoringItemsInFpl,
   playerGameweekStatsInFpl,
@@ -87,6 +88,12 @@ export type DbPlayerMarketSnapshotInsert = Readonly<typeof playerMarketSnapshots
 export type DbPlayerFixtureStat = Readonly<typeof playerFixtureStatsInFpl.$inferSelect>;
 export type DbPlayerFixtureStatInsert = Readonly<typeof playerFixtureStatsInFpl.$inferInsert>;
 export type DbPlayerStatInsert = Readonly<typeof playerEventSnapshotsInFpl.$inferInsert>;
+export type DbPlayerEventSnapshotPublication = Readonly<
+  typeof playerEventSnapshotPublicationsInFpl.$inferSelect
+>;
+export type DbPlayerEventSnapshotPublicationInsert = Readonly<
+  typeof playerEventSnapshotPublicationsInFpl.$inferInsert
+>;
 export type DbPublicLeagueTrend = Readonly<typeof publicLeagueTrendsInCompetition.$inferSelect>;
 export type DbPublicLeagueTrendInsert = Readonly<
   typeof publicLeagueTrendsInCompetition.$inferInsert
