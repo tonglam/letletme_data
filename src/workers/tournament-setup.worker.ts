@@ -131,6 +131,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
             async (): Promise<SetupFailure | null> => {
               const bullmqAttempt = Math.max(1, job.attemptsMade + 1);
               let attempt = bullmqAttempt;
+              let maxAttempts = Math.max(1, job.opts.attempts ?? 1);
               const startedAt = new Date();
               let attemptFailure: SetupFailure | null = null;
 
@@ -240,7 +241,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                   return null;
                 }
 
-                const maxAttempts = Math.max(1, persistedStatus.setupMaxAttempts ?? 3);
+                maxAttempts = Math.max(1, persistedStatus.setupMaxAttempts ?? maxAttempts);
                 const nextAttempt = Math.max(
                   bullmqAttempt,
                   Math.max(0, persistedStatus.setupAttempt ?? 0) + 1,
@@ -262,7 +263,8 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                   }),
                 );
               } catch (error) {
-                const terminal = isTerminalJobAttemptFailure(job, error, attempt);
+                const terminal =
+                  isTerminalJobAttemptFailure(job, error, attempt) || attempt >= maxAttempts;
                 const changed = await tournamentInfoRepository.markSetupAttemptFailure(
                   season,
                   job.data.tournamentId,
