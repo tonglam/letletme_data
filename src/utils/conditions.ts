@@ -204,7 +204,7 @@ export function isSelectTime(event: Event, fixtures: Fixture[], date = new Date(
   }
 
   const windowStart = deadlineMs + 30 * 60 * 1000;
-  const windowEnd = deadlineMs + 60 * 60 * 1000;
+  const windowEnd = deadlineMs + 90 * 60 * 1000;
 
   const now = date.getTime();
   return now >= windowStart && now <= windowEnd;
