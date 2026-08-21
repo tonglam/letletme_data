@@ -1,6 +1,4 @@
 import { Elysia, t } from 'elysia';
-import { ZodError } from 'zod';
-
 import {
   checkTournamentNameAvailability,
   createTournament,
@@ -8,18 +6,8 @@ import {
 } from '../services/tournament-create.service';
 import { validateTournamentCreateInput } from '../domain/tournament';
 import { tournamentManagementService } from '../services/tournament-management.service';
-import { getErrorMessage, getHttpStatusFromError } from '../utils/errors';
 import { createTournamentPreview } from '../services/tournament-preview.service';
-
-function mapErrorToResponse(error: unknown): { status: number; message: string } {
-  if (error instanceof ZodError) {
-    return {
-      status: 400,
-      message: error.issues.map((issue) => issue.message).join('; ') || 'Invalid request payload.',
-    };
-  }
-  return { status: getHttpStatusFromError(error), message: getErrorMessage(error) };
-}
+import { mapTournamentErrorToResponse } from './tournament-errors';
 
 const positiveInteger = t.Number({ minimum: 1, multipleOf: 1 });
 
@@ -45,9 +33,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
           participants: preview.participants,
         };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
+        const { status, message, code } = mapTournamentErrorToResponse(error);
         set.status = status;
-        return { success: false, error: message };
+        return { success: false, error: message, code };
       }
     },
     {
@@ -103,9 +91,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
           setupStatus: 'pending',
         };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
+        const { status, message, code } = mapTournamentErrorToResponse(error);
         set.status = status;
-        return { success: false, error: message };
+        return { success: false, error: message, code };
       }
     },
     {
@@ -121,9 +109,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         set.status = result.queued || result.changed ? 202 : 200;
         return { success: true, ...result };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
+        const { status, message, code } = mapTournamentErrorToResponse(error);
         set.status = status;
-        return { success: false, error: message };
+        return { success: false, error: message, code };
       }
     },
     {
@@ -142,9 +130,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         set.status = 202;
         return { success: true, tournament };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
+        const { status, message, code } = mapTournamentErrorToResponse(error);
         set.status = status;
-        return { success: false, error: message };
+        return { success: false, error: message, code };
       }
     },
     {
@@ -166,9 +154,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         if (body.state === 'active' && tournament.state !== 'active') set.status = 202;
         return { success: true, tournament };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
+        const { status, message, code } = mapTournamentErrorToResponse(error);
         set.status = status;
-        return { success: false, error: message };
+        return { success: false, error: message, code };
       }
     },
     {
@@ -192,9 +180,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
           setupStatus: result.setupStatus,
         };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
+        const { status, message, code } = mapTournamentErrorToResponse(error);
         set.status = status;
-        return { success: false, error: message };
+        return { success: false, error: message, code };
       }
     },
     {
@@ -226,9 +214,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         );
         return { success: true, tournament };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
+        const { status, message, code } = mapTournamentErrorToResponse(error);
         set.status = status;
-        return { success: false, error: message };
+        return { success: false, error: message, code };
       }
     },
     {
@@ -253,9 +241,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
           deletedName: tournament.name,
         };
       } catch (error) {
-        const { status, message } = mapErrorToResponse(error);
+        const { status, message, code } = mapTournamentErrorToResponse(error);
         set.status = status;
-        return { success: false, error: message };
+        return { success: false, error: message, code };
       }
     },
     {
