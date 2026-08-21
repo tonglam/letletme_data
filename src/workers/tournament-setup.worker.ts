@@ -4,7 +4,6 @@ import {
   tournamentSetupQueue,
   tournamentSetupQueueName,
   getTournamentSetupRetryDelayMs,
-  TOURNAMENT_SETUP_MAX_ATTEMPTS,
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
 import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
@@ -40,10 +39,19 @@ const WATCHDOG_INTERVAL_MS = Number(process.env.TOURNAMENT_SETUP_WATCHDOG_INTERV
 type SetupFailure = { error: unknown };
 
 function setupErrorCode(error: unknown): string {
-  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
-    return error.code;
+  const seen = new Set<unknown>();
+  let fallback: string | null = null;
+  let current = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if ('code' in current && typeof current.code === 'string') {
+      fallback ??= current.code;
+      if (/^[0-9A-Z]{5}$/.test(current.code)) return current.code;
+    }
+    current = 'cause' in current ? current.cause : null;
   }
-  return error instanceof Error ? error.name : 'SETUP_FAILED';
+  return fallback ?? (error instanceof Error ? error.name : 'SETUP_FAILED');
 }
 
 async function updateSetupJobProgressBestEffort(
@@ -121,7 +129,8 @@ export function createTournamentSetupWorker(): WorkerRuntime {
               scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
             },
             async (): Promise<SetupFailure | null> => {
-              const attempt = job.attemptsMade + 1;
+              const bullmqAttempt = Math.max(1, job.attemptsMade + 1);
+              let attempt = bullmqAttempt;
               const startedAt = new Date();
               let attemptFailure: SetupFailure | null = null;
 
@@ -208,6 +217,48 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                   }
                 }
 
+                const persistedStatus = await tournamentInfoRepository.findSetupStatus(
+                  season,
+                  job.data.tournamentId,
+                );
+                if (!persistedStatus) {
+                  logInfo('Ignoring tournament setup job for a deleted tournament', {
+                    tournamentId: job.data.tournamentId,
+                    jobId: job.id,
+                  });
+                  return null;
+                }
+                if (
+                  persistedStatus.setupStatus === 'ready' ||
+                  (persistedStatus.setupStatus === 'failed' &&
+                    persistedStatus.setupNextRetryAt === null)
+                ) {
+                  logInfo('Ignoring stale tournament setup job after terminal state', {
+                    tournamentId: job.data.tournamentId,
+                    jobId: job.id,
+                    setupStatus: persistedStatus.setupStatus,
+                  });
+                  return null;
+                }
+
+                const maxAttempts = Math.max(1, persistedStatus.setupMaxAttempts ?? 3);
+                const nextAttempt = Math.max(
+                  bullmqAttempt,
+                  Math.max(0, persistedStatus.setupAttempt ?? 0) + 1,
+                );
+                attempt = Math.min(maxAttempts, nextAttempt);
+                context.attempt = attempt;
+                if (nextAttempt > maxAttempts) {
+                  throw Object.assign(
+                    new Error('Tournament setup automatic retries exhausted.'),
+                    {
+                      code:
+                        persistedStatus.setupLastErrorCode ??
+                        'SETUP_AUTOMATIC_RETRIES_EXHAUSTED',
+                    },
+                  );
+                }
+
                 await updateSetupJobProgressBestEffort(job, 'running');
                 logInfo('Tournament setup worker started job');
                 await withDatabaseSavepoint(() =>
@@ -217,11 +268,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                   }),
                 );
               } catch (error) {
-                const terminal = isTerminalJobAttemptFailure(
-                  job,
-                  error,
-                  attempt,
-                );
+                const terminal = isTerminalJobAttemptFailure(job, error, attempt);
                 const changed = await tournamentInfoRepository.markSetupAttemptFailure(
                   season,
                   job.data.tournamentId,

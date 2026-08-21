@@ -681,7 +681,10 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupLastErrorAt: now,
           setupProgressIndeterminate: false,
           setupProgressUpdatedAt: now,
-          setupStartedAt: sql`COALESCE(${tournamentsInCompetition.setupStartedAt}, ${failure.startedAt})`,
+          setupStartedAt: sql`COALESCE(
+            ${tournamentsInCompetition.setupStartedAt},
+            ${failure.startedAt.toISOString()}::timestamptz
+          )`,
           setupFinishedAt: failure.terminal ? now : null,
           standingsReadyAt: null,
           profilesReadyAt: null,
@@ -693,6 +696,9 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
             tournamentScope(season, tournamentId),
             inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
             sql`${tournamentsInCompetition.setupFinishedAt} IS NULL`,
+            failure.terminal
+              ? lte(tournamentsInCompetition.setupAttempt, attempt)
+              : lt(tournamentsInCompetition.setupAttempt, attempt),
           ),
         )
         .returning({ tournamentId: tournamentsInCompetition.tournamentId });
@@ -768,11 +774,16 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupCompletedUnits: 0,
           setupTotalUnits: 0,
           setupWarningCount: 0,
-          setupAttempt: 0,
+          // A watchdog replay is part of the same setup lifecycle. Preserve
+          // the attempt counter so a lost/delayed BullMQ job cannot reset the
+          // three-attempt terminal gate on every watchdog tick.
           // Recovery diagnostics are kept in structured error-code columns;
           // setup_error is reserved for a terminal blocking error.
           setupError: null,
-          setupLastErrorCode: 'STUCK_SETUP_RECOVERY',
+          setupLastErrorCode: sql`COALESCE(
+            ${tournamentsInCompetition.setupLastErrorCode},
+            'STUCK_SETUP_RECOVERY'
+          )`,
           setupLastErrorAt: now,
           setupNextRetryAt: now,
           setupProgressUpdatedAt: now,

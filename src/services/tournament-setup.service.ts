@@ -75,21 +75,29 @@ const EMPTY_ENRICHMENT_PLAN: TournamentEnrichmentPlan = {
   reusedTransferEntries: 0,
 };
 
-function safeErrorCode(error: unknown): string {
-  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
-    return error.code;
+function findErrorCode(error: unknown): string | null {
+  const seen = new Set<unknown>();
+  let fallback: string | null = null;
+  let current = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
+    if (seen.has(current)) return null;
+    seen.add(current);
+    if ('code' in current && typeof current.code === 'string') {
+      fallback ??= current.code;
+      if (/^[0-9A-Z]{5}$/.test(current.code)) return current.code;
+    }
+    current = 'cause' in current ? current.cause : null;
   }
-  return error instanceof Error ? error.name : 'UNKNOWN_ERROR';
+  return fallback;
+}
+
+function safeErrorCode(error: unknown): string {
+  return findErrorCode(error) ?? (error instanceof Error ? error.name : 'UNKNOWN_ERROR');
 }
 
 function isPostgresStatementError(error: unknown): boolean {
-  return (
-    error !== null &&
-    typeof error === 'object' &&
-    'code' in error &&
-    typeof error.code === 'string' &&
-    /^[0-9A-Z]{5}$/.test(error.code)
-  );
+  const code = findErrorCode(error);
+  return code !== null && /^[0-9A-Z]{5}$/.test(code);
 }
 
 function elapsedBetween(start: string | null | undefined, end: string | null | undefined) {
@@ -190,6 +198,17 @@ export async function setupTournamentStructure(
       failureCode: null,
       work: { entrySnapshots: entryPlan, coreResults: corePlan, enrichment: enrichmentPlan },
       fpl: getFplRequestMetricsSnapshot(),
+    });
+    return;
+  }
+
+  // A successor or delayed BullMQ delivery may acquire the lifecycle lock
+  // after another job has already published readiness. Never let that stale
+  // delivery reset a READY tournament back to PROCESSING.
+  if (initialStatus.setupStatus === 'ready') {
+    outcome = initialStatus.setupWarningCount > 0 ? 'ready_with_warnings' : 'ready';
+    logInfo('Ignoring tournament setup job after readiness was published', {
+      tournamentId,
     });
     return;
   }
