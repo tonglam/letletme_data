@@ -75,11 +75,29 @@ const EMPTY_ENRICHMENT_PLAN: TournamentEnrichmentPlan = {
   reusedTransferEntries: 0,
 };
 
-function safeErrorCode(error: unknown): string {
-  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
-    return error.code;
+function findErrorCode(error: unknown): string | null {
+  const seen = new Set<unknown>();
+  let fallback: string | null = null;
+  let current = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
+    if (seen.has(current)) return null;
+    seen.add(current);
+    if ('code' in current && typeof current.code === 'string') {
+      fallback ??= current.code;
+      if (/^[0-9A-Z]{5}$/.test(current.code)) return current.code;
+    }
+    current = 'cause' in current ? current.cause : null;
   }
-  return error instanceof Error ? error.name : 'UNKNOWN_ERROR';
+  return fallback;
+}
+
+function safeErrorCode(error: unknown): string {
+  return findErrorCode(error) ?? (error instanceof Error ? error.name : 'UNKNOWN_ERROR');
+}
+
+function isPostgresStatementError(error: unknown): boolean {
+  const code = findErrorCode(error);
+  return code !== null && /^[0-9A-Z]{5}$/.test(code);
 }
 
 function elapsedBetween(start: string | null | undefined, end: string | null | undefined) {
@@ -105,7 +123,7 @@ export async function finalizePublishedTournamentSetup(
 export async function setupTournamentStructure(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: { resumeMarker?: string },
+  options?: { resumeMarker?: string; attempt?: number },
 ): Promise<void> {
   const setupStartedAtMs = performance.now();
   const phaseDurationsMs = {
@@ -184,10 +202,22 @@ export async function setupTournamentStructure(
     return;
   }
 
+  // A successor or delayed BullMQ delivery may acquire the lifecycle lock
+  // after another job has already published readiness. Never let that stale
+  // delivery reset a READY tournament back to PROCESSING.
+  if (initialStatus.setupStatus === 'ready') {
+    outcome = initialStatus.setupWarningCount > 0 ? 'ready_with_warnings' : 'ready';
+    logInfo('Ignoring tournament setup job after readiness was published', {
+      tournamentId,
+    });
+    return;
+  }
+
   // Historical readiness must not downgrade a failure in this new setup or
   // resume attempt into a warning. Only publication completed below makes
   // failures non-critical for this attempt.
   let standingsPublished = false;
+  let transactionAborted = false;
   const progressMarker = options?.resumeMarker;
   const markSetupProgress = (
     phase: TournamentSetupPhase,
@@ -206,7 +236,12 @@ export async function setupTournamentStructure(
     );
 
   try {
-    await tournamentInfoRepository.markSetupProcessing(season, tournamentId, progressMarker);
+    await tournamentInfoRepository.markSetupProcessing(
+      season,
+      tournamentId,
+      progressMarker,
+      options?.attempt,
+    );
     const setupIssues: TournamentSetupIssue[] = [];
     const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
       season,
@@ -423,12 +458,13 @@ export async function setupTournamentStructure(
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Tournament setup failed.';
     failureCode = safeErrorCode(error);
+    transactionAborted = isPostgresStatementError(error);
     logError('Tournament setup failed', error, {
       tournamentId,
       durationMs: Math.round(performance.now() - setupStartedAtMs),
       standingsPublished,
     });
-    if (standingsPublished) {
+    if (standingsPublished && !transactionAborted) {
       const issueState = await tournamentSetupIssueRepository.sync(season, tournamentId, [
         normalizeTournamentSetupIssue({
           scope: 'event-results',
@@ -448,12 +484,14 @@ export async function setupTournamentStructure(
     throw error;
   } finally {
     let terminalStatus = null;
-    try {
-      terminalStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
-    } catch (error) {
-      logError('Unable to read terminal tournament setup status for reporting', error, {
-        tournamentId,
-      });
+    if (!transactionAborted) {
+      try {
+        terminalStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+      } catch (error) {
+        logError('Unable to read terminal tournament setup status for reporting', error, {
+          tournamentId,
+        });
+      }
     }
     const context = getJobLogContext();
     const createdAt = terminalStatus?.createdAt ?? initialStatus.createdAt;
