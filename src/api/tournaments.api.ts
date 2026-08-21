@@ -1,6 +1,4 @@
 import { Elysia, t } from 'elysia';
-import { ZodError } from 'zod';
-
 import {
   checkTournamentNameAvailability,
   createTournament,
@@ -8,33 +6,23 @@ import {
 } from '../services/tournament-create.service';
 import { validateTournamentCreateInput } from '../domain/tournament';
 import { tournamentManagementService } from '../services/tournament-management.service';
-import {
-  getHttpStatusFromError,
-  getOrCreateRequestId,
-  getPublicErrorCode,
-  getPublicErrorMessage,
-} from '../utils/errors';
-import { logError } from '../utils/logger';
 import { createTournamentPreview } from '../services/tournament-preview.service';
+import { mapTournamentErrorToResponse } from './tournament-errors';
+import { getOrCreateRequestId } from '../utils/errors';
+import { logError } from '../utils/logger';
 
 function mapErrorToResponse(
   error: unknown,
   request: Request,
   set: { headers: Record<string, string | number>; status?: unknown },
-): { status: number; body: { success: false; error: string; code?: string; requestId?: string } } {
-  let status: number;
-  let message: string;
-  if (error instanceof ZodError) {
-    status = 400;
-    message = error.issues.map((issue) => issue.message).join('; ') || 'Invalid request payload.';
-  } else {
-    status = getHttpStatusFromError(error);
-    message = getPublicErrorMessage(error, status);
-  }
+): {
+  status: number;
+  body: { success: false; error: string; code?: string; requestId?: string };
+} {
+  const { status, message, code } = mapTournamentErrorToResponse(error);
   const requestId = getOrCreateRequestId(request);
   logError('Tournament request failed', error, { requestId });
   set.headers['x-request-id'] = requestId;
-  const code = getPublicErrorCode(error, status);
   return {
     status,
     body: {

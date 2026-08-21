@@ -16,6 +16,7 @@ mock.module('../../src/services/events.service', () => ({
 
 const enqueueEventsSyncJob = mock(async () => ({ id: 'events-job-1' }));
 const enqueueCoreSnapshotJob = mock(async () => ({ id: 'core-snapshot-job-1' }));
+const enqueuePlayerPricesSyncJob = mock(async () => ({ id: 'player-prices-job-1' }));
 const enqueuePlayersSyncJob = mock(async () => ({ id: 'players-job-1' }));
 const enqueuePlayerValuesSyncJob = mock(async () => ({ id: 'player-values-job-1' }));
 const enqueuePlayerStatsSyncJob = mock(async () => ({ id: 'player-stats-job-1' }));
@@ -24,6 +25,7 @@ const enqueuePhasesSyncJob = mock(async () => ({ id: 'phases-job-1' }));
 mock.module('../../src/jobs/data-sync-enqueue', () => ({
   enqueueCoreSnapshotJob,
   enqueueEventsSyncJob,
+  enqueuePlayerPricesSyncJob,
   enqueuePlayersSyncJob,
   enqueuePlayerValuesSyncJob,
   enqueuePlayerStatsSyncJob,
@@ -573,6 +575,7 @@ describe('tournamentsAPI handlers', () => {
     expect(await response.json()).toEqual({
       success: false,
       error: 'Only the tournament administrator can delete this tournament.',
+      code: 'TOURNAMENT_FORBIDDEN',
     });
   });
 });
