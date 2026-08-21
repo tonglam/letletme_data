@@ -4,6 +4,8 @@ import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
 
+const LIVE_SNAPSHOT_PERSISTENCE_BUCKET_MS = 10 * 60_000;
+
 async function hasSupersedingPendingJob(
   queue: typeof liveDataQueue,
   season: FplSeasonRef,
@@ -36,6 +38,29 @@ export function liveSnapshotMinuteBucket(date: Date): string {
   return `${date.toISOString().slice(0, 16).replace(/\D/g, '')}${String(seconds).padStart(2, '0')}`;
 }
 
+export function liveSnapshotPersistenceJobId(eventId: number, date: Date): string {
+  const bucketStart = new Date(
+    Math.floor(date.getTime() / LIVE_SNAPSHOT_PERSISTENCE_BUCKET_MS) *
+      LIVE_SNAPSHOT_PERSISTENCE_BUCKET_MS,
+  );
+  return `live-snapshot-e${eventId}-periodic-${bucketStart
+    .toISOString()
+    .slice(0, 16)
+    .replace(/\D/g, '')}`;
+}
+
+export async function enqueueLiveActiveSnapshot(season: FplSeasonRef, eventId: number, now: Date) {
+  const periodicJobId = liveSnapshotPersistenceJobId(eventId, now);
+  const qualifiedPeriodicJobId = `${season.seasonCode}-${periodicJobId}`;
+  const periodicSnapshotExists = Boolean(await liveDataQueue.getJob(qualifiedPeriodicJobId));
+
+  return enqueueLiveSnapshot(season, eventId, 'cron', {
+    now,
+    persistEventLives: !periodicSnapshotExists,
+    ...(periodicSnapshotExists ? {} : { jobId: periodicJobId }),
+  });
+}
+
 export async function enqueueLiveSnapshot(
   season: FplSeasonRef,
   eventId: number,
@@ -51,6 +76,16 @@ export async function enqueueLiveSnapshot(
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
   try {
     const queue = liveDataQueue;
+    const explicitJobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : null;
+    if (explicitJobId && (await queue.getJob(explicitJobId))) {
+      logInfo('Live snapshot job already exists; skipping enqueue', {
+        jobId: explicitJobId,
+        season: season.seasonCode,
+        eventId,
+        persistEventLives,
+      });
+      return null;
+    }
     if (
       source === 'cron' &&
       (await hasSupersedingPendingJob(
@@ -83,7 +118,7 @@ export async function enqueueLiveSnapshot(
       source === 'cron'
         ? `live-snapshot-${season.seasonCode}-e${eventId}-${liveSnapshotMinuteBucket(options.now ?? new Date())}-${suffix}`
         : `live-snapshot-${season.seasonCode}-e${eventId}-${source}-${suffix}`;
-    const jobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : generatedJobId;
+    const jobId = explicitJobId ?? generatedJobId;
     const job = await queue.add(jobName, jobData, {
       jobId,
       ...(source === 'manual' ? { removeOnComplete: true, removeOnFail: true } : {}),

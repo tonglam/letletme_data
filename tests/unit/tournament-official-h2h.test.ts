@@ -68,6 +68,32 @@ function group(entryId: number): DbTournamentGroup {
 }
 
 describe('official H2H source import', () => {
+  test('ignores the official Average Team placeholder in standings', async () => {
+    const getLeagueH2HStandings = mock(async () => ({
+      standings: {
+        has_next: false,
+        results: [
+          { entry: null, entry_name: 'AVERAGE', player_name: 'AVERAGE', rank: 1, total: 0 },
+          { entry: 7819, entry_name: 'Real Team', player_name: 'Real Manager', rank: 1, total: 0 },
+        ],
+      },
+      new_entries: { has_next: false, results: [] },
+      league: { id: 34879, name: 'H2H' },
+    }));
+    const getLeagueH2HMatches = mock(async () => ({
+      has_next: false,
+      page: 1,
+      results: [],
+    }));
+
+    const snapshot = await fetchOfficialH2HSourceSnapshot(34879, {
+      getLeagueH2HStandings: getLeagueH2HStandings as never,
+      getLeagueH2HMatches: getLeagueH2HMatches as never,
+    });
+
+    expect(snapshot.standings.map((standing) => standing.entry)).toEqual([7819]);
+  });
+
   test('reads every match page and preserves the official absolute order', async () => {
     const getLeagueH2HStandings = mock(async () => ({
       standings: { has_next: false, results: [] },

@@ -114,7 +114,7 @@ export type TournamentParticipant = {
 };
 
 export type RawStandingsResult = {
-  entry?: number;
+  entry?: number | null;
   entry_name?: string;
   player_name?: string;
   player_first_name?: string;

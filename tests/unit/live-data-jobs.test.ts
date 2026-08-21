@@ -14,6 +14,7 @@ const waitingJobs: Array<{
     finalizeEvent?: boolean;
   };
 }> = [];
+const existingJobIds = new Set<string>();
 
 mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: { LIVE_SNAPSHOT: 'live-snapshot' },
@@ -23,18 +24,23 @@ mock.module('../../src/queues/live-data.queue', () => ({
       addCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
     },
+    getJob: async (jobId: string) => (existingJobIds.has(jobId) ? { id: jobId } : null),
     getJobs: async () => waitingJobs,
   },
 }));
 
-const { enqueueLiveSnapshot, liveSnapshotMinuteBucket } = await import(
-  '../../src/jobs/live-data.jobs'
-);
+const {
+  enqueueLiveActiveSnapshot,
+  enqueueLiveSnapshot,
+  liveSnapshotMinuteBucket,
+  liveSnapshotPersistenceJobId,
+} = await import('../../src/jobs/live-data.jobs');
 
 describe('coherent live-snapshot enqueue', () => {
   beforeEach(() => {
     addCalls.length = 0;
     waitingJobs.length = 0;
+    existingJobIds.clear();
   });
 
   test('carries explicit season identity and one coherent job name', async () => {
@@ -137,5 +143,59 @@ describe('coherent live-snapshot enqueue', () => {
     });
     expect(cacheOnly?.id).toBe('live-snapshot-2627-e12-20260809123430-cache');
     expect(durable?.id).toBe('live-snapshot-2627-e12-20260809123430-persist');
+  });
+
+  test('uses one durable job ID per UTC ten-minute bucket', () => {
+    expect(liveSnapshotPersistenceJobId(12, new Date('2026-08-09T12:34:56.000Z'))).toBe(
+      'live-snapshot-e12-periodic-202608091230',
+    );
+    expect(liveSnapshotPersistenceJobId(12, new Date('2026-08-09T12:39:59.999Z'))).toBe(
+      'live-snapshot-e12-periodic-202608091230',
+    );
+    expect(liveSnapshotPersistenceJobId(12, new Date('2026-08-09T12:40:00.000Z'))).toBe(
+      'live-snapshot-e12-periodic-202608091240',
+    );
+  });
+
+  test('does not recreate an explicit durable bucket that already settled', async () => {
+    existingJobIds.add('2627-live-snapshot-e12-periodic-202608091230');
+
+    await expect(
+      enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
+        persistEventLives: true,
+        now: new Date('2026-08-09T12:34:56.000Z'),
+        jobId: 'live-snapshot-e12-periodic-202608091230',
+      }),
+    ).resolves.toBeNull();
+    expect(addCalls).toHaveLength(0);
+  });
+
+  test('enqueues only the durable snapshot on the first live tick in a bucket', async () => {
+    const job = await enqueueLiveActiveSnapshot(
+      TEST_SEASON,
+      12,
+      new Date('2026-08-09T12:34:56.000Z'),
+    );
+
+    expect(job?.id).toBe('2627-live-snapshot-e12-periodic-202608091230');
+    expect(addCalls).toHaveLength(1);
+    expect(addCalls[0]).toMatchObject({
+      data: { persistEventLives: true },
+      opts: { jobId: '2627-live-snapshot-e12-periodic-202608091230' },
+    });
+  });
+
+  test('enqueues only cache work after the durable bucket already exists', async () => {
+    existingJobIds.add('2627-live-snapshot-e12-periodic-202608091230');
+
+    const job = await enqueueLiveActiveSnapshot(
+      TEST_SEASON,
+      12,
+      new Date('2026-08-09T12:34:56.000Z'),
+    );
+
+    expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-cache');
+    expect(addCalls).toHaveLength(1);
+    expect(addCalls[0]).toMatchObject({ data: { persistEventLives: false } });
   });
 });

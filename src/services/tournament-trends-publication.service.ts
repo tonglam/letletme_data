@@ -41,7 +41,7 @@ function positiveInteger(value: unknown): number {
   return Number.isInteger(number) && number > 0 ? number : 0;
 }
 
-function isScopeRevisionConflict(error: unknown): boolean {
+export function isRetryableTournamentTrendPublicationConflict(error: unknown): boolean {
   const seen = new Set<unknown>();
   let current = error;
   for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
@@ -53,6 +53,9 @@ function isScopeRevisionConflict(error: unknown): boolean {
       constraint_name?: unknown;
       cause?: unknown;
     };
+    if (record.code === '40001') {
+      return true;
+    }
     if (
       record.code === '23505' &&
       String(record.constraint_name ?? record.constraint ?? '') === SCOPE_REVISION_CONSTRAINT
@@ -377,11 +380,16 @@ export async function publishTournamentTrendScope(
       return await publishOnce();
     } catch (error) {
       lastError = error;
-      if (!isScopeRevisionConflict(error) || attempt === MAX_PUBLICATION_ATTEMPTS) throw error;
+      if (
+        !isRetryableTournamentTrendPublicationConflict(error) ||
+        attempt === MAX_PUBLICATION_ATTEMPTS
+      ) {
+        throw error;
+      }
       // A waiter can acquire the advisory lock with a snapshot fixed before the
       // previous publisher committed. Retry the whole transaction so the next
       // lock acquisition and publication read use a fresh snapshot.
-      logInfo('Retrying tournament trends publication after revision conflict', {
+      logInfo('Retrying tournament trends publication after concurrent write', {
         season: season.seasonCode,
         tournamentId,
         eventId,
