@@ -461,6 +461,8 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                     resumeMarker: job.data.resumeMarker,
                     requireResumeMarker: job.data.resumeAfterSetup === true,
                     settleBoundaryFailure: job.data.settleBoundaryFailure === true,
+                    allowUnlockedOfficialH2HRecovery:
+                      job.data.allowUnlockedOfficialH2HRecovery === true,
                     expectedProgressMarker: job.data.expectedProgressMarker,
                   }),
                 };

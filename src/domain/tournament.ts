@@ -251,6 +251,41 @@ export function diffTournamentRoster(
   };
 }
 
+type OfficialH2HRosterRecoveryRecord = Pick<
+  TournamentSyncContext,
+  'leagueType' | 'rosterMode' | 'groupMode'
+> & {
+  state: 'active' | 'inactive' | 'finished';
+  rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
+  officialScheduleLockedAt: string | null;
+};
+
+/**
+ * A live-gameweek roster repair is safe only for an official H2H mirror that
+ * never locked or published its schedule. The caller must still prove that
+ * the authoritative roster is additive before publishing it.
+ */
+export function isUnlockedOfficialH2HRosterRecoveryState(
+  tournament: OfficialH2HRosterRecoveryRecord,
+  expectedStatus: 'failed' | 'processing',
+  hasResultRows: boolean,
+): boolean {
+  return (
+    isOfficialH2HTournament(tournament) &&
+    tournament.state === 'active' &&
+    tournament.rosterSyncStatus === expectedStatus &&
+    tournament.officialScheduleLockedAt === null &&
+    !hasResultRows
+  );
+}
+
+export function isAdditiveTournamentRosterRecovery(
+  existingEntryIds: readonly number[],
+  authoritativeEntryIds: readonly number[],
+): boolean {
+  return diffTournamentRoster(existingEntryIds, authoritativeEntryIds).removedEntryIds.length === 0;
+}
+
 export type SeedPair = { homeEntryId: number | null; awayEntryId: number | null };
 
 export type TournamentStructurePlan = {

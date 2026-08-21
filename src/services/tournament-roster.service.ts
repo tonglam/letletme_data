@@ -8,7 +8,9 @@ import { tournamentEntryCoreScopes, tournamentSetupRebuildScopes } from '../doma
 import {
   diffTournamentRoster,
   getTournamentBackfillWindow,
+  isAdditiveTournamentRosterRecovery,
   isOfficialH2HTournament,
+  isUnlockedOfficialH2HRosterRecoveryState,
 } from '../domain/tournament';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
@@ -56,17 +58,34 @@ export type TournamentRosterReconcileResult = {
   automaticallyPaused: boolean;
 };
 
+export type TournamentRosterReconcileOptions = {
+  allowInactive?: boolean;
+  resumeAfterSetup?: boolean;
+  requireResumeMarker?: boolean;
+  resumeMarker?: string;
+  settleBoundaryFailure?: boolean;
+  expectedProgressMarker?: string | null;
+  allowUnlockedOfficialH2HRecovery?: boolean;
+};
+
+async function assertUnlockedOfficialH2HRecoveryState(
+  season: FplSeasonRef,
+  tournament: NonNullable<Awaited<ReturnType<typeof tournamentRosterRepository.findById>>>,
+  expectedStatus: 'failed' | 'processing',
+): Promise<void> {
+  const hasResultRows = await tournamentRosterRepository.hasResultRows(season, tournament.id);
+  if (!isUnlockedOfficialH2HRosterRecoveryState(tournament, expectedStatus, hasResultRows)) {
+    throw new ConflictError(
+      'Official H2H roster recovery is unsafe after schedule publication.',
+      'TOURNAMENT_OFFICIAL_H2H_RECOVERY_UNSAFE',
+    );
+  }
+}
+
 async function reconcileTournamentRosterUnlocked(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: {
-    allowInactive?: boolean;
-    resumeAfterSetup?: boolean;
-    requireResumeMarker?: boolean;
-    resumeMarker?: string;
-    settleBoundaryFailure?: boolean;
-    expectedProgressMarker?: string | null;
-  },
+  options?: TournamentRosterReconcileOptions,
 ): Promise<TournamentRosterReconcileResult> {
   const tournament = await tournamentRosterRepository.findById(season, tournamentId);
   if (!tournament) {
@@ -159,44 +178,54 @@ async function reconcileTournamentRosterUnlocked(
     }
   }
 
+  let unlockedOfficialH2HRecovery = false;
   try {
     await assertPreGameweekBoundary(season);
   } catch (error) {
-    // A resume can be accepted just before the gameweek boundary closes and
-    // only reach the worker after the gameweek becomes active. Settle that
-    // asynchronous intent instead of retrying a deterministic boundary error
-    // with pending roster/setup markers left behind.
     if (
-      (options?.resumeAfterSetup || options?.settleBoundaryFailure) &&
+      options?.allowUnlockedOfficialH2HRecovery === true &&
       error instanceof ConflictError &&
       error.code === 'TOURNAMENT_ROSTER_FROZEN'
     ) {
-      const message = error.message;
-      await Promise.all([
-        tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
-        ...(options.resumeAfterSetup
-          ? [
-              tournamentInfoRepository.markSetupResult(
-                season,
-                tournamentId,
-                'failed',
-                message,
-                0,
-                options.resumeMarker,
-              ),
-            ]
-          : []),
-      ]);
-      return {
-        tournamentId,
-        changed: false,
-        addedEntryIds: [],
-        removedEntryIds: [],
-        participantCount: tournament.totalTeamNum,
-        automaticallyPaused: false,
-      };
+      await assertUnlockedOfficialH2HRecoveryState(season, tournament, 'failed');
+      unlockedOfficialH2HRecovery = true;
+    } else {
+      // A resume can be accepted just before the gameweek boundary closes and
+      // only reach the worker after the gameweek becomes active. Settle that
+      // asynchronous intent instead of retrying a deterministic boundary error
+      // with pending roster/setup markers left behind.
+      if (
+        (options?.resumeAfterSetup || options?.settleBoundaryFailure) &&
+        error instanceof ConflictError &&
+        error.code === 'TOURNAMENT_ROSTER_FROZEN'
+      ) {
+        const message = error.message;
+        await Promise.all([
+          tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
+          ...(options.resumeAfterSetup
+            ? [
+                tournamentInfoRepository.markSetupResult(
+                  season,
+                  tournamentId,
+                  'failed',
+                  message,
+                  0,
+                  options.resumeMarker,
+                ),
+              ]
+            : []),
+        ]);
+        return {
+          tournamentId,
+          changed: false,
+          addedEntryIds: [],
+          removedEntryIds: [],
+          participantCount: tournament.totalTeamNum,
+          automaticallyPaused: false,
+        };
+      }
+      throw error;
     }
-    throw error;
   }
 
   if (!options?.resumeAfterSetup && options?.expectedProgressMarker === undefined) {
@@ -210,6 +239,15 @@ async function reconcileTournamentRosterUnlocked(
     const existingIds = await tournamentRosterRepository.findEntryIds(season, tournamentId);
     const sourceIds = source.participants.map((participant) => Number(participant.id));
     const { addedEntryIds, removedEntryIds } = diffTournamentRoster(existingIds, sourceIds);
+    if (
+      unlockedOfficialH2HRecovery &&
+      !isAdditiveTournamentRosterRecovery(existingIds, sourceIds)
+    ) {
+      throw new ConflictError(
+        'Official H2H live recovery cannot remove tournament entries.',
+        'TOURNAMENT_OFFICIAL_H2H_RECOVERY_NOT_ADDITIVE',
+      );
+    }
     if (
       (addedEntryIds.length > 0 || removedEntryIds.length > 0) &&
       isOfficialH2HTournament(tournament) &&
@@ -282,7 +320,25 @@ async function reconcileTournamentRosterUnlocked(
         scopes: [...tournamentSetupRebuildScopes(tournamentId), 'data-core:events'],
       },
       async () => {
-        await assertPreGameweekBoundary(season);
+        if (unlockedOfficialH2HRecovery) {
+          const lockedTournament = await tournamentRosterRepository.findById(season, tournamentId);
+          if (!lockedTournament) {
+            throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
+          }
+          await assertUnlockedOfficialH2HRecoveryState(season, lockedTournament, 'processing');
+          const lockedEntryIds = await tournamentRosterRepository.findEntryIds(
+            season,
+            tournamentId,
+          );
+          if (!isAdditiveTournamentRosterRecovery(lockedEntryIds, sourceIds)) {
+            throw new ConflictError(
+              'Official H2H live recovery cannot remove tournament entries.',
+              'TOURNAMENT_OFFICIAL_H2H_RECOVERY_NOT_ADDITIVE',
+            );
+          }
+        } else {
+          await assertPreGameweekBoundary(season);
+        }
         return tournamentRosterRepository.publishAuthoritativeRoster(
           season,
           tournament,
@@ -381,14 +437,7 @@ async function reconcileTournamentRosterUnlocked(
 export async function reconcileTournamentRoster(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: {
-    allowInactive?: boolean;
-    resumeAfterSetup?: boolean;
-    requireResumeMarker?: boolean;
-    resumeMarker?: string;
-    settleBoundaryFailure?: boolean;
-    expectedProgressMarker?: string | null;
-  },
+  options?: TournamentRosterReconcileOptions,
 ): Promise<TournamentRosterReconcileResult> {
   // The authoritative fetch/backfill runs without a transaction held open.
   // The short publication scope below serializes the canonical roster write;

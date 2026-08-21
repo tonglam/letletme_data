@@ -4,6 +4,8 @@ import {
   buildKnockoutRows,
   estimateTournamentSetupRequests,
   getTournamentBackfillWindow,
+  isAdditiveTournamentRosterRecovery,
+  isUnlockedOfficialH2HRosterRecoveryState,
   nextPowerOfTwo,
   parseLeagueUrl,
   planTournamentStructure,
@@ -348,6 +350,42 @@ describe('tournament initialization window and request budget', () => {
       optimizedTransferHistoryRequests: 75,
       coreStandingsBaseline: 150,
     });
+  });
+});
+
+describe('official H2H live roster recovery', () => {
+  const recoverable = {
+    leagueType: 'h2h' as const,
+    rosterMode: 'official_sync' as const,
+    groupMode: 'battle_races' as const,
+    state: 'active' as const,
+    rosterSyncStatus: 'failed' as const,
+    officialScheduleLockedAt: null,
+  };
+
+  test('permits only an unlocked failed mirror without published results', () => {
+    expect(isUnlockedOfficialH2HRosterRecoveryState(recoverable, 'failed', false)).toBe(true);
+    expect(
+      isUnlockedOfficialH2HRosterRecoveryState(
+        { ...recoverable, officialScheduleLockedAt: '2026-08-21T17:30:00.000Z' },
+        'failed',
+        false,
+      ),
+    ).toBe(false);
+    expect(isUnlockedOfficialH2HRosterRecoveryState(recoverable, 'failed', true)).toBe(false);
+    expect(
+      isUnlockedOfficialH2HRosterRecoveryState(
+        { ...recoverable, rosterSyncStatus: 'processing' },
+        'failed',
+        false,
+      ),
+    ).toBe(false);
+  });
+
+  test('allows additive/no-op recovery but rejects authoritative removals', () => {
+    expect(isAdditiveTournamentRosterRecovery([1, 2], [1, 2, 3])).toBe(true);
+    expect(isAdditiveTournamentRosterRecovery([1, 2], [1, 2])).toBe(true);
+    expect(isAdditiveTournamentRosterRecovery([1, 2], [1, 3])).toBe(false);
   });
 });
 

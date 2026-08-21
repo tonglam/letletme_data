@@ -54,6 +54,8 @@ export interface TournamentSyncJobData {
   allowInactive?: boolean;
   /** Settle a queued opt-in when the gameweek boundary closes before it runs. */
   settleBoundaryFailure?: boolean;
+  /** Repair an additive official-H2H roster only while its schedule is still unlocked. */
+  allowUnlockedOfficialH2HRecovery?: boolean;
   /** Progress marker observed when a non-resume retry was queued. */
   expectedProgressMarker?: string | null;
 }

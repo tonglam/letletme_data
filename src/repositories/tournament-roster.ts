@@ -170,6 +170,35 @@ export const tournamentRosterRepository = {
     }
   },
 
+  hasResultRows: async (season: FplSeasonRef, tournamentId: number): Promise<boolean> => {
+    try {
+      const client = await getDbClient();
+      const rows = await client<Array<{ exists: boolean }>>`
+        SELECT EXISTS (
+          SELECT 1
+          FROM competition.tournament_battle_group_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+          UNION ALL
+          SELECT 1
+          FROM competition.tournament_knockout_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+          UNION ALL
+          SELECT 1
+          FROM competition.tournament_points_group_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        ) AS exists
+      `;
+      return rows[0]?.exists === true;
+    } catch (error) {
+      logError('Failed to inspect tournament roster result rows', error, { tournamentId });
+      throw new DatabaseError(
+        'Failed to inspect tournament roster results.',
+        'TOURNAMENT_ROSTER_RESULTS_INSPECT_ERROR',
+        error instanceof Error ? error : undefined,
+      );
+    }
+  },
+
   markSyncProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
     const client = await getDbClient();
     await client`

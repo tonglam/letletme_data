@@ -3,6 +3,7 @@ import { tournamentBattleGroupResultsRepository } from '../repositories/tourname
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import { enqueueTournamentRosterReconcile } from '../jobs/tournament-sync.jobs';
 import { mapWithConcurrency } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
@@ -341,6 +342,31 @@ export async function syncOfficialH2HTournaments(
     try {
       return await OfficialH2HStrategy.sync(season, tournament, eventId);
     } catch (error) {
+      if (
+        error !== null &&
+        typeof error === 'object' &&
+        'code' in error &&
+        error.code === 'TOURNAMENT_OFFICIAL_H2H_STANDINGS_INCOMPLETE'
+      ) {
+        try {
+          const recoveryJob = await enqueueTournamentRosterReconcile(
+            season,
+            tournament.id,
+            'watchdog',
+            { allowUnlockedOfficialH2HRecovery: true },
+          );
+          logWarn('Enqueued guarded official H2H roster recovery', {
+            tournamentId: tournament.id,
+            eventId,
+            jobId: recoveryJob.id,
+          });
+        } catch (recoveryError) {
+          logError('Failed to enqueue guarded official H2H roster recovery', recoveryError, {
+            tournamentId: tournament.id,
+            eventId,
+          });
+        }
+      }
       failures.push(tournament.id);
       logError('Official H2H strategy failed', error, { tournamentId: tournament.id, eventId });
       return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
