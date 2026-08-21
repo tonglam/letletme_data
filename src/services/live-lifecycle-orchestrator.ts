@@ -16,7 +16,7 @@ import { isMatchDayTime } from '../utils/conditions';
 import { logError, logInfo } from '../utils/logger';
 import { persistEntryEventPicksResponse } from './entries.service';
 import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
-import { enqueueLiveSnapshot, liveSnapshotPersistenceJobId } from '../jobs/live-data.jobs';
+import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
@@ -367,23 +367,15 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         decision.state === 'GW_REVIEW' ||
         decision.recoverStaleFixtures ||
         decision.finalizeEvent;
-      const snapshotJobs = [
-        enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
+      if (decision.state === 'LIVE_ACTIVE' && !persistContinuously) {
+        await enqueueLiveActiveSnapshot(season, currentEvent.id, now);
+      } else {
+        await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
           persistEventLives: persistContinuously,
           finalizeEvent: decision.finalizeEvent,
           now,
-        }),
-      ];
-      if (decision.state === 'LIVE_ACTIVE' && !persistContinuously) {
-        snapshotJobs.push(
-          enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
-            persistEventLives: true,
-            now,
-            jobId: liveSnapshotPersistenceJobId(currentEvent.id, now),
-          }),
-        );
+        });
       }
-      await Promise.all(snapshotJobs);
     }
     if (isMatchDayTime(currentEvent, fixtures, now)) {
       await enqueueTournamentOfficialH2H(season, currentEvent.id, 'cron', {

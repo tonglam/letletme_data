@@ -49,6 +49,18 @@ export function liveSnapshotPersistenceJobId(eventId: number, date: Date): strin
     .replace(/\D/g, '')}`;
 }
 
+export async function enqueueLiveActiveSnapshot(season: FplSeasonRef, eventId: number, now: Date) {
+  const periodicJobId = liveSnapshotPersistenceJobId(eventId, now);
+  const qualifiedPeriodicJobId = `${season.seasonCode}-${periodicJobId}`;
+  const periodicSnapshotExists = Boolean(await liveDataQueue.getJob(qualifiedPeriodicJobId));
+
+  return enqueueLiveSnapshot(season, eventId, 'cron', {
+    now,
+    persistEventLives: !periodicSnapshotExists,
+    ...(periodicSnapshotExists ? {} : { jobId: periodicJobId }),
+  });
+}
+
 export async function enqueueLiveSnapshot(
   season: FplSeasonRef,
   eventId: number,
