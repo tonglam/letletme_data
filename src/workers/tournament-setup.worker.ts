@@ -230,8 +230,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                 }
                 if (
                   persistedStatus.setupStatus === 'ready' ||
-                  (persistedStatus.setupStatus === 'failed' &&
-                    persistedStatus.setupNextRetryAt === null)
+                  (persistedStatus.setupStatus === 'failed' && !persistedStatus.setupNextRetryAt)
                 ) {
                   logInfo('Ignoring stale tournament setup job after terminal state', {
                     tournamentId: job.data.tournamentId,
@@ -249,14 +248,9 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                 attempt = Math.min(maxAttempts, nextAttempt);
                 context.attempt = attempt;
                 if (nextAttempt > maxAttempts) {
-                  throw Object.assign(
-                    new Error('Tournament setup automatic retries exhausted.'),
-                    {
-                      code:
-                        persistedStatus.setupLastErrorCode ??
-                        'SETUP_AUTOMATIC_RETRIES_EXHAUSTED',
-                    },
-                  );
+                  throw Object.assign(new Error('Tournament setup automatic retries exhausted.'), {
+                    code: persistedStatus.setupLastErrorCode ?? 'SETUP_AUTOMATIC_RETRIES_EXHAUSTED',
+                  });
                 }
 
                 await updateSetupJobProgressBestEffort(job, 'running');

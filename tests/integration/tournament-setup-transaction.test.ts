@@ -271,4 +271,60 @@ describe('tournament setup transaction recovery', () => {
     expect(row?.setup_attempt).toBe(1);
     expect(row?.setup_finished_at).not.toBeNull();
   });
+
+  test('watchdog recovery preserves the attempt counter and real error code', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    await withMutationScopes(
+      {
+        queueName: 'integration-tournament-setup',
+        jobName: 'watchdog-seed',
+        tournamentId: RETRY_TOURNAMENT_ID,
+        scopes: [tournamentSetupLifecycleScope(RETRY_TOURNAMENT_ID)],
+      },
+      async () => {
+        await tournamentInfoRepository.markSetupRetryQueued(season, RETRY_TOURNAMENT_ID);
+        expect(
+          await tournamentInfoRepository.markSetupAttemptFailure(season, RETRY_TOURNAMENT_ID, {
+            attempt: 1,
+            terminal: false,
+            errorCode: '42846',
+            nextRetryAt: new Date(Date.now() + 60_000),
+            startedAt: new Date(),
+          }),
+        ).toBe(true);
+      },
+    );
+
+    const beforeRecovery = await tournamentInfoRepository.findSetupStatus(
+      season,
+      RETRY_TOURNAMENT_ID,
+    );
+    expect(beforeRecovery?.setupProgressUpdatedAt).not.toBeNull();
+    expect(
+      await withMutationScopes(
+        {
+          queueName: 'integration-tournament-setup',
+          jobName: 'watchdog-recovery',
+          tournamentId: RETRY_TOURNAMENT_ID,
+          scopes: [tournamentSetupLifecycleScope(RETRY_TOURNAMENT_ID)],
+        },
+        () =>
+          tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
+            season,
+            RETRY_TOURNAMENT_ID,
+            beforeRecovery?.setupProgressUpdatedAt ?? null,
+          ),
+      ),
+    ).toBe(true);
+
+    const afterRecovery = await tournamentInfoRepository.findSetupStatus(
+      season,
+      RETRY_TOURNAMENT_ID,
+    );
+    expect(afterRecovery).toMatchObject({
+      setupStatus: 'pending',
+      setupAttempt: 1,
+      setupLastErrorCode: '42846',
+    });
+  });
 });
