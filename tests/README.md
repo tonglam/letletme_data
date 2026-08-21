@@ -58,7 +58,7 @@ Integration tests exercise:
 
 - Full data flow: FPL boundary → transformer → repository → DB → cache
 - Worker behavior with BullMQ against a real Redis instance
-- Tournament lifecycle, cascade barriers, and mutation locking
+- Tournament lifecycle, cascade barriers, and mutation-scope concurrency
 - Upsert correctness and idempotency
 
 They assume a fresh or isolated test database and a non-zero Redis DB. Run migrations before the suite:

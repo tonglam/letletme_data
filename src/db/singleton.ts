@@ -1,11 +1,25 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 import { isTransactionPoolerConnection } from './postgres-connection';
 import { assertDataRuntimeRole } from './runtime-role-contract';
 import * as schema from './schemas/index.schema';
+
+/**
+ * A guarded mutation propagates its pinned PostgreSQL transaction through the
+ * call graph. Repositories can keep their existing `getDb()`/`getDbClient()`
+ * contracts while canonical writes execute on the same connection as the
+ * mutation-scope row lock.
+ */
+type DatabaseTransactionContext = {
+  raw: postgres.TransactionSql;
+  db: ReturnType<typeof drizzle> | TransactionHandle;
+};
+
+export const databaseTransactionStorage = new AsyncLocalStorage<DatabaseTransactionContext>();
 
 /**
  * Database Singleton
@@ -94,6 +108,8 @@ class DatabaseSingleton {
    * Get the database instance (auto-connects if needed)
    */
   public async getDb(): Promise<ReturnType<typeof drizzle>> {
+    const transaction = databaseTransactionStorage.getStore();
+    if (transaction) return transaction.db as ReturnType<typeof drizzle>;
     if (!this.isConnected) {
       await this.connect();
     }
@@ -109,6 +125,8 @@ class DatabaseSingleton {
    * Get the raw client (auto-connects if needed)
    */
   public async getClient(): Promise<postgres.Sql> {
+    const transaction = databaseTransactionStorage.getStore();
+    if (transaction) return transaction.raw as unknown as postgres.Sql;
     if (!this.isConnected) {
       await this.connect();
     }
@@ -180,6 +198,12 @@ export const databaseSingleton = DatabaseSingleton.getInstance();
 // Convenience exports for repository and service callers.
 export const getDb = () => databaseSingleton.getDb();
 export const getDbClient = () => databaseSingleton.getClient();
+
+export const runInDatabaseTransaction = <T>(
+  transaction: postgres.TransactionSql,
+  operation: () => Promise<T>,
+  db: ReturnType<typeof drizzle> | TransactionHandle,
+): Promise<T> => databaseTransactionStorage.run({ raw: transaction, db }, operation);
 
 /**
  * Database handle, or an active transaction scoped to it. Repository factories

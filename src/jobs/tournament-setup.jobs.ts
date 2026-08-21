@@ -6,7 +6,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentSetupEnqueueScope } from '../domain/mutation-scope';
 import { ConflictError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
 export interface EnqueueTournamentSetupOptions {
@@ -277,7 +277,7 @@ export function enqueueTournamentSetup(
   source: TournamentSetupJobSource = 'create',
   options: EnqueueTournamentSetupOptions = {},
 ) {
-  return withMutationConflictGuard(
+  return withMutationScopes(
     {
       queueName: 'tournament-setup-enqueue',
       jobName: 'tournament-setup-enqueue',

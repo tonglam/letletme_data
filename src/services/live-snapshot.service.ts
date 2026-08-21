@@ -22,6 +22,7 @@ import { createTeamRepository } from '../repositories/teams';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
+import { postgresJsonbCanonicalJson } from '../utils/content-hash';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import {
@@ -32,6 +33,7 @@ import {
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   readonly season: string;
@@ -81,7 +83,7 @@ export interface LiveSnapshotDurablePersistenceResult {
 }
 
 function publicationItemProof(name: 'eventLive' | 'fixtures', payload: unknown) {
-  const serialized = JSON.stringify(payload);
+  const serialized = postgresJsonbCanonicalJson(payload);
   return {
     name,
     payload,
@@ -117,6 +119,7 @@ export interface LiveSnapshotSyncOptions {
   readonly persistEventLives?: boolean;
   readonly finalizeEvent?: boolean;
   readonly trigger?: 'cron' | 'manual' | 'cascade' | 'queue';
+  readonly mutationScopes?: readonly string[];
   readonly dependencies?: LiveSnapshotDependencies;
 }
 
@@ -436,7 +439,11 @@ function toCachePayload(prepared: PreparedLiveSnapshot): LiveSnapshotCachePayloa
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  try {
+    return postgresJsonbCanonicalJson(left) === postgresJsonbCanonicalJson(right);
+  } catch {
+    return false;
+  }
 }
 
 function snapshotContentMatches(
@@ -507,6 +514,19 @@ export async function syncLiveSnapshot(
     throw new Error(`Invalid live snapshot event ID: ${eventId}`);
   }
   const dependencies = options.dependencies ?? defaultDependencies;
+  const persistDurably = async (request: LiveSnapshotDurablePersistenceRequest) => {
+    const scopes = options.mutationScopes ?? [];
+    if (scopes.length === 0) return dependencies.persistDurably(request);
+    return withMutationScopes(
+      {
+        queueName: 'live-data',
+        jobName: 'live-snapshot',
+        eventId,
+        scopes: [...scopes],
+      },
+      () => dependencies.persistDurably(request),
+    );
+  };
   const startedAt = Date.now();
   if (!options.dependencies) {
     await recoverPendingLiveSnapshotPublication(season, eventId);
@@ -555,7 +575,7 @@ export async function syncLiveSnapshot(
       // Fixture flags are the lifecycle source of truth even for cache-only
       // polls. Persisting them independently of event-live durability prevents
       // a stale database fixture from keeping the orchestrator in LIVE_ACTIVE.
-      const durable = await dependencies.persistDurably({
+      const durable = await persistDurably({
         season,
         eventId,
         checkedAt,
@@ -626,7 +646,7 @@ export async function syncLiveSnapshot(
         }
       },
       beforeActivate: async () => {
-        const durable = await dependencies.persistDurably({
+        const durable = await persistDurably({
           season,
           eventId,
           checkedAt,

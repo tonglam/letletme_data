@@ -202,8 +202,11 @@ publication TTLs in Data.
 Allowed Redis state is limited to `QUEUE_REDIS_*`:
 
 - BullMQ keys for the two Understat queues;
-- `llm:queue:coordination:mutation-lock:understat:*`;
 - `llm:queue:coordination:understat-request-permits`.
+
+Cross-process mutation coordination is PostgreSQL-owned. Writers acquire the sorted
+`ops.mutation_scopes` rows inside the same transaction as their canonical writes; no Redis
+mutation coordination key is authoritative.
 
 GraphQL may later add a bounded, revision-aware query cache for the few Understat pages, but that
 cache is GraphQL-owned and cannot become a Data ingestion dependency.
@@ -243,5 +246,6 @@ and Player runs independently and counts facts directly from the provider tables
 - Complete Team and Player snapshots commit with expected counts.
 - Incomplete Team and Player snapshots preserve the prior complete facts byte-for-byte.
 - Runtime source contains no Understat Data cache client/key/manifest/publication path.
-- Permit and mutation-lock clients resolve only to `QUEUE_REDIS_*`.
+- Permit clients resolve only to `QUEUE_REDIS_*`; mutation coordination resolves to PostgreSQL
+  `ops.mutation_scopes` and never depends on Redis.
 - No FPL archive service, duplicate schema, duplicate job, API, or table-name routing is introduced.

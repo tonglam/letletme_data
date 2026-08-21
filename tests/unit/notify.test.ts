@@ -17,6 +17,11 @@ const ENV_KEYS = [
   'QUEUE_REDIS_DB',
   'ENABLE_AUTH',
   'DATA_API_KEY_HASHES',
+  'BUG_REPORT_SCREENSHOT_STORAGE_ENABLED',
+  'BUG_REPORT_SCREENSHOT_SUPABASE_URL',
+  'BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY',
+  'BUG_REPORT_SCREENSHOT_BUCKET',
+  'BUG_REPORT_SCREENSHOT_RETENTION_DAYS',
 ] as const;
 const savedEnv = new Map<string, string | undefined>();
 
@@ -26,6 +31,11 @@ beforeEach(() => {
   process.env.DATABASE_URL = 'postgresql://localhost/notify-test';
   process.env.WECHAT_NOTIFICATION_URL = 'https://bot.example.test/notification';
   process.env.WECHAT_NOTIFICATION_API_TOKEN = 'n'.repeat(32);
+  process.env.BUG_REPORT_SCREENSHOT_STORAGE_ENABLED = 'true';
+  process.env.BUG_REPORT_SCREENSHOT_SUPABASE_URL = 'https://example.supabase.co';
+  process.env.BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY = 'test-secret';
+  process.env.BUG_REPORT_SCREENSHOT_BUCKET = 'bug-report-screenshots';
+  process.env.BUG_REPORT_SCREENSHOT_RETENTION_DAYS = '90';
   resetConfigForTests();
 });
 

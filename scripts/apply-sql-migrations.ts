@@ -3,15 +3,38 @@ import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
+import * as schema from '../src/db/schemas/index.schema';
 import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
+import { createBugReportRepository } from '../src/repositories/bug-reports';
+import { runBugReportStorageMigration } from '../src/services/bug-report-storage-migration.service';
 
 const MIGRATIONS_DIR = process.env.MIGRATIONS_DIR ?? 'migrations';
 const INITIAL_MIGRATION = '0000_platform_baseline.sql';
 const PLATFORM_SCHEMAS = ['bridge', 'competition', 'fpl', 'ops', 'reporting', 'understat'];
 const ADVISORY_LOCK_KEY = 912_883_471;
 const STATUS_ONLY = process.argv.includes('--status');
+// These additive migrations were introduced by a branch merge after the
+// production ledger had already recorded 0020. They are explicitly reviewed
+// as safe lexical backfills; any future out-of-order migration must be added
+// here deliberately instead of silently broadening the exception.
+const APPROVED_BACKDATED_MIGRATIONS = new Set([
+  '0016_tournament_setup_reliability.sql',
+  '0017_core_mutation_safety.sql',
+  '0018_content_publication_freeze.sql',
+  '0019_bug_report_submission_request_hash.sql',
+]);
+const STORAGE_MIGRATION = process.argv.includes('--storage-migration');
+const STORAGE_MIGRATION_APPLY = process.argv.includes('--apply');
+
+if (STORAGE_MIGRATION_APPLY && !STORAGE_MIGRATION) {
+  throw new Error('--apply is only valid together with --storage-migration');
+}
+if (STATUS_ONLY && STORAGE_MIGRATION) {
+  throw new Error('--status cannot be combined with --storage-migration');
+}
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -21,7 +44,7 @@ if (!databaseUrl) {
 
 if (isTransactionPoolerConnection(databaseUrl)) {
   throw new Error(
-    'The migration runner requires a direct PostgreSQL connection; transaction poolers cannot hold its advisory lock',
+    'The migration runner requires direct PostgreSQL or a session-mode pooler connection; transaction poolers cannot hold its advisory lock',
   );
 }
 
@@ -104,14 +127,18 @@ function pendingMigrations(
 
   const latestApplied = ledger.at(-1)?.filename;
   const pending = migrations.filter((migration) => !applied.has(migration.filename));
-  const backdated = latestApplied
-    ? pending.filter((migration) => migration.filename < latestApplied)
+  const disallowedBackdated = latestApplied
+    ? pending.filter(
+        (migration) =>
+          migration.filename < latestApplied &&
+          !APPROVED_BACKDATED_MIGRATIONS.has(migration.filename),
+      )
     : [];
-  if (backdated.length > 0) {
+  if (disallowedBackdated.length > 0) {
     throw new Error(
-      `Pending migrations sort before applied tail ${latestApplied}: ${backdated
+      `Pending migrations sort before applied tail ${latestApplied}: ${disallowedBackdated
         .map((migration) => migration.filename)
-        .join(', ')}`,
+        .join(', ')}; review and allowlist additive backfills explicitly`,
     );
   }
   if (requireComplete && pending.length > 0) {
@@ -212,6 +239,20 @@ async function main(): Promise<void> {
     return;
   }
   await migrate(migrations);
+
+  if (STORAGE_MIGRATION) {
+    const migrationDb = drizzle(sql, { schema });
+    const result = await runBugReportStorageMigration({
+      dryRun: !STORAGE_MIGRATION_APPLY,
+      repository: createBugReportRepository(migrationDb),
+    });
+    console.log(`[storage-migrate] ${JSON.stringify(result)}`);
+    if (STORAGE_MIGRATION_APPLY && result.failed > 0) {
+      throw new Error(
+        `Storage migration completed with ${result.failed} failed item(s); rerun after remediation`,
+      );
+    }
+  }
 }
 
 main()

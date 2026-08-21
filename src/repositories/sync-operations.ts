@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { and, asc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 
@@ -14,7 +14,13 @@ import {
   type DataPublicationDataset,
   type DataPublicationManifest,
 } from '../cache/data-publication';
+import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import {
+  contentHash,
+  postgresJsonbContentHash,
+  postgresJsonbCanonicalJson,
+} from '../utils/content-hash';
 import { DatabaseError } from '../utils/errors';
 
 export type SyncRunStatus =
@@ -118,6 +124,67 @@ function publicationScope(dataset: DataPublicationDataset, season: FplSeasonRef,
       ? isNull(datasetPublicationsInOps.eventId)
       : eq(datasetPublicationsInOps.eventId, eventId),
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasFixtureBreakdownEvidence(value: unknown): value is EventLive {
+  if (!isRecord(value) || !Array.isArray(value.fixtureBreakdown)) return false;
+  const fixtureIds = new Set<number>();
+  return value.fixtureBreakdown.every((fixture) => {
+    if (
+      !isRecord(fixture) ||
+      !Number.isInteger(fixture.fixtureId) ||
+      Number(fixture.fixtureId) <= 0 ||
+      fixtureIds.has(Number(fixture.fixtureId)) ||
+      !Array.isArray(fixture.stats)
+    ) {
+      return false;
+    }
+    fixtureIds.add(Number(fixture.fixtureId));
+    const identifiers = new Set<string>();
+    return fixture.stats.every((stat) => {
+      if (
+        !isRecord(stat) ||
+        typeof stat.identifier !== 'string' ||
+        stat.identifier.length === 0 ||
+        identifiers.has(stat.identifier) ||
+        typeof stat.value !== 'number' ||
+        !Number.isFinite(stat.value) ||
+        typeof stat.points !== 'number' ||
+        !Number.isFinite(stat.points) ||
+        (stat.pointsModification !== null &&
+          (typeof stat.pointsModification !== 'number' ||
+            !Number.isFinite(stat.pointsModification)))
+      ) {
+        return false;
+      }
+      identifiers.add(stat.identifier);
+      return true;
+    });
+  });
+}
+
+function publicationItemCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === 'object') return Object.keys(value).length;
+  return value === null || value === undefined ? 0 : 1;
+}
+
+function publicationPayloadChecksums(value: unknown): readonly string[] {
+  try {
+    const canonical = postgresJsonbCanonicalJson(value);
+    const legacy = JSON.stringify(value);
+    const checksums = [postgresJsonbContentHash(value), contentHash(value)];
+    if (legacy !== canonical) {
+      checksums.push(createHash('sha256').update(legacy, 'utf8').digest('hex'));
+    }
+    return checksums;
+  } catch {
+    return [];
+  }
 }
 
 export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => {
@@ -828,6 +895,77 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         )
         .limit(1);
       return rows[0] ?? null;
+    },
+
+    findActiveLiveEventLives: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<readonly EventLive[] | null> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          publicationId: datasetPublicationsInOps.publicationId,
+          revision: datasetPublicationsInOps.revision,
+          manifest: datasetPublicationsInOps.manifest,
+          itemName: datasetPublicationItemsInOps.itemName,
+          itemCount: datasetPublicationItemsInOps.itemCount,
+          checksum: datasetPublicationItemsInOps.checksum,
+          payload: datasetPublicationItemsInOps.payload,
+        })
+        .from(datasetPublicationsInOps)
+        .innerJoin(
+          datasetPublicationItemsInOps,
+          eq(datasetPublicationItemsInOps.publicationId, datasetPublicationsInOps.publicationId),
+        )
+        .where(
+          and(
+            publicationScope('fpl:live', season, eventId),
+            eq(datasetPublicationsInOps.status, 'active'),
+          ),
+        );
+      if (rows.length !== 2) return null;
+
+      const first = rows[0];
+      if (!first || !isDataPublicationId(first.publicationId)) return null;
+      const manifest = first.manifest;
+      if (
+        !isRecord(manifest) ||
+        manifest.dataset !== 'fpl:live' ||
+        manifest.seasonCode !== season.seasonCode ||
+        manifest.eventId !== eventId ||
+        manifest.revision !== first.revision ||
+        manifest.publicationId !== first.publicationId ||
+        !['scheduled', 'live', 'settled'].includes(String(manifest.state)) ||
+        !Array.isArray(manifest.items) ||
+        manifest.items.length !== 2
+      ) {
+        return null;
+      }
+
+      for (const row of rows) {
+        const manifestItem = manifest.items.find(
+          (candidate) => isRecord(candidate) && candidate.name === row.itemName,
+        );
+        if (
+          !manifestItem ||
+          manifestItem.count !== row.itemCount ||
+          manifestItem.sha256 !== row.checksum ||
+          !publicationPayloadChecksums(row.payload).includes(row.checksum) ||
+          publicationItemCount(row.payload) !== row.itemCount
+        ) {
+          return null;
+        }
+      }
+
+      const eventLivePayload = rows.find((row) => row.itemName === 'eventLive')?.payload;
+      const fixturesPayload = rows.find((row) => row.itemName === 'fixtures')?.payload;
+      if (!Array.isArray(eventLivePayload) || !Array.isArray(fixturesPayload)) return null;
+      // Every live revision after the fixture-grain rollout carries an
+      // immutable per-fixture explanation on every player row. A retired
+      // revision may still have a valid checksum after migration 0017, but
+      // it is not safe to serve its legacy payload after a cache miss.
+      if (!eventLivePayload.every(hasFixtureBreakdownEvidence)) return null;
+      return eventLivePayload as EventLive[];
     },
 
     findPublicationById: async (

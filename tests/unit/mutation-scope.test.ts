@@ -82,6 +82,15 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toEqual([]);
   });
 
+  it('does not reintroduce the global entry-info lock', () => {
+    expect(
+      resolveMutationScopes({
+        queueName: 'entry-sync',
+        jobName: 'entry-info',
+      }),
+    ).toEqual([]);
+  });
+
   it('exposes rebuild, backfill, and lifecycle scopes for setup phases', () => {
     expect(tournamentSetupRebuildScopes(789)).toEqual([
       'tournament-structure:tournament:789',
@@ -193,5 +202,23 @@ describe('resolveMutationScopes', () => {
       eventId: 33,
     });
     expect(refreshScopes.filter((scope) => cupScopes.includes(scope))).toEqual([]);
+  });
+
+  it('protects Understat review commands and bridge writers with durable scopes', () => {
+    expect(
+      resolveMutationScopes({
+        queueName: 'understat-mappings',
+        jobName: 'understat-mappings-reconcile',
+      }),
+    ).toEqual(['understat:reference:all']);
+    expect(
+      resolveMutationScopes({
+        queueName: 'understat-player-sync',
+        jobName: 'understat-player-detail',
+      }),
+    ).toEqual(['understat:reference:all']);
+    expect(resolveMutationScopes({ queueName: 'bridge', jobName: 'entity-link' })).toEqual([
+      'bridge:all',
+    ]);
   });
 });

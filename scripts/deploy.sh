@@ -13,13 +13,53 @@ COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml}
 ENV_FILE=${ENV_FILE:-.env.deploy}
 MIGRATION_ENV_FILE=${MIGRATION_ENV_FILE:-.env.migrate}
 PROJECT_DIR=${PROJECT_DIR:-$(pwd)}
+DEPLOY_SHA=${DEPLOY_SHA:-$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)}
 export MIGRATION_ENV_FILE
+export DEPLOY_SHA
 
 IFS=' ' read -r -a COMPOSE_CMD <<<"${COMPOSE_BIN}"
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Read only the non-secret backup settings from the deployment env file.  Do
+# not source the file: it also contains credentials and must never be treated
+# as shell code.  Explicit process environment values still take precedence.
+read_env_setting() {
+  local key=$1
+  local file=$2
+  local value
+  value=$(awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub("^[[:space:]]*" key "[[:space:]]*=", "", $0)
+      print
+      exit
+    }
+  ' "$file")
+  value=${value#\"}
+  value=${value%\"}
+  value=${value#\'}
+  value=${value%\'}
+  printf '%s' "$value"
+}
+
+load_backup_settings() {
+  local value
+  if [[ -z "${DATABASE_BACKUP_DIR:-}" ]]; then
+    value=$(read_env_setting DATABASE_BACKUP_DIR "$ENV_FILE")
+    DATABASE_BACKUP_DIR=${value:-/var/backups/letletme-data}
+  fi
+  if [[ -z "${DATABASE_BACKUP_KEEP:-}" ]]; then
+    value=$(read_env_setting DATABASE_BACKUP_KEEP "$ENV_FILE")
+    DATABASE_BACKUP_KEEP=${value:-7}
+  fi
+  if [[ -z "${DATABASE_BACKUP_PG_MAJOR:-}" ]]; then
+    value=$(read_env_setting DATABASE_BACKUP_PG_MAJOR "$ENV_FILE")
+    DATABASE_BACKUP_PG_MAJOR=${value:-15}
+  fi
+  export DATABASE_BACKUP_DIR DATABASE_BACKUP_KEEP DATABASE_BACKUP_PG_MAJOR
+}
 
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
@@ -55,9 +95,10 @@ require_files() {
     exit 1
   fi
   if [[ ! -f "${MIGRATION_ENV_FILE}" ]]; then
-    log_error "${MIGRATION_ENV_FILE} not found. Copy .env.migrate.example and add the direct Supabase postgres URL."
+    log_error "${MIGRATION_ENV_FILE} not found. Copy .env.migrate.example and add a direct or session-mode Supabase postgres URL."
     exit 1
   fi
+  load_backup_settings
 }
 
 compose() {
@@ -65,9 +106,9 @@ compose() {
 }
 
 restore_stopped_services() {
-  log_warn "Restoring the existing API and worker because migration has not started"
-  if ! compose start api worker; then
-    log_error "The existing API and worker could not be restarted; manual recovery is required."
+  log_warn "Restoring existing services because migration has not started"
+  if ! compose start api worker content-worker; then
+    log_error "Existing services could not be restarted; manual recovery is required."
   fi
 }
 
@@ -78,7 +119,7 @@ deploy() {
   if [[ -n "${APP_IMAGE:-}" ]]; then
     export APP_IMAGE
     log_info "Pulling the configured application image"
-    compose pull api worker migration
+    compose --profile migration pull api worker content-worker migration backup
   else
     log_info "Building containers"
     compose build --pull
@@ -101,6 +142,11 @@ deploy() {
     log_error "Application environment contract failed; services were not stopped."
     exit 1
   fi
+  log_info "Probing the private bug-report screenshot bucket"
+  if ! compose run --rm -T api bun validate-env.ts --probe-bug-report-storage; then
+    log_error "Bug-report screenshot storage contract failed; services were not stopped."
+    exit 1
+  fi
   log_info "Probing the migration LOGIN for at most 120 seconds"
   if ! compose run --rm -T migration bun scripts/wait-for-migration-login.ts; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
@@ -114,6 +160,11 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
+  if ! compose stop -t 45 content-worker; then
+    log_error "Content worker did not stop cleanly; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
   if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only; then
     log_error "Database work is not quiescent; migration was not started."
     restore_stopped_services
@@ -121,6 +172,12 @@ deploy() {
   fi
   if ! compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only; then
     log_error "Queue work is not quiescent; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  log_info "Creating and validating the pre-migration PostgreSQL dump"
+  if ! compose --profile migration run --rm -T backup; then
+    log_error "Pre-migration backup failed; migration was not started."
     restore_stopped_services
     exit 1
   fi
@@ -157,6 +214,11 @@ deploy() {
   compose up -d --remove-orphans
   log_info "Current service status"
   compose ps
+  if ! PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
+    scripts/verify-runtime-health.sh; then
+    log_error "Runtime health verification failed."
+    exit 1
+  fi
   finish_stage
 }
 

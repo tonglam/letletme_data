@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "receipts"],
+  "properties": {
+    "status": { "enum": ["EMPTY", "PARTIAL", "COMPLETED", "FAILED"] },
+    "error": { "type": "string", "maxLength": 500 },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceId", "externalId", "canonicalUrl", "capturedAt", "canonicalHash"],
+        "properties": {
+          "sourceId": { "type": "string", "format": "uuid" },
+          "externalId": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "canonicalUrl": { "type": "string", "pattern": "^https://" },
+          "capturedAt": { "type": "string", "format": "date-time" },
+          "publishedAt": { "type": ["string", "null"], "format": "date-time" },
+          "canonicalHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "payload": { "type": "object" }
+        }
+      }
+    }
+  }
+}

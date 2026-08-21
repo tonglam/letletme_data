@@ -16,7 +16,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
 import type { WorkerRuntime } from './worker-runtime';
 
@@ -56,7 +56,7 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
       queueWaitMs: context.queueWaitMs,
     },
     () =>
-      withMutationConflictGuard(
+      withMutationScopes(
         {
           queueName: job.queueName,
           jobName: job.name,

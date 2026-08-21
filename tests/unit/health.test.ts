@@ -10,6 +10,7 @@ describe('data API readiness', () => {
         cacheRedis: async () => true,
         queueRedis: async () => true,
         activeSeason: async () => true,
+        screenshotRetentionConfigured: async () => true,
       }),
     ).resolves.toEqual({
       ready: true,
@@ -18,6 +19,7 @@ describe('data API readiness', () => {
         cacheRedis: true,
         queueRedis: true,
         activeSeason: true,
+        screenshotRetentionConfigured: true,
       },
     });
   });
@@ -31,6 +33,7 @@ describe('data API readiness', () => {
         cacheRedis: async () => false,
         queueRedis: async () => true,
         activeSeason: async () => false,
+        screenshotRetentionConfigured: async () => true,
       }),
     ).resolves.toEqual({
       ready: false,
@@ -39,6 +42,7 @@ describe('data API readiness', () => {
         cacheRedis: false,
         queueRedis: true,
         activeSeason: false,
+        screenshotRetentionConfigured: true,
       },
     });
   });

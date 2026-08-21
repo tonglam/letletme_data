@@ -65,13 +65,7 @@ const EnvSchema = z.object({
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
-  PUBLICATION_RETENTION_MODE: z.enum(['report', 'apply']).default('report'),
-  // Mutation conflict guard timing
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(false),
-  MUTATION_LOCK_TTL_MS: integerEnv(30_000),
-  MUTATION_LOCK_WAIT_TIMEOUT_MS: integerEnv(120_000),
-  MUTATION_LOCK_RETRY_DELAY_MS: integerEnv(250),
-  MUTATION_LOCK_HEARTBEAT_MS: integerEnv(10_000),
   FPL_MAX_INFLIGHT: z.coerce.number().int().min(1).max(32).default(5),
   FPL_REQUESTS_PER_SECOND: z.coerce.number().int().min(1).max(20).default(4),
   FPL_BULK_MAX_INFLIGHT_DURING_LIVE: z.coerce.number().int().min(1).max(32).default(3),
@@ -100,7 +94,6 @@ const EnvSchema = z.object({
   GW_REVIEW_POLL_MS: integerEnv(10 * 60_000),
   GW_REVIEW_FINALIZATION_POLL_MS: integerEnv(2 * 60_000),
   FINALIZED_POLL_MS: integerEnv(5 * 60_000),
-  PULSELIVE_COMP_SEASON: z.string().optional(),
   // Disabled until automated Understat access is explicitly approved.
   UNDERSTAT_ENABLED: booleanEnv(false),
   UNDERSTAT_BASE_URL: z.string().url().default('https://understat.com'),
@@ -114,7 +107,6 @@ const EnvSchema = z.object({
     .regex(/^\d{4}$/)
     .default('2627'),
   UNDERSTAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
-  UNDERSTAT_TOTAL_DEADLINE_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
   UNDERSTAT_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(4),
   // Telegram notifications (optional)
   TELEGRAM_BOT_TOKEN: z.string().optional(),
@@ -123,6 +115,11 @@ const EnvSchema = z.object({
   TELEGRAM_NOTIFICATION_URL: optionalEnv(z.string().url().optional()),
   WECHAT_NOTIFICATION_URL: optionalEnv(z.string().url().optional()),
   WECHAT_NOTIFICATION_API_TOKEN: optionalEnv(z.string().min(32).optional()),
+  // Bug-report screenshot cleanup is a production dependency. The legacy
+  // origin is validated only by the one-time storage migration command.
+  BUG_REPORT_STORAGE_INTERNAL_URL: optionalEnv(z.string().url().optional()),
+  BUG_REPORT_CLEANUP_SECRET: optionalEnv(z.string().min(32).optional()),
+  BUG_REPORT_STORAGE_LEGACY_ORIGIN: optionalEnv(z.string().url().optional()),
 });
 
 type BugReportScreenshotConfigKeys =
@@ -158,6 +155,24 @@ export function resetConfigForTests(): void {
 /** Lightweight environment check for error/logging bootstrap paths. */
 export function isProductionEnvironment(): boolean {
   return process.env.NODE_ENV === 'production';
+}
+
+export function isBugReportScreenshotStorageConfigured(config: AppConfig): boolean {
+  return (
+    config.BUG_REPORT_SCREENSHOT_STORAGE_ENABLED === true &&
+    Boolean(config.BUG_REPORT_SCREENSHOT_SUPABASE_URL) &&
+    Boolean(config.BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY) &&
+    config.BUG_REPORT_SCREENSHOT_BUCKET === 'bug-report-screenshots' &&
+    config.BUG_REPORT_SCREENSHOT_RETENTION_DAYS === 90
+  );
+}
+
+export function assertBugReportScreenshotStorageConfigured(config: AppConfig): void {
+  if (!isBugReportScreenshotStorageConfigured(config)) {
+    throw new Error(
+      'Production bug-report screenshot storage must be enabled with the private bucket and 90-day retention',
+    );
+  }
 }
 
 function endpointIdentity(endpoint: RedisEndpointConfig): string {
@@ -218,6 +233,10 @@ export function getConfig(): AppConfig {
       throw new Error('ENABLE_AUTH must be true in production');
     }
 
+    if (parsed.NODE_ENV === 'production') {
+      assertBugReportScreenshotStorageConfigured(parsed);
+    }
+
     if (
       parsed.NODE_ENV === 'production' &&
       parsed.BUG_REPORT_SCREENSHOT_STORAGE_ENABLED &&
@@ -239,8 +258,13 @@ export function getConfig(): AppConfig {
       );
     }
 
-    if (parsed.MUTATION_LOCK_HEARTBEAT_MS > parsed.MUTATION_LOCK_TTL_MS / 3) {
-      throw new Error('MUTATION_LOCK_HEARTBEAT_MS must be no greater than one third of TTL');
+    if (
+      parsed.NODE_ENV === 'production' &&
+      (!parsed.BUG_REPORT_STORAGE_INTERNAL_URL || !parsed.BUG_REPORT_CLEANUP_SECRET)
+    ) {
+      throw new Error(
+        'BUG_REPORT_STORAGE_INTERNAL_URL and BUG_REPORT_CLEANUP_SECRET are required in production',
+      );
     }
 
     if (parsed.FPL_ADMISSION_LEASE_MS < parsed.FPL_REQUEST_DEADLINE_MS + 5_000) {
@@ -280,6 +304,9 @@ export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
   try {
     const conf = getConfig();
     resolveAuthConfig(conf);
+    if (conf.NODE_ENV === 'production') {
+      assertBugReportScreenshotStorageConfigured(conf);
+    }
     logInfo('[env] OK', {
       PORT: conf.PORT,
       DATABASE_URL: conf.DATABASE_URL ? 'set' : 'missing',

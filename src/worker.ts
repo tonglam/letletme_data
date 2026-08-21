@@ -4,13 +4,13 @@ import { createLiveDataWorker } from './workers/live-data.worker';
 import { createLeagueSyncWorker } from './workers/league-sync.worker';
 import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
 import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
+import { createTournamentRepairWorker } from './workers/tournament-repair.worker';
 import { createUnderstatWorker } from './workers/understat.worker';
 import { databaseSingleton } from './db/singleton';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
-import { closeLockClient } from './utils/mutation-lock';
 import { closeUnderstatPermitClient } from './utils/understat-rate-limit';
 import type { WorkerRuntime } from './workers/worker-runtime';
 
@@ -20,13 +20,6 @@ const config = getConfig();
 if (config.NODE_ENV === 'production') {
   await databaseSingleton.connect();
 }
-const mutationLockConfig = {
-  ttlMs: config.MUTATION_LOCK_TTL_MS,
-  waitTimeoutMs: config.MUTATION_LOCK_WAIT_TIMEOUT_MS,
-  retryDelayMs: config.MUTATION_LOCK_RETRY_DELAY_MS,
-  heartbeatMs: config.MUTATION_LOCK_HEARTBEAT_MS,
-};
-
 const runtimes: WorkerRuntime[] = [
   createDataSyncWorker(),
   createEntrySyncWorker(),
@@ -34,6 +27,7 @@ const runtimes: WorkerRuntime[] = [
   createLeagueSyncWorker(),
   createTournamentSyncWorker(),
   createTournamentSetupWorker(),
+  createTournamentRepairWorker(),
   createUnderstatWorker(),
 ];
 
@@ -64,7 +58,6 @@ async function shutdown(signal: string) {
   const closeAll = Promise.allSettled([
     ...allWorkers.map((worker) => worker.close()),
     ...allQueueEvents.map((events) => events.close()),
-    closeLockClient(),
     closeUnderstatPermitClient(),
   ]);
 
@@ -86,5 +79,5 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
 logInfo('Background worker started', {
-  mutationLockConfig,
+  mutationCoordination: 'postgresql-transaction-scoped',
 });

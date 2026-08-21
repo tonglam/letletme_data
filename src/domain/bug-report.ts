@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { ValidationError } from '../utils/errors';
 
@@ -9,6 +9,21 @@ export const BUG_REPORT_BODY_MIN = 8;
 export const BUG_REPORT_BODY_MAX = 500;
 const CLIENT_META_MAX_BYTES = 16 * 1024;
 const PG_INT_MAX = 2_147_483_647;
+const RETENTION_DAYS = 180;
+const CLOSED_RETENTION_DAYS = 30;
+
+const DIAGNOSTIC_KEYS = new Set([
+  'route',
+  'currentGw',
+  'envVersion',
+  'clientTime',
+  'platform',
+  'osMajor',
+  'sdkVersion',
+  'language',
+  'viewportBucket',
+  'operations',
+]);
 const SUBMISSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SCREENSHOT_OBJECT_KEY_PATTERN =
@@ -28,6 +43,9 @@ export type BugReportInsert = {
   screenshotDeletedAt?: Date | null;
   screenshotUrl: string | null;
   clientMeta: Record<string, unknown>;
+  submissionRequestHash: string;
+  closedAt: Date | null;
+  expiresAt: Date;
 };
 
 export type BugReportCreateInput = {
@@ -41,13 +59,115 @@ export type BugReportCreateInput = {
   clientMeta?: unknown;
 };
 
+export type BugReportStatus = 'open' | 'ack' | 'closed';
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-export const createPublicBugReportId = (): string =>
-  `LL-${randomBytes(3).toString('hex').toUpperCase()}`;
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalize(value[key])]),
+  );
+};
 
-export const validateBugReportCreateInput = (input: BugReportCreateInput): BugReportInsert => {
+type BugReportRequestIdentity = Pick<
+  BugReportInsert,
+  | 'source'
+  | 'userId'
+  | 'entryId'
+  | 'body'
+  | 'submissionId'
+  | 'screenshotObjectKey'
+  | 'screenshotUrl'
+  | 'clientMeta'
+>;
+
+export const bugReportRequestHash = (input: BugReportRequestIdentity): string =>
+  createHash('sha256')
+    .update(JSON.stringify(canonicalize({ version: 1, ...input })), 'utf8')
+    .digest('hex');
+
+const redactDiagnosticText = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const cleaned = value
+    // Stop at JSON delimiters so a URL immediately before a sensitive field
+    // cannot consume the field name and leave its value behind.
+    .replace(/https?:\/\/[^\s"'<>，、；;},\]]+/gi, '[url]')
+    .replace(
+      /(["']?)\b(?:authorization|token)\b\1\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9_-]*\s+)?(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi,
+      '[redacted]',
+    )
+    .replace(
+      /(["']?)\b(?:cookie|deviceId|entryId)\b\1\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi,
+      '[redacted]',
+    )
+    .replace(/\bauthorization\b\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[^\s,;&]+/gi, '[redacted]')
+    .replace(/\btoken\b\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[^\s,;&]+/gi, '[redacted]')
+    .replace(/\b(?:cookie|deviceId|entryId)\b\s*[:=]\s*[^\s,;&]+(?:;\s*[^\s,;&]+)*/gi, '[redacted]')
+    .replace(/([A-Za-z0-9_-]+)=(?:[^\s&]+)/g, '$1=[redacted]')
+    .replace(/\b(?:token|authorization|cookie|deviceId|entryId)\b/gi, '[redacted]')
+    .trim()
+    .slice(0, 160);
+  return cleaned || null;
+};
+
+export function sanitizeBugReportClientMeta(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!DIAGNOSTIC_KEYS.has(key)) continue;
+    if (key === 'operations') {
+      if (!Array.isArray(entry)) continue;
+      const operations = entry.slice(-3).flatMap((operation) => {
+        if (!isRecord(operation)) return [];
+        const result: Record<string, string> = {};
+        for (const field of ['operation', 'requestId', 'code', 'message']) {
+          const text = redactDiagnosticText(operation[field]);
+          if (text) result[field] = text;
+        }
+        return Object.keys(result).length > 0 ? [result] : [];
+      });
+      if (operations.length > 0) cleaned.operations = operations;
+      continue;
+    }
+    if (typeof entry === 'string') {
+      const text = redactDiagnosticText(entry);
+      if (text) cleaned[key] = text;
+      continue;
+    }
+    if (typeof entry === 'number' && Number.isFinite(entry)) {
+      cleaned[key] = entry;
+      continue;
+    }
+    if (typeof entry === 'boolean') cleaned[key] = entry;
+  }
+  if (Buffer.byteLength(JSON.stringify(cleaned), 'utf8') > CLIENT_META_MAX_BYTES)
+    return { truncated: true };
+  return cleaned;
+}
+
+export function retentionDeadline(
+  createdAt: Date,
+  status: BugReportStatus,
+  closedAt: Date | null,
+): Date {
+  const hard = new Date(createdAt.getTime() + RETENTION_DAYS * 24 * 60 * 60 * 1000);
+  if (status !== 'closed' || !closedAt) return hard;
+  const closed = new Date(closedAt.getTime() + CLOSED_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+  return closed < hard ? closed : hard;
+}
+
+export const createPublicBugReportId = (): string =>
+  `LL-${randomBytes(6).toString('hex').toUpperCase()}`;
+
+export const validateBugReportCreateInput = (
+  input: BugReportCreateInput,
+  options: { publicIdGenerator?: () => string } = {},
+): BugReportInsert => {
   if (input.source !== 'website' && input.source !== 'wechat_miniprogram') {
     throw new ValidationError('Unknown report source.');
   }
@@ -98,14 +218,11 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
     throw new ValidationError('Screenshot URL must be https.');
   }
 
-  const clientMeta = isRecord(input.clientMeta) ? input.clientMeta : {};
-  if (Buffer.byteLength(JSON.stringify(clientMeta), 'utf8') > CLIENT_META_MAX_BYTES) {
-    throw new ValidationError('Diagnostic payload is too large.');
-  }
+  const clientMeta = sanitizeBugReportClientMeta(input.clientMeta);
+  const createdAt = new Date();
 
   return {
     id: randomUUID(),
-    publicId: createPublicBugReportId(),
     source: input.source,
     userId,
     entryId,
@@ -114,5 +231,18 @@ export const validateBugReportCreateInput = (input: BugReportCreateInput): BugRe
     screenshotObjectKey,
     screenshotUrl,
     clientMeta,
+    submissionRequestHash: bugReportRequestHash({
+      source: input.source as BugReportSource,
+      userId,
+      entryId,
+      body,
+      submissionId,
+      screenshotObjectKey,
+      screenshotUrl,
+      clientMeta,
+    }),
+    publicId: (options.publicIdGenerator ?? createPublicBugReportId)(),
+    closedAt: null,
+    expiresAt: retentionDeadline(createdAt, 'open', null),
   };
 };

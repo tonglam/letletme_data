@@ -2,7 +2,7 @@ import { cors } from '@elysiajs/cors';
 import { Elysia } from 'elysia';
 
 // Import API route groups
-import { bugReportsAPI } from './api/bug-reports.api';
+import { bugReportsAPI, bugReportsStatusAPI } from './api/bug-reports.api';
 import { registerMutationAuthGuard } from './api/auth.guard';
 import { entryInfoAPI } from './api/entry-info.api';
 import { contentAPI } from './content/api/content.api';
@@ -36,7 +36,13 @@ import { registerTournamentJobs } from './jobs/tournament-jobs';
 // Import utilities
 import { assertContentRuntimeFlags, getContentRuntimeFlags } from './content/config';
 import { getAuthConfig, getConfig } from './utils/config';
-import { getErrorMessage, getHttpStatusFromError, getPublicErrorMessage } from './utils/errors';
+import {
+  getErrorMessage,
+  getHttpStatusFromError,
+  getOrCreateRequestId,
+  getPublicErrorCode,
+  getPublicErrorMessage,
+} from './utils/errors';
 import { getHttpErrorLogLevel, getHttpRequestLogContext } from './utils/http-logging';
 import { logDebug, logError, logInfo, logWarn } from './utils/logger';
 
@@ -65,6 +71,7 @@ if (config.NODE_ENV === 'production') {
 }
 const { PORT: port } = config;
 const { CORS_ORIGINS, ENABLE_AUTH } = getAuthConfig();
+const requestIds = new WeakMap<Request, string>();
 
 const app = new Elysia()
   // ================================
@@ -75,7 +82,13 @@ const app = new Elysia()
     cors({
       origin: CORS_ORIGINS.length > 0 ? CORS_ORIGINS : false,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'x-api-key'],
+      allowedHeaders: [
+        'Content-Type',
+        'x-api-key',
+        'idempotency-key',
+        'x-idempotency-key',
+        'x-actor-id',
+      ],
     }),
   )
 
@@ -83,7 +96,10 @@ const app = new Elysia()
   .use(registerMutationAuthGuard)
 
   // Request logging
-  .onRequest(({ request }) => {
+  .onRequest(({ request, set }) => {
+    const requestId = getOrCreateRequestId(request);
+    requestIds.set(request, requestId);
+    set.headers['x-request-id'] = requestId;
     const requestContext = getHttpRequestLogContext(request);
     if (requestContext) {
       logDebug('HTTP Request', requestContext);
@@ -92,12 +108,15 @@ const app = new Elysia()
 
   // Global error handling
   .onError(({ code, error, request, set }) => {
+    const requestId = requestIds.get(request) ?? getOrCreateRequestId(request);
+    requestIds.set(request, requestId);
+    set.headers['x-request-id'] = requestId;
     const message = getErrorMessage(error);
     const requestContext = getHttpRequestLogContext(request) ?? {
       method: request.method,
       pathname: new URL(request.url).pathname,
     };
-    const logContext = { code, ...requestContext };
+    const logContext = { ...requestContext, requestId, code };
 
     switch (getHttpErrorLogLevel(code)) {
       case 'debug':
@@ -120,7 +139,13 @@ const app = new Elysia()
       default: {
         const status = getHttpStatusFromError(error);
         set.status = status;
-        return { success: false, error: getPublicErrorMessage(error, status) };
+        const publicCode = getPublicErrorCode(error, status);
+        return {
+          success: false,
+          error: getPublicErrorMessage(error, status),
+          ...(publicCode ? { code: publicCode } : {}),
+          ...(status >= 500 && process.env.NODE_ENV === 'production' ? { requestId } : {}),
+        };
       }
     }
   })
@@ -169,6 +194,7 @@ const app = new Elysia()
   .use(jobsAPI)
   .use(tournamentsAPI)
   .use(bugReportsAPI)
+  .use(bugReportsStatusAPI)
   .use(understatAPI)
   .use(trendsAPI)
   .use(contentAPI)
@@ -237,6 +263,7 @@ logInfo('🚀 Elysia server started', {
     'tournament-info',
     'tournament-selection-stats',
     'tournament-materialized-views-refresh',
+    'bug-report-screenshot-retention',
   ],
 });
 

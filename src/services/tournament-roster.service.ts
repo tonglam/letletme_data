@@ -4,10 +4,7 @@ import { entryEventTransfersRepository } from '../repositories/entry-event-trans
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
-import {
-  tournamentSetupLifecycleScope,
-  tournamentSetupRebuildScopes,
-} from '../domain/mutation-scope';
+import { tournamentEntryCoreScopes, tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import {
   diffTournamentRoster,
   getTournamentBackfillWindow,
@@ -18,7 +15,7 @@ import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { ConflictError, NotFoundError, ValidationError } from '../utils/errors';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 import {
   ensureTournamentCoreResults,
@@ -228,9 +225,15 @@ async function reconcileTournamentRosterUnlocked(
 
     if (addedEntryIds.length > 0) {
       const targetEventId = window?.endEventId ?? 0;
-      const entryIssues = await syncTournamentEntryDetails(season, addedEntryIds, {
-        targetEventId,
-      });
+      const entryIssues = await withMutationScopes(
+        {
+          queueName: 'tournament-roster',
+          jobName: 'entry-profile',
+          tournamentId,
+          scopes: tournamentEntryCoreScopes(season.seasonId, addedEntryIds),
+        },
+        () => syncTournamentEntryDetails(season, addedEntryIds, { targetEventId }),
+      );
       if (entryIssues.length > 0) {
         const failedCount = entryIssues.reduce(
           (count, issue) => count + (issue.failedEntries?.length ?? 0),
@@ -247,9 +250,18 @@ async function reconcileTournamentRosterUnlocked(
         addedEntryIds,
         targetEventId,
       );
-      const transfers = await syncEntryTransferHistories(season, transferEntryIds, targetEventId, {
-        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-      });
+      const transfers = await withMutationScopes(
+        {
+          queueName: 'tournament-roster',
+          jobName: 'entry-transfer-history',
+          tournamentId,
+          scopes: tournamentEntryCoreScopes(season.seasonId, transferEntryIds),
+        },
+        () =>
+          syncEntryTransferHistories(season, transferEntryIds, targetEventId, {
+            concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+          }),
+      );
       if (transfers.errors > 0) {
         throw new Error(
           `Unable to prepare transfer history for ${transfers.errors} new entrant(s)`,
@@ -260,7 +272,7 @@ async function reconcileTournamentRosterUnlocked(
     // The authoritative fetch and entrant backfills above intentionally happen
     // without the global structure lock. Hold it only for the short roster
     // publication transaction, which replaces tournament-owned structure rows.
-    const publication = await withMutationConflictGuard(
+    const publication = await withMutationScopes(
       {
         queueName: 'tournament-roster',
         jobName: 'publish-authoritative-roster',
@@ -378,18 +390,10 @@ export async function reconcileTournamentRoster(
     expectedProgressMarker?: string | null;
   },
 ): Promise<TournamentRosterReconcileResult> {
-  // Serialize create/setup, delete, resume, and roster retry for this one
-  // tournament. This is deliberately not the global structure lock, so slow
-  // FPL requests do not block unrelated tournament calculations.
-  return withMutationConflictGuard(
-    {
-      queueName: 'tournament-roster',
-      jobName: 'reconcile-authoritative-roster',
-      tournamentId,
-      scopes: [tournamentSetupLifecycleScope(tournamentId)],
-    },
-    () => reconcileTournamentRosterUnlocked(season, tournamentId, options),
-  );
+  // The authoritative fetch/backfill runs without a transaction held open.
+  // The short publication scope below serializes the canonical roster write;
+  // setup enqueue happens only after that transaction has committed.
+  return reconcileTournamentRosterUnlocked(season, tournamentId, options);
 }
 
 export async function reconcileOfficialTournamentRosters(season: FplSeasonRef): Promise<{
@@ -413,18 +417,9 @@ export async function reconcileOfficialTournamentRosters(season: FplSeasonRef): 
   let errors = 0;
   await mapWithConcurrency(tournaments, 2, async (tournament) => {
     try {
-      const result = await withMutationConflictGuard(
-        {
-          queueName: 'tournament-roster',
-          jobName: 'reconcile-authoritative-roster',
-          tournamentId: tournament.id,
-          scopes: [tournamentSetupLifecycleScope(tournament.id)],
-        },
-        () =>
-          reconcileTournamentRosterUnlocked(season, tournament.id, {
-            expectedProgressMarker: tournament.setupProgressUpdatedAt,
-          }),
-      );
+      const result = await reconcileTournamentRosterUnlocked(season, tournament.id, {
+        expectedProgressMarker: tournament.setupProgressUpdatedAt,
+      });
       if (result.changed) changed += 1;
     } catch (error) {
       errors += 1;

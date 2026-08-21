@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 
 import {
   getHttpStatusFromError,
+  getOrCreateRequestId,
+  getPublicErrorCode,
   getPublicErrorMessage,
   NotFoundError,
   ValidationError,
@@ -41,5 +43,24 @@ describe('getHttpStatusFromError', () => {
     expect(getHttpStatusFromError(new ValidationError('bad input'))).toBe(400);
     expect(getHttpStatusFromError(new NotFoundError('missing'))).toBe(404);
     expect(getHttpStatusFromError(new Error('boom'))).toBe(500);
+  });
+});
+
+describe('public request diagnostics', () => {
+  test('keeps a bounded caller request id and rejects unsafe values', () => {
+    const supplied = new Request('http://localhost', { headers: { 'x-request-id': 'trace-123' } });
+    expect(getOrCreateRequestId(supplied)).toBe('trace-123');
+
+    const unsafe = new Request('http://localhost', {
+      headers: { 'x-request-id': 'trace!injected' },
+    });
+    expect(getOrCreateRequestId(unsafe)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  test('only exposes stable business codes for client errors', () => {
+    expect(getPublicErrorCode(new ValidationError('bad', 'INPUT_INVALID'), 400)).toBe(
+      'INPUT_INVALID',
+    );
+    expect(getPublicErrorCode(new Error('database detail'), 500)).toBeUndefined();
   });
 });

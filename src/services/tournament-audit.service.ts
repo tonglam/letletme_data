@@ -1,6 +1,6 @@
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
+import { tournamentEntryCoreScopes, tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import {
   buildKnockoutRows,
   isOfficialH2HTournament,
@@ -11,7 +11,7 @@ import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo, logWarn } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 import {
   backfillTournamentHistory,
@@ -32,6 +32,7 @@ export type TournamentAuditResult = {
 function isCriticalAuditIssue(issue: string): boolean {
   return (
     issue.startsWith('tournament_entries count ') ||
+    issue.startsWith('tournament_groups count ') ||
     issue.startsWith('invalid group_index sequence') ||
     issue.startsWith('knockout structure mismatch')
   );
@@ -57,6 +58,8 @@ async function loadPresentEntryInfoIds(
 async function loadPresentEntryLeagueInfoIds(
   season: FplSeasonRef,
   entryIds: number[],
+  leagueId: number,
+  leagueType: 'classic' | 'h2h',
 ): Promise<number[]> {
   if (entryIds.length === 0) {
     return [];
@@ -67,6 +70,8 @@ async function loadPresentEntryLeagueInfoIds(
     FROM competition.entry_leagues
     WHERE season_id = ${season.seasonId}
       AND entry_id = ANY(${entryIds}::int[])
+      AND league_id = ${leagueId}
+      AND league_type = ${leagueType}
   `;
   return rows.map((row) => row.entryId);
 }
@@ -96,7 +101,14 @@ export async function auditTournamentSetup(
     issues.push(`missing entry_infos for ${missingEntryInfoIds.length} entries`);
   }
 
-  const presentEntryLeagueInfoIds = new Set(await loadPresentEntryLeagueInfoIds(season, entryIds));
+  const presentEntryLeagueInfoIds = new Set(
+    await loadPresentEntryLeagueInfoIds(
+      season,
+      entryIds,
+      tournament.leagueId ?? 0,
+      tournament.leagueType ?? 'classic',
+    ),
+  );
   const missingEntryLeagueInfoIds = entryIds.filter(
     (entryId) => !presentEntryLeagueInfoIds.has(entryId),
   );
@@ -300,12 +312,12 @@ export async function runTournamentAuditAndFixup(
   ]);
   if (missingEntryIds.length > 0) {
     // Entry FPL only — no structure global (same as primary setup path).
-    const entrySyncIssues = await withMutationConflictGuard(
+    const entrySyncIssues = await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',
         tournamentId: tournament.id,
-        scopes: ['entry-core:all'],
+        scopes: tournamentEntryCoreScopes(season.seasonId, missingEntryIds),
       },
       () =>
         syncTournamentEntryDetails(season, missingEntryIds, {
@@ -322,7 +334,7 @@ export async function runTournamentAuditAndFixup(
     );
     // C4: audit rebuild must hold structure global (setup worker no longer
     // wraps the whole job — FP-07 Codex P1).
-    await withMutationConflictGuard(
+    await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { getDb } from '../../db/singleton';
 import {
@@ -10,7 +10,7 @@ import {
   contentAcquisitionRunXTraces,
   contentSourceReceipts,
 } from '../../db/schemas/content.schema';
-import type { GrokRunResult } from './grok-runner';
+import { isValidGrokReceipt, type GrokRunResult } from './grok-runner';
 import type { SourceSnapshotItem } from './source-registry';
 
 export type AcquisitionRunInput = Readonly<{
@@ -34,11 +34,133 @@ export type AcquisitionRunState =
   | 'failed'
   | 'completed';
 
-const dateOnly = (value: string): string => {
-  const time = Date.parse(value);
-  if (!Number.isFinite(time)) throw new Error(`Invalid acquisition date: ${value}`);
-  return new Date(time).toISOString().slice(0, 10);
-};
+export const ACQUISITION_RUN_STALE_AFTER_MS = 5 * 60_000;
+
+export function isAcquisitionRunStale(input: {
+  startedAt?: Date | null;
+  createdAt: Date;
+  now?: Date;
+  staleAfterMs?: number;
+}): boolean {
+  const now = (input.now ?? new Date()).getTime();
+  const anchor = (input.startedAt ?? input.createdAt).getTime();
+  const staleAfterMs = input.staleAfterMs ?? ACQUISITION_RUN_STALE_AFTER_MS;
+  return Number.isFinite(anchor) && now >= anchor && now - anchor >= staleAfterMs;
+}
+
+export type PendingAcquisitionRunInput = Readonly<{
+  runId: string;
+  groupId: string;
+  partitionKey: string;
+  mode: 'poll' | 'enrich' | 'compose';
+  windowStart: string;
+  windowEnd: string;
+  idempotencyKey: string;
+}>;
+
+/**
+ * Reserve a scheduler submission before it is handed to BullMQ.  A waiting
+ * BullMQ job has not entered the worker yet, so relying on the worker-created
+ * acquisition row lets every scheduler tick enqueue another copy.  The
+ * pending row is durable and is promoted by beginAcquisitionRun when the
+ * worker actually starts; an enqueue failure is reclaimed by the normal stale
+ * run lease instead of silently disappearing.
+ */
+export async function reservePendingAcquisitionRun(input: PendingAcquisitionRunInput): Promise<{
+  runId: string;
+  status: AcquisitionRunState;
+  reused: boolean;
+}> {
+  const db = await getDb();
+  const inserted = await db
+    .insert(contentAcquisitionRuns)
+    .values({
+      runId: input.runId,
+      groupId: input.groupId,
+      mode: input.mode,
+      partitionKey: input.partitionKey,
+      windowStart: new Date(input.windowStart),
+      windowEnd: new Date(input.windowEnd),
+      idempotencyKey: input.idempotencyKey,
+      status: 'pending',
+      sourceSnapshot: [],
+      sourceSnapshotRevision: null,
+    })
+    .onConflictDoNothing({ target: contentAcquisitionRuns.idempotencyKey })
+    .returning({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status });
+  if (inserted[0]) {
+    return { ...inserted[0], status: inserted[0].status as AcquisitionRunState, reused: false };
+  }
+
+  const existing = await db
+    .select({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.idempotencyKey, input.idempotencyKey))
+    .limit(1);
+  const row = existing[0];
+  if (!row) throw new Error('Pending acquisition reservation disappeared');
+  return { ...row, status: row.status as AcquisitionRunState, reused: true };
+}
+
+export async function reclaimStaleAcquisitionRuns(input: {
+  groupId: string;
+  partitionKey: string;
+  mode: 'poll' | 'enrich' | 'compose';
+  now?: Date;
+  staleAfterMs?: number;
+}): Promise<number> {
+  const now = input.now ?? new Date();
+  const cutoff = new Date(now.getTime() - (input.staleAfterMs ?? ACQUISITION_RUN_STALE_AFTER_MS));
+  const db = await getDb();
+  const reclaimed = await db
+    .update(contentAcquisitionRuns)
+    .set({
+      status: 'failed',
+      traceVerified: false,
+      checkpointAdvanced: false,
+      errorSummary: 'Acquisition run lease expired; reclaimed by scheduler',
+      completedAt: now,
+    })
+    .where(
+      and(
+        eq(contentAcquisitionRuns.groupId, input.groupId),
+        eq(contentAcquisitionRuns.partitionKey, input.partitionKey),
+        eq(contentAcquisitionRuns.mode, input.mode),
+        inArray(contentAcquisitionRuns.status, ['pending', 'running']),
+        or(
+          lt(contentAcquisitionRuns.startedAt, cutoff),
+          and(
+            isNull(contentAcquisitionRuns.startedAt),
+            isNull(contentAcquisitionRuns.enqueueConfirmedAt),
+            lt(contentAcquisitionRuns.createdAt, cutoff),
+          ),
+        ),
+      ),
+    )
+    .returning({ runId: contentAcquisitionRuns.runId });
+  return reclaimed.length;
+}
+
+/** Record that the deterministic BullMQ job was accepted after the durable
+ * pending reservation committed.  Pending rows with this confirmation must
+ * not be reclaimed merely because they waited in BullMQ longer than the
+ * worker's execution lease; only an unconfirmed enqueue may be reclaimed.
+ */
+export async function confirmAcquisitionRunEnqueued(runId: string): Promise<boolean> {
+  const db = await getDb();
+  const updated = await db
+    .update(contentAcquisitionRuns)
+    .set({ enqueueConfirmedAt: new Date() })
+    .where(
+      and(
+        eq(contentAcquisitionRuns.runId, runId),
+        eq(contentAcquisitionRuns.status, 'pending'),
+        isNull(contentAcquisitionRuns.enqueueConfirmedAt),
+      ),
+    )
+    .returning({ runId: contentAcquisitionRuns.runId });
+  return updated.length === 1;
+}
 
 const asJsonObject = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -72,6 +194,7 @@ export async function beginAcquisitionRun(input: AcquisitionRunInput): Promise<{
       idempotencyKey: input.idempotencyKey,
       status: 'running',
       sourceSnapshot: input.sourceSnapshot,
+      sourceSnapshotRevision: input.sourceSnapshotRevision,
       skillSha: input.skillSha ?? null,
       startedAt: new Date(),
     })
@@ -80,14 +203,47 @@ export async function beginAcquisitionRun(input: AcquisitionRunInput): Promise<{
   if (inserted[0])
     return { ...inserted[0], status: inserted[0].status as AcquisitionRunState, reused: false };
 
-  const existing = await db
-    .select({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status })
-    .from(contentAcquisitionRuns)
-    .where(eq(contentAcquisitionRuns.idempotencyKey, input.idempotencyKey))
-    .limit(1);
-  const row = existing[0];
-  if (!row) throw new Error('Acquisition run disappeared after idempotency conflict');
-  return { ...row, status: row.status as AcquisitionRunState, reused: true };
+  const existing = await db.transaction(async (tx) => {
+    const rows = await tx
+      .select({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status })
+      .from(contentAcquisitionRuns)
+      .where(eq(contentAcquisitionRuns.idempotencyKey, input.idempotencyKey))
+      .for('update')
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    if (row.status === 'pending' && row.runId === input.runId) {
+      const promoted = await tx
+        .update(contentAcquisitionRuns)
+        .set({
+          groupId: input.groupId,
+          mode: input.mode,
+          partitionKey: input.partitionKey,
+          windowStart: new Date(input.windowStart),
+          windowEnd: new Date(input.windowEnd),
+          sourceSnapshot: input.sourceSnapshot,
+          sourceSnapshotRevision: input.sourceSnapshotRevision,
+          skillSha: input.skillSha ?? null,
+          status: 'running',
+          startedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(contentAcquisitionRuns.runId, input.runId),
+            eq(contentAcquisitionRuns.status, 'pending'),
+          ),
+        )
+        .returning({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status });
+      return promoted[0] ? { row: promoted[0], reused: false } : { row, reused: true };
+    }
+    return { row, reused: true };
+  });
+  if (!existing) throw new Error('Acquisition run disappeared after idempotency conflict');
+  return {
+    ...existing.row,
+    status: existing.row.status as AcquisitionRunState,
+    reused: existing.reused,
+  };
 }
 
 export async function reserveXCallBudget(input: {
@@ -95,28 +251,53 @@ export async function reserveXCallBudget(input: {
   windowStart: string;
   dailyBudget: number;
   requestedXCalls: number;
+  budgetScope?: 'daily' | 'final90';
+  phaseBudget?: number | null;
 }): Promise<boolean> {
+  const budgetScope = input.budgetScope ?? 'daily';
+  const budgetLimit = budgetScope === 'final90' ? (input.phaseBudget ?? 0) : input.dailyBudget;
   if (
-    !Number.isSafeInteger(input.dailyBudget) ||
-    input.dailyBudget < 1 ||
+    !Number.isSafeInteger(budgetLimit) ||
+    budgetLimit < 1 ||
     !Number.isSafeInteger(input.requestedXCalls) ||
     input.requestedXCalls < 1 ||
-    input.requestedXCalls > input.dailyBudget
+    input.requestedXCalls > budgetLimit
   )
     return false;
   const db = await getDb();
-  const budgetDate = dateOnly(input.windowStart);
+  // Budget consumption belongs to the database's current UTC day, not the
+  // historical acquisition window.  Retries/catch-up runs must not spend a
+  // different day's allowance merely because their windowStart is old.
+  const clockRows = await db.execute<{ utc_date: string }>(
+    sql`SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text AS utc_date`,
+  );
+  const clock = clockRows[0];
+  const budgetDate = clock?.utc_date;
+  if (!budgetDate) throw new Error('Database UTC date is unavailable');
   await db
     .insert(contentAcquisitionBudgets)
     .values({
       budgetId: randomUUID(),
       groupId: input.groupId,
       budgetDate,
-      maxXCalls: input.dailyBudget,
+      budgetScope,
+      maxXCalls: budgetLimit,
       usedXCalls: 0,
     })
-    .onConflictDoNothing({
-      target: [contentAcquisitionBudgets.groupId, contentAcquisitionBudgets.budgetDate],
+    .onConflictDoUpdate({
+      target: [
+        contentAcquisitionBudgets.groupId,
+        contentAcquisitionBudgets.budgetDate,
+        contentAcquisitionBudgets.budgetScope,
+      ],
+      // A retry or a phase-policy change may lower the configured budget after
+      // calls have already been consumed. Preserve the check constraint and
+      // let the reservation predicate naturally deny any further calls when
+      // usedXCalls has reached the lower effective limit.
+      set: {
+        maxXCalls: sql`GREATEST(${contentAcquisitionBudgets.usedXCalls}, ${budgetLimit})`,
+        updatedAt: new Date(),
+      },
     });
   const updated = await db
     .update(contentAcquisitionBudgets)
@@ -128,6 +309,7 @@ export async function reserveXCallBudget(input: {
       and(
         eq(contentAcquisitionBudgets.groupId, input.groupId),
         eq(contentAcquisitionBudgets.budgetDate, budgetDate),
+        eq(contentAcquisitionBudgets.budgetScope, budgetScope),
         sql`${contentAcquisitionBudgets.usedXCalls} + ${input.requestedXCalls} <= ${contentAcquisitionBudgets.maxXCalls}`,
       ),
     )
@@ -140,7 +322,8 @@ export async function finishAcquisitionRun(input: {
   result: GrokRunResult;
   checkpointCursor?: string | null;
 }): Promise<{ status: AcquisitionRunState; checkpointAdvanced: boolean; receiptCount: number }> {
-  const state = resultState(input.result);
+  const receiptsSchemaValid = input.result.receipts.every((receipt) => isValidGrokReceipt(receipt));
+  const state = receiptsSchemaValid ? resultState(input.result) : 'failed';
   const sourceIds = new Set(input.run.sourceSnapshot.map((source) => source.sourceId));
   const rightsBySourceId = new Map(
     input.run.sourceSnapshot.map((source) => [source.sourceId, source.rightsPolicy ?? {}]),
@@ -149,6 +332,7 @@ export async function finishAcquisitionRun(input: {
 
   const db = await getDb();
   const receiptValues = input.result.receipts.flatMap((value) => {
+    if (!receiptsSchemaValid) return [];
     const receipt = asJsonObject(value);
     const sourceId = typeof receipt.sourceId === 'string' ? receipt.sourceId : null;
     const externalId = typeof receipt.externalId === 'string' ? receipt.externalId : null;
@@ -174,14 +358,42 @@ export async function finishAcquisitionRun(input: {
       },
     ];
   });
-  const checkpointAdvanced =
+  const checkpointEligible =
+    receiptsSchemaValid &&
     input.result.traceVerified === true &&
     ((input.result.status === 'EMPTY' && input.result.receipts.length === 0) ||
       (input.result.status === 'COMPLETED' &&
         receiptValues.length === input.result.receipts.length &&
+        receiptValues.length > 0) ||
+      (input.result.status === 'PARTIAL' &&
+        asJsonObject(input.result.traceMetadata).completePartition === true &&
+        receiptValues.length === input.result.receipts.length &&
         receiptValues.length > 0));
 
-  await db.transaction(async (tx) => {
+  const finished = await db.transaction(async (tx) => {
+    const claimed = await tx
+      .update(contentAcquisitionRuns)
+      .set({
+        status: state,
+        xCallCount: input.result.xCallCount,
+        traceVerified: input.result.traceVerified && receiptsSchemaValid,
+        skillSha: input.result.skillSha || null,
+        adapterVersion: input.result.adapterVersion ?? null,
+        errorSummary:
+          input.result.error ?? (receiptsSchemaValid ? null : 'Invalid Grok receipt schema'),
+        checkpointAdvanced: false,
+        completedAt: now,
+      })
+      .where(
+        and(
+          eq(contentAcquisitionRuns.runId, input.run.runId),
+          inArray(contentAcquisitionRuns.status, ['pending', 'running']),
+        ),
+      )
+      .returning({ runId: contentAcquisitionRuns.runId });
+    if (claimed.length === 0)
+      return { status: 'failed' as const, checkpointAdvanced: false, receiptCount: 0 };
+
     if (receiptValues.length > 0) {
       await tx
         .insert(contentSourceReceipts)
@@ -190,19 +402,6 @@ export async function finishAcquisitionRun(input: {
           target: [contentSourceReceipts.sourceId, contentSourceReceipts.externalId],
         });
     }
-    await tx
-      .update(contentAcquisitionRuns)
-      .set({
-        status: state,
-        xCallCount: input.result.xCallCount,
-        traceVerified: input.result.traceVerified,
-        skillSha: input.result.skillSha || null,
-        adapterVersion: input.result.adapterVersion ?? null,
-        errorSummary: input.result.error ?? null,
-        checkpointAdvanced,
-        completedAt: now,
-      })
-      .where(eq(contentAcquisitionRuns.runId, input.run.runId));
     await tx
       .insert(contentAcquisitionRunXTraces)
       .values({
@@ -214,7 +413,7 @@ export async function finishAcquisitionRun(input: {
         responseHash: input.result.responseHash ?? null,
         callCount: input.result.xCallCount,
         traceMetadata: input.result.traceMetadata ?? {},
-        verified: input.result.traceVerified === true,
+        verified: input.result.traceVerified === true && receiptsSchemaValid,
       })
       .onConflictDoUpdate({
         target: contentAcquisitionRunXTraces.runId,
@@ -226,7 +425,7 @@ export async function finishAcquisitionRun(input: {
           responseHash: input.result.responseHash ?? null,
           callCount: input.result.xCallCount,
           traceMetadata: input.result.traceMetadata ?? {},
-          verified: input.result.traceVerified === true,
+          verified: input.result.traceVerified === true && receiptsSchemaValid,
           capturedAt: now,
         },
       });
@@ -241,8 +440,9 @@ export async function finishAcquisitionRun(input: {
         metadata: { skillSha: input.result.skillSha || null },
       });
     }
-    if (checkpointAdvanced) {
-      await tx
+    let checkpointAdvanced = false;
+    if (checkpointEligible) {
+      const checkpointWrite = await tx
         .insert(contentAcquisitionCheckpoints)
         .values({
           groupId: input.run.groupId,
@@ -263,9 +463,18 @@ export async function finishAcquisitionRun(input: {
             windowEnd: new Date(input.run.windowEnd),
             updatedAt: now,
           },
-        });
+          // A late/overlapping run must never move a checkpoint backwards.
+          where: sql`${contentAcquisitionCheckpoints.windowEnd} < EXCLUDED.window_end`,
+        })
+        .returning({ windowEnd: contentAcquisitionCheckpoints.windowEnd });
+      checkpointAdvanced = checkpointWrite.length === 1;
+      await tx
+        .update(contentAcquisitionRuns)
+        .set({ checkpointAdvanced })
+        .where(eq(contentAcquisitionRuns.runId, input.run.runId));
     }
+    return { status: state, checkpointAdvanced, receiptCount: receiptValues.length };
   });
 
-  return { status: state, checkpointAdvanced, receiptCount: receiptValues.length };
+  return finished;
 }

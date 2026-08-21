@@ -1,15 +1,45 @@
-import { and, asc, eq, isNotNull, lte, sql } from 'drizzle-orm';
+import { createHash, randomUUID } from 'node:crypto';
 
-import { bugReportsInOps } from '../db/schemas/platform.schema';
+import { and, asc, eq, gt, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import {
+  bugReportRetentionBackupsInOps,
+  bugReportStorageMigrationsInOps,
+  bugReportsInOps,
+} from '../db/schemas/platform.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
-import type { BugReportInsert } from '../domain/bug-report';
-import { DatabaseError } from '../utils/errors';
+import {
+  bugReportRequestHash,
+  retentionDeadline,
+  type BugReportInsert,
+  type BugReportStatus,
+} from '../domain/bug-report';
+import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError } from '../utils/logger';
 
 export type StoredBugReport = {
   id: string;
   publicId: string;
   createdAt: Date;
+  status: BugReportStatus;
+  closedAt: Date | null;
+  expiresAt: Date;
+  screenshotUrl: string | null;
+  screenshotObjectKey: string | null;
+  screenshotDeletedAt: Date | null;
+  body: string;
+  clientMeta: Record<string, unknown>;
+  source: string;
+  userId: string | null;
+  entryId: number | null;
+};
+
+export type BugReportExpiryCursor = Pick<StoredBugReport, 'expiresAt' | 'id'>;
+export type BugReportScreenshotCursor = Pick<StoredBugReport, 'createdAt' | 'id'>;
+export type BugReportStorageDeletionCursor = { migratedAt: Date; id: string };
+export type BugReportDeletionClaim = {
+  report: StoredBugReport;
+  screenshotUrl: string | null;
+  completed?: boolean;
 };
 
 export type ExpiredBugReportScreenshot = {
@@ -18,33 +48,267 @@ export type ExpiredBugReportScreenshot = {
   createdAt: Date;
 };
 
+/**
+ * Retention tombstones must not preserve a completed screenshot URL. A plain
+ * SHA-256 digest is stable for idempotent reuse checks while removing bearer
+ * tokens, credentials, and query-string secrets from the durable snapshot.
+ */
+export const hashBugReportScreenshotLocator = (locator: string): string =>
+  createHash('sha256').update(locator, 'utf8').digest('hex');
+
+const SCRUBBED_BUG_REPORT_BODY = 'Screenshot cleanup pending.';
+
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
+
+  const screenshotUrlFromSnapshot = (snapshot: unknown): string | null => {
+    if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+    const value = (snapshot as Record<string, unknown>).screenshotUrl;
+    return typeof value === 'string' ? value : null;
+  };
+
+  const screenshotObjectKeyFromSnapshot = (snapshot: unknown): string | null => {
+    if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+    const value = (snapshot as Record<string, unknown>).screenshotObjectKey;
+    return typeof value === 'string' ? value : null;
+  };
+
+  const submissionIdFromScreenshotObjectKey = (objectKey: string | null): string | null => {
+    if (!objectKey) return null;
+    const match =
+      /^bug-reports\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|png|webp|gif)$/i.exec(
+        objectKey,
+      );
+    return match?.[1] ?? null;
+  };
+
+  const screenshotWasDeletedInSnapshot = (snapshot: unknown): boolean => {
+    if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+    const value = (snapshot as Record<string, unknown>).screenshotDeletedAt;
+    return value !== null && value !== undefined;
+  };
+
+  const lockPublicId = async (connection: DbOrTransaction, publicId: string): Promise<void> => {
+    await connection.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${publicId}))`);
+  };
+
+  const lockScreenshotLocators = async (
+    connection: DbOrTransaction,
+    locators: readonly (string | null | undefined)[],
+  ): Promise<void> => {
+    const uniqueLocators = [
+      ...new Set(locators.filter((locator): locator is string => Boolean(locator))),
+    ].sort();
+    for (const locator of uniqueLocators) {
+      await connection.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${locator}))`);
+    }
+  };
 
   const insert = async (report: BugReportInsert): Promise<StoredBugReport> => {
     try {
       const db = await getDbInstance();
-      const [row] = await db
-        .insert(bugReportsInOps)
-        .values({
-          id: report.id,
-          publicId: report.publicId,
-          source: report.source,
-          userId: report.userId,
-          entryId: report.entryId,
-          body: report.body,
-          submissionId: report.submissionId,
-          screenshotObjectKey: report.screenshotObjectKey,
-          screenshotUrl: report.screenshotUrl,
-          clientMeta: report.clientMeta,
-          status: 'open',
-        })
-        .onConflictDoNothing({ target: bugReportsInOps.submissionId })
-        .returning({
-          id: bugReportsInOps.id,
-          publicId: bugReportsInOps.publicId,
-          createdAt: bugReportsInOps.createdAt,
-        });
+      const insertRow = async (connection: DbOrTransaction) => {
+        // A retry of a committed submission is idempotent even if its original
+        // locator has since been retired or migrated. Resolve it before any
+        // new-report locator checks.
+        if (report.submissionId) {
+          const [existingSubmission] = await connection
+            .select({
+              id: bugReportsInOps.id,
+              publicId: bugReportsInOps.publicId,
+              createdAt: bugReportsInOps.createdAt,
+              source: bugReportsInOps.source,
+              userId: bugReportsInOps.userId,
+              entryId: bugReportsInOps.entryId,
+              body: bugReportsInOps.body,
+              submissionId: bugReportsInOps.submissionId,
+              screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+              screenshotUrl: bugReportsInOps.screenshotUrl,
+              clientMeta: bugReportsInOps.clientMeta,
+              submissionRequestHash: bugReportsInOps.submissionRequestHash,
+            })
+            .from(bugReportsInOps)
+            .where(eq(bugReportsInOps.submissionId, report.submissionId))
+            .limit(1);
+          if (existingSubmission) {
+            const existingHash =
+              existingSubmission.submissionRequestHash ??
+              bugReportRequestHash({
+                source: existingSubmission.source as BugReportInsert['source'],
+                userId: existingSubmission.userId,
+                entryId: existingSubmission.entryId,
+                body: existingSubmission.body,
+                submissionId: existingSubmission.submissionId,
+                screenshotObjectKey: existingSubmission.screenshotObjectKey,
+                screenshotUrl: existingSubmission.screenshotUrl,
+                clientMeta: (existingSubmission.clientMeta ?? {}) as Record<string, unknown>,
+              });
+            if (existingHash !== report.submissionRequestHash)
+              throw new ConflictError(
+                'Submission ID was already used for a different bug report',
+                'BUG_REPORT_SUBMISSION_ID_REUSED',
+              );
+            if (!existingSubmission.submissionRequestHash) {
+              await connection
+                .update(bugReportsInOps)
+                .set({ submissionRequestHash: report.submissionRequestHash })
+                .where(eq(bugReportsInOps.id, existingSubmission.id));
+            }
+            return {
+              id: existingSubmission.id,
+              publicId: existingSubmission.publicId,
+              createdAt: existingSubmission.createdAt,
+            };
+          }
+        }
+
+        // Allocation and retirement use the same transaction-scoped lock so
+        // a new row cannot pass the registry check while cleanup is creating
+        // its durable retired-ID record.
+        await lockPublicId(connection, report.publicId);
+        // Retention backups are the durable registry for public IDs after the
+        // live report row is removed. Reject a generated ID that already
+        // belongs to a retired report so the status endpoint can never point
+        // an old reference at a newer report.
+        const [retiredPublicId] = await connection
+          .select({ id: bugReportRetentionBackupsInOps.id })
+          .from(bugReportRetentionBackupsInOps)
+          .where(eq(bugReportRetentionBackupsInOps.publicId, report.publicId))
+          .limit(1);
+        if (retiredPublicId) {
+          throw new DatabaseError(
+            'Bug report public id has already been retired',
+            '23505',
+            undefined,
+            'bug_report_retention_backups_public_id_key',
+          );
+        }
+
+        if (report.submissionId) {
+          const [retiredSubmission] = await connection
+            .select({ id: bugReportRetentionBackupsInOps.id })
+            .from(bugReportRetentionBackupsInOps)
+            .where(eq(bugReportRetentionBackupsInOps.submissionId, report.submissionId))
+            .limit(1);
+          if (retiredSubmission) {
+            throw new DatabaseError(
+              'Bug report submission has already been retired',
+              'BUG_REPORT_SUBMISSION_RETIRED',
+            );
+          }
+        }
+
+        if (report.screenshotObjectKey) {
+          const [retiredPrivateKey] = await connection
+            .select({ id: bugReportRetentionBackupsInOps.id })
+            .from(bugReportRetentionBackupsInOps)
+            .where(
+              and(
+                eq(bugReportRetentionBackupsInOps.screenshotObjectKey, report.screenshotObjectKey),
+                isNull(bugReportRetentionBackupsInOps.screenshotDeletedAt),
+              ),
+            )
+            .limit(1);
+          if (retiredPrivateKey) {
+            throw new DatabaseError(
+              'Bug report screenshot object key has already been reserved',
+              'BUG_REPORT_SCREENSHOT_KEY_RETIRED',
+            );
+          }
+        }
+
+        if (report.screenshotUrl) {
+          await connection.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtext(${report.screenshotUrl}))`,
+          );
+
+          // A retention claim is a durable tombstone for its original object
+          // locator. Checking it after the advisory lock means an insert that
+          // started while cleanup was deleting the object cannot resurrect the
+          // now-missing locator after the delete commits.
+          const [retiredByRetention] = await connection
+            .select({ id: bugReportRetentionBackupsInOps.id })
+            .from(bugReportRetentionBackupsInOps)
+            .where(
+              and(
+                or(
+                  sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrl' = ${report.screenshotUrl}`,
+                  sql`${bugReportRetentionBackupsInOps.snapshot}->>'screenshotUrlHash' = ${hashBugReportScreenshotLocator(report.screenshotUrl)}`,
+                ),
+                or(
+                  isNotNull(bugReportRetentionBackupsInOps.screenshotDeleteStartedAt),
+                  isNotNull(bugReportRetentionBackupsInOps.screenshotDeletedAt),
+                ),
+              ),
+            )
+            .limit(1);
+          if (retiredByRetention) {
+            throw new DatabaseError(
+              'Screenshot locator has already been retired',
+              'BUG_REPORT_SCREENSHOT_LOCATOR_RETIRED',
+            );
+          }
+
+          const [retiredByMigration] = await connection
+            .select({ id: bugReportStorageMigrationsInOps.id })
+            .from(bugReportStorageMigrationsInOps)
+            .where(
+              and(
+                eq(bugReportStorageMigrationsInOps.sourceLocator, report.screenshotUrl),
+                or(
+                  isNotNull(bugReportStorageMigrationsInOps.deleteStartedAt),
+                  isNotNull(bugReportStorageMigrationsInOps.deletedAt),
+                ),
+              ),
+            )
+            .limit(1);
+          if (retiredByMigration) {
+            throw new DatabaseError(
+              'Screenshot locator has already been migrated and deleted',
+              'BUG_REPORT_SCREENSHOT_LOCATOR_RETIRED',
+            );
+          }
+        }
+        const [row] = await connection
+          .insert(bugReportsInOps)
+          .values({
+            id: report.id,
+            publicId: report.publicId,
+            source: report.source,
+            userId: report.userId,
+            entryId: report.entryId,
+            body: report.body,
+            submissionId: report.submissionId,
+            screenshotObjectKey: report.screenshotObjectKey,
+            screenshotUrl: report.screenshotUrl,
+            clientMeta: report.clientMeta,
+            submissionRequestHash: report.submissionRequestHash,
+            status: 'open',
+            closedAt: report.closedAt,
+            expiresAt: report.expiresAt,
+          })
+          .onConflictDoNothing({ target: bugReportsInOps.submissionId })
+          .returning({
+            id: bugReportsInOps.id,
+            publicId: bugReportsInOps.publicId,
+            createdAt: bugReportsInOps.createdAt,
+            status: bugReportsInOps.status,
+            closedAt: bugReportsInOps.closedAt,
+            expiresAt: bugReportsInOps.expiresAt,
+            submissionId: bugReportsInOps.submissionId,
+            screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+            screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
+            screenshotUrl: bugReportsInOps.screenshotUrl,
+            body: bugReportsInOps.body,
+            clientMeta: bugReportsInOps.clientMeta,
+            source: bugReportsInOps.source,
+            userId: bugReportsInOps.userId,
+            entryId: bugReportsInOps.entryId,
+            submissionRequestHash: bugReportsInOps.submissionRequestHash,
+          });
+        return row;
+      };
+      const row = 'transaction' in db ? await db.transaction(insertRow) : await insertRow(db);
 
       if (!row) {
         if (!report.submissionId) throw new DatabaseError('Bug report insert returned no row');
@@ -53,14 +317,50 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             id: bugReportsInOps.id,
             publicId: bugReportsInOps.publicId,
             createdAt: bugReportsInOps.createdAt,
+            status: bugReportsInOps.status,
+            closedAt: bugReportsInOps.closedAt,
+            expiresAt: bugReportsInOps.expiresAt,
+            screenshotUrl: bugReportsInOps.screenshotUrl,
+            screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+            screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
+            body: bugReportsInOps.body,
+            clientMeta: bugReportsInOps.clientMeta,
+            source: bugReportsInOps.source,
+            userId: bugReportsInOps.userId,
+            entryId: bugReportsInOps.entryId,
+            submissionId: bugReportsInOps.submissionId,
+            submissionRequestHash: bugReportsInOps.submissionRequestHash,
           })
           .from(bugReportsInOps)
           .where(eq(bugReportsInOps.submissionId, report.submissionId))
           .limit(1);
         if (!existing) throw new DatabaseError('Bug report insert returned no row');
-        return existing;
+        const existingHash =
+          existing.submissionRequestHash ??
+          bugReportRequestHash({
+            source: existing.source as BugReportInsert['source'],
+            userId: existing.userId,
+            entryId: existing.entryId,
+            body: existing.body,
+            submissionId: existing.submissionId,
+            screenshotObjectKey: existing.screenshotObjectKey,
+            screenshotUrl: existing.screenshotUrl,
+            clientMeta: (existing.clientMeta ?? {}) as Record<string, unknown>,
+          });
+        if (existingHash !== report.submissionRequestHash)
+          throw new ConflictError(
+            'Submission ID was already used for a different bug report',
+            'BUG_REPORT_SUBMISSION_ID_REUSED',
+          );
+        if (!existing.submissionRequestHash) {
+          await db
+            .update(bugReportsInOps)
+            .set({ submissionRequestHash: report.submissionRequestHash })
+            .where(eq(bugReportsInOps.id, existing.id));
+        }
+        return existing as StoredBugReport;
       }
-      return row;
+      return row as StoredBugReport;
     } catch (error) {
       logError('Failed to insert bug report', error);
       if (error instanceof DatabaseError) throw error;
@@ -79,57 +379,1081 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
     }
   };
 
+  const findByPublicId = async (publicId: string) => {
+    const db = await getDbInstance();
+    const [row] = await db
+      .select({
+        id: bugReportsInOps.id,
+        publicId: bugReportsInOps.publicId,
+        createdAt: bugReportsInOps.createdAt,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+        screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+        screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
+        body: bugReportsInOps.body,
+        clientMeta: bugReportsInOps.clientMeta,
+        source: bugReportsInOps.source,
+        userId: bugReportsInOps.userId,
+        entryId: bugReportsInOps.entryId,
+      })
+      .from(bugReportsInOps)
+      .where(eq(bugReportsInOps.publicId, publicId))
+      .limit(1);
+    return row as StoredBugReport | undefined;
+  };
+
+  const updateStatus = async (publicId: string, status: BugReportStatus, now: Date) => {
+    const db = await getDbInstance();
+    return db.transaction(async (tx) => {
+      await lockPublicId(tx, publicId);
+      // Inspect locators without a row lock first. All mutation paths acquire
+      // the public-id fence before the locator fence; locking the locator
+      // before FOR UPDATE keeps status changes and storage migration in the
+      // same order and avoids a row-lock/advisory-lock deadlock.
+      const [observed] = await tx
+        .select({
+          id: bugReportsInOps.id,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+        })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.publicId, publicId))
+        .limit(1);
+      if (!observed) return null;
+
+      const [observedClaim] = await tx
+        .select({
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, observed.id))
+        .limit(1);
+
+      await lockScreenshotLocators(tx, [
+        observed.screenshotUrl,
+        observedClaim ? screenshotUrlFromSnapshot(observedClaim.snapshot) : null,
+      ]);
+
+      const [current] = await tx
+        .select({
+          id: bugReportsInOps.id,
+          publicId: bugReportsInOps.publicId,
+          createdAt: bugReportsInOps.createdAt,
+          status: bugReportsInOps.status,
+          closedAt: bugReportsInOps.closedAt,
+          expiresAt: bugReportsInOps.expiresAt,
+          scrubbedAt: bugReportsInOps.scrubbedAt,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+          screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+          screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
+          body: bugReportsInOps.body,
+          clientMeta: bugReportsInOps.clientMeta,
+          source: bugReportsInOps.source,
+          userId: bugReportsInOps.userId,
+          entryId: bugReportsInOps.entryId,
+        })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.publicId, publicId))
+        .for('update')
+        .limit(1);
+      if (!current) return null;
+
+      const [claim] = await tx
+        .select({
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotDeleteStartedAt: bugReportRetentionBackupsInOps.screenshotDeleteStartedAt,
+          screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, current.id))
+        .for('update')
+        .limit(1);
+
+      // Once cleanup has scrubbed the report body, reopening it would create
+      // a misleading live report with irreversible data loss and could also
+      // detach the locator reservation from its deletion retry. Keep the
+      // terminal state idempotent and reject any attempted transition.
+      if (current.scrubbedAt) {
+        if (status !== current.status) {
+          throw new ConflictError(
+            'Expired bug report has been scrubbed and cannot change status.',
+            'BUG_REPORT_RETENTION_FINALIZED',
+          );
+        }
+        return {
+          publicId: current.publicId,
+          status: current.status,
+          closedAt: current.closedAt,
+          expiresAt: current.expiresAt,
+        };
+      }
+
+      let screenshotUrl = current.screenshotUrl;
+      let removeClaim = false;
+      const claimedLocator = claim ? screenshotUrlFromSnapshot(claim.snapshot) : null;
+      if (claim && claimedLocator) {
+        // A status update may race with storage migration. Serialise on the
+        // same locator fence (acquired before the row lock), then prefer the migration target when the source
+        // has already been deleted; never restore a retired source URL.
+        const [migration] = await tx
+          .select({ targetLocator: bugReportStorageMigrationsInOps.targetLocator })
+          .from(bugReportStorageMigrationsInOps)
+          .where(
+            and(
+              eq(bugReportStorageMigrationsInOps.sourceLocator, claimedLocator),
+              or(
+                isNotNull(bugReportStorageMigrationsInOps.deleteStartedAt),
+                isNotNull(bugReportStorageMigrationsInOps.deletedAt),
+              ),
+            ),
+          )
+          .limit(1);
+        if (claim.screenshotDeleteStartedAt && !claim.screenshotDeletedAt) {
+          // The remote delete is already fenced. Keep the locator retired and
+          // leave the claim for completion/retry; never restore a URL that may
+          // be removed after this status transaction commits.
+          screenshotUrl = null;
+          removeClaim = false;
+        } else {
+          screenshotUrl =
+            migration?.targetLocator ?? (claim.screenshotDeletedAt ? null : claimedLocator);
+          removeClaim = !claim.screenshotDeletedAt || Boolean(migration);
+        }
+      }
+      if (claim && removeClaim) {
+        await tx
+          .delete(bugReportRetentionBackupsInOps)
+          .where(eq(bugReportRetentionBackupsInOps.id, current.id));
+      }
+
+      const closedAt =
+        status === 'closed'
+          ? current.status === 'closed'
+            ? (current.closedAt ?? now)
+            : now
+          : null;
+      const expiresAt = retentionDeadline(current.createdAt, status, closedAt);
+      const [row] = await tx
+        .update(bugReportsInOps)
+        .set({ status, closedAt, expiresAt, screenshotUrl })
+        .where(eq(bugReportsInOps.id, current.id))
+        .returning({
+          publicId: bugReportsInOps.publicId,
+          status: bugReportsInOps.status,
+          closedAt: bugReportsInOps.closedAt,
+          expiresAt: bugReportsInOps.expiresAt,
+        });
+      return row ?? null;
+    });
+  };
+
+  const listExpired = async (now: Date, limit: number, after?: BugReportExpiryCursor) => {
+    const cursor = after
+      ? or(
+          gt(bugReportsInOps.expiresAt, after.expiresAt),
+          and(eq(bugReportsInOps.expiresAt, after.expiresAt), gt(bugReportsInOps.id, after.id)),
+        )
+      : undefined;
+    const rows = await (
+      await getDbInstance()
+    )
+      .select({
+        id: bugReportsInOps.id,
+        publicId: bugReportsInOps.publicId,
+        createdAt: bugReportsInOps.createdAt,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+        screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+        screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
+        body: bugReportsInOps.body,
+        clientMeta: bugReportsInOps.clientMeta,
+        source: bugReportsInOps.source,
+        userId: bugReportsInOps.userId,
+        entryId: bugReportsInOps.entryId,
+      })
+      .from(bugReportsInOps)
+      .where(
+        cursor
+          ? and(lte(bugReportsInOps.expiresAt, now), cursor)
+          : lte(bugReportsInOps.expiresAt, now),
+      )
+      .orderBy(asc(bugReportsInOps.expiresAt), asc(bugReportsInOps.id))
+      .limit(Math.min(Math.max(limit, 1), 100));
+    return rows as StoredBugReport[];
+  };
+
+  const listWithScreenshots = async (limit: number, after?: BugReportScreenshotCursor) => {
+    const cursor = after
+      ? or(
+          gt(bugReportsInOps.createdAt, after.createdAt),
+          and(eq(bugReportsInOps.createdAt, after.createdAt), gt(bugReportsInOps.id, after.id)),
+        )
+      : undefined;
+    const rows = await (
+      await getDbInstance()
+    )
+      .select({
+        id: bugReportsInOps.id,
+        publicId: bugReportsInOps.publicId,
+        createdAt: bugReportsInOps.createdAt,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+        screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+        screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
+        body: bugReportsInOps.body,
+        clientMeta: bugReportsInOps.clientMeta,
+        source: bugReportsInOps.source,
+        userId: bugReportsInOps.userId,
+        entryId: bugReportsInOps.entryId,
+      })
+      .from(bugReportsInOps)
+      .where(
+        cursor
+          ? and(isNotNull(bugReportsInOps.screenshotUrl), cursor)
+          : isNotNull(bugReportsInOps.screenshotUrl),
+      )
+      .orderBy(asc(bugReportsInOps.createdAt), asc(bugReportsInOps.id))
+      .limit(Math.min(Math.max(limit, 1), 100));
+    return rows as StoredBugReport[];
+  };
+
+  const listByScreenshotUrl = async (sourceLocator: string) => {
+    const rows = await (
+      await getDbInstance()
+    )
+      .select({
+        id: bugReportsInOps.id,
+        publicId: bugReportsInOps.publicId,
+        createdAt: bugReportsInOps.createdAt,
+        status: bugReportsInOps.status,
+        closedAt: bugReportsInOps.closedAt,
+        expiresAt: bugReportsInOps.expiresAt,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+        body: bugReportsInOps.body,
+        clientMeta: bugReportsInOps.clientMeta,
+        source: bugReportsInOps.source,
+        userId: bugReportsInOps.userId,
+        entryId: bugReportsInOps.entryId,
+      })
+      .from(bugReportsInOps)
+      .where(eq(bugReportsInOps.screenshotUrl, sourceLocator));
+    return rows as StoredBugReport[];
+  };
+
+  const updateScreenshotUrl = async (
+    publicId: string,
+    sourceLocator: string,
+    targetLocator: string,
+  ) => {
+    const [row] = await (
+      await getDbInstance()
+    )
+      .update(bugReportsInOps)
+      .set({ screenshotUrl: targetLocator })
+      .where(
+        and(
+          eq(bugReportsInOps.publicId, publicId),
+          eq(bugReportsInOps.screenshotUrl, sourceLocator),
+        ),
+      )
+      .returning({
+        publicId: bugReportsInOps.publicId,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+      });
+    return row ?? null;
+  };
+
+  const updateScreenshotUrls = async (sourceLocator: string, targetLocator: string) => {
+    const rows = await (await getDbInstance())
+      .update(bugReportsInOps)
+      .set({ screenshotUrl: targetLocator })
+      .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+      .returning({
+        publicId: bugReportsInOps.publicId,
+        screenshotUrl: bugReportsInOps.screenshotUrl,
+      });
+    return rows;
+  };
+
+  const migrateAndDeleteStorageLocator = async (
+    sourceLocator: string,
+    targetLocator: string | (() => Promise<string>),
+    deleteSource: () => Promise<void>,
+    now = new Date(),
+  ): Promise<boolean> => {
+    const db = await getDbInstance();
+    const prepared = await db.transaction(async (tx) => {
+      // Status, retention, and insertion paths all fence a report public id
+      // before taking the screenshot-locator fence. Lock every affected id in
+      // a stable order before the locator so a shared legacy object cannot
+      // deadlock migration with a concurrent status update.
+      const affectedReports = await tx
+        .select({ publicId: bugReportsInOps.publicId })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+        .orderBy(asc(bugReportsInOps.publicId));
+      const lockedPublicIds = new Set<string>();
+      for (const report of affectedReports) {
+        await lockPublicId(tx, report.publicId);
+        lockedPublicIds.add(report.publicId);
+      }
+      // Pick up reports that committed after the inventory scan but before the
+      // locator fence. Lock them in the same public-id-before-locator order;
+      // any later insert must wait on the locator and will be rejected after
+      // this migration commits.
+      const preSourceReports = await tx
+        .select({ publicId: bugReportsInOps.publicId })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+        .orderBy(asc(bugReportsInOps.publicId));
+      for (const report of preSourceReports) {
+        if (lockedPublicIds.has(report.publicId)) continue;
+        await lockPublicId(tx, report.publicId);
+        lockedPublicIds.add(report.publicId);
+      }
+      await lockScreenshotLocators(tx, [sourceLocator]);
+      // Re-read after every shared fence is held. Cleanup may have removed the
+      // row that was visible in the initial inventory scan while migration was
+      // waiting on its public-id lock; never create a target for that stale
+      // candidate.
+      const liveReports = await tx
+        .select({ publicId: bugReportsInOps.publicId })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+        .orderBy(asc(bugReportsInOps.publicId));
+      if (
+        typeof targetLocator === 'function' &&
+        (liveReports.length === 0 ||
+          liveReports.some((report) => !lockedPublicIds.has(report.publicId)))
+      ) {
+        return false;
+      }
+      const [migration] = await tx
+        .select({
+          id: bugReportStorageMigrationsInOps.id,
+          targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+          deleteStartedAt: bugReportStorageMigrationsInOps.deleteStartedAt,
+          deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+        })
+        .from(bugReportStorageMigrationsInOps)
+        .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
+        .for('update')
+        .limit(1);
+      if (migration?.deletedAt) return false;
+      if (!migration && liveReports.length === 0) {
+        throw new DatabaseError('Storage migration record is missing');
+      }
+
+      // For a first attempt, keep the public-id and source-locator fences held
+      // while the internal endpoint copies the object. A retry with an
+      // existing migration record reuses its durable target and never copies
+      // the source a second time.
+      let effectiveTargetLocator = migration?.targetLocator;
+      if (!effectiveTargetLocator) {
+        effectiveTargetLocator =
+          typeof targetLocator === 'function' ? await targetLocator() : targetLocator;
+        if (!/^https:\/\//i.test(effectiveTargetLocator)) {
+          throw new DatabaseError('Storage migration returned an invalid target locator');
+        }
+      } else if (typeof targetLocator === 'string' && migration.targetLocator !== targetLocator) {
+        throw new DatabaseError('Storage migration target locator conflict');
+      }
+
+      let migrationId = migration?.id;
+      if (!migrationId) {
+        const [created] = await tx
+          .insert(bugReportStorageMigrationsInOps)
+          .values({
+            id: randomUUID(),
+            publicId: liveReports[0]?.publicId ?? affectedReports[0]?.publicId ?? 'unknown',
+            sourceLocator,
+            targetLocator: effectiveTargetLocator,
+          })
+          .onConflictDoNothing({ target: bugReportStorageMigrationsInOps.sourceLocator })
+          .returning({ id: bugReportStorageMigrationsInOps.id });
+        if (created) {
+          migrationId = created.id;
+        } else {
+          const [existing] = await tx
+            .select({
+              id: bugReportStorageMigrationsInOps.id,
+              targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+              deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+            })
+            .from(bugReportStorageMigrationsInOps)
+            .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
+            .for('update')
+            .limit(1);
+          if (!existing || existing.deletedAt) return false;
+          if (existing.targetLocator !== effectiveTargetLocator) {
+            throw new DatabaseError('Storage migration target locator conflict');
+          }
+          migrationId = existing.id;
+        }
+      }
+
+      await tx
+        .update(bugReportsInOps)
+        .set({ screenshotUrl: effectiveTargetLocator })
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator));
+      const remaining = await tx
+        .select({ id: bugReportsInOps.id })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, sourceLocator))
+        .limit(1);
+      if (remaining.length > 0) {
+        throw new DatabaseError('Storage migration compare-and-swap lost');
+      }
+
+      // Commit the target rewrite and durable pending-delete fence together.
+      // A failed or interrupted remote delete remains visible to the retry
+      // scan, while cleanup cannot claim the old locator in the gap.
+      await tx
+        .update(bugReportStorageMigrationsInOps)
+        .set({ deleteStartedAt: migration?.deleteStartedAt ?? now })
+        .where(eq(bugReportStorageMigrationsInOps.id, migrationId));
+      return true;
+    });
+    if (!prepared) return false;
+
+    await deleteSource();
+
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${sourceLocator}))`);
+      const [migration] = await tx
+        .select({
+          id: bugReportStorageMigrationsInOps.id,
+          deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+        })
+        .from(bugReportStorageMigrationsInOps)
+        .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
+        .for('update')
+        .limit(1);
+      if (!migration || migration.deletedAt) return;
+      const [marked] = await tx
+        .update(bugReportStorageMigrationsInOps)
+        .set({ deletedAt: now })
+        .where(
+          and(
+            eq(bugReportStorageMigrationsInOps.id, migration.id),
+            isNotNull(bugReportStorageMigrationsInOps.deleteStartedAt),
+            isNull(bugReportStorageMigrationsInOps.deletedAt),
+          ),
+        )
+        .returning({ id: bugReportStorageMigrationsInOps.id });
+      if (!marked) throw new DatabaseError('Storage migration completion marker was lost');
+    });
+    return true;
+  };
+
+  const recordStorageMigration = async (
+    publicId: string,
+    sourceLocator: string,
+    targetLocator: string,
+  ) => {
+    const [row] = await (
+      await getDbInstance()
+    )
+      .insert(bugReportStorageMigrationsInOps)
+      .values({
+        id: randomUUID(),
+        publicId,
+        sourceLocator,
+        targetLocator,
+      })
+      .onConflictDoNothing({ target: bugReportStorageMigrationsInOps.sourceLocator })
+      .returning({
+        publicId: bugReportStorageMigrationsInOps.publicId,
+        sourceLocator: bugReportStorageMigrationsInOps.sourceLocator,
+        targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+        deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+      });
+    if (row) return row;
+    const [existing] = await (
+      await getDbInstance()
+    )
+      .select({
+        publicId: bugReportStorageMigrationsInOps.publicId,
+        sourceLocator: bugReportStorageMigrationsInOps.sourceLocator,
+        targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+        deletedAt: bugReportStorageMigrationsInOps.deletedAt,
+      })
+      .from(bugReportStorageMigrationsInOps)
+      .where(eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator))
+      .limit(1);
+    return existing ?? null;
+  };
+
+  const listPendingStorageDeletes = async (
+    limit: number,
+    after?: BugReportStorageDeletionCursor,
+  ) => {
+    const cursor = after
+      ? or(
+          gt(bugReportStorageMigrationsInOps.migratedAt, after.migratedAt),
+          and(
+            eq(bugReportStorageMigrationsInOps.migratedAt, after.migratedAt),
+            gt(bugReportStorageMigrationsInOps.id, after.id),
+          ),
+        )
+      : undefined;
+    return (await (
+      await getDbInstance()
+    )
+      .select({
+        id: bugReportStorageMigrationsInOps.id,
+        publicId: bugReportStorageMigrationsInOps.publicId,
+        sourceLocator: bugReportStorageMigrationsInOps.sourceLocator,
+        targetLocator: bugReportStorageMigrationsInOps.targetLocator,
+        migratedAt: bugReportStorageMigrationsInOps.migratedAt,
+      })
+      .from(bugReportStorageMigrationsInOps)
+      .where(
+        cursor
+          ? and(isNull(bugReportStorageMigrationsInOps.deletedAt), cursor)
+          : isNull(bugReportStorageMigrationsInOps.deletedAt),
+      )
+      .orderBy(
+        asc(bugReportStorageMigrationsInOps.migratedAt),
+        asc(bugReportStorageMigrationsInOps.id),
+      )
+      .limit(Math.min(Math.max(limit, 1), 100))) as Array<{
+      id: string;
+      publicId: string;
+      sourceLocator: string;
+      targetLocator: string;
+      migratedAt: Date;
+    }>;
+  };
+
+  const markStorageDeleted = async (sourceLocator: string, now = new Date()) => {
+    await (
+      await getDbInstance()
+    )
+      .update(bugReportStorageMigrationsInOps)
+      .set({ deletedAt: now })
+      .where(
+        and(
+          eq(bugReportStorageMigrationsInOps.sourceLocator, sourceLocator),
+          isNull(bugReportStorageMigrationsInOps.deletedAt),
+        ),
+      );
+  };
+
+  const claimForDeletion = async (
+    report: StoredBugReport,
+    now = new Date(),
+  ): Promise<BugReportDeletionClaim | null> => {
+    const db = await getDbInstance();
+    return db.transaction(async (tx) => {
+      // Keep the public-ID allocation lock before taking the live-row lock;
+      // insert and retirement therefore share one lock order and cannot race
+      // a generated ID through the deletion window.
+      await lockPublicId(tx, report.publicId);
+      const [current] = await tx
+        .select({
+          id: bugReportsInOps.id,
+          publicId: bugReportsInOps.publicId,
+          createdAt: bugReportsInOps.createdAt,
+          status: bugReportsInOps.status,
+          closedAt: bugReportsInOps.closedAt,
+          expiresAt: bugReportsInOps.expiresAt,
+          scrubbedAt: bugReportsInOps.scrubbedAt,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+          screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+          screenshotDeletedAt: bugReportsInOps.screenshotDeletedAt,
+          body: bugReportsInOps.body,
+          clientMeta: bugReportsInOps.clientMeta,
+          source: bugReportsInOps.source,
+          userId: bugReportsInOps.userId,
+          entryId: bugReportsInOps.entryId,
+          submissionId: bugReportsInOps.submissionId,
+        })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, report.id), lte(bugReportsInOps.expiresAt, now)))
+        .for('update')
+        .limit(1);
+      if (!current) return null;
+
+      const [existingClaim] = await tx
+        .select({
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+          submissionId: bugReportRetentionBackupsInOps.submissionId,
+          screenshotObjectKey: bugReportRetentionBackupsInOps.screenshotObjectKey,
+          screenshotCreatedAt: bugReportRetentionBackupsInOps.screenshotCreatedAt,
+          screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, current.id))
+        .limit(1);
+
+      if (current.screenshotObjectKey && !current.screenshotDeletedAt) {
+        // Move the exact private key into a scrubbed durable inventory before
+        // deleting the report row. The private screenshot worker can then
+        // retry the object independently of report-body retention.
+        const inventoryKey = existingClaim?.screenshotObjectKey ?? current.screenshotObjectKey;
+        const inventorySubmissionId =
+          existingClaim?.submissionId ??
+          current.submissionId ??
+          submissionIdFromScreenshotObjectKey(inventoryKey);
+        if (
+          existingClaim?.screenshotObjectKey &&
+          existingClaim.screenshotObjectKey !== inventoryKey
+        ) {
+          throw new DatabaseError('Bug report screenshot inventory key conflict');
+        }
+        if (
+          existingClaim &&
+          (!existingClaim.screenshotObjectKey || !existingClaim.screenshotCreatedAt)
+        ) {
+          await tx
+            .update(bugReportRetentionBackupsInOps)
+            .set({
+              snapshot: { screenshotObjectKey: inventoryKey },
+              submissionId: inventorySubmissionId,
+              screenshotObjectKey: inventoryKey,
+              screenshotCreatedAt: current.createdAt,
+            })
+            .where(eq(bugReportRetentionBackupsInOps.id, current.id));
+        } else if (!existingClaim) {
+          await tx
+            .insert(bugReportRetentionBackupsInOps)
+            .values({
+              id: current.id,
+              publicId: current.publicId,
+              snapshot: { screenshotObjectKey: inventoryKey },
+              submissionId: inventorySubmissionId,
+              screenshotObjectKey: inventoryKey,
+              screenshotCreatedAt: current.createdAt,
+            })
+            .onConflictDoNothing();
+        }
+        const [deleted] = await tx
+          .delete(bugReportsInOps)
+          .where(and(eq(bugReportsInOps.id, current.id), lte(bugReportsInOps.expiresAt, now)))
+          .returning({ id: bugReportsInOps.id });
+        if (!deleted) return null;
+        return {
+          report: { ...(current as StoredBugReport), screenshotUrl: null },
+          screenshotUrl: null,
+          completed: true,
+        };
+      }
+
+      const screenshotUrl = existingClaim
+        ? existingClaim.screenshotDeletedAt
+          ? null
+          : screenshotUrlFromSnapshot(existingClaim.snapshot)
+        : current.screenshotUrl;
+      if (existingClaim && !existingClaim.submissionId && current.submissionId) {
+        await tx
+          .update(bugReportRetentionBackupsInOps)
+          .set({ submissionId: current.submissionId })
+          .where(eq(bugReportRetentionBackupsInOps.id, current.id));
+      }
+      if (!existingClaim) {
+        await tx
+          .insert(bugReportRetentionBackupsInOps)
+          .values({
+            id: current.id,
+            publicId: current.publicId,
+            // The report body and diagnostics are not part of the deletion
+            // retry contract. Keep only the exact locator until the remote
+            // delete is confirmed, then scrub it to a digest below.
+            snapshot: current.screenshotUrl ? { screenshotUrl: current.screenshotUrl } : {},
+            submissionId: current.submissionId,
+          })
+          .onConflictDoNothing();
+      }
+      if (screenshotUrl) {
+        await tx
+          .update(bugReportRetentionBackupsInOps)
+          .set({ snapshot: { screenshotUrl } })
+          .where(eq(bugReportRetentionBackupsInOps.id, current.id));
+      }
+      if (current.screenshotUrl !== null) {
+        await tx
+          .update(bugReportsInOps)
+          .set({
+            // The remote delete may be unavailable for an extended period.
+            // Keep only the minimum row needed to drive the retry cursor;
+            // report text, identity, entry, and diagnostics must not remain
+            // past their retention deadline while storage is failing.
+            body: SCRUBBED_BUG_REPORT_BODY,
+            userId: null,
+            entryId: null,
+            clientMeta: {},
+            screenshotUrl: null,
+            scrubbedAt: now,
+          })
+          .where(eq(bugReportsInOps.id, current.id));
+      }
+      return {
+        report: { ...(current as StoredBugReport), screenshotUrl: null },
+        screenshotUrl,
+      };
+    });
+  };
+
+  type BugReportDeletionPreparation =
+    | { kind: 'pending' }
+    | { kind: 'delete'; screenshotUrl: string }
+    | { kind: 'complete' };
+
+  const scrubRetentionBackup = async (
+    tx: DbOrTransaction,
+    reportId: string,
+    screenshotUrl: string | null,
+  ) => {
+    await tx
+      .update(bugReportRetentionBackupsInOps)
+      .set({
+        snapshot: screenshotUrl
+          ? { screenshotUrlHash: hashBugReportScreenshotLocator(screenshotUrl) }
+          : {},
+      })
+      .where(eq(bugReportRetentionBackupsInOps.id, reportId));
+  };
+
+  const prepareClaimedDeletion = async (
+    reportId: string,
+    now = new Date(),
+  ): Promise<BugReportDeletionPreparation | null> => {
+    const db = await getDbInstance();
+    return db.transaction(async (tx) => {
+      const [candidate] = await tx
+        .select({
+          id: bugReportsInOps.id,
+          publicId: bugReportsInOps.publicId,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+        })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .limit(1);
+      if (!candidate) return null;
+      await lockPublicId(tx, candidate.publicId);
+
+      const [observedClaim] = await tx
+        .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+        .limit(1);
+      await lockScreenshotLocators(tx, [
+        candidate.screenshotUrl,
+        observedClaim ? screenshotUrlFromSnapshot(observedClaim.snapshot) : null,
+      ]);
+
+      const [current] = await tx
+        .select({ id: bugReportsInOps.id })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .for('update')
+        .limit(1);
+      if (!current) return null;
+      const [claim] = await tx
+        .select({
+          id: bugReportRetentionBackupsInOps.id,
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotDeleteStartedAt: bugReportRetentionBackupsInOps.screenshotDeleteStartedAt,
+          screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+        .for('update')
+        .limit(1);
+      if (!claim) return null;
+
+      const privateScreenshotKey = screenshotObjectKeyFromSnapshot(claim.snapshot);
+      if (privateScreenshotKey && !screenshotWasDeletedInSnapshot(claim.snapshot)) {
+        // The private screenshot retention worker still owns this object. Do
+        // not remove the report row or its exact-key inventory yet.
+        return { kind: 'pending' };
+      }
+
+      const screenshotUrl = screenshotUrlFromSnapshot(claim.snapshot);
+      if (screenshotUrl) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
+      }
+
+      if (claim.screenshotDeletedAt || !screenshotUrl) {
+        const [deleted] = await tx
+          .delete(bugReportsInOps)
+          .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+          .returning({ id: bugReportsInOps.id });
+        if (!deleted) return null;
+        await scrubRetentionBackup(tx, reportId, screenshotUrl);
+        return { kind: 'complete' };
+      }
+
+      if (claim.screenshotDeleteStartedAt) return { kind: 'delete', screenshotUrl };
+
+      const [reference] = await tx
+        .select({ id: bugReportsInOps.id })
+        .from(bugReportsInOps)
+        .where(eq(bugReportsInOps.screenshotUrl, screenshotUrl))
+        .limit(1);
+      if (reference) {
+        const [deleted] = await tx
+          .delete(bugReportsInOps)
+          .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+          .returning({ id: bugReportsInOps.id });
+        if (!deleted) return null;
+        // The object remains protected by the other live report; scrub this
+        // expired report's backup without creating a deletion tombstone.
+        await scrubRetentionBackup(tx, reportId, null);
+        return { kind: 'complete' };
+      }
+
+      await tx
+        .update(bugReportRetentionBackupsInOps)
+        .set({ screenshotDeleteStartedAt: now })
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId));
+      return { kind: 'delete', screenshotUrl };
+    });
+  };
+
+  const completeClaimedDeletion = async (reportId: string, now = new Date()): Promise<boolean> => {
+    const db = await getDbInstance();
+    return db.transaction(async (tx) => {
+      const [candidate] = await tx
+        .select({
+          publicId: bugReportsInOps.publicId,
+          screenshotUrl: bugReportsInOps.screenshotUrl,
+        })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .limit(1);
+      if (!candidate) return false;
+      await lockPublicId(tx, candidate.publicId);
+
+      const [observedClaim] = await tx
+        .select({ snapshot: bugReportRetentionBackupsInOps.snapshot })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+        .limit(1);
+      await lockScreenshotLocators(tx, [
+        candidate.screenshotUrl,
+        observedClaim ? screenshotUrlFromSnapshot(observedClaim.snapshot) : null,
+      ]);
+
+      const [current] = await tx
+        .select({ id: bugReportsInOps.id })
+        .from(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .for('update')
+        .limit(1);
+      if (!current) return false;
+      const [claim] = await tx
+        .select({
+          id: bugReportRetentionBackupsInOps.id,
+          snapshot: bugReportRetentionBackupsInOps.snapshot,
+          screenshotDeleteStartedAt: bugReportRetentionBackupsInOps.screenshotDeleteStartedAt,
+          screenshotDeletedAt: bugReportRetentionBackupsInOps.screenshotDeletedAt,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(eq(bugReportRetentionBackupsInOps.id, reportId))
+        .for('update')
+        .limit(1);
+      if (!claim) return false;
+      const privateScreenshotKey = screenshotObjectKeyFromSnapshot(claim.snapshot);
+      if (privateScreenshotKey && !screenshotWasDeletedInSnapshot(claim.snapshot)) return false;
+      const screenshotUrl = screenshotUrlFromSnapshot(claim.snapshot);
+      if (screenshotUrl) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${screenshotUrl}))`);
+        if (!claim.screenshotDeletedAt && !claim.screenshotDeleteStartedAt) return false;
+        if (!claim.screenshotDeletedAt) {
+          await tx
+            .update(bugReportRetentionBackupsInOps)
+            .set({ screenshotDeletedAt: now })
+            .where(eq(bugReportRetentionBackupsInOps.id, reportId));
+        }
+      }
+      const [deleted] = await tx
+        .delete(bugReportsInOps)
+        .where(and(eq(bugReportsInOps.id, reportId), lte(bugReportsInOps.expiresAt, now)))
+        .returning({ id: bugReportsInOps.id });
+      if (!deleted) return false;
+      await scrubRetentionBackup(tx, reportId, screenshotUrl);
+      return true;
+    });
+  };
+
+  const finalizeClaimedDeletion = async (
+    reportId: string,
+    now = new Date(),
+    beforeDelete?: () => Promise<boolean>,
+  ): Promise<boolean> => {
+    const prepared = await prepareClaimedDeletion(reportId, now);
+    if (!prepared) return false;
+    if (prepared.kind === 'pending') return false;
+    if (prepared.kind === 'complete') {
+      return prepared.kind === 'complete';
+    }
+    if (!beforeDelete || !(await beforeDelete())) return false;
+    return completeClaimedDeletion(reportId, now);
+  };
+
   const listExpiredScreenshots = async (
     cutoff: Date,
     limit: number,
     offset = 0,
   ): Promise<ExpiredBugReportScreenshot[]> => {
     const db = await getDbInstance();
-    return db
-      .select({
-        id: bugReportsInOps.id,
-        screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
-        createdAt: bugReportsInOps.createdAt,
-      })
-      .from(bugReportsInOps)
-      .where(
-        and(
-          lte(bugReportsInOps.createdAt, cutoff),
-          isNotNull(bugReportsInOps.screenshotObjectKey),
-          sql`${bugReportsInOps.screenshotDeletedAt} IS NULL`,
-        ),
+    const scanLimit = Math.min(Math.max(offset + limit, limit), 1_100);
+    const [liveRows, backupRows] = await Promise.all([
+      db
+        .select({
+          id: bugReportsInOps.id,
+          screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+          createdAt: bugReportsInOps.createdAt,
+        })
+        .from(bugReportsInOps)
+        .where(
+          and(
+            lte(bugReportsInOps.createdAt, cutoff),
+            isNotNull(bugReportsInOps.screenshotObjectKey),
+            sql`${bugReportsInOps.screenshotDeletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(asc(bugReportsInOps.createdAt), asc(bugReportsInOps.id))
+        .limit(scanLimit),
+      db
+        .select({
+          id: bugReportRetentionBackupsInOps.id,
+          screenshotObjectKey: bugReportRetentionBackupsInOps.screenshotObjectKey,
+          createdAt: bugReportRetentionBackupsInOps.screenshotCreatedAt,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(
+          and(
+            lte(bugReportRetentionBackupsInOps.screenshotCreatedAt, cutoff),
+            isNotNull(bugReportRetentionBackupsInOps.screenshotObjectKey),
+            sql`${bugReportRetentionBackupsInOps.screenshotDeletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(
+          asc(bugReportRetentionBackupsInOps.screenshotCreatedAt),
+          asc(bugReportRetentionBackupsInOps.id),
+        )
+        .limit(scanLimit),
+    ]);
+    return [...liveRows, ...backupRows]
+      .flatMap((row) =>
+        row.screenshotObjectKey && row.createdAt
+          ? [{ id: row.id, screenshotObjectKey: row.screenshotObjectKey, createdAt: row.createdAt }]
+          : [],
       )
-      .orderBy(asc(bugReportsInOps.createdAt))
-      .limit(limit)
-      .offset(offset) as Promise<ExpiredBugReportScreenshot[]>;
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      )
+      .slice(offset, offset + limit);
   };
 
   const listActiveScreenshotKeys = async (limit: number, offset = 0): Promise<string[]> => {
     const db = await getDbInstance();
-    const rows = await db
-      .select({ screenshotObjectKey: bugReportsInOps.screenshotObjectKey })
-      .from(bugReportsInOps)
-      .where(
-        and(
-          isNotNull(bugReportsInOps.screenshotObjectKey),
-          sql`${bugReportsInOps.screenshotDeletedAt} IS NULL`,
-        ),
+    const scanLimit = Math.min(Math.max(offset + limit, limit), 1_100);
+    const [liveRows, backupRows] = await Promise.all([
+      db
+        .select({
+          screenshotObjectKey: bugReportsInOps.screenshotObjectKey,
+          createdAt: bugReportsInOps.createdAt,
+          id: bugReportsInOps.id,
+        })
+        .from(bugReportsInOps)
+        .where(
+          and(
+            isNotNull(bugReportsInOps.screenshotObjectKey),
+            sql`${bugReportsInOps.screenshotDeletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(asc(bugReportsInOps.createdAt), asc(bugReportsInOps.id))
+        .limit(scanLimit),
+      db
+        .select({
+          screenshotObjectKey: bugReportRetentionBackupsInOps.screenshotObjectKey,
+          createdAt: bugReportRetentionBackupsInOps.screenshotCreatedAt,
+          id: bugReportRetentionBackupsInOps.id,
+        })
+        .from(bugReportRetentionBackupsInOps)
+        .where(
+          and(
+            isNotNull(bugReportRetentionBackupsInOps.screenshotObjectKey),
+            sql`${bugReportRetentionBackupsInOps.screenshotDeletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(
+          asc(bugReportRetentionBackupsInOps.screenshotCreatedAt),
+          asc(bugReportRetentionBackupsInOps.id),
+        )
+        .limit(scanLimit),
+    ]);
+    const keys = [...liveRows, ...backupRows]
+      .flatMap((row) =>
+        row.screenshotObjectKey && row.createdAt
+          ? [{ id: row.id, screenshotObjectKey: row.screenshotObjectKey, createdAt: row.createdAt }]
+          : [],
       )
-      .orderBy(asc(bugReportsInOps.createdAt))
-      .limit(limit)
-      .offset(offset);
-    return rows.flatMap((row) => (row.screenshotObjectKey ? [row.screenshotObjectKey] : []));
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      )
+      .map((row) => row.screenshotObjectKey);
+    return [...new Set(keys)].slice(offset, offset + limit);
   };
 
   const markScreenshotDeleted = async (id: string, deletedAt: Date): Promise<void> => {
     const db = await getDbInstance();
-    await db
-      .update(bugReportsInOps)
-      .set({ screenshotObjectKey: null, screenshotDeletedAt: deletedAt })
-      .where(eq(bugReportsInOps.id, id));
+    const mark = async (connection: DbOrTransaction) => {
+      await connection
+        .update(bugReportsInOps)
+        .set({ screenshotObjectKey: null, screenshotDeletedAt: deletedAt })
+        .where(eq(bugReportsInOps.id, id));
+      await connection
+        .update(bugReportRetentionBackupsInOps)
+        .set({
+          screenshotObjectKey: null,
+          screenshotCreatedAt: null,
+          screenshotDeletedAt: deletedAt,
+          snapshot: {},
+        })
+        .where(
+          and(
+            eq(bugReportRetentionBackupsInOps.id, id),
+            isNotNull(bugReportRetentionBackupsInOps.screenshotObjectKey),
+          ),
+        );
+    };
+    if ('transaction' in db) await db.transaction(mark);
+    else await mark(db);
   };
 
-  return { insert, listExpiredScreenshots, listActiveScreenshotKeys, markScreenshotDeleted };
+  return {
+    insert,
+    findByPublicId,
+    updateStatus,
+    listExpired,
+    listWithScreenshots,
+    listByScreenshotUrl,
+    updateScreenshotUrl,
+    updateScreenshotUrls,
+    migrateAndDeleteStorageLocator,
+    recordStorageMigration,
+    listPendingStorageDeletes,
+    markStorageDeleted,
+    claimForDeletion,
+    finalizeClaimedDeletion,
+    listExpiredScreenshots,
+    listActiveScreenshotKeys,
+    markScreenshotDeleted,
+  };
 };
 
 export const bugReportRepository = createBugReportRepository();
+
+export type BugReportRepository = ReturnType<typeof createBugReportRepository>;

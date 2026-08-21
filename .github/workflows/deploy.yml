@@ -110,7 +110,6 @@ jobs:
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 15m
-          script_stop: true
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
@@ -126,11 +125,11 @@ jobs:
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
                 if [ "$services_start_attempted" = true ]; then
                   echo "Data deployment failed after starting new services; stopping them for operator recovery" >&2
-                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker || true
+                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker content-worker || true
                 fi
                 if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
                   echo "Data deployment failed before migration; restoring previous API and worker image" >&2
-                  APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
+                  APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker content-worker || true
                 elif [ "$migration_started" = true ]; then
                   echo "Data deployment failed after migration started; leaving services stopped for operator recovery" >&2
                 fi
@@ -161,6 +160,35 @@ jobs:
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
             env_file=${ENV_FILE:-.env.deploy}
             migration_env_file=${MIGRATION_ENV_FILE:-.env.migrate}
+            read_env_setting() {
+              key=$1
+              file=$2
+              value=$(awk -v key="$key" '
+                $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+                  sub("^[[:space:]]*" key "[[:space:]]*=", "", $0)
+                  print
+                  exit
+                }
+              ' "$file")
+              value=${value#\"}
+              value=${value%\"}
+              value=${value#\'}
+              value=${value%\'}
+              printf '%s' "$value"
+            }
+            if [ -z "${DATABASE_BACKUP_DIR:-}" ]; then
+              DATABASE_BACKUP_DIR=$(read_env_setting DATABASE_BACKUP_DIR "$env_file")
+            fi
+            if [ -z "${DATABASE_BACKUP_KEEP:-}" ]; then
+              DATABASE_BACKUP_KEEP=$(read_env_setting DATABASE_BACKUP_KEEP "$env_file")
+            fi
+            if [ -z "${DATABASE_BACKUP_PG_MAJOR:-}" ]; then
+              DATABASE_BACKUP_PG_MAJOR=$(read_env_setting DATABASE_BACKUP_PG_MAJOR "$env_file")
+            fi
+            export DATABASE_BACKUP_DIR=${DATABASE_BACKUP_DIR:-/var/backups/letletme-data}
+            export DATABASE_BACKUP_KEEP=${DATABASE_BACKUP_KEEP:-7}
+            export DATABASE_BACKUP_PG_MAJOR=${DATABASE_BACKUP_PG_MAJOR:-15}
+            export DEPLOY_SHA
             export ENV_FILE="$env_file"
             export MIGRATION_ENV_FILE="$migration_env_file"
             test -f "$env_file"
@@ -182,7 +210,8 @@ jobs:
               test -n "$old_image"
             fi
 
-            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
+            export APP_IMAGE="$IMAGE_REF"
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker content-worker migration backup
             finish_stage
             start_stage preflight
             echo "deploy preflight: image pulled"
@@ -194,6 +223,8 @@ jobs:
             fi
             echo "deploy preflight: using the configured Data runtime URL without rewriting it"
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun validate-env.ts --probe-bug-report-storage
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/wait-for-migration-login.ts
             finish_stage
@@ -202,17 +233,18 @@ jobs:
             migration_started=false
             restore_before_migration() {
               if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
-                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker || true
+                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker content-worker || true
               fi
             }
             trap restore_before_migration ERR
 
             start_stage quiescence
-            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker content-worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/assert-queue-quiescence.ts --database-only
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun scripts/assert-queue-quiescence.ts --redis-only
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration run --rm -T backup
             finish_stage
             migration_started=true
             start_stage migration
@@ -231,35 +263,9 @@ jobs:
             finish_stage
             start_stage serviceReady
             services_start_attempted=true
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
-
-            for attempt in $(seq 1 30); do
-              if curl --fail --silent http://127.0.0.1:3000/health >/dev/null \
-                && curl --fail --silent http://127.0.0.1:3000/ready >/dev/null; then
-                break
-              fi
-              if [ "$attempt" -eq 30 ]; then
-                docker compose ps
-                docker logs --tail 100 "$(docker compose ps -q api)" || true
-                exit 1
-              fi
-              sleep 2
-            done
-
-            worker_container=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)
-            test -n "$worker_container"
-            for attempt in $(seq 1 30); do
-              status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$worker_container")
-              if [ "$status" = healthy ]; then
-                break
-              fi
-              if [ "$attempt" -eq 30 ]; then
-                docker compose ps
-                docker logs --tail 100 "$worker_container" || true
-                exit 1
-              fi
-              sleep 2
-            done
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker content-worker
+            PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
+              scripts/verify-runtime-health.sh
 
             finish_stage
             docker compose ps

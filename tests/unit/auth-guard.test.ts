@@ -44,7 +44,12 @@ describe('mutation auth policy', () => {
 
   test('lets content role hashes authenticate briefing mutations', () => {
     expect(shouldRequireApiKey('POST', '/content/sources')).toBe(false);
-    expect(shouldRequireApiKey('POST', '/content/briefing/week/publish')).toBe(false);
+    expect(
+      shouldRequireApiKey(
+        'POST',
+        '/content/briefing/week/editions/00000000-0000-4000-8000-000000000000/publish',
+      ),
+    ).toBe(false);
     expect(shouldRequireApiKey('POST', '/content/editorial/candidates')).toBe(false);
     expect(shouldRequireApiKey('GET', '/content/briefing/week/active')).toBe(false);
   });

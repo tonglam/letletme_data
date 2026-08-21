@@ -36,6 +36,20 @@ export interface EventLive {
   readonly inDreamTeam: boolean | null;
   readonly totalPoints: number;
   readonly createdAt: Date | null;
+  /** Revision-pinned fixture-grain explain facts published with live data. */
+  readonly fixtureBreakdown?: readonly EventLiveFixtureBreakdown[];
+}
+
+export interface EventLiveFixtureBreakdownStat {
+  readonly identifier: string;
+  readonly value: number;
+  readonly points: number;
+  readonly pointsModification: number | null;
+}
+
+export interface EventLiveFixtureBreakdown {
+  readonly fixtureId: number;
+  readonly stats: readonly EventLiveFixtureBreakdownStat[];
 }
 
 export type EventLives = readonly EventLive[];
@@ -74,6 +88,21 @@ export const EventLiveSchema = z.object({
   inDreamTeam: z.boolean().nullable(),
   totalPoints: z.number().int(),
   createdAt: z.date().nullable(),
+  fixtureBreakdown: z
+    .array(
+      z.object({
+        fixtureId: z.number().int().positive(),
+        stats: z.array(
+          z.object({
+            identifier: z.string().min(1),
+            value: z.number().finite(),
+            points: z.number().finite(),
+            pointsModification: z.number().finite().nullable(),
+          }),
+        ),
+      }),
+    )
+    .optional(),
 });
 
 export const EventLivesSchema = z.array(EventLiveSchema);

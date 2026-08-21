@@ -9,9 +9,10 @@ import {
 import { seasonRepository } from '../repositories/seasons';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { syncOperationsRepository } from '../repositories/sync-operations';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import {
-  commitCoreSnapshotPublication,
+  persistCoreSnapshotPublication,
+  publishCoreSnapshotPublication,
   readCoreSnapshotOrderingTimestamp,
   recoverPendingCoreSnapshotPublication,
 } from './core-snapshot-publication.service';
@@ -114,7 +115,7 @@ export async function syncCoreSnapshot(
   });
 
   let preparedPublicationId: string | null = null;
-  let commitInvoked = false;
+  let persistenceCommitted = false;
   try {
     const sourceCheckedAt = await dependencies.readOrderingTimestamp();
     const [bootstrap, fixtures] = await Promise.all([
@@ -143,7 +144,7 @@ export async function syncCoreSnapshot(
       },
     });
 
-    return await withMutationConflictGuard(
+    const persisted = await withMutationScopes(
       {
         queueName: 'data-sync',
         jobName: 'core-snapshot',
@@ -151,24 +152,30 @@ export async function syncCoreSnapshot(
       },
       async () => {
         dependencies.onMilestone?.('locked');
-        commitInvoked = true;
-        const committed = await commitCoreSnapshotPublication(snapshot, {
+        return persistCoreSnapshotPublication(snapshot, {
           revision: prepared.revision,
           publicationId: prepared.publicationId,
           sourceRunId,
           sourceCheckedAt,
         });
-        dependencies.onMilestone?.('persisted');
-        if (committed.status === 'stale') return result(snapshot, false);
-        dependencies.onMilestone?.('published');
-        return result(snapshot, true, {
-          publicationId: prepared.publicationId,
-          revision: prepared.revision,
-        });
       },
     );
+    persistenceCommitted = true;
+    dependencies.onMilestone?.('persisted');
+    const committed = await publishCoreSnapshotPublication(persisted, {
+      revision: prepared.revision,
+      publicationId: prepared.publicationId,
+      sourceRunId,
+      sourceCheckedAt,
+    });
+    if (committed.status === 'stale') return result(snapshot, false);
+    dependencies.onMilestone?.('published');
+    return result(snapshot, true, {
+      publicationId: prepared.publicationId,
+      revision: prepared.revision,
+    });
   } catch (error) {
-    if (preparedPublicationId && !commitInvoked) {
+    if (preparedPublicationId && !persistenceCommitted) {
       await syncOperationsRepository
         .failPublication(preparedPublicationId, error)
         .catch(() => undefined);

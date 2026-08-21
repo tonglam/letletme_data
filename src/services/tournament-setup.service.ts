@@ -1,4 +1,5 @@
 import {
+  tournamentEntryCoreScopes,
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
@@ -11,15 +12,17 @@ import {
   type TournamentSetupStatus,
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
+import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
+import { tournamentSetupIssueRepository } from '../repositories/tournament-setup-issues';
 import { NotFoundError } from '../utils/errors';
 import { getFplRequestMetricsSnapshot } from '../utils/fpl-request-metrics';
 import { getJobLogContext } from '../utils/job-log-context';
 import { logError, logInfo } from '../utils/logger';
-import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 import { auditTournamentSetup } from './tournament-audit.service';
 import {
@@ -27,6 +30,8 @@ import {
   enrichTournamentHistory,
   ensureTournamentCoreResults,
   syncTournamentEntryDetails,
+  normalizeTournamentSetupIssue,
+  tournamentSetupIssueFromAuditMessage,
   type TournamentCoreSyncPlan,
   type TournamentEnrichmentPlan,
   type TournamentEntrySyncPlan,
@@ -37,22 +42,6 @@ import { rebuildTournamentStructure } from './tournament-structure.service';
 import { syncOfficialH2HTournament } from './tournament-official-h2h.service';
 
 export { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
-
-function formatSetupWarning(issues: TournamentSetupIssue[]): string | null {
-  if (issues.length === 0) {
-    return null;
-  }
-
-  const uniqueMessages = [...new Set(issues.map((issue) => issue.message.trim()).filter(Boolean))];
-  if (uniqueMessages.length === 0) {
-    return null;
-  }
-
-  const preview = uniqueMessages.slice(0, 5).join('; ');
-  const overflow =
-    uniqueMessages.length > 5 ? `; and ${uniqueMessages.length - 5} more warning(s)` : '';
-  return `Setup completed with warnings: ${preview}${overflow}`;
-}
 
 function isBlockingCoreAuditIssue(issue: string): boolean {
   // League metadata enriches profiles but is not part of the scoring barrier.
@@ -103,20 +92,14 @@ function elapsedBetween(start: string | null | undefined, end: string | null | u
 export async function finalizePublishedTournamentSetup(
   season: FplSeasonRef,
   tournamentId: number,
-  warningMessage: string | null,
-  warningCount: number,
+  warningMessageOrCount: string | null | number = null,
+  warningCount = typeof warningMessageOrCount === 'number' ? warningMessageOrCount : 0,
 ): Promise<void> {
   // Resume first. If that transition fails, the setup remains processing and
   // the worker/watchdog can retry instead of leaving an inactive tournament
   // terminally marked ready.
   await tournamentRosterRepository.markReadyAndResume(season, tournamentId);
-  await tournamentInfoRepository.markSetupResult(
-    season,
-    tournamentId,
-    'ready',
-    warningMessage,
-    warningCount,
-  );
+  await tournamentInfoRepository.markSetupResult(season, tournamentId, 'ready', null, warningCount);
 }
 
 export async function setupTournamentStructure(
@@ -137,6 +120,7 @@ export async function setupTournamentStructure(
   let enrichmentPlan = { ...EMPTY_ENRICHMENT_PLAN };
   let entryCount = 0;
   let eventCount = 0;
+  let setupEntryIds: number[] = [];
   let outcome: TournamentSetupAttemptOutcome = 'failed_before_standings';
   let failureCode: string | null = null;
   logInfo('Starting tournament setup', { tournamentId });
@@ -209,6 +193,7 @@ export async function setupTournamentStructure(
     phase: TournamentSetupPhase,
     completedUnits: number,
     totalUnits: number,
+    progressIndeterminate = false,
   ) =>
     tournamentInfoRepository.markSetupProgress(
       season,
@@ -217,6 +202,7 @@ export async function setupTournamentStructure(
       completedUnits,
       totalUnits,
       progressMarker,
+      progressIndeterminate,
     );
 
   try {
@@ -226,6 +212,7 @@ export async function setupTournamentStructure(
       season,
       tournamentId,
     );
+    setupEntryIds = entryIds;
     entryCount = entryIds.length;
     const finalizedEvent = await eventRepository.findLatestFinalized(season);
     const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
@@ -235,12 +222,12 @@ export async function setupTournamentStructure(
 
     // Entry FPL sync: entry-core only — do NOT hold tournament-structure:global
     // across potentially long external HTTP (FP-07 Codex P1).
-    const entrySyncIssues = await withMutationConflictGuard(
+    const entrySyncIssues = await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',
         tournamentId,
-        scopes: ['entry-core:all'],
+        scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
       },
       () =>
         syncTournamentEntryDetails(season, entryIds, {
@@ -280,7 +267,7 @@ export async function setupTournamentStructure(
     );
 
     // Structure rebuild: per-tournament + global (C4 mutual exclusion with results).
-    await withMutationConflictGuard(
+    await withMutationScopes(
       {
         queueName: 'tournament-setup',
         jobName: 'tournament-setup',
@@ -372,7 +359,7 @@ export async function setupTournamentStructure(
     });
 
     phaseStartedAtMs = performance.now();
-    await markSetupProgress('enriching_history', 0, 0);
+    await markSetupProgress('enriching_history', 0, 0, true);
     setupIssues.push(
       ...(await enrichTournamentHistory(season, tournamentId, entryIds, window, {
         onPlan: (plan) => {
@@ -392,12 +379,6 @@ export async function setupTournamentStructure(
     phaseStartedAtMs = performance.now();
     await markSetupProgress('finalizing', 0, 1);
     const audit = await auditTournamentSetup(season, tournament, window);
-    setupIssues.push(
-      ...audit.issues.map((message) => ({
-        scope: 'event-results' as const,
-        message: `Audit: ${message}`,
-      })),
-    );
     await refreshTournamentMaterializedViews();
     await markSetupProgress('finalizing', 1, 1);
     phaseDurationsMs.finalizing = Math.round(performance.now() - phaseStartedAtMs);
@@ -408,20 +389,35 @@ export async function setupTournamentStructure(
       warningCount: setupIssues.length,
     });
 
-    const warningMessage = formatSetupWarning(setupIssues);
-    await finalizePublishedTournamentSetup(
+    const auditIssues = audit.issues.map((message) =>
+      tournamentSetupIssueFromAuditMessage(message, {
+        affectedEntryIds: message.startsWith('missing entry_league_infos')
+          ? audit.missingEntryLeagueInfoIds
+          : message.startsWith('missing entry_infos')
+            ? audit.missingEntryInfoIds
+            : entryIds,
+      }),
+    );
+    setupIssues.push(...auditIssues);
+    const persistedIssues = setupIssues.map(normalizeTournamentSetupIssue);
+    const issueState = await tournamentSetupIssueRepository.sync(
       season,
       tournamentId,
-      warningMessage,
-      setupIssues.length,
+      persistedIssues,
     );
+    const unresolvedIssues = await tournamentSetupIssueRepository.listUnresolved(
+      season,
+      tournamentId,
+    );
+    await Promise.all(unresolvedIssues.map((issue) => enqueueTournamentRepair(season, issue)));
+    await finalizePublishedTournamentSetup(season, tournamentId, issueState.warningCount);
     outcome = setupIssues.length > 0 ? 'ready_with_warnings' : 'ready';
     logInfo('Tournament setup completed', {
       tournamentId,
       backfillStartEventId: window?.startEventId ?? null,
       backfillEndEventId: window?.endEventId ?? null,
       warnings: setupIssues.length,
-      warningMessage,
+      warningCount: issueState.warningCount,
       durationMs: Math.round(performance.now() - setupStartedAtMs),
     });
   } catch (error) {
@@ -433,23 +429,22 @@ export async function setupTournamentStructure(
       standingsPublished,
     });
     if (standingsPublished) {
-      await finalizePublishedTournamentSetup(season, tournamentId, message, 1);
+      const issueState = await tournamentSetupIssueRepository.sync(season, tournamentId, [
+        normalizeTournamentSetupIssue({
+          scope: 'event-results',
+          message,
+          failedEntries: setupEntryIds,
+          diagnosticCode: failureCode,
+        }),
+      ]);
+      await finalizePublishedTournamentSetup(season, tournamentId, issueState.warningCount);
       outcome = 'ready_with_warnings';
       return;
     }
     outcome = 'failed_before_standings';
-    if (progressMarker !== undefined) {
-      await tournamentInfoRepository.markSetupResult(
-        season,
-        tournamentId,
-        'failed',
-        message,
-        0,
-        progressMarker,
-      );
-    } else {
-      await tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message, 0);
-    }
+    // BullMQ owns retry classification. Keep the row PROCESSING until the
+    // worker observes whether this attempt is retryable or terminal; this
+    // prevents a transient lock/FPL failure from rendering a false FAILED UI.
     throw error;
   } finally {
     let terminalStatus = null;
@@ -533,7 +528,7 @@ export async function recoverStuckTournamentSetups(
   const skippedActive: number[] = [];
   for (const row of stuck) {
     try {
-      await withMutationConflictGuard(
+      await withMutationScopes(
         {
           queueName: 'tournament-setup-watchdog',
           jobName: 'recover-stuck-setup',
@@ -594,7 +589,6 @@ export async function recoverStuckTournamentSetups(
             season,
             row.id,
             row.setupProgressUpdatedAt,
-            `Setup stopped progressing at ${row.setupProgressUpdatedAt ?? 'unknown'}; re-enqueued by watchdog.`,
           );
           if (!marked) {
             logInfo('Skipping watchdog recovery after setup state advanced', {

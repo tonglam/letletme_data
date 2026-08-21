@@ -366,6 +366,17 @@ export const schemaMigrationsInOps = ops.table(
   ],
 );
 
+export const mutationScopesInOps = ops.table(
+  'mutation_scopes',
+  {
+    scopeKey: text('scope_key').primaryKey().notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (_table) => [check('mutation_scopes_key_nonempty', sql`btrim(scope_key) <> ''::text`)],
+);
+
 export const bugReportsInOps = ops.table(
   'bug_reports',
   {
@@ -382,10 +393,17 @@ export const bugReportsInOps = ops.table(
     submissionId: uuid('submission_id'),
     screenshotObjectKey: text('screenshot_object_key'),
     screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    closedAt: timestamp('closed_at', { withTimezone: true, mode: 'date' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+    submissionRequestHash: text('submission_request_hash'),
+    scrubbedAt: timestamp('scrubbed_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     uniqueIndex('bug_reports_public_id_key').on(table.publicId),
     uniqueIndex('bug_reports_submission_id_key').on(table.submissionId),
+    uniqueIndex('bug_reports_screenshot_object_key_key')
+      .on(table.screenshotObjectKey)
+      .where(sql`screenshot_object_key IS NOT NULL`),
     index('bug_reports_created_idx').on(table.createdAt.desc()),
     index('bug_reports_screenshot_retention_idx')
       .on(table.createdAt.asc())
@@ -393,7 +411,11 @@ export const bugReportsInOps = ops.table(
     index('bug_reports_user_created_idx')
       .on(table.userId, table.createdAt.desc())
       .where(sql`user_id IS NOT NULL`),
-    check('bug_reports_public_id_format', sql`public_id ~ '^LL-[0-9A-F]{6}$'::text`),
+    index('bug_reports_expiry_idx').on(table.expiresAt.asc()),
+    index('bug_reports_submission_request_hash_idx')
+      .on(table.submissionRequestHash)
+      .where(sql`submission_request_hash IS NOT NULL`),
+    check('bug_reports_public_id_format', sql`public_id ~ '^LL-([0-9A-F]{6}|[0-9A-F]{12})$'::text`),
     check(
       'bug_reports_source_known',
       sql`source = ANY (ARRAY['website'::text, 'wechat_miniprogram'::text])`,
@@ -413,12 +435,77 @@ export const bugReportsInOps = ops.table(
     ),
     check(
       'bug_reports_screenshot_object_key_format',
-      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND COALESCE(substring(lower(screenshot_object_key) FROM '^bug-reports/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.(jpg|png|webp|gif)$'::text) = lower(submission_id::text), false))`,
+      sql`(screenshot_object_key IS NULL) OR ((submission_id IS NOT NULL) AND (screenshot_object_key ~* ('^bug-reports/' || submission_id::text || '\\.(jpg|png|webp|gif)$'::text)))`,
     ),
     check(
       'bug_reports_screenshot_https',
       sql`(screenshot_url IS NULL) OR (screenshot_url ~ '^https://'::text)`,
     ),
+    check('bug_reports_expiry_after_created', sql`expires_at >= created_at`),
+    check(
+      'bug_reports_submission_request_hash_format',
+      sql`(submission_request_hash IS NULL) OR (submission_request_hash ~ '^[0-9a-f]{64}$'::text)`,
+    ),
+  ],
+);
+
+export const bugReportRetentionBackupsInOps = ops.table(
+  'bug_report_retention_backups',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    backedUpAt: timestamp('backed_up_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    snapshot: jsonb().notNull(),
+    screenshotDeleteStartedAt: timestamp('screenshot_delete_started_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    screenshotDeletedAt: timestamp('screenshot_deleted_at', { withTimezone: true, mode: 'date' }),
+    screenshotObjectKey: text('screenshot_object_key'),
+    screenshotCreatedAt: timestamp('screenshot_created_at', { withTimezone: true, mode: 'date' }),
+    submissionId: uuid('submission_id'),
+  },
+  (table) => [
+    uniqueIndex('bug_report_retention_backups_public_id_key').on(table.publicId),
+    index('bug_report_retention_backups_created_idx').on(table.backedUpAt.desc()),
+    index('bug_report_retention_backups_screenshot_tombstone_idx')
+      .using('btree', sql`((snapshot->>'screenshotUrl'))`)
+      .where(sql`screenshot_delete_started_at IS NOT NULL OR screenshot_deleted_at IS NOT NULL`),
+    index('bug_report_retention_backups_private_key_idx')
+      .on(table.screenshotObjectKey)
+      .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
+    index('bug_report_retention_backups_screenshot_hash_idx')
+      .using('btree', sql`((snapshot->>'screenshotUrlHash'))`)
+      .where(sql`(snapshot->>'screenshotUrlHash') IS NOT NULL`),
+    uniqueIndex('bug_report_retention_backups_submission_id_key')
+      .on(table.submissionId)
+      .where(sql`submission_id IS NOT NULL`),
+    index('bug_report_retention_backups_private_screenshot_idx')
+      .on(table.backedUpAt.asc())
+      .where(sql`screenshot_object_key IS NOT NULL AND screenshot_deleted_at IS NULL`),
+  ],
+);
+
+export const bugReportStorageMigrationsInOps = ops.table(
+  'bug_report_storage_migrations',
+  {
+    id: uuid().primaryKey().notNull(),
+    publicId: text('public_id').notNull(),
+    sourceLocator: text('source_locator').notNull(),
+    targetLocator: text('target_locator').notNull(),
+    migratedAt: timestamp('migrated_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    deleteStartedAt: timestamp('delete_started_at', { withTimezone: true, mode: 'date' }),
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    uniqueIndex('bug_report_storage_migrations_source_key').on(table.sourceLocator),
+    index('bug_report_storage_migrations_pending_idx').on(table.deletedAt, table.migratedAt),
+    check('bug_report_storage_migrations_source_https', sql`source_locator ~ '^https://'::text`),
+    check('bug_report_storage_migrations_target_https', sql`target_locator ~ '^https://'::text`),
   ],
 );
 
@@ -529,6 +616,14 @@ export const tournamentsInCompetition = competition.table(
     // Preview-backed creates persist the idempotency fingerprint on the
     // authoritative row so recovery cannot infer ownership from name/time.
     previewPayloadFingerprint: text('preview_payload_fingerprint'),
+    setupAttempt: integer('setup_attempt').default(0).notNull(),
+    setupMaxAttempts: integer('setup_max_attempts').default(3).notNull(),
+    setupNextRetryAt: timestamp('setup_next_retry_at', { withTimezone: true, mode: 'date' }),
+    setupLastErrorCode: text('setup_last_error_code'),
+    setupLastErrorAt: timestamp('setup_last_error_at', { withTimezone: true, mode: 'date' }),
+    setupProgressIndeterminate: boolean('setup_progress_indeterminate').default(false).notNull(),
+    profilesReadyAt: timestamp('profiles_ready_at', { withTimezone: true, mode: 'date' }),
+    insightsReadyAt: timestamp('insights_ready_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     index('tournaments_admin_entry_idx').using(
@@ -613,6 +708,10 @@ export const tournamentsInCompetition = competition.table(
       sql`(setup_completed_units >= 0) AND (setup_total_units >= 0) AND (setup_completed_units <= setup_total_units) AND (setup_warning_count >= 0)`,
     ),
     check(
+      'tournaments_setup_attempts_valid',
+      sql`setup_attempt >= 0 AND setup_max_attempts >= 1 AND setup_attempt <= setup_max_attempts`,
+    ),
+    check(
       'tournaments_group_event_order',
       sql`(group_ended_event_id IS NULL) OR (group_started_event_id IS NULL) OR (group_ended_event_id >= group_started_event_id)`,
     ),
@@ -623,6 +722,100 @@ export const tournamentsInCompetition = competition.table(
     check(
       'tournaments_setup_time_order',
       sql`(setup_finished_at IS NULL) OR (setup_started_at IS NULL) OR (setup_finished_at >= setup_started_at)`,
+    ),
+  ],
+);
+
+export const tournamentSetupIssuesInCompetition = competition.table(
+  'tournament_setup_issues',
+  {
+    issueId: bigint('issue_id', { mode: 'number' })
+      .generatedByDefaultAsIdentity({ name: 'tournament_setup_issues_issue_id_seq' })
+      .primaryKey(),
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    issueKey: text('issue_key').notNull(),
+    code: text().notNull(),
+    category: text().notNull(),
+    severity: text().notNull(),
+    eventId: integer('event_id'),
+    affectedEntryIds: integer('affected_entry_ids')
+      .array()
+      .default(sql`'{}'::integer[]`)
+      .notNull(),
+    affectedEntryCount: integer('affected_entry_count').default(0).notNull(),
+    diagnosticCode: text('diagnostic_code'),
+    internalMessage: text('internal_message'),
+    repairAttempts: integer('repair_attempts').default(0).notNull(),
+    nextRepairAt: timestamp('next_repair_at', { withTimezone: true, mode: 'date' }),
+    repairExhaustedAt: timestamp('repair_exhausted_at', { withTimezone: true, mode: 'date' }),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'tournament_setup_issues_tournament_fk',
+    }).onDelete('cascade'),
+    unique('tournament_setup_issues_scope_unique').on(
+      table.seasonId,
+      table.tournamentId,
+      table.issueKey,
+    ),
+    index('tournament_setup_issues_unresolved_idx')
+      .using(
+        'btree',
+        table.seasonId.asc().nullsLast(),
+        table.tournamentId.asc().nullsLast(),
+        table.category.asc().nullsLast(),
+        table.severity.asc().nullsLast(),
+      )
+      .where(sql`resolved_at IS NULL`),
+    index('tournament_setup_issues_repair_due_idx')
+      .using(
+        'btree',
+        table.nextRepairAt.asc().nullsLast(),
+        table.seasonId.asc().nullsLast(),
+        table.tournamentId.asc().nullsLast(),
+      )
+      .where(
+        sql`resolved_at IS NULL AND repair_exhausted_at IS NULL AND next_repair_at IS NOT NULL`,
+      ),
+    index('tournament_setup_issues_event_idx')
+      .using(
+        'btree',
+        table.seasonId.asc().nullsLast(),
+        table.tournamentId.asc().nullsLast(),
+        table.eventId.asc().nullsLast(),
+      )
+      .where(sql`resolved_at IS NULL AND event_id IS NOT NULL`),
+    check(
+      'tournament_setup_issues_category_valid',
+      sql`category = ANY (ARRAY['profiles'::text, 'insights'::text, 'results'::text])`,
+    ),
+    check(
+      'tournament_setup_issues_code_valid',
+      sql`code = ANY (ARRAY['ENTRY_PROFILE_INCOMPLETE'::text, 'ENTRY_HISTORY_INCOMPLETE'::text, 'LEAGUE_INSIGHTS_INCOMPLETE'::text, 'SELECTION_INSIGHTS_INCOMPLETE'::text, 'TOURNAMENT_RESULTS_INCOMPLETE'::text, 'STRUCTURE_INTEGRITY_FAILED'::text])`,
+    ),
+    check(
+      'tournament_setup_issues_severity_valid',
+      sql`severity = ANY (ARRAY['warning'::text, 'blocking'::text])`,
+    ),
+    check(
+      'tournament_setup_issues_key_nonempty',
+      sql`btrim(issue_key) <> '' AND btrim(code) <> ''`,
+    ),
+    check(
+      'tournament_setup_issues_counts_valid',
+      sql`affected_entry_count >= 0 AND repair_attempts >= 0 AND affected_entry_count = cardinality(affected_entry_ids)`,
     ),
   ],
 );
@@ -3786,6 +3979,10 @@ export const playerStateSeasonRowsInReporting = reporting.table(
     refreshedAt: timestamp('refreshed_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
+    fplTotalPoints: integer('fpl_total_points').default(0).notNull(),
+    fplStarts: integer('fpl_starts').default(0).notNull(),
+    fplCleanSheets: integer('fpl_clean_sheets').default(0).notNull(),
+    fplSaves: integer('fpl_saves').default(0).notNull(),
   },
   (table) => [
     index('player_state_season_rows_player_idx').using(
@@ -3821,6 +4018,10 @@ export const playerStateSeasonRowsInReporting = reporting.table(
     check(
       'player_state_season_rows_counts_nonnegative',
       sql`(fpl_minutes >= 0) AND (fpl_gameweeks >= 0) AND (fpl_peer_count >= 0) AND (understat_peer_count >= 0)`,
+    ),
+    check(
+      'player_state_season_rows_fpl_summary_counts_nonnegative',
+      sql`(fpl_starts >= 0) AND (fpl_clean_sheets >= 0) AND (fpl_saves >= 0)`,
     ),
     check(
       'player_state_season_rows_mapping_check',
