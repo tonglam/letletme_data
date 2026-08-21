@@ -17,10 +17,7 @@ export function isTerminalJobAttemptFailure(
   error: unknown,
   attempt = job.attemptsMade + 1,
 ): boolean {
-  return (
-    isUnrecoverableFailure(error) ||
-    attempt >= Math.max(1, job.opts.attempts ?? 1)
-  );
+  return isUnrecoverableFailure(error) || attempt >= Math.max(1, job.opts.attempts ?? 1);
 }
 
 export function isTerminalJobFailure(job: RetryableJob, error: unknown): boolean {

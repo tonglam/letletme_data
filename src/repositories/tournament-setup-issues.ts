@@ -94,7 +94,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
       options?: { preserveUnresolvedIssueKeys?: readonly string[] },
     ): Promise<{ warningCount: number; unresolvedCount: number }> => {
       const db = await getDbInstance();
-      const now = new Date();
+      const now = new Date().toISOString();
       const normalized = issues.map((issue) => ({
         ...issue,
         affectedEntryIds: dedupeSetupIssueEntries(issue.affectedEntryIds),
@@ -131,7 +131,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
             ${issue.affectedEntryIds.length},
             ${issue.diagnosticCode ?? null},
             ${issue.internalMessage ?? null},
-            ${issue.nextRepairAt ?? null},
+            ${issue.nextRepairAt?.toISOString() ?? null},
             ${now},
             NULL,
             ${now}

@@ -681,7 +681,10 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
           setupLastErrorAt: now,
           setupProgressIndeterminate: false,
           setupProgressUpdatedAt: now,
-          setupStartedAt: sql`COALESCE(${tournamentsInCompetition.setupStartedAt}, ${failure.startedAt})`,
+          setupStartedAt: sql`COALESCE(
+            ${tournamentsInCompetition.setupStartedAt},
+            ${failure.startedAt.toISOString()}::timestamptz
+          )`,
           setupFinishedAt: failure.terminal ? now : null,
           standingsReadyAt: null,
           profilesReadyAt: null,
@@ -693,6 +696,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
             tournamentScope(season, tournamentId),
             inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
             sql`${tournamentsInCompetition.setupFinishedAt} IS NULL`,
+            lt(tournamentsInCompetition.setupAttempt, attempt),
           ),
         )
         .returning({ tournamentId: tournamentsInCompetition.tournamentId });

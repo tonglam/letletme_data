@@ -4,7 +4,6 @@ import {
   tournamentSetupQueue,
   tournamentSetupQueueName,
   getTournamentSetupRetryDelayMs,
-  TOURNAMENT_SETUP_MAX_ATTEMPTS,
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
 import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
@@ -40,10 +39,19 @@ const WATCHDOG_INTERVAL_MS = Number(process.env.TOURNAMENT_SETUP_WATCHDOG_INTERV
 type SetupFailure = { error: unknown };
 
 function setupErrorCode(error: unknown): string {
-  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
-    return error.code;
+  const seen = new Set<unknown>();
+  let fallback: string | null = null;
+  let current = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if ('code' in current && typeof current.code === 'string') {
+      fallback ??= current.code;
+      if (/^[0-9A-Z]{5}$/.test(current.code)) return current.code;
+    }
+    current = 'cause' in current ? current.cause : null;
   }
-  return error instanceof Error ? error.name : 'SETUP_FAILED';
+  return fallback ?? (error instanceof Error ? error.name : 'SETUP_FAILED');
 }
 
 async function updateSetupJobProgressBestEffort(
@@ -217,11 +225,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                   }),
                 );
               } catch (error) {
-                const terminal = isTerminalJobAttemptFailure(
-                  job,
-                  error,
-                  attempt,
-                );
+                const terminal = isTerminalJobAttemptFailure(job, error, attempt);
                 const changed = await tournamentInfoRepository.markSetupAttemptFailure(
                   season,
                   job.data.tournamentId,
