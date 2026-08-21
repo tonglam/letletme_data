@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, notInArray, sql } from 'drizzle-orm';
 
 import { tournamentSetupIssuesInCompetition } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -101,6 +101,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
       }));
 
       for (const issue of normalized) {
+        const affectedEntryIds = sql.param(issue.affectedEntryIds, table.affectedEntryIds);
         await db.execute(sql`
           INSERT INTO competition.tournament_setup_issues (
             season_id,
@@ -126,7 +127,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
             ${issue.category},
             ${issue.severity},
             ${issue.eventId ?? null},
-            ${issue.affectedEntryIds}::integer[],
+            ${affectedEntryIds},
             ${issue.affectedEntryIds.length},
             ${issue.diagnosticCode ?? null},
             ${issue.internalMessage ?? null},
@@ -191,7 +192,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
           WHERE season_id = ${season.seasonId}
             AND tournament_id = ${tournamentId}
             AND resolved_at IS NULL
-            AND NOT (issue_key = ANY(${keys}::text[]))
+            AND ${notInArray(table.issueKey, keys)}
         `);
       }
       const [counts] = await db.execute<{ warningCount: number; unresolvedCount: number }>(sql`

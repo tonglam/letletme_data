@@ -82,6 +82,16 @@ function safeErrorCode(error: unknown): string {
   return error instanceof Error ? error.name : 'UNKNOWN_ERROR';
 }
 
+function isPostgresStatementError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === 'object' &&
+    'code' in error &&
+    typeof error.code === 'string' &&
+    /^[0-9A-Z]{5}$/.test(error.code)
+  );
+}
+
 function elapsedBetween(start: string | null | undefined, end: string | null | undefined) {
   if (!start || !end) return null;
   const startMs = Date.parse(start);
@@ -105,7 +115,7 @@ export async function finalizePublishedTournamentSetup(
 export async function setupTournamentStructure(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: { resumeMarker?: string },
+  options?: { resumeMarker?: string; attempt?: number },
 ): Promise<void> {
   const setupStartedAtMs = performance.now();
   const phaseDurationsMs = {
@@ -188,6 +198,7 @@ export async function setupTournamentStructure(
   // resume attempt into a warning. Only publication completed below makes
   // failures non-critical for this attempt.
   let standingsPublished = false;
+  let transactionAborted = false;
   const progressMarker = options?.resumeMarker;
   const markSetupProgress = (
     phase: TournamentSetupPhase,
@@ -206,7 +217,12 @@ export async function setupTournamentStructure(
     );
 
   try {
-    await tournamentInfoRepository.markSetupProcessing(season, tournamentId, progressMarker);
+    await tournamentInfoRepository.markSetupProcessing(
+      season,
+      tournamentId,
+      progressMarker,
+      options?.attempt,
+    );
     const setupIssues: TournamentSetupIssue[] = [];
     const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
       season,
@@ -423,12 +439,13 @@ export async function setupTournamentStructure(
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Tournament setup failed.';
     failureCode = safeErrorCode(error);
+    transactionAborted = isPostgresStatementError(error);
     logError('Tournament setup failed', error, {
       tournamentId,
       durationMs: Math.round(performance.now() - setupStartedAtMs),
       standingsPublished,
     });
-    if (standingsPublished) {
+    if (standingsPublished && !transactionAborted) {
       const issueState = await tournamentSetupIssueRepository.sync(season, tournamentId, [
         normalizeTournamentSetupIssue({
           scope: 'event-results',
@@ -448,12 +465,14 @@ export async function setupTournamentStructure(
     throw error;
   } finally {
     let terminalStatus = null;
-    try {
-      terminalStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
-    } catch (error) {
-      logError('Unable to read terminal tournament setup status for reporting', error, {
-        tournamentId,
-      });
+    if (!transactionAborted) {
+      try {
+        terminalStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+      } catch (error) {
+        logError('Unable to read terminal tournament setup status for reporting', error, {
+          tournamentId,
+        });
+      }
     }
     const context = getJobLogContext();
     const createdAt = terminalStatus?.createdAt ?? initialStatus.createdAt;
