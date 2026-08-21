@@ -538,6 +538,26 @@ describe('tournamentsAPI handlers', () => {
     });
   });
 
+  test('PATCH /tournaments/:id preserves the service-attested platform role', async () => {
+    const response = await tournamentsAPI.handle(
+      new Request('http://localhost/tournaments/55', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Platform Managed Cup',
+          adminEntryId: 6953,
+          platformAdmin: true,
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(updateTournament).toHaveBeenCalledWith(55, {
+      name: 'Platform Managed Cup',
+      adminEntryId: 6953,
+      platformAdmin: true,
+    });
+  });
+
   test('DELETE /tournaments/:id forwards ownership and returns a bounded receipt', async () => {
     const response = await tournamentsAPI.handle(
       new Request('http://localhost/tournaments/55', {

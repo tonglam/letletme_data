@@ -171,6 +171,7 @@ describe('planTournamentStructure', () => {
     tournamentName: 'Test Cup',
     adminId: '1',
     creator: 'admin',
+    platformAdmin: false,
     participantSource: 'custom',
     leagueUrl: 'https://fantasy.premierleague.com/leagues/1/standings/c',
     groupFormat: 'none',
@@ -213,6 +214,23 @@ describe('planTournamentStructure', () => {
         'classic',
       ),
     ).toThrow(ValidationError);
+  });
+
+  test('allows a platform administrator outside the official participant set', () => {
+    const plan = planTournamentStructure(
+      { ...basePayload, adminId: '6953', platformAdmin: true },
+      participants([1, 2, 3, 4]),
+      1,
+      'classic',
+    );
+
+    expect(plan.adminEntryId).toBe(6953);
+    expect(plan.selectedParticipants.map((participant) => participant.id)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+    ]);
   });
 
   test('accepts knockout team counts that are not a power of two with byes', () => {

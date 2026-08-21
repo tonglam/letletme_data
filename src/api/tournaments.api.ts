@@ -133,7 +133,10 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
     },
     {
       params: t.Object({ tournamentId: positiveInteger }),
-      body: t.Object({ adminEntryId: positiveInteger }),
+      body: t.Object({
+        adminEntryId: positiveInteger,
+        platformAdmin: t.Optional(t.Boolean()),
+      }),
     },
   )
   .post(
@@ -151,7 +154,10 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
     },
     {
       params: t.Object({ tournamentId: positiveInteger }),
-      body: t.Object({ adminEntryId: positiveInteger }),
+      body: t.Object({
+        adminEntryId: positiveInteger,
+        platformAdmin: t.Optional(t.Boolean()),
+      }),
     },
   )
   .patch(
@@ -174,6 +180,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       params: t.Object({ tournamentId: positiveInteger }),
       body: t.Object({
         adminEntryId: positiveInteger,
+        platformAdmin: t.Optional(t.Boolean()),
         rosterMode: t.Literal('official_sync'),
       }),
     },
@@ -198,6 +205,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       params: t.Object({ tournamentId: positiveInteger }),
       body: t.Object({
         adminEntryId: positiveInteger,
+        platformAdmin: t.Optional(t.Boolean()),
         state: t.Union([t.Literal('active'), t.Literal('inactive')]),
       }),
     },
@@ -225,6 +233,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         tournamentName: t.String({ minLength: 3, maxLength: 80 }),
         adminId: t.String(),
         creator: t.String({ minLength: 1, maxLength: 80 }),
+        platformAdmin: t.Optional(t.Boolean()),
         participantSource: t.Union([t.Literal('official'), t.Literal('custom')]),
         tournamentType: t.Optional(t.String()),
         leagueUrl: t.String({ minLength: 1, maxLength: 512 }),
@@ -259,6 +268,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       body: t.Object({
         name: t.String({ minLength: 3, maxLength: 80 }),
         adminEntryId: positiveInteger,
+        platformAdmin: t.Optional(t.Boolean()),
       }),
     },
   )
@@ -283,6 +293,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
     },
     {
       params: t.Object({ tournamentId: positiveInteger }),
-      body: t.Object({ adminEntryId: positiveInteger }),
+      body: t.Object({
+        adminEntryId: positiveInteger,
+        platformAdmin: t.Optional(t.Boolean()),
+      }),
     },
   );

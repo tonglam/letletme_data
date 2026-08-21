@@ -151,6 +151,28 @@ describe('tournament management service', () => {
     ).rejects.toBeInstanceOf(ForbiddenError);
   });
 
+  test('lets a platform administrator update another owner while preserving ownership', async () => {
+    const persistedOwnerEntryIds: number[] = [];
+    const service = createTestService(
+      createRepository({
+        updateNameOwned: async (_season, _id, adminEntryId, name) => {
+          persistedOwnerEntryIds.push(adminEntryId);
+          return { ...tournament, name };
+        },
+      }),
+    );
+
+    const updated = await service.updateTournament(42, {
+      name: 'Platform Managed Cup',
+      adminEntryId: 6953,
+      platformAdmin: true,
+    });
+
+    expect(updated.name).toBe('Platform Managed Cup');
+    expect(persistedOwnerEntryIds).toEqual([tournament.adminEntryId]);
+    expect(updated.adminEntryId).toBe(tournament.adminEntryId);
+  });
+
   test('returns a same-name retry without refreshing unrelated reporting views', async () => {
     const calls: string[] = [];
     const service = createTestService(createRepository(), {
@@ -266,6 +288,25 @@ describe('tournament management service', () => {
     await expect(service.deleteTournament(42, { adminEntryId: 999 })).rejects.toBeInstanceOf(
       ForbiddenError,
     );
+  });
+
+  test('lets a platform administrator delete through the canonical owner predicate', async () => {
+    const persistedOwnerEntryIds: number[] = [];
+    const service = createTestService(
+      createRepository({
+        deleteOwned: async (_season, _id, adminEntryId) => {
+          persistedOwnerEntryIds.push(adminEntryId);
+          return { status: 'deleted', tournament };
+        },
+      }),
+    );
+
+    await service.deleteTournament(42, {
+      adminEntryId: 6953,
+      platformAdmin: true,
+    });
+
+    expect(persistedOwnerEntryIds).toEqual([tournament.adminEntryId]);
   });
 
   test('surfaces a materialized-view refresh failure after canonical deletion', async () => {
