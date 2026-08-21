@@ -16,6 +16,10 @@ import {
   recoverStuckTournamentSetups,
   setupTournamentStructure,
 } from '../services/tournament-setup.service';
+import {
+  persistEscapedTournamentSetupFailure,
+  tournamentSetupErrorCode,
+} from '../services/tournament-setup-failure.service';
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { seasonRepository } from '../repositories/seasons';
@@ -37,21 +41,10 @@ const STUCK_PROCESSING_CUTOFF_MINUTES = Number(
 const WATCHDOG_INTERVAL_MS = Number(process.env.TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS ?? 300_000);
 
 type SetupFailure = { error: unknown };
+const setupFailuresPersistedInProcessor = new Set<string>();
 
-function setupErrorCode(error: unknown): string {
-  const seen = new Set<unknown>();
-  let fallback: string | null = null;
-  let current = error;
-  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
-    if (seen.has(current)) break;
-    seen.add(current);
-    if ('code' in current && typeof current.code === 'string') {
-      fallback ??= current.code;
-      if (/^[0-9A-Z]{5}$/.test(current.code)) return current.code;
-    }
-    current = 'cause' in current ? current.cause : null;
-  }
-  return fallback ?? (error instanceof Error ? error.name : 'SETUP_FAILED');
+function setupJobKey(job: Pick<Job<TournamentSetupJobData>, 'id'>): string {
+  return String(job.id);
 }
 
 async function updateSetupJobProgressBestEffort(
@@ -97,6 +90,8 @@ export function createTournamentSetupWorker(): WorkerRuntime {
   const worker = new Worker<TournamentSetupJobData>(
     tournamentSetupQueueName,
     async (job: Job<TournamentSetupJobData>) => {
+      const setupFailureKey = setupJobKey(job);
+      setupFailuresPersistedInProcessor.delete(setupFailureKey);
       const season = await requireCurrentSeasonForJob(job.data);
       await updateSetupJobProgressBestEffort(job, 'waiting_for_lifecycle');
       const triggeredAtMs = Date.parse(job.data.triggeredAt);
@@ -271,7 +266,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
                   {
                     attempt,
                     terminal,
-                    errorCode: setupErrorCode(error),
+                    errorCode: tournamentSetupErrorCode(error),
                     nextRetryAt: terminal
                       ? null
                       : new Date(Date.now() + getTournamentSetupRetryDelayMs(attempt)),
@@ -297,7 +292,12 @@ export function createTournamentSetupWorker(): WorkerRuntime {
           ),
         ),
       );
-      if (failure) throw failure.error;
+      if (failure) {
+        // Reaching this point proves the outer lifecycle transaction committed
+        // the retry state. The failed listener must not persist it a second time.
+        setupFailuresPersistedInProcessor.add(setupFailureKey);
+        throw failure.error;
+      }
     },
     {
       connection,
@@ -322,7 +322,26 @@ export function createTournamentSetupWorker(): WorkerRuntime {
       jobId: job?.id,
       tournamentId: job?.data.tournamentId,
     });
-    if (job) void alertOnFinalFailure(job, err);
+    if (job) {
+      const alreadyPersisted = setupFailuresPersistedInProcessor.delete(setupJobKey(job));
+      if (!alreadyPersisted) {
+        void persistEscapedTournamentSetupFailure(job, err)
+          .then((changed) => {
+            logInfo('Tournament setup escaped failure fallback completed', {
+              jobId: job.id,
+              tournamentId: job.data.tournamentId,
+              changed,
+            });
+          })
+          .catch((error) => {
+            logError('Tournament setup escaped failure fallback failed', error, {
+              jobId: job.id,
+              tournamentId: job.data.tournamentId,
+            });
+          });
+      }
+      void alertOnFinalFailure(job, err);
+    }
   });
 
   worker.on('error', (err) => {

@@ -9,6 +9,7 @@ import { getDb, getDbClient, withDatabaseSavepoint } from '../../src/db/singleto
 import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import { tournamentSetupLifecycleScope } from '../../src/domain/mutation-scope';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
+import { publishTournamentTrendScope } from '../../src/services/tournament-trends-publication.service';
 import { withMutationScopes } from '../../src/utils/mutation-scopes';
 
 const SEASON_CODE = '9293';
@@ -28,6 +29,10 @@ async function cleanup(): Promise<void> {
     DELETE FROM competition.entries
     WHERE season_id = ${SEASON_ID}
       AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+  `;
+  await sqlClient`
+    DELETE FROM fpl.events
+    WHERE season_id = ${SEASON_ID}
   `;
   await sqlClient`
     DELETE FROM fpl.seasons
@@ -63,6 +68,10 @@ async function seed(): Promise<void> {
     INSERT INTO competition.entries (season_id, entry_id, entry_name, player_name)
     SELECT ${SEASON_ID}, entry_id, 'Transaction Entry ' || entry_id::text, 'Transaction Manager ' || entry_id::text
     FROM unnest(${[...ENTRY_IDS]}::integer[]) AS entries(entry_id)
+  `;
+  await sqlClient`
+    INSERT INTO fpl.events (season_id, event_id, name)
+    VALUES (${SEASON_ID}, 1, 'Gameweek 1')
   `;
   await sqlClient`
     INSERT INTO competition.tournaments (
@@ -148,6 +157,32 @@ async function runDatabaseFailure(
 }
 
 describe('tournament setup transaction recovery', () => {
+  test('starts repeatable-read safely and converges concurrent Trends publishers', async () => {
+    const [first, second] = await Promise.all([
+      publishTournamentTrendScope(explicitSeasonRef(SEASON_CODE), SUCCESS_TOURNAMENT_ID, 1),
+      publishTournamentTrendScope(explicitSeasonRef(SEASON_CODE), SUCCESS_TOURNAMENT_ID, 1),
+    ]);
+
+    expect(first).toMatchObject({
+      tournamentId: SUCCESS_TOURNAMENT_ID,
+      eventId: 1,
+      state: 'COLLECTING',
+      ownershipState: 'NOT_READY',
+      transfersState: 'NOT_READY',
+      rows: 0,
+    });
+    expect(second).toMatchObject({
+      tournamentId: SUCCESS_TOURNAMENT_ID,
+      eventId: 1,
+      state: 'REUSED',
+      ownershipState: 'NOT_READY',
+      transfersState: 'NOT_READY',
+      rows: 0,
+    });
+    expect(first.publicationId).toBeNumber();
+    expect(second.publicationId).toBe(first.publicationId);
+  });
+
   test('rolls back a database statement error to the savepoint and persists retry state', async () => {
     const sqlClient = await getDbClient();
     const season = explicitSeasonRef(SEASON_CODE);

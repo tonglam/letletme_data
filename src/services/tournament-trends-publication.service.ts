@@ -22,9 +22,46 @@ type TrendRow = {
   team_short_name: string;
 };
 
+const SCOPE_REVISION_CONSTRAINT = 'tournament_selection_stat_publications_scope_revision_unique';
+const MAX_PUBLICATION_ATTEMPTS = 3;
+
+export type TournamentTrendScopePublication = {
+  tournamentId: number;
+  eventId: number;
+  publicationId: number | null;
+  revision: number | null;
+  state: 'READY' | 'COLLECTING' | 'FAILED' | 'REUSED';
+  ownershipState: string;
+  transfersState: string;
+  rows: number;
+};
+
 function positiveInteger(value: unknown): number {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : 0;
+}
+
+function isScopeRevisionConflict(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const record = current as {
+      code?: unknown;
+      constraint?: unknown;
+      constraint_name?: unknown;
+      cause?: unknown;
+    };
+    if (
+      record.code === '23505' &&
+      String(record.constraint_name ?? record.constraint ?? '') === SCOPE_REVISION_CONSTRAINT
+    ) {
+      return true;
+    }
+    current = record.cause;
+  }
+  return false;
 }
 
 /**
@@ -36,16 +73,7 @@ export async function publishTournamentTrendScope(
   season: FplSeasonRef,
   tournamentId: number,
   eventId: number,
-): Promise<{
-  tournamentId: number;
-  eventId: number;
-  publicationId: number | null;
-  revision: number | null;
-  state: 'READY' | 'COLLECTING' | 'FAILED' | 'REUSED';
-  ownershipState: string;
-  transfersState: string;
-  rows: number;
-}> {
+): Promise<TournamentTrendScopePublication> {
   if (!Number.isInteger(tournamentId) || tournamentId <= 0) {
     throw new Error('tournamentId must be a positive integer');
   }
@@ -56,12 +84,14 @@ export async function publishTournamentTrendScope(
   const client = await getDbClient();
   // Audit, checksum and row aggregation must observe one source snapshot. The
   // advisory lock only serializes publishers; source writers do not take it.
-  return client.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`trends:${season.seasonId}:${tournamentId}:${eventId}`}, 0))`;
-    // Establish the repeatable-read snapshot only after the scope lock is held.
-    await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
+  const publishOnce = (): Promise<TournamentTrendScopePublication> =>
+    client.begin(async (tx) => {
+      // PostgreSQL requires SET TRANSACTION before every other statement in the
+      // transaction. The snapshot is established by the first query below.
+      await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`trends:${season.seasonId}:${tournamentId}:${eventId}`}, 0))`;
 
-    const auditRows = await tx<ScopeAudit[]>`
+      const auditRows = await tx<ScopeAudit[]>`
       SELECT
         count(*)::int AS expected_entries,
         count(*) FILTER (WHERE picks.complete)::int AS complete_pick_entries,
@@ -84,27 +114,27 @@ export async function publishTournamentTrendScope(
         AND roster.tournament_id = ${tournamentId}
         AND (entry.started_event IS NULL OR entry.started_event <= ${eventId})
     `;
-    const audit = auditRows[0] ?? {
-      expected_entries: 0,
-      complete_pick_entries: 0,
-      transfer_checkpoint_entries: 0,
-    };
-    const expectedEntries = positiveInteger(audit.expected_entries);
-    const completePickEntries = positiveInteger(audit.complete_pick_entries);
-    const transferCheckpointEntries = positiveInteger(audit.transfer_checkpoint_entries);
-    // An empty roster is a confirmed absence of a prepared competition, not a
-    // complete observation. Keep it collecting so GraphQL cannot present an
-    // empty array as a measured zero-population trend.
-    const picksReady = expectedEntries > 0 && completePickEntries === expectedEntries;
-    const transfersReady = expectedEntries > 0 && transferCheckpointEntries === expectedEntries;
+      const audit = auditRows[0] ?? {
+        expected_entries: 0,
+        complete_pick_entries: 0,
+        transfer_checkpoint_entries: 0,
+      };
+      const expectedEntries = positiveInteger(audit.expected_entries);
+      const completePickEntries = positiveInteger(audit.complete_pick_entries);
+      const transferCheckpointEntries = positiveInteger(audit.transfer_checkpoint_entries);
+      // An empty roster is a confirmed absence of a prepared competition, not a
+      // complete observation. Keep it collecting so GraphQL cannot present an
+      // empty array as a measured zero-population trend.
+      const picksReady = expectedEntries > 0 && completePickEntries === expectedEntries;
+      const transfersReady = expectedEntries > 0 && transferCheckpointEntries === expectedEntries;
 
-    const sourceRows = await tx<
-      Array<{
-        source_watermark: Date | string | null;
-        roster_checksum: string;
-        player_metadata_checksum: string;
-      }>
-    >`
+      const sourceRows = await tx<
+        Array<{
+          source_watermark: Date | string | null;
+          roster_checksum: string;
+          player_metadata_checksum: string;
+        }>
+      >`
       SELECT NULLIF(GREATEST(
         COALESCE(max(pick.source_updated_at), '-infinity'::timestamptz),
         COALESCE(max(entry.updated_at), '-infinity'::timestamptz),
@@ -158,24 +188,26 @@ export async function publishTournamentTrendScope(
         ON transfer.season_id = roster.season_id AND transfer.entry_id = roster.entry_id AND transfer.event_id = ${eventId}
       WHERE roster.season_id = ${season.seasonId} AND roster.tournament_id = ${tournamentId}
     `;
-    const sourceWatermarkValue = sourceRows[0]?.source_watermark ?? new Date(0);
-    const sourceWatermark =
-      sourceWatermarkValue instanceof Date ? sourceWatermarkValue : new Date(sourceWatermarkValue);
-    if (!Number.isFinite(sourceWatermark.getTime())) {
-      throw new Error('Tournament Trends source watermark is invalid');
-    }
-    const rosterChecksum = sourceRows[0]?.roster_checksum ?? 'd41d8cd98f00b204e9800998ecf8427e';
-    const playerMetadataChecksum =
-      sourceRows[0]?.player_metadata_checksum ?? 'd41d8cd98f00b204e9800998ecf8427e';
-    const checksum = createHash('sha256')
-      .update(
-        `${season.seasonId}:${tournamentId}:${eventId}:${expectedEntries}:${completePickEntries}:${transferCheckpointEntries}:${sourceWatermark.toISOString()}:${rosterChecksum}:${playerMetadataChecksum}`,
-      )
-      .digest('hex');
+      const sourceWatermarkValue = sourceRows[0]?.source_watermark ?? new Date(0);
+      const sourceWatermark =
+        sourceWatermarkValue instanceof Date
+          ? sourceWatermarkValue
+          : new Date(sourceWatermarkValue);
+      if (!Number.isFinite(sourceWatermark.getTime())) {
+        throw new Error('Tournament Trends source watermark is invalid');
+      }
+      const rosterChecksum = sourceRows[0]?.roster_checksum ?? 'd41d8cd98f00b204e9800998ecf8427e';
+      const playerMetadataChecksum =
+        sourceRows[0]?.player_metadata_checksum ?? 'd41d8cd98f00b204e9800998ecf8427e';
+      const checksum = createHash('sha256')
+        .update(
+          `${season.seasonId}:${tournamentId}:${eventId}:${expectedEntries}:${completePickEntries}:${transferCheckpointEntries}:${sourceWatermark.toISOString()}:${rosterChecksum}:${playerMetadataChecksum}`,
+        )
+        .digest('hex');
 
-    const existing = await tx<
-      Array<{ publication_id: number; revision: number; publication_state: string }>
-    >`
+      const existing = await tx<
+        Array<{ publication_id: number; revision: number; publication_state: string }>
+      >`
       SELECT publication_id, revision, publication_state
       FROM reporting.tournament_selection_stat_publications
       WHERE season_id = ${season.seasonId}
@@ -185,32 +217,33 @@ export async function publishTournamentTrendScope(
       ORDER BY revision DESC
       LIMIT 1
     `;
-    if (
-      existing[0]?.publication_state === 'READY' ||
-      existing[0]?.publication_state === 'COLLECTING'
-    ) {
-      return {
-        tournamentId,
-        eventId,
-        publicationId: Number(existing[0].publication_id),
-        revision: Number(existing[0].revision),
-        state: 'REUSED',
-        ownershipState: picksReady ? 'READY' : 'NOT_READY',
-        transfersState: transfersReady ? 'READY' : 'NOT_READY',
-        rows: 0,
-      };
-    }
+      if (
+        existing[0]?.publication_state === 'READY' ||
+        existing[0]?.publication_state === 'COLLECTING'
+      ) {
+        return {
+          tournamentId,
+          eventId,
+          publicationId: Number(existing[0].publication_id),
+          revision: Number(existing[0].revision),
+          state: 'REUSED',
+          ownershipState: picksReady ? 'READY' : 'NOT_READY',
+          transfersState: transfersReady ? 'READY' : 'NOT_READY',
+          rows: 0,
+        };
+      }
 
-    const revisionRows = await tx<Array<{ revision: number }>>`
+      const revisionRows = await tx<Array<{ revision: number }>>`
       SELECT COALESCE(max(revision), 0)::bigint + 1 AS revision
       FROM reporting.tournament_selection_stat_publications
       WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId} AND event_id = ${eventId}
     `;
-    const revision = Number(revisionRows[0]?.revision ?? 1);
-    const publicationState = picksReady ? 'READY' : 'COLLECTING';
-    const ownershipState = picksReady ? 'READY' : 'NOT_READY';
-    const transfersState = transfersReady ? 'READY' : 'NOT_READY';
-    const inserted = await tx<Array<{ publication_id: number }>>`
+      const revision = Number(revisionRows[0]?.revision ?? 1);
+      const publicationState = picksReady ? 'READY' : 'COLLECTING';
+      const ownershipState = picksReady ? 'READY' : 'NOT_READY';
+      const transfersState = transfersReady ? 'READY' : 'NOT_READY';
+      const publishedAt = picksReady ? new Date().toISOString() : null;
+      const inserted = await tx<Array<{ publication_id: number }>>`
       INSERT INTO reporting.tournament_selection_stat_publications (
         season_id, tournament_id, event_id, revision, publication_state, is_active,
         source_watermark, source_checksum, expected_entries, complete_pick_entries,
@@ -218,15 +251,15 @@ export async function publishTournamentTrendScope(
         vice_captaincy_state, transfers_state, published_at
       ) VALUES (
         ${season.seasonId}, ${tournamentId}, ${eventId}, ${revision}, ${publicationState}, false,
-        ${sourceWatermark}, ${checksum}, ${expectedEntries}, ${completePickEntries},
+        ${sourceWatermark.toISOString()}::timestamptz, ${checksum}, ${expectedEntries}, ${completePickEntries},
         ${transferCheckpointEntries}, ${ownershipState}, ${ownershipState},
-        ${ownershipState}, ${transfersState}, ${picksReady ? new Date() : null}
+        ${ownershipState}, ${transfersState}, ${publishedAt}::timestamptz
       ) RETURNING publication_id
     `;
-    const publicationId = Number(inserted[0].publication_id);
-    let rows = 0;
-    if (picksReady) {
-      const trendRows = await tx<TrendRow[]>`
+      const publicationId = Number(inserted[0].publication_id);
+      let rows = 0;
+      if (picksReady) {
+        const trendRows = await tx<TrendRow[]>`
         WITH eligible AS (
           SELECT roster.entry_id
           FROM competition.tournament_entries roster
@@ -289,8 +322,8 @@ export async function publishTournamentTrendScope(
           player.first_name, player.second_name, player.web_name, player.element_type, team.short_name
         ORDER BY element_ids.element_id
       `;
-      for (const row of trendRows) {
-        await tx`
+        for (const row of trendRows) {
+          await tx`
           INSERT INTO reporting.tournament_selection_stat_rows (
             publication_id, element_id, selected_count, effective_selection_count,
             captain_count, vice_captain_count, transfer_in_count, transfer_out_count,
@@ -301,42 +334,62 @@ export async function publishTournamentTrendScope(
             ${row.player_name}, ${row.player_position}, ${row.team_short_name}
           )
         `;
-        rows += 1;
-      }
-      await tx`
+          rows += 1;
+        }
+        await tx`
         UPDATE reporting.tournament_selection_stat_publications
         SET is_active = false
         WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId} AND event_id = ${eventId}
           AND is_active
       `;
-      await tx`
+        await tx`
         UPDATE reporting.tournament_selection_stat_publications
         SET is_active = true
         WHERE publication_id = ${publicationId}
       `;
-    }
+      }
 
-    logInfo('Published tournament trends scope', {
-      season: season.seasonCode,
-      tournamentId,
-      eventId,
-      publicationId,
-      revision,
-      publicationState,
-      rows,
-      transfersState,
+      logInfo('Published tournament trends scope', {
+        season: season.seasonCode,
+        tournamentId,
+        eventId,
+        publicationId,
+        revision,
+        publicationState,
+        rows,
+        transfersState,
+      });
+      return {
+        tournamentId,
+        eventId,
+        publicationId,
+        revision,
+        state: publicationState,
+        ownershipState,
+        transfersState,
+        rows,
+      };
     });
-    return {
-      tournamentId,
-      eventId,
-      publicationId,
-      revision,
-      state: publicationState,
-      ownershipState,
-      transfersState,
-      rows,
-    };
-  });
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_PUBLICATION_ATTEMPTS; attempt += 1) {
+    try {
+      return await publishOnce();
+    } catch (error) {
+      lastError = error;
+      if (!isScopeRevisionConflict(error) || attempt === MAX_PUBLICATION_ATTEMPTS) throw error;
+      // A waiter can acquire the advisory lock with a snapshot fixed before the
+      // previous publisher committed. Retry the whole transaction so the next
+      // lock acquisition and publication read use a fresh snapshot.
+      logInfo('Retrying tournament trends publication after revision conflict', {
+        season: season.seasonCode,
+        tournamentId,
+        eventId,
+        attempt,
+      });
+    }
+  }
+  throw lastError;
 }
 
 export async function publishTournamentTrendScopes(
