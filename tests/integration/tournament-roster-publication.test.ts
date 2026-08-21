@@ -2,7 +2,7 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 
 import { getDbClient } from '../../src/db/singleton';
 import { explicitSeasonRef } from '../../src/domain/fpl-season';
@@ -64,8 +64,8 @@ async function seed(): Promise<void> {
   `;
 }
 
-beforeAll(seed);
-afterAll(cleanup);
+beforeEach(seed);
+afterEach(cleanup);
 
 describe('authoritative tournament roster publication', () => {
   test('replaces tournament-owned structure and publishes newly joined entries', async () => {
@@ -120,5 +120,171 @@ describe('authoritative tournament roster publication', () => {
       roster_sync_status: 'ready',
       setup_status: 'pending',
     });
+  });
+
+  test('fences a ready official H2H roster before a recovery worker claims it', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const sql = await getDbClient();
+    await sql`
+      UPDATE competition.tournaments
+      SET group_mode = 'battle_races', roster_sync_status = 'ready'
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+
+    const marker = await tournamentRosterRepository.prepareUnlockedOfficialH2HRecovery(
+      season,
+      TOURNAMENT_ID,
+    );
+    expect(marker).toBeString();
+
+    const [prepared] = await sql<Array<{ rosterSyncStatus: string | null; marker: string | null }>>`
+      SELECT
+        roster_sync_status AS "rosterSyncStatus",
+        setup_progress_updated_at::text AS marker
+      FROM competition.tournaments
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+    expect(prepared).toEqual({ rosterSyncStatus: 'failed', marker });
+    expect(
+      await tournamentRosterRepository.claimUnlockedOfficialH2HRecovery(
+        season,
+        TOURNAMENT_ID,
+        marker!,
+      ),
+    ).toBe(true);
+    expect(
+      await tournamentRosterRepository.claimUnlockedOfficialH2HRecovery(
+        season,
+        TOURNAMENT_ID,
+        marker!,
+      ),
+    ).toBe(false);
+  });
+
+  test('publishes an additive recovery only while its atomic guard remains valid', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const sql = await getDbClient();
+    await sql`
+      UPDATE competition.tournaments
+      SET group_mode = 'battle_races', roster_sync_status = 'ready'
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+    const marker = await tournamentRosterRepository.prepareUnlockedOfficialH2HRecovery(
+      season,
+      TOURNAMENT_ID,
+    );
+    expect(marker).toBeString();
+    expect(
+      await tournamentRosterRepository.claimUnlockedOfficialH2HRecovery(
+        season,
+        TOURNAMENT_ID,
+        marker!,
+      ),
+    ).toBe(true);
+    const tournament = await tournamentRosterRepository.findById(season, TOURNAMENT_ID);
+    expect(tournament).not.toBeNull();
+
+    const result = await tournamentRosterRepository.publishAuthoritativeRoster(
+      season,
+      tournament!,
+      ENTRY_IDS.map((entryId) => ({
+        id: String(entryId),
+        team: `Recovered Entry ${entryId}`,
+        manager: `Recovered Manager ${entryId}`,
+        overallRank: entryId,
+        totalPoints: 0,
+      })),
+      'Recovered H2H League',
+      {
+        expectedProgressMarker: marker,
+        guardUnlockedOfficialH2HRecovery: true,
+      },
+    );
+    expect(result.changed).toBe(true);
+    expect(result.participantCount).toBe(ENTRY_IDS.length);
+  });
+
+  test('rejects guarded recovery removals inside the publication transaction', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const sql = await getDbClient();
+    const [prepared] = await sql<Array<{ marker: string }>>`
+      UPDATE competition.tournaments
+      SET group_mode = 'battle_races',
+          roster_sync_status = 'processing',
+          setup_progress_updated_at = now()
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+      RETURNING setup_progress_updated_at::text AS marker
+    `;
+    const tournament = await tournamentRosterRepository.findById(season, TOURNAMENT_ID);
+    expect(tournament).not.toBeNull();
+
+    await expect(
+      tournamentRosterRepository.publishAuthoritativeRoster(
+        season,
+        tournament!,
+        [
+          {
+            id: String(ENTRY_IDS[0]),
+            team: 'Removal Attempt',
+            manager: 'Removal Attempt',
+            overallRank: ENTRY_IDS[0],
+            totalPoints: 0,
+          },
+        ],
+        'Unsafe H2H League',
+        {
+          expectedProgressMarker: prepared!.marker,
+          guardUnlockedOfficialH2HRecovery: true,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'TOURNAMENT_OFFICIAL_H2H_RECOVERY_NOT_ADDITIVE' });
+  });
+
+  test('rejects publication when the official schedule locks after recovery claim', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const sql = await getDbClient();
+    await sql`
+      UPDATE competition.tournaments
+      SET group_mode = 'battle_races', roster_sync_status = 'ready'
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+    const marker = await tournamentRosterRepository.prepareUnlockedOfficialH2HRecovery(
+      season,
+      TOURNAMENT_ID,
+    );
+    expect(marker).toBeString();
+    expect(
+      await tournamentRosterRepository.claimUnlockedOfficialH2HRecovery(
+        season,
+        TOURNAMENT_ID,
+        marker!,
+      ),
+    ).toBe(true);
+    await sql`
+      UPDATE competition.tournaments
+      SET official_schedule_locked_at = now()
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+    const tournament = await tournamentRosterRepository.findById(season, TOURNAMENT_ID);
+    expect(tournament).not.toBeNull();
+
+    await expect(
+      tournamentRosterRepository.publishAuthoritativeRoster(
+        season,
+        tournament!,
+        ENTRY_IDS.map((entryId) => ({
+          id: String(entryId),
+          team: `Late Entry ${entryId}`,
+          manager: `Late Manager ${entryId}`,
+          overallRank: entryId,
+          totalPoints: 0,
+        })),
+        'Locked H2H League',
+        {
+          expectedProgressMarker: marker,
+          guardUnlockedOfficialH2HRecovery: true,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'TOURNAMENT_OFFICIAL_H2H_RECOVERY_UNSAFE' });
   });
 });

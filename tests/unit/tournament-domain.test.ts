@@ -376,6 +376,13 @@ describe('official H2H live roster recovery', () => {
     expect(
       isUnlockedOfficialH2HRosterRecoveryState(
         { ...recoverable, rosterSyncStatus: 'processing' },
+        'processing',
+        false,
+      ),
+    ).toBe(true);
+    expect(
+      isUnlockedOfficialH2HRosterRecoveryState(
+        { ...recoverable, rosterSyncStatus: 'processing' },
         'failed',
         false,
       ),
