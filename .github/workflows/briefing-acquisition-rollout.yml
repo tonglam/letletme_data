@@ -31,6 +31,7 @@ jobs:
             output_file="$tmp_dir/output.jsonl"
             trace_file="$tmp_dir/trace.log"
 
+            set +e
             sudo -u deploy -H env \
               HOME=/home/deploy \
               GROK_HOME=/home/deploy/.grok \
@@ -55,6 +56,8 @@ jobs:
                 --deny 'WebSearch(*)' \
                 -p 'Use x_thread_fetch exactly once with post_id 2091144605710647466. Return only one JSON object and no prose: {"posts":[{"postId":"string","authorHandle":"string","createdAt":"ISO-8601","text":"full exact post text","url":"https://x.com/...","media":[{"kind":"IMAGE|VIDEO|OTHER","url":"public media URL or null","mimeType":"string or null","altText":"exact alt text or null"}]}]}. Copy media only when the X tool provides it. If the tool does not provide media metadata, return media as an empty array; never invent a URL or visual fact. Do not use any other tool.' \
               >"$output_file" 2>"$trace_file"
+            status=$?
+            set -e
 
             printf '%s\n' '--- output bytes ---'
             wc -c "$output_file"
@@ -62,3 +65,4 @@ jobs:
             sed -n '1,160p' "$output_file"
             printf '%s\n' '--- trace tail ---'
             tail -n 80 "$trace_file"
+            exit "$status"
