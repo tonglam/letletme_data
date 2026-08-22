@@ -201,12 +201,13 @@ const toClassicRows = (
 ): ManagerLiveScoreRow[] => {
   const upstreamUpdatedAt = response.last_updated_data ?? null;
   return response.standings.results
-    .filter((result) => Number.isSafeInteger(result.entry) && result.entry > 0)
-    .map((result) =>
-      withRevision({
+    .map((result) => {
+      const entryId = result.entry;
+      if (typeof entryId !== 'number' || !Number.isSafeInteger(entryId) || entryId <= 0) return null;
+      return withRevision({
         season,
         eventId,
-        entryId: result.entry,
+        entryId,
         eventPoints: result.event_total ?? null,
         netEventPoints: null,
         totalPoints: result.total ?? null,
@@ -220,8 +221,9 @@ const toClassicRows = (
         checkedAt,
         upstreamUpdatedAt,
         staleAt: plusSeconds(checkedAt, STALE_SECONDS),
-      }),
-    );
+      });
+    })
+    .filter((row): row is ManagerLiveScoreRow => row !== null);
 };
 
 const ageSeconds = (checkedAt: string, now = Date.now()): number => {
