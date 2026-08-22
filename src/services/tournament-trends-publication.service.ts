@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { getDbClient } from '../db/singleton';
+import { withDatabaseTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { logError, logInfo } from '../utils/logger';
 
@@ -84,11 +84,10 @@ export async function publishTournamentTrendScope(
     throw new Error('eventId must be between 1 and 38');
   }
 
-  const client = await getDbClient();
   // Audit, checksum and row aggregation must observe one source snapshot. The
   // advisory lock only serializes publishers; source writers do not take it.
   const publishOnce = (): Promise<TournamentTrendScopePublication> =>
-    client.begin(async (tx) => {
+    withDatabaseTransaction(async (tx) => {
       // PostgreSQL requires SET TRANSACTION before every other statement in the
       // transaction. The snapshot is established by the first query below.
       await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
