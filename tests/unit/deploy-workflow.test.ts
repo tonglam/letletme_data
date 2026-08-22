@@ -79,6 +79,9 @@ describe('release workflow gates', () => {
     expect(controlProbeScript).toContain('GLOBAL:GROK_BUILD_X');
     expect(controlProbeScript).toContain('content.acquisition_budget_reservations');
     expect(controlProbeScript).toContain('CONTROL_PLANE_PROBE');
+    expect(controlProbeScript).toContain('lease_expires_at < now()');
+    expect(controlProbeScript).toContain('CONTROL_PROBE_INTERRUPTED');
+    expect(controlProbeScript).toContain('controlProbeRecovery');
     expect(hostRunnerDeployScript).toContain('rollback_on_failure');
     expect(hostRunnerRollbackScript).toContain('/home/workspace/letletme-grok-runner');
   });

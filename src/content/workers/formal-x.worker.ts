@@ -29,6 +29,7 @@ import {
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
 import {
   releaseOneXRunBudgetUnit,
+  releaseXRunBudgetsExcept,
   reserveXRunBudgets,
   type XBudgetLane,
   type XBudgetPolicy,
@@ -119,8 +120,10 @@ export async function runFormalXWorker(
   let identityRun = false;
   let providerProcessStarted = false;
   let probeReservationIds: readonly string[] | null = null;
+  let probeIncrementedReservationIds: readonly string[] = [];
   let probeProcessStarted = false;
   let releaseProbeBudget: (() => Promise<void>) | null = null;
+  let releaseMainBudgetAfterProbe: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
   let scanAccounting: Readonly<{
@@ -192,6 +195,7 @@ export async function runFormalXWorker(
         );
       }
       probeReservationIds = budget.reservationIds;
+      probeIncrementedReservationIds = budget.incrementedReservationIds;
     };
     const executionHooks: GrokBuildExecutionHooks = {
       runId: job.runId,
@@ -219,6 +223,35 @@ export async function runFormalXWorker(
         if (!released) throw new Error('X probe budget reservation disappeared before release');
       });
       probeReservationIds = null;
+    };
+    releaseMainBudgetAfterProbe = async (): Promise<void> => {
+      if (probeReservationIds === null) return;
+      const keepReservationIds = probeReservationIds;
+      const incrementedReservationIds = probeIncrementedReservationIds;
+      await db.transaction(async (tx) => {
+        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
+        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
+        // A probe may cross an hourly ledger boundary. Rows created by the
+        // probe are probe-only; rows increased in place contain one original
+        // execution unit plus one probe unit. Release the former execution
+        // reservations while retaining exactly one unit for each probe.
+        await releaseXRunBudgetsExcept({
+          tx,
+          runId: job.runId,
+          dbNow,
+          keepReservationIds,
+        });
+        if (incrementedReservationIds.length > 0) {
+          const released = await releaseOneXRunBudgetUnit({
+            tx,
+            runId: job.runId,
+            dbNow,
+            reservationIds: incrementedReservationIds,
+          });
+          if (!released) throw new Error('Original X execution budget disappeared after probe');
+        }
+      });
     };
     const executor = dependencies?.executor;
     if (!executor) throw new Error('Host Grok runner executor is not configured');
@@ -454,11 +487,22 @@ export async function runFormalXWorker(
   } catch (error) {
     if (began) {
       const failure = errorFacts(error);
-      const billedProviderProcessStarted = providerProcessStarted || probeProcessStarted;
+      // The control-plane probe and the requested scan are separate billable
+      // operations. A successful probe followed by a pre-dispatch scan
+      // failure must commit only the probe unit and release the scan unit.
+      const mainProviderProcessStarted = providerProcessStarted;
+      const probeOnly = probeProcessStarted && !mainProviderProcessStarted;
       const probeEvidence = probeProcessStarted
         ? hostXProbeEvidence('CONTROL_PLANE_PROBE_FAILED')
         : undefined;
-      if (failure.failureClass === 'RUNNER_CAPACITY' && !billedProviderProcessStarted) {
+      if (probeOnly) {
+        await releaseMainBudgetAfterProbe?.();
+      }
+      if (
+        failure.failureClass === 'RUNNER_CAPACITY' &&
+        !mainProviderProcessStarted &&
+        !probeProcessStarted
+      ) {
         await releaseProbeBudget?.();
         const deferred = await deferFormalRunForCapacity({
           runId: job.runId,
@@ -482,7 +526,7 @@ export async function runFormalXWorker(
           runId: job.runId,
           failureClass: failure.failureClass,
           errorSummary: failure.summary,
-          providerProcessStarted: billedProviderProcessStarted,
+          providerProcessStarted: mainProviderProcessStarted,
           providerExecution: identityExecution ?? undefined,
           probeEvidence,
           db,
@@ -528,7 +572,7 @@ export async function runFormalXWorker(
               }
             : undefined,
           rejections,
-          providerProcessStarted: billedProviderProcessStarted,
+          providerProcessStarted: mainProviderProcessStarted,
           probeEvidence,
           db,
         });

@@ -267,6 +267,7 @@ export async function persistXIdentityResult(input: {
         summary: 'Resolved X user ID conflicts with an existing stable identity',
         identityStatus: 'CONFLICT',
         execution: input.execution,
+        probeEvidence: input.probeEvidence,
       });
     }
 
@@ -456,7 +457,8 @@ export async function failXIdentityRun(input: {
             }
           : providerAttempted
             ? {
-                providerProcessStarted: true,
+                providerProcessStarted: mainProviderAttempted,
+                controlPlaneProbeProcessStarted: input.probeEvidence !== undefined,
                 providerTraceVerified: false,
                 probeCallCount: input.probeEvidence ? 1 : 0,
               }

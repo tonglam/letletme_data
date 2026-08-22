@@ -66,6 +66,97 @@ SET LOCAL statement_timeout = '15s';
 SET LOCAL lock_timeout = '2s';
 SET LOCAL idle_in_transaction_session_timeout = '20s';
 
+-- A deploy shell can be interrupted after this transaction reserves the
+-- control-probe unit but before finalize_probe runs. Recover only the
+-- explicitly tagged control-probe rows; ordinary acquisition runs use their
+-- own lease reclaimer. We commit conservatively because the host process may
+-- already have started, and leave an audit trace explaining the ambiguity.
+SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'));
+SELECT set_config('briefing.request_hash', :'request_hash', true);
+
+DO $recover$
+DECLARE
+  stale RECORD;
+  reservation RECORD;
+  committed_units numeric;
+  trace_count integer;
+  digest text;
+  trace_uuid uuid;
+BEGIN
+  FOR stale IN
+    SELECT run_id
+    FROM content.acquisition_runs
+    WHERE job_kind IS NULL
+      AND status = 'RUNNING'
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at < now()
+      AND run_metrics ->> 'controlPlaneProbe' = 'true'
+    FOR UPDATE
+  LOOP
+    committed_units := 0;
+    FOR reservation IN
+      SELECT reservation_id, ledger_id, units
+      FROM content.acquisition_budget_reservations
+      WHERE run_id = stale.run_id
+        AND status = 'RESERVED'
+      FOR UPDATE
+    LOOP
+      IF reservation.units <= 0 THEN
+        RAISE EXCEPTION 'control probe reservation has invalid units';
+      END IF;
+      UPDATE content.acquisition_budget_reservations
+      SET status = 'COMMITTED', updated_at = now()
+      WHERE reservation_id = reservation.reservation_id;
+      UPDATE content.acquisition_budget_ledgers
+      SET reserved_units = reserved_units - reservation.units,
+          committed_units = committed_units + reservation.units,
+          updated_at = now()
+      WHERE ledger_id = reservation.ledger_id;
+      committed_units := committed_units + reservation.units;
+    END LOOP;
+
+    SELECT count(*) INTO trace_count
+    FROM content.acquisition_provider_traces
+    WHERE run_id = stale.run_id;
+    IF committed_units > 0 AND trace_count = 0 THEN
+      digest := md5(stale.run_id::text || ':control-probe-recovery');
+      trace_uuid := (
+        substr(digest, 1, 8) || '-' || substr(digest, 9, 4) || '-' ||
+        substr(digest, 13, 4) || '-' || substr(digest, 17, 4) || '-' ||
+        substr(digest, 21, 12)
+      )::uuid;
+      INSERT INTO content.acquisition_provider_traces (
+        trace_id, run_id, sequence, provider, operation,
+        request_metadata_hash, response_metadata_hash, provider_job_id_hash,
+        provider_units, terminal_state
+      )
+      VALUES (
+        trace_uuid, stale.run_id, 0, 'grok-build', 'x_user_search',
+        current_setting('briefing.request_hash'), NULL, NULL,
+        committed_units, 'CONTROL_PROBE_INTERRUPTED_UNKNOWN'
+      );
+    END IF;
+
+    UPDATE content.acquisition_runs
+    SET status = 'FAILED',
+        provider = CASE WHEN committed_units > 0 THEN 'grok-build' ELSE NULL END,
+        provider_units = CASE WHEN committed_units > 0 THEN committed_units ELSE NULL END,
+        x_call_count = CASE WHEN committed_units > 0 THEN 1 ELSE 0 END,
+        trace_verified = false,
+        failure_class = 'CONTROL_PROBE_INTERRUPTED',
+        error_summary = 'Control-plane probe lease expired before finalization; provider call state was unknown',
+        failure_details_hash = current_setting('briefing.request_hash'),
+        run_metrics = run_metrics || jsonb_build_object(
+          'controlProbeRecovery', 'expired-lease',
+          'providerProcessStartedUnknown', committed_units > 0
+        ),
+        completed_at = now(),
+        lease_expires_at = null
+    WHERE run_id = stale.run_id;
+  END LOOP;
+END
+$recover$;
+
 INSERT INTO content.acquisition_runs (
   run_id, window_start, window_end, idempotency_key, status,
   request_snapshot, request_hash, source_snapshot, endpoint_snapshot,
@@ -78,7 +169,6 @@ VALUES (
   '{"controlPlaneProbe":true,"probeTarget":"OfficialFPL"}'::jsonb
 );
 
-SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'));
 SELECT set_config('briefing.run_id', :'run_id', true);
 SELECT set_config('briefing.reservation_id', :'reservation_id', true);
 SELECT set_config('briefing.ledger_id', :'ledger_id', true);

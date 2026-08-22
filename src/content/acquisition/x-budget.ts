@@ -25,6 +25,8 @@ export type XBudgetReservationResult = Readonly<{
   deferredScope: string | null;
   remainingBeforeReservation: number;
   reservationIds: readonly string[];
+  createdReservationIds: readonly string[];
+  incrementedReservationIds: readonly string[];
 }>;
 
 type BudgetScope = Readonly<{
@@ -150,12 +152,16 @@ export async function reserveXRunBudgets(input: {
         deferredScope: `${scope.scopeKind}:${scope.scopeKey}`,
         remainingBeforeReservation: Math.max(0, scope.limit - used),
         reservationIds: [],
+        createdReservationIds: [],
+        incrementedReservationIds: [],
       };
     }
   }
 
   const bucket = hourBucket(input.dbNow);
   const reservationIds: string[] = [];
+  const createdReservationIds: string[] = [];
+  const incrementedReservationIds: string[] = [];
   for (const { scope, used } of usage) {
     const ledgerRows = await input.tx
       .insert(contentAcquisitionBudgetLedgers)
@@ -221,6 +227,7 @@ export async function reserveXRunBudgets(input: {
         })
         .where(eq(contentAcquisitionBudgetReservations.reservationId, existing[0].reservationId));
       reservationIds.push(existing[0].reservationId);
+      incrementedReservationIds.push(existing[0].reservationId);
     } else {
       const reservationId = randomUUID();
       await input.tx.insert(contentAcquisitionBudgetReservations).values({
@@ -233,6 +240,7 @@ export async function reserveXRunBudgets(input: {
         updatedAt: input.dbNow,
       });
       reservationIds.push(reservationId);
+      createdReservationIds.push(reservationId);
     }
     if (used + requestedUnits > scope.limit)
       throw new Error('X budget reservation exceeded its hard cap');
@@ -241,6 +249,8 @@ export async function reserveXRunBudgets(input: {
     reserved: true,
     deferredScope: null,
     reservationIds,
+    createdReservationIds,
+    incrementedReservationIds,
     remainingBeforeReservation: Math.min(
       ...usage.map(({ scope, used }) => Math.max(0, scope.limit - used - requestedUnits)),
     ),
@@ -302,6 +312,55 @@ export async function releaseOneXRunBudgetUnit(input: {
       .where(eq(contentAcquisitionBudgetLedgers.ledgerId, reservation.ledgerId));
   }
   return true;
+}
+
+/** Release all reserved units for a run except rows belonging to a started provider call. */
+export async function releaseXRunBudgetsExcept(input: {
+  tx: TransactionHandle;
+  runId: string;
+  dbNow: Date;
+  keepReservationIds: readonly string[];
+}): Promise<number> {
+  const keepReservationIds = [...new Set(input.keepReservationIds)];
+  await input.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'))`);
+  const exclusion = keepReservationIds.length
+    ? sql`AND reservation.reservation_id NOT IN (${sql.join(
+        keepReservationIds.map((reservationId) => sql`${reservationId}::uuid`),
+        sql`, `,
+      )})`
+    : sql``;
+  const reservations = await input.tx.execute<{
+    reservationId: string;
+    ledgerId: string;
+    units: string | number;
+  }>(sql`
+    SELECT reservation.reservation_id AS "reservationId",
+           reservation.ledger_id AS "ledgerId",
+           reservation.units
+    FROM content.acquisition_budget_reservations AS reservation
+    WHERE reservation.run_id = ${input.runId}::uuid
+      AND reservation.status = 'RESERVED'
+      ${exclusion}
+    FOR UPDATE
+  `);
+  for (const reservation of reservations) {
+    const units = Number(reservation.units);
+    if (!Number.isSafeInteger(units) || units < 1) {
+      throw new Error('X budget reservation is invalid');
+    }
+    await input.tx
+      .update(contentAcquisitionBudgetReservations)
+      .set({ status: 'RELEASED', updatedAt: input.dbNow })
+      .where(eq(contentAcquisitionBudgetReservations.reservationId, reservation.reservationId));
+    await input.tx
+      .update(contentAcquisitionBudgetLedgers)
+      .set({
+        reservedUnits: sql`${contentAcquisitionBudgetLedgers.reservedUnits} - ${units}`,
+        updatedAt: input.dbNow,
+      })
+      .where(eq(contentAcquisitionBudgetLedgers.ledgerId, reservation.ledgerId));
+  }
+  return reservations.length;
 }
 
 async function transitionRunBudgets(input: {
