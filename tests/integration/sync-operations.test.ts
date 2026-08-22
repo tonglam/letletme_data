@@ -283,13 +283,15 @@ describe('ops sync state machine', () => {
       },
     );
 
-    const rows = await sql<Array<{ started_at: Date; completed_at: Date | null }>>`
+    const rows = await sql<Array<{ started_at: string; completed_at: string | null }>>`
       SELECT started_at, completed_at
       FROM ops.sync_runs
       WHERE run_id = ${RUN_IDS[0]}::uuid
     `;
     expect(rows[0]?.completed_at).not.toBeNull();
-    expect(rows[0]!.completed_at!.getTime()).toBeGreaterThanOrEqual(rows[0]!.started_at.getTime());
+    expect(Date.parse(rows[0]!.completed_at!)).toBeGreaterThanOrEqual(
+      Date.parse(rows[0]!.started_at),
+    );
   });
 
   test('atomically replaces the active publication and retires the prior revision', async () => {
