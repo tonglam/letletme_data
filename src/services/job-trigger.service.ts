@@ -7,7 +7,6 @@ import {
 import {
   enqueueEntryInfoSyncJob,
   enqueueEntryPicksSyncJob,
-  enqueueEntryResultsSyncJob,
   enqueueEntryTransfersSyncJob,
 } from '../jobs/entry-sync-enqueue';
 import { runManualEventCurrentRefresh } from '../jobs/event-current-refresh.job';
@@ -31,6 +30,7 @@ import {
   enqueuePlayerMarketFreshness,
   enqueuePlayerSeasonSummaryRepair,
   enqueuePostMatchConsolidation,
+  enqueueMyFplSnapshot,
   enqueueTournamentTrendsRepair,
 } from '../jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
@@ -103,6 +103,71 @@ function requirePlayerPricesChangeDate(input: unknown): string {
   return changeDate;
 }
 
+type MyFplManualSnapshotInput = {
+  eventId?: number;
+  snapshotKind?: 'PROVISIONAL' | 'FINAL';
+  snapshotActor?: string;
+  snapshotReason?: string;
+  snapshotIdempotencyKey?: string;
+};
+
+function readMyFplManualSnapshotInput(input: unknown): MyFplManualSnapshotInput {
+  if (input === undefined || input === null) return {};
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    throw new ValidationError(
+      'My FPL snapshot input must be an object',
+      'MY_FPL_SNAPSHOT_INPUT_INVALID',
+    );
+  }
+  const value = input as Record<string, unknown>;
+  const eventId = value.eventId;
+  if (eventId !== undefined && (!Number.isSafeInteger(eventId) || Number(eventId) <= 0)) {
+    throw new ValidationError(
+      'My FPL snapshot eventId must be a positive integer',
+      'MY_FPL_SNAPSHOT_EVENT_INVALID',
+    );
+  }
+  const snapshotKind = value.snapshotKind ?? 'PROVISIONAL';
+  if (snapshotKind !== 'PROVISIONAL' && snapshotKind !== 'FINAL') {
+    throw new ValidationError(
+      'My FPL snapshotKind must be PROVISIONAL or FINAL',
+      'MY_FPL_SNAPSHOT_KIND_INVALID',
+    );
+  }
+  const readText = (key: string): string | undefined => {
+    const candidate = value[key];
+    if (candidate === undefined) return undefined;
+    if (typeof candidate !== 'string' || candidate.trim() === '') {
+      throw new ValidationError(
+        `My FPL ${key} must be a non-empty string`,
+        'MY_FPL_SNAPSHOT_OVERRIDE_INVALID',
+      );
+    }
+    return candidate.trim();
+  };
+  const result = {
+    ...(eventId === undefined ? {} : { eventId: eventId as number }),
+    snapshotKind,
+    ...(readText('snapshotActor') ? { snapshotActor: readText('snapshotActor') } : {}),
+    ...(readText('snapshotReason') ? { snapshotReason: readText('snapshotReason') } : {}),
+    ...(readText('snapshotIdempotencyKey')
+      ? { snapshotIdempotencyKey: readText('snapshotIdempotencyKey') }
+      : {}),
+  } satisfies MyFplManualSnapshotInput;
+  const overrideKeys = [
+    result.snapshotActor,
+    result.snapshotReason,
+    result.snapshotIdempotencyKey,
+  ].filter((candidate) => candidate !== undefined);
+  if (overrideKeys.length > 0 && (snapshotKind !== 'FINAL' || overrideKeys.length !== 3)) {
+    throw new ValidationError(
+      'My FPL final override requires snapshotActor, snapshotReason, and snapshotIdempotencyKey',
+      'MY_FPL_SNAPSHOT_OVERRIDE_INVALID',
+    );
+  }
+  return result;
+}
+
 function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
   return {
     'event-current-refresh': () => runManualEventCurrentRefresh(),
@@ -172,11 +237,42 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     },
     'entry-event-results-daily': async () => {
       const season = await seasonRepository.findCurrent();
-      const currentEvent = await getCurrentEvent(season);
+      const requested = readMyFplManualSnapshotInput(input);
+      const currentEvent = requested.eventId
+        ? await eventRepository.findById(season, requested.eventId)
+        : await getCurrentEvent(season);
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueEntryResultsSyncJob(season, 'manual', { eventId: currentEvent.id });
+      return enqueueMyFplSnapshot(season, 'manual', {
+        eventId: currentEvent.id,
+        snapshotKind: requested.snapshotKind ?? 'PROVISIONAL',
+        jobId: `manual-entry-event-results-daily-${currentEvent.id}-${Date.now()}`,
+        ...(requested.snapshotActor ? { snapshotActor: requested.snapshotActor } : {}),
+        ...(requested.snapshotReason ? { snapshotReason: requested.snapshotReason } : {}),
+        ...(requested.snapshotIdempotencyKey
+          ? { snapshotIdempotencyKey: requested.snapshotIdempotencyKey }
+          : {}),
+      });
+    },
+    'my-fpl-finalization': async () => {
+      const requested = readMyFplManualSnapshotInput({
+        ...(input && typeof input === 'object' && !Array.isArray(input) ? input : {}),
+        snapshotKind: 'FINAL',
+      });
+      const season = await seasonRepository.findCurrent();
+      const event = requested.eventId
+        ? await eventRepository.findById(season, requested.eventId)
+        : await eventRepository.findLatestFinalized(season);
+      if (!event) throw new Error('No finalized event found');
+      return enqueueMyFplSnapshot(season, 'manual', {
+        eventId: event.id,
+        snapshotKind: 'FINAL',
+        jobId: `manual-my-fpl-finalization-${event.id}-${Date.now()}`,
+        snapshotActor: requested.snapshotActor!,
+        snapshotReason: requested.snapshotReason!,
+        snapshotIdempotencyKey: requested.snapshotIdempotencyKey!,
+      });
     },
     'entry-picks': async () => {
       const season = await seasonRepository.findCurrent();

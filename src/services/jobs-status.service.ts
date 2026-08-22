@@ -9,16 +9,23 @@ import { checkRuntimeHeartbeat, readRuntimeHeartbeat } from '../utils/runtime-he
 import { schedulerObligationSummary } from '../repositories/scheduler-obligations';
 import { schedulerRegistry } from '../scheduler/job-registry';
 import { eventRepository } from '../repositories/events';
+import { getMyFplSnapshotOperationalStatus } from './my-fpl-snapshot-publication.service';
 
 export async function getJobsStatus(): Promise<Record<string, unknown>> {
   const season = await seasonRepository.findCurrent();
-  const [obligations, schedulerHeartbeat, queueWorkerHeartbeat, contentWorkerHeartbeat] =
-    await Promise.all([
-      schedulerObligationSummary(),
-      readRuntimeHeartbeat('scheduler'),
-      readRuntimeHeartbeat('queueWorker'),
-      readRuntimeHeartbeat('contentWorker'),
-    ]);
+  const [
+    obligations,
+    schedulerHeartbeat,
+    queueWorkerHeartbeat,
+    contentWorkerHeartbeat,
+    myFplSnapshots,
+  ] = await Promise.all([
+    schedulerObligationSummary(),
+    readRuntimeHeartbeat('scheduler'),
+    readRuntimeHeartbeat('queueWorker'),
+    readRuntimeHeartbeat('contentWorker'),
+    getMyFplSnapshotOperationalStatus(season),
+  ]);
   const scheduler = Boolean(schedulerHeartbeat && (await checkRuntimeHeartbeat('scheduler')));
   const queueWorker = Boolean(queueWorkerHeartbeat && (await checkRuntimeHeartbeat('queueWorker')));
   const contentWorker = Boolean(
@@ -91,6 +98,7 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
       contentWorker: { healthy: contentWorker, heartbeat: contentWorkerHeartbeat },
     },
     obligations,
+    myFplSnapshots,
     publicationConsistency,
     queues,
   };

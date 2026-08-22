@@ -3073,6 +3073,259 @@ export const entryEventResultsInCompetition = competition.table(
   ],
 );
 
+export const myFplSnapshotPublicationsInCompetition = competition.table(
+  'my_fpl_snapshot_publications',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' })
+      .default(sql`nextval('competition.my_fpl_snapshot_revision_seq'::regclass)`)
+      .notNull(),
+    snapshotDate: date('snapshot_date').notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    kind: text().notNull(),
+    active: boolean().default(false).notNull(),
+    expectedEntryCount: integer('expected_entry_count').notNull(),
+    readyEntryCount: integer('ready_entry_count').notNull(),
+    emptyEntryCount: integer('empty_entry_count').notNull(),
+    expectedTournamentCount: integer('expected_tournament_count').notNull(),
+    readyTournamentCount: integer('ready_tournament_count').notNull(),
+    contentSha256: text('content_sha256').notNull(),
+    overrideActor: text('override_actor'),
+    overrideReason: text('override_reason'),
+    idempotencyKey: text('idempotency_key'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('my_fpl_snapshot_publications_gc_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.publishedAt.desc(),
+    ),
+    uniqueIndex('my_fpl_snapshot_publications_active_key')
+      .on(table.seasonId, table.eventId)
+      .where(sql`active`),
+    uniqueIndex('my_fpl_snapshot_publications_idempotency_key')
+      .on(table.seasonId, table.eventId, table.idempotencyKey)
+      .where(sql`idempotency_key IS NOT NULL`),
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'my_fpl_snapshot_publications_season_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'my_fpl_snapshot_publications_event_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId, table.eventId, table.revision],
+      name: 'my_fpl_snapshot_publications_pkey',
+    }),
+    check(
+      'my_fpl_snapshot_publications_kind_check',
+      sql`kind = ANY (ARRAY['PROVISIONAL'::text, 'FINAL'::text])`,
+    ),
+    check(
+      'my_fpl_snapshot_publications_counts_check',
+      sql`expected_entry_count >= 0 AND ready_entry_count >= 0 AND empty_entry_count >= 0 AND ready_entry_count + empty_entry_count = expected_entry_count AND expected_tournament_count >= 0 AND ready_tournament_count >= 0 AND ready_tournament_count <= expected_tournament_count`,
+    ),
+    check('my_fpl_snapshot_publications_hash_check', sql`content_sha256 ~ '^[0-9a-f]{64}$'::text`),
+    check(
+      'my_fpl_snapshot_publications_override_check',
+      sql`((override_actor IS NULL AND override_reason IS NULL AND idempotency_key IS NULL) OR (kind = 'FINAL'::text AND override_actor IS NOT NULL AND override_reason IS NOT NULL AND idempotency_key IS NOT NULL AND btrim(override_actor) <> '' AND btrim(override_reason) <> '' AND btrim(idempotency_key) <> ''))`,
+    ),
+  ],
+);
+
+export const myFplSnapshotPublicationOutboxInCompetition = competition.table(
+  'my_fpl_snapshot_publication_outbox',
+  {
+    outboxId: uuid('outbox_id').defaultRandom().primaryKey().notNull(),
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    manifest: jsonb().notNull(),
+    status: text().default('PENDING').notNull(),
+    availableAt: timestamp('available_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    attempts: integer().default(0).notNull(),
+    leaseOwner: text('lease_owner'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true, mode: 'date' }),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('my_fpl_snapshot_publication_outbox_revision_key').on(
+      table.seasonId,
+      table.eventId,
+      table.revision,
+    ),
+    index('my_fpl_snapshot_publication_outbox_pending_idx')
+      .on(table.availableAt, table.outboxId)
+      .where(sql`status IN ('PENDING', 'PROCESSING') AND delivered_at IS NULL`),
+    index('my_fpl_snapshot_publication_outbox_reclaim_idx')
+      .on(table.leaseExpiresAt, table.outboxId)
+      .where(sql`status = 'PROCESSING' AND delivered_at IS NULL`),
+    foreignKey({
+      columns: [table.seasonId, table.eventId, table.revision],
+      foreignColumns: [
+        myFplSnapshotPublicationsInCompetition.seasonId,
+        myFplSnapshotPublicationsInCompetition.eventId,
+        myFplSnapshotPublicationsInCompetition.revision,
+      ],
+      name: 'my_fpl_snapshot_publication_outbox_scope_fk',
+    }).onDelete('cascade'),
+    check(
+      'my_fpl_snapshot_publication_outbox_status_check',
+      sql`status = ANY (ARRAY['PENDING'::text, 'PROCESSING'::text, 'DELIVERED'::text, 'SUPERSEDED'::text, 'FAILED'::text])`,
+    ),
+    check('my_fpl_snapshot_publication_outbox_attempts_check', sql`attempts >= 0`),
+    check(
+      'my_fpl_snapshot_publication_outbox_manifest_check',
+      sql`jsonb_typeof(manifest) = 'object'::text`,
+    ),
+    check(
+      'my_fpl_snapshot_publication_outbox_lease_check',
+      sql`(lease_owner IS NULL AND lease_expires_at IS NULL) OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)`,
+    ),
+  ],
+);
+
+export const myFplSnapshotEntriesInCompetition = competition.table(
+  'my_fpl_snapshot_entries',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    entryId: integer('entry_id').notNull(),
+    picksCount: integer('picks_count').notNull(),
+    isEmpty: boolean('is_empty').default(false).notNull(),
+    payload: jsonb().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('my_fpl_snapshot_entries_active_lookup_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.entryId,
+      table.revision.desc(),
+    ),
+    foreignKey({
+      columns: [table.seasonId, table.eventId, table.revision],
+      foreignColumns: [
+        myFplSnapshotPublicationsInCompetition.seasonId,
+        myFplSnapshotPublicationsInCompetition.eventId,
+        myFplSnapshotPublicationsInCompetition.revision,
+      ],
+      name: 'my_fpl_snapshot_entries_publication_fk',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.seasonId, table.entryId],
+      foreignColumns: [entriesInCompetition.seasonId, entriesInCompetition.entryId],
+      name: 'my_fpl_snapshot_entries_entry_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId, table.eventId, table.revision, table.entryId],
+      name: 'my_fpl_snapshot_entries_pkey',
+    }),
+    check('my_fpl_snapshot_entries_picks_check', sql`picks_count >= 0 AND picks_count <= 15`),
+    check('my_fpl_snapshot_entries_payload_check', sql`jsonb_typeof(payload) = 'object'::text`),
+  ],
+);
+
+export const myFplSnapshotTournamentRowsInCompetition = competition.table(
+  'my_fpl_snapshot_tournament_rows',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    entryId: integer('entry_id').notNull(),
+    payload: jsonb().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('my_fpl_snapshot_tournament_rows_board_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.tournamentId,
+      table.revision,
+      table.entryId,
+    ),
+    foreignKey({
+      columns: [table.seasonId, table.eventId, table.revision],
+      foreignColumns: [
+        myFplSnapshotPublicationsInCompetition.seasonId,
+        myFplSnapshotPublicationsInCompetition.eventId,
+        myFplSnapshotPublicationsInCompetition.revision,
+      ],
+      name: 'my_fpl_snapshot_tournament_rows_publication_fk',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.seasonId, table.entryId],
+      foreignColumns: [entriesInCompetition.seasonId, entriesInCompetition.entryId],
+      name: 'my_fpl_snapshot_tournament_rows_entry_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'my_fpl_snapshot_tournament_rows_tournament_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId, table.eventId, table.revision, table.tournamentId, table.entryId],
+      name: 'my_fpl_snapshot_tournament_rows_pkey',
+    }),
+    check(
+      'my_fpl_snapshot_tournament_rows_payload_check',
+      sql`jsonb_typeof(payload) = 'object'::text`,
+    ),
+  ],
+);
+
+export const myFplSnapshotTournamentAggregatesInCompetition = competition.table(
+  'my_fpl_snapshot_tournament_aggregates',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    payload: jsonb().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.seasonId, table.eventId, table.revision],
+      foreignColumns: [
+        myFplSnapshotPublicationsInCompetition.seasonId,
+        myFplSnapshotPublicationsInCompetition.eventId,
+        myFplSnapshotPublicationsInCompetition.revision,
+      ],
+      name: 'my_fpl_snapshot_tournament_aggregates_publication_fk',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'my_fpl_snapshot_tournament_aggregates_tournament_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId, table.eventId, table.revision, table.tournamentId],
+      name: 'my_fpl_snapshot_tournament_aggregates_pkey',
+    }),
+    check(
+      'my_fpl_snapshot_tournament_aggregates_payload_check',
+      sql`jsonb_typeof(payload) = 'object'::text`,
+    ),
+  ],
+);
+
 export const tournamentGroupsInCompetition = competition.table(
   'tournament_groups',
   {
