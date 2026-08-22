@@ -34,6 +34,12 @@ export type PlayerMarketPublicationSource = {
   readonly rowCount: number;
 };
 
+function normalizeDatabaseDate(value: Date | string | null | undefined): Date | null {
+  if (value === null || value === undefined) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
 export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
@@ -101,7 +107,9 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
         return {
           snapshotCount: coverage?.snapshotCount ?? 0,
           captureCount: coverage?.captureCount ?? 0,
-          latestCapturedAt: coverage?.latestCapturedAt ?? null,
+          latestCapturedAt: normalizeDatabaseDate(
+            coverage?.latestCapturedAt as Date | string | null | undefined,
+          ),
         };
       } catch (error) {
         logError('Failed to read player market snapshot coverage', error, {
