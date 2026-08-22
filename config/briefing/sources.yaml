@@ -1,0 +1,919 @@
+schemaVersion: 1
+entities:
+  - sourceKey: official-fpl
+    sourceType: OFFICIAL_FPL
+    displayName: Official FPL
+    endpoints:
+      - endpointKey: official-fpl-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: OfficialFPL }
+        profileKey: x-official-v1
+
+  - sourceKey: premier-league
+    sourceType: LEAGUE_OFFICIAL
+    displayName: Premier League
+    endpoints:
+      - endpointKey: premier-league-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: premierleague }
+        profileKey: x-official-v1
+
+  - sourceKey: arsenal
+    sourceType: CLUB_OFFICIAL
+    displayName: Arsenal
+    clubCoverage: [{ clubKey: arsenal, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: arsenal-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: Arsenal }
+        profileKey: x-club-v1
+
+  - sourceKey: aston-villa
+    sourceType: CLUB_OFFICIAL
+    displayName: Aston Villa
+    clubCoverage: [{ clubKey: aston-villa, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: aston-villa-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: AstonVilla }
+        profileKey: x-club-v1
+
+  - sourceKey: bournemouth
+    sourceType: CLUB_OFFICIAL
+    displayName: AFC Bournemouth
+    clubCoverage: [{ clubKey: bournemouth, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: bournemouth-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: afcbournemouth }
+        profileKey: x-club-v1
+
+  - sourceKey: brentford
+    sourceType: CLUB_OFFICIAL
+    displayName: Brentford
+    clubCoverage: [{ clubKey: brentford, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: brentford-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: BrentfordFC }
+        profileKey: x-club-v1
+
+  - sourceKey: brighton
+    sourceType: CLUB_OFFICIAL
+    displayName: Brighton & Hove Albion
+    clubCoverage: [{ clubKey: brighton, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: brighton-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: BHAFC }
+        profileKey: x-club-v1
+
+  - sourceKey: chelsea
+    sourceType: CLUB_OFFICIAL
+    displayName: Chelsea
+    clubCoverage: [{ clubKey: chelsea, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: chelsea-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: ChelseaFC }
+        profileKey: x-club-v1
+
+  - sourceKey: coventry
+    sourceType: CLUB_OFFICIAL
+    displayName: Coventry City
+    clubCoverage: [{ clubKey: coventry, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: coventry-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: CoventryCityFC }
+        profileKey: x-club-v1
+
+  - sourceKey: crystal-palace
+    sourceType: CLUB_OFFICIAL
+    displayName: Crystal Palace
+    clubCoverage: [{ clubKey: crystal-palace, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: crystal-palace-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: CPFC }
+        profileKey: x-club-v1
+
+  - sourceKey: everton
+    sourceType: CLUB_OFFICIAL
+    displayName: Everton
+    clubCoverage: [{ clubKey: everton, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: everton-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: Everton }
+        profileKey: x-club-v1
+
+  - sourceKey: fulham
+    sourceType: CLUB_OFFICIAL
+    displayName: Fulham
+    clubCoverage: [{ clubKey: fulham, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: fulham-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FulhamFC }
+        profileKey: x-club-v1
+
+  - sourceKey: hull
+    sourceType: CLUB_OFFICIAL
+    displayName: Hull City
+    clubCoverage: [{ clubKey: hull, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: hull-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: HullCity }
+        profileKey: x-club-v1
+
+  - sourceKey: ipswich
+    sourceType: CLUB_OFFICIAL
+    displayName: Ipswich Town
+    clubCoverage: [{ clubKey: ipswich, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: ipswich-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: IpswichTown }
+        profileKey: x-club-v1
+
+  - sourceKey: leeds
+    sourceType: CLUB_OFFICIAL
+    displayName: Leeds United
+    clubCoverage: [{ clubKey: leeds, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: leeds-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: LUFC }
+        profileKey: x-club-v1
+
+  - sourceKey: liverpool
+    sourceType: CLUB_OFFICIAL
+    displayName: Liverpool
+    clubCoverage: [{ clubKey: liverpool, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: liverpool-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: LFC }
+        profileKey: x-club-v1
+
+  - sourceKey: man-city
+    sourceType: CLUB_OFFICIAL
+    displayName: Manchester City
+    clubCoverage: [{ clubKey: man-city, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: man-city-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: ManCity }
+        profileKey: x-club-v1
+
+  - sourceKey: man-utd
+    sourceType: CLUB_OFFICIAL
+    displayName: Manchester United
+    clubCoverage: [{ clubKey: man-utd, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: man-utd-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: ManUtd }
+        profileKey: x-club-v1
+
+  - sourceKey: newcastle
+    sourceType: CLUB_OFFICIAL
+    displayName: Newcastle United
+    clubCoverage: [{ clubKey: newcastle, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: newcastle-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: NUFC }
+        profileKey: x-club-v1
+
+  - sourceKey: nottingham-forest
+    sourceType: CLUB_OFFICIAL
+    displayName: Nottingham Forest
+    clubCoverage: [{ clubKey: nottingham-forest, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: nottingham-forest-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: NFFC }
+        profileKey: x-club-v1
+
+  - sourceKey: sunderland
+    sourceType: CLUB_OFFICIAL
+    displayName: Sunderland
+    clubCoverage: [{ clubKey: sunderland, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: sunderland-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: SunderlandAFC }
+        profileKey: x-club-v1
+
+  - sourceKey: tottenham
+    sourceType: CLUB_OFFICIAL
+    displayName: Tottenham Hotspur
+    clubCoverage: [{ clubKey: tottenham, role: OFFICIAL }]
+    endpoints:
+      - endpointKey: tottenham-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: SpursOfficial }
+        profileKey: x-club-v1
+
+  - sourceKey: ben-dinnery
+    sourceType: REPORTER
+    displayName: Ben Dinnery
+    endpoints:
+      - endpointKey: ben-dinnery-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: BenDinnery }
+        profileKey: x-reporter-v1
+
+  - sourceKey: david-ornstein
+    sourceType: REPORTER
+    displayName: David Ornstein
+    clubCoverage: [{ clubKey: arsenal, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: david-ornstein-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: David_Ornstein }
+        profileKey: x-reporter-v1
+
+  - sourceKey: fabrizio-romano
+    sourceType: REPORTER
+    displayName: Fabrizio Romano
+    endpoints:
+      - endpointKey: fabrizio-romano-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FabrizioRomano }
+        profileKey: x-reporter-v1
+
+  - sourceKey: sami-mokbel
+    sourceType: REPORTER
+    displayName: Sami Mokbel
+    clubCoverage: [{ clubKey: arsenal, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: sami-mokbel-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: SamiMokbel_BBC }
+        profileKey: x-reporter-v1
+
+  - sourceKey: sam-lee
+    sourceType: REPORTER
+    displayName: Sam Lee
+    clubCoverage: [{ clubKey: man-city, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: sam-lee-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: SamLee }
+        profileKey: x-reporter-v1
+
+  - sourceKey: james-pearce
+    sourceType: REPORTER
+    displayName: James Pearce
+    clubCoverage: [{ clubKey: liverpool, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: james-pearce-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: JamesPearceLFC }
+        profileKey: x-reporter-v1
+
+  - sourceKey: simon-stone
+    sourceType: REPORTER
+    displayName: Simon Stone
+    clubCoverage: [{ clubKey: man-utd, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: simon-stone-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: sistoney67 }
+        profileKey: x-reporter-v1
+
+  - sourceKey: nizaar-kinsella
+    sourceType: REPORTER
+    displayName: Nizaar Kinsella
+    clubCoverage: [{ clubKey: chelsea, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: nizaar-kinsella-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: NizaarKinsella }
+        profileKey: x-reporter-v1
+
+  - sourceKey: john-townley
+    sourceType: REPORTER
+    displayName: John Townley
+    clubCoverage: [{ clubKey: aston-villa, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: john-townley-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: johntownley11 }
+        profileKey: x-reporter-v1
+
+  - sourceKey: jacob-tanswell
+    sourceType: REPORTER
+    displayName: Jacob Tanswell
+    clubCoverage: [{ clubKey: aston-villa, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: jacob-tanswell-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: J_Tanswell }
+        profileKey: x-reporter-v1
+
+  - sourceKey: alexander-smith
+    sourceType: REPORTER
+    displayName: Alexander Smith
+    clubCoverage: [{ clubKey: bournemouth, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: alexander-smith-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: AlexSmithEcho }
+        profileKey: x-reporter-v1
+
+  - sourceKey: tom-crocker
+    sourceType: REPORTER
+    displayName: Tom Crocker
+    clubCoverage: [{ clubKey: bournemouth, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: tom-crocker-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: TomJCrocker }
+        profileKey: x-reporter-v1
+
+  - sourceKey: sam-tabuteau
+    sourceType: REPORTER
+    displayName: Sam Tabuteau
+    clubCoverage:
+      - { clubKey: brentford, role: PRIMARY_REPORTING }
+      - { clubKey: fulham, role: PRIMARY_REPORTING }
+    endpoints:
+      - endpointKey: sam-tabuteau-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: tabuteauS }
+        profileKey: x-reporter-v1
+
+  - sourceKey: david-mcintyre
+    sourceType: REPORTER
+    displayName: David McIntyre
+    clubCoverage: [{ clubKey: brentford, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: david-mcintyre-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: davidmcintyre76 }
+        profileKey: x-reporter-v1
+
+  - sourceKey: andy-naylor
+    sourceType: REPORTER
+    displayName: Andy Naylor
+    clubCoverage: [{ clubKey: brighton, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: andy-naylor-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: AndyNaylorBHAFC }
+        profileKey: x-reporter-v1
+
+  - sourceKey: brian-owen
+    sourceType: REPORTER
+    displayName: Brian Owen
+    clubCoverage: [{ clubKey: brighton, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: brian-owen-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: Brian__Owen }
+        profileKey: x-reporter-v1
+
+  - sourceKey: liam-twomey
+    sourceType: REPORTER
+    displayName: Liam Twomey
+    clubCoverage: [{ clubKey: chelsea, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: liam-twomey-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: liam_twomey }
+        profileKey: x-reporter-v1
+
+  - sourceKey: andy-turner
+    sourceType: REPORTER
+    displayName: Andy Turner
+    clubCoverage: [{ clubKey: coventry, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: andy-turner-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: AndyTurnerccfc }
+        profileKey: x-reporter-v1
+
+  - sourceKey: bbc-coventry-warwickshire-sport
+    sourceType: PUBLICATION
+    displayName: BBC Sport Coventry & Warwickshire
+    clubCoverage: [{ clubKey: coventry, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: bbc-coventry-warwickshire-sport-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: BBCCWRSport }
+        profileKey: x-reporter-v1
+
+  - sourceKey: matt-woosnam
+    sourceType: REPORTER
+    displayName: Matt Woosnam
+    clubCoverage: [{ clubKey: crystal-palace, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: matt-woosnam-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: MattWoosie }
+        profileKey: x-reporter-v1
+
+  - sourceKey: edmund-brack
+    sourceType: REPORTER
+    displayName: Edmund Brack
+    clubCoverage: [{ clubKey: crystal-palace, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: edmund-brack-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: EdmundBrack }
+        profileKey: x-reporter-v1
+
+  - sourceKey: patrick-boyland
+    sourceType: REPORTER
+    displayName: Patrick Boyland
+    clubCoverage: [{ clubKey: everton, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: patrick-boyland-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: Paddy_Boyland }
+        profileKey: x-reporter-v1
+
+  - sourceKey: joe-thomas
+    sourceType: REPORTER
+    displayName: Joe Thomas
+    clubCoverage: [{ clubKey: everton, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: joe-thomas-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: joe_thomas18 }
+        profileKey: x-reporter-v1
+
+  - sourceKey: jack-kelly
+    sourceType: REPORTER
+    displayName: Jack Kelly
+    clubCoverage: [{ clubKey: fulham, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: jack-kelly-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: jackellyffc }
+        profileKey: x-reporter-v1
+
+  - sourceKey: barry-cooper
+    sourceType: REPORTER
+    displayName: Barry Cooper
+    clubCoverage: [{ clubKey: hull, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: barry-cooper-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: bazdjcooper }
+        profileKey: x-reporter-v1
+
+  - sourceKey: james-smailes
+    sourceType: REPORTER
+    displayName: James Smailes
+    clubCoverage: [{ clubKey: hull, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: james-smailes-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: James_Smailes }
+        profileKey: x-reporter-v1
+
+  - sourceKey: stuart-watson
+    sourceType: REPORTER
+    displayName: Stuart Watson
+    clubCoverage: [{ clubKey: ipswich, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: stuart-watson-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: Stuart_Watson }
+        profileKey: x-reporter-v1
+
+  - sourceKey: ross-halls
+    sourceType: REPORTER
+    displayName: Ross Halls
+    clubCoverage: [{ clubKey: ipswich, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: ross-halls-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: rossmediauk }
+        profileKey: x-reporter-v1
+
+  - sourceKey: phil-hay
+    sourceType: REPORTER
+    displayName: Phil Hay
+    clubCoverage: [{ clubKey: leeds, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: phil-hay-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: PhilHay_ }
+        profileKey: x-reporter-v1
+
+  - sourceKey: graham-smyth
+    sourceType: REPORTER
+    displayName: Graham Smyth
+    clubCoverage: [{ clubKey: leeds, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: graham-smyth-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: GrahamSmyth }
+        profileKey: x-reporter-v1
+
+  - sourceKey: david-lynch
+    sourceType: REPORTER
+    displayName: David Lynch
+    clubCoverage: [{ clubKey: liverpool, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: david-lynch-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: davidlynchlfc }
+        profileKey: x-reporter-v1
+
+  - sourceKey: simon-bajkowski
+    sourceType: REPORTER
+    displayName: Simon Bajkowski
+    clubCoverage: [{ clubKey: man-city, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: simon-bajkowski-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: spbajko }
+        profileKey: x-reporter-v1
+
+  - sourceKey: laurie-whitwell
+    sourceType: REPORTER
+    displayName: Laurie Whitwell
+    clubCoverage: [{ clubKey: man-utd, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: laurie-whitwell-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: lauriewhitwell }
+        profileKey: x-reporter-v1
+
+  - sourceKey: chris-waugh
+    sourceType: REPORTER
+    displayName: Chris Waugh
+    clubCoverage: [{ clubKey: newcastle, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: chris-waugh-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: ChrisDHWaugh }
+        profileKey: x-reporter-v1
+
+  - sourceKey: george-caulkin
+    sourceType: REPORTER
+    displayName: George Caulkin
+    clubCoverage: [{ clubKey: newcastle, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: george-caulkin-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: GeorgeCaulkin }
+        profileKey: x-reporter-v1
+
+  - sourceKey: paul-taylor-forest
+    sourceType: REPORTER
+    displayName: Paul Taylor
+    clubCoverage: [{ clubKey: nottingham-forest, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: paul-taylor-forest-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: nottmtails }
+        profileKey: x-reporter-v1
+
+  - sourceKey: sarah-clapson
+    sourceType: REPORTER
+    displayName: Sarah Clapson
+    clubCoverage: [{ clubKey: nottingham-forest, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: sarah-clapson-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: Sarah_Clapson }
+        profileKey: x-reporter-v1
+
+  - sourceKey: phil-smith-sunderland
+    sourceType: REPORTER
+    displayName: Phil Smith
+    clubCoverage: [{ clubKey: sunderland, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: phil-smith-sunderland-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: Phil__Smith }
+        profileKey: x-reporter-v1
+
+  - sourceKey: bbc-newcastle-sport
+    sourceType: PUBLICATION
+    displayName: BBC Sport Tyne & Wear
+    clubCoverage: [{ clubKey: sunderland, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: bbc-newcastle-sport-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: bbcnewcastle }
+        profileKey: x-reporter-v1
+
+  - sourceKey: charlie-eccleshare
+    sourceType: REPORTER
+    displayName: Charlie Eccleshare
+    clubCoverage: [{ clubKey: tottenham, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: charlie-eccleshare-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: CDEccleshare }
+        profileKey: x-reporter-v1
+
+  - sourceKey: alasdair-gold
+    sourceType: REPORTER
+    displayName: Alasdair Gold
+    clubCoverage: [{ clubKey: tottenham, role: PRIMARY_REPORTING }]
+    endpoints:
+      - endpointKey: alasdair-gold-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: AlasdairGold }
+        profileKey: x-reporter-v1
+
+  - sourceKey: ben-crellin
+    sourceType: CREATOR
+    displayName: Ben Crellin
+    endpoints:
+      - endpointKey: ben-crellin-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: BenCrellin }
+        profileKey: x-creator-v1
+
+  - sourceKey: fpl-general
+    sourceType: CREATOR
+    displayName: FPL General
+    endpoints:
+      - endpointKey: fpl-general-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FPLGeneral }
+        profileKey: x-creator-v1
+      - endpointKey: fpl-general-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UCxj4WVoWBuwXPGJsvUFPVig }
+        profileKey: youtube-caption-first-v1
+
+  - sourceKey: fpl-focal
+    sourceType: CREATOR
+    displayName: FPL Focal
+    endpoints:
+      - endpointKey: fpl-focal-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FPLFocal }
+        profileKey: x-creator-v1
+      - endpointKey: fpl-focal-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UC72QokPHXQ9r98ROfNZmaDw }
+        profileKey: youtube-caption-first-v1
+
+  - sourceKey: lateriser
+    sourceType: CREATOR
+    displayName: Lateriser
+    endpoints:
+      - endpointKey: lateriser-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: lateriser12 }
+        profileKey: x-creator-v1
+
+  - sourceKey: pras
+    sourceType: CREATOR
+    displayName: Pras
+    endpoints:
+      - endpointKey: pras-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: Pras_fpl }
+        profileKey: x-creator-v1
+
+  - sourceKey: big-man-bakar
+    sourceType: CREATOR
+    displayName: Big Man Bakar
+    endpoints:
+      - endpointKey: big-man-bakar-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: BigManBakar }
+        profileKey: x-creator-v1
+
+  - sourceKey: fpl-raptor
+    sourceType: CREATOR
+    displayName: FPL Raptor
+    endpoints:
+      - endpointKey: fpl-raptor-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FPL_Raptor }
+        profileKey: x-creator-v1
+      - endpointKey: fpl-raptor-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UC54QLWzsMifTRjNQ02z5pCw }
+        profileKey: youtube-caption-first-v1
+
+  - sourceKey: fpl-harry
+    sourceType: CREATOR
+    displayName: FPL Harry
+    endpoints:
+      - endpointKey: fpl-harry-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FPL_Harry }
+        profileKey: x-creator-v1
+      - endpointKey: fpl-harry-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UCcPWnCj5AKC19HaySZjb25g }
+        profileKey: youtube-caption-first-v1
+
+  - sourceKey: lets-talk-fpl
+    sourceType: CREATOR
+    displayName: Let's Talk FPL
+    endpoints:
+      - endpointKey: lets-talk-fpl-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: LetsTalk_FPL }
+        profileKey: x-creator-v1
+      - endpointKey: lets-talk-fpl-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UCxeOc7eFxq37yW_Nc-69deA }
+        profileKey: youtube-caption-first-v1
+
+  - sourceKey: fpl-salah
+    sourceType: CREATOR
+    displayName: FPL Salah
+    endpoints:
+      - endpointKey: fpl-salah-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FPL_Salah }
+        profileKey: x-creator-v1
+
+  - sourceKey: fantasy-football-scout
+    sourceType: PUBLICATION
+    displayName: Fantasy Football Scout
+    endpoints:
+      - endpointKey: fantasy-football-scout-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FFScout }
+        profileKey: x-longform-v1
+      - endpointKey: fantasy-football-scout-rss
+        adapterKind: RSS_ATOM
+        locator: { url: https://www.fantasyfootballscout.co.uk/feed/ }
+        profileKey: rss-news-v1
+      - endpointKey: fantasy-football-scout-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UCVEKeBG9nbkufZxHWVtDHzQ }
+        profileKey: youtube-caption-first-v1
+
+  - sourceKey: planet-fpl
+    sourceType: SHOW
+    displayName: Planet FPL
+    endpoints:
+      - endpointKey: planet-fpl-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: PlanetFPLPod }
+        profileKey: x-longform-v1
+      - endpointKey: planet-fpl-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UC8043oOKTB4uP8Nq15Kz6bg }
+        profileKey: youtube-caption-first-v1
+      - endpointKey: planet-fpl-podcast
+        adapterKind: PODCAST_FEED
+        locator: { url: https://feeds.megaphone.fm/COMG5751810297 }
+        profileKey: podcast-public-v1
+
+  - sourceKey: the-fpl-wire
+    sourceType: SHOW
+    displayName: The FPL Wire
+    endpoints:
+      - endpointKey: the-fpl-wire-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: TheFPLWire }
+        profileKey: x-longform-v1
+      - endpointKey: the-fpl-wire-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UCtIPFexB6PLKNNl0XH3SKKw }
+        profileKey: youtube-caption-first-v1
+      - endpointKey: the-fpl-wire-podcast
+        adapterKind: PODCAST_FEED
+        locator: { url: https://feeds.megaphone.fm/BLU9598812574 }
+        profileKey: podcast-public-v1
+
+  - sourceKey: fpl-blackbox
+    sourceType: SHOW
+    displayName: FPL BlackBox
+    endpoints:
+      - endpointKey: fpl-blackbox-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FPLBlackBox_ }
+        profileKey: x-longform-v1
+      - endpointKey: fpl-blackbox-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UCGJ8-xqhOLwyJNuPMsVoQWQ }
+        profileKey: youtube-caption-first-v1
+      - endpointKey: fpl-blackbox-podcast
+        adapterKind: PODCAST_FEED
+        locator: { url: https://feeds.megaphone.fm/BLU4752868283 }
+        profileKey: podcast-public-v1
+
+  - sourceKey: who-got-the-assist
+    sourceType: SHOW
+    displayName: Who Got The Assist?
+    endpoints:
+      - endpointKey: who-got-the-assist-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: WGTA_FPL }
+        profileKey: x-longform-v1
+      - endpointKey: who-got-the-assist-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UCkk58co4Qe1A1GFRPVziSGQ }
+        profileKey: youtube-caption-first-v1
+      - endpointKey: who-got-the-assist-podcast
+        adapterKind: PODCAST_FEED
+        locator: { url: https://feeds.megaphone.fm/COMG2325258523 }
+        profileKey: podcast-public-v1
+
+  - sourceKey: fml-fpl
+    sourceType: SHOW
+    displayName: FML FPL
+    endpoints:
+      - endpointKey: fml-fpl-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FMLFPL }
+        profileKey: x-longform-v1
+      - endpointKey: fml-fpl-podcast
+        adapterKind: PODCAST_FEED
+        locator: { url: https://feeds.megaphone.fm/COMG5321018029 }
+        profileKey: podcast-public-v1
+
+  - sourceKey: fifty-ninth-minute
+    sourceType: SHOW
+    displayName: The 59th Minute
+    endpoints:
+      - endpointKey: fifty-ninth-minute-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: 59thMinutePod }
+        profileKey: x-longform-v1
+      - endpointKey: fifty-ninth-minute-podcast
+        adapterKind: PODCAST_FEED
+        locator: { url: https://feeds.megaphone.fm/COMG4750541235 }
+        profileKey: podcast-public-v1
+
+  - sourceKey: fpl-podcast
+    sourceType: SHOW
+    displayName: FPL Pod
+    endpoints:
+      - endpointKey: fpl-podcast-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FPLPod }
+        profileKey: x-longform-v1
+      - endpointKey: fpl-podcast-feed
+        adapterKind: PODCAST_FEED
+        locator: { url: https://audioboom.com/channels/5001585.rss }
+        profileKey: podcast-public-v1
+
+  - sourceKey: fantasy-football-hub
+    sourceType: PUBLICATION
+    displayName: Fantasy Football Hub
+    endpoints:
+      - endpointKey: fantasy-football-hub-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: FFH_HQ }
+        profileKey: x-longform-v1
+      - endpointKey: fantasy-football-hub-youtube
+        adapterKind: YOUTUBE_CHANNEL
+        locator: { channelId: UCcqEr3DfrRwtoF2a1yW8qgQ }
+        profileKey: youtube-caption-first-v1
+
+  - sourceKey: all-about-fpl
+    sourceType: PUBLICATION
+    displayName: All About FPL
+    endpoints:
+      - endpointKey: all-about-fpl-x
+        adapterKind: X_ACCOUNT
+        locator: { handle: allaboutfpl }
+        profileKey: x-longform-v1
+      - endpointKey: all-about-fpl-rss
+        adapterKind: RSS_ATOM
+        locator: { url: https://allaboutfpl.com/feed/ }
+        profileKey: rss-news-v1
+
+  - sourceKey: santi-signals
+    sourceType: PUBLICATION
+    displayName: SantiSignals
+    endpoints:
+      - endpointKey: santi-signals-rss
+        adapterKind: RSS_ATOM
+        locator: { url: https://santisignals.substack.com/feed }
+        profileKey: substack-public-v1
+
+  - sourceKey: briefing-semantic-discovery
+    sourceType: AGGREGATOR
+    displayName: Briefing Semantic Discovery
+    endpoints:
+      - endpointKey: semantic-official-changes-x
+        adapterKind: X_SEMANTIC
+        locator: { semanticProfileKey: gw-official-changes-v1 }
+        profileKey: x-semantic-official-v1
+      - endpointKey: semantic-availability-x
+        adapterKind: X_SEMANTIC
+        locator: { semanticProfileKey: availability-v1 }
+        profileKey: x-semantic-availability-v1
+      - endpointKey: semantic-lineup-role-x
+        adapterKind: X_SEMANTIC
+        locator: { semanticProfileKey: lineup-role-v1 }
+        profileKey: x-semantic-lineup-v1
+      - endpointKey: semantic-analysis-longform-x
+        adapterKind: X_SEMANTIC
+        locator: { semanticProfileKey: analysis-longform-v1 }
+        profileKey: x-semantic-longform-v1

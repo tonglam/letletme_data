@@ -108,8 +108,16 @@ services:
       - TZ=Asia/Shanghai
       - WORKER_HEARTBEAT_PATH=/tmp/content-worker-heartbeat
       - GROK_HOME=/home/appuser/.grok
+      - CONTENT_MANIFEST_GIT_REVISION=${CONTENT_MANIFEST_GIT_REVISION:-unknown}
     volumes:
       - grok-home:/home/appuser/.grok
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging: *default-logging
     restart: unless-stopped
     healthcheck:

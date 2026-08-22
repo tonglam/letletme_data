@@ -82,6 +82,41 @@ jobs:
           QUEUE_REDIS_DB: '10'
         run: bun run build
 
+      - name: Build production runtime image
+        run: docker build --target runner --tag letletme-data:ci .
+
+      - name: Verify production runtime identity and Grok CLI
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' letletme-data:ci)" = "appuser"
+          test "$(docker run --rm --entrypoint id letletme-data:ci -u)" = "1001"
+          docker run --rm --entrypoint sh letletme-data:ci -c \
+            'test "$HOME" = /home/appuser && test "$GROK_HOME" = /home/appuser/.grok && \
+             test -r /app/config/briefing/sources.yaml && \
+             test -r /app/config/briefing/acquisition-plan.yaml'
+          briefing_grok_volume="letletme-data-ci-grok-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if docker volume inspect "$briefing_grok_volume" >/dev/null 2>&1; then
+            echo 'refusing to reuse an existing CI Grok volume' >&2
+            exit 1
+          fi
+          docker volume create "$briefing_grok_volume" >/dev/null
+          cleanup_briefing_grok_volume() {
+            docker volume rm "$briefing_grok_volume" >/dev/null
+          }
+          trap cleanup_briefing_grok_volume EXIT
+          docker run --rm --read-only --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700 \
+            --mount "type=volume,source=$briefing_grok_volume,target=/home/appuser/.grok" \
+            --entrypoint sh letletme-data:ci -euc '
+              test "$(stat -c "%u" "$GROK_HOME")" = 1001
+              test "$(stat -c "%g" "$GROK_HOME")" = 1001
+              test -x "$GROK_HOME/bin/grok-1.0.5"
+              /app/node_modules/.bin/grok inspect --json \
+                | grep -Eq "\"grokVersion\"[[:space:]]*:[[:space:]]*\"1\\.0\\.5\""
+            '
+          trap - EXIT
+          cleanup_briefing_grok_volume
+
       - name: Production dependency audit
         run: bun audit --production
 

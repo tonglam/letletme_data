@@ -15,10 +15,38 @@ describe('content worker poll policy', () => {
   test('rejects a per-run X-call ceiling above the tracked Grok schema limit', () => {
     const flags: ContentRuntimeFlags = {
       pipelineEnabled: true,
+      acquisitionShadowMode: true,
+      xScanEnabled: false,
+      httpAcquisitionEnabled: false,
+      podcastTranscriptEnabled: false,
+      youtubeDiscoveryEnabled: false,
+      youtubeNativeEnabled: false,
+      youtubeGeneratedEnabled: false,
       realGrokEnabled: false,
       publicationEnabled: false,
       briefingPublicEnabled: false,
       grokConcurrency: 1,
+      httpConcurrency: 4,
+      httpHostConcurrency: 2,
+      hermesTranscriptConcurrency: 1,
+      hermesTranscriptUrl: null,
+      hermesTranscriptTokenPresent: false,
+      hermesTranscriptTimeoutMs: 7_200_000,
+      hermesTranscriptMaxOutputBytes: 16_777_216,
+      supadataTimeoutMs: 75_000,
+      supadataMaxOutputBytes: 16_777_216,
+      supadataJobPollIntervalMs: 5_000,
+      grokTimeoutMs: 240_000,
+      grokMaxOutputBytes: 4_194_304,
+      grokExpectedVersion: '1.0.5',
+      httpTimeoutMs: 40_000,
+      httpMaxOutputBytes: 8_388_608,
+      dailyXCallLimit: 2_400,
+      final90XCallLimit: 300,
+      supadataDailyCreditLimit: 0,
+      hermesDailyAudioMinutes: 0,
+      supadataApiKeyPresent: false,
+      youtubeDataApiKeyPresent: false,
       pollMaxXCalls: 21,
       dailyXCallBudget: 24,
       revalidationUrl: null,
@@ -27,6 +55,40 @@ describe('content worker poll policy', () => {
       publisherApiKeyHashes: [],
     };
     expect(() => assertContentRuntimeFlags(flags)).toThrow('from 1 to 20');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        httpAcquisitionEnabled: true,
+        youtubeDiscoveryEnabled: true,
+        youtubeNativeEnabled: true,
+        youtubeDataApiKeyPresent: true,
+        supadataApiKeyPresent: true,
+        supadataDailyCreditLimit: Number.NaN,
+        pollMaxXCalls: 2,
+      }),
+    ).toThrow('CONTENT_SUPADATA_DAILY_CREDIT_LIMIT must be a non-negative safe integer');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        httpAcquisitionEnabled: true,
+        podcastTranscriptEnabled: true,
+        hermesTranscriptUrl: 'https://hermes.invalid/transcribe',
+        hermesTranscriptTokenPresent: true,
+        hermesDailyAudioMinutes: 1.5,
+        pollMaxXCalls: 2,
+      }),
+    ).toThrow('CONTENT_HERMES_DAILY_AUDIO_MINUTES must be a non-negative safe integer');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        httpAcquisitionEnabled: true,
+        podcastTranscriptEnabled: true,
+        hermesTranscriptUrl: 'file:///tmp/hermes',
+        hermesTranscriptTokenPresent: true,
+        hermesDailyAudioMinutes: 1,
+        pollMaxXCalls: 2,
+      }),
+    ).toThrow('HERMES_TRANSCRIPT_URL must be an HTTP(S) URL without credentials');
   });
 
   test('keeps FINAL_90 disabled unless a future duty window and budget are recorded', () => {

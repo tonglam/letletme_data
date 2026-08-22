@@ -177,6 +177,10 @@ export async function upsertContentSource(
   actor: ContentSourceCommandActor,
 ): Promise<string> {
   const sourceId = randomUUID();
+  const sourceKey = `legacy-${createHash('sha256')
+    .update(`${input.platform}\u0000${input.externalId}`, 'utf8')
+    .digest('hex')
+    .slice(0, 24)}`;
   assertSourceSnapshotContract({
     sourceId,
     platform: input.platform,
@@ -196,12 +200,14 @@ export async function upsertContentSource(
         .insert(contentSources)
         .values({
           sourceId,
+          sourceKey,
           platform: input.platform,
           externalId: input.externalId,
           handle: input.handle ?? null,
           displayName: input.displayName,
           sourceType: input.sourceType,
           reportingFamily: input.reportingFamily,
+          origin: 'DISCOVERED',
           rightsPolicy: input.rightsPolicy ?? {},
         })
         .onConflictDoUpdate({
@@ -335,16 +341,24 @@ export async function buildSourceSnapshot(
   // Keep the persisted group identifier out of each generated source object.
   // The Grok input schema intentionally accepts only the public source fields;
   // groupId belongs to the enclosing snapshot metadata, not an item.
-  const items: SourceSnapshotItem[] = rows.map((row) => ({
-    sourceId: row.sourceId,
-    platform: row.platform,
-    externalId: row.externalId,
-    handle: row.handle,
-    displayName: row.displayName,
-    sourceType: row.sourceType,
-    reportingFamily: row.reportingFamily,
-    rightsPolicy: (row.rightsPolicy ?? {}) as Record<string, unknown>,
-  }));
+  const items: SourceSnapshotItem[] = rows.map((row) => {
+    if (!row.platform || !row.externalId) {
+      throw new ValidationError(
+        `Legacy source group ${groupKey} contains endpoint-managed source ${row.sourceId}`,
+        'EDITORIAL_SOURCE_CONTRACT_INVALID',
+      );
+    }
+    return {
+      sourceId: row.sourceId,
+      platform: row.platform,
+      externalId: row.externalId,
+      handle: row.handle,
+      displayName: row.displayName,
+      sourceType: row.sourceType,
+      reportingFamily: row.reportingFamily,
+      rightsPolicy: (row.rightsPolicy ?? {}) as Record<string, unknown>,
+    };
+  });
   items.forEach(assertSourceSnapshotContract);
   return { groupId, revision: sourceSnapshotRevision(items), items };
 }

@@ -1,50 +1,83 @@
-import { randomUUID } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
-
-import { databaseSingleton, getDb } from './db/singleton';
 import {
-  contentAcquisitionCheckpoints,
-  contentAcquisitionRuns,
-  contentSourceGroups,
-} from './db/schemas/content.schema';
-import { getContentRuntimeFlags } from './content/config';
+  loadBriefingManifest,
+  type BriefingManifestBundle,
+} from './content/acquisition/acquisition-manifest';
 import {
-  enqueueContentXScan,
-  createContentXWorkerRuntime,
-  closeContentXQueue,
-} from './content/workers/content-x.queue';
-import { startWorkerHeartbeat } from './utils/worker-heartbeat';
-import { logError, logInfo } from './utils/logger';
-import { withMutationScopes } from './utils/mutation-scopes';
-import { computePollWindow, isPollDue, pollBudget, resolvePollPhase } from './content/poll-policy';
-import {
-  confirmAcquisitionRunEnqueued,
-  reclaimStaleAcquisitionRuns,
-  reservePendingAcquisitionRun,
-} from './content/acquisition/run-repository';
-import { buildSourceSnapshot } from './content/acquisition/source-registry';
+  dispatchAcquisitionJobOutbox,
+  type AcquisitionQueueName,
+} from './content/acquisition/job-outbox';
+import { reconcileBriefingSourceRegistry } from './content/acquisition/manifest-reconciler';
+import { scheduleFormalAcquisition } from './content/acquisition/formal-scheduler';
+import { planTriggeredContentWork } from './content/acquisition/triggered-work-planner';
+import { compileXBudgetPolicy, type XBudgetPolicy } from './content/acquisition/x-budget';
+import { assertContentRuntimeFlags, getContentRuntimeFlags } from './content/config';
 import { dispatchPublicationOutbox } from './content/publication/revalidation';
+import {
+  closeContentHttpAcquisitionQueue,
+  createFormalHttpWorkerRuntime,
+  enqueueFormalHttpRun,
+} from './content/workers/content-http-acquisition.queue';
+import {
+  closeContentXQueue,
+  createConfiguredGrokBuildExecutor,
+  createFormalXWorkerRuntime,
+  enqueueFormalXRun,
+} from './content/workers/content-x.queue';
+import {
+  closeContentMediaTranscriptQueue,
+  createFormalMediaWorkerRuntime,
+  enqueueFormalMediaRun,
+} from './content/workers/content-media-transcript.queue';
+import { databaseSingleton } from './db/singleton';
+import { logError, logInfo } from './utils/logger';
+import { startWorkerHeartbeat } from './utils/worker-heartbeat';
+
+const FORMAL_SCHEDULER_INTERVAL_MS = 30_000;
+const ACQUISITION_JOB_OUTBOX_INTERVAL_MS = 5_000;
+const PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS = 30_000;
 
 const flags = getContentRuntimeFlags();
-const partitionKey = process.env.CONTENT_PARTITION_KEY?.trim() || 'week';
-const runtime = createContentXWorkerRuntime();
+assertContentRuntimeFlags(flags);
+
 const stopHeartbeat = startWorkerHeartbeat({
   path: process.env.WORKER_HEARTBEAT_PATH ?? '/tmp/content-worker-heartbeat',
 });
-let scheduler: ReturnType<typeof setInterval> | null = null;
+
+let manifestBundle: BriefingManifestBundle | null = null;
+let xBudgetPolicy: XBudgetPolicy | null = null;
+let formalScheduler: ReturnType<typeof setInterval> | null = null;
+let acquisitionJobOutboxDispatcher: ReturnType<typeof setInterval> | null = null;
 let publicationOutboxDispatcher: ReturnType<typeof setInterval> | null = null;
+let formalHttpRuntime: ReturnType<typeof createFormalHttpWorkerRuntime> | null = null;
+let formalXRuntime: ReturnType<typeof createFormalXWorkerRuntime> | null = null;
+let formalMediaRuntime: ReturnType<typeof createFormalMediaWorkerRuntime> | null = null;
+let formalScheduleInFlight: Promise<void> | null = null;
+let acquisitionJobOutboxDispatchInFlight: Promise<void> | null = null;
 let publicationOutboxDispatchInFlight: Promise<void> | null = null;
 
-const PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS = 30_000;
+function runtimeGitRevision(): string {
+  return (
+    process.env.CONTENT_MANIFEST_GIT_REVISION?.trim() ||
+    process.env.GIT_SHA?.trim() ||
+    process.env.VERCEL_GIT_COMMIT_SHA?.trim() ||
+    'unknown'
+  );
+}
+
+function enabledAcquisitionQueues(): readonly AcquisitionQueueName[] {
+  const queues: AcquisitionQueueName[] = [];
+  if (formalXRuntime) queues.push('content-x-scan');
+  if (flags.httpAcquisitionEnabled) queues.push('content-http-acquisition');
+  if (formalMediaRuntime) queues.push('content-media-transcript');
+  return queues;
+}
 
 async function dispatchPendingPublicationOutbox(): Promise<void> {
   if (publicationOutboxDispatchInFlight) return publicationOutboxDispatchInFlight;
 
   const dispatch = dispatchPublicationOutbox()
     .then((delivered) => {
-      if (delivered > 0) {
-        logInfo('Publication outbox rows delivered', { delivered });
-      }
+      if (delivered > 0) logInfo('Publication outbox rows delivered', { delivered });
     })
     .catch((error) => {
       logError('Publication outbox dispatch pass failed; rows remain pending', error);
@@ -56,157 +89,169 @@ async function dispatchPendingPublicationOutbox(): Promise<void> {
   return dispatch;
 }
 
-async function scheduleFromDatabase(): Promise<void> {
-  if (!flags.pipelineEnabled) return;
-  const db = await getDb();
-  const groups = await db
-    .select({
-      groupId: contentSourceGroups.groupId,
-      groupKey: contentSourceGroups.groupKey,
-      pollPolicy: contentSourceGroups.pollPolicy,
+async function dispatchPendingAcquisitionJobOutbox(): Promise<void> {
+  if (acquisitionJobOutboxDispatchInFlight) return acquisitionJobOutboxDispatchInFlight;
+  const queueNames = enabledAcquisitionQueues();
+  if (queueNames.length === 0) return;
+
+  const dispatch = dispatchAcquisitionJobOutbox({
+    enabledQueueNames: queueNames,
+    hermesRunLeaseMs: flags.hermesTranscriptTimeoutMs + 5 * 60_000,
+    enqueue: async (job) => {
+      if (job.queueName === 'content-http-acquisition') {
+        await enqueueFormalHttpRun(job);
+        return;
+      }
+      if (job.queueName === 'content-x-scan' && formalXRuntime) {
+        await enqueueFormalXRun(job);
+        return;
+      }
+      if (job.queueName === 'content-media-transcript' && formalMediaRuntime) {
+        await enqueueFormalMediaRun(job);
+        return;
+      }
+      throw new Error(`Acquisition queue is not enabled in this runtime: ${job.queueName}`);
+    },
+  })
+    .then((result) => {
+      if (result.claimed > 0) logInfo('Acquisition job outbox dispatch completed', result);
     })
-    .from(contentSourceGroups)
-    .where(eq(contentSourceGroups.status, 'active'));
-  const now = new Date();
-  for (const group of groups) {
-    const reservation = await withMutationScopes(
-      {
-        queueName: 'content-x-scheduler',
-        jobName: 'content-x-poll',
-        scopes: [`content-x-poll:${group.groupId}:${partitionKey}`],
-      },
-      async () => {
-        const transactionDb = await getDb();
-        const phase = resolvePollPhase(group.pollPolicy, now, flags.pollMaxXCalls);
-        await reclaimStaleAcquisitionRuns({
-          groupId: group.groupId,
-          partitionKey,
-          mode: 'poll',
-          now,
-        });
-        const [checkpoints, activeRuns] = await Promise.all([
-          transactionDb
-            .select({ windowEnd: contentAcquisitionCheckpoints.windowEnd })
-            .from(contentAcquisitionCheckpoints)
-            .where(
-              and(
-                eq(contentAcquisitionCheckpoints.groupId, group.groupId),
-                eq(contentAcquisitionCheckpoints.partitionKey, partitionKey),
-              ),
-            )
-            .limit(1),
-          transactionDb
-            .select({ runId: contentAcquisitionRuns.runId })
-            .from(contentAcquisitionRuns)
-            .where(
-              and(
-                eq(contentAcquisitionRuns.groupId, group.groupId),
-                eq(contentAcquisitionRuns.partitionKey, partitionKey),
-                eq(contentAcquisitionRuns.mode, 'poll'),
-                inArray(contentAcquisitionRuns.status, ['pending', 'running']),
-              ),
-            )
-            .limit(1),
-        ]);
-        const checkpointEnd = checkpoints[0]?.windowEnd ?? null;
-        if (
-          activeRuns.length > 0 ||
-          !isPollDue({ policy: group.pollPolicy, phase, now, checkpointEnd })
-        )
-          return null;
-        const window = computePollWindow({
-          policy: group.pollPolicy,
-          phase,
-          now,
-          checkpointEnd,
-        });
-        const end = window.windowEnd.toISOString();
-        const start = window.windowStart.toISOString();
-        const snapshot = await buildSourceSnapshot(group.groupKey);
-        if (snapshot.items.length === 0) {
-          logInfo('Content scheduler skipped empty source group', {
-            groupKey: group.groupKey,
-            partitionKey,
-          });
-          return null;
-        }
-        const runId = randomUUID();
-        const idempotencyKey = `briefing:x:${group.groupKey}:${partitionKey}:poll:${phase}:${end}`;
-        const pending = await reservePendingAcquisitionRun({
-          runId,
-          groupId: group.groupId,
-          partitionKey,
-          mode: 'poll',
-          windowStart: start,
-          windowEnd: end,
-          idempotencyKey,
-        });
-        return { pending, runId, phase, start, end, idempotencyKey };
-      },
-    );
-    if (!reservation || reservation.pending.reused) continue;
-    try {
-      await enqueueContentXScan({
-        runId: reservation.runId,
-        idempotencyKey: reservation.idempotencyKey,
-        groupKey: group.groupKey,
-        partitionKey,
-        mode: 'poll',
-        pollPhase: reservation.phase,
-        phaseBudget: pollBudget(group.pollPolicy, reservation.phase, flags.pollMaxXCalls),
-        windowStart: reservation.start,
-        windowEnd: reservation.end,
-      });
-      await confirmAcquisitionRunEnqueued(reservation.runId);
-    } catch (error) {
-      logError('Content scheduler enqueue failed; pending run will be reclaimed', error, {
-        runId: reservation.runId,
-        groupKey: group.groupKey,
-        partitionKey,
+    .catch((error) => {
+      logError('Acquisition job outbox dispatch failed; rows remain pending', error);
+    })
+    .finally(() => {
+      acquisitionJobOutboxDispatchInFlight = null;
+    });
+  acquisitionJobOutboxDispatchInFlight = dispatch;
+  return dispatch;
+}
+
+async function schedulePendingFormalAcquisition(): Promise<void> {
+  if (formalScheduleInFlight) return formalScheduleInFlight;
+  if (!manifestBundle) return;
+
+  const schedule = (async () => {
+    const result = await scheduleFormalAcquisition({
+      fullRolloutEligible: manifestBundle.coverage.fullRolloutEligible,
+      flags: formalXRuntime ? flags : { ...flags, xScanEnabled: false, realGrokEnabled: false },
+      xBudgetPolicy: xBudgetPolicy ?? undefined,
+      enqueueHttp: enqueueFormalHttpRun,
+      enqueueX: enqueueFormalXRun,
+    });
+    if (result.claimed > 0 || result.skippedCoverageGate) {
+      logInfo('Formal acquisition scheduler pass completed', result);
+    }
+    if (result.skippedCoverageGate && !flags.acquisitionShadowMode) return;
+    const triggered = await planTriggeredContentWork({ flags });
+    if (triggered.planned > 0 || triggered.reclaimed > 0 || triggered.providerPollRecovered > 0) {
+      logInfo('Triggered acquisition planner pass completed', triggered);
+    }
+  })()
+    .catch((error) => {
+      logError('Formal acquisition scheduler pass failed', error);
+    })
+    .finally(() => {
+      formalScheduleInFlight = null;
+    });
+  formalScheduleInFlight = schedule;
+  return schedule;
+}
+
+async function startFormalAcquisition(): Promise<void> {
+  if (!flags.pipelineEnabled) return;
+  try {
+    const bundle = await loadBriefingManifest();
+    const reconciliation = await reconcileBriefingSourceRegistry({
+      bundle,
+      gitRevision: runtimeGitRevision(),
+    });
+    manifestBundle = bundle;
+    if (flags.xScanEnabled && flags.realGrokEnabled) {
+      xBudgetPolicy = compileXBudgetPolicy({
+        coverage: bundle.coverage,
+        globalRolling24hLimit: flags.dailyXCallLimit,
+        final90Rolling90mLimit: flags.final90XCallLimit,
       });
     }
+    logInfo('Briefing source manifest reconciled', {
+      manifestHash: bundle.manifestHash,
+      fullRolloutEligible: bundle.coverage.fullRolloutEligible,
+      status: reconciliation.status,
+    });
+  } catch (error) {
+    // Acquisition fails closed, but publication delivery remains independent.
+    logError('Briefing source manifest invalid; acquisition scheduler remains stopped', error);
+    return;
   }
+
+  if (flags.httpAcquisitionEnabled) formalHttpRuntime = createFormalHttpWorkerRuntime();
+  if (flags.podcastTranscriptEnabled) formalMediaRuntime = createFormalMediaWorkerRuntime();
+  if (flags.xScanEnabled && flags.realGrokEnabled) {
+    try {
+      const executor = createConfiguredGrokBuildExecutor();
+      await executor.assertVersion();
+      formalXRuntime = createFormalXWorkerRuntime(executor, xBudgetPolicy ?? undefined);
+    } catch (error) {
+      logError('Grok Build version/provider check failed; X acquisition remains stopped', error);
+    }
+  }
+
+  await dispatchPendingAcquisitionJobOutbox();
+  await schedulePendingFormalAcquisition();
+  acquisitionJobOutboxDispatcher = setInterval(() => {
+    void dispatchPendingAcquisitionJobOutbox();
+  }, ACQUISITION_JOB_OUTBOX_INTERVAL_MS);
+  formalScheduler = setInterval(() => {
+    void schedulePendingFormalAcquisition();
+  }, FORMAL_SCHEDULER_INTERVAL_MS);
 }
 
-if (flags.pipelineEnabled) {
-  void scheduleFromDatabase().catch((error) =>
-    logError('Content scheduler initial pass failed', error),
-  );
-  scheduler = setInterval(() => {
-    void scheduleFromDatabase().catch((error) => logError('Content scheduler pass failed', error));
-  }, 30_000);
-}
-
-// Publication revalidation is an independent delivery concern. Keep retrying
-// pending rows even when no new edition is published; the content worker is a
-// long-running service in every environment and the dispatcher is a no-op
-// until the revalidation URL and secret are configured.
+// Publication revalidation is intentionally independent of source registry,
+// Grok, feed parsing, and acquisition feature flags.
 void dispatchPendingPublicationOutbox();
 publicationOutboxDispatcher = setInterval(() => {
   void dispatchPendingPublicationOutbox();
 }, PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS);
 
+void startFormalAcquisition().catch((error) => {
+  logError('Formal acquisition startup failed; publication delivery remains active', error);
+});
+
 async function shutdown(signal: string): Promise<void> {
   logInfo('Content worker shutting down', { signal });
-  if (scheduler) clearInterval(scheduler);
+  if (formalScheduler) clearInterval(formalScheduler);
+  if (acquisitionJobOutboxDispatcher) clearInterval(acquisitionJobOutboxDispatcher);
   if (publicationOutboxDispatcher) clearInterval(publicationOutboxDispatcher);
   stopHeartbeat();
   await Promise.allSettled([
+    formalScheduleInFlight,
+    acquisitionJobOutboxDispatchInFlight,
     publicationOutboxDispatchInFlight,
-    runtime.worker.close(),
-    runtime.queueEvents.close(),
-    closeContentXQueue(),
-    databaseSingleton.disconnect(),
   ]);
+  await Promise.allSettled([
+    formalHttpRuntime?.worker.close(),
+    formalHttpRuntime?.queueEvents.close(),
+    formalXRuntime?.worker.close(),
+    formalXRuntime?.queueEvents.close(),
+    formalMediaRuntime?.worker.close(),
+    formalMediaRuntime?.queueEvents.close(),
+    closeContentHttpAcquisitionQueue(),
+    closeContentXQueue(),
+    closeContentMediaTranscriptQueue(),
+  ]);
+  await databaseSingleton.disconnect();
   process.exit(0);
 }
 
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-logInfo('Content X worker ready', {
+logInfo('Content worker process ready', {
   pipelineEnabled: flags.pipelineEnabled,
+  acquisitionShadowMode: flags.acquisitionShadowMode,
+  httpAcquisitionEnabled: flags.httpAcquisitionEnabled,
+  xScanEnabled: flags.xScanEnabled,
   realGrokEnabled: flags.realGrokEnabled,
-  concurrency: flags.grokConcurrency,
-  queue: 'content-x-scan',
+  podcastTranscriptEnabled: flags.podcastTranscriptEnabled,
+  httpConcurrency: flags.httpConcurrency,
 });

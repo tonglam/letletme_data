@@ -1,0 +1,367 @@
+name: Briefing acquisition rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect, enable shadow acquisition, or disable acquisition adapters
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - shadow
+          - disabled
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify protected main dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          test "$main_sha" = "$GITHUB_SHA"
+
+      - name: Apply bounded acquisition mode
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          ROLLOUT_MODE: ${{ inputs.mode }}
+          ROLLOUT_SHA: ${{ github.sha }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 12m
+          envs: ROLLOUT_MODE,ROLLOUT_SHA,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+
+            expected_workdir=/home/workspace/letletme_data
+            test "$VPS_WORKDIR" = "$expected_workdir"
+            test "$(realpath --canonicalize-existing "$VPS_WORKDIR")" = "$expected_workdir"
+            cd "$expected_workdir"
+            test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"
+            test -x scripts/configure-briefing-acquisition-env.sh
+            export CONTENT_MANIFEST_GIT_REVISION="$ROLLOUT_SHA"
+
+            env_file="$expected_workdir/.env.deploy"
+            migration_env_file="$expected_workdir/.env.migrate"
+            test -f "$env_file"
+            test ! -L "$env_file"
+            test -f "$migration_env_file"
+            test ! -L "$migration_env_file"
+            container=$(docker compose ps -q content-worker | head -n 1)
+            test -n "$container"
+            current_image=$(docker inspect --format '{{.Config.Image}}' "$container")
+            test -n "$current_image"
+
+            active_content_container() {
+              local active_container
+              active_container=$(docker compose ps -q content-worker | head -n 1)
+              test -n "$active_container"
+              printf '%s' "$active_container"
+            }
+
+            verify_grok_version() {
+              local active_container
+              active_container=$(active_content_container)
+              docker exec "$active_container" /app/node_modules/.bin/grok inspect --json \
+                | grep -Eq '"grokVersion"[[:space:]]*:[[:space:]]*"1\.0\.5"'
+            }
+
+            grok_auth_usable() {
+              local active_container
+              active_container=$(active_content_container)
+              docker exec "$active_container" /app/node_modules/.bin/grok models >/dev/null 2>&1
+            }
+
+            verify_grok_runtime() {
+              verify_grok_version
+              if ! grok_auth_usable; then
+                echo 'briefing rollout refused: Grok authentication is not usable in content-worker' >&2
+                exit 1
+              fi
+            }
+
+            report_acquisition_health() {
+              MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
+                --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<'SQL'
+            BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+            SET LOCAL statement_timeout = '15s';
+            SET LOCAL lock_timeout = '2s';
+            SET LOCAL idle_in_transaction_session_timeout = '20s';
+
+            WITH latest_reconciliation AS (
+              SELECT status, entity_count, endpoint_count, partition_count, schedule_count
+              FROM content.source_registry_reconciliations
+              ORDER BY created_at DESC
+              LIMIT 1
+            )
+            SELECT jsonb_build_object(
+              'event', 'briefing_acquisition_control_health',
+              'reconciliationStatus', COALESCE(reconciliation.status, 'MISSING'),
+              'entityCount', COALESCE(reconciliation.entity_count, 0),
+              'endpointCount', COALESCE(reconciliation.endpoint_count, 0),
+              'partitionCount', COALESCE(reconciliation.partition_count, 0),
+              'scheduleCount', COALESCE(reconciliation.schedule_count, 0),
+              'verifiedXAccounts', (
+                SELECT count(*)
+                FROM content.source_endpoints
+                WHERE adapter_kind = 'X_ACCOUNT' AND identity_status = 'VERIFIED'
+              ),
+              'unresolvedXAccounts', (
+                SELECT count(*)
+                FROM content.source_endpoints
+                WHERE adapter_kind = 'X_ACCOUNT' AND identity_status <> 'VERIFIED'
+              ),
+              'activeSchedules', (
+                SELECT count(*) FROM content.source_schedules WHERE status = 'active'
+              ),
+              'dueSchedules', (
+                SELECT count(*)
+                FROM content.source_schedules
+                WHERE status = 'active' AND next_due_at <= now()
+              ),
+              'maxDueLagSeconds', COALESCE((
+                SELECT max(due_lag_seconds)
+                FROM content.acquisition_endpoint_health
+                WHERE schedule_status = 'active'
+              ), 0)
+            )::text
+            FROM (SELECT 1) AS singleton
+            LEFT JOIN latest_reconciliation AS reconciliation ON true;
+
+            WITH recent_runs AS (
+              SELECT *
+              FROM content.acquisition_runs
+              WHERE job_kind IS NOT NULL AND created_at >= now() - interval '30 minutes'
+            ), grouped AS (
+              SELECT adapter_kind, status, count(*) AS run_count
+              FROM recent_runs
+              GROUP BY adapter_kind, status
+            )
+            SELECT jsonb_build_object(
+              'event', 'briefing_acquisition_run_health',
+              'windowMinutes', 30,
+              'runCount', (SELECT count(*) FROM recent_runs),
+              'activeCount', (
+                SELECT count(*) FROM recent_runs WHERE status IN ('PENDING', 'RUNNING')
+              ),
+              'failedCount', (SELECT count(*) FROM recent_runs WHERE status = 'FAILED'),
+              'gapCount', (SELECT count(*) FROM recent_runs WHERE status = 'GAP'),
+              'saturatedCount', (SELECT count(*) FROM recent_runs WHERE status = 'SATURATED'),
+              'resultCount', COALESCE((SELECT sum(result_count) FROM recent_runs), 0),
+              'rejectedCount', COALESCE((SELECT sum(rejected_count) FROM recent_runs), 0),
+              'providerUnits', COALESCE((SELECT sum(provider_units) FROM recent_runs), 0),
+              'byAdapter', COALESCE((
+                SELECT jsonb_agg(
+                  jsonb_build_object(
+                    'adapter', adapter_kind,
+                    'status', status,
+                    'runCount', run_count
+                  ) ORDER BY adapter_kind, status
+                )
+                FROM grouped
+              ), '[]'::jsonb)
+            )::text;
+
+            SELECT jsonb_build_object(
+              'event', 'briefing_acquisition_fact_health',
+              'receiptCount', (
+                SELECT count(*)
+                FROM content.source_receipts
+                WHERE primary_endpoint_id IS NOT NULL
+              ),
+              'revisionCount', (SELECT count(*) FROM content.source_receipt_revisions),
+              'observationCount', (SELECT count(*) FROM content.source_observations),
+              'pendingOutboxCount', (
+                SELECT count(*) FROM content.pipeline_outbox WHERE status = 'PENDING'
+              ),
+              'deliveredOutboxCount', (
+                SELECT count(*) FROM content.pipeline_outbox WHERE status = 'DELIVERED'
+              ),
+              'transcriptRevisionCount', (
+                SELECT count(*) FROM content.source_transcript_revisions
+              ),
+              'transcriptSegmentCount', (
+                SELECT count(*) FROM content.source_transcript_segments
+              )
+            )::text;
+
+            COMMIT;
+            SQL
+            }
+
+            assert_manifest_reconciliation() {
+              reconciliation_status=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
+                --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<SQL
+            SELECT status
+            FROM content.source_registry_reconciliations
+            WHERE git_revision = '$ROLLOUT_SHA'
+            ORDER BY created_at DESC
+            LIMIT 1;
+            SQL
+              )
+              case "$reconciliation_status" in
+                APPLIED|UNCHANGED) ;;
+                *)
+                  echo "briefing rollout refused: manifest reconciliation for $ROLLOUT_SHA is ${reconciliation_status:-MISSING}" >&2
+                  return 1
+                  ;;
+              esac
+            }
+
+            seed_existing_grok_auth() {
+              local active_container auth_file auth_links auth_mode auth_mode_value auth_size
+              active_container=$(active_content_container)
+              auth_file="$HOME/.grok/auth.json"
+              if [ ! -f "$auth_file" ] || [ -L "$auth_file" ]; then
+                echo 'briefing rollout refused: existing VPS Grok auth.json is unavailable' >&2
+                exit 1
+              fi
+              test "$(stat -c '%u' "$auth_file")" -eq "$(id -u)"
+              test "$(stat -c '%g' "$auth_file")" -eq "$(id -g)"
+              auth_links=$(stat -c '%h' "$auth_file")
+              test "$auth_links" -eq 1
+              auth_mode=$(stat -c '%a' "$auth_file")
+              auth_mode_value=$((8#$auth_mode))
+              if [ $((auth_mode_value & 077)) -ne 0 ]; then
+                echo 'briefing rollout refused: existing VPS Grok auth.json permissions are unsafe' >&2
+                exit 1
+              fi
+              auth_size=$(stat -c '%s' "$auth_file")
+              if [ "$auth_size" -lt 2 ] || [ "$auth_size" -gt 1048576 ]; then
+                echo 'briefing rollout refused: existing VPS Grok auth.json size is invalid' >&2
+                exit 1
+              fi
+              if docker exec "$active_container" sh -c \
+                'test -e "$GROK_HOME/auth.json" || test -L "$GROK_HOME/auth.json"'; then
+                echo 'briefing rollout refused: container Grok auth exists but is unusable' >&2
+                exit 1
+              fi
+              docker exec -i "$active_container" sh -euc '
+                temporary_auth="$GROK_HOME/.auth.json.briefing-seed.$$"
+                cleanup_auth() { rm -f -- "$temporary_auth"; }
+                trap cleanup_auth EXIT
+                umask 077
+                cat >"$temporary_auth"
+                test -s "$temporary_auth"
+                chmod 600 "$temporary_auth"
+                test ! -e "$GROK_HOME/auth.json"
+                test ! -L "$GROK_HOME/auth.json"
+                mv "$temporary_auth" "$GROK_HOME/auth.json"
+                temporary_auth=""
+                trap - EXIT
+              ' <"$auth_file"
+              if ! grok_auth_usable; then
+                docker exec "$active_container" sh -euc \
+                  'test -f "$GROK_HOME/auth.json" && rm -f -- "$GROK_HOME/auth.json"'
+                echo 'briefing rollout refused: copied VPS Grok auth is not usable' >&2
+                exit 1
+              fi
+              printf '%s\n' \
+                '{"event":"briefing_grok_auth_seed","outcome":"passed","secretValueExposed":false}'
+            }
+
+            ensure_grok_runtime_for_shadow() {
+              local active_container
+              verify_grok_version
+              active_container=$(active_content_container)
+              if docker exec "$active_container" test -L /home/appuser/.grok/auth.json; then
+                echo 'briefing rollout refused: container Grok auth must not be a symlink' >&2
+                exit 1
+              fi
+              if ! docker exec "$active_container" test -f /home/appuser/.grok/auth.json; then
+                seed_existing_grok_auth
+              fi
+              verify_grok_runtime
+            }
+
+            if [ "$ROLLOUT_MODE" = status ]; then
+              scripts/configure-briefing-acquisition-env.sh status "$env_file"
+              test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy
+              verify_grok_version
+              if grok_auth_usable; then
+                printf '%s\n' '{"event":"briefing_grok_auth_readiness","ready":true}'
+              else
+                printf '%s\n' '{"event":"briefing_grok_auth_readiness","ready":false}'
+              fi
+              report_acquisition_health
+              exit 0
+            fi
+
+            if [ "$ROLLOUT_MODE" = shadow ]; then
+              ensure_grok_runtime_for_shadow
+            fi
+
+            umask 077
+            backup_file=$(mktemp "$expected_workdir/.env.deploy.briefing-backup.XXXXXX")
+            cp -p "$env_file" "$backup_file"
+            mutation_started=false
+            rollout_committed=false
+            on_exit() {
+              original_status=$?
+              final_status=$original_status
+              trap - EXIT
+              set +e
+              if [ "$original_status" -ne 0 ] && [ "$mutation_started" = true ] \
+                && [ "$rollout_committed" = false ]; then
+                rollback_status=0
+                if mv "$backup_file" "$env_file"; then
+                  APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate \
+                    content-worker || rollback_status=1
+                  if [ "$rollback_status" -eq 0 ]; then
+                    PROJECT_DIR="$expected_workdir" COMPOSE_FILE=docker-compose.yml \
+                      COMPOSE_BIN='docker compose' scripts/verify-runtime-health.sh \
+                      || rollback_status=1
+                  fi
+                else
+                  rollback_status=1
+                fi
+                if [ "$rollback_status" -ne 0 ]; then
+                  echo 'briefing rollout rollback failed; acquisition state requires attention' >&2
+                  final_status=70
+                fi
+              fi
+              if [ -f "$backup_file" ]; then
+                rm -f -- "$backup_file"
+              fi
+              exit "$final_status"
+            }
+            trap on_exit EXIT
+
+            mutation_started=true
+            scripts/configure-briefing-acquisition-env.sh "$ROLLOUT_MODE" "$env_file"
+            APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate \
+              content-worker
+            PROJECT_DIR="$expected_workdir" COMPOSE_FILE=docker-compose.yml \
+              COMPOSE_BIN='docker compose' scripts/verify-runtime-health.sh
+            active_container=$(active_content_container)
+            test "$(docker inspect --format '{{.Config.Image}}' "$active_container")" = "$current_image"
+            if [ "$ROLLOUT_MODE" = shadow ]; then
+              verify_grok_runtime
+            fi
+            scripts/configure-briefing-acquisition-env.sh status "$env_file"
+            report_acquisition_health
+            if [ "$ROLLOUT_MODE" = shadow ]; then
+              assert_manifest_reconciliation
+            fi
+            rollout_committed=true
+            rm -f -- "$backup_file"
+            backup_file=''
+            trap - EXIT

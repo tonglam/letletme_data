@@ -499,6 +499,21 @@ function rightsAllowPublic(value: unknown): boolean {
   );
 }
 
+const EDITORIAL_COMPLETE_ACQUISITION_STATUSES = new Set([
+  'COMPLETED',
+  'CHECKED_NO_CHANGE',
+  'EMPTY',
+  'PARTIAL',
+  // Retain compatibility with rows created before formal acquisition normalized statuses.
+  'completed',
+  'empty',
+  'partial',
+]);
+
+export function isEditorialAcquisitionRunComplete(status: string): boolean {
+  return EDITORIAL_COMPLETE_ACQUISITION_STATUSES.has(status);
+}
+
 export async function markStoryReady(storyId: string, actor: EditorialActor): Promise<void> {
   requireRole(actor, 'content_editor');
   requireUuid(storyId, 'storyId');
@@ -543,7 +558,7 @@ export async function markStoryReady(storyId: string, actor: EditorialActor): Pr
         'Every Story evidence receipt needs explicit public rights',
         'EDITORIAL_RIGHTS_REQUIRED',
       );
-    if (evidence.some((row) => !/^https?:\/\//i.test(row.canonicalUrl)))
+    if (evidence.some((row) => !row.canonicalUrl || !/^https?:\/\//i.test(row.canonicalUrl)))
       throw new ValidationError('Story evidence URL must be http(s)', 'EDITORIAL_URL_INVALID');
     await tx
       .update(contentStories)
@@ -775,7 +790,7 @@ export async function markWeekEditionReady(
     if (
       sourceRuns.some(
         (run) =>
-          !['completed', 'empty', 'partial'].includes(run.status) ||
+          !isEditorialAcquisitionRunComplete(run.status) ||
           run.traceVerified !== true ||
           run.checkpointAdvanced !== true ||
           !run.completedAt ||
@@ -878,7 +893,7 @@ export async function markWeekEditionReady(
           'Every Story evidence receipt needs explicit public rights',
           'EDITORIAL_RIGHTS_REQUIRED',
         );
-      if (!/^https?:\/\//i.test(row.canonicalUrl))
+      if (!row.canonicalUrl || !/^https?:\/\//i.test(row.canonicalUrl))
         throw new ValidationError('Story evidence URL must be http(s)', 'EDITORIAL_URL_INVALID');
       const list = evidenceByStory.get(row.storyId) ?? [];
       list.push({
