@@ -359,7 +359,7 @@ async function enqueueTournamentSyncJob(
       cascadeId: options.cascadeId,
       tournamentCount: options.finalizationTargets?.length,
     });
-    await trackMyFplRefreshJob(job.data.runId, queue.name, job.id);
+    await trackMyFplRefreshJob(job.data?.runId, queue.name, job.id);
 
     return job;
   } catch (error) {
