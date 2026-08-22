@@ -359,6 +359,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
     ): Promise<void> => {
       const db = await getDbInstance();
       await db.transaction(async (tx) => {
+        const now = new Date();
         const rows = await tx
           .select({ status: syncRunsInOps.status })
           .from(syncRunsInOps)
@@ -388,8 +389,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             dataChanged: input.dataChanged,
             ...(input.publicationId !== undefined ? { publicationId: input.publicationId } : {}),
             ...(input.metadata ? { metadata: input.metadata } : {}),
-            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, now())`,
-            updatedAt: new Date(),
+            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, ${now.toISOString()})`,
+            updatedAt: now,
           })
           .where(eq(syncRunsInOps.runId, runId));
       });
@@ -755,7 +756,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             status: 'published',
             publicationId: input.publicationId,
             dataChanged: true,
-            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, now())`,
+            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, ${now.toISOString()})`,
             updatedAt: now,
           })
           .where(eq(syncRunsInOps.runId, input.sourceRunId));

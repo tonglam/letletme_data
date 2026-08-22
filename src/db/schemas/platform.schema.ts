@@ -115,6 +115,18 @@ export const playerMarketSnapshotSourceIdsInFpl = fpl.sequence(
   },
 );
 
+export const playerEventSnapshotPublicationRevisionsInFpl = fpl.sequence(
+  'player_event_snapshot_publication_revision_seq',
+  {
+    startWith: '1',
+    increment: '1',
+    minValue: '1',
+    maxValue: '9223372036854775807',
+    cache: '1',
+    cycle: false,
+  },
+);
+
 export const seasonImportsInOps = ops.table(
   'season_imports',
   {
@@ -1779,6 +1791,7 @@ export const playersInFpl = fpl.table(
     }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
   },
   (table) => [
     index('players_team_idx').using(
@@ -1790,6 +1803,12 @@ export const playersInFpl = fpl.table(
       'btree',
       table.seasonId.asc().nullsLast(),
       table.elementType.asc().nullsLast(),
+    ),
+    index('players_active_idx').using(
+      'btree',
+      table.seasonId.asc().nullsLast(),
+      table.isActive.asc().nullsLast(),
+      table.elementId.asc().nullsLast(),
     ),
     index('players_web_name_idx').using(
       'btree',
@@ -3837,6 +3856,56 @@ export const playerEventSnapshotsInFpl = fpl.table(
     check(
       'player_event_snapshots_selected_percent',
       sql`(selected_by_percent IS NULL) OR ((selected_by_percent >= (0)::numeric) AND (selected_by_percent <= (100)::numeric))`,
+    ),
+  ],
+);
+
+export const playerEventSnapshotPublicationsInFpl = fpl.table(
+  'player_event_snapshot_publications',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' })
+      .default(sql`nextval('fpl.player_event_snapshot_publication_revision_seq'::regclass)`)
+      .notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    rowCount: integer('row_count').notNull(),
+    expectedRowCount: integer('expected_row_count').notNull(),
+    contentSha256: text('content_sha256').notNull(),
+    baselineVerifiedAt: timestamp('baseline_verified_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'player_event_snapshot_publications_season_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'player_event_snapshot_publications_event_fk',
+    }),
+    primaryKey({
+      columns: [table.seasonId, table.eventId],
+      name: 'player_event_snapshot_publications_pkey',
+    }),
+    check('player_event_snapshot_publications_revision_positive', sql`revision > 0`),
+    check(
+      'player_event_snapshot_publications_counts_positive',
+      sql`row_count > 0 AND expected_row_count > 0`,
+    ),
+    check(
+      'player_event_snapshot_publications_counts_complete',
+      sql`row_count = expected_row_count`,
+    ),
+    check(
+      'player_event_snapshot_publications_hash_valid',
+      sql`content_sha256 ~ '^[0-9a-f]{64}$'::text`,
     ),
   ],
 );

@@ -11,6 +11,7 @@ import { eventLivesAPI } from './api/event-lives.api';
 import { eventsAPI } from './api/events.api';
 import { fixturesAPI } from './api/fixtures.api';
 import { jobsAPI } from './api/jobs.api';
+import { managerLiveAPI } from './api/manager-live.api';
 import { phasesAPI } from './api/phases.api';
 import { playerStatsAPI } from './api/player-stats.api';
 import { playerValuesAPI } from './api/player-values.api';
@@ -191,6 +192,7 @@ const app = new Elysia()
   .use(phasesAPI)
   .use(entryInfoAPI)
   .use(entrySyncAPI)
+  .use(managerLiveAPI)
   .use(jobsAPI)
   .use(tournamentsAPI)
   .use(bugReportsAPI)
@@ -243,6 +245,7 @@ logInfo('🚀 Elysia server started', {
     'player-values',
     'entry-info',
     'phases',
+    'manager-live',
     'jobs',
     'tournaments',
     'understat',

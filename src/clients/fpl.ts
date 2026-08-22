@@ -340,6 +340,8 @@ export const EntrySummarySchema = z.object({
   player_last_name: z.string(),
   player_region_name: z.string().nullable().optional(),
   started_event: z.number().nullable().optional(),
+  summary_event_points: z.number().nullable().optional(),
+  summary_event_rank: z.number().nullable().optional(),
   summary_overall_points: z.number().nullable().optional(),
   summary_overall_rank: z.number().nullable().optional(),
   bank: z.number().nullable().optional(),
@@ -404,6 +406,7 @@ const StandingsResultSchema = z
     player_name: z.string().optional(),
     player_first_name: z.string().optional(),
     player_last_name: z.string().optional(),
+    event_total: z.number().nullable().optional(),
     rank: z.number().nullable().optional(),
     rank_sort: z.number().nullable().optional(),
     total: z.number().nullable().optional(),
@@ -434,6 +437,7 @@ const StandingsLeagueSchema = z
   .passthrough();
 export const LeagueStandingsSchema = z
   .object({
+    last_updated_data: z.string().nullable().optional(),
     standings: StandingsSchema,
     new_entries: StandingsSchema.optional(),
     league: StandingsLeagueSchema.optional(),

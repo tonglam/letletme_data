@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
 
 import { playersInFpl, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
@@ -35,7 +35,7 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
         const query = db
           .select()
           .from(playersInFpl)
-          .where(eq(playersInFpl.seasonId, season.seasonId));
+          .where(and(eq(playersInFpl.seasonId, season.seasonId), eq(playersInFpl.isActive, true)));
         const rows = options.lock ? await query.for('update') : await query;
         return rows.map(mapDbPlayerToDomain);
       } catch (error) {
@@ -149,6 +149,7 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
       season: FplSeasonRef,
       domainPlayers: DomainPlayer[],
       preservePriceSourceCheckedAtOrAfter?: Date,
+      options: { markMissingInactive?: boolean } = {},
     ): Promise<DomainPlayer[]> => {
       try {
         if (domainPlayers.length === 0) {
@@ -173,6 +174,23 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
         }));
 
         const db = await getDbInstance();
+        if (options.markMissingInactive) {
+          await db
+            .update(playersInFpl)
+            .set({
+              isActive: false,
+              updatedAt: sql`NOW()`,
+            })
+            .where(
+              and(
+                eq(playersInFpl.seasonId, season.seasonId),
+                notInArray(
+                  playersInFpl.elementId,
+                  domainPlayers.map((player) => player.id),
+                ),
+              ),
+            );
+        }
         const result = await db
           .insert(playersInFpl)
           .values(newPlayers)
@@ -182,6 +200,7 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
               code: sql`excluded.code`,
               elementType: sql`excluded.element_type`,
               teamId: sql`excluded.team_id`,
+              isActive: sql`true`,
               price: sql`excluded.price`,
               priceSourceCheckedAt: sourceCheckedAtIso
                 ? sql`CASE

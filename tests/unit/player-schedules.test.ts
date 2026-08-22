@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   PLAYER_MARKET_FRESHNESS_WATCHDOG_CRON_PATTERN,
+  PLAYER_STATS_ACTIVE_CRON_PATTERN,
   PLAYER_PRICES_REPLAY_CRON_PATTERN,
   PLAYER_STATS_CRON_PATTERN,
   PLAYER_VALUES_CRON_PATTERN,
@@ -19,5 +20,9 @@ describe('player synchronization schedules', () => {
   test('runs current-price replay and player stats daily at 09:40', () => {
     expect(PLAYER_PRICES_REPLAY_CRON_PATTERN).toBe('40 9 * * *');
     expect(PLAYER_STATS_CRON_PATTERN).toBe('40 9 * * *');
+  });
+
+  test('coordinates live player stats every minute and backs off in the job', () => {
+    expect(PLAYER_STATS_ACTIVE_CRON_PATTERN).toBe('* * * * *');
   });
 });

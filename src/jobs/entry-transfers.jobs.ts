@@ -2,8 +2,9 @@ import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
 import { enqueueEntryTransfersSyncJob } from './entry-sync-enqueue';
+import { ENTRY_PICKS_CRON_PATTERN } from '../domain/job-schedules';
 import { getCurrentEvent } from '../services/events.service';
-import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
+import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
 import { executeTrackedCron } from '../utils/job-run-logger';
@@ -13,13 +14,14 @@ import { CRON_TIMEZONE } from '../utils/timezone';
 /**
  * Entry Event Transfers Cron Jobs
  *
- * Syncs transfers for all known entries in the current event.
+ * Syncs transfers for all known entries in the current event during the same
+ * post-deadline publication window as entry picks.
  */
 export function registerEntryTransfersJobs(app: Elysia) {
   return app.use(
     cron({
       name: 'entry-event-transfers-daily',
-      pattern: '40 10 * * *',
+      pattern: ENTRY_PICKS_CRON_PATTERN,
       timezone: CRON_TIMEZONE,
       async run() {
         try {
@@ -40,8 +42,8 @@ export function registerEntryTransfersJobs(app: Elysia) {
             }
 
             const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
-            if (!isAfterMatchDay(currentEvent, fixtures, now)) {
-              logInfo('Skipping entry transfers sync - before matchday end', {
+            if (!isSelectTime(currentEvent, fixtures, now)) {
+              logInfo('Skipping entry transfers sync - outside entry snapshot window', {
                 eventId: currentEvent.id,
               });
               return;
