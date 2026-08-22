@@ -1327,11 +1327,17 @@ export async function deferFormalRunForBudget(input: {
     if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
     if (run.scheduleId) throw new Error('Triggered content budget deferral cannot own a schedule');
     await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+    const suppliedNextEligibleAt = input.metrics.nextEligibleAt;
+    const nextEligibleAt =
+      typeof suppliedNextEligibleAt === 'string' &&
+      Number.isFinite(Date.parse(suppliedNextEligibleAt))
+        ? suppliedNextEligibleAt
+        : new Date(dbNow.getTime() + 24 * 60 * 60_000).toISOString();
     const updated = await tx
       .update(contentAcquisitionRuns)
       .set({
         status: 'BUDGET_DEFERRED',
-        runMetrics: input.metrics,
+        runMetrics: { ...input.metrics, nextEligibleAt },
         completedAt: dbNow,
         leaseExpiresAt: null,
         checkpointAdvanced: false,

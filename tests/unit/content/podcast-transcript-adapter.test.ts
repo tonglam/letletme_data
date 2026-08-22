@@ -113,6 +113,7 @@ Second cue
       },
       timeoutMs: 1_000,
       maximumBytes: 10_000,
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
       fetchImpl: async (input) => {
         calls.push(String(input));
         return String(input).endsWith('/a-invalid.vtt')
@@ -127,7 +128,10 @@ Second cue
       },
     });
 
-    expect(calls).toEqual(['https://example.com/a-invalid.vtt', 'https://example.com/b-valid.vtt']);
+    expect(calls).toEqual([
+      'https://93.184.216.34/a-invalid.vtt',
+      'https://93.184.216.34/b-valid.vtt',
+    ]);
     expect(result?.segments).toEqual([{ startMs: 0, endMs: 1_000, text: 'Fallback artifact' }]);
     expect(result?.artifactAttemptCount).toBe(2);
   });

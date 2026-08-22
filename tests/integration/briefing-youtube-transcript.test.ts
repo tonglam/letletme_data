@@ -565,11 +565,15 @@ test('rejects a stale billable transcript result without overwriting the current
 
   const publishedAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
   const videoId = 'staleResult01';
-  const feedXml = (title: string, description: string) => `<?xml version="1.0"?>
+  const feedXml = (
+    title: string,
+    description: string,
+    updatedAt = publishedAt,
+  ) => `<?xml version="1.0"?>
     <feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015"
       xmlns:media="http://search.yahoo.com/mrss/">
       <entry><yt:videoId>${videoId}</yt:videoId><yt:channelId>UC72QokPHXQ9r98ROfNZmaDw</yt:channelId>
-        <title>${title}</title><published>${publishedAt}</published><updated>${publishedAt}</updated>
+        <title>${title}</title><published>${publishedAt}</published><updated>${updatedAt}</updated>
         <link rel="alternate" href="https://www.youtube.com/watch?v=${videoId}" />
         <author><name>FPL Focal</name><uri>https://www.youtube.com/channel/UC72QokPHXQ9r98ROfNZmaDw</uri></author>
         <media:group><media:description>${description}</media:description></media:group>
@@ -589,6 +593,16 @@ test('rejects a stale billable transcript result without overwriting the current
         headers: { 'content-type': 'application/atom+xml' },
       }),
   });
+  const [initialSchedule] = await db
+    .select({ checkpoint: contentSourceSchedules.checkpoint })
+    .from(contentSourceSchedules)
+    .where(eq(contentSourceSchedules.endpointId, endpoint.endpointId));
+  const initialCheckedAt = new Date(
+    String((initialSchedule?.checkpoint as Record<string, unknown> | null)?.checkedAt ?? ''),
+  );
+  if (!Number.isFinite(initialCheckedAt.getTime())) {
+    throw new Error('Initial stale-result checkpoint is missing checkedAt');
+  }
   const [metadataRun] = await db
     .select({ runId: contentAcquisitionRuns.runId })
     .from(contentAcquisitionRuns)
@@ -649,10 +663,17 @@ test('rejects a stale billable transcript result without overwriting the current
   await runFormalHttpWorker(refreshRun.job, {
     flags,
     fetchImpl: async () =>
-      new Response(feedXml('Newer feed title', 'Newer feed description'), {
-        status: 200,
-        headers: { 'content-type': 'application/atom+xml' },
-      }),
+      new Response(
+        feedXml(
+          'Newer feed title',
+          'Newer feed description',
+          new Date(initialCheckedAt.getTime() + 1).toISOString(),
+        ),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/atom+xml' },
+        },
+      ),
   });
   const [receiptBefore] = await db
     .select({

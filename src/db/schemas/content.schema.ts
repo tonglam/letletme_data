@@ -656,7 +656,6 @@ export const contentSourceReceipts = content.table(
   },
   (table) => [
     unique('content_source_receipts_receipt_key_key').on(table.receiptKey),
-    unique('content_source_receipts_source_external_key').on(table.sourceId, table.externalId),
     index('content_source_receipts_run_idx').on(table.runId, table.capturedAt),
     index('content_source_receipts_endpoint_idx')
       .on(table.primaryEndpointId, table.createdAt)

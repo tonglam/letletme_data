@@ -210,6 +210,36 @@ describe('Briefing source registry reconciliation', () => {
       outboxCount: 0,
     });
 
+    const metadataOnlyRights = {
+      mode: 'PUBLIC_METADATA_ONLY',
+      allowPublic: true,
+      allowFullText: false,
+      attributionRequired: true,
+    };
+    await db
+      .update(contentSourceEndpoints)
+      .set({ rightsPolicy: metadataOnlyRights })
+      .where(eq(contentSourceEndpoints.endpointId, endpoint.endpointId));
+    const rightsRefreshRunId = await createRun();
+    const rightsRefresh = await persistAcquisitionResult({
+      runId: rightsRefreshRunId,
+      state: 'COMPLETED',
+      batches: [baseBatch],
+      checkpointComplete: true,
+      checkpoint: { videoId: 'Xef37ImWz3M' },
+      nextDueAt: new Date(Date.now() + 30 * 60_000),
+    });
+    expect(rightsRefresh).toMatchObject({
+      state: 'CHECKED_NO_CHANGE',
+      revisionCount: 0,
+      outboxCount: 0,
+    });
+    const [refreshedReceipt] = await db
+      .select({ rightsPolicy: contentSourceReceipts.rightsPolicy })
+      .from(contentSourceReceipts)
+      .where(eq(contentSourceReceipts.externalId, 'Xef37ImWz3M'));
+    expect(refreshedReceipt?.rightsPolicy).toEqual(metadataOnlyRights);
+
     const thirdRunId = await createRun();
     const third = await persistAcquisitionResult({
       runId: thirdRunId,
@@ -246,7 +276,7 @@ describe('Briefing source registry reconciliation', () => {
         contentPipelineOutbox,
         eq(contentPipelineOutbox.receiptId, contentSourceReceipts.receiptId),
       );
-    expect(databaseCounts).toEqual({ receipts: 1, revisions: 2, observations: 3, outbox: 2 });
+    expect(databaseCounts).toEqual({ receipts: 1, revisions: 2, observations: 4, outbox: 2 });
 
     const revision = await db
       .select({ id: contentSourceReceiptRevisions.receiptRevisionId })

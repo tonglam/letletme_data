@@ -113,6 +113,13 @@ describe('Briefing content migration contract', () => {
     );
   });
 
+  test('removes the legacy cross-kind receipt identity constraint', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0031_content_receipt_identity_constraint.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('DROP CONSTRAINT content_source_receipts_source_external_key');
+  });
+
   test('makes active publication unique by scope and revisioned', async () => {
     const sql = await Bun.file(migrationPath).text();
     expect(sql).toContain('UNIQUE (scope_key, revision)');

@@ -147,6 +147,35 @@ describe('RSS/Atom feed adapter', () => {
     expect(result.rejections[0]).toMatchObject({ externalItemId: 'invalid-item' });
   });
 
+  test('applies the persisted polling window and item cap after bootstrap', () => {
+    const result = parseFeedXml({
+      endpointKey: 'bounded-poll',
+      adapterKind: 'RSS_ATOM',
+      profileKey: 'rss-news-v1',
+      checkedAt: '2026-08-22T12:00:00.000Z',
+      transportBodyHash: hash,
+      validator,
+      pollWindow: {
+        windowStart: new Date('2026-08-22T09:00:00.000Z'),
+        windowEnd: new Date('2026-08-22T12:00:00.000Z'),
+        maxItems: 2,
+      },
+      xml: `<?xml version="1.0"?><rss version="2.0"><channel>
+        <link>https://example.com/</link>
+        <item><guid>old</guid><link>https://example.com/old</link><title>Old</title>
+          <pubDate>Fri, 22 Aug 2026 08:59:59 GMT</pubDate></item>
+        <item><guid>new-1</guid><link>https://example.com/new-1</link><title>New 1</title>
+          <pubDate>Fri, 22 Aug 2026 10:00:00 GMT</pubDate></item>
+        <item><guid>new-2</guid><link>https://example.com/new-2</link><title>New 2</title>
+          <pubDate>Fri, 22 Aug 2026 11:00:00 GMT</pubDate></item>
+        <item><guid>new-3</guid><link>https://example.com/new-3</link><title>New 3</title>
+          <pubDate>Fri, 22 Aug 2026 11:30:00 GMT</pubDate></item>
+      </channel></rss>`,
+    });
+    expect(result.rejections).toHaveLength(0);
+    expect(result.batch.items.map((item) => item.externalItemId)).toEqual(['new-3', 'new-2']);
+  });
+
   test('allows a bounded larger archive for podcast feeds only', async () => {
     const xml = `<?xml version="1.0"?><rss version="2.0"><channel>
       <link>https://example.com/</link>

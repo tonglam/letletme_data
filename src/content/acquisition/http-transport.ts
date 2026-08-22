@@ -9,7 +9,21 @@ export type HttpValidator = Readonly<{
   lastModified: string | null;
 }>;
 
-export type PublicFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+type PublicFetchInit = RequestInit & {
+  tls?: Readonly<{
+    serverName?: string;
+    rejectUnauthorized?: boolean;
+  }>;
+};
+
+export type PublicFetch = (
+  input: string | URL | Request,
+  init?: PublicFetchInit,
+) => Promise<Response>;
+export type PublicDnsLookup = (
+  hostname: string,
+  options: { all: true; verbatim: true },
+) => Promise<readonly { address: string; family: number }[]>;
 
 export type PublicHttpResult = Readonly<{
   requestUrl: string;
@@ -109,7 +123,11 @@ export function isPublicIpAddress(address: string): boolean {
   return false;
 }
 
-async function assertPublicTarget(url: URL, allowHttp: boolean): Promise<void> {
+async function assertPublicTarget(
+  url: URL,
+  allowHttp: boolean,
+  lookupImpl: PublicDnsLookup,
+): Promise<{ hostname: string; address: string }> {
   if (url.username || url.password) {
     throw new PublicHttpError('URL_CREDENTIALS_FORBIDDEN', 'Public URL cannot contain credentials');
   }
@@ -130,17 +148,29 @@ async function assertPublicTarget(url: URL, allowHttp: boolean): Promise<void> {
   if (literalFamily && !isPublicIpAddress(hostname)) {
     throw new PublicHttpError('PRIVATE_TARGET', 'Private IP targets are forbidden');
   }
-  if (!literalFamily) {
-    const addresses = await lookup(hostname, { all: true, verbatim: true }).catch((error) => {
-      throw new PublicHttpError(
-        'DNS_FAILED',
-        `Public hostname resolution failed: ${error instanceof Error ? error.message : 'unknown'}`,
-      );
-    });
-    if (addresses.length === 0 || addresses.some((entry) => !isPublicIpAddress(entry.address))) {
-      throw new PublicHttpError('PRIVATE_TARGET', 'Hostname resolves to a non-public address');
-    }
+  if (literalFamily) return { hostname, address: hostname };
+  const addresses = await lookupImpl(hostname, { all: true, verbatim: true }).catch((error) => {
+    throw new PublicHttpError(
+      'DNS_FAILED',
+      `Public hostname resolution failed: ${error instanceof Error ? error.message : 'unknown'}`,
+    );
+  });
+  if (addresses.length === 0 || addresses.some((entry) => !isPublicIpAddress(entry.address))) {
+    throw new PublicHttpError('PRIVATE_TARGET', 'Hostname resolves to a non-public address');
   }
+  const address = addresses[0]?.address;
+  if (!address) throw new PublicHttpError('DNS_FAILED', 'Public hostname has no address');
+  return { hostname, address };
+}
+
+function pinnedUrl(url: URL, address: string): string {
+  const result = new URL(url.toString());
+  result.hostname = address;
+  return result.toString();
+}
+
+function hostHeader(url: URL): string {
+  return url.port ? `${url.hostname}:${url.port}` : url.hostname;
 }
 
 function cacheNotBefore(headers: Headers, checkedAt: Date): string | null {
@@ -195,11 +225,13 @@ export async function fetchPublicResource(input: {
   accept?: string;
   now?: Date;
   fetchImpl?: PublicFetch;
+  lookupImpl?: PublicDnsLookup;
 }): Promise<PublicHttpResult> {
   const timeoutMs = input.timeoutMs ?? 40_000;
   const maximumBytes = input.maximumBytes ?? 8 * 1_024 * 1_024;
   const maximumRedirects = input.maximumRedirects ?? 5;
   const fetchImpl = input.fetchImpl ?? fetch;
+  const lookupImpl = input.lookupImpl ?? (lookup as PublicDnsLookup);
   const checkedAt = input.now ?? new Date();
   const requestUrl = canonicalizePublicUrl(input.url);
   const accept =
@@ -225,26 +257,36 @@ export async function fetchPublicResource(input: {
 
   for (let redirects = 0; redirects <= maximumRedirects; redirects += 1) {
     const parsed = new URL(currentUrl);
-    await assertPublicTarget(parsed, input.allowHttp ?? false);
+    const validatedTarget = await assertPublicTarget(parsed, input.allowHttp ?? false, lookupImpl);
     if (parsed.origin !== allowedOrigin) {
       throw new PublicHttpError('CROSS_ORIGIN_REDIRECT', 'Cross-origin redirect is forbidden');
     }
+    const transportUrl =
+      validatedTarget.address === validatedTarget.hostname
+        ? currentUrl
+        : pinnedUrl(parsed, validatedTarget.address);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
-      response = await fetchImpl(currentUrl, {
+      response = await fetchImpl(transportUrl, {
         method: 'GET',
         redirect: 'manual',
         signal: controller.signal,
         headers: {
           Accept: accept,
           'User-Agent': 'LetLetMe-Briefing-Acquisition/1.0',
+          ...(validatedTarget.address !== validatedTarget.hostname
+            ? { Host: hostHeader(parsed) }
+            : {}),
           ...(input.validator?.etag ? { 'If-None-Match': input.validator.etag } : {}),
           ...(input.validator?.lastModified
             ? { 'If-Modified-Since': input.validator.lastModified }
             : {}),
         },
+        ...(validatedTarget.address !== validatedTarget.hostname && parsed.protocol === 'https:'
+          ? { tls: { serverName: validatedTarget.hostname, rejectUnauthorized: true } }
+          : {}),
       });
     } catch (error) {
       clearTimeout(timer);

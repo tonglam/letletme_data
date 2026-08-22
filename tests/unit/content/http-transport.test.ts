@@ -51,6 +51,30 @@ describe('public HTTP acquisition transport', () => {
     ).rejects.toMatchObject({ failureClass: 'BODY_TOO_LARGE' });
   });
 
+  test('pins a validated DNS address while preserving Host and TLS identity', async () => {
+    let requestedUrl = '';
+    let requestedHost = '';
+    let requestedServerName = '';
+    const result = await fetchPublicResource({
+      url: 'https://feed.example.test/path',
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+      fetchImpl: async (url, init) => {
+        requestedUrl = String(url);
+        requestedHost = new Headers(init?.headers).get('host') ?? '';
+        requestedServerName =
+          (init as { tls?: { serverName?: string } } | undefined)?.tls?.serverName ?? '';
+        return new Response('<rss/>', {
+          status: 200,
+          headers: { 'content-type': 'application/xml' },
+        });
+      },
+    });
+    expect(result.status).toBe(200);
+    expect(requestedUrl).toBe('https://93.184.216.34/path');
+    expect(requestedHost).toBe('feed.example.test');
+    expect(requestedServerName).toBe('feed.example.test');
+  });
+
   test('rejects cross-origin redirects', async () => {
     await expect(
       fetchPublicResource({

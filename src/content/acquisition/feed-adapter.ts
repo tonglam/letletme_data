@@ -330,6 +330,11 @@ export function parseFeedXml(input: {
   xml: string;
   transportBodyHash: string;
   validator: HttpValidator & { cacheNotBefore: string | null };
+  pollWindow?: Readonly<{
+    windowStart: Date;
+    windowEnd: Date;
+    maxItems: number;
+  }>;
   bootstrap?: Readonly<{
     cutoffAt: Date;
     lookbackMinutes: number;
@@ -357,34 +362,44 @@ export function parseFeedXml(input: {
   const rawNodes = values(rssChannel ? channel.item : channel.entry);
   let bootstrapMetrics: FeedBootstrapMetrics | null = null;
   let nodes = rawNodes;
-  if (input.bootstrap) {
-    const cutoffMs = input.bootstrap.cutoffAt.getTime();
-    const thresholdMs = cutoffMs - input.bootstrap.lookbackMinutes * 60_000;
-    const eligible: Array<{ value: unknown; publishedAt: string; publishedMs: number }> = [];
+  const scope = input.bootstrap
+    ? {
+        windowStart: new Date(
+          input.bootstrap.cutoffAt.getTime() - input.bootstrap.lookbackMinutes * 60_000,
+        ),
+        windowEnd: input.bootstrap.cutoffAt,
+        maxItems: input.bootstrap.maxItems,
+      }
+    : input.pollWindow;
+  if (scope) {
+    const cutoffMs = scope.windowEnd.getTime();
+    const thresholdMs = scope.windowStart.getTime();
+    const eligible: Array<{ value: unknown; effectiveAt: string; effectiveMs: number }> = [];
     let missingPublishedAtCount = 0;
     let outOfScopeCount = 0;
     for (const value of rawNodes) {
       const node = record(value);
       const publishedAt = node
-        ? isoDate(
-            rssChannel
-              ? firstText(node.pubDate, node.published)
-              : firstText(node.published, node.updated),
-          )
+        ? isoDate(rssChannel ? firstText(node.pubDate, node.published) : firstText(node.published))
         : null;
-      if (!publishedAt) {
+      const updatedAt = node ? isoDate(firstText(node.updated, node['dc:date'])) : null;
+      const effectiveAt = [publishedAt, updatedAt]
+        .filter((value): value is string => value !== null)
+        .sort()
+        .at(-1);
+      if (!effectiveAt) {
         missingPublishedAtCount += 1;
         continue;
       }
-      const publishedMs = Date.parse(publishedAt);
-      if (publishedMs < thresholdMs || publishedMs > cutoffMs) {
+      const effectiveMs = Date.parse(effectiveAt);
+      if (effectiveMs < thresholdMs || effectiveMs > cutoffMs) {
         outOfScopeCount += 1;
         continue;
       }
-      eligible.push({ value, publishedAt, publishedMs });
+      eligible.push({ value, effectiveAt, effectiveMs });
     }
-    eligible.sort((left, right) => right.publishedMs - left.publishedMs);
-    const selected = eligible.slice(0, input.bootstrap.maxItems);
+    eligible.sort((left, right) => right.effectiveMs - left.effectiveMs);
+    const selected = eligible.slice(0, scope.maxItems);
     const itemLimitCount = Math.max(0, eligible.length - selected.length);
     nodes = selected.map((entry) => entry.value);
     bootstrapMetrics = {
@@ -392,8 +407,8 @@ export function parseFeedXml(input: {
       missingPublishedAtCount,
       outOfScopeCount,
       itemLimitCount,
-      oldestAcceptedAt: selected.at(-1)?.publishedAt ?? null,
-      newestAcceptedAt: selected[0]?.publishedAt ?? null,
+      oldestAcceptedAt: selected.at(-1)?.effectiveAt ?? null,
+      newestAcceptedAt: selected[0]?.effectiveAt ?? null,
     };
   }
   const items: AcquisitionItemV1[] = [];
@@ -529,6 +544,11 @@ export async function runFeedAdapter(input: {
   validator?: Partial<HttpValidator>;
   bootstrapProfile?: AcquisitionProfile;
   bootstrapCutoffAt?: Date;
+  pollWindow?: Readonly<{
+    windowStart: Date;
+    windowEnd: Date;
+    maxItems: number;
+  }>;
   now?: Date;
   fetchImpl?: PublicFetch;
   timeoutMs?: number;
@@ -583,6 +603,7 @@ export async function runFeedAdapter(input: {
     xml,
     transportBodyHash: transport.bodyHash,
     validator: { ...transport.validator, cacheNotBefore: transport.cacheNotBefore },
+    pollWindow: input.pollWindow,
     bootstrap:
       input.bootstrapProfile && input.bootstrapCutoffAt
         ? {

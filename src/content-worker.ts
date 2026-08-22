@@ -141,6 +141,7 @@ async function schedulePendingFormalAcquisition(): Promise<void> {
     if (result.claimed > 0 || result.skippedCoverageGate) {
       logInfo('Formal acquisition scheduler pass completed', result);
     }
+    if (result.skippedCoverageGate && !flags.acquisitionShadowMode) return;
     const triggered = await planTriggeredContentWork({ flags });
     if (triggered.planned > 0 || triggered.reclaimed > 0 || triggered.providerPollRecovered > 0) {
       logInfo('Triggered acquisition planner pass completed', triggered);

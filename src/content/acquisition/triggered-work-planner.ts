@@ -108,7 +108,10 @@ function runNextEligibleAt(run: TerminalRun | null, fallbackDelayMs: number): Da
   if (explicit) return explicit;
   const completedAt = run.completedAt ?? run.createdAt;
   if (run.status === 'BUDGET_DEFERRED') {
-    return new Date(completedAt.getTime() + 30 * 60_000);
+    // Provider ledgers are rolling 24-hour windows. A short retry cadence can
+    // exhaust the bounded attempt count before capacity returns, so a legacy
+    // deferral without an explicit provider reset hint waits out the window.
+    return new Date(completedAt.getTime() + 24 * 60 * 60_000);
   }
   if (run.status === 'FAILED') return new Date(completedAt.getTime() + fallbackDelayMs);
   return new Date(completedAt.getTime() + fallbackDelayMs);
@@ -138,9 +141,7 @@ function transcriptStage(run: TerminalRun): 'NATIVE_FIRST' | 'NATIVE_SECOND' | '
 }
 
 function retryFailureCount(runs: readonly TerminalRun[], jobKind: string): number {
-  return runs.filter(
-    (run) => run.jobKind === jobKind && ['FAILED', 'BUDGET_DEFERRED'].includes(run.status),
-  ).length;
+  return runs.filter((run) => run.jobKind === jobKind && run.status === 'FAILED').length;
 }
 
 function planForCandidate(input: {
@@ -275,7 +276,11 @@ function planForCandidate(input: {
     latest = null;
     if (new Date(completedAt.getTime() + 10 * 60_000) > dbNow) return null;
   } else if (['FAILED', 'BUDGET_DEFERRED'].includes(first.status)) {
-    if (transcriptRuns.filter((run) => transcriptStage(run) === 'NATIVE_FIRST').length >= 3) {
+    if (
+      transcriptRuns.filter(
+        (run) => transcriptStage(run) === 'NATIVE_FIRST' && run.status === 'FAILED',
+      ).length >= 3
+    ) {
       return null;
     }
     stage = 'NATIVE_FIRST';
@@ -287,7 +292,11 @@ function planForCandidate(input: {
     mode = 'NATIVE';
     latest = first;
   } else if (['FAILED', 'BUDGET_DEFERRED'].includes(second.status)) {
-    if (transcriptRuns.filter((run) => transcriptStage(run) === 'NATIVE_SECOND').length >= 3) {
+    if (
+      transcriptRuns.filter(
+        (run) => transcriptStage(run) === 'NATIVE_SECOND' && run.status === 'FAILED',
+      ).length >= 3
+    ) {
       return null;
     }
     stage = 'NATIVE_SECOND';
@@ -296,7 +305,12 @@ function planForCandidate(input: {
   } else {
     if (generated && ['FAILED', 'BUDGET_DEFERRED'].includes(generated.status)) {
       const generatedRuns = transcriptRuns.filter((run) => transcriptStage(run) === 'GENERATED');
-      if (generated.providerJobId || generatedRuns.length >= 3) return null;
+      if (
+        generated.providerJobId ||
+        generatedRuns.filter((run) => run.status === 'FAILED').length >= 3
+      ) {
+        return null;
+      }
       stage = 'GENERATED';
       mode = 'AUTO';
       latest = generated;

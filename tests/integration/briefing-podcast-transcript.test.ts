@@ -177,8 +177,18 @@ test('upgrades Podcast receipts from pending to publisher and Hermes timestamped
       leaseExpiresAt: null,
     })
     .where(eq(contentSourceSchedules.endpointId, endpoint.endpointId));
+  const [publisherSchedule] = await db
+    .select({ checkpoint: contentSourceSchedules.checkpoint })
+    .from(contentSourceSchedules)
+    .where(eq(contentSourceSchedules.endpointId, endpoint.endpointId));
+  const publisherCheckedAt = new Date(
+    String((publisherSchedule?.checkpoint as Record<string, unknown> | null)?.checkedAt ?? ''),
+  );
+  if (!Number.isFinite(publisherCheckedAt.getTime())) {
+    throw new Error('Publisher checkpoint is missing checkedAt');
+  }
+  const hermesPublishedAt = new Date(publisherCheckedAt.getTime() + 1).toISOString();
   const hermesFeed = await claimPodcastFeed();
-  const hermesPublishedAt = new Date(Date.now() - 60_000).toUTCString();
   const hermesDiscovery = await runFormalHttpWorker(hermesFeed.job, {
     flags,
     fetchImpl: async () =>

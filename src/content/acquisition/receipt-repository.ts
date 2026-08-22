@@ -26,7 +26,7 @@ import {
   type AcquisitionItemV1,
 } from './acquisition-contract';
 import { sha256CanonicalJson, transcriptSegmentsHash } from './canonicalization';
-import type { CanonicalTranscriptSegmentV1 } from './canonicalization';
+import type { CanonicalTranscriptSegmentV1, JsonValue } from './canonicalization';
 import {
   parseFormalRunRequestV1,
   type ArticleFetchRunRequestV1,
@@ -216,6 +216,10 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function rightsPolicyHash(value: unknown): string {
+  return sha256CanonicalJson(asRecord(value) as Record<string, JsonValue>);
 }
 
 class StaleTargetReceiptRevisionError extends Error {
@@ -544,6 +548,7 @@ export async function persistAcquisitionResult(
               externalId: contentSourceReceipts.externalId,
               contentKind: contentSourceReceipts.contentKind,
               currentRevisionId: contentSourceReceipts.currentRevisionId,
+              rightsPolicy: contentSourceReceipts.rightsPolicy,
             })
             .from(contentSourceReceipts)
             .where(
@@ -704,6 +709,7 @@ export async function persistAcquisitionResult(
             publishedAt: work.item.publishedAt ? new Date(work.item.publishedAt) : null,
             payload: work.payload,
             canonicalHash: work.canonicalHash,
+            rightsPolicy: work.rightsPolicy,
             currentRevisionId: receiptRevisionId,
           })
           .where(eq(contentSourceReceipts.receiptId, receiptId));
@@ -734,6 +740,15 @@ export async function persistAcquisitionResult(
         outboxCount += 1;
         revisedReceiptKeys.add(work.receiptKey);
       } else {
+        if (
+          existing &&
+          rightsPolicyHash(existing.rightsPolicy) !== rightsPolicyHash(work.rightsPolicy)
+        ) {
+          await tx
+            .update(contentSourceReceipts)
+            .set({ rightsPolicy: work.rightsPolicy })
+            .where(eq(contentSourceReceipts.receiptId, existing.receiptId));
+        }
         unchangedCount += 1;
       }
       if (!receiptRevisionId) {

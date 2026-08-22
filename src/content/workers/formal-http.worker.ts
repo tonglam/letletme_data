@@ -174,6 +174,11 @@ export async function runFormalHttpWorker(
         bootstrapCutoffAt: request.bootstrap.enabled
           ? new Date(request.bootstrap.cutoffAt)
           : undefined,
+        pollWindow: {
+          windowStart: new Date(request.windowStart),
+          windowEnd: new Date(request.windowEnd),
+          maxItems: request.bootstrap.maxItems,
+        },
         fetchImpl: dependencies?.fetchImpl,
         timeoutMs: flags.httpTimeoutMs,
         maximumBytes: flags.httpMaxOutputBytes,

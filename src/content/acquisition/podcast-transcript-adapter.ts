@@ -8,6 +8,7 @@ import {
   fetchPublicResource,
   publicHttpTrace,
   type AcquisitionHttpTrace,
+  type PublicDnsLookup,
   type PublicFetch,
   type PublicHttpResult,
 } from './http-transport';
@@ -131,6 +132,7 @@ export async function fetchPublisherPodcastTranscript(input: {
   timeoutMs: number;
   maximumBytes: number;
   fetchImpl?: PublicFetch;
+  lookupImpl?: PublicDnsLookup;
 }): Promise<PublisherTranscriptResult | null> {
   const supportedMimeType =
     /^(?:text\/(?:vtt|plain)|application\/(?:x-subrip|srt|json|ld\+json))(?:\s*;|$)/i;
@@ -150,6 +152,7 @@ export async function fetchPublisherPodcastTranscript(input: {
         timeoutMs: input.timeoutMs,
         maximumBytes: input.maximumBytes,
         fetchImpl: input.fetchImpl,
+        lookupImpl: input.lookupImpl,
         accept:
           'text/vtt, application/x-subrip, application/srt, application/json, text/plain;q=0.8',
         acceptedContentTypes: [
