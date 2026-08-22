@@ -126,6 +126,25 @@ describe('release workflow gates', () => {
     expect(rearmScript).toContain(`${quote}RUNNER_NOT_READY${quote}`);
   });
 
+  test('does not roll back Data when the optional Briefing provider probe is degraded', () => {
+    expect(workflow).toContain('runner_probe_succeeded=false');
+    expect(workflow).toContain('if scripts/run-briefing-control-probe.sh');
+    expect(workflow).toContain('dataDeploymentContinues');
+    expect(workflow).toContain('[ "$runner_probe_succeeded" = true ]');
+    expect(workflow).toContain('finish_stage degraded');
+
+    expect(deployScript).toContain('DEPLOY_RUNNER_PROBE_SUCCEEDED=false');
+    expect(deployScript).toContain('if "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh"');
+    expect(deployScript).toContain('dataDeploymentContinues');
+    expect(deployScript).toContain('[[ "$DEPLOY_RUNNER_PROBE_SUCCEEDED" = true ]]');
+    expect(deployScript).toContain('finish_stage degraded');
+
+    expect(briefingRolloutWorkflow).toContain(
+      'scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"',
+    );
+    expect(briefingRolloutWorkflow).not.toContain('dataDeploymentContinues');
+  });
+
   test('requires exact successful CI for both automatic and manual deployment', () => {
     expect(workflow).toContain(`github.event.workflow_run.event == ${quote}push${quote}`);
     expect(workflow).toContain('test "$WORKFLOW_EVENT" = "push"');

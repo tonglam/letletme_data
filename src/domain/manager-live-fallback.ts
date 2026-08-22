@@ -1,4 +1,59 @@
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
+const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
+
+export type ManagerSummaryFetchPriority = 'foreground' | 'background';
+
+export const createManagerSummaryFetchGate = (
+  maxConcurrent = MAX_SUMMARY_FETCH_CONCURRENCY,
+): (<T>(task: () => Promise<T>, priority?: ManagerSummaryFetchPriority) => Promise<T>) => {
+  if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent <= 0) {
+    throw new RangeError('maxConcurrent must be a positive integer');
+  }
+
+  let active = 0;
+  const foregroundWaiters: Array<() => void> = [];
+  const backgroundWaiters: Array<() => void> = [];
+
+  const acquire = (priority: ManagerSummaryFetchPriority): Promise<void> =>
+    new Promise((resolve) => {
+      const start = (): void => {
+        active += 1;
+        resolve();
+      };
+
+      if (active < maxConcurrent) {
+        start();
+      } else {
+        (priority === 'foreground' ? foregroundWaiters : backgroundWaiters).push(start);
+      }
+    });
+
+  return async <T>(
+    task: () => Promise<T>,
+    priority: ManagerSummaryFetchPriority = 'foreground',
+  ): Promise<T> => {
+    await acquire(priority);
+    try {
+      return await task();
+    } finally {
+      active -= 1;
+      // A background crawl may queue hundreds of entries. Once an active
+      // permit completes, always admit a request-path refresh first so the
+      // desk waits for at most the currently running upstream wave.
+      (foregroundWaiters.shift() ?? backgroundWaiters.shift())?.();
+    }
+  };
+};
+
+export const managerSummaryFetchBatches = (
+  entryIds: readonly number[],
+): readonly (readonly number[])[] => {
+  const batches: number[][] = [];
+  for (let offset = 0; offset < entryIds.length; offset += MAX_SUMMARY_FETCH_CONCURRENCY) {
+    batches.push(entryIds.slice(offset, offset + MAX_SUMMARY_FETCH_CONCURRENCY));
+  }
+  return batches;
+};
 
 export const planClassicManagerFallback = (
   pendingEntryIds: readonly number[],

@@ -71,6 +71,7 @@ DEPLOY_OLD_IMAGE=''
 DEPLOY_OLD_REVISION=''
 DEPLOY_LEDGER_BEFORE=''
 DEPLOY_RUNNER_UPDATED=false
+DEPLOY_RUNNER_PROBE_SUCCEEDED=false
 DEPLOY_RUNNER_PREVIOUS_TARGET=''
 DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 
@@ -80,11 +81,13 @@ start_stage() {
 }
 
 finish_stage() {
+  local outcome
   local finished_at duration_ms
+  outcome=${1:-passed}
   finished_at=$(date +%s)
   duration_ms=$(((finished_at - DEPLOY_STAGE_STARTED_AT) * 1000))
-  printf '{"event":"deploy_stage_timing","stage":"%s","outcome":"passed","durationMs":%s}\n' \
-    "${ACTIVE_DEPLOY_STAGE}" "${duration_ms}"
+  printf '{"event":"deploy_stage_timing","stage":"%s","outcome":"%s","durationMs":%s}\n' \
+    "${ACTIVE_DEPLOY_STAGE}" "$outcome" "${duration_ms}"
   ACTIVE_DEPLOY_STAGE=''
 }
 
@@ -265,9 +268,21 @@ deploy() {
     DEPLOY_RUNNER_UPDATED=true
     "${PROJECT_DIR}/scripts/deploy-host-grok-runner.sh" \
       "$runner_image_ref" "$DEPLOY_SHA" "$runner_root"
-    "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh" \
-      "$ENV_FILE" "$MIGRATION_ENV_FILE" "$DEPLOY_SHA"
-    finish_stage
+    if "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh" \
+      "$ENV_FILE" "$MIGRATION_ENV_FILE" "$DEPLOY_SHA"; then
+      DEPLOY_RUNNER_PROBE_SUCCEEDED=true
+      finish_stage
+    else
+      runner_probe_status=$?
+      export CONTENT_GROK_RUNNER_RELEASE_SHA="${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}"
+      test -x "${PROJECT_DIR}/scripts/rollback-host-grok-runner.sh"
+      "${PROJECT_DIR}/scripts/rollback-host-grok-runner.sh" \
+        "$runner_root" "$DEPLOY_RUNNER_PREVIOUS_TARGET" "$DEPLOY_RUNNER_PREVIOUS_RELEASE"
+      DEPLOY_RUNNER_UPDATED=false
+      printf '{"event":"briefing_control_probe","outcome":"degraded","exitCode":%s,"runnerRestored":true,"dataDeploymentContinues":true}\n' \
+        "$runner_probe_status"
+      finish_stage degraded
+    fi
   else
     log_info 'Host Grok runner is not required while X scanning or the real Grok provider is disabled'
   fi
@@ -311,9 +326,13 @@ deploy() {
   fi
   finish_stage
   if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
-    [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
+    [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]] &&
+    [[ "$DEPLOY_RUNNER_PROBE_SUCCEEDED" = true ]]; then
     test -x "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh"
     "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh" "$ENV_FILE" "$MIGRATION_ENV_FILE"
+  elif [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
+    [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
+    printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'
   fi
   DEPLOY_COMMITTED=true
 }

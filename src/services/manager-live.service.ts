@@ -18,7 +18,12 @@ import { entryEventResultsRepository } from '../repositories/entry-event-results
 import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { planClassicManagerFallback } from '../domain/manager-live-fallback';
+import {
+  createManagerSummaryFetchGate,
+  managerSummaryFetchBatches,
+  type ManagerSummaryFetchPriority,
+  planClassicManagerFallback,
+} from '../domain/manager-live-fallback';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
 // Refresh at 30s while an event is active, but keep a successfully published
@@ -311,6 +316,10 @@ const isWithinStaleWindow = (row: CachedRow, now = Date.now()): boolean =>
   Number.isFinite(Date.parse(row.checkedAt)) && ageSeconds(row.checkedAt, now) >= 0;
 
 const managerLiveBackgroundInFlight = new Map<string, Promise<void>>();
+// This gate is shared by every live-desk refresh in the process. Per-request
+// batching alone is insufficient because distinct tournaments can refresh at
+// the same time and otherwise multiply FPL entry-summary concurrency.
+const runManagerSummaryFetch = createManagerSummaryFetchGate();
 
 const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void => {
   if (managerLiveBackgroundInFlight.has(key)) return;
@@ -334,69 +343,85 @@ const refreshEntrySummaries = async (
   rows: Map<number, CachedRow>,
   redis: Redis | null,
   scope: ManagerScoreScope = entryScope,
-  options: { maxFetches?: number } = {},
+  options: { maxFetches?: number; priority?: ManagerSummaryFetchPriority } = {},
 ): Promise<'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null> => {
   const targets = entryIds
     .filter((entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!))
     .slice(0, options.maxFetches ?? Number.POSITIVE_INFINITY);
   if (targets.length === 0) return null;
 
-  const checkedAt = nowIso();
   const refreshed: ManagerLiveScoreRow[] = [];
   let refreshErrorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null = null;
-  await Promise.all(
-    targets.map(async (entryId) => {
-      try {
-        const summary = await fplClient.getEntrySummary(entryId);
-        refreshed.push(toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt));
-      } catch (error) {
-        if (error instanceof FPLClientError && error.status === 429) {
-          refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
-        } else {
-          refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+  for (const batch of managerSummaryFetchBatches(targets)) {
+    const completedBatch: ManagerLiveScoreRow[] = [];
+    await Promise.all(
+      batch.map(async (entryId) => {
+        try {
+          const summary = await runManagerSummaryFetch(
+            () => fplClient.getEntrySummary(entryId),
+            options.priority,
+          );
+          const checkedAt = nowIso();
+          const row = toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
+          completedBatch.push(row);
+          refreshed.push(row);
+          rows.set(row.entryId, row);
+          // Publish each completed response to the primary cache immediately.
+          // A slow sibling or later batch must not hide already-fetched
+          // official scores until the whole background crawl finishes.
+          await writeRows(redis, season.seasonCode, eventId, scope, [row]);
+        } catch (error) {
+          if (error instanceof FPLClientError && error.status === 429) {
+            refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
+          } else {
+            refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+          }
+          logWarn('Official manager entry summary refresh failed', {
+            entryId,
+            eventId,
+            error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
+          });
         }
-        logWarn('Official manager entry summary refresh failed', {
-          entryId,
-          eventId,
-          error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
-        });
-      }
-    }),
-  );
-  await writeRows(
-    redis,
-    season.seasonCode,
-    eventId,
-    scope,
-    refreshed,
-    refreshed.length > 0
-      ? {
-          season: season.seasonCode,
-          eventId,
-          source: 'FPL_ENTRY_SUMMARY',
-          rowCount: refreshed.length,
-          checkedAt,
-          revision: refreshed[0]?.revision ?? null,
-          nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-        }
-      : undefined,
-    'entry-summary',
-  );
-  await managerScoreCheckpointRepository
-    .upsertBatch(
-      season,
-      eventId,
-      scope,
-      refreshed.map((row) => toManagerScoreCheckpoint(row)),
-    )
-    .catch((error) =>
-      logWarn('Official manager checkpoint write failed', {
-        eventId,
-        scope: scopeKey(scope),
-        error: error instanceof Error ? error.message : 'unknown',
       }),
     );
-  for (const row of refreshed) rows.set(row.entryId, row);
+    if (completedBatch.length === 0) continue;
+
+    const checkedAt = refreshed.reduce(
+      (latest, row) => (row.checkedAt > latest ? row.checkedAt : latest),
+      refreshed[0]!.checkedAt,
+    );
+    await writeRows(
+      redis,
+      season.seasonCode,
+      eventId,
+      scope,
+      [],
+      {
+        season: season.seasonCode,
+        eventId,
+        source: 'FPL_ENTRY_SUMMARY',
+        rowCount: refreshed.length,
+        checkedAt,
+        revision: refreshed[0]!.revision,
+        nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+      },
+      'entry-summary',
+    );
+    await managerScoreCheckpointRepository
+      .upsertBatch(
+        season,
+        eventId,
+        scope,
+        completedBatch.map((row) => toManagerScoreCheckpoint(row)),
+      )
+      .catch((error) =>
+        logWarn('Official manager checkpoint write failed', {
+          eventId,
+          scope: scopeKey(scope),
+          error: error instanceof Error ? error.message : 'unknown',
+        }),
+      );
+  }
   return refreshErrorCode;
 };
 
@@ -723,6 +748,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
             backgroundRows,
             redis,
             entryScope,
+            { priority: 'background' },
           );
           logDebug('Official H2H manager background refresh completed', {
             eventId: input.eventId,
@@ -794,6 +820,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
             backgroundRows,
             redis,
             scope,
+            { priority: 'background' },
           );
         }
         logDebug('Official classic manager background refresh completed', {
@@ -839,6 +866,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           backgroundRows,
           redis,
           entryScope,
+          { priority: 'background' },
         );
       });
     }
