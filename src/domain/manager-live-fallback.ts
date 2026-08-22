@@ -1,17 +1,20 @@
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
 
+export type ManagerSummaryFetchPriority = 'foreground' | 'background';
+
 export const createManagerSummaryFetchGate = (
   maxConcurrent = MAX_SUMMARY_FETCH_CONCURRENCY,
-): (<T>(task: () => Promise<T>) => Promise<T>) => {
+): (<T>(task: () => Promise<T>, priority?: ManagerSummaryFetchPriority) => Promise<T>) => {
   if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent <= 0) {
     throw new RangeError('maxConcurrent must be a positive integer');
   }
 
   let active = 0;
-  const waiters: Array<() => void> = [];
+  const foregroundWaiters: Array<() => void> = [];
+  const backgroundWaiters: Array<() => void> = [];
 
-  const acquire = (): Promise<void> =>
+  const acquire = (priority: ManagerSummaryFetchPriority): Promise<void> =>
     new Promise((resolve) => {
       const start = (): void => {
         active += 1;
@@ -21,17 +24,23 @@ export const createManagerSummaryFetchGate = (
       if (active < maxConcurrent) {
         start();
       } else {
-        waiters.push(start);
+        (priority === 'foreground' ? foregroundWaiters : backgroundWaiters).push(start);
       }
     });
 
-  return async <T>(task: () => Promise<T>): Promise<T> => {
-    await acquire();
+  return async <T>(
+    task: () => Promise<T>,
+    priority: ManagerSummaryFetchPriority = 'foreground',
+  ): Promise<T> => {
+    await acquire(priority);
     try {
       return await task();
     } finally {
       active -= 1;
-      waiters.shift()?.();
+      // A background crawl may queue hundreds of entries. Once an active
+      // permit completes, always admit a request-path refresh first so the
+      // desk waits for at most the currently running upstream wave.
+      (foregroundWaiters.shift() ?? backgroundWaiters.shift())?.();
     }
   };
 };

@@ -72,6 +72,32 @@ describe('classic manager live fallback', () => {
     expect(maximumActive).toBe(2);
   });
 
+  test('admits foreground work before queued background batches', async () => {
+    const run = createManagerSummaryFetchGate(1);
+    const order: string[] = [];
+    let releaseActive: (() => void) | undefined;
+    const active = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+
+    const runningBackground = run(async () => {
+      order.push('background-active');
+      await active;
+    }, 'background');
+    await Promise.resolve();
+    const queuedBackground = run(async () => {
+      order.push('background-queued');
+    }, 'background');
+    const foreground = run(async () => {
+      order.push('foreground');
+    }, 'foreground');
+
+    releaseActive?.();
+    await Promise.all([runningBackground, queuedBackground, foreground]);
+
+    expect(order).toEqual(['background-active', 'foreground', 'background-queued']);
+  });
+
   test('rejects an invalid shared concurrency limit', () => {
     expect(() => createManagerSummaryFetchGate(0)).toThrow(RangeError);
   });
