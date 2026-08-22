@@ -117,6 +117,7 @@ jobs:
             old_image=""
             old_revision=""
             ledger_before=""
+            image_pull_attempted=false
             deployment_started=false
             deployment_committed=false
             migration_started=false
@@ -125,6 +126,63 @@ jobs:
             runner_probe_succeeded=false
             runner_previous_target=""
             runner_previous_release=""
+            image_id_for_ref() {
+              local image_ref=${1:-}
+              [ -n "$image_ref" ] || return 0
+              docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null || true
+            }
+            image_id_is_referenced() {
+              local candidate_id=${1:-}
+              local container_id container_image_id
+              [ -n "$candidate_id" ] || return 1
+              while IFS= read -r container_id; do
+                [ -n "$container_id" ] || continue
+                container_image_id=$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)
+                if [ "$container_image_id" = "$candidate_id" ]; then
+                  return 0
+                fi
+              done < <(docker ps -aq 2>/dev/null || true)
+              return 1
+            }
+            cleanup_failed_image() {
+              local image_ref=${1:-}
+              local image_id old_image_id
+              [ -n "$image_ref" ] || return 0
+              image_id=$(image_id_for_ref "$image_ref")
+              if [ -z "$image_id" ]; then
+                echo "Data image cleanup: new image is not present; nothing to remove"
+                return 0
+              fi
+              old_image_id=$(image_id_for_ref "$old_image")
+              if [ -n "$old_image_id" ] && [ "$image_id" = "$old_image_id" ]; then
+                echo "Data image cleanup: retaining new ref because it resolves to the rollback image"
+                return 0
+              fi
+              if image_id_is_referenced "$image_id"; then
+                echo "Data image cleanup: retaining $image_ref because a container references it"
+                return 0
+              fi
+              docker image rm "$image_ref" || echo "unable to remove failed Data image reference: $image_ref" >&2
+            }
+            cleanup_obsolete_data_digests() {
+              local image_name="${IMAGE_REF%@*}"
+              local digest_ref digest_id scoped_repo_digests
+              scoped_repo_digests=$(docker image ls --no-trunc --digests \
+                --format '{{.Repository}}@{{.Digest}}' \
+                --filter "reference=${image_name}@sha256:*" 2>/dev/null || true)
+              while IFS= read -r digest_ref; do
+                if [ -z "$digest_ref" ] || [ "$digest_ref" = "$IMAGE_REF" ] || \
+                  { [ -n "$old_image" ] && [ "$digest_ref" = "$old_image" ]; }; then
+                  continue
+                fi
+                digest_id=$(image_id_for_ref "$digest_ref")
+                if [ -n "$digest_id" ] && image_id_is_referenced "$digest_id"; then
+                  echo "Data image cleanup: retaining referenced digest $digest_ref"
+                  continue
+                fi
+                docker image rm "$digest_ref" || echo "unable to remove obsolete Data image reference: $digest_ref" >&2
+              done <<< "$scoped_repo_digests"
+            }
             on_exit() {
               original_status=$?
               trap - EXIT
@@ -152,6 +210,9 @@ jobs:
                     echo "Data deployment failed after a ledger change or unverifiable ledger state; leaving services stopped for forward recovery" >&2
                   fi
                 fi
+              fi
+              if [ "$original_status" -ne 0 ] && [ "$image_pull_attempted" = true ]; then
+                cleanup_failed_image "${IMAGE_REF:-}"
               fi
               release_deploy_lock || true
               exit "$original_status"
@@ -238,6 +299,7 @@ jobs:
             compose() { docker compose "$@"; }
             source scripts/deploy-state-machine.sh
             acquire_deploy_lock
+            image_pull_attempted=true
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker migration backup
             image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_REF")
             test "$image_revision" = "$DEPLOY_SHA"
@@ -359,4 +421,5 @@ jobs:
               printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
               chmod 600 "$HOME/.letletme-data-previous-image"
             fi
+            cleanup_obsolete_data_digests
             docker system df || true

@@ -183,6 +183,25 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('test "$latest_digest" = "$expected_digest"');
   });
 
+  test('retains current and rollback Data digests and removes only unused failed digests', () => {
+    const commit = workflow.indexOf('deployment_committed=true');
+    const successCleanup = workflow.lastIndexOf('cleanup_obsolete_data_digests');
+    const failedCleanupCall = workflow.indexOf('cleanup_failed_image "${IMAGE_REF:-}"');
+
+    expect(failedCleanupCall).toBeGreaterThan(-1);
+    expect(successCleanup).toBeGreaterThan(commit);
+    expect(workflow).toContain('image_pull_attempted=true');
+    expect(workflow).toContain(
+      'if [ "$original_status" -ne 0 ] && [ "$image_pull_attempted" = true ]; then',
+    );
+    expect(workflow).toContain('docker image ls --no-trunc --digests');
+    expect(workflow).toContain('[ "$digest_ref" = "$IMAGE_REF" ]');
+    expect(workflow).toContain('[ "$digest_ref" = "$old_image" ]');
+    expect(workflow).toContain('done < <(docker ps -aq');
+    expect(workflow).toContain('image_id_is_referenced "$digest_id"');
+    expect(workflow).toContain('docker image rm "$image_ref"');
+  });
+
   test('weekly security workflow scans a freshly built production image', () => {
     expect(securityWorkflow).toContain(`cron: ${quote}0 18 * * 6${quote}`);
     expect(securityWorkflow).toContain('docker build --tag letletme-data:security-scan .');
