@@ -1,4 +1,4 @@
-name: Briefing six-hour X sample
+name: Briefing X media probe
 
 on:
   workflow_dispatch:
@@ -7,449 +7,58 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-main
+  group: briefing-x-media-probe
   cancel-in-progress: false
 
 jobs:
-  sample:
-    if: github.ref == 'refs/heads/codex/briefing-sample-6h'
+  probe:
+    if: github.ref == 'refs/heads/codex/briefing-full-12h'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
-      - name: Verify production main revision
-        id: target
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          printf 'sha=%s\n' "$main_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Run six-hour per-account sample on production
+      - name: Run media-bearing X post probe on production host
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        env:
-          ROLLOUT_SHA: ${{ steps.target.outputs.sha }}
-          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 20m
-          envs: ROLLOUT_SHA,VPS_WORKDIR
+          command_timeout: 12m
           script: |
             set -euo pipefail
 
-            expected_workdir=/home/workspace/letletme_data
-            test "$VPS_WORKDIR" = "$expected_workdir"
-            test "$(realpath --canonicalize-existing "$VPS_WORKDIR")" = "$expected_workdir"
-            cd "$expected_workdir"
-            test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"
+            tmp_dir=$(mktemp -d /tmp/letletme-x-media-probe.XXXXXX)
+            trap 'rm -rf "$tmp_dir"' EXIT
+            output_file="$tmp_dir/output.jsonl"
+            trace_file="$tmp_dir/trace.log"
 
-            env_file="$expected_workdir/.env.deploy"
-            migration_env_file="$expected_workdir/.env.migrate"
-            test -f "$env_file"
-            test -f "$migration_env_file"
-            test ! -L "$env_file"
-            test ! -L "$migration_env_file"
+            sudo -u deploy -H env \
+              HOME=/home/deploy \
+              GROK_HOME=/home/deploy/.grok \
+              GROK_NO_AUTO_UPDATE=1 \
+              /home/deploy/.grok/bin/grok \
+                --always-approve \
+                --sandbox strict \
+                --output-format streaming-messages-json \
+                --disable-web-search \
+                --no-subagents \
+                --no-plan \
+                --max-turns 4 \
+                --disallowed-tools 'Bash,Edit,Read,Grep,WebFetch,MCPTool,Write,Glob,WebSearch,image_gen,image_edit,image_to_video' \
+                --deny 'Bash(*)' \
+                --deny 'Edit(*)' \
+                --deny 'Read(*)' \
+                --deny 'Grep(*)' \
+                --deny 'WebFetch(*)' \
+                --deny 'MCPTool(*)' \
+                --deny 'Write(*)' \
+                --deny 'Glob(*)' \
+                --deny 'WebSearch(*)' \
+                -p 'Use x_thread_fetch exactly once with post_id 2091144605710647466. Return only one JSON object and no prose: {"posts":[{"postId":"string","authorHandle":"string","createdAt":"ISO-8601","text":"full exact post text","url":"https://x.com/...","media":[{"kind":"IMAGE|VIDEO|OTHER","url":"public media URL or null","mimeType":"string or null","altText":"exact alt text or null"}]}]}. Copy media only when the X tool provides it. If the tool does not provide media metadata, return media as an empty array; never invent a URL or visual fact. Do not use any other tool.' \
+              >"$output_file" 2>"$trace_file"
 
-            runner_socket=/run/letletme-grok-runner/runner.sock
-            health=$(curl --silent --show-error --connect-timeout 5 --max-time 15 \
-              --unix-socket "$runner_socket" http://localhost/v1/health)
-            printf '%s\n' "$health"
-            printf '%s' "$health" | jq -e \
-              '.ok == true and .ready == true and .grokVersion == "1.0.5" and .sandbox == "strict" and .lastXProbeOk == true' \
-              >/dev/null
-
-            sample_batch=$(cat /proc/sys/kernel/random/uuid)
-            printf 'sampleBatch=%s\n' "$sample_batch"
-
-            MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
-              --rm -T --no-deps --entrypoint sh backup -euc \
-              'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 "$@"' \
-              -- --set=sample_batch="$sample_batch" <<'SQL'
-            BEGIN;
-            SET LOCAL statement_timeout = '30s';
-            SET LOCAL lock_timeout = '2s';
-            SET LOCAL idle_in_transaction_session_timeout = '40s';
-            SELECT pg_advisory_xact_lock(hashtext('briefing-six-hour-sample-v1'));
-            SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'));
-            SELECT set_config('briefing.sample_batch', :'sample_batch', true);
-
-            DO $sample$
-            DECLARE
-              db_now timestamptz;
-              sample_window_start timestamptz;
-              sample_window_end timestamptz;
-              candidate RECORD;
-              endpoint_snapshot jsonb;
-              partition_snapshot jsonb;
-              source_snapshot jsonb;
-              request jsonb;
-              request_hash text;
-              run_id uuid;
-              outbox_id uuid;
-              reservation_id uuid;
-              budget_ledger_id uuid;
-              job_id text;
-              budget_scope_kind text;
-              budget_scope_key text;
-              budget_scope_limit numeric;
-              budget_scope_window_minutes integer;
-              used_units numeric;
-              can_run boolean;
-              inserted_count integer := 0;
-              skipped_count integer := 0;
-            BEGIN
-              SELECT now(), now() - interval '6 hours', now() - interval '60 seconds'
-                INTO db_now, sample_window_start, sample_window_end;
-
-              FOR candidate IN
-                SELECT
-                  endpoint.endpoint_id,
-                  endpoint.endpoint_key,
-                  endpoint.locator,
-                  endpoint.stable_external_id,
-                  endpoint.rights_policy AS endpoint_rights_policy,
-                  endpoint.profile_key,
-                  endpoint.identity_status,
-                  source.source_id,
-                  source.source_key,
-                  source.status AS source_status,
-                  source.rights_policy AS source_rights_policy,
-                  partition.partition_id,
-                  partition.partition_key,
-                  partition.manifest_revision,
-                  partition.priority,
-                  CASE
-                    WHEN partition.profile_key = 'x-longform-v1' THEN 'LONGFORM'
-                    ELSE 'CLUB'
-                  END AS lane
-                FROM content.source_endpoints AS endpoint
-                JOIN content.sources AS source ON source.source_id = endpoint.source_id
-                JOIN content.source_partition_members AS member
-                  ON member.endpoint_id = endpoint.endpoint_id
-                JOIN content.source_partitions AS partition
-                  ON partition.partition_id = member.partition_id
-                WHERE endpoint.endpoint_key IN (
-                  'fantasy-football-scout-x',
-                  'planet-fpl-x',
-                  'the-fpl-wire-x',
-                  'fpl-blackbox-x',
-                  'who-got-the-assist-x',
-                  'fml-fpl-x',
-                  'fifty-ninth-minute-x',
-                  'fpl-podcast-x',
-                  'fantasy-football-hub-x',
-                  'all-about-fpl-x',
-                  'brighton-x',
-                  'crystal-palace-x'
-                )
-                  AND endpoint.adapter_kind = 'X_ACCOUNT'
-                  AND endpoint.status = 'active'
-                  AND endpoint.identity_status = 'VERIFIED'
-                  AND source.status = 'active'
-                  AND partition.status = 'active'
-                ORDER BY
-                  CASE WHEN partition.profile_key = 'x-longform-v1' THEN 0 ELSE 1 END,
-                  endpoint.endpoint_key
-              LOOP
-                can_run := true;
-
-                FOR budget_scope_kind, budget_scope_key, budget_scope_window_minutes, budget_scope_limit IN
-                  SELECT * FROM (VALUES
-                    ('GLOBAL'::text, 'GROK_BUILD_X'::text, 1440, 2400::numeric),
-                    ('LANE'::text, ('NORMAL:' || candidate.lane)::text, 1440,
-                      CASE WHEN candidate.lane = 'LONGFORM' THEN 8::numeric ELSE 404::numeric END)
-                  ) AS scopes(kind, key, window_minutes, max_units)
-                LOOP
-                  SELECT coalesce(sum(reservation.units), 0)
-                    INTO used_units
-                  FROM content.acquisition_budget_reservations AS reservation
-                  JOIN content.acquisition_budget_ledgers AS ledger
-                    ON ledger.ledger_id = reservation.ledger_id
-                  WHERE ledger.scope_kind = budget_scope_kind
-                    AND ledger.scope_key = budget_scope_key
-                    AND ledger.unit_kind = 'CALL'
-                    AND reservation.status IN ('RESERVED', 'COMMITTED')
-                    AND reservation.created_at > db_now - make_interval(mins => budget_scope_window_minutes);
-                  IF used_units + 1 > budget_scope_limit THEN
-                    can_run := false;
-                  END IF;
-                END LOOP;
-
-                IF NOT can_run THEN
-                  skipped_count := skipped_count + 1;
-                  CONTINUE;
-                END IF;
-
-                endpoint_snapshot := jsonb_build_object(
-                  'endpointId', candidate.endpoint_id::text,
-                  'endpointKey', candidate.endpoint_key,
-                  'sourceId', candidate.source_id::text,
-                  'sourceKey', candidate.source_key,
-                  'adapterKind', 'X_ACCOUNT',
-                  'profileKey', candidate.profile_key,
-                  'locator', candidate.locator,
-                  'stableExternalId', candidate.stable_external_id,
-                  'rightsPolicy', jsonb_build_object(
-                    'source', candidate.source_rights_policy,
-                    'endpoint', candidate.endpoint_rights_policy
-                  )
-                );
-                partition_snapshot := jsonb_build_object(
-                  'partitionId', candidate.partition_id::text,
-                  'partitionKey', candidate.partition_key,
-                  'members', jsonb_build_array(endpoint_snapshot)
-                );
-                source_snapshot := jsonb_build_array(jsonb_build_object(
-                  'sourceId', candidate.source_id::text,
-                  'sourceKey', candidate.source_key,
-                  'rightsPolicy', jsonb_build_object(
-                    'source', candidate.source_rights_policy,
-                    'endpoint', candidate.endpoint_rights_policy
-                  )
-                ));
-                request := jsonb_build_object(
-                  'schemaVersion', 1,
-                  'jobKind', 'X_KEYWORD_SCAN',
-                  'adapterKind', 'X_ACCOUNT',
-                  'phase', 'NORMAL',
-                  'profileKey', candidate.profile_key,
-                  'profileRevision', 1,
-                  'windowStart', to_char(sample_window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                  'windowEnd', to_char(sample_window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                  'partition', partition_snapshot,
-                  'toolRequest', jsonb_build_object(
-                    'toolName', 'x_keyword_search',
-                    'query', format(
-                      'from:%s since:%s until:%s -is:retweet',
-                      candidate.locator->>'handle',
-                      to_char(sample_window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD_HH24:MI:SS') || '_UTC',
-                      to_char(sample_window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD_HH24:MI:SS') || '_UTC'
-                    ),
-                    'mode', 'Latest',
-                    'limit', 10
-                  )
-                );
-                request_hash := encode(sha256(convert_to(request::text, 'UTF8')), 'hex');
-                run_id := (
-                  substr(md5(current_setting('briefing.sample_batch') || ':' || candidate.endpoint_id::text), 1, 8) || '-' ||
-                  substr(md5(current_setting('briefing.sample_batch') || ':' || candidate.endpoint_id::text), 9, 4) || '-' ||
-                  substr(md5(current_setting('briefing.sample_batch') || ':' || candidate.endpoint_id::text), 13, 4) || '-' ||
-                  substr(md5(current_setting('briefing.sample_batch') || ':' || candidate.endpoint_id::text), 17, 4) || '-' ||
-                  substr(md5(current_setting('briefing.sample_batch') || ':' || candidate.endpoint_id::text), 21, 12)
-                )::uuid;
-
-                INSERT INTO content.acquisition_runs (
-                  run_id, source_partition_id, partition_key, job_kind, adapter_kind,
-                  profile_key, profile_revision, window_start, window_end, idempotency_key,
-                  status, request_snapshot, request_hash, source_snapshot, endpoint_snapshot,
-                  source_snapshot_revision, attempt_no, lease_expires_at, evidence_mode
-                )
-                VALUES (
-                  run_id,
-                  candidate.partition_id,
-                  candidate.partition_key,
-                  'X_KEYWORD_SCAN',
-                  'X_ACCOUNT',
-                  candidate.profile_key,
-                  1,
-                  sample_window_start,
-                  sample_window_end,
-                  'briefing-sample-6h:' || current_setting('briefing.sample_batch') || ':' || candidate.endpoint_key,
-                  'PENDING',
-                  request,
-                  request_hash,
-                  source_snapshot,
-                  partition_snapshot,
-                  candidate.manifest_revision,
-                  1,
-                  db_now + interval '6 minutes',
-                  'GROK_ATTESTED_FINAL'
-                );
-
-                FOR budget_scope_kind, budget_scope_key, budget_scope_window_minutes, budget_scope_limit IN
-                  SELECT * FROM (VALUES
-                    ('GLOBAL'::text, 'GROK_BUILD_X'::text, 1440, 2400::numeric),
-                    ('LANE'::text, ('NORMAL:' || candidate.lane)::text, 1440,
-                      CASE WHEN candidate.lane = 'LONGFORM' THEN 8::numeric ELSE 404::numeric END)
-                  ) AS scopes(kind, key, window_minutes, max_units)
-                LOOP
-                  budget_ledger_id := (
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 1, 8) || '-' ||
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 9, 4) || '-' ||
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 13, 4) || '-' ||
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 17, 4) || '-' ||
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 21, 12)
-                  )::uuid;
-                  INSERT INTO content.acquisition_budget_ledgers (
-                    ledger_id, scope_kind, scope_key, unit_kind,
-                    window_start, window_end, max_units
-                  )
-                  VALUES (
-                    budget_ledger_id, budget_scope_kind, budget_scope_key, 'CALL',
-                    date_trunc('hour', db_now), date_trunc('hour', db_now) + interval '1 hour', budget_scope_limit
-                  )
-                  ON CONFLICT (scope_kind, scope_key, unit_kind, window_start, window_end)
-                  DO UPDATE SET
-                    max_units = greatest(
-                      content.acquisition_budget_ledgers.max_units,
-                      content.acquisition_budget_ledgers.reserved_units + content.acquisition_budget_ledgers.committed_units,
-                      excluded.max_units
-                    ),
-                    updated_at = db_now;
-                  SELECT budget.ledger_id INTO budget_ledger_id
-                  FROM content.acquisition_budget_ledgers AS budget
-                  WHERE budget.scope_kind = budget_scope_kind
-                    AND budget.scope_key = budget_scope_key
-                    AND budget.unit_kind = 'CALL'
-                    AND budget.window_start = date_trunc('hour', db_now)
-                    AND budget.window_end = date_trunc('hour', db_now) + interval '1 hour';
-                  UPDATE content.acquisition_budget_ledgers
-                  SET reserved_units = reserved_units + 1, updated_at = db_now
-                  WHERE content.acquisition_budget_ledgers.ledger_id = budget_ledger_id;
-                  reservation_id := (
-                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 1, 8) || '-' ||
-                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 9, 4) || '-' ||
-                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 13, 4) || '-' ||
-                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 17, 4) || '-' ||
-                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 21, 12)
-                  )::uuid;
-                  INSERT INTO content.acquisition_budget_reservations (
-                    reservation_id, ledger_id, run_id, units, status, created_at, updated_at
-                  ) VALUES (reservation_id, budget_ledger_id, run_id, 1, 'RESERVED', db_now, db_now);
-                END LOOP;
-
-                outbox_id := (
-                  substr(md5(run_id::text || ':outbox'), 1, 8) || '-' ||
-                  substr(md5(run_id::text || ':outbox'), 9, 4) || '-' ||
-                  substr(md5(run_id::text || ':outbox'), 13, 4) || '-' ||
-                  substr(md5(run_id::text || ':outbox'), 17, 4) || '-' ||
-                  substr(md5(run_id::text || ':outbox'), 21, 12)
-                )::uuid;
-                job_id := 'content-sample-6h-' || substr(request_hash, 1, 48);
-                INSERT INTO content.acquisition_job_outbox (
-                  outbox_id, run_id, queue_name, job_id, priority, available_at, created_at, updated_at
-                ) VALUES (outbox_id, run_id, 'content-x-scan', job_id, candidate.priority, db_now, db_now, db_now);
-                inserted_count := inserted_count + 1;
-              END LOOP;
-              RAISE NOTICE 'sampleBatch=% inserted=% skippedByBudget=% windowStart=% windowEnd=%',
-                current_setting('briefing.sample_batch'), inserted_count, skipped_count, sample_window_start, sample_window_end;
-            END
-            $sample$;
-            COMMIT;
-            SQL
-
-            scan_snapshot() {
-              MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
-                --rm -T --no-deps --entrypoint sh backup -euc \
-                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 "$@"' \
-                -- --set=sample_batch="$sample_batch" <<'SQL'
-            WITH RECURSIVE roots AS (
-              SELECT run.run_id
-              FROM content.acquisition_runs AS run
-              WHERE run.idempotency_key LIKE 'briefing-sample-6h:' || :'sample_batch' || ':%'
-            ), tree AS (
-              SELECT run_id FROM roots
-              UNION ALL
-              SELECT child.run_id
-              FROM content.acquisition_runs AS child
-              JOIN tree ON tree.run_id = child.parent_run_id
-            )
-            SELECT jsonb_build_object(
-              'total', (SELECT count(*) FROM tree),
-              'terminal', (SELECT count(*) FROM tree JOIN content.acquisition_runs run USING (run_id) WHERE run.status NOT IN ('PENDING', 'RUNNING')),
-              'pending', (SELECT count(*) FROM tree JOIN content.acquisition_runs run USING (run_id) WHERE run.status IN ('PENDING', 'RUNNING')),
-              'outboxPending', (SELECT count(*) FROM content.acquisition_job_outbox outbox JOIN tree ON tree.run_id = outbox.run_id WHERE outbox.delivered_at IS NULL)
-            )::text;
-            SQL
-            }
-
-            scan_state=''
-            for attempt in $(seq 1 180); do
-              scan_state=$(scan_snapshot)
-              total=$(printf '%s' "$scan_state" | jq -r '.total')
-              terminal=$(printf '%s' "$scan_state" | jq -r '.terminal')
-              pending=$(printf '%s' "$scan_state" | jq -r '.pending')
-              outbox_pending=$(printf '%s' "$scan_state" | jq -r '.outboxPending')
-              if [ "$total" -gt 0 ] && [ "$pending" = 0 ] && [ "$outbox_pending" = 0 ] && [ "$terminal" = "$total" ]; then
-                break
-              fi
-              sleep 5
-            done
-
-            MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
-              --rm -T --no-deps --entrypoint sh backup -euc \
-              'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 "$@"' \
-              -- --set=sample_batch="$sample_batch" <<'SQL'
-            WITH RECURSIVE roots AS (
-              SELECT run.run_id
-              FROM content.acquisition_runs AS run
-              WHERE run.idempotency_key LIKE 'briefing-sample-6h:' || :'sample_batch' || ':%'
-            ), tree AS (
-              SELECT run_id FROM roots
-              UNION ALL
-              SELECT child.run_id
-              FROM content.acquisition_runs AS child
-              JOIN tree ON tree.run_id = child.parent_run_id
-            ), run_rows AS (
-              SELECT
-                run.run_id,
-                run.parent_run_id,
-                run.status,
-                run.partition_key,
-                run.window_start,
-                run.window_end,
-                run.result_count,
-                run.rejected_count,
-                run.x_call_count,
-                run.provider_units,
-                run.trace_verified,
-                run.checkpoint_advanced,
-                run.request_snapshot,
-                run.failure_class,
-                run.error_summary,
-                run.created_at
-              FROM content.acquisition_runs AS run
-              JOIN tree ON tree.run_id = run.run_id
-            ), observations AS (
-              SELECT
-                observation.run_id,
-                observation.external_item_id,
-                observation.outcome,
-                observation.reason_code,
-                endpoint.endpoint_key,
-                receipt.receipt_id,
-                receipt.canonical_url,
-                receipt.published_at,
-                receipt.captured_at,
-                left(coalesce(receipt.payload #>> '{body,text}', ''), 2000) AS text,
-                receipt.payload #>> '{authorExternalId}' AS author_external_id,
-                revision.revision_number,
-                observation.observed_at,
-                (
-                  SELECT count(*)
-                  FROM content.pipeline_outbox AS outbox
-                  WHERE outbox.run_id = observation.run_id
-                    AND outbox.receipt_id = observation.receipt_id
-                    AND outbox.receipt_revision_id = observation.receipt_revision_id
-                ) AS publication_outbox_count
-              FROM content.source_observations AS observation
-              JOIN tree ON tree.run_id = observation.run_id
-              JOIN content.source_endpoints AS endpoint ON endpoint.endpoint_id = observation.endpoint_id
-              LEFT JOIN content.source_receipts AS receipt ON receipt.receipt_id = observation.receipt_id
-              LEFT JOIN content.source_receipt_revisions AS revision
-                ON revision.receipt_revision_id = observation.receipt_revision_id
-            )
-            SELECT jsonb_build_object(
-              'event', 'briefing_six_hour_per_account_sample',
-              'sampleBatch', :'sample_batch',
-              'windowHours', 6,
-              'runs', coalesce((SELECT jsonb_agg(to_jsonb(run_rows) ORDER BY run_rows.created_at, run_rows.run_id) FROM run_rows), '[]'::jsonb),
-              'observations', coalesce((SELECT jsonb_agg(to_jsonb(observations) ORDER BY observations.observed_at, observations.external_item_id) FROM observations), '[]'::jsonb),
-              'distinctPostIds', (SELECT count(DISTINCT external_item_id) FROM observations),
-              'observationCount', (SELECT count(*) FROM observations),
-              'distinctReceiptIds', (SELECT count(DISTINCT receipt_id) FROM observations WHERE receipt_id IS NOT NULL)
-            )::text;
-            SQL
-            exit 0
+            printf '%s\n' '--- output bytes ---'
+            wc -c "$output_file"
+            printf '%s\n' '--- output ---'
+            sed -n '1,160p' "$output_file"
+            printf '%s\n' '--- trace tail ---'
+            tail -n 80 "$trace_file"
