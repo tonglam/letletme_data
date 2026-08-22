@@ -3,13 +3,6 @@ import { Elysia, t } from 'elysia';
 import { getContentRuntimeFlags } from '../config';
 import { getAuthConfig } from '../../utils/config';
 import { matchesApiKeyHash } from '../../api/auth.guard';
-import {
-  addSourceToGroup,
-  upsertContentSource,
-  upsertContentSourceGroup,
-  type ContentSourceGroupInput,
-  type ContentSourceInput,
-} from '../acquisition/source-registry';
 import { readActiveWeekPublication } from '../publication/week-publication';
 import {
   acceptCandidate,
@@ -110,24 +103,14 @@ const publishBody = t.Object({
   expectedFrozenSha256: sha256,
   validUntil: t.Optional(t.Union([dateTime, t.Null()])),
 });
-const sourceGroupBody = t.Object({
-  groupKey: t.String({ minLength: 1, maxLength: 100 }),
-  displayName: t.String({ minLength: 1, maxLength: 240 }),
-  pollPolicy: t.Optional(t.Object({}, { additionalProperties: true })),
-});
-const sourceBody = t.Object({
-  platform: t.String({ minLength: 1, maxLength: 32 }),
-  externalId: t.String({ minLength: 1, maxLength: 128 }),
-  handle: t.Optional(t.Union([t.String({ maxLength: 128 }), t.Null()])),
-  displayName: t.String({ minLength: 1, maxLength: 200 }),
-  sourceType: t.String({ minLength: 1, maxLength: 64 }),
-  reportingFamily: t.String({ minLength: 1, maxLength: 64 }),
-  rightsPolicy: t.Optional(t.Object({}, { additionalProperties: true })),
-});
-const sourceMemberParams = t.Object({
-  groupKey: t.String({ minLength: 1, maxLength: 100 }),
-  sourceId: uuid,
-});
+const manifestManagedResponse = (set: { status?: unknown }) => {
+  set.status = 410;
+  return {
+    success: false,
+    code: 'SOURCE_REGISTRY_MANIFEST_MANAGED',
+    error: 'Briefing source registry is managed by the versioned manifest',
+  };
+};
 
 export const contentAPI = new Elysia({ prefix: '/content' })
   .get('/briefing/week/active', async ({ query, set }) => {
@@ -144,67 +127,9 @@ export const contentAPI = new Elysia({ prefix: '/content' })
     }
     return { success: true, data: publication };
   })
-  .post(
-    '/sources/groups',
-    async ({ body, request, set }) => {
-      if (!hasContentRole(request, 'editor')) {
-        set.status = 403;
-        return { success: false, error: 'Content editor role required' };
-      }
-      const actor = requireActor(request, 'content_editor', set);
-      if (!actor) return { success: false, error: 'Idempotency-Key is required' };
-      const value = body as ContentSourceGroupInput;
-      if (!value.groupKey || !value.displayName) {
-        set.status = 400;
-        return { success: false, error: 'groupKey and displayName are required' };
-      }
-      const groupId = await upsertContentSourceGroup(value, actor);
-      return { success: true, data: { groupId } };
-    },
-    { body: sourceGroupBody },
-  )
-  .post(
-    '/sources',
-    async ({ body, request, set }) => {
-      if (!hasContentRole(request, 'editor')) {
-        set.status = 403;
-        return { success: false, error: 'Content editor role required' };
-      }
-      const actor = requireActor(request, 'content_editor', set);
-      if (!actor) return { success: false, error: 'Idempotency-Key is required' };
-      const value = body as ContentSourceInput;
-      if (
-        !value.platform ||
-        !value.externalId ||
-        !value.displayName ||
-        !value.sourceType ||
-        !value.reportingFamily
-      ) {
-        set.status = 400;
-        return {
-          success: false,
-          error: 'platform, externalId, displayName, sourceType and reportingFamily are required',
-        };
-      }
-      const sourceId = await upsertContentSource(value, actor);
-      return { success: true, data: { sourceId } };
-    },
-    { body: sourceBody },
-  )
-  .post(
-    '/sources/groups/:groupKey/members/:sourceId',
-    async ({ params, request, set }) => {
-      if (!hasContentRole(request, 'editor')) {
-        set.status = 403;
-        return { success: false, error: 'Content editor role required' };
-      }
-      const actor = requireActor(request, 'content_editor', set);
-      if (!actor) return { success: false, error: 'Idempotency-Key is required' };
-      await addSourceToGroup(params.groupKey, params.sourceId, 100, actor);
-      return { success: true };
-    },
-    { params: sourceMemberParams },
-  )
+  .post('/sources/groups', ({ set }) => manifestManagedResponse(set))
+  .post('/sources', ({ set }) => manifestManagedResponse(set))
+  .post('/sources/groups/:groupKey/members/:sourceId', ({ set }) => manifestManagedResponse(set))
   .post(
     '/editorial/candidates',
     async ({ body, request, set }) => {

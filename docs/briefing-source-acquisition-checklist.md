@@ -1,10 +1,11 @@
 # Briefing 多来源采集案例验证 Checklist
 
-> 状态：2026-08-22 的 live feasibility record，不是已上线能力说明。
+> 状态：2026-08-22 的 live feasibility record 与当前 worktree 验证记录，不是已上线能力说明。
 >
-> 当前仓库仍只有 X/Grok acquisition 相关 runner。RSS/Atom、Substack、公开网页、
-> Podcast 和 YouTube 尚未接入 scheduler、PostgreSQL、outbox 或生产容器。本轮没有实现
-> 代码、migration 或页面，只验证每类来源至少一个真实案例，并锁定实施 gate。
+> 本文前半保留最初的可行性 probe。后续 implementation follow-up 已把 RSS/Atom、Substack、
+> 公开网页、Podcast、YouTube 和 X 接入当前 worktree 的 scheduler、PostgreSQL、outbox 与
+> adapter；功能开关默认关闭，尚未部署。没有 Supadata key 的受控 integration fixture 不能冒充
+> live provider 结果。
 >
 > 目标实施顺序、schema 和 rollout gates 见
 > [Briefing 第一层：多来源采集实施计划](./briefing-source-acquisition-layer-implementation-plan.md)。
@@ -21,7 +22,42 @@
 6. YouTube
 
 Instagram 和 TikTok 明确不做。六个案例验证的是 adapter 能力，不代表账号/频道覆盖清单
-已经足够；20 家俱乐部的跟队来源、Creators/KOL、Publications/Shows 仍需另行扩充。
+已经足够。当前 implementation follow-up 已另行扩充来源，结果见下节。
+
+### 1.1 Implementation follow-up 快照
+
+当前 worktree 的版本化 manifest 编译结果：
+
+- 85 个 Entity、108 个 Endpoint、44 个 recurring X partition 和 65 个 schedule。
+- Endpoint：83 `X_ACCOUNT`、4 `X_SEMANTIC`、3 `RSS_ATOM`、7 `PODCAST_FEED`、
+  11 `YOUTUBE_CHANNEL`。
+- 20 家俱乐部均有 1 个 official 和 2 个 primary reporting Entity；无 coverage 缺口。
+- X NORMAL 预计 1,026 calls/day；APPROACHING 预计 3,012 calls/day，超过 2,400 global hard cap；
+  FINAL90 预计 401 calls/90min，超过 300 sub-cap。调度必须按优先级形成
+  `BUDGET_DEFERRED`，不能宣称全量 cadence。
+
+2026-08-22 在全新 PostgreSQL 15 测试数据库、正式 scheduler/worker 合同上的真实采集结果：
+
+- 21 个非 X recurring Endpoint 全部完成：19 个 `COMPLETED`、2 个
+  `CHECKED_NO_CHANGE`，0 个 `FAILED/EMPTY`；共写入 155 个 Receipt、155 个 immutable
+  ReceiptRevision、155 个 pipeline outbox event，并创建 29 个有界 triggered content job。
+- 11 个 YouTube feed 均以 entry `yt:channelId` 通过 manifest identity gate；真实 Atom 中的
+  `<author><uri>` 是频道 URL，不能优先当作 channel ID。parser 已按该证据修正并锁入 fixture。
+- Planet FPL Podcast feed 实测 13,294,897 bytes；Podcast body cap 有界提高到 16 MiB，RSS 与
+  YouTube 仍为 8 MiB。首次 bootstrap 只接收 3 集，2,030 个历史 item 被确定性跳过。
+- AllAboutFPL 一条真实文章从 feed `EXCERPT` revision 升级成 `FULL` revision；正文 8,056
+  characters，分别保存 `robots.fetch` 与 `article.fetch` trace。
+- OfficialFPL 主扫描返回 10 条并标记 `SATURATED`，25,288 ms、USD 0.01139744；唯一一次更早窗口
+  follow-up 再返回 10 条并落成 `GAP`，17,715 ms、USD 0.01304644。没有第三次翻页或悬挂 run。
+- Aston Villa 双记者 partition 先用两次 `x_user_search` 精确绑定 John Townley 与 Jacob Tanswell，
+  再用一次合并 `x_keyword_search` 返回 6 条、0 reject、未饱和；总计 3 次调用、约 USD
+  0.02671028。它验证了“账号只验证一次、同分区只扫一次”，不是按记者或页面重复查询。
+- YouTube metadata、异步 transcript submit/poll、provider job resume、segment、预算与 health view
+  的受控 integration test 通过；当前环境没有真实 Supadata key，因此 live transcript provider
+  仍未验收。
+- migration `0025`–`0029` 已在 PostgreSQL 15.18 fresh database 全量应用；malformed historical
+  checkpoint timestamp 会在 health view 中安全投影为 `NULL`，不会拖垮整张 view，且该内部 view/
+  helper 不授予 GraphQL reader。
 
 状态定义：
 
@@ -30,6 +66,8 @@ Instagram 和 TikTok 明确不做。六个案例验证的是 adapter 能力，�
 - `PARTIAL`：发现或内容链路的一部分已跑通，仍有明确生产缺口。
 - `FAIL`：当前目标运行位置无法通过，不能进入生产。
 - `N/A`：该来源不需要此 gate。
+
+下表是 implementation 之前的原始 feasibility snapshot；当前 worktree 结果以 1.1 节为准。
 
 | 来源 | 真实案例 | 发现 | 内容 | 增量/缓存 | 转录 | 无人值守 VPS | 总结 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -150,7 +188,7 @@ type AcquisitionItemV1 = {
 - [x] feed 成功且零条才是空；HTTP/provider/parser 失败不是空。
 - [x] 不绕过登录、付费墙或私有内容。
 - [x] Briefing 卡片只链接来源，不公开复制全文或完整转录。
-- [ ] 这些合同尚未实现为生产 TypeScript schema。
+- [x] 当前 worktree 已实现 Zod/TypeScript schema；尚未部署。
 
 当前 Hermes `transcribe_audio()` helper 只返回拼接后的字符串，不返回 Whisper 原生时间轴。
 本轮 probe 因此直接在 Hermes venv 内调用相同 `faster-whisper` model/options 保留 segments。
@@ -561,27 +599,27 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 
 ### 12.1 Shared
 
-- [ ] 将 manifest 改成 Entity + Endpoint，并完成 Zod schema 与 reconcile。
-- [ ] 定义 feed/article/media/transcript 的响应体、时长和并发上限。
+- [x] 将 manifest 改成 Entity + Endpoint，并完成 Zod schema 与 reconcile。
+- [x] 定义 feed/article/media/transcript 的响应体、时长和并发上限。
 - [ ] 定义 Receipt raw-content retention 与访问权限。
-- [ ] 为每个 adapter 加 deterministic fixtures、live opt-in probes 和 failure classes。
-- [ ] 所有 adapter 统一写 Observation、ReceiptRevision 和 outbox。
-- [ ] 锁定并测试 bootstrap lookback/item/content-job 上限；Podcast 长 feed 不得无界回灌。
-- [ ] 实现 Canonicalization V1 golden fixtures，区分 provider-native evidence hash 与 revision hash。
-- [ ] 允许 Podcast item link 缺失，并阻止 `MISSING` link 进入可发布 surface。
+- [x] 为每个 adapter 加 deterministic fixtures、live opt-in probes 和 failure classes。
+- [x] 所有 adapter 统一写 Observation、ReceiptRevision 和 outbox。
+- [x] 锁定并测试 bootstrap lookback/item/content-job 上限；Podcast 长 feed 不得无界回灌。
+- [x] 实现 Canonicalization V1 golden fixtures，区分 provider-native evidence hash 与 revision hash。
+- [ ] 第一层已允许 Podcast item link 缺失；`MISSING` link 的 surface 阻断仍需由第二、三层验收。
 
 ### 12.2 X
 
 - [ ] 在实际 production content-worker 中验证 Grok 1.0.5、auth 和四种 X tools。
 - [ ] 安装/验证 bubblewrap，严格 sandbox 下重新通过 single-tool trace gate。
-- [ ] 使用 `streaming-messages-json`、strict whole-result JSON 与 `GROK_ATTESTED_FINAL` evidence
+- [x] 使用 `streaming-messages-json`、strict whole-result JSON 与 `GROK_ATTESTED_FINAL` evidence
   mode 保存脱敏 fixture；不得再要求 CLI 不提供的 raw post payload。
 
 ### 12.3 Feed / Web
 
-- [ ] 实现一个 RSS/Atom parser，Substack 和 Podcast 复用 transport。
-- [ ] 实现 conditional GET、redirect identity 和 parser-empty gate。
-- [ ] 实现 robots-aware article fetch 与 Readability extraction。
+- [x] 实现一个 RSS/Atom parser，Substack 和 Podcast 复用 transport。
+- [x] 实现 conditional GET、redirect identity 和 parser-empty gate。
+- [x] 实现 robots-aware article fetch 与 Readability extraction。
 
 ### 12.4 Media
 
@@ -589,9 +627,9 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 - [ ] 用 Supadata API key 从 VPS 重跑 native exact case，并轮询无字幕 Auto job 至 terminal。
 - [ ] 记录 Supadata actual billable units、async latency、empty/lang-none 和 job failure mapping。
 - [ ] 若改用 Hermes 处理 YouTube，先实现并验证独立 media transport；当前 VPS 直取路径不得上线。
-- [ ] live/upcoming/finished gate，避免直播开始前生成假 transcript。
-- [ ] transcript segment schema、chunk merge、hash reuse 和失败状态。
-- [ ] 为 Hermes STT 增加保留原生 timestamps 的稳定 wrapper；不得使用当前只返回字符串的
+- [x] live/upcoming/finished gate，避免直播开始前生成假 transcript。
+- [x] transcript segment schema、chunk merge、hash reuse 和失败状态。
+- [x] 为 Hermes STT 增加保留原生 timestamps 的稳定 wrapper；不得使用当前只返回字符串的
   helper 作为生产 transcript adapter。
 
 ## 13. 本轮验收

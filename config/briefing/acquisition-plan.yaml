@@ -1,0 +1,228 @@
+schemaVersion: 1
+seasonKey: 2026-27
+clubKeys:
+  - arsenal
+  - aston-villa
+  - bournemouth
+  - brentford
+  - brighton
+  - chelsea
+  - coventry
+  - crystal-palace
+  - everton
+  - fulham
+  - hull
+  - ipswich
+  - leeds
+  - liverpool
+  - man-city
+  - man-utd
+  - newcastle
+  - nottingham-forest
+  - sunderland
+  - tottenham
+coverage:
+  minimumOfficialPerClub: 1
+  minimumPrimaryReportingPerClub: 2
+partitions:
+  - partitionKey: official-fpl
+    profileKey: x-official-v1
+    priority: 10
+    endpointKeys: [official-fpl-x]
+  - partitionKey: official-premier-league
+    profileKey: x-official-v1
+    priority: 10
+    endpointKeys: [premier-league-x]
+
+  - partitionKey: club-arsenal
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [arsenal-x]
+  - partitionKey: club-aston-villa
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [aston-villa-x]
+  - partitionKey: club-chelsea
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [chelsea-x]
+  - partitionKey: club-liverpool
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [liverpool-x]
+  - partitionKey: club-man-city
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [man-city-x]
+  - partitionKey: club-man-utd
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [man-utd-x]
+  - partitionKey: club-newcastle
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [newcastle-x]
+  - partitionKey: club-tottenham
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [tottenham-x]
+  - partitionKey: clubs-bournemouth-brentford
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [bournemouth-x, brentford-x]
+  - partitionKey: clubs-brighton-crystal-palace
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [brighton-x, crystal-palace-x]
+  - partitionKey: clubs-coventry-hull
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [coventry-x, hull-x]
+  - partitionKey: clubs-everton-fulham
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [everton-x, fulham-x]
+  - partitionKey: clubs-ipswich-leeds
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [ipswich-x, leeds-x]
+  - partitionKey: clubs-forest-sunderland
+    profileKey: x-club-v1
+    priority: 30
+    endpointKeys: [nottingham-forest-x, sunderland-x]
+
+  - partitionKey: reporter-ben-dinnery
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [ben-dinnery-x]
+  - partitionKey: reporter-fabrizio-romano
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [fabrizio-romano-x]
+  - partitionKey: reporters-ornstein-mokbel
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [david-ornstein-x, sami-mokbel-x]
+  - partitionKey: reporters-lee-pearce
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [sam-lee-x, james-pearce-x]
+  - partitionKey: reporters-stone-kinsella
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [simon-stone-x, nizaar-kinsella-x]
+  - partitionKey: reporters-villa
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [john-townley-x, jacob-tanswell-x]
+  - partitionKey: reporters-bournemouth
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [alexander-smith-x, tom-crocker-x]
+  - partitionKey: reporters-brentford
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [sam-tabuteau-x, david-mcintyre-x]
+  - partitionKey: reporters-brighton
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [andy-naylor-x, brian-owen-x]
+  - partitionKey: reporters-chelsea-united
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [liam-twomey-x, laurie-whitwell-x]
+  - partitionKey: reporters-coventry
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [andy-turner-x, bbc-coventry-warwickshire-sport-x]
+  - partitionKey: reporters-crystal-palace
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [matt-woosnam-x, edmund-brack-x]
+  - partitionKey: reporters-everton
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [patrick-boyland-x, joe-thomas-x]
+  - partitionKey: reporter-jack-kelly
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [jack-kelly-x]
+  - partitionKey: reporters-hull
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [barry-cooper-x, james-smailes-x]
+  - partitionKey: reporters-ipswich
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [stuart-watson-x, ross-halls-x]
+  - partitionKey: reporters-leeds
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [phil-hay-x, graham-smyth-x]
+  - partitionKey: reporters-liverpool-city
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [david-lynch-x, simon-bajkowski-x]
+  - partitionKey: reporters-newcastle
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [chris-waugh-x, george-caulkin-x]
+  - partitionKey: reporters-nottingham-forest
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [paul-taylor-forest-x, sarah-clapson-x]
+  - partitionKey: reporters-sunderland
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [phil-smith-sunderland-x, bbc-newcastle-sport-x]
+  - partitionKey: reporters-tottenham
+    profileKey: x-reporter-v1
+    priority: 20
+    endpointKeys: [charlie-eccleshare-x, alasdair-gold-x]
+
+  - partitionKey: creators-core
+    profileKey: x-creator-v1
+    priority: 50
+    endpointKeys:
+      - ben-crellin-x
+      - fpl-general-x
+      - fpl-focal-x
+      - lateriser-x
+      - pras-x
+      - big-man-bakar-x
+      - fpl-raptor-x
+      - fpl-harry-x
+      - lets-talk-fpl-x
+      - fpl-salah-x
+
+  - partitionKey: publications-shows
+    profileKey: x-longform-v1
+    priority: 60
+    endpointKeys:
+      - fantasy-football-scout-x
+      - planet-fpl-x
+      - the-fpl-wire-x
+      - fpl-blackbox-x
+      - who-got-the-assist-x
+      - fml-fpl-x
+      - fifty-ninth-minute-x
+      - fpl-podcast-x
+      - fantasy-football-hub-x
+      - all-about-fpl-x
+
+  - partitionKey: semantic-official-changes
+    profileKey: x-semantic-official-v1
+    priority: 40
+    endpointKeys: [semantic-official-changes-x]
+  - partitionKey: semantic-availability
+    profileKey: x-semantic-availability-v1
+    priority: 40
+    endpointKeys: [semantic-availability-x]
+  - partitionKey: semantic-lineup-role
+    profileKey: x-semantic-lineup-v1
+    priority: 40
+    endpointKeys: [semantic-lineup-role-x]
+  - partitionKey: semantic-analysis-longform
+    profileKey: x-semantic-longform-v1
+    priority: 40
+    endpointKeys: [semantic-analysis-longform-x]

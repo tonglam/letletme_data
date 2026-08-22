@@ -1,70 +1,77 @@
-import { createHash } from 'node:crypto';
-
 import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 
-import { getQueueConnection } from '../../utils/queue';
+import { GrokBuildExecutor } from '../acquisition/grok-build-executor';
+import type { ClaimedAcquisitionJobOutbox } from '../acquisition/job-outbox';
+import type { XBudgetPolicy } from '../acquisition/x-budget';
+import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
+import type { ClaimedFormalRun } from '../acquisition/formal-run-repository';
+import { getContentRuntimeFlags } from '../config';
 import { logError, logInfo } from '../../utils/logger';
-import { assertContentRuntimeFlags, getContentRuntimeFlags } from '../config';
-import { runContentXWorker, type ContentXWorkerInput } from './content-x.worker';
+import { getQueueConnection } from '../../utils/queue';
+import { runFormalXWorker, type GrokBuildExecutorLike } from './formal-x.worker';
 
 export const contentXScanQueueName = 'content-x-scan';
 
-function contentXScanJobId(
-  group: string,
-  partition: string,
-  mode: string,
-  phase: string,
-  end: string,
-): string {
-  const key = [group, partition, mode, phase, end].join('\u001f');
-  return `content-x-${createHash('sha256').update(key, 'utf8').digest('hex')}`;
+let queue: Queue<AcquisitionJobV1> | null = null;
+
+export function getContentXScanQueue(): Queue<AcquisitionJobV1> {
+  queue ??= new Queue<AcquisitionJobV1>(contentXScanQueueName, {
+    connection: getQueueConnection(),
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: { age: 86_400, count: 1_000 },
+      removeOnFail: { age: 172_800, count: 1_000 },
+    },
+  });
+  return queue;
 }
 
-export const contentXScanQueue = new Queue<ContentXWorkerInput>(contentXScanQueueName, {
-  connection: getQueueConnection(),
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 30_000 },
-    removeOnComplete: { age: 86_400, count: 100 },
-    removeOnFail: { age: 172_800, count: 100 },
-  },
-});
-
-export async function enqueueContentXScan(
-  input: ContentXWorkerInput = {},
-): Promise<Job<ContentXWorkerInput>> {
-  const end = input.windowEnd ?? new Date().toISOString();
-  const group = input.groupKey ?? process.env.CONTENT_SOURCE_GROUP_KEY ?? 'fpl-week';
-  const partition = input.partitionKey ?? process.env.CONTENT_PARTITION_KEY ?? 'week';
-  const mode = input.mode ?? 'poll';
-  const phase = input.pollPhase ?? 'NORMAL';
-  return contentXScanQueue.add('content-x-scan', input, {
-    jobId: contentXScanJobId(group, partition, mode, phase, end),
+export async function enqueueFormalXRun(
+  claimed: Pick<ClaimedFormalRun | ClaimedAcquisitionJobOutbox, 'job' | 'jobId' | 'priority'>,
+): Promise<Job<AcquisitionJobV1>> {
+  const job = acquisitionJobV1Schema.parse(claimed.job);
+  return getContentXScanQueue().add('content-x-scan', job, {
+    jobId: claimed.jobId,
+    priority: claimed.priority,
   });
 }
 
-export function createContentXWorkerRuntime() {
-  const connection = getQueueConnection();
+export function createConfiguredGrokBuildExecutor(): GrokBuildExecutor {
   const flags = getContentRuntimeFlags();
-  assertContentRuntimeFlags(flags);
-  const worker = new Worker<ContentXWorkerInput>(
+  return new GrokBuildExecutor({
+    expectedVersion: flags.grokExpectedVersion,
+    timeoutMs: flags.grokTimeoutMs,
+    maximumOutputBytes: flags.grokMaxOutputBytes,
+  });
+}
+
+export function createFormalXWorkerRuntime(
+  executor: GrokBuildExecutorLike = createConfiguredGrokBuildExecutor(),
+  xBudgetPolicy?: XBudgetPolicy,
+) {
+  const flags = getContentRuntimeFlags();
+  const connection = getQueueConnection();
+  const worker = new Worker<AcquisitionJobV1>(
     contentXScanQueueName,
-    async (job) => runContentXWorker(job.data),
+    async (job) =>
+      runFormalXWorker(acquisitionJobV1Schema.parse(job.data), { executor, xBudgetPolicy }),
     { connection, concurrency: flags.grokConcurrency },
   );
   const queueEvents = new QueueEvents(contentXScanQueueName, { connection });
-  worker.on('completed', (job) => logInfo('Content X scan job completed', { jobId: job.id }));
-  worker.on('failed', (job, error) =>
-    logError('Content X scan job failed', error, { jobId: job?.id }),
+  worker.on('completed', (job) =>
+    logInfo('Formal Grok Build X job completed', { jobId: job.id, runId: job.data.runId }),
   );
-  worker.on('error', (error) => logError('Content X worker runtime error', error));
-  return {
-    worker,
-    queueEvents,
-    stop: () => undefined,
-  };
+  worker.on('failed', (job, error) =>
+    logError('Formal Grok Build X job failed', error, {
+      jobId: job?.id,
+      runId: job?.data.runId,
+    }),
+  );
+  worker.on('error', (error) => logError('Formal Grok Build X worker runtime error', error));
+  return { worker, queueEvents, executor };
 }
 
 export async function closeContentXQueue(): Promise<void> {
-  await contentXScanQueue.close();
+  await queue?.close();
+  queue = null;
 }

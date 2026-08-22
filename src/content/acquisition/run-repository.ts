@@ -27,12 +27,12 @@ export type AcquisitionRunInput = Readonly<{
 }>;
 
 export type AcquisitionRunState =
-  | 'pending'
-  | 'running'
-  | 'empty'
-  | 'partial'
-  | 'failed'
-  | 'completed';
+  | 'PENDING'
+  | 'RUNNING'
+  | 'EMPTY'
+  | 'PARTIAL'
+  | 'FAILED'
+  | 'COMPLETED';
 
 export const ACQUISITION_RUN_STALE_AFTER_MS = 5 * 60_000;
 
@@ -82,7 +82,7 @@ export async function reservePendingAcquisitionRun(input: PendingAcquisitionRunI
       windowStart: new Date(input.windowStart),
       windowEnd: new Date(input.windowEnd),
       idempotencyKey: input.idempotencyKey,
-      status: 'pending',
+      status: 'PENDING',
       sourceSnapshot: [],
       sourceSnapshotRevision: null,
     })
@@ -115,7 +115,7 @@ export async function reclaimStaleAcquisitionRuns(input: {
   const reclaimed = await db
     .update(contentAcquisitionRuns)
     .set({
-      status: 'failed',
+      status: 'FAILED',
       traceVerified: false,
       checkpointAdvanced: false,
       errorSummary: 'Acquisition run lease expired; reclaimed by scheduler',
@@ -126,7 +126,7 @@ export async function reclaimStaleAcquisitionRuns(input: {
         eq(contentAcquisitionRuns.groupId, input.groupId),
         eq(contentAcquisitionRuns.partitionKey, input.partitionKey),
         eq(contentAcquisitionRuns.mode, input.mode),
-        inArray(contentAcquisitionRuns.status, ['pending', 'running']),
+        inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
         or(
           lt(contentAcquisitionRuns.startedAt, cutoff),
           and(
@@ -154,7 +154,7 @@ export async function confirmAcquisitionRunEnqueued(runId: string): Promise<bool
     .where(
       and(
         eq(contentAcquisitionRuns.runId, runId),
-        eq(contentAcquisitionRuns.status, 'pending'),
+        eq(contentAcquisitionRuns.status, 'PENDING'),
         isNull(contentAcquisitionRuns.enqueueConfirmedAt),
       ),
     )
@@ -170,10 +170,10 @@ const asJsonObject = (value: unknown): Record<string, unknown> =>
 const sha256 = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
 
 function resultState(result: GrokRunResult): AcquisitionRunState {
-  if (result.status === 'EMPTY') return 'empty';
-  if (result.status === 'PARTIAL') return 'partial';
-  if (result.status === 'COMPLETED') return 'completed';
-  return 'failed';
+  if (result.status === 'EMPTY') return 'EMPTY';
+  if (result.status === 'PARTIAL') return 'PARTIAL';
+  if (result.status === 'COMPLETED') return 'COMPLETED';
+  return 'FAILED';
 }
 
 export async function beginAcquisitionRun(input: AcquisitionRunInput): Promise<{
@@ -192,7 +192,7 @@ export async function beginAcquisitionRun(input: AcquisitionRunInput): Promise<{
       windowStart: new Date(input.windowStart),
       windowEnd: new Date(input.windowEnd),
       idempotencyKey: input.idempotencyKey,
-      status: 'running',
+      status: 'RUNNING',
       sourceSnapshot: input.sourceSnapshot,
       sourceSnapshotRevision: input.sourceSnapshotRevision,
       skillSha: input.skillSha ?? null,
@@ -212,7 +212,7 @@ export async function beginAcquisitionRun(input: AcquisitionRunInput): Promise<{
       .limit(1);
     const row = rows[0];
     if (!row) return null;
-    if (row.status === 'pending' && row.runId === input.runId) {
+    if (row.status === 'PENDING' && row.runId === input.runId) {
       const promoted = await tx
         .update(contentAcquisitionRuns)
         .set({
@@ -224,13 +224,13 @@ export async function beginAcquisitionRun(input: AcquisitionRunInput): Promise<{
           sourceSnapshot: input.sourceSnapshot,
           sourceSnapshotRevision: input.sourceSnapshotRevision,
           skillSha: input.skillSha ?? null,
-          status: 'running',
+          status: 'RUNNING',
           startedAt: new Date(),
         })
         .where(
           and(
             eq(contentAcquisitionRuns.runId, input.runId),
-            eq(contentAcquisitionRuns.status, 'pending'),
+            eq(contentAcquisitionRuns.status, 'PENDING'),
           ),
         )
         .returning({ runId: contentAcquisitionRuns.runId, status: contentAcquisitionRuns.status });
@@ -323,7 +323,7 @@ export async function finishAcquisitionRun(input: {
   checkpointCursor?: string | null;
 }): Promise<{ status: AcquisitionRunState; checkpointAdvanced: boolean; receiptCount: number }> {
   const receiptsSchemaValid = input.result.receipts.every((receipt) => isValidGrokReceipt(receipt));
-  const state = receiptsSchemaValid ? resultState(input.result) : 'failed';
+  const state = receiptsSchemaValid ? resultState(input.result) : 'FAILED';
   const sourceIds = new Set(input.run.sourceSnapshot.map((source) => source.sourceId));
   const rightsBySourceId = new Map(
     input.run.sourceSnapshot.map((source) => [source.sourceId, source.rightsPolicy ?? {}]),
@@ -346,6 +346,7 @@ export async function finishAcquisitionRun(input: {
     return [
       {
         receiptId: randomUUID(),
+        receiptKey: `legacy-${sourceId.replaceAll('-', '')}-${sha256(externalId)}`,
         runId: input.run.runId,
         sourceId,
         externalId,
@@ -387,12 +388,12 @@ export async function finishAcquisitionRun(input: {
       .where(
         and(
           eq(contentAcquisitionRuns.runId, input.run.runId),
-          inArray(contentAcquisitionRuns.status, ['pending', 'running']),
+          inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
         ),
       )
       .returning({ runId: contentAcquisitionRuns.runId });
     if (claimed.length === 0)
-      return { status: 'failed' as const, checkpointAdvanced: false, receiptCount: 0 };
+      return { status: 'FAILED' as const, checkpointAdvanced: false, receiptCount: 0 };
 
     if (receiptValues.length > 0) {
       await tx

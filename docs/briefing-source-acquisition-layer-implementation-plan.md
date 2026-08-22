@@ -1,12 +1,12 @@
 # Briefing 第一层：多来源采集实施计划
 
-> 状态：目标实施计划，尚未实现。
+> 状态：目标实施合同与当前 worktree 实施记录；尚未合并、部署或开启 production rollout。
 >
 > 本文根据
 > [Briefing 多来源采集案例验证 Checklist](./briefing-source-acquisition-checklist.md)
-> 的 2026-08-22 live probes 修订。当前仓库仍只有 X/Grok acquisition foundation；本文中的
-> manifest、schema、queue、adapter、ReceiptRevision、pipeline outbox 和运行开关都不能被描述为
-> 已有能力。
+> 的 2026-08-22 live probes 修订。当前实施分支已经加入 manifest、schema、queue、adapter、
+> ReceiptRevision、pipeline outbox、预算与 health view，但默认开关仍关闭；这些能力不能被描述为
+> 已部署或 production ready。真实 Supadata key、全量 X identity 和 VPS rollout 仍是明确 gate。
 
 ## 1. 目标与边界
 
@@ -104,7 +104,7 @@ conflict gates。run 保存 `evidence_mode=GROK_ATTESTED_FINAL`，不能对外�
 
 ## 3. 现状评审
 
-仓库当前已有：
+`origin/main` 原有：
 
 - `content-worker` 长进程、30 秒 scheduler tick 和独立 publication outbox dispatcher。
 - `content.sources / source_groups / source_group_members`。
@@ -121,8 +121,31 @@ conflict gates。run 保存 `evidence_mode=GROK_ATTESTED_FINAL`，不能对外�
 - run 状态缺少 `CHECKED_NO_CHANGE / SATURATED / GAP / BUDGET_DEFERRED /
   CONTENT_DEFERRED`。
 - `source_receipts` 可变且只保存首个 hash，没有 ReceiptRevision、Observation 或 pipeline outbox。
-- feed、article、Podcast、YouTube 和 transcript adapter 均未实现。
+- feed、article、Podcast、YouTube 和 transcript adapter 在基线中均未实现。
 - legacy Story/Edition 表仍存在，但不是三层目标设计的下游合同；第一层实施不读取或写入它们。
+
+当前 `codex/briefing-source-acquisition` worktree 已实现但尚未上线：
+
+- 85 个 SourceEntity、108 个 SourceEndpoint 和 44 个 recurring X partitions；Endpoint 分布为
+  83 个 X 账号、4 个 X semantic、3 个 RSS/Atom、7 个 Podcast 和 11 个 YouTube。
+- 20 家俱乐部均达到 1 个官方来源和 2 个 primary reporting 来源，coverage snapshot 的
+  `fullRolloutEligible=true`。
+- migration `0025`–`0029`、manifest reconcile、run/lease/budget/outbox、immutable
+  ReceiptRevision、Observation、transcript segments 和 acquisition health views。
+- Grok Build 1.0.5 strict single-tool worker，以及 RSS/Atom、article、Podcast/Hermes、YouTube
+  metadata 和 Supadata transcript adapter。
+- PostgreSQL 15.18 fresh database 上，正式 scheduler/worker 跑完 21 个非 X recurring Endpoint：
+  19 个 `COMPLETED`、2 个 `CHECKED_NO_CHANGE`、0 个 `FAILED/EMPTY`，生成 155 个 Receipt、
+  155 个 immutable ReceiptRevision、155 个 pipeline outbox event 和 29 个有界 triggered job。
+- OfficialFPL 两次有界扫描取得 20 条 Receipt，并在第二次饱和后写 `GAP` 停止；Aston Villa
+  双记者 partition 用两次 identity call 加一次合并 keyword call 取得 6 条帖子，验证多账号只扫一次。
+- 11 个真实 YouTube Atom feed 均通过 persisted channel ID identity gate；Podcast 的 16 MiB 专用
+  body cap 已覆盖 13,294,897-byte Planet FPL feed，未放宽 RSS/YouTube 的 8 MiB cap。
+- recurring retry 会复用失败 run 的 exact request、window、source snapshot 和 endpoint snapshot；
+  attempt 3 的 X window 明确落 `GAP`、写 gap record、推进该 X checkpoint 并打开 circuit。
+
+这些结果只证明当前 worktree 和测试基础设施可运行，不代表 VPS service、secret、全量 identity、
+长期吞吐或第二层消费已经启用。
 
 publication outbox/revalidation 必须继续独立运行。任何 manifest、Grok、feed、provider 或 Hermes
 故障都不能拖停已有 publication dispatcher。
@@ -131,7 +154,7 @@ publication outbox/revalidation 必须继续独立运行。任何 manifest、Gro
 
 - 在执行时从最新 `origin/main` 建立干净的 `codex/briefing-source-acquisition` worktree。
 - 纳入本实施计划和 live probe checklist，不混入其他 worktree 的 tournament/live 改动。
-- 所有 migration 增量加入；当前预计从 `0024` 开始，执行时若被占用则顺延。
+- 所有 migration 增量加入；当前 main 已占用 `0024`，本层使用 `0025`–`0029`。
 - 所有新能力默认关闭；fixture/shadow 不得生成公开 Briefing 内容。
 - VPS Grok auth 已存在，不重复安装或导出认证。
 - Supadata key、Hermes credential 或其他 provider secret 只从运行环境注入，不写入 manifest、
@@ -196,11 +219,11 @@ feed 时把全部历史当成新内容。
 
 ### 5.2 Core coverage gate
 
-早先的“50 个 X 账号、27 个 X partitions”只能作为 X baseline，不能再当作完整来源清单。
-生产 manifest 至少满足：
+早先的“50 个 X 账号、27 个 X partitions”只能作为初始 X baseline，不能再当作完整来源清单。
+当前 snapshot 已扩为 83 个 X 账号和 44 个 X partitions。生产 manifest 至少满足：
 
 - OfficialFPL、Premier League 和当季 20 家俱乐部各有一个官方 Entity/Endpoint。
-- 20 家俱乐部各有一个主要跟队记者或当地 publication Entity；如果它同时有 X、RSS 或公开
+- 20 家俱乐部各有两个主要跟队记者或当地 publication Entity；如果它同时有 X、RSS 或公开
   文章入口，应挂在同一 Entity 下，而不是算多个来源。
 - 核心 FPL reporters 保留 X Endpoint，并按可用情况补 publication/feed Endpoint。
 - Creators/KOL 不能只维护 X；已确认的 YouTube channel、Podcast 和 newsletter 必须作为同一
@@ -771,10 +794,15 @@ Hermes 集成必须是固定、认证、结构化的 service/CLI contract，不�
 ## 12. 失败、重试与恢复
 
 - 普通 transient failure 在 1 分钟、5 分钟后各建一个新 attempt run。
-- 第三次仍失败时按 adapter policy 写 gap 或打开 circuit；不能永久卡住 schedule。
+- retry 必须复用上一失败 run 已持久化的 exact request、window、source snapshot、endpoint snapshot
+  和 request hash；manifest 或 schedule 在两次 attempt 之间变化也不能悄悄改变被重试的工作。
+- X 的第三次相同窗口失败写 `GAP` 和 `RETRY_EXHAUSTED` evidence，推进该 X checkpoint 并打开
+  circuit；HTTP/feed 第三次失败打开 circuit，但不能把未知历史范围虚构成 X-style gap 或推进
+  checkpoint。
 - auth/quota/CLI/provider outage 打开 provider-level circuit；单 URL parse/query 错误只隔离
   Endpoint/item。
-- circuit 每 30 分钟允许一次 probe；成功后自动关闭。
+- circuit 每 30 分钟允许一次 probe；成功后自动关闭。lease expiry 计入同一 failure streak；X
+  第三次 stale lease 同样形成有证据的 gap，其他 adapter 不推进 checkpoint。
 - stale run 按 adapter lease 回收：HTTP 短 lease、Grok 6 分钟、长转录按 heartbeat 延长。
 - feed due lag 超过最大回看时仍处理当前 feed item，并记录无法保证的历史 gap。
 - bootstrap 有界跳过属于明确产品范围，不是 gap；bootstrap cutoff、上限和 skipped metrics 必须
@@ -944,6 +972,20 @@ bun run format:check
 bun run build
 bun run db:migrate:status
 ```
+
+### 16.4 当前 worktree 验证记录（2026-08-22）
+
+- PostgreSQL 15.18 fresh migration `0025`–`0029` 通过；重复 migration status 为 up to date。
+- 正式 HTTP/feed scheduler-worker live batch：21/21 Endpoint terminal，19 `COMPLETED`、2
+  `CHECKED_NO_CHANGE`、155 ReceiptRevision、0 `FAILED/EMPTY`。
+- 正式 X live：OfficialFPL 饱和主 run + 一次 bounded follow-up；双记者 partition 的 identity 与
+  combined keyword 共 3 calls，均满足 single-tool/exact-request contract。
+- 隔离数据库 integration：HTTP run-ID worker、Podcast publisher/Hermes、X semantic unknown-source
+  attribution、YouTube async submit/poll/resume 全部通过。
+- retry integration：HTTP attempt 2 复用完整 immutable request/snapshots；X attempts 1–3 保持同一
+  request hash，第三次为 `GAP` 且 checkpoint/circuit 状态与 gap evidence 一致。
+- YouTube provider integration 使用受控 response fixture；本机没有 Supadata/YouTube API key，不能
+  把它写成 live provider pass。VPS service、83 个 X identity 全量 resolution 和长期容量仍未验收。
 
 ## 17. 验收标准
 

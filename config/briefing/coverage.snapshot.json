@@ -1,0 +1,220 @@
+{
+  "schemaVersion": 1,
+  "seasonKey": "2026-27",
+  "manifestHash": "259733f8ef8024a46a1a050cf8b37d6a385e37d6200a1591509ac26480460a76",
+  "entityCount": 85,
+  "endpointCount": 108,
+  "endpointCounts": {
+    "X_ACCOUNT": 83,
+    "X_SEMANTIC": 4,
+    "RSS_ATOM": 3,
+    "PODCAST_FEED": 7,
+    "YOUTUBE_CHANNEL": 11
+  },
+  "partitionCount": 44,
+  "forecastCalls": {
+    "NORMAL": 1794,
+    "APPROACHING": 4548,
+    "FINAL90": 8616
+  },
+  "xForecastWindowMinutes": {
+    "NORMAL": 1440,
+    "APPROACHING": 1440,
+    "FINAL90": 90
+  },
+  "xLaneForecastCalls": {
+    "NORMAL": {
+      "OFFICIAL": 96,
+      "CLUB": 336,
+      "REPORTER": 528,
+      "CREATOR": 12,
+      "LONGFORM": 6,
+      "SEMANTIC": 48
+    },
+    "APPROACHING": {
+      "OFFICIAL": 288,
+      "CLUB": 1008,
+      "REPORTER": 1584,
+      "CREATOR": 24,
+      "LONGFORM": 12,
+      "SEMANTIC": 96
+    },
+    "FINAL90": {
+      "OFFICIAL": 60,
+      "CLUB": 126,
+      "REPORTER": 198,
+      "CREATOR": 3,
+      "LONGFORM": 2,
+      "SEMANTIC": 12
+    }
+  },
+  "xLaneCallCaps": {
+    "NORMAL": {
+      "OFFICIAL": 116,
+      "CLUB": 404,
+      "REPORTER": 634,
+      "CREATOR": 15,
+      "LONGFORM": 8,
+      "SEMANTIC": 58
+    },
+    "APPROACHING": {
+      "OFFICIAL": 346,
+      "CLUB": 1210,
+      "REPORTER": 1901,
+      "CREATOR": 29,
+      "LONGFORM": 15,
+      "SEMANTIC": 116
+    },
+    "FINAL90": {
+      "OFFICIAL": 72,
+      "CLUB": 152,
+      "REPORTER": 238,
+      "CREATOR": 4,
+      "LONGFORM": 3,
+      "SEMANTIC": 15
+    }
+  },
+  "clubs": [
+    {
+      "clubKey": "arsenal",
+      "officialEntities": ["arsenal"],
+      "primaryReportingEntities": ["david-ornstein", "sami-mokbel"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "aston-villa",
+      "officialEntities": ["aston-villa"],
+      "primaryReportingEntities": ["jacob-tanswell", "john-townley"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "bournemouth",
+      "officialEntities": ["bournemouth"],
+      "primaryReportingEntities": ["alexander-smith", "tom-crocker"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "brentford",
+      "officialEntities": ["brentford"],
+      "primaryReportingEntities": ["david-mcintyre", "sam-tabuteau"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "brighton",
+      "officialEntities": ["brighton"],
+      "primaryReportingEntities": ["andy-naylor", "brian-owen"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "chelsea",
+      "officialEntities": ["chelsea"],
+      "primaryReportingEntities": ["liam-twomey", "nizaar-kinsella"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "coventry",
+      "officialEntities": ["coventry"],
+      "primaryReportingEntities": ["andy-turner", "bbc-coventry-warwickshire-sport"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "crystal-palace",
+      "officialEntities": ["crystal-palace"],
+      "primaryReportingEntities": ["edmund-brack", "matt-woosnam"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "everton",
+      "officialEntities": ["everton"],
+      "primaryReportingEntities": ["joe-thomas", "patrick-boyland"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "fulham",
+      "officialEntities": ["fulham"],
+      "primaryReportingEntities": ["jack-kelly", "sam-tabuteau"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "hull",
+      "officialEntities": ["hull"],
+      "primaryReportingEntities": ["barry-cooper", "james-smailes"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "ipswich",
+      "officialEntities": ["ipswich"],
+      "primaryReportingEntities": ["ross-halls", "stuart-watson"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "leeds",
+      "officialEntities": ["leeds"],
+      "primaryReportingEntities": ["graham-smyth", "phil-hay"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "liverpool",
+      "officialEntities": ["liverpool"],
+      "primaryReportingEntities": ["david-lynch", "james-pearce"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "man-city",
+      "officialEntities": ["man-city"],
+      "primaryReportingEntities": ["sam-lee", "simon-bajkowski"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "man-utd",
+      "officialEntities": ["man-utd"],
+      "primaryReportingEntities": ["laurie-whitwell", "simon-stone"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "newcastle",
+      "officialEntities": ["newcastle"],
+      "primaryReportingEntities": ["chris-waugh", "george-caulkin"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "nottingham-forest",
+      "officialEntities": ["nottingham-forest"],
+      "primaryReportingEntities": ["paul-taylor-forest", "sarah-clapson"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "sunderland",
+      "officialEntities": ["sunderland"],
+      "primaryReportingEntities": ["bbc-newcastle-sport", "phil-smith-sunderland"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    },
+    {
+      "clubKey": "tottenham",
+      "officialEntities": ["tottenham"],
+      "primaryReportingEntities": ["alasdair-gold", "charlie-eccleshare"],
+      "officialMissing": 0,
+      "primaryReportingMissing": 0
+    }
+  ],
+  "fullRolloutEligible": true
+}

@@ -543,7 +543,7 @@ export async function markStoryReady(storyId: string, actor: EditorialActor): Pr
         'Every Story evidence receipt needs explicit public rights',
         'EDITORIAL_RIGHTS_REQUIRED',
       );
-    if (evidence.some((row) => !/^https?:\/\//i.test(row.canonicalUrl)))
+    if (evidence.some((row) => !row.canonicalUrl || !/^https?:\/\//i.test(row.canonicalUrl)))
       throw new ValidationError('Story evidence URL must be http(s)', 'EDITORIAL_URL_INVALID');
     await tx
       .update(contentStories)
@@ -878,7 +878,7 @@ export async function markWeekEditionReady(
           'Every Story evidence receipt needs explicit public rights',
           'EDITORIAL_RIGHTS_REQUIRED',
         );
-      if (!/^https?:\/\//i.test(row.canonicalUrl))
+      if (!row.canonicalUrl || !/^https?:\/\//i.test(row.canonicalUrl))
         throw new ValidationError('Story evidence URL must be http(s)', 'EDITORIAL_URL_INVALID');
       const list = evidenceByStory.get(row.storyId) ?? [];
       list.push({
