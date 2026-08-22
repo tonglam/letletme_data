@@ -122,6 +122,7 @@ jobs:
             migration_started=false
             services_start_attempted=false
             runner_updated=false
+            runner_probe_succeeded=false
             runner_previous_target=""
             runner_previous_release=""
             on_exit() {
@@ -163,10 +164,11 @@ jobs:
               stage_started_at=$(date +%s)
             }
             finish_stage() {
+              outcome=${1:-passed}
               finished_at=$(date +%s)
               duration_ms=$(( (finished_at - stage_started_at) * 1000 ))
-              printf '{"event":"deploy_stage_timing","stage":"%s","outcome":"passed","durationMs":%s}\n' \
-                "$active_stage" "$duration_ms"
+              printf '{"event":"deploy_stage_timing","stage":"%s","outcome":"%s","durationMs":%s}\n' \
+                "$active_stage" "$outcome" "$duration_ms"
               active_stage=""
             }
             start_stage pull
@@ -292,13 +294,27 @@ jobs:
               runner_root=/home/workspace/letletme-grok-runner
               runner_previous_target=$(readlink -e "$runner_root/current" 2>/dev/null || true)
               runner_previous_release=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
+              runner_previous_release=${runner_previous_release:-unknown}
               test -x scripts/deploy-host-grok-runner.sh
               runner_updated=true
               scripts/deploy-host-grok-runner.sh "$IMAGE_REF" "$DEPLOY_SHA" \
                 "$runner_root"
               test -x scripts/run-briefing-control-probe.sh
-              scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$DEPLOY_SHA"
-              finish_stage
+              if scripts/run-briefing-control-probe.sh \
+                "$env_file" "$migration_env_file" "$DEPLOY_SHA"; then
+                runner_probe_succeeded=true
+                finish_stage
+              else
+                runner_probe_status=$?
+                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
+                test -x scripts/rollback-host-grok-runner.sh
+                scripts/rollback-host-grok-runner.sh \
+                  "$runner_root" "$runner_previous_target" "$runner_previous_release"
+                runner_updated=false
+                printf '{"event":"briefing_control_probe","outcome":"degraded","exitCode":%s,"runnerRestored":true,"dataDeploymentContinues":true}\n' \
+                  "$runner_probe_status"
+                finish_stage degraded
+              fi
             else
               echo 'deploy: host Grok runner is not required while X scanning or the real Grok provider is disabled'
             fi
@@ -329,9 +345,13 @@ jobs:
 
             finish_stage
             if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
-              [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
+              [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]] &&
+              [ "$runner_probe_succeeded" = true ]; then
               test -x scripts/rearm-briefing-x-after-probe.sh
               scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
+            elif [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
+              [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
+              printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'
             fi
             deployment_committed=true
             docker compose ps
