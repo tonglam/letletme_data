@@ -1593,19 +1593,42 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
   const owner = randomUUID();
   const db = await getDbClient();
   const claimed = await db.begin(async (tx) => {
-    const rows = await tx<SnapshotOutboxRow[]>`
-      SELECT outbox_id, season_id, event_id, revision, manifest
-      FROM competition.my_fpl_snapshot_publication_outbox
-      WHERE status IN ('PENDING', 'PROCESSING')
-        AND available_at <= clock_timestamp()
-        AND (
-          status = 'PENDING'
-          OR lease_expires_at IS NULL
-          OR lease_expires_at <= clock_timestamp()
+    await tx`
+      UPDATE competition.my_fpl_snapshot_publication_outbox outbox
+      SET status = 'SUPERSEDED',
+          delivered_at = clock_timestamp(),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          last_error = 'Publication is no longer the active My FPL revision',
+          updated_at = clock_timestamp()
+      WHERE outbox.status IN ('PENDING', 'PROCESSING')
+        AND EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_publications publication
+          WHERE publication.season_id = outbox.season_id
+            AND publication.event_id = outbox.event_id
+            AND publication.revision = outbox.revision
+            AND publication.active = false
         )
-        ${options.eventId ? tx`AND event_id = ${options.eventId}` : tx``}
-        ${options.seasonCode ? tx`AND manifest->>'seasonCode' = ${options.seasonCode}` : tx``}
-      ORDER BY available_at, outbox_id
+    `;
+    const rows = await tx<SnapshotOutboxRow[]>`
+      SELECT outbox.outbox_id, outbox.season_id, outbox.event_id, outbox.revision, outbox.manifest
+      FROM competition.my_fpl_snapshot_publication_outbox outbox
+      JOIN competition.my_fpl_snapshot_publications publication
+        ON publication.season_id = outbox.season_id
+       AND publication.event_id = outbox.event_id
+       AND publication.revision = outbox.revision
+       AND publication.active = true
+      WHERE outbox.status IN ('PENDING', 'PROCESSING')
+        AND outbox.available_at <= clock_timestamp()
+        AND (
+          outbox.status = 'PENDING'
+          OR outbox.lease_expires_at IS NULL
+          OR outbox.lease_expires_at <= clock_timestamp()
+        )
+        ${options.eventId ? tx`AND outbox.event_id = ${options.eventId}` : tx``}
+        ${options.seasonCode ? tx`AND outbox.manifest->>'seasonCode' = ${options.seasonCode}` : tx``}
+      ORDER BY outbox.available_at, outbox.outbox_id
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     `;

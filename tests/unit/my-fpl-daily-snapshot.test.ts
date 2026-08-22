@@ -21,6 +21,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(migration).toContain('DELIVERED');
     expect(migration).toContain('ON DELETE CASCADE');
     expect(publicationService).toContain('24 * 60 * 60_000');
+    expect(publicationService).toContain('publication.active = true');
+    expect(publicationService).toContain('Publication is no longer the active My FPL revision');
   });
 
   test('captures official auto substitutions without inferring Bench Boost', () => {
