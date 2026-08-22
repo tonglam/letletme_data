@@ -258,11 +258,12 @@ describe('ops sync state machine', () => {
   test('uses wall-clock completion time inside a long mutation transaction', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
-    const startedAt = new Date();
 
     await withMutationScopes(
       { queueName: 'data-sync', jobName: 'player-values', jobId: RUN_IDS[0] },
       async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const startedAt = new Date();
         await syncOperationsRepository.startRun({
           runId: RUN_IDS[0],
           provider: 'fpl',
@@ -274,7 +275,6 @@ describe('ops sync state machine', () => {
           expectedItems: 1,
           startedAt,
         });
-        await new Promise((resolve) => setTimeout(resolve, 10));
         await syncOperationsRepository.finishRun(RUN_IDS[0], {
           status: 'published',
           completedItems: 1,
