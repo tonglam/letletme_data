@@ -78,8 +78,8 @@ jobs:
             DO $sample$
             DECLARE
               db_now timestamptz;
-              window_start timestamptz;
-              window_end timestamptz;
+              sample_window_start timestamptz;
+              sample_window_end timestamptz;
               candidate RECORD;
               endpoint_snapshot jsonb;
               partition_snapshot jsonb;
@@ -101,7 +101,7 @@ jobs:
               skipped_count integer := 0;
             BEGIN
               SELECT now(), now() - interval '6 hours', now() - interval '60 seconds'
-                INTO db_now, window_start, window_end;
+                INTO db_now, sample_window_start, sample_window_end;
 
               FOR candidate IN
                 SELECT
@@ -216,16 +216,16 @@ jobs:
                   'phase', 'NORMAL',
                   'profileKey', candidate.profile_key,
                   'profileRevision', 1,
-                  'windowStart', to_char(window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                  'windowEnd', to_char(window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                  'windowStart', to_char(sample_window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                  'windowEnd', to_char(sample_window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                   'partition', partition_snapshot,
                   'toolRequest', jsonb_build_object(
                     'toolName', 'x_keyword_search',
                     'query', format(
                       'from:%s since:%s until:%s -is:retweet',
                       candidate.locator->>'handle',
-                      to_char(window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD_HH24:MI:SS') || '_UTC',
-                      to_char(window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD_HH24:MI:SS') || '_UTC'
+                      to_char(sample_window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD_HH24:MI:SS') || '_UTC',
+                      to_char(sample_window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD_HH24:MI:SS') || '_UTC'
                     ),
                     'mode', 'Latest',
                     'limit', 10
@@ -254,8 +254,8 @@ jobs:
                   'X_ACCOUNT',
                   candidate.profile_key,
                   1,
-                  window_start,
-                  window_end,
+                  sample_window_start,
+                  sample_window_end,
                   'briefing-sample-6h:' || current_setting('briefing.sample_batch') || ':' || candidate.endpoint_key,
                   'PENDING',
                   request,
@@ -334,7 +334,7 @@ jobs:
                 inserted_count := inserted_count + 1;
               END LOOP;
               RAISE NOTICE 'sampleBatch=% inserted=% skippedByBudget=% windowStart=% windowEnd=%',
-                current_setting('briefing.sample_batch'), inserted_count, skipped_count, window_start, window_end;
+                current_setting('briefing.sample_batch'), inserted_count, skipped_count, sample_window_start, sample_window_end;
             END
             $sample$;
             COMMIT;
