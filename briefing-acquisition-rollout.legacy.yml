@@ -1,0 +1,291 @@
+name: Briefing acquisition rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect, enable HTTP shadow, enable host Grok shadow, or disable acquisition
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - shadow-http
+          - host-shadow
+          - disabled
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify protected main dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          test "$main_sha" = "$GITHUB_SHA"
+
+      - name: Apply host-runner acquisition mode
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          ROLLOUT_MODE: ${{ inputs.mode }}
+          ROLLOUT_SHA: ${{ github.sha }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 12m
+          envs: ROLLOUT_MODE,ROLLOUT_SHA,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+
+            expected_workdir=/home/workspace/letletme_data
+            test "$VPS_WORKDIR" = "$expected_workdir"
+            test "$(realpath --canonicalize-existing "$VPS_WORKDIR")" = "$expected_workdir"
+            cd "$expected_workdir"
+            test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"
+            test -x scripts/configure-briefing-acquisition-env.sh
+            test -x scripts/run-briefing-control-probe.sh
+            export CONTENT_MANIFEST_GIT_REVISION="$ROLLOUT_SHA"
+            export CONTENT_GROK_RUNNER_RELEASE_SHA="$ROLLOUT_SHA"
+
+            env_file="$expected_workdir/.env.deploy"
+            migration_env_file="$expected_workdir/.env.migrate"
+            test -f "$env_file"
+            test ! -L "$env_file"
+            test -f "$migration_env_file"
+            test ! -L "$migration_env_file"
+
+            runner_socket=/run/letletme-grok-runner/runner.sock
+            current_container=$(docker compose ps -q content-worker | head -n 1)
+            test -n "$current_container"
+            current_image=$(docker inspect --format '{{.Config.Image}}' "$current_container")
+            test -n "$current_image"
+            image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$current_image")
+            test "$image_revision" = "$ROLLOUT_SHA"
+            runner_root=/home/workspace/letletme-grok-runner
+            runner_updated=false
+            runner_previous_target=""
+            runner_previous_release=""
+            services_quiesced=false
+            worker_restart_started_at=''
+
+            rollback_runner() {
+              scripts/rollback-host-grok-runner.sh "$runner_root" \
+                "$runner_previous_target" "$runner_previous_release" || true
+            }
+
+            runner_health() {
+              health=$(curl --silent --show-error --connect-timeout 5 --max-time 15 --unix-socket "$runner_socket" \
+                http://localhost/v1/health
+              )
+              printf '%s\n' "$health"
+              printf '%s' "$health" | jq -e \
+                --arg sha "$ROLLOUT_SHA" \
+                '.ok == true and .ready == true and .runnerReleaseSha == $sha and .grokVersion == "1.0.5" and .sandbox == "strict" and .lastXProbeOk == true' \
+                >/dev/null
+            }
+
+            runner_probe() {
+              health=$(curl --silent --show-error --connect-timeout 5 --max-time 15 --unix-socket "$runner_socket" \
+                http://localhost/v1/health)
+              if [ "${1:-}" != force ] && printf '%s' "$health" | jq -e '.ok == true and .ready == true and .lastXProbeOk == true' >/dev/null; then
+                printf '%s\n' '{"probeSkipped":"fresh-health"}'
+                return 0
+              fi
+              scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"
+            }
+
+            report_acquisition_health() {
+              MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
+                --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<'SQL'
+            BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+            SET LOCAL statement_timeout = '15s';
+            SET LOCAL lock_timeout = '2s';
+            SET LOCAL idle_in_transaction_session_timeout = '20s';
+            SELECT jsonb_build_object(
+              'event', 'briefing_acquisition_control_health',
+              'verifiedXAccounts', (
+                SELECT count(*) FROM content.source_endpoints
+                WHERE adapter_kind = 'X_ACCOUNT' AND identity_status = 'VERIFIED'
+              ),
+              'unresolvedXAccounts', (
+                SELECT count(*) FROM content.source_endpoints
+                WHERE adapter_kind = 'X_ACCOUNT' AND identity_status <> 'VERIFIED'
+              ),
+              'activeSchedules', (
+                SELECT count(*) FROM content.source_schedules WHERE status = 'active'
+              ),
+              'dueSchedules', (
+                SELECT count(*) FROM content.source_schedules
+                WHERE status = 'active' AND next_due_at <= now()
+              ),
+              'pendingOutbox', (
+                SELECT count(*) FROM content.pipeline_outbox WHERE status = 'PENDING'
+              )
+            )::text;
+            SELECT jsonb_build_object(
+              'event', 'briefing_acquisition_run_health',
+              'recentRuns', count(*),
+              'failedRuns', count(*) FILTER (WHERE status = 'FAILED'),
+              'gapRuns', count(*) FILTER (WHERE status = 'GAP'),
+              'saturatedRuns', count(*) FILTER (WHERE status = 'SATURATED'),
+              'providerUnits', coalesce(sum(provider_units), 0)
+            )::text
+            FROM content.acquisition_runs
+            WHERE job_kind IS NOT NULL AND created_at >= now() - interval '30 minutes';
+            COMMIT;
+            SQL
+            }
+
+            verify_manifest_reconciliation() {
+              reconciliation_ok=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose \
+                --profile migration run --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<SQL
+            BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+            SET LOCAL statement_timeout = '15s';
+            SET LOCAL lock_timeout = '2s';
+            SET LOCAL idle_in_transaction_session_timeout = '20s';
+            SELECT CASE WHEN COALESCE((
+              SELECT status IN ('APPLIED', 'UNCHANGED') AND completed_at IS NOT NULL
+              FROM content.source_registry_reconciliations
+              WHERE git_revision = '${ROLLOUT_SHA}'
+                AND created_at >= '${worker_restart_started_at}'::timestamptz
+              ORDER BY created_at DESC
+              LIMIT 1
+            ), false) THEN 'true' ELSE 'false' END;
+            COMMIT;
+            SQL
+              )
+              test "$reconciliation_ok" = true
+            }
+
+            capture_worker_restart_started_at() {
+              worker_restart_started_at=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose \
+                --profile migration run --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 -c "SELECT clock_timestamp()::text;"')
+              test -n "$worker_restart_started_at"
+            }
+
+            read_pipeline_enabled() {
+              awk '
+                $0 ~ "^[[:space:]]*(export[[:space:]]+)?CONTENT_PIPELINE_ENABLED[[:space:]]*=" {
+                  value = $0
+                  sub("^[[:space:]]*(export[[:space:]]+)?CONTENT_PIPELINE_ENABLED[[:space:]]*=", "", value)
+                  sub("^[[:space:]]+", "", value)
+                  sub("[[:space:]]+$", "", value)
+                  if (value ~ /^".*"$/ || value ~ /^\047.*\047$/) {
+                    value = substr(value, 2, length(value) - 2)
+                  }
+                  print tolower(value)
+                  exit
+                }
+              ' "$env_file"
+            }
+
+            if [ "$ROLLOUT_MODE" = status ]; then
+              scripts/configure-briefing-acquisition-env.sh status "$env_file"
+              test "$(docker inspect --format '{{.State.Health.Status}}' "$current_container")" = healthy
+              # Status must still print the probe/health payload when the Runner is
+              # unavailable or degraded; collect failures before returning the status.
+              set +e
+              runner_probe
+              probe_status=$?
+              runner_health
+              health_status=$?
+              set -e
+              report_acquisition_health
+              test "$probe_status" -eq 0
+              test "$health_status" -eq 0
+              exit 0
+            fi
+
+            backup_file=''
+            mutation_started=false
+            rollout_committed=false
+            on_exit() {
+              original_status=$?
+              trap - EXIT
+              set +e
+              if [ "$original_status" -ne 0 ] && [ "$rollout_committed" = false ] && [ "$runner_updated" = true ]; then
+                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
+                rollback_runner
+              fi
+              if [ "$original_status" -ne 0 ] && [ "$rollout_committed" = false ] && {
+                [ "$services_quiesced" = true ] || [ "$mutation_started" = true ]
+              }; then
+                if [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
+                  mv "$backup_file" "$env_file"
+                fi
+                if [ "$services_quiesced" = true ]; then
+                  APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate \
+                    scheduler content-worker || true
+                else
+                  APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate \
+                    content-worker || true
+                fi
+              fi
+              if [ -n "$backup_file" ]; then rm -f -- "$backup_file"; fi
+              exit "$original_status"
+            }
+            trap on_exit EXIT
+
+            umask 077
+            backup_file=$(mktemp "$expected_workdir/.env.deploy.briefing-backup.XXXXXX")
+            cp -p "$env_file" "$backup_file"
+
+            if [ "$ROLLOUT_MODE" = host-shadow ]; then
+              services_quiesced=true
+              docker compose stop -t 45 scheduler content-worker
+              runner_previous_target=$(readlink -e "$runner_root/current" 2>/dev/null || true)
+              runner_previous_release=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
+              runner_previous_release=${runner_previous_release:-unknown}
+              runner_updated=true
+              test -x scripts/deploy-host-grok-runner.sh
+              scripts/deploy-host-grok-runner.sh "$current_image" "$ROLLOUT_SHA" "$runner_root"
+              scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"
+              runner_health
+            fi
+
+            mutation_started=true
+            scripts/configure-briefing-acquisition-env.sh "$ROLLOUT_MODE" "$env_file"
+            capture_worker_restart_started_at
+            APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate content-worker
+            if [ "$services_quiesced" = true ]; then
+              APP_IMAGE="$current_image" docker compose up -d --no-build scheduler
+            fi
+            PROJECT_DIR="$expected_workdir" COMPOSE_FILE=docker-compose.yml \
+              COMPOSE_BIN='docker compose' scripts/verify-runtime-health.sh
+            report_acquisition_health
+            pipeline_enabled_after=$(read_pipeline_enabled)
+            case "$pipeline_enabled_after" in
+              true | 1 | yes | on)
+                verify_manifest_reconciliation
+                ;;
+              false | 0 | no | off)
+                ;;
+              *)
+                echo "invalid CONTENT_PIPELINE_ENABLED after rollout: $pipeline_enabled_after" >&2
+                exit 1
+                ;;
+            esac
+            if [ "$ROLLOUT_MODE" = host-shadow ]; then
+              test -x scripts/rearm-briefing-x-after-probe.sh
+              scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
+            fi
+            rollout_committed=true
+            rm -f -- "$backup_file"
+            backup_file=''
+            trap - EXIT
