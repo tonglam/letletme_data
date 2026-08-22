@@ -11,6 +11,7 @@ import {
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
   isDataPublicationId,
+  parseDataPublicationManifest,
   type DataPublicationDataset,
   type DataPublicationManifest,
 } from '../cache/data-publication';
@@ -896,6 +897,38 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         )
         .limit(1);
       return rows[0] ?? null;
+    },
+
+    findActivePublicationManifest: async (
+      dataset: DataPublicationDataset,
+      season: FplSeasonRef,
+      eventId?: number,
+    ): Promise<DataPublicationManifest | null> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({ manifest: datasetPublicationsInOps.manifest })
+        .from(datasetPublicationsInOps)
+        .where(
+          and(
+            publicationScope(dataset, season, eventId),
+            eq(datasetPublicationsInOps.status, 'active'),
+          ),
+        )
+        .limit(1);
+      const raw = rows[0]?.manifest;
+      if (!raw) return null;
+      const manifest = parseDataPublicationManifest(
+        typeof raw === 'string' ? raw : JSON.stringify(raw),
+      );
+      if (
+        !manifest ||
+        manifest.dataset !== dataset ||
+        manifest.seasonCode !== season.seasonCode ||
+        manifest.eventId !== (eventId ?? null)
+      ) {
+        return null;
+      }
+      return manifest;
     },
 
     findActiveLiveEventLives: async (
