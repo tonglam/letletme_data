@@ -35,6 +35,12 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).not.toMatch(mutableAction);
     expect(ciWorkflow).not.toContain(`bun-version: [${quote}1.3.3${quote}]`);
     expect(ciWorkflow).toContain(`bun-version: [${quote}1.3.14${quote}]`);
+    expect(ciWorkflow).toContain('docker volume create "$briefing_grok_volume"');
+    expect(ciWorkflow).toContain(
+      'type=volume,source=$briefing_grok_volume,target=/home/appuser/.grok',
+    );
+    expect(ciWorkflow).toContain('test -x "$GROK_HOME/bin/grok-1.0.5"');
+    expect(ciWorkflow).not.toContain('--tmpfs /home/appuser/.grok:');
   });
 
   test('keeps Briefing acquisition rollout on protected main with rollback and fixed modes', () => {

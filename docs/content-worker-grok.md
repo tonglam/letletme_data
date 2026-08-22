@@ -38,6 +38,11 @@ started. Timeout, malformed output, invalid trace, or any later failure conserva
 call unit even when no attested provider trace can be stored. Such a run is `FAILED`, has
 `traceVerified=false`, and never advances its checkpoint or produces a Receipt.
 
+The image build materializes the pinned native binary under `/home/appuser/.grok/bin`. Docker's
+first mount of the empty named volume copies that directory into the volume, so the read-only
+container never needs to unpack a binary into `node_modules`. CI creates a fresh named volume and
+tests that exact first-mount path under the production hardening flags.
+
 Content flags remain disabled until a separately approved rollout:
 
 ```text
