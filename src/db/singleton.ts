@@ -239,3 +239,27 @@ export async function withDatabaseSavepoint<T>(operation: () => Promise<T>): Pro
     return runInDatabaseTransaction(raw, operation, nestedTransaction);
   });
 }
+
+/**
+ * Run raw postgres.js work in a transaction without assuming that the caller
+ * owns the root client. Mutation scopes expose an already-pinned transaction
+ * through AsyncLocalStorage; nesting `postgres.Sql.begin()` there is invalid
+ * because `TransactionSql` has no `begin` method. Use a Drizzle savepoint for
+ * that case and a normal postgres.js transaction for unscoped callers.
+ */
+export async function withDatabaseTransaction<T>(
+  operation: (transaction: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  if (databaseTransactionStorage.getStore()) {
+    return withDatabaseSavepoint(async () => {
+      const nested = databaseTransactionStorage.getStore();
+      if (!nested) {
+        throw new Error('Database transaction context was lost inside its savepoint');
+      }
+      return operation(nested.raw);
+    });
+  }
+
+  const client = await databaseSingleton.getClient();
+  return (await client.begin(operation)) as T;
+}

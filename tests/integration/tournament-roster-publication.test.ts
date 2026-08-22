@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { getDbClient } from '../../src/db/singleton';
 import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import { tournamentRosterRepository } from '../../src/repositories/tournament-roster';
+import { withMutationScopes } from '../../src/utils/mutation-scopes';
 
 const SEASON_CODE = '8990';
 const SEASON_ID = explicitSeasonRef(SEASON_CODE).seasonId;
@@ -161,7 +162,7 @@ describe('authoritative tournament roster publication', () => {
     ).toBe(false);
   });
 
-  test('publishes an additive recovery only while its atomic guard remains valid', async () => {
+  test('publishes an additive recovery inside its production mutation scope', async () => {
     const season = explicitSeasonRef(SEASON_CODE);
     const sql = await getDbClient();
     await sql`
@@ -184,21 +185,29 @@ describe('authoritative tournament roster publication', () => {
     const tournament = await tournamentRosterRepository.findById(season, TOURNAMENT_ID);
     expect(tournament).not.toBeNull();
 
-    const result = await tournamentRosterRepository.publishAuthoritativeRoster(
-      season,
-      tournament!,
-      ENTRY_IDS.map((entryId) => ({
-        id: String(entryId),
-        team: `Recovered Entry ${entryId}`,
-        manager: `Recovered Manager ${entryId}`,
-        overallRank: entryId,
-        totalPoints: 0,
-      })),
-      'Recovered H2H League',
+    const result = await withMutationScopes(
       {
-        expectedProgressMarker: marker,
-        guardUnlockedOfficialH2HRecovery: true,
+        queueName: 'integration-test',
+        jobName: 'publish-authoritative-roster',
+        scopes: [`integration:tournament-roster:${TOURNAMENT_ID}`],
       },
+      () =>
+        tournamentRosterRepository.publishAuthoritativeRoster(
+          season,
+          tournament!,
+          ENTRY_IDS.map((entryId) => ({
+            id: String(entryId),
+            team: `Recovered Entry ${entryId}`,
+            manager: `Recovered Manager ${entryId}`,
+            overallRank: entryId,
+            totalPoints: 0,
+          })),
+          'Recovered H2H League',
+          {
+            expectedProgressMarker: marker,
+            guardUnlockedOfficialH2HRecovery: true,
+          },
+        ),
     );
     expect(result.changed).toBe(true);
     expect(result.participantCount).toBe(ENTRY_IDS.length);

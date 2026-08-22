@@ -1,4 +1,4 @@
-import { getDbClient } from '../db/singleton';
+import { getDbClient, withDatabaseTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type {
   GroupMode,
@@ -465,8 +465,7 @@ export const tournamentRosterRepository = {
     try {
       const participantIds = uniqueParticipantIds(participants);
       const sortedParticipantIds = [...participantIds].sort((left, right) => left - right);
-      const client = await getDbClient();
-      return await client.begin(async (tx) => {
+      return await withDatabaseTransaction(async (tx) => {
         const seasonRows = await tx<Array<{ isCurrent: boolean }>>`
           SELECT is_current AS "isCurrent"
           FROM fpl.seasons
