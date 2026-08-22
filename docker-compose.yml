@@ -55,6 +55,9 @@ services:
       # must not load pino-pretty (devDependency) in the runtime image.
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      # Four runtime processes share a 15-session Supavisor login. Keep each
+      # process bounded so the API can start alongside the workers.
+      - DATABASE_POOL_MAX=${DATABASE_POOL_MAX:-3}
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
       - SCHEDULER_MODE=standalone
     logging: *default-logging
@@ -86,6 +89,7 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      - DATABASE_POOL_MAX=${DATABASE_POOL_MAX:-3}
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
     logging: *default-logging
     restart: unless-stopped
@@ -111,6 +115,7 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      - DATABASE_POOL_MAX=${DATABASE_POOL_MAX:-3}
       - SCHEDULER_MODE=standalone
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
       - SCHEDULER_HEARTBEAT_PATH=/tmp/scheduler-heartbeat
@@ -135,6 +140,7 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      - DATABASE_POOL_MAX=${DATABASE_POOL_MAX:-3}
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
       - WORKER_HEARTBEAT_PATH=/tmp/content-worker-heartbeat
       - GROK_HOME=/home/appuser/.grok
