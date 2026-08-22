@@ -1,0 +1,55 @@
+name: Briefing X media probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/codex/briefing-full-12h'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe host Grok X thread media
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+            probe_dir=$(mktemp -d /tmp/letletme-x-media-probe.XXXXXX)
+            chown deploy:deploy "$probe_dir"
+            trap 'rm -rf -- "$probe_dir"' EXIT
+            output="$probe_dir/trace.jsonl"
+            sudo -u deploy -H env \
+              HOME=/home/deploy \
+              GROK_HOME=/home/deploy/.grok \
+              GROK_NO_AUTO_UPDATE=1 \
+              /home/deploy/.grok/bin/grok \
+              --always-approve \
+              --sandbox strict \
+              --disallowed-tools 'read_file,search_replace,list_dir,grep,todo_write,scheduler_create,scheduler_delete,scheduler_list,monitor,search_tool,use_tool,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,image_gen,image_edit,image_to_video,reference_to_video,write' \
+              --output-format streaming-messages-json \
+              --disable-web-search \
+              --no-subagents \
+              --no-plan \
+              --max-turns 4 \
+              --deny 'Bash(*)' \
+              --deny 'Edit(*)' \
+              --deny 'Read(*)' \
+              --deny 'Grep(*)' \
+              --deny 'WebFetch(*)' \
+              --deny 'MCPTool(*)' \
+              --deny 'Write(*)' \
+              --deny 'Glob(*)' \
+              --deny 'WebSearch(*)' \
+              --cwd "$probe_dir" \
+              --verbatim \
+              -p 'Use x_thread_fetch exactly once with post_id 2091144605710647466. Return only one JSON object with this exact shape: {"posts":[{"postId":"numeric string","authorHandle":"handle","createdAt":"ISO-8601","text":"full text","url":"https X status URL","media":[{"kind":"IMAGE|VIDEO|OTHER","url":"public media URL or null","mimeType":"string or null","altText":"exact alt text or null"}]}]}. Copy media facts only when the X tool actually provides them; use an empty array when it does not. Do not infer or invent media URLs. Do not call any other tool and do not summarize.' \
+              >"$output"
+            printf 'output_bytes=%s\n' "$(wc -c <"$output")"
+            tail -c 16000 "$output"
