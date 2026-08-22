@@ -74,19 +74,13 @@ chmod 0640 "$release_root/current.release"
 sudo systemctl restart letletme-grok-runner.service
 sudo systemctl is-active --quiet letletme-grok-runner.service
 
-curl --silent --show-error \
-  --unix-socket /run/letletme-grok-runner/runner.sock \
-  -X POST -H 'content-type: application/json' \
-  --data '{"schemaVersion":1}' http://localhost/v1/probes/x
-printf '\n'
-
 health=$(curl --silent --show-error \
   --unix-socket /run/letletme-grok-runner/runner.sock \
   http://localhost/v1/health)
 printf '%s\n' "$health"
 printf '%s' "$health" | jq -e \
   --arg sha "$release_sha" \
-  '.ok == true and .ready == true and .runnerReleaseSha == $sha and .grokVersion == "1.0.5" and .sandbox == "strict" and .lastXProbeOk == true' \
+  '.ok == true and .runnerReleaseSha == $sha and .grokVersion == "1.0.5" and .sandbox == "strict"' \
   >/dev/null
 trap - EXIT
 cleanup

@@ -690,6 +690,13 @@ path 或 environment。Runner 通过 `/v1/health` 暴露 release、版本、stri
 通过 `/v1/probes/x` 执行真实 `OfficialFPL` probe。应用 image 只携带供部署提取的 glibc standalone
 artifact，不在容器内运行它。
 
+部署和 status 流程不能直接 POST probe 绕过 X 调用预算。它们使用
+`scripts/run-briefing-control-probe.sh`：先在 PostgreSQL 中创建 control-plane run、锁定
+`GLOBAL:GROK_BUILD_X` 的一个 CALL reservation，再调用 Unix socket；成功或 provider 已可能启动时
+提交 reservation 并写 provider trace，明确的 pre-provider capacity/rate-limit 则释放并记为
+`BUDGET_DEFERRED`。因此 runner 重启后的探针仍计入同一 rolling-day hard cap，且不会和正式 run
+的 `provider_units` 统计脱节。
+
 同参数的对抗性实测还分别诱导 `run_terminal_command` 与 `spawn_subagent`；两次均由 permission
 policy 拒绝，且 attempt 会留在 streaming trace 中。预算边界也以真实 `grok -p` process launch 为
 准：launch 前失败释放 reservation；launch 后 timeout、损坏输出或 trace/schema 失败保守提交一次

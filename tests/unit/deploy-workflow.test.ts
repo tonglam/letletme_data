@@ -13,6 +13,7 @@ const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
 const dockerfile = readFileSync('Dockerfile', 'utf8');
 const hostRunnerDeployScript = readFileSync('scripts/deploy-host-grok-runner.sh', 'utf8');
+const controlProbeScript = readFileSync('scripts/run-briefing-control-probe.sh', 'utf8');
 const hostRunnerRollbackScript = readFileSync('scripts/rollback-host-grok-runner.sh', 'utf8');
 const quote = String.fromCharCode(39);
 
@@ -61,6 +62,7 @@ describe('release workflow gates', () => {
       'runner_socket=/run/letletme-grok-runner/runner.sock',
     );
     expect(briefingRolloutWorkflow).toContain('runner_probe');
+    expect(briefingRolloutWorkflow).toContain('run-briefing-control-probe.sh');
     expect(briefingRolloutWorkflow).not.toContain('auth.json');
     expect(briefingRolloutWorkflow).toContain(
       'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY',
@@ -73,6 +75,10 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).not.toContain('tar -C "$HOME/.grok"');
     expect(briefingRolloutWorkflow).not.toContain('script_stop:');
     expect(hostRunnerDeployScript).toContain('--self-test');
+    expect(hostRunnerDeployScript).not.toContain('/v1/probes/x');
+    expect(controlProbeScript).toContain('GLOBAL:GROK_BUILD_X');
+    expect(controlProbeScript).toContain('content.acquisition_budget_reservations');
+    expect(controlProbeScript).toContain('CONTROL_PLANE_PROBE');
     expect(hostRunnerDeployScript).toContain('rollback_on_failure');
     expect(hostRunnerRollbackScript).toContain('/home/workspace/letletme-grok-runner');
   });

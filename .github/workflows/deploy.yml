@@ -294,6 +294,8 @@ jobs:
               runner_updated=true
               scripts/deploy-host-grok-runner.sh "$IMAGE_REF" "$DEPLOY_SHA" \
                 "$runner_root"
+              test -x scripts/run-briefing-control-probe.sh
+              scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$DEPLOY_SHA"
               test -x scripts/rearm-briefing-x-after-probe.sh
               scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
               finish_stage

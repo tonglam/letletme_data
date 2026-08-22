@@ -52,6 +52,8 @@ const hostGrokProbeResponseSchema = z.discriminatedUnion('ok', [
 ]);
 
 const PROBE_TIMEOUT_MS = 60_000;
+const HEALTH_TIMEOUT_MS = 5_000;
+const EXECUTION_DEADLINE_MS = 5 * 60_000;
 
 type HostGrokRunnerClientOptions = Readonly<{
   socketPath: string;
@@ -200,6 +202,7 @@ export class HostGrokRunnerClient {
 
   async assertVersion(
     hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+    deadlineAt = Date.now() + EXECUTION_DEADLINE_MS,
   ): Promise<void> {
     // Health is deliberately checked on every execution. The runner's probe
     // state is process-local and resets on a systemd restart; a TTL cache here
@@ -207,7 +210,7 @@ export class HostGrokRunnerClient {
     // its real X probe. Coalesce concurrent checks, but never reuse a completed
     // check across executions.
     if (this.healthCheck) return this.healthCheck;
-    const check = this.inspectHealth(hooks);
+    const check = this.inspectHealth(hooks, deadlineAt);
     this.healthCheck = check;
     try {
       await check;
@@ -218,7 +221,15 @@ export class HostGrokRunnerClient {
 
   private async inspectHealth(
     hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+    deadlineAt = Date.now() + EXECUTION_DEADLINE_MS,
   ): Promise<void> {
+    const remainingTimeout = (maximumMs: number): number => {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        throw new GrokBuildExecutionError('RUNNER_TIMEOUT', 'Host Grok run deadline exceeded');
+      }
+      return Math.min(maximumMs, remainingMs);
+    };
     const readHealth = async (): Promise<{
       response: JsonResponse;
       health: z.infer<typeof hostGrokHealthSchema>;
@@ -228,7 +239,7 @@ export class HostGrokRunnerClient {
           socketPath: this.socketPath,
           path: '/v1/health',
           method: 'GET',
-          timeoutMs: Math.min(this.timeoutMs, 30_000),
+          timeoutMs: remainingTimeout(Math.min(this.timeoutMs, HEALTH_TIMEOUT_MS)),
           maximumResponseBytes: 32 * 1024,
         });
         const health = hostGrokHealthSchema.safeParse(response.body);
@@ -271,7 +282,7 @@ export class HostGrokRunnerClient {
       !healthResponse.health.ready ||
       healthResponse.health.lastXProbeOk !== true
     ) {
-      await this.refreshProbe(hooks);
+      await this.refreshProbe(hooks, deadlineAt);
       healthResponse = await readHealth();
       assertIdentity(healthResponse.health);
     }
@@ -286,10 +297,18 @@ export class HostGrokRunnerClient {
 
   private async refreshProbe(
     hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+    deadlineAt = Date.now() + EXECUTION_DEADLINE_MS,
   ): Promise<void> {
     if (this.probeCheck) return this.probeCheck;
     const probe = (async () => {
       let response: JsonResponse;
+      const remainingTimeout = (): number => {
+        const remainingMs = deadlineAt - Date.now();
+        if (remainingMs <= 0) {
+          throw new GrokBuildExecutionError('RUNNER_TIMEOUT', 'Host Grok run deadline exceeded');
+        }
+        return Math.min(this.timeoutMs, PROBE_TIMEOUT_MS, remainingMs);
+      };
       try {
         await hooks?.onProbeRequest?.();
         response = await requestJson({
@@ -297,7 +316,7 @@ export class HostGrokRunnerClient {
           path: '/v1/probes/x',
           method: 'POST',
           body: { schemaVersion: 1 },
-          timeoutMs: Math.min(this.timeoutMs, PROBE_TIMEOUT_MS),
+          timeoutMs: remainingTimeout(),
           maximumResponseBytes: 32 * 1024,
           onTransportLossAfterDispatch: hooks?.onProbeProcessStart,
         });
@@ -307,10 +326,14 @@ export class HostGrokRunnerClient {
       }
       const parsed = hostGrokProbeResponseSchema.safeParse(response.body);
       if (!parsed.success || response.statusCode !== 200 || !parsed.data.ok) {
-        if (parsed.success && !parsed.data.ok && parsed.data.failureClass === 'RUNNER_CAPACITY') {
+        if (
+          parsed.success &&
+          !parsed.data.ok &&
+          ['RUNNER_CAPACITY', 'RUNNER_PROBE_RATE_LIMITED'].includes(parsed.data.failureClass)
+        ) {
           throw new GrokBuildExecutionError('RUNNER_CAPACITY', 'Host Grok runner is at capacity');
         }
-        if (!parsed.success || response.statusCode !== 200 || parsed.data.ok) {
+        if (!parsed.success || (response.statusCode !== 200 && parsed.data.ok)) {
           // The request reached the host runner, but a malformed/non-200
           // response cannot prove whether the provider process started. Charge
           // the probe conservatively so a lost response cannot bypass the X
@@ -356,7 +379,8 @@ export class HostGrokRunnerClient {
     hooks?: GrokBuildExecutionHooks,
   ): Promise<GrokBuildExecutionResult> {
     const toolRequest = xToolRequestV1Schema.parse(requestValue);
-    await this.assertVersion(hooks);
+    const deadlineAt = Date.now() + EXECUTION_DEADLINE_MS;
+    await this.assertVersion(hooks, deadlineAt);
     const request: HostGrokExecutionRequestV1 = hostGrokExecutionRequestV1Schema.parse({
       schemaVersion: 1,
       runId: hooks?.runId ?? randomUUID(),
@@ -371,12 +395,16 @@ export class HostGrokRunnerClient {
     };
     let response: JsonResponse;
     try {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        throw new GrokBuildExecutionError('RUNNER_TIMEOUT', 'Host Grok run deadline exceeded');
+      }
       response = await requestJson({
         socketPath: this.socketPath,
         path: '/v1/executions',
         method: 'POST',
         body: request,
-        timeoutMs: this.timeoutMs,
+        timeoutMs: Math.min(this.timeoutMs, remainingMs),
         maximumResponseBytes: this.maximumResponseBytes,
         onTransportLossAfterDispatch: markProviderStarted,
       });

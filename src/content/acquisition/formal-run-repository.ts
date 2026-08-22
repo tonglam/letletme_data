@@ -87,6 +87,23 @@ export type FormalRunProviderEvidence = Readonly<{
   runMetrics: Readonly<Record<string, unknown>>;
 }>;
 
+/**
+ * A host-runner liveness probe is a real billable X call, but the probe
+ * endpoint intentionally returns only a bounded health response.  Keep its
+ * request identity while allowing the provider response/call id to remain
+ * unavailable rather than inventing evidence the runner did not return.
+ */
+export type FormalRunProbeEvidence = Readonly<{
+  provider: 'grok-build';
+  operation: 'x_user_search';
+  requestMetadataHash: string;
+  responseMetadataHash: string | null;
+  providerJobIdHash: string | null;
+  providerUnits: 1;
+  terminalState: string;
+  runMetrics: Readonly<Record<string, unknown>>;
+}>;
+
 export type FormalRunFailureRejection = Readonly<{
   endpointKey: string;
   externalItemId: string;
@@ -1051,6 +1068,7 @@ export async function failFormalRun(input: {
   errorSummary: string;
   retryDelayMs?: number;
   providerEvidence?: FormalRunProviderEvidence;
+  probeEvidence?: FormalRunProbeEvidence;
   supadataFailureEvidence?: SupadataFailureEvidence;
   providerProcessStarted?: boolean;
   hermesProviderAttempted?: boolean;
@@ -1087,49 +1105,96 @@ export async function failFormalRun(input: {
     if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
     if (
       (input.providerEvidence ? 1 : 0) +
+        (input.probeEvidence ? 1 : 0) +
         (input.supadataFailureEvidence ? 1 : 0) +
         (input.hermesProviderAttempted ? 1 : 0) >
       1
     ) {
-      throw new Error('Formal failure cannot contain evidence from multiple providers');
+      if (!input.providerEvidence || !input.probeEvidence) {
+        throw new Error('Formal failure cannot contain evidence from multiple providers');
+      }
+    }
+    if (input.probeEvidence && (input.supadataFailureEvidence || input.hermesProviderAttempted)) {
+      throw new Error('X probe evidence cannot be combined with non-Grok provider evidence');
     }
     if (input.rejections?.length && !input.providerEvidence) {
       throw new Error('Rejected provider items require persisted provider evidence');
     }
     const request = parseFormalRunRequestV1(run.requestSnapshot);
     const grokProviderAttempted =
-      input.providerEvidence !== undefined || input.providerProcessStarted === true;
+      input.providerEvidence !== undefined ||
+      input.probeEvidence !== undefined ||
+      input.providerProcessStarted === true;
+    const grokProviderUnits =
+      (input.providerEvidence?.providerUnits ?? (input.providerProcessStarted ? 1 : 0)) +
+      (input.probeEvidence?.providerUnits ?? 0);
+    if (input.probeEvidence) {
+      if (
+        !/^[0-9a-f]{64}$/.test(input.probeEvidence.requestMetadataHash) ||
+        (input.probeEvidence.responseMetadataHash !== null &&
+          !/^[0-9a-f]{64}$/.test(input.probeEvidence.responseMetadataHash)) ||
+        (input.probeEvidence.providerJobIdHash !== null &&
+          !/^[0-9a-f]{64}$/.test(input.probeEvidence.providerJobIdHash)) ||
+        !input.probeEvidence.terminalState.trim()
+      ) {
+        throw new Error('Failed formal run has invalid X probe evidence');
+      }
+    }
     let supadataTotalProviderUnits: number | null = null;
-    if (input.providerEvidence) {
+    if (input.providerEvidence || input.probeEvidence) {
       if (run.adapterKind !== 'X_ACCOUNT' && run.adapterKind !== 'X_SEMANTIC') {
         throw new Error('Grok provider evidence is only valid for formal X runs');
       }
-      if (
-        !('toolRequest' in request) ||
-        request.toolRequest.toolName !== input.providerEvidence.operation ||
-        !/^[0-9a-f]{64}$/.test(input.providerEvidence.requestMetadataHash) ||
-        !/^[0-9a-f]{64}$/.test(input.providerEvidence.responseMetadataHash) ||
-        !/^[0-9a-f]{64}$/.test(input.providerEvidence.providerJobIdHash) ||
-        !input.providerEvidence.terminalState.trim()
-      ) {
-        throw new Error('Failed formal run has invalid provider evidence');
+      if (input.providerEvidence) {
+        if (
+          !('toolRequest' in request) ||
+          request.toolRequest.toolName !== input.providerEvidence.operation ||
+          !/^[0-9a-f]{64}$/.test(input.providerEvidence.requestMetadataHash) ||
+          !/^[0-9a-f]{64}$/.test(input.providerEvidence.responseMetadataHash) ||
+          !/^[0-9a-f]{64}$/.test(input.providerEvidence.providerJobIdHash) ||
+          !input.providerEvidence.terminalState.trim()
+        ) {
+          throw new Error('Failed formal run has invalid provider evidence');
+        }
       }
       const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
       if (committedReservations === 0) {
         throw new Error('Billed formal X failure has no reserved budget');
       }
-      await tx.insert(contentAcquisitionProviderTraces).values({
-        traceId: randomUUID(),
-        runId: input.runId,
-        sequence: 0,
-        provider: input.providerEvidence.provider,
-        operation: input.providerEvidence.operation,
-        requestMetadataHash: input.providerEvidence.requestMetadataHash,
-        responseMetadataHash: input.providerEvidence.responseMetadataHash,
-        providerJobIdHash: input.providerEvidence.providerJobIdHash,
-        providerUnits: String(input.providerEvidence.providerUnits),
-        terminalState: input.providerEvidence.terminalState,
-      });
+      await tx.insert(contentAcquisitionProviderTraces).values([
+        ...(input.probeEvidence
+          ? [
+              {
+                traceId: randomUUID(),
+                runId: input.runId,
+                sequence: 0,
+                provider: input.probeEvidence.provider,
+                operation: input.probeEvidence.operation,
+                requestMetadataHash: input.probeEvidence.requestMetadataHash,
+                responseMetadataHash: input.probeEvidence.responseMetadataHash,
+                providerJobIdHash: input.probeEvidence.providerJobIdHash,
+                providerUnits: String(input.probeEvidence.providerUnits),
+                terminalState: input.probeEvidence.terminalState,
+              },
+            ]
+          : []),
+        ...(input.providerEvidence
+          ? [
+              {
+                traceId: randomUUID(),
+                runId: input.runId,
+                sequence: input.probeEvidence ? 1 : 0,
+                provider: input.providerEvidence.provider,
+                operation: input.providerEvidence.operation,
+                requestMetadataHash: input.providerEvidence.requestMetadataHash,
+                responseMetadataHash: input.providerEvidence.responseMetadataHash,
+                providerJobIdHash: input.providerEvidence.providerJobIdHash,
+                providerUnits: String(input.providerEvidence.providerUnits),
+                terminalState: input.providerEvidence.terminalState,
+              },
+            ]
+          : []),
+      ]);
     } else if (input.supadataFailureEvidence) {
       const evidence = input.supadataFailureEvidence;
       const expectedOperation = run.providerJobId ? 'transcript.poll' : 'transcript.submit';
@@ -1317,10 +1382,10 @@ export async function failFormalRun(input: {
             ? input.hermesProviderUnits !== undefined
               ? String(input.hermesProviderUnits)
               : grokProviderAttempted
-                ? '1'
+                ? String(grokProviderUnits || 1)
                 : undefined
             : String(supadataTotalProviderUnits),
-        xCallCount: grokProviderAttempted ? 1 : 0,
+        xCallCount: grokProviderAttempted ? Math.max(1, grokProviderUnits) : 0,
         traceVerified: input.providerEvidence !== undefined,
         runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify(
           input.supadataFailureEvidence
@@ -1330,6 +1395,7 @@ export async function failFormalRun(input: {
                 providerFailureDurationMs: input.supadataFailureEvidence.durationMs,
               }
             : (input.providerEvidence?.runMetrics ??
+                input.probeEvidence?.runMetrics ??
                 (input.hermesProviderAttempted
                   ? { hermesProviderStarted: true, providerTraceVerified: false }
                   : input.providerProcessStarted

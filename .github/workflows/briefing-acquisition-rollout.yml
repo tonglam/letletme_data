@@ -56,6 +56,7 @@ jobs:
             cd "$expected_workdir"
             test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"
             test -x scripts/configure-briefing-acquisition-env.sh
+            test -x scripts/run-briefing-control-probe.sh
             export CONTENT_MANIFEST_GIT_REVISION="$ROLLOUT_SHA"
             export CONTENT_GROK_RUNNER_RELEASE_SHA="$ROLLOUT_SHA"
 
@@ -102,11 +103,7 @@ jobs:
                 printf '%s\n' '{"probeSkipped":"fresh-health"}'
                 return 0
               fi
-              probe=$(curl --silent --show-error --unix-socket "$runner_socket" \
-                -X POST -H 'content-type: application/json' \
-                --data '{"schemaVersion":1}' http://localhost/v1/probes/x)
-              printf '%s\n' "$probe"
-              printf '%s' "$probe" | jq -e '.ok == true and .toolName == "x_user_search"' >/dev/null
+              scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"
             }
 
             report_acquisition_health() {
@@ -186,7 +183,13 @@ jobs:
                 APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
                 exit 1
               fi
-              if ! runner_probe force || ! runner_health; then
+              if ! scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"; then
+                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
+                rollback_runner
+                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
+                exit 1
+              fi
+              if ! runner_health; then
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 rollback_runner
                 APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true

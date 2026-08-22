@@ -375,7 +375,7 @@ export async function startHostGrokRunner(): Promise<{
             : {
                 failureClass: probe.ok ? 'X_PROBE_NOT_EXACT' : probe.failureClass,
                 errorDigest: probe.ok ? digest('X_PROBE_NOT_EXACT') : probe.errorDigest,
-                providerProcessStarted: probe.providerProcessStarted,
+                providerProcessStarted: probe.ok ? true : probe.providerProcessStarted,
               }),
         });
         return;

@@ -24,6 +24,7 @@ export type XBudgetReservationResult = Readonly<{
   reserved: boolean;
   deferredScope: string | null;
   remainingBeforeReservation: number;
+  reservationIds: readonly string[];
 }>;
 
 type BudgetScope = Readonly<{
@@ -148,11 +149,13 @@ export async function reserveXRunBudgets(input: {
         reserved: false,
         deferredScope: `${scope.scopeKind}:${scope.scopeKey}`,
         remainingBeforeReservation: Math.max(0, scope.limit - used),
+        reservationIds: [],
       };
     }
   }
 
   const bucket = hourBucket(input.dbNow);
+  const reservationIds: string[] = [];
   for (const { scope, used } of usage) {
     const ledgerRows = await input.tx
       .insert(contentAcquisitionBudgetLedgers)
@@ -217,9 +220,11 @@ export async function reserveXRunBudgets(input: {
           updatedAt: input.dbNow,
         })
         .where(eq(contentAcquisitionBudgetReservations.reservationId, existing[0].reservationId));
+      reservationIds.push(existing[0].reservationId);
     } else {
+      const reservationId = randomUUID();
       await input.tx.insert(contentAcquisitionBudgetReservations).values({
-        reservationId: randomUUID(),
+        reservationId,
         ledgerId: ledger.ledgerId,
         runId: input.runId,
         units: String(requestedUnits),
@@ -227,6 +232,7 @@ export async function reserveXRunBudgets(input: {
         createdAt: input.dbNow,
         updatedAt: input.dbNow,
       });
+      reservationIds.push(reservationId);
     }
     if (used + requestedUnits > scope.limit)
       throw new Error('X budget reservation exceeded its hard cap');
@@ -234,6 +240,7 @@ export async function reserveXRunBudgets(input: {
   return {
     reserved: true,
     deferredScope: null,
+    reservationIds,
     remainingBeforeReservation: Math.min(
       ...usage.map(({ scope, used }) => Math.max(0, scope.limit - used - requestedUnits)),
     ),
@@ -244,7 +251,10 @@ export async function releaseOneXRunBudgetUnit(input: {
   tx: TransactionHandle;
   runId: string;
   dbNow: Date;
+  reservationIds: readonly string[];
 }): Promise<boolean> {
+  const reservationIds = [...new Set(input.reservationIds)];
+  if (reservationIds.length === 0) return false;
   await input.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'))`);
   const reservations = await input.tx
     .select({
@@ -256,11 +266,14 @@ export async function releaseOneXRunBudgetUnit(input: {
     .where(
       and(
         eq(contentAcquisitionBudgetReservations.runId, input.runId),
+        inArray(contentAcquisitionBudgetReservations.reservationId, reservationIds),
         eq(contentAcquisitionBudgetReservations.status, 'RESERVED'),
       ),
     )
     .for('update');
-  if (reservations.length === 0) return false;
+  if (reservations.length !== reservationIds.length) {
+    throw new Error('X probe budget reservation disappeared before release');
+  }
   for (const reservation of reservations) {
     const units = Number(reservation.units);
     if (!Number.isSafeInteger(units) || units < 1) {

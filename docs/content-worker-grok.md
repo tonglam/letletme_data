@@ -70,7 +70,9 @@ Runner 发送响应前发生 timeout、断开或进程异常时，响应会标�
 
 `HostGrokRunnerClient` 是 content worker 唯一的 X executor。content-worker 可以先创建
 队列 runtime，但每个正式 X run 都必须在执行前验证 socket health、release SHA 和 1.0.5；
-health 过期时的真实 probe 先扣该 run 的 X budget。Runner 不可用或 probe 失败只产生明确
+health 过期时的真实 probe 先扣该 run 的 X budget。部署/状态脚本通过
+`scripts/run-briefing-control-probe.sh` 创建带预算 reservation 的 control-plane run；不会
+直接绕过预算调用 probe。Runner 不可用或 probe 失败只产生明确
 provider failure，不会生成 `EMPTY`、Receipt 或推进 checkpoint。
 
 执行结果的 `runMetrics` 至少记录：
@@ -94,7 +96,8 @@ provider failure，不会生成 `EMPTY`、Receipt 或推进 checkpoint。
 4. 应用 image 构建 `/app/letletme-grok-runner` glibc standalone artifact；部署脚本将
    它提取到 `/home/workspace/letletme-grok-runner/releases/<sha>`，原子切换 `current`
    和 `current.release`，重启 Runner。
-5. 先验证 `/v1/probes/x`，再验证包含最近成功 probe 的 `/v1/health`，最后重启 content worker。
+5. 通过 `scripts/run-briefing-control-probe.sh` 先以全局 X budget reservation 验证
+   `/v1/probes/x`，再验证包含最近成功 probe 的 `/v1/health`，最后重启 content worker。
 6. 只有 host probe 成功后才允许 `host-shadow`；publication/public 保持关闭。
 
 成功 probe 后，部署/host-shadow 流程会调用
@@ -110,7 +113,8 @@ terminal run。
 `status` 必须同时报告 Runner health 和最近真实 X probe；`grok models` 成功不能单独
 表示 X READY。必须能证明 Grok 子进程的 parent/cgroup 属于宿主机 Runner，而非 Docker。
 Runner 对并发 probe 只允许一个进行，并对重复 probe 施加最小 60 秒间隔；status 在 health
-已经新鲜时不重复发起真实 probe，host-shadow 部署仍强制执行一次真实 probe。
+已经新鲜时不重复发起真实 probe，host-shadow 部署会通过带预算的 control-plane run 执行一次
+真实 probe，不会因为 runner 的 60 秒限流而重复调用。
 
 自动检查覆盖 UDS 缺失/拒绝、响应损坏、版本或 release 漂移、超时、输出超限、重复 run ID、
 预算 pre/post-dispatch 语义和四种 X 工具 trace。CI 必须确认生产 image 不含 Grok CLI、
