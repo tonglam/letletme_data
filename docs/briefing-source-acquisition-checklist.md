@@ -247,13 +247,14 @@ transport 等价，不能直接控制 transcript revision。
 - [ ] 当前 SSH 用户无 Docker socket 权限，未验证生产 `content-worker` 镜像内的 CLI、auth
   和 sandbox。
 
-因此这个早期案例只能记为 `shadow transport PASS / production FAIL`。后续实现没有把宿主机
-`--sandbox none` 诊断调用直接接入 scheduler；当前隔离与工具面合同见 3.2 和
+因此这个早期案例只能记为 `historical shadow transport PASS / production FAIL`。它没有接入
+scheduler；当前宿主机 Runner、认证和工具面合同见 3.2、3.3 和
 [Content worker Grok operations](./content-worker-grok.md)。
 
 ### 3.2 Grok Build 1.0.5 本机 shadow
 
-在 `2026-08-21T19:31:59Z` 附近又执行了两次有界验证：
+在 `2026-08-21T19:31:59Z` 附近又执行了两次有界验证。这些是本机/隔离环境的历史合同验证，
+不是当前 VPS production readiness：
 
 - 本机 Grok Build 1.0.5，strict sandbox，OfficialFPL 同日窗口，limit 10。
 - 第一次 20.2 秒返回 10 条，时间范围 `17:01:00Z–19:27:05Z`；10 个 ID 唯一，作者、窗口、
@@ -269,9 +270,20 @@ transport 等价，不能直接控制 transcript revision。
 信任边界，不得标成 raw-result verified。若产品以后要求 raw payload，只能更换接口。
 
 后续受控验证证明：strict bubblewrap 只有给容器 `--privileged` 才能继续运行，这个方案不接受。
-当前目标使用外层非特权只读容器、最小 writable volume、sanitized env、工具移除/deny 和启动
-inventory gate；真实 X full sweep 的 49/49 调用均通过 single-tool/exact-request trace。该结果
-仍是本机隔离测试库证据，不能外推为 VPS production pass。
+因此当前目标改为宿主机窄 Runner：`content-worker → Unix socket → deploy 用户 Grok Build`。
+真实 X full sweep 的 49/49 调用仍只是本机隔离测试库证据，不能外推为 VPS production pass。
+
+### 3.3 宿主机 Runner 验收（当前目标）
+
+- [ ] root 已安装 `letletme-grok-runner.service`、bubblewrap 和 bridge GID 1555。
+- [ ] deploy 用户已在部署阶段完成一次 `grok login --device-auth`；不复制或读取其他用户认证。
+- [ ] deploy Grok `1.0.5`、`GROK_NO_AUTO_UPDATE=1` 和 `--sandbox strict` 通过 preflight。
+- [ ] `/v1/health` 的 runner release 与应用 SHA 相同，且最近 probe 状态可见。
+- [ ] `/v1/probes/x` 的真实 `OfficialFPL` identity probe 成功。
+- [ ] probe 必须返回恰好一个 case-insensitive `OfficialFPL` 用户；否则 health 保持 503/unavailable。
+- [ ] 四种 X tool 均通过 UDS single-tool/exact-request/structured-output contract。
+- [ ] cgroup/parent 证据证明 Grok 子进程运行在宿主机 Runner，不在 Docker。
+- [ ] host-shadow 之前 publication/public 保持关闭；失败不能变成 `EMPTY` 或推进 checkpoint。
 
 ## 4. RSS/Atom 案例：Fantasy Football Scout
 
@@ -631,7 +643,8 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 
 ### 12.2 X
 
-- [ ] 在实际 production content-worker 中验证 Grok 1.0.5、auth 和四种 X tools。
+- [ ] 在实际 production content-worker → Unix socket → 宿主机 Runner 路径中验证 deploy 用户
+  Grok 1.0.5、strict sandbox 和四种 X tools；不在容器内验证或挂载 auth。
 - [x] 验证 nested bubblewrap 在普通非特权 Docker 中不可用，并拒绝 `--privileged` 方案；改用
   read-only/cap-drop/no-new-privileges 容器、sanitized env、tool removal/deny 与 inventory gate。
 - [x] 使用 `streaming-messages-json`、strict whole-result JSON 与 `GROK_ATTESTED_FINAL` evidence
@@ -675,8 +688,8 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 - [ ] Supadata 无字幕 YouTube async job 尚未用 API key 轮询至 terminal。
 - [ ] 尚不能宣布多来源第一层 production ready。
 
-本轮环境：macOS acquisition probe、VPS `VM-12-6-ubuntu`、Hermes Agent `0.20.0`、
-Grok host CLI `1.0.3`、`@mozilla/readability@0.6.0`、`jsdom@26.1.0`、
+本轮历史环境：macOS acquisition probe、VPS `VM-12-6-ubuntu`、Hermes Agent `0.20.0`、
+Grok host CLI `1.0.3`（历史证据，不是目标 production 版本）、`@mozilla/readability@0.6.0`、`jsdom@26.1.0`、
 本机 Grok Build 1.0.5、`youtube-transcript-api@1.2.4`、`yt-dlp@2026.8.19`。首次证据采集时间为
 `2026-08-21T18:17:41Z` 附近，Supadata/YouTube 补充验证完成于 `2026-08-21T19:08:13Z`
 附近，第二轮完整 shadow 完成于 `2026-08-21T19:35Z` 附近；83 个 identity 与 49-call 完整 X

@@ -24,6 +24,8 @@ export type ContentRuntimeFlags = Readonly<{
   grokTimeoutMs: number;
   grokMaxOutputBytes: number;
   grokExpectedVersion: string;
+  grokRunnerSocket: string;
+  grokRunnerReleaseSha: string | null;
   httpTimeoutMs: number;
   httpMaxOutputBytes: number;
   dailyXCallLimit: number;
@@ -32,16 +34,11 @@ export type ContentRuntimeFlags = Readonly<{
   hermesDailyAudioMinutes: number;
   supadataApiKeyPresent: boolean;
   youtubeDataApiKeyPresent: boolean;
-  pollMaxXCalls: number;
-  dailyXCallBudget: number;
   revalidationUrl: string | null;
   revalidationSecret: string | null;
   editorApiKeyHashes: readonly string[];
   publisherApiKeyHashes: readonly string[];
 }>;
-
-// Keep runtime requests within the tracked Grok input schema's ceiling.
-export const CONTENT_POLL_MAX_X_CALLS_LIMIT = 20;
 
 const apiKeyHashes = (value: string | undefined): readonly string[] =>
   (value ?? '')
@@ -111,8 +108,14 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
       Number(process.env.CONTENT_SUPADATA_JOB_POLL_INTERVAL_MS ?? 5_000),
     ),
     grokTimeoutMs: Math.max(1, Number(process.env.CONTENT_GROK_TIMEOUT_MS ?? 240_000)),
-    grokMaxOutputBytes: Math.max(1, Number(process.env.CONTENT_GROK_MAX_OUTPUT_BYTES ?? 4_194_304)),
+    grokMaxOutputBytes: Math.min(
+      4_194_304,
+      Math.max(1, Number(process.env.CONTENT_GROK_MAX_OUTPUT_BYTES ?? 4_194_304)),
+    ),
     grokExpectedVersion: process.env.CONTENT_GROK_EXPECTED_VERSION?.trim() || '1.0.5',
+    grokRunnerSocket:
+      process.env.CONTENT_GROK_RUNNER_SOCKET?.trim() || '/run/letletme-grok-runner/runner.sock',
+    grokRunnerReleaseSha: process.env.CONTENT_GROK_RUNNER_RELEASE_SHA?.trim() || null,
     httpTimeoutMs: Math.max(1, Number(process.env.CONTENT_HTTP_TIMEOUT_MS ?? 40_000)),
     httpMaxOutputBytes: Math.max(1, Number(process.env.CONTENT_HTTP_MAX_OUTPUT_BYTES ?? 8_388_608)),
     dailyXCallLimit: Math.max(0, Number(process.env.CONTENT_X_DAILY_CALL_LIMIT ?? 2_400)),
@@ -127,8 +130,6 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
     ),
     supadataApiKeyPresent: Boolean(process.env.SUPADATA_API_KEY?.trim()),
     youtubeDataApiKeyPresent: Boolean(process.env.YOUTUBE_DATA_API_KEY?.trim()),
-    pollMaxXCalls: Math.max(1, Number(process.env.CONTENT_POLL_MAX_X_CALLS ?? 2)),
-    dailyXCallBudget: Math.max(1, Number(process.env.CONTENT_DAILY_X_CALL_BUDGET ?? 24)),
     revalidationUrl: process.env.BRIEFING_REVALIDATE_URL?.trim() || null,
     revalidationSecret: process.env.BRIEFING_REVALIDATE_SECRET?.trim() || null,
     editorApiKeyHashes: apiKeyHashes(process.env.CONTENT_EDITOR_API_KEY_HASHES),
@@ -207,6 +208,16 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   if (flags.grokConcurrency > 2) {
     throw new Error('CONTENT_GROK_CONCURRENCY above 2 requires a separately validated rollout');
   }
+  if (flags.grokRunnerSocket.length === 0 || !flags.grokRunnerSocket.startsWith('/')) {
+    throw new Error('CONTENT_GROK_RUNNER_SOCKET must be an absolute Unix socket path');
+  }
+  if (
+    flags.grokRunnerReleaseSha !== null &&
+    flags.grokRunnerReleaseSha !== 'unknown' &&
+    !/^[0-9a-f]{7,128}$/i.test(flags.grokRunnerReleaseSha)
+  ) {
+    throw new Error('CONTENT_GROK_RUNNER_RELEASE_SHA must be a release SHA or unknown');
+  }
   for (const [name, value] of [
     ['CONTENT_HTTP_CONCURRENCY', flags.httpConcurrency],
     ['CONTENT_HTTP_HOST_CONCURRENCY', flags.httpHostConcurrency],
@@ -227,22 +238,5 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   }
   if (flags.httpHostConcurrency > flags.httpConcurrency) {
     throw new Error('CONTENT_HTTP_HOST_CONCURRENCY cannot exceed CONTENT_HTTP_CONCURRENCY');
-  }
-  if (
-    !Number.isSafeInteger(flags.pollMaxXCalls) ||
-    flags.pollMaxXCalls < 1 ||
-    flags.pollMaxXCalls > CONTENT_POLL_MAX_X_CALLS_LIMIT
-  ) {
-    throw new Error(
-      `CONTENT_POLL_MAX_X_CALLS must be an integer from 1 to ${CONTENT_POLL_MAX_X_CALLS_LIMIT}`,
-    );
-  }
-  if (
-    !Number.isSafeInteger(flags.dailyXCallBudget) ||
-    flags.dailyXCallBudget < flags.pollMaxXCalls
-  ) {
-    throw new Error(
-      'CONTENT_DAILY_X_CALL_BUDGET must be an integer at least CONTENT_POLL_MAX_X_CALLS',
-    );
   }
 }

@@ -19,7 +19,7 @@ import {
 } from './content/workers/content-http-acquisition.queue';
 import {
   closeContentXQueue,
-  createConfiguredGrokBuildExecutor,
+  createConfiguredHostGrokRunner,
   createFormalXWorkerRuntime,
   enqueueFormalXRun,
 } from './content/workers/content-x.queue';
@@ -190,7 +190,7 @@ async function startFormalAcquisition(): Promise<void> {
   if (flags.podcastTranscriptEnabled) formalMediaRuntime = createFormalMediaWorkerRuntime();
   if (flags.xScanEnabled && flags.realGrokEnabled) {
     try {
-      const executor = createConfiguredGrokBuildExecutor();
+      const executor = createConfiguredHostGrokRunner();
       await executor.assertVersion();
       formalXRuntime = createFormalXWorkerRuntime(executor, xBudgetPolicy ?? undefined);
     } catch (error) {

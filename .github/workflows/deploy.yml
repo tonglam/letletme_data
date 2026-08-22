@@ -120,10 +120,18 @@ jobs:
             deployment_committed=false
             migration_started=false
             services_start_attempted=false
+            runner_updated=false
+            runner_previous_target=""
+            runner_previous_release=""
             on_exit() {
               original_status=$?
               trap - EXIT
               set +e
+              if [ "$original_status" -ne 0 ] && [ "$runner_updated" = true ]; then
+                scripts/rollback-host-grok-runner.sh \
+                  "/home/workspace/letletme-grok-runner" \
+                  "$runner_previous_target" "$runner_previous_release" || true
+              fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
                 if [ "$services_start_attempted" = true ]; then
                   echo "Data deployment failed after service start; preserving scheduler/worker/content-worker for recovery" >&2
@@ -199,6 +207,8 @@ jobs:
             export DATABASE_BACKUP_KEEP=${DATABASE_BACKUP_KEEP:-7}
             export DATABASE_BACKUP_PG_MAJOR=${DATABASE_BACKUP_PG_MAJOR:-15}
             export DEPLOY_SHA
+            export CONTENT_MANIFEST_GIT_REVISION="$DEPLOY_SHA"
+            export CONTENT_GROK_RUNNER_RELEASE_SHA="$DEPLOY_SHA"
             export ENV_FILE="$env_file"
             export MIGRATION_ENV_FILE="$migration_env_file"
             test -f "$env_file"
@@ -225,6 +235,20 @@ jobs:
             source scripts/deploy-state-machine.sh
             acquire_deploy_lock
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker migration backup
+            x_scan_setting=$(read_env_setting CONTENT_X_SCAN_ENABLED "$env_file" | tr '[:upper:]' '[:lower:]' || true)
+            if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]]; then
+              runner_root=/home/workspace/letletme-grok-runner
+              runner_previous_target=$(readlink -f "$runner_root/current" 2>/dev/null || true)
+              runner_previous_release=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
+              test -x scripts/deploy-host-grok-runner.sh
+              runner_updated=true
+              scripts/deploy-host-grok-runner.sh "$IMAGE_REF" "$DEPLOY_SHA" \
+                "$runner_root"
+              test -x scripts/rearm-briefing-x-after-probe.sh
+              scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
+            else
+              echo 'deploy: host Grok runner is not required while X scanning is disabled'
+            fi
             finish_stage
             start_stage preflight
             echo "deploy preflight: image pulled"

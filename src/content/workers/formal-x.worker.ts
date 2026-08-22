@@ -9,7 +9,6 @@ import { sha256CanonicalJson } from '../acquisition/canonicalization';
 import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
 import { beginFormalRun, failFormalRun } from '../acquisition/formal-run-repository';
 import {
-  GrokBuildExecutor,
   type GrokBuildExecutionResult,
   type GrokBuildExecutionHooks,
 } from '../acquisition/grok-build-executor';
@@ -24,6 +23,7 @@ import {
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
 import type { XBudgetPolicy } from '../acquisition/x-budget';
 import { compileXKeywordRequest } from '../acquisition/x-query-compiler';
+import type { XToolRequestV1 } from '../acquisition/x-query-compiler';
 import { getContentRuntimeFlags, type ContentRuntimeFlags } from '../config';
 import { getDb, type DbHandle } from '../../db/singleton';
 
@@ -48,7 +48,7 @@ export type FormalXWorkerResult = Readonly<{
 
 export type GrokBuildExecutorLike = Readonly<{
   execute: (
-    request: Parameters<GrokBuildExecutor['execute']>[0],
+    request: XToolRequestV1,
     hooks?: GrokBuildExecutionHooks,
   ) => Promise<GrokBuildExecutionResult>;
 }>;
@@ -114,7 +114,8 @@ export async function runFormalXWorker(
     if (
       run.request.jobKind !== 'X_IDENTITY' &&
       run.request.jobKind !== 'X_KEYWORD_SCAN' &&
-      run.request.jobKind !== 'X_SEMANTIC_SCAN'
+      run.request.jobKind !== 'X_SEMANTIC_SCAN' &&
+      run.request.jobKind !== 'X_THREAD_FETCH'
     ) {
       throw new Error(`X worker cannot execute ${run.request.jobKind}`);
     }
@@ -122,15 +123,11 @@ export async function runFormalXWorker(
     if (!profile || profile.revision !== run.request.profileRevision) {
       throw new Error('Persisted X profile no longer matches versioned code');
     }
-    const executor =
-      dependencies?.executor ??
-      new GrokBuildExecutor({
-        expectedVersion: flags.grokExpectedVersion,
-        timeoutMs: flags.grokTimeoutMs,
-        maximumOutputBytes: flags.grokMaxOutputBytes,
-      });
+    const executor = dependencies?.executor;
+    if (!executor) throw new Error('Host Grok runner executor is not configured');
     if (run.request.jobKind === 'X_IDENTITY') {
       const execution = await executor.execute(run.request.toolRequest, {
+        runId: job.runId,
         onProviderProcessStart: () => {
           providerProcessStarted = true;
         },
@@ -152,11 +149,14 @@ export async function runFormalXWorker(
       (scanRequest.jobKind === 'X_KEYWORD_SCAN' &&
         scanRequest.toolRequest.toolName !== 'x_keyword_search') ||
       (scanRequest.jobKind === 'X_SEMANTIC_SCAN' &&
-        scanRequest.toolRequest.toolName !== 'x_semantic_search')
+        scanRequest.toolRequest.toolName !== 'x_semantic_search') ||
+      (scanRequest.jobKind === 'X_THREAD_FETCH' &&
+        scanRequest.toolRequest.toolName !== 'x_thread_fetch')
     ) {
       throw new Error('Persisted X scan job and tool request do not agree');
     }
     const execution = await executor.execute(scanRequest.toolRequest, {
+      runId: job.runId,
       onProviderProcessStart: () => {
         providerProcessStarted = true;
       },
@@ -319,6 +319,10 @@ export async function runFormalXWorker(
         inputTokens: execution.inputTokens,
         outputTokens: execution.outputTokens,
         totalCostUsd: execution.totalCostUsd,
+        executionLocation: execution.executionLocation,
+        runnerReleaseSha: execution.runnerReleaseSha,
+        grokVersion: execution.grokVersion,
+        runnerBinaryHash: execution.runnerBinaryHash,
         returned: adapted.returnedCount,
         accepted: adapted.acceptedCount,
         rejected: adapted.rejections.length,
@@ -376,6 +380,10 @@ export async function runFormalXWorker(
                   inputTokens: scanExecution.inputTokens,
                   outputTokens: scanExecution.outputTokens,
                   totalCostUsd: scanExecution.totalCostUsd,
+                  executionLocation: scanExecution.executionLocation,
+                  runnerReleaseSha: scanExecution.runnerReleaseSha,
+                  grokVersion: scanExecution.grokVersion,
+                  runnerBinaryHash: scanExecution.runnerBinaryHash,
                   returned: scanExecution.posts.length,
                   ...(scanAccounting ?? {}),
                   rejected: rejections?.length ?? scanAccounting?.rejected ?? 0,

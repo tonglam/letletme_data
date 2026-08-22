@@ -14,11 +14,6 @@ export type PollPolicy = Readonly<{
   maxCatchupMinutes?: number;
 }>;
 
-// The default runtime ceiling is two X calls per poll.  Callers that load a
-// different CONTENT_POLL_MAX_X_CALLS value pass it explicitly so a FINAL_90
-// policy can never reserve less budget than one worker invocation consumes.
-export const DEFAULT_POLL_MAX_X_CALLS = 2;
-
 function policyObject(policy: unknown): PollPolicy {
   return policy && typeof policy === 'object' && !Array.isArray(policy)
     ? (policy as PollPolicy)
@@ -40,15 +35,11 @@ export function pollPeriodMinutes(policyValue: unknown, phase: PollPhase): numbe
       : policyNumber(policy, 'normalMinutes', 30);
 }
 
-export function pollBudget(
-  policyValue: unknown,
-  phase: PollPhase,
-  minimumXCalls = DEFAULT_POLL_MAX_X_CALLS,
-): number | null {
+export function pollBudget(policyValue: unknown, phase: PollPhase): number | null {
   if (phase !== 'FINAL_90') return null;
   const policy = policyObject(policyValue);
   const budget = Number(policy.final90Budget);
-  return Number.isSafeInteger(budget) && budget >= minimumXCalls ? budget : null;
+  return Number.isSafeInteger(budget) && budget >= 1 ? budget : null;
 }
 
 export function isPollDue(input: {
@@ -67,11 +58,7 @@ export function isPollDue(input: {
   );
 }
 
-export function resolvePollPhase(
-  policyValue: unknown,
-  now = new Date(),
-  minimumXCalls = DEFAULT_POLL_MAX_X_CALLS,
-): PollPhase {
+export function resolvePollPhase(policyValue: unknown, now = new Date()): PollPhase {
   const policy = policyObject(policyValue);
   const deadline = Date.parse(policy.deadlineAt ?? '');
   if (!Number.isFinite(deadline)) return 'NORMAL';
@@ -81,7 +68,7 @@ export function resolvePollPhase(
     minutesToDeadline > 0 &&
     minutesToDeadline <= 90 &&
     policy.final90Enabled === true &&
-    pollBudget(policy, 'FINAL_90', minimumXCalls) !== null &&
+    pollBudget(policy, 'FINAL_90') !== null &&
     Number.isFinite(onDutyUntil) &&
     onDutyUntil > now.getTime()
   )

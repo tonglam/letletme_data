@@ -1,6 +1,6 @@
 import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 
-import { GrokBuildExecutor } from '../acquisition/grok-build-executor';
+import { HostGrokRunnerClient } from '../acquisition/host-grok-runner-client';
 import type { ClaimedAcquisitionJobOutbox } from '../acquisition/job-outbox';
 import type { XBudgetPolicy } from '../acquisition/x-budget';
 import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
@@ -37,17 +37,19 @@ export async function enqueueFormalXRun(
   });
 }
 
-export function createConfiguredGrokBuildExecutor(): GrokBuildExecutor {
+export function createConfiguredHostGrokRunner(): HostGrokRunnerClient {
   const flags = getContentRuntimeFlags();
-  return new GrokBuildExecutor({
+  return new HostGrokRunnerClient({
+    socketPath: flags.grokRunnerSocket,
     expectedVersion: flags.grokExpectedVersion,
+    expectedRunnerReleaseSha: flags.grokRunnerReleaseSha,
     timeoutMs: flags.grokTimeoutMs,
-    maximumOutputBytes: flags.grokMaxOutputBytes,
+    maximumResponseBytes: flags.grokMaxOutputBytes,
   });
 }
 
 export function createFormalXWorkerRuntime(
-  executor: GrokBuildExecutorLike = createConfiguredGrokBuildExecutor(),
+  executor: GrokBuildExecutorLike = createConfiguredHostGrokRunner(),
   xBudgetPolicy?: XBudgetPolicy,
 ) {
   const flags = getContentRuntimeFlags();

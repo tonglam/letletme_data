@@ -6,9 +6,9 @@ mode=${1:-}
 env_file=${2:-}
 
 case "$mode" in
-  status | shadow | disabled) ;;
+  status | shadow-http | host-shadow | disabled) ;;
   *)
-    echo 'usage: configure-briefing-acquisition-env.sh status|shadow|disabled ENV_FILE' >&2
+    echo 'usage: configure-briefing-acquisition-env.sh status|shadow-http|host-shadow|disabled ENV_FILE' >&2
     exit 2
     ;;
 esac
@@ -149,22 +149,23 @@ changed=false
 if [[ "$mode" != status ]]; then
   publication_enabled=$(boolean_setting CONTENT_PUBLICATION_ENABLED)
   public_enabled=$(boolean_setting BRIEFING_PUBLIC_ENABLED)
-  if [[ "$mode" == shadow && ("$publication_enabled" == true || "$public_enabled" == true) ]]; then
+  if [[ ("$mode" == shadow-http || "$mode" == host-shadow) \
+    && ("$publication_enabled" == true || "$public_enabled" == true) ]]; then
     echo 'briefing rollout refused: shadow acquisition cannot alter a public publication runtime' >&2
     exit 1
   fi
 
-  if [[ "$mode" == shadow ]]; then
+  if [[ "$mode" == shadow-http || "$mode" == host-shadow ]]; then
     settings=(
       CONTENT_PIPELINE_ENABLED=true
       CONTENT_ACQUISITION_SHADOW_MODE=true
-      CONTENT_X_SCAN_ENABLED=true
+      "CONTENT_X_SCAN_ENABLED=$([[ "$mode" == host-shadow ]] && printf true || printf false)"
       CONTENT_HTTP_ACQUISITION_ENABLED=true
       "CONTENT_PODCAST_TRANSCRIPT_ENABLED=$hermes_ready"
       CONTENT_YOUTUBE_DISCOVERY_ENABLED=true
       "CONTENT_YOUTUBE_NATIVE_ENABLED=$youtube_native_ready"
       CONTENT_YOUTUBE_GENERATED_ENABLED=false
-      CONTENT_REAL_GROK_ENABLED=true
+      "CONTENT_REAL_GROK_ENABLED=$([[ "$mode" == host-shadow ]] && printf true || printf false)"
     )
   else
     pipeline_after_disable=false

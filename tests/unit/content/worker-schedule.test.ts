@@ -6,13 +6,13 @@ import {
   pollBudget,
   resolvePollPhase,
 } from '../../../src/content/poll-policy';
-import { isAcquisitionRunStale } from '../../../src/content/acquisition/run-repository';
+import { isAcquisitionRunStale } from '../../../src/content/acquisition/run-lifecycle';
 import { assertContentRuntimeFlags, type ContentRuntimeFlags } from '../../../src/content/config';
 
 const now = new Date('2026-08-20T10:00:00.000Z');
 
 describe('content worker poll policy', () => {
-  test('rejects a per-run X-call ceiling above the tracked Grok schema limit', () => {
+  test('rejects Grok concurrency above the host runner limit', () => {
     const flags: ContentRuntimeFlags = {
       pipelineEnabled: true,
       acquisitionShadowMode: true,
@@ -25,7 +25,9 @@ describe('content worker poll policy', () => {
       realGrokEnabled: false,
       publicationEnabled: false,
       briefingPublicEnabled: false,
-      grokConcurrency: 1,
+      grokConcurrency: 3,
+      grokRunnerSocket: '/run/letletme-grok-runner/runner.sock',
+      grokRunnerReleaseSha: null,
       httpConcurrency: 4,
       httpHostConcurrency: 2,
       hermesTranscriptConcurrency: 1,
@@ -47,14 +49,12 @@ describe('content worker poll policy', () => {
       hermesDailyAudioMinutes: 0,
       supadataApiKeyPresent: false,
       youtubeDataApiKeyPresent: false,
-      pollMaxXCalls: 21,
-      dailyXCallBudget: 24,
       revalidationUrl: null,
       revalidationSecret: null,
       editorApiKeyHashes: [],
       publisherApiKeyHashes: [],
     };
-    expect(() => assertContentRuntimeFlags(flags)).toThrow('from 1 to 20');
+    expect(() => assertContentRuntimeFlags(flags)).toThrow('above 2');
     expect(() =>
       assertContentRuntimeFlags({
         ...flags,
@@ -64,7 +64,6 @@ describe('content worker poll policy', () => {
         youtubeDataApiKeyPresent: true,
         supadataApiKeyPresent: true,
         supadataDailyCreditLimit: Number.NaN,
-        pollMaxXCalls: 2,
       }),
     ).toThrow('CONTENT_SUPADATA_DAILY_CREDIT_LIMIT must be a non-negative safe integer');
     expect(() =>
@@ -75,7 +74,6 @@ describe('content worker poll policy', () => {
         hermesTranscriptUrl: 'https://hermes.invalid/transcribe',
         hermesTranscriptTokenPresent: true,
         hermesDailyAudioMinutes: 1.5,
-        pollMaxXCalls: 2,
       }),
     ).toThrow('CONTENT_HERMES_DAILY_AUDIO_MINUTES must be a non-negative safe integer');
     expect(() =>
@@ -86,7 +84,6 @@ describe('content worker poll policy', () => {
         hermesTranscriptUrl: 'file:///tmp/hermes',
         hermesTranscriptTokenPresent: true,
         hermesDailyAudioMinutes: 1,
-        pollMaxXCalls: 2,
       }),
     ).toThrow('HERMES_TRANSCRIPT_URL must be an HTTP(S) URL without credentials');
   });
@@ -103,7 +100,7 @@ describe('content worker poll policy', () => {
         { ...base, final90Budget: 1, editorOnDutyUntil: '2026-08-20T10:30:00.000Z' },
         now,
       ),
-    ).toBe('APPROACHING');
+    ).toBe('FINAL_90');
   });
 
   test('uses safety lag, overlap and a bounded catch-up window', () => {
@@ -136,8 +133,7 @@ describe('content worker poll policy', () => {
     expect(pollBudget({ final90Budget: 3 }, 'NORMAL')).toBeNull();
     expect(pollBudget({ final90Budget: 3 }, 'FINAL_90')).toBe(3);
     expect(pollBudget({ final90Budget: 0 }, 'FINAL_90')).toBeNull();
-    expect(pollBudget({ final90Budget: 1 }, 'FINAL_90')).toBeNull();
-    expect(pollBudget({ final90Budget: 1 }, 'FINAL_90', 1)).toBe(1);
+    expect(pollBudget({ final90Budget: 1 }, 'FINAL_90')).toBe(1);
   });
 
   test('reclaims only acquisition runs whose lease anchor is stale', () => {
