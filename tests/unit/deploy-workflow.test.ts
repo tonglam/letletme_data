@@ -15,6 +15,7 @@ const dockerfile = readFileSync('Dockerfile', 'utf8');
 const hostRunnerDeployScript = readFileSync('scripts/deploy-host-grok-runner.sh', 'utf8');
 const controlProbeScript = readFileSync('scripts/run-briefing-control-probe.sh', 'utf8');
 const hostRunnerRollbackScript = readFileSync('scripts/rollback-host-grok-runner.sh', 'utf8');
+const hostRunnerService = readFileSync('deploy/letletme-grok-runner.service', 'utf8');
 const quote = String.fromCharCode(39);
 
 describe('release workflow gates', () => {
@@ -91,6 +92,8 @@ describe('release workflow gates', () => {
     expect(hostRunnerDeployScript).toContain('prune_old_releases');
     expect(hostRunnerDeployScript).toContain('keep_recent=3');
     expect(hostRunnerRollbackScript).toContain('/home/workspace/letletme-grok-runner');
+    expect(hostRunnerService).toContain('RuntimeDirectoryMode=0770');
+    expect(hostRunnerService).toContain('RuntimeDirectoryPreserve=yes');
   });
 
   test('requires exact successful CI for both automatic and manual deployment', () => {

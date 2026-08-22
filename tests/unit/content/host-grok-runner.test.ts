@@ -272,6 +272,7 @@ describe('host Grok runner client contract', () => {
     });
     let probeRequests = 0;
     let probeProcessStarted = 0;
+    let probeCompleted = 0;
     await expect(
       client.assertVersion({
         onProbeRequest: async () => {
@@ -280,10 +281,14 @@ describe('host Grok runner client contract', () => {
         onProbeProcessStart: () => {
           probeProcessStarted += 1;
         },
+        onProbeCompleted: () => {
+          probeCompleted += 1;
+        },
       }),
     ).resolves.toBeUndefined();
     expect(probeRequests).toBe(1);
     expect(probeProcessStarted).toBe(1);
+    expect(probeCompleted).toBe(1);
   });
 
   test('rechecks process-local probe state after a prior successful health check', async () => {

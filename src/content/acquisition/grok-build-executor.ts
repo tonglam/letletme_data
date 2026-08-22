@@ -87,6 +87,7 @@ export type GrokBuildExecutionHooks = Readonly<{
   onProviderProcessStart?: () => void;
   onProbeRequest?: () => Promise<void>;
   onProbeProcessStart?: () => void;
+  onProbeCompleted?: () => void;
 }>;
 
 type JsonRecord = Record<string, unknown>;

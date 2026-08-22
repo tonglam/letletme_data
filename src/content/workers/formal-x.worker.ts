@@ -28,7 +28,6 @@ import {
 } from '../acquisition/x-post-adapter';
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
 import {
-  commitOneXRunBudgetUnit,
   releaseOneXRunBudgetUnit,
   releaseXRunBudgetsExcept,
   reserveXRunBudgets,
@@ -123,8 +122,8 @@ export async function runFormalXWorker(
   let probeReservationIds: readonly string[] | null = null;
   let probeIncrementedReservationIds: readonly string[] = [];
   let probeProcessStarted = false;
+  let probeCompletedSuccessfully = false;
   let releaseProbeBudget: (() => Promise<void>) | null = null;
-  let commitProbeBudget: (() => Promise<void>) | null = null;
   let releaseMainBudgetAfterProbe: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
@@ -209,6 +208,9 @@ export async function runFormalXWorker(
       onProbeProcessStart: () => {
         probeProcessStarted = true;
       },
+      onProbeCompleted: () => {
+        probeCompletedSuccessfully = true;
+      },
     };
     releaseProbeBudget = async (): Promise<void> => {
       if (probeReservationIds === null) return;
@@ -226,22 +228,6 @@ export async function runFormalXWorker(
         if (!released) throw new Error('X probe budget reservation disappeared before release');
       });
       probeReservationIds = null;
-    };
-    commitProbeBudget = async (): Promise<void> => {
-      if (probeReservationIds === null) return;
-      const reservationIds = probeReservationIds;
-      await db.transaction(async (tx) => {
-        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
-        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
-        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
-        const committed = await commitOneXRunBudgetUnit({
-          tx,
-          runId: job.runId,
-          dbNow,
-          reservationIds,
-        });
-        if (!committed) throw new Error('X probe budget reservation disappeared before commit');
-      });
     };
     releaseMainBudgetAfterProbe = async (): Promise<void> => {
       if (probeReservationIds === null) return;
@@ -514,7 +500,9 @@ export async function runFormalXWorker(
       const mainProviderProcessStarted = providerProcessStarted;
       const probeOnly = probeProcessStarted && !mainProviderProcessStarted;
       const probeEvidence = probeProcessStarted
-        ? hostXProbeEvidence('CONTROL_PLANE_PROBE_FAILED')
+        ? hostXProbeEvidence(
+            probeCompletedSuccessfully ? 'CONTROL_PLANE_PROBE' : 'CONTROL_PLANE_PROBE_FAILED',
+          )
         : undefined;
       const transientPreProviderFailure = [
         'RUNNER_CAPACITY',
@@ -523,13 +511,7 @@ export async function runFormalXWorker(
         'RUNNER_NOT_READY',
       ].includes(failure.failureClass);
       if (transientPreProviderFailure && !mainProviderProcessStarted) {
-        if (probeOnly) {
-          // Commit the probe unit but leave the original execution unit
-          // reserved so capacity deferral can safely requeue a saturation
-          // follow-up. Ordinary scheduled runs release that original unit in
-          // deferFormalRunForCapacity; a follow-up keeps it for the retry.
-          await commitProbeBudget?.();
-        } else {
+        if (!probeOnly) {
           await releaseProbeBudget?.();
         }
         const deferred = await deferFormalRunForCapacity({
@@ -537,6 +519,7 @@ export async function runFormalXWorker(
           metrics: { failureClass: failure.failureClass },
           failureClass: failure.failureClass,
           probeEvidence,
+          probeReservationIds: probeOnly ? (probeReservationIds ?? undefined) : undefined,
           db,
         });
         if (deferred) {

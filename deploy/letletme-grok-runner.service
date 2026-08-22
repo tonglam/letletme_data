@@ -19,7 +19,8 @@ Environment=CONTENT_GROK_EXPECTED_VERSION=1.0.5
 Environment=CONTENT_GROK_TIMEOUT_MS=240000
 Environment=CONTENT_GROK_MAX_OUTPUT_BYTES=4194304
 RuntimeDirectory=letletme-grok-runner
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 UMask=0007
 ExecStartPre=/usr/bin/test -x /home/deploy/.grok/bin/grok
 ExecStartPre=/bin/sh -c "test -x /usr/bin/bwrap || test -x /bin/bwrap"

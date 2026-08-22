@@ -36,6 +36,7 @@ import {
   compileXUserRequest,
 } from './x-query-compiler';
 import {
+  commitOneXRunBudgetUnit,
   commitRunBudgets,
   reconcileReservedProviderBudget,
   releaseXRunBudgets,
@@ -1128,6 +1129,10 @@ export async function failFormalRun(input: {
     const currentGrokProviderUnits =
       (input.providerEvidence?.providerUnits ?? (input.providerProcessStarted ? 1 : 0)) +
       (input.probeEvidence?.providerUnits ?? 0);
+    const currentGrokCallCount =
+      (input.providerEvidence ? 1 : 0) +
+      (input.probeEvidence ? 1 : 0) +
+      (!input.providerEvidence && input.providerProcessStarted ? 1 : 0);
     const priorGrokProviderUnits = Number(run.providerUnits ?? 0);
     if (!Number.isFinite(priorGrokProviderUnits) || priorGrokProviderUnits < 0) {
       throw new Error('Failed formal run has invalid persisted Grok provider units');
@@ -1416,12 +1421,7 @@ export async function failFormalRun(input: {
                 : undefined
             : String(supadataTotalProviderUnits),
         xCallCount: grokProviderAttempted
-          ? priorGrokTraceCount +
-            (input.providerEvidence ? 1 : 0) +
-            (input.probeEvidence ? 1 : 0) +
-            (!input.providerEvidence && !input.probeEvidence && input.providerProcessStarted
-              ? 1
-              : 0)
+          ? priorGrokTraceCount + currentGrokCallCount
           : priorGrokTraceCount,
         traceVerified: input.providerEvidence !== undefined,
         runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify(
@@ -1538,6 +1538,7 @@ export async function deferFormalRunForCapacity(input: {
   runId: string;
   metrics: Readonly<Record<string, unknown>>;
   probeEvidence?: FormalRunProbeEvidence;
+  probeReservationIds?: readonly string[];
   failureClass?: string;
   retryDelayMs?: number;
   db?: DbHandle;
@@ -1594,6 +1595,18 @@ export async function deferFormalRunForCapacity(input: {
           !/^[0-9a-f]{64}$/.test(input.probeEvidence.providerJobIdHash))
       ) {
         throw new Error('Deferred formal run has invalid X probe evidence');
+      }
+      if (!input.probeReservationIds || input.probeReservationIds.length === 0) {
+        throw new Error('Deferred formal run has probe evidence without reserved probe budget');
+      }
+      const committedProbe = await commitOneXRunBudgetUnit({
+        tx,
+        runId: input.runId,
+        dbNow,
+        reservationIds: input.probeReservationIds,
+      });
+      if (!committedProbe) {
+        throw new Error('Deferred formal run probe budget reservation disappeared before commit');
       }
       const traceRows = await tx
         .select({ maximum: max(contentAcquisitionProviderTraces.sequence) })

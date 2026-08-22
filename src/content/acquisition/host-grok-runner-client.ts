@@ -201,7 +201,10 @@ export class HostGrokRunnerClient {
   }
 
   async assertVersion(
-    hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+    hooks?: Pick<
+      GrokBuildExecutionHooks,
+      'onProbeRequest' | 'onProbeProcessStart' | 'onProbeCompleted'
+    >,
     deadlineAt = Date.now() + EXECUTION_DEADLINE_MS,
   ): Promise<void> {
     // Health is deliberately checked on every execution. The runner's probe
@@ -220,7 +223,10 @@ export class HostGrokRunnerClient {
   }
 
   private async inspectHealth(
-    hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+    hooks?: Pick<
+      GrokBuildExecutionHooks,
+      'onProbeRequest' | 'onProbeProcessStart' | 'onProbeCompleted'
+    >,
     deadlineAt = Date.now() + EXECUTION_DEADLINE_MS,
   ): Promise<void> {
     const remainingTimeout = (maximumMs: number): number => {
@@ -296,7 +302,10 @@ export class HostGrokRunnerClient {
   }
 
   private async refreshProbe(
-    hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+    hooks?: Pick<
+      GrokBuildExecutionHooks,
+      'onProbeRequest' | 'onProbeProcessStart' | 'onProbeCompleted'
+    >,
     deadlineAt = Date.now() + EXECUTION_DEADLINE_MS,
   ): Promise<void> {
     if (this.probeCheck) return this.probeCheck;
@@ -365,6 +374,7 @@ export class HostGrokRunnerClient {
           `Expected runner release ${this.expectedRunnerReleaseSha}, observed ${parsed.data.runnerReleaseSha}`,
         );
       }
+      hooks?.onProbeCompleted?.();
     })();
     this.probeCheck = probe;
     try {
