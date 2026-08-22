@@ -30,6 +30,7 @@ export type ContentRuntimeFlags = Readonly<{
   httpMaxOutputBytes: number;
   dailyXCallLimit: number;
   final90XCallLimit: number;
+  identityXCallLimit: number;
   supadataDailyCreditLimit: number;
   hermesDailyAudioMinutes: number;
   supadataApiKeyPresent: boolean;
@@ -123,6 +124,7 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
     httpMaxOutputBytes: Math.max(1, Number(process.env.CONTENT_HTTP_MAX_OUTPUT_BYTES ?? 8_388_608)),
     dailyXCallLimit: Math.max(0, Number(process.env.CONTENT_X_DAILY_CALL_LIMIT ?? 2_400)),
     final90XCallLimit: Math.max(0, Number(process.env.CONTENT_X_FINAL90_CALL_LIMIT ?? 300)),
+    identityXCallLimit: Math.max(0, Number(process.env.CONTENT_X_IDENTITY_CALL_LIMIT ?? 100)),
     supadataDailyCreditLimit: Math.max(
       0,
       Number(process.env.CONTENT_SUPADATA_DAILY_CREDIT_LIMIT ?? 0),
@@ -144,6 +146,7 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   for (const [name, value] of [
     ['CONTENT_X_DAILY_CALL_LIMIT', flags.dailyXCallLimit],
     ['CONTENT_X_FINAL90_CALL_LIMIT', flags.final90XCallLimit],
+    ['CONTENT_X_IDENTITY_CALL_LIMIT', flags.identityXCallLimit],
     ['CONTENT_SUPADATA_DAILY_CREDIT_LIMIT', flags.supadataDailyCreditLimit],
     ['CONTENT_HERMES_DAILY_AUDIO_MINUTES', flags.hermesDailyAudioMinutes],
   ] as const) {
