@@ -8,6 +8,7 @@ import { repairTournamentTrendScopes } from '../jobs/tournament-trends-repair.jo
 import { runLaunchMonitor } from '../jobs/launch.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { enqueueCoreSnapshotJob, enqueuePlayerStatsSyncJob } from '../jobs/data-sync-enqueue';
+import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
   enqueueEntryInfoSyncJob,
   enqueueEntryPicksSyncJob,
@@ -25,7 +26,6 @@ import {
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplPublication,
 } from '../services/my-fpl-snapshot-publication.service';
-import { seasonRepository } from '../repositories/seasons';
 import {
   MAINTENANCE_JOBS,
   maintenanceQueue,
@@ -148,7 +148,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
         if (!job.data.eventId || !job.data.snapshotKind) {
           throw new Error('My FPL snapshot job is missing eventId or snapshotKind');
         }
-        const season = await seasonRepository.findCurrent();
+        const season = await requireCurrentSeasonForJob(job.data);
         const active = await getActiveMyFplPublication(season, job.data.eventId);
         const hasExplicitFinalOverride =
           job.data.snapshotKind === 'FINAL' &&

@@ -192,8 +192,7 @@ GRANT SELECT
   ON TABLE competition.my_fpl_snapshot_publications,
              competition.my_fpl_snapshot_entries,
              competition.my_fpl_snapshot_tournament_rows,
-             competition.my_fpl_snapshot_tournament_aggregates,
-             competition.my_fpl_snapshot_publication_outbox
+             competition.my_fpl_snapshot_tournament_aggregates
   TO letletme_graphql_reader;
 GRANT SELECT, USAGE
   ON SEQUENCE competition.my_fpl_snapshot_revision_seq TO letletme_data_writer;

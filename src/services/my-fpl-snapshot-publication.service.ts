@@ -971,14 +971,23 @@ export async function captureMyFplSnapshot(
       ORDER BY event_id
     `;
     const historyRows = await tx<(HistoryRow & { entry_id: number })[]>`
-      SELECT result.entry_id, result.event_id, result.event_points, result.event_rank,
-             result.overall_points, result.overall_rank, result.event_transfers,
-             result.event_transfers_cost, result.event_net_points,
-             result.event_bench_points, result.event_auto_sub_points,
-             result.event_chip::text,
-             result.captain_points, player.web_name AS captain_web_name,
-             team.short_name AS captain_team_short_name,
-             result.team_value, result.bank
+      SELECT result.entry_id,
+             result.event_id AS "eventId",
+             result.event_points AS "eventPoints",
+             result.event_rank AS "eventRank",
+             result.overall_points AS "overallPoints",
+             result.overall_rank AS "overallRank",
+             result.event_transfers AS "eventTransfers",
+             result.event_transfers_cost AS "eventTransfersCost",
+             result.event_net_points AS "eventNetPoints",
+             result.event_bench_points AS "eventBenchPoints",
+             result.event_auto_sub_points AS "eventAutoSubPoints",
+             result.event_chip::text AS "eventChip",
+             result.captain_points AS "eventCaptainPoints",
+             player.web_name AS "captainWebName",
+             team.short_name AS "captainTeamShortName",
+             result.team_value AS "teamValue",
+             result.bank
       FROM competition.entry_event_results result
       LEFT JOIN fpl.players player
         ON player.season_id = result.season_id
@@ -1187,13 +1196,34 @@ export async function captureMyFplSnapshot(
       });
     }
 
+    const configuredTournaments = await tx<{ tournament_id: number; total_team_num: number }[]>`
+      SELECT tournament_id, total_team_num
+      FROM competition.tournaments
+      WHERE season_id = ${season.seasonId}
+      ORDER BY tournament_id
+    `;
     const tournamentMembership = await tx<{ tournament_id: number; entry_id: number }[]>`
       SELECT tournament_id, entry_id
       FROM competition.tournament_entries
       WHERE season_id = ${season.seasonId}
       ORDER BY tournament_id, entry_id
     `;
-    const tournamentIds = [...new Set(tournamentMembership.map((row) => row.tournament_id))];
+    const tournamentIds = configuredTournaments.map((row) => row.tournament_id);
+    const membershipCounts = new Map<number, number>();
+    for (const membership of tournamentMembership) {
+      membershipCounts.set(
+        membership.tournament_id,
+        (membershipCounts.get(membership.tournament_id) ?? 0) + 1,
+      );
+    }
+    for (const tournament of configuredTournaments) {
+      const membershipCount = membershipCounts.get(tournament.tournament_id) ?? 0;
+      if (membershipCount !== tournament.total_team_num) {
+        throw new MyFplSnapshotIncompleteError(
+          `Tournament ${tournament.tournament_id} roster is incomplete: expected ${tournament.total_team_num}, got ${membershipCount}`,
+        );
+      }
+    }
     const tournamentRows = await tx<TournamentRow[]>`
       WITH current_rows AS (
         SELECT roster.tournament_id, roster.entry_id,
@@ -1244,6 +1274,9 @@ export async function captureMyFplSnapshot(
       ORDER BY current_rows.tournament_id, current_rows.entry_id
     `;
     const tournamentRowsByTournament = groupBy(tournamentRows, (row) => row.tournament_id);
+    const tournamentRowByMembership = new Map(
+      tournamentRows.map((row) => [`${row.tournament_id}:${row.entry_id}`, row] as const),
+    );
     const entryById = new Map(entries.map((entry) => [entry.entry_id, entry]));
     for (const membership of tournamentMembership) {
       const entry = entryById.get(membership.entry_id);
@@ -1252,10 +1285,8 @@ export async function captureMyFplSnapshot(
           `Tournament ${membership.tournament_id} references unknown entry ${membership.entry_id}`,
         );
       }
-      const row = tournamentRows.find(
-        (candidate) =>
-          candidate.tournament_id === membership.tournament_id &&
-          candidate.entry_id === membership.entry_id,
+      const row = tournamentRowByMembership.get(
+        `${membership.tournament_id}:${membership.entry_id}`,
       );
       const isEmpty = (entry.started_event ?? 1) > eventId;
       if (!row || (!isEmpty && row.event_net_points === null)) {
@@ -1320,10 +1351,11 @@ export async function captureMyFplSnapshot(
       );
       const currentRanks = rankForBoard(boardRows, 'eventNetPoints');
       const previousRanks = rankForBoard(boardRows, 'previousEventNetPoints');
+      const sourceRowsByEntry = new Map(
+        sourceRows.map((sourceRow) => [sourceRow.entry_id, sourceRow]),
+      );
       for (const row of boardRows) {
-        const sourceRow = sourceRows.find(
-          (candidate) => candidate.entry_id === integerValue(row.entryId),
-        );
+        const sourceRow = sourceRowsByEntry.get(integerValue(row.entryId));
         // Points-race group ranks are authoritative for the tournament rank;
         // the raw event-net-points ordering is only the full-field fallback
         // used by tournaments without a group-result rank.
@@ -1356,7 +1388,9 @@ export async function captureMyFplSnapshot(
         'My FPL snapshot contains an invalid source timestamp',
       );
     }
-    const sourceCheckedAt = new Date(Math.max(now.getTime(), ...sourceTimes));
+    const sourceCheckedAt = new Date(
+      sourceTimes.reduce((latest, value) => Math.max(latest, value), now.getTime()),
+    );
     const content = {
       seasonId: season.seasonId,
       eventId,
@@ -1669,36 +1703,70 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
         throw new Error(`Invalid My FPL snapshot outbox manifest ${row.outbox_id}`);
       }
       const manifest = row.manifest;
-      const result = (await redis.eval(
-        MY_FPL_SNAPSHOT_REDIS_ACTIVATE_SCRIPT,
-        1,
-        myFplSnapshotRedisManifestKey(manifest.seasonCode, manifest.eventId),
-        JSON.stringify(manifest),
-      )) as [string, string?];
-      const status = result[0];
-      if (status === 'stale') {
-        await db`
+      // Keep the publication advisory lock until the Redis activation and
+      // delivery receipt commit. A capture racing after the claim either
+      // waits for this transaction or is observed as inactive before Redis is
+      // touched; Redis can never be left on an inactive database revision.
+      const status = await db.begin(async (tx) => {
+        await tx`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${`my-fpl:${row.season_id}:${row.event_id}`}, 0)
+          )
+        `;
+        const ownership = await tx<{ active: boolean }[]>`
+          SELECT publication.active
+          FROM competition.my_fpl_snapshot_publication_outbox outbox
+          JOIN competition.my_fpl_snapshot_publications publication
+            ON publication.season_id = outbox.season_id
+           AND publication.event_id = outbox.event_id
+           AND publication.revision = outbox.revision
+          WHERE outbox.outbox_id = ${row.outbox_id}::uuid
+            AND outbox.lease_owner = ${owner}
+          FOR UPDATE
+        `;
+        if (!ownership[0]?.active) {
+          await tx`
+            UPDATE competition.my_fpl_snapshot_publication_outbox
+            SET status = 'SUPERSEDED', delivered_at = clock_timestamp(),
+                lease_owner = NULL, lease_expires_at = NULL,
+                last_error = 'Publication is no longer the active My FPL revision',
+                updated_at = clock_timestamp()
+            WHERE outbox_id = ${row.outbox_id}::uuid AND lease_owner = ${owner}
+          `;
+          return 'superseded' as const;
+        }
+
+        const activation = (await redis.eval(
+          MY_FPL_SNAPSHOT_REDIS_ACTIVATE_SCRIPT,
+          1,
+          myFplSnapshotRedisManifestKey(manifest.seasonCode, manifest.eventId),
+          JSON.stringify(manifest),
+        )) as [string, string?];
+        if (activation[0] === 'stale') {
+          await tx`
+            UPDATE competition.my_fpl_snapshot_publication_outbox
+            SET status = 'SUPERSEDED', delivered_at = clock_timestamp(),
+                lease_owner = NULL, lease_expires_at = NULL,
+                last_error = 'A newer My FPL revision already owns the Redis manifest',
+                updated_at = clock_timestamp()
+            WHERE outbox_id = ${row.outbox_id}::uuid AND lease_owner = ${owner}
+          `;
+          return 'superseded' as const;
+        }
+        if (activation[0] !== 'published') {
+          throw new Error(`My FPL Redis manifest activation failed: ${activation[0]}`);
+        }
+        await tx`
           UPDATE competition.my_fpl_snapshot_publication_outbox
-          SET status = 'SUPERSEDED', delivered_at = clock_timestamp(),
+          SET status = 'DELIVERED', delivered_at = clock_timestamp(),
               lease_owner = NULL, lease_expires_at = NULL,
-              last_error = 'A newer My FPL revision already owns the Redis manifest',
-              updated_at = clock_timestamp()
+              last_error = NULL, updated_at = clock_timestamp()
           WHERE outbox_id = ${row.outbox_id}::uuid AND lease_owner = ${owner}
         `;
-        superseded += 1;
-        continue;
-      }
-      if (status !== 'published') {
-        throw new Error(`My FPL Redis manifest activation failed: ${status}`);
-      }
-      await db`
-        UPDATE competition.my_fpl_snapshot_publication_outbox
-        SET status = 'DELIVERED', delivered_at = clock_timestamp(),
-            lease_owner = NULL, lease_expires_at = NULL,
-            last_error = NULL, updated_at = clock_timestamp()
-        WHERE outbox_id = ${row.outbox_id}::uuid AND lease_owner = ${owner}
-      `;
-      delivered += 1;
+        return 'delivered' as const;
+      });
+      if (status === 'superseded') superseded += 1;
+      else delivered += 1;
     } catch (error) {
       failed += 1;
       logWarn('My FPL snapshot Redis manifest delivery failed', {
