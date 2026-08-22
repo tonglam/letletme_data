@@ -59,7 +59,7 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(transaction).toContain('client.begin(beginOptions, operation)');
     expect(trends).toContain(`isolationLevel: '${repeatableRead}'`);
     expect(trends).not.toContain('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-    expect(tournamentWorker).toContain(`isolationLevel: '${repeatableRead}'`);
+    expect(tournamentWorker).not.toContain('TREND_PUBLICATION_JOB_NAMES');
   });
 
   test('waits through transient API port-proxy teardown before rejecting an unknown listener', () => {
