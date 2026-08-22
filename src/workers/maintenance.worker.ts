@@ -37,6 +37,7 @@ import {
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
+  renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -48,10 +49,38 @@ import { entrySyncQueue } from '../queues/entry-sync.queue';
 import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
 import { clearMyFplRefreshJobs, listMyFplRefreshJobs } from '../services/my-fpl-refresh-tracker';
 
-const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 10 * 60_000;
+// A full current-season snapshot fans out picks, results, transfers, and the
+// tournament cascade across every known entry. The coordinator timeout must
+// cover the complete barrier; a 10-minute window expires before the current
+// season's ~1,700 entries finish even while the workers are making progress.
+// The maintenance retry cadence remains 30 minutes, so a failed/partial run
+// still leaves the previous active publication serving.
+const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 30 * 60_000;
 const MY_FPL_REFRESH_WAIT_POLL_MS = 2_000;
+const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
 const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+
+function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void {
+  const obligationId = job.data.obligationId;
+  if (!obligationId) return () => undefined;
+
+  const timer = setInterval(() => {
+    void renewSchedulerObligation({
+      obligationId,
+      generation: job.data.obligationGeneration,
+    }).catch((error) => {
+      logError('Failed to renew maintenance scheduler obligation lease', error, {
+        jobId: job.id,
+        jobName: job.name,
+        obligationId,
+        generation: job.data.obligationGeneration,
+      });
+    });
+  }, SCHEDULER_LEASE_HEARTBEAT_MS);
+
+  return () => clearInterval(timer);
+}
 
 /**
  * Refresh jobs fan out into keyset chunks and tournament cascade children. A
@@ -141,131 +170,136 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
     attempt: job.attemptsMade + 1,
   };
   logJobTriggered(context);
-  return runTrackedJob(context, async () => {
-    switch (job.name) {
-      case MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS:
-        return runPlayerMarketFreshnessWatchdog();
-      case MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY:
-        return repairPlayerSeasonSummaries();
-      case MAINTENANCE_JOBS.TOURNAMENT_TRENDS:
-        return repairTournamentTrendScopes();
-      case MAINTENANCE_JOBS.BUG_REPORT_CLEANUP: {
-        const result = await runBugReportCleanup();
-        if (result.retried > 0) {
-          throw new Error(`Bug report cleanup left ${result.retried} row(s) for retry`);
+  const stopLeaseHeartbeat = startSchedulerLeaseHeartbeat(job);
+  try {
+    return await runTrackedJob(context, async () => {
+      switch (job.name) {
+        case MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS:
+          return runPlayerMarketFreshnessWatchdog();
+        case MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY:
+          return repairPlayerSeasonSummaries();
+        case MAINTENANCE_JOBS.TOURNAMENT_TRENDS:
+          return repairTournamentTrendScopes();
+        case MAINTENANCE_JOBS.BUG_REPORT_CLEANUP: {
+          const result = await runBugReportCleanup();
+          if (result.retried > 0) {
+            throw new Error(`Bug report cleanup left ${result.retried} row(s) for retry`);
+          }
+          return result;
         }
-        return result;
-      }
-      case MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION:
-        return runBugReportScreenshotRetention();
-      case MAINTENANCE_JOBS.LAUNCH_MONITOR:
-        return runLaunchMonitor({ source: 'cron' });
-      case MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION:
-        return runPostMatchConsolidation();
-      case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT: {
-        if (!job.data.eventId || !job.data.snapshotKind) {
-          throw new Error('My FPL snapshot job is missing eventId or snapshotKind');
-        }
-        const season = await requireCurrentSeasonForJob(job.data);
-        const active = await getActiveMyFplPublication(season, job.data.eventId);
-        const hasExplicitFinalOverride =
-          job.data.snapshotKind === 'FINAL' &&
-          Boolean(job.data.snapshotActor) &&
-          Boolean(job.data.snapshotReason) &&
-          Boolean(job.data.snapshotIdempotencyKey);
-        if (
-          active?.kind === 'FINAL' &&
-          (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
-        ) {
-          return { status: 'noop', publication: active };
-        }
+        case MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION:
+          return runBugReportScreenshotRetention();
+        case MAINTENANCE_JOBS.LAUNCH_MONITOR:
+          return runLaunchMonitor({ source: 'cron' });
+        case MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION:
+          return runPostMatchConsolidation();
+        case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT: {
+          if (!job.data.eventId || !job.data.snapshotKind) {
+            throw new Error('My FPL snapshot job is missing eventId or snapshotKind');
+          }
+          const season = await requireCurrentSeasonForJob(job.data);
+          const active = await getActiveMyFplPublication(season, job.data.eventId);
+          const hasExplicitFinalOverride =
+            job.data.snapshotKind === 'FINAL' &&
+            Boolean(job.data.snapshotActor) &&
+            Boolean(job.data.snapshotReason) &&
+            Boolean(job.data.snapshotIdempotencyKey);
+          if (
+            active?.kind === 'FINAL' &&
+            (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
+          ) {
+            return { status: 'noop', publication: active };
+          }
 
-        // Refresh the mutable inputs for this retry attempt first. The
-        // publication service remains fail-closed, so an upstream 503, a
-        // missing row, or a partial sync leaves the previous active revision
-        // serving while this job retries in 30 minutes.
-        const attemptKey = `${job.data.runId}-a${job.attemptsMade + 1}`;
-        const source = job.data.snapshotKind === 'FINAL' ? 'reconcile' : 'catchup';
-        await Promise.all([
-          enqueueCoreSnapshotJob(season, source, {
-            jobId: `my-fpl-${attemptKey}-core`,
-            runId: attemptKey,
-            removeOnSettle: false,
-          }),
-          enqueuePlayerStatsSyncJob(season, source, {
-            eventId: job.data.eventId,
-            jobId: `my-fpl-${attemptKey}-player-stats`,
-            runId: attemptKey,
-            removeOnSettle: false,
-          }),
-          enqueueEntryInfoSyncJob(season, source, {
-            eventId: job.data.eventId,
-            jobId: `my-fpl-${attemptKey}-entry-info`,
-            runId: attemptKey,
-            queueKey: `my-fpl-${attemptKey}-entry-info`,
-            removeOnSettle: false,
-          }),
-          enqueueEntryPicksSyncJob(season, source, {
-            eventId: job.data.eventId,
-            jobId: `my-fpl-${attemptKey}-entry-picks`,
-            runId: attemptKey,
-            queueKey: `my-fpl-${attemptKey}-entry-picks`,
-            removeOnSettle: false,
-          }),
-          enqueueEntryResultsSyncJob(season, source, {
-            eventId: job.data.eventId,
-            jobId: `my-fpl-${attemptKey}-entry-results`,
-            runId: attemptKey,
-            queueKey: `my-fpl-${attemptKey}-entry-results`,
-            removeOnSettle: false,
-          }),
-          enqueueEntryTransfersSyncJob(season, source, {
-            eventId: job.data.eventId,
-            jobId: `my-fpl-${attemptKey}-entry-transfers`,
-            runId: attemptKey,
-            queueKey: `my-fpl-${attemptKey}-entry-transfers`,
-            removeOnSettle: false,
-          }),
-          enqueueTournamentRosterSync(season, source, {
-            finalizedEventId: job.data.eventId,
-            jobId: `my-fpl-${attemptKey}-tournament-roster`,
-            runId: attemptKey,
-          }),
-          enqueueTournamentEventResults(season, job.data.eventId, source, {
-            jobId: `my-fpl-${attemptKey}-tournament-results`,
-            runId: attemptKey,
-          }),
-          enqueueTournamentEventPicks(season, job.data.eventId, source, {
-            jobId: `my-fpl-${attemptKey}-tournament-picks`,
-            runId: attemptKey,
-          }),
-          enqueueTournamentTransfersPre(season, job.data.eventId, source, {
-            jobId: `my-fpl-${attemptKey}-tournament-transfers`,
-            runId: attemptKey,
-          }),
-        ]);
-        await waitForMyFplRefreshJobs(attemptKey);
-        const capture = await captureMyFplSnapshot(
-          season,
-          job.data.eventId,
-          job.data.snapshotKind,
-          {
-            ...(job.data.snapshotActor ? { actor: job.data.snapshotActor } : {}),
-            ...(job.data.snapshotReason ? { reason: job.data.snapshotReason } : {}),
-            ...(job.data.snapshotIdempotencyKey
-              ? { idempotencyKey: job.data.snapshotIdempotencyKey }
-              : {}),
-          },
-        );
-        const redis = await dispatchMyFplSnapshotPublicationOutbox({ limit: 20 });
-        return { ...capture, redis };
+          // Refresh the mutable inputs for this retry attempt first. The
+          // publication service remains fail-closed, so an upstream 503, a
+          // missing row, or a partial sync leaves the previous active revision
+          // serving while this job retries in 30 minutes.
+          const attemptKey = `${job.data.runId}-a${job.attemptsMade + 1}`;
+          const source = job.data.snapshotKind === 'FINAL' ? 'reconcile' : 'catchup';
+          await Promise.all([
+            enqueueCoreSnapshotJob(season, source, {
+              jobId: `my-fpl-${attemptKey}-core`,
+              runId: attemptKey,
+              removeOnSettle: false,
+            }),
+            enqueuePlayerStatsSyncJob(season, source, {
+              eventId: job.data.eventId,
+              jobId: `my-fpl-${attemptKey}-player-stats`,
+              runId: attemptKey,
+              removeOnSettle: false,
+            }),
+            enqueueEntryInfoSyncJob(season, source, {
+              eventId: job.data.eventId,
+              jobId: `my-fpl-${attemptKey}-entry-info`,
+              runId: attemptKey,
+              queueKey: `my-fpl-${attemptKey}-entry-info`,
+              removeOnSettle: false,
+            }),
+            enqueueEntryPicksSyncJob(season, source, {
+              eventId: job.data.eventId,
+              jobId: `my-fpl-${attemptKey}-entry-picks`,
+              runId: attemptKey,
+              queueKey: `my-fpl-${attemptKey}-entry-picks`,
+              removeOnSettle: false,
+            }),
+            enqueueEntryResultsSyncJob(season, source, {
+              eventId: job.data.eventId,
+              jobId: `my-fpl-${attemptKey}-entry-results`,
+              runId: attemptKey,
+              queueKey: `my-fpl-${attemptKey}-entry-results`,
+              removeOnSettle: false,
+            }),
+            enqueueEntryTransfersSyncJob(season, source, {
+              eventId: job.data.eventId,
+              jobId: `my-fpl-${attemptKey}-entry-transfers`,
+              runId: attemptKey,
+              queueKey: `my-fpl-${attemptKey}-entry-transfers`,
+              removeOnSettle: false,
+            }),
+            enqueueTournamentRosterSync(season, source, {
+              finalizedEventId: job.data.eventId,
+              jobId: `my-fpl-${attemptKey}-tournament-roster`,
+              runId: attemptKey,
+            }),
+            enqueueTournamentEventResults(season, job.data.eventId, source, {
+              jobId: `my-fpl-${attemptKey}-tournament-results`,
+              runId: attemptKey,
+            }),
+            enqueueTournamentEventPicks(season, job.data.eventId, source, {
+              jobId: `my-fpl-${attemptKey}-tournament-picks`,
+              runId: attemptKey,
+            }),
+            enqueueTournamentTransfersPre(season, job.data.eventId, source, {
+              jobId: `my-fpl-${attemptKey}-tournament-transfers`,
+              runId: attemptKey,
+            }),
+          ]);
+          await waitForMyFplRefreshJobs(attemptKey);
+          const capture = await captureMyFplSnapshot(
+            season,
+            job.data.eventId,
+            job.data.snapshotKind,
+            {
+              ...(job.data.snapshotActor ? { actor: job.data.snapshotActor } : {}),
+              ...(job.data.snapshotReason ? { reason: job.data.snapshotReason } : {}),
+              ...(job.data.snapshotIdempotencyKey
+                ? { idempotencyKey: job.data.snapshotIdempotencyKey }
+                : {}),
+            },
+          );
+          const redis = await dispatchMyFplSnapshotPublicationOutbox({ limit: 20 });
+          return { ...capture, redis };
+        }
+        case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX:
+          return dispatchMyFplSnapshotPublicationOutbox({ limit: 50 });
+        default:
+          throw new Error(`Unknown maintenance job: ${job.name}`);
       }
-      case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX:
-        return dispatchMyFplSnapshotPublicationOutbox({ limit: 50 });
-      default:
-        throw new Error(`Unknown maintenance job: ${job.name}`);
-    }
-  });
+    });
+  } finally {
+    stopLeaseHeartbeat();
+  }
 }
 
 export function createMaintenanceWorker(): WorkerRuntime {

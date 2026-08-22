@@ -11,6 +11,10 @@ const publicationService = readFileSync(
 );
 const scheduler = readFileSync('src/scheduler/job-registry.ts', 'utf8');
 const worker = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
+const transaction = readFileSync('src/db/singleton.ts', 'utf8');
+const trends = readFileSync('src/services/tournament-trends-publication.service.ts', 'utf8');
+const tournamentWorker = readFileSync('src/workers/tournament-sync.worker.ts', 'utf8');
+const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 
 describe('My FPL daily snapshot publication contract', () => {
   test('keeps one active revision and a durable Redis handoff per gameweek', () => {
@@ -40,6 +44,31 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scheduler).toContain('utc8DueAt(context.now, 10, 45)');
     expect(scheduler).toContain('finished && lifecycle.dataChecked');
     expect(worker).toContain('dispatchMyFplSnapshotPublicationOutbox');
+  });
+
+  test('allows the full current-season refresh barrier to settle', () => {
+    expect(worker).toContain('const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 30 * 60_000');
+    expect(worker).not.toContain('const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 10 * 60_000');
+    expect(worker).toContain('renewSchedulerObligation');
+    expect(worker).toContain('SCHEDULER_LEASE_HEARTBEAT_MS = 60_000');
+  });
+
+  test('keeps trend publication repeatable-read safe across savepoints', () => {
+    const repeatableRead = 'repeatable read';
+    expect(transaction).toContain(`options: { isolationLevel?: '${repeatableRead}' } = {}`);
+    expect(transaction).toContain('client.begin(beginOptions, operation)');
+    expect(trends).toContain(`isolationLevel: '${repeatableRead}'`);
+    expect(trends).not.toContain('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    expect(tournamentWorker).not.toContain('TREND_PUBLICATION_JOB_NAMES');
+  });
+
+  test('waits through transient API port-proxy teardown before rejecting an unknown listener', () => {
+    expect(deployStateMachine).toContain(
+      'remove_exact_stopped_container api\n    wait_for_port_3000_free',
+    );
+    expect(deployStateMachine).not.toContain(
+      'remove_exact_stopped_container api\n    assert_port_3000_free',
+    );
   });
 
   test('names Redis manifests by season and event', () => {

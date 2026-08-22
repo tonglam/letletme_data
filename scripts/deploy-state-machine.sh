@@ -116,7 +116,6 @@ start_runtime_services() {
     # is external; otherwise the safety check prevents the retry from ever
     # recreating the required host port mapping.
     remove_exact_stopped_container api
-    assert_port_3000_free
     wait_for_port_3000_free 30 2
     compose up -d --remove-orphans --no-build api
   }
