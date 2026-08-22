@@ -112,6 +112,7 @@ async function persistCoreSnapshotRows(
     season,
     snapshot.players,
     sourceCheckedAt,
+    { markMissingInactive: true },
   );
   const savedPhases = await createPhaseRepository(db).upsertBatch(season, snapshot.phases);
   const fixtureRepository = createFixtureRepository(db);

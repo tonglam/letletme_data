@@ -6,6 +6,7 @@ import {
   playerEventSnapshotPublicationsInFpl,
   playerEventSnapshotsInFpl,
   playersInFpl,
+  seasonsInFpl,
   type DbPlayerStatInsert,
 } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
@@ -148,7 +149,7 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
       const rows = await db
         .select({ elementId: playersInFpl.elementId })
         .from(playersInFpl)
-        .where(eq(playersInFpl.seasonId, season.seasonId));
+        .where(and(eq(playersInFpl.seasonId, season.seasonId), eq(playersInFpl.isActive, true)));
       return rows.map((row) => Number(row.elementId));
     },
 
@@ -226,6 +227,7 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
             ],
             set: {
               totalPoints: sql`excluded.total_points`,
+              elementType: sql`excluded.element_type`,
               form: sql`excluded.form`,
               influence: sql`excluded.influence`,
               creativity: sql`excluded.creativity`,
@@ -328,10 +330,22 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
       const expectedRowCount = rows.length;
 
       const persist = async (db: DbOrTransaction) => {
+        const currentSeasonRows = await db
+          .select({ seasonId: seasonsInFpl.seasonId })
+          .from(seasonsInFpl)
+          .where(and(eq(seasonsInFpl.seasonId, season.seasonId), eq(seasonsInFpl.isCurrent, true)))
+          .for('share');
+        if (currentSeasonRows.length !== 1) {
+          throw new DatabaseError(
+            'Player stats publication season is not the sole current season',
+            'PLAYER_STATS_CURRENT_SEASON_MISMATCH',
+          );
+        }
+
         const corePlayerRows = await db
           .select({ elementId: playersInFpl.elementId })
           .from(playersInFpl)
-          .where(eq(playersInFpl.seasonId, season.seasonId));
+          .where(and(eq(playersInFpl.seasonId, season.seasonId), eq(playersInFpl.isActive, true)));
         const corePlayerIds = corePlayerRows.map((row) => Number(row.elementId));
         const corePlayerSet = new Set(corePlayerIds);
         if (
@@ -377,6 +391,7 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
             ],
             set: {
               totalPoints: sql`excluded.total_points`,
+              elementType: sql`excluded.element_type`,
               form: sql`excluded.form`,
               influence: sql`excluded.influence`,
               creativity: sql`excluded.creativity`,

@@ -1779,6 +1779,7 @@ export const playersInFpl = fpl.table(
     code: integer().notNull(),
     elementType: integer('element_type').notNull(),
     teamId: integer('team_id').notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
     price: integer().default(0).notNull(),
     startPrice: integer('start_price').default(0).notNull(),
     firstName: text('first_name'),
@@ -1802,6 +1803,12 @@ export const playersInFpl = fpl.table(
       'btree',
       table.seasonId.asc().nullsLast(),
       table.elementType.asc().nullsLast(),
+    ),
+    index('players_active_idx').using(
+      'btree',
+      table.seasonId.asc().nullsLast(),
+      table.isActive.asc().nullsLast(),
+      table.elementId.asc().nullsLast(),
     ),
     index('players_web_name_idx').using(
       'btree',
