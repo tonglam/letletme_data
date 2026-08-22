@@ -121,6 +121,8 @@ export async function reserveXRunBudgets(input: {
   dbNow: Date;
   policy: XBudgetPolicy;
   units?: number;
+  /** Keep an independently billable control-plane call in its own row. */
+  separateReservation?: boolean;
 }): Promise<XBudgetReservationResult> {
   const requestedUnits = input.units ?? 1;
   if (!Number.isSafeInteger(requestedUnits) || requestedUnits < 1) {
@@ -201,20 +203,22 @@ export async function reserveXRunBudgets(input: {
         updatedAt: input.dbNow,
       })
       .where(eq(contentAcquisitionBudgetLedgers.ledgerId, ledger.ledgerId));
-    const existing = await input.tx
-      .select({
-        reservationId: contentAcquisitionBudgetReservations.reservationId,
-        status: contentAcquisitionBudgetReservations.status,
-      })
-      .from(contentAcquisitionBudgetReservations)
-      .where(
-        and(
-          eq(contentAcquisitionBudgetReservations.runId, input.runId),
-          eq(contentAcquisitionBudgetReservations.ledgerId, ledger.ledgerId),
-        ),
-      )
-      .for('update')
-      .limit(1);
+    const existing = input.separateReservation
+      ? []
+      : await input.tx
+          .select({
+            reservationId: contentAcquisitionBudgetReservations.reservationId,
+            status: contentAcquisitionBudgetReservations.status,
+          })
+          .from(contentAcquisitionBudgetReservations)
+          .where(
+            and(
+              eq(contentAcquisitionBudgetReservations.runId, input.runId),
+              eq(contentAcquisitionBudgetReservations.ledgerId, ledger.ledgerId),
+            ),
+          )
+          .for('update')
+          .limit(1);
     if (existing[0]) {
       if (existing[0].status !== 'RESERVED') {
         throw new Error('X budget reservation cannot be increased after transition');

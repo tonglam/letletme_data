@@ -188,6 +188,7 @@ export async function runFormalXWorker(
           dbNow,
           policy: dependencies.xBudgetPolicy!,
           units: 1,
+          separateReservation: true,
         });
       });
       if (!budget.reserved) {
