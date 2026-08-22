@@ -62,7 +62,7 @@ CREATE UNIQUE INDEX my_fpl_snapshot_publications_idempotency_key
   WHERE idempotency_key IS NOT NULL;
 
 CREATE INDEX my_fpl_snapshot_publications_gc_idx
-  ON competition.my_fpl_snapshot_publications(season_id, event_id, published_at DESC);
+  ON competition.my_fpl_snapshot_publications(season_id, event_id, published_at DESC NULLS LAST);
 
 -- The database switch and the Redis manifest handoff are one durable unit:
 -- GraphQL reads the projection tables, while the outbox lets Redis recover
@@ -130,7 +130,7 @@ CREATE TABLE competition.my_fpl_snapshot_entries (
 );
 
 CREATE INDEX my_fpl_snapshot_entries_active_lookup_idx
-  ON competition.my_fpl_snapshot_entries(season_id, event_id, entry_id, revision DESC);
+  ON competition.my_fpl_snapshot_entries(season_id, event_id, entry_id, revision DESC NULLS LAST);
 
 CREATE TABLE competition.my_fpl_snapshot_tournament_rows (
   season_id smallint NOT NULL,
