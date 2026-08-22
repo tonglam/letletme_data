@@ -202,6 +202,35 @@ jobs:
               )
             )::text;
 
+            SELECT jsonb_build_object(
+              'event', 'briefing_acquisition_failure_health',
+              'recentFailureClasses', COALESCE((
+                SELECT jsonb_agg(
+                  jsonb_build_object(
+                    'adapter', adapter_kind,
+                    'jobKind', job_kind,
+                    'failureClass', failure_class,
+                    'runCount', run_count
+                  ) ORDER BY adapter_kind, job_kind, failure_class
+                )
+                FROM (
+                  SELECT adapter_kind, job_kind, failure_class, count(*) AS run_count
+                  FROM content.acquisition_runs
+                  WHERE status = 'FAILED' AND created_at >= now() - interval '30 minutes'
+                  GROUP BY adapter_kind, job_kind, failure_class
+                ) AS failures
+              ), '[]'::jsonb),
+              'identityStatuses', COALESCE((
+                SELECT jsonb_object_agg(identity_status, status_count)
+                FROM (
+                  SELECT identity_status, count(*) AS status_count
+                  FROM content.source_endpoints
+                  WHERE adapter_kind = 'X_ACCOUNT'
+                  GROUP BY identity_status
+                ) AS identities
+              ), '{}'::jsonb)
+            )::text;
+
             COMMIT;
             SQL
             }
