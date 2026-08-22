@@ -24,6 +24,7 @@ import {
   isCompatibilitySchedulerEnabled,
   isStandaloneSchedulerEnabled,
 } from '../utils/scheduler-mode';
+import { liveLifecycleStatusRepository } from '../repositories/live-window';
 
 /** The live producer cadence is a data contract: one fresh poll every 30s. */
 export const LIVE_POLL_MS = 30_000;
@@ -74,6 +75,18 @@ export type LiveLifecycleDecision = {
   nextRetryAt: Date | null;
 };
 
+export type LiveLifecycleObservation = {
+  /** The last content revision observed for this event, if any. */
+  lastRevision?: number | null;
+  /** When the current revision first became quiet. */
+  unchangedSince?: number | null;
+  /** Whether the current time is still inside an authoritative fixture window. */
+  matchDayTime?: boolean;
+  /** A valid live publication can lead core fixture lifecycle flags briefly. */
+  publicationActive?: boolean;
+  publicationStarted?: boolean;
+};
+
 type PicksProbeState = {
   attempts: number;
   nextProbeAt: number;
@@ -106,6 +119,7 @@ export function decideLiveLifecycle(
     'started' | 'finished' | 'finishedProvisional' | 'kickoffTime'
   >[],
   now = new Date(),
+  observation: LiveLifecycleObservation = {},
 ): LiveLifecycleDecision {
   const nowMs = now.getTime();
   const deadlineMs = event.deadlineTime ? new Date(event.deadlineTime).getTime() : Number.NaN;
@@ -114,10 +128,25 @@ export function decideLiveLifecycle(
   const allFinished =
     fixtures.length > 0 &&
     fixtures.every((fixture) => fixture.finished || fixture.finishedProvisional);
-  const active = fixtures.some(
+  const coreActive = fixtures.some(
     (fixture) => fixture.started && !fixture.finished && !fixture.finishedProvisional,
   );
-  const anyStarted = fixtures.some((fixture) => fixture.started);
+  const activeEvidence = coreActive || observation.publicationActive === true;
+  // FPL's finished flag can lag for hours.  It is useful as a short grace
+  // period, but must not keep an old publication in LIVE_ACTIVE forever. The
+  // orchestrator passes the same bounded match-window decision used by the
+  // producer, while unit callers that do not provide it retain the historical
+  // evidence-only behaviour.
+  const active = activeEvidence && observation.matchDayTime !== false;
+  const anyStarted =
+    fixtures.some((fixture) => fixture.started) || observation.publicationStarted === true;
+  const futureFixtures = fixtures.some(
+    (fixture) =>
+      !fixture.finished &&
+      !fixture.finishedProvisional &&
+      fixture.started !== true &&
+      (fixture.kickoffTime?.getTime() ?? Number.POSITIVE_INFINITY) > nowMs,
+  );
 
   if (event.finished && event.dataChecked && allFinished) {
     return {
@@ -133,7 +162,10 @@ export function decideLiveLifecycle(
   if (allFinished && lastKickoffMs !== null) {
     const afterLast = nowMs - lastKickoffMs;
     return {
-      state: afterLast < 24 * 60 * 60_000 ? 'GW_REVIEW' : 'FINALIZED',
+      // Time since the last kickoff controls polling cadence only.  It must
+      // not manufacture FINALIZED before the event is explicitly marked
+      // finished and data-checked.
+      state: 'GW_REVIEW',
       shouldFetchLive: afterLast < 24 * 60 * 60_000,
       shouldProbePicks: false,
       shouldSyncPicks: false,
@@ -154,6 +186,21 @@ export function decideLiveLifecycle(
     };
   }
   if (anyStarted) {
+    const quietFor = observation.unchangedSince ? nowMs - observation.unchangedSince : 0;
+    if (futureFixtures && quietFor >= DAY_SETTLING_STABLE_AFTER_MS) {
+      return {
+        state: 'BETWEEN_FIXTURES',
+        // Keep polling at the low cadence so a new official revision can be
+        // observed, but do not sync picks or manufacture a publication for a
+        // lifecycle-only transition.
+        shouldFetchLive: true,
+        shouldProbePicks: false,
+        shouldSyncPicks: false,
+        recoverStaleFixtures: false,
+        finalizeEvent: false,
+        nextRetryAt: null,
+      };
+    }
     return {
       state: 'DAY_SETTLING',
       shouldFetchLive: true,
@@ -199,11 +246,16 @@ export function decideLiveLifecycle(
   }
   if (firstKickoffMs !== null && nowMs >= firstKickoffMs) {
     return {
-      state: 'LIVE_ACTIVE',
+      // A scheduled kickoff is not proof that the fixture has started. Keep
+      // the lifecycle state in its picks/sync lane until the core fixture
+      // says started=true (or an authoritative publication proves it). Keep
+      // a bounded live probe running so this worker can discover that change;
+      // the fetch itself must not be treated as start evidence.
+      state: 'PICKS_SYNC',
       shouldFetchLive: true,
       shouldProbePicks: true,
       shouldSyncPicks: true,
-      recoverStaleFixtures: true,
+      recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
     };
@@ -338,21 +390,63 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
   const currentEvent = await (await import('./events.service')).getCurrentEvent(season);
   if (!currentEvent) return null;
   const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
-  const decision = decideLiveLifecycle(currentEvent, fixtures, now);
+  const key = `${season.seasonCode}:${currentEvent.id}`;
+  const cache = await readLiveSnapshotCache(season.seasonCode, currentEvent.id).catch(() => null);
+  const revision = cache?.manifest.revision ?? null;
+  const persisted = await liveLifecycleStatusRepository
+    .findByEventId(season, currentEvent.id)
+    .catch(() => null);
+  const publishedAtMs = cache?.manifest.publishedAt
+    ? new Date(cache.manifest.publishedAt).getTime()
+    : Number.NaN;
+  const persistedSourceCheckedAtMs = persisted?.sourceCheckedAt?.getTime() ?? Number.NaN;
+  const initialUnchangedSince = Number.isFinite(publishedAtMs)
+    ? Math.min(now.getTime(), publishedAtMs)
+    : Number.isFinite(persistedSourceCheckedAtMs)
+      ? Math.min(now.getTime(), persistedSourceCheckedAtMs)
+      : now.getTime();
+  const previous = daySettlingStates.get(key);
+  if (!previous || previous.revision !== revision) {
+    daySettlingStates.set(key, { revision, unchangedSince: initialUnchangedSince });
+  }
+  const observation = daySettlingStates.get(key);
+  const decision = decideLiveLifecycle(currentEvent, fixtures, now, {
+    lastRevision: revision,
+    unchangedSince: observation?.unchangedSince ?? null,
+    matchDayTime: isMatchDayTime(currentEvent, fixtures, now),
+    publicationStarted: cache?.fixtures.some((fixture) => fixture.started === true),
+    publicationActive: cache?.fixtures.some(
+      (fixture) => fixture.started === true && !fixture.finished && !fixture.finishedProvisional,
+    ),
+  });
 
-  // DAY_SETTLING remains frequent for the first ten quiet minutes, then the
-  // orchestrator can back off without changing the publication contract.
-  if (decision.state === 'DAY_SETTLING') {
-    const cache = await readLiveSnapshotCache(season.seasonCode, currentEvent.id).catch(() => null);
-    const revision = cache?.manifest.revision ?? null;
-    const key = `${season.seasonCode}:${currentEvent.id}`;
-    const previous = daySettlingStates.get(key);
-    if (!previous || previous.revision !== revision) {
-      daySettlingStates.set(key, { revision, unchangedSince: now.getTime() });
-    }
-  } else {
+  // DAY_SETTLING and BETWEEN_FIXTURES share the same quiet-revision clock.
+  // Other states do not need it and can start a fresh clock on the next match
+  // day.
+  if (decision.state !== 'DAY_SETTLING' && decision.state !== 'BETWEEN_FIXTURES') {
     daySettlingStates.delete(`${season.seasonCode}:${currentEvent.id}`);
   }
+
+  const nextRefreshDelay = lifecycleDelay(decision, season, currentEvent.id, now);
+  await liveLifecycleStatusRepository
+    .upsert(season, {
+      eventId: currentEvent.id,
+      state: decision.state,
+      observedAt: now,
+      lastChangedAt: persisted?.state === decision.state ? persisted.lastChangedAt : now,
+      nextRefreshAt: nextRefreshDelay === null ? null : new Date(now.getTime() + nextRefreshDelay),
+      liveRevision: revision === null ? null : String(revision),
+      publicationId: cache?.manifest.publicationId ?? null,
+      sourceCheckedAt: cache?.manifest.sourceCheckedAt
+        ? new Date(cache.manifest.sourceCheckedAt)
+        : null,
+    })
+    .catch((error) => {
+      logError('Failed to persist live lifecycle status', error, {
+        eventId: currentEvent.id,
+        state: decision.state,
+      });
+    });
 
   if (decision.shouldProbePicks || decision.shouldSyncPicks) {
     await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {

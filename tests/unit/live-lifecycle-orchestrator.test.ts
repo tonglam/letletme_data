@@ -31,7 +31,7 @@ describe('live lifecycle decisions', () => {
     );
   });
 
-  test('starts live polling at kickoff when persisted fixture flags still lag', () => {
+  test('does not start live polling from a scheduled kickoff alone', () => {
     const decision = decideLiveLifecycle(
       { deadlineTime: '2026-08-15T10:00:00.000Z', finished: false, dataChecked: false },
       [
@@ -46,12 +46,95 @@ describe('live lifecycle decisions', () => {
     );
 
     expect(decision).toMatchObject({
-      state: 'LIVE_ACTIVE',
+      state: 'PICKS_SYNC',
       shouldFetchLive: true,
       shouldProbePicks: true,
       shouldSyncPicks: true,
-      recoverStaleFixtures: true,
+      recoverStaleFixtures: false,
       finalizeEvent: false,
+    });
+  });
+
+  test('accepts a valid live publication as lifecycle evidence before core flags catch up', () => {
+    const decision = decideLiveLifecycle(
+      { deadlineTime: '2026-08-15T10:00:00.000Z', finished: false, dataChecked: false },
+      [
+        {
+          started: false,
+          finished: false,
+          finishedProvisional: false,
+          kickoffTime: new Date('2026-08-15T12:00:00.000Z'),
+        },
+      ],
+      new Date('2026-08-15T12:00:01.000Z'),
+      { publicationActive: true, publicationStarted: true },
+    );
+
+    expect(decision).toMatchObject({
+      state: 'LIVE_ACTIVE',
+      shouldFetchLive: true,
+      shouldSyncPicks: true,
+    });
+  });
+
+  test('enters between fixtures after a quiet revision and keeps the next fixture scheduled', () => {
+    const decision = decideLiveLifecycle(
+      { deadlineTime: '2026-08-15T10:00:00.000Z', finished: false, dataChecked: false },
+      [
+        {
+          started: true,
+          finished: true,
+          finishedProvisional: false,
+          kickoffTime: new Date('2026-08-15T12:00:00.000Z'),
+        },
+        {
+          started: false,
+          finished: false,
+          finishedProvisional: false,
+          kickoffTime: new Date('2026-08-15T19:00:00.000Z'),
+        },
+      ],
+      new Date('2026-08-15T18:15:00.000Z'),
+      { unchangedSince: new Date('2026-08-15T18:00:00.000Z').getTime() - 10 * 60_000 },
+    );
+
+    expect(decision).toMatchObject({
+      state: 'BETWEEN_FIXTURES',
+      shouldFetchLive: true,
+      shouldSyncPicks: false,
+    });
+  });
+
+  test('does not let stale unfinished flags or a last-good publication keep live active', () => {
+    const decision = decideLiveLifecycle(
+      { deadlineTime: '2026-08-15T10:00:00.000Z', finished: false, dataChecked: false },
+      [
+        {
+          started: true,
+          finished: false,
+          finishedProvisional: false,
+          kickoffTime: new Date('2026-08-15T12:00:00.000Z'),
+        },
+        {
+          started: false,
+          finished: false,
+          finishedProvisional: false,
+          kickoffTime: new Date('2026-08-15T19:00:00.000Z'),
+        },
+      ],
+      new Date('2026-08-15T18:15:00.000Z'),
+      {
+        matchDayTime: false,
+        publicationActive: true,
+        publicationStarted: true,
+        unchangedSince: new Date('2026-08-15T12:30:00.000Z').getTime(),
+      },
+    );
+
+    expect(decision).toMatchObject({
+      state: 'BETWEEN_FIXTURES',
+      shouldFetchLive: true,
+      shouldSyncPicks: false,
     });
   });
 
@@ -73,6 +156,27 @@ describe('live lifecycle decisions', () => {
       state: 'FINALIZED',
       shouldFetchLive: true,
       finalizeEvent: true,
+    });
+  });
+
+  test('keeps an unfinalized event in GW_REVIEW after the quiet polling window', () => {
+    const decision = decideLiveLifecycle(
+      { deadlineTime: '2026-08-15T10:00:00.000Z', finished: false, dataChecked: false },
+      [
+        {
+          started: true,
+          finished: true,
+          finishedProvisional: false,
+          kickoffTime: new Date('2026-08-15T12:00:00.000Z'),
+        },
+      ],
+      new Date('2026-08-17T12:00:01.000Z'),
+    );
+
+    expect(decision).toMatchObject({
+      state: 'GW_REVIEW',
+      shouldFetchLive: false,
+      finalizeEvent: false,
     });
   });
 });

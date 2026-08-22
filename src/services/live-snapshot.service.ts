@@ -205,7 +205,15 @@ function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
   if (fixtures.every((fixture) => fixture.finished || fixture.finishedProvisional)) {
     return 'settled';
   }
-  return 'scheduled';
+  // Keep the event live between fixtures once any fixture has started or
+  // reached provisional completion. The live publication still carries the
+  // authoritative rows for the whole event; `scheduled` is reserved for a
+  // pre-kickoff event with no started or provisionally settled fixture.
+  return fixtures.some(
+    (fixture) => fixture.started || fixture.finished || fixture.finishedProvisional,
+  )
+    ? 'live'
+    : 'scheduled';
 }
 
 export function prepareLiveSnapshot(
