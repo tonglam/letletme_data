@@ -115,6 +115,18 @@ export const playerMarketSnapshotSourceIdsInFpl = fpl.sequence(
   },
 );
 
+export const playerEventSnapshotPublicationRevisionsInFpl = fpl.sequence(
+  'player_event_snapshot_publication_revision_seq',
+  {
+    startWith: '1',
+    increment: '1',
+    minValue: '1',
+    maxValue: '9223372036854775807',
+    cache: '1',
+    cycle: false,
+  },
+);
+
 export const seasonImportsInOps = ops.table(
   'season_imports',
   {
