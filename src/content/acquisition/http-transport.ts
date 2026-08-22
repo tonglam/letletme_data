@@ -165,7 +165,7 @@ async function assertPublicTarget(
 
 function pinnedUrl(url: URL, address: string): string {
   const result = new URL(url.toString());
-  result.hostname = address;
+  result.hostname = address.includes(':') ? `[${address}]` : address;
   return result.toString();
 }
 

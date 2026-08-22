@@ -88,6 +88,8 @@ export async function runFormalMediaWorker(
   const flags = dependencies?.flags ?? getContentRuntimeFlags();
   const db = dependencies?.db ?? (await getDb());
   let began = false;
+  let hermesProviderAttempted = false;
+  let hermesProviderUnits: number | undefined;
   try {
     const run = await beginFormalRun({ runId: job.runId, db });
     if (run.status === 'TERMINAL') {
@@ -212,6 +214,8 @@ export async function runFormalMediaWorker(
         timeoutMs: flags.hermesTranscriptTimeoutMs,
         maximumResponseBytes: flags.hermesTranscriptMaxOutputBytes,
       });
+    hermesProviderAttempted = true;
+    hermesProviderUnits = Math.ceil(audio.durationSeconds);
     const execution = await hermesClient.transcribe({
       runId: job.runId,
       externalItemId: request.discoveryItem.externalItemId,
@@ -280,6 +284,8 @@ export async function runFormalMediaWorker(
         runId: job.runId,
         failureClass: failure.failureClass,
         errorSummary: failure.summary,
+        hermesProviderAttempted,
+        hermesProviderUnits,
         db,
       });
     }

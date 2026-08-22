@@ -75,6 +75,22 @@ describe('public HTTP acquisition transport', () => {
     expect(requestedServerName).toBe('feed.example.test');
   });
 
+  test('brackets a validated IPv6 address in the pinned URL', async () => {
+    let requestedUrl = '';
+    await fetchPublicResource({
+      url: 'https://feed.example.test/path',
+      lookupImpl: async () => [{ address: '2001:4860:4860::8888', family: 6 }],
+      fetchImpl: async (url) => {
+        requestedUrl = String(url);
+        return new Response('<rss/>', {
+          status: 200,
+          headers: { 'content-type': 'application/xml' },
+        });
+      },
+    });
+    expect(requestedUrl).toBe('https://[2001:4860:4860::8888]/path');
+  });
+
   test('rejects cross-origin redirects', async () => {
     await expect(
       fetchPublicResource({

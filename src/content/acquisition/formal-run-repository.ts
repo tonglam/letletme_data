@@ -553,6 +553,7 @@ export async function claimDueFormalRuns(input: {
         adapterKind: contentSourceSchedules.adapterKind,
         profileKey: contentSourceSchedules.profileKey,
         profileRevision: contentSourceSchedules.profileRevision,
+        manifestRevision: contentSourceSchedules.manifestRevision,
         priority: contentSourceSchedules.priority,
         validator: contentSourceSchedules.validator,
         checkpoint: contentSourceSchedules.checkpoint,
@@ -591,6 +592,17 @@ export async function claimDueFormalRuns(input: {
       .for('update', { skipLocked: true });
 
     const claimed: ClaimedFormalRun[] = [];
+    const deferIneligibleSchedule = async (scheduleId: string): Promise<void> => {
+      await tx
+        .update(contentSourceSchedules)
+        .set({
+          nextDueAt: new Date(dbNow.getTime() + 5 * 60_000),
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          updatedAt: dbNow,
+        })
+        .where(eq(contentSourceSchedules.scheduleId, scheduleId));
+    };
     for (const schedule of schedules) {
       let scheduleFailureStreak = schedule.failureStreak;
       if (schedule.leaseOwner && schedule.leaseExpiresAt && schedule.leaseExpiresAt <= dbNow) {
@@ -700,6 +712,7 @@ export async function claimDueFormalRuns(input: {
             endpoint.adapterKind !== 'RSS_ATOM' &&
             endpoint.adapterKind !== 'PODCAST_FEED')
         ) {
+          await deferIneligibleSchedule(schedule.scheduleId);
           continue;
         }
         const validator = asRecord(schedule.validator);
@@ -759,6 +772,7 @@ export async function claimDueFormalRuns(input: {
               member.profileKey !== partition.profileKey,
           )
         ) {
+          await deferIneligibleSchedule(schedule.scheduleId);
           continue;
         }
         const members = partition.members.map((member) => ({
@@ -814,10 +828,11 @@ export async function claimDueFormalRuns(input: {
           members,
         };
       } else {
+        await deferIneligibleSchedule(schedule.scheduleId);
         continue;
       }
 
-      let sourceSnapshotRevision = schedule.scheduleId;
+      let sourceSnapshotRevision = schedule.manifestRevision;
       if (scheduleFailureStreak > 0 && scheduleFailureStreak < 3) {
         const retryRows = await tx
           .select({
@@ -857,7 +872,7 @@ export async function claimDueFormalRuns(input: {
           request = parseFormalRunRequestV1(retry.requestSnapshot);
           sourceSnapshot = retry.sourceSnapshot.map((item) => asRecord(item));
           endpointSnapshotValue = asRecord(retry.endpointSnapshot);
-          sourceSnapshotRevision = retry.sourceSnapshotRevision ?? schedule.scheduleId;
+          sourceSnapshotRevision = retry.sourceSnapshotRevision ?? schedule.manifestRevision;
         }
       }
 
@@ -1002,6 +1017,8 @@ export async function failFormalRun(input: {
   providerEvidence?: FormalRunProviderEvidence;
   supadataFailureEvidence?: SupadataFailureEvidence;
   providerProcessStarted?: boolean;
+  hermesProviderAttempted?: boolean;
+  hermesProviderUnits?: number;
   rejections?: readonly FormalRunFailureRejection[];
   db?: DbHandle;
 }): Promise<boolean> {
@@ -1032,7 +1049,12 @@ export async function failFormalRun(input: {
       .limit(1);
     const run = rows[0];
     if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
-    if (input.providerEvidence && input.supadataFailureEvidence) {
+    if (
+      (input.providerEvidence ? 1 : 0) +
+        (input.supadataFailureEvidence ? 1 : 0) +
+        (input.hermesProviderAttempted ? 1 : 0) >
+      1
+    ) {
       throw new Error('Formal failure cannot contain evidence from multiple providers');
     }
     if (input.rejections?.length && !input.providerEvidence) {
@@ -1133,6 +1155,20 @@ export async function failFormalRun(input: {
         providerUnits: String(evidence.providerUnits),
         terminalState: `FAILED:${input.failureClass}`.slice(0, 200),
       });
+    } else if (input.hermesProviderAttempted) {
+      if (run.jobKind !== 'PODCAST_TRANSCRIPT' || run.adapterKind !== 'HERMES_TRANSCRIPT') {
+        throw new Error('Hermes provider evidence is only valid for podcast transcript runs');
+      }
+      if (
+        input.hermesProviderUnits !== undefined &&
+        (!Number.isSafeInteger(input.hermesProviderUnits) || input.hermesProviderUnits < 1)
+      ) {
+        throw new Error('Hermes provider units are invalid');
+      }
+      const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
+      if (committedReservations === 0) {
+        throw new Error('Billed Hermes failure has no reserved budget');
+      }
     } else if (input.providerProcessStarted) {
       const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
       if (committedReservations === 0) {
@@ -1234,15 +1270,19 @@ export async function failFormalRun(input: {
         rejectedCount: input.rejections?.length ?? 0,
         provider: input.supadataFailureEvidence
           ? 'supadata'
-          : grokProviderAttempted
-            ? 'grok-build'
-            : undefined,
+          : input.hermesProviderAttempted
+            ? 'hermes'
+            : grokProviderAttempted
+              ? 'grok-build'
+              : undefined,
         providerJobId: input.supadataFailureEvidence?.providerJobId ?? undefined,
         providerUnits:
           supadataTotalProviderUnits === null
-            ? grokProviderAttempted
-              ? '1'
-              : undefined
+            ? input.hermesProviderUnits !== undefined
+              ? String(input.hermesProviderUnits)
+              : grokProviderAttempted
+                ? '1'
+                : undefined
             : String(supadataTotalProviderUnits),
         xCallCount: grokProviderAttempted ? 1 : 0,
         traceVerified: input.providerEvidence !== undefined,
@@ -1254,9 +1294,11 @@ export async function failFormalRun(input: {
                 providerFailureDurationMs: input.supadataFailureEvidence.durationMs,
               }
             : (input.providerEvidence?.runMetrics ??
-                (input.providerProcessStarted
-                  ? { providerProcessStarted: true, providerTraceVerified: false }
-                  : {})),
+                (input.hermesProviderAttempted
+                  ? { hermesProviderStarted: true, providerTraceVerified: false }
+                  : input.providerProcessStarted
+                    ? { providerProcessStarted: true, providerTraceVerified: false }
+                    : {})),
         )}::jsonb`,
         completedAt: dbNow,
         leaseExpiresAt: null,

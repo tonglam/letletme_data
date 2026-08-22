@@ -193,18 +193,161 @@ export async function reconcileBriefingSourceRegistry(input: {
         details: { fullRolloutEligible: input.bundle.coverage.fullRolloutEligible },
       });
 
-      const prior = await tx
-        .select({ reconciliationId: contentSourceRegistryReconciliations.reconciliationId })
-        .from(contentSourceRegistryReconciliations)
-        .where(
-          and(
-            eq(contentSourceRegistryReconciliations.manifestHash, state.manifestHash),
-            inArray(contentSourceRegistryReconciliations.status, ['APPLIED', 'UNCHANGED']),
+      const existingSources = await tx
+        .select({
+          sourceId: contentSources.sourceId,
+          sourceKey: contentSources.sourceKey,
+          status: contentSources.status,
+          manifestRevision: contentSources.manifestRevision,
+        })
+        .from(contentSources)
+        .where(eq(contentSources.origin, 'MANIFEST'))
+        .orderBy(asc(contentSources.sourceKey))
+        .for('update');
+      const sourceIdByKey = new Map(
+        existingSources.map((source) => [source.sourceKey, source.sourceId]),
+      );
+      const desiredSourceKeys = state.entities.map((entity) => entity.sourceKey);
+      const desiredEndpointKeys = state.endpoints.map((endpoint) => endpoint.endpointKey);
+      const desiredPartitionKeys = state.partitions.map((partition) => partition.partitionKey);
+      const desiredScheduleKeyList = state.schedules.map((schedule) => schedule.scheduleKey);
+      const [
+        sourceDesiredCount,
+        endpointDesiredCount,
+        partitionDesiredCount,
+        scheduleDesiredCount,
+      ] = await Promise.all([
+        tx
+          .select({ count: sql<number>`count(*)::int` })
+          .from(contentSources)
+          .where(
+            and(
+              eq(contentSources.origin, 'MANIFEST'),
+              inArray(contentSources.sourceKey, desiredSourceKeys),
+            ),
           ),
-        )
-        .orderBy(asc(contentSourceRegistryReconciliations.createdAt))
-        .limit(1);
-      if (prior[0]) {
+        tx
+          .select({ count: sql<number>`count(*)::int` })
+          .from(contentSourceEndpoints)
+          .where(inArray(contentSourceEndpoints.endpointKey, desiredEndpointKeys)),
+        tx
+          .select({ count: sql<number>`count(*)::int` })
+          .from(contentSourcePartitions)
+          .where(inArray(contentSourcePartitions.partitionKey, desiredPartitionKeys)),
+        tx
+          .select({ count: sql<number>`count(*)::int` })
+          .from(contentSourceSchedules)
+          .where(inArray(contentSourceSchedules.scheduleKey, desiredScheduleKeyList)),
+      ]);
+      const [
+        sourceMismatch,
+        sourceExtra,
+        endpointMismatch,
+        endpointExtra,
+        partitionMismatch,
+        partitionExtra,
+        scheduleMismatch,
+        scheduleExtra,
+      ] = await Promise.all([
+        tx
+          .select({ sourceId: contentSources.sourceId })
+          .from(contentSources)
+          .where(
+            and(
+              eq(contentSources.origin, 'MANIFEST'),
+              inArray(contentSources.sourceKey, desiredSourceKeys),
+              sql`${contentSources.manifestRevision} IS DISTINCT FROM ${state.manifestHash}`,
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ sourceId: contentSources.sourceId })
+          .from(contentSources)
+          .where(
+            and(
+              eq(contentSources.origin, 'MANIFEST'),
+              eq(contentSources.status, 'active'),
+              notInArray(contentSources.sourceKey, desiredSourceKeys),
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ endpointId: contentSourceEndpoints.endpointId })
+          .from(contentSourceEndpoints)
+          .where(
+            and(
+              eq(contentSourceEndpoints.origin, 'MANIFEST'),
+              inArray(contentSourceEndpoints.endpointKey, desiredEndpointKeys),
+              sql`${contentSourceEndpoints.manifestRevision} IS DISTINCT FROM ${state.manifestHash}`,
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ endpointId: contentSourceEndpoints.endpointId })
+          .from(contentSourceEndpoints)
+          .where(
+            and(
+              eq(contentSourceEndpoints.origin, 'MANIFEST'),
+              eq(contentSourceEndpoints.status, 'active'),
+              notInArray(contentSourceEndpoints.endpointKey, desiredEndpointKeys),
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ partitionId: contentSourcePartitions.partitionId })
+          .from(contentSourcePartitions)
+          .where(
+            and(
+              inArray(contentSourcePartitions.partitionKey, desiredPartitionKeys),
+              sql`${contentSourcePartitions.manifestRevision} IS DISTINCT FROM ${state.manifestHash}`,
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ partitionId: contentSourcePartitions.partitionId })
+          .from(contentSourcePartitions)
+          .where(
+            and(
+              eq(contentSourcePartitions.status, 'active'),
+              notInArray(contentSourcePartitions.partitionKey, desiredPartitionKeys),
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ scheduleId: contentSourceSchedules.scheduleId })
+          .from(contentSourceSchedules)
+          .where(
+            and(
+              inArray(contentSourceSchedules.scheduleKey, desiredScheduleKeyList),
+              sql`${contentSourceSchedules.manifestRevision} IS DISTINCT FROM ${state.manifestHash}`,
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ scheduleId: contentSourceSchedules.scheduleId })
+          .from(contentSourceSchedules)
+          .where(
+            and(
+              eq(contentSourceSchedules.status, 'active'),
+              notInArray(contentSourceSchedules.scheduleKey, desiredScheduleKeyList),
+            ),
+          )
+          .limit(1),
+      ]);
+      if (
+        sourceDesiredCount[0]?.count === desiredSourceKeys.length &&
+        endpointDesiredCount[0]?.count === desiredEndpointKeys.length &&
+        partitionDesiredCount[0]?.count === desiredPartitionKeys.length &&
+        scheduleDesiredCount[0]?.count === desiredScheduleKeyList.length &&
+        sourceMismatch.length === 0 &&
+        sourceExtra.length === 0 &&
+        endpointMismatch.length === 0 &&
+        endpointExtra.length === 0 &&
+        partitionMismatch.length === 0 &&
+        partitionExtra.length === 0 &&
+        scheduleMismatch.length === 0 &&
+        scheduleExtra.length === 0
+      ) {
         await tx
           .update(contentSourceRegistryReconciliations)
           .set({ status: 'UNCHANGED', completedAt: dbNow })
@@ -217,16 +360,6 @@ export async function reconcileBriefingSourceRegistry(input: {
           fullRolloutEligible: input.bundle.coverage.fullRolloutEligible,
         };
       }
-
-      const existingSources = await tx
-        .select({ sourceId: contentSources.sourceId, sourceKey: contentSources.sourceKey })
-        .from(contentSources)
-        .where(eq(contentSources.origin, 'MANIFEST'))
-        .orderBy(asc(contentSources.sourceKey))
-        .for('update');
-      const sourceIdByKey = new Map(
-        existingSources.map((source) => [source.sourceKey, source.sourceId]),
-      );
       const sourceRows = state.entities.map((entity) => ({
         sourceId: sourceIdByKey.get(entity.sourceKey) ?? randomUUID(),
         sourceKey: entity.sourceKey,
@@ -285,6 +418,8 @@ export async function reconcileBriefingSourceRegistry(input: {
           identityErrorSummary: contentSourceEndpoints.identityErrorSummary,
           identityCheckedAt: contentSourceEndpoints.identityCheckedAt,
           identityNextCheckAt: contentSourceEndpoints.identityNextCheckAt,
+          status: contentSourceEndpoints.status,
+          manifestRevision: contentSourceEndpoints.manifestRevision,
         })
         .from(contentSourceEndpoints)
         .where(eq(contentSourceEndpoints.origin, 'MANIFEST'))
@@ -357,6 +492,8 @@ export async function reconcileBriefingSourceRegistry(input: {
           partitionKey: contentSourcePartitions.partitionKey,
           adapterKind: contentSourcePartitions.adapterKind,
           profileKey: contentSourcePartitions.profileKey,
+          status: contentSourcePartitions.status,
+          manifestRevision: contentSourcePartitions.manifestRevision,
         })
         .from(contentSourcePartitions)
         .orderBy(asc(contentSourcePartitions.partitionKey))
@@ -442,11 +579,14 @@ export async function reconcileBriefingSourceRegistry(input: {
           adapterKind: contentSourceSchedules.adapterKind,
           profileKey: contentSourceSchedules.profileKey,
           profileRevision: contentSourceSchedules.profileRevision,
+          status: contentSourceSchedules.status,
+          manifestRevision: contentSourceSchedules.manifestRevision,
           nextDueAt: contentSourceSchedules.nextDueAt,
         })
         .from(contentSourceSchedules)
         .orderBy(asc(contentSourceSchedules.scheduleKey))
         .for('update');
+
       const scheduleByKey = new Map(
         existingSchedules.map((schedule) => [schedule.scheduleKey, schedule]),
       );

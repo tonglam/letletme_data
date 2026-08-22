@@ -186,10 +186,14 @@ export async function runFormalHttpWorker(
       if (result.rejections.length > 0 && result.batch.items.length === 0) {
         throw new Error('Feed parser rejected every in-scope item');
       }
+      const feedWindowTruncated =
+        !request.bootstrap.enabled && (result.bootstrapMetrics?.itemLimitCount ?? 0) > 0;
       const state =
         result.rejections.length > 0 && result.batch.items.length > 0
           ? ('PARTIAL' as const)
-          : result.stateHint;
+          : feedWindowTruncated
+            ? ('PARTIAL' as const)
+            : result.stateHint;
       const checkpointComplete = state !== 'PARTIAL';
       const feedOrigin = new URL(result.transport.finalUrl).origin;
       const articleItems = result.batch.items
@@ -615,7 +619,7 @@ export async function runFormalHttpWorker(
         item = {
           ...request.discoveryItem,
           transcript: {
-            status: 'FAILED',
+            status: providerResult.kind === 'EMPTY' ? 'DEFERRED' : 'FAILED',
             language: providerResult.kind === 'EMPTY' ? providerResult.language : null,
             trackKind: 'UNKNOWN',
             providerRevision:

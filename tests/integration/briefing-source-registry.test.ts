@@ -92,6 +92,43 @@ describe('Briefing source registry reconciliation', () => {
     expect(reconciliations.map((row) => row.status).sort()).toEqual(['APPLIED', 'UNCHANGED']);
   });
 
+  test('reapplies a previously seen manifest after a rollback', async () => {
+    await resetBriefingAcquisitionState();
+    const sourcesYaml = await Bun.file('config/briefing/sources.yaml').text();
+    const acquisitionPlanYaml = await Bun.file('config/briefing/acquisition-plan.yaml').text();
+    const original = parseBriefingManifest({ sourcesYaml, acquisitionPlanYaml });
+    const changedSourcesYaml = sourcesYaml.replace(
+      'displayName: Official FPL',
+      'displayName: Official FPL temporary',
+    );
+    expect(changedSourcesYaml).not.toBe(sourcesYaml);
+    const changed = parseBriefingManifest({
+      sourcesYaml: changedSourcesYaml,
+      acquisitionPlanYaml,
+    });
+
+    await reconcileBriefingSourceRegistry({ bundle: original, gitRevision: 'rollback-a' });
+    await reconcileBriefingSourceRegistry({ bundle: changed, gitRevision: 'rollback-b' });
+    const rolledBack = await reconcileBriefingSourceRegistry({
+      bundle: original,
+      gitRevision: 'rollback-a-again',
+    });
+    expect(rolledBack).toMatchObject({ status: 'APPLIED', manifestHash: original.manifestHash });
+
+    const db = await getDb();
+    const [source] = await db
+      .select({
+        displayName: contentSources.displayName,
+        manifestRevision: contentSources.manifestRevision,
+      })
+      .from(contentSources)
+      .where(eq(contentSources.sourceKey, 'official-fpl'));
+    expect(source).toEqual({
+      displayName: 'Official FPL',
+      manifestRevision: original.manifestHash,
+    });
+  });
+
   test('atomically creates, reuses and revises a stable Receipt', async () => {
     await resetBriefingAcquisitionState();
     const bundle = await loadBriefingManifest();

@@ -274,7 +274,12 @@ jobs:
             if [ "$ROLLOUT_MODE" = status ]; then
               scripts/configure-briefing-acquisition-env.sh status "$env_file"
               test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy
-              verify_grok_runtime
+              verify_grok_version
+              if grok_auth_usable; then
+                printf '%s\n' '{"event":"briefing_grok_auth_readiness","ready":true}'
+              else
+                printf '%s\n' '{"event":"briefing_grok_auth_readiness","ready":false}'
+              fi
               report_acquisition_health
               exit 0
             fi
