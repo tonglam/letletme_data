@@ -36,7 +36,14 @@ export const liveLifecycleStatusInOps = ops.table(
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
       name: 'live_lifecycle_status_event_fk',
     }),
-    check('live_lifecycle_status_state_nonempty', sql`btrim(state) <> ''::text`),
+    check(
+      'live_lifecycle_status_state_valid',
+      sql`state IN (
+        'PRE_DEADLINE', 'PICKS_WAIT', 'PICKS_PROBE', 'PICKS_SYNC',
+        'LIVE_ACTIVE', 'BETWEEN_FIXTURES', 'DAY_SETTLING', 'GW_REVIEW',
+        'FINALIZED'
+      )`,
+    ),
   ],
 );
 
@@ -87,6 +94,29 @@ export const managerEventScoreSnapshotsInFpl = fpl.table(
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
       name: 'manager_event_score_snapshots_event_fk',
     }),
-    check('manager_event_score_snapshots_scope_nonempty', sql`btrim(scope_type) <> ''::text`),
+    check(
+      'manager_event_score_snapshots_scope_valid',
+      sql`(
+        (scope_type = 'ENTRY' AND scope_id = 0)
+        OR (scope_type = 'CLASSIC_LEAGUE' AND scope_id > 0)
+      )`,
+    ),
+    check('manager_event_score_snapshots_ids_positive', sql`event_id > 0 AND entry_id > 0`),
+    check(
+      'manager_event_score_snapshots_source_valid',
+      sql`source IN ('FPL_ENTRY_SUMMARY', 'FPL_CLASSIC_STANDINGS', 'FPL_FINAL_RESULT')`,
+    ),
+    check(
+      'manager_event_score_snapshots_scope_total_valid',
+      sql`total_scope IN ('OVERALL', 'CLASSIC_PHASE')`,
+    ),
+    check(
+      'manager_event_score_snapshots_semantics_valid',
+      sql`event_point_semantics IN ('GROSS', 'NET', 'ZERO_COST_EQUIVALENT', 'UNKNOWN')`,
+    ),
+    check(
+      'manager_event_score_snapshots_revision_nonempty',
+      sql`btrim(content_revision) <> ''::text`,
+    ),
   ],
 );
