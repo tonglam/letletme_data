@@ -20,6 +20,10 @@ import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-dat
 import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
+import {
+  isCompatibilitySchedulerEnabled,
+  isStandaloneSchedulerEnabled,
+} from '../utils/scheduler-mode';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
 
 /** The live producer cadence is a data contract: one fresh poll every 30s. */
@@ -538,6 +542,15 @@ function lifecycleDelay(
   }
 }
 
+async function runLifecycleTick(now: Date): Promise<LiveLifecycleDecision | null> {
+  if (isCompatibilitySchedulerEnabled()) {
+    const { runCompatibilitySchedulerPass } = await import('../scheduler/scheduler.service');
+    await runCompatibilitySchedulerPass(now);
+    return null;
+  }
+  return runLiveLifecycle(now);
+}
+
 export function registerLiveLifecycleTimer(app: Elysia) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
@@ -546,7 +559,7 @@ export function registerLiveLifecycleTimer(app: Elysia) {
     timer = setTimeout(
       async () => {
         const now = new Date();
-        const decision = await runLiveLifecycle(now).catch((error) => {
+        const decision = await runLifecycleTick(now).catch((error) => {
           logError('Live lifecycle tick failed', error);
           return null;
         });
@@ -567,10 +580,11 @@ export function registerLiveLifecycleTimer(app: Elysia) {
   };
   return app
     .onStart(() => {
+      if (isStandaloneSchedulerEnabled()) return;
       stopped = false;
       void (async () => {
         const now = new Date();
-        const decision = await runLiveLifecycle(now).catch((error) => {
+        const decision = await runLifecycleTick(now).catch((error) => {
           logError('Live lifecycle tick failed', error);
           return null;
         });

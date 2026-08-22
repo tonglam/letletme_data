@@ -8,14 +8,17 @@ import {
   type LeagueSyncJobData,
 } from '../queues/league-sync.queue';
 import { logError, logInfo } from '../utils/logger';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 
-export type LeagueSyncJobSource = 'cron' | 'manual' | 'cascade';
+export type LeagueSyncJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
 export type LeagueSyncEnqueueOptions = {
   tournamentId?: number;
   delay?: number;
   jobId?: string;
   runId?: string;
+  obligationId?: string;
+  obligationGeneration?: number;
 };
 
 async function enqueueLeagueSyncJob(
@@ -36,6 +39,10 @@ async function enqueueLeagueSyncJob(
       source,
       triggeredAt: new Date().toISOString(),
       runId,
+      ...(options.obligationId ? { obligationId: options.obligationId } : {}),
+      ...(options.obligationGeneration === undefined
+        ? {}
+        : { obligationGeneration: options.obligationGeneration }),
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.
@@ -46,13 +53,14 @@ async function enqueueLeagueSyncJob(
       : `${jobName}-${season.seasonCode}-e${eventId}-coordinator-${jobNonce}`;
     const jobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : generatedJobId;
 
+    const manualCleanup = source === 'manual';
     const job = await queue.add(jobName, jobData, {
       jobId,
       delay: options.delay,
       ...(options.jobId
         ? {
-            removeOnComplete: { age: 86_400 },
-            removeOnFail: true,
+            removeOnComplete: manualCleanup ? true : BULL_COMPLETED_RETENTION,
+            removeOnFail: manualCleanup ? true : BULL_FAILED_RETENTION,
           }
         : {}),
     });

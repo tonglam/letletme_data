@@ -15,6 +15,7 @@ import {
   type NotificationDeliveryResult,
 } from '../utils/notify';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const LAUNCH_MONITOR_CRON_PATTERN = '*/5 * * * *';
 const NOTIFICATION_MARKER_ATTEMPTS = 3;
@@ -271,6 +272,7 @@ export function registerLaunchJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('launch-monitor', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             await runLaunchMonitor({ source: 'cron' });
           });
         } catch {

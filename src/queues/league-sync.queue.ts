@@ -2,6 +2,7 @@ import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
 import { leagueSyncQueueName } from './names';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { leagueSyncQueueName } from './names';
 
@@ -17,12 +18,15 @@ export interface LeagueSyncJobData {
   seasonCode: string;
   eventId: number;
   tournamentId?: number; // If specified, process only this tournament; if not, coordinator job
-  source: 'cron' | 'manual' | 'cascade';
+  source: 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
   triggeredAt: string;
   /** Stable database-clock reuse cutoff retained across BullMQ attempts. */
   freshAfter?: string;
   /** Correlates a coordinator and all of its per-tournament child attempts. */
   runId?: string;
+  /** Durable scheduler obligation identity carried through coordinator jobs. */
+  obligationId?: string;
+  obligationGeneration?: number;
 }
 
 export const leagueSyncQueue = new Queue<LeagueSyncJobData>(leagueSyncQueueName, {
@@ -33,14 +37,8 @@ export const leagueSyncQueue = new Queue<LeagueSyncJobData>(leagueSyncQueueName,
       type: 'exponential',
       delay: 60_000, // 1 minute
     },
-    removeOnComplete: {
-      age: 86400, // 24 hours
-      count: 100,
-    },
-    removeOnFail: {
-      age: 172800, // 48 hours
-      count: 50,
-    },
+    removeOnComplete: BULL_COMPLETED_RETENTION,
+    removeOnFail: BULL_FAILED_RETENTION,
   },
 });
 

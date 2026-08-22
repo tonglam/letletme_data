@@ -114,6 +114,8 @@ jobs:
           script: |
             set -euo pipefail
             old_image=""
+            old_revision=""
+            ledger_before=""
             deployment_started=false
             deployment_committed=false
             migration_started=false
@@ -124,16 +126,23 @@ jobs:
               set +e
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
                 if [ "$services_start_attempted" = true ]; then
-                  echo "Data deployment failed after starting new services; stopping them for operator recovery" >&2
-                  APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker content-worker || true
+                  echo "Data deployment failed after service start; preserving scheduler/worker/content-worker for recovery" >&2
+                  APP_IMAGE="$IMAGE_REF" docker compose ps || true
+                  ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
                 if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
                   echo "Data deployment failed before migration; restoring previous API and worker image" >&2
-                  APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker content-worker || true
+                  if [ -n "$old_revision" ]; then
+                    git reset --hard "$old_revision" || true
+                  fi
+                  APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build scheduler worker content-worker api || true
                 elif [ "$migration_started" = true ]; then
-                  echo "Data deployment failed after migration started; leaving services stopped for operator recovery" >&2
+                  if ! restore_last_known_healthy_if_ledger_unchanged "$old_image" "$ledger_before" "$old_revision"; then
+                    echo "Data deployment failed after a ledger change or unverifiable ledger state; leaving services stopped for forward recovery" >&2
+                  fi
                 fi
               fi
+              release_deploy_lock || true
               exit "$original_status"
             }
             trap on_exit EXIT
@@ -154,6 +163,7 @@ jobs:
             lower_user=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$lower_user" --password-stdin
             cd "$VPS_WORKDIR"
+            old_revision=$(git rev-parse HEAD)
             git fetch origin main
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
@@ -211,7 +221,10 @@ jobs:
             fi
 
             export APP_IMAGE="$IMAGE_REF"
-            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker content-worker migration backup
+            compose() { docker compose "$@"; }
+            source scripts/deploy-state-machine.sh
+            acquire_deploy_lock
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker migration backup
             finish_stage
             start_stage preflight
             echo "deploy preflight: image pulled"
@@ -233,13 +246,23 @@ jobs:
             migration_started=false
             restore_before_migration() {
               if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
-                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build api worker content-worker || true
+                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build scheduler worker content-worker api || true
               fi
             }
             trap restore_before_migration ERR
 
             start_stage quiescence
-            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker content-worker
+            echo "deploy preflight: validating migration plan before stopping services"
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun scripts/apply-sql-migrations.ts --plan
+            ledger_before=$(APP_IMAGE="$IMAGE_REF" migration_ledger_fingerprint)
+            test -n "$ledger_before"
+            echo "deploy preflight: migration_ledger_before=$ledger_before"
+            # Keep the API/worker gate explicit: API bind recovery must never
+            # stop a healthy worker.  (The scheduler is stopped separately.)
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler content-worker
+            remove_exact_stopped_container api
+            wait_for_port_3000_free 30 2
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/assert-queue-quiescence.ts --database-only
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
@@ -263,7 +286,10 @@ jobs:
             finish_stage
             start_stage serviceReady
             services_start_attempted=true
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker content-worker
+            # The shared state machine owns the equivalent API/worker startup
+            # (`docker compose up -d ...`) and preserves healthy workers on a
+            # first API bind failure.
+            APP_IMAGE="$IMAGE_REF" start_runtime_services
             PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
               scripts/verify-runtime-health.sh
 

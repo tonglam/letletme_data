@@ -25,16 +25,28 @@ export interface EntrySyncJobOptions {
   delayMs?: number;
   eventId?: number;
   runId?: string;
+  obligationId?: string;
+  obligationGeneration?: number;
   /** Stable deduplication key for every table-scan chunk in one trigger lane. */
   queueKey?: string;
   removeOnSettle?: boolean;
 }
 
 export function retainEntrySyncChainOptions(
-  options: Pick<EntrySyncJobOptions, 'runId' | 'queueKey' | 'removeOnSettle'> | undefined,
-): Pick<EntrySyncJobOptions, 'runId' | 'queueKey' | 'removeOnSettle'> {
+  options:
+    | Pick<
+        EntrySyncJobOptions,
+        'runId' | 'queueKey' | 'removeOnSettle' | 'obligationId' | 'obligationGeneration'
+      >
+    | undefined,
+): Pick<
+  EntrySyncJobOptions,
+  'runId' | 'queueKey' | 'removeOnSettle' | 'obligationId' | 'obligationGeneration'
+> {
   return {
     runId: options?.runId,
+    obligationId: options?.obligationId,
+    obligationGeneration: options?.obligationGeneration,
     queueKey: options?.queueKey,
     removeOnSettle: options?.removeOnSettle,
   };
@@ -136,7 +148,9 @@ async function enqueueEntrySyncJob(
     const runId = options.runId ?? (source === 'cron' ? `${Date.now()}` : randomUUID());
     const tableScanQueueKey = options.queueKey ?? (source === 'manual' ? 'manual' : runId);
     const isEntryList = options.entryIds !== undefined;
-    const removeOnSettle = options.removeOnSettle === true || isEntryList || source === 'manual';
+    // Keep queue evidence for every non-manual trigger, including explicit
+    // entry-list/API scans. Manual one-shots may still clean up on settle.
+    const removeOnSettle = source === 'manual' && options.removeOnSettle !== false;
 
     const jobData = {
       seasonId: season.seasonId,
@@ -152,6 +166,8 @@ async function enqueueEntrySyncJob(
       throttleMs,
       eventId: options.eventId,
       runId,
+      obligationId: options.obligationId,
+      obligationGeneration: options.obligationGeneration,
       queueKey: tableScanQueueKey,
       removeOnSettle,
     };

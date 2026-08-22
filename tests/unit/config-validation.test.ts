@@ -172,8 +172,9 @@ describe('production environment preflight', () => {
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /restore_stopped_services\(\)[\s\S]*?compose start api worker content-worker/,
+      /restore_stopped_services\(\)[\s\S]*?compose up -d --remove-orphans --no-build[\s\S]*?scheduler worker content-worker api/,
     );
+    expect(deployScript).toContain('APP_IMAGE="$DEPLOY_OLD_IMAGE"');
     expect(deployScript).toContain('load_backup_settings');
     expect(deployScript).toContain('read_env_setting DATABASE_BACKUP_DIR "$ENV_FILE"');
   });

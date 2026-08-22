@@ -6,6 +6,10 @@ import {
   prepareCoreSnapshot,
   type CoreSnapshot,
 } from '../domain/core-snapshot';
+import {
+  prepareCoreSnapshotCache,
+  selectCurrentEventIdByDeadline,
+} from '../cache/core-snapshot-cache';
 import { seasonRepository } from '../repositories/seasons';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { syncOperationsRepository } from '../repositories/sync-operations';
@@ -133,18 +137,7 @@ export async function syncCoreSnapshot(
     dependencies.onMilestone?.('validated');
     const publicationId = randomUUID();
     preparedPublicationId = publicationId;
-    const prepared = await syncOperationsRepository.preparePublication({
-      publicationId,
-      dataset: 'fpl:core',
-      season: currentSeason,
-      sourceRunId,
-      manifest: {
-        state: 'staging',
-        sourceCheckedAt: sourceCheckedAt.toISOString(),
-      },
-    });
-
-    const persisted = await withMutationScopes(
+    const preparedAndPersisted = await withMutationScopes(
       {
         queueName: 'data-sync',
         jobName: 'core-snapshot',
@@ -152,27 +145,75 @@ export async function syncCoreSnapshot(
       },
       async () => {
         dependencies.onMilestone?.('locked');
-        return persistCoreSnapshotPublication(snapshot, {
+        // Keep the staging publication, immutable DB item proof and canonical
+        // FPL rows in one short PostgreSQL mutation transaction. Redis is
+        // still delivered only after this transaction commits.
+        const prepared = await syncOperationsRepository.preparePublication({
+          publicationId,
+          dataset: 'fpl:core',
+          season: currentSeason,
+          sourceRunId,
+          manifest: {
+            state: 'staging',
+            sourceCheckedAt: sourceCheckedAt.toISOString(),
+          },
+        });
+        const preparedCache = prepareCoreSnapshotCache(snapshot, {
+          revision: prepared.revision,
+          publicationId: prepared.publicationId,
+          sourceCheckedAt,
+        });
+        const payloads: Record<string, unknown> = {
+          events: snapshot.events,
+          teams: snapshot.teams,
+          players: snapshot.players,
+          phases: snapshot.phases,
+          fixtures: snapshot.fixtures,
+          currentEventId: selectCurrentEventIdByDeadline(snapshot.events, sourceCheckedAt),
+          selectionRules: snapshot.selectionRules ?? null,
+        };
+        await syncOperationsRepository.stagePublicationItems(
+          prepared.publicationId,
+          preparedCache.manifest.items.map((item) => ({
+            name: item.name as
+              | 'events'
+              | 'teams'
+              | 'players'
+              | 'phases'
+              | 'fixtures'
+              | 'currentEventId'
+              | 'selectionRules',
+            payload: payloads[item.name],
+            count: item.count,
+            checksum: item.sha256,
+          })),
+        );
+        const persisted = await persistCoreSnapshotPublication(snapshot, {
           revision: prepared.revision,
           publicationId: prepared.publicationId,
           sourceRunId,
           sourceCheckedAt,
         });
+        return { prepared, persisted, preparedCache };
       },
     );
     persistenceCommitted = true;
     dependencies.onMilestone?.('persisted');
-    const committed = await publishCoreSnapshotPublication(persisted, {
-      revision: prepared.revision,
-      publicationId: prepared.publicationId,
-      sourceRunId,
-      sourceCheckedAt,
-    });
+    const committed = await publishCoreSnapshotPublication(
+      preparedAndPersisted.persisted,
+      {
+        revision: preparedAndPersisted.prepared.revision,
+        publicationId: preparedAndPersisted.prepared.publicationId,
+        sourceRunId,
+        sourceCheckedAt,
+      },
+      preparedAndPersisted.preparedCache,
+    );
     if (committed.status === 'stale') return result(snapshot, false);
     dependencies.onMilestone?.('published');
     return result(snapshot, true, {
-      publicationId: prepared.publicationId,
-      revision: prepared.revision,
+      publicationId: preparedAndPersisted.prepared.publicationId,
+      revision: preparedAndPersisted.prepared.revision,
     });
   } catch (error) {
     if (preparedPublicationId && !persistenceCommitted) {

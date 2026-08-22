@@ -4,6 +4,7 @@ import type { Elysia } from 'elysia';
 import { runBugReportScreenshotRetention } from '../services/bug-report-screenshot-retention.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const BUG_REPORT_SCREENSHOT_RETENTION_SCHEDULE = '20 3 * * *';
 
@@ -16,6 +17,7 @@ export function registerBugReportScreenshotRetentionJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('bug-report-screenshot-retention', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             await runBugReportScreenshotRetention();
           });
         } catch {

@@ -2,6 +2,7 @@ import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
 import { dataSyncQueueName } from './names';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { dataSyncQueueName } from './names';
 
@@ -10,10 +11,13 @@ export type DataSyncJobName = 'core-snapshot' | 'player-prices' | 'player-stats'
 export interface DataSyncJobData {
   seasonId: number;
   seasonCode: string;
-  source?: 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
+  source?: 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade' | 'catchup' | 'reconcile';
   triggeredAt: string;
   /** Correlates one logical execution across BullMQ retries; independent of queue dedupe ID. */
   runId?: string;
+  /** Durable scheduler obligation identity carried through worker completion. */
+  obligationId?: string;
+  obligationGeneration?: number;
   /** Optional event filter (fixtures, player-stats); absent = current/all behavior */
   eventId?: number;
   /** Price-history date in the configured cron timezone (YYYYMMDD). */
@@ -26,8 +30,10 @@ const defaultJobOptions = {
     type: 'exponential' as const,
     delay: 60_000,
   },
-  removeOnComplete: 100,
-  removeOnFail: 200,
+  // Keep deterministic execution evidence long enough for production
+  // incident review. Queue emptiness is not success evidence.
+  removeOnComplete: BULL_COMPLETED_RETENTION,
+  removeOnFail: BULL_FAILED_RETENTION,
 };
 
 export const dataSyncQueue = new Queue<DataSyncJobData>(dataSyncQueueName, {

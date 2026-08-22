@@ -18,6 +18,8 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      - SCHEDULER_MODE=standalone
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
     command: bun scripts/migration-login-contract.ts
     logging: *default-logging
     restart: 'no'
@@ -53,6 +55,8 @@ services:
       # must not load pino-pretty (devDependency) in the runtime image.
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
+      - SCHEDULER_MODE=standalone
     logging: *default-logging
     ports:
       - '127.0.0.1:3000:3000'
@@ -82,6 +86,7 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
     logging: *default-logging
     restart: unless-stopped
     healthcheck:
@@ -89,6 +94,30 @@ services:
       # the event loop is hung even though the process still runs. find exits
       # 0 without matches, so assert on non-empty output.
       test: ['CMD-SHELL', 'test -n "$$(find /tmp/worker-heartbeat -mmin -2 2>/dev/null)"']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  scheduler:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    command: bun dist/scheduler.js
+    env_file:
+      - path: ${ENV_FILE:-.env.deploy}
+        required: false
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+      - SCHEDULER_MODE=standalone
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
+      - SCHEDULER_HEARTBEAT_PATH=/tmp/scheduler-heartbeat
+    logging: *default-logging
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'test -n "$$(find /tmp/scheduler-heartbeat -mmin -2 2>/dev/null)"']
       interval: 30s
       timeout: 5s
       retries: 3
@@ -106,6 +135,7 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
       - WORKER_HEARTBEAT_PATH=/tmp/content-worker-heartbeat
       - GROK_HOME=/home/appuser/.grok
       - CONTENT_MANIFEST_GIT_REVISION=${CONTENT_MANIFEST_GIT_REVISION:-unknown}

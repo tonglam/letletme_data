@@ -57,9 +57,16 @@ import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
+import { isTerminalJobFailure } from '../utils/worker-failure';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { getQueueConnection } from '../utils/queue';
+import {
+  completeSchedulerObligation,
+  completeSchedulerObligationByBullJobId,
+  failSchedulerObligation,
+  failSchedulerObligationByBullJobId,
+} from '../repositories/scheduler-obligations';
 import type { WorkerRuntime } from './worker-runtime';
 
 const maxRetryCycles = 2;
@@ -630,6 +637,21 @@ export function createEntrySyncWorker(): WorkerRuntime {
           runMutation,
         );
         if (scoped.afterCommit) await scoped.afterCommit();
+        if (effectiveJobData?.obligationId && scoped.value.scanComplete) {
+          await completeSchedulerObligation({
+            obligationId: effectiveJobData.obligationId,
+            generation: effectiveJobData.obligationGeneration,
+            status: 'succeeded',
+            evidence: {
+              queue: entrySyncQueueName,
+              jobName: job.name,
+              eventId: targetEventId,
+              requiredUnits: scoped.value.requiredUnits,
+              succeededUnits: scoped.value.succeededUnits,
+              reusedUnits: scoped.value.reusedUnits,
+            },
+          });
+        }
         return scoped.value;
       });
     });
@@ -645,6 +667,12 @@ export function createEntrySyncWorker(): WorkerRuntime {
 
   worker.on('completed', (job) => {
     logInfo('Entry sync job completed', { jobId: job.id, name: job.name });
+    if (job.id !== undefined && !job.data.obligationId) {
+      void completeSchedulerObligationByBullJobId({
+        bullJobId: job.id,
+        evidence: { queue: entrySyncQueueName, jobName: job.name },
+      }).catch(() => undefined);
+    }
   });
   worker.on('failed', (job, error) => {
     logError('Entry sync job failed', error, {
@@ -652,7 +680,20 @@ export function createEntrySyncWorker(): WorkerRuntime {
       name: job?.name,
       attemptsMade: job?.attemptsMade,
     });
-    if (job) void alertOnFinalFailure(job, error);
+    if (job) {
+      void alertOnFinalFailure(job, error);
+      if (isTerminalJobFailure(job, error) && job.data.obligationId) {
+        void failSchedulerObligation({
+          obligationId: job.data.obligationId,
+          generation: job.data.obligationGeneration,
+          error,
+        }).catch(() => undefined);
+      } else if (job.id !== undefined && isTerminalJobFailure(job, error)) {
+        void failSchedulerObligationByBullJobId({ bullJobId: job.id, error }).catch(
+          () => undefined,
+        );
+      }
+    }
   });
 
   return {

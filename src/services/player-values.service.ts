@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 
-import { fplClient } from '../clients/fpl';
+import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import type { PlayerValue } from '../domain/player-values';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { PlayerMarketSnapshot } from '../domain/player-market-snapshots';
@@ -40,6 +40,35 @@ export type PlayerValuesSyncDependencies = {
   getCurrentChangeDate: () => string;
   now: () => Date;
 };
+
+export type PlayerValuesSyncResult = {
+  count: number;
+  eventId?: number;
+  marketSnapshotCount?: number;
+  outcome?: 'noop';
+  requiredUnits?: number;
+  succeededUnits?: number;
+  failedUnits?: number;
+  timings?: PlayerValuesPhaseTimings;
+  /** Set only when notification delivery must happen after the caller commits. */
+  notificationMessage?: string;
+};
+
+/**
+ * The upstream market payload is immutable after this point.  Keeping this
+ * value separate from the persistence step lets the worker perform network
+ * I/O before acquiring the short canonical-write mutation scope.
+ */
+export type PreparedPlayerValuesSync = Readonly<{
+  season: FplSeasonRef;
+  changeDate: string;
+  eventId: number;
+  bootstrap: FPLBootstrapResponse;
+  snapshots: readonly PlayerMarketSnapshot[];
+  capturedAt: Date;
+  requiredUnits: number;
+  timings: PlayerValuesPhaseTimings;
+}>;
 
 const defaultDependencies: PlayerValuesSyncDependencies = {
   getBootstrap: () => fplClient.getBootstrap(),
@@ -132,6 +161,168 @@ function attachAttemptEvidence(
   }
 }
 
+function assertChangeDate(changeDate: string, currentChangeDate: string): void {
+  if (!/^\d{8}$/.test(changeDate)) {
+    throw new Error(`Invalid player value change date: ${changeDate}`);
+  }
+  if (changeDate !== currentChangeDate) {
+    throw new Error(`Player market date ${changeDate} is outside the current UTC+8 window`);
+  }
+}
+
+export async function preparePlayerValuesSync(
+  season: FplSeasonRef,
+  changeDate: string,
+  dependencies: PlayerValuesSyncDependencies = defaultDependencies,
+  options?: { onTargetEventResolved?: (eventId: number) => void },
+): Promise<PreparedPlayerValuesSync | null> {
+  if (!/^\d{8}$/.test(changeDate)) {
+    throw new Error(`Invalid player value change date: ${changeDate}`);
+  }
+  if (changeDate !== dependencies.getCurrentChangeDate()) {
+    logInfo('Skipping market snapshot outside its scheduled date', { changeDate });
+    return null;
+  }
+
+  const timings: Partial<PlayerValuesPhaseTimings> = {};
+  let requiredUnits = 0;
+  try {
+    const syncEvent = await dependencies.resolvePlayerSyncEvent(season);
+    if (!syncEvent) throw new Error('No current or next event found for player values');
+    options?.onTargetEventResolved?.(syncEvent.event.id);
+
+    const bootstrap = await measurePhase(timings, 'bootstrap', dependencies.getBootstrap);
+    if (!Array.isArray(bootstrap.elements) || bootstrap.elements.length === 0) {
+      throw new Error('No player market data returned from FPL API');
+    }
+    requiredUnits = bootstrap.elements.length;
+    const capturedAt = dependencies.now();
+    const snapshots = transformPlayerMarketSnapshots(bootstrap, capturedAt);
+    return {
+      season,
+      changeDate,
+      eventId: syncEvent.event.id,
+      bootstrap,
+      snapshots,
+      capturedAt,
+      requiredUnits,
+      timings: timings as PlayerValuesPhaseTimings,
+    };
+  } catch (error) {
+    attachAttemptEvidence(error, {
+      requiredUnits,
+      succeededUnits: 0,
+      failedUnits: Math.max(0, requiredUnits),
+      timings,
+    });
+    throw error;
+  }
+}
+
+export async function persistPreparedPlayerValuesSync(
+  prepared: PreparedPlayerValuesSync,
+  dependencies: PlayerValuesSyncDependencies = defaultDependencies,
+  options?: {
+    deferPriceSyncEnqueue?: boolean;
+    deferMarketPublication?: boolean;
+    deferNotification?: boolean;
+  },
+): Promise<PlayerValuesSyncResult> {
+  const timings: Partial<PlayerValuesPhaseTimings> = { ...prepared.timings };
+  let succeededUnits = 0;
+  try {
+    assertChangeDate(prepared.changeDate, dependencies.getCurrentChangeDate());
+    const persisted = await measurePhase(timings, 'snapshotWrite', () =>
+      dependencies.persistMarketSnapshot(
+        prepared.season,
+        prepared.eventId,
+        prepared.snapshots,
+        prepared.requiredUnits,
+      ),
+    );
+    succeededUnits = persisted.persistedCount;
+    if (persisted.snapshotDate.replaceAll('-', '') !== prepared.changeDate) {
+      throw new Error(
+        `Market snapshot date ${persisted.snapshotDate} does not match requested date ${prepared.changeDate}`,
+      );
+    }
+
+    const derivedRows = await measurePhase(timings, 'derivedView', () =>
+      dependencies.findByChangeDate(prepared.season, prepared.changeDate),
+    );
+    const changedRows = enrichChangedRows(
+      derivedRows,
+      prepared.bootstrap.elements,
+      prepared.bootstrap.teams,
+    );
+    let publicationId: string | undefined;
+    if (dependencies.publishMarketPublication && !options?.deferMarketPublication) {
+      const publication = await measurePhase(timings, 'publication', () =>
+        dependencies.publishMarketPublication!(prepared.season),
+      );
+      publicationId = publication.publicationId;
+    }
+    const notificationMessage =
+      changedRows.length > 0
+        ? formatPlayerValuesNotification(prepared.changeDate, changedRows)
+        : undefined;
+    if (changedRows.length > 0) {
+      if (!options?.deferPriceSyncEnqueue) {
+        await dependencies.enqueuePlayerPrices(prepared.season, 'cascade', {
+          changeDate: prepared.changeDate,
+          jobId: `player-prices-${prepared.changeDate}-immediate`,
+          removeOnSettle: false,
+        });
+      }
+      if (!options?.deferNotification) {
+        try {
+          await dependencies.notify(notificationMessage!, {
+            // The publication/snapshot identity, rather than the wall-clock
+            // minute, is the notification's idempotency boundary. A worker
+            // retry may happen in a later minute but must not duplicate the
+            // same successfully committed market publication.
+            idempotencyKey: `market:${prepared.season.seasonCode}:${prepared.changeDate}:${publicationId ?? 'snapshot'}`,
+          });
+        } catch (error) {
+          logError('Failed to send player values notification', error, {
+            changeDate: prepared.changeDate,
+          });
+        }
+      }
+    }
+
+    const completeTimings = timings as PlayerValuesPhaseTimings;
+    logInfo('Daily player market snapshot completed', {
+      season: prepared.season.seasonCode,
+      eventId: prepared.eventId,
+      changeDate: prepared.changeDate,
+      marketSnapshotCount: persisted.persistedCount,
+      derivedChanges: changedRows.length,
+      requiredUnits: prepared.requiredUnits,
+      succeededUnits,
+      timings: completeTimings,
+    });
+    return {
+      count: changedRows.length,
+      eventId: prepared.eventId,
+      marketSnapshotCount: persisted.persistedCount,
+      requiredUnits: prepared.requiredUnits,
+      succeededUnits,
+      failedUnits: Math.max(0, prepared.requiredUnits - succeededUnits),
+      timings: completeTimings,
+      ...(options?.deferNotification && notificationMessage ? { notificationMessage } : {}),
+    };
+  } catch (error) {
+    attachAttemptEvidence(error, {
+      requiredUnits: prepared.requiredUnits,
+      succeededUnits,
+      failedUnits: Math.max(0, prepared.requiredUnits - succeededUnits),
+      timings,
+    });
+    throw error;
+  }
+}
+
 /**
  * Capture one complete daily market snapshot. reporting.player_value_changes
  * derives Start/Rise/Faller rows from these snapshots; there is no second
@@ -144,108 +335,15 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
     options?: {
       onTargetEventResolved?: (eventId: number) => void;
       deferPriceSyncEnqueue?: boolean;
+      /** Publish only after the caller's canonical mutation transaction commits. */
+      deferMarketPublication?: boolean;
+      /** Deliver bot notifications only after the caller confirms publication. */
+      deferNotification?: boolean;
     },
-  ): Promise<{
-    count: number;
-    eventId?: number;
-    marketSnapshotCount?: number;
-    outcome?: 'noop';
-    requiredUnits?: number;
-    succeededUnits?: number;
-    failedUnits?: number;
-    timings?: PlayerValuesPhaseTimings;
-  }> {
-    if (!/^\d{8}$/.test(changeDate)) {
-      throw new Error(`Invalid player value change date: ${changeDate}`);
-    }
-    if (changeDate !== dependencies.getCurrentChangeDate()) {
-      logInfo('Skipping market snapshot outside its scheduled date', { changeDate });
-      return { count: 0, outcome: 'noop' };
-    }
-
-    const syncEvent = await dependencies.resolvePlayerSyncEvent(season);
-    if (!syncEvent) throw new Error('No current or next event found for player values');
-    options?.onTargetEventResolved?.(syncEvent.event.id);
-
-    const timings: Partial<PlayerValuesPhaseTimings> = {};
-    let requiredUnits = 0;
-    let succeededUnits = 0;
-    try {
-      const bootstrap = await measurePhase(timings, 'bootstrap', dependencies.getBootstrap);
-      if (!Array.isArray(bootstrap.elements) || bootstrap.elements.length === 0) {
-        throw new Error('No player market data returned from FPL API');
-      }
-      requiredUnits = bootstrap.elements.length;
-      const capturedAt = dependencies.now();
-      const snapshots = transformPlayerMarketSnapshots(bootstrap, capturedAt);
-      const persisted = await measurePhase(timings, 'snapshotWrite', () =>
-        dependencies.persistMarketSnapshot(
-          season,
-          syncEvent.event.id,
-          snapshots,
-          bootstrap.elements.length,
-        ),
-      );
-      succeededUnits = persisted.persistedCount;
-      if (persisted.snapshotDate.replaceAll('-', '') !== changeDate) {
-        throw new Error(
-          `Market snapshot date ${persisted.snapshotDate} does not match requested date ${changeDate}`,
-        );
-      }
-
-      const derivedRows = await measurePhase(timings, 'derivedView', () =>
-        dependencies.findByChangeDate(season, changeDate),
-      );
-      const changedRows = enrichChangedRows(derivedRows, bootstrap.elements, bootstrap.teams);
-      if (dependencies.publishMarketPublication) {
-        await measurePhase(timings, 'publication', () =>
-          dependencies.publishMarketPublication!(season),
-        );
-      }
-      if (changedRows.length > 0) {
-        if (!options?.deferPriceSyncEnqueue) {
-          await dependencies.enqueuePlayerPrices(season, 'cascade', {
-            changeDate,
-            jobId: `player-prices-${changeDate}-immediate`,
-            removeOnSettle: true,
-          });
-        }
-        try {
-          await dependencies.notify(formatPlayerValuesNotification(changeDate, changedRows));
-        } catch (error) {
-          logError('Failed to send player values notification', error, { changeDate });
-        }
-      }
-
-      const completeTimings = timings as PlayerValuesPhaseTimings;
-      logInfo('Daily player market snapshot completed', {
-        season: season.seasonCode,
-        eventId: syncEvent.event.id,
-        changeDate,
-        marketSnapshotCount: persisted.persistedCount,
-        derivedChanges: changedRows.length,
-        requiredUnits,
-        succeededUnits,
-        timings: completeTimings,
-      });
-      return {
-        count: changedRows.length,
-        eventId: syncEvent.event.id,
-        marketSnapshotCount: persisted.persistedCount,
-        requiredUnits,
-        succeededUnits,
-        failedUnits: Math.max(0, requiredUnits - succeededUnits),
-        timings: completeTimings,
-      };
-    } catch (error) {
-      attachAttemptEvidence(error, {
-        requiredUnits,
-        succeededUnits,
-        failedUnits: Math.max(0, requiredUnits - succeededUnits),
-        timings,
-      });
-      throw error;
-    }
+  ): Promise<PlayerValuesSyncResult> {
+    const prepared = await preparePlayerValuesSync(season, changeDate, dependencies, options);
+    if (!prepared) return { count: 0, outcome: 'noop' };
+    return persistPreparedPlayerValuesSync(prepared, dependencies, options);
   };
 }
 

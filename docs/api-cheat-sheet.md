@@ -3,8 +3,9 @@
 Examples use `http://data.internal.example`; substitute the trusted environment URL.
 
 - This is an ingestion/operations API, not the public product API.
-- `/health` is process liveness. `/ready` requires PostgreSQL, cache Redis, queue Redis, and
-  exactly one current row in `fpl.seasons`.
+- `/health` is process liveness. `/ready` requires PostgreSQL, cache Redis, queue Redis, exactly
+  one current row in `fpl.seasons`, fresh scheduler/worker heartbeats, and DB/Redis publication
+  consistency (a transient publication mismatch is tolerated for 120 seconds).
 - Every `POST`, `PATCH`, and `DELETE` requires `x-api-key` when `ENABLE_AUTH=true`.
 - A `202` normally proves enqueueing only. Verify the BullMQ result and PostgreSQL/publication
   state separately.
@@ -125,6 +126,7 @@ Mutation bodies include the verified `adminEntryId` contract documented by the W
 
 ```bash
 curl "$DATA_URL/jobs"
+curl "$DATA_URL/jobs/status" -H "$DATA_AUTH_HEADER"
 curl -X POST "$DATA_URL/jobs/core-snapshot-sync/trigger" -H "$DATA_AUTH_HEADER"
 curl -X POST "$DATA_URL/jobs/live-snapshot/trigger" -H "$DATA_AUTH_HEADER"
 curl -X POST "$DATA_URL/jobs/player-prices/trigger" \
@@ -132,17 +134,18 @@ curl -X POST "$DATA_URL/jobs/player-prices/trigger" \
   -d '{"changeDate":"20260803"}'
 ```
 
-`GET /jobs` is the runtime authority. The current trigger names are:
-
-- `core-snapshot-sync`, `event-current-refresh`, `player-prices`,
-  `player-stats-sync`, `player-values-sync`;
-- `entry-info-daily`, `entry-event-picks-daily`,
-  `entry-event-transfers-daily`, `entry-event-results-daily`;
-- `league-event-picks-sync`, `league-event-results-sync`;
-- `tournament-event-picks-sync`, `tournament-event-results-sync`,
-  `tournament-event-transfers-pre-sync`, `tournament-selection-stats-sync`,
-  `tournament-info-sync`,
-  `tournament-materialized-views-refresh`;
-- `live-snapshot`, `post-match-consolidation`, and `launch-monitor`.
+`GET /jobs` is generated from the scheduler registry and the compatibility
+manual adapters; use it as the runtime authority rather than copying a static
+schedule list. Compatibility adapters include `core-snapshot-sync`,
+`event-current-refresh`, `player-prices`, `player-stats-sync`,
+`player-values-sync`, `entry-info-daily`, `entry-event-results-daily`,
+`league-event-results-sync`, `tournament-event-results-sync`,
+`tournament-selection-stats-sync`, `tournament-info-sync`,
+`tournament-materialized-views-refresh`, `live-snapshot`,
+`post-match-consolidation`, and `launch-monitor`. Registry names include
+`entry-picks`, `entry-transfers`, `entry-results`, `league-event-picks`,
+`league-event-results`, `tournament-event-picks`, `tournament-event-results`,
+`tournament-transfers-pre`, `core-snapshot`, `market-daily`, `player-stats`,
+`live-finalization`, and the maintenance queue jobs shown by `GET /jobs`.
 
 Only names returned by `GET /jobs` are accepted; removed trigger aliases are not recognized.

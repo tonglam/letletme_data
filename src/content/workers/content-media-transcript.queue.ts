@@ -6,6 +6,7 @@ import { getContentRuntimeFlags } from '../config';
 import { logError, logInfo } from '../../utils/logger';
 import { getQueueConnection } from '../../utils/queue';
 import { runFormalMediaWorker } from './formal-media.worker';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../../queues/retention';
 
 export const contentMediaTranscriptQueueName = 'content-media-transcript';
 
@@ -16,8 +17,8 @@ export function getContentMediaTranscriptQueue(): Queue<AcquisitionJobV1> {
     connection: getQueueConnection(),
     defaultJobOptions: {
       attempts: 1,
-      removeOnComplete: { age: 86_400, count: 1_000 },
-      removeOnFail: { age: 172_800, count: 1_000 },
+      removeOnComplete: BULL_COMPLETED_RETENTION,
+      removeOnFail: BULL_FAILED_RETENTION,
     },
   });
   return queue;

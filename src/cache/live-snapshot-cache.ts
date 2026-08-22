@@ -24,7 +24,7 @@ export interface LiveSnapshotCacheContents extends LiveSnapshotCachePayload {
 }
 
 export interface LiveSnapshotCachePublishOptions
-  extends Pick<PublishDataRevisionOptions, 'beforeActivate' | 'afterStage'> {
+  extends Pick<PublishDataRevisionOptions, 'activate' | 'beforeActivate' | 'afterStage'> {
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;

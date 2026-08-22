@@ -12,7 +12,7 @@ import 'dotenv/config';
 
 import { Queue } from 'bullmq';
 
-import { queueNames } from '../src/queues/names';
+import { allQueueNames } from '../src/queues/names';
 import { getQueueConnection } from '../src/utils/queue';
 
 async function main(): Promise<void> {
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
     ),
   );
 
-  for (const name of queueNames) {
+  for (const name of allQueueNames) {
     const queue = new Queue(name, { connection });
     const counts = await queue.getJobCounts(
       'waiting',

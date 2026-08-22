@@ -34,6 +34,7 @@ import { withMutationScopes } from '../utils/mutation-scopes';
 import { getQueueConnection } from '../utils/queue';
 import { isTerminalJobAttemptFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 
 const STUCK_PROCESSING_CUTOFF_MINUTES = Number(
   process.env.TOURNAMENT_SETUP_STUCK_CUTOFF_MINUTES ?? 15,
@@ -302,8 +303,8 @@ export function createTournamentSetupWorker(): WorkerRuntime {
     {
       connection,
       concurrency: 2,
-      removeOnComplete: { count: 100 },
-      removeOnFail: { count: 50 },
+      removeOnComplete: BULL_COMPLETED_RETENTION,
+      removeOnFail: BULL_FAILED_RETENTION,
       lockDuration: 120_000,
       maxStalledCount: 2,
       stalledInterval: 15_000,

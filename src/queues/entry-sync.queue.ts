@@ -2,12 +2,13 @@ import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
 import { entrySyncQueueName } from './names';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { entrySyncQueueName } from './names';
 
 export type EntrySyncJobName = 'entry-info' | 'entry-picks' | 'entry-transfers' | 'entry-results';
 
-export type EntrySyncJobSource = 'cron' | 'manual' | 'api';
+export type EntrySyncJobSource = 'cron' | 'manual' | 'api' | 'catchup' | 'reconcile';
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -47,6 +48,9 @@ export interface EntrySyncJobData {
   throttleMs?: number;
   eventId?: number;
   runId?: string;
+  /** Durable scheduler obligation carried through every scan chunk/retry. */
+  obligationId?: string;
+  obligationGeneration?: number;
   queueKey?: string;
   /** Propagated through continuation/retry chunks for deterministic daily jobs. */
   removeOnSettle?: boolean;
@@ -60,8 +64,8 @@ export const entrySyncQueue = new Queue<EntrySyncJobData>(entrySyncQueueName, {
       type: 'exponential',
       delay: 60_000,
     },
-    removeOnComplete: 100,
-    removeOnFail: 200,
+    removeOnComplete: BULL_COMPLETED_RETENTION,
+    removeOnFail: BULL_FAILED_RETENTION,
   },
 });
 

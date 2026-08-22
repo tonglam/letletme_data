@@ -1,8 +1,12 @@
 import {
   publishCoreSnapshotCache,
   readCoreSnapshotCache,
+  selectCurrentEventIdByDeadline,
   type CoreSnapshotCachePublication,
 } from '../cache/core-snapshot-cache';
+import { stageDataPublication } from '../cache/data-publication';
+import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
+import { randomUUID } from 'node:crypto';
 import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
 import { seasonRepository } from '../repositories/seasons';
 import { syncOperationsRepository } from '../repositories/sync-operations';
@@ -16,6 +20,7 @@ import {
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 
 import type { CoreSnapshot } from '../domain/core-snapshot';
+import type { PreparedCoreSnapshotCachePublication } from '../cache/core-snapshot-cache';
 
 export interface CoreSnapshotPublicationContext {
   readonly revision: number;
@@ -66,18 +71,62 @@ export async function persistCoreSnapshotPublication(
 export async function publishCoreSnapshotPublication(
   persisted: CoreSnapshotPersistedResult,
   context: CoreSnapshotPublicationContext,
+  preparedCache?: PreparedCoreSnapshotCachePublication,
 ): Promise<CoreSnapshotCommitResult> {
   const season = explicitSeasonRef(persisted.snapshot.season);
   try {
-    const publication = await publishCoreSnapshotCache(persisted.snapshot, {
-      revision: context.revision,
-      publicationId: context.publicationId,
-      sourceCheckedAt: context.sourceCheckedAt,
-      beforeActivate: async () => {
-        const current = await seasonRepository.findCurrent();
-        return current.seasonId === season.seasonId && current.seasonCode === season.seasonCode;
-      },
-    });
+    const publication = preparedCache
+      ? await (async () => {
+          await stageDataPublication(preparedCache);
+          const current = await seasonRepository.findCurrent();
+          return {
+            published:
+              current.seasonId === season.seasonId && current.seasonCode === season.seasonCode,
+            reason: 'published' as const,
+            manifest: preparedCache.manifest,
+            previousManifest: null,
+          };
+        })()
+      : await publishCoreSnapshotCache(persisted.snapshot, {
+          revision: context.revision,
+          publicationId: context.publicationId,
+          sourceCheckedAt: context.sourceCheckedAt,
+          activate: false,
+          afterStage: async (manifest) => {
+            const payloads: Record<string, unknown> = {
+              events: persisted.snapshot.events,
+              teams: persisted.snapshot.teams,
+              players: persisted.snapshot.players,
+              phases: persisted.snapshot.phases,
+              fixtures: persisted.snapshot.fixtures,
+              currentEventId: selectCurrentEventIdByDeadline(
+                persisted.snapshot.events,
+                context.sourceCheckedAt,
+              ),
+              selectionRules: persisted.snapshot.selectionRules ?? null,
+            };
+            await syncOperationsRepository.stagePublicationItems(
+              context.publicationId,
+              manifest.items.map((item) => ({
+                name: item.name as
+                  | 'events'
+                  | 'teams'
+                  | 'players'
+                  | 'phases'
+                  | 'fixtures'
+                  | 'currentEventId'
+                  | 'selectionRules',
+                payload: payloads[item.name],
+                count: item.count,
+                checksum: item.sha256,
+              })),
+            );
+          },
+          beforeActivate: async () => {
+            const current = await seasonRepository.findCurrent();
+            return current.seasonId === season.seasonId && current.seasonCode === season.seasonCode;
+          },
+        });
     if (!publication.published) {
       await syncOperationsRepository.skipPublication(
         context.publicationId,
@@ -102,7 +151,17 @@ export async function publishCoreSnapshotPublication(
       season,
       sourceRunId: context.sourceRunId,
       manifest: publication.manifest,
+      outbox: { outboxId: randomUUID() },
     });
+    const delivered = await dispatchDataPublicationOutbox({
+      limit: 1,
+      publicationId: context.publicationId,
+    });
+    if (delivered.delivered !== 1) {
+      throw new Error(
+        `Core publication ${context.publicationId} is canonical but Redis delivery is pending`,
+      );
+    }
     return { status: 'committed', persistence: persisted.persistence, publication };
   } catch (error) {
     // Canonical PostgreSQL persistence already committed before this phase.
@@ -141,10 +200,18 @@ export async function recoverPendingCoreSnapshotPublication(
     pending.revision !== cached.manifest.revision ||
     !pending.sourceRunId
   ) {
-    throw new DatabaseError(
-      'Active core cache manifest has no recoverable ops publication',
-      'CORE_PUBLICATION_RECOVERY_CONTRACT_MISMATCH',
+    // A Redis-only/legacy pointer is a ghost, not authority.  Leave it in
+    // place for the compare-if-current reconciler; a fresh core job must first
+    // commit canonical facts and a complete DB proof.
+    logError(
+      'Active core cache manifest has no recoverable DB publication; refusing promotion',
+      new DatabaseError(
+        'Active core cache manifest has no recoverable ops publication',
+        'CORE_PUBLICATION_RECOVERY_CONTRACT_MISMATCH',
+      ),
+      { season: season.seasonCode, publicationId: cached.manifest.publicationId },
     );
+    return 'none';
   }
 
   await syncOperationsRepository.activatePublication({
@@ -153,7 +220,9 @@ export async function recoverPendingCoreSnapshotPublication(
     season,
     sourceRunId: pending.sourceRunId,
     manifest: cached.manifest,
+    outbox: { outboxId: randomUUID() },
   });
+  await dispatchDataPublicationOutbox({ limit: 1, publicationId: pending.publicationId });
   logInfo('Recovered ops authority from a complete active core cache manifest', {
     season: season.seasonCode,
     revision: pending.revision,

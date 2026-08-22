@@ -10,6 +10,7 @@ const SERVICE_ONLY_READ_PATHS = [
   /^\/understat\/status\/[^/]+\/?$/,
   /^\/understat\/mappings\/[^/]+\/?$/,
   /^\/trends\/public-catalog\/[^/]+\/?$/,
+  /^\/jobs\/status\/?$/,
 ] as const;
 
 function isContentApiPath(path: string): boolean {

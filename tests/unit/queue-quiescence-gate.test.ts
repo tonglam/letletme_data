@@ -42,8 +42,9 @@ describe('queue quiescence gate', () => {
       'understat-player-sync',
       'understat-team-sync',
       'tournament-repair',
+      'maintenance',
     ]);
-    expect(new Set(queueNames).size).toBe(9);
+    expect(new Set(queueNames).size).toBe(10);
   });
 
   test('accepts a fully settled hard-cut boundary', () => {

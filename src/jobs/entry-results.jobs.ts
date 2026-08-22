@@ -8,6 +8,7 @@ import { getCurrentEvent } from '../services/events.service';
 import { seasonRepository } from '../repositories/seasons';
 import { logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 /**
  * Entry Event Results Cron Jobs
@@ -23,6 +24,7 @@ export function registerEntryResultsJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('entry-event-results-daily', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             const season = await seasonRepository.findCurrent();
             if (!(await isFPLSeason(season))) {
               logInfo('Skipping entry results sync - outside FPL season');

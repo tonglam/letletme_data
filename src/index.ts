@@ -24,8 +24,6 @@ import { tournamentsAPI } from './api/tournaments.api';
 import { understatAPI } from './api/understat.api';
 import { trendsAPI } from './api/trends.api';
 import { databaseSingleton } from './db/singleton';
-import { seasonRepository } from './repositories/seasons';
-import { ensureMarketPublication } from './services/market-publication.service';
 
 // Import job registration functions
 import { registerDataJobs } from './jobs/data-jobs';
@@ -47,6 +45,8 @@ import {
 } from './utils/errors';
 import { getHttpErrorLogLevel, getHttpRequestLogContext } from './utils/http-logging';
 import { logDebug, logError, logInfo, logWarn } from './utils/logger';
+import { schedulerRegistry } from './scheduler/job-registry';
+import { isStandaloneSchedulerEnabled } from './utils/scheduler-mode';
 
 /**
  * Letletme Data API - Elysia Application
@@ -63,13 +63,6 @@ const config = getConfig();
 assertContentRuntimeFlags(getContentRuntimeFlags());
 if (config.NODE_ENV === 'production') {
   await databaseSingleton.connect();
-  try {
-    await ensureMarketPublication(await seasonRepository.findCurrent());
-  } catch (error) {
-    logWarn('Market publication recovery deferred to the scheduled watchdog', {
-      error: error instanceof Error ? error.name : 'unknown',
-    });
-  }
 }
 const { PORT: port } = config;
 const { CORS_ORIGINS, ENABLE_AUTH } = getAuthConfig();
@@ -237,6 +230,7 @@ logInfo('🚀 Elysia server started', {
   port,
   environment: process.env.NODE_ENV || 'development',
   authEnabled: ENABLE_AUTH,
+  schedulerMode: isStandaloneSchedulerEnabled() ? 'standalone' : 'compatibility',
   apis: [
     'events',
     'event-lives',
@@ -252,24 +246,7 @@ logInfo('🚀 Elysia server started', {
     'tournaments',
     'understat',
   ],
-  jobs: [
-    'data-sync',
-    'launch-monitor',
-    'player-values-window',
-    'player-market-freshness-watchdog',
-    'player-season-summary-repair',
-    'live-snapshot',
-    'post-match-consolidation',
-    'event-current-refresh',
-    'entry-info',
-    'entry-results',
-    'league-event-results',
-    'tournament-event-results',
-    'tournament-info',
-    'tournament-selection-stats',
-    'tournament-materialized-views-refresh',
-    'bug-report-screenshot-retention',
-  ],
+  jobs: schedulerRegistry.map((definition) => definition.name),
 });
 
 export { app };

@@ -35,8 +35,10 @@ async function enqueueDataSyncJob(
     const jobId = options.jobId
       ? getExplicitDataSyncQueueJobId(season, options.jobId)
       : defaultDataSyncJobId(jobName, season, source, options);
-    const hasDeterministicId = jobId !== undefined;
-    const removeOnSettle = options.removeOnSettle ?? hasDeterministicId;
+    // Only an explicitly manual one-shot may opt into immediate cleanup.
+    // Scheduled, cascade, API and reconciliation jobs retain failed evidence
+    // for the incident window even when they use deterministic IDs.
+    const removeOnSettle = source === 'manual' && (options.removeOnSettle ?? true);
     const jobData = createDataSyncJobData(season, source, options);
     const job = await queue.add(jobName, jobData, {
       attempts: 3,
@@ -74,7 +76,10 @@ export const enqueueCoreSnapshotJob = (
   enqueueDataSyncJob(season, 'core-snapshot', source, {
     ...options,
     jobId: getCoreSnapshotJobId(source, options),
-    removeOnSettle: true,
+    // Production scheduler jobs retain Bull evidence. Manual/API callers can
+    // still opt into immediate cleanup explicitly when they need one-shot
+    // semantics.
+    removeOnSettle: options?.removeOnSettle ?? source === 'manual',
   });
 
 // Scoped producers converge on the one coherent core publisher.

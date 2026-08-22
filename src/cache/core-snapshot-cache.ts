@@ -1,8 +1,10 @@
 import type Redis from 'ioredis';
 
 import {
+  prepareDataPublication,
   publishDataRevision,
   readActiveDataPublication,
+  type DataPublicationDeliveryItem,
   type DataPublicationManifest,
   type PublishDataRevisionOptions,
 } from './data-publication';
@@ -17,6 +19,11 @@ export interface CoreSnapshotCachePublication {
   readonly previousManifest: DataPublicationManifest | null;
 }
 
+export type PreparedCoreSnapshotCachePublication = Readonly<{
+  manifest: DataPublicationManifest;
+  items: readonly DataPublicationDeliveryItem[];
+}>;
+
 export interface CoreSnapshotCacheContents {
   readonly manifest: DataPublicationManifest;
   readonly events: Event[];
@@ -29,11 +36,37 @@ export interface CoreSnapshotCacheContents {
 }
 
 export interface CoreSnapshotCachePublishOptions
-  extends Pick<PublishDataRevisionOptions, 'beforeActivate' | 'afterStage'> {
+  extends Pick<PublishDataRevisionOptions, 'activate' | 'beforeActivate' | 'afterStage'> {
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
   readonly redis?: Redis;
+}
+
+export function prepareCoreSnapshotCache(
+  snapshot: CoreSnapshot,
+  options: Pick<CoreSnapshotCachePublishOptions, 'revision' | 'publicationId' | 'sourceCheckedAt'>,
+): PreparedCoreSnapshotCachePublication {
+  return prepareDataPublication({
+    dataset: 'fpl:core',
+    seasonCode: snapshot.season,
+    revision: options.revision,
+    publicationId: options.publicationId,
+    sourceCheckedAt: options.sourceCheckedAt,
+    state: 'active',
+    items: [
+      { name: 'events', value: snapshot.events },
+      { name: 'teams', value: snapshot.teams },
+      { name: 'players', value: snapshot.players },
+      { name: 'phases', value: snapshot.phases },
+      { name: 'fixtures', value: snapshot.fixtures },
+      {
+        name: 'currentEventId',
+        value: selectCurrentEventIdByDeadline(snapshot.events, options.sourceCheckedAt),
+      },
+      { name: 'selectionRules', value: snapshot.selectionRules ?? null },
+    ],
+  });
 }
 
 export function selectCurrentEventIdByDeadline(
@@ -54,6 +87,7 @@ export async function publishCoreSnapshotCache(
   snapshot: CoreSnapshot,
   options: CoreSnapshotCachePublishOptions,
 ): Promise<CoreSnapshotCachePublication> {
+  const prepared = prepareCoreSnapshotCache(snapshot, options);
   const result = await publishDataRevision(
     {
       dataset: 'fpl:core',
@@ -62,21 +96,14 @@ export async function publishCoreSnapshotCache(
       publicationId: options.publicationId,
       sourceCheckedAt: options.sourceCheckedAt,
       state: 'active',
-      items: [
-        { name: 'events', value: snapshot.events },
-        { name: 'teams', value: snapshot.teams },
-        { name: 'players', value: snapshot.players },
-        { name: 'phases', value: snapshot.phases },
-        { name: 'fixtures', value: snapshot.fixtures },
-        {
-          name: 'currentEventId',
-          value: selectCurrentEventIdByDeadline(snapshot.events, options.sourceCheckedAt),
-        },
-        { name: 'selectionRules', value: snapshot.selectionRules ?? null },
-      ],
+      items: prepared.items.map((item) => ({
+        name: item.manifest.name,
+        value: JSON.parse(item.payload) as unknown,
+      })),
     },
     {
       redis: options.redis,
+      activate: options.activate,
       beforeActivate: options.beforeActivate,
       afterStage: options.afterStage,
     },

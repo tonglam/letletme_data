@@ -354,13 +354,88 @@ export const datasetPublicationItemsInOps = ops.table(
     ),
     check(
       'dataset_publication_items_name_valid',
-      sql`item_name = ANY (ARRAY['eventLive'::text, 'fixtures'::text])`,
+      sql`item_name = ANY (ARRAY['context'::text, 'events'::text, 'teams'::text, 'players'::text, 'phases'::text, 'fixtures'::text, 'currentEventId'::text, 'selectionRules'::text, 'eventLive'::text])`,
     ),
     check('dataset_publication_items_count_nonnegative', sql`item_count >= 0`),
     check('dataset_publication_items_checksum_nonempty', sql`btrim(checksum) <> ''::text`),
     check(
       'dataset_publication_items_payload_shape',
-      sql`jsonb_typeof(payload) = ANY (ARRAY['array'::text, 'object'::text])`,
+      sql`jsonb_typeof(payload) = ANY (ARRAY['array'::text, 'object'::text, 'number'::text, 'null'::text, 'boolean'::text, 'string'::text])`,
+    ),
+  ],
+);
+
+export const dataPublicationOutboxInOps = ops.table(
+  'data_publication_outbox',
+  {
+    outboxId: uuid('outbox_id').primaryKey().notNull(),
+    publicationId: uuid('publication_id').notNull(),
+    sourceRunId: uuid('source_run_id'),
+    dataset: text().notNull(),
+    seasonId: smallint('season_id'),
+    eventId: integer('event_id'),
+    manifest: jsonb().notNull(),
+    status: text().default('pending').notNull(),
+    availableAt: timestamp('available_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    attempts: integer().default(0).notNull(),
+    leaseOwner: text('lease_owner'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
+    stagedAt: timestamp('staged_at', { withTimezone: true, mode: 'date' }),
+    dbActivatedAt: timestamp('db_activated_at', { withTimezone: true, mode: 'date' }),
+    redisActivatedAt: timestamp('redis_activated_at', { withTimezone: true, mode: 'date' }),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true, mode: 'date' }),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex('data_publication_outbox_publication_key').on(table.publicationId),
+    index('data_publication_outbox_pending_idx')
+      .on(table.availableAt, table.outboxId)
+      .where(
+        sql`status IN ('pending', 'staged', 'db_activated', 'redis_activated') AND delivered_at IS NULL`,
+      ),
+    index('data_publication_outbox_reclaim_idx')
+      .on(table.leaseExpiresAt, table.outboxId)
+      .where(sql`delivered_at IS NULL AND lease_expires_at IS NOT NULL`),
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'data_publication_outbox_season_fk',
+    }),
+    foreignKey({
+      columns: [table.publicationId],
+      foreignColumns: [datasetPublicationsInOps.publicationId],
+      name: 'data_publication_outbox_publication_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.sourceRunId],
+      foreignColumns: [syncRunsInOps.runId],
+      name: 'data_publication_outbox_source_run_id_fkey',
+    }).onDelete('restrict'),
+    check(
+      'data_publication_outbox_dataset_check',
+      sql`dataset = ANY (ARRAY['fpl:core'::text, 'fpl:live'::text, 'fpl:market'::text])`,
+    ),
+    check(
+      'data_publication_outbox_status_check',
+      sql`status = ANY (ARRAY['pending'::text, 'staged'::text, 'db_activated'::text, 'redis_activated'::text, 'delivered'::text, 'failed'::text])`,
+    ),
+    check('data_publication_outbox_attempts_check', sql`attempts >= 0`),
+    check(
+      'data_publication_outbox_manifest_object_check',
+      sql`jsonb_typeof(manifest) = 'object'::text`,
+    ),
+    check('data_publication_outbox_event_check', sql`(event_id IS NULL) OR (event_id > 0)`),
+    check(
+      'data_publication_outbox_lease_check',
+      sql`(lease_owner IS NULL AND lease_expires_at IS NULL) OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)`,
     ),
   ],
 );
@@ -387,6 +462,74 @@ export const mutationScopesInOps = ops.table(
       .notNull(),
   },
   (_table) => [check('mutation_scopes_key_nonempty', sql`btrim(scope_key) <> ''::text`)],
+);
+
+export const schedulerObligationsInOps = ops.table(
+  'scheduler_obligations',
+  {
+    obligationId: uuid('obligation_id').primaryKey().notNull(),
+    jobName: text('job_name').notNull(),
+    scopeKey: text('scope_key').notNull(),
+    periodKey: text('period_key').notNull(),
+    cadence: text().notNull(),
+    timezone: text().notNull(),
+    status: text().default('pending').notNull(),
+    source: text().default('schedule').notNull(),
+    dueAt: timestamp('due_at', { withTimezone: true, mode: 'date' }).notNull(),
+    generation: integer().default(0).notNull(),
+    leaseOwner: text('lease_owner'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
+    bullJobId: text('bull_job_id'),
+    runId: uuid('run_id'),
+    attempts: integer().default(0).notNull(),
+    lastError: text('last_error'),
+    evidence: jsonb().default({}).notNull(),
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex('scheduler_obligations_identity_key').on(
+      table.jobName,
+      table.scopeKey,
+      table.periodKey,
+    ),
+    index('scheduler_obligations_due_idx')
+      .on(table.status, table.dueAt, table.obligationId)
+      .where(sql`status IN ('pending', 'failed')`),
+    index('scheduler_obligations_lease_idx')
+      .on(table.leaseExpiresAt, table.obligationId)
+      .where(sql`lease_expires_at IS NOT NULL AND status IN ('enqueued', 'running')`),
+    index('scheduler_obligations_failure_idx')
+      .on(table.jobName, table.status, table.updatedAt.desc())
+      .where(sql`status IN ('failed', 'irrecoverable')`),
+    check(
+      'scheduler_obligations_status_check',
+      sql`status = ANY (ARRAY['pending'::text, 'enqueued'::text, 'running'::text, 'succeeded'::text, 'failed'::text, 'skipped'::text, 'irrecoverable'::text])`,
+    ),
+    check(
+      'scheduler_obligations_source_check',
+      sql`source = ANY (ARRAY['schedule'::text, 'catchup'::text, 'reconcile'::text, 'manual'::text])`,
+    ),
+    check('scheduler_obligations_generation_check', sql`generation >= 0`),
+    check('scheduler_obligations_attempts_check', sql`attempts >= 0`),
+    check(
+      'scheduler_obligations_evidence_object_check',
+      sql`jsonb_typeof(evidence) = 'object'::text`,
+    ),
+    check(
+      'scheduler_obligations_lease_check',
+      sql`(lease_owner IS NULL AND lease_expires_at IS NULL) OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)`,
+    ),
+    check(
+      'scheduler_obligations_identity_check',
+      sql`btrim(job_name) <> '' AND btrim(scope_key) <> '' AND btrim(period_key) <> ''`,
+    ),
+  ],
 );
 
 export const bugReportsInOps = ops.table(

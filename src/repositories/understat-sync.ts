@@ -122,7 +122,7 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         status: 'running',
         dataChanged: input.dataChanged ?? false,
         metadata: {},
-        startedAt: new Date(),
+        startedAt: sql`clock_timestamp()`,
       })
       .onConflictDoNothing({ target: understatSyncRuns.runId });
     const [row] = await db
@@ -177,7 +177,7 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     const expectedItems = countRow?.count ?? 0;
     await db
       .update(understatSyncRuns)
-      .set({ expectedItems, updatedAt: new Date() })
+      .set({ expectedItems, updatedAt: sql`clock_timestamp()` })
       .where(
         and(
           eq(understatSyncRuns.runId, runId),
@@ -221,8 +221,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         status: 'completed',
         sourceHash,
         normalizedPayload,
-        completedAt: new Date(),
-        updatedAt: new Date(),
+        completedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(
         and(
@@ -247,7 +247,7 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     const db = await getDatabase(dbInstance);
     const updatedItem = await db
       .update(understatSyncItems)
-      .set({ status: 'failed', lastError: error, completedAt: new Date() })
+      .set({ status: 'failed', lastError: error, completedAt: sql`clock_timestamp()` })
       .where(
         and(
           eq(understatSyncItems.runId, runId),
@@ -261,7 +261,7 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     if (updatedItem.length === 0) return;
     await db
       .update(understatSyncRuns)
-      .set({ errorSummary: error, updatedAt: new Date() })
+      .set({ errorSummary: error, updatedAt: sql`clock_timestamp()` })
       .where(
         and(
           eq(understatSyncRuns.runId, runId),
@@ -292,8 +292,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         skippedItems,
         failedItems,
         status: !settled ? 'running' : failedItems > 0 ? 'failed' : 'ready_to_publish',
-        completedAt: settled ? new Date() : null,
-        updatedAt: new Date(),
+        completedAt: settled ? sql`clock_timestamp()` : null,
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(
         and(
@@ -312,8 +312,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       .set({
         status: 'failed',
         errorSummary: error,
-        completedAt: new Date(),
-        updatedAt: new Date(),
+        completedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(
         and(
@@ -335,8 +335,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         status: 'completed',
         metadata,
         ...(dataChanged === undefined ? {} : { dataChanged }),
-        completedAt: new Date(),
-        updatedAt: new Date(),
+        completedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(
         and(
@@ -354,8 +354,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         status: 'skipped',
         metadata: { finalized: false, reason },
         dataChanged: false,
-        completedAt: new Date(),
-        updatedAt: new Date(),
+        completedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(
         and(

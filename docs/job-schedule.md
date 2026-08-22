@@ -1,59 +1,76 @@
 # Job schedule and execution gates
 
-All cron expressions run in `Asia/Shanghai` (UTC+8). Cron ticks are candidates,
-not guarantees of a write: each job applies its documented season, current
-event, fixture-window, and data-availability gates before enqueueing.
+The standalone `scheduler` service is the durable schedule authority. Its
+`ScheduledJobDefinition` registry resolves scope, period, catch-up policy and
+success evidence into `ops.scheduler_obligations`; BullMQ is only the delivery
+mechanism. `GET /jobs` is generated from the same registry plus the explicitly
+supported maintenance/manual adapters, and `GET /jobs/status` exposes overdue,
+failed and runtime-heartbeat evidence. The API-side cron registrations that
+remain during migration are compatibility triggers, not a second source of
+schedule truth. They are disabled when the standalone scheduler owns
+production cadence. If a rolling migration temporarily leaves the API as the
+timer owner, set `SCHEDULER_MODE=compatibility`; those ticks call the same
+obligation reservation pass instead of enqueueing directly.
+
+Legacy API cron registrations use `Asia/Shanghai` (UTC+8); the standalone
+registry declares each obligation's timezone explicitly. Cron ticks are
+candidates, not guarantees of a write: each job applies its documented season,
+current event, fixture-window, and data-availability gates before enqueueing.
 
 ## Core season discovery
 
 This job runs year-round so a newly published season can be discovered before
 the fixture-derived `isFPLSeason` window opens.
 
-| Job | Cron | Gate |
+| Job | Cadence | Gate |
 |---|---|---|
-| `core-snapshot-sync` | `35 6 * * *` | None; both validated upstream payloads are required before atomic publication |
+| `core-snapshot` | daily obligation | None; both validated upstream payloads are required before atomic publication |
 
 The snapshot uses one bootstrap call and one fixtures call. Events, teams,
 players, phases, and fixtures are committed together; an empty or incomplete
 payload preserves the previously accepted PostgreSQL and Redis state.
 
-`player-stats-sync` runs at `40 9 * * *` but is not a discovery job. Player
+`player-stats-sync` has a daily obligation but is not a discovery job. Player
 values and stats use the player-specific `current ?? next` resolver so GW1 can
 be initialized before the ordinary current-event gate opens.
 
 ## Season launch and current-event control
 
-| Job | Cron | Gate / behavior |
+| Job | Cadence | Gate / behavior |
 |---|---|---|
-| `launch-monitor` | `*/5 * * * *` | One bootstrap read detects both an empty-event warning and a published current-year GW1; each notification is sent once |
-| `event-current-refresh` | `* * * * *` | `isFPLSeason`; compares PostgreSQL's current event with the active core revision and enqueues a complete rebuild on mismatch |
+| `launch-monitor` | every five minutes | Maintenance queue obligation; one bootstrap read detects both an empty-event warning and a published current-year GW1; each notification is sent once |
+| `core-current-reconcile` | every 30 seconds | Scheduler reconciliation; compares PostgreSQL's current event with the active core revision and enqueues a complete rebuild on mismatch |
 
-The launch monitor calls the FPL bootstrap endpoint directly from the API
-process. All other synchronization work is queue-backed.
+The launch monitor calls the FPL bootstrap endpoint from the maintenance
+worker. All synchronization work is queue-backed; the scheduler only reserves
+and dispatches durable obligations.
 
 ## Player values
 
-| Job | Cron | Gate / behavior |
+| Job | Cadence | Gate / behavior |
 |---|---|---|
-| `player-values-sync` | `25-35 9 * * *` | Before GW1 only 09:25 runs against the next event; once current, every minute until that UTC+8 date's Rise/Faller batch exists |
-| `player-market-freshness-watchdog` | `36 9 * * *` | Read-only final-capture check: waits up to five minutes for the deterministic 09:35 job's retries, then verifies current-day cardinality and end-of-window evidence; alerts without changing `/ready` |
-| `player-prices-sync` | `40 9 * * *` | Replays that UTC+8 date's persisted Rise/Faller rows into affected current players; skips cleanly when none exist |
-| `player-stats-sync` | `40 9 * * *` | Refreshes the current event, or the next event only when no current event exists |
+| `market-daily` | 09:25 UTC+8 plus durable retries | Before GW1 only the current UTC+8 date is eligible; failed or unavailable upstream responses retry through the same obligation without replaying old dates |
+| `player-market-freshness-watchdog` | after the market window | Maintenance queue final-capture check: verifies current-day cardinality and end-of-window evidence; alerts without changing `/ready` |
+| `player-prices` | after values capture | Replays that UTC+8 date's persisted Rise/Faller rows into affected current players; skips cleanly when none exist |
+| `player-stats` | daily plus active-event reconciliation | Refreshes the current event, or the next event only when no current event exists |
 
-The window uses one deterministic daily job ID to prevent overlap. The data
-worker retries failures, and settled deterministic jobs are removed so another
-tick can enqueue when needed. Snapshot upsert, stale-row removal, and final
+The standalone scheduler reserves one durable daily obligation before enqueueing
+the job. The data worker retries failures, while completed jobs remain for 24
+hours and failed jobs for seven days (bounded to 500 each) so an empty queue is
+never mistaken for success. Snapshot upsert, stale-row removal, and final
 cardinality verification share one database transaction. Zero derived price
-changes remains a successful complete capture.
+changes remains a successful complete capture. After recovery, only the current
+UTC+8 market date is retried; older dates are explicitly recorded as
+`irrecoverable` rather than reconstructed from today's bootstrap.
 
 ## Entry jobs
 
-| Job | Cron | Gate / behavior |
+| Job | Cadence | Gate / behavior |
 |---|---|---|
-| `entry-info-daily` | `30 10 * * *` | `isFPLSeason`; once per UTC date marker |
-| `entry-event-picks-window` | `*/5 * * * *` | `isFPLSeason`, current event, selection publication window |
-| `entry-event-transfers-daily` | `*/5 * * * *` | `isFPLSeason`, current event, same selection publication window as picks |
-| `entry-event-results-daily` | `45 10 * * *` | `isFPLSeason` and current event |
+| `entry-info` | daily obligation | `isFPLSeason`; once per UTC date marker |
+| `entry-picks` | event checkpoint after deadline + 30m | `isFPLSeason`; every due event is reconciled from the entry checkpoint, not only the current API process |
+| `entry-transfers` | same event checkpoint as picks | Uses the same deadline window and event scope as picks; a service restart cannot permanently lose transfers |
+| `entry-results` | event checkpoint | `isFPLSeason` and every due event |
 
 Entry jobs operate only on known `competition.entries`; core season bootstrap does not
 create entry bindings. Scans use an entry-ID keyset cursor, failed-entry retries
@@ -62,14 +79,16 @@ checkpoints prevent successful units from being fetched again.
 
 ## Match-window live jobs
 
-| Job | Cron | Gate / behavior |
+| Job | Cadence | Gate / behavior |
 |---|---|---|
-| `live-snapshot-trigger` | `* * * * *` | `isFPLSeason`, current event, `isMatchDayTime`; one job concurrently fetches event-live + fixtures, atomically publishes every live Redis view, and persists fixture rows only when football content changes. Every UTC ten-minute boundary also persists event-live/explain rows and runs the dependent cascade. Deterministic event/minute IDs dedupe scheduler replicas, while a waiting/delayed/active check prevents a slow prior minute from stacking. |
-| `post-match-consolidation` | `0 6,8,10 * * *` | Current event and bounded post-match result slot; forces a persistent snapshot with a deterministic result-slot ID. |
+| `live-snapshot` | 30-second lifecycle obligation | `isFPLSeason`, current event, `isMatchDayTime`; one job concurrently fetches event-live + fixtures, atomically publishes every live Redis view, and persists fixture rows only when football content changes. Every UTC ten-minute boundary also persists event-live/explain rows and runs the dependent cascade. |
+| `post-match-consolidation` | bounded post-match slots | Maintenance coordinator enqueues the separate live-finalization and player-stat checkpoint obligations; its success means downstream jobs were accepted, not that their writes are complete. |
 
 The snapshot derives `eventLives`, `fixtures`, `liveFixtures`, and `liveBonus` items from the same
 accepted upstream pair. Every changed item publishes under one immutable revision;
-content-identical minutes are a no-op. This replaces the former independent
+content-identical minutes are a no-op. The standalone scheduler owns the 30-second
+lifecycle obligation, requests full event-live persistence on a ten-minute bucket,
+and has a separate post-match finalization obligation. This replaces the former independent
 cache, score, fixture, and bonus writers, which could race or derive from
 different minutes.
 
@@ -81,22 +100,18 @@ a distinct final league-results correction after the durable rows commit.
 
 ## Selection publication window
 
-The following poll every five minutes:
-
-- `league-event-picks-trigger`
-- `tournament-event-picks-trigger`
-- `tournament-event-transfers-pre-trigger`
-
-They require `isFPLSeason`, a current event, and `isSelectTime`. Selection time
+The former standalone picks/transfers cron modules are removed. The registry's
+event-checkpoint obligations are the only scheduled authority; API-side
+compatibility code does not own these windows. Selection time
 is the UTC match date from 30 through 90 minutes after the FPL deadline. It is
 the post-deadline publication window for immutable picks and pre-event transfer tracking.
 
 ## Post-match league and tournament results
 
-| Job | Cron | Gate / behavior |
+| Job | Cadence | Gate / behavior |
 |---|---|---|
-| `league-event-results-trigger` | `*/10 * * * *` | Current event plus bounded post-match slot |
-| `tournament-event-results-trigger` | `*/10 * * * *` | Current event plus bounded post-match slot |
+| `league-event-results-trigger` | post-match checkpoint | Current event plus bounded post-match slot |
+| `tournament-event-results-trigger` | post-match checkpoint | Current event plus bounded post-match slot |
 
 The result window starts after the final fixture's expected end
 (`latest kickoff + 2 hours`) and remains open for 24 hours. It intentionally
@@ -105,8 +120,9 @@ can still run.
 
 Each hour maps to `provisional-N` or `final-N` according to the event's
 `data_checked` flag. Deterministic job IDs make repeated ten-minute ticks
-idempotent. Successful jobs remain in BullMQ for 24 hours; failed jobs are
-removed so a later tick can retry the same slot.
+idempotent. Successful jobs remain in BullMQ for 24 hours and failed jobs for
+seven days (bounded to 500 per queue); a later scheduler generation retries the
+same slot without losing the previous failure evidence.
 
 The tournament event-results job starts its cascade only when at least one
 active tournament entry was processed. The cascade contains:
@@ -124,9 +140,9 @@ since that same job began and fetches only the remaining entry/event units.
 
 ## Tournament metadata
 
-| Job | Cron | Gate / behavior |
+| Job | Cadence | Gate / behavior |
 |---|---|---|
-| `tournament-info-sync` | `45 10 * * *` | `isFPLSeason` |
+| `tournament-info-sync` | daily obligation | `isFPLSeason` |
 
 ## Gate definitions
 
@@ -146,6 +162,9 @@ since that same job began and fetches only the remaining entry/event units.
 - Post-match result slot: later than final kickoff +2h but earlier than 24
   hours after that expected end.
 
-Manual triggers are listed by `GET /jobs`. Some manual paths intentionally
+Manual triggers are listed by `GET /jobs`; scheduler definitions and their
+catch-up policies are included in that response. `GET /jobs/status` requires
+the service API key and reports obligations, runtime heartbeats, queue counts,
+and DB/Redis publication consistency. Some manual paths intentionally
 bypass a cron time gate for recovery; operators must verify upstream readiness
 before using them.

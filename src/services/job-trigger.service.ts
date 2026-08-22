@@ -4,10 +4,14 @@ import {
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
 } from '../jobs/data-sync-enqueue';
-import { enqueueEntryInfoSyncJob, enqueueEntryResultsSyncJob } from '../jobs/entry-sync-enqueue';
+import {
+  enqueueEntryInfoSyncJob,
+  enqueueEntryPicksSyncJob,
+  enqueueEntryResultsSyncJob,
+  enqueueEntryTransfersSyncJob,
+} from '../jobs/entry-sync-enqueue';
 import { runManualEventCurrentRefresh } from '../jobs/event-current-refresh.job';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
-import { runLaunchMonitor } from '../jobs/launch.jobs';
 import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { runTournamentEventResultsSync } from '../jobs/tournament-event-results.jobs';
@@ -16,10 +20,20 @@ import { getCurrentEvent } from './events.service';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
-import { repairPlayerSeasonSummaries } from './player-season-summaries.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
 import { logInfo } from '../utils/logger';
 import { ValidationError } from '../utils/errors';
+import { schedulerRegistry } from '../scheduler/job-registry';
+import {
+  enqueueBugReportCleanup,
+  enqueueBugReportScreenshotRetention,
+  enqueueLaunchMonitor,
+  enqueuePlayerMarketFreshness,
+  enqueuePlayerSeasonSummaryRepair,
+  enqueuePostMatchConsolidation,
+  enqueueTournamentTrendsRepair,
+} from '../jobs/maintenance.jobs';
+import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
 
 export type TriggerableJobInfo = {
   name: string;
@@ -51,88 +65,29 @@ export type JobTriggerResult =
       message: string;
     };
 
-const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
-  {
-    name: 'core-snapshot-sync',
-    description: 'Atomically sync events, teams, players, phases, and fixtures',
-    schedule: 'Daily at 06:35 UTC+8 (year-round discovery)',
-  },
-  {
-    name: 'event-current-refresh',
-    description: 'Refresh the coherent core publication when the current event changes',
-    schedule: 'Every minute (cron); POST here for immediate run (ignores season window)',
-  },
-  {
-    name: 'player-prices',
-    description: 'Replay persisted price changes into current player prices',
-    schedule: 'Daily at 09:40 UTC+8 plus immediate player-values cascade',
-  },
-  {
-    name: 'player-stats-sync',
-    description: 'Sync player stats from FPL API',
-    schedule: 'Daily at 09:40 UTC+8 (current event or preseason next event)',
-  },
-  {
-    name: 'player-season-summary-repair',
-    description: 'Repair stale physical player season summary read models',
-    schedule: 'Hourly at minute 17 and after every durable live write',
-  },
-  {
-    name: 'player-values-sync',
-    description: 'Sync player values from FPL API',
-    schedule: 'Preseason 09:25; in-season 09:25-09:35 until changes are stored',
-  },
-  {
-    name: 'entry-info-daily',
-    description: 'Sync known entry profile data',
-    schedule: 'Daily at 10:30 AM',
-  },
-  {
-    name: 'entry-event-results-daily',
-    description: 'Sync entry results for current event',
-    schedule: 'Daily at 10:45 AM',
-  },
-  {
-    name: 'league-event-results-sync',
-    description: 'Sync league results (per-tournament jobs)',
-    schedule: 'Every 10 minutes in the 24-hour post-match result window',
-  },
-  {
-    name: 'tournament-event-results-sync',
-    description: 'Sync tournament results (triggers cascade)',
-    schedule: 'Every 10 minutes in the 24-hour post-match result window',
-  },
-  {
-    name: 'tournament-selection-stats-sync',
-    description: 'Build tournament selection stats read model',
-    schedule: 'Cascade after tournament transfers post',
-  },
-  {
-    name: 'tournament-info-sync',
-    description: 'Refresh tournament info names daily',
-    schedule: 'Daily 10:45',
-  },
-  {
-    name: 'tournament-materialized-views-refresh',
-    description: 'Refresh tournament materialized views for GraphQL APIs',
-    schedule: 'Cascade after the three structure jobs complete their barrier',
-  },
-  {
-    name: 'live-snapshot',
-    description: 'Fetch and atomically publish one coherent live football snapshot',
-    schedule: 'Every 1 minute during match hours; persists full live rows every 10 minutes',
-  },
-  {
-    name: 'post-match-consolidation',
-    description: 'Catch FPL overnight data finalization (bonus, corrected scores)',
-    schedule: '06:00, 08:00, 10:00 UTC+8 inside the 24-hour post-match window',
-  },
-  {
-    name: 'launch-monitor',
-    description: 'Detect pre-season and season-start transitions with one bootstrap request',
-    schedule: 'Every five minutes year-round (deduplicated by transition)',
-  },
-];
+/**
+ * Manual names kept for API compatibility with older clients. The scheduler
+ * registry is the only source of truth for cadence and catch-up semantics;
+ * aliases deliberately expose no second copy of those schedules.
+ */
+const COMPATIBILITY_MANUAL_ALIASES: TriggerableJobInfo[] = [
+  'core-snapshot-sync',
+  'event-current-refresh',
+  'player-prices',
+  'player-stats-sync',
+  'player-values-sync',
+  'entry-info-daily',
+  'entry-event-results-daily',
+  'league-event-results-sync',
+  'tournament-event-results-sync',
+  'tournament-selection-stats-sync',
+  'tournament-info-sync',
+  'tournament-materialized-views-refresh',
+].map((name) => ({
+  name,
+  description: `Manual compatibility alias for ${name}`,
+  schedule: 'manual compatibility alias; schedule is owned by the registry',
+}));
 
 function requirePlayerPricesChangeDate(input: unknown): string {
   const changeDate =
@@ -151,7 +106,12 @@ function requirePlayerPricesChangeDate(input: unknown): string {
 function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
   return {
     'event-current-refresh': () => runManualEventCurrentRefresh(),
+    'core-current-reconcile': () => runManualEventCurrentRefresh(),
     'core-snapshot-sync': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueueCoreSnapshotJob(season, 'manual');
+    },
+    'core-snapshot': async () => {
       const season = await seasonRepository.findCurrent();
       return enqueueCoreSnapshotJob(season, 'manual');
     },
@@ -165,10 +125,45 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       const season = await seasonRepository.findCurrent();
       return enqueuePlayerStatsSyncJob(season, 'manual');
     },
-    'player-season-summary-repair': repairPlayerSeasonSummaries,
+    'player-season-summary-repair': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePlayerSeasonSummaryRepair(season, 'manual');
+    },
+    [MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS]: async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePlayerMarketFreshness(season, 'manual');
+    },
+    [MAINTENANCE_JOBS.TOURNAMENT_TRENDS]: async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueueTournamentTrendsRepair(season, 'manual');
+    },
+    [MAINTENANCE_JOBS.BUG_REPORT_CLEANUP]: async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueueBugReportCleanup(season, 'manual');
+    },
+    [MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION]: async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueueBugReportScreenshotRetention(season, 'manual');
+    },
+    [MAINTENANCE_JOBS.LAUNCH_MONITOR]: async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueueLaunchMonitor(season, 'manual');
+    },
+    [MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION]: async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePostMatchConsolidation(season, 'manual');
+    },
     'player-values-sync': async () => {
       const season = await seasonRepository.findCurrent();
       return enqueuePlayerValuesSyncJob(season, 'manual');
+    },
+    'market-daily': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePlayerValuesSyncJob(season, 'manual');
+    },
+    'player-stats': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePlayerStatsSyncJob(season, 'manual');
     },
     'entry-info-daily': async () => {
       const season = await seasonRepository.findCurrent();
@@ -182,6 +177,18 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
         throw new Error('No current event found');
       }
       return enqueueEntryResultsSyncJob(season, 'manual', { eventId: currentEvent.id });
+    },
+    'entry-picks': async () => {
+      const season = await seasonRepository.findCurrent();
+      const currentEvent = await getCurrentEvent(season);
+      if (!currentEvent) throw new Error('No current event found');
+      return enqueueEntryPicksSyncJob(season, 'manual', { eventId: currentEvent.id });
+    },
+    'entry-transfers': async () => {
+      const season = await seasonRepository.findCurrent();
+      const currentEvent = await getCurrentEvent(season);
+      if (!currentEvent) throw new Error('No current event found');
+      return enqueueEntryTransfersSyncJob(season, 'manual', { eventId: currentEvent.id });
     },
     'league-event-results-sync': async () => {
       await runLeagueEventResultsSync({
@@ -216,13 +223,22 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
         persistEventLives: false,
       });
     },
-    'post-match-consolidation': runPostMatchConsolidation,
-    'launch-monitor': () => runLaunchMonitor({ source: 'manual' }),
+    'live-finalization': runPostMatchConsolidation,
   };
 }
 
 export function listTriggerableJobs(): TriggerableJobInfo[] {
-  return TRIGGERABLE_JOBS;
+  const registered = schedulerRegistry
+    .filter((definition) => definition.manualTrigger !== false)
+    .map((definition) => ({
+      name: definition.name,
+      description: definition.successPredicate,
+      schedule: `${definition.cadence} (${definition.timezone}); catch-up=${definition.catchUpPolicy}`,
+    }));
+  const byName = new Map(
+    [...registered, ...COMPATIBILITY_MANUAL_ALIASES].map((job) => [job.name, job]),
+  );
+  return [...byName.values()];
 }
 
 export async function triggerJob(name: string, input?: unknown): Promise<JobTriggerResult> {

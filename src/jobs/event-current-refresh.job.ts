@@ -11,6 +11,7 @@ import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { enqueueCoreSnapshotJob, enqueuePlayerStatsSyncJob } from './data-sync-enqueue';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export type ManualEventCurrentRefreshResult = {
   refreshed: boolean;
@@ -84,6 +85,7 @@ export function registerEventCurrentRefreshJobs(app: Elysia) {
       timezone: CRON_TIMEZONE,
       async run() {
         try {
+          if (isStandaloneSchedulerEnabled()) return;
           await executeTrackedCron('event-current-refresh', runEventCurrentRefresh);
         } catch {
           // Failure details are already emitted by runTrackedJob.
