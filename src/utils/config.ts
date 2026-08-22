@@ -30,7 +30,12 @@ const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   // API and worker share one Supavisor session-pool login in production. Keep
   // each process bounded so their combined pools leave room for deploy probes.
-  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(5).default(5),
+  // Supabase session-mode poolers commonly expose a 15-connection project
+  // pool. API, worker, scheduler, and content-worker each own a process-level
+  // pool, so the default must leave headroom for all four services rather
+  // than exhausting the project pool as soon as the standalone scheduler is
+  // enabled.
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(5).default(3),
   // Rebuildable Data publications only. Queue/coordination state must never use this client.
   CACHE_REDIS_HOST: z.string().default('localhost'),
   CACHE_REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),

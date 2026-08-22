@@ -35,6 +35,8 @@ import { coreSnapshotRefreshReason } from '../domain/core-snapshot-refresh';
 import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
+import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { syncOperationsRepository } from '../repositories/sync-operations';
 import { isMatchDayTime } from '../utils/conditions';
 import { decideLiveLifecycle } from '../services/live-lifecycle-orchestrator';
 
@@ -356,7 +358,16 @@ function coreLifecycleReconcileDefinition(): ScheduledJobDefinition {
       if (!current) return [];
       const fixtures = await fixtureRepository.findByEvent(context.season, current.id);
       const publication = await readCoreSnapshotCache(context.season.seasonCode);
-      const reason = coreSnapshotRefreshReason(current, fixtures, publication, context.now);
+      const active = await syncOperationsRepository.findActivePublication(
+        'fpl:core',
+        context.season,
+      );
+      const durablePublication = active
+        ? await loadDataPublicationDelivery(active.publicationId).catch(() => null)
+        : null;
+      const reason = durablePublication
+        ? coreSnapshotRefreshReason(current, fixtures, publication, context.now)
+        : 'missing-publication';
       if (!reason) return [];
       return [
         {

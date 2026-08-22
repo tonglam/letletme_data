@@ -4,7 +4,7 @@ import {
   entryEventResultsInCompetition,
   entryEventTransfersInCompetition,
   entryLeaguesInCompetition,
-  entrySeasonHistoriesInCompetition,
+  entryPastSeasonsInCompetition,
   eventsInFpl,
   fixturesInFpl,
   leagueEventResultsInCompetition,
@@ -53,9 +53,7 @@ export type DbEntryEventTransfer = DbEntryEventTransferStorage & Readonly<{ id: 
 export type DbEntryEventTransferInsert = Readonly<
   typeof entryEventTransfersInCompetition.$inferInsert
 >;
-export type DbEntryHistoryInfoInsert = Readonly<
-  typeof entrySeasonHistoriesInCompetition.$inferInsert
->;
+export type DbEntryHistoryInfoInsert = Readonly<typeof entryPastSeasonsInCompetition.$inferInsert>;
 type DbEntryInfoStorage = Readonly<typeof entriesInCompetition.$inferSelect>;
 export type DbEntryInfo = DbEntryInfoStorage &
   Readonly<{

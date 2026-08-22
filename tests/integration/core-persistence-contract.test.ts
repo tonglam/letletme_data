@@ -68,11 +68,12 @@ async function clearFixtureSeason(client: postgres.Sql): Promise<void> {
     await transaction`DELETE FROM competition.entry_event_results WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.league_event_results WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.entry_leagues WHERE season_id = 2026`;
-    await transaction`DELETE FROM competition.entry_season_histories WHERE season_id = 2026`;
+    await transaction`DELETE FROM competition.entry_past_seasons WHERE entry_season_id = 2026`;
     await transaction`
-      DELETE FROM competition.entry_season_histories
-      WHERE season_id = 2025 AND entry_id IN (70001, 70002)
-    `;
+	      DELETE FROM competition.entry_past_seasons
+	      WHERE entry_season_id IN (2025, 2026)
+	    `;
+    await transaction`DELETE FROM competition.entries WHERE season_id = 2025`;
     await transaction`DELETE FROM competition.entries WHERE season_id = 2026`;
     await transaction`DELETE FROM fpl.player_fixture_stats WHERE season_id = 2026`;
     await transaction`DELETE FROM fpl.player_gameweek_scoring_items WHERE season_id = 2026`;
@@ -84,7 +85,7 @@ async function clearFixtureSeason(client: postgres.Sql): Promise<void> {
     await transaction`DELETE FROM fpl.players WHERE season_id = 2026`;
     await transaction`DELETE FROM fpl.teams WHERE season_id = 2026`;
     await transaction`DELETE FROM fpl.events WHERE season_id = 2026`;
-    await transaction`DELETE FROM fpl.seasons WHERE season_id IN (2025, 2026)`;
+    await transaction`DELETE FROM fpl.seasons WHERE season_id BETWEEN 2014 AND 2026`;
   });
   await client`REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats`;
 }
@@ -196,7 +197,7 @@ persistenceTest(
     try {
       await clearFixtureSeason(client);
       await client`
-        INSERT INTO fpl.seasons (
+	        INSERT INTO fpl.seasons (
           season_id,
           season_code,
           display_name,
@@ -206,8 +207,32 @@ persistenceTest(
           is_current
         ) VALUES
           (2025, '2526', '2025/26', 2025, 2026, 'completed', false),
-          (2026, '2627', '2026/27', 2026, 2027, 'preseason', true)
-      `;
+	          (2026, '2627', '2026/27', 2026, 2027, 'preseason', true)
+	      `;
+      await client`
+	        INSERT INTO fpl.seasons (
+	          season_id,
+	          season_code,
+	          display_name,
+	          start_year,
+	          end_year,
+	          lifecycle_state,
+	          is_current
+	        )
+	        SELECT
+	          year,
+	          right(year::text, 2) || right((year + 1)::text, 2),
+	          year::text || '/' || right((year + 1)::text, 2),
+	          year,
+	          year + 1,
+	          'completed',
+	          false
+	        FROM generate_series(2014, 2024) AS years(year)
+	      `;
+      await client`
+	        INSERT INTO competition.entries (season_id, entry_id, entry_name, player_name, last_event_id)
+	        VALUES (2025, 70001, 'Prior Season Entry', 'Prior Season Manager', 0)
+	      `;
 
       const source = buildCoreSnapshotFixture();
       const snapshot = prepareCoreSnapshot(source.bootstrap, source.fixtures);
@@ -512,6 +537,7 @@ persistenceTest(
       for (const entryId of entryIds) {
         await entryRepository.upsertFromSummary(season, buildEntrySummary(entryId), 1, 1);
       }
+      await entryRepository.upsertFromSummary(season, buildEntrySummary(70_003), 1, 1);
       const renamed = await entryRepository.upsertFromSummary(
         season,
         { ...buildEntrySummary(entryIds[0]), name: 'Renamed Runtime Entry' },
@@ -575,6 +601,73 @@ persistenceTest(
         chips: [],
         past: [{ season_name: '2025/26', total_points: 2_501, rank: 1_000 }],
       });
+      await historyRepository.upsertFromHistory(season, entryIds[1], {
+        current: [],
+        chips: [],
+        past: [],
+      });
+      const twelvePastSeasons = Array.from({ length: 12 }, (_, index) => ({
+        season_name: `${2014 + index}/${String(15 + index).padStart(2, '0')}`,
+        total_points: 2_000 + index,
+        rank: 10_000 - index,
+      }));
+      await historyRepository.upsertFromHistory(season, 70_003, {
+        current: [],
+        chips: [],
+        past: twelvePastSeasons,
+      });
+      await expect(
+        historyRepository.upsertFromHistory(season, 70_003, {
+          current: [],
+          chips: [],
+          past: [{ season_name: 'not-a-season', total_points: 1, rank: 1 }],
+        }),
+      ).rejects.toThrow();
+      const [historyBoundaryCounts] = await client<
+        Array<{
+          twelve_rows: number;
+          empty_rows: number;
+          twelve_checkpoint_count: number | null;
+          empty_checkpoint_count: number | null;
+        }>
+      >`
+	        SELECT
+	          (SELECT count(*)::integer FROM competition.entry_past_seasons
+	            WHERE entry_season_id = 2026 AND entry_id = 70003) AS twelve_rows,
+	          (SELECT count(*)::integer FROM competition.entry_past_seasons
+	            WHERE entry_season_id = 2026 AND entry_id = 70002) AS empty_rows,
+	          (SELECT past_seasons_count FROM competition.entries
+	            WHERE season_id = 2026 AND entry_id = 70003) AS twelve_checkpoint_count,
+	          (SELECT past_seasons_count FROM competition.entries
+	            WHERE season_id = 2026 AND entry_id = 70002) AS empty_checkpoint_count
+	      `;
+      expect({ ...historyBoundaryCounts }).toEqual({
+        twelve_rows: 12,
+        empty_rows: 0,
+        twelve_checkpoint_count: 12,
+        empty_checkpoint_count: 0,
+      });
+      await historyRepository.upsertFromHistory(
+        { seasonId: 2025, seasonCode: '2526' },
+        entryIds[0],
+        {
+          current: [],
+          chips: [],
+          past: [{ season_name: '2025/26', total_points: 1_500, rank: 2_000 }],
+        },
+      );
+      const crossSeasonHistory = await client<
+        Array<{ entry_season_id: number; total_points: number }>
+      >`
+        SELECT entry_season_id, total_points
+        FROM competition.entry_past_seasons
+        WHERE entry_id = 70001 AND source_season_id = 2025
+        ORDER BY entry_season_id
+      `;
+      expect(crossSeasonHistory.map((row) => ({ ...row }))).toEqual([
+        { entry_season_id: 2025, total_points: 1_500 },
+        { entry_season_id: 2026, total_points: 2_501 },
+      ]);
 
       const leagueRepository = createEntryLeagueInfoRepository(db);
       await leagueRepository.upsertFromLeagues(season, entryIds[0], {
@@ -696,10 +789,10 @@ persistenceTest(
         }>
       >`
         SELECT
-          (SELECT count(*)::integer FROM competition.entry_season_histories
-            WHERE season_id = 2025 AND entry_id = ${entryIds[0]}) AS historical_rows,
-          (SELECT total_points::integer FROM competition.entry_season_histories
-            WHERE season_id = 2025 AND entry_id = ${entryIds[0]}) AS historical_points,
+          (SELECT count(*)::integer FROM competition.entry_past_seasons
+            WHERE entry_season_id = 2026 AND entry_id = ${entryIds[0]}) AS historical_rows,
+          (SELECT total_points::integer FROM competition.entry_past_seasons
+            WHERE entry_season_id = 2026 AND entry_id = ${entryIds[0]}) AS historical_points,
           (SELECT count(*)::integer FROM competition.entry_leagues
             WHERE season_id = 2026 AND entry_id = ${entryIds[0]}) AS league_rows,
           (SELECT league_name FROM competition.entry_leagues

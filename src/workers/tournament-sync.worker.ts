@@ -28,6 +28,7 @@ import { syncTournamentEventPicks } from '../services/tournament-event-picks.ser
 import { syncTournamentInfo } from '../services/tournament-info.service';
 import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
 import { syncTournamentSelectionStats } from '../services/tournament-selection-stats.service';
+import { eventRepository } from '../repositories/events';
 import {
   finishTournamentsThroughEvent,
   reconcileOfficialTournamentRosters,
@@ -57,6 +58,7 @@ import {
   enqueueTournamentCupResults,
   enqueueTournamentMaterializedViewsRefresh,
   enqueueTournamentSelectionStats,
+  enqueueTournamentRosterSync,
 } from '../jobs/tournament-sync.jobs';
 import type { WorkerRuntime } from './worker-runtime';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
@@ -249,6 +251,22 @@ function tournamentEventFinalizationDependencies(
   };
 }
 
+async function enqueueOfficialRosterSyncAfterFinalization(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<void> {
+  const event = await eventRepository.findById(season, eventId);
+  if (!event?.finished || !event.dataChecked) {
+    return;
+  }
+
+  await enqueueTournamentRosterSync(season, 'cascade', { finalizedEventId: eventId });
+  logInfo('Enqueued official tournament roster reconcile after finalized event', {
+    season: season.seasonCode,
+    eventId,
+  });
+}
+
 /**
  * Tournament Sync Worker
  *
@@ -313,8 +331,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             return synced;
           });
           if (shouldEnqueueTournamentCascade(result)) {
+            await enqueueOfficialRosterSyncAfterFinalization(season, eventId);
             await enqueueTournamentCascade(season, eventId, result.finalizationTargets);
           } else {
+            await enqueueOfficialRosterSyncAfterFinalization(season, eventId);
             await finalizeTournamentEventLifecycle(eventId, {
               ...tournamentEventFinalizationDependencies(season, []),
               // Recover a prior terminal write followed by a failed

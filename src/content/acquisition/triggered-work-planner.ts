@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import { and, asc, desc, eq, inArray, isNull, lte, max, ne, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 
 import {
   contentAcquisitionJobOutbox,
@@ -502,12 +503,16 @@ export async function planTriggeredContentWork(input: {
       nextDeadline: date(clockRows[0]?.nextDeadline),
     });
     const reclaimed = await recoverStaleTriggeredRuns(tx, dbNow);
+    // PostgreSQL requires an unqualified relation name in `FOR UPDATE OF`.
+    // Drizzle emits the schema-qualified name for a base table, so use an
+    // explicit alias to keep the lock scoped to the mutable receipt relation.
+    const plannerReceipts = alias(contentSourceReceipts, 'planner_receipts');
     const candidates = await tx
       .select({
-        receiptId: contentSourceReceipts.receiptId,
+        receiptId: plannerReceipts.receiptId,
         receiptRevisionId: contentSourceReceiptRevisions.receiptRevisionId,
         revisionRunId: contentSourceReceiptRevisions.runId,
-        contentKind: contentSourceReceipts.contentKind,
+        contentKind: plannerReceipts.contentKind,
         payload: contentSourceReceiptRevisions.payload,
         endpointId: contentSourceEndpoints.endpointId,
         endpointKey: contentSourceEndpoints.endpointKey,
@@ -520,32 +525,33 @@ export async function planTriggeredContentWork(input: {
         sourceKey: contentSources.sourceKey,
         sourceRightsPolicy: contentSources.rightsPolicy,
       })
-      .from(contentSourceReceipts)
+      .from(plannerReceipts)
       .innerJoin(
         contentSourceReceiptRevisions,
-        eq(
-          contentSourceReceiptRevisions.receiptRevisionId,
-          contentSourceReceipts.currentRevisionId,
-        ),
+        eq(contentSourceReceiptRevisions.receiptRevisionId, plannerReceipts.currentRevisionId),
       )
       .innerJoin(
         contentSourceEndpoints,
-        eq(contentSourceEndpoints.endpointId, contentSourceReceipts.primaryEndpointId),
+        eq(contentSourceEndpoints.endpointId, plannerReceipts.primaryEndpointId),
       )
-      .innerJoin(contentSources, eq(contentSources.sourceId, contentSourceReceipts.sourceId))
+      .innerJoin(contentSources, eq(contentSources.sourceId, plannerReceipts.sourceId))
       .where(
         and(
-          inArray(contentSourceReceipts.contentKind, ['ARTICLE', 'EPISODE', 'VIDEO']),
+          inArray(plannerReceipts.contentKind, ['ARTICLE', 'EPISODE', 'VIDEO']),
           eq(contentSourceEndpoints.status, 'active'),
           eq(contentSources.status, 'active'),
         ),
       )
       .orderBy(
-        sql`${contentSourceReceipts.workPlannerCheckedAt} ASC NULLS FIRST`,
+        sql`${plannerReceipts.workPlannerCheckedAt} ASC NULLS FIRST`,
         desc(contentSourceReceiptRevisions.createdAt),
       )
       .limit(limit)
-      .for('update', { skipLocked: true });
+      // Only the mutable receipt row is claimed here.  The joined revision is
+      // intentionally immutable and the runtime role is not granted UPDATE
+      // on it; a plain FOR UPDATE would implicitly lock every joined table
+      // and fail with 42501 before any content work could be planned.
+      .for('update', { of: plannerReceipts, skipLocked: true });
 
     if (candidates.length > 0) {
       await tx

@@ -6,6 +6,7 @@ import { getConfig, isBugReportScreenshotStorageConfigured } from '../utils/conf
 import { checkRuntimeHeartbeat } from '../utils/runtime-heartbeat';
 import { readActiveDataPublication } from '../cache/data-publication';
 import { syncOperationsRepository } from '../repositories/sync-operations';
+import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
 import { eventRepository } from '../repositories/events';
 
 export type ReadinessResult = {
@@ -73,7 +74,11 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       scope.eventId,
     );
     const redisActive = await readActiveDataPublication(scope);
+    const durableEvidence = dbActive
+      ? await loadDataPublicationDelivery(dbActive.publicationId).catch(() => null)
+      : null;
     const matches =
+      Boolean(dbActive) === Boolean(durableEvidence) &&
       Boolean(dbActive) === Boolean(redisActive) &&
       (!dbActive ||
         !redisActive ||

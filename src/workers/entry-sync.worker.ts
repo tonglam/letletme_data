@@ -66,6 +66,7 @@ import {
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
+  renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import type { WorkerRuntime } from './worker-runtime';
 
@@ -88,6 +89,23 @@ interface SyncEntriesOptions {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function resolveRetryDelayMs(retryCount: number): number {
+  const delayMultiplier = Math.max(retryCount, 1);
+  return Math.min(retryBaseDelayMs * delayMultiplier, retryMaxDelayMs);
+}
+
+async function renewEntrySyncObligationLease(
+  jobData: Pick<EntrySyncJobData, 'obligationId' | 'obligationGeneration'> | undefined,
+  additionalLeaseMs = 0,
+): Promise<boolean> {
+  if (!jobData?.obligationId) return true;
+  return renewSchedulerObligation({
+    obligationId: jobData.obligationId,
+    generation: jobData.obligationGeneration,
+    additionalLeaseMs,
+  });
+}
 
 export async function loadEntryIdsForSync(
   season: FplSeasonRef,
@@ -206,8 +224,7 @@ async function scheduleRetry(
   failedIds: number[],
   retryCount: number,
 ) {
-  const delayMultiplier = Math.max(retryCount, 1);
-  const delayMs = Math.min(retryBaseDelayMs * delayMultiplier, retryMaxDelayMs);
+  const delayMs = resolveRetryDelayMs(retryCount);
 
   return enqueueEntryJob(season, jobName, jobData?.source, {
     entryIds: failedIds,
@@ -330,6 +347,22 @@ async function handleEntryJob(
         failedUnits: result.failed,
       },
       afterCommit: async () => {
+        // Keep the obligation alive through the delayed retry.  A fixed lease
+        // measured from the first generation would expire while the next
+        // retry is still waiting in BullMQ, allowing the scheduler to enqueue
+        // an overlapping generation against the same mutation scopes.
+        const leaseRenewed = await renewEntrySyncObligationLease(
+          jobData,
+          resolveRetryDelayMs(decision.retryCount),
+        );
+        if (!leaseRenewed) {
+          logInfo('Entry sync retry skipped for stale scheduler generation', {
+            jobName,
+            obligationId: jobData?.obligationId,
+            obligationGeneration: jobData?.obligationGeneration,
+          });
+          return;
+        }
         const retryJob = await scheduleRetry(
           season,
           jobName,
@@ -378,6 +411,15 @@ async function handleEntryJob(
     return {
       value,
       afterCommit: async () => {
+        const leaseRenewed = await renewEntrySyncObligationLease(jobData);
+        if (!leaseRenewed) {
+          logInfo('Entry sync continuation skipped for stale scheduler generation', {
+            jobName,
+            obligationId: jobData?.obligationId,
+            obligationGeneration: jobData?.obligationGeneration,
+          });
+          return;
+        }
         const nextJob = await enqueueEntryJob(season, jobName, jobData?.source, {
           afterEntryId: decision.afterEntryId,
           chunkSize: loaded.chunkSize,
@@ -434,6 +476,22 @@ export function createEntrySyncWorker(): WorkerRuntime {
     };
 
     logJobTriggered(context);
+
+    // A delayed retry or continuation may be the first job to run after a
+    // long scheduler interval.  Reject stale generations before they can
+    // touch entry data; the current generation remains authoritative.
+    if (job.data?.obligationId) {
+      const leaseRenewed = await renewEntrySyncObligationLease(job.data);
+      if (!leaseRenewed) {
+        logInfo('Entry sync job skipped for stale scheduler generation', {
+          jobId,
+          jobName: job.name,
+          obligationId: job.data.obligationId,
+          obligationGeneration: job.data.obligationGeneration,
+        });
+        return { skipped: true, staleSchedulerGeneration: true };
+      }
+    }
 
     const attemptContext: DataSyncAttemptContext = {
       queue: job.queueName,
