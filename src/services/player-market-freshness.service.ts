@@ -76,7 +76,8 @@ export type PlayerMarketFreshnessResult =
     };
 
 function isFinalWindowCapture(snapshotDate: string, capturedAt: Date | null): boolean {
-  if (!capturedAt || formatCronDateKey(capturedAt) !== snapshotDate) return false;
+  if (!capturedAt || !Number.isFinite(capturedAt.getTime())) return false;
+  if (formatCronDateKey(capturedAt) !== snapshotDate) return false;
   const year = Number(snapshotDate.slice(0, 4));
   const month = Number(snapshotDate.slice(4, 6));
   const day = Number(snapshotDate.slice(6, 8));

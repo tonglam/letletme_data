@@ -212,4 +212,26 @@ describe('complete daily market snapshot repository', () => {
       latestCapturedAt: snapshot.capturedAt,
     });
   });
+
+  test('normalizes aggregate timestamp strings returned by PostgreSQL', async () => {
+    const repository = createPlayerMarketSnapshotsRepository({
+      select: () => ({
+        from: () => ({
+          where: async () => [
+            {
+              snapshotCount: 600,
+              captureCount: 1,
+              latestCapturedAt: '2026-08-03T01:40:00.000Z',
+            },
+          ],
+        }),
+      }),
+    } as never);
+
+    await expect(repository.getDayCoverage(TEST_SEASON, '20260803')).resolves.toEqual({
+      snapshotCount: 600,
+      captureCount: 1,
+      latestCapturedAt: new Date('2026-08-03T01:40:00.000Z'),
+    });
+  });
 });
