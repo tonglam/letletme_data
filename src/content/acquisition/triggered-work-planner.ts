@@ -545,7 +545,11 @@ export async function planTriggeredContentWork(input: {
         desc(contentSourceReceiptRevisions.createdAt),
       )
       .limit(limit)
-      .for('update', { skipLocked: true });
+      // Only the mutable receipt row is claimed here.  The joined revision is
+      // intentionally immutable and the runtime role is not granted UPDATE
+      // on it; a plain FOR UPDATE would implicitly lock every joined table
+      // and fail with 42501 before any content work could be planned.
+      .for('update', { of: contentSourceReceipts, skipLocked: true });
 
     if (candidates.length > 0) {
       await tx
