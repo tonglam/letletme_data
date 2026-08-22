@@ -290,8 +290,13 @@ test('creates one bounded saturation follow-up and turns a second saturation int
     .select({ status: contentAcquisitionBudgetReservations.status })
     .from(contentAcquisitionBudgetReservations)
     .where(eq(contentAcquisitionBudgetReservations.runId, child.runId));
+  expect(committedChildReservations.some((reservation) => reservation.status === 'RELEASED')).toBe(
+    true,
+  );
   expect(
-    committedChildReservations.every((reservation) => reservation.status === 'COMMITTED'),
+    committedChildReservations
+      .filter((reservation) => reservation.status !== 'RELEASED')
+      .every((reservation) => reservation.status === 'COMMITTED'),
   ).toBe(true);
 
   await db
