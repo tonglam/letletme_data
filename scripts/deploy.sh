@@ -256,7 +256,7 @@ deploy() {
     [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
     start_stage hostRunner
     runner_root=/home/workspace/letletme-grok-runner
-    DEPLOY_RUNNER_PREVIOUS_TARGET=$(readlink -f "$runner_root/current" 2>/dev/null || true)
+    DEPLOY_RUNNER_PREVIOUS_TARGET=$(readlink -e "$runner_root/current" 2>/dev/null || true)
     DEPLOY_RUNNER_PREVIOUS_RELEASE=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
     DEPLOY_RUNNER_PREVIOUS_RELEASE=${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}
     runner_image_ref=${APP_IMAGE:-letletme-data:local}
