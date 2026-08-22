@@ -179,6 +179,22 @@ jobs:
               test -n "$worker_restart_started_at"
             }
 
+            read_pipeline_enabled() {
+              awk '
+                $0 ~ "^[[:space:]]*(export[[:space:]]+)?CONTENT_PIPELINE_ENABLED[[:space:]]*=" {
+                  value = $0
+                  sub("^[[:space:]]*(export[[:space:]]+)?CONTENT_PIPELINE_ENABLED[[:space:]]*=", "", value)
+                  sub("^[[:space:]]+", "", value)
+                  sub("[[:space:]]+$", "", value)
+                  if (value ~ /^".*"$/ || value ~ /^\047.*\047$/) {
+                    value = substr(value, 2, length(value) - 2)
+                  }
+                  print tolower(value)
+                  exit
+                }
+              ' "$env_file"
+            }
+
             if [ "$ROLLOUT_MODE" = status ]; then
               scripts/configure-briefing-acquisition-env.sh status "$env_file"
               test "$(docker inspect --format '{{.State.Health.Status}}' "$current_container")" = healthy
@@ -253,7 +269,18 @@ jobs:
             PROJECT_DIR="$expected_workdir" COMPOSE_FILE=docker-compose.yml \
               COMPOSE_BIN='docker compose' scripts/verify-runtime-health.sh
             report_acquisition_health
-            verify_manifest_reconciliation
+            pipeline_enabled_after=$(read_pipeline_enabled)
+            case "$pipeline_enabled_after" in
+              true | 1 | yes | on)
+                verify_manifest_reconciliation
+                ;;
+              false | 0 | no | off)
+                ;;
+              *)
+                echo "invalid CONTENT_PIPELINE_ENABLED after rollout: $pipeline_enabled_after" >&2
+                exit 1
+                ;;
+            esac
             if [ "$ROLLOUT_MODE" = host-shadow ]; then
               test -x scripts/rearm-briefing-x-after-probe.sh
               scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
