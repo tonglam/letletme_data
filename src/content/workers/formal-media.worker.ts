@@ -156,6 +156,7 @@ export async function runFormalMediaWorker(
         runMetrics: {
           transcriptSource: 'PUBLISHER',
           segmentCount: publisher.segments.length,
+          artifactAttemptCount: publisher.artifactAttemptCount,
         },
         db,
       });

@@ -38,5 +38,17 @@ describe('Briefing acquisition registry state', () => {
       sourceType: 'CREATOR',
       reportingFamily: 'CREATOR',
     });
+    expect(focalEndpoints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          rightsPolicy: expect.objectContaining({
+            mode: 'PUBLIC_ATTRIBUTED',
+            allowPublic: true,
+            allowFullText: true,
+            attributionRequired: true,
+          }),
+        }),
+      ]),
+    );
   });
 });

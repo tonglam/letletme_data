@@ -3,6 +3,7 @@ import { XMLParser } from 'fast-xml-parser';
 
 import {
   acquisitionBatchV1Schema,
+  acquisitionItemV1Schema,
   canonicalizePublicUrl,
   type AcquisitionBatchV1,
   type AcquisitionItemV1,
@@ -406,22 +407,21 @@ export function parseFeedXml(input: {
     const fallbackId =
       firstText(node.guid, node.id, node['yt:videoId']) ?? `invalid-index-${index}`;
     try {
-      items.push(
-        rssChannel
-          ? parseRssItem({
-              endpointKey: input.endpointKey,
-              node,
-              channelLink,
-              adapterKind: input.adapterKind,
-              profileKey: input.profileKey,
-            })
-          : parseAtomItem({
-              endpointKey: input.endpointKey,
-              node,
-              channelLink,
-              adapterKind: input.adapterKind,
-            }),
-      );
+      const item = rssChannel
+        ? parseRssItem({
+            endpointKey: input.endpointKey,
+            node,
+            channelLink,
+            adapterKind: input.adapterKind,
+            profileKey: input.profileKey,
+          })
+        : parseAtomItem({
+            endpointKey: input.endpointKey,
+            node,
+            channelLink,
+            adapterKind: input.adapterKind,
+          });
+      items.push(acquisitionItemV1Schema.parse(item));
     } catch (error) {
       rejections.push({
         externalItemId: fallbackId,

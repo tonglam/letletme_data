@@ -130,7 +130,12 @@ export function compileBriefingRegistryState(
         locator: locatorRecord(endpoint.locator),
         status: entity.enabled && endpoint.enabled ? ('active' as const) : ('paused' as const),
         origin: 'MANIFEST' as const,
-        rightsPolicy: { mode: endpoint.rightsPolicy },
+        rightsPolicy: {
+          mode: endpoint.rightsPolicy,
+          allowPublic: true,
+          allowFullText: endpoint.rightsPolicy === 'PUBLIC_ATTRIBUTED',
+          attributionRequired: true,
+        },
         manifestRevision: bundle.manifestHash,
       })),
     )

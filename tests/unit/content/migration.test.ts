@@ -104,6 +104,15 @@ describe('Briefing content migration contract', () => {
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS enqueue_confirmed_at');
   });
 
+  test('indexes every receipt kind handled by the triggered planner', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0030_content_article_planner_index.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain(
+      'content_kind IN (|ARTICLE|, |EPISODE|, |VIDEO|)'.replaceAll('|', String.fromCharCode(39)),
+    );
+  });
+
   test('makes active publication unique by scope and revisioned', async () => {
     const sql = await Bun.file(migrationPath).text();
     expect(sql).toContain('UNIQUE (scope_key, revision)');

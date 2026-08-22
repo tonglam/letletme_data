@@ -109,4 +109,34 @@ describe('YouTube metadata client', () => {
       client.getVideo({ discoveryItem, expectedChannelId: 'UC-wrong' }),
     ).rejects.toMatchObject({ failureClass: 'IDENTITY_CONFLICT' });
   });
+
+  test('cancels an oversized streaming response before buffering the whole body', async () => {
+    let cancelled = false;
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new TextEncoder().encode('1234567890'));
+        if (pulls === 4) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const client = new YouTubeMetadataClient({
+      apiKey: 'secret',
+      timeoutMs: 1_000,
+      maximumResponseBytes: 15,
+      fetchImpl: async () => new Response(body, { status: 200 }),
+    });
+
+    await expect(
+      client.getVideo({
+        discoveryItem,
+        expectedChannelId: 'UC72QokPHXQ9r98ROfNZmaDw',
+      }),
+    ).rejects.toMatchObject({ failureClass: 'OUTPUT_LIMIT' });
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(4);
+  });
 });

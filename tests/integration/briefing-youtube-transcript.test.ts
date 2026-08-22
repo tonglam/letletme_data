@@ -467,4 +467,267 @@ test('plans the second native attempt and reclaims a stale triggered lease', asy
     .orderBy(desc(contentSourceReceiptRevisions.revisionNumber))
     .limit(1);
   expect(currentTranscript?.status).toBe('DEFERRED');
+  const [secondRunState] = await db
+    .select({ runMetrics: contentAcquisitionRuns.runMetrics })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, secondTranscript.runId));
+  await db
+    .update(contentAcquisitionRuns)
+    .set({
+      runMetrics: {
+        ...(secondRunState?.runMetrics as Record<string, unknown>),
+        nextEligibleAt: new Date(Date.now() - 60_000).toISOString(),
+      },
+    })
+    .where(eq(contentAcquisitionRuns.runId, secondTranscript.runId));
+
+  const makeLatestGeneratedRunFailed = async (input?: { providerJobId?: string }) => {
+    const transcriptRuns = await db
+      .select({
+        runId: contentAcquisitionRuns.runId,
+        requestSnapshot: contentAcquisitionRuns.requestSnapshot,
+      })
+      .from(contentAcquisitionRuns)
+      .where(eq(contentAcquisitionRuns.targetReceiptId, receipt.receiptId))
+      .orderBy(desc(contentAcquisitionRuns.createdAt));
+    const generated = transcriptRuns.find(
+      (run) => (run.requestSnapshot as Record<string, unknown>).attemptStage === 'GENERATED',
+    );
+    if (!generated) throw new Error('Generated transcript run is missing');
+    await db
+      .update(contentAcquisitionRuns)
+      .set({
+        status: 'FAILED',
+        completedAt: new Date(Date.now() - 10 * 60_000),
+        provider: input?.providerJobId ? 'supadata' : null,
+        providerJobId: input?.providerJobId ?? null,
+        runMetrics: input?.providerJobId ? { providerPollRecoveries: 2 } : {},
+      })
+      .where(eq(contentAcquisitionRuns.runId, generated.runId));
+    return generated.runId;
+  };
+
+  const generatedPlan = await planTriggeredContentWork({ flags });
+  expect(generatedPlan.byJobKind).toMatchObject({ YOUTUBE_TRANSCRIPT: 1 });
+  await makeLatestGeneratedRunFailed();
+  expect((await planTriggeredContentWork({ flags })).byJobKind).toMatchObject({
+    YOUTUBE_TRANSCRIPT: 1,
+  });
+  await makeLatestGeneratedRunFailed();
+  expect((await planTriggeredContentWork({ flags })).byJobKind).toMatchObject({
+    YOUTUBE_TRANSCRIPT: 1,
+  });
+  const exhaustedRunId = await makeLatestGeneratedRunFailed({ providerJobId: 'stuck-job' });
+  const exhaustedPlan = await planTriggeredContentWork({ flags });
+  expect(exhaustedPlan.planned).toBe(0);
+  const [exhausted] = await db
+    .select({
+      failureClass: contentAcquisitionRuns.failureClass,
+      runMetrics: contentAcquisitionRuns.runMetrics,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, exhaustedRunId));
+  expect(exhausted).toMatchObject({
+    failureClass: 'PROVIDER_POLL_RETRY_EXHAUSTED',
+    runMetrics: { providerPollTerminalState: 'POLL_RETRY_EXHAUSTED' },
+  });
+  const generatedRuns = await db
+    .select({ requestSnapshot: contentAcquisitionRuns.requestSnapshot })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.targetReceiptId, receipt.receiptId));
+  expect(
+    generatedRuns.filter(
+      (run) => (run.requestSnapshot as Record<string, unknown>).attemptStage === 'GENERATED',
+    ),
+  ).toHaveLength(3);
+});
+
+test('rejects a stale billable transcript result without overwriting the current receipt', async () => {
+  await resetBriefingAcquisitionState();
+  const bundle = await loadBriefingManifest();
+  await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'youtube-stale-result-test' });
+  const db = await getDb();
+  const endpointKey = 'fpl-focal-youtube';
+  const [endpoint] = await db
+    .select({ endpointId: contentSourceEndpoints.endpointId })
+    .from(contentSourceEndpoints)
+    .where(eq(contentSourceEndpoints.endpointKey, endpointKey))
+    .limit(1);
+  if (!endpoint) throw new Error('FPL Focal YouTube endpoint is missing');
+  await db
+    .update(contentSourceSchedules)
+    .set({ status: 'paused' })
+    .where(ne(contentSourceSchedules.endpointId, endpoint.endpointId));
+  await db
+    .update(contentSourceSchedules)
+    .set({ status: 'active', nextDueAt: new Date(Date.now() - 60_000) })
+    .where(eq(contentSourceSchedules.endpointId, endpoint.endpointId));
+
+  const publishedAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  const videoId = 'staleResult01';
+  const feedXml = (title: string, description: string) => `<?xml version="1.0"?>
+    <feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns:media="http://search.yahoo.com/mrss/">
+      <entry><yt:videoId>${videoId}</yt:videoId><yt:channelId>UC72QokPHXQ9r98ROfNZmaDw</yt:channelId>
+        <title>${title}</title><published>${publishedAt}</published><updated>${publishedAt}</updated>
+        <link rel="alternate" href="https://www.youtube.com/watch?v=${videoId}" />
+        <author><name>FPL Focal</name><uri>https://www.youtube.com/channel/UC72QokPHXQ9r98ROfNZmaDw</uri></author>
+        <media:group><media:description>${description}</media:description></media:group>
+      </entry>
+    </feed>`;
+
+  const [feedRun] = await claimDueFormalRuns({
+    enabledAdapters: ['YOUTUBE_CHANNEL'],
+    claimLimit: 1,
+  });
+  if (!feedRun) throw new Error('Initial stale-result feed run was not claimed');
+  await runFormalHttpWorker(feedRun.job, {
+    flags,
+    fetchImpl: async () =>
+      new Response(feedXml('Initial title', 'Initial description'), {
+        status: 200,
+        headers: { 'content-type': 'application/atom+xml' },
+      }),
+  });
+  const [metadataRun] = await db
+    .select({ runId: contentAcquisitionRuns.runId })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.parentRunId, feedRun.runId));
+  if (!metadataRun) throw new Error('Stale-result metadata run is missing');
+  await runFormalHttpWorker(
+    { schemaVersion: 1, runId: metadataRun.runId },
+    {
+      flags,
+      youtubeMetadataClient: new YouTubeMetadataClient({
+        apiKey: 'youtube-secret',
+        timeoutMs: 1_000,
+        maximumResponseBytes: 1_000_000,
+        fetchImpl: async () =>
+          Response.json({
+            items: [
+              {
+                id: videoId,
+                snippet: {
+                  channelId: 'UC72QokPHXQ9r98ROfNZmaDw',
+                  title: 'Canonical initial title',
+                  description: 'Canonical initial description',
+                  publishedAt,
+                  liveBroadcastContent: 'none',
+                },
+                contentDetails: { duration: 'PT2M', caption: 'true' },
+                status: { uploadStatus: 'processed', privacyStatus: 'public' },
+              },
+            ],
+          }),
+      }),
+    },
+  );
+  const [transcriptRun] = await db
+    .select({
+      runId: contentAcquisitionRuns.runId,
+      targetReceiptRevisionId: contentAcquisitionRuns.targetReceiptRevisionId,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.parentRunId, metadataRun.runId));
+  if (!transcriptRun?.targetReceiptRevisionId) {
+    throw new Error('Stale-result transcript run is missing its target revision');
+  }
+
+  await db
+    .update(contentSourceSchedules)
+    .set({
+      nextDueAt: new Date(Date.now() - 60_000),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    })
+    .where(eq(contentSourceSchedules.endpointId, endpoint.endpointId));
+  const [refreshRun] = await claimDueFormalRuns({
+    enabledAdapters: ['YOUTUBE_CHANNEL'],
+    claimLimit: 1,
+  });
+  if (!refreshRun) throw new Error('Refresh feed run was not claimed');
+  await runFormalHttpWorker(refreshRun.job, {
+    flags,
+    fetchImpl: async () =>
+      new Response(feedXml('Newer feed title', 'Newer feed description'), {
+        status: 200,
+        headers: { 'content-type': 'application/atom+xml' },
+      }),
+  });
+  const [receiptBefore] = await db
+    .select({
+      receiptId: contentSourceReceipts.receiptId,
+      currentRevisionId: contentSourceReceipts.currentRevisionId,
+      payload: contentSourceReceipts.payload,
+    })
+    .from(contentSourceReceipts)
+    .where(eq(contentSourceReceipts.externalId, videoId));
+  if (!receiptBefore?.currentRevisionId) throw new Error('Stale-result receipt is missing');
+  expect(receiptBefore.currentRevisionId).not.toBe(transcriptRun.targetReceiptRevisionId);
+
+  const billableClient = new SupadataTranscriptClient({
+    apiKey: 'supadata-secret',
+    timeoutMs: 1_000,
+    maximumResponseBytes: 1_000_000,
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          content: [{ text: 'Old transcript content', offset: 0, duration: 1_000, lang: 'en' }],
+          lang: 'en',
+          availableLangs: ['en'],
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'x-billable-requests': '3' },
+        },
+      ),
+  });
+  await expect(
+    runFormalHttpWorker(
+      { schemaVersion: 1, runId: transcriptRun.runId },
+      { flags, supadataClient: billableClient },
+    ),
+  ).rejects.toThrow('STALE_TARGET_RECEIPT_REVISION');
+
+  const [receiptAfter] = await db
+    .select({
+      currentRevisionId: contentSourceReceipts.currentRevisionId,
+      payload: contentSourceReceipts.payload,
+    })
+    .from(contentSourceReceipts)
+    .where(eq(contentSourceReceipts.receiptId, receiptBefore.receiptId));
+  expect(receiptAfter?.currentRevisionId).toBe(receiptBefore.currentRevisionId);
+  expect(receiptAfter?.payload).toEqual(receiptBefore.payload);
+  const [failedRun] = await db
+    .select({
+      status: contentAcquisitionRuns.status,
+      failureClass: contentAcquisitionRuns.failureClass,
+      providerUnits: contentAcquisitionRuns.providerUnits,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, transcriptRun.runId));
+  expect(failedRun).toEqual({
+    status: 'FAILED',
+    failureClass: 'STALE_TARGET_RECEIPT_REVISION',
+    providerUnits: '3.000000',
+  });
+  const [reservation] = await db
+    .select({
+      status: contentAcquisitionBudgetReservations.status,
+      units: contentAcquisitionBudgetReservations.units,
+    })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, transcriptRun.runId));
+  expect(reservation).toEqual({ status: 'COMMITTED', units: '3.000000' });
+  const [trace] = await db
+    .select({
+      providerUnits: contentAcquisitionProviderTraces.providerUnits,
+      terminalState: contentAcquisitionProviderTraces.terminalState,
+    })
+    .from(contentAcquisitionProviderTraces)
+    .where(eq(contentAcquisitionProviderTraces.runId, transcriptRun.runId));
+  expect(trace).toEqual({
+    providerUnits: '3.000000',
+    terminalState: 'FAILED:STALE_TARGET_RECEIPT_REVISION',
+  });
 });

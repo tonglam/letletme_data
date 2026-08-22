@@ -499,6 +499,21 @@ function rightsAllowPublic(value: unknown): boolean {
   );
 }
 
+const EDITORIAL_COMPLETE_ACQUISITION_STATUSES = new Set([
+  'COMPLETED',
+  'CHECKED_NO_CHANGE',
+  'EMPTY',
+  'PARTIAL',
+  // Retain compatibility with rows created before formal acquisition normalized statuses.
+  'completed',
+  'empty',
+  'partial',
+]);
+
+export function isEditorialAcquisitionRunComplete(status: string): boolean {
+  return EDITORIAL_COMPLETE_ACQUISITION_STATUSES.has(status);
+}
+
 export async function markStoryReady(storyId: string, actor: EditorialActor): Promise<void> {
   requireRole(actor, 'content_editor');
   requireUuid(storyId, 'storyId');
@@ -775,7 +790,7 @@ export async function markWeekEditionReady(
     if (
       sourceRuns.some(
         (run) =>
-          !['completed', 'empty', 'partial'].includes(run.status) ||
+          !isEditorialAcquisitionRunComplete(run.status) ||
           run.traceVerified !== true ||
           run.checkpointAdvanced !== true ||
           !run.completedAt ||

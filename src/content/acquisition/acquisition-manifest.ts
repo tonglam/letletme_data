@@ -406,7 +406,7 @@ function validateBundle(sources: BriefingSourcesManifest, plan: BriefingAcquisit
 
   for (const endpoint of endpointKeys.values()) {
     if (
-      endpoint.enabled &&
+      activeEndpointKeys.has(endpoint.endpointKey) &&
       (endpoint.adapterKind === 'X_ACCOUNT' || endpoint.adapterKind === 'X_SEMANTIC') &&
       !partitionMembership.has(endpoint.endpointKey)
     ) {

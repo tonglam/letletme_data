@@ -89,4 +89,46 @@ Second cue
       }),
     ).rejects.toThrow('TRANSCRIPT_HAS_NO_TIMESTAMPED_CUES');
   });
+
+  test('tries later publisher artifacts when an earlier supported artifact is malformed', async () => {
+    const calls: string[] = [];
+    const result = await fetchPublisherPodcastTranscript({
+      item: {
+        ...item,
+        media: [
+          item.media[0]!,
+          {
+            kind: 'TRANSCRIPT',
+            url: 'https://example.com/a-invalid.vtt',
+            mimeType: 'text/vtt',
+            durationSeconds: null,
+          },
+          {
+            kind: 'TRANSCRIPT',
+            url: 'https://example.com/b-valid.vtt',
+            mimeType: 'text/vtt',
+            durationSeconds: null,
+          },
+        ],
+      },
+      timeoutMs: 1_000,
+      maximumBytes: 10_000,
+      fetchImpl: async (input) => {
+        calls.push(String(input));
+        return String(input).endsWith('/a-invalid.vtt')
+          ? new Response('Untimed publisher transcript', {
+              status: 200,
+              headers: { 'content-type': 'text/plain' },
+            })
+          : new Response('WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nFallback artifact\n', {
+              status: 200,
+              headers: { 'content-type': 'text/vtt' },
+            });
+      },
+    });
+
+    expect(calls).toEqual(['https://example.com/a-invalid.vtt', 'https://example.com/b-valid.vtt']);
+    expect(result?.segments).toEqual([{ startMs: 0, endMs: 1_000, text: 'Fallback artifact' }]);
+    expect(result?.artifactAttemptCount).toBe(2);
+  });
 });

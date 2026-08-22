@@ -22,6 +22,7 @@ import {
   type XAcquisitionLane,
 } from './acquisition-profiles';
 import { sha256CanonicalJson } from './canonicalization';
+import type { SupadataFailureEvidence } from './supadata-transcript-client';
 import {
   acquisitionJobV1Schema,
   parseFormalRunRequestV1,
@@ -999,6 +1000,7 @@ export async function failFormalRun(input: {
   errorSummary: string;
   retryDelayMs?: number;
   providerEvidence?: FormalRunProviderEvidence;
+  supadataFailureEvidence?: SupadataFailureEvidence;
   providerProcessStarted?: boolean;
   rejections?: readonly FormalRunFailureRejection[];
   db?: DbHandle;
@@ -1019,6 +1021,10 @@ export async function failFormalRun(input: {
         windowEnd: contentAcquisitionRuns.windowEnd,
         requestSnapshot: contentAcquisitionRuns.requestSnapshot,
         status: contentAcquisitionRuns.status,
+        jobKind: contentAcquisitionRuns.jobKind,
+        provider: contentAcquisitionRuns.provider,
+        providerJobId: contentAcquisitionRuns.providerJobId,
+        providerUnits: contentAcquisitionRuns.providerUnits,
       })
       .from(contentAcquisitionRuns)
       .where(eq(contentAcquisitionRuns.runId, input.runId))
@@ -1026,11 +1032,16 @@ export async function failFormalRun(input: {
       .limit(1);
     const run = rows[0];
     if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
+    if (input.providerEvidence && input.supadataFailureEvidence) {
+      throw new Error('Formal failure cannot contain evidence from multiple providers');
+    }
     if (input.rejections?.length && !input.providerEvidence) {
       throw new Error('Rejected provider items require persisted provider evidence');
     }
     const request = parseFormalRunRequestV1(run.requestSnapshot);
-    const providerAttempted = input.providerEvidence !== undefined || input.providerProcessStarted;
+    const grokProviderAttempted =
+      input.providerEvidence !== undefined || input.providerProcessStarted === true;
+    let supadataTotalProviderUnits: number | null = null;
     if (input.providerEvidence) {
       if (run.adapterKind !== 'X_ACCOUNT' && run.adapterKind !== 'X_SEMANTIC') {
         throw new Error('Grok provider evidence is only valid for formal X runs');
@@ -1060,6 +1071,67 @@ export async function failFormalRun(input: {
         providerJobIdHash: input.providerEvidence.providerJobIdHash,
         providerUnits: String(input.providerEvidence.providerUnits),
         terminalState: input.providerEvidence.terminalState,
+      });
+    } else if (input.supadataFailureEvidence) {
+      const evidence = input.supadataFailureEvidence;
+      const expectedOperation = run.providerJobId ? 'transcript.poll' : 'transcript.submit';
+      const expectedProviderJobIdHash = run.providerJobId
+        ? createHash('sha256').update(run.providerJobId, 'utf8').digest('hex')
+        : null;
+      const submittedProviderJobIdHash = evidence.providerJobId
+        ? createHash('sha256').update(evidence.providerJobId, 'utf8').digest('hex')
+        : null;
+      if (
+        run.jobKind !== 'YOUTUBE_TRANSCRIPT' ||
+        run.adapterKind !== 'SUPADATA_TRANSCRIPT' ||
+        (run.provider && run.provider !== 'supadata') ||
+        evidence.provider !== 'supadata' ||
+        evidence.operation !== expectedOperation ||
+        (run.providerJobId
+          ? evidence.providerJobId !== run.providerJobId ||
+            evidence.providerJobIdHash !== expectedProviderJobIdHash
+          : evidence.providerJobIdHash !== submittedProviderJobIdHash) ||
+        (evidence.providerJobId !== null &&
+          (!evidence.providerJobId.trim() || evidence.providerJobId.length > 512)) ||
+        !/^[0-9a-f]{64}$/.test(evidence.requestMetadataHash) ||
+        !/^[0-9a-f]{64}$/.test(evidence.responseMetadataHash) ||
+        !Number.isSafeInteger(evidence.providerUnits) ||
+        evidence.providerUnits < 1 ||
+        !Number.isSafeInteger(evidence.durationMs) ||
+        evidence.durationMs < 0
+      ) {
+        throw new Error('Failed Supadata run has invalid billable provider evidence');
+      }
+      const existingProviderUnits = Number(run.providerUnits ?? 0);
+      if (!Number.isFinite(existingProviderUnits) || existingProviderUnits < 0) {
+        throw new Error('Failed Supadata run has invalid persisted provider units');
+      }
+      supadataTotalProviderUnits = existingProviderUnits + evidence.providerUnits;
+      const reconciled = await reconcileReservedProviderBudget({
+        tx,
+        runId: input.runId,
+        scopeKey: 'SUPADATA_TRANSCRIPT',
+        unitKind: 'CREDIT',
+        actualUnits: supadataTotalProviderUnits,
+        dbNow,
+      });
+      if (!reconciled) throw new Error('Billed Supadata failure has no reserved credit budget');
+      await commitRunBudgets({ tx, runId: input.runId, dbNow });
+      const traceRows = await tx
+        .select({ maximum: max(contentAcquisitionProviderTraces.sequence) })
+        .from(contentAcquisitionProviderTraces)
+        .where(eq(contentAcquisitionProviderTraces.runId, input.runId));
+      await tx.insert(contentAcquisitionProviderTraces).values({
+        traceId: randomUUID(),
+        runId: input.runId,
+        sequence: Number(traceRows[0]?.maximum ?? -1) + 1,
+        provider: evidence.provider,
+        operation: evidence.operation,
+        requestMetadataHash: evidence.requestMetadataHash,
+        responseMetadataHash: evidence.responseMetadataHash,
+        providerJobIdHash: evidence.providerJobIdHash,
+        providerUnits: String(evidence.providerUnits),
+        terminalState: `FAILED:${input.failureClass}`.slice(0, 200),
       });
     } else if (input.providerProcessStarted) {
       const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
@@ -1160,15 +1232,32 @@ export async function failFormalRun(input: {
         failureDetailsHash: sha256CanonicalJson({ failureClass, errorSummary }),
         errorSummary,
         rejectedCount: input.rejections?.length ?? 0,
-        provider: providerAttempted ? 'grok-build' : undefined,
-        providerUnits: providerAttempted ? '1' : undefined,
-        xCallCount: providerAttempted ? 1 : 0,
+        provider: input.supadataFailureEvidence
+          ? 'supadata'
+          : grokProviderAttempted
+            ? 'grok-build'
+            : undefined,
+        providerJobId: input.supadataFailureEvidence?.providerJobId ?? undefined,
+        providerUnits:
+          supadataTotalProviderUnits === null
+            ? grokProviderAttempted
+              ? '1'
+              : undefined
+            : String(supadataTotalProviderUnits),
+        xCallCount: grokProviderAttempted ? 1 : 0,
         traceVerified: input.providerEvidence !== undefined,
-        runMetrics:
-          input.providerEvidence?.runMetrics ??
-          (input.providerProcessStarted
-            ? { providerProcessStarted: true, providerTraceVerified: false }
-            : {}),
+        runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify(
+          input.supadataFailureEvidence
+            ? {
+                billableProviderFailure: true,
+                providerFailureOperation: input.supadataFailureEvidence.operation,
+                providerFailureDurationMs: input.supadataFailureEvidence.durationMs,
+              }
+            : (input.providerEvidence?.runMetrics ??
+                (input.providerProcessStarted
+                  ? { providerProcessStarted: true, providerTraceVerified: false }
+                  : {})),
+        )}::jsonb`,
         completedAt: dbNow,
         leaseExpiresAt: null,
         checkpointAdvanced: exhaustedXWindow,

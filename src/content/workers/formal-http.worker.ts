@@ -25,6 +25,8 @@ import { persistAcquisitionResult } from '../acquisition/receipt-repository';
 import {
   SUPADATA_PROVIDER_REVISION,
   SupadataTranscriptClient,
+  SupadataTranscriptClientError,
+  type SupadataFailureEvidence,
   type SupadataPollResult,
   type SupadataSubmitResult,
   type SupadataTranscriptClientLike,
@@ -136,6 +138,7 @@ export async function runFormalHttpWorker(
   const job = acquisitionJobV1Schema.parse(rawJob);
   const flags = dependencies?.flags ?? getContentRuntimeFlags();
   let began = false;
+  let supadataFailureEvidence: SupadataFailureEvidence | undefined;
   try {
     const run = await beginFormalRun({ runId: job.runId, db: dependencies?.db });
     if (run.status === 'TERMINAL') {
@@ -530,6 +533,20 @@ export async function runFormalHttpWorker(
             mode: request.mode.toLowerCase() as 'native' | 'auto',
             language: request.policy.language,
           });
+      const providerJobIdHash =
+        'providerJobIdHash' in providerResult ? providerResult.providerJobIdHash : null;
+      if (providerResult.providerUnits > 0) {
+        supadataFailureEvidence = {
+          provider: 'supadata',
+          operation: run.providerJobId ? 'transcript.poll' : 'transcript.submit',
+          requestMetadataHash: providerResult.requestMetadataHash,
+          responseMetadataHash: providerResult.responseMetadataHash,
+          providerJobId: 'jobId' in providerResult ? providerResult.jobId : run.providerJobId,
+          providerJobIdHash,
+          providerUnits: providerResult.providerUnits,
+          durationMs: providerResult.durationMs,
+        };
+      }
       if (providerResult.kind === 'PENDING') {
         const providerJobId = 'jobId' in providerResult ? providerResult.jobId : run.providerJobId;
         if (!providerJobId) throw new Error('Supadata pending result lost its provider job ID');
@@ -571,8 +588,6 @@ export async function runFormalHttpWorker(
         };
       }
 
-      const providerJobIdHash =
-        'providerJobIdHash' in providerResult ? providerResult.providerJobIdHash : null;
       const totalProviderUnits = run.providerUnits + providerResult.providerUnits;
       let item: AcquisitionItemV1 | null = null;
       let state: 'COMPLETED' | 'CONTENT_DEFERRED' = 'CONTENT_DEFERRED';
@@ -682,10 +697,15 @@ export async function runFormalHttpWorker(
   } catch (error) {
     if (began) {
       const failure = errorFacts(error);
+      const clientEvidence =
+        error instanceof SupadataTranscriptClientError
+          ? (error.providerEvidence ?? undefined)
+          : undefined;
       await failFormalRun({
         runId: job.runId,
         failureClass: failure.failureClass,
         errorSummary: failure.summary,
+        supadataFailureEvidence: clientEvidence ?? supadataFailureEvidence,
         db: dependencies?.db,
       });
     }

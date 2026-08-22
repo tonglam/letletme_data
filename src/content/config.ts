@@ -120,6 +120,16 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
 }
 
 export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
+  for (const [name, value] of [
+    ['CONTENT_X_DAILY_CALL_LIMIT', flags.dailyXCallLimit],
+    ['CONTENT_X_FINAL90_CALL_LIMIT', flags.final90XCallLimit],
+    ['CONTENT_SUPADATA_DAILY_CREDIT_LIMIT', flags.supadataDailyCreditLimit],
+    ['CONTENT_HERMES_DAILY_AUDIO_MINUTES', flags.hermesDailyAudioMinutes],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${name} must be a non-negative safe integer`);
+    }
+  }
   if (flags.realGrokEnabled && !flags.pipelineEnabled) {
     throw new Error('CONTENT_REAL_GROK_ENABLED requires CONTENT_PIPELINE_ENABLED');
   }

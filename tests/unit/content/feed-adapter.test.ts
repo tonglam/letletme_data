@@ -125,6 +125,28 @@ describe('RSS/Atom feed adapter', () => {
     ).toThrow('XML_DTD_FORBIDDEN');
   });
 
+  test('rejects one malformed feed item without discarding valid siblings', () => {
+    const result = parseFeedXml({
+      endpointKey: 'mixed-quality-rss',
+      adapterKind: 'RSS_ATOM',
+      profileKey: 'rss-news-v1',
+      checkedAt: '2026-08-22T00:00:00.000Z',
+      transportBodyHash: hash,
+      validator,
+      xml: `<?xml version="1.0"?><rss version="2.0"><channel>
+        <link>https://example.com/</link>
+        <item><guid>valid-item</guid><link>https://example.com/valid</link>
+          <title>Valid item</title><pubDate>Fri, 21 Aug 2026 00:00:00 GMT</pubDate></item>
+        <item><guid>invalid-item</guid><link>https://example.com/invalid</link>
+          <title>${'x'.repeat(2_001)}</title><pubDate>Fri, 21 Aug 2026 00:00:00 GMT</pubDate></item>
+      </channel></rss>`,
+    });
+
+    expect(result.batch.items.map((item) => item.externalItemId)).toEqual(['valid-item']);
+    expect(result.rejections).toHaveLength(1);
+    expect(result.rejections[0]).toMatchObject({ externalItemId: 'invalid-item' });
+  });
+
   test('allows a bounded larger archive for podcast feeds only', async () => {
     const xml = `<?xml version="1.0"?><rss version="2.0"><channel>
       <link>https://example.com/</link>

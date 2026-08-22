@@ -40,15 +40,61 @@ const jobStatusSchema = z
   })
   .passthrough();
 
+export type SupadataFailureEvidence = Readonly<{
+  provider: 'supadata';
+  operation: 'transcript.submit' | 'transcript.poll';
+  requestMetadataHash: string;
+  responseMetadataHash: string;
+  providerJobId: string | null;
+  providerJobIdHash: string | null;
+  providerUnits: number;
+  durationMs: number;
+}>;
+
 export class SupadataTranscriptClientError extends Error {
   readonly failureClass: string;
   readonly httpStatus: number | null;
+  readonly providerEvidence: SupadataFailureEvidence | null;
 
-  constructor(message: string, failureClass: string, httpStatus: number | null = null) {
+  constructor(
+    message: string,
+    failureClass: string,
+    httpStatus: number | null = null,
+    providerEvidence: SupadataFailureEvidence | null = null,
+  ) {
     super(message);
     this.name = 'SupadataTranscriptClientError';
     this.failureClass = failureClass;
     this.httpStatus = httpStatus;
+    this.providerEvidence = providerEvidence;
+  }
+}
+
+function attachFailureEvidence(
+  error: unknown,
+  evidence: SupadataFailureEvidence,
+): SupadataTranscriptClientError {
+  const normalized =
+    error instanceof SupadataTranscriptClientError
+      ? error
+      : new SupadataTranscriptClientError(
+          error instanceof Error ? error.message : 'Supadata response processing failed',
+          'SCHEMA_FAILED',
+        );
+  if (normalized.providerEvidence || evidence.providerUnits < 1) return normalized;
+  return new SupadataTranscriptClientError(
+    normalized.message,
+    normalized.failureClass,
+    normalized.httpStatus,
+    evidence,
+  );
+}
+
+function withFailureEvidence<T>(evidence: SupadataFailureEvidence, action: () => T): T {
+  try {
+    return action();
+  } catch (error) {
+    throw attachFailureEvidence(error, evidence);
   }
 }
 
@@ -278,7 +324,13 @@ export class SupadataTranscriptClient implements SupadataTranscriptClientLike {
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
-  private async request(url: URL): Promise<{
+  private async request(input: {
+    url: URL;
+    operation: SupadataFailureEvidence['operation'];
+    requestMetadataHash: string;
+    providerJobId: string | null;
+    providerJobIdHash: string | null;
+  }): Promise<{
     response: Response;
     decoded: unknown;
     durationMs: number;
@@ -287,7 +339,7 @@ export class SupadataTranscriptClient implements SupadataTranscriptClientLike {
     const startedAt = Date.now();
     let response: Response;
     try {
-      response = await this.fetchImpl(url, {
+      response = await this.fetchImpl(input.url, {
         method: 'GET',
         headers: { accept: 'application/json', 'x-api-key': this.apiKey },
         signal: AbortSignal.timeout(this.timeoutMs),
@@ -298,12 +350,39 @@ export class SupadataTranscriptClient implements SupadataTranscriptClientLike {
         'TRANSPORT_FAILED',
       );
     }
-    return {
-      response,
-      decoded: await boundedJson(response, this.maximumResponseBytes),
-      durationMs: Date.now() - startedAt,
-      providerUnits: billableUnits(response, response.ok || response.status === 206),
-    };
+    let providerUnits: number;
+    try {
+      providerUnits = billableUnits(response, response.ok || response.status === 206);
+    } catch (error) {
+      await response.body?.cancel('Supadata billing evidence was invalid');
+      throw error;
+    }
+    try {
+      return {
+        response,
+        decoded: await boundedJson(response, this.maximumResponseBytes),
+        durationMs: Date.now() - startedAt,
+        providerUnits,
+      };
+    } catch (error) {
+      const failureClass =
+        error instanceof SupadataTranscriptClientError ? error.failureClass : 'SCHEMA_FAILED';
+      throw attachFailureEvidence(error, {
+        provider: 'supadata',
+        operation: input.operation,
+        requestMetadataHash: input.requestMetadataHash,
+        responseMetadataHash: sha256CanonicalJson({
+          httpStatus: response.status,
+          contentLength: response.headers.get('content-length'),
+          providerUnits,
+          failureClass,
+        }),
+        providerJobIdHash: input.providerJobIdHash,
+        providerJobId: input.providerJobId,
+        providerUnits,
+        durationMs: Date.now() - startedAt,
+      });
+    }
   }
 
   async submit(input: {
@@ -325,14 +404,13 @@ export class SupadataTranscriptClient implements SupadataTranscriptClientLike {
       mode: input.mode,
       language: input.language,
     });
-    const execution = await this.request(url);
-    if (execution.providerUnits < 1) {
-      throw new SupadataTranscriptClientError(
-        'Supadata transcript submission reported no billable request',
-        'BILLING_HEADER_INVALID',
-        execution.response.status,
-      );
-    }
+    const execution = await this.request({
+      url,
+      operation: 'transcript.submit',
+      requestMetadataHash,
+      providerJobId: null,
+      providerJobIdHash: null,
+    });
     const evidence = {
       requestMetadataHash,
       responseMetadataHash: sha256CanonicalJson({
@@ -342,73 +420,89 @@ export class SupadataTranscriptClient implements SupadataTranscriptClientLike {
       providerUnits: execution.providerUnits,
       durationMs: execution.durationMs,
     };
-    if (execution.response.status === 206) {
-      const error = errorFacts(execution.decoded);
-      if (error.code !== 'transcript-unavailable') {
+    const failureEvidence: SupadataFailureEvidence = {
+      provider: 'supadata',
+      operation: 'transcript.submit',
+      providerJobId: null,
+      providerJobIdHash: null,
+      ...evidence,
+    };
+    return withFailureEvidence(failureEvidence, () => {
+      if (execution.providerUnits < 1) {
         throw new SupadataTranscriptClientError(
-          error.summary,
-          'PROVIDER_REJECTED',
+          'Supadata transcript submission reported no billable request',
+          'BILLING_HEADER_INVALID',
           execution.response.status,
         );
       }
-      return {
-        kind: 'UNAVAILABLE',
-        errorCode: error.code,
-        errorSummary: error.summary,
-        ...evidence,
-      };
-    }
-    if (execution.response.status === 202) {
-      const parsed = jobSchema.safeParse(execution.decoded);
+      if (execution.response.status === 206) {
+        const error = errorFacts(execution.decoded);
+        if (error.code !== 'transcript-unavailable') {
+          throw new SupadataTranscriptClientError(
+            error.summary,
+            'PROVIDER_REJECTED',
+            execution.response.status,
+          );
+        }
+        return {
+          kind: 'UNAVAILABLE',
+          errorCode: error.code,
+          errorSummary: error.summary,
+          ...evidence,
+        };
+      }
+      if (execution.response.status === 202) {
+        const parsed = jobSchema.safeParse(execution.decoded);
+        if (!parsed.success) {
+          throw new SupadataTranscriptClientError(
+            'Supadata async response did not contain a valid job ID',
+            'SCHEMA_FAILED',
+            execution.response.status,
+          );
+        }
+        return {
+          kind: 'PENDING',
+          jobId: parsed.data.jobId,
+          providerJobIdHash: jobIdHash(parsed.data.jobId),
+          ...evidence,
+        };
+      }
+      if (!execution.response.ok) {
+        const error = errorFacts(execution.decoded);
+        throw new SupadataTranscriptClientError(
+          error.summary,
+          execution.response.status === 401 || execution.response.status === 402
+            ? 'AUTH_OR_QUOTA'
+            : execution.response.status === 429
+              ? 'RATE_LIMITED'
+              : 'PROVIDER_REJECTED',
+          execution.response.status,
+        );
+      }
+      const parsed = transcriptSchema.safeParse(execution.decoded);
       if (!parsed.success) {
         throw new SupadataTranscriptClientError(
-          'Supadata async response did not contain a valid job ID',
+          `Supadata transcript schema failed: ${parsed.error.issues[0]?.message ?? 'unknown'}`,
           'SCHEMA_FAILED',
           execution.response.status,
         );
       }
+      if (parsed.data.content.length === 0) {
+        return {
+          kind: 'EMPTY',
+          language: parsed.data.lang,
+          availableLanguages: parsed.data.availableLangs,
+          ...evidence,
+        };
+      }
       return {
-        kind: 'PENDING',
-        jobId: parsed.data.jobId,
-        providerJobIdHash: jobIdHash(parsed.data.jobId),
-        ...evidence,
-      };
-    }
-    if (!execution.response.ok) {
-      const error = errorFacts(execution.decoded);
-      throw new SupadataTranscriptClientError(
-        error.summary,
-        execution.response.status === 401 || execution.response.status === 402
-          ? 'AUTH_OR_QUOTA'
-          : execution.response.status === 429
-            ? 'RATE_LIMITED'
-            : 'PROVIDER_REJECTED',
-        execution.response.status,
-      );
-    }
-    const parsed = transcriptSchema.safeParse(execution.decoded);
-    if (!parsed.success) {
-      throw new SupadataTranscriptClientError(
-        `Supadata transcript schema failed: ${parsed.error.issues[0]?.message ?? 'unknown'}`,
-        'SCHEMA_FAILED',
-        execution.response.status,
-      );
-    }
-    if (parsed.data.content.length === 0) {
-      return {
-        kind: 'EMPTY',
+        kind: 'COMPLETED',
         language: parsed.data.lang,
         availableLanguages: parsed.data.availableLangs,
+        segments: canonicalSegments(parsed.data.content),
         ...evidence,
       };
-    }
-    return {
-      kind: 'COMPLETED',
-      language: parsed.data.lang,
-      availableLanguages: parsed.data.availableLangs,
-      segments: canonicalSegments(parsed.data.content),
-      ...evidence,
-    };
+    });
   }
 
   async poll(jobId: string): Promise<SupadataPollResult> {
@@ -420,25 +514,13 @@ export class SupadataTranscriptClient implements SupadataTranscriptClientLike {
       operation: 'transcript.poll',
       providerJobIdHash,
     });
-    const execution = await this.request(
-      new URL(`https://api.supadata.ai/v1/transcript/${encodeURIComponent(parsedJobId)}`),
-    );
-    if (!execution.response.ok) {
-      const error = errorFacts(execution.decoded);
-      throw new SupadataTranscriptClientError(
-        error.summary,
-        execution.response.status === 404 ? 'PROVIDER_JOB_EXPIRED' : 'PROVIDER_POLL_FAILED',
-        execution.response.status,
-      );
-    }
-    const parsed = jobStatusSchema.safeParse(execution.decoded);
-    if (!parsed.success) {
-      throw new SupadataTranscriptClientError(
-        `Supadata job schema failed: ${parsed.error.issues[0]?.message ?? 'unknown'}`,
-        'SCHEMA_FAILED',
-        execution.response.status,
-      );
-    }
+    const execution = await this.request({
+      url: new URL(`https://api.supadata.ai/v1/transcript/${encodeURIComponent(parsedJobId)}`),
+      operation: 'transcript.poll',
+      requestMetadataHash,
+      providerJobId: parsedJobId,
+      providerJobIdHash,
+    });
     const evidence = {
       requestMetadataHash,
       responseMetadataHash: sha256CanonicalJson({
@@ -449,40 +531,64 @@ export class SupadataTranscriptClient implements SupadataTranscriptClientLike {
       durationMs: execution.durationMs,
       providerJobIdHash,
     };
-    if (parsed.data.status === 'queued' || parsed.data.status === 'active') {
-      return { kind: 'PENDING', providerStatus: parsed.data.status, ...evidence };
-    }
-    if (parsed.data.status === 'failed') {
-      const error = errorFacts(parsed.data.error);
-      return { kind: 'FAILED', errorCode: error.code, errorSummary: error.summary, ...evidence };
-    }
-    const completed = transcriptSchema.safeParse({
-      content: parsed.data.content,
-      lang: parsed.data.lang,
-      availableLangs: parsed.data.availableLangs,
-    });
-    if (!completed.success) {
-      throw new SupadataTranscriptClientError(
-        `Supadata completed job had no valid transcript: ${completed.error.issues[0]?.message ?? 'unknown'}`,
-        'SCHEMA_FAILED',
-        execution.response.status,
-      );
-    }
-    if (completed.data.content.length === 0) {
-      return {
-        kind: 'EMPTY',
-        language: completed.data.lang,
-        availableLanguages: completed.data.availableLangs,
-        ...evidence,
-      };
-    }
-    return {
-      kind: 'COMPLETED',
-      language: completed.data.lang,
-      availableLanguages: completed.data.availableLangs,
-      segments: canonicalSegments(completed.data.content),
+    const failureEvidence: SupadataFailureEvidence = {
+      provider: 'supadata',
+      operation: 'transcript.poll',
+      providerJobId: parsedJobId,
       ...evidence,
     };
+    return withFailureEvidence(failureEvidence, () => {
+      if (!execution.response.ok) {
+        const error = errorFacts(execution.decoded);
+        throw new SupadataTranscriptClientError(
+          error.summary,
+          execution.response.status === 404 ? 'PROVIDER_JOB_EXPIRED' : 'PROVIDER_POLL_FAILED',
+          execution.response.status,
+        );
+      }
+      const parsed = jobStatusSchema.safeParse(execution.decoded);
+      if (!parsed.success) {
+        throw new SupadataTranscriptClientError(
+          `Supadata job schema failed: ${parsed.error.issues[0]?.message ?? 'unknown'}`,
+          'SCHEMA_FAILED',
+          execution.response.status,
+        );
+      }
+      if (parsed.data.status === 'queued' || parsed.data.status === 'active') {
+        return { kind: 'PENDING', providerStatus: parsed.data.status, ...evidence };
+      }
+      if (parsed.data.status === 'failed') {
+        const error = errorFacts(parsed.data.error);
+        return { kind: 'FAILED', errorCode: error.code, errorSummary: error.summary, ...evidence };
+      }
+      const completed = transcriptSchema.safeParse({
+        content: parsed.data.content,
+        lang: parsed.data.lang,
+        availableLangs: parsed.data.availableLangs,
+      });
+      if (!completed.success) {
+        throw new SupadataTranscriptClientError(
+          `Supadata completed job had no valid transcript: ${completed.error.issues[0]?.message ?? 'unknown'}`,
+          'SCHEMA_FAILED',
+          execution.response.status,
+        );
+      }
+      if (completed.data.content.length === 0) {
+        return {
+          kind: 'EMPTY',
+          language: completed.data.lang,
+          availableLanguages: completed.data.availableLangs,
+          ...evidence,
+        };
+      }
+      return {
+        kind: 'COMPLETED',
+        language: completed.data.lang,
+        availableLanguages: completed.data.availableLangs,
+        segments: canonicalSegments(completed.data.content),
+        ...evidence,
+      };
+    });
   }
 }
 

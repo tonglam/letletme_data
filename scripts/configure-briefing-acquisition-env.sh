@@ -90,10 +90,10 @@ boolean_setting() {
   esac
 }
 
-positive_setting() {
+positive_integer_setting() {
   local value
   value=$(read_setting "$1")
-  awk -v value="$value" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 > 0) }'
+  [[ "$value" =~ ^[1-9][0-9]*$ ]]
 }
 
 nonempty_setting() {
@@ -134,14 +134,14 @@ done
 hermes_ready=false
 if nonempty_setting HERMES_TRANSCRIPT_URL \
   && nonempty_setting HERMES_TRANSCRIPT_TOKEN \
-  && positive_setting CONTENT_HERMES_DAILY_AUDIO_MINUTES; then
+  && positive_integer_setting CONTENT_HERMES_DAILY_AUDIO_MINUTES; then
   hermes_ready=true
 fi
 
 youtube_native_ready=false
 if nonempty_setting YOUTUBE_DATA_API_KEY \
   && nonempty_setting SUPADATA_API_KEY \
-  && positive_setting CONTENT_SUPADATA_DAILY_CREDIT_LIMIT; then
+  && positive_integer_setting CONTENT_SUPADATA_DAILY_CREDIT_LIMIT; then
   youtube_native_ready=true
 fi
 

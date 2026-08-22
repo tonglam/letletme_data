@@ -118,6 +118,19 @@ function finishedAt(item: AcquisitionItemV1): Date | null {
   return date(item.video?.actualEndAt ?? item.publishedAt);
 }
 
+export function articleSourceMatchesEndpointOrigin(input: {
+  locator: unknown;
+  sourceUrl: string;
+}): boolean {
+  const endpointUrl = record(input.locator).url;
+  if (typeof endpointUrl !== 'string') return false;
+  try {
+    return new URL(endpointUrl).origin === new URL(input.sourceUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
 function transcriptStage(run: TerminalRun): 'NATIVE_FIRST' | 'NATIVE_SECOND' | 'GENERATED' | null {
   if (run.jobKind !== 'YOUTUBE_TRANSCRIPT') return null;
   const request = parseFormalRunRequestV1(run.requestSnapshot);
@@ -158,6 +171,7 @@ function planForCandidate(input: {
     item.body.availability !== 'FULL' &&
     item.linkAvailability === 'DIRECT' &&
     item.sourceUrl !== null &&
+    articleSourceMatchesEndpointOrigin({ locator: candidate.locator, sourceUrl: item.sourceUrl }) &&
     flags.httpAcquisitionEnabled
   ) {
     const latest = latestRun(runs, 'ARTICLE_FETCH');
@@ -280,18 +294,26 @@ function planForCandidate(input: {
     mode = 'NATIVE';
     latest = second;
   } else {
-    if (
-      !flags.youtubeGeneratedEnabled ||
-      generated ||
-      second.status !== 'CONTENT_DEFERRED' ||
-      contentAgeMinutes > YOUTUBE_TRANSCRIPT_POLICY_V1.maximumContentAgeMinutes ||
-      item.video.durationSeconds > YOUTUBE_TRANSCRIPT_POLICY_V1.maximumDurationSeconds
-    ) {
-      return null;
+    if (generated && ['FAILED', 'BUDGET_DEFERRED'].includes(generated.status)) {
+      const generatedRuns = transcriptRuns.filter((run) => transcriptStage(run) === 'GENERATED');
+      if (generated.providerJobId || generatedRuns.length >= 3) return null;
+      stage = 'GENERATED';
+      mode = 'AUTO';
+      latest = generated;
+    } else {
+      if (
+        !flags.youtubeGeneratedEnabled ||
+        generated ||
+        second.status !== 'CONTENT_DEFERRED' ||
+        contentAgeMinutes > YOUTUBE_TRANSCRIPT_POLICY_V1.maximumContentAgeMinutes ||
+        item.video.durationSeconds > YOUTUBE_TRANSCRIPT_POLICY_V1.maximumDurationSeconds
+      ) {
+        return null;
+      }
+      stage = 'GENERATED';
+      mode = 'AUTO';
+      latest = second;
     }
-    stage = 'GENERATED';
-    mode = 'AUTO';
-    latest = second;
   }
   const due = runNextEligibleAt(latest, 5 * 60_000);
   if (due && due > dbNow) return null;
@@ -384,7 +406,25 @@ async function recoverFailedProviderPoll(
   const metrics = record(run.runMetrics);
   const recoveries =
     typeof metrics.providerPollRecoveries === 'number' ? metrics.providerPollRecoveries : 0;
-  if (!Number.isSafeInteger(recoveries) || recoveries >= 2) return false;
+  if (!Number.isSafeInteger(recoveries)) return false;
+  if (recoveries >= 2) {
+    await tx
+      .update(contentAcquisitionRuns)
+      .set({
+        failureClass: 'PROVIDER_POLL_RETRY_EXHAUSTED',
+        runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify({
+          providerPollTerminalState: 'POLL_RETRY_EXHAUSTED',
+          providerPollExhaustedAt: dbNow.toISOString(),
+        })}::jsonb`,
+      })
+      .where(
+        and(
+          eq(contentAcquisitionRuns.runId, run.runId),
+          eq(contentAcquisitionRuns.status, 'FAILED'),
+        ),
+      );
+    return false;
+  }
   const due = new Date((run.completedAt ?? run.createdAt).getTime() + (recoveries + 1) * 60_000);
   if (due > dbNow) return false;
   const recoveryId = createHash('sha256')
@@ -530,8 +570,10 @@ export async function planTriggeredContentWork(input: {
         (run) =>
           run.jobKind === 'YOUTUBE_TRANSCRIPT' && run.providerJobId && run.status === 'FAILED',
       );
-      if (failedProviderRun && (await recoverFailedProviderPoll(tx, failedProviderRun, dbNow))) {
-        providerPollRecovered += 1;
+      if (failedProviderRun) {
+        if (await recoverFailedProviderPoll(tx, failedProviderRun, dbNow)) {
+          providerPollRecovered += 1;
+        }
         continue;
       }
       const plan = planForCandidate({ candidate, item, runs, flags: input.flags, phase, dbNow });

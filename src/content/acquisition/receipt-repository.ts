@@ -218,6 +218,15 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+class StaleTargetReceiptRevisionError extends Error {
+  readonly failureClass = 'STALE_TARGET_RECEIPT_REVISION';
+
+  constructor() {
+    super('STALE_TARGET_RECEIPT_REVISION');
+    this.name = 'StaleTargetReceiptRevisionError';
+  }
+}
+
 export async function persistAcquisitionResult(
   input: PersistAcquisitionResultInput,
 ): Promise<PersistAcquisitionResult> {
@@ -247,6 +256,8 @@ export async function persistAcquisitionResult(
         requestSnapshot: contentAcquisitionRuns.requestSnapshot,
         sourceSnapshot: contentAcquisitionRuns.sourceSnapshot,
         endpointSnapshot: contentAcquisitionRuns.endpointSnapshot,
+        targetReceiptId: contentAcquisitionRuns.targetReceiptId,
+        targetReceiptRevisionId: contentAcquisitionRuns.targetReceiptRevisionId,
       })
       .from(contentAcquisitionRuns)
       .where(eq(contentAcquisitionRuns.runId, input.runId))
@@ -263,6 +274,47 @@ export async function persistAcquisitionResult(
       request.profileRevision !== run.profileRevision
     ) {
       throw new Error('Acquisition run columns do not match its immutable request snapshot');
+    }
+    if ((run.targetReceiptId === null) !== (run.targetReceiptRevisionId === null)) {
+      throw new Error('Triggered acquisition run has an incomplete target receipt contract');
+    }
+    let targetReceiptKey: string | null = null;
+    if (run.targetReceiptId && run.targetReceiptRevisionId) {
+      const targetSnapshot = await tx
+        .select({ receiptKey: contentSourceReceipts.receiptKey })
+        .from(contentSourceReceipts)
+        .where(eq(contentSourceReceipts.receiptId, run.targetReceiptId))
+        .limit(1);
+      targetReceiptKey = targetSnapshot[0]?.receiptKey ?? null;
+      if (!targetReceiptKey) throw new Error('Triggered acquisition target receipt disappeared');
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${targetReceiptKey}))`);
+      const currentTarget = await tx
+        .select({
+          currentRevisionId: contentSourceReceipts.currentRevisionId,
+          sourceId: contentSourceReceipts.sourceId,
+          primaryEndpointId: contentSourceReceipts.primaryEndpointId,
+          externalId: contentSourceReceipts.externalId,
+          contentKind: contentSourceReceipts.contentKind,
+        })
+        .from(contentSourceReceipts)
+        .where(eq(contentSourceReceipts.receiptId, run.targetReceiptId))
+        .for('update')
+        .limit(1);
+      if (currentTarget[0]?.currentRevisionId !== run.targetReceiptRevisionId) {
+        throw new StaleTargetReceiptRevisionError();
+      }
+      const target = currentTarget[0];
+      if (
+        !target ||
+        !('endpoint' in request) ||
+        !('discoveryItem' in request) ||
+        target.sourceId !== request.endpoint.sourceId ||
+        target.primaryEndpointId !== request.endpoint.endpointId ||
+        target.externalId !== request.discoveryItem.externalItemId ||
+        target.contentKind !== request.discoveryItem.contentKind
+      ) {
+        throw new Error('Triggered acquisition request does not match its target receipt identity');
+      }
     }
     const immutableEndpoints =
       'endpoint' in request ? [request.endpoint] : request.partition.members;
@@ -472,6 +524,12 @@ export async function persistAcquisitionResult(
     const workItems = [...workByReceiptKey.values()].sort((left, right) =>
       left.receiptKey.localeCompare(right.receiptKey),
     );
+    if (
+      targetReceiptKey &&
+      (workItems.length > 1 || (workItems[0] && workItems[0].receiptKey !== targetReceiptKey))
+    ) {
+      throw new Error('Triggered acquisition result escaped its target receipt identity');
+    }
     for (const item of workItems) {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${item.receiptKey}))`);
     }

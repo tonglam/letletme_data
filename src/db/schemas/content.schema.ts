@@ -663,7 +663,7 @@ export const contentSourceReceipts = content.table(
       .where(sql`primary_endpoint_id IS NOT NULL`),
     index('content_source_receipts_work_planner_idx')
       .on(table.workPlannerCheckedAt, table.createdAt)
-      .where(sql`content_kind IN ('EPISODE', 'VIDEO')`),
+      .where(sql`content_kind IN ('ARTICLE', 'EPISODE', 'VIDEO')`),
   ],
 );
 

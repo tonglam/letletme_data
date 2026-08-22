@@ -23,6 +23,7 @@ export type PublisherTranscriptResult = Readonly<{
   language: string | null;
   providerRevision: string;
   artifactHash: string;
+  artifactAttemptCount: number;
   transport: PublicHttpResult;
 }>;
 
@@ -131,33 +132,54 @@ export async function fetchPublisherPodcastTranscript(input: {
   maximumBytes: number;
   fetchImpl?: PublicFetch;
 }): Promise<PublisherTranscriptResult | null> {
-  const candidate = input.item.media.find((media) => media.kind === 'TRANSCRIPT');
-  if (!candidate) return null;
-  const transport = await fetchPublicResource({
-    url: candidate.url,
-    timeoutMs: input.timeoutMs,
-    maximumBytes: input.maximumBytes,
-    fetchImpl: input.fetchImpl,
-    accept: 'text/vtt, application/x-subrip, application/srt, application/json, text/plain;q=0.8',
-    acceptedContentTypes: [/text\/(?:vtt|plain)/i, /application\/(?:x-subrip|srt|json|ld\+json)/i],
-    acceptedStatusCodes: [200],
-  });
-  if (!transport.body || !transport.bodyHash) {
-    throw new Error('PUBLISHER_TRANSCRIPT_BODY_MISSING');
+  const supportedMimeType =
+    /^(?:text\/(?:vtt|plain)|application\/(?:x-subrip|srt|json|ld\+json))(?:\s*;|$)/i;
+  const candidates = input.item.media
+    .filter(
+      (media) =>
+        media.kind === 'TRANSCRIPT' &&
+        (media.mimeType === null || supportedMimeType.test(media.mimeType)),
+    )
+    .sort((left, right) => left.url.localeCompare(right.url));
+  if (candidates.length === 0) return null;
+  let lastError: unknown;
+  for (const [index, candidate] of candidates.entries()) {
+    try {
+      const transport = await fetchPublicResource({
+        url: candidate.url,
+        timeoutMs: input.timeoutMs,
+        maximumBytes: input.maximumBytes,
+        fetchImpl: input.fetchImpl,
+        accept:
+          'text/vtt, application/x-subrip, application/srt, application/json, text/plain;q=0.8',
+        acceptedContentTypes: [
+          /text\/(?:vtt|plain)/i,
+          /application\/(?:x-subrip|srt|json|ld\+json)/i,
+        ],
+        acceptedStatusCodes: [200],
+      });
+      if (!transport.body || !transport.bodyHash) {
+        throw new Error('PUBLISHER_TRANSCRIPT_BODY_MISSING');
+      }
+      let value: string;
+      try {
+        value = new TextDecoder('utf-8', { fatal: true }).decode(transport.body);
+      } catch {
+        throw new Error('PUBLISHER_TRANSCRIPT_UTF8_INVALID');
+      }
+      const parsed = parsePublisherBody({ value, contentType: transport.contentType });
+      return {
+        ...parsed,
+        providerRevision: 'publisher-timed-text-v1',
+        artifactHash: transport.bodyHash,
+        artifactAttemptCount: index + 1,
+        transport,
+      };
+    } catch (error) {
+      lastError = error;
+    }
   }
-  let value: string;
-  try {
-    value = new TextDecoder('utf-8', { fatal: true }).decode(transport.body);
-  } catch {
-    throw new Error('PUBLISHER_TRANSCRIPT_UTF8_INVALID');
-  }
-  const parsed = parsePublisherBody({ value, contentType: transport.contentType });
-  return {
-    ...parsed,
-    providerRevision: 'publisher-timed-text-v1',
-    artifactHash: transport.bodyHash,
-    transport,
-  };
+  throw lastError ?? new Error('PUBLISHER_TRANSCRIPT_CANDIDATES_EXHAUSTED');
 }
 
 export function publisherTranscriptHttpTrace(transport: PublicHttpResult): AcquisitionHttpTrace {

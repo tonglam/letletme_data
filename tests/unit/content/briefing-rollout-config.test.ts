@@ -98,6 +98,26 @@ describe('Briefing acquisition rollout env control', () => {
     });
   });
 
+  test('does not enable provider adapters from fractional budget settings', () => {
+    const target = fixture([
+      'CONTENT_PUBLICATION_ENABLED=false',
+      'BRIEFING_PUBLIC_ENABLED=false',
+      'HERMES_TRANSCRIPT_URL=https://hermes.invalid/transcribe',
+      'HERMES_TRANSCRIPT_TOKEN=fixture-secret',
+      'CONTENT_HERMES_DAILY_AUDIO_MINUTES=1.5',
+      'YOUTUBE_DATA_API_KEY=fixture-youtube-secret',
+      'SUPADATA_API_KEY=fixture-supadata-secret',
+      'CONTENT_SUPADATA_DAILY_CREDIT_LIMIT=2.5',
+    ]);
+
+    expect(parse(run('shadow', target))).toMatchObject({
+      podcast: false,
+      youtubeNative: false,
+      hermesReady: false,
+      youtubeNativeReady: false,
+    });
+  });
+
   test('disables acquisition without exposing or removing unrelated settings', () => {
     const target = fixture([
       'DATABASE_URL=postgresql://fixture',

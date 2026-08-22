@@ -111,13 +111,42 @@ function parseIsoDurationSeconds(value: string): number | null {
 }
 
 async function boundedBody(response: Response, maximumBytes: number): Promise<string> {
-  const buffer = new Uint8Array(await response.arrayBuffer());
-  if (buffer.byteLength > maximumBytes) {
-    throw new YouTubeMetadataClientError(
-      'YouTube metadata response exceeded the byte limit',
-      'OUTPUT_LIMIT',
-      response.status,
-    );
+  const declaredLength = response.headers.get('content-length');
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (Number.isSafeInteger(parsedLength) && parsedLength > maximumBytes) {
+      await response.body?.cancel('YouTube metadata response exceeded the byte limit');
+      throw new YouTubeMetadataClientError(
+        'YouTube metadata response exceeded the byte limit',
+        'OUTPUT_LIMIT',
+        response.status,
+      );
+    }
+  }
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  const reader = response.body?.getReader();
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maximumBytes) {
+        await reader.cancel('YouTube metadata response exceeded the byte limit');
+        throw new YouTubeMetadataClientError(
+          'YouTube metadata response exceeded the byte limit',
+          'OUTPUT_LIMIT',
+          response.status,
+        );
+      }
+      chunks.push(value);
+    }
+  }
+  const buffer = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(buffer);

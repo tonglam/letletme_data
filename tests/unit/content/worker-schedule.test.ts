@@ -55,6 +55,29 @@ describe('content worker poll policy', () => {
       publisherApiKeyHashes: [],
     };
     expect(() => assertContentRuntimeFlags(flags)).toThrow('from 1 to 20');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        httpAcquisitionEnabled: true,
+        youtubeDiscoveryEnabled: true,
+        youtubeNativeEnabled: true,
+        youtubeDataApiKeyPresent: true,
+        supadataApiKeyPresent: true,
+        supadataDailyCreditLimit: Number.NaN,
+        pollMaxXCalls: 2,
+      }),
+    ).toThrow('CONTENT_SUPADATA_DAILY_CREDIT_LIMIT must be a non-negative safe integer');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        httpAcquisitionEnabled: true,
+        podcastTranscriptEnabled: true,
+        hermesTranscriptUrl: 'https://hermes.invalid/transcribe',
+        hermesTranscriptTokenPresent: true,
+        hermesDailyAudioMinutes: 1.5,
+        pollMaxXCalls: 2,
+      }),
+    ).toThrow('CONTENT_HERMES_DAILY_AUDIO_MINUTES must be a non-negative safe integer');
   });
 
   test('keeps FINAL_90 disabled unless a future duty window and budget are recorded', () => {

@@ -132,6 +132,31 @@ describe('Supadata transcript client', () => {
     ).rejects.toMatchObject({ failureClass: 'BILLING_HEADER_MISSING' });
   });
 
+  test('attaches billable evidence when a successful response fails schema validation', async () => {
+    const client = new SupadataTranscriptClient({
+      apiKey: 'secret',
+      timeoutMs: 1_000,
+      maximumResponseBytes: 1_000_000,
+      fetchImpl: async () => response({ unexpected: true }, 200, '3'),
+    });
+
+    await expect(
+      client.submit({
+        videoUrl: 'https://www.youtube.com/watch?v=malformed',
+        mode: 'auto',
+        language: 'en',
+      }),
+    ).rejects.toMatchObject({
+      failureClass: 'SCHEMA_FAILED',
+      providerEvidence: {
+        provider: 'supadata',
+        operation: 'transcript.submit',
+        providerJobIdHash: null,
+        providerUnits: 3,
+      },
+    });
+  });
+
   test('cancels a streaming response as soon as the byte limit is exceeded', async () => {
     let cancelled = false;
     let pulls = 0;

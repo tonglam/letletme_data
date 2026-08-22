@@ -95,6 +95,22 @@ describe('Briefing acquisition manifest', () => {
     );
   });
 
+  test('allows a source-level pause after its recurring partition is removed', async () => {
+    const input = await manifests();
+    const sourcesYaml = input.sourcesYaml.replace(
+      '    displayName: Official FPL\n    endpoints:',
+      '    displayName: Official FPL\n    enabled: false\n    endpoints:',
+    );
+    const acquisitionPlanYaml = input.acquisitionPlanYaml.replace(
+      '  - partitionKey: official-fpl\n    profileKey: x-official-v1\n    priority: 10\n    endpointKeys: [official-fpl-x]\n',
+      '',
+    );
+
+    const paused = parseBriefingManifest({ sourcesYaml, acquisitionPlanYaml });
+    expect(paused.coverage.entityCount).toBe(84);
+    expect(paused.coverage.partitionCount).toBe(43);
+  });
+
   test('rejects unsupported social adapters instead of silently accepting them', async () => {
     const input = await manifests();
     const sourcesYaml = input.sourcesYaml.replace(
