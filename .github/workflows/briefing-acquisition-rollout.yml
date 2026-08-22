@@ -89,7 +89,7 @@ jobs:
               run_id uuid;
               outbox_id uuid;
               reservation_id uuid;
-              ledger_id uuid;
+              budget_ledger_id uuid;
               job_id text;
               budget_scope_kind text;
               budget_scope_key text;
@@ -275,7 +275,7 @@ jobs:
                       CASE WHEN candidate.lane = 'LONGFORM' THEN 8::numeric ELSE 404::numeric END)
                   ) AS scopes(kind, key, window_minutes, max_units)
                 LOOP
-                  ledger_id := (
+                  budget_ledger_id := (
                     substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 1, 8) || '-' ||
                     substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 9, 4) || '-' ||
                     substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 13, 4) || '-' ||
@@ -287,7 +287,7 @@ jobs:
                     window_start, window_end, max_units
                   )
                   VALUES (
-                    ledger_id, budget_scope_kind, budget_scope_key, 'CALL',
+                    budget_ledger_id, budget_scope_kind, budget_scope_key, 'CALL',
                     date_trunc('hour', db_now), date_trunc('hour', db_now) + interval '1 hour', budget_scope_limit
                   )
                   ON CONFLICT (scope_kind, scope_key, unit_kind, window_start, window_end)
@@ -298,7 +298,7 @@ jobs:
                       excluded.max_units
                     ),
                     updated_at = db_now;
-                  SELECT budget.ledger_id INTO ledger_id
+                  SELECT budget.ledger_id INTO budget_ledger_id
                   FROM content.acquisition_budget_ledgers AS budget
                   WHERE budget.scope_kind = budget_scope_kind
                     AND budget.scope_key = budget_scope_key
@@ -307,7 +307,7 @@ jobs:
                     AND budget.window_end = date_trunc('hour', db_now) + interval '1 hour';
                   UPDATE content.acquisition_budget_ledgers
                   SET reserved_units = reserved_units + 1, updated_at = db_now
-                  WHERE content.acquisition_budget_ledgers.ledger_id = ledger_id;
+                  WHERE content.acquisition_budget_ledgers.ledger_id = budget_ledger_id;
                   reservation_id := (
                     substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 1, 8) || '-' ||
                     substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 9, 4) || '-' ||
@@ -317,7 +317,7 @@ jobs:
                   )::uuid;
                   INSERT INTO content.acquisition_budget_reservations (
                     reservation_id, ledger_id, run_id, units, status, created_at, updated_at
-                  ) VALUES (reservation_id, ledger_id, run_id, 1, 'RESERVED', db_now, db_now);
+                  ) VALUES (reservation_id, budget_ledger_id, run_id, 1, 'RESERVED', db_now, db_now);
                 END LOOP;
 
                 outbox_id := (
