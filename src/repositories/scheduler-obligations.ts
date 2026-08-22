@@ -228,6 +228,47 @@ export async function confirmSchedulerObligationEnqueued(input: {
   return updated.length === 1;
 }
 
+/**
+ * Extend an in-flight obligation while a worker is progressing a chained
+ * job.  The generation guard is important: a delayed successor from an old
+ * generation must not be able to reclaim or extend a newer worker's lease.
+ * The optional extension covers BullMQ retry/continuation delays in addition
+ * to the normal processing safety window.
+ */
+export async function renewSchedulerObligation(input: {
+  obligationId: string;
+  generation?: number;
+  additionalLeaseMs?: number;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const additionalLeaseMs = Math.max(0, Math.floor(input.additionalLeaseMs ?? 0));
+  if (!Number.isSafeInteger(additionalLeaseMs)) {
+    throw new Error('Additional scheduler lease must be a safe integer');
+  }
+  const leaseMs = resolveSchedulerLeaseMs() + additionalLeaseMs;
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) {
+    throw new Error('Scheduler lease must be a positive safe integer');
+  }
+  const db = input.db ?? (await getDb());
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      leaseExpiresAt: sql`clock_timestamp() + ${leaseMs} * interval '1 millisecond'`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligationId),
+        input.generation === undefined
+          ? undefined
+          : eq(schedulerObligationsInOps.generation, input.generation),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length === 1;
+}
+
 export async function completeSchedulerObligation(input: {
   obligationId: string;
   status: Extract<SchedulerObligationStatus, 'succeeded' | 'skipped' | 'irrecoverable'>;
