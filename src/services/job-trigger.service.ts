@@ -169,6 +169,18 @@ function readMyFplManualSnapshotInput(input: unknown): MyFplManualSnapshotInput 
   return result;
 }
 
+function requireManualFinalOverride(input: MyFplManualSnapshotInput): void {
+  if (
+    input.snapshotKind === 'FINAL' &&
+    (!input.snapshotActor || !input.snapshotReason || !input.snapshotIdempotencyKey)
+  ) {
+    throw new ValidationError(
+      'Manual My FPL FINAL requires snapshotActor, snapshotReason, and snapshotIdempotencyKey',
+      'MY_FPL_SNAPSHOT_OVERRIDE_REQUIRED',
+    );
+  }
+}
+
 function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
   return {
     'event-current-refresh': () => runManualEventCurrentRefresh(),
@@ -239,6 +251,7 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     'entry-event-results-daily': async () => {
       const season = await seasonRepository.findCurrent();
       const requested = readMyFplManualSnapshotInput(input);
+      requireManualFinalOverride(requested);
       const currentEvent = requested.eventId
         ? await eventRepository.findById(season, requested.eventId)
         : await getCurrentEvent(season);
@@ -259,6 +272,7 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     'my-fpl-snapshot': async () => {
       const season = await seasonRepository.findCurrent();
       const requested = readMyFplManualSnapshotInput(input);
+      requireManualFinalOverride(requested);
       const currentEvent = requested.eventId
         ? await eventRepository.findById(season, requested.eventId)
         : await getCurrentEvent(season);
@@ -285,6 +299,7 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
         ...(input && typeof input === 'object' && !Array.isArray(input) ? input : {}),
         snapshotKind: 'FINAL',
       });
+      requireManualFinalOverride(requested);
       const season = await seasonRepository.findCurrent();
       const event = requested.eventId
         ? await eventRepository.findById(season, requested.eventId)
