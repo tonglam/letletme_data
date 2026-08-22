@@ -287,7 +287,16 @@ jobs:
                 exit 1
               fi
               if ! docker exec "$active_container" test -f /home/appuser/.grok/auth.json; then
-                seed_existing_grok_auth
+                # A deployed content-worker may already have a usable auth
+                # provider without exposing a host-side auth.json to the
+                # deploy user. Reuse that authenticated runtime; only fall
+                # back to the guarded host-file seed when it is actually
+                # needed and available.
+                if grok_auth_usable; then
+                  printf '%s\n' '{"event":"briefing_grok_auth_reuse","outcome":"passed","secretValueExposed":false}'
+                else
+                  seed_existing_grok_auth
+                fi
               fi
               verify_grok_runtime
             }
