@@ -7,6 +7,7 @@ import { runSchedulerPass } from './scheduler/scheduler.service';
 import { dispatchDataPublicationOutbox } from './repositories/data-publication-outbox';
 import { reconcileCoreAndMarketPublications } from './services/data-publication-reconciler';
 import { seasonRepository } from './repositories/seasons';
+import { persistLiveLifecycleStatus } from './services/live-lifecycle-orchestrator';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
 
@@ -22,10 +23,12 @@ let inFlight: Promise<unknown> | null = null;
 async function runPass(): Promise<void> {
   if (inFlight) return inFlight.then(() => undefined);
   const pass = (async () => {
+    const now = new Date();
     const season = await seasonRepository.findCurrent();
     await reconcileCoreAndMarketPublications(season);
     await dispatchDataPublicationOutbox({ limit: 20 });
-    await runSchedulerPass();
+    await persistLiveLifecycleStatus(now);
+    await runSchedulerPass(now);
   })()
     .catch((error) => logError('Scheduler reconciliation pass failed', error))
     .finally(() => {

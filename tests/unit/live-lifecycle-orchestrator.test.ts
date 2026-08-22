@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import {
   decideLiveLifecycle,
@@ -6,6 +7,14 @@ import {
 } from '../../src/services/live-lifecycle-orchestrator';
 
 describe('live lifecycle decisions', () => {
+  test('standalone scheduler persists lifecycle independently of live publications', () => {
+    const source = readFileSync('src/scheduler.ts', 'utf8');
+    expect(source).toContain('await persistLiveLifecycleStatus(now)');
+    expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
+      source.indexOf('runSchedulerPass(now)'),
+    );
+  });
+
   test('starts the first picks probe 60 minutes after the deadline', () => {
     expect(PICKS_FIRST_PROBE_OFFSET_MS).toBe(60 * 60_000);
 
