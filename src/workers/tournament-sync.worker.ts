@@ -313,23 +313,23 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           eventId,
         };
 
-        // The event-results write owns the parent scope.  Commit that scoped
-        // canonical work before adding dependent structure jobs; otherwise a
-        // worker can dequeue a cascade job while the parent transaction is
-        // still uncommitted and read stale rows.
+        // Event-results catch-up is an entry-scoped batch.  Do not wrap the
+        // whole network-heavy batch in one mutation transaction: each entry
+        // persists under a short entry-core scope in the service, while a
+        // long-lived outer transaction would retain multiple advisory locks
+        // and deadlock against entry-info.  The service resolves every
+        // per-entry write before this branch hands off any dependent jobs.
         if (job.name === TOURNAMENT_JOBS.EVENT_RESULTS) {
           const freshAfter = await resolveJobFreshAfter(job);
-          const result = await withMutationScopes(mutationInput, async () => {
-            const synced = await syncTournamentEventResults(season, eventId, {
-              freshAfter,
-            });
-            if (!shouldEnqueueTournamentCascade(synced)) {
-              logInfo('Skipping tournament cascade - no active tournament entries', {
-                eventId,
-              });
-            }
-            return synced;
+          const result = await syncTournamentEventResults(season, eventId, {
+            freshAfter,
+            perEntryMutationScopes: true,
           });
+          if (!shouldEnqueueTournamentCascade(result)) {
+            logInfo('Skipping tournament cascade - no active tournament entries', {
+              eventId,
+            });
+          }
           if (shouldEnqueueTournamentCascade(result)) {
             await enqueueOfficialRosterSyncAfterFinalization(season, eventId);
             await enqueueTournamentCascade(season, eventId, result.finalizationTargets);

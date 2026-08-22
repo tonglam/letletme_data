@@ -1,6 +1,7 @@
 import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
+import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
 import {
   createEntryEventPicksRepository,
   entryEventPicksRepository,
@@ -22,6 +23,7 @@ import type { RawFPLEntryTransfersResponse } from '../types';
 import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { isFreshnessBoundaryNewer, latestFreshnessTimestamp } from '../domain/freshness';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -44,6 +46,13 @@ export type TournamentEventResultsSyncOptions = {
   transferSourceCheckedAt?: string;
   sourceCheckedAt?: string;
   freshAfter?: Date | string;
+  /**
+   * Keep each entry's canonical writes in its own short mutation scope.
+   * Large catch-up batches must not hold one transaction while processing
+   * hundreds of entries: that lets entry-info and result jobs deadlock while
+   * each waits on a different entry advisory lock.
+   */
+  perEntryMutationScopes?: boolean;
 };
 
 type TournamentResultWorkSummary = {
@@ -231,39 +240,54 @@ export async function syncTournamentEventResultsForEntryIds(
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
-      await withTimeout(
-        withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
-          await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
-            season,
-            entryId,
-            eventId,
-            picks,
-            live,
-            sourceOrdering.exact,
-          );
-          await createEntryEventPicksRepository(tx).upsertFromPicks(
-            season,
-            entryId,
-            eventId,
-            picks,
-            sourceOrdering.exact,
-          );
-        }),
-        ENTRY_PERSIST_TIMEOUT_MS,
-        `Timed out persisting entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_PERSIST_TIMEOUT_MS}ms`,
-      );
-      if (transfers) {
-        await entryEventTransfersRepository.replaceForEvent(
-          season,
-          entryId,
-          eventId,
-          transfers,
-          pointsByElement,
-          // The endpoint returned the entrant's complete transfer history.
-          // Persist and checkpoint that same scope so the following audit
-          // cannot reject a successful backfill repair.
-          { sourceCheckedAt: transferSourceCheckedAt! },
+      const persistEntry = async () => {
+        await withTimeout(
+          withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
+            await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
+              season,
+              entryId,
+              eventId,
+              picks,
+              live,
+              sourceOrdering.exact,
+            );
+            await createEntryEventPicksRepository(tx).upsertFromPicks(
+              season,
+              entryId,
+              eventId,
+              picks,
+              sourceOrdering.exact,
+            );
+          }),
+          ENTRY_PERSIST_TIMEOUT_MS,
+          `Timed out persisting entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_PERSIST_TIMEOUT_MS}ms`,
         );
+        if (transfers) {
+          await entryEventTransfersRepository.replaceForEvent(
+            season,
+            entryId,
+            eventId,
+            transfers,
+            pointsByElement,
+            // The endpoint returned the entrant's complete transfer history.
+            // Persist and checkpoint that same scope so the following audit
+            // cannot reject a successful backfill repair.
+            { sourceCheckedAt: transferSourceCheckedAt! },
+          );
+        }
+      };
+      if (options?.perEntryMutationScopes) {
+        await withMutationScopes(
+          {
+            queueName: 'tournament-sync',
+            jobName: 'tournament-event-results',
+            eventId,
+            scopes: tournamentEntryCoreScopes(season.seasonId, [entryId]),
+          },
+          persistEntry,
+        );
+      } else {
+        await persistEntry();
       }
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
@@ -322,7 +346,7 @@ export async function syncEntryTransferHistories(
   season: FplSeasonRef,
   entryIds: number[],
   endEventId: number,
-  options?: { concurrency?: number },
+  options?: { concurrency?: number; perEntryMutationScopes?: boolean },
 ): Promise<{
   synced: number;
   errors: number;
@@ -343,20 +367,34 @@ export async function syncEntryTransferHistories(
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching transfer history for entry ${entryId}`,
       );
-      await withTimeout(
-        entryEventTransfersRepository.replaceForEvent(
-          season,
-          entryId,
-          endEventId,
-          transfers,
-          undefined,
+      const persistTransfers = () =>
+        withTimeout(
+          entryEventTransfersRepository.replaceForEvent(
+            season,
+            entryId,
+            endEventId,
+            transfers,
+            undefined,
+            {
+              sourceCheckedAt,
+            },
+          ),
+          ENTRY_PERSIST_TIMEOUT_MS,
+          `Timed out persisting transfer history for entry ${entryId}`,
+        );
+      if (options?.perEntryMutationScopes) {
+        await withMutationScopes(
           {
-            sourceCheckedAt,
+            queueName: 'tournament-sync',
+            jobName: 'tournament-event-results',
+            eventId: endEventId,
+            scopes: tournamentEntryCoreScopes(season.seasonId, [entryId]),
           },
-        ),
-        ENTRY_PERSIST_TIMEOUT_MS,
-        `Timed out persisting transfer history for entry ${entryId}`,
-      );
+          persistTransfers,
+        );
+      } else {
+        await persistTransfers();
+      }
       return true;
     } catch (error) {
       logError('Failed to sync entry transfer history', error, { entryId, endEventId });
@@ -525,6 +563,7 @@ export async function syncTournamentEventResults(
     plan.requiredTransferEntryIds.length > 0
       ? syncEntryTransferHistories(season, plan.requiredTransferEntryIds, eventId, {
           concurrency: options?.concurrency,
+          perEntryMutationScopes: options?.perEntryMutationScopes,
         })
       : Promise.resolve(null),
   ]);
