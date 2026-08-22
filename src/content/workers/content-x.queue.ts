@@ -1,6 +1,7 @@
 import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 
 import { HostGrokRunnerClient } from '../acquisition/host-grok-runner-client';
+import { resolveXPostMediaBatch } from '../acquisition/x-media-resolver';
 import type { ClaimedAcquisitionJobOutbox } from '../acquisition/job-outbox';
 import type { XBudgetPolicy } from '../acquisition/x-budget';
 import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
@@ -57,7 +58,12 @@ export function createFormalXWorkerRuntime(
   const worker = new Worker<AcquisitionJobV1>(
     contentXScanQueueName,
     async (job) =>
-      runFormalXWorker(acquisitionJobV1Schema.parse(job.data), { executor, xBudgetPolicy }),
+      runFormalXWorker(acquisitionJobV1Schema.parse(job.data), {
+        executor,
+        xBudgetPolicy,
+        mediaResolver: (posts) =>
+          resolveXPostMediaBatch(posts, { concurrency: Math.min(flags.httpHostConcurrency, 4) }),
+      }),
     { connection, concurrency: flags.grokConcurrency },
   );
   const queueEvents = new QueueEvents(contentXScanQueueName, { connection });
