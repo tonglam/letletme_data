@@ -48,7 +48,13 @@ import { entrySyncQueue } from '../queues/entry-sync.queue';
 import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
 import { clearMyFplRefreshJobs, listMyFplRefreshJobs } from '../services/my-fpl-refresh-tracker';
 
-const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 10 * 60_000;
+// A full current-season snapshot fans out picks, results, transfers, and the
+// tournament cascade across every known entry. The coordinator timeout must
+// cover the complete barrier; a 10-minute window expires before the current
+// season's ~1,700 entries finish even while the workers are making progress.
+// The maintenance retry cadence remains 30 minutes, so a failed/partial run
+// still leaves the previous active publication serving.
+const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 30 * 60_000;
 const MY_FPL_REFRESH_WAIT_POLL_MS = 2_000;
 const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));

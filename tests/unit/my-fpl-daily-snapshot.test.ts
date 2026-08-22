@@ -42,6 +42,11 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).toContain('dispatchMyFplSnapshotPublicationOutbox');
   });
 
+  test('allows the full current-season refresh barrier to settle', () => {
+    expect(worker).toContain('const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 30 * 60_000');
+    expect(worker).not.toContain('const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 10 * 60_000');
+  });
+
   test('names Redis manifests by season and event', () => {
     expect(myFplSnapshotRedisManifestKey('2627', 1)).toBe('llm:data:fpl:my-fpl:2627:1:active');
     expect(() => myFplSnapshotRedisManifestKey('26', 1)).toThrow();
