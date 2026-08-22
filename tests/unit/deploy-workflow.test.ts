@@ -14,6 +14,7 @@ const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
 const dockerfile = readFileSync('Dockerfile', 'utf8');
 const hostRunnerDeployScript = readFileSync('scripts/deploy-host-grok-runner.sh', 'utf8');
 const controlProbeScript = readFileSync('scripts/run-briefing-control-probe.sh', 'utf8');
+const rearmScript = readFileSync('scripts/rearm-briefing-x-after-probe.sh', 'utf8');
 const hostRunnerRollbackScript = readFileSync('scripts/rollback-host-grok-runner.sh', 'utf8');
 const hostRunnerService = readFileSync('deploy/letletme-grok-runner.service', 'utf8');
 const quote = String.fromCharCode(39);
@@ -71,6 +72,12 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).toContain(`SET LOCAL statement_timeout = ${quote}15s${quote}`);
     expect(briefingRolloutWorkflow).toContain('briefing_acquisition_control_health');
     expect(briefingRolloutWorkflow).toContain('briefing_acquisition_run_health');
+    expect(briefingRolloutWorkflow).toContain('verify_manifest_reconciliation');
+    expect(briefingRolloutWorkflow).toContain('source_registry_reconciliations');
+    expect(briefingRolloutWorkflow).toContain('--connect-timeout 5 --max-time 15');
+    expect(briefingRolloutWorkflow).toContain(
+      '[ "$services_quiesced" = true ] || [ "$mutation_started" = true ]',
+    );
     expect(briefingRolloutWorkflow).not.toContain('briefing_acquisition_fact_health');
     expect(briefingRolloutWorkflow).not.toContain('error_summary,');
     expect(briefingRolloutWorkflow).not.toContain('tar -C "$HOME/.grok"');
@@ -94,6 +101,11 @@ describe('release workflow gates', () => {
     expect(hostRunnerRollbackScript).toContain('/home/workspace/letletme-grok-runner');
     expect(hostRunnerService).toContain('RuntimeDirectoryMode=0770');
     expect(hostRunnerService).toContain('RuntimeDirectoryPreserve=yes');
+    expect(rearmScript).toContain(
+      `identity_status IN (${quote}PENDING${quote}, ${quote}FAILED${quote})`,
+    );
+    expect(rearmScript).toContain('latest_runner_failure');
+    expect(rearmScript).toContain(`${quote}RUNNER_NOT_READY${quote}`);
   });
 
   test('requires exact successful CI for both automatic and manual deployment', () => {

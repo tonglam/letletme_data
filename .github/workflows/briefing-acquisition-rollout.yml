@@ -86,7 +86,7 @@ jobs:
             }
 
             runner_health() {
-              health=$(curl --silent --show-error --unix-socket "$runner_socket" \
+              health=$(curl --silent --show-error --connect-timeout 5 --max-time 15 --unix-socket "$runner_socket" \
                 http://localhost/v1/health
               )
               printf '%s\n' "$health"
@@ -97,7 +97,7 @@ jobs:
             }
 
             runner_probe() {
-              health=$(curl --silent --show-error --unix-socket "$runner_socket" \
+              health=$(curl --silent --show-error --connect-timeout 5 --max-time 15 --unix-socket "$runner_socket" \
                 http://localhost/v1/health)
               if [ "${1:-}" != force ] && printf '%s' "$health" | jq -e '.ok == true and .ready == true and .lastXProbeOk == true' >/dev/null; then
                 printf '%s\n' '{"probeSkipped":"fresh-health"}'
@@ -149,6 +149,27 @@ jobs:
             SQL
             }
 
+            verify_manifest_reconciliation() {
+              reconciliation_ok=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose \
+                --profile migration run --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<SQL
+            BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+            SET LOCAL statement_timeout = '15s';
+            SET LOCAL lock_timeout = '2s';
+            SET LOCAL idle_in_transaction_session_timeout = '20s';
+            SELECT CASE WHEN COALESCE((
+              SELECT status IN ('APPLIED', 'UNCHANGED') AND completed_at IS NOT NULL
+              FROM content.source_registry_reconciliations
+              WHERE git_revision = '${ROLLOUT_SHA}'
+              ORDER BY created_at DESC
+              LIMIT 1
+            ), false) THEN 'true' ELSE 'false' END;
+            COMMIT;
+            SQL
+              )
+              test "$reconciliation_ok" = true
+            }
+
             if [ "$ROLLOUT_MODE" = status ]; then
               scripts/configure-briefing-acquisition-env.sh status "$env_file"
               test "$(docker inspect --format '{{.State.Health.Status}}' "$current_container")" = healthy
@@ -166,47 +187,7 @@ jobs:
               exit 0
             fi
 
-            if [ "$ROLLOUT_MODE" = host-shadow ]; then
-              if ! docker compose stop -t 45 scheduler content-worker; then
-                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
-                exit 1
-              fi
-              services_quiesced=true
-              runner_previous_target=$(readlink -f "$runner_root/current" 2>/dev/null || true)
-              runner_previous_release=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
-              runner_previous_release=${runner_previous_release:-unknown}
-              runner_updated=true
-              test -x scripts/deploy-host-grok-runner.sh
-              if ! scripts/deploy-host-grok-runner.sh "$current_image" "$ROLLOUT_SHA" "$runner_root"; then
-                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
-                rollback_runner
-                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
-                exit 1
-              fi
-              if ! scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"; then
-                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
-                rollback_runner
-                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
-                exit 1
-              fi
-              if ! runner_health; then
-                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
-                rollback_runner
-                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
-                exit 1
-              fi
-              test -x scripts/rearm-briefing-x-after-probe.sh
-              if ! scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"; then
-                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
-                rollback_runner
-                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
-                exit 1
-              fi
-            fi
-
-            umask 077
-            backup_file=$(mktemp "$expected_workdir/.env.deploy.briefing-backup.XXXXXX")
-            cp -p "$env_file" "$backup_file"
+            backup_file=''
             mutation_started=false
             rollout_committed=false
             on_exit() {
@@ -217,15 +198,43 @@ jobs:
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 rollback_runner
               fi
-              if [ "$original_status" -ne 0 ] && [ "$services_quiesced" = true ]; then
-                mv "$backup_file" "$env_file"
-                APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate \
-                  scheduler content-worker || true
+              if [ "$original_status" -ne 0 ] && {
+                [ "$services_quiesced" = true ] || [ "$mutation_started" = true ]
+              }; then
+                if [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
+                  mv "$backup_file" "$env_file"
+                fi
+                if [ "$services_quiesced" = true ]; then
+                  APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate \
+                    scheduler content-worker || true
+                else
+                  APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate \
+                    content-worker || true
+                fi
               fi
-              rm -f -- "$backup_file"
+              if [ -n "$backup_file" ]; then rm -f -- "$backup_file"; fi
               exit "$original_status"
             }
             trap on_exit EXIT
+
+            umask 077
+            backup_file=$(mktemp "$expected_workdir/.env.deploy.briefing-backup.XXXXXX")
+            cp -p "$env_file" "$backup_file"
+
+            if [ "$ROLLOUT_MODE" = host-shadow ]; then
+              services_quiesced=true
+              docker compose stop -t 45 scheduler content-worker
+              runner_previous_target=$(readlink -f "$runner_root/current" 2>/dev/null || true)
+              runner_previous_release=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
+              runner_previous_release=${runner_previous_release:-unknown}
+              runner_updated=true
+              test -x scripts/deploy-host-grok-runner.sh
+              scripts/deploy-host-grok-runner.sh "$current_image" "$ROLLOUT_SHA" "$runner_root"
+              scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"
+              runner_health
+              test -x scripts/rearm-briefing-x-after-probe.sh
+              scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
+            fi
 
             mutation_started=true
             scripts/configure-briefing-acquisition-env.sh "$ROLLOUT_MODE" "$env_file"
@@ -236,6 +245,7 @@ jobs:
             PROJECT_DIR="$expected_workdir" COMPOSE_FILE=docker-compose.yml \
               COMPOSE_BIN='docker compose' scripts/verify-runtime-health.sh
             report_acquisition_health
+            verify_manifest_reconciliation
             rollout_committed=true
             rm -f -- "$backup_file"
             backup_file=''

@@ -27,6 +27,7 @@ WITH due AS (
   FROM content.source_endpoints
   WHERE adapter_kind = 'X_ACCOUNT'
     AND status = 'active'
+    AND identity_status IN ('PENDING', 'FAILED')
 )
 UPDATE content.source_endpoints AS endpoint
 SET identity_next_check_at = LEAST(
@@ -37,6 +38,14 @@ SET identity_next_check_at = LEAST(
 FROM due
 WHERE endpoint.endpoint_id = due.endpoint_id;
 
+WITH latest_runner_failure AS (
+  SELECT DISTINCT ON (schedule_id)
+         schedule_id,
+         failure_class
+  FROM content.acquisition_runs
+  WHERE schedule_id IS NOT NULL
+  ORDER BY schedule_id, completed_at DESC NULLS LAST, created_at DESC, run_id DESC
+)
 UPDATE content.source_schedules AS schedule
 SET failure_streak = 0,
     circuit_state = 'CLOSED',
@@ -46,8 +55,22 @@ SET failure_streak = 0,
       now() + make_interval(secs => mod((hashtext(schedule.schedule_id::text)::bigint & 2147483647), 121))
     ),
     updated_at = now()
+FROM latest_runner_failure
 WHERE schedule.status = 'active'
-  AND schedule.adapter_kind IN ('X_ACCOUNT', 'X_SEMANTIC');
+  AND schedule.adapter_kind IN ('X_ACCOUNT', 'X_SEMANTIC')
+  AND schedule.circuit_state = 'OPEN'
+  AND latest_runner_failure.schedule_id = schedule.schedule_id
+  AND latest_runner_failure.failure_class IN (
+    'RUNNER_CAPACITY',
+    'RUNNER_UNAVAILABLE',
+    'RUNNER_TIMEOUT',
+    'RUNNER_NOT_READY',
+    'RUNNER_RELEASE_MISMATCH',
+    'RUNNER_IDENTITY_MISMATCH',
+    'RUNNER_TRANSPORT_AFTER_DISPATCH',
+    'RUNNER_RESPONSE_INVALID',
+    'GROK_VERSION_MISMATCH'
+  );
 COMMIT;
 SQL
 
