@@ -51,6 +51,19 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).not.toContain('const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 10 * 60_000');
     expect(worker).toContain('renewSchedulerObligation');
     expect(worker).toContain('SCHEDULER_LEASE_HEARTBEAT_MS = 60_000');
+    expect(worker).toContain('runMyFplRefreshPhase(attemptKey');
+    expect(worker).not.toContain('await Promise.all([\n          enqueueCoreSnapshotJob');
+  });
+
+  test('serializes tournament result and transfer writes', () => {
+    const resultPhase = 'if (requiredResultEntryIds.length > 0)';
+    const transferPhase = 'if (plan.requiredTransferEntryIds.length > 0)';
+    expect(tournamentWorker).toContain('perEntryMutationScopes: true');
+    const source = readFileSync('src/services/tournament-event-results.service.ts', 'utf8');
+    expect(source).toContain(resultPhase);
+    expect(source).toContain(transferPhase);
+    expect(source.indexOf(resultPhase)).toBeLessThan(source.indexOf(transferPhase));
+    expect(source).toContain('advisory-lock cycle');
   });
 
   test('keeps trend publication repeatable-read safe across savepoints', () => {

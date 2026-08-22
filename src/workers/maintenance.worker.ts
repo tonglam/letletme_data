@@ -160,6 +160,17 @@ async function waitForMyFplRefreshJobs(runId: string): Promise<void> {
   }
 }
 
+/**
+ * Keep refresh phases ordered.  Entry and tournament jobs share the
+ * season/event entry write fences, so enqueueing every table scan at once
+ * turns a publication barrier into a deadlock race.  A phase is complete
+ * only after every child (including descendants) has settled.
+ */
+async function runMyFplRefreshPhase(runId: string, jobs: readonly Promise<unknown>[]) {
+  await Promise.all(jobs);
+  await waitForMyFplRefreshJobs(runId);
+}
+
 async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unknown> {
   const context = {
     jobType: 'queue' as const,
@@ -217,7 +228,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           // serving while this job retries in 30 minutes.
           const attemptKey = `${job.data.runId}-a${job.attemptsMade + 1}`;
           const source = job.data.snapshotKind === 'FINAL' ? 'reconcile' : 'catchup';
-          await Promise.all([
+          await runMyFplRefreshPhase(attemptKey, [
             enqueueCoreSnapshotJob(season, source, {
               jobId: `my-fpl-${attemptKey}-core`,
               runId: attemptKey,
@@ -236,6 +247,9 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               queueKey: `my-fpl-${attemptKey}-entry-info`,
               removeOnSettle: false,
             }),
+          ]);
+
+          await runMyFplRefreshPhase(attemptKey, [
             enqueueEntryPicksSyncJob(season, source, {
               eventId: job.data.eventId,
               jobId: `my-fpl-${attemptKey}-entry-picks`,
@@ -257,25 +271,36 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               queueKey: `my-fpl-${attemptKey}-entry-transfers`,
               removeOnSettle: false,
             }),
+          ]);
+
+          await runMyFplRefreshPhase(attemptKey, [
             enqueueTournamentRosterSync(season, source, {
               finalizedEventId: job.data.eventId,
               jobId: `my-fpl-${attemptKey}-tournament-roster`,
               runId: attemptKey,
             }),
+          ]);
+
+          await runMyFplRefreshPhase(attemptKey, [
             enqueueTournamentEventResults(season, job.data.eventId, source, {
               jobId: `my-fpl-${attemptKey}-tournament-results`,
               runId: attemptKey,
             }),
+          ]);
+
+          await runMyFplRefreshPhase(attemptKey, [
             enqueueTournamentEventPicks(season, job.data.eventId, source, {
               jobId: `my-fpl-${attemptKey}-tournament-picks`,
               runId: attemptKey,
             }),
+          ]);
+
+          await runMyFplRefreshPhase(attemptKey, [
             enqueueTournamentTransfersPre(season, job.data.eventId, source, {
               jobId: `my-fpl-${attemptKey}-tournament-transfers`,
               runId: attemptKey,
             }),
           ]);
-          await waitForMyFplRefreshJobs(attemptKey);
           const capture = await captureMyFplSnapshot(
             season,
             job.data.eventId,

@@ -551,22 +551,34 @@ export async function syncTournamentEventResults(
   );
   const { requiredResultEntryIds } = plan;
 
-  await Promise.allSettled([
-    requiredResultEntryIds.length > 0
-      ? syncTournamentEventResultsForEntryIds(season, requiredResultEntryIds, eventId, {
-          ...options,
-          skipTransfers: true,
-          freshAfter,
-          sourceCheckedAt: sourceOrdering.exact,
-        })
-      : Promise.resolve(null),
-    plan.requiredTransferEntryIds.length > 0
-      ? syncEntryTransferHistories(season, plan.requiredTransferEntryIds, eventId, {
-          concurrency: options?.concurrency,
-          perEntryMutationScopes: options?.perEntryMutationScopes,
-        })
-      : Promise.resolve(null),
-  ]);
+  // Both operations write the same season/entry transfer fences.  Running
+  // them in parallel lets one entry-results transaction hold an entry lock
+  // while a transfer transaction holds another, producing a PostgreSQL
+  // advisory-lock cycle.  Preserve best-effort auditing, but make the write
+  // phases strictly ordered so a transient failure is retried by the caller
+  // instead of poisoning the whole batch with 25P02 errors.
+  if (requiredResultEntryIds.length > 0) {
+    try {
+      await syncTournamentEventResultsForEntryIds(season, requiredResultEntryIds, eventId, {
+        ...options,
+        skipTransfers: true,
+        freshAfter,
+        sourceCheckedAt: sourceOrdering.exact,
+      });
+    } catch (error) {
+      logError('Tournament result phase did not converge', error, { eventId });
+    }
+  }
+  if (plan.requiredTransferEntryIds.length > 0) {
+    try {
+      await syncEntryTransferHistories(season, plan.requiredTransferEntryIds, eventId, {
+        concurrency: options?.concurrency,
+        perEntryMutationScopes: options?.perEntryMutationScopes,
+      });
+    } catch (error) {
+      logError('Tournament transfer phase did not converge', error, { eventId });
+    }
+  }
 
   const [auditedStaleResultEntryIds, auditedPickEntryIds, missingTransferEntryIds] =
     await Promise.all([
