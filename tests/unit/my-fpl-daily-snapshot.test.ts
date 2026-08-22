@@ -39,7 +39,9 @@ describe('My FPL daily snapshot publication contract', () => {
 
   test('serializes publication timestamps for the production postgres adapter', () => {
     expect(publicationService).toContain('const nowIso = now.toISOString()');
-    expect(publicationService).toContain('const sourceCheckedAtIso = sourceCheckedAt.toISOString()');
+    expect(publicationService).toContain(
+      'const sourceCheckedAtIso = sourceCheckedAt.toISOString()',
+    );
     expect(publicationService).toContain('const supersededBeforeIso = new Date(');
     expect(publicationService).toContain('${sourceCheckedAtIso}::timestamptz');
     expect(publicationService).toContain('${nowIso}::timestamptz');
