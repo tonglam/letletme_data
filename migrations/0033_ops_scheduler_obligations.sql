@@ -49,7 +49,7 @@ CREATE INDEX scheduler_obligations_lease_idx
   WHERE lease_expires_at IS NOT NULL
     AND status IN ('enqueued', 'running');
 CREATE INDEX scheduler_obligations_failure_idx
-  ON ops.scheduler_obligations (job_name, status, updated_at DESC)
+  ON ops.scheduler_obligations (job_name, status, updated_at DESC NULLS LAST)
   WHERE status IN ('failed', 'irrecoverable');
 
 REVOKE ALL ON TABLE ops.scheduler_obligations FROM PUBLIC;
