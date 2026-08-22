@@ -1779,7 +1779,6 @@ export const playersInFpl = fpl.table(
     code: integer().notNull(),
     elementType: integer('element_type').notNull(),
     teamId: integer('team_id').notNull(),
-    isActive: boolean('is_active').default(true).notNull(),
     price: integer().default(0).notNull(),
     startPrice: integer('start_price').default(0).notNull(),
     firstName: text('first_name'),
@@ -1792,6 +1791,7 @@ export const playersInFpl = fpl.table(
     }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
   },
   (table) => [
     index('players_team_idx').using(
