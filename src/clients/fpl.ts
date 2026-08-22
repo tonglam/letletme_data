@@ -199,6 +199,22 @@ export const ElementSchema = z.object({
   threat_rank_type: z.number().optional(),
   ict_index_rank: z.number().optional(),
   ict_index_rank_type: z.number().optional(),
+  // Official price-change prediction fields. These are optional because the
+  // FPL bootstrap has historically changed their presence during preseason
+  // and while the upstream is recalibrating.
+  price_change_percent: z.union([z.number(), z.string()]).optional(),
+  price_change_hourly_rate: z.union([z.number(), z.string()]).optional(),
+  price_change_projections: z
+    .array(
+      z.object({
+        offset: z.number(),
+        projected_percent: z.union([z.number(), z.string()]),
+        likelihood: z.number(),
+      }),
+    )
+    .optional(),
+  price_change_locked_until: z.string().nullable().optional(),
+  price_change_calibrating: z.boolean().optional(),
 });
 
 export const PhaseSchema = z.object({
@@ -262,6 +278,18 @@ export const BootstrapResponseSchema = z.object({
   teams: z.array(TeamSchema),
   elements: z.array(ElementSchema),
   game_settings: z.unknown(),
+  game_config: z
+    .object({
+      settings: z
+        .object({
+          price_change_deadlines: z.array(z.string()).nullable().optional(),
+        })
+        .passthrough()
+        .nullable()
+        .optional(),
+    })
+    .passthrough()
+    .optional(),
   phases: z.array(PhaseSchema),
   total_players: z.number(),
   element_stats: z.array(z.unknown()),
