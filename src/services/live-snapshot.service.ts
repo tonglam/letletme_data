@@ -5,6 +5,7 @@ import { and, eq, isNull, lte, or } from 'drizzle-orm';
 import {
   publishLiveSnapshotCache,
   readLiveSnapshotCache,
+  refreshLiveSnapshotHeartbeat,
   type LiveSnapshotCacheContents,
   type LiveSnapshotCachePayload,
 } from '../cache/live-snapshot-cache';
@@ -114,6 +115,11 @@ export interface LiveSnapshotDependencies {
   readonly readPublished: (
     seasonCode: string,
     eventId: number,
+  ) => Promise<LiveSnapshotCacheContents | null>;
+  readonly refreshHeartbeat?: (
+    seasonCode: string,
+    eventId: number,
+    lastSuccessfulFetchAt: Date,
   ) => Promise<LiveSnapshotCacheContents | null>;
   readonly publish: typeof publishLiveSnapshotCache;
 }
@@ -580,6 +586,7 @@ export async function syncLiveSnapshot(
         dependencies.readPublished(season.seasonCode, eventId),
       ]);
     fetchedAt = Date.now();
+    const lastSuccessfulFetchAt = await dependencies.readOrderingTimestamp();
     if (referenceData.season !== season.seasonCode) {
       throw new DatabaseError('Live reference data belongs to another FPL season');
     }
@@ -607,13 +614,22 @@ export async function syncLiveSnapshot(
         persistFixtures: true,
         persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
         persistEventLivesIfMissing: true,
-        persistEventLivesIfStaleAt: active?.manifest.sourceCheckedAt
-          ? new Date(active.manifest.sourceCheckedAt)
-          : null,
+        persistEventLivesIfStaleAt: active?.manifest.lastSuccessfulFetchAt
+          ? new Date(active.manifest.lastSuccessfulFetchAt)
+          : active?.manifest.sourceCheckedAt
+            ? new Date(active.manifest.sourceCheckedAt)
+            : null,
         finalizeEvent: options.finalizeEvent,
       });
       persistedFixtures = durable.persistedFixtures;
       persistedEventLives = durable.persistedEventLives;
+      if (active) {
+        await (
+          dependencies.refreshHeartbeat ??
+          ((seasonCode: string, currentEventId: number, checkedAt: Date) =>
+            refreshLiveSnapshotHeartbeat(seasonCode, currentEventId, checkedAt))
+        )(season.seasonCode, eventId, lastSuccessfulFetchAt);
+      }
       await syncOperationsRepository.finishRun(sourceRunId, {
         status: 'skipped',
         completedItems:
@@ -638,15 +654,15 @@ export async function syncLiveSnapshot(
         persistedFixtures,
         persistedEventLives,
       };
-      const sourceAgeMs = Math.max(0, Date.now() - checkedAt.getTime());
       logInfo('Live snapshot content unchanged', {
         ...result,
         durationMs: Date.now() - startedAt,
         fetchDurationMs: (fetchedAt ?? Date.now()) - startedAt,
         publishDurationMs: 0,
-        sourceCheckedAt: checkedAt.toISOString(),
-        sourceAgeMs,
-        stale: sourceAgeMs > LIVE_SOURCE_STALE_AFTER_MS,
+        sourceCheckedAt: active?.manifest.sourceCheckedAt ?? null,
+        lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
+        sourceAgeMs: Math.max(0, Date.now() - lastSuccessfulFetchAt.getTime()),
+        stale: false,
       });
       return result;
     }
@@ -679,6 +695,7 @@ export async function syncLiveSnapshot(
           manifest: {
             state: 'staging',
             sourceCheckedAt: checkedAt.toISOString(),
+            lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
           },
         });
         // The surrounding scope already pins the transaction for this whole
@@ -733,6 +750,7 @@ export async function syncLiveSnapshot(
       revision: staging.revision,
       publicationId: staging.publicationId,
       sourceCheckedAt: checkedAt,
+      lastSuccessfulFetchAt,
       activate: false,
       afterStage: async (manifest) => {
         if (manifest.items.some((item) => item.name !== 'eventLive' && item.name !== 'fixtures')) {
@@ -773,7 +791,7 @@ export async function syncLiveSnapshot(
       };
     }
     cachePublished = true;
-    const sourceAgeMs = Math.max(0, Date.now() - checkedAt.getTime());
+    const sourceAgeMs = Math.max(0, Date.now() - lastSuccessfulFetchAt.getTime());
     if (sourceAgeMs > LIVE_SOURCE_STALE_AFTER_MS) {
       logError(
         'Live snapshot source exceeded hard freshness threshold',
@@ -781,6 +799,7 @@ export async function syncLiveSnapshot(
         {
           eventId,
           sourceCheckedAt: checkedAt.toISOString(),
+          lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
           sourceAgeMs,
           thresholdMs: LIVE_SOURCE_STALE_AFTER_MS,
         },
@@ -825,6 +844,7 @@ export async function syncLiveSnapshot(
       fetchDurationMs: (fetchedAt ?? Date.now()) - startedAt,
       publishDurationMs: Date.now() - publishStartedAt,
       sourceCheckedAt: checkedAt.toISOString(),
+      lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
       sourceAgeMs,
       stale: sourceAgeMs > LIVE_SOURCE_STALE_AFTER_MS,
     });

@@ -4,6 +4,7 @@ import type { EventLive } from '../domain/event-lives';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
 import type { Fixture } from '../types';
 import {
+  compareAndSwapDataPublicationPointer,
   publishDataRevision,
   readActiveDataPublication,
   retireActiveDataPublication,
@@ -28,6 +29,7 @@ export interface LiveSnapshotCachePublishOptions
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
+  readonly lastSuccessfulFetchAt?: Date;
   readonly redis?: Redis;
 }
 
@@ -50,6 +52,7 @@ export async function publishLiveSnapshotCache(
       revision: options.revision,
       publicationId: options.publicationId,
       sourceCheckedAt: options.sourceCheckedAt,
+      lastSuccessfulFetchAt: options.lastSuccessfulFetchAt,
       state: payload.state,
       items: [
         { name: 'eventLive', value: payload.eventLives },
@@ -65,6 +68,41 @@ export async function publishLiveSnapshotCache(
     manifest: result.manifest,
     previousManifest: result.previousManifest,
   };
+}
+
+/**
+ * Refresh the source heartbeat without changing the immutable live payload or
+ * revision. The active pointer is swapped with a compare-and-swap so a newer
+ * publication cannot be overwritten by a slower unchanged poll.
+ */
+export async function refreshLiveSnapshotHeartbeat(
+  season: string,
+  eventId: number,
+  lastSuccessfulFetchAt: Date,
+  redis?: Redis,
+): Promise<LiveSnapshotCacheContents | null> {
+  if (!Number.isFinite(lastSuccessfulFetchAt.getTime())) {
+    throw new Error('Invalid live snapshot successful-fetch timestamp');
+  }
+  const active = await readLiveSnapshotCache(season, eventId, redis);
+  if (!active) return null;
+
+  const timestamp = lastSuccessfulFetchAt.toISOString();
+  const currentTimestamp = active.manifest.lastSuccessfulFetchAt ?? active.manifest.sourceCheckedAt;
+  if (Date.parse(currentTimestamp) >= lastSuccessfulFetchAt.getTime()) return active;
+
+  const replacement = {
+    ...active.manifest,
+    lastSuccessfulFetchAt: timestamp,
+  };
+  const status = await compareAndSwapDataPublicationPointer(
+    { dataset: 'fpl:live', seasonCode: season, eventId },
+    active.manifest.publicationId,
+    replacement,
+    redis,
+  );
+  if (status === 'replaced') return { ...active, manifest: replacement };
+  return readLiveSnapshotCache(season, eventId, redis);
 }
 
 export async function readLiveSnapshotCache(

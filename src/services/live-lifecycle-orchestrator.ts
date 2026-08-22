@@ -398,6 +398,7 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
   const key = `${season.seasonCode}:${currentEvent.id}`;
   const cache = await readLiveSnapshotCache(season.seasonCode, currentEvent.id).catch(() => null);
   const revision = cache?.manifest.revision ?? null;
+  const sourceCheckedAt = cache?.manifest.lastSuccessfulFetchAt ?? cache?.manifest.sourceCheckedAt;
   const persisted = await liveLifecycleStatusRepository
     .findByEventId(season, currentEvent.id)
     .catch(() => null);
@@ -442,9 +443,7 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
       nextRefreshAt: nextRefreshDelay === null ? null : new Date(now.getTime() + nextRefreshDelay),
       liveRevision: revision === null ? null : String(revision),
       publicationId: cache?.manifest.publicationId ?? null,
-      sourceCheckedAt: cache?.manifest.sourceCheckedAt
-        ? new Date(cache.manifest.sourceCheckedAt)
-        : null,
+      sourceCheckedAt: sourceCheckedAt ? new Date(sourceCheckedAt) : null,
     })
     .catch((error) => {
       logError('Failed to persist live lifecycle status', error, {
