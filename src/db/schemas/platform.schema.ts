@@ -369,12 +369,8 @@ export const dataPublicationOutboxInOps = ops.table(
   'data_publication_outbox',
   {
     outboxId: uuid('outbox_id').primaryKey().notNull(),
-    publicationId: uuid('publication_id')
-      .notNull()
-      .references(() => datasetPublicationsInOps.publicationId, { onDelete: 'cascade' }),
-    sourceRunId: uuid('source_run_id').references(() => syncRunsInOps.runId, {
-      onDelete: 'restrict',
-    }),
+    publicationId: uuid('publication_id').notNull(),
+    sourceRunId: uuid('source_run_id'),
     dataset: text().notNull(),
     seasonId: smallint('season_id'),
     eventId: integer('event_id'),
@@ -399,7 +395,7 @@ export const dataPublicationOutboxInOps = ops.table(
       .notNull(),
   },
   (table) => [
-    unique('data_publication_outbox_publication_key').on(table.publicationId),
+    uniqueIndex('data_publication_outbox_publication_key').on(table.publicationId),
     index('data_publication_outbox_pending_idx')
       .on(table.availableAt, table.outboxId)
       .where(
@@ -413,6 +409,16 @@ export const dataPublicationOutboxInOps = ops.table(
       foreignColumns: [seasonsInFpl.seasonId],
       name: 'data_publication_outbox_season_fk',
     }),
+    foreignKey({
+      columns: [table.publicationId],
+      foreignColumns: [datasetPublicationsInOps.publicationId],
+      name: 'data_publication_outbox_publication_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.sourceRunId],
+      foreignColumns: [syncRunsInOps.runId],
+      name: 'data_publication_outbox_source_run_id_fkey',
+    }).onDelete('restrict'),
     check(
       'data_publication_outbox_dataset_check',
       sql`dataset = ANY (ARRAY['fpl:core'::text, 'fpl:live'::text, 'fpl:market'::text])`,
@@ -487,7 +493,11 @@ export const schedulerObligationsInOps = ops.table(
       .notNull(),
   },
   (table) => [
-    unique('scheduler_obligations_identity_key').on(table.jobName, table.scopeKey, table.periodKey),
+    uniqueIndex('scheduler_obligations_identity_key').on(
+      table.jobName,
+      table.scopeKey,
+      table.periodKey,
+    ),
     index('scheduler_obligations_due_idx')
       .on(table.status, table.dueAt, table.obligationId)
       .where(sql`status IN ('pending', 'failed')`),
