@@ -79,6 +79,12 @@ type ScopedTournamentJobResult = {
 };
 
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
+const TREND_PUBLICATION_JOB_NAMES: ReadonlySet<string> = new Set([
+  TOURNAMENT_JOBS.EVENT_PICKS,
+  TOURNAMENT_JOBS.TRANSFERS_PRE,
+  TOURNAMENT_JOBS.TRANSFERS_POST,
+  TOURNAMENT_JOBS.SELECTION_STATS,
+]);
 
 function startSchedulerLeaseHeartbeat(job: Job<TournamentSyncJobData>): () => void {
   const obligationId = job.data.obligationId;
@@ -344,6 +350,9 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             jobName: job.name,
             jobId: String(job.id),
             eventId,
+            ...(TREND_PUBLICATION_JOB_NAMES.has(job.name)
+              ? { isolationLevel: 'repeatable read' as const }
+              : {}),
           };
 
           // Event-results catch-up is an entry-scoped batch.  Do not wrap the

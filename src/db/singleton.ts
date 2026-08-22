@@ -249,8 +249,12 @@ export async function withDatabaseSavepoint<T>(operation: () => Promise<T>): Pro
  */
 export async function withDatabaseTransaction<T>(
   operation: (transaction: postgres.TransactionSql) => Promise<T>,
+  options: { isolationLevel?: 'repeatable read' } = {},
 ): Promise<T> {
   if (databaseTransactionStorage.getStore()) {
+    // A savepoint inherits the outer transaction's isolation level. PostgreSQL
+    // rejects SET TRANSACTION here, so callers that require repeatable reads
+    // must establish it on the outer transaction before its first statement.
     return withDatabaseSavepoint(async () => {
       const nested = databaseTransactionStorage.getStore();
       if (!nested) {
@@ -261,5 +265,10 @@ export async function withDatabaseTransaction<T>(
   }
 
   const client = await databaseSingleton.getClient();
-  return (await client.begin(operation)) as T;
+  const beginOptions = options.isolationLevel
+    ? `isolation level ${options.isolationLevel}`
+    : undefined;
+  return (await (beginOptions
+    ? client.begin(beginOptions, operation)
+    : client.begin(operation))) as T;
 }
