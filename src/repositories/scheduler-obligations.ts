@@ -34,6 +34,20 @@ export type SchedulerObligation = Readonly<{
   evidence: Record<string, unknown>;
 }>;
 
+// A scheduled job may own one obligation while it scans a bounded batch of
+// entries.  The previous 90-second default was shorter than the production
+// 500-entry catch-up batches, so the scheduler reclaimed healthy work and
+// started a second generation against the same mutation scopes.  Keep the
+// lease comfortably above the longest normal batch; a dead worker is still
+// reclaimed deterministically once this safety window expires.
+const DEFAULT_SCHEDULER_LEASE_MS = 15 * 60_000;
+
+function resolveSchedulerLeaseMs(): number {
+  const configured = Number(process.env.SCHEDULER_LEASE_MS);
+  if (Number.isSafeInteger(configured) && configured >= 60_000) return configured;
+  return DEFAULT_SCHEDULER_LEASE_MS;
+}
+
 function dateValue(value: Date | string | null | undefined): Date | null {
   if (value === null || value === undefined) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -119,7 +133,7 @@ export async function claimSchedulerObligations(
   } = {},
 ): Promise<readonly { obligation: SchedulerObligation; owner: string }[]> {
   const limit = input.limit ?? 50;
-  const leaseMs = input.leaseMs ?? 90_000;
+  const leaseMs = input.leaseMs ?? resolveSchedulerLeaseMs();
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
     throw new Error('Scheduler claim limit must be between 1 and 200');
   }
