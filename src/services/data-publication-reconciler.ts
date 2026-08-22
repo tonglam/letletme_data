@@ -17,7 +17,7 @@ import { dispatchDataPublicationOutbox } from '../repositories/data-publication-
 import { logInfo, logWarn } from '../utils/logger';
 
 export type DataPublicationReconciliationResult = Readonly<{
-  status: 'matched' | 'repaired' | 'ghost' | 'missing';
+  status: 'matched' | 'repaired' | 'ghost' | 'missing' | 'failed';
   dataset: DataPublicationScope['dataset'];
   publicationId?: string;
 }>;
@@ -170,16 +170,29 @@ export async function reconcileCoreAndMarketPublications(
   season: FplSeasonRef,
 ): Promise<readonly DataPublicationReconciliationResult[]> {
   const currentEvent = await eventRepository.findCurrent(season);
-  return Promise.all([
-    reconcileDataPublication({ dataset: 'fpl:core', seasonCode: season.seasonCode }, season),
-    reconcileDataPublication({ dataset: 'fpl:market', seasonCode: season.seasonCode }, season),
+  const scopes: readonly DataPublicationScope[] = [
+    { dataset: 'fpl:core', seasonCode: season.seasonCode },
+    { dataset: 'fpl:market', seasonCode: season.seasonCode },
     ...(currentEvent
-      ? [
-          reconcileDataPublication(
-            { dataset: 'fpl:live', seasonCode: season.seasonCode, eventId: currentEvent.id },
-            season,
-          ),
-        ]
+      ? [{ dataset: 'fpl:live' as const, seasonCode: season.seasonCode, eventId: currentEvent.id }]
       : []),
-  ]);
+  ];
+  return Promise.all(
+    scopes.map(async (scope): Promise<DataPublicationReconciliationResult> => {
+      try {
+        return await reconcileDataPublication(scope, season);
+      } catch (error) {
+        // A malformed legacy active publication must not block the global
+        // scheduler. The corresponding durable job will rebuild canonical
+        // evidence; readiness remains false until that repair is complete.
+        logWarn('Data publication reconciliation failed; scheduler will continue', {
+          dataset: scope.dataset,
+          season: scope.seasonCode,
+          eventId: scope.eventId,
+          error: error instanceof Error ? error.message : 'unknown',
+        });
+        return { status: 'failed', dataset: scope.dataset };
+      }
+    }),
+  );
 }
