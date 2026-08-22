@@ -78,6 +78,17 @@ describe('content worker poll policy', () => {
         pollMaxXCalls: 2,
       }),
     ).toThrow('CONTENT_HERMES_DAILY_AUDIO_MINUTES must be a non-negative safe integer');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        httpAcquisitionEnabled: true,
+        podcastTranscriptEnabled: true,
+        hermesTranscriptUrl: 'file:///tmp/hermes',
+        hermesTranscriptTokenPresent: true,
+        hermesDailyAudioMinutes: 1,
+        pollMaxXCalls: 2,
+      }),
+    ).toThrow('HERMES_TRANSCRIPT_URL must be an HTTP(S) URL without credentials');
   });
 
   test('keeps FINAL_90 disabled unless a future duty window and budget are recorded', () => {

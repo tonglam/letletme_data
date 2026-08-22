@@ -123,7 +123,7 @@ export function isPublicIpAddress(address: string): boolean {
   return false;
 }
 
-async function assertPublicTarget(
+export async function resolvePublicTarget(
   url: URL,
   allowHttp: boolean,
   lookupImpl: PublicDnsLookup,
@@ -257,7 +257,7 @@ export async function fetchPublicResource(input: {
 
   for (let redirects = 0; redirects <= maximumRedirects; redirects += 1) {
     const parsed = new URL(currentUrl);
-    const validatedTarget = await assertPublicTarget(parsed, input.allowHttp ?? false, lookupImpl);
+    const validatedTarget = await resolvePublicTarget(parsed, input.allowHttp ?? false, lookupImpl);
     if (parsed.origin !== allowedOrigin) {
       throw new PublicHttpError('CROSS_ORIGIN_REDIRECT', 'Cross-origin redirect is forbidden');
     }

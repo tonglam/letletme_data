@@ -9,6 +9,7 @@ import {
 } from './formal-run-repository';
 import type { XBudgetPolicy } from './x-budget';
 import { failXIdentityRun } from './x-identity-repository';
+import { logError } from '../../utils/logger';
 
 export type FormalRunEnqueuer = (run: ClaimedFormalRun) => Promise<unknown>;
 
@@ -61,15 +62,14 @@ export async function scheduleFormalAcquisition(input: {
       claimLimit: flags.httpConcurrency * 2,
     }),
   ]);
-  const remainingXCapacity = Math.max(0, xCapacity - identityRuns.length);
-  const xRuns =
-    remainingXCapacity > 0
-      ? await claimDueFormalRuns({
-          enabledAdapters: xAdapters(flags),
-          claimLimit: remainingXCapacity,
-          xBudgetPolicy: input.xBudgetPolicy,
-        })
-      : [];
+  // Claim repositories enforce one shared DB admission limit across pending
+  // and running X work. Asking both X claimers for the full capacity avoids
+  // double-counting identity runs and wasting available slots.
+  const xRuns = await claimDueFormalRuns({
+    enabledAdapters: xAdapters(flags),
+    claimLimit: xCapacity,
+    xBudgetPolicy: input.xBudgetPolicy,
+  });
   const runs = [...identityRuns, ...xRuns, ...httpRuns];
   let enqueued = 0;
   let enqueueFailed = 0;
@@ -78,7 +78,6 @@ export async function scheduleFormalAcquisition(input: {
       try {
         if (run.queueKind === 'X') await input.enqueueX(run);
         else await input.enqueueHttp(run);
-        await confirmFormalRunEnqueued({ runId: run.runId });
         enqueued += 1;
       } catch (error) {
         enqueueFailed += 1;
@@ -97,6 +96,19 @@ export async function scheduleFormalAcquisition(input: {
             retryDelayMs: 60_000,
           });
         }
+        return;
+      }
+
+      // Queue insertion is the durable hand-off. Confirmation is an audit
+      // marker only; a transient DB failure must not terminalize or release a
+      // run that may already be RUNNING in the queue worker.
+      try {
+        await confirmFormalRunEnqueued({ runId: run.runId });
+      } catch (error) {
+        logError('Formal queue enqueue confirmation failed; run remains claimable', error, {
+          runId: run.runId,
+          queueKind: run.queueKind,
+        });
       }
     }),
   );

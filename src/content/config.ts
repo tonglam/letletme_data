@@ -54,6 +54,23 @@ const booleanEnv = (value: string | undefined, fallback: boolean): boolean => {
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
 };
 
+function assertHttpUrlWithoutCredentials(value: string, name: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an HTTP(S) URL without credentials`);
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    !parsed.hostname ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error(`${name} must be an HTTP(S) URL without credentials`);
+  }
+}
+
 export function getContentRuntimeFlags(): ContentRuntimeFlags {
   return {
     pipelineEnabled: booleanEnv(process.env.CONTENT_PIPELINE_ENABLED, false),
@@ -160,6 +177,9 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
     throw new Error(
       'CONTENT_PODCAST_TRANSCRIPT_ENABLED requires HTTP acquisition, Hermes URL/token and a positive audio-minute limit',
     );
+  }
+  if (flags.podcastTranscriptEnabled && flags.hermesTranscriptUrl) {
+    assertHttpUrlWithoutCredentials(flags.hermesTranscriptUrl, 'HERMES_TRANSCRIPT_URL');
   }
   if (
     flags.youtubeNativeEnabled &&

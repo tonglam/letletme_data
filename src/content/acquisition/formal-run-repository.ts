@@ -292,6 +292,21 @@ async function nextAttemptNumber(
   return Number(rows[0]?.maximum ?? 0) + 1;
 }
 
+async function outstandingXRunCount(tx: TransactionHandle, dbNow: Date): Promise<number> {
+  const rows = await tx.execute<{ outstanding: string | number }>(sql`
+    SELECT count(*)::integer AS outstanding
+    FROM content.acquisition_runs
+    WHERE adapter_kind IN ('X_ACCOUNT', 'X_SEMANTIC')
+      AND status IN ('PENDING', 'RUNNING')
+      AND (lease_expires_at IS NULL OR lease_expires_at > ${dbNow})
+  `);
+  const outstanding = Number(rows[0]?.outstanding ?? 0);
+  if (!Number.isSafeInteger(outstanding) || outstanding < 0) {
+    throw new Error('Outstanding X acquisition run count is invalid');
+  }
+  return outstanding;
+}
+
 export async function claimDueXIdentityRuns(input: {
   claimLimit: number;
   budgetPolicy: XBudgetPolicy;
@@ -310,6 +325,10 @@ export async function claimDueXIdentityRuns(input: {
     );
     const dbNow = dateValue(clockRows[0]?.dbNow);
     if (!dbNow) throw new Error('Database clock is invalid');
+    // Serialize X admission across scheduler instances. The same lock is
+    // used by recurring scans, so queued PENDING work is counted before
+    // another identity run can be claimed.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-capacity-v1'))`);
     const phase = resolveFormalAcquisitionPhase({
       now: dbNow,
       nextDeadline: dateValue(clockRows[0]?.nextDeadline),
@@ -354,6 +373,11 @@ export async function claimDueXIdentityRuns(input: {
         );
       await releaseXRunBudgets({ tx, runId: stale.runId, dbNow });
     }
+    const availableClaimLimit = Math.max(
+      0,
+      input.claimLimit - (await outstandingXRunCount(tx, dbNow)),
+    );
+    if (availableClaimLimit === 0) return [];
     const dueEndpoints = await tx
       .select({ endpointId: contentSourceEndpoints.endpointId })
       .from(contentSourceEndpoints)
@@ -389,7 +413,7 @@ export async function claimDueXIdentityRuns(input: {
         asc(contentSourceEndpoints.identityNextCheckAt),
         asc(contentSourceEndpoints.endpointId),
       )
-      .limit(input.claimLimit)
+      .limit(availableClaimLimit)
       .for('update', { skipLocked: true });
 
     const claimed: ClaimedFormalRun[] = [];
@@ -542,6 +566,17 @@ export async function claimDueFormalRuns(input: {
     if (!dbNow) throw new Error('Database clock is invalid');
     const nextDeadline = dateValue(clockRows[0]?.nextDeadline);
     const phase = resolveFormalAcquisitionPhase({ now: dbNow, nextDeadline });
+    const isXClaim = input.enabledAdapters.some(
+      (adapter) => adapter === 'X_ACCOUNT' || adapter === 'X_SEMANTIC',
+    );
+    let effectiveClaimLimit = input.claimLimit;
+    if (isXClaim) {
+      // Count PENDING as well as RUNNING: the scheduler has already handed
+      // those jobs to BullMQ and they still consume the bounded X capacity.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-capacity-v1'))`);
+      effectiveClaimLimit = Math.max(0, input.claimLimit - (await outstandingXRunCount(tx, dbNow)));
+      if (effectiveClaimLimit === 0) return [];
+    }
 
     const schedules = await tx
       .select({
@@ -588,7 +623,7 @@ export async function claimDueFormalRuns(input: {
         asc(contentSourceSchedules.nextDueAt),
         asc(contentSourceSchedules.scheduleId),
       )
-      .limit(input.claimLimit)
+      .limit(effectiveClaimLimit)
       .for('update', { skipLocked: true });
 
     const claimed: ClaimedFormalRun[] = [];

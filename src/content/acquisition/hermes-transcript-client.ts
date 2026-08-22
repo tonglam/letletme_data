@@ -1,8 +1,10 @@
 import { TextDecoder } from 'node:util';
+import { lookup } from 'node:dns/promises';
 
 import { z } from 'zod';
 
 import { normalizeCanonicalText, sha256CanonicalJson } from './canonicalization';
+import { resolvePublicTarget, PublicHttpError, type PublicDnsLookup } from './http-transport';
 
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
 const hermesResponseSchema = z
@@ -124,6 +126,7 @@ export class HermesTranscriptClient implements HermesTranscriptClientLike {
   private readonly timeoutMs: number;
   private readonly maximumResponseBytes: number;
   private readonly fetchImpl: HermesFetch;
+  private readonly lookupImpl: PublicDnsLookup;
 
   constructor(input: {
     endpoint: string;
@@ -131,6 +134,7 @@ export class HermesTranscriptClient implements HermesTranscriptClientLike {
     timeoutMs: number;
     maximumResponseBytes: number;
     fetchImpl?: HermesFetch;
+    lookupImpl?: PublicDnsLookup;
   }) {
     const endpoint = new URL(input.endpoint);
     if (
@@ -146,6 +150,7 @@ export class HermesTranscriptClient implements HermesTranscriptClientLike {
     this.timeoutMs = input.timeoutMs;
     this.maximumResponseBytes = input.maximumResponseBytes;
     this.fetchImpl = input.fetchImpl ?? fetch;
+    this.lookupImpl = input.lookupImpl ?? lookup;
   }
 
   async transcribe(input: {
@@ -162,11 +167,39 @@ export class HermesTranscriptClient implements HermesTranscriptClientLike {
         'Media URL is not public HTTP(S)',
       );
     }
+    let resolvedMediaTarget: { hostname: string; address: string };
+    try {
+      // Resolve every address before forwarding the URL to the authenticated
+      // Hermes service. This rejects localhost, RFC1918/link-local, and
+      // mixed public/private DNS answers at the media boundary rather than
+      // relying on the URL scheme alone. Hermes must repeat this check for
+      // every redirect before fetching the media, so a redirect or DNS
+      // rebinding cannot turn a validated public URL into a private target.
+      resolvedMediaTarget = await resolvePublicTarget(media, true, this.lookupImpl);
+    } catch (error) {
+      const failureClass =
+        error instanceof PublicHttpError
+          ? `HERMES_MEDIA_${error.failureClass}`
+          : 'HERMES_MEDIA_TARGET_INVALID';
+      throw new HermesTranscriptError(
+        failureClass,
+        error instanceof Error ? error.message : 'Media URL failed public-target validation',
+      );
+    }
     const requestBody = {
       schemaVersion: 1 as const,
       requestId: input.runId,
       externalItemId: input.externalItemId,
       mediaUrl: media.toString(),
+      // This attestation is part of the fixed Hermes contract. The VPS
+      // service pins the initial request to this address, then re-resolves
+      // and revalidates every same-origin redirect before following it.
+      mediaTarget: resolvedMediaTarget,
+      mediaFetchPolicy: {
+        maximumRedirects: 5,
+        sameOriginOnly: true,
+        revalidateDnsOnRedirect: true,
+      },
       expectedDurationSeconds: input.expectedDurationSeconds,
       chunkDurationSeconds: input.chunkDurationSeconds,
     };

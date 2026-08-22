@@ -84,7 +84,11 @@ function budgetScopes(input: {
     },
     {
       scopeKind: 'LANE',
-      scopeKey: input.lane,
+      // Lane caps are phase-specific.  Keeping one key would let a burst in
+      // APPROACHING consume the same rolling bucket that FINAL90/NORMAL use,
+      // making the configured cadence depend on whichever phase happened
+      // first.  The global and FINAL90 provider scopes remain shared guards.
+      scopeKey: input.lane === 'IDENTITY' ? input.lane : `${input.phase}:${input.lane}`,
       windowMinutes: laneWindowMinutes,
       limit: laneLimit,
     },

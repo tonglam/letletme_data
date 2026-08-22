@@ -192,7 +192,17 @@ export async function runFormalXWorker(
       | { windowStart: string; windowEnd: string; reason: string; detailsHash: string }
       | undefined;
     const oldestAcceptedAt = adapted.oldestAcceptedAt ? new Date(adapted.oldestAcceptedAt) : null;
-    const earlierWindowEnd = oldestAcceptedAt ? new Date(oldestAcceptedAt.getTime() - 1_000) : null;
+    // X search bounds are second-precision and the evidence gate is
+    // inclusive. Overlap the oldest accepted second (plus one second where
+    // possible) so posts tied at the saturation boundary cannot disappear
+    // between the parent and its one bounded follow-up. Receipt identity
+    // deduplication makes the overlap harmless.
+    const earlierWindowEnd =
+      oldestAcceptedAt && scanRequest.windowEnd
+        ? new Date(
+            Math.min(Date.parse(scanRequest.windowEnd) - 1, oldestAcceptedAt.getTime() + 1_000),
+          )
+        : null;
     const hasEarlierWindow =
       earlierWindowEnd !== null &&
       earlierWindowEnd.getTime() >= Date.parse(scanRequest.windowStart);

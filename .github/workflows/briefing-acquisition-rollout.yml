@@ -55,6 +55,7 @@ jobs:
             cd "$expected_workdir"
             test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"
             test -x scripts/configure-briefing-acquisition-env.sh
+            export CONTENT_MANIFEST_GIT_REVISION="$ROLLOUT_SHA"
 
             env_file="$expected_workdir/.env.deploy"
             migration_env_file="$expected_workdir/.env.migrate"
@@ -205,6 +206,26 @@ jobs:
             SQL
             }
 
+            assert_manifest_reconciliation() {
+              reconciliation_status=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
+                --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<SQL
+            SELECT status
+            FROM content.source_registry_reconciliations
+            WHERE git_revision = '$ROLLOUT_SHA'
+            ORDER BY created_at DESC
+            LIMIT 1;
+            SQL
+              )
+              case "$reconciliation_status" in
+                APPLIED|UNCHANGED) ;;
+                *)
+                  echo "briefing rollout refused: manifest reconciliation for $ROLLOUT_SHA is ${reconciliation_status:-MISSING}" >&2
+                  return 1
+                  ;;
+              esac
+            }
+
             seed_existing_grok_auth() {
               local active_container auth_file auth_links auth_mode auth_mode_value auth_size
               active_container=$(active_content_container)
@@ -337,6 +358,9 @@ jobs:
             fi
             scripts/configure-briefing-acquisition-env.sh status "$env_file"
             report_acquisition_health
+            if [ "$ROLLOUT_MODE" = shadow ]; then
+              assert_manifest_reconciliation
+            fi
             rollout_committed=true
             rm -f -- "$backup_file"
             backup_file=''

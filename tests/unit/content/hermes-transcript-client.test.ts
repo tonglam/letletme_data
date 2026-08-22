@@ -15,6 +15,12 @@ describe('Hermes fixed transcript service contract', () => {
         expect(body).toMatchObject({
           schemaVersion: 1,
           externalItemId: 'episode-1',
+          mediaTarget: { hostname: 'example.com', address: expect.any(String) },
+          mediaFetchPolicy: {
+            maximumRedirects: 5,
+            sameOriginOnly: true,
+            revalidateDnsOnRedirect: true,
+          },
           expectedDurationSeconds: 60,
           chunkDurationSeconds: 900,
         });
@@ -94,5 +100,51 @@ describe('Hermes fixed transcript service contract', () => {
         chunkDurationSeconds: 900,
       }),
     ).rejects.toThrow('exceeds the returned media duration');
+  });
+
+  test('rejects private or mixed DNS media targets before contacting Hermes', async () => {
+    const client = new HermesTranscriptClient({
+      endpoint: 'https://hermes.example.com/v1/transcripts',
+      token: 'fixture-secret',
+      timeoutMs: 1_000,
+      maximumResponseBytes: 10_000,
+      lookupImpl: async () => [
+        { address: '93.184.216.34', family: 4 },
+        { address: '127.0.0.1', family: 4 },
+      ],
+      fetchImpl: async () => {
+        throw new Error('Hermes must not be contacted');
+      },
+    });
+    await expect(
+      client.transcribe({
+        runId: '00000000-0000-4000-8000-000000000001',
+        externalItemId: 'episode-1',
+        mediaUrl: 'https://feed.example.test/episode.mp3',
+        expectedDurationSeconds: 60,
+        chunkDurationSeconds: 900,
+      }),
+    ).rejects.toMatchObject({ failureClass: 'HERMES_MEDIA_PRIVATE_TARGET' });
+  });
+
+  test('rejects literal localhost media targets', async () => {
+    const client = new HermesTranscriptClient({
+      endpoint: 'https://hermes.example.com/v1/transcripts',
+      token: 'fixture-secret',
+      timeoutMs: 1_000,
+      maximumResponseBytes: 10_000,
+      fetchImpl: async () => {
+        throw new Error('Hermes must not be contacted');
+      },
+    });
+    await expect(
+      client.transcribe({
+        runId: '00000000-0000-4000-8000-000000000001',
+        externalItemId: 'episode-1',
+        mediaUrl: 'http://127.0.0.1/episode.mp3',
+        expectedDurationSeconds: 60,
+        chunkDurationSeconds: 900,
+      }),
+    ).rejects.toMatchObject({ failureClass: 'HERMES_MEDIA_PRIVATE_TARGET' });
   });
 });

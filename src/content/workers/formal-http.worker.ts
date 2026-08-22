@@ -188,8 +188,13 @@ export async function runFormalHttpWorker(
       }
       const feedWindowTruncated =
         !request.bootstrap.enabled && (result.bootstrapMetrics?.itemLimitCount ?? 0) > 0;
+      // Bootstrap is a bounded, best-effort seed.  A malformed item must be
+      // recorded as a rejection, but it must not keep the fixed bootstrap
+      // cutoff open forever: a later retry cannot recover posts that arrived
+      // after the original cutoff.  Polls remain PARTIAL so their checkpoint
+      // does not advance across an item-level rejection.
       const state =
-        result.rejections.length > 0 && result.batch.items.length > 0
+        !request.bootstrap.enabled && result.rejections.length > 0 && result.batch.items.length > 0
           ? ('PARTIAL' as const)
           : feedWindowTruncated
             ? ('PARTIAL' as const)
