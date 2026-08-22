@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { coreSnapshotRefreshReason } from '../../src/domain/core-snapshot-refresh';
+import {
+  coreLifecycleReconcilePeriodKey,
+  coreSnapshotRefreshReason,
+} from '../../src/domain/core-snapshot-refresh';
 
 const current = {
   id: 1,
@@ -29,6 +32,33 @@ function publication(fixture = scheduledFixture) {
 }
 
 describe('event current refresh lifecycle comparison', () => {
+  test('opens a new durable obligation for each canonical lifecycle transition', () => {
+    const scheduledKey = coreLifecycleReconcilePeriodKey(
+      current,
+      [scheduledFixture],
+      'kickoff-cutover',
+    );
+    const repeatedKey = coreLifecycleReconcilePeriodKey(
+      current,
+      [scheduledFixture],
+      'kickoff-cutover',
+    );
+    const startedKey = coreLifecycleReconcilePeriodKey(
+      current,
+      [{ ...scheduledFixture, started: true }],
+      'fixture-lifecycle',
+    );
+    const provisionalKey = coreLifecycleReconcilePeriodKey(
+      current,
+      [{ ...scheduledFixture, started: true, finishedProvisional: true }],
+      'fixture-lifecycle',
+    );
+
+    expect(repeatedKey).toBe(scheduledKey);
+    expect(startedKey).not.toBe(scheduledKey);
+    expect(provisionalKey).not.toBe(startedKey);
+  });
+
   test('forces a core refresh at kickoff even when the current event id is unchanged', () => {
     expect(
       coreSnapshotRefreshReason(

@@ -18,6 +18,7 @@ import { entryEventResultsRepository } from '../repositories/entry-event-results
 import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { planClassicManagerFallback } from '../domain/manager-live-fallback';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
 // Refresh at 30s while an event is active, but keep a successfully published
@@ -743,10 +744,25 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       redis,
     );
     refreshErrorCode = standings.errorCode;
-    const pending = staleOrMissing.filter(
+    let pending = staleOrMissing.filter(
       (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
     );
-    if (pending.length > 0 && !standings.complete) {
+    const fallbackPlan = planClassicManagerFallback(pending, standings.complete);
+    if (fallbackPlan.foregroundSummaryEntryIds.length > 0) {
+      const summaryError = await refreshEntrySummaries(
+        season,
+        input.eventId,
+        fallbackPlan.foregroundSummaryEntryIds,
+        rows,
+        redis,
+        scope,
+      );
+      refreshErrorCode = refreshErrorCode ?? summaryError;
+      pending = fallbackPlan.backgroundEntryIds.filter(
+        (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+      );
+    }
+    if (pending.length > 0) {
       const backgroundKey = `classic:${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
       scheduleBackgroundRefresh(backgroundKey, async () => {
         const backgroundRows = await readCachedRows(
@@ -756,19 +772,34 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           scope,
           pending,
         );
-        const backgroundResult = await refreshClassicStandings(
-          season,
-          input.eventId,
-          classicLeagueId,
-          new Set(pending),
-          backgroundRows,
-          redis,
-          { startPage: standings.nextPage, maxPages: MAX_STANDINGS_PAGES },
+        const backgroundResult = fallbackPlan.continueStandings
+          ? await refreshClassicStandings(
+              season,
+              input.eventId,
+              classicLeagueId,
+              new Set(pending),
+              backgroundRows,
+              redis,
+              { startPage: standings.nextPage, maxPages: MAX_STANDINGS_PAGES },
+            )
+          : { complete: true, nextPage: standings.nextPage, errorCode: null };
+        const summaryTargets = pending.filter(
+          (entryId) => !backgroundRows.has(entryId) || !isFresh(backgroundRows.get(entryId)!),
         );
+        if (backgroundResult.complete && summaryTargets.length > 0) {
+          await refreshEntrySummaries(
+            season,
+            input.eventId,
+            summaryTargets,
+            backgroundRows,
+            redis,
+            scope,
+          );
+        }
         logDebug('Official classic manager background refresh completed', {
           eventId: input.eventId,
           leagueId: classicLeagueId,
-          remaining: pending.length,
+          remaining: summaryTargets.length,
           complete: backgroundResult.complete,
         });
       });
