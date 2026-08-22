@@ -14,6 +14,8 @@ export type DataSyncJobSource =
 
 export interface DataSyncEnqueueOptions {
   jobId?: string;
+  /** Correlates all refresh inputs for one My FPL coordinator attempt. */
+  runId?: string;
   eventId?: number;
   changeDate?: string;
   obligationId?: string;
@@ -51,7 +53,7 @@ export function createDataSyncJobData(
     seasonCode: season.seasonCode,
     source,
     triggeredAt: new Date().toISOString(),
-    runId: randomUUID(),
+    runId: options.runId ?? randomUUID(),
     ...(options.obligationId ? { obligationId: options.obligationId } : {}),
     ...(options.obligationGeneration === undefined
       ? {}

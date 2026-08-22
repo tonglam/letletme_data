@@ -113,13 +113,14 @@ async function enqueueTournamentCascade(
   season: FplSeasonRef,
   eventId: number,
   finalizationTargets: TournamentFinalizationTarget[],
+  runId?: string,
 ) {
   logInfo('Enqueueing tournament cascade jobs', { eventId });
 
   try {
     const cascadeId = createCascadeId(season, eventId);
     await initCascadeStructureBarrier(cascadeId);
-    const structureOpts = { cascadeId, finalizationTargets };
+    const structureOpts = { cascadeId, finalizationTargets, runId };
 
     // Structure jobs carry cascadeId for the MV barrier; cup/transfers do not.
     const results = await Promise.allSettled([
@@ -181,6 +182,7 @@ async function enqueueTournamentCascade(
       cascadeId,
       'structure-enqueue-gaps',
       finalizationTargets,
+      runId,
     );
   } catch (error) {
     logError('Failed to enqueue tournament cascade jobs', error, { eventId });
@@ -199,6 +201,7 @@ async function maybeEnqueueCascadeMaterializedRefresh(
   cascadeId: string,
   lastJob: string,
   finalizationTargets: TournamentFinalizationTarget[],
+  runId?: string,
 ): Promise<void> {
   const claim = await tryClaimCascadeRefreshEnqueue(cascadeId);
   if (claim === 'already-enqueued' || claim === 'not-pending') {
@@ -213,6 +216,7 @@ async function maybeEnqueueCascadeMaterializedRefresh(
     await enqueueTournamentMaterializedViewsRefresh(season, eventId, 'cascade', {
       cascadeId,
       finalizationTargets,
+      runId,
     });
     await markCascadeRefreshEnqueued(cascadeId);
     logInfo('Enqueued tournament materialized views refresh after structure cascade', {
@@ -238,6 +242,7 @@ async function afterCascadeStructureJob(
   cascadeId: string | undefined,
   jobName: string,
   finalizationTargets: TournamentFinalizationTarget[],
+  runId?: string,
 ): Promise<void> {
   if (!cascadeId) {
     return;
@@ -251,6 +256,7 @@ async function afterCascadeStructureJob(
     cascadeId,
     jobName,
     finalizationTargets,
+    runId,
   );
 }
 
@@ -278,13 +284,14 @@ function tournamentEventFinalizationDependencies(
 async function enqueueOfficialRosterSyncAfterFinalization(
   season: FplSeasonRef,
   eventId: number,
+  runId?: string,
 ): Promise<void> {
   const event = await eventRepository.findById(season, eventId);
   if (!event?.finished || !event.dataChecked) {
     return;
   }
 
-  await enqueueTournamentRosterSync(season, 'cascade', { finalizedEventId: eventId });
+  await enqueueTournamentRosterSync(season, 'cascade', { finalizedEventId: eventId, runId });
   logInfo('Enqueued official tournament roster reconcile after finalized event', {
     season: season.seasonCode,
     eventId,
@@ -357,10 +364,15 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
               });
             }
             if (shouldEnqueueTournamentCascade(result)) {
-              await enqueueOfficialRosterSyncAfterFinalization(season, eventId);
-              await enqueueTournamentCascade(season, eventId, result.finalizationTargets);
+              await enqueueOfficialRosterSyncAfterFinalization(season, eventId, job.data.runId);
+              await enqueueTournamentCascade(
+                season,
+                eventId,
+                result.finalizationTargets,
+                job.data.runId,
+              );
             } else {
-              await enqueueOfficialRosterSyncAfterFinalization(season, eventId);
+              await enqueueOfficialRosterSyncAfterFinalization(season, eventId, job.data.runId);
               await finalizeTournamentEventLifecycle(eventId, {
                 ...tournamentEventFinalizationDependencies(season, []),
                 // Recover a prior terminal write followed by a failed
@@ -385,6 +397,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       cascadeId,
                       job.name,
                       finalizationTargets,
+                      job.data.runId,
                     ),
                 };
               }
@@ -401,6 +414,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       cascadeId,
                       job.name,
                       finalizationTargets,
+                      job.data.runId,
                     ),
                 };
               }
@@ -420,6 +434,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       cascadeId,
                       job.name,
                       finalizationTargets,
+                      job.data.runId,
                     ),
                 };
               }
@@ -432,6 +447,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                     await enqueueTournamentSelectionStats(season, eventId, 'cascade', {
                       cascadeId,
                       finalizationTargets,
+                      runId: job.data.runId,
                     });
                     await afterCascadeStructureJob(
                       season,
@@ -439,6 +455,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       cascadeId,
                       job.name,
                       finalizationTargets,
+                      job.data.runId,
                     );
                   },
                 };
@@ -455,6 +472,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       cascadeId,
                       job.name,
                       finalizationTargets,
+                      job.data.runId,
                     ),
                 };
               }
@@ -470,6 +488,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       cascadeId,
                       job.name,
                       finalizationTargets,
+                      job.data.runId,
                     ),
                 };
               }

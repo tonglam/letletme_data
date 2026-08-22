@@ -16,6 +16,13 @@ export type MaintenanceEnqueueOptions = Readonly<{
   runId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  eventId?: number;
+  snapshotKind?: 'PROVISIONAL' | 'FINAL';
+  snapshotActor?: string;
+  snapshotReason?: string;
+  snapshotIdempotencyKey?: string;
+  attempts?: number;
+  backoffDelayMs?: number;
 }>;
 
 export async function enqueueMaintenanceJob(
@@ -36,10 +43,21 @@ export async function enqueueMaintenanceJob(
     ...(options.obligationGeneration === undefined
       ? {}
       : { obligationGeneration: options.obligationGeneration }),
+    ...(options.eventId === undefined ? {} : { eventId: options.eventId }),
+    ...(options.snapshotKind === undefined ? {} : { snapshotKind: options.snapshotKind }),
+    ...(options.snapshotActor === undefined ? {} : { snapshotActor: options.snapshotActor }),
+    ...(options.snapshotReason === undefined ? {} : { snapshotReason: options.snapshotReason }),
+    ...(options.snapshotIdempotencyKey === undefined
+      ? {}
+      : { snapshotIdempotencyKey: options.snapshotIdempotencyKey }),
   };
   try {
     const job = await maintenanceQueue.add(jobName, data, {
       jobId: options.jobId,
+      ...(options.attempts === undefined ? {} : { attempts: options.attempts }),
+      ...(options.backoffDelayMs === undefined
+        ? {}
+        : { backoff: { type: 'fixed' as const, delay: options.backoffDelayMs } }),
       ...(source === 'manual' ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
     logInfo('Maintenance job enqueued', {
@@ -98,3 +116,23 @@ export const enqueuePostMatchConsolidation = (
   source: MaintenanceJobSource,
   options?: MaintenanceEnqueueOptions,
 ) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION, source, options);
+
+export const enqueueMyFplSnapshot = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options: MaintenanceEnqueueOptions & {
+    eventId: number;
+    snapshotKind: 'PROVISIONAL' | 'FINAL';
+  },
+) =>
+  enqueueMaintenanceJob(season, MAINTENANCE_JOBS.MY_FPL_SNAPSHOT, source, {
+    ...options,
+    attempts: options.attempts ?? 8,
+    backoffDelayMs: options.backoffDelayMs ?? 30 * 60_000,
+  });
+
+export const enqueueMyFplSnapshotOutbox = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX, source, options);

@@ -27,6 +27,8 @@ import {
   enqueuePlayerMarketFreshness,
   enqueuePlayerSeasonSummaryRepair,
   enqueuePostMatchConsolidation,
+  enqueueMyFplSnapshot,
+  enqueueMyFplSnapshotOutbox,
   enqueueTournamentTrendsRepair,
 } from '../jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
@@ -42,6 +44,7 @@ import { loadDataPublicationDelivery } from '../repositories/data-publication-ou
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { isMatchDayTime } from '../utils/conditions';
 import { decideLiveLifecycle } from '../services/live-lifecycle-orchestrator';
+import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -201,6 +204,111 @@ function eventDefinition(input: {
       });
     },
   };
+}
+
+function myFplSnapshotDefinition(): ScheduledJobDefinition {
+  return {
+    name: MAINTENANCE_JOBS.MY_FPL_SNAPSHOT,
+    cadence: 'daily at 10:45 UTC+8 and finalization reconciliation',
+    timezone: 'Asia/Shanghai',
+    catchUpPolicy: 'checkpoint',
+    criticality: 'critical',
+    queueName: 'maintenance',
+    successPredicate: 'complete My FPL projection published as one active revision',
+    resolve: async (context) => {
+      const dueAt = utc8DueAt(context.now, 10, 45);
+      if (context.now < dueAt) return [];
+      const plans: SchedulerObligationPlan[] = [];
+      const dateKey = formatCronDateKey(context.now);
+      for (const event of context.events) {
+        if (!event.deadlineTime || event.deadlineTime > context.now) continue;
+        const lifecycle = await eventRepository.findById(context.season, event.id);
+        if (!lifecycle || (lifecycle.finished && lifecycle.dataChecked)) continue;
+        if (await hasFinalMyFplPublication(context.season, event.id)) continue;
+        plans.push({
+          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+          periodKey: `daily-${event.id}-${dateKey}`,
+          dueAt,
+          eventId: event.id,
+          source: 'catchup',
+          evidence: { snapshotKind: 'PROVISIONAL', snapshotDate: dateKey },
+        });
+      }
+      return plans;
+    },
+    enqueue: async ({ context, plan, obligationId, generation }) => {
+      const eventId = plan.eventId;
+      if (!eventId) throw new Error('My FPL snapshot obligation has no event checkpoint');
+      const job = await enqueueMyFplSnapshot(context.season, 'catchup', {
+        eventId,
+        snapshotKind: 'PROVISIONAL',
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        obligationId,
+        obligationGeneration: generation,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  };
+}
+
+function myFplFinalizationDefinition(): ScheduledJobDefinition {
+  return {
+    name: 'my-fpl-finalization',
+    cadence: '30-second finished + data_checked reconciliation',
+    timezone: 'UTC',
+    catchUpPolicy: 'latest-authoritative',
+    criticality: 'critical',
+    queueName: 'maintenance',
+    successPredicate: 'final My FPL revision replaces the provisional revision',
+    resolve: async (context) => {
+      const plans: SchedulerObligationPlan[] = [];
+      for (const event of context.events) {
+        const lifecycle = await eventRepository.findById(context.season, event.id);
+        if (!lifecycle?.finished || !lifecycle.dataChecked) continue;
+        if (await hasFinalMyFplPublication(context.season, event.id)) continue;
+        const checkedAt = lifecycle.dataCheckedAt?.toISOString() ?? 'unknown';
+        plans.push({
+          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+          periodKey: `final-${event.id}-${checkedAt}`,
+          dueAt: context.now,
+          eventId: event.id,
+          source: 'reconcile',
+          evidence: { snapshotKind: 'FINAL', dataCheckedAt: checkedAt },
+        });
+      }
+      return plans;
+    },
+    enqueue: async ({ context, plan, obligationId, generation }) => {
+      const eventId = plan.eventId;
+      if (!eventId) throw new Error('My FPL finalization obligation has no event checkpoint');
+      const job = await enqueueMyFplSnapshot(context.season, 'reconcile', {
+        eventId,
+        snapshotKind: 'FINAL',
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        obligationId,
+        obligationGeneration: generation,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  };
+}
+
+function myFplSnapshotOutboxDefinition(): ScheduledJobDefinition {
+  return periodicMaintenanceDefinition({
+    name: MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX,
+    cadence: 'every five minutes',
+    periodMs: 5 * 60_000,
+    criticality: 'critical',
+    successPredicate: 'committed My FPL Redis manifests are delivered or retried',
+    enqueue: async ({ context, obligationId, generation }) => {
+      const job = await enqueueMyFplSnapshotOutbox(context.season, 'catchup', {
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        obligationId,
+        obligationGeneration: generation,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  });
 }
 
 function periodicMaintenanceDefinition(input: {
@@ -647,6 +755,9 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       },
     }),
     postMatchMaintenanceDefinition(),
+    myFplSnapshotDefinition(),
+    myFplFinalizationDefinition(),
+    myFplSnapshotOutboxDefinition(),
     dailyDefinition({
       name: 'entry-info',
       hour: 10,

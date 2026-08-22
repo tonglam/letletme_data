@@ -1,13 +1,13 @@
 import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
-import { enqueueEntryResultsSyncJob } from './entry-sync-enqueue';
+import { enqueueMyFplSnapshot } from './maintenance.jobs';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { isFPLSeason } from '../utils/conditions';
 import { getCurrentEvent } from '../services/events.service';
 import { seasonRepository } from '../repositories/seasons';
 import { logInfo } from '../utils/logger';
-import { CRON_TIMEZONE } from '../utils/timezone';
+import { CRON_TIMEZONE, formatCronDateKey } from '../utils/timezone';
 import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 /**
@@ -35,10 +35,12 @@ export function registerEntryResultsJobs(app: Elysia) {
               logInfo('Skipping entry results sync - no current event');
               return;
             }
-            const job = await enqueueEntryResultsSyncJob(season, 'cron', {
+            const job = await enqueueMyFplSnapshot(season, 'cron', {
               eventId: currentEvent.id,
+              snapshotKind: 'PROVISIONAL',
+              jobId: `compat-entry-event-results-daily-${formatCronDateKey()}`,
             });
-            logInfo('Entry results sync job enqueued via cron', {
+            logInfo('My FPL snapshot coordinator enqueued via compatibility cron', {
               jobId: job.id,
               eventId: currentEvent.id,
             });

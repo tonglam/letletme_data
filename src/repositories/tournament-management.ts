@@ -10,6 +10,7 @@ import type {
 } from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { invalidateMyFplSnapshotRedisManifest } from '../services/my-fpl-snapshot-publication.service';
 
 export interface TournamentManagementRecord {
   id: number;
@@ -405,15 +406,75 @@ export const createTournamentManagementRepository = () => ({
           DELETE FROM competition.tournament_entries
           WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
         `;
+        // Serialize against capture/Redis activation for every event that has
+        // ever contained this tournament. The second query below is after the
+        // advisory locks, so it also sees a revision that raced the first
+        // discovery query.
+        const snapshotEvents = await tx<{ event_id: number }[]>`
+          SELECT DISTINCT publication.event_id
+          FROM competition.my_fpl_snapshot_publications publication
+          JOIN competition.my_fpl_snapshot_tournament_rows snapshot_row
+            ON snapshot_row.season_id = publication.season_id
+           AND snapshot_row.event_id = publication.event_id
+           AND snapshot_row.revision = publication.revision
+          WHERE publication.season_id = ${season.seasonId}
+            AND snapshot_row.tournament_id = ${tournamentId}
+        `;
+        for (const snapshotEvent of snapshotEvents) {
+          await tx`
+            SELECT pg_advisory_xact_lock(
+              hashtextextended(${`my-fpl:${season.seasonId}:${snapshotEvent.event_id}`}, 0)
+            )
+          `;
+        }
+        const activeSnapshotPointers = await tx<{ event_id: number; revision: number | string }[]>`
+          SELECT DISTINCT publication.event_id, publication.revision
+          FROM competition.my_fpl_snapshot_publications publication
+          JOIN competition.my_fpl_snapshot_tournament_rows snapshot_row
+            ON snapshot_row.season_id = publication.season_id
+           AND snapshot_row.event_id = publication.event_id
+           AND snapshot_row.revision = publication.revision
+          WHERE publication.season_id = ${season.seasonId}
+            AND publication.active
+            AND snapshot_row.tournament_id = ${tournamentId}
+        `;
+        // A snapshot that contains this tournament is no longer a coherent
+        // publication once the tournament is deleted. Remove that publication
+        // inside the same transaction; its child rows/outbox are cascaded and
+        // My FPL will fail closed until the next complete snapshot is built.
+        await tx`
+          DELETE FROM competition.my_fpl_snapshot_publications publication
+          WHERE publication.season_id = ${season.seasonId}
+            AND EXISTS (
+              SELECT 1
+              FROM competition.my_fpl_snapshot_tournament_rows snapshot_row
+              WHERE snapshot_row.season_id = publication.season_id
+                AND snapshot_row.event_id = publication.event_id
+                AND snapshot_row.revision = publication.revision
+                AND snapshot_row.tournament_id = ${tournamentId}
+            )
+        `;
         await tx`
           DELETE FROM competition.tournaments
           WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
         `;
 
-        return { status: 'deleted', tournament: row } as const;
+        return { status: 'deleted', tournament: row, activeSnapshotPointers } as const;
       });
       if (result.status === 'deleted') {
+        await Promise.all(
+          result.activeSnapshotPointers.map((pointer) =>
+            invalidateMyFplSnapshotRedisManifest(
+              season.seasonCode,
+              pointer.event_id,
+              pointer.revision,
+            ),
+          ),
+        );
         logInfo('Deleted tournament and related data', { tournamentId, adminEntryId });
+      }
+      if (result.status === 'deleted') {
+        return { status: result.status, tournament: result.tournament };
       }
       return result;
     } catch (error) {
