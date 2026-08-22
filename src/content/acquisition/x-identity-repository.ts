@@ -13,7 +13,11 @@ import { sha256CanonicalJson } from './canonicalization';
 import { parseFormalRunRequestV1 } from './formal-run-contract';
 import type { FormalRunProbeEvidence } from './formal-run-repository';
 import type { GrokBuildExecutionResult, GrokBuildXUserV1 } from './grok-build-executor';
-import { commitXRunBudgets, releaseXRunBudgets } from './x-budget';
+import {
+  commitProbeAndReleaseXRunBudgets,
+  commitXRunBudgets,
+  releaseXRunBudgets,
+} from './x-budget';
 
 const IDENTITY_REFRESH_MS = 30 * 24 * 60 * 60_000;
 const IDENTITY_RETRY_MS = 30 * 60_000;
@@ -352,6 +356,9 @@ export async function failXIdentityRun(input: {
   providerProcessStarted?: boolean;
   providerExecution?: GrokBuildExecutionResult;
   probeEvidence?: FormalRunProbeEvidence;
+  releaseExecutionBudgetAfterProbe?: boolean;
+  probeReservationIds?: readonly string[];
+  probeIncrementedReservationIds?: readonly string[];
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -384,7 +391,18 @@ export async function failXIdentityRun(input: {
       input.providerProcessStarted === true;
     const mainProviderAttempted =
       input.providerExecution !== undefined || input.providerProcessStarted === true;
-    if (providerAttempted) {
+    if (input.releaseExecutionBudgetAfterProbe) {
+      if (!input.probeEvidence || mainProviderAttempted || !input.probeReservationIds?.length) {
+        throw new Error('Probe-only identity transition requires probe evidence and no main call');
+      }
+      await commitProbeAndReleaseXRunBudgets({
+        tx,
+        runId: input.runId,
+        dbNow,
+        probeReservationIds: input.probeReservationIds,
+        probeIncrementedReservationIds: input.probeIncrementedReservationIds,
+      });
+    } else if (providerAttempted) {
       const committedReservations = await commitXRunBudgets({ tx, runId: input.runId, dbNow });
       if (committedReservations === 0) {
         throw new Error('Started X identity provider process has no reserved budget');

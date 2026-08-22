@@ -36,6 +36,7 @@ import {
   compileXUserRequest,
 } from './x-query-compiler';
 import {
+  commitProbeAndReleaseXRunBudgets,
   commitOneXRunBudgetUnit,
   commitRunBudgets,
   reconcileReservedProviderBudget,
@@ -1072,6 +1073,9 @@ export async function failFormalRun(input: {
   probeEvidence?: FormalRunProbeEvidence;
   supadataFailureEvidence?: SupadataFailureEvidence;
   providerProcessStarted?: boolean;
+  releaseExecutionBudgetAfterProbe?: boolean;
+  probeReservationIds?: readonly string[];
+  probeIncrementedReservationIds?: readonly string[];
   hermesProviderAttempted?: boolean;
   hermesProviderUnits?: number;
   rejections?: readonly FormalRunFailureRejection[];
@@ -1117,6 +1121,17 @@ export async function failFormalRun(input: {
     }
     if (input.probeEvidence && (input.supadataFailureEvidence || input.hermesProviderAttempted)) {
       throw new Error('X probe evidence cannot be combined with non-Grok provider evidence');
+    }
+    if (
+      input.releaseExecutionBudgetAfterProbe &&
+      (!input.probeEvidence ||
+        input.providerEvidence ||
+        input.providerProcessStarted ||
+        input.supadataFailureEvidence ||
+        input.hermesProviderAttempted ||
+        !input.probeReservationIds?.length)
+    ) {
+      throw new Error('Probe-only budget transition requires probe evidence and no main call');
     }
     if (input.rejections?.length && !input.providerEvidence) {
       throw new Error('Rejected provider items require persisted provider evidence');
@@ -1189,9 +1204,17 @@ export async function failFormalRun(input: {
           throw new Error('Failed formal run has invalid provider evidence');
         }
       }
-      const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
+      const committedReservations = input.releaseExecutionBudgetAfterProbe
+        ? await commitProbeAndReleaseXRunBudgets({
+            tx,
+            runId: input.runId,
+            dbNow,
+            probeReservationIds: input.probeReservationIds!,
+            probeIncrementedReservationIds: input.probeIncrementedReservationIds,
+          })
+        : await commitRunBudgets({ tx, runId: input.runId, dbNow });
       if (
-        committedReservations === 0 &&
+        !committedReservations &&
         !(input.probeEvidence && priorGrokProviderUnits >= input.probeEvidence.providerUnits)
       ) {
         throw new Error('Billed formal X failure has no reserved budget');

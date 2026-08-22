@@ -427,6 +427,44 @@ export async function releaseXRunBudgetsExcept(input: {
   return reservations.length;
 }
 
+/** Commit the independently reserved probe unit while releasing the run's
+ * execution reservation in the same transaction. */
+export async function commitProbeAndReleaseXRunBudgets(input: {
+  tx: TransactionHandle;
+  runId: string;
+  dbNow: Date;
+  probeReservationIds: readonly string[];
+  probeIncrementedReservationIds?: readonly string[];
+}): Promise<boolean> {
+  const probeReservationIds = [...new Set(input.probeReservationIds)];
+  const incrementedReservationIds = [...new Set(input.probeIncrementedReservationIds ?? [])];
+  if (probeReservationIds.length === 0) return false;
+  const keepReservationIds = [...new Set([...probeReservationIds, ...incrementedReservationIds])];
+  await releaseXRunBudgetsExcept({
+    tx: input.tx,
+    runId: input.runId,
+    dbNow: input.dbNow,
+    keepReservationIds,
+  });
+  if (incrementedReservationIds.length > 0) {
+    const released = await releaseOneXRunBudgetUnit({
+      tx: input.tx,
+      runId: input.runId,
+      dbNow: input.dbNow,
+      reservationIds: incrementedReservationIds,
+    });
+    if (!released) throw new Error('Original X execution budget disappeared after probe');
+  }
+  const committed = await commitOneXRunBudgetUnit({
+    tx: input.tx,
+    runId: input.runId,
+    dbNow: input.dbNow,
+    reservationIds: probeReservationIds,
+  });
+  if (!committed) throw new Error('X probe budget reservation disappeared before commit');
+  return true;
+}
+
 async function transitionRunBudgets(input: {
   tx: TransactionHandle;
   runId: string;

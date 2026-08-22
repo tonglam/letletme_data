@@ -29,7 +29,6 @@ import {
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
 import {
   releaseOneXRunBudgetUnit,
-  releaseXRunBudgetsExcept,
   reserveXRunBudgets,
   type XBudgetLane,
   type XBudgetPolicy,
@@ -124,7 +123,6 @@ export async function runFormalXWorker(
   let probeProcessStarted = false;
   let probeCompletedSuccessfully = false;
   let releaseProbeBudget: (() => Promise<void>) | null = null;
-  let releaseMainBudgetAfterProbe: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
   let scanAccounting: Readonly<{
@@ -228,35 +226,6 @@ export async function runFormalXWorker(
         if (!released) throw new Error('X probe budget reservation disappeared before release');
       });
       probeReservationIds = null;
-    };
-    releaseMainBudgetAfterProbe = async (): Promise<void> => {
-      if (probeReservationIds === null) return;
-      const keepReservationIds = probeReservationIds;
-      const incrementedReservationIds = probeIncrementedReservationIds;
-      await db.transaction(async (tx) => {
-        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
-        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
-        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
-        // A probe may cross an hourly ledger boundary. Rows created by the
-        // probe are probe-only; rows increased in place contain one original
-        // execution unit plus one probe unit. Release the former execution
-        // reservations while retaining exactly one unit for each probe.
-        await releaseXRunBudgetsExcept({
-          tx,
-          runId: job.runId,
-          dbNow,
-          keepReservationIds,
-        });
-        if (incrementedReservationIds.length > 0) {
-          const released = await releaseOneXRunBudgetUnit({
-            tx,
-            runId: job.runId,
-            dbNow,
-            reservationIds: incrementedReservationIds,
-          });
-          if (!released) throw new Error('Original X execution budget disappeared after probe');
-        }
-      });
     };
     const executor = dependencies?.executor;
     if (!executor) throw new Error('Host Grok runner executor is not configured');
@@ -534,9 +503,6 @@ export async function runFormalXWorker(
           };
         }
       }
-      if (probeOnly) {
-        await releaseMainBudgetAfterProbe?.();
-      }
       if (identityRun) {
         await failXIdentityRun({
           runId: job.runId,
@@ -545,6 +511,9 @@ export async function runFormalXWorker(
           providerProcessStarted: mainProviderProcessStarted,
           providerExecution: identityExecution ?? undefined,
           probeEvidence,
+          releaseExecutionBudgetAfterProbe: probeOnly,
+          probeReservationIds: probeOnly ? (probeReservationIds ?? undefined) : undefined,
+          probeIncrementedReservationIds: probeOnly ? probeIncrementedReservationIds : undefined,
           db,
         });
       } else {
@@ -590,6 +559,9 @@ export async function runFormalXWorker(
           rejections,
           providerProcessStarted: mainProviderProcessStarted,
           probeEvidence,
+          releaseExecutionBudgetAfterProbe: probeOnly,
+          probeReservationIds: probeOnly ? (probeReservationIds ?? undefined) : undefined,
+          probeIncrementedReservationIds: probeOnly ? probeIncrementedReservationIds : undefined,
           db,
         });
       }
