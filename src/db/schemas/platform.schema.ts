@@ -3259,6 +3259,11 @@ export const entriesInCompetition = competition.table(
       withTimezone: true,
       mode: 'date',
     }),
+    pastSeasonsCheckedAt: timestamp('past_seasons_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    pastSeasonsCount: integer('past_seasons_count'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
@@ -3290,6 +3295,60 @@ export const entriesInCompetition = competition.table(
     check(
       'entries_event_ids_valid',
       sql`((started_event IS NULL) OR (started_event > 0)) AND (last_event_id >= 0) AND ((snapshot_synced_through_event_id IS NULL) OR (snapshot_synced_through_event_id >= 0)) AND ((transfers_synced_through_event_id IS NULL) OR (transfers_synced_through_event_id >= 0))`,
+    ),
+    check(
+      'entries_past_seasons_count_nonnegative',
+      sql`(past_seasons_count IS NULL) OR (past_seasons_count >= 0)`,
+    ),
+  ],
+);
+
+export const entryPastSeasonsInCompetition = competition.table(
+  'entry_past_seasons',
+  {
+    entrySeasonId: smallint('entry_season_id').notNull(),
+    entryId: integer('entry_id').notNull(),
+    sourceSeasonId: smallint('source_season_id').notNull(),
+    sourceSeasonLabel: text('source_season_label').notNull(),
+    totalPoints: integer('total_points').default(0).notNull(),
+    overallRank: integer('overall_rank').default(0).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('entry_past_seasons_entry_idx').using(
+      'btree',
+      table.entrySeasonId.asc().nullsLast(),
+      table.entryId.asc().nullsLast(),
+      table.sourceSeasonId.desc().nullsFirst(),
+    ),
+    foreignKey({
+      columns: [table.entrySeasonId, table.entryId],
+      foreignColumns: [entriesInCompetition.seasonId, entriesInCompetition.entryId],
+      name: 'entry_past_seasons_entry_fk',
+    }),
+    foreignKey({
+      columns: [table.entrySeasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'entry_past_seasons_entry_season_fk',
+    }),
+    foreignKey({
+      columns: [table.sourceSeasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'entry_past_seasons_source_season_fk',
+    }),
+    primaryKey({
+      columns: [table.entrySeasonId, table.entryId, table.sourceSeasonId],
+      name: 'entry_past_seasons_pkey',
+    }),
+    check('entry_past_seasons_ids_positive', sql`(entry_id > 0) AND (source_season_id > 0)`),
+    check(
+      'entry_past_seasons_totals_nonnegative',
+      sql`(total_points >= 0) AND (overall_rank >= 0)`,
+    ),
+    check(
+      'entry_past_seasons_label_format',
+      sql`source_season_label ~ '^[0-9]{4}/[0-9]{2}$'::text`,
     ),
   ],
 );

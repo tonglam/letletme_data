@@ -34,6 +34,7 @@ export type TournamentSyncEnqueueOptions = {
   operationId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  finalizedEventId?: number;
 };
 
 async function hasPendingOfficialH2HJob(season: FplSeasonRef, eventId: number): Promise<boolean> {
@@ -478,7 +479,11 @@ export const enqueueTournamentRosterSync = (
 ) =>
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_SYNC, season, 0, source, {
     ...options,
-    jobId: options?.jobId ?? `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
+    jobId:
+      options?.jobId ??
+      (options?.finalizedEventId && options.finalizedEventId > 0
+        ? `tournament-roster-sync-finalized-e${options.finalizedEventId}`
+        : `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`),
   });
 
 export const enqueueTournamentRosterReconcile = async (
