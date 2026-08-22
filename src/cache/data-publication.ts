@@ -57,6 +57,8 @@ export interface DataPublicationManifest {
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: string;
+  /** The last successful source fetch, even when the immutable payload is unchanged. */
+  readonly lastSuccessfulFetchAt?: string;
   readonly publishedAt: string;
   readonly state: DataPublicationState;
   readonly items: readonly DataPublicationManifestItem[];
@@ -71,6 +73,7 @@ export interface PublishDataRevisionInput extends DataPublicationScope {
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
+  readonly lastSuccessfulFetchAt?: Date;
   readonly state: DataPublicationState;
   readonly items: readonly DataPublicationItemInput[];
 }
@@ -107,7 +110,15 @@ const MANIFEST_FIELDS = [
   'state',
   'items',
 ] as const;
+const OPTIONAL_MANIFEST_FIELDS = ['lastSuccessfulFetchAt'] as const;
 const MANIFEST_ITEM_FIELDS = ['name', 'key', 'type', 'count', 'bytes', 'sha256'] as const;
+
+function hasManifestFields(value: Record<string, unknown>): boolean {
+  return (
+    hasExactFields(value, MANIFEST_FIELDS) ||
+    hasExactFields(value, [...MANIFEST_FIELDS, ...OPTIONAL_MANIFEST_FIELDS])
+  );
+}
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
   'fpl:core': [
     'events',
@@ -190,6 +201,7 @@ if current_raw then
       or current_event ~= candidate_event
       or current.revision ~= candidate.revision
       or current.sourceCheckedAt ~= candidate.sourceCheckedAt
+      or tostring(current.lastSuccessfulFetchAt) ~= tostring(candidate.lastSuccessfulFetchAt)
       or tostring(current.state) ~= tostring(candidate.state)
       or #current.items ~= #candidate.items then
       return {'publication_id_conflict'}
@@ -402,7 +414,14 @@ function createManifest(
       'DATA_PUBLICATION_SOURCE_TIME_INVALID',
     );
   }
+  if (input.lastSuccessfulFetchAt && !Number.isFinite(input.lastSuccessfulFetchAt.getTime())) {
+    throw new CacheError(
+      'Invalid publication successful-fetch timestamp',
+      'DATA_PUBLICATION_SUCCESSFUL_FETCH_TIME_INVALID',
+    );
+  }
   const sourceCheckedAt = input.sourceCheckedAt.toISOString();
+  const lastSuccessfulFetchAt = input.lastSuccessfulFetchAt?.toISOString();
   if (!isDataPublicationId(input.publicationId)) {
     throw new CacheError('Invalid publication ID', 'DATA_PUBLICATION_ID_INVALID');
   }
@@ -416,6 +435,7 @@ function createManifest(
     revision: input.revision,
     publicationId: input.publicationId,
     sourceCheckedAt,
+    ...(lastSuccessfulFetchAt ? { lastSuccessfulFetchAt } : {}),
     publishedAt: new Date().toISOString(),
     state: input.state,
     items: items.map((item) => item.manifest),
@@ -569,7 +589,7 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
   if (!raw) return null;
   try {
     const value = JSON.parse(raw) as unknown;
-    if (!isRecord(value) || !hasExactFields(value, MANIFEST_FIELDS)) return null;
+    if (!isRecord(value) || !hasManifestFields(value)) return null;
     if (
       value.dataset !== 'fpl:core' &&
       value.dataset !== 'fpl:live' &&
@@ -586,6 +606,9 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
       !isDataPublicationId(value.publicationId) ||
       typeof value.sourceCheckedAt !== 'string' ||
       !Number.isFinite(new Date(value.sourceCheckedAt).getTime()) ||
+      (value.lastSuccessfulFetchAt !== undefined &&
+        (typeof value.lastSuccessfulFetchAt !== 'string' ||
+          !Number.isFinite(new Date(value.lastSuccessfulFetchAt).getTime()))) ||
       typeof value.publishedAt !== 'string' ||
       !Number.isFinite(new Date(value.publishedAt).getTime()) ||
       !isCanonicalState(dataset, value.state) ||

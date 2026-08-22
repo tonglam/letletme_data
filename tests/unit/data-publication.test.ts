@@ -56,6 +56,19 @@ describe('data publication contract', () => {
     expect(parseDataPublicationManifest(JSON.stringify(manifest))).toEqual(manifest);
   });
 
+  test('accepts the optional successful-fetch heartbeat without changing revision identity', () => {
+    const manifest = {
+      ...validManifest(),
+      lastSuccessfulFetchAt: '2026-08-09T01:00:02.000Z',
+    };
+    expect(parseDataPublicationManifest(JSON.stringify(manifest))).toEqual(manifest);
+    expect(
+      parseDataPublicationManifest(
+        JSON.stringify({ ...manifest, lastSuccessfulFetchAt: 'not-a-date' }),
+      ),
+    ).toBeNull();
+  });
+
   test('rejects malformed IDs, duplicate names, and noncanonical item keys', () => {
     const manifest = validManifest();
     expect(

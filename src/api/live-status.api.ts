@@ -101,6 +101,9 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
             publicationId: selectedPublication.manifest.publicationId,
             state: selectedPublication.manifest.state,
             sourceCheckedAt: selectedPublication.manifest.sourceCheckedAt,
+            lastSuccessfulFetchAt:
+              selectedPublication.manifest.lastSuccessfulFetchAt ??
+              selectedPublication.manifest.sourceCheckedAt,
             source: selectedSource,
             fixtureCount: cachedPublication?.fixtures.length ?? null,
             eventLiveCount:
