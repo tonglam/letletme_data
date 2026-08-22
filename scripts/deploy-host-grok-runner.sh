@@ -15,7 +15,7 @@ test -n "$(docker image inspect "$image_ref" --format '{{.Id}}')"
 mkdir -p "$release_root/releases"
 release_path="$release_root/releases/$release_sha"
 temporary_path="$release_root/.runner.$$.tmp"
-previous_target=$(readlink -f "$release_root/current" 2>/dev/null || true)
+previous_target=$(readlink -e "$release_root/current" 2>/dev/null || true)
 previous_release=$(cat "$release_root/current.release" 2>/dev/null || printf unknown)
 previous_release=${previous_release:-unknown}
 if [[ -n "$previous_target" && "$previous_target" != "$release_root/releases/"* ]]; then

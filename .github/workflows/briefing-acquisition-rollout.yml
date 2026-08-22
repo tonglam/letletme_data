@@ -249,7 +249,7 @@ jobs:
             if [ "$ROLLOUT_MODE" = host-shadow ]; then
               services_quiesced=true
               docker compose stop -t 45 scheduler content-worker
-              runner_previous_target=$(readlink -f "$runner_root/current" 2>/dev/null || true)
+              runner_previous_target=$(readlink -e "$runner_root/current" 2>/dev/null || true)
               runner_previous_release=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
               runner_previous_release=${runner_previous_release:-unknown}
               runner_updated=true

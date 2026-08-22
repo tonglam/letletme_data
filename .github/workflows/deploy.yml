@@ -290,7 +290,7 @@ jobs:
               [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
               start_stage hostRunner
               runner_root=/home/workspace/letletme-grok-runner
-              runner_previous_target=$(readlink -f "$runner_root/current" 2>/dev/null || true)
+              runner_previous_target=$(readlink -e "$runner_root/current" 2>/dev/null || true)
               runner_previous_release=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
               test -x scripts/deploy-host-grok-runner.sh
               runner_updated=true
