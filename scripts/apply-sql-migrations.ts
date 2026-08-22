@@ -25,6 +25,11 @@ const APPROVED_BACKDATED_MIGRATIONS = new Set([
   '0017_core_mutation_safety.sql',
   '0018_content_publication_freeze.sql',
   '0019_bug_report_submission_request_hash.sql',
+  // Briefing migrations were merged alongside the platform 0025/0026 tail.
+  // They are additive content-schema backfills and are explicitly ordered
+  // here so production can apply them after the already-recorded tail.
+  '0025_content_source_control_plane.sql',
+  '0026_content_acquisition_run_engine.sql',
 ]);
 const STORAGE_MIGRATION = process.argv.includes('--storage-migration');
 const STORAGE_MIGRATION_APPLY = process.argv.includes('--apply');
