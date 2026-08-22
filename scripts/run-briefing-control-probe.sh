@@ -71,6 +71,7 @@ SET LOCAL idle_in_transaction_session_timeout = '20s';
 -- explicitly tagged control-probe rows; ordinary acquisition runs use their
 -- own lease reclaimer. We commit conservatively because the host process may
 -- already have started, and leave an audit trace explaining the ambiguity.
+\o /dev/null
 SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'));
 SELECT set_config('briefing.request_hash', :'request_hash', true);
 
@@ -107,11 +108,11 @@ BEGIN
       UPDATE content.acquisition_budget_reservations
       SET status = 'COMMITTED', updated_at = now()
       WHERE reservation_id = reservation.reservation_id;
-      UPDATE content.acquisition_budget_ledgers
-      SET reserved_units = reserved_units - reservation.units,
-          committed_units = committed_units + reservation.units,
+      UPDATE content.acquisition_budget_ledgers AS ledger
+      SET reserved_units = ledger.reserved_units - reservation.units,
+          committed_units = ledger.committed_units + reservation.units,
           updated_at = now()
-      WHERE ledger_id = reservation.ledger_id;
+      WHERE ledger.ledger_id = reservation.ledger_id;
       committed_units := committed_units + reservation.units;
     END LOOP;
 
@@ -157,6 +158,8 @@ BEGIN
 END
 $recover$;
 
+\o
+
 INSERT INTO content.acquisition_runs (
   run_id, window_start, window_end, idempotency_key, status,
   request_snapshot, request_hash, source_snapshot, endpoint_snapshot,
@@ -169,10 +172,12 @@ VALUES (
   '{"controlPlaneProbe":true,"probeTarget":"OfficialFPL"}'::jsonb
 );
 
+\o /dev/null
 SELECT set_config('briefing.run_id', :'run_id', true);
 SELECT set_config('briefing.reservation_id', :'reservation_id', true);
 SELECT set_config('briefing.ledger_id', :'ledger_id', true);
 SELECT set_config('briefing.daily_limit', :'daily_limit', true);
+\o
 
 DO $do$
 DECLARE
@@ -289,6 +294,7 @@ finalize_probe() {
 BEGIN;
 SET LOCAL statement_timeout = '15s';
 SET LOCAL lock_timeout = '2s';
+\o /dev/null
 SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'));
 SELECT set_config('briefing.run_id', :'run_id', true);
 SELECT set_config('briefing.reservation_id', :'reservation_id', true);
@@ -300,6 +306,7 @@ SELECT set_config('briefing.failure_class', :'failure_class', true);
 SELECT set_config('briefing.summary', :'summary', true);
 SELECT set_config('briefing.response_hash', :'response_hash', true);
 SELECT set_config('briefing.http_code', :'http_code', true);
+\o
 
 DO $do$
 DECLARE

@@ -515,7 +515,13 @@ export async function runFormalXWorker(
       const probeEvidence = probeProcessStarted
         ? hostXProbeEvidence('CONTROL_PLANE_PROBE_FAILED')
         : undefined;
-      if (failure.failureClass === 'RUNNER_CAPACITY' && !mainProviderProcessStarted) {
+      const transientPreProviderFailure = [
+        'RUNNER_CAPACITY',
+        'RUNNER_UNAVAILABLE',
+        'RUNNER_TIMEOUT',
+        'RUNNER_NOT_READY',
+      ].includes(failure.failureClass);
+      if (transientPreProviderFailure && !mainProviderProcessStarted) {
         if (probeOnly) {
           // Commit the probe unit but leave the original execution unit
           // reserved so capacity deferral can safely requeue a saturation
@@ -528,6 +534,7 @@ export async function runFormalXWorker(
         const deferred = await deferFormalRunForCapacity({
           runId: job.runId,
           metrics: { failureClass: failure.failureClass },
+          failureClass: failure.failureClass,
           probeEvidence,
           db,
         });

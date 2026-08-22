@@ -1538,6 +1538,7 @@ export async function deferFormalRunForCapacity(input: {
   runId: string;
   metrics: Readonly<Record<string, unknown>>;
   probeEvidence?: FormalRunProbeEvidence;
+  failureClass?: string;
   retryDelayMs?: number;
   db?: DbHandle;
 }): Promise<boolean> {
@@ -1570,9 +1571,10 @@ export async function deferFormalRunForCapacity(input: {
     const retryDelayMs = Math.max(1_000, input.retryDelayMs ?? 60_000);
     const nextEligibleAtDate = new Date(dbNow.getTime() + retryDelayMs);
     const nextEligibleAt = nextEligibleAtDate.toISOString();
+    const deferredFailureClass = (input.failureClass ?? 'RUNNER_CAPACITY').slice(0, 200);
     const metrics = {
       ...input.metrics,
-      deferredReason: 'RUNNER_CAPACITY',
+      deferredReason: deferredFailureClass,
       nextEligibleAt,
       ...(input.probeEvidence?.runMetrics ?? {}),
       ...(input.probeEvidence ? { probeCallCount: 1 } : {}),
@@ -1657,13 +1659,13 @@ export async function deferFormalRunForCapacity(input: {
           .set({
             status: 'PENDING',
             ...providerPatch,
-            failureClass: 'RUNNER_CAPACITY',
+            failureClass: deferredFailureClass,
             failureDetailsHash: sha256CanonicalJson(metrics),
-            errorSummary: 'Host Grok runner capacity was unavailable; X follow-up will retry',
+            errorSummary: `Host Grok runner ${deferredFailureClass} occurred; X follow-up will retry`,
             runMetrics: metrics,
             enqueueConfirmedAt: null,
             completedAt: null,
-            leaseExpiresAt: null,
+            leaseExpiresAt: new Date(dbNow.getTime() + 6 * 60_000),
             checkpointAdvanced: false,
           })
           .where(
@@ -1693,7 +1695,7 @@ export async function deferFormalRunForCapacity(input: {
       }
 
       await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
-      const gapReason = 'RUNNER_CAPACITY_FOLLOWUP_ORPHANED';
+      const gapReason = `${deferredFailureClass}_FOLLOWUP_ORPHANED`.slice(0, 200);
       const gapDetails = {
         ...metrics,
         gapReason,
@@ -1744,9 +1746,9 @@ export async function deferFormalRunForCapacity(input: {
       .set({
         status: 'BUDGET_DEFERRED',
         ...providerPatch,
-        failureClass: 'RUNNER_CAPACITY',
+        failureClass: deferredFailureClass,
         failureDetailsHash: sha256CanonicalJson(metrics),
-        errorSummary: 'Host Grok runner capacity was unavailable before provider start',
+        errorSummary: `Host Grok runner ${deferredFailureClass} occurred before provider start`,
         runMetrics: metrics,
         completedAt: dbNow,
         leaseExpiresAt: null,
