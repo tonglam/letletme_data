@@ -385,7 +385,12 @@ export async function runPicksProbeAndSync(
   return { canaryCount, synced: canaryCount, pending: remaining.length };
 }
 
-export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleDecision | null> {
+/**
+ * Observe and persist the lifecycle checkpoint without enqueuing work. The
+ * standalone scheduler owns queue dispatch, so it calls this on every pass to
+ * keep lifecycle state independent from publication revisions.
+ */
+export async function persistLiveLifecycleStatus(now = new Date()) {
   const season = await seasonRepository.findCurrent();
   const currentEvent = await (await import('./events.service')).getCurrentEvent(season);
   if (!currentEvent) return null;
@@ -447,6 +452,14 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         state: decision.state,
       });
     });
+
+  return { season, currentEvent, fixtures, decision };
+}
+
+export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleDecision | null> {
+  const tick = await persistLiveLifecycleStatus(now);
+  if (!tick) return null;
+  const { season, currentEvent, fixtures, decision } = tick;
 
   if (decision.shouldProbePicks || decision.shouldSyncPicks) {
     await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {
