@@ -218,8 +218,9 @@ test('creates one bounded saturation follow-up and turns a second saturation int
   expect(requeuedChild).toMatchObject({
     status: 'PENDING',
     completedAt: null,
-    leaseExpiresAt: null,
   });
+  expect(requeuedChild?.leaseExpiresAt).not.toBeNull();
+  expect(requeuedChild?.leaseExpiresAt?.getTime() ?? 0).toBeGreaterThan(Date.now());
   const [requeuedJob] = await db
     .select({
       deliveredAt: contentAcquisitionJobOutbox.deliveredAt,
