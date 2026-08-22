@@ -66,6 +66,7 @@ load_backup_settings() {
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
+DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
 DEPLOY_OLD_REVISION=''
 DEPLOY_LEDGER_BEFORE=''
@@ -141,18 +142,18 @@ deploy() {
     trap - EXIT
     set +e
     if [[ "$status" -ne 0 ]]; then
-      if [[ "$DEPLOY_RUNNER_UPDATED" = true ]]; then
+      if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_RUNNER_UPDATED" = true ]]; then
         export CONTENT_GROK_RUNNER_RELEASE_SHA="${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}"
         "${PROJECT_DIR}/scripts/rollback-host-grok-runner.sh" \
           /home/workspace/letletme-grok-runner \
           "$DEPLOY_RUNNER_PREVIOUS_TARGET" "$DEPLOY_RUNNER_PREVIOUS_RELEASE" || true
       fi
-      if [[ "$DEPLOY_MIGRATION_STARTED" = true ]]; then
+      if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = true ]]; then
         if ! restore_last_known_healthy_if_ledger_unchanged \
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION"; then
           log_error "Migration changed or obscured the ledger; leaving services stopped for forward recovery."
         fi
-      else
+      elif [[ "$DEPLOY_COMMITTED" = false ]]; then
         restore_stopped_services || true
       fi
     fi
@@ -307,6 +308,11 @@ deploy() {
     exit 1
   fi
   finish_stage
+  if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]]; then
+    test -x "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh"
+    "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh" "$ENV_FILE" "$MIGRATION_ENV_FILE"
+  fi
+  DEPLOY_COMMITTED=true
 }
 
 update_repo() {
