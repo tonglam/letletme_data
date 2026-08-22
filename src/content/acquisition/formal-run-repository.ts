@@ -4,6 +4,7 @@ import { and, asc, desc, eq, inArray, isNull, lte, max, or, sql } from 'drizzle-
 
 import {
   contentAcquisitionGaps,
+  contentAcquisitionBudgetReservations,
   contentAcquisitionJobOutbox,
   contentAcquisitionProviderTraces,
   contentAcquisitionRuns,
@@ -1446,6 +1447,11 @@ export async function deferFormalRunForCapacity(input: {
         status: contentAcquisitionRuns.status,
         scheduleId: contentAcquisitionRuns.scheduleId,
         endpointId: contentAcquisitionRuns.endpointId,
+        parentRunId: contentAcquisitionRuns.parentRunId,
+        sourcePartitionId: contentAcquisitionRuns.sourcePartitionId,
+        jobKind: contentAcquisitionRuns.jobKind,
+        windowStart: contentAcquisitionRuns.windowStart,
+        windowEnd: contentAcquisitionRuns.windowEnd,
       })
       .from(contentAcquisitionRuns)
       .where(eq(contentAcquisitionRuns.runId, input.runId))
@@ -1454,14 +1460,131 @@ export async function deferFormalRunForCapacity(input: {
     const run = rows[0];
     if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
 
-    await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
     const retryDelayMs = Math.max(1_000, input.retryDelayMs ?? 60_000);
-    const nextEligibleAt = new Date(dbNow.getTime() + retryDelayMs).toISOString();
+    const nextEligibleAtDate = new Date(dbNow.getTime() + retryDelayMs);
+    const nextEligibleAt = nextEligibleAtDate.toISOString();
     const metrics = {
       ...input.metrics,
       deferredReason: 'RUNNER_CAPACITY',
       nextEligibleAt,
     };
+
+    const isTriggeredXSaturationFollowUp =
+      run.parentRunId !== null &&
+      run.sourcePartitionId !== null &&
+      run.scheduleId === null &&
+      run.endpointId === null &&
+      (run.jobKind === 'X_KEYWORD_SCAN' || run.jobKind === 'X_SEMANTIC_SCAN');
+
+    if (isTriggeredXSaturationFollowUp) {
+      const [outbox] = await tx
+        .select({
+          outboxId: contentAcquisitionJobOutbox.outboxId,
+          queueName: contentAcquisitionJobOutbox.queueName,
+        })
+        .from(contentAcquisitionJobOutbox)
+        .where(eq(contentAcquisitionJobOutbox.runId, input.runId))
+        .for('update')
+        .limit(1);
+      const reservations = await tx
+        .select({ status: contentAcquisitionBudgetReservations.status })
+        .from(contentAcquisitionBudgetReservations)
+        .where(eq(contentAcquisitionBudgetReservations.runId, input.runId))
+        .for('update');
+      const hasReservedBudget =
+        reservations.length > 0 &&
+        reservations.every((reservation) => reservation.status === 'RESERVED');
+
+      if (outbox?.queueName === 'content-x-scan' && hasReservedBudget) {
+        const retryJobId = `content-x-capacity-retry-${sha256CanonicalJson({
+          runId: input.runId,
+          nextEligibleAt,
+        })}`;
+        const updated = await tx
+          .update(contentAcquisitionRuns)
+          .set({
+            status: 'PENDING',
+            failureClass: 'RUNNER_CAPACITY',
+            failureDetailsHash: sha256CanonicalJson(metrics),
+            errorSummary: 'Host Grok runner capacity was unavailable; X follow-up will retry',
+            runMetrics: metrics,
+            enqueueConfirmedAt: null,
+            completedAt: null,
+            leaseExpiresAt: null,
+            checkpointAdvanced: false,
+          })
+          .where(
+            and(
+              eq(contentAcquisitionRuns.runId, input.runId),
+              inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+            ),
+          )
+          .returning({ runId: contentAcquisitionRuns.runId });
+        const reopened = await tx
+          .update(contentAcquisitionJobOutbox)
+          .set({
+            jobId: retryJobId,
+            availableAt: nextEligibleAtDate,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            deliveredAt: null,
+            lastErrorHash: sha256CanonicalJson(metrics),
+            updatedAt: dbNow,
+          })
+          .where(eq(contentAcquisitionJobOutbox.outboxId, outbox.outboxId))
+          .returning({ outboxId: contentAcquisitionJobOutbox.outboxId });
+        if (updated.length !== 1 || reopened.length !== 1) {
+          throw new Error('X saturation follow-up capacity retry transition was lost');
+        }
+        return true;
+      }
+
+      await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+      const gapReason = 'RUNNER_CAPACITY_FOLLOWUP_ORPHANED';
+      const gapDetails = {
+        ...metrics,
+        gapReason,
+        outboxPresent: Boolean(outbox),
+        outboxQueue: outbox?.queueName ?? null,
+        reservationStatuses: reservations.map((reservation) => reservation.status),
+      };
+      const updated = await tx
+        .update(contentAcquisitionRuns)
+        .set({
+          status: 'GAP',
+          failureClass: gapReason,
+          failureDetailsHash: sha256CanonicalJson(gapDetails),
+          errorSummary: 'X saturation follow-up could not be safely requeued',
+          runMetrics: gapDetails,
+          completedAt: dbNow,
+          leaseExpiresAt: null,
+          checkpointAdvanced: false,
+        })
+        .where(
+          and(
+            eq(contentAcquisitionRuns.runId, input.runId),
+            inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+          ),
+        )
+        .returning({ runId: contentAcquisitionRuns.runId });
+      if (updated.length !== 1) throw new Error('X saturation follow-up gap transition was lost');
+      if (!run.windowStart || !run.windowEnd) {
+        throw new Error('X saturation follow-up gap window is missing');
+      }
+      await tx.insert(contentAcquisitionGaps).values({
+        gapId: randomUUID(),
+        declaringRunId: input.runId,
+        partitionId: run.sourcePartitionId,
+        windowStart: run.windowStart,
+        windowEnd: run.windowEnd,
+        reason: gapReason,
+        detailsHash: sha256CanonicalJson(gapDetails),
+        declaredAt: dbNow,
+      });
+      return true;
+    }
+
+    await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
     await tx
       .update(contentAcquisitionRuns)
       .set({

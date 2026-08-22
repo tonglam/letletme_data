@@ -14,9 +14,10 @@ import {
 } from '../../src/content/acquisition/formal-run-repository';
 import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/manifest-reconciler';
 import { compileXBudgetPolicy } from '../../src/content/acquisition/x-budget';
-import type {
-  GrokBuildExecutionResult,
-  GrokBuildXPostV1,
+import {
+  GrokBuildExecutionError,
+  type GrokBuildExecutionResult,
+  type GrokBuildXPostV1,
 } from '../../src/content/acquisition/grok-build-executor';
 import type { XToolRequestV1 } from '../../src/content/acquisition/x-query-compiler';
 import { getContentRuntimeFlags } from '../../src/content/config';
@@ -189,6 +190,50 @@ test('creates one bounded saturation follow-up and turns a second saturation int
     .where(eq(contentAcquisitionBudgetReservations.runId, child.runId));
   expect(childReservations.length).toBeGreaterThanOrEqual(2);
   expect(childReservations.every((reservation) => reservation.status === 'RESERVED')).toBe(true);
+
+  const capacityDeferred = await runFormalXWorker(
+    { schemaVersion: 1, runId: child.runId },
+    {
+      flags,
+      executor: {
+        execute: async () => {
+          throw new GrokBuildExecutionError(
+            'RUNNER_CAPACITY',
+            'synthetic host runner capacity exhaustion',
+          );
+        },
+      },
+      xBudgetPolicy: budgetPolicy,
+    },
+  );
+  expect(capacityDeferred.status).toBe('BUDGET_DEFERRED');
+  const [requeuedChild] = await db
+    .select({
+      status: contentAcquisitionRuns.status,
+      completedAt: contentAcquisitionRuns.completedAt,
+      leaseExpiresAt: contentAcquisitionRuns.leaseExpiresAt,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, child.runId));
+  expect(requeuedChild).toMatchObject({
+    status: 'PENDING',
+    completedAt: null,
+    leaseExpiresAt: null,
+  });
+  const [requeuedJob] = await db
+    .select({
+      deliveredAt: contentAcquisitionJobOutbox.deliveredAt,
+      availableAt: contentAcquisitionJobOutbox.availableAt,
+    })
+    .from(contentAcquisitionJobOutbox)
+    .where(eq(contentAcquisitionJobOutbox.runId, child.runId));
+  expect(requeuedJob?.deliveredAt).toBeNull();
+  expect(requeuedJob?.availableAt.getTime()).toBeGreaterThan(Date.now() - 1_000);
+  const requeuedReservations = await db
+    .select({ status: contentAcquisitionBudgetReservations.status })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, child.runId));
+  expect(requeuedReservations.every((reservation) => reservation.status === 'RESERVED')).toBe(true);
 
   const followUp = await runFormalXWorker(
     { schemaVersion: 1, runId: child.runId },
