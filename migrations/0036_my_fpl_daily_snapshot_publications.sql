@@ -150,7 +150,8 @@ CREATE TABLE competition.my_fpl_snapshot_tournament_rows (
     FOREIGN KEY (season_id, entry_id) REFERENCES competition.entries(season_id, entry_id),
   CONSTRAINT my_fpl_snapshot_tournament_rows_tournament_fk
     FOREIGN KEY (season_id, tournament_id)
-    REFERENCES competition.tournaments(season_id, tournament_id),
+    REFERENCES competition.tournaments(season_id, tournament_id)
+    ON DELETE CASCADE,
   CONSTRAINT my_fpl_snapshot_tournament_rows_payload_check
     CHECK (jsonb_typeof(payload) = 'object'::text)
 );
@@ -174,7 +175,8 @@ CREATE TABLE competition.my_fpl_snapshot_tournament_aggregates (
     ON DELETE CASCADE,
   CONSTRAINT my_fpl_snapshot_tournament_aggregates_tournament_fk
     FOREIGN KEY (season_id, tournament_id)
-    REFERENCES competition.tournaments(season_id, tournament_id),
+    REFERENCES competition.tournaments(season_id, tournament_id)
+    ON DELETE CASCADE,
   CONSTRAINT my_fpl_snapshot_tournament_aggregates_payload_check
     CHECK (jsonb_typeof(payload) = 'object'::text)
 );

@@ -21,6 +21,8 @@ export type TournamentSyncJobSource =
 
 export type TournamentSyncEnqueueOptions = {
   delay?: number;
+  /** Correlates cascade children with the My FPL snapshot coordinator. */
+  runId?: string;
   cascadeId?: string;
   jobId?: string;
   finalizationTargets?: TournamentFinalizationTarget[];
@@ -293,7 +295,7 @@ async function enqueueTournamentSyncJob(
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
-      runId: randomUUID(),
+      runId: options.runId ?? randomUUID(),
       ...(options.obligationId ? { obligationId: options.obligationId } : {}),
       ...(options.obligationGeneration === undefined
         ? {}

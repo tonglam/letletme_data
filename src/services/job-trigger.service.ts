@@ -31,6 +31,7 @@ import {
   enqueuePlayerSeasonSummaryRepair,
   enqueuePostMatchConsolidation,
   enqueueMyFplSnapshot,
+  enqueueMyFplSnapshotOutbox,
   enqueueTournamentTrendsRepair,
 } from '../jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
@@ -253,6 +254,30 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
         ...(requested.snapshotIdempotencyKey
           ? { snapshotIdempotencyKey: requested.snapshotIdempotencyKey }
           : {}),
+      });
+    },
+    'my-fpl-snapshot': async () => {
+      const season = await seasonRepository.findCurrent();
+      const requested = readMyFplManualSnapshotInput(input);
+      const currentEvent = requested.eventId
+        ? await eventRepository.findById(season, requested.eventId)
+        : await getCurrentEvent(season);
+      if (!currentEvent) throw new Error('No current event found');
+      return enqueueMyFplSnapshot(season, 'manual', {
+        eventId: currentEvent.id,
+        snapshotKind: requested.snapshotKind ?? 'PROVISIONAL',
+        jobId: `manual-my-fpl-snapshot-${currentEvent.id}-${Date.now()}`,
+        ...(requested.snapshotActor ? { snapshotActor: requested.snapshotActor } : {}),
+        ...(requested.snapshotReason ? { snapshotReason: requested.snapshotReason } : {}),
+        ...(requested.snapshotIdempotencyKey
+          ? { snapshotIdempotencyKey: requested.snapshotIdempotencyKey }
+          : {}),
+      });
+    },
+    'my-fpl-snapshot-outbox': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueueMyFplSnapshotOutbox(season, 'manual', {
+        jobId: `manual-my-fpl-snapshot-outbox-${Date.now()}`,
       });
     },
     'my-fpl-finalization': async () => {

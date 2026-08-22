@@ -3290,7 +3290,7 @@ export const myFplSnapshotTournamentRowsInCompetition = competition.table(
       columns: [table.seasonId, table.tournamentId],
       foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
       name: 'my_fpl_snapshot_tournament_rows_tournament_fk',
-    }),
+    }).onDelete('cascade'),
     primaryKey({
       columns: [table.seasonId, table.eventId, table.revision, table.tournamentId, table.entryId],
       name: 'my_fpl_snapshot_tournament_rows_pkey',
@@ -3326,7 +3326,7 @@ export const myFplSnapshotTournamentAggregatesInCompetition = competition.table(
       columns: [table.seasonId, table.tournamentId],
       foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
       name: 'my_fpl_snapshot_tournament_aggregates_tournament_fk',
-    }),
+    }).onDelete('cascade'),
     primaryKey({
       columns: [table.seasonId, table.eventId, table.revision, table.tournamentId],
       name: 'my_fpl_snapshot_tournament_aggregates_pkey',

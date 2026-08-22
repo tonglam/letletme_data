@@ -43,6 +43,75 @@ import { logError, logInfo } from '../utils/logger';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
+import { dataSyncQueue } from '../queues/data-sync.queue';
+import { entrySyncQueue } from '../queues/entry-sync.queue';
+import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
+
+const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 10 * 60_000;
+const MY_FPL_REFRESH_WAIT_POLL_MS = 2_000;
+const MY_FPL_REFRESH_QUEUE_STATES = [
+  'waiting',
+  'active',
+  'delayed',
+  'prioritized',
+  'paused',
+  'failed',
+] as const;
+
+const sleep = (milliseconds: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+
+/**
+ * Refresh jobs fan out into keyset chunks and tournament cascade children. A
+ * Promise.all around Queue.add only waits for Redis enqueue acknowledgements;
+ * it is not a publication barrier. Drain every child carrying this run id so
+ * capture cannot reuse a structurally complete row from the previous day.
+ */
+async function waitForMyFplRefreshJobs(runId: string): Promise<void> {
+  const queues: Array<typeof dataSyncQueue | typeof entrySyncQueue | typeof tournamentSyncQueue> = [
+    dataSyncQueue,
+    entrySyncQueue,
+    tournamentSyncQueue,
+  ];
+  const deadline = Date.now() + MY_FPL_REFRESH_WAIT_TIMEOUT_MS;
+  let observed = false;
+
+  while (Date.now() < deadline) {
+    let pending = 0;
+    const failed: string[] = [];
+    for (const queue of queues) {
+      for (const state of MY_FPL_REFRESH_QUEUE_STATES) {
+        const jobs = await queue.getJobs([state]);
+        for (const candidate of jobs) {
+          const candidateData = candidate.data;
+          if (
+            !candidateData ||
+            typeof candidateData !== 'object' ||
+            !('runId' in candidateData) ||
+            candidateData.runId !== runId
+          ) {
+            continue;
+          }
+          observed = true;
+          if (state === 'failed') {
+            failed.push(`${queue.name}:${candidate.name}:${candidate.id ?? 'unknown'}`);
+          } else {
+            pending += 1;
+          }
+        }
+      }
+    }
+    if (failed.length > 0) {
+      throw new Error(
+        `My FPL refresh run ${runId} has terminal queue failures: ${failed.join(', ')}`,
+      );
+    }
+    if (observed && pending === 0) return;
+    await sleep(MY_FPL_REFRESH_WAIT_POLL_MS);
+  }
+
+  throw new Error(`My FPL refresh run ${runId} did not settle before the coordinator timeout`);
+}
 
 async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unknown> {
   const context = {
@@ -81,7 +150,17 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
         }
         const season = await seasonRepository.findCurrent();
         const active = await getActiveMyFplPublication(season, job.data.eventId);
-        if (active?.kind === 'FINAL') return { status: 'noop', publication: active };
+        const hasExplicitFinalOverride =
+          job.data.snapshotKind === 'FINAL' &&
+          Boolean(job.data.snapshotActor) &&
+          Boolean(job.data.snapshotReason) &&
+          Boolean(job.data.snapshotIdempotencyKey);
+        if (
+          active?.kind === 'FINAL' &&
+          (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
+        ) {
+          return { status: 'noop', publication: active };
+        }
 
         // Refresh the mutable inputs for this retry attempt first. The
         // publication service remains fail-closed, so an upstream 503, a
@@ -92,11 +171,13 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
         await Promise.all([
           enqueueCoreSnapshotJob(season, source, {
             jobId: `my-fpl-${attemptKey}-core`,
+            runId: attemptKey,
             removeOnSettle: false,
           }),
           enqueuePlayerStatsSyncJob(season, source, {
             eventId: job.data.eventId,
             jobId: `my-fpl-${attemptKey}-player-stats`,
+            runId: attemptKey,
             removeOnSettle: false,
           }),
           enqueueEntryInfoSyncJob(season, source, {
@@ -130,17 +211,22 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           enqueueTournamentRosterSync(season, source, {
             finalizedEventId: job.data.eventId,
             jobId: `my-fpl-${attemptKey}-tournament-roster`,
+            runId: attemptKey,
           }),
           enqueueTournamentEventResults(season, job.data.eventId, source, {
             jobId: `my-fpl-${attemptKey}-tournament-results`,
+            runId: attemptKey,
           }),
           enqueueTournamentEventPicks(season, job.data.eventId, source, {
             jobId: `my-fpl-${attemptKey}-tournament-picks`,
+            runId: attemptKey,
           }),
           enqueueTournamentTransfersPre(season, job.data.eventId, source, {
             jobId: `my-fpl-${attemptKey}-tournament-transfers`,
+            runId: attemptKey,
           }),
         ]);
+        await waitForMyFplRefreshJobs(attemptKey);
         const capture = await captureMyFplSnapshot(
           season,
           job.data.eventId,

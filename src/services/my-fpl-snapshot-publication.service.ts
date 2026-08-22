@@ -169,6 +169,7 @@ type TournamentRow = {
   tournament_id: number;
   entry_id: number;
   group_id: number | null;
+  current_group_rank: number | null;
   entry_name: string | null;
   player_name: string | null;
   event_points: number | null;
@@ -419,7 +420,8 @@ const resultPayload = (result: EventResult, picks: JsonRecord[]): JsonRecord => 
   eventChip: chip(result.event_chip),
   eventCaptainPoints: result.captain_points ?? 0,
   playedCaptainWebName:
-    (picks.find((pick) => pick.isCaptain === true)?.webName as string | undefined) ?? null,
+    (picks.find((pick) => integerValue(pick.element) === result.played_captain_element_id)
+      ?.webName as string | undefined) ?? null,
   teamValue: result.team_value,
   bank: result.bank,
   picks,
@@ -1016,7 +1018,7 @@ export async function captureMyFplSnapshot(
       ) historical_team ON TRUE
       LEFT JOIN fpl.teams team
         ON team.season_id = player.season_id
-       AND team.team_id = historical_team.team_id
+       AND team.team_id = COALESCE(historical_team.team_id, player.team_id)
       LEFT JOIN fpl.player_gameweek_stats stats
         ON stats.season_id = pick.season_id
        AND stats.event_id = pick.event_id
@@ -1042,7 +1044,7 @@ export async function captureMyFplSnapshot(
            ELSE fixture.team_h_id END
         WHERE fixture.season_id = pick.season_id
           AND fixture.event_id = pick.event_id
-          AND fixture_stats.team_id = historical_team.team_id
+          AND fixture_stats.team_id = COALESCE(historical_team.team_id, player.team_id)
       ) fixture ON TRUE
       WHERE pick.season_id = ${season.seasonId} AND pick.event_id = ${eventId}
       ORDER BY pick.entry_id, pick.position
@@ -1199,6 +1201,7 @@ export async function captureMyFplSnapshot(
                result.event_net_points, result.event_rank, result.overall_points,
                result.overall_rank, result.event_chip::text,
                result.played_captain_element_id AS captain_id,
+               group_result.event_group_rank AS current_group_rank,
                captain.web_name AS captain_web_name,
                captain_team.short_name AS captain_team_short_name,
                result.captain_points, result.team_value, result.bank,
@@ -1318,9 +1321,17 @@ export async function captureMyFplSnapshot(
       const currentRanks = rankForBoard(boardRows, 'eventNetPoints');
       const previousRanks = rankForBoard(boardRows, 'previousEventNetPoints');
       for (const row of boardRows) {
-        row.rank = currentRanks.get(integerValue(row.entryId)) ?? null;
-        row.previousRank = previousRanks.get(integerValue(row.entryId)) ?? null;
-        row.fieldRank = row.rank;
+        const sourceRow = sourceRows.find(
+          (candidate) => candidate.entry_id === integerValue(row.entryId),
+        );
+        // Points-race group ranks are authoritative for the tournament rank;
+        // the raw event-net-points ordering is only the full-field fallback
+        // used by tournaments without a group-result rank.
+        row.rank =
+          sourceRow?.current_group_rank ?? currentRanks.get(integerValue(row.entryId)) ?? null;
+        row.previousRank =
+          sourceRow?.previous_group_rank ?? previousRanks.get(integerValue(row.entryId)) ?? null;
+        row.fieldRank = currentRanks.get(integerValue(row.entryId)) ?? null;
         tournamentPayloadRows.push({
           season_id: season.seasonId,
           event_id: eventId,
@@ -1366,7 +1377,7 @@ export async function captureMyFplSnapshot(
       .update(postgresJsonbCanonicalJson(content), 'utf8')
       .digest('hex');
 
-    const publicationRows = await tx<{ revision: number; published_at: Date | string }[]>`
+    const publicationRows = await tx<{ revision: number | string; published_at: Date | string }[]>`
       INSERT INTO competition.my_fpl_snapshot_publications
         (season_id, event_id, snapshot_date, source_checked_at, published_at, kind,
          active, expected_entry_count, ready_entry_count, empty_entry_count,
@@ -1379,8 +1390,10 @@ export async function captureMyFplSnapshot(
          ${overrideActor}, ${overrideReason}, ${idempotencyKey})
       RETURNING revision, published_at
     `;
-    const revision = publicationRows[0]?.revision;
-    if (!revision) throw new Error('My FPL publication revision was not allocated');
+    const revision = Number(publicationRows[0]?.revision);
+    if (!Number.isSafeInteger(revision) || revision <= 0) {
+      throw new Error('My FPL publication revision was not allocated');
+    }
 
     const entryInsertRows = payloadEntries.map((row) => ({ ...row, revision }));
     if (entryInsertRows.length > 0) {
