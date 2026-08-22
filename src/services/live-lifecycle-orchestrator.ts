@@ -76,6 +76,8 @@ export type LiveLifecycleObservation = {
   lastRevision?: number | null;
   /** When the current revision first became quiet. */
   unchangedSince?: number | null;
+  /** Whether the current time is still inside an authoritative fixture window. */
+  matchDayTime?: boolean;
   /** A valid live publication can lead core fixture lifecycle flags briefly. */
   publicationActive?: boolean;
   publicationStarted?: boolean;
@@ -125,7 +127,13 @@ export function decideLiveLifecycle(
   const coreActive = fixtures.some(
     (fixture) => fixture.started && !fixture.finished && !fixture.finishedProvisional,
   );
-  const active = coreActive || observation.publicationActive === true;
+  const activeEvidence = coreActive || observation.publicationActive === true;
+  // FPL's finished flag can lag for hours.  It is useful as a short grace
+  // period, but must not keep an old publication in LIVE_ACTIVE forever. The
+  // orchestrator passes the same bounded match-window decision used by the
+  // producer, while unit callers that do not provide it retain the historical
+  // evidence-only behaviour.
+  const active = activeEvidence && observation.matchDayTime !== false;
   const anyStarted =
     fixtures.some((fixture) => fixture.started) || observation.publicationStarted === true;
   const futureFixtures = fixtures.some(
@@ -381,14 +389,27 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
   const key = `${season.seasonCode}:${currentEvent.id}`;
   const cache = await readLiveSnapshotCache(season.seasonCode, currentEvent.id).catch(() => null);
   const revision = cache?.manifest.revision ?? null;
+  const persisted = await liveLifecycleStatusRepository
+    .findByEventId(season, currentEvent.id)
+    .catch(() => null);
+  const publishedAtMs = cache?.manifest.publishedAt
+    ? new Date(cache.manifest.publishedAt).getTime()
+    : Number.NaN;
+  const persistedSourceCheckedAtMs = persisted?.sourceCheckedAt?.getTime() ?? Number.NaN;
+  const initialUnchangedSince = Number.isFinite(publishedAtMs)
+    ? Math.min(now.getTime(), publishedAtMs)
+    : Number.isFinite(persistedSourceCheckedAtMs)
+      ? Math.min(now.getTime(), persistedSourceCheckedAtMs)
+      : now.getTime();
   const previous = daySettlingStates.get(key);
   if (!previous || previous.revision !== revision) {
-    daySettlingStates.set(key, { revision, unchangedSince: now.getTime() });
+    daySettlingStates.set(key, { revision, unchangedSince: initialUnchangedSince });
   }
   const observation = daySettlingStates.get(key);
   const decision = decideLiveLifecycle(currentEvent, fixtures, now, {
     lastRevision: revision,
     unchangedSince: observation?.unchangedSince ?? null,
+    matchDayTime: isMatchDayTime(currentEvent, fixtures, now),
     publicationStarted: cache?.fixtures.some((fixture) => fixture.started === true),
     publicationActive: cache?.fixtures.some(
       (fixture) => fixture.started === true && !fixture.finished && !fixture.finishedProvisional,
@@ -403,9 +424,6 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
   }
 
   const nextRefreshDelay = lifecycleDelay(decision, season, currentEvent.id, now);
-  const persisted = await liveLifecycleStatusRepository
-    .findByEventId(season, currentEvent.id)
-    .catch(() => null);
   await liveLifecycleStatusRepository
     .upsert(season, {
       eventId: currentEvent.id,
