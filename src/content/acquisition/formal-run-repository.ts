@@ -298,7 +298,7 @@ async function outstandingXRunCount(tx: TransactionHandle, dbNow: Date): Promise
     FROM content.acquisition_runs
     WHERE adapter_kind IN ('X_ACCOUNT', 'X_SEMANTIC')
       AND status IN ('PENDING', 'RUNNING')
-      AND (lease_expires_at IS NULL OR lease_expires_at > ${dbNow})
+      AND (lease_expires_at IS NULL OR lease_expires_at > ${dbNow.toISOString()}::timestamptz)
   `);
   const outstanding = Number(rows[0]?.outstanding ?? 0);
   if (!Number.isSafeInteger(outstanding) || outstanding < 0) {
