@@ -27,80 +27,52 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
       return { success: false, code: 'LIVE_EVENT_NOT_FOUND' };
     }
 
-    const [
-      fixtures,
-      lifecycle,
-      redisRead,
-      postgresManifestRead,
-      postgresEventLivesRead,
-      managerRead,
-    ] = await Promise.all([
-      fixtureRepository.findByEvent(season, event.id),
-      liveLifecycleStatusRepository.findByEventId(season, event.id),
-      (async () => {
-        try {
-          return { value: await readLiveSnapshotCache(season.seasonCode, event.id), error: null };
-        } catch (error) {
-          return {
-            value: null,
-            error: error instanceof Error ? error.name : 'UNKNOWN',
-          };
-        }
-      })(),
-      (async () => {
-        try {
-          return {
-            value: await syncOperationsRepository.findActivePublicationManifest(
-              'fpl:live',
-              season,
-              event.id,
-            ),
-            error: null,
-          };
-        } catch (error) {
-          return {
-            value: null,
-            error: error instanceof Error ? error.name : 'UNKNOWN',
-          };
-        }
-      })(),
-      (async () => {
-        try {
-          return {
-            value: await syncOperationsRepository.findActiveLiveEventLives(season, event.id),
-            error: null,
-          };
-        } catch (error) {
-          return {
-            value: null,
-            error: error instanceof Error ? error.name : 'UNKNOWN',
-          };
-        }
-      })(),
-      (async () => {
-        try {
-          return {
-            value: await managerScoreCheckpointRepository.findCoverageByEvent(season, event.id),
-            error: null,
-          };
-        } catch (error) {
-          return {
-            value: null,
-            error: error instanceof Error ? error.name : 'UNKNOWN',
-          };
-        }
-      })(),
-    ]);
-    const cachedPublication = redisRead.value;
-    const postgresManifest = postgresManifestRead.value;
-    const postgresEventLives = postgresEventLivesRead.value;
-    const postgresPublication =
-      postgresManifest && postgresEventLives
-        ? {
-            manifest: postgresManifest,
-            eventLives: postgresEventLives,
+    const [fixtures, lifecycle, redisRead, postgresPublicationRead, managerRead] =
+      await Promise.all([
+        fixtureRepository.findByEvent(season, event.id),
+        liveLifecycleStatusRepository.findByEventId(season, event.id),
+        (async () => {
+          try {
+            return { value: await readLiveSnapshotCache(season.seasonCode, event.id), error: null };
+          } catch (error) {
+            return {
+              value: null,
+              error: error instanceof Error ? error.name : 'UNKNOWN',
+            };
           }
-        : null;
+        })(),
+        (async () => {
+          try {
+            return {
+              value: await syncOperationsRepository.findActiveLivePublicationEvidence(
+                season,
+                event.id,
+              ),
+              error: null,
+            };
+          } catch (error) {
+            return {
+              value: null,
+              error: error instanceof Error ? error.name : 'UNKNOWN',
+            };
+          }
+        })(),
+        (async () => {
+          try {
+            return {
+              value: await managerScoreCheckpointRepository.findCoverageByEvent(season, event.id),
+              error: null,
+            };
+          } catch (error) {
+            return {
+              value: null,
+              error: error instanceof Error ? error.name : 'UNKNOWN',
+            };
+          }
+        })(),
+      ]);
+    const cachedPublication = redisRead.value;
+    const postgresPublication = postgresPublicationRead.value;
     const selectedPublication = cachedPublication ?? postgresPublication;
     const selectedSource = cachedPublication ? 'REDIS' : postgresPublication ? 'POSTGRES' : null;
     const finishedFixtures = fixtures.filter(
@@ -140,12 +112,11 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         publication: selectedPublication ? 'AVAILABLE' : 'NO_NEW_REVISION',
         fallback: {
           redis: redisRead.error ? 'UNAVAILABLE' : cachedPublication ? 'AVAILABLE' : 'EMPTY',
-          postgres:
-            postgresManifestRead.error || postgresEventLivesRead.error
-              ? 'UNAVAILABLE'
-              : postgresPublication
-                ? 'AVAILABLE'
-                : 'EMPTY',
+          postgres: postgresPublicationRead.error
+            ? 'UNAVAILABLE'
+            : postgresPublication
+              ? 'AVAILABLE'
+              : 'EMPTY',
           selected: selectedSource ?? 'NONE',
         },
         manager: managerRead.value

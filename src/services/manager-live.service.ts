@@ -699,6 +699,37 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         entryScope,
         { maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES },
       );
+      const pending = staleOrMissing.filter(
+        (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+      );
+      if (pending.length > 0) {
+        const backgroundKey = `h2h:${season.seasonCode}:${input.eventId}:${input.tournamentId}:${pending
+          .slice()
+          .sort((left, right) => left - right)
+          .join(',')}`;
+        scheduleBackgroundRefresh(backgroundKey, async () => {
+          const backgroundRows = await readCachedRows(
+            redis,
+            season.seasonCode,
+            input.eventId,
+            entryScope,
+            pending,
+          );
+          await refreshEntrySummaries(
+            season,
+            input.eventId,
+            pending,
+            backgroundRows,
+            redis,
+            entryScope,
+          );
+          logDebug('Official H2H manager background refresh completed', {
+            eventId: input.eventId,
+            tournamentId: input.tournamentId,
+            remaining: pending.length,
+          });
+        });
+      }
     }
   } else if (input.tournamentId !== undefined && staleOrMissing.length > 0) {
     if (!tournament) throw new Error('Tournament validation unexpectedly missing');
