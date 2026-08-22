@@ -60,6 +60,26 @@ curl -X POST "$DATA_URL/event-lives/sync/1" -H "$DATA_AUTH_HEADER"
 `cache` publishes one coherent live revision. `sync` also persists event-live and explain facts.
 Both validate the complete current-season player and fixture identity baseline.
 
+## Official manager live read-through
+
+The GraphQL service uses this protected endpoint for official manager headlines. It is
+season-scoped, accepts at most 500 entries, and does not accept caller-supplied league
+identities. A tournament ID is checked against the current-season roster; H2H tournaments
+return `UNSUPPORTED_H2H_LIVE` and remain on the legacy GraphQL adapter.
+
+```bash
+curl -X POST "$DATA_URL/internal/manager-live/resolve" \
+  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+  -d '{"eventId":1,"entryIds":[12345,67890],"tournamentId":42}'
+```
+
+Rows are published under `OfficialManagerLive:{season}:{event}` with a 48-hour Redis
+retention window. Each row exposes `checkedAt` and `staleAt`. Rows outside the stale window
+are not returned; callers receive an explicit unavailable result instead of a locally
+calculated manager score. This is a forward-only contract: there is no local manager-score
+mode or rollback switch; an unavailable row is repaired by refreshing the official
+publication.
+
 ## Entries
 
 ```bash
