@@ -124,6 +124,24 @@ describe('live snapshot preparation', () => {
         }),
       ),
     ).toBe('scheduled');
+    expect(
+      prepareLiveSnapshot(
+        1,
+        mockEventLiveResponseFixture,
+        [
+          liveRawFixture({ finished_provisional: true, minutes: 90 }),
+          liveRawFixture({
+            id: mockRawFPLFixture1.id + 1,
+            started: false,
+            minutes: 0,
+            team_h_score: null,
+            team_a_score: null,
+          }),
+        ],
+        referenceData(),
+        [1, 2],
+      ).state,
+    ).toBe('live');
     expect(prepare(liveRawFixture())).toBe('live');
     expect(
       prepare(
