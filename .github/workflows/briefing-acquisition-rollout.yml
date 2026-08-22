@@ -141,8 +141,8 @@ jobs:
                   'fpl-podcast-x',
                   'fantasy-football-hub-x',
                   'all-about-fpl-x',
-                  'brighton-official-x',
-                  'crystal-palace-official-x'
+                  'brighton-x',
+                  'crystal-palace-x'
                 )
                   AND endpoint.adapter_kind = 'X_ACCOUNT'
                   AND endpoint.status = 'active'
