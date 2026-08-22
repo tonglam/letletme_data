@@ -128,7 +128,7 @@ jobs:
               original_status=$?
               trap - EXIT
               set +e
-              if [ "$original_status" -ne 0 ] && [ "$runner_updated" = true ]; then
+              if [ "$original_status" -ne 0 ] && [ "$deployment_committed" = false ] && [ "$runner_updated" = true ]; then
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 scripts/rollback-host-grok-runner.sh \
                   "/home/workspace/letletme-grok-runner" \
@@ -296,8 +296,6 @@ jobs:
                 "$runner_root"
               test -x scripts/run-briefing-control-probe.sh
               scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$DEPLOY_SHA"
-              test -x scripts/rearm-briefing-x-after-probe.sh
-              scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
               finish_stage
             else
               echo 'deploy: host Grok runner is not required while X scanning is disabled'
@@ -328,8 +326,12 @@ jobs:
               scripts/verify-runtime-health.sh
 
             finish_stage
-            docker compose ps
+            if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]]; then
+              test -x scripts/rearm-briefing-x-after-probe.sh
+              scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
+            fi
             deployment_committed=true
+            docker compose ps
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
               chmod 600 "$HOME/.letletme-data-previous-image"

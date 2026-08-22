@@ -1657,10 +1657,15 @@ export async function deferFormalRunForCapacity(input: {
         .from(contentAcquisitionBudgetReservations)
         .where(eq(contentAcquisitionBudgetReservations.runId, input.runId))
         .for('update');
+      const activeReservations = reservations.filter(
+        (reservation) => reservation.status !== 'RELEASED',
+      );
       const hasReservedBudget =
-        reservations.length > 0 &&
-        reservations.some((reservation) => reservation.status === 'RESERVED') &&
-        reservations.every((reservation) => ['RESERVED', 'COMMITTED'].includes(reservation.status));
+        activeReservations.length > 0 &&
+        activeReservations.some((reservation) => reservation.status === 'RESERVED') &&
+        activeReservations.every((reservation) =>
+          ['RESERVED', 'COMMITTED'].includes(reservation.status),
+        );
 
       if (outbox?.queueName === 'content-x-scan' && hasReservedBudget) {
         const retryJobId = `content-x-capacity-retry-${sha256CanonicalJson({

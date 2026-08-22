@@ -191,6 +191,34 @@ test('creates one bounded saturation follow-up and turns a second saturation int
   expect(childReservations.length).toBeGreaterThanOrEqual(2);
   expect(childReservations.every((reservation) => reservation.status === 'RESERVED')).toBe(true);
 
+  const probeRejected = await runFormalXWorker(
+    { schemaVersion: 1, runId: child.runId },
+    {
+      flags,
+      executor: {
+        execute: async (_request, hooks) => {
+          await hooks?.onProbeRequest?.();
+          throw new GrokBuildExecutionError(
+            'RUNNER_NOT_READY',
+            'synthetic readiness probe rejection before provider start',
+          );
+        },
+      },
+      xBudgetPolicy: budgetPolicy,
+    },
+  );
+  expect(probeRejected.status).toBe('BUDGET_DEFERRED');
+  const probeRejectedReservations = await db
+    .select({ status: contentAcquisitionBudgetReservations.status })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, child.runId));
+  expect(probeRejectedReservations.some((reservation) => reservation.status === 'RELEASED')).toBe(
+    true,
+  );
+  expect(probeRejectedReservations.some((reservation) => reservation.status === 'RESERVED')).toBe(
+    true,
+  );
+
   const capacityDeferred = await runFormalXWorker(
     { schemaVersion: 1, runId: child.runId },
     {
@@ -234,7 +262,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
     .select({ status: contentAcquisitionBudgetReservations.status })
     .from(contentAcquisitionBudgetReservations)
     .where(eq(contentAcquisitionBudgetReservations.runId, child.runId));
-  expect(requeuedReservations.every((reservation) => reservation.status === 'RESERVED')).toBe(true);
+  expect(requeuedReservations.some((reservation) => reservation.status === 'RELEASED')).toBe(true);
+  expect(
+    requeuedReservations
+      .filter((reservation) => reservation.status !== 'RELEASED')
+      .every((reservation) => reservation.status === 'RESERVED'),
+  ).toBe(true);
 
   const followUp = await runFormalXWorker(
     { schemaVersion: 1, runId: child.runId },

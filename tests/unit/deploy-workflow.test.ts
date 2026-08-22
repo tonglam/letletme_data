@@ -17,6 +17,8 @@ const controlProbeScript = readFileSync('scripts/run-briefing-control-probe.sh',
 const rearmScript = readFileSync('scripts/rearm-briefing-x-after-probe.sh', 'utf8');
 const hostRunnerRollbackScript = readFileSync('scripts/rollback-host-grok-runner.sh', 'utf8');
 const hostRunnerService = readFileSync('deploy/letletme-grok-runner.service', 'utf8');
+const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+const composeFile = readFileSync('docker-compose.yml', 'utf8');
 const quote = String.fromCharCode(39);
 
 describe('release workflow gates', () => {
@@ -109,6 +111,11 @@ describe('release workflow gates', () => {
     expect(hostRunnerRollbackScript).toContain('/home/workspace/letletme-grok-runner');
     expect(hostRunnerService).toContain('RuntimeDirectoryMode=0770');
     expect(hostRunnerService).toContain('RuntimeDirectoryPreserve=yes');
+    expect(deployScript).toContain('deploy-host-grok-runner.sh');
+    expect(deployScript).toContain('run-briefing-control-probe.sh');
+    expect(deployScript).toContain('DEPLOY_RUNNER_UPDATED');
+    expect(composeFile).toContain('/run/letletme-grok-runner:/run/letletme-grok-runner:ro');
+    expect(composeFile).toContain(['group_add:', `      - ${quote}1555${quote}`].join('\n'));
     expect(rearmScript).toContain(
       `identity_status IN (${quote}PENDING${quote}, ${quote}FAILED${quote})`,
     );

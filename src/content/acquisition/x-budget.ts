@@ -215,6 +215,7 @@ export async function reserveXRunBudgets(input: {
             and(
               eq(contentAcquisitionBudgetReservations.runId, input.runId),
               eq(contentAcquisitionBudgetReservations.ledgerId, ledger.ledgerId),
+              eq(contentAcquisitionBudgetReservations.status, 'RESERVED'),
             ),
           )
           .for('update')
