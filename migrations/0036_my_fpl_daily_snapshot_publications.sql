@@ -197,6 +197,84 @@ GRANT SELECT
 GRANT SELECT, USAGE
   ON SEQUENCE competition.my_fpl_snapshot_revision_seq TO letletme_data_writer;
 
+-- Keep the physical tables available to the writer while enforcing the
+-- product boundary for the GraphQL reader. Superseded revisions remain in
+-- PostgreSQL for the 24-hour rollback window, but the reader role can only
+-- observe the one active revision and its children.
+ALTER TABLE competition.my_fpl_snapshot_publications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE competition.my_fpl_snapshot_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE competition.my_fpl_snapshot_tournament_rows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE competition.my_fpl_snapshot_tournament_aggregates ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS my_fpl_snapshot_publications_graphql_active
+  ON competition.my_fpl_snapshot_publications;
+CREATE POLICY my_fpl_snapshot_publications_graphql_active
+  ON competition.my_fpl_snapshot_publications
+  FOR SELECT TO letletme_graphql_reader
+  USING (active);
+
+DROP POLICY IF EXISTS my_fpl_snapshot_entries_graphql_active
+  ON competition.my_fpl_snapshot_entries;
+CREATE POLICY my_fpl_snapshot_entries_graphql_active
+  ON competition.my_fpl_snapshot_entries
+  FOR SELECT TO letletme_graphql_reader
+  USING (EXISTS (
+    SELECT 1
+    FROM competition.my_fpl_snapshot_publications publication
+    WHERE publication.season_id = my_fpl_snapshot_entries.season_id
+      AND publication.event_id = my_fpl_snapshot_entries.event_id
+      AND publication.revision = my_fpl_snapshot_entries.revision
+      AND publication.active
+  ));
+
+DROP POLICY IF EXISTS my_fpl_snapshot_tournament_rows_graphql_active
+  ON competition.my_fpl_snapshot_tournament_rows;
+CREATE POLICY my_fpl_snapshot_tournament_rows_graphql_active
+  ON competition.my_fpl_snapshot_tournament_rows
+  FOR SELECT TO letletme_graphql_reader
+  USING (EXISTS (
+    SELECT 1
+    FROM competition.my_fpl_snapshot_publications publication
+    WHERE publication.season_id = my_fpl_snapshot_tournament_rows.season_id
+      AND publication.event_id = my_fpl_snapshot_tournament_rows.event_id
+      AND publication.revision = my_fpl_snapshot_tournament_rows.revision
+      AND publication.active
+  ));
+
+DROP POLICY IF EXISTS my_fpl_snapshot_tournament_aggregates_graphql_active
+  ON competition.my_fpl_snapshot_tournament_aggregates;
+CREATE POLICY my_fpl_snapshot_tournament_aggregates_graphql_active
+  ON competition.my_fpl_snapshot_tournament_aggregates
+  FOR SELECT TO letletme_graphql_reader
+  USING (EXISTS (
+    SELECT 1
+    FROM competition.my_fpl_snapshot_publications publication
+    WHERE publication.season_id = my_fpl_snapshot_tournament_aggregates.season_id
+      AND publication.event_id = my_fpl_snapshot_tournament_aggregates.event_id
+      AND publication.revision = my_fpl_snapshot_tournament_aggregates.revision
+      AND publication.active
+  ));
+
+-- A non-owner writer role otherwise receives the default-deny behavior of
+-- RLS. Give it an unrestricted policy; GraphQL keeps the active-only policy.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'letletme_data_writer') THEN
+    CREATE POLICY my_fpl_snapshot_publications_writer_all
+      ON competition.my_fpl_snapshot_publications
+      FOR ALL TO letletme_data_writer USING (true) WITH CHECK (true);
+    CREATE POLICY my_fpl_snapshot_entries_writer_all
+      ON competition.my_fpl_snapshot_entries
+      FOR ALL TO letletme_data_writer USING (true) WITH CHECK (true);
+    CREATE POLICY my_fpl_snapshot_tournament_rows_writer_all
+      ON competition.my_fpl_snapshot_tournament_rows
+      FOR ALL TO letletme_data_writer USING (true) WITH CHECK (true);
+    CREATE POLICY my_fpl_snapshot_tournament_aggregates_writer_all
+      ON competition.my_fpl_snapshot_tournament_aggregates
+      FOR ALL TO letletme_data_writer USING (true) WITH CHECK (true);
+  END IF;
+END $$;
+
 COMMENT ON TABLE competition.my_fpl_snapshot_publications IS
   'Atomic My FPL product publications. Only the active row is queryable by GraphQL.';
 COMMENT ON COLUMN competition.my_fpl_snapshot_publications.snapshot_date IS

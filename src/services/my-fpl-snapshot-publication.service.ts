@@ -307,6 +307,53 @@ redis.call('SET', KEYS[1], candidate_raw)
 return {'published'}
 `;
 
+const MY_FPL_SNAPSHOT_REDIS_INVALIDATE_SCRIPT = `
+local current_raw = redis.call('GET', KEYS[1])
+if not current_raw then
+  return {'absent'}
+end
+local decoded, current = pcall(cjson.decode, current_raw)
+if not decoded or type(current) ~= 'table' then
+  redis.call('DEL', KEYS[1])
+  return {'invalid_deleted'}
+end
+if ARGV[1] ~= '' and tonumber(current.revision) ~= tonumber(ARGV[1]) then
+  return {'newer'}
+end
+redis.call('DEL', KEYS[1])
+return {'deleted'}
+`;
+
+/**
+ * Remove a Redis pointer only when it still names the deleted publication.
+ * A concurrent rebuild can therefore publish a newer revision after the DB
+ * deletion without having its fresh pointer removed by the cleanup path.
+ */
+export async function invalidateMyFplSnapshotRedisManifest(
+  seasonCode: string,
+  eventId: number,
+  revision?: number | string,
+): Promise<'absent' | 'deleted' | 'invalid_deleted' | 'newer'> {
+  const redis = await redisSingleton.getClient();
+  const result = (await redis.eval(
+    MY_FPL_SNAPSHOT_REDIS_INVALIDATE_SCRIPT,
+    1,
+    myFplSnapshotRedisManifestKey(seasonCode, eventId),
+    revision === undefined ? '' : String(revision),
+  )) as [string];
+  const status = result[0];
+  if (
+    status !== 'absent' &&
+    status !== 'deleted' &&
+    status !== 'invalid_deleted' &&
+    status !== 'newer'
+  ) {
+    throw new Error(`My FPL Redis manifest invalidation failed: ${status}`);
+  }
+  logInfo('Invalidated My FPL snapshot Redis manifest', { seasonCode, eventId, revision, status });
+  return status;
+}
+
 const automaticSubElements = (value: unknown): Set<number> => {
   if (!Array.isArray(value)) return new Set();
   return new Set(
@@ -476,8 +523,17 @@ function buildAggregate(
   const rowWithRanks: Array<JsonRecord & { rank: number | null; previousRank: number | null }> =
     rows.map((row) => ({
       ...row,
-      rank: currentRanks.get(integerValue(row.entryId)) ?? null,
-      previousRank: previousRanks.get(integerValue(row.entryId)) ?? null,
+      // Tournament board rows carry the authoritative points-group ranks.
+      // Keep those values for grouped tournaments; only the full-field rank
+      // fallback is derived from the event-net ordering.
+      rank:
+        typeof row.rank === 'number'
+          ? row.rank
+          : (currentRanks.get(integerValue(row.entryId)) ?? null),
+      previousRank:
+        typeof row.previousRank === 'number'
+          ? row.previousRank
+          : (previousRanks.get(integerValue(row.entryId)) ?? null),
     }));
   const performance = (row: JsonRecord): JsonRecord => ({
     entryId: integerValue(row.entryId),
@@ -992,8 +1048,18 @@ export async function captureMyFplSnapshot(
       LEFT JOIN fpl.players player
         ON player.season_id = result.season_id
        AND player.element_id = result.played_captain_element_id
+      LEFT JOIN LATERAL (
+        SELECT fixture_stats.team_id
+        FROM fpl.player_fixture_stats fixture_stats
+        WHERE fixture_stats.season_id = result.season_id
+          AND fixture_stats.event_id = result.event_id
+          AND fixture_stats.element_id = result.played_captain_element_id
+        ORDER BY fixture_stats.fixture_id
+        LIMIT 1
+      ) historical_captain_team ON TRUE
       LEFT JOIN fpl.teams team
-        ON team.season_id = player.season_id AND team.team_id = player.team_id
+        ON team.season_id = player.season_id
+       AND team.team_id = COALESCE(historical_captain_team.team_id, player.team_id)
       WHERE result.season_id = ${season.seasonId}
         AND result.event_id <= ${eventId}
         AND result.rich_synced_at IS NOT NULL
@@ -1076,13 +1142,33 @@ export async function captureMyFplSnapshot(
       LEFT JOIN fpl.players player_in
         ON player_in.season_id = transfer.season_id
        AND player_in.element_id = transfer.element_in_id
+      LEFT JOIN LATERAL (
+        SELECT fixture_stats.team_id
+        FROM fpl.player_fixture_stats fixture_stats
+        WHERE fixture_stats.season_id = transfer.season_id
+          AND fixture_stats.event_id = transfer.event_id
+          AND fixture_stats.element_id = transfer.element_in_id
+        ORDER BY fixture_stats.fixture_id
+        LIMIT 1
+      ) historical_in_team ON TRUE
       LEFT JOIN fpl.teams team_in
-        ON team_in.season_id = player_in.season_id AND team_in.team_id = player_in.team_id
+        ON team_in.season_id = player_in.season_id
+       AND team_in.team_id = COALESCE(historical_in_team.team_id, player_in.team_id)
       LEFT JOIN fpl.players player_out
         ON player_out.season_id = transfer.season_id
        AND player_out.element_id = transfer.element_out_id
+      LEFT JOIN LATERAL (
+        SELECT fixture_stats.team_id
+        FROM fpl.player_fixture_stats fixture_stats
+        WHERE fixture_stats.season_id = transfer.season_id
+          AND fixture_stats.event_id = transfer.event_id
+          AND fixture_stats.element_id = transfer.element_out_id
+        ORDER BY fixture_stats.fixture_id
+        LIMIT 1
+      ) historical_out_team ON TRUE
       LEFT JOIN fpl.teams team_out
-        ON team_out.season_id = player_out.season_id AND team_out.team_id = player_out.team_id
+        ON team_out.season_id = player_out.season_id
+       AND team_out.team_id = COALESCE(historical_out_team.team_id, player_out.team_id)
       LEFT JOIN competition.entry_event_results result
         ON result.season_id = transfer.season_id
        AND result.entry_id = transfer.entry_id
@@ -1388,9 +1474,11 @@ export async function captureMyFplSnapshot(
         'My FPL snapshot contains an invalid source timestamp',
       );
     }
-    const sourceCheckedAt = new Date(
-      sourceTimes.reduce((latest, value) => Math.max(latest, value), now.getTime()),
-    );
+    const latestSourceTimestamp =
+      sourceTimes.length === 0
+        ? now.getTime()
+        : sourceTimes.reduce((latest, value) => Math.max(latest, value), -Infinity);
+    const sourceCheckedAt = new Date(latestSourceTimestamp);
     const content = {
       seasonId: season.seasonId,
       eventId,

@@ -10,6 +10,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { queueRedisSingleton } from '../queues/redis';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
+import { trackMyFplRefreshJob } from '../services/my-fpl-refresh-tracker';
 
 export type TournamentSyncJobSource =
   | 'cron'
@@ -358,6 +359,7 @@ async function enqueueTournamentSyncJob(
       cascadeId: options.cascadeId,
       tournamentCount: options.finalizationTargets?.length,
     });
+    await trackMyFplRefreshJob(job.data.runId, queue.name, job.id);
 
     return job;
   } catch (error) {

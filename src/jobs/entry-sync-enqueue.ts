@@ -12,6 +12,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { getCurrentEvent } from '../services/events.service';
 import { logError, logInfo } from '../utils/logger';
 import { stableHash } from '../utils/stable-hash';
+import { trackMyFplRefreshJob } from '../services/my-fpl-refresh-tracker';
 
 export interface EntrySyncJobOptions {
   entryIds?: number[];
@@ -204,6 +205,7 @@ async function enqueueEntrySyncJob(
       chunkSize,
       runId: job.data.runId ?? runId,
     });
+    await trackMyFplRefreshJob(job.data.runId ?? runId, queue.name, job.id);
     return job;
   } catch (error) {
     logError('Failed to enqueue entry sync job', error, { jobName, source });

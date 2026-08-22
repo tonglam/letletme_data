@@ -46,18 +46,10 @@ import type { WorkerRuntime } from './worker-runtime';
 import { dataSyncQueue } from '../queues/data-sync.queue';
 import { entrySyncQueue } from '../queues/entry-sync.queue';
 import { tournamentSyncQueue } from '../queues/tournament-sync.queue';
+import { clearMyFplRefreshJobs, listMyFplRefreshJobs } from '../services/my-fpl-refresh-tracker';
 
 const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 10 * 60_000;
 const MY_FPL_REFRESH_WAIT_POLL_MS = 2_000;
-const MY_FPL_REFRESH_QUEUE_STATES = [
-  'waiting',
-  'active',
-  'delayed',
-  'prioritized',
-  'paused',
-  'failed',
-] as const;
-
 const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
@@ -68,49 +60,75 @@ const sleep = (milliseconds: number) =>
  * capture cannot reuse a structurally complete row from the previous day.
  */
 async function waitForMyFplRefreshJobs(runId: string): Promise<void> {
-  const queues: Array<typeof dataSyncQueue | typeof entrySyncQueue | typeof tournamentSyncQueue> = [
-    dataSyncQueue,
-    entrySyncQueue,
-    tournamentSyncQueue,
-  ];
+  const queues = [dataSyncQueue, entrySyncQueue, tournamentSyncQueue] as const;
+  const queueEvents = new Map(
+    queues.map((queue) => [
+      queue.name,
+      new QueueEvents(queue.name, { connection: getQueueConnection() }),
+    ]),
+  );
   const deadline = Date.now() + MY_FPL_REFRESH_WAIT_TIMEOUT_MS;
-  let observed = false;
-
-  while (Date.now() < deadline) {
-    let pending = 0;
-    const failed: string[] = [];
-    for (const queue of queues) {
-      for (const state of MY_FPL_REFRESH_QUEUE_STATES) {
-        const jobs = await queue.getJobs([state]);
-        for (const candidate of jobs) {
-          const candidateData = candidate.data;
-          if (
-            !candidateData ||
-            typeof candidateData !== 'object' ||
-            !('runId' in candidateData) ||
-            candidateData.runId !== runId
-          ) {
-            continue;
-          }
-          observed = true;
-          if (state === 'failed') {
-            failed.push(`${queue.name}:${candidate.name}:${candidate.id ?? 'unknown'}`);
-          } else {
-            pending += 1;
-          }
-        }
+  const completed = new Set<string>();
+  let settled = false;
+  try {
+    while (Date.now() < deadline) {
+      const references = await listMyFplRefreshJobs(runId);
+      if (references.length === 0) {
+        await sleep(MY_FPL_REFRESH_WAIT_POLL_MS);
+        continue;
       }
-    }
-    if (failed.length > 0) {
-      throw new Error(
-        `My FPL refresh run ${runId} has terminal queue failures: ${failed.join(', ')}`,
-      );
-    }
-    if (observed && pending === 0) return;
-    await sleep(MY_FPL_REFRESH_WAIT_POLL_MS);
-  }
 
-  throw new Error(`My FPL refresh run ${runId} did not settle before the coordinator timeout`);
+      const pending: Promise<unknown>[] = [];
+      for (const reference of references) {
+        const identity = `${reference.queueName}:${reference.jobId}`;
+        if (completed.has(identity)) continue;
+        const queue = queues.find((candidate) => candidate.name === reference.queueName);
+        const events = queueEvents.get(reference.queueName);
+        if (!queue || !events) {
+          throw new Error(
+            `My FPL refresh run ${runId} references unknown queue ${reference.queueName}`,
+          );
+        }
+        const job = await queue.getJob(reference.jobId);
+        if (!job) {
+          throw new Error(`My FPL refresh run ${runId} lost tracked job ${identity}`);
+        }
+        const state = await job.getState();
+        if (state === 'failed') {
+          throw new Error(
+            `My FPL refresh run ${runId} has terminal queue failure ${identity}: ${job.failedReason ?? 'unknown error'}`,
+          );
+        }
+        if (state === 'completed') {
+          completed.add(identity);
+          continue;
+        }
+        const remaining = Math.max(1, deadline - Date.now());
+        pending.push(job.waitUntilFinished(events, remaining));
+      }
+
+      if (pending.length === 0) {
+        // A worker registers every descendant before resolving its own job.
+        // Read the set again after all known jobs are terminal; only then can
+        // the coordinator publish without a queue-state scan race.
+        const finalReferences = await listMyFplRefreshJobs(runId);
+        if (
+          finalReferences.every((reference) =>
+            completed.has(`${reference.queueName}:${reference.jobId}`),
+          )
+        ) {
+          settled = true;
+          return;
+        }
+        continue;
+      }
+      await Promise.all(pending);
+    }
+    throw new Error(`My FPL refresh run ${runId} did not settle before the coordinator timeout`);
+  } finally {
+    await Promise.all([...queueEvents.values()].map((events) => events.close()));
+    if (settled) await clearMyFplRefreshJobs(runId);
+  }
 }
 
 async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unknown> {
