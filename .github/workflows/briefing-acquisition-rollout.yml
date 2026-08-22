@@ -434,14 +434,42 @@ jobs:
                 '{"event":"briefing_grok_auth_seed","outcome":"passed","secretValueExposed":false}'
             }
 
+            resolve_host_grok_auth_file() {
+              local candidate owner links mode mode_value size
+              HOST_GROK_AUTH_FILE=''
+              for candidate in \
+                "$HOME/.grok/auth.json" \
+                "$VPS_WORKDIR/.grok/auth.json" \
+                /root/.grok/auth.json \
+                /home/*/.grok/auth.json; do
+                if [ ! -f "$candidate" ] || [ -L "$candidate" ] || [ ! -r "$candidate" ]; then
+                  continue
+                fi
+                owner=$(stat -c '%u' "$candidate")
+                if [ "$owner" -ne "$(id -u)" ]; then
+                  continue
+                fi
+                links=$(stat -c '%h' "$candidate")
+                mode=$(stat -c '%a' "$candidate")
+                mode_value=$((8#$mode))
+                size=$(stat -c '%s' "$candidate")
+                if [ "$links" -eq 1 ] && [ $((mode_value & 077)) -eq 0 ] \
+                  && [ "$size" -ge 2 ] && [ "$size" -le 1048576 ]; then
+                  HOST_GROK_AUTH_FILE="$candidate"
+                  return 0
+                fi
+              done
+              return 1
+            }
+
             refresh_existing_grok_auth() {
               local active_container auth_file auth_mode auth_mode_value auth_size probe_home
               active_container=$(active_content_container)
-              auth_file="$HOME/.grok/auth.json"
-              if [ ! -f "$auth_file" ] || [ -L "$auth_file" ]; then
+              if ! resolve_host_grok_auth_file; then
                 printf '%s\n' '{"event":"briefing_grok_auth_refresh","outcome":"skipped","reason":"HOST_AUTH_UNAVAILABLE","secretValueExposed":false}'
                 return 1
               fi
+              auth_file="$HOST_GROK_AUTH_FILE"
               if ! test "$(stat -c '%u' "$auth_file")" -eq "$(id -u)" \
                 || ! test "$(stat -c '%g' "$auth_file")" -eq "$(id -g)" \
                 || ! test "$(stat -c '%h' "$auth_file")" -eq 1; then
