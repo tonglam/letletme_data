@@ -389,7 +389,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             dataChanged: input.dataChanged,
             ...(input.publicationId !== undefined ? { publicationId: input.publicationId } : {}),
             ...(input.metadata ? { metadata: input.metadata } : {}),
-            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, ${now})`,
+            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, ${now.toISOString()})`,
             updatedAt: now,
           })
           .where(eq(syncRunsInOps.runId, runId));
@@ -756,7 +756,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             status: 'published',
             publicationId: input.publicationId,
             dataChanged: true,
-            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, ${now})`,
+            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, ${now.toISOString()})`,
             updatedAt: now,
           })
           .where(eq(syncRunsInOps.runId, input.sourceRunId));
