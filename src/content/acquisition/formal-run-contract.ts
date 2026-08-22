@@ -74,7 +74,7 @@ const feedPollRunRequestV1Schema = commonSchema
 
 const xScanRunRequestV1Schema = commonSchema
   .extend({
-    jobKind: z.enum(['X_KEYWORD_SCAN', 'X_SEMANTIC_SCAN']),
+    jobKind: z.enum(['X_KEYWORD_SCAN', 'X_SEMANTIC_SCAN', 'X_THREAD_FETCH']),
     adapterKind: z.enum(['X_ACCOUNT', 'X_SEMANTIC']),
     partition: z
       .object({
@@ -91,7 +91,8 @@ const xScanRunRequestV1Schema = commonSchema
       (request.jobKind === 'X_KEYWORD_SCAN' &&
         request.toolRequest.toolName !== 'x_keyword_search') ||
       (request.jobKind === 'X_SEMANTIC_SCAN' &&
-        request.toolRequest.toolName !== 'x_semantic_search')
+        request.toolRequest.toolName !== 'x_semantic_search') ||
+      (request.jobKind === 'X_THREAD_FETCH' && request.toolRequest.toolName !== 'x_thread_fetch')
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,

@@ -4,6 +4,7 @@ import { and, asc, desc, eq, inArray, isNull, lte, max, or, sql } from 'drizzle-
 
 import {
   contentAcquisitionGaps,
+  contentAcquisitionBudgetReservations,
   contentAcquisitionJobOutbox,
   contentAcquisitionProviderTraces,
   contentAcquisitionRuns,
@@ -35,6 +36,8 @@ import {
   compileXUserRequest,
 } from './x-query-compiler';
 import {
+  commitProbeAndReleaseXRunBudgets,
+  commitOneXRunBudgetUnit,
   commitRunBudgets,
   reconcileReservedProviderBudget,
   releaseXRunBudgets,
@@ -81,6 +84,23 @@ export type FormalRunProviderEvidence = Readonly<{
   requestMetadataHash: string;
   responseMetadataHash: string;
   providerJobIdHash: string;
+  providerUnits: 1;
+  terminalState: string;
+  runMetrics: Readonly<Record<string, unknown>>;
+}>;
+
+/**
+ * A host-runner liveness probe is a real billable X call, but the probe
+ * endpoint intentionally returns only a bounded health response.  Keep its
+ * request identity while allowing the provider response/call id to remain
+ * unavailable rather than inventing evidence the runner did not return.
+ */
+export type FormalRunProbeEvidence = Readonly<{
+  provider: 'grok-build';
+  operation: 'x_user_search';
+  requestMetadataHash: string;
+  responseMetadataHash: string | null;
+  providerJobIdHash: string | null;
   providerUnits: 1;
   terminalState: string;
   runMetrics: Readonly<Record<string, unknown>>;
@@ -1050,8 +1070,12 @@ export async function failFormalRun(input: {
   errorSummary: string;
   retryDelayMs?: number;
   providerEvidence?: FormalRunProviderEvidence;
+  probeEvidence?: FormalRunProbeEvidence;
   supadataFailureEvidence?: SupadataFailureEvidence;
   providerProcessStarted?: boolean;
+  releaseExecutionBudgetAfterProbe?: boolean;
+  probeReservationIds?: readonly string[];
+  probeIncrementedReservationIds?: readonly string[];
   hermesProviderAttempted?: boolean;
   hermesProviderUnits?: number;
   rejections?: readonly FormalRunFailureRejection[];
@@ -1086,49 +1110,149 @@ export async function failFormalRun(input: {
     if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
     if (
       (input.providerEvidence ? 1 : 0) +
+        (input.probeEvidence ? 1 : 0) +
         (input.supadataFailureEvidence ? 1 : 0) +
         (input.hermesProviderAttempted ? 1 : 0) >
       1
     ) {
-      throw new Error('Formal failure cannot contain evidence from multiple providers');
+      if (!input.providerEvidence || !input.probeEvidence) {
+        throw new Error('Formal failure cannot contain evidence from multiple providers');
+      }
+    }
+    if (input.probeEvidence && (input.supadataFailureEvidence || input.hermesProviderAttempted)) {
+      throw new Error('X probe evidence cannot be combined with non-Grok provider evidence');
+    }
+    if (
+      input.releaseExecutionBudgetAfterProbe &&
+      (!input.probeEvidence ||
+        input.providerEvidence ||
+        input.providerProcessStarted ||
+        input.supadataFailureEvidence ||
+        input.hermesProviderAttempted ||
+        !input.probeReservationIds?.length)
+    ) {
+      throw new Error('Probe-only budget transition requires probe evidence and no main call');
     }
     if (input.rejections?.length && !input.providerEvidence) {
       throw new Error('Rejected provider items require persisted provider evidence');
     }
     const request = parseFormalRunRequestV1(run.requestSnapshot);
     const grokProviderAttempted =
-      input.providerEvidence !== undefined || input.providerProcessStarted === true;
+      input.providerEvidence !== undefined ||
+      input.probeEvidence !== undefined ||
+      input.providerProcessStarted === true;
+    const currentGrokProviderUnits =
+      (input.providerEvidence?.providerUnits ?? (input.providerProcessStarted ? 1 : 0)) +
+      (input.probeEvidence?.providerUnits ?? 0);
+    const currentGrokCallCount =
+      (input.providerEvidence ? 1 : 0) +
+      (input.probeEvidence ? 1 : 0) +
+      (!input.providerEvidence && input.providerProcessStarted ? 1 : 0);
+    const priorGrokProviderUnits = Number(run.providerUnits ?? 0);
+    if (!Number.isFinite(priorGrokProviderUnits) || priorGrokProviderUnits < 0) {
+      throw new Error('Failed formal run has invalid persisted Grok provider units');
+    }
+    const grokProviderUnits = priorGrokProviderUnits + currentGrokProviderUnits;
+    let priorGrokTraceCount = 0;
+    let maximumGrokTraceSequence = -1;
+    if (grokProviderAttempted) {
+      const traceRows = await tx.execute<{
+        maximum: number | string | null;
+        count: number | string;
+      }>(sql`
+        SELECT max(sequence) AS maximum,
+               count(*) FILTER (WHERE provider = 'grok-build')::integer AS count
+        FROM content.acquisition_provider_traces
+        WHERE run_id = ${input.runId}::uuid
+      `);
+      maximumGrokTraceSequence = Number(traceRows[0]?.maximum ?? -1);
+      priorGrokTraceCount = Number(traceRows[0]?.count ?? 0);
+      if (
+        !Number.isSafeInteger(maximumGrokTraceSequence) ||
+        !Number.isSafeInteger(priorGrokTraceCount) ||
+        priorGrokTraceCount < 0
+      ) {
+        throw new Error('Failed formal run has invalid persisted provider trace state');
+      }
+    }
+    if (input.probeEvidence) {
+      if (
+        !/^[0-9a-f]{64}$/.test(input.probeEvidence.requestMetadataHash) ||
+        (input.probeEvidence.responseMetadataHash !== null &&
+          !/^[0-9a-f]{64}$/.test(input.probeEvidence.responseMetadataHash)) ||
+        (input.probeEvidence.providerJobIdHash !== null &&
+          !/^[0-9a-f]{64}$/.test(input.probeEvidence.providerJobIdHash)) ||
+        !input.probeEvidence.terminalState.trim()
+      ) {
+        throw new Error('Failed formal run has invalid X probe evidence');
+      }
+    }
     let supadataTotalProviderUnits: number | null = null;
-    if (input.providerEvidence) {
+    if (input.providerEvidence || input.probeEvidence) {
       if (run.adapterKind !== 'X_ACCOUNT' && run.adapterKind !== 'X_SEMANTIC') {
         throw new Error('Grok provider evidence is only valid for formal X runs');
       }
-      if (
-        !('toolRequest' in request) ||
-        request.toolRequest.toolName !== input.providerEvidence.operation ||
-        !/^[0-9a-f]{64}$/.test(input.providerEvidence.requestMetadataHash) ||
-        !/^[0-9a-f]{64}$/.test(input.providerEvidence.responseMetadataHash) ||
-        !/^[0-9a-f]{64}$/.test(input.providerEvidence.providerJobIdHash) ||
-        !input.providerEvidence.terminalState.trim()
-      ) {
-        throw new Error('Failed formal run has invalid provider evidence');
+      if (input.providerEvidence) {
+        if (
+          !('toolRequest' in request) ||
+          request.toolRequest.toolName !== input.providerEvidence.operation ||
+          !/^[0-9a-f]{64}$/.test(input.providerEvidence.requestMetadataHash) ||
+          !/^[0-9a-f]{64}$/.test(input.providerEvidence.responseMetadataHash) ||
+          !/^[0-9a-f]{64}$/.test(input.providerEvidence.providerJobIdHash) ||
+          !input.providerEvidence.terminalState.trim()
+        ) {
+          throw new Error('Failed formal run has invalid provider evidence');
+        }
       }
-      const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
-      if (committedReservations === 0) {
+      const committedReservations = input.releaseExecutionBudgetAfterProbe
+        ? await commitProbeAndReleaseXRunBudgets({
+            tx,
+            runId: input.runId,
+            dbNow,
+            probeReservationIds: input.probeReservationIds!,
+            probeIncrementedReservationIds: input.probeIncrementedReservationIds,
+          })
+        : await commitRunBudgets({ tx, runId: input.runId, dbNow });
+      if (
+        !committedReservations &&
+        !(input.probeEvidence && priorGrokProviderUnits >= input.probeEvidence.providerUnits)
+      ) {
         throw new Error('Billed formal X failure has no reserved budget');
       }
-      await tx.insert(contentAcquisitionProviderTraces).values({
-        traceId: randomUUID(),
-        runId: input.runId,
-        sequence: 0,
-        provider: input.providerEvidence.provider,
-        operation: input.providerEvidence.operation,
-        requestMetadataHash: input.providerEvidence.requestMetadataHash,
-        responseMetadataHash: input.providerEvidence.responseMetadataHash,
-        providerJobIdHash: input.providerEvidence.providerJobIdHash,
-        providerUnits: String(input.providerEvidence.providerUnits),
-        terminalState: input.providerEvidence.terminalState,
-      });
+      await tx.insert(contentAcquisitionProviderTraces).values([
+        ...(input.probeEvidence
+          ? [
+              {
+                traceId: randomUUID(),
+                runId: input.runId,
+                sequence: maximumGrokTraceSequence + 1,
+                provider: input.probeEvidence.provider,
+                operation: input.probeEvidence.operation,
+                requestMetadataHash: input.probeEvidence.requestMetadataHash,
+                responseMetadataHash: input.probeEvidence.responseMetadataHash,
+                providerJobIdHash: input.probeEvidence.providerJobIdHash,
+                providerUnits: String(input.probeEvidence.providerUnits),
+                terminalState: input.probeEvidence.terminalState,
+              },
+            ]
+          : []),
+        ...(input.providerEvidence
+          ? [
+              {
+                traceId: randomUUID(),
+                runId: input.runId,
+                sequence: maximumGrokTraceSequence + 1 + (input.probeEvidence ? 1 : 0),
+                provider: input.providerEvidence.provider,
+                operation: input.providerEvidence.operation,
+                requestMetadataHash: input.providerEvidence.requestMetadataHash,
+                responseMetadataHash: input.providerEvidence.responseMetadataHash,
+                providerJobIdHash: input.providerEvidence.providerJobIdHash,
+                providerUnits: String(input.providerEvidence.providerUnits),
+                terminalState: input.providerEvidence.terminalState,
+              },
+            ]
+          : []),
+      ]);
     } else if (input.supadataFailureEvidence) {
       const evidence = input.supadataFailureEvidence;
       const expectedOperation = run.providerJobId ? 'transcript.poll' : 'transcript.submit';
@@ -1316,10 +1440,12 @@ export async function failFormalRun(input: {
             ? input.hermesProviderUnits !== undefined
               ? String(input.hermesProviderUnits)
               : grokProviderAttempted
-                ? '1'
+                ? String(grokProviderUnits || 1)
                 : undefined
             : String(supadataTotalProviderUnits),
-        xCallCount: grokProviderAttempted ? 1 : 0,
+        xCallCount: grokProviderAttempted
+          ? priorGrokTraceCount + currentGrokCallCount
+          : priorGrokTraceCount,
         traceVerified: input.providerEvidence !== undefined,
         runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify(
           input.supadataFailureEvidence
@@ -1329,6 +1455,7 @@ export async function failFormalRun(input: {
                 providerFailureDurationMs: input.supadataFailureEvidence.durationMs,
               }
             : (input.providerEvidence?.runMetrics ??
+                input.probeEvidence?.runMetrics ??
                 (input.hermesProviderAttempted
                   ? { hermesProviderStarted: true, providerTraceVerified: false }
                   : input.providerProcessStarted
@@ -1427,6 +1554,277 @@ export async function deferFormalRunForBudget(input: {
       )
       .returning({ runId: contentAcquisitionRuns.runId });
     return updated.length === 1;
+  });
+}
+
+export async function deferFormalRunForCapacity(input: {
+  runId: string;
+  metrics: Readonly<Record<string, unknown>>;
+  probeEvidence?: FormalRunProbeEvidence;
+  probeReservationIds?: readonly string[];
+  failureClass?: string;
+  retryDelayMs?: number;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+    const dbNow = dateValue(clockRows[0]?.dbNow);
+    if (!dbNow) throw new Error('Database clock is invalid');
+    const rows = await tx
+      .select({
+        status: contentAcquisitionRuns.status,
+        scheduleId: contentAcquisitionRuns.scheduleId,
+        endpointId: contentAcquisitionRuns.endpointId,
+        parentRunId: contentAcquisitionRuns.parentRunId,
+        sourcePartitionId: contentAcquisitionRuns.sourcePartitionId,
+        jobKind: contentAcquisitionRuns.jobKind,
+        adapterKind: contentAcquisitionRuns.adapterKind,
+        windowStart: contentAcquisitionRuns.windowStart,
+        windowEnd: contentAcquisitionRuns.windowEnd,
+        providerUnits: contentAcquisitionRuns.providerUnits,
+        xCallCount: contentAcquisitionRuns.xCallCount,
+      })
+      .from(contentAcquisitionRuns)
+      .where(eq(contentAcquisitionRuns.runId, input.runId))
+      .for('update')
+      .limit(1);
+    const run = rows[0];
+    if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
+
+    const retryDelayMs = Math.max(1_000, input.retryDelayMs ?? 60_000);
+    const nextEligibleAtDate = new Date(dbNow.getTime() + retryDelayMs);
+    const nextEligibleAt = nextEligibleAtDate.toISOString();
+    const deferredFailureClass = (input.failureClass ?? 'RUNNER_CAPACITY').slice(0, 200);
+    const metrics = {
+      ...input.metrics,
+      deferredReason: deferredFailureClass,
+      nextEligibleAt,
+      ...(input.probeEvidence?.runMetrics ?? {}),
+      ...(input.probeEvidence ? { probeCallCount: 1 } : {}),
+    };
+
+    let providerUnits = Number(run.providerUnits ?? 0);
+    if (!Number.isFinite(providerUnits) || providerUnits < 0) {
+      throw new Error('Deferred formal run provider units are invalid');
+    }
+    if (input.probeEvidence) {
+      if (
+        (run.adapterKind !== 'X_ACCOUNT' && run.adapterKind !== 'X_SEMANTIC') ||
+        !/^[0-9a-f]{64}$/.test(input.probeEvidence.requestMetadataHash) ||
+        (input.probeEvidence.responseMetadataHash !== null &&
+          !/^[0-9a-f]{64}$/.test(input.probeEvidence.responseMetadataHash)) ||
+        (input.probeEvidence.providerJobIdHash !== null &&
+          !/^[0-9a-f]{64}$/.test(input.probeEvidence.providerJobIdHash))
+      ) {
+        throw new Error('Deferred formal run has invalid X probe evidence');
+      }
+      if (!input.probeReservationIds || input.probeReservationIds.length === 0) {
+        throw new Error('Deferred formal run has probe evidence without reserved probe budget');
+      }
+      const committedProbe = await commitOneXRunBudgetUnit({
+        tx,
+        runId: input.runId,
+        dbNow,
+        reservationIds: input.probeReservationIds,
+      });
+      if (!committedProbe) {
+        throw new Error('Deferred formal run probe budget reservation disappeared before commit');
+      }
+      const traceRows = await tx
+        .select({ maximum: max(contentAcquisitionProviderTraces.sequence) })
+        .from(contentAcquisitionProviderTraces)
+        .where(eq(contentAcquisitionProviderTraces.runId, input.runId));
+      await tx.insert(contentAcquisitionProviderTraces).values({
+        traceId: randomUUID(),
+        runId: input.runId,
+        sequence: Number(traceRows[0]?.maximum ?? -1) + 1,
+        provider: input.probeEvidence.provider,
+        operation: input.probeEvidence.operation,
+        requestMetadataHash: input.probeEvidence.requestMetadataHash,
+        responseMetadataHash: input.probeEvidence.responseMetadataHash,
+        providerJobIdHash: input.probeEvidence.providerJobIdHash,
+        providerUnits: String(input.probeEvidence.providerUnits),
+        terminalState: input.probeEvidence.terminalState,
+      });
+      providerUnits += input.probeEvidence.providerUnits;
+    }
+    const providerPatch = input.probeEvidence
+      ? {
+          provider: 'grok-build' as const,
+          providerUnits: String(providerUnits),
+          xCallCount: (run.xCallCount ?? 0) + 1,
+          traceVerified: false,
+        }
+      : {};
+
+    const isTriggeredXSaturationFollowUp =
+      run.parentRunId !== null &&
+      run.sourcePartitionId !== null &&
+      run.scheduleId === null &&
+      run.endpointId === null &&
+      (run.jobKind === 'X_KEYWORD_SCAN' || run.jobKind === 'X_SEMANTIC_SCAN');
+
+    if (isTriggeredXSaturationFollowUp) {
+      const [outbox] = await tx
+        .select({
+          outboxId: contentAcquisitionJobOutbox.outboxId,
+          queueName: contentAcquisitionJobOutbox.queueName,
+        })
+        .from(contentAcquisitionJobOutbox)
+        .where(eq(contentAcquisitionJobOutbox.runId, input.runId))
+        .for('update')
+        .limit(1);
+      const reservations = await tx
+        .select({ status: contentAcquisitionBudgetReservations.status })
+        .from(contentAcquisitionBudgetReservations)
+        .where(eq(contentAcquisitionBudgetReservations.runId, input.runId))
+        .for('update');
+      const activeReservations = reservations.filter(
+        (reservation) => reservation.status !== 'RELEASED',
+      );
+      const hasReservedBudget =
+        activeReservations.length > 0 &&
+        activeReservations.some((reservation) => reservation.status === 'RESERVED') &&
+        activeReservations.every((reservation) =>
+          ['RESERVED', 'COMMITTED'].includes(reservation.status),
+        );
+
+      if (outbox?.queueName === 'content-x-scan' && hasReservedBudget) {
+        const retryJobId = `content-x-capacity-retry-${sha256CanonicalJson({
+          runId: input.runId,
+          nextEligibleAt,
+        })}`;
+        const updated = await tx
+          .update(contentAcquisitionRuns)
+          .set({
+            status: 'PENDING',
+            ...providerPatch,
+            failureClass: deferredFailureClass,
+            failureDetailsHash: sha256CanonicalJson(metrics),
+            errorSummary: `Host Grok runner ${deferredFailureClass} occurred; X follow-up will retry`,
+            runMetrics: metrics,
+            enqueueConfirmedAt: null,
+            completedAt: null,
+            // The run stays pending until the outbox becomes eligible. Anchor
+            // its execution lease to that eligibility time so a retry has the
+            // full provider deadline after it can actually be claimed.
+            leaseExpiresAt: new Date(nextEligibleAtDate.getTime() + 6 * 60_000),
+            checkpointAdvanced: false,
+          })
+          .where(
+            and(
+              eq(contentAcquisitionRuns.runId, input.runId),
+              inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+            ),
+          )
+          .returning({ runId: contentAcquisitionRuns.runId });
+        const reopened = await tx
+          .update(contentAcquisitionJobOutbox)
+          .set({
+            jobId: retryJobId,
+            availableAt: nextEligibleAtDate,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            deliveredAt: null,
+            lastErrorHash: sha256CanonicalJson(metrics),
+            updatedAt: dbNow,
+          })
+          .where(eq(contentAcquisitionJobOutbox.outboxId, outbox.outboxId))
+          .returning({ outboxId: contentAcquisitionJobOutbox.outboxId });
+        if (updated.length !== 1 || reopened.length !== 1) {
+          throw new Error('X saturation follow-up capacity retry transition was lost');
+        }
+        return true;
+      }
+
+      await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+      const gapReason = `${deferredFailureClass}_FOLLOWUP_ORPHANED`.slice(0, 200);
+      const gapDetails = {
+        ...metrics,
+        gapReason,
+        outboxPresent: Boolean(outbox),
+        outboxQueue: outbox?.queueName ?? null,
+        reservationStatuses: reservations.map((reservation) => reservation.status),
+      };
+      const updated = await tx
+        .update(contentAcquisitionRuns)
+        .set({
+          status: 'GAP',
+          ...providerPatch,
+          failureClass: gapReason,
+          failureDetailsHash: sha256CanonicalJson(gapDetails),
+          errorSummary: 'X saturation follow-up could not be safely requeued',
+          runMetrics: gapDetails,
+          completedAt: dbNow,
+          leaseExpiresAt: null,
+          checkpointAdvanced: false,
+        })
+        .where(
+          and(
+            eq(contentAcquisitionRuns.runId, input.runId),
+            inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+          ),
+        )
+        .returning({ runId: contentAcquisitionRuns.runId });
+      if (updated.length !== 1) throw new Error('X saturation follow-up gap transition was lost');
+      if (!run.windowStart || !run.windowEnd) {
+        throw new Error('X saturation follow-up gap window is missing');
+      }
+      await tx.insert(contentAcquisitionGaps).values({
+        gapId: randomUUID(),
+        declaringRunId: input.runId,
+        partitionId: run.sourcePartitionId,
+        windowStart: run.windowStart,
+        windowEnd: run.windowEnd,
+        reason: gapReason,
+        detailsHash: sha256CanonicalJson(gapDetails),
+        declaredAt: dbNow,
+      });
+      return true;
+    }
+
+    await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+    await tx
+      .update(contentAcquisitionRuns)
+      .set({
+        status: 'BUDGET_DEFERRED',
+        ...providerPatch,
+        failureClass: deferredFailureClass,
+        failureDetailsHash: sha256CanonicalJson(metrics),
+        errorSummary: `Host Grok runner ${deferredFailureClass} occurred before provider start`,
+        runMetrics: metrics,
+        completedAt: dbNow,
+        leaseExpiresAt: null,
+        checkpointAdvanced: false,
+      })
+      .where(
+        and(
+          eq(contentAcquisitionRuns.runId, input.runId),
+          inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+        ),
+      );
+
+    if (run.scheduleId) {
+      await tx
+        .update(contentSourceSchedules)
+        .set({
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          nextDueAt: new Date(dbNow.getTime() + retryDelayMs),
+          updatedAt: dbNow,
+        })
+        .where(eq(contentSourceSchedules.scheduleId, run.scheduleId));
+    } else if (run.endpointId) {
+      await tx
+        .update(contentSourceEndpoints)
+        .set({
+          identityNextCheckAt: new Date(dbNow.getTime() + retryDelayMs),
+          updatedAt: dbNow,
+        })
+        .where(eq(contentSourceEndpoints.endpointId, run.endpointId));
+    }
+    return true;
   });
 }
 

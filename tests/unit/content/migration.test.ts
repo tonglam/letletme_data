@@ -127,4 +127,13 @@ describe('Briefing content migration contract', () => {
       ['WHERE status = ', 'active', ' AND servable'].join(String.fromCharCode(39)),
     );
   });
+
+  test('keeps host-runner probe reservations independently transitionable', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0035_content_x_probe_reservations.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain(
+      'DROP CONSTRAINT IF EXISTS content_acquisition_budget_reservations_run_ledger_key',
+    );
+  });
 });

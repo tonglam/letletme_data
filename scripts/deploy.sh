@@ -16,6 +16,8 @@ PROJECT_DIR=${PROJECT_DIR:-$(pwd)}
 DEPLOY_SHA=${DEPLOY_SHA:-$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)}
 export MIGRATION_ENV_FILE
 export DEPLOY_SHA
+export CONTENT_MANIFEST_GIT_REVISION="$DEPLOY_SHA"
+export CONTENT_GROK_RUNNER_RELEASE_SHA="$DEPLOY_SHA"
 
 IFS=' ' read -r -a COMPOSE_CMD <<<"${COMPOSE_BIN}"
 
@@ -64,9 +66,13 @@ load_backup_settings() {
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
+DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
 DEPLOY_OLD_REVISION=''
 DEPLOY_LEDGER_BEFORE=''
+DEPLOY_RUNNER_UPDATED=false
+DEPLOY_RUNNER_PREVIOUS_TARGET=''
+DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -136,12 +142,18 @@ deploy() {
     trap - EXIT
     set +e
     if [[ "$status" -ne 0 ]]; then
-      if [[ "$DEPLOY_MIGRATION_STARTED" = true ]]; then
+      if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_RUNNER_UPDATED" = true ]]; then
+        export CONTENT_GROK_RUNNER_RELEASE_SHA="${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}"
+        "${PROJECT_DIR}/scripts/rollback-host-grok-runner.sh" \
+          /home/workspace/letletme-grok-runner \
+          "$DEPLOY_RUNNER_PREVIOUS_TARGET" "$DEPLOY_RUNNER_PREVIOUS_RELEASE" || true
+      fi
+      if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = true ]]; then
         if ! restore_last_known_healthy_if_ledger_unchanged \
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION"; then
           log_error "Migration changed or obscured the ledger; leaving services stopped for forward recovery."
         fi
-      else
+      elif [[ "$DEPLOY_COMMITTED" = false ]]; then
         restore_stopped_services || true
       fi
     fi
@@ -238,6 +250,27 @@ deploy() {
     exit 1
   fi
   finish_stage
+  x_scan_setting=$(read_env_setting CONTENT_X_SCAN_ENABLED "$ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
+  real_grok_setting=$(read_env_setting CONTENT_REAL_GROK_ENABLED "$ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
+  if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
+    [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
+    start_stage hostRunner
+    runner_root=/home/workspace/letletme-grok-runner
+    DEPLOY_RUNNER_PREVIOUS_TARGET=$(readlink -f "$runner_root/current" 2>/dev/null || true)
+    DEPLOY_RUNNER_PREVIOUS_RELEASE=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
+    DEPLOY_RUNNER_PREVIOUS_RELEASE=${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}
+    runner_image_ref=${APP_IMAGE:-letletme-data:local}
+    test -x "${PROJECT_DIR}/scripts/deploy-host-grok-runner.sh"
+    test -x "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh"
+    DEPLOY_RUNNER_UPDATED=true
+    "${PROJECT_DIR}/scripts/deploy-host-grok-runner.sh" \
+      "$runner_image_ref" "$DEPLOY_SHA" "$runner_root"
+    "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh" \
+      "$ENV_FILE" "$MIGRATION_ENV_FILE" "$DEPLOY_SHA"
+    finish_stage
+  else
+    log_info 'Host Grok runner is not required while X scanning or the real Grok provider is disabled'
+  fi
   start_stage migration
   DEPLOY_MIGRATION_STARTED=true
   log_info "Running migrations"
@@ -277,6 +310,12 @@ deploy() {
     exit 1
   fi
   finish_stage
+  if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
+    [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
+    test -x "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh"
+    "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh" "$ENV_FILE" "$MIGRATION_ENV_FILE"
+  fi
+  DEPLOY_COMMITTED=true
 }
 
 update_repo() {

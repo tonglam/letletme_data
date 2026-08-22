@@ -10,7 +10,7 @@ import {
   claimDueFormalRuns,
   confirmFormalRunEnqueued,
 } from '../../src/content/acquisition/formal-run-repository';
-import { GrokBuildExecutor } from '../../src/content/acquisition/grok-build-executor';
+import { HostGrokRunnerClient } from '../../src/content/acquisition/host-grok-runner-client';
 import { dispatchAcquisitionJobOutbox } from '../../src/content/acquisition/job-outbox';
 import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/manifest-reconciler';
 import { compileXBudgetPolicy } from '../../src/content/acquisition/x-budget';
@@ -113,10 +113,12 @@ liveTest(
       xScanEnabled: true,
       realGrokEnabled: true,
     };
-    const executor = new GrokBuildExecutor({
+    const executor = new HostGrokRunnerClient({
+      socketPath: flags.grokRunnerSocket,
       expectedVersion: flags.grokExpectedVersion,
+      expectedRunnerReleaseSha: flags.grokRunnerReleaseSha,
       timeoutMs: flags.grokTimeoutMs,
-      maximumOutputBytes: flags.grokMaxOutputBytes,
+      maximumResponseBytes: flags.grokMaxOutputBytes,
     });
     const mainRunIds: string[] = [];
     const processedScheduleIds = new Set<string>();

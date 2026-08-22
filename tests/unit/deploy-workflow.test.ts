@@ -12,6 +12,13 @@ const briefingRolloutWorkflow = readFileSync(
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
 const dockerfile = readFileSync('Dockerfile', 'utf8');
+const hostRunnerDeployScript = readFileSync('scripts/deploy-host-grok-runner.sh', 'utf8');
+const controlProbeScript = readFileSync('scripts/run-briefing-control-probe.sh', 'utf8');
+const rearmScript = readFileSync('scripts/rearm-briefing-x-after-probe.sh', 'utf8');
+const hostRunnerRollbackScript = readFileSync('scripts/rollback-host-grok-runner.sh', 'utf8');
+const hostRunnerService = readFileSync('deploy/letletme-grok-runner.service', 'utf8');
+const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+const composeFile = readFileSync('docker-compose.yml', 'utf8');
 const quote = String.fromCharCode(39);
 
 describe('release workflow gates', () => {
@@ -36,12 +43,10 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).not.toMatch(mutableAction);
     expect(ciWorkflow).not.toContain(`bun-version: [${quote}1.3.3${quote}]`);
     expect(ciWorkflow).toContain(`bun-version: [${quote}1.3.14${quote}]`);
-    expect(ciWorkflow).toContain('docker volume create "$briefing_grok_volume"');
-    expect(ciWorkflow).toContain(
-      'type=volume,source=$briefing_grok_volume,target=/home/appuser/.grok',
-    );
-    expect(ciWorkflow).toContain('test -x "$GROK_HOME/bin/grok-1.0.5"');
-    expect(ciWorkflow).not.toContain('--tmpfs /home/appuser/.grok:');
+    expect(ciWorkflow).toContain('test -x /app/letletme-grok-runner');
+    expect(ciWorkflow).toContain('getent group letletme-grok-bridge');
+    expect(ciWorkflow).not.toContain('grok-home');
+    expect(ciWorkflow).not.toContain('auth.json');
     expect(dockerfile).toContain('COPY --from=build /app/config/briefing ./config/briefing');
     expect(ciWorkflow).toContain('test -r /app/config/briefing/sources.yaml');
     expect(ciWorkflow).toContain('test -r /app/config/briefing/acquisition-plan.yaml');
@@ -52,26 +57,73 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).toContain('test "$main_sha" = "$GITHUB_SHA"');
     expect(briefingRolloutWorkflow).toContain('test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"');
     expect(briefingRolloutWorkflow).toContain(
-      'options:\n          - status\n          - shadow\n          - disabled',
+      'options:\n          - status\n          - shadow-http\n          - host-shadow\n          - disabled',
     );
     expect(briefingRolloutWorkflow).toContain('mv "$backup_file" "$env_file"');
-    expect(briefingRolloutWorkflow).toContain('--force-recreate \\\n');
-    expect(briefingRolloutWorkflow).toContain('content-worker || rollback_status=1');
-    expect(briefingRolloutWorkflow).toContain('/app/node_modules/.bin/grok models');
-    expect(briefingRolloutWorkflow).toContain('auth_file="$HOME/.grok/auth.json"');
-    expect(briefingRolloutWorkflow).toContain('seed_existing_grok_auth');
-    expect(briefingRolloutWorkflow).toContain('secretValueExposed":false');
-    expect(briefingRolloutWorkflow).toContain('briefing rollout rollback failed');
+    expect(briefingRolloutWorkflow).toContain('--force-recreate content-worker');
+    expect(briefingRolloutWorkflow).toContain('content-worker || true');
+    expect(briefingRolloutWorkflow).toContain(
+      'runner_socket=/run/letletme-grok-runner/runner.sock',
+    );
+    expect(briefingRolloutWorkflow).toContain('runner_probe');
+    expect(briefingRolloutWorkflow).toContain('run-briefing-control-probe.sh');
+    expect(briefingRolloutWorkflow).not.toContain('auth.json');
     expect(briefingRolloutWorkflow).toContain(
       'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY',
     );
     expect(briefingRolloutWorkflow).toContain(`SET LOCAL statement_timeout = ${quote}15s${quote}`);
     expect(briefingRolloutWorkflow).toContain('briefing_acquisition_control_health');
     expect(briefingRolloutWorkflow).toContain('briefing_acquisition_run_health');
-    expect(briefingRolloutWorkflow).toContain('briefing_acquisition_fact_health');
+    expect(briefingRolloutWorkflow).toContain('verify_manifest_reconciliation');
+    expect(briefingRolloutWorkflow).toContain('source_registry_reconciliations');
+    expect(briefingRolloutWorkflow).toContain('worker_restart_started_at');
+    expect(briefingRolloutWorkflow).toContain(
+      ['created_at >= ', quote, '${worker_restart_started_at}', quote, '::timestamptz'].join(''),
+    );
+    expect(briefingRolloutWorkflow).toContain('[ "$rollout_committed" = false ]');
+    expect(
+      briefingRolloutWorkflow.lastIndexOf('scripts/rearm-briefing-x-after-probe.sh'),
+    ).toBeGreaterThan(briefingRolloutWorkflow.lastIndexOf('verify_manifest_reconciliation'));
+    expect(briefingRolloutWorkflow).toContain('--connect-timeout 5 --max-time 15');
+    expect(briefingRolloutWorkflow).toContain(
+      '[ "$services_quiesced" = true ] || [ "$mutation_started" = true ]',
+    );
+    expect(briefingRolloutWorkflow).not.toContain('briefing_acquisition_fact_health');
     expect(briefingRolloutWorkflow).not.toContain('error_summary,');
     expect(briefingRolloutWorkflow).not.toContain('tar -C "$HOME/.grok"');
     expect(briefingRolloutWorkflow).not.toContain('script_stop:');
+    expect(hostRunnerDeployScript).toContain('--self-test');
+    expect(hostRunnerDeployScript).toContain('runner_health_deadline=$((SECONDS + 60))');
+    expect(hostRunnerDeployScript).toContain(
+      'runner socket did not become ready within 60 seconds',
+    );
+    expect(hostRunnerDeployScript).not.toContain('/v1/probes/x');
+    expect(controlProbeScript).toContain('GLOBAL:GROK_BUILD_X');
+    expect(controlProbeScript).toContain('content.acquisition_budget_reservations');
+    expect(controlProbeScript).toContain('CONTROL_PLANE_PROBE');
+    expect(controlProbeScript).toContain('lease_expires_at < now()');
+    expect(controlProbeScript).toContain('CONTROL_PROBE_INTERRUPTED');
+    expect(controlProbeScript).toContain('controlProbeRecovery');
+    expect(controlProbeScript).toContain('\\o /dev/null');
+    expect(controlProbeScript).toContain('psql "$DATABASE_URL"');
+    expect(hostRunnerDeployScript).toContain('rollback_on_failure');
+    expect(hostRunnerDeployScript).toContain('prune_old_releases');
+    expect(hostRunnerDeployScript).toContain('keep_recent=3');
+    expect(hostRunnerRollbackScript).toContain('/home/workspace/letletme-grok-runner');
+    expect(hostRunnerService).toContain('RuntimeDirectoryMode=0770');
+    expect(hostRunnerService).toContain('RuntimeDirectoryPreserve=yes');
+    expect(deployScript).toContain('deploy-host-grok-runner.sh');
+    expect(deployScript).toContain('run-briefing-control-probe.sh');
+    expect(deployScript).toContain('DEPLOY_RUNNER_UPDATED');
+    expect(deployScript).toContain('CONTENT_REAL_GROK_ENABLED');
+    expect(workflow).toContain('CONTENT_REAL_GROK_ENABLED');
+    expect(composeFile).toContain('/run/letletme-grok-runner:/run/letletme-grok-runner:ro');
+    expect(composeFile).toContain(['group_add:', `      - ${quote}1555${quote}`].join('\n'));
+    expect(rearmScript).toContain(
+      `identity_status IN (${quote}PENDING${quote}, ${quote}FAILED${quote})`,
+    );
+    expect(rearmScript).toContain('latest_runner_failure');
+    expect(rearmScript).toContain(`${quote}RUNNER_NOT_READY${quote}`);
   });
 
   test('requires exact successful CI for both automatic and manual deployment', () => {

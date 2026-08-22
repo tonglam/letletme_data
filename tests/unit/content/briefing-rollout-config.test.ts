@@ -15,7 +15,7 @@ function fixture(lines: readonly string[], mode = 0o600): string {
   return target;
 }
 
-function run(mode: 'status' | 'shadow' | 'disabled', target: string) {
+function run(mode: 'status' | 'shadow-http' | 'host-shadow' | 'disabled', target: string) {
   const result = Bun.spawnSync(['bash', script, mode, target], {
     cwd: process.cwd(),
     stdout: 'pipe',
@@ -54,8 +54,8 @@ describe('Briefing acquisition rollout env control', () => {
       'CONTENT_PIPELINE_ENABLED=false',
     ]);
 
-    expect(parse(run('shadow', target))).toMatchObject({
-      mode: 'shadow',
+    expect(parse(run('host-shadow', target))).toMatchObject({
+      mode: 'host-shadow',
       changed: true,
       pipeline: true,
       shadow: true,
@@ -79,7 +79,7 @@ describe('Briefing acquisition rollout env control', () => {
     expect(run('status', target).stdout).not.toContain('fixture-supadata-secret');
     expect(content.match(/^CONTENT_PIPELINE_ENABLED=/gm)).toHaveLength(1);
     expect(statSync(target).mode & 0o777).toBe(0o600);
-    expect(parse(run('shadow', target))).toMatchObject({ changed: false });
+    expect(parse(run('host-shadow', target))).toMatchObject({ changed: false });
   });
 
   test('keeps optional transcript adapters disabled when their prerequisites are absent', () => {
@@ -88,7 +88,7 @@ describe('Briefing acquisition rollout env control', () => {
       'CONTENT_PUBLICATION_ENABLED=false',
       'BRIEFING_PUBLIC_ENABLED=false',
     ]);
-    expect(parse(run('shadow', target))).toMatchObject({
+    expect(parse(run('host-shadow', target))).toMatchObject({
       podcast: false,
       youtubeDiscovery: true,
       youtubeNative: false,
@@ -110,7 +110,7 @@ describe('Briefing acquisition rollout env control', () => {
       'CONTENT_SUPADATA_DAILY_CREDIT_LIMIT=2.5',
     ]);
 
-    expect(parse(run('shadow', target))).toMatchObject({
+    expect(parse(run('host-shadow', target))).toMatchObject({
       podcast: false,
       youtubeNative: false,
       hermesReady: false,
@@ -152,7 +152,7 @@ describe('Briefing acquisition rollout env control', () => {
       publication: true,
       public: true,
     });
-    const shadow = run('shadow', target);
+    const shadow = run('host-shadow', target);
     expect(shadow.exitCode).not.toBe(0);
     expect(shadow.stderr).toContain('cannot alter a public publication runtime');
   });

@@ -11,8 +11,13 @@ import {
 import { getDb, type DbHandle, type TransactionHandle } from '../../db/singleton';
 import { sha256CanonicalJson } from './canonicalization';
 import { parseFormalRunRequestV1 } from './formal-run-contract';
+import type { FormalRunProbeEvidence } from './formal-run-repository';
 import type { GrokBuildExecutionResult, GrokBuildXUserV1 } from './grok-build-executor';
-import { commitXRunBudgets, releaseXRunBudgets } from './x-budget';
+import {
+  commitProbeAndReleaseXRunBudgets,
+  commitXRunBudgets,
+  releaseXRunBudgets,
+} from './x-budget';
 
 const IDENTITY_REFRESH_MS = 30 * 24 * 60 * 60_000;
 const IDENTITY_RETRY_MS = 30 * 60_000;
@@ -39,11 +44,12 @@ async function insertProviderTrace(input: {
   runId: string;
   execution: GrokBuildExecutionResult;
   terminalState: string;
+  sequence?: number;
 }): Promise<void> {
   await input.tx.insert(contentAcquisitionProviderTraces).values({
     traceId: randomUUID(),
     runId: input.runId,
-    sequence: 0,
+    sequence: input.sequence ?? 0,
     provider: 'grok-build',
     operation: input.execution.toolName,
     requestMetadataHash: input.execution.requestMetadataHash,
@@ -51,6 +57,25 @@ async function insertProviderTrace(input: {
     providerJobIdHash: input.execution.toolCallIdHash,
     providerUnits: '1',
     terminalState: input.terminalState,
+  });
+}
+
+async function insertProbeTrace(input: {
+  tx: TransactionHandle;
+  runId: string;
+  evidence: FormalRunProbeEvidence;
+}): Promise<void> {
+  await input.tx.insert(contentAcquisitionProviderTraces).values({
+    traceId: randomUUID(),
+    runId: input.runId,
+    sequence: 0,
+    provider: input.evidence.provider,
+    operation: input.evidence.operation,
+    requestMetadataHash: input.evidence.requestMetadataHash,
+    responseMetadataHash: input.evidence.responseMetadataHash,
+    providerJobIdHash: input.evidence.providerJobIdHash,
+    providerUnits: String(input.evidence.providerUnits),
+    terminalState: input.evidence.terminalState,
   });
 }
 
@@ -64,6 +89,7 @@ async function failIdentityResult(input: {
   summary: string;
   identityStatus: 'FAILED' | 'CONFLICT';
   execution: GrokBuildExecutionResult;
+  probeEvidence?: FormalRunProbeEvidence;
 }): Promise<IdentityTerminalResult> {
   const summary = sanitizeError(input.summary);
   const committedReservations = await commitXRunBudgets({
@@ -74,11 +100,14 @@ async function failIdentityResult(input: {
   if (committedReservations === 0) {
     throw new Error('Attested X identity result has no reserved budget');
   }
+  if (input.probeEvidence)
+    await insertProbeTrace({ tx: input.tx, runId: input.runId, evidence: input.probeEvidence });
   await insertProviderTrace({
     tx: input.tx,
     runId: input.runId,
     execution: input.execution,
     terminalState: input.identityStatus,
+    sequence: input.probeEvidence ? 1 : 0,
   });
   await input.tx
     .update(contentSourceEndpoints)
@@ -101,8 +130,8 @@ async function failIdentityResult(input: {
       errorSummary: summary,
       failureDetailsHash: sha256CanonicalJson({ failureClass: input.failureClass, summary }),
       provider: 'grok-build',
-      providerUnits: '1',
-      xCallCount: 1,
+      providerUnits: String(1 + (input.probeEvidence ? input.probeEvidence.providerUnits : 0)),
+      xCallCount: 1 + (input.probeEvidence ? 1 : 0),
       traceVerified: true,
       resultCount: 0,
       rejectedCount: input.execution.users.length,
@@ -110,8 +139,13 @@ async function failIdentityResult(input: {
         durationMs: Math.round(input.execution.durationMs),
         eventCount: input.execution.eventCount,
         totalCostUsd: input.execution.totalCostUsd,
+        executionLocation: input.execution.executionLocation,
+        runnerReleaseSha: input.execution.runnerReleaseSha,
+        grokVersion: input.execution.grokVersion,
+        runnerBinaryHash: input.execution.runnerBinaryHash,
         rawPostEvidenceAvailable: input.execution.rawPostEvidenceAvailable,
         traceHash: input.execution.traceHash,
+        probeCallCount: input.probeEvidence ? 1 : 0,
       },
       completedAt: input.dbNow,
       leaseExpiresAt: null,
@@ -144,6 +178,7 @@ function oneExactUser(
 export async function persistXIdentityResult(input: {
   runId: string;
   execution: GrokBuildExecutionResult;
+  probeEvidence?: FormalRunProbeEvidence;
   db?: DbHandle;
 }): Promise<IdentityTerminalResult> {
   if (input.execution.toolName !== 'x_user_search') {
@@ -195,6 +230,7 @@ export async function persistXIdentityResult(input: {
         summary: 'x_user_search did not return exactly one exact case-insensitive handle match',
         identityStatus: 'FAILED',
         execution: input.execution,
+        probeEvidence: input.probeEvidence,
       });
     }
 
@@ -235,14 +271,19 @@ export async function persistXIdentityResult(input: {
         summary: 'Resolved X user ID conflicts with an existing stable identity',
         identityStatus: 'CONFLICT',
         execution: input.execution,
+        probeEvidence: input.probeEvidence,
       });
     }
 
+    if (input.probeEvidence) {
+      await insertProbeTrace({ tx, runId: input.runId, evidence: input.probeEvidence });
+    }
     await insertProviderTrace({
       tx,
       runId: input.runId,
       execution: input.execution,
       terminalState: 'VERIFIED',
+      sequence: input.probeEvidence ? 1 : 0,
     });
     const committedReservations = await commitXRunBudgets({ tx, runId: input.runId, dbNow });
     if (committedReservations === 0) {
@@ -268,8 +309,8 @@ export async function persistXIdentityResult(input: {
       .set({
         status: 'COMPLETED',
         provider: 'grok-build',
-        providerUnits: '1',
-        xCallCount: 1,
+        providerUnits: String(1 + (input.probeEvidence ? input.probeEvidence.providerUnits : 0)),
+        xCallCount: 1 + (input.probeEvidence ? 1 : 0),
         traceVerified: true,
         resultCount: 1,
         rejectedCount: 0,
@@ -279,8 +320,13 @@ export async function persistXIdentityResult(input: {
           inputTokens: input.execution.inputTokens,
           outputTokens: input.execution.outputTokens,
           totalCostUsd: input.execution.totalCostUsd,
+          executionLocation: input.execution.executionLocation,
+          runnerReleaseSha: input.execution.runnerReleaseSha,
+          grokVersion: input.execution.grokVersion,
+          runnerBinaryHash: input.execution.runnerBinaryHash,
           rawPostEvidenceAvailable: input.execution.rawPostEvidenceAvailable,
           traceHash: input.execution.traceHash,
+          probeCallCount: input.probeEvidence ? 1 : 0,
         },
         completedAt: dbNow,
         leaseExpiresAt: null,
@@ -309,6 +355,10 @@ export async function failXIdentityRun(input: {
   errorSummary: string;
   providerProcessStarted?: boolean;
   providerExecution?: GrokBuildExecutionResult;
+  probeEvidence?: FormalRunProbeEvidence;
+  releaseExecutionBudgetAfterProbe?: boolean;
+  probeReservationIds?: readonly string[];
+  probeIncrementedReservationIds?: readonly string[];
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -336,8 +386,23 @@ export async function failXIdentityRun(input: {
       throw new Error('Failed X identity provider evidence used the wrong tool');
     }
     const providerAttempted =
+      input.providerExecution !== undefined ||
+      input.probeEvidence !== undefined ||
+      input.providerProcessStarted === true;
+    const mainProviderAttempted =
       input.providerExecution !== undefined || input.providerProcessStarted === true;
-    if (providerAttempted) {
+    if (input.releaseExecutionBudgetAfterProbe) {
+      if (!input.probeEvidence || mainProviderAttempted || !input.probeReservationIds?.length) {
+        throw new Error('Probe-only identity transition requires probe evidence and no main call');
+      }
+      await commitProbeAndReleaseXRunBudgets({
+        tx,
+        runId: input.runId,
+        dbNow,
+        probeReservationIds: input.probeReservationIds,
+        probeIncrementedReservationIds: input.probeIncrementedReservationIds,
+      });
+    } else if (providerAttempted) {
       const committedReservations = await commitXRunBudgets({ tx, runId: input.runId, dbNow });
       if (committedReservations === 0) {
         throw new Error('Started X identity provider process has no reserved budget');
@@ -345,12 +410,16 @@ export async function failXIdentityRun(input: {
     } else {
       await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
     }
+    if (input.probeEvidence) {
+      await insertProbeTrace({ tx, runId: input.runId, evidence: input.probeEvidence });
+    }
     if (input.providerExecution) {
       await insertProviderTrace({
         tx,
         runId: input.runId,
         execution: input.providerExecution,
         terminalState: 'ATTESTED_PROCESSING_FAILED',
+        sequence: input.probeEvidence ? 1 : 0,
       });
     }
     await tx
@@ -379,8 +448,15 @@ export async function failXIdentityRun(input: {
           summary,
         }),
         provider: providerAttempted ? 'grok-build' : undefined,
-        providerUnits: providerAttempted ? '1' : undefined,
-        xCallCount: providerAttempted ? 1 : 0,
+        providerUnits: providerAttempted
+          ? String(
+              (mainProviderAttempted ? 1 : 0) +
+                (input.probeEvidence ? input.probeEvidence.providerUnits : 0) || 1,
+            )
+          : undefined,
+        xCallCount: providerAttempted
+          ? (mainProviderAttempted ? 1 : 0) + (input.probeEvidence ? 1 : 0) || 1
+          : 0,
         traceVerified: input.providerExecution !== undefined,
         runMetrics: input.providerExecution
           ? {
@@ -389,11 +465,21 @@ export async function failXIdentityRun(input: {
               inputTokens: input.providerExecution.inputTokens,
               outputTokens: input.providerExecution.outputTokens,
               totalCostUsd: input.providerExecution.totalCostUsd,
+              executionLocation: input.providerExecution.executionLocation,
+              runnerReleaseSha: input.providerExecution.runnerReleaseSha,
+              grokVersion: input.providerExecution.grokVersion,
+              runnerBinaryHash: input.providerExecution.runnerBinaryHash,
               rawPostEvidenceAvailable: input.providerExecution.rawPostEvidenceAvailable,
               traceHash: input.providerExecution.traceHash,
+              probeCallCount: input.probeEvidence ? 1 : 0,
             }
           : providerAttempted
-            ? { providerProcessStarted: true, providerTraceVerified: false }
+            ? {
+                providerProcessStarted: mainProviderAttempted,
+                controlPlaneProbeProcessStarted: input.probeEvidence !== undefined,
+                providerTraceVerified: false,
+                probeCallCount: input.probeEvidence ? 1 : 0,
+              }
             : {},
         completedAt: dbNow,
         leaseExpiresAt: null,
