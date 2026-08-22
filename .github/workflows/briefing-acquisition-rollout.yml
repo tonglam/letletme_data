@@ -91,10 +91,10 @@ jobs:
               reservation_id uuid;
               ledger_id uuid;
               job_id text;
-              scope_kind text;
-              scope_key text;
-              scope_limit numeric;
-              scope_window_minutes integer;
+              budget_scope_kind text;
+              budget_scope_key text;
+              budget_scope_limit numeric;
+              budget_scope_window_minutes integer;
               used_units numeric;
               can_run boolean;
               inserted_count integer := 0;
@@ -155,7 +155,7 @@ jobs:
               LOOP
                 can_run := true;
 
-                FOR scope_kind, scope_key, scope_window_minutes, scope_limit IN
+                FOR budget_scope_kind, budget_scope_key, budget_scope_window_minutes, budget_scope_limit IN
                   SELECT * FROM (VALUES
                     ('GLOBAL'::text, 'GROK_BUILD_X'::text, 1440, 2400::numeric),
                     ('LANE'::text, ('NORMAL:' || candidate.lane)::text, 1440,
@@ -167,12 +167,12 @@ jobs:
                   FROM content.acquisition_budget_reservations AS reservation
                   JOIN content.acquisition_budget_ledgers AS ledger
                     ON ledger.ledger_id = reservation.ledger_id
-                  WHERE ledger.scope_kind = scope_kind
-                    AND ledger.scope_key = scope_key
+                  WHERE ledger.scope_kind = budget_scope_kind
+                    AND ledger.scope_key = budget_scope_key
                     AND ledger.unit_kind = 'CALL'
                     AND reservation.status IN ('RESERVED', 'COMMITTED')
-                    AND reservation.created_at > db_now - make_interval(mins => scope_window_minutes);
-                  IF used_units + 1 > scope_limit THEN
+                    AND reservation.created_at > db_now - make_interval(mins => budget_scope_window_minutes);
+                  IF used_units + 1 > budget_scope_limit THEN
                     can_run := false;
                   END IF;
                 END LOOP;
@@ -268,7 +268,7 @@ jobs:
                   'GROK_ATTESTED_FINAL'
                 );
 
-                FOR scope_kind, scope_key, scope_window_minutes, scope_limit IN
+                FOR budget_scope_kind, budget_scope_key, budget_scope_window_minutes, budget_scope_limit IN
                   SELECT * FROM (VALUES
                     ('GLOBAL'::text, 'GROK_BUILD_X'::text, 1440, 2400::numeric),
                     ('LANE'::text, ('NORMAL:' || candidate.lane)::text, 1440,
@@ -276,19 +276,19 @@ jobs:
                   ) AS scopes(kind, key, window_minutes, max_units)
                 LOOP
                   ledger_id := (
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || scope_kind || ':' || scope_key || ':' || date_trunc('hour', db_now)::text), 1, 8) || '-' ||
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || scope_kind || ':' || scope_key || ':' || date_trunc('hour', db_now)::text), 9, 4) || '-' ||
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || scope_kind || ':' || scope_key || ':' || date_trunc('hour', db_now)::text), 13, 4) || '-' ||
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || scope_kind || ':' || scope_key || ':' || date_trunc('hour', db_now)::text), 17, 4) || '-' ||
-                    substr(md5(current_setting('briefing.sample_batch') || ':' || scope_kind || ':' || scope_key || ':' || date_trunc('hour', db_now)::text), 21, 12)
+                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 1, 8) || '-' ||
+                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 9, 4) || '-' ||
+                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 13, 4) || '-' ||
+                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 17, 4) || '-' ||
+                    substr(md5(current_setting('briefing.sample_batch') || ':' || budget_scope_kind || ':' || budget_scope_key || ':' || date_trunc('hour', db_now)::text), 21, 12)
                   )::uuid;
                   INSERT INTO content.acquisition_budget_ledgers (
                     ledger_id, scope_kind, scope_key, unit_kind,
                     window_start, window_end, max_units
                   )
                   VALUES (
-                    ledger_id, scope_kind, scope_key, 'CALL',
-                    date_trunc('hour', db_now), date_trunc('hour', db_now) + interval '1 hour', scope_limit
+                    ledger_id, budget_scope_kind, budget_scope_key, 'CALL',
+                    date_trunc('hour', db_now), date_trunc('hour', db_now) + interval '1 hour', budget_scope_limit
                   )
                   ON CONFLICT (scope_kind, scope_key, unit_kind, window_start, window_end)
                   DO UPDATE SET
@@ -300,8 +300,8 @@ jobs:
                     updated_at = db_now;
                   SELECT budget.ledger_id INTO ledger_id
                   FROM content.acquisition_budget_ledgers AS budget
-                  WHERE budget.scope_kind = scope_kind
-                    AND budget.scope_key = scope_key
+                  WHERE budget.scope_kind = budget_scope_kind
+                    AND budget.scope_key = budget_scope_key
                     AND budget.unit_kind = 'CALL'
                     AND budget.window_start = date_trunc('hour', db_now)
                     AND budget.window_end = date_trunc('hour', db_now) + interval '1 hour';
@@ -309,11 +309,11 @@ jobs:
                   SET reserved_units = reserved_units + 1, updated_at = db_now
                   WHERE content.acquisition_budget_ledgers.ledger_id = ledger_id;
                   reservation_id := (
-                    substr(md5(run_id::text || ':' || scope_kind || ':' || scope_key), 1, 8) || '-' ||
-                    substr(md5(run_id::text || ':' || scope_kind || ':' || scope_key), 9, 4) || '-' ||
-                    substr(md5(run_id::text || ':' || scope_kind || ':' || scope_key), 13, 4) || '-' ||
-                    substr(md5(run_id::text || ':' || scope_kind || ':' || scope_key), 17, 4) || '-' ||
-                    substr(md5(run_id::text || ':' || scope_kind || ':' || scope_key), 21, 12)
+                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 1, 8) || '-' ||
+                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 9, 4) || '-' ||
+                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 13, 4) || '-' ||
+                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 17, 4) || '-' ||
+                    substr(md5(run_id::text || ':' || budget_scope_kind || ':' || budget_scope_key), 21, 12)
                   )::uuid;
                   INSERT INTO content.acquisition_budget_reservations (
                     reservation_id, ledger_id, run_id, units, status, created_at, updated_at
