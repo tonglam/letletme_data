@@ -52,7 +52,14 @@ chmod 0750 "$temporary_path"
 test -s "$temporary_path"
 artifact_sha=$(sha256sum "$temporary_path" | awk '{print $1}')
 [[ "$artifact_sha" =~ ^[0-9a-f]{64}$ ]]
-sudo -u deploy -H env \
+run_as_deploy() {
+  if [[ "$(id -un)" == deploy ]]; then
+    env "$@"
+  else
+    sudo -u deploy -H env "$@"
+  fi
+}
+run_as_deploy \
   HOME=/home/deploy \
   GROK_HOME=/home/deploy/.grok \
   GROK_NO_AUTO_UPDATE=1 \
