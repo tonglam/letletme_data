@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { planClassicManagerFallback } from '../../src/domain/manager-live-fallback';
+import {
+  managerSummaryFetchBatches,
+  planClassicManagerFallback,
+} from '../../src/domain/manager-live-fallback';
 
 describe('classic manager live fallback', () => {
   test('uses official entry summaries after standings pagination is exhausted', () => {
@@ -25,5 +28,14 @@ describe('classic manager live fallback', () => {
       backgroundEntryIds: [1, 2, 3, 4, 5],
       continueStandings: false,
     });
+  });
+
+  test('caps concurrent entry-summary work while retaining every target', () => {
+    const entryIds = Array.from({ length: 11 }, (_, index) => index + 1);
+
+    const batches = managerSummaryFetchBatches(entryIds);
+
+    expect(batches.map((batch) => batch.length)).toEqual([4, 4, 3]);
+    expect(batches.flat()).toEqual(entryIds);
   });
 });

@@ -1,4 +1,15 @@
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
+const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
+
+export const managerSummaryFetchBatches = (
+  entryIds: readonly number[],
+): readonly (readonly number[])[] => {
+  const batches: number[][] = [];
+  for (let offset = 0; offset < entryIds.length; offset += MAX_SUMMARY_FETCH_CONCURRENCY) {
+    batches.push(entryIds.slice(offset, offset + MAX_SUMMARY_FETCH_CONCURRENCY));
+  }
+  return batches;
+};
 
 export const planClassicManagerFallback = (
   pendingEntryIds: readonly number[],

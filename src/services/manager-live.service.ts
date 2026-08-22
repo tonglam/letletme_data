@@ -18,7 +18,10 @@ import { entryEventResultsRepository } from '../repositories/entry-event-results
 import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { planClassicManagerFallback } from '../domain/manager-live-fallback';
+import {
+  managerSummaryFetchBatches,
+  planClassicManagerFallback,
+} from '../domain/manager-live-fallback';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
 // Refresh at 30s while an event is active, but keep a successfully published
@@ -344,25 +347,29 @@ const refreshEntrySummaries = async (
   const checkedAt = nowIso();
   const refreshed: ManagerLiveScoreRow[] = [];
   let refreshErrorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null = null;
-  await Promise.all(
-    targets.map(async (entryId) => {
-      try {
-        const summary = await fplClient.getEntrySummary(entryId);
-        refreshed.push(toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt));
-      } catch (error) {
-        if (error instanceof FPLClientError && error.status === 429) {
-          refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
-        } else {
-          refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+  for (const batch of managerSummaryFetchBatches(targets)) {
+    await Promise.all(
+      batch.map(async (entryId) => {
+        try {
+          const summary = await fplClient.getEntrySummary(entryId);
+          refreshed.push(
+            toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt),
+          );
+        } catch (error) {
+          if (error instanceof FPLClientError && error.status === 429) {
+            refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
+          } else {
+            refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+          }
+          logWarn('Official manager entry summary refresh failed', {
+            entryId,
+            eventId,
+            error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
+          });
         }
-        logWarn('Official manager entry summary refresh failed', {
-          entryId,
-          eventId,
-          error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
-        });
-      }
-    }),
-  );
+      }),
+    );
+  }
   await writeRows(
     redis,
     season.seasonCode,
