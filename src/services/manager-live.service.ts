@@ -109,7 +109,9 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
     }
     if (
       typeof row.staleAt !== 'string' ||
-      (row.netEventPoints !== undefined && row.netEventPoints !== null && typeof row.netEventPoints !== 'number') ||
+      (row.netEventPoints !== undefined &&
+        row.netEventPoints !== null &&
+        typeof row.netEventPoints !== 'number') ||
       (row.eventPointSemantics !== 'GROSS' &&
         row.eventPointSemantics !== 'NET' &&
         row.eventPointSemantics !== 'ZERO_COST_EQUIVALENT' &&
@@ -203,7 +205,8 @@ const toClassicRows = (
   return response.standings.results
     .map((result) => {
       const entryId = result.entry;
-      if (typeof entryId !== 'number' || !Number.isSafeInteger(entryId) || entryId <= 0) return null;
+      if (typeof entryId !== 'number' || !Number.isSafeInteger(entryId) || entryId <= 0)
+        return null;
       return withRevision({
         season,
         eventId,
@@ -231,7 +234,8 @@ const ageSeconds = (checkedAt: string, now = Date.now()): number => {
   return Number.isFinite(timestamp) ? Math.max(0, (now - timestamp) / 1000) : Infinity;
 };
 
-const isFresh = (row: CachedRow, now = Date.now()): boolean => ageSeconds(row.checkedAt, now) <= REFRESH_SECONDS;
+const isFresh = (row: CachedRow, now = Date.now()): boolean =>
+  ageSeconds(row.checkedAt, now) <= REFRESH_SECONDS;
 const isWithinStaleWindow = (row: CachedRow, now = Date.now()): boolean =>
   ageSeconds(row.checkedAt, now) <= STALE_SECONDS;
 
@@ -243,7 +247,7 @@ const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void
     .catch((error) => {
       logWarn('Official manager live background refresh failed', {
         key,
-        error: error instanceof FPLClientError ? error.code ?? error.status : 'unknown',
+        error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
       });
     })
     .finally(() => {
@@ -282,20 +286,29 @@ const refreshEntrySummaries = async (
         logWarn('Official manager entry summary refresh failed', {
           entryId,
           eventId,
-          error: error instanceof FPLClientError ? error.code ?? error.status : 'unknown',
+          error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
         });
       }
     }),
   );
-  await writeRows(redis, season, eventId, refreshed, refreshed.length > 0 ? {
-      season,
-      eventId,
-      source: 'FPL_ENTRY_SUMMARY',
-      rowCount: refreshed.length,
-      checkedAt,
-      revision: refreshed[0]?.revision ?? null,
-      nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-    } : undefined, 'entry-summary');
+  await writeRows(
+    redis,
+    season,
+    eventId,
+    refreshed,
+    refreshed.length > 0
+      ? {
+          season,
+          eventId,
+          source: 'FPL_ENTRY_SUMMARY',
+          rowCount: refreshed.length,
+          checkedAt,
+          revision: refreshed[0]?.revision ?? null,
+          nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+        }
+      : undefined,
+    'entry-summary',
+  );
   for (const row of refreshed) rows.set(row.entryId, row);
   return refreshErrorCode;
 };
@@ -341,16 +354,25 @@ const refreshClassicStandings = async (
         break;
       }
     }
-    await writeRows(redis, season, eventId, fetchedRows, fetchedRows.length > 0 ? {
-        season,
-        eventId,
-        source: 'FPL_CLASSIC_STANDINGS',
-        leagueId,
-        rowCount: fetchedRows.length,
-        checkedAt,
-        revision: fetchedRows[0]?.revision ?? null,
-        nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-      } : undefined, `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`);
+    await writeRows(
+      redis,
+      season,
+      eventId,
+      fetchedRows,
+      fetchedRows.length > 0
+        ? {
+            season,
+            eventId,
+            source: 'FPL_CLASSIC_STANDINGS',
+            leagueId,
+            rowCount: fetchedRows.length,
+            checkedAt,
+            revision: fetchedRows[0]?.revision ?? null,
+            nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+          }
+        : undefined,
+      `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
+    );
     logDebug('Official classic manager live refresh completed', {
       eventId,
       leagueId,
@@ -363,13 +385,14 @@ const refreshClassicStandings = async (
       errorCode: null,
     };
   } catch (error) {
-    refreshErrorCode = error instanceof FPLClientError && error.status === 429
-      ? 'UPSTREAM_RATE_LIMITED'
-      : 'UPSTREAM_UNAVAILABLE';
+    refreshErrorCode =
+      error instanceof FPLClientError && error.status === 429
+        ? 'UPSTREAM_RATE_LIMITED'
+        : 'UPSTREAM_UNAVAILABLE';
     logWarn('Official classic manager standings refresh failed', {
       eventId,
       leagueId,
-      error: error instanceof FPLClientError ? error.code ?? error.status : 'unknown',
+      error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
     });
     return { complete: false, nextPage, errorCode: refreshErrorCode };
   }
@@ -399,7 +422,10 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
 
   const event = await eventRepository.findById(season, input.eventId);
   if (!event) {
-    throw new ValidationError('Event does not belong to the active season.', 'MANAGER_LIVE_EVENT_INVALID');
+    throw new ValidationError(
+      'Event does not belong to the active season.',
+      'MANAGER_LIVE_EVENT_INVALID',
+    );
   }
 
   const redis = await redisSingleton.getClient();
@@ -408,16 +434,27 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
   );
   let errorCode: ManagerLiveResolveResult['errorCode'] = null;
-  let refreshErrorCode: Exclude<ManagerLiveResolveResult['errorCode'], 'UNSUPPORTED_H2H_LIVE' | null> | null = null;
+  let refreshErrorCode: Exclude<
+    ManagerLiveResolveResult['errorCode'],
+    'UNSUPPORTED_H2H_LIVE' | null
+  > | null = null;
 
   if (input.tournamentId !== undefined) {
     const tournament = await tournamentInfoRepository.findById(season, input.tournamentId);
     if (!tournament) {
-      throw new ValidationError('Tournament does not belong to the active season.', 'MANAGER_LIVE_TOURNAMENT_INVALID');
+      throw new ValidationError(
+        'Tournament does not belong to the active season.',
+        'MANAGER_LIVE_TOURNAMENT_INVALID',
+      );
     }
-    const roster = new Set(await tournamentEntryRepository.findEntryIdsByTournamentId(season, input.tournamentId));
+    const roster = new Set(
+      await tournamentEntryRepository.findEntryIdsByTournamentId(season, input.tournamentId),
+    );
     if (uniqueEntryIds.some((entryId) => !roster.has(entryId))) {
-      throw new ValidationError('Entry is not a member of the tournament.', 'MANAGER_LIVE_ENTRY_NOT_IN_TOURNAMENT');
+      throw new ValidationError(
+        'Entry is not a member of the tournament.',
+        'MANAGER_LIVE_ENTRY_NOT_IN_TOURNAMENT',
+      );
     }
     if (tournament.leagueType === 'h2h') {
       errorCode = 'UNSUPPORTED_H2H_LIVE';
@@ -465,9 +502,16 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
 
   if (!errorCode && input.tournamentId === undefined && staleOrMissing.length > 0) {
     const summaryTargets = staleOrMissing;
-    refreshErrorCode = await refreshEntrySummaries(season.seasonCode, input.eventId, summaryTargets, rows, redis, {
-      maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES,
-    });
+    refreshErrorCode = await refreshEntrySummaries(
+      season.seasonCode,
+      input.eventId,
+      summaryTargets,
+      rows,
+      redis,
+      {
+        maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES,
+      },
+    );
     const pending = summaryTargets.filter(
       (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
     );
@@ -491,14 +535,15 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     }
   }
 
-	const now = Date.now();
-	// Never reuse an event-scoped entry/classic row for an H2H board. H2H stays
-	// on its legacy adapter until FPL publishes a usable live H2H contract.
-	const resolvedRows = errorCode === 'UNSUPPORTED_H2H_LIVE'
-		? []
-		: uniqueEntryIds
-			.map((entryId) => rows.get(entryId))
-			.filter((row): row is CachedRow => row !== undefined && isWithinStaleWindow(row, now));
+  const now = Date.now();
+  // Never reuse an event-scoped entry/classic row for an H2H board. H2H stays
+  // on its legacy adapter until FPL publishes a usable live H2H contract.
+  const resolvedRows =
+    errorCode === 'UNSUPPORTED_H2H_LIVE'
+      ? []
+      : uniqueEntryIds
+          .map((entryId) => rows.get(entryId))
+          .filter((row): row is CachedRow => row !== undefined && isWithinStaleWindow(row, now));
   const resolvedIds = new Set(resolvedRows.map((row) => row.entryId));
   const missingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
   if (!errorCode && refreshErrorCode) errorCode = refreshErrorCode;
