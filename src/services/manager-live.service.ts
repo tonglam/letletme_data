@@ -506,6 +506,7 @@ const finalResultRows = async (
   season: FplSeasonRef,
   eventId: number,
   entryIds: readonly number[],
+  freshAfter: Date | null,
 ): Promise<CachedRow[]> => {
   const results = await entryEventResultsRepository.findByEventAndEntryIds(
     season,
@@ -513,26 +514,33 @@ const finalResultRows = async (
     Array.from(new Set(entryIds)),
   );
   const checkedAt = nowIso();
-  return results.map((result) =>
-    withRevision({
-      season: season.seasonCode,
-      eventId,
-      entryId: result.entryId,
-      eventPoints: result.eventPoints,
-      netEventPoints: result.eventNetPoints,
-      totalPoints: result.overallPoints,
-      totalScope: 'OVERALL',
-      eventRank: result.eventRank,
-      overallRank: result.overallRank,
-      leagueRank: null,
-      source: 'FPL_FINAL_RESULT',
-      transferCost: result.eventTransfersCost,
-      eventPointSemantics: 'GROSS',
-      checkedAt,
-      upstreamUpdatedAt: null,
-      staleAt: plusSeconds(checkedAt, STALE_SECONDS),
-    }),
-  );
+  const freshAfterMs = freshAfter?.getTime() ?? null;
+  return results
+    .filter(
+      (result) =>
+        result.richSyncedAt !== null &&
+        (freshAfterMs === null || result.richSyncedAt.getTime() >= freshAfterMs),
+    )
+    .map((result) =>
+      withRevision({
+        season: season.seasonCode,
+        eventId,
+        entryId: result.entryId,
+        eventPoints: result.eventPoints,
+        netEventPoints: result.eventNetPoints,
+        totalPoints: result.overallPoints,
+        totalScope: 'OVERALL',
+        eventRank: result.eventRank,
+        overallRank: result.overallRank,
+        leagueRank: null,
+        source: 'FPL_FINAL_RESULT',
+        transferCost: result.eventTransfersCost,
+        eventPointSemantics: 'GROSS',
+        checkedAt,
+        upstreamUpdatedAt: result.richSyncedAt?.toISOString() ?? null,
+        staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+      }),
+    );
 };
 
 const managerLiveInFlight = new Map<string, Promise<ManagerLiveResolveResult>>();
@@ -589,14 +597,42 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   // A finished/data-checked event is historical data. Do not call the current
   // FPL manager endpoint for it; the final result table is the authority.
   if (event.finished && event.dataChecked) {
-    const finalRows = await finalResultRows(season, input.eventId, uniqueEntryIds);
+    const finalRows = await finalResultRows(
+      season,
+      input.eventId,
+      uniqueEntryIds,
+      event.dataCheckedAt,
+    );
     const resolvedIds = new Set(finalRows.map((row) => row.entryId));
+    const checkpointRows =
+      resolvedIds.size === uniqueEntryIds.length
+        ? []
+        : await managerScoreCheckpointRepository
+            .findByScopeAndEntryIds(
+              season,
+              input.eventId,
+              scope,
+              uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId)),
+            )
+            .catch((error) => {
+              logWarn('Final manager result fallback checkpoint read failed', {
+                eventId: input.eventId,
+                scope: scopeKey(scope),
+                error: error instanceof Error ? error.message : 'unknown',
+              });
+              return [];
+            });
+    const checkpointFallbackRows = checkpointRows
+      .filter((row) => !resolvedIds.has(row.entryId))
+      .map((row) => fromManagerScoreCheckpoint(row, season.seasonCode));
+    const rows = [...finalRows, ...checkpointFallbackRows];
+    const resolvedWithFallbackIds = new Set(rows.map((row) => row.entryId));
     return {
       season: season.seasonCode,
       eventId: input.eventId,
-      rows: finalRows,
-      missingEntryIds: uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId)),
-      partial: uniqueEntryIds.some((entryId) => !resolvedIds.has(entryId)),
+      rows,
+      missingEntryIds: uniqueEntryIds.filter((entryId) => !resolvedWithFallbackIds.has(entryId)),
+      partial: uniqueEntryIds.some((entryId) => !resolvedWithFallbackIds.has(entryId)),
       errorCode: null,
       checkedAt: nowIso(),
       nextRefreshAt: nextRefresh(true),

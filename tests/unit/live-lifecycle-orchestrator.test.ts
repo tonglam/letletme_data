@@ -47,7 +47,7 @@ describe('live lifecycle decisions', () => {
 
     expect(decision).toMatchObject({
       state: 'PICKS_SYNC',
-      shouldFetchLive: false,
+      shouldFetchLive: true,
       shouldProbePicks: true,
       shouldSyncPicks: true,
       recoverStaleFixtures: false,

@@ -235,10 +235,12 @@ export function decideLiveLifecycle(
   if (firstKickoffMs !== null && nowMs >= firstKickoffMs) {
     return {
       // A scheduled kickoff is not proof that the fixture has started. Keep
-      // the producer in its picks/sync lane until the core fixture lifecycle
-      // says started=true (or an authoritative publication proves it).
+      // the lifecycle state in its picks/sync lane until the core fixture
+      // says started=true (or an authoritative publication proves it). Keep
+      // a bounded live probe running so this worker can discover that change;
+      // the fetch itself must not be treated as start evidence.
       state: 'PICKS_SYNC',
-      shouldFetchLive: false,
+      shouldFetchLive: true,
       shouldProbePicks: true,
       shouldSyncPicks: true,
       recoverStaleFixtures: false,

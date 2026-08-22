@@ -27,27 +27,73 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
       return { success: false, code: 'LIVE_EVENT_NOT_FOUND' };
     }
 
-    const [fixtures, lifecycle, redisRead, postgresManifest, postgresEventLives, managerCoverage] =
-      await Promise.all([
-        fixtureRepository.findByEvent(season, event.id),
-        liveLifecycleStatusRepository.findByEventId(season, event.id),
-        (async () => {
-          try {
-            return { value: await readLiveSnapshotCache(season.seasonCode, event.id), error: null };
-          } catch (error) {
-            return {
-              value: null,
-              error: error instanceof Error ? error.name : 'UNKNOWN',
-            };
-          }
-        })(),
-        syncOperationsRepository
-          .findActivePublicationManifest('fpl:live', season, event.id)
-          .catch(() => null),
-        syncOperationsRepository.findActiveLiveEventLives(season, event.id).catch(() => null),
-        managerScoreCheckpointRepository.findCoverageByEvent(season, event.id).catch(() => null),
-      ]);
+    const [
+      fixtures,
+      lifecycle,
+      redisRead,
+      postgresManifestRead,
+      postgresEventLivesRead,
+      managerRead,
+    ] = await Promise.all([
+      fixtureRepository.findByEvent(season, event.id),
+      liveLifecycleStatusRepository.findByEventId(season, event.id),
+      (async () => {
+        try {
+          return { value: await readLiveSnapshotCache(season.seasonCode, event.id), error: null };
+        } catch (error) {
+          return {
+            value: null,
+            error: error instanceof Error ? error.name : 'UNKNOWN',
+          };
+        }
+      })(),
+      (async () => {
+        try {
+          return {
+            value: await syncOperationsRepository.findActivePublicationManifest(
+              'fpl:live',
+              season,
+              event.id,
+            ),
+            error: null,
+          };
+        } catch (error) {
+          return {
+            value: null,
+            error: error instanceof Error ? error.name : 'UNKNOWN',
+          };
+        }
+      })(),
+      (async () => {
+        try {
+          return {
+            value: await syncOperationsRepository.findActiveLiveEventLives(season, event.id),
+            error: null,
+          };
+        } catch (error) {
+          return {
+            value: null,
+            error: error instanceof Error ? error.name : 'UNKNOWN',
+          };
+        }
+      })(),
+      (async () => {
+        try {
+          return {
+            value: await managerScoreCheckpointRepository.findCoverageByEvent(season, event.id),
+            error: null,
+          };
+        } catch (error) {
+          return {
+            value: null,
+            error: error instanceof Error ? error.name : 'UNKNOWN',
+          };
+        }
+      })(),
+    ]);
     const cachedPublication = redisRead.value;
+    const postgresManifest = postgresManifestRead.value;
+    const postgresEventLives = postgresEventLivesRead.value;
     const postgresPublication =
       postgresManifest && postgresEventLives
         ? {
@@ -94,16 +140,22 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         publication: selectedPublication ? 'AVAILABLE' : 'NO_NEW_REVISION',
         fallback: {
           redis: redisRead.error ? 'UNAVAILABLE' : cachedPublication ? 'AVAILABLE' : 'EMPTY',
-          postgres: postgresPublication ? 'AVAILABLE' : 'EMPTY',
+          postgres:
+            postgresManifestRead.error || postgresEventLivesRead.error
+              ? 'UNAVAILABLE'
+              : postgresPublication
+                ? 'AVAILABLE'
+                : 'EMPTY',
           selected: selectedSource ?? 'NONE',
         },
-        manager: managerCoverage
+        manager: managerRead.value
           ? {
-              checkpointRows: managerCoverage.checkpointRows,
-              scopes: managerCoverage.scopes,
-              latestCheckedAt: managerCoverage.latestCheckedAt?.toISOString() ?? null,
+              checkpointRows: managerRead.value.checkpointRows,
+              scopes: managerRead.value.scopes,
+              latestCheckedAt: managerRead.value.latestCheckedAt?.toISOString() ?? null,
             }
           : null,
+        managerState: managerRead.error ? 'UNAVAILABLE' : managerRead.value ? 'AVAILABLE' : 'EMPTY',
       },
       timestamp: new Date().toISOString(),
     };
