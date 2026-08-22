@@ -313,6 +313,46 @@ export async function claimDueXIdentityRuns(input: {
       now: dbNow,
       nextDeadline: dateValue(clockRows[0]?.nextDeadline),
     });
+    const staleIdentityRuns = await tx
+      .select({ runId: contentAcquisitionRuns.runId })
+      .from(contentAcquisitionRuns)
+      .where(
+        and(
+          eq(contentAcquisitionRuns.jobKind, 'X_IDENTITY'),
+          inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+          lte(contentAcquisitionRuns.leaseExpiresAt, dbNow),
+        ),
+      )
+      .orderBy(asc(contentAcquisitionRuns.leaseExpiresAt), asc(contentAcquisitionRuns.runId))
+      .limit(input.claimLimit)
+      .for('update', { skipLocked: true });
+    for (const stale of staleIdentityRuns) {
+      await tx
+        .update(contentAcquisitionRuns)
+        .set({
+          status: 'FAILED',
+          failureClass: 'LEASE_EXPIRED',
+          failureDetailsHash: sha256CanonicalJson({
+            failureClass: 'LEASE_EXPIRED',
+            recoveryOwner: 'X_IDENTITY_SCHEDULER',
+          }),
+          errorSummary: 'X identity acquisition lease expired before terminal commit',
+          completedAt: dbNow,
+          leaseExpiresAt: null,
+          checkpointAdvanced: false,
+          runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify({
+            recoveredAfterLeaseExpiryAt: dbNow.toISOString(),
+            recoveryOwner: 'X_IDENTITY_SCHEDULER',
+          })}::jsonb`,
+        })
+        .where(
+          and(
+            eq(contentAcquisitionRuns.runId, stale.runId),
+            inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+          ),
+        );
+      await releaseXRunBudgets({ tx, runId: stale.runId, dbNow });
+    }
     const dueEndpoints = await tx
       .select({ endpointId: contentSourceEndpoints.endpointId })
       .from(contentSourceEndpoints)
@@ -1422,4 +1462,19 @@ export async function beginFormalRun(input: {
       status: 'RUNNING',
     };
   });
+}
+
+export async function loadFormalRunRequest(input: {
+  runId: string;
+  db?: DbHandle;
+}): Promise<FormalRunRequestV1> {
+  const db = input.db ?? (await getDb());
+  const rows = await db
+    .select({ requestSnapshot: contentAcquisitionRuns.requestSnapshot })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, input.runId))
+    .limit(1);
+  const run = rows[0];
+  if (!run) throw new Error(`Formal acquisition run not found: ${input.runId}`);
+  return parseFormalRunRequestV1(run.requestSnapshot);
 }

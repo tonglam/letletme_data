@@ -90,7 +90,9 @@ jobs:
           test "$(docker image inspect --format '{{.Config.User}}' letletme-data:ci)" = "appuser"
           test "$(docker run --rm --entrypoint id letletme-data:ci -u)" = "1001"
           docker run --rm --entrypoint sh letletme-data:ci -c \
-            'test "$HOME" = /home/appuser && test "$GROK_HOME" = /home/appuser/.grok'
+            'test "$HOME" = /home/appuser && test "$GROK_HOME" = /home/appuser/.grok && \
+             test -r /app/config/briefing/sources.yaml && \
+             test -r /app/config/briefing/acquisition-plan.yaml'
           briefing_grok_volume="letletme-data-ci-grok-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if docker volume inspect "$briefing_grok_volume" >/dev/null 2>&1; then
             echo 'refusing to reuse an existing CI Grok volume' >&2

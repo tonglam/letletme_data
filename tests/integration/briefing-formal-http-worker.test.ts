@@ -12,6 +12,7 @@ import {
 } from '../../src/content/acquisition/formal-run-repository';
 import { dispatchAcquisitionJobOutbox } from '../../src/content/acquisition/job-outbox';
 import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/manifest-reconciler';
+import { planTriggeredContentWork } from '../../src/content/acquisition/triggered-work-planner';
 import { getContentRuntimeFlags } from '../../src/content/config';
 import { runFormalHttpWorker } from '../../src/content/workers/formal-http.worker';
 import {
@@ -140,4 +141,43 @@ test('executes a claimed feed run from only its run ID and commits the formal re
   });
   expect(dispatch).toEqual({ claimed: 1, delivered: 1, failed: 0 });
   expect(enqueued).toEqual([childRuns[0]!.runId]);
+
+  await expect(
+    runFormalHttpWorker(
+      { schemaVersion: 1, runId: childRuns[0]!.runId },
+      {
+        flags,
+        fetchImpl: async () => {
+          throw new Error('synthetic article transport failure');
+        },
+      },
+    ),
+  ).rejects.toThrow('synthetic article transport failure');
+  await db
+    .update(contentAcquisitionRuns)
+    .set({ completedAt: new Date(Date.now() - 2 * 60_000) })
+    .where(eq(contentAcquisitionRuns.runId, childRuns[0]!.runId));
+  await db
+    .update(contentSourceReceipts)
+    .set({ workPlannerCheckedAt: null })
+    .where(eq(contentSourceReceipts.receiptId, receipts[0]!.receiptId));
+
+  const retryPlan = await planTriggeredContentWork({ flags, limit: 10 });
+  expect(retryPlan.byJobKind).toEqual({ ARTICLE_FETCH: 1 });
+  const articleRuns = await db
+    .select({
+      runId: contentAcquisitionRuns.runId,
+      parentRunId: contentAcquisitionRuns.parentRunId,
+      status: contentAcquisitionRuns.status,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.targetReceiptId, receipts[0]!.receiptId));
+  expect(articleRuns).toHaveLength(2);
+  expect(articleRuns).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ runId: childRuns[0]!.runId, status: 'FAILED' }),
+      expect.objectContaining({ parentRunId: childRuns[0]!.runId, status: 'PENDING' }),
+    ]),
+  );
+  expect((await planTriggeredContentWork({ flags, limit: 10 })).planned).toBe(0);
 });

@@ -6,7 +6,10 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { eq, ne, sql } from 'drizzle-orm';
 
 import type { AcquisitionBatchV1 } from '../../src/content/acquisition/acquisition-contract';
-import { loadBriefingManifest } from '../../src/content/acquisition/acquisition-manifest';
+import {
+  loadBriefingManifest,
+  parseBriefingManifest,
+} from '../../src/content/acquisition/acquisition-manifest';
 import {
   beginFormalRun,
   claimDueFormalRuns,
@@ -16,6 +19,7 @@ import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/m
 import { persistAcquisitionResult } from '../../src/content/acquisition/receipt-repository';
 import {
   contentPipelineOutbox,
+  contentAcquisitionRuns,
   contentSourceEndpoints,
   contentSourceObservations,
   contentSourcePartitionMembers,
@@ -259,5 +263,172 @@ describe('Briefing source registry reconciliation', () => {
         })(),
       ).rejects.toThrow();
     }
+  });
+
+  test('resets only schedules whose immutable acquisition contract changed', async () => {
+    await resetBriefingAcquisitionState();
+    const bundle = await loadBriefingManifest();
+    await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'contract-reset-v1' });
+    const db = await getDb();
+    const [target] = await db
+      .select({
+        scheduleId: contentSourceSchedules.scheduleId,
+        endpointId: contentSourceSchedules.endpointId,
+      })
+      .from(contentSourceSchedules)
+      .where(eq(contentSourceSchedules.scheduleKey, 'endpoint-fantasy-football-scout-rss'));
+    const [unrelated] = await db
+      .select({ scheduleId: contentSourceSchedules.scheduleId })
+      .from(contentSourceSchedules)
+      .where(eq(contentSourceSchedules.scheduleKey, 'endpoint-fml-fpl-podcast'));
+    if (!target?.endpointId || !unrelated) throw new Error('Contract reset schedules are missing');
+
+    await db
+      .update(contentSourceSchedules)
+      .set({ status: 'paused' })
+      .where(ne(contentSourceSchedules.scheduleId, target.scheduleId));
+    await db
+      .update(contentSourceSchedules)
+      .set({ status: 'active', nextDueAt: new Date(Date.now() - 60_000) })
+      .where(eq(contentSourceSchedules.scheduleId, target.scheduleId));
+    const [activeRun] = await claimDueFormalRuns({ enabledAdapters: ['RSS_ATOM'], claimLimit: 1 });
+    if (!activeRun) throw new Error('Target RSS run was not claimed');
+
+    const oldCutoff = new Date(Date.now() - 2 * 60 * 60_000);
+    const oldCompleted = new Date(Date.now() - 60 * 60_000);
+    await db
+      .update(contentSourceSchedules)
+      .set({
+        failureStreak: 2,
+        circuitState: 'OPEN',
+        probeAfter: new Date(Date.now() + 60 * 60_000),
+        cacheNotBefore: new Date(Date.now() + 30 * 60_000),
+        validator: { etag: 'old-target-etag' },
+        checkpoint: { windowEnd: oldCompleted.toISOString() },
+        bootstrapCutoffAt: oldCutoff,
+        bootstrapCompletedAt: oldCompleted,
+        underLimitStreak: 3,
+      })
+      .where(eq(contentSourceSchedules.scheduleId, target.scheduleId));
+
+    const unrelatedNextDue = new Date(Date.now() + 4 * 60 * 60_000);
+    const unrelatedCutoff = new Date(Date.now() - 4 * 60 * 60_000);
+    const unrelatedCompleted = new Date(Date.now() - 3 * 60 * 60_000);
+    await db
+      .update(contentSourceSchedules)
+      .set({
+        nextDueAt: unrelatedNextDue,
+        validator: { etag: 'keep-etag' },
+        checkpoint: { windowEnd: unrelatedCompleted.toISOString() },
+        bootstrapCutoffAt: unrelatedCutoff,
+        bootstrapCompletedAt: unrelatedCompleted,
+        cacheNotBefore: new Date(Date.now() + 20 * 60_000),
+      })
+      .where(eq(contentSourceSchedules.scheduleId, unrelated.scheduleId));
+
+    const modifiedSources = structuredClone(bundle.sources);
+    const modifiedEndpoint = modifiedSources.entities
+      .flatMap((entity) => entity.endpoints)
+      .find((endpoint) => endpoint.endpointKey === 'fantasy-football-scout-rss');
+    if (!modifiedEndpoint) throw new Error('Fantasy Football Scout RSS endpoint is missing');
+    modifiedEndpoint.locator.url =
+      'https://www.fantasyfootballscout.co.uk/feed/?briefing-contract=v2';
+    const modifiedBundle = parseBriefingManifest({
+      sourcesYaml: JSON.stringify(modifiedSources),
+      acquisitionPlanYaml: JSON.stringify(bundle.plan),
+    });
+    const reconcileStartedAt = Date.now();
+    await reconcileBriefingSourceRegistry({
+      bundle: modifiedBundle,
+      gitRevision: 'contract-reset-v2',
+    });
+
+    const [resetTarget] = await db
+      .select({
+        nextDueAt: contentSourceSchedules.nextDueAt,
+        leaseOwner: contentSourceSchedules.leaseOwner,
+        leaseExpiresAt: contentSourceSchedules.leaseExpiresAt,
+        failureStreak: contentSourceSchedules.failureStreak,
+        circuitState: contentSourceSchedules.circuitState,
+        probeAfter: contentSourceSchedules.probeAfter,
+        cacheNotBefore: contentSourceSchedules.cacheNotBefore,
+        validator: contentSourceSchedules.validator,
+        checkpoint: contentSourceSchedules.checkpoint,
+        bootstrapCompletedAt: contentSourceSchedules.bootstrapCompletedAt,
+        bootstrapCutoffAt: contentSourceSchedules.bootstrapCutoffAt,
+        underLimitStreak: contentSourceSchedules.underLimitStreak,
+      })
+      .from(contentSourceSchedules)
+      .where(eq(contentSourceSchedules.scheduleId, target.scheduleId));
+    expect(resetTarget).toMatchObject({
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      failureStreak: 0,
+      circuitState: 'CLOSED',
+      probeAfter: null,
+      cacheNotBefore: null,
+      validator: {},
+      checkpoint: {},
+      bootstrapCompletedAt: null,
+      underLimitStreak: 0,
+    });
+    expect(resetTarget?.nextDueAt.getTime()).toBeGreaterThanOrEqual(reconcileStartedAt);
+    expect(resetTarget?.bootstrapCutoffAt?.getTime() ?? 0).toBeGreaterThanOrEqual(
+      reconcileStartedAt,
+    );
+
+    const [preservedUnrelated] = await db
+      .select({
+        nextDueAt: contentSourceSchedules.nextDueAt,
+        validator: contentSourceSchedules.validator,
+        checkpoint: contentSourceSchedules.checkpoint,
+        bootstrapCompletedAt: contentSourceSchedules.bootstrapCompletedAt,
+        bootstrapCutoffAt: contentSourceSchedules.bootstrapCutoffAt,
+      })
+      .from(contentSourceSchedules)
+      .where(eq(contentSourceSchedules.scheduleId, unrelated.scheduleId));
+    expect(preservedUnrelated).toEqual({
+      nextDueAt: unrelatedNextDue,
+      validator: { etag: 'keep-etag' },
+      checkpoint: { windowEnd: unrelatedCompleted.toISOString() },
+      bootstrapCompletedAt: unrelatedCompleted,
+      bootstrapCutoffAt: unrelatedCutoff,
+    });
+    const [invalidatedRun] = await db
+      .select({
+        status: contentAcquisitionRuns.status,
+        failureClass: contentAcquisitionRuns.failureClass,
+      })
+      .from(contentAcquisitionRuns)
+      .where(eq(contentAcquisitionRuns.runId, activeRun.runId));
+    expect(invalidatedRun).toEqual({
+      status: 'FAILED',
+      failureClass: 'MANIFEST_CONTRACT_CHANGED',
+    });
+
+    await db
+      .update(contentSourceSchedules)
+      .set({ status: 'paused' })
+      .where(ne(contentSourceSchedules.scheduleId, target.scheduleId));
+    await db
+      .update(contentSourceSchedules)
+      .set({ status: 'active', nextDueAt: new Date(Date.now() - 60_000) })
+      .where(eq(contentSourceSchedules.scheduleId, target.scheduleId));
+    const [replacementRun] = await claimDueFormalRuns({
+      enabledAdapters: ['RSS_ATOM'],
+      claimLimit: 1,
+    });
+    if (!replacementRun) throw new Error('Replacement RSS run was not claimed');
+    const replacementRequest = await beginFormalRun({ runId: replacementRun.runId });
+    expect(replacementRequest.request).toMatchObject({
+      jobKind: 'FEED_POLL',
+      endpoint: {
+        locator: {
+          url: 'https://www.fantasyfootballscout.co.uk/feed/?briefing-contract=v2',
+        },
+      },
+      validator: { etag: null, lastModified: null },
+      bootstrap: { enabled: true },
+    });
   });
 });

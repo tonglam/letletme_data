@@ -2,7 +2,8 @@ import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 
 import type { ClaimedAcquisitionJobOutbox } from '../acquisition/job-outbox';
 import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
-import type { ClaimedFormalRun } from '../acquisition/formal-run-repository';
+import { loadFormalRunRequest, type ClaimedFormalRun } from '../acquisition/formal-run-repository';
+import { formalHttpHostKey, HostConcurrencyLimiter } from '../acquisition/host-concurrency-limiter';
 import { getContentRuntimeFlags } from '../config';
 import { logError, logInfo } from '../../utils/logger';
 import { getQueueConnection } from '../../utils/queue';
@@ -37,9 +38,16 @@ export async function enqueueFormalHttpRun(
 export function createFormalHttpWorkerRuntime() {
   const flags = getContentRuntimeFlags();
   const connection = getQueueConnection();
+  const hostLimiter = new HostConcurrencyLimiter(flags.httpHostConcurrency);
   const worker = new Worker<AcquisitionJobV1>(
     contentHttpAcquisitionQueueName,
-    async (job) => runFormalHttpWorker(acquisitionJobV1Schema.parse(job.data)),
+    async (job) => {
+      const acquisitionJob = acquisitionJobV1Schema.parse(job.data);
+      const request = await loadFormalRunRequest({ runId: acquisitionJob.runId });
+      return hostLimiter.withPermit(formalHttpHostKey(request), () =>
+        runFormalHttpWorker(acquisitionJob),
+      );
+    },
     { connection, concurrency: flags.httpConcurrency },
   );
   const queueEvents = new QueueEvents(contentHttpAcquisitionQueueName, { connection });

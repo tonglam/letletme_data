@@ -27,22 +27,33 @@ function dbDate(value: Date | string | undefined): Date {
   return result;
 }
 
-function runLeaseMs(adapterKind: string | null): number {
+const DEFAULT_HERMES_RUN_LEASE_MS = 125 * 60_000;
+
+function runLeaseMs(adapterKind: string | null, hermesRunLeaseMs?: number): number {
   if (adapterKind === 'X_ACCOUNT' || adapterKind === 'X_SEMANTIC') return 6 * 60_000;
-  if (adapterKind === 'HERMES_TRANSCRIPT') return 30 * 60_000;
-  return 2 * 60_000;
+  if (adapterKind === 'HERMES_TRANSCRIPT') {
+    return hermesRunLeaseMs ?? DEFAULT_HERMES_RUN_LEASE_MS;
+  }
+  return 6 * 60_000;
 }
 
 export async function claimAcquisitionJobOutbox(input: {
   limit: number;
   enabledQueueNames?: readonly AcquisitionQueueName[];
   leaseMs?: number;
+  hermesRunLeaseMs?: number;
   db?: DbHandle;
 }): Promise<readonly ClaimedAcquisitionJobOutbox[]> {
   if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
     throw new Error('Acquisition job outbox claim limit must be an integer from 1 to 100');
   }
   if (input.enabledQueueNames?.length === 0) return [];
+  if (
+    input.hermesRunLeaseMs !== undefined &&
+    (!Number.isSafeInteger(input.hermesRunLeaseMs) || input.hermesRunLeaseMs < 1)
+  ) {
+    throw new Error('Hermes acquisition run lease must be a positive safe integer');
+  }
   const db = input.db ?? (await getDb());
   const owner = randomUUID();
   return db.transaction(async (tx) => {
@@ -108,7 +119,11 @@ export async function claimAcquisitionJobOutbox(input: {
         .where(eq(contentAcquisitionJobOutbox.outboxId, row.outboxId));
       await tx
         .update(contentAcquisitionRuns)
-        .set({ leaseExpiresAt: new Date(dbNow.getTime() + runLeaseMs(run.adapterKind)) })
+        .set({
+          leaseExpiresAt: new Date(
+            dbNow.getTime() + runLeaseMs(run.adapterKind, input.hermesRunLeaseMs),
+          ),
+        })
         .where(eq(contentAcquisitionRuns.runId, row.runId));
       claimed.push({
         outboxId: row.outboxId,
@@ -215,11 +230,13 @@ export async function dispatchAcquisitionJobOutbox(input: {
   enqueue: (job: ClaimedAcquisitionJobOutbox) => Promise<unknown>;
   enabledQueueNames?: readonly AcquisitionQueueName[];
   limit?: number;
+  hermesRunLeaseMs?: number;
   db?: DbHandle;
 }): Promise<{ claimed: number; delivered: number; failed: number }> {
   const claimed = await claimAcquisitionJobOutbox({
     limit: input.limit ?? 20,
     enabledQueueNames: input.enabledQueueNames,
+    hermesRunLeaseMs: input.hermesRunLeaseMs,
     db: input.db,
   });
   let delivered = 0;

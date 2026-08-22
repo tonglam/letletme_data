@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, lte, max, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lte, max, ne, sql } from 'drizzle-orm';
 
 import {
   contentAcquisitionJobOutbox,
@@ -13,6 +13,7 @@ import {
 import { getDb, type DbHandle, type TransactionHandle } from '../../db/singleton';
 import { parseCanonicalAcquisitionItemV1, type AcquisitionItemV1 } from './acquisition-contract';
 import { getAcquisitionProfile, type AcquisitionPhase } from './acquisition-profiles';
+import { ARTICLE_PROFILE_KEY, ARTICLE_PROFILE_REVISION } from './article-adapter';
 import { sha256CanonicalJson } from './canonicalization';
 import { parseFormalRunRequestV1, type FormalRunRequestV1 } from './formal-run-contract';
 import { resolveFormalAcquisitionPhase } from './formal-run-repository';
@@ -55,7 +56,7 @@ type Candidate = Readonly<{
 type Plan = Readonly<{
   request: FormalRunRequestV1;
   queueName: 'content-http-acquisition' | 'content-media-transcript';
-  evidenceMode: 'PROVIDER_ATTESTED' | 'HERMES_TIMESTAMPED';
+  evidenceMode: 'HTTP_DETERMINISTIC' | 'PROVIDER_ATTESTED' | 'HERMES_TIMESTAMPED';
   parentRunId: string;
   priority: number;
 }>;
@@ -85,7 +86,7 @@ function endpointSnapshot(candidate: Candidate) {
     endpointKey: candidate.endpointKey,
     sourceId: candidate.sourceId,
     sourceKey: candidate.sourceKey,
-    adapterKind: candidate.endpointAdapterKind as 'PODCAST_FEED' | 'YOUTUBE_CHANNEL',
+    adapterKind: candidate.endpointAdapterKind as 'RSS_ATOM' | 'PODCAST_FEED' | 'YOUTUBE_CHANNEL',
     profileKey: candidate.profileKey,
     locator: record(candidate.locator) as Record<string, string>,
     stableExternalId: candidate.stableExternalId,
@@ -151,6 +152,36 @@ function planForCandidate(input: {
     endpoint,
     discoveryItem: item,
   };
+
+  if (
+    candidate.contentKind === 'ARTICLE' &&
+    item.body.availability !== 'FULL' &&
+    item.linkAvailability === 'DIRECT' &&
+    item.sourceUrl !== null &&
+    flags.httpAcquisitionEnabled
+  ) {
+    const latest = latestRun(runs, 'ARTICLE_FETCH');
+    const failures = retryFailureCount(runs, 'ARTICLE_FETCH');
+    if (latest && !['FAILED', 'BUDGET_DEFERRED'].includes(latest.status)) return null;
+    if (failures >= 3) return null;
+    const due = runNextEligibleAt(latest, failures <= 1 ? 60_000 : 5 * 60_000);
+    if (due && due > dbNow) return null;
+    return {
+      request: parseFormalRunRequestV1({
+        ...common,
+        jobKind: 'ARTICLE_FETCH',
+        adapterKind: 'ARTICLE_HTTP',
+        profileKey: ARTICLE_PROFILE_KEY,
+        profileRevision: ARTICLE_PROFILE_REVISION,
+        allowedOrigins: [new URL(item.sourceUrl).origin],
+        validator: { etag: null, lastModified: null },
+      }),
+      queueName: 'content-http-acquisition',
+      evidenceMode: 'HTTP_DETERMINISTIC',
+      parentRunId: latest?.runId ?? candidate.revisionRunId,
+      priority: profile.priority,
+    };
+  }
 
   if (
     candidate.contentKind === 'EPISODE' &&
@@ -304,6 +335,7 @@ async function recoverStaleTriggeredRuns(tx: TransactionHandle, dbNow: Date): Pr
     .where(
       and(
         isNull(contentAcquisitionRuns.scheduleId),
+        ne(contentAcquisitionRuns.jobKind, 'X_IDENTITY'),
         inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
         lte(contentAcquisitionRuns.leaseExpiresAt, dbNow),
       ),
@@ -449,7 +481,7 @@ export async function planTriggeredContentWork(input: {
       .innerJoin(contentSources, eq(contentSources.sourceId, contentSourceReceipts.sourceId))
       .where(
         and(
-          inArray(contentSourceReceipts.contentKind, ['EPISODE', 'VIDEO']),
+          inArray(contentSourceReceipts.contentKind, ['ARTICLE', 'EPISODE', 'VIDEO']),
           eq(contentSourceEndpoints.status, 'active'),
           eq(contentSources.status, 'active'),
         ),

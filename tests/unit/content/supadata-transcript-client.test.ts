@@ -131,4 +131,73 @@ describe('Supadata transcript client', () => {
       }),
     ).rejects.toMatchObject({ failureClass: 'BILLING_HEADER_MISSING' });
   });
+
+  test('cancels a streaming response as soon as the byte limit is exceeded', async () => {
+    let cancelled = false;
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new TextEncoder().encode(pulls === 1 ? '{"content":[' : '1234567890'));
+        if (pulls === 4) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const client = new SupadataTranscriptClient({
+      apiKey: 'secret',
+      timeoutMs: 1_000,
+      maximumResponseBytes: 15,
+      fetchImpl: async () =>
+        new Response(body, {
+          headers: { 'content-type': 'application/json', 'x-billable-requests': '1' },
+        }),
+    });
+
+    await expect(
+      client.submit({
+        videoUrl: 'https://www.youtube.com/watch?v=oversized',
+        mode: 'native',
+        language: 'en',
+      }),
+    ).rejects.toMatchObject({ failureClass: 'OUTPUT_LIMIT' });
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(4);
+  });
+
+  test('rejects an oversized declared response before reading its body', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode('{}'));
+        controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const client = new SupadataTranscriptClient({
+      apiKey: 'secret',
+      timeoutMs: 1_000,
+      maximumResponseBytes: 10,
+      fetchImpl: async () =>
+        new Response(body, {
+          headers: {
+            'content-length': '100',
+            'content-type': 'application/json',
+            'x-billable-requests': '1',
+          },
+        }),
+    });
+
+    await expect(
+      client.submit({
+        videoUrl: 'https://www.youtube.com/watch?v=declared-oversized',
+        mode: 'native',
+        language: 'en',
+      }),
+    ).rejects.toMatchObject({ failureClass: 'OUTPUT_LIMIT' });
+    expect(cancelled).toBe(true);
+  });
 });

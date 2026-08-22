@@ -10,6 +10,10 @@ import {
   claimDueFormalRuns,
   confirmFormalRunEnqueued,
 } from '../../src/content/acquisition/formal-run-repository';
+import {
+  claimAcquisitionJobOutbox,
+  confirmAcquisitionJobOutbox,
+} from '../../src/content/acquisition/job-outbox';
 import type { HermesTranscriptClientLike } from '../../src/content/acquisition/hermes-transcript-client';
 import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/manifest-reconciler';
 import { getContentRuntimeFlags } from '../../src/content/config';
@@ -17,6 +21,7 @@ import { runFormalHttpWorker } from '../../src/content/workers/formal-http.worke
 import { runFormalMediaWorker } from '../../src/content/workers/formal-media.worker';
 import {
   contentAcquisitionBudgetReservations,
+  contentAcquisitionJobOutbox,
   contentAcquisitionRuns,
   contentSourceEndpoints,
   contentSourceReceiptRevisions,
@@ -127,6 +132,26 @@ test('upgrades Podcast receipts from pending to publisher and Hermes timestamped
   if (!publisherChild) throw new Error('Publisher transcript child was not created');
   expect(publisherChild.targetReceiptId).not.toBeNull();
   expect(publisherChild.targetReceiptRevisionId).not.toBeNull();
+  const [publisherOutbox] = await claimAcquisitionJobOutbox({
+    limit: 1,
+    enabledQueueNames: ['content-media-transcript'],
+    hermesRunLeaseMs: flags.hermesTranscriptTimeoutMs + 5 * 60_000,
+  });
+  if (!publisherOutbox) throw new Error('Publisher transcript outbox was not claimed');
+  expect(publisherOutbox.runId).toBe(publisherChild.runId);
+  const [leasedPublisherRun] = await db
+    .select({ leaseExpiresAt: contentAcquisitionRuns.leaseExpiresAt })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, publisherChild.runId));
+  expect(leasedPublisherRun?.leaseExpiresAt?.getTime() ?? 0).toBeGreaterThanOrEqual(
+    Date.now() + flags.hermesTranscriptTimeoutMs + 4 * 60_000,
+  );
+  expect(
+    await confirmAcquisitionJobOutbox({
+      outboxId: publisherOutbox.outboxId,
+      owner: publisherOutbox.owner,
+    }),
+  ).toBe(true);
   const publisherResult = await runFormalMediaWorker(
     { schemaVersion: 1, runId: publisherChild.runId },
     {
@@ -232,4 +257,51 @@ test('upgrades Podcast receipts from pending to publisher and Hermes timestamped
     .from(contentAcquisitionBudgetReservations)
     .where(eq(contentAcquisitionBudgetReservations.runId, hermesChild.runId));
   expect(hermesReservations).toEqual([{ status: 'COMMITTED' }]);
+});
+
+test('does not create Podcast transcript work when the adapter flag is disabled', async () => {
+  await resetBriefingAcquisitionState();
+  const bundle = await loadBriefingManifest();
+  await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'podcast-disabled-test' });
+  const db = await getDb();
+  const [endpoint] = await db
+    .select({ endpointId: contentSourceEndpoints.endpointId })
+    .from(contentSourceEndpoints)
+    .where(eq(contentSourceEndpoints.endpointKey, 'fml-fpl-podcast'))
+    .limit(1);
+  if (!endpoint) throw new Error('FML FPL Podcast endpoint is missing');
+  await db
+    .update(contentSourceSchedules)
+    .set({ status: 'paused' })
+    .where(ne(contentSourceSchedules.endpointId, endpoint.endpointId));
+  await db
+    .update(contentSourceSchedules)
+    .set({
+      status: 'active',
+      nextDueAt: new Date(Date.now() - 60_000),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    })
+    .where(eq(contentSourceSchedules.endpointId, endpoint.endpointId));
+
+  const feed = await claimPodcastFeed();
+  const result = await runFormalHttpWorker(feed.job, {
+    flags: { ...flags, podcastTranscriptEnabled: false },
+    fetchImpl: async () =>
+      new Response(
+        feedXml({
+          guid: 'disabled-transcript-episode',
+          publishedAt: new Date(Date.now() - 60_000).toUTCString(),
+        }),
+        { status: 200, headers: { 'content-type': 'application/rss+xml' } },
+      ),
+  });
+  expect(result).toMatchObject({ status: 'COMPLETED', triggeredJobCount: 0 });
+  const childRuns = await db
+    .select({ runId: contentAcquisitionRuns.runId })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.parentRunId, feed.runId));
+  const acquisitionOutbox = await db.select().from(contentAcquisitionJobOutbox);
+  expect(childRuns).toEqual([]);
+  expect(acquisitionOutbox).toEqual([]);
 });

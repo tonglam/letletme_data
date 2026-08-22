@@ -42,6 +42,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/src ./src
 COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/migrations ./migrations
+COPY --from=build /app/config/briefing ./config/briefing
 COPY --from=build /app/drizzle.config.ts ./
 COPY --from=build /app/validate-env.ts ./
 COPY --from=build /app/tsconfig.json ./

@@ -194,14 +194,16 @@ export async function runFormalHttpWorker(
             new URL(item.sourceUrl).origin === feedOrigin,
         )
         .slice(0, request.bootstrap.maxContentJobs);
-      const podcastItems = result.batch.items
-        .filter(
-          (item) =>
-            item.contentKind === 'EPISODE' &&
-            item.transcript.status === 'PENDING' &&
-            item.media.some((media) => media.kind === 'AUDIO'),
-        )
-        .slice(0, request.bootstrap.maxContentJobs);
+      const podcastItems = flags.podcastTranscriptEnabled
+        ? result.batch.items
+            .filter(
+              (item) =>
+                item.contentKind === 'EPISODE' &&
+                item.transcript.status === 'PENDING' &&
+                item.media.some((media) => media.kind === 'AUDIO'),
+            )
+            .slice(0, request.bootstrap.maxContentJobs)
+        : [];
       const youtubeItems = flags.youtubeNativeEnabled
         ? result.batch.items
             .filter((item) => item.contentKind === 'VIDEO' && item.transcript.status === 'PENDING')

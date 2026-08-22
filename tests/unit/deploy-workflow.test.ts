@@ -11,6 +11,7 @@ const briefingRolloutWorkflow = readFileSync(
 );
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
+const dockerfile = readFileSync('Dockerfile', 'utf8');
 const quote = String.fromCharCode(39);
 
 describe('release workflow gates', () => {
@@ -41,6 +42,9 @@ describe('release workflow gates', () => {
     );
     expect(ciWorkflow).toContain('test -x "$GROK_HOME/bin/grok-1.0.5"');
     expect(ciWorkflow).not.toContain('--tmpfs /home/appuser/.grok:');
+    expect(dockerfile).toContain('COPY --from=build /app/config/briefing ./config/briefing');
+    expect(ciWorkflow).toContain('test -r /app/config/briefing/sources.yaml');
+    expect(ciWorkflow).toContain('test -r /app/config/briefing/acquisition-plan.yaml');
   });
 
   test('keeps Briefing acquisition rollout on protected main with rollback and fixed modes', () => {

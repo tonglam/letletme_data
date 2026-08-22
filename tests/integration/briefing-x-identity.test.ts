@@ -11,6 +11,7 @@ import {
   confirmFormalRunEnqueued,
 } from '../../src/content/acquisition/formal-run-repository';
 import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/manifest-reconciler';
+import { planTriggeredContentWork } from '../../src/content/acquisition/triggered-work-planner';
 import { compileXBudgetPolicy } from '../../src/content/acquisition/x-budget';
 import { getContentRuntimeFlags } from '../../src/content/config';
 import { runFormalXWorker } from '../../src/content/workers/formal-x.worker';
@@ -199,4 +200,74 @@ test('conservatively commits budget when the Grok identity process starts but tr
     .from(contentAcquisitionProviderTraces)
     .where(eq(contentAcquisitionProviderTraces.runId, claimed.runId));
   expect(traces).toEqual([]);
+});
+
+test('identity scheduler owns stale lease recovery and creates a fresh bounded attempt', async () => {
+  await resetBriefingAcquisitionState();
+  const bundle = await loadBriefingManifest();
+  const budgetPolicy = compileXBudgetPolicy({
+    coverage: bundle.coverage,
+    globalRolling24hLimit: 2_400,
+    final90Rolling90mLimit: 300,
+  });
+  await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'x-identity-recovery-test' });
+  const db = await getDb();
+  const [endpoint] = await db
+    .select({ endpointId: contentSourceEndpoints.endpointId })
+    .from(contentSourceEndpoints)
+    .where(eq(contentSourceEndpoints.endpointKey, 'official-fpl-x'))
+    .limit(1);
+  if (!endpoint) throw new Error('OfficialFPL endpoint is missing');
+  await db
+    .update(contentSourceEndpoints)
+    .set({ status: 'paused' })
+    .where(ne(contentSourceEndpoints.endpointId, endpoint.endpointId));
+
+  const [stale] = await claimDueXIdentityRuns({ claimLimit: 1, budgetPolicy });
+  if (!stale) throw new Error('Initial X identity run was not claimed');
+  await db
+    .update(contentAcquisitionRuns)
+    .set({ leaseExpiresAt: new Date(Date.now() - 60_000) })
+    .where(eq(contentAcquisitionRuns.runId, stale.runId));
+
+  const genericRecovery = await planTriggeredContentWork({
+    flags: { ...getContentRuntimeFlags(), pipelineEnabled: true },
+    limit: 1,
+  });
+  expect(genericRecovery.reclaimed).toBe(0);
+  const [stillPending] = await db
+    .select({ status: contentAcquisitionRuns.status })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, stale.runId));
+  expect(stillPending?.status).toBe('PENDING');
+
+  const [replacement] = await claimDueXIdentityRuns({ claimLimit: 1, budgetPolicy });
+  if (!replacement) throw new Error('Replacement X identity run was not claimed');
+  expect(replacement.runId).not.toBe(stale.runId);
+  const recoveredRuns = await db
+    .select({
+      runId: contentAcquisitionRuns.runId,
+      status: contentAcquisitionRuns.status,
+      failureClass: contentAcquisitionRuns.failureClass,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.endpointId, endpoint.endpointId));
+  expect(recoveredRuns).toEqual(
+    expect.arrayContaining([
+      { runId: stale.runId, status: 'FAILED', failureClass: 'LEASE_EXPIRED' },
+      { runId: replacement.runId, status: 'PENDING', failureClass: null },
+    ]),
+  );
+  const oldReservations = await db
+    .select({ status: contentAcquisitionBudgetReservations.status })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, stale.runId));
+  const newReservations = await db
+    .select({ status: contentAcquisitionBudgetReservations.status })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, replacement.runId));
+  expect(oldReservations.length).toBeGreaterThan(0);
+  expect(newReservations.length).toBeGreaterThan(0);
+  expect(oldReservations.every((reservation) => reservation.status === 'RELEASED')).toBe(true);
+  expect(newReservations.every((reservation) => reservation.status === 'RESERVED')).toBe(true);
 });

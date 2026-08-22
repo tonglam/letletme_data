@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 
 import {
+  contentAcquisitionRuns,
   contentSourceEndpoints,
   contentSourcePartitionMembers,
   contentSourcePartitions,
@@ -11,10 +12,11 @@ import {
   contentSources,
 } from '../../db/schemas/content.schema';
 import { getDb, type DbHandle } from '../../db/singleton';
-import { canonicalJson, type JsonValue } from './canonicalization';
+import { canonicalJson, sha256CanonicalJson, type JsonValue } from './canonicalization';
 import { getAcquisitionProfile, type AdapterKind } from './acquisition-profiles';
 import type { BriefingManifestBundle } from './acquisition-manifest';
 import { compileBriefingRegistryState, type DesiredSourceEndpoint } from './registry-state';
+import { releaseXRunBudgets } from './x-budget';
 
 const IDENTITY_REFRESH_MS = 30 * 24 * 60 * 60_000;
 const RECONCILE_LOCK_KEY = 'briefing-source-registry-v1';
@@ -274,6 +276,7 @@ export async function reconcileBriefingSourceRegistry(input: {
         .select({
           endpointId: contentSourceEndpoints.endpointId,
           endpointKey: contentSourceEndpoints.endpointKey,
+          sourceId: contentSourceEndpoints.sourceId,
           adapterKind: contentSourceEndpoints.adapterKind,
           profileKey: contentSourceEndpoints.profileKey,
           locator: contentSourceEndpoints.locator,
@@ -352,6 +355,8 @@ export async function reconcileBriefingSourceRegistry(input: {
         .select({
           partitionId: contentSourcePartitions.partitionId,
           partitionKey: contentSourcePartitions.partitionKey,
+          adapterKind: contentSourcePartitions.adapterKind,
+          profileKey: contentSourcePartitions.profileKey,
         })
         .from(contentSourcePartitions)
         .orderBy(asc(contentSourcePartitions.partitionKey))
@@ -396,6 +401,25 @@ export async function reconcileBriefingSourceRegistry(input: {
         partitionIdByKey.set(row.partitionKey, row.partitionId);
       }
 
+      const existingPartitionMembers = await tx
+        .select({
+          partitionId: contentSourcePartitionMembers.partitionId,
+          endpointId: contentSourcePartitionMembers.endpointId,
+          position: contentSourcePartitionMembers.position,
+        })
+        .from(contentSourcePartitionMembers)
+        .orderBy(
+          asc(contentSourcePartitionMembers.partitionId),
+          asc(contentSourcePartitionMembers.position),
+        )
+        .for('update');
+      const existingMemberIdsByPartition = new Map<string, string[]>();
+      for (const member of existingPartitionMembers) {
+        const members = existingMemberIdsByPartition.get(member.partitionId) ?? [];
+        members.push(member.endpointId);
+        existingMemberIdsByPartition.set(member.partitionId, members);
+      }
+
       await tx.delete(contentSourcePartitionMembers);
       const memberRows = state.partitions.flatMap((partition) => {
         const partitionId = partitionIdByKey.get(partition.partitionKey);
@@ -412,6 +436,12 @@ export async function reconcileBriefingSourceRegistry(input: {
         .select({
           scheduleId: contentSourceSchedules.scheduleId,
           scheduleKey: contentSourceSchedules.scheduleKey,
+          endpointId: contentSourceSchedules.endpointId,
+          partitionId: contentSourceSchedules.partitionId,
+          jobKind: contentSourceSchedules.jobKind,
+          adapterKind: contentSourceSchedules.adapterKind,
+          profileKey: contentSourceSchedules.profileKey,
+          profileRevision: contentSourceSchedules.profileRevision,
           nextDueAt: contentSourceSchedules.nextDueAt,
         })
         .from(contentSourceSchedules)
@@ -420,6 +450,79 @@ export async function reconcileBriefingSourceRegistry(input: {
       const scheduleByKey = new Map(
         existingSchedules.map((schedule) => [schedule.scheduleKey, schedule]),
       );
+      const desiredEndpointByKey = new Map(
+        endpointRows.map((endpoint) => [endpoint.endpointKey, endpoint]),
+      );
+      const existingPartitionByKey = new Map(
+        existingPartitions.map((partition) => [partition.partitionKey, partition]),
+      );
+      const desiredPartitionByKey = new Map(
+        partitionRows.map((partition) => [partition.partitionKey, partition]),
+      );
+      const endpointContractChanged = (endpointKey: string): boolean => {
+        const existing = endpointByKey.get(endpointKey);
+        const desired = desiredEndpointByKey.get(endpointKey);
+        return (
+          !existing ||
+          !desired ||
+          existing.sourceId !== desired.sourceId ||
+          existing.adapterKind !== desired.adapterKind ||
+          existing.profileKey !== desired.profileKey ||
+          canonicalLocator(existing.locator) !== canonicalLocator(desired.locator)
+        );
+      };
+      const partitionContractChanged = (partitionKey: string): boolean => {
+        const existing = existingPartitionByKey.get(partitionKey);
+        const desired = desiredPartitionByKey.get(partitionKey);
+        const desiredState = state.partitions.find(
+          (partition) => partition.partitionKey === partitionKey,
+        );
+        if (!existing || !desired || !desiredState) return true;
+        const desiredMemberIds = desiredState.endpointKeys.map((endpointKey) => {
+          const endpointId = endpointIdByKey.get(endpointKey);
+          if (!endpointId) throw new Error(`Missing partition endpoint ${endpointKey}`);
+          return endpointId;
+        });
+        const existingMemberIds = existingMemberIdsByPartition.get(existing.partitionId) ?? [];
+        return (
+          existing.adapterKind !== desired.adapterKind ||
+          existing.profileKey !== desired.profileKey ||
+          canonicalJson(existingMemberIds) !== canonicalJson(desiredMemberIds) ||
+          desiredState.endpointKeys.some(endpointContractChanged)
+        );
+      };
+      const changedScheduleIds = new Set<string>();
+      const desiredScheduleKeys = new Set(state.schedules.map((schedule) => schedule.scheduleKey));
+      for (const existing of existingSchedules) {
+        if (!desiredScheduleKeys.has(existing.scheduleKey))
+          changedScheduleIds.add(existing.scheduleId);
+      }
+      for (const schedule of state.schedules) {
+        const existing = scheduleByKey.get(schedule.scheduleKey);
+        if (!existing) continue;
+        const endpointId =
+          schedule.target.kind === 'endpoint'
+            ? endpointIdByKey.get(schedule.target.endpointKey)
+            : null;
+        const partitionId =
+          schedule.target.kind === 'partition'
+            ? partitionIdByKey.get(schedule.target.partitionKey)
+            : null;
+        const targetChanged =
+          existing.endpointId !== endpointId || existing.partitionId !== partitionId;
+        const scheduleChanged =
+          existing.jobKind !== schedule.jobKind ||
+          existing.adapterKind !== schedule.adapterKind ||
+          existing.profileKey !== schedule.profileKey ||
+          existing.profileRevision !== schedule.profileRevision;
+        const acquisitionTargetChanged =
+          schedule.target.kind === 'endpoint'
+            ? endpointContractChanged(schedule.target.endpointKey)
+            : partitionContractChanged(schedule.target.partitionKey);
+        if (targetChanged || scheduleChanged || acquisitionTargetChanged) {
+          changedScheduleIds.add(existing.scheduleId);
+        }
+      }
       const scheduleRows = state.schedules.map((schedule) => {
         const existing = scheduleByKey.get(schedule.scheduleKey);
         const endpointId =
@@ -448,15 +551,16 @@ export async function reconcileBriefingSourceRegistry(input: {
           priority: schedule.priority,
           status: schedule.status,
           nextDueAt:
-            existing?.nextDueAt ??
-            new Date(
-              dbNow.getTime() +
-                deterministicScheduleJitterMs({
-                  scheduleKey: schedule.scheduleKey,
-                  adapterKind: schedule.adapterKind,
-                  profileKey: schedule.profileKey,
-                }),
-            ),
+            existing && !changedScheduleIds.has(existing.scheduleId)
+              ? existing.nextDueAt
+              : new Date(
+                  dbNow.getTime() +
+                    deterministicScheduleJitterMs({
+                      scheduleKey: schedule.scheduleKey,
+                      adapterKind: schedule.adapterKind,
+                      profileKey: schedule.profileKey,
+                    }),
+                ),
           manifestRevision: schedule.manifestRevision,
           updatedAt: dbNow,
         };
@@ -479,6 +583,57 @@ export async function reconcileBriefingSourceRegistry(input: {
             updatedAt: dbNow,
           },
         });
+
+      if (changedScheduleIds.size > 0) {
+        const staleRuns = await tx
+          .update(contentAcquisitionRuns)
+          .set({
+            status: 'FAILED',
+            failureClass: 'MANIFEST_CONTRACT_CHANGED',
+            failureDetailsHash: sha256CanonicalJson({
+              failureClass: 'MANIFEST_CONTRACT_CHANGED',
+              manifestHash: state.manifestHash,
+            }),
+            errorSummary: 'Acquisition contract changed during manifest reconciliation',
+            completedAt: dbNow,
+            leaseExpiresAt: null,
+            checkpointAdvanced: false,
+          })
+          .where(
+            and(
+              inArray(contentAcquisitionRuns.scheduleId, [...changedScheduleIds]),
+              inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+            ),
+          )
+          .returning({ runId: contentAcquisitionRuns.runId });
+        for (const run of staleRuns) {
+          await releaseXRunBudgets({ tx, runId: run.runId, dbNow });
+        }
+        for (const existing of existingSchedules) {
+          if (!changedScheduleIds.has(existing.scheduleId)) continue;
+          const desired = scheduleRows.find(
+            (schedule) => schedule.scheduleId === existing.scheduleId,
+          );
+          await tx
+            .update(contentSourceSchedules)
+            .set({
+              nextDueAt: desired?.nextDueAt ?? dbNow,
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              failureStreak: 0,
+              circuitState: 'CLOSED',
+              probeAfter: null,
+              cacheNotBefore: null,
+              validator: {},
+              checkpoint: {},
+              bootstrapCompletedAt: null,
+              bootstrapCutoffAt: dbNow,
+              underLimitStreak: 0,
+              updatedAt: dbNow,
+            })
+            .where(eq(contentSourceSchedules.scheduleId, existing.scheduleId));
+        }
+      }
       await tx
         .update(contentSourceSchedules)
         .set({ status: 'paused', updatedAt: dbNow })
@@ -495,6 +650,7 @@ export async function reconcileBriefingSourceRegistry(input: {
           status: 'APPLIED',
           details: {
             fullRolloutEligible: input.bundle.coverage.fullRolloutEligible,
+            resetScheduleCount: changedScheduleIds.size,
             primaryReportingMissing: input.bundle.coverage.clubs.reduce(
               (total, club) => total + club.primaryReportingMissing,
               0,

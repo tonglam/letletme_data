@@ -96,6 +96,7 @@ async function dispatchPendingAcquisitionJobOutbox(): Promise<void> {
 
   const dispatch = dispatchAcquisitionJobOutbox({
     enabledQueueNames: queueNames,
+    hermesRunLeaseMs: flags.hermesTranscriptTimeoutMs + 5 * 60_000,
     enqueue: async (job) => {
       if (job.queueName === 'content-http-acquisition') {
         await enqueueFormalHttpRun(job);
