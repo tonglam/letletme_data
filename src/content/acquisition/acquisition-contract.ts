@@ -35,7 +35,7 @@ const validatorSchema = z
 
 const mediaSchema = z
   .object({
-    kind: z.enum(['AUDIO', 'VIDEO', 'TRANSCRIPT', 'OTHER']),
+    kind: z.enum(['IMAGE', 'AUDIO', 'VIDEO', 'TRANSCRIPT', 'OTHER']),
     url: publicUrl,
     mimeType: z.string().max(255).nullable(),
     durationSeconds: z
@@ -160,6 +160,7 @@ export const acquisitionItemV1Schema = z
       })
       .strict(),
     media: z.array(mediaSchema).max(64),
+    mediaStatus: z.enum(['FOUND', 'CHECKED_NONE', 'UNAVAILABLE']).optional(),
     transcript: transcriptSchema,
     video: videoStateSchema.nullable().optional(),
   })
@@ -340,6 +341,7 @@ export function canonicalAcquisitionItem(item: AcquisitionItemV1): {
     },
     video: item.video ?? null,
   };
+  if (item.mediaStatus !== undefined) payload.mediaStatus = item.mediaStatus;
   return { payload, hash: sha256CanonicalJson(payload), segments };
 }
 

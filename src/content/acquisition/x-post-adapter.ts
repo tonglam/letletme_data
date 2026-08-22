@@ -3,6 +3,7 @@ import { normalizeCanonicalText, sha256CanonicalJson } from './canonicalization'
 import type { XScanRunRequestV1 } from './formal-run-contract';
 import type { GrokBuildExecutionResult, GrokBuildXPostV1 } from './grok-build-executor';
 import { canonicalXPostUrl } from './x-query-compiler';
+import type { XPostMediaEvidence } from './x-media-resolver';
 
 const X_SNOWFLAKE_EPOCH_MS = 1_288_834_974_657n;
 const SNOWFLAKE_TIME_TOLERANCE_MS = 5_000;
@@ -21,6 +22,7 @@ export type XPostAdapterResult = Readonly<{
   returnedCount: number;
   acceptedCount: number;
   saturated: boolean;
+  mediaUnavailableCount: number;
   newestPostId: string | null;
   oldestAcceptedAt: string | null;
 }>;
@@ -117,8 +119,10 @@ function toAcquisitionItem(input: {
   post: GrokBuildXPostV1;
   endpointKey: string;
   stableExternalId: string | null;
+  mediaEvidence?: XPostMediaEvidence;
 }): AcquisitionItemV1 {
   const canonicalUrl = canonicalXPostUrl(input.post.authorHandle, input.post.postId);
+  const mediaEvidence = input.mediaEvidence;
   return {
     endpointKey: input.endpointKey,
     externalItemId: input.post.postId,
@@ -131,7 +135,8 @@ function toAcquisitionItem(input: {
     authorExternalId: input.stableExternalId,
     contentKind: 'POST',
     body: { availability: 'FULL', text: input.post.text },
-    media: [],
+    media: mediaEvidence ? [...mediaEvidence.media] : [],
+    ...(mediaEvidence ? { mediaStatus: mediaEvidence.status } : {}),
     transcript: {
       status: 'NOT_APPLICABLE',
       language: null,
@@ -181,6 +186,7 @@ function adaptMappedPosts(input: {
   checkedAt: Date;
   limit: number;
   fallbackEndpointKey: string;
+  mediaByPostId?: ReadonlyMap<string, XPostMediaEvidence>;
   resolveAuthor: (
     post: GrokBuildXPostV1,
   ) => Readonly<{ endpointKey: string; stableExternalId: string | null }> | undefined;
@@ -189,6 +195,7 @@ function adaptMappedPosts(input: {
 
   const itemsByEndpoint = new Map<string, AcquisitionItemV1[]>();
   const rejections: XPostRejection[] = [];
+  let mediaUnavailableCount = 0;
   for (const post of uniquePosts.values()) {
     let endpoint: Readonly<{ endpointKey: string; stableExternalId: string | null }> | undefined;
     try {
@@ -201,13 +208,20 @@ function adaptMappedPosts(input: {
         );
       }
       const items = itemsByEndpoint.get(endpoint.endpointKey) ?? [];
+      const mediaEvidence = input.mediaByPostId
+        ? (input.mediaByPostId.get(post.postId) ?? { status: 'UNAVAILABLE', media: [] })
+        : undefined;
       items.push(
         toAcquisitionItem({
           post,
           endpointKey: endpoint.endpointKey,
           stableExternalId: endpoint.stableExternalId,
+          mediaEvidence,
         }),
       );
+      if (mediaEvidence?.status === 'UNAVAILABLE') {
+        mediaUnavailableCount += 1;
+      }
       itemsByEndpoint.set(endpoint.endpointKey, items);
     } catch (error) {
       const qualityError =
@@ -256,7 +270,7 @@ function adaptMappedPosts(input: {
   }
   const saturated = input.execution.posts.length >= input.limit;
   const stateHint =
-    rejections.length > 0
+    rejections.length > 0 || mediaUnavailableCount > 0
       ? ('PARTIAL' as const)
       : acceptedCount === 0
         ? ('EMPTY' as const)
@@ -280,6 +294,7 @@ function adaptMappedPosts(input: {
     returnedCount: input.execution.posts.length,
     acceptedCount,
     saturated,
+    mediaUnavailableCount,
     newestPostId,
     oldestAcceptedAt,
   };
@@ -289,6 +304,7 @@ export function adaptGrokBuildPosts(input: {
   request: XScanRunRequestV1;
   execution: GrokBuildExecutionResult;
   checkedAt: Date;
+  mediaByPostId?: ReadonlyMap<string, XPostMediaEvidence>;
 }): XPostAdapterResult {
   if (input.request.jobKind !== 'X_KEYWORD_SCAN' && input.request.jobKind !== 'X_THREAD_FETCH') {
     throw new XPostQualityError(
@@ -324,6 +340,7 @@ export function adaptGrokBuildPosts(input: {
         ? input.request.toolRequest.limit
         : 101,
     fallbackEndpointKey,
+    mediaByPostId: input.mediaByPostId,
     resolveAuthor: (post) => {
       if (!allowedHandles.has(post.authorHandle.toLowerCase())) {
         throw new XPostQualityError(
@@ -348,6 +365,7 @@ export function adaptGrokBuildSemanticPosts(input: {
   execution: GrokBuildExecutionResult;
   checkedAt: Date;
   authors: readonly ResolvedSemanticXAuthor[];
+  mediaByPostId?: ReadonlyMap<string, XPostMediaEvidence>;
 }): XPostAdapterResult {
   if (
     input.request.jobKind !== 'X_SEMANTIC_SCAN' ||
@@ -374,6 +392,7 @@ export function adaptGrokBuildSemanticPosts(input: {
     checkedAt: input.checkedAt,
     limit: input.request.toolRequest.limit,
     fallbackEndpointKey: input.request.partition.members[0]!.endpointKey,
+    mediaByPostId: input.mediaByPostId,
     resolveAuthor: (post) => authorByHandle.get(post.authorHandle.toLowerCase()),
   });
 }

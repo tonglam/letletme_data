@@ -26,6 +26,7 @@ import {
   prevalidateGrokBuildPostsForAuthorResolution,
   XPostQualityError,
 } from '../acquisition/x-post-adapter';
+import type { XMediaResolutionBatch } from '../acquisition/x-media-resolver';
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
 import {
   releaseOneXRunBudgetUnit,
@@ -108,6 +109,7 @@ export async function runFormalXWorker(
   dependencies?: Readonly<{
     flags?: ContentRuntimeFlags;
     executor?: GrokBuildExecutorLike;
+    mediaResolver?: (posts: GrokBuildExecutionResult['posts']) => Promise<XMediaResolutionBatch>;
     xBudgetPolicy?: XBudgetPolicy;
     db?: DbHandle;
   }>,
@@ -125,11 +127,13 @@ export async function runFormalXWorker(
   let releaseProbeBudget: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
+  let mediaResolution: XMediaResolutionBatch | null = null;
   let scanAccounting: Readonly<{
     returned: number;
     accepted: number;
     rejected: number;
     saturated: boolean;
+    mediaUnavailable: number;
   }> | null = null;
   try {
     const run = await beginFormalRun({ runId: job.runId, db });
@@ -262,6 +266,16 @@ export async function runFormalXWorker(
     const execution = await executor.execute(scanRequest.toolRequest, executionHooks);
     scanExecution = execution;
     const checkedAt = await databaseNow(db);
+    mediaResolution = dependencies?.mediaResolver
+      ? await dependencies.mediaResolver(execution.posts)
+      : null;
+    if (mediaResolution) {
+      for (const post of execution.posts) {
+        if (!mediaResolution.evidenceByPostId.has(post.postId)) {
+          throw new Error(`X media resolver omitted post ${post.postId}`);
+        }
+      }
+    }
     const semanticAuthors =
       scanRequest.jobKind === 'X_SEMANTIC_SCAN'
         ? await resolveSemanticXAuthors({
@@ -278,13 +292,20 @@ export async function runFormalXWorker(
           execution,
           checkedAt,
           authors: semanticAuthors,
+          mediaByPostId: mediaResolution?.evidenceByPostId,
         })
-      : adaptGrokBuildPosts({ request: scanRequest, execution, checkedAt });
+      : adaptGrokBuildPosts({
+          request: scanRequest,
+          execution,
+          checkedAt,
+          mediaByPostId: mediaResolution?.evidenceByPostId,
+        });
     scanAccounting = {
       returned: adapted.returnedCount,
       accepted: adapted.acceptedCount,
       rejected: adapted.rejections.length,
       saturated: adapted.saturated,
+      mediaUnavailable: adapted.mediaUnavailableCount,
     };
     let state: 'EMPTY' | 'COMPLETED' | 'PARTIAL' | 'SATURATED' | 'GAP' = adapted.stateHint;
     let acquisitionGap:
@@ -445,6 +466,9 @@ export async function runFormalXWorker(
         accepted: adapted.acceptedCount,
         rejected: adapted.rejections.length,
         saturated: adapted.saturated,
+        mediaChecked: mediaResolution?.checkedCount ?? 0,
+        mediaFound: mediaResolution?.foundCount ?? 0,
+        mediaUnavailable: mediaResolution?.unavailableCount ?? 0,
         probeCallCount: probeProcessStarted ? 1 : 0,
         rawPostEvidenceAvailable: execution.rawPostEvidenceAvailable,
         traceHash: execution.traceHash,
@@ -549,6 +573,9 @@ export async function runFormalXWorker(
                   runnerBinaryHash: scanExecution.runnerBinaryHash,
                   returned: scanExecution.posts.length,
                   ...(scanAccounting ?? {}),
+                  mediaChecked: mediaResolution?.checkedCount ?? 0,
+                  mediaFound: mediaResolution?.foundCount ?? 0,
+                  mediaUnavailable: mediaResolution?.unavailableCount ?? 0,
                   rejected: rejections?.length ?? scanAccounting?.rejected ?? 0,
                   probeCallCount: probeProcessStarted ? 1 : 0,
                   rawPostEvidenceAvailable: scanExecution.rawPostEvidenceAvailable,
