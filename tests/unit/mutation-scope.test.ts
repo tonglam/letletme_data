@@ -61,6 +61,15 @@ describe('resolveMutationScopes', () => {
     expect(priceSync).toEqual(['data-core:players']);
   });
 
+  it('serializes player stats publication with the canonical player roster', () => {
+    expect(
+      resolveMutationScopes({
+        queueName: 'data-sync',
+        jobName: 'player-stats',
+      }),
+    ).toEqual(['data-core:players']);
+  });
+
   it('adds event-scoped conflict groups for league event results', () => {
     const scopes = resolveMutationScopes({
       queueName: 'league-sync',

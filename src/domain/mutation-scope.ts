@@ -97,7 +97,7 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
         return ['data-core:players'];
       case 'player-stats':
       case 'player-values':
-        return [`data-core:${jobName}`];
+        return jobName === 'player-stats' ? ['data-core:players'] : [`data-core:${jobName}`];
       default:
         return [];
     }

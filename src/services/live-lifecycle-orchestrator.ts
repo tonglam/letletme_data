@@ -21,7 +21,8 @@ import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
 
-export const LIVE_POLL_MS = Number(process.env.LIVE_POLL_MS ?? 30_000);
+/** The live producer cadence is a data contract: one fresh poll every 30s. */
+export const LIVE_POLL_MS = 30_000;
 export const PICKS_FIRST_PROBE_OFFSET_MS = Number(
   process.env.PICKS_FIRST_PROBE_OFFSET_MS ?? 60 * 60_000,
 );
