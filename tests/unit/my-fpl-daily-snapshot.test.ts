@@ -37,6 +37,17 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('same transaction as the immutable');
   });
 
+  test('serializes publication timestamps for the production postgres adapter', () => {
+    expect(publicationService).toContain('const nowIso = now.toISOString()');
+    expect(publicationService).toContain('const sourceCheckedAtIso = sourceCheckedAt.toISOString()');
+    expect(publicationService).toContain('const supersededBeforeIso = new Date(');
+    expect(publicationService).toContain('${sourceCheckedAtIso}::timestamptz');
+    expect(publicationService).toContain('${nowIso}::timestamptz');
+    expect(publicationService).toContain('${supersededBeforeIso}::timestamptz');
+    expect(publicationService).not.toContain('${sourceCheckedAt}, ${now},');
+    expect(publicationService).not.toContain('${new Date(now.getTime() - 24 * 60 * 60_000)}');
+  });
+
   test('uses the daily 10:45 obligation, finalization reconciliation, and outbox retry worker', () => {
     expect(scheduler).toContain('name: MAINTENANCE_JOBS.MY_FPL_SNAPSHOT');
     expect(scheduler).toContain('my-fpl-finalization');
