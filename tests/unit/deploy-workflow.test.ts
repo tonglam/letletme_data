@@ -74,6 +74,14 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).toContain('briefing_acquisition_run_health');
     expect(briefingRolloutWorkflow).toContain('verify_manifest_reconciliation');
     expect(briefingRolloutWorkflow).toContain('source_registry_reconciliations');
+    expect(briefingRolloutWorkflow).toContain('worker_restart_started_at');
+    expect(briefingRolloutWorkflow).toContain(
+      "created_at >= '${worker_restart_started_at}'::timestamptz",
+    );
+    expect(briefingRolloutWorkflow).toContain('[ "$rollout_committed" = false ]');
+    expect(
+      briefingRolloutWorkflow.lastIndexOf('scripts/rearm-briefing-x-after-probe.sh'),
+    ).toBeGreaterThan(briefingRolloutWorkflow.lastIndexOf('verify_manifest_reconciliation'));
     expect(briefingRolloutWorkflow).toContain('--connect-timeout 5 --max-time 15');
     expect(briefingRolloutWorkflow).toContain(
       '[ "$services_quiesced" = true ] || [ "$mutation_started" = true ]',

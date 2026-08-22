@@ -79,6 +79,7 @@ jobs:
             runner_previous_target=""
             runner_previous_release=""
             services_quiesced=false
+            worker_restart_started_at=''
 
             rollback_runner() {
               scripts/rollback-host-grok-runner.sh "$runner_root" \
@@ -161,6 +162,7 @@ jobs:
               SELECT status IN ('APPLIED', 'UNCHANGED') AND completed_at IS NOT NULL
               FROM content.source_registry_reconciliations
               WHERE git_revision = '${ROLLOUT_SHA}'
+                AND created_at >= '${worker_restart_started_at}'::timestamptz
               ORDER BY created_at DESC
               LIMIT 1
             ), false) THEN 'true' ELSE 'false' END;
@@ -168,6 +170,13 @@ jobs:
             SQL
               )
               test "$reconciliation_ok" = true
+            }
+
+            capture_worker_restart_started_at() {
+              worker_restart_started_at=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose \
+                --profile migration run --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 -c "SELECT clock_timestamp()::text;"')
+              test -n "$worker_restart_started_at"
             }
 
             if [ "$ROLLOUT_MODE" = status ]; then
@@ -194,11 +203,11 @@ jobs:
               original_status=$?
               trap - EXIT
               set +e
-              if [ "$original_status" -ne 0 ] && [ "$runner_updated" = true ]; then
+              if [ "$original_status" -ne 0 ] && [ "$rollout_committed" = false ] && [ "$runner_updated" = true ]; then
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 rollback_runner
               fi
-              if [ "$original_status" -ne 0 ] && {
+              if [ "$original_status" -ne 0 ] && [ "$rollout_committed" = false ] && {
                 [ "$services_quiesced" = true ] || [ "$mutation_started" = true ]
               }; then
                 if [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
@@ -232,12 +241,11 @@ jobs:
               scripts/deploy-host-grok-runner.sh "$current_image" "$ROLLOUT_SHA" "$runner_root"
               scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"
               runner_health
-              test -x scripts/rearm-briefing-x-after-probe.sh
-              scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
             fi
 
             mutation_started=true
             scripts/configure-briefing-acquisition-env.sh "$ROLLOUT_MODE" "$env_file"
+            capture_worker_restart_started_at
             APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate content-worker
             if [ "$services_quiesced" = true ]; then
               APP_IMAGE="$current_image" docker compose up -d --no-build scheduler
@@ -246,6 +254,10 @@ jobs:
               COMPOSE_BIN='docker compose' scripts/verify-runtime-health.sh
             report_acquisition_health
             verify_manifest_reconciliation
+            if [ "$ROLLOUT_MODE" = host-shadow ]; then
+              test -x scripts/rearm-briefing-x-after-probe.sh
+              scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
+            fi
             rollout_committed=true
             rm -f -- "$backup_file"
             backup_file=''
