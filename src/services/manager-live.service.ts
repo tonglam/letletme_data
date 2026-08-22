@@ -8,8 +8,16 @@ import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import {
+  managerScoreCheckpointRepository,
+  type ManagerScoreCheckpoint,
+  type ManagerScoreScope,
+} from '../repositories/live-window';
+import { managerEventScoreSnapshotsInFpl } from '../db/schemas/live-window.schema';
+import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
+import type { FplSeasonRef } from '../domain/fpl-season';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
 // Refresh at 30s while an event is active, but keep a successfully published
@@ -21,7 +29,7 @@ const MAX_STANDINGS_PAGES = 20;
 const MAX_FOREGROUND_STANDINGS_PAGES = 4;
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 
-export type ManagerLiveSource = 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS';
+export type ManagerLiveSource = 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
 export type ManagerLiveTotalScope = 'OVERALL' | 'CLASSIC_PHASE';
 
 export type ManagerLiveScoreRow = {
@@ -57,10 +65,14 @@ export type ManagerLiveResolveResult = {
 
 type CachedRow = ManagerLiveScoreRow;
 
-const cacheKey = (season: string, eventId: number): string =>
-  `OfficialManagerLive:${season}:${eventId}`;
-const metaCacheKey = (season: string, eventId: number): string =>
-  `OfficialManagerLiveMeta:${season}:${eventId}`;
+const entryScope: ManagerScoreScope = { scopeType: 'ENTRY', scopeId: 0 };
+
+const scopeKey = (scope: ManagerScoreScope): string => `${scope.scopeType}:${scope.scopeId}`;
+
+const cacheKey = (season: string, eventId: number, scope: ManagerScoreScope): string =>
+  `OfficialManagerLive:${season}:${eventId}:${scopeKey(scope)}`;
+const metaCacheKey = (season: string, eventId: number, scope: ManagerScoreScope): string =>
+  `OfficialManagerLiveMeta:${season}:${eventId}:${scopeKey(scope)}`;
 
 const stableRevision = (row: Omit<ManagerLiveScoreRow, 'revision'>): string => {
   const digest = createHash('sha1')
@@ -83,12 +95,54 @@ const stableRevision = (row: Omit<ManagerLiveScoreRow, 'revision'>): string => {
     )
     .digest('hex')
     .slice(0, 16);
-  return `${row.checkedAt}:${digest}`;
+  // A manager revision is a content revision, not a polling timestamp. This
+  // lets all three desks share a stable cache key during a quiet interval.
+  return digest;
 };
 
 const withRevision = (row: Omit<ManagerLiveScoreRow, 'revision'>): ManagerLiveScoreRow => ({
   ...row,
   revision: stableRevision(row),
+});
+
+const toManagerScoreCheckpoint = (row: ManagerLiveScoreRow): ManagerScoreCheckpoint => ({
+  entryId: row.entryId,
+  eventPoints: row.eventPoints,
+  netEventPoints: row.netEventPoints,
+  totalPoints: row.totalPoints,
+  totalScope: row.totalScope,
+  eventRank: row.eventRank,
+  overallRank: row.overallRank,
+  leagueRank: row.leagueRank,
+  source: row.source,
+  transferCost: row.transferCost,
+  eventPointSemantics: row.eventPointSemantics,
+  contentRevision: row.revision,
+  checkedAt: new Date(row.checkedAt),
+  upstreamUpdatedAt: row.upstreamUpdatedAt ? new Date(row.upstreamUpdatedAt) : null,
+});
+
+const fromManagerScoreCheckpoint = (
+  row: typeof managerEventScoreSnapshotsInFpl.$inferSelect,
+  seasonCode: string,
+): CachedRow => ({
+  season: seasonCode,
+  eventId: row.eventId,
+  entryId: row.entryId,
+  eventPoints: row.eventPoints,
+  netEventPoints: row.netEventPoints,
+  totalPoints: row.totalPoints,
+  totalScope: row.totalScope as ManagerLiveTotalScope,
+  eventRank: row.eventRank,
+  overallRank: row.overallRank,
+  leagueRank: row.leagueRank,
+  source: row.source as ManagerLiveSource,
+  transferCost: row.transferCost,
+  eventPointSemantics: row.eventPointSemantics as ManagerLiveScoreRow['eventPointSemantics'],
+  checkedAt: row.checkedAt.toISOString(),
+  upstreamUpdatedAt: row.upstreamUpdatedAt?.toISOString() ?? null,
+  staleAt: plusSeconds(row.checkedAt.toISOString(), STALE_SECONDS),
+  revision: row.contentRevision,
 });
 
 const parseCachedRow = (value: string | null): CachedRow | null => {
@@ -103,7 +157,9 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
       !Number.isSafeInteger(row.entryId) ||
       typeof row.checkedAt !== 'string' ||
       typeof row.revision !== 'string' ||
-      (row.source !== 'FPL_ENTRY_SUMMARY' && row.source !== 'FPL_CLASSIC_STANDINGS')
+      (row.source !== 'FPL_ENTRY_SUMMARY' &&
+        row.source !== 'FPL_CLASSIC_STANDINGS' &&
+        row.source !== 'FPL_FINAL_RESULT')
     ) {
       return null;
     }
@@ -126,13 +182,14 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
 };
 
 const readCachedRows = async (
-  redis: Redis,
+  redis: Redis | null,
   season: string,
   eventId: number,
+  scope: ManagerScoreScope,
   entryIds: readonly number[],
 ): Promise<Map<number, CachedRow>> => {
-  if (entryIds.length === 0) return new Map();
-  const values = await redis.hmget(cacheKey(season, eventId), ...entryIds.map(String));
+  if (!redis || entryIds.length === 0) return new Map();
+  const values = await redis.hmget(cacheKey(season, eventId, scope), ...entryIds.map(String));
   const rows = new Map<number, CachedRow>();
   for (let index = 0; index < entryIds.length; index += 1) {
     const row = parseCachedRow(values[index] ?? null);
@@ -142,26 +199,36 @@ const readCachedRows = async (
 };
 
 const writeRows = async (
-  redis: Redis,
+  redis: Redis | null,
   season: string,
   eventId: number,
+  scope: ManagerScoreScope,
   rows: readonly ManagerLiveScoreRow[],
   metadata?: Record<string, unknown>,
   metadataField = 'publication',
 ): Promise<void> => {
-  if (rows.length === 0 && !metadata) return;
-  const key = cacheKey(season, eventId);
-  // Use a Redis transaction so a row publication and its metadata become
-  // visible together; readers never observe a half-published page.
-  const pipeline = redis.multi();
-  for (const row of rows) pipeline.hset(key, String(row.entryId), JSON.stringify(row));
-  if (rows.length > 0) pipeline.expire(key, CACHE_TTL_SECONDS);
-  if (metadata) {
-    const metaKey = metaCacheKey(season, eventId);
-    pipeline.hset(metaKey, metadataField, JSON.stringify(metadata));
-    pipeline.expire(metaKey, CACHE_TTL_SECONDS);
+  if (!redis || (rows.length === 0 && !metadata)) return;
+  try {
+    const key = cacheKey(season, eventId, scope);
+    // Use a Redis transaction so a row publication and its metadata become
+    // visible together; readers never observe a half-published page.
+    const pipeline = redis.multi();
+    for (const row of rows) pipeline.hset(key, String(row.entryId), JSON.stringify(row));
+    if (rows.length > 0) pipeline.expire(key, CACHE_TTL_SECONDS);
+    if (metadata) {
+      const metaKey = metaCacheKey(season, eventId, scope);
+      pipeline.hset(metaKey, metadataField, JSON.stringify(metadata));
+      pipeline.expire(metaKey, CACHE_TTL_SECONDS);
+    }
+    await pipeline.exec();
+  } catch (error) {
+    logWarn('Official manager Redis write failed; PostgreSQL checkpoint remains authoritative', {
+      season,
+      eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
   }
-  await pipeline.exec();
 };
 
 const nowIso = (): string => new Date().toISOString();
@@ -237,7 +304,10 @@ const ageSeconds = (checkedAt: string, now = Date.now()): number => {
 const isFresh = (row: CachedRow, now = Date.now()): boolean =>
   ageSeconds(row.checkedAt, now) <= REFRESH_SECONDS;
 const isWithinStaleWindow = (row: CachedRow, now = Date.now()): boolean =>
-  ageSeconds(row.checkedAt, now) <= STALE_SECONDS;
+  // Redis expiry is an operational cleanup mechanism. A successful official
+  // row remains the last-good value until a newer official or final result
+  // replaces it; it must not disappear merely because 90 seconds elapsed.
+  Number.isFinite(Date.parse(row.checkedAt)) && ageSeconds(row.checkedAt, now) >= 0;
 
 const managerLiveBackgroundInFlight = new Map<string, Promise<void>>();
 
@@ -257,11 +327,12 @@ const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void
 };
 
 const refreshEntrySummaries = async (
-  season: string,
+  season: FplSeasonRef,
   eventId: number,
   entryIds: readonly number[],
   rows: Map<number, CachedRow>,
-  redis: Redis,
+  redis: Redis | null,
+  scope: ManagerScoreScope = entryScope,
   options: { maxFetches?: number } = {},
 ): Promise<'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null> => {
   const targets = entryIds
@@ -276,7 +347,7 @@ const refreshEntrySummaries = async (
     targets.map(async (entryId) => {
       try {
         const summary = await fplClient.getEntrySummary(entryId);
-        refreshed.push(toEntrySummaryRow(season, eventId, entryId, summary, checkedAt));
+        refreshed.push(toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt));
       } catch (error) {
         if (error instanceof FPLClientError && error.status === 429) {
           refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
@@ -293,12 +364,13 @@ const refreshEntrySummaries = async (
   );
   await writeRows(
     redis,
-    season,
+    season.seasonCode,
     eventId,
+    scope,
     refreshed,
     refreshed.length > 0
       ? {
-          season,
+          season: season.seasonCode,
           eventId,
           source: 'FPL_ENTRY_SUMMARY',
           rowCount: refreshed.length,
@@ -309,17 +381,31 @@ const refreshEntrySummaries = async (
       : undefined,
     'entry-summary',
   );
+  await managerScoreCheckpointRepository
+    .upsertBatch(
+      season,
+      eventId,
+      scope,
+      refreshed.map((row) => toManagerScoreCheckpoint(row)),
+    )
+    .catch((error) =>
+      logWarn('Official manager checkpoint write failed', {
+        eventId,
+        scope: scopeKey(scope),
+        error: error instanceof Error ? error.message : 'unknown',
+      }),
+    );
   for (const row of refreshed) rows.set(row.entryId, row);
   return refreshErrorCode;
 };
 
 const refreshClassicStandings = async (
-  season: string,
+  season: FplSeasonRef,
   eventId: number,
   leagueId: number,
   targetIds: ReadonlySet<number>,
   rows: Map<number, CachedRow>,
-  redis: Redis,
+  redis: Redis | null,
   options: { startPage?: number; maxPages?: number } = {},
 ): Promise<{
   complete: boolean;
@@ -342,7 +428,7 @@ const refreshClassicStandings = async (
     ) {
       nextPage = page + 1;
       const response = await fplClient.getLeagueClassicStandings(leagueId, page);
-      const pageRows = toClassicRows(season, eventId, response, checkedAt);
+      const pageRows = toClassicRows(season.seasonCode, eventId, response, checkedAt);
       for (const row of pageRows) {
         if (!targetIds.has(row.entryId)) continue;
         if (!rows.has(row.entryId) || !isFresh(rows.get(row.entryId)!)) found += 1;
@@ -356,12 +442,13 @@ const refreshClassicStandings = async (
     }
     await writeRows(
       redis,
-      season,
+      season.seasonCode,
       eventId,
+      { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
       fetchedRows,
       fetchedRows.length > 0
         ? {
-            season,
+            season: season.seasonCode,
             eventId,
             source: 'FPL_CLASSIC_STANDINGS',
             leagueId,
@@ -373,6 +460,20 @@ const refreshClassicStandings = async (
         : undefined,
       `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
     );
+    await managerScoreCheckpointRepository
+      .upsertBatch(
+        season,
+        eventId,
+        { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
+        fetchedRows.map((row) => toManagerScoreCheckpoint(row)),
+      )
+      .catch((error) =>
+        logWarn('Official manager checkpoint write failed', {
+          eventId,
+          leagueId,
+          error: error instanceof Error ? error.message : 'unknown',
+        }),
+      );
     logDebug('Official classic manager live refresh completed', {
       eventId,
       leagueId,
@@ -401,6 +502,47 @@ const refreshClassicStandings = async (
 const nextRefresh = (eventFinished: boolean): string =>
   new Date(Date.now() + (eventFinished ? 60_000 : 30_000)).toISOString();
 
+const finalResultRows = async (
+  season: FplSeasonRef,
+  eventId: number,
+  entryIds: readonly number[],
+  freshAfter: Date | null,
+): Promise<CachedRow[]> => {
+  const results = await entryEventResultsRepository.findByEventAndEntryIds(
+    season,
+    eventId,
+    Array.from(new Set(entryIds)),
+  );
+  const checkedAt = nowIso();
+  const freshAfterMs = freshAfter?.getTime() ?? null;
+  return results
+    .filter(
+      (result) =>
+        result.richSyncedAt !== null &&
+        (freshAfterMs === null || result.richSyncedAt.getTime() >= freshAfterMs),
+    )
+    .map((result) =>
+      withRevision({
+        season: season.seasonCode,
+        eventId,
+        entryId: result.entryId,
+        eventPoints: result.eventPoints,
+        netEventPoints: result.eventNetPoints,
+        totalPoints: result.overallPoints,
+        totalScope: 'OVERALL',
+        eventRank: result.eventRank,
+        overallRank: result.overallRank,
+        leagueRank: null,
+        source: 'FPL_FINAL_RESULT',
+        transferCost: result.eventTransfersCost,
+        eventPointSemantics: 'GROSS',
+        checkedAt,
+        upstreamUpdatedAt: result.richSyncedAt?.toISOString() ?? null,
+        staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+      }),
+    );
+};
+
 const managerLiveInFlight = new Map<string, Promise<ManagerLiveResolveResult>>();
 
 const resolveManagerLiveScoresUncoalesced = async (input: {
@@ -428,19 +570,10 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     );
   }
 
-  const redis = await redisSingleton.getClient();
-  const rows = await readCachedRows(redis, season.seasonCode, input.eventId, uniqueEntryIds);
-  const staleOrMissing = uniqueEntryIds.filter(
-    (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
-  );
-  let errorCode: ManagerLiveResolveResult['errorCode'] = null;
-  let refreshErrorCode: Exclude<
-    ManagerLiveResolveResult['errorCode'],
-    'UNSUPPORTED_H2H_LIVE' | null
-  > | null = null;
-
+  let scope: ManagerScoreScope = entryScope;
+  let tournament: Awaited<ReturnType<typeof tournamentInfoRepository.findById>> = null;
   if (input.tournamentId !== undefined) {
-    const tournament = await tournamentInfoRepository.findById(season, input.tournamentId);
+    tournament = await tournamentInfoRepository.findById(season, input.tournamentId);
     if (!tournament) {
       throw new ValidationError(
         'Tournament does not belong to the active season.',
@@ -456,58 +589,201 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         'MANAGER_LIVE_ENTRY_NOT_IN_TOURNAMENT',
       );
     }
-    if (tournament.leagueType === 'h2h') {
-      errorCode = 'UNSUPPORTED_H2H_LIVE';
-    } else if (staleOrMissing.length > 0) {
-      const standings = await refreshClassicStandings(
-        season.seasonCode,
+    if (tournament.leagueType === 'classic') {
+      scope = { scopeType: 'CLASSIC_LEAGUE', scopeId: tournament.leagueId };
+    }
+  }
+
+  // A finished/data-checked event is historical data. Do not call the current
+  // FPL manager endpoint for it; the final result table is the authority.
+  if (event.finished && event.dataChecked) {
+    const finalRows = await finalResultRows(
+      season,
+      input.eventId,
+      uniqueEntryIds,
+      event.dataCheckedAt,
+    );
+    const resolvedIds = new Set(finalRows.map((row) => row.entryId));
+    const checkpointRows =
+      resolvedIds.size === uniqueEntryIds.length
+        ? []
+        : await managerScoreCheckpointRepository
+            .findByScopeAndEntryIds(
+              season,
+              input.eventId,
+              scope,
+              uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId)),
+            )
+            .catch((error) => {
+              logWarn('Final manager result fallback checkpoint read failed', {
+                eventId: input.eventId,
+                scope: scopeKey(scope),
+                error: error instanceof Error ? error.message : 'unknown',
+              });
+              return [];
+            });
+    const checkpointFallbackRows = checkpointRows
+      .filter((row) => !resolvedIds.has(row.entryId))
+      .map((row) => fromManagerScoreCheckpoint(row, season.seasonCode));
+    const rows = [...finalRows, ...checkpointFallbackRows];
+    const resolvedWithFallbackIds = new Set(rows.map((row) => row.entryId));
+    return {
+      season: season.seasonCode,
+      eventId: input.eventId,
+      rows,
+      missingEntryIds: uniqueEntryIds.filter((entryId) => !resolvedWithFallbackIds.has(entryId)),
+      partial: uniqueEntryIds.some((entryId) => !resolvedWithFallbackIds.has(entryId)),
+      errorCode: null,
+      checkedAt: nowIso(),
+      nextRefreshAt: nextRefresh(true),
+    };
+  }
+
+  let redis: Redis | null = null;
+  try {
+    redis = await redisSingleton.getClient();
+  } catch (error) {
+    logWarn('Official manager Redis unavailable; using PostgreSQL checkpoint', {
+      eventId: input.eventId,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+  }
+  let rows = new Map<number, CachedRow>();
+  try {
+    rows = await readCachedRows(redis, season.seasonCode, input.eventId, scope, uniqueEntryIds);
+  } catch (error) {
+    logWarn('Official manager Redis read failed; using PostgreSQL checkpoint', {
+      eventId: input.eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+  }
+  const checkpoints = await managerScoreCheckpointRepository
+    .findByScopeAndEntryIds(season, input.eventId, scope, uniqueEntryIds)
+    .catch((error) => {
+      logWarn('Official manager PostgreSQL checkpoint read failed', {
+        eventId: input.eventId,
+        scope: scopeKey(scope),
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+      return [];
+    });
+  for (const checkpoint of checkpoints) {
+    const cached = rows.get(checkpoint.entryId);
+    const checkpointTime = checkpoint.checkedAt.getTime();
+    const cachedTime = cached ? Date.parse(cached.checkedAt) : Number.NaN;
+    if (!cached || (Number.isFinite(checkpointTime) && checkpointTime > cachedTime)) {
+      rows.set(checkpoint.entryId, fromManagerScoreCheckpoint(checkpoint, season.seasonCode));
+    }
+  }
+  const staleOrMissing = uniqueEntryIds.filter(
+    (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+  );
+  let errorCode: ManagerLiveResolveResult['errorCode'] = null;
+  let refreshErrorCode: Exclude<
+    ManagerLiveResolveResult['errorCode'],
+    'UNSUPPORTED_H2H_LIVE' | null
+  > | null = null;
+
+  if (input.tournamentId !== undefined && tournament?.leagueType === 'h2h') {
+    // FPL does not expose a live H2H table, but its official entry summary is
+    // still a well-defined event score. Use it for provisional pairings and
+    // let the final database result replace it after finalization.
+    if (staleOrMissing.length > 0) {
+      refreshErrorCode = await refreshEntrySummaries(
+        season,
         input.eventId,
-        tournament.leagueId,
-        new Set(staleOrMissing),
+        staleOrMissing,
         rows,
         redis,
+        entryScope,
+        { maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES },
       );
-      refreshErrorCode = standings.errorCode;
       const pending = staleOrMissing.filter(
         (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
       );
-      if (pending.length > 0 && !standings.complete) {
-        const backgroundKey = `classic:${season.seasonCode}:${input.eventId}:${tournament.leagueId}`;
+      if (pending.length > 0) {
+        const backgroundKey = `h2h:${season.seasonCode}:${input.eventId}:${input.tournamentId}:${pending
+          .slice()
+          .sort((left, right) => left - right)
+          .join(',')}`;
         scheduleBackgroundRefresh(backgroundKey, async () => {
           const backgroundRows = await readCachedRows(
             redis,
             season.seasonCode,
             input.eventId,
+            entryScope,
             pending,
           );
-          const backgroundResult = await refreshClassicStandings(
-            season.seasonCode,
+          await refreshEntrySummaries(
+            season,
             input.eventId,
-            tournament.leagueId,
-            new Set(pending),
+            pending,
             backgroundRows,
             redis,
-            { startPage: standings.nextPage, maxPages: MAX_STANDINGS_PAGES },
+            entryScope,
           );
-          logDebug('Official classic manager background refresh completed', {
+          logDebug('Official H2H manager background refresh completed', {
             eventId: input.eventId,
-            leagueId: tournament.leagueId,
+            tournamentId: input.tournamentId,
             remaining: pending.length,
-            complete: backgroundResult.complete,
           });
         });
       }
     }
+  } else if (input.tournamentId !== undefined && staleOrMissing.length > 0) {
+    if (!tournament) throw new Error('Tournament validation unexpectedly missing');
+    const classicLeagueId = tournament.leagueId;
+    const standings = await refreshClassicStandings(
+      season,
+      input.eventId,
+      classicLeagueId,
+      new Set(staleOrMissing),
+      rows,
+      redis,
+    );
+    refreshErrorCode = standings.errorCode;
+    const pending = staleOrMissing.filter(
+      (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+    );
+    if (pending.length > 0 && !standings.complete) {
+      const backgroundKey = `classic:${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
+      scheduleBackgroundRefresh(backgroundKey, async () => {
+        const backgroundRows = await readCachedRows(
+          redis,
+          season.seasonCode,
+          input.eventId,
+          scope,
+          pending,
+        );
+        const backgroundResult = await refreshClassicStandings(
+          season,
+          input.eventId,
+          classicLeagueId,
+          new Set(pending),
+          backgroundRows,
+          redis,
+          { startPage: standings.nextPage, maxPages: MAX_STANDINGS_PAGES },
+        );
+        logDebug('Official classic manager background refresh completed', {
+          eventId: input.eventId,
+          leagueId: classicLeagueId,
+          remaining: pending.length,
+          complete: backgroundResult.complete,
+        });
+      });
+    }
   }
 
-  if (!errorCode && input.tournamentId === undefined && staleOrMissing.length > 0) {
+  if (input.tournamentId === undefined && staleOrMissing.length > 0) {
     const summaryTargets = staleOrMissing;
     refreshErrorCode = await refreshEntrySummaries(
-      season.seasonCode,
+      season,
       input.eventId,
       summaryTargets,
       rows,
       redis,
+      entryScope,
       {
         maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES,
       },
@@ -522,28 +798,25 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           redis,
           season.seasonCode,
           input.eventId,
+          entryScope,
           pending,
         );
         await refreshEntrySummaries(
-          season.seasonCode,
+          season,
           input.eventId,
           pending,
           backgroundRows,
           redis,
+          entryScope,
         );
       });
     }
   }
 
   const now = Date.now();
-  // Never reuse an event-scoped entry/classic row for an H2H board. H2H stays
-  // on its legacy adapter until FPL publishes a usable live H2H contract.
-  const resolvedRows =
-    errorCode === 'UNSUPPORTED_H2H_LIVE'
-      ? []
-      : uniqueEntryIds
-          .map((entryId) => rows.get(entryId))
-          .filter((row): row is CachedRow => row !== undefined && isWithinStaleWindow(row, now));
+  const resolvedRows = uniqueEntryIds
+    .map((entryId) => rows.get(entryId))
+    .filter((row): row is CachedRow => row !== undefined && isWithinStaleWindow(row, now));
   const resolvedIds = new Set(resolvedRows.map((row) => row.entryId));
   const missingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
   if (!errorCode && refreshErrorCode) errorCode = refreshErrorCode;

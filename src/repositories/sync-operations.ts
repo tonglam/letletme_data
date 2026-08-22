@@ -11,6 +11,7 @@ import {
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
   isDataPublicationId,
+  parseDataPublicationManifest,
   type DataPublicationDataset,
   type DataPublicationManifest,
 } from '../cache/data-publication';
@@ -189,6 +190,82 @@ function publicationPayloadChecksums(value: unknown): readonly string[] {
 
 export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
+
+  const findActiveLivePublicationEvidence = async (
+    season: FplSeasonRef,
+    eventId: number,
+  ): Promise<{
+    manifest: DataPublicationManifest;
+    eventLives: readonly EventLive[];
+  } | null> => {
+    const db = await getDbInstance();
+    const rows = await db
+      .select({
+        publicationId: datasetPublicationsInOps.publicationId,
+        revision: datasetPublicationsInOps.revision,
+        manifest: datasetPublicationsInOps.manifest,
+        itemName: datasetPublicationItemsInOps.itemName,
+        itemCount: datasetPublicationItemsInOps.itemCount,
+        checksum: datasetPublicationItemsInOps.checksum,
+        payload: datasetPublicationItemsInOps.payload,
+      })
+      .from(datasetPublicationsInOps)
+      .innerJoin(
+        datasetPublicationItemsInOps,
+        eq(datasetPublicationItemsInOps.publicationId, datasetPublicationsInOps.publicationId),
+      )
+      .where(
+        and(
+          publicationScope('fpl:live', season, eventId),
+          eq(datasetPublicationsInOps.status, 'active'),
+        ),
+      );
+    if (rows.length !== 2) return null;
+
+    const first = rows[0];
+    if (!first || !isDataPublicationId(first.publicationId)) return null;
+    const manifest = parseDataPublicationManifest(
+      typeof first.manifest === 'string' ? first.manifest : JSON.stringify(first.manifest),
+    );
+    if (
+      !manifest ||
+      manifest.dataset !== 'fpl:live' ||
+      manifest.seasonCode !== season.seasonCode ||
+      manifest.eventId !== eventId ||
+      manifest.revision !== first.revision ||
+      manifest.publicationId !== first.publicationId ||
+      !['scheduled', 'live', 'settled'].includes(String(manifest.state)) ||
+      !Array.isArray(manifest.items) ||
+      manifest.items.length !== 2
+    ) {
+      return null;
+    }
+
+    for (const row of rows) {
+      const manifestItem = manifest.items.find(
+        (candidate) => isRecord(candidate) && candidate.name === row.itemName,
+      );
+      if (
+        !manifestItem ||
+        manifestItem.count !== row.itemCount ||
+        manifestItem.sha256 !== row.checksum ||
+        !publicationPayloadChecksums(row.payload).includes(row.checksum) ||
+        publicationItemCount(row.payload) !== row.itemCount
+      ) {
+        return null;
+      }
+    }
+
+    const eventLivePayload = rows.find((row) => row.itemName === 'eventLive')?.payload;
+    const fixturesPayload = rows.find((row) => row.itemName === 'fixtures')?.payload;
+    if (!Array.isArray(eventLivePayload) || !Array.isArray(fixturesPayload)) return null;
+    // Every live revision after the fixture-grain rollout carries an
+    // immutable per-fixture explanation on every player row. A retired
+    // revision may still have a valid checksum after migration 0017, but
+    // it is not safe to serve its legacy payload after a cache miss.
+    if (!eventLivePayload.every(hasFixtureBreakdownEvidence)) return null;
+    return { manifest, eventLives: eventLivePayload as EventLive[] };
+  };
 
   return {
     startRun: async (input: StartSyncRunInput): Promise<string> => {
@@ -898,76 +975,45 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       return rows[0] ?? null;
     },
 
-    findActiveLiveEventLives: async (
+    findActivePublicationManifest: async (
+      dataset: DataPublicationDataset,
       season: FplSeasonRef,
-      eventId: number,
-    ): Promise<readonly EventLive[] | null> => {
+      eventId?: number,
+    ): Promise<DataPublicationManifest | null> => {
       const db = await getDbInstance();
       const rows = await db
-        .select({
-          publicationId: datasetPublicationsInOps.publicationId,
-          revision: datasetPublicationsInOps.revision,
-          manifest: datasetPublicationsInOps.manifest,
-          itemName: datasetPublicationItemsInOps.itemName,
-          itemCount: datasetPublicationItemsInOps.itemCount,
-          checksum: datasetPublicationItemsInOps.checksum,
-          payload: datasetPublicationItemsInOps.payload,
-        })
+        .select({ manifest: datasetPublicationsInOps.manifest })
         .from(datasetPublicationsInOps)
-        .innerJoin(
-          datasetPublicationItemsInOps,
-          eq(datasetPublicationItemsInOps.publicationId, datasetPublicationsInOps.publicationId),
-        )
         .where(
           and(
-            publicationScope('fpl:live', season, eventId),
+            publicationScope(dataset, season, eventId),
             eq(datasetPublicationsInOps.status, 'active'),
           ),
-        );
-      if (rows.length !== 2) return null;
-
-      const first = rows[0];
-      if (!first || !isDataPublicationId(first.publicationId)) return null;
-      const manifest = first.manifest;
+        )
+        .limit(1);
+      const raw = rows[0]?.manifest;
+      if (!raw) return null;
+      const manifest = parseDataPublicationManifest(
+        typeof raw === 'string' ? raw : JSON.stringify(raw),
+      );
       if (
-        !isRecord(manifest) ||
-        manifest.dataset !== 'fpl:live' ||
+        !manifest ||
+        manifest.dataset !== dataset ||
         manifest.seasonCode !== season.seasonCode ||
-        manifest.eventId !== eventId ||
-        manifest.revision !== first.revision ||
-        manifest.publicationId !== first.publicationId ||
-        !['scheduled', 'live', 'settled'].includes(String(manifest.state)) ||
-        !Array.isArray(manifest.items) ||
-        manifest.items.length !== 2
+        manifest.eventId !== (eventId ?? null)
       ) {
         return null;
       }
-
-      for (const row of rows) {
-        const manifestItem = manifest.items.find(
-          (candidate) => isRecord(candidate) && candidate.name === row.itemName,
-        );
-        if (
-          !manifestItem ||
-          manifestItem.count !== row.itemCount ||
-          manifestItem.sha256 !== row.checksum ||
-          !publicationPayloadChecksums(row.payload).includes(row.checksum) ||
-          publicationItemCount(row.payload) !== row.itemCount
-        ) {
-          return null;
-        }
-      }
-
-      const eventLivePayload = rows.find((row) => row.itemName === 'eventLive')?.payload;
-      const fixturesPayload = rows.find((row) => row.itemName === 'fixtures')?.payload;
-      if (!Array.isArray(eventLivePayload) || !Array.isArray(fixturesPayload)) return null;
-      // Every live revision after the fixture-grain rollout carries an
-      // immutable per-fixture explanation on every player row. A retired
-      // revision may still have a valid checksum after migration 0017, but
-      // it is not safe to serve its legacy payload after a cache miss.
-      if (!eventLivePayload.every(hasFixtureBreakdownEvidence)) return null;
-      return eventLivePayload as EventLive[];
+      return manifest;
     },
+
+    findActiveLivePublicationEvidence,
+
+    findActiveLiveEventLives: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<readonly EventLive[] | null> =>
+      (await findActiveLivePublicationEvidence(season, eventId))?.eventLives ?? null,
 
     findPublicationById: async (
       publicationId: string,
