@@ -31,7 +31,10 @@ import {
 } from '../jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
-import { coreSnapshotRefreshReason } from '../domain/core-snapshot-refresh';
+import {
+  coreLifecycleReconcilePeriodKey,
+  coreSnapshotRefreshReason,
+} from '../domain/core-snapshot-refresh';
 import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
@@ -372,11 +375,10 @@ function coreLifecycleReconcileDefinition(): ScheduledJobDefinition {
       return [
         {
           scopeKey: `${context.season.seasonCode}:core-lifecycle`,
-          // Keep one durable reconciliation obligation for the current event
-          // until its publication catches up.  A 30-second resolver tick must
-          // not manufacture a parallel full core rebuild every time it sees
-          // the same mismatch.
-          periodKey: `core-lifecycle-${current.id}`,
+          // Keep one durable obligation per canonical lifecycle target. A
+          // succeeded repair for an earlier fixture transition must not block
+          // the next started/provisional/final transition in this event.
+          periodKey: coreLifecycleReconcilePeriodKey(current, fixtures, reason),
           dueAt: context.now,
           eventId: current.id,
           source: 'reconcile' as const,

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { Event, Fixture } from '../types';
 
 export type CoreSnapshotRefreshReason =
@@ -9,11 +11,11 @@ export type CoreSnapshotRefreshReason =
 
 const KICKOFF_CUTOVER_REFRESH_WINDOW_MS = 20 * 60_000;
 
-type CurrentEventLifecycle = Pick<
+export type CurrentEventLifecycle = Pick<
   Event,
   'id' | 'isPrevious' | 'isCurrent' | 'isNext' | 'finished' | 'dataChecked'
 >;
-type CurrentFixtureLifecycle = Pick<
+export type CurrentFixtureLifecycle = Pick<
   Fixture,
   'id' | 'event' | 'kickoffTime' | 'started' | 'finished' | 'finishedProvisional'
 >;
@@ -31,6 +33,41 @@ function fixtureLifecycleKey(fixture: CurrentFixtureLifecycle): string {
     fixture.finished,
     fixture.finishedProvisional,
   ].join(':');
+}
+
+/**
+ * One completed reconciliation must not suppress a later lifecycle change in
+ * the same event. The period key is therefore derived from the canonical
+ * target state (and the reason that opened the repair), never from wall time.
+ */
+export function coreLifecycleReconcilePeriodKey(
+  current: CurrentEventLifecycle,
+  currentFixtures: readonly CurrentFixtureLifecycle[],
+  reason: CoreSnapshotRefreshReason,
+): string {
+  const target = JSON.stringify({
+    reason,
+    event: {
+      id: current.id,
+      isPrevious: current.isPrevious,
+      isCurrent: current.isCurrent,
+      isNext: current.isNext,
+      finished: current.finished,
+      dataChecked: current.dataChecked,
+    },
+    fixtures: currentFixtures
+      .map((fixture) => ({
+        id: fixture.id,
+        event: fixture.event,
+        kickoffTime: fixture.kickoffTime?.toISOString() ?? null,
+        started: fixture.started,
+        finished: fixture.finished,
+        finishedProvisional: fixture.finishedProvisional,
+      }))
+      .sort((left, right) => left.id - right.id),
+  });
+  const fingerprint = createHash('sha256').update(target).digest('hex').slice(0, 16);
+  return `core-lifecycle-${current.id}-${reason}-${fingerprint}`;
 }
 
 /**
