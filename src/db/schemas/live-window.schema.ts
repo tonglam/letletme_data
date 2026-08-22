@@ -80,14 +80,14 @@ export const managerEventScoreSnapshotsInFpl = fpl.table(
       table.seasonId,
       table.eventId,
       table.entryId,
-      table.checkedAt,
+      table.checkedAt.desc(),
     ),
     index('manager_event_score_snapshots_scope_idx').on(
       table.seasonId,
       table.eventId,
       table.scopeType,
       table.scopeId,
-      table.checkedAt,
+      table.checkedAt.desc(),
     ),
     foreignKey({
       columns: [table.seasonId, table.eventId],
