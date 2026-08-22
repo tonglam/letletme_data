@@ -15,6 +15,7 @@ import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import { seasonRepository } from '../../src/repositories/seasons';
 import { syncOperationsRepository } from '../../src/repositories/sync-operations';
 import { DatabaseError } from '../../src/utils/errors';
+import { withMutationScopes } from '../../src/utils/mutation-scopes';
 
 const RUN_IDS = [
   '10000000-0000-4000-8000-000000000001',
@@ -252,6 +253,43 @@ describe('ops sync state machine', () => {
       WHERE run_id = ${RUN_IDS[0]}::uuid
     `;
     expect(rows[0]).toEqual({ status: 'completed', error_summary: null });
+  });
+
+  test('uses wall-clock completion time inside a long mutation transaction', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    const startedAt = new Date();
+
+    await withMutationScopes(
+      { queueName: 'data-sync', jobName: 'player-values', jobId: RUN_IDS[0] },
+      async () => {
+        await syncOperationsRepository.startRun({
+          runId: RUN_IDS[0],
+          provider: 'fpl',
+          lane: 'market',
+          scope: 'integration-contract',
+          season,
+          mode: 'publication',
+          trigger: 'test',
+          expectedItems: 1,
+          startedAt,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await syncOperationsRepository.finishRun(RUN_IDS[0], {
+          status: 'published',
+          completedItems: 1,
+          dataChanged: true,
+        });
+      },
+    );
+
+    const rows = await sql<Array<{ started_at: Date; completed_at: Date | null }>>`
+      SELECT started_at, completed_at
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(rows[0]?.completed_at).not.toBeNull();
+    expect(rows[0]!.completed_at!.getTime()).toBeGreaterThanOrEqual(rows[0]!.started_at.getTime());
   });
 
   test('atomically replaces the active publication and retires the prior revision', async () => {
