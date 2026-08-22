@@ -1,0 +1,47 @@
+name: Temporary Data port diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Inspect production Data port and runtime state
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            expected_workdir=/home/workspace/letletme_data
+            test "$VPS_WORKDIR" = "$expected_workdir"
+            test "$(realpath --canonicalize-existing "$VPS_WORKDIR")" = "$expected_workdir"
+            cd "$VPS_WORKDIR"
+            echo "HOST=$(hostname)"
+            echo "TIME=$(date -Is)"
+            echo '--- listener ---'
+            ss -ltnp '( sport = :3000 )' 2>/dev/null || true
+            if command -v lsof >/dev/null 2>&1; then
+              lsof -nP -iTCP:3000 -sTCP:LISTEN 2>/dev/null || true
+            fi
+            echo '--- docker containers exposing 3000 ---'
+            docker ps -a --format '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}' | grep -E '(^|[[:space:]])3000(:|->|/tcp)' || true
+            echo '--- data compose ---'
+            docker compose ps -a
+            echo '--- matching processes ---'
+            ps -eo user,pid,ppid,comm,args | grep -E '[b]un|[n]ode|[d]ocker-proxy|[l]etletme' || true
+            echo '--- git ---'
+            git rev-parse HEAD
