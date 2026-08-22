@@ -949,6 +949,12 @@ export async function captureMyFplSnapshot(
     throw new Error('My FPL final override metadata is invalid');
   }
   const client = await getDbClient();
+  // The production postgres-js runtime is configured with string timestamp
+  // parameters. Keep the publication transaction on the same explicit wire
+  // representation instead of passing Bun Date objects through the tagged
+  // template serializer (which rejects Date at runtime).
+  const nowIso = now.toISOString();
+  const supersededBeforeIso = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
 
   return client.begin(async (tx) => {
     await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
@@ -1479,6 +1485,7 @@ export async function captureMyFplSnapshot(
         ? now.getTime()
         : sourceTimes.reduce((latest, value) => Math.max(latest, value), -Infinity);
     const sourceCheckedAt = new Date(latestSourceTimestamp);
+    const sourceCheckedAtIso = sourceCheckedAt.toISOString();
     const content = {
       seasonId: season.seasonId,
       eventId,
@@ -1506,7 +1513,7 @@ export async function captureMyFplSnapshot(
          expected_tournament_count, ready_tournament_count, content_sha256,
          override_actor, override_reason, idempotency_key)
       VALUES
-        (${season.seasonId}, ${eventId}, ${snapshotDate}::date, ${sourceCheckedAt}, ${now}, ${kind},
+        (${season.seasonId}, ${eventId}, ${snapshotDate}::date, ${sourceCheckedAtIso}::timestamptz, ${nowIso}::timestamptz, ${kind},
          false, ${entries.length}, ${readyEntryIds.size}, ${emptyEntryCount},
          ${tournamentIds.length}, ${tournamentIds.length}, ${contentSha256},
          ${overrideActor}, ${overrideReason}, ${idempotencyKey})
@@ -1597,24 +1604,24 @@ export async function captureMyFplSnapshot(
         (season_id, event_id, revision, manifest, status, available_at, updated_at)
       VALUES
         (${season.seasonId}, ${eventId}, ${revision}, ${JSON.stringify(redisManifest)}::jsonb,
-         'PENDING', ${now}, ${now})
+         'PENDING', ${nowIso}::timestamptz, ${nowIso}::timestamptz)
       ON CONFLICT (season_id, event_id, revision) DO NOTHING
     `;
 
     await tx`
       UPDATE competition.my_fpl_snapshot_publications
-      SET active = false, updated_at = ${now}
+      SET active = false, updated_at = ${nowIso}::timestamptz
       WHERE season_id = ${season.seasonId} AND event_id = ${eventId} AND active
     `;
     await tx`
       UPDATE competition.my_fpl_snapshot_publications
-      SET active = true, updated_at = ${now}
+      SET active = true, updated_at = ${nowIso}::timestamptz
       WHERE season_id = ${season.seasonId} AND event_id = ${eventId} AND revision = ${revision}
     `;
     await tx`
       DELETE FROM competition.my_fpl_snapshot_publications
       WHERE season_id = ${season.seasonId} AND event_id = ${eventId}
-        AND active = false AND published_at < ${new Date(now.getTime() - 24 * 60 * 60_000)}
+        AND active = false AND published_at < ${supersededBeforeIso}::timestamptz
     `;
 
     const publication: MyFplSnapshotPublication = {
