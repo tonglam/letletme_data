@@ -48,12 +48,31 @@ CONTENT_PUBLICATION_ENABLED=false
 BRIEFING_PUBLIC_ENABLED=false
 ```
 
-The VPS Grok authentication already exists. Do not reinstall, export, or print it. Before enabling
-real acquisition, validate it from the deployed worker image as UID 1001:
+The VPS Grok authentication already exists. Do not reinstall, export, or print it. The protected
+shadow-rollout workflow copies only the existing, owner-only `~/.grok/auth.json` into an absent
+container credential file, over stdin without logging its value. It refuses symlinks, hardlinks,
+unexpected ownership, group/world permissions, oversized files, and an existing-but-unusable
+container credential. It then validates the credential from the deployed worker image as UID 1001:
 
 ```sh
 docker compose run --rm --user 1001 content-worker /app/node_modules/.bin/grok inspect --json
 ```
+
+The same workflow emits only bounded aggregate control-plane, recent-run, ReceiptRevision, outbox,
+and transcript health from a repeatable-read, read-only PostgreSQL transaction. It never prints
+provider credentials, Receipt bodies, post text, transcript text, or stored error summaries.
+
+After the exact main SHA has passed CI and deployed, `Briefing acquisition rollout` is the only
+supported switch:
+
+- `shadow` seeds an absent container credential, enables real acquisition while keeping
+  publication/public flags unchanged, recreates only `content-worker`, and rolls the env file and
+  worker back if any version, auth, service-health, image-identity, or database-health gate fails;
+- `status` is read-only and proves config, worker, Grok auth/version, and aggregate database health;
+- `disabled` turns off acquisition adapters without stopping an already enabled publication loop.
+
+The first rollout uses `shadow` because an empty new named volume has no container credential yet.
+Subsequent monitoring uses `status`; neither mode installs Grok or starts an interactive login.
 
 The `grok-home` volume is mounted at `/home/appuser/.grok` and is writable only by UID/GID 1001. If
 device credentials expire, acquisition remains failed closed; an attended device-auth login may be

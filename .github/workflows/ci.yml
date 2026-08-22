@@ -91,7 +91,11 @@ jobs:
           test "$(docker run --rm --entrypoint id letletme-data:ci -u)" = "1001"
           docker run --rm --entrypoint sh letletme-data:ci -c \
             'test "$HOME" = /home/appuser && test "$GROK_HOME" = /home/appuser/.grok'
-          docker run --rm --entrypoint sh letletme-data:ci -c \
+          docker run --rm --read-only --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700 \
+            --tmpfs /home/appuser/.grok:rw,nosuid,nodev,size=64m,uid=1001,gid=1001,mode=700 \
+            --entrypoint sh letletme-data:ci -c \
             "/app/node_modules/.bin/grok inspect --json | grep -Eq '\"grokVersion\"[[:space:]]*:[[:space:]]*\"1\\.0\\.5\"'"
 
       - name: Production dependency audit
