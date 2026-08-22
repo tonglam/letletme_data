@@ -35,6 +35,8 @@ import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import { withMutationScopes } from '../utils/mutation-scopes';
 
+const LIVE_SOURCE_STALE_AFTER_MS = 60_000;
+
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   readonly season: string;
   readonly playerTeamById: Map<number, number>;
@@ -546,6 +548,7 @@ export async function syncLiveSnapshot(
 
   let publicationId: string | null = null;
   let cachePublished = false;
+  let fetchedAt: number | null = null;
   try {
     const checkedAt = await dependencies.readOrderingTimestamp();
     const [liveResponse, rawFixtures, expectedFixtureIds, referenceData, active] =
@@ -556,6 +559,7 @@ export async function syncLiveSnapshot(
         dependencies.getReferenceData(season),
         dependencies.readPublished(season.seasonCode, eventId),
       ]);
+    fetchedAt = Date.now();
     if (referenceData.season !== season.seasonCode) {
       throw new DatabaseError('Live reference data belongs to another FPL season');
     }
@@ -614,7 +618,16 @@ export async function syncLiveSnapshot(
         persistedFixtures,
         persistedEventLives,
       };
-      logInfo('Live snapshot content unchanged', { ...result, durationMs: Date.now() - startedAt });
+      const sourceAgeMs = Math.max(0, Date.now() - checkedAt.getTime());
+      logInfo('Live snapshot content unchanged', {
+        ...result,
+        durationMs: Date.now() - startedAt,
+        fetchDurationMs: (fetchedAt ?? Date.now()) - startedAt,
+        publishDurationMs: 0,
+        sourceCheckedAt: checkedAt.toISOString(),
+        sourceAgeMs,
+        stale: sourceAgeMs > LIVE_SOURCE_STALE_AFTER_MS,
+      });
       return result;
     }
 
@@ -632,6 +645,7 @@ export async function syncLiveSnapshot(
     });
     let persistedFixtures = false;
     let persistedEventLives = false;
+    const publishStartedAt = Date.now();
     const published = await dependencies.publish(payload, {
       revision: staging.revision,
       publicationId: staging.publicationId,
@@ -691,6 +705,19 @@ export async function syncLiveSnapshot(
       };
     }
     cachePublished = true;
+    const sourceAgeMs = Math.max(0, Date.now() - checkedAt.getTime());
+    if (sourceAgeMs > LIVE_SOURCE_STALE_AFTER_MS) {
+      logError(
+        'Live snapshot source exceeded hard freshness threshold',
+        new Error('LIVE_SOURCE_STALE'),
+        {
+          eventId,
+          sourceCheckedAt: checkedAt.toISOString(),
+          sourceAgeMs,
+          thresholdMs: LIVE_SOURCE_STALE_AFTER_MS,
+        },
+      );
+    }
     await syncOperationsRepository.activatePublication({
       publicationId: staging.publicationId,
       dataset: 'fpl:live',
@@ -717,6 +744,11 @@ export async function syncLiveSnapshot(
     logInfo('Live snapshot publication completed', {
       ...result,
       durationMs: Date.now() - startedAt,
+      fetchDurationMs: (fetchedAt ?? Date.now()) - startedAt,
+      publishDurationMs: Date.now() - publishStartedAt,
+      sourceCheckedAt: checkedAt.toISOString(),
+      sourceAgeMs,
+      stale: sourceAgeMs > LIVE_SOURCE_STALE_AFTER_MS,
     });
     return result;
   } catch (error) {

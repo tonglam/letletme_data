@@ -398,7 +398,10 @@ export const PicksResponseSchema = z.object({
 // League standings schemas
 const StandingsResultSchema = z
   .object({
-    entry: z.number(),
+    // Official H2H leagues expose the synthetic AVERAGE participant with a
+    // null entry id. Keep the upstream shape valid at the boundary; consumers
+    // must ignore it when they need a real FPL entry.
+    entry: z.number().int().positive().nullable(),
     entry_name: z.string().optional(),
     player_name: z.string().optional(),
     player_first_name: z.string().optional(),

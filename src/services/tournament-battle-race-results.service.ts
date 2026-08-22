@@ -3,6 +3,8 @@ import { tournamentBattleGroupResultsRepository } from '../repositories/tourname
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import { tournamentRosterRepository } from '../repositories/tournament-roster';
+import { enqueueTournamentRosterReconcile } from '../jobs/tournament-sync.jobs';
 import { mapWithConcurrency } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
@@ -11,6 +13,50 @@ import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/i
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/tournament';
 import { OfficialH2HStrategy } from './tournament-official-h2h.service';
+
+const officialH2HRecoveryTargets = new WeakMap<IncompleteDataSyncError, number[]>();
+
+export function getOfficialH2HRecoveryTargets(error: unknown): readonly number[] {
+  return error instanceof IncompleteDataSyncError
+    ? (officialH2HRecoveryTargets.get(error) ?? [])
+    : [];
+}
+
+export async function enqueueOfficialH2HRosterRecoveries(
+  season: FplSeasonRef,
+  eventId: number,
+  tournamentIds: readonly number[],
+): Promise<void> {
+  await mapWithConcurrency([...new Set(tournamentIds)], 5, async (tournamentId) => {
+    try {
+      const recoveryMarker = await tournamentRosterRepository.prepareUnlockedOfficialH2HRecovery(
+        season,
+        tournamentId,
+      );
+      if (!recoveryMarker) {
+        logWarn('Skipped unsafe or already claimed official H2H roster recovery', {
+          tournamentId,
+          eventId,
+        });
+        return;
+      }
+      const recoveryJob = await enqueueTournamentRosterReconcile(season, tournamentId, 'watchdog', {
+        allowUnlockedOfficialH2HRecovery: true,
+        expectedProgressMarker: recoveryMarker,
+      });
+      logWarn('Enqueued guarded official H2H roster recovery', {
+        tournamentId,
+        eventId,
+        jobId: recoveryJob.id,
+      });
+    } catch (recoveryError) {
+      logError('Failed to enqueue guarded official H2H roster recovery', recoveryError, {
+        tournamentId,
+        eventId,
+      });
+    }
+  });
+}
 
 function groupRankKey(points: number, overallRank: number | null) {
   return `${points}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
@@ -337,10 +383,19 @@ export async function syncOfficialH2HTournaments(
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
+  const recoveryTournamentIds: number[] = [];
   const results = await mapWithConcurrency(tournaments, 5, async (tournament) => {
     try {
       return await OfficialH2HStrategy.sync(season, tournament, eventId);
     } catch (error) {
+      if (
+        error !== null &&
+        typeof error === 'object' &&
+        'code' in error &&
+        error.code === 'TOURNAMENT_OFFICIAL_H2H_STANDINGS_INCOMPLETE'
+      ) {
+        recoveryTournamentIds.push(tournament.id);
+      }
       failures.push(tournament.id);
       logError('Official H2H strategy failed', error, { tournamentId: tournament.id, eventId });
       return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
@@ -351,13 +406,15 @@ export async function syncOfficialH2HTournaments(
     updatedResults += result.updatedResults;
   }
   if (failures.length > 0) {
-    throw new IncompleteDataSyncError(
+    const error = new IncompleteDataSyncError(
       'Official H2H mirrors did not converge',
       tournaments.length,
       0,
       tournaments.length - failures.length,
       failures.length,
     );
+    officialH2HRecoveryTargets.set(error, recoveryTournamentIds);
+    throw error;
   }
   return { eventId, updatedGroups, updatedResults, skipped: 0 };
 }

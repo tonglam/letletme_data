@@ -211,6 +211,38 @@ describe('FPL boundary schemas (FP-04)', () => {
     expect(result.league?.start_event).toBe(1);
     expect(result.new_entries?.results[0]?.entry).toBe(7819);
   });
+
+  test('H2H standings accept the official Average Team placeholder', async () => {
+    const payload = {
+      league: { id: 34879, name: 'H2H', start_event: 1, scoring: 'h' },
+      standings: {
+        has_next: false,
+        page: 1,
+        results: [
+          {
+            entry: null,
+            entry_name: 'AVERAGE',
+            player_name: 'AVERAGE',
+            rank: 1,
+            total: 0,
+            matches_played: 0,
+            matches_won: 0,
+            matches_drawn: 0,
+            matches_lost: 0,
+            points_for: 0,
+          },
+        ],
+      },
+      new_entries: { has_next: false, page: 1, results: [] },
+    };
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify(payload), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const result = await fplClient.getLeagueH2HStandings(34879, 1);
+
+    expect(result.standings.results[0]?.entry).toBeNull();
+  });
 });
 
 describe('chip mapping at the DB boundary', () => {

@@ -9,7 +9,7 @@ import { seasonRepository } from '../repositories/seasons';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
-import { enqueueCoreSnapshotJob } from './data-sync-enqueue';
+import { enqueueCoreSnapshotJob, enqueuePlayerStatsSyncJob } from './data-sync-enqueue';
 import { CRON_TIMEZONE } from '../utils/timezone';
 
 export type ManualEventCurrentRefreshResult = {
@@ -62,6 +62,14 @@ export async function runEventCurrentRefresh() {
     try {
       const job = await enqueueCoreSnapshotJob(season, 'event-transition');
       logInfo('Core snapshot job enqueued (transition)', { jobId: job.id });
+      if (current) {
+        const playerStatsJob = await enqueuePlayerStatsSyncJob(season, 'event-transition', {
+          eventId: current.id,
+          jobId: `player-stats-transition-e${current.id}`,
+          removeOnSettle: true,
+        });
+        logInfo('Player stats job enqueued (transition)', { jobId: playerStatsJob.id });
+      }
     } catch {
       logInfo('Core snapshot job already enqueued or failed (transition)');
     }

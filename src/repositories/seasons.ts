@@ -3,8 +3,11 @@ import { eq } from 'drizzle-orm';
 import { seasonsInFpl } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
+import { advanceSeasonLifecycleState } from '../domain/season-lifecycle';
 import { DatabaseError } from '../utils/errors';
 import { logError } from '../utils/logger';
+
+import type { Event } from '../types';
 
 export interface FplSeasonRecord extends FplSeasonRef {
   readonly displayName: string;
@@ -76,6 +79,33 @@ export const createSeasonRepository = (dbInstance?: DbOrTransaction) => {
   return {
     findByCode,
     findById,
+
+    advanceLifecycle: async (
+      season: FplSeasonRef,
+      events: ReadonlyArray<Pick<Event, 'id' | 'finished' | 'dataChecked' | 'isCurrent'>>,
+    ): Promise<FplSeasonRecord> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select()
+        .from(seasonsInFpl)
+        .where(eq(seasonsInFpl.seasonId, season.seasonId))
+        .limit(1);
+      const current = rows[0];
+      if (!current) {
+        throw new DatabaseError(
+          `FPL season ${season.seasonCode} does not exist`,
+          'FPL_SEASON_NOT_FOUND',
+        );
+      }
+      const nextState = advanceSeasonLifecycleState(current.lifecycleState, events);
+      if (nextState !== current.lifecycleState) {
+        await db
+          .update(seasonsInFpl)
+          .set({ lifecycleState: nextState, updatedAt: new Date() })
+          .where(eq(seasonsInFpl.seasonId, season.seasonId));
+      }
+      return mapSeason({ ...current, lifecycleState: nextState });
+    },
 
     requireByCode: async (seasonCode: string): Promise<FplSeasonRecord> => {
       const season = await findByCode(seasonCode);
