@@ -105,6 +105,39 @@ describe('live lifecycle decisions', () => {
     });
   });
 
+  test('does not let stale unfinished flags or a last-good publication keep live active', () => {
+    const decision = decideLiveLifecycle(
+      { deadlineTime: '2026-08-15T10:00:00.000Z', finished: false, dataChecked: false },
+      [
+        {
+          started: true,
+          finished: false,
+          finishedProvisional: false,
+          kickoffTime: new Date('2026-08-15T12:00:00.000Z'),
+        },
+        {
+          started: false,
+          finished: false,
+          finishedProvisional: false,
+          kickoffTime: new Date('2026-08-15T19:00:00.000Z'),
+        },
+      ],
+      new Date('2026-08-15T18:15:00.000Z'),
+      {
+        matchDayTime: false,
+        publicationActive: true,
+        publicationStarted: true,
+        unchangedSince: new Date('2026-08-15T12:30:00.000Z').getTime(),
+      },
+    );
+
+    expect(decision).toMatchObject({
+      state: 'BETWEEN_FIXTURES',
+      shouldFetchLive: true,
+      shouldSyncPicks: false,
+    });
+  });
+
   test('requests a final durable snapshot before entering finalized state', () => {
     const decision = decideLiveLifecycle(
       { deadlineTime: '2026-08-15T10:00:00.000Z', finished: true, dataChecked: true },
