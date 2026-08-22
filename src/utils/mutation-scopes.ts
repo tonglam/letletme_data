@@ -70,6 +70,14 @@ async function withDatabaseMutationScopes<T>(
       if (!transaction) {
         throw new Error('Drizzle transaction did not expose its pinned postgres client');
       }
+      // Supabase production sessions may inherit a much shorter
+      // statement_timeout than the coordination lock window.  Without
+      // overriding it here, a concurrent entry-info writer can abort the
+      // advisory-scope acquisition after a few seconds even though the
+      // mutation scope explicitly allows a 120s wait.  Keep both limits
+      // aligned for scoped writes; the operation-level timeouts remain the
+      // tighter guard for the actual canonical work.
+      await transaction`SELECT set_config('statement_timeout', ${`${MUTATION_SCOPE_WAIT_TIMEOUT_MS}ms`}, true)`;
       await transaction`SELECT set_config('lock_timeout', ${`${MUTATION_SCOPE_WAIT_TIMEOUT_MS}ms`}, true)`;
       await acquireMutationScopes(transaction, normalizedScopes);
       return runInDatabaseTransaction(transaction, operation, drizzleTransaction);
