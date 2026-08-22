@@ -72,10 +72,10 @@ CREATE TABLE fpl.manager_event_score_snapshots (
 );
 
 CREATE INDEX manager_event_score_snapshots_entry_idx
-  ON fpl.manager_event_score_snapshots (season_id, event_id, entry_id, checked_at DESC);
+  ON fpl.manager_event_score_snapshots (season_id, event_id, entry_id, checked_at DESC NULLS LAST);
 
 CREATE INDEX manager_event_score_snapshots_scope_idx
-  ON fpl.manager_event_score_snapshots (season_id, event_id, scope_type, scope_id, checked_at DESC);
+  ON fpl.manager_event_score_snapshots (season_id, event_id, scope_type, scope_id, checked_at DESC NULLS LAST);
 
 GRANT SELECT, INSERT, UPDATE, DELETE
   ON TABLE ops.live_lifecycle_status TO letletme_data_writer;
