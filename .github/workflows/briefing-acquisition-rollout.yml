@@ -65,4 +65,10 @@ jobs:
             sed -n '1,160p' "$output_file"
             printf '%s\n' '--- trace tail ---'
             tail -n 80 "$trace_file"
+            printf '%s\n' '--- host X page media ---'
+            curl --fail --silent --show-error --location --max-time 30 \
+              --user-agent 'LetLetMe-Briefing-Acquisition/1.0' \
+              'https://x.com/CPFC/status/2091144605710647466' \
+              | grep -oE 'https://pbs\.twimg\.com/media/[^" ]+' \
+              | sort -u
             exit "$status"
