@@ -55,8 +55,6 @@ let formalXRuntime: ReturnType<typeof createFormalXWorkerRuntime> | null = null;
 let formalMediaRuntime: ReturnType<typeof createFormalMediaWorkerRuntime> | null = null;
 let formalScheduleInFlight: Promise<void> | null = null;
 let formalXInitializationInFlight: Promise<void> | null = null;
-let formalXRetryNotBefore = 0;
-let formalXRetryDelayMs = FORMAL_SCHEDULER_INTERVAL_MS;
 let acquisitionJobOutboxDispatchInFlight: Promise<void> | null = null;
 let publicationOutboxDispatchInFlight: Promise<void> | null = null;
 
@@ -141,24 +139,18 @@ async function ensureFormalXRuntime(): Promise<void> {
   ) {
     return;
   }
-  if (Date.now() < formalXRetryNotBefore) return;
   if (formalXInitializationInFlight) return formalXInitializationInFlight;
 
   const initialization = (async () => {
     try {
       const executor = createConfiguredHostGrokRunner();
-      await executor.assertVersion();
       formalXRuntime = createFormalXWorkerRuntime(executor, xBudgetPolicy ?? undefined);
-      formalXRetryNotBefore = 0;
-      formalXRetryDelayMs = FORMAL_SCHEDULER_INTERVAL_MS;
-      logInfo('Host Grok runner initialized; X acquisition enabled');
+      logInfo(
+        'Host Grok runner client initialized; X acquisition will validate the host runner per run',
+      );
       await dispatchPendingAcquisitionJobOutbox();
     } catch (error) {
-      formalXRetryNotBefore = Date.now() + formalXRetryDelayMs;
-      formalXRetryDelayMs = Math.min(5 * 60_000, formalXRetryDelayMs * 2);
-      logError('Grok Build version/provider check failed; X acquisition will retry', error, {
-        retryAt: new Date(formalXRetryNotBefore).toISOString(),
-      });
+      logError('Host Grok runner client initialization failed; X acquisition will retry', error);
     }
   })();
   formalXInitializationInFlight = initialization;

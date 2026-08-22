@@ -270,7 +270,20 @@ describe('host Grok runner client contract', () => {
       expectedRunnerReleaseSha: 'abc1234',
       timeoutMs: 2_000,
     });
-    await expect(client.assertVersion()).resolves.toBeUndefined();
+    let probeRequests = 0;
+    let probeProcessStarted = 0;
+    await expect(
+      client.assertVersion({
+        onProbeRequest: async () => {
+          probeRequests += 1;
+        },
+        onProbeProcessStart: () => {
+          probeProcessStarted += 1;
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(probeRequests).toBe(1);
+    expect(probeProcessStarted).toBe(1);
   });
 
   test('rechecks process-local probe state after a prior successful health check', async () => {

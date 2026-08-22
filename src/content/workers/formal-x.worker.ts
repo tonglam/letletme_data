@@ -13,6 +13,7 @@ import {
   failFormalRun,
 } from '../acquisition/formal-run-repository';
 import {
+  GrokBuildExecutionError,
   type GrokBuildExecutionResult,
   type GrokBuildExecutionHooks,
 } from '../acquisition/grok-build-executor';
@@ -25,7 +26,12 @@ import {
   XPostQualityError,
 } from '../acquisition/x-post-adapter';
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
-import type { XBudgetPolicy } from '../acquisition/x-budget';
+import {
+  releaseOneXRunBudgetUnit,
+  reserveXRunBudgets,
+  type XBudgetLane,
+  type XBudgetPolicy,
+} from '../acquisition/x-budget';
 import { compileXKeywordRequest } from '../acquisition/x-query-compiler';
 import type { XToolRequestV1 } from '../acquisition/x-query-compiler';
 import { getContentRuntimeFlags, type ContentRuntimeFlags } from '../config';
@@ -90,6 +96,9 @@ export async function runFormalXWorker(
   let began = false;
   let identityRun = false;
   let providerProcessStarted = false;
+  let probeBudgetReserved = false;
+  let probeProcessStarted = false;
+  let releaseProbeBudget: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
   let scanAccounting: Readonly<{
@@ -128,15 +137,65 @@ export async function runFormalXWorker(
     if (!profile || profile.revision !== run.request.profileRevision) {
       throw new Error('Persisted X profile no longer matches versioned code');
     }
+    const budgetLane: XBudgetLane = identityRun ? 'IDENTITY' : (profile.lane as XAcquisitionLane);
+    if (!identityRun && !X_ACQUISITION_LANES.includes(budgetLane as XAcquisitionLane)) {
+      throw new Error('Persisted X profile has no valid budget lane');
+    }
+    const reserveProbeBudget = async (): Promise<void> => {
+      if (probeBudgetReserved) return;
+      if (!dependencies?.xBudgetPolicy) {
+        throw new GrokBuildExecutionError(
+          'RUNNER_CAPACITY',
+          'X probe requires an explicit budget policy',
+        );
+      }
+      const budget = await db.transaction(async (tx) => {
+        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
+        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
+        return reserveXRunBudgets({
+          tx,
+          runId: job.runId,
+          phase: run.request.phase,
+          lane: budgetLane,
+          dbNow,
+          policy: dependencies.xBudgetPolicy!,
+          units: 1,
+        });
+      });
+      if (!budget.reserved) {
+        throw new GrokBuildExecutionError(
+          'RUNNER_CAPACITY',
+          `X probe budget is unavailable (${budget.deferredScope ?? 'unknown scope'})`,
+        );
+      }
+      probeBudgetReserved = true;
+    };
+    const executionHooks: GrokBuildExecutionHooks = {
+      runId: job.runId,
+      onProviderProcessStart: () => {
+        providerProcessStarted = true;
+      },
+      onProbeRequest: reserveProbeBudget,
+      onProbeProcessStart: () => {
+        probeProcessStarted = true;
+      },
+    };
+    releaseProbeBudget = async (): Promise<void> => {
+      if (!probeBudgetReserved) return;
+      await db.transaction(async (tx) => {
+        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
+        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
+        const released = await releaseOneXRunBudgetUnit({ tx, runId: job.runId, dbNow });
+        if (!released) throw new Error('X probe budget reservation disappeared before release');
+      });
+      probeBudgetReserved = false;
+    };
     const executor = dependencies?.executor;
     if (!executor) throw new Error('Host Grok runner executor is not configured');
     if (run.request.jobKind === 'X_IDENTITY') {
-      const execution = await executor.execute(run.request.toolRequest, {
-        runId: job.runId,
-        onProviderProcessStart: () => {
-          providerProcessStarted = true;
-        },
-      });
+      const execution = await executor.execute(run.request.toolRequest, executionHooks);
       identityExecution = execution;
       const identity = await persistXIdentityResult({ runId: job.runId, execution, db });
       return {
@@ -160,12 +219,7 @@ export async function runFormalXWorker(
     ) {
       throw new Error('Persisted X scan job and tool request do not agree');
     }
-    const execution = await executor.execute(scanRequest.toolRequest, {
-      runId: job.runId,
-      onProviderProcessStart: () => {
-        providerProcessStarted = true;
-      },
-    });
+    const execution = await executor.execute(scanRequest.toolRequest, executionHooks);
     scanExecution = execution;
     const checkedAt = await databaseNow(db);
     const semanticAuthors =
@@ -332,6 +386,7 @@ export async function runFormalXWorker(
         accepted: adapted.acceptedCount,
         rejected: adapted.rejections.length,
         saturated: adapted.saturated,
+        probeCallCount: probeProcessStarted ? 1 : 0,
         rawPostEvidenceAvailable: execution.rawPostEvidenceAvailable,
         traceHash: execution.traceHash,
       },
@@ -349,7 +404,9 @@ export async function runFormalXWorker(
   } catch (error) {
     if (began) {
       const failure = errorFacts(error);
-      if (failure.failureClass === 'RUNNER_CAPACITY' && !providerProcessStarted) {
+      const billedProviderProcessStarted = providerProcessStarted || probeProcessStarted;
+      if (failure.failureClass === 'RUNNER_CAPACITY' && !billedProviderProcessStarted) {
+        await releaseProbeBudget?.();
         const deferred = await deferFormalRunForCapacity({
           runId: job.runId,
           metrics: { failureClass: failure.failureClass },
@@ -372,7 +429,7 @@ export async function runFormalXWorker(
           runId: job.runId,
           failureClass: failure.failureClass,
           errorSummary: failure.summary,
-          providerProcessStarted,
+          providerProcessStarted: billedProviderProcessStarted,
           providerExecution: identityExecution ?? undefined,
           db,
         });
@@ -410,13 +467,14 @@ export async function runFormalXWorker(
                   returned: scanExecution.posts.length,
                   ...(scanAccounting ?? {}),
                   rejected: rejections?.length ?? scanAccounting?.rejected ?? 0,
+                  probeCallCount: probeProcessStarted ? 1 : 0,
                   rawPostEvidenceAvailable: scanExecution.rawPostEvidenceAvailable,
                   traceHash: scanExecution.traceHash,
                 },
               }
             : undefined,
           rejections,
-          providerProcessStarted,
+          providerProcessStarted: billedProviderProcessStarted,
           db,
         });
       }

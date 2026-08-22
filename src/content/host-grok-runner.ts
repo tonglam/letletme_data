@@ -32,7 +32,7 @@ const CONFIG = {
   releaseFile:
     process.env.GROK_RUNNER_RELEASE_FILE?.trim() ||
     '/home/workspace/letletme-grok-runner/current.release',
-  timeoutMs: Math.max(1, Number(process.env.CONTENT_GROK_TIMEOUT_MS ?? 240_000)),
+  timeoutMs: Math.min(240_000, Math.max(1, Number(process.env.CONTENT_GROK_TIMEOUT_MS ?? 240_000))),
   maximumOutputBytes: Math.min(
     4_194_304,
     Math.max(1, Number(process.env.CONTENT_GROK_MAX_OUTPUT_BYTES ?? 4_194_304)),
@@ -43,6 +43,7 @@ const CONFIG = {
 };
 
 const X_PROBE_MAX_AGE_MS = 30 * 60_000;
+const X_PROBE_MIN_INTERVAL_MS = 60_000;
 
 type RunnerFailure = Readonly<{
   failureClass: string;
@@ -257,6 +258,7 @@ export async function startHostGrokRunner(): Promise<{
   let active = 0;
   let lastXProbeAt: string | null = null;
   let lastXProbeOk: boolean | null = null;
+  let probeInFlight = false;
   const executions = new Map<string, StoredExecution>();
   const inFlightExecutions = new Map<string, InFlightExecution>();
   const activeControllers = new Set<AbortController>();
@@ -293,6 +295,32 @@ export async function startHostGrokRunner(): Promise<{
         return;
       }
       if (request.method === 'POST' && request.url === '/v1/probes/x') {
+        const now = Date.now();
+        const lastProbeAtMs = lastXProbeAt === null ? Number.NaN : Date.parse(lastXProbeAt);
+        if (probeInFlight) {
+          writeJson(response, 429, {
+            ok: false,
+            runnerReleaseSha: releaseSha,
+            grokVersion: metadata.grokVersion,
+            toolName: 'x_user_search',
+            failureClass: 'RUNNER_CAPACITY',
+            errorDigest: digest('runner probe already in flight'),
+            providerProcessStarted: false,
+          });
+          return;
+        }
+        if (Number.isFinite(lastProbeAtMs) && now - lastProbeAtMs < X_PROBE_MIN_INTERVAL_MS) {
+          writeJson(response, 429, {
+            ok: false,
+            runnerReleaseSha: releaseSha,
+            grokVersion: metadata.grokVersion,
+            toolName: 'x_user_search',
+            failureClass: 'RUNNER_PROBE_RATE_LIMITED',
+            errorDigest: digest('runner probe rate limited'),
+            providerProcessStarted: false,
+          });
+          return;
+        }
         if (active >= CONFIG.concurrency) {
           writeJson(response, 429, {
             ok: false,
@@ -313,6 +341,7 @@ export async function startHostGrokRunner(): Promise<{
           toolRequest,
         });
         const abortController = new AbortController();
+        probeInFlight = true;
         active += 1;
         activeControllers.add(abortController);
         const abortProbe = () => abortController.abort();
@@ -326,6 +355,7 @@ export async function startHostGrokRunner(): Promise<{
           response.off('close', abortProbe);
           activeControllers.delete(abortController);
           active -= 1;
+          probeInFlight = false;
         }
         const exactProbeUser = probe.ok
           ? probe.result.users.length === 1 &&

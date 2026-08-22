@@ -85,6 +85,8 @@ export type GrokBuildXUserV1 = z.infer<typeof grokBuildXUserV1Schema>;
 export type GrokBuildExecutionHooks = Readonly<{
   runId?: string;
   onProviderProcessStart?: () => void;
+  onProbeRequest?: () => Promise<void>;
+  onProbeProcessStart?: () => void;
 }>;
 
 type JsonRecord = Record<string, unknown>;

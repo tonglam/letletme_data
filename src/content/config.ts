@@ -107,7 +107,10 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
       1_000,
       Number(process.env.CONTENT_SUPADATA_JOB_POLL_INTERVAL_MS ?? 5_000),
     ),
-    grokTimeoutMs: Math.max(1, Number(process.env.CONTENT_GROK_TIMEOUT_MS ?? 240_000)),
+    grokTimeoutMs: Math.min(
+      240_000,
+      Math.max(1, Number(process.env.CONTENT_GROK_TIMEOUT_MS ?? 240_000)),
+    ),
     grokMaxOutputBytes: Math.min(
       4_194_304,
       Math.max(1, Number(process.env.CONTENT_GROK_MAX_OUTPUT_BYTES ?? 4_194_304)),

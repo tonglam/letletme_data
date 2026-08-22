@@ -96,6 +96,12 @@ jobs:
             }
 
             runner_probe() {
+              health=$(curl --silent --show-error --unix-socket "$runner_socket" \
+                http://localhost/v1/health)
+              if [ "${1:-}" != force ] && printf '%s' "$health" | jq -e '.ok == true and .ready == true and .lastXProbeOk == true' >/dev/null; then
+                printf '%s\n' '{"probeSkipped":"fresh-health"}'
+                return 0
+              fi
               probe=$(curl --silent --show-error --unix-socket "$runner_socket" \
                 -X POST -H 'content-type: application/json' \
                 --data '{"schemaVersion":1}' http://localhost/v1/probes/x)
@@ -165,7 +171,7 @@ jobs:
 
             if [ "$ROLLOUT_MODE" = host-shadow ]; then
               if ! docker compose stop -t 45 scheduler content-worker; then
-                docker compose up -d --no-build scheduler content-worker || true
+                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
                 exit 1
               fi
               services_quiesced=true
@@ -175,19 +181,22 @@ jobs:
               runner_updated=true
               test -x scripts/deploy-host-grok-runner.sh
               if ! scripts/deploy-host-grok-runner.sh "$current_image" "$ROLLOUT_SHA" "$runner_root"; then
+                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 rollback_runner
-                docker compose up -d --no-build scheduler content-worker || true
+                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
                 exit 1
               fi
-              if ! runner_probe || ! runner_health; then
+              if ! runner_probe force || ! runner_health; then
+                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 rollback_runner
-                docker compose up -d --no-build scheduler content-worker || true
+                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
                 exit 1
               fi
               test -x scripts/rearm-briefing-x-after-probe.sh
               if ! scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"; then
+                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 rollback_runner
-                docker compose up -d --no-build scheduler content-worker || true
+                APP_IMAGE="$current_image" docker compose up -d --no-build scheduler content-worker || true
                 exit 1
               fi
             fi

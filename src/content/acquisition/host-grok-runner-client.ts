@@ -51,6 +51,8 @@ const hostGrokProbeResponseSchema = z.discriminatedUnion('ok', [
     .strict(),
 ]);
 
+const PROBE_TIMEOUT_MS = 60_000;
+
 type HostGrokRunnerClientOptions = Readonly<{
   socketPath: string;
   expectedVersion: string;
@@ -196,14 +198,16 @@ export class HostGrokRunnerClient {
     );
   }
 
-  async assertVersion(): Promise<void> {
+  async assertVersion(
+    hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+  ): Promise<void> {
     // Health is deliberately checked on every execution. The runner's probe
     // state is process-local and resets on a systemd restart; a TTL cache here
     // could otherwise start a provider call before the new process has passed
     // its real X probe. Coalesce concurrent checks, but never reuse a completed
     // check across executions.
     if (this.healthCheck) return this.healthCheck;
-    const check = this.inspectHealth();
+    const check = this.inspectHealth(hooks);
     this.healthCheck = check;
     try {
       await check;
@@ -212,7 +216,9 @@ export class HostGrokRunnerClient {
     }
   }
 
-  private async inspectHealth(): Promise<void> {
+  private async inspectHealth(
+    hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+  ): Promise<void> {
     const readHealth = async (): Promise<{
       response: JsonResponse;
       health: z.infer<typeof hostGrokHealthSchema>;
@@ -265,7 +271,7 @@ export class HostGrokRunnerClient {
       !healthResponse.health.ready ||
       healthResponse.health.lastXProbeOk !== true
     ) {
-      await this.refreshProbe();
+      await this.refreshProbe(hooks);
       healthResponse = await readHealth();
       assertIdentity(healthResponse.health);
     }
@@ -278,20 +284,25 @@ export class HostGrokRunnerClient {
     }
   }
 
-  private async refreshProbe(): Promise<void> {
+  private async refreshProbe(
+    hooks?: Pick<GrokBuildExecutionHooks, 'onProbeRequest' | 'onProbeProcessStart'>,
+  ): Promise<void> {
     if (this.probeCheck) return this.probeCheck;
     const probe = (async () => {
       let response: JsonResponse;
       try {
+        await hooks?.onProbeRequest?.();
         response = await requestJson({
           socketPath: this.socketPath,
           path: '/v1/probes/x',
           method: 'POST',
           body: { schemaVersion: 1 },
-          timeoutMs: this.timeoutMs,
+          timeoutMs: Math.min(this.timeoutMs, PROBE_TIMEOUT_MS),
           maximumResponseBytes: 32 * 1024,
+          onTransportLossAfterDispatch: hooks?.onProbeProcessStart,
         });
       } catch (error) {
+        if (error instanceof GrokBuildExecutionError) throw error;
         throw new GrokBuildExecutionError('RUNNER_UNAVAILABLE', errorMessage(error));
       }
       const parsed = hostGrokProbeResponseSchema.safeParse(response.body);
@@ -299,11 +310,22 @@ export class HostGrokRunnerClient {
         if (parsed.success && !parsed.data.ok && parsed.data.failureClass === 'RUNNER_CAPACITY') {
           throw new GrokBuildExecutionError('RUNNER_CAPACITY', 'Host Grok runner is at capacity');
         }
+        if (!parsed.success || response.statusCode !== 200 || parsed.data.ok) {
+          // The request reached the host runner, but a malformed/non-200
+          // response cannot prove whether the provider process started. Charge
+          // the probe conservatively so a lost response cannot bypass the X
+          // call cap.
+          hooks?.onProbeProcessStart?.();
+        }
+        if (parsed.success && !parsed.data.ok && parsed.data.providerProcessStarted) {
+          hooks?.onProbeProcessStart?.();
+        }
         throw new GrokBuildExecutionError(
           'RUNNER_NOT_READY',
           'Host Grok runner is not ready after the X probe failed',
         );
       }
+      hooks?.onProbeProcessStart?.();
       if (parsed.data.grokVersion !== this.expectedVersion) {
         throw new GrokBuildExecutionError(
           'GROK_VERSION_MISMATCH',
@@ -334,7 +356,7 @@ export class HostGrokRunnerClient {
     hooks?: GrokBuildExecutionHooks,
   ): Promise<GrokBuildExecutionResult> {
     const toolRequest = xToolRequestV1Schema.parse(requestValue);
-    await this.assertVersion();
+    await this.assertVersion(hooks);
     const request: HostGrokExecutionRequestV1 = hostGrokExecutionRequestV1Schema.parse({
       schemaVersion: 1,
       runId: hooks?.runId ?? randomUUID(),
