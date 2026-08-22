@@ -92,7 +92,7 @@ jobs:
           docker run --rm --entrypoint sh letletme-data:ci -c \
             'test "$HOME" = /home/appuser && test "$GROK_HOME" = /home/appuser/.grok'
           docker run --rm --entrypoint sh letletme-data:ci -c \
-            "grok inspect --json | grep -Eq '\"grokVersion\"[[:space:]]*:[[:space:]]*\"1\\.0\\.5\"'"
+            "/app/node_modules/.bin/grok inspect --json | grep -Eq '\"grokVersion\"[[:space:]]*:[[:space:]]*\"1\\.0\\.5\"'"
 
       - name: Production dependency audit
         run: bun audit --production

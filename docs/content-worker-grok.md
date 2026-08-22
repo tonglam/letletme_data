@@ -52,7 +52,7 @@ The VPS Grok authentication already exists. Do not reinstall, export, or print i
 real acquisition, validate it from the deployed worker image as UID 1001:
 
 ```sh
-docker compose run --rm --user 1001 content-worker grok inspect --json
+docker compose run --rm --user 1001 content-worker /app/node_modules/.bin/grok inspect --json
 ```
 
 The `grok-home` volume is mounted at `/home/appuser/.grok` and is writable only by UID/GID 1001. If
