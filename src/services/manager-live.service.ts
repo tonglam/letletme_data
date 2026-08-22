@@ -34,6 +34,10 @@ const STALE_SECONDS = Math.max(90, 3 * REFRESH_SECONDS);
 const MAX_STANDINGS_PAGES = 20;
 const MAX_FOREGROUND_STANDINGS_PAGES = 4;
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
+// A small classic roster should receive a complete OR column in the initial
+// response. Larger leagues remain bounded and finish through the background
+// refresh below.
+const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
 
 export type ManagerLiveSource = 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
 export type ManagerLiveTotalScope = 'OVERALL' | 'CLASSIC_PHASE';
@@ -343,10 +347,15 @@ const refreshEntrySummaries = async (
   rows: Map<number, CachedRow>,
   redis: Redis | null,
   scope: ManagerScoreScope = entryScope,
-  options: { maxFetches?: number; priority?: ManagerSummaryFetchPriority } = {},
+  options: {
+    maxFetches?: number;
+    priority?: ManagerSummaryFetchPriority;
+    force?: boolean;
+    preserveClassicStanding?: boolean;
+  } = {},
 ): Promise<'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null> => {
   const targets = entryIds
-    .filter((entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!))
+    .filter((entryId) => options.force || !rows.has(entryId) || !isFresh(rows.get(entryId)!))
     .slice(0, options.maxFetches ?? Number.POSITIVE_INFINITY);
   if (targets.length === 0) return null;
 
@@ -362,7 +371,21 @@ const refreshEntrySummaries = async (
             options.priority,
           );
           const checkedAt = nowIso();
-          const row = toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
+          const existing = rows.get(entryId);
+          const row =
+            options.preserveClassicStanding && existing?.source === 'FPL_CLASSIC_STANDINGS'
+              ? (() => {
+                  const { revision: _revision, ...classicRow } = existing;
+                  return withRevision({
+                    ...classicRow,
+                    // Classic standings owns event/phase totals and league rank;
+                    // the entry summary owns the season-wide FPL OR.
+                    overallRank: summary.summary_overall_rank ?? null,
+                    checkedAt,
+                    staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+                  });
+                })()
+              : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
           completedBatch.push(row);
           refreshed.push(row);
           rows.set(row.entryId, row);
@@ -524,6 +547,12 @@ const refreshClassicStandings = async (
     return { complete: false, nextPage, errorCode: refreshErrorCode };
   }
 };
+
+const classicStandingNeedsOverallRank = (row: CachedRow | undefined): boolean =>
+  row?.source === 'FPL_CLASSIC_STANDINGS' &&
+  (typeof row.overallRank !== 'number' ||
+    !Number.isSafeInteger(row.overallRank) ||
+    row.overallRank <= 0);
 
 const nextRefresh = (eventFinished: boolean): string =>
   new Date(Date.now() + (eventFinished ? 60_000 : 30_000)).toISOString();
@@ -705,6 +734,10 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   const staleOrMissing = uniqueEntryIds.filter(
     (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
   );
+  const classicOverallRankMissing =
+    input.tournamentId !== undefined &&
+    tournament?.leagueType === 'classic' &&
+    uniqueEntryIds.some((entryId) => classicStandingNeedsOverallRank(rows.get(entryId)));
   let errorCode: ManagerLiveResolveResult['errorCode'] = null;
   let refreshErrorCode: Exclude<
     ManagerLiveResolveResult['errorCode'],
@@ -758,7 +791,10 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         });
       }
     }
-  } else if (input.tournamentId !== undefined && staleOrMissing.length > 0) {
+  } else if (
+    input.tournamentId !== undefined &&
+    (staleOrMissing.length > 0 || classicOverallRankMissing)
+  ) {
     if (!tournament) throw new Error('Tournament validation unexpectedly missing');
     const classicLeagueId = tournament.leagueId;
     const standings = await refreshClassicStandings(
@@ -770,6 +806,57 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       redis,
     );
     refreshErrorCode = standings.errorCode;
+
+    // FPL classic standings expose the event/phase totals and the league
+    // position, but not the season-wide Overall Rank (OR). Do not let the
+    // GraphQL layer fall back to the stale rank captured when the manager
+    // joined the tournament. Enrich the classic row with the current entry
+    // summary rank while preserving its classic standings metrics.
+    const classicOverallRankTargets = uniqueEntryIds.filter((entryId) =>
+      classicStandingNeedsOverallRank(rows.get(entryId)),
+    );
+    if (classicOverallRankTargets.length > 0) {
+      const foregroundTargets = classicOverallRankTargets.slice(
+        0,
+        MAX_FOREGROUND_OVERALL_RANK_FETCHES,
+      );
+      const summaryError = await refreshEntrySummaries(
+        season,
+        input.eventId,
+        foregroundTargets,
+        rows,
+        redis,
+        scope,
+        { force: true, preserveClassicStanding: true },
+      );
+      refreshErrorCode = refreshErrorCode ?? summaryError;
+
+      const pendingOverallRank = classicOverallRankTargets.filter((entryId) =>
+        classicStandingNeedsOverallRank(rows.get(entryId)),
+      );
+      if (pendingOverallRank.length > 0) {
+        const backgroundKey = `classic-or:${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
+        scheduleBackgroundRefresh(backgroundKey, async () => {
+          const backgroundRows = await readCachedRows(
+            redis,
+            season.seasonCode,
+            input.eventId,
+            scope,
+            pendingOverallRank,
+          );
+          await refreshEntrySummaries(
+            season,
+            input.eventId,
+            pendingOverallRank,
+            backgroundRows,
+            redis,
+            scope,
+            { force: true, priority: 'background', preserveClassicStanding: true },
+          );
+        });
+      }
+    }
+
     let pending = staleOrMissing.filter(
       (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
     );
