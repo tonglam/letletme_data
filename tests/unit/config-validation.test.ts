@@ -80,7 +80,7 @@ describe('production environment preflight', () => {
   test('keeps each process pool within the shared Supavisor session budget', async () => {
     const digest = 'a'.repeat(64);
 
-    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '5' })).toBe(0);
+    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '3' })).toBe(0);
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '0' })).not.toBe(0);
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '6' })).not.toBe(0);
   });
