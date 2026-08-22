@@ -439,17 +439,26 @@ jobs:
               active_container=$(active_content_container)
               auth_file="$HOME/.grok/auth.json"
               if [ ! -f "$auth_file" ] || [ -L "$auth_file" ]; then
+                printf '%s\n' '{"event":"briefing_grok_auth_refresh","outcome":"skipped","reason":"HOST_AUTH_UNAVAILABLE","secretValueExposed":false}'
                 return 1
               fi
-              test "$(stat -c '%u' "$auth_file")" -eq "$(id -u)"
-              test "$(stat -c '%g' "$auth_file")" -eq "$(id -g)"
-              test "$(stat -c '%h' "$auth_file")" -eq 1
+              if ! test "$(stat -c '%u' "$auth_file")" -eq "$(id -u)" \
+                || ! test "$(stat -c '%g' "$auth_file")" -eq "$(id -g)" \
+                || ! test "$(stat -c '%h' "$auth_file")" -eq 1; then
+                printf '%s\n' '{"event":"briefing_grok_auth_refresh","outcome":"skipped","reason":"HOST_AUTH_METADATA_INVALID","secretValueExposed":false}'
+                return 1
+              fi
               auth_mode=$(stat -c '%a' "$auth_file")
               auth_mode_value=$((8#$auth_mode))
-              test $((auth_mode_value & 077)) -eq 0
+              if ! test $((auth_mode_value & 077)) -eq 0; then
+                printf '%s\n' '{"event":"briefing_grok_auth_refresh","outcome":"skipped","reason":"HOST_AUTH_PERMISSIONS_INVALID","secretValueExposed":false}'
+                return 1
+              fi
               auth_size=$(stat -c '%s' "$auth_file")
-              test "$auth_size" -ge 2
-              test "$auth_size" -le 1048576
+              if ! test "$auth_size" -ge 2 || ! test "$auth_size" -le 1048576; then
+                printf '%s\n' '{"event":"briefing_grok_auth_refresh","outcome":"skipped","reason":"HOST_AUTH_SIZE_INVALID","secretValueExposed":false}'
+                return 1
+              fi
               probe_home=$(docker exec "$active_container" sh -euc \
                 'umask 077; mktemp -d "$GROK_HOME/briefing-auth-refresh.XXXXXX"')
               if ! docker exec -i "$active_container" sh -euc '
@@ -460,15 +469,18 @@ jobs:
                 chmod 600 "$staged_home/auth.json"
               ' sh "$probe_home" <"$auth_file"; then
                 docker exec "$active_container" rm -rf -- "$probe_home" >/dev/null 2>&1 || true
+                printf '%s\n' '{"event":"briefing_grok_auth_refresh","outcome":"failed","reason":"STAGE_COPY_FAILED","secretValueExposed":false}'
                 return 1
               fi
               if ! docker exec -e "GROK_HOME=$probe_home" "$active_container" \
                 /app/node_modules/.bin/grok models >/dev/null 2>&1; then
                 docker exec "$active_container" rm -rf -- "$probe_home" >/dev/null 2>&1 || true
+                printf '%s\n' '{"event":"briefing_grok_auth_refresh","outcome":"failed","reason":"STAGED_AUTH_MODELS_FAILED","secretValueExposed":false}'
                 return 1
               fi
               if ! grok_x_probe "$active_container" "$probe_home"; then
                 docker exec "$active_container" rm -rf -- "$probe_home" >/dev/null 2>&1 || true
+                printf '%s\n' '{"event":"briefing_grok_auth_refresh","outcome":"failed","reason":"STAGED_AUTH_X_FAILED","secretValueExposed":false}'
                 return 1
               fi
               docker exec "$active_container" sh -euc '
