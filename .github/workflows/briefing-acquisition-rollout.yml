@@ -202,6 +202,55 @@ jobs:
               )
             )::text;
 
+            WITH recent_failures AS (
+              SELECT
+                adapter_kind,
+                job_kind,
+                failure_class,
+                error_summary::text AS failure_text
+              FROM content.acquisition_runs
+              WHERE status = 'FAILED' AND created_at >= now() - interval '30 minutes'
+            ), failure_classes AS (
+              SELECT adapter_kind, job_kind, failure_class, count(*) AS run_count
+              FROM recent_failures
+              GROUP BY adapter_kind, job_kind, failure_class
+            ), safe_failures AS (
+              SELECT
+                adapter_kind,
+                job_kind,
+                failure_class,
+                CASE
+                  WHEN coalesce(failure_text, '') ~* 'auth|credential|login|token|401|403'
+                    THEN 'AUTH'
+                  WHEN coalesce(failure_text, '') ~* 'quota|rate.?limit|429|too many'
+                    THEN 'RATE_LIMIT'
+                  WHEN coalesce(failure_text, '') ~* 'timeout|timed out|deadline'
+                    THEN 'TIMEOUT'
+                  WHEN coalesce(failure_text, '') ~* 'sandbox|bwrap|permission denied'
+                    THEN 'SANDBOX'
+                  WHEN coalesce(failure_text, '') ~* 'unknown option|invalid argument|usage:'
+                    THEN 'CLI_USAGE'
+                  WHEN coalesce(failure_text, '') = ''
+                    THEN 'EMPTY'
+                  ELSE 'OTHER'
+                END AS error_category,
+                length(coalesce(failure_text, '')) AS error_length,
+                md5(coalesce(failure_text, '')) AS error_digest
+              FROM recent_failures
+            ), failure_profiles AS (
+              SELECT
+                adapter_kind,
+                job_kind,
+                failure_class,
+                error_category,
+                error_length,
+                error_digest,
+                count(*) AS run_count
+              FROM safe_failures
+              GROUP BY adapter_kind, job_kind, failure_class, error_category, error_length, error_digest
+              ORDER BY run_count DESC, adapter_kind, job_kind, failure_class, error_category, error_digest
+              LIMIT 20
+            )
             SELECT jsonb_build_object(
               'event', 'briefing_acquisition_failure_health',
               'recentFailureClasses', COALESCE((
@@ -213,12 +262,21 @@ jobs:
                     'runCount', run_count
                   ) ORDER BY adapter_kind, job_kind, failure_class
                 )
-                FROM (
-                  SELECT adapter_kind, job_kind, failure_class, count(*) AS run_count
-                  FROM content.acquisition_runs
-                  WHERE status = 'FAILED' AND created_at >= now() - interval '30 minutes'
-                  GROUP BY adapter_kind, job_kind, failure_class
-                ) AS failures
+                FROM failure_classes
+              ), '[]'::jsonb),
+              'failureProfiles', COALESCE((
+                SELECT jsonb_agg(
+                  jsonb_build_object(
+                    'adapter', adapter_kind,
+                    'jobKind', job_kind,
+                    'failureClass', failure_class,
+                    'runCount', run_count,
+                    'errorCategory', error_category,
+                    'errorLength', error_length,
+                    'errorDigest', error_digest
+                  ) ORDER BY adapter_kind, job_kind, failure_class, error_category, error_digest
+                )
+                FROM failure_profiles
               ), '[]'::jsonb),
               'identityStatuses', COALESCE((
                 SELECT jsonb_object_agg(identity_status, status_count)
