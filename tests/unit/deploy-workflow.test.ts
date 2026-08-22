@@ -76,7 +76,7 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).toContain('source_registry_reconciliations');
     expect(briefingRolloutWorkflow).toContain('worker_restart_started_at');
     expect(briefingRolloutWorkflow).toContain(
-      "created_at >= '${worker_restart_started_at}'::timestamptz",
+      ['created_at >= ', quote, '${worker_restart_started_at}', quote, '::timestamptz'].join(''),
     );
     expect(briefingRolloutWorkflow).toContain('[ "$rollout_committed" = false ]');
     expect(
