@@ -6,11 +6,13 @@ import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
 import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
 import { createTournamentRepairWorker } from './workers/tournament-repair.worker';
 import { createUnderstatWorker } from './workers/understat.worker';
+import { createMaintenanceWorker } from './workers/maintenance.worker';
 import { databaseSingleton } from './db/singleton';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
+import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { closeUnderstatPermitClient } from './utils/understat-rate-limit';
 import type { WorkerRuntime } from './workers/worker-runtime';
 
@@ -29,6 +31,7 @@ const runtimes: WorkerRuntime[] = [
   createTournamentSetupWorker(),
   createTournamentRepairWorker(),
   createUnderstatWorker(),
+  createMaintenanceWorker(),
 ];
 
 const queueMonitors = runtimes.flatMap((runtime) =>
@@ -46,12 +49,14 @@ const allQueueEvents = runtimes.flatMap((runtime) => runtime.queueEvents);
 // Docker healthcheck reads this file's mtime; a stale heartbeat means the
 // event loop is hung even if the process is still alive.
 const stopHeartbeat = startWorkerHeartbeat();
+const stopRuntimeHeartbeat = startRuntimeHeartbeat('queueWorker');
 
 const SHUTDOWN_TIMEOUT_MS = 30_000;
 
 async function shutdown(signal: string) {
   logInfo('Worker shutting down', { signal });
   stopHeartbeat();
+  stopRuntimeHeartbeat();
   queueMonitors.forEach((monitor) => monitor.stop());
   runtimes.forEach((runtime) => runtime.stop?.());
 

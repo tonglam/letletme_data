@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { and, asc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 
 import {
   datasetPublicationItemsInOps,
   datasetPublicationsInOps,
+  dataPublicationOutboxInOps,
   syncItemsInOps,
   syncRunsInOps,
 } from '../db/schemas/index.schema';
@@ -75,7 +76,16 @@ export interface PreparedDatasetPublication {
 }
 
 export interface DatasetPublicationItemInput {
-  readonly name: 'eventLive' | 'fixtures';
+  readonly name:
+    | 'context'
+    | 'events'
+    | 'teams'
+    | 'players'
+    | 'phases'
+    | 'fixtures'
+    | 'currentEventId'
+    | 'selectionRules'
+    | 'eventLive';
   readonly payload: unknown;
   readonly count: number;
   readonly checksum: string;
@@ -194,7 +204,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
     startRun: async (input: StartSyncRunInput): Promise<string> => {
       const db = await getDbInstance();
       const runId = input.runId ?? randomUUID();
-      const startedAt = input.startedAt ?? new Date();
+      const startedAt = input.startedAt;
       const inserted = await db
         .insert(syncRunsInOps)
         .values({
@@ -210,7 +220,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           status: 'running',
           expectedItems: input.expectedItems ?? 0,
           metadata: input.metadata ?? {},
-          startedAt,
+          startedAt: startedAt ?? sql`clock_timestamp()`,
         })
         .onConflictDoNothing({ target: syncRunsInOps.runId })
         .returning({ runId: syncRunsInOps.runId });
@@ -337,7 +347,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                       AND ${syncItemsInOps.status} IN ('completed', 'skipped')
                     )
                   THEN ${syncItemsInOps.updatedAt}
-                  ELSE now()
+                  ELSE clock_timestamp()
                 END
               `,
             },
@@ -359,7 +369,6 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
     ): Promise<void> => {
       const db = await getDbInstance();
       await db.transaction(async (tx) => {
-        const now = new Date();
         const rows = await tx
           .select({ status: syncRunsInOps.status })
           .from(syncRunsInOps)
@@ -389,8 +398,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             dataChanged: input.dataChanged,
             ...(input.publicationId !== undefined ? { publicationId: input.publicationId } : {}),
             ...(input.metadata ? { metadata: input.metadata } : {}),
-            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, ${now.toISOString()})`,
-            updatedAt: now,
+            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, clock_timestamp())`,
+            updatedAt: sql`clock_timestamp()`,
           })
           .where(eq(syncRunsInOps.runId, runId));
       });
@@ -404,8 +413,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         .set({
           status: 'failed',
           errorSummary: summary.slice(0, 4_000),
-          completedAt: new Date(),
-          updatedAt: new Date(),
+          completedAt: sql`clock_timestamp()`,
+          updatedAt: sql`clock_timestamp()`,
         })
         .where(
           and(
@@ -426,14 +435,13 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           'DATASET_PUBLICATION_ID_INVALID',
         );
       }
-      const now = new Date();
       await db.transaction(async (tx) => {
         const expired = await tx
           .select({ publicationId: datasetPublicationsInOps.publicationId })
           .from(datasetPublicationsInOps)
           .where(
             and(
-              lte(datasetPublicationsInOps.expiresAt, now),
+              lte(datasetPublicationsInOps.expiresAt, sql`clock_timestamp()`),
               inArray(datasetPublicationsInOps.status, ['retired', 'failed']),
             ),
           )
@@ -447,14 +455,14 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         const expiredIds = expired.map((row) => row.publicationId);
         await tx
           .update(syncRunsInOps)
-          .set({ publicationId: null, updatedAt: now })
+          .set({ publicationId: null, updatedAt: sql`clock_timestamp()` })
           .where(inArray(syncRunsInOps.publicationId, expiredIds));
         await tx
           .delete(datasetPublicationsInOps)
           .where(
             and(
               inArray(datasetPublicationsInOps.publicationId, expiredIds),
-              lte(datasetPublicationsInOps.expiresAt, now),
+              lte(datasetPublicationsInOps.expiresAt, sql`clock_timestamp()`),
               inArray(datasetPublicationsInOps.status, ['retired', 'failed']),
             ),
           );
@@ -469,7 +477,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           status: 'staging',
           manifest: input.manifest ?? {},
           sourceRunId: input.sourceRunId,
-          expiresAt: new Date(Date.now() + 15 * 60 * 1_000),
+          expiresAt: sql`clock_timestamp() + interval '15 minutes'`,
         })
         .onConflictDoNothing({ target: datasetPublicationsInOps.publicationId })
         .returning({
@@ -516,9 +524,33 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       publicationId: string,
       items: readonly DatasetPublicationItemInput[],
     ): Promise<void> => {
-      if (items.length !== 2 || new Set(items.map((item) => item.name)).size !== 2) {
+      const names = new Set(items.map((item) => item.name));
+      const isLiveItems = items.length === 2 && names.has('eventLive') && names.has('fixtures');
+      const isMarketItems = items.length === 1 && names.has('context');
+      const coreNames = new Set([
+        'events',
+        'teams',
+        'players',
+        'phases',
+        'fixtures',
+        'currentEventId',
+        'selectionRules',
+      ]);
+      const legacyCoreNames = new Set([
+        'events',
+        'teams',
+        'players',
+        'phases',
+        'fixtures',
+        'currentEventId',
+      ]);
+      const isCoreItems =
+        (items.length === coreNames.size || items.length === legacyCoreNames.size) &&
+        [...names].every((name) => coreNames.has(name)) &&
+        (items.length === coreNames.size || [...names].every((name) => legacyCoreNames.has(name)));
+      if ((!isLiveItems && !isMarketItems && !isCoreItems) || names.size !== items.length) {
         throw new DatabaseError(
-          'Live publication must stage exactly eventLive and fixtures',
+          'Publication item proof is incomplete',
           'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
         );
       }
@@ -573,7 +605,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         )
       ) {
         throw new DatabaseError(
-          `Publication ${publicationId} does not contain a complete live item set`,
+          `Publication ${publicationId} does not contain a complete item set`,
           'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
         );
       }
@@ -586,6 +618,9 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       eventId?: number;
       sourceRunId: string;
       manifest: DataPublicationManifest;
+      outbox?: {
+        outboxId: string;
+      };
     }): Promise<void> => {
       const db = await getDbInstance();
       await db.transaction(async (tx) => {
@@ -639,19 +674,22 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           revision: targetRow.revision,
         });
 
-        if (input.dataset === 'fpl:live') {
-          const itemRows = await tx
-            .select({
-              itemName: datasetPublicationItemsInOps.itemName,
-              itemCount: datasetPublicationItemsInOps.itemCount,
-              checksum: datasetPublicationItemsInOps.checksum,
-            })
-            .from(datasetPublicationItemsInOps)
-            .where(eq(datasetPublicationItemsInOps.publicationId, input.publicationId));
-          const manifestItems = input.manifest.items;
+        const itemRows = await tx
+          .select({
+            itemName: datasetPublicationItemsInOps.itemName,
+            itemCount: datasetPublicationItemsInOps.itemCount,
+            checksum: datasetPublicationItemsInOps.checksum,
+          })
+          .from(datasetPublicationItemsInOps)
+          .where(eq(datasetPublicationItemsInOps.publicationId, input.publicationId));
+        const manifestItems = input.manifest.items;
+        // New production publication paths always provide an outbox receipt;
+        // those paths must prove every immutable payload before DB activation.
+        // Keep the no-outbox form compatible with legacy repair/import callers
+        // while they are migrated to the durable delivery contract.
+        if (input.outbox) {
           if (
-            itemRows.length !== 2 ||
-            manifestItems.length !== 2 ||
+            itemRows.length !== manifestItems.length ||
             manifestItems.some(
               (item) =>
                 !itemRows.some(
@@ -663,7 +701,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             )
           ) {
             throw new DatabaseError(
-              'Live publication item proof is incomplete',
+              `${input.dataset} publication item proof is incomplete`,
               'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
             );
           }
@@ -720,15 +758,13 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           );
         }
 
-        const now = new Date();
-
         await tx
           .update(datasetPublicationsInOps)
           .set({
             status: 'retired',
-            retiredAt: now,
-            expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
-            updatedAt: now,
+            retiredAt: sql`clock_timestamp()`,
+            expiresAt: sql`clock_timestamp() + interval '24 hours'`,
+            updatedAt: sql`clock_timestamp()`,
           })
           .where(
             and(
@@ -743,23 +779,44 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .set({
             status: 'active',
             manifest: input.manifest,
-            activatedAt: now,
+            activatedAt: sql`clock_timestamp()`,
             retiredAt: null,
             expiresAt: null,
-            updatedAt: now,
+            updatedAt: sql`clock_timestamp()`,
           })
           .where(eq(datasetPublicationsInOps.publicationId, input.publicationId));
 
         await tx
           .update(syncRunsInOps)
           .set({
-            status: 'published',
+            status: input.outbox ? 'ready_to_publish' : 'published',
             publicationId: input.publicationId,
             dataChanged: true,
-            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, ${now.toISOString()})`,
-            updatedAt: now,
+            completedAt: sql`coalesce(${syncRunsInOps.completedAt}, clock_timestamp())`,
+            updatedAt: sql`clock_timestamp()`,
           })
           .where(eq(syncRunsInOps.runId, input.sourceRunId));
+
+        if (input.outbox) {
+          await tx
+            .insert(dataPublicationOutboxInOps)
+            .values({
+              outboxId: input.outbox.outboxId,
+              publicationId: input.publicationId,
+              sourceRunId: input.sourceRunId,
+              dataset: input.dataset,
+              seasonId: input.season.seasonId,
+              eventId: input.eventId,
+              manifest: input.manifest,
+              // The receipt is created in the same transaction that activates
+              // the canonical DB publication.  Make that durable phase
+              // explicit; the dispatcher will advance it through staged,
+              // redis_activated and delivered after commit.
+              status: 'db_activated',
+              dbActivatedAt: sql`clock_timestamp()`,
+            })
+            .onConflictDoNothing({ target: dataPublicationOutboxInOps.publicationId });
+        }
       });
     },
 
@@ -769,7 +826,11 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       await db.transaction(async (tx) => {
         const rows = await tx
           .update(datasetPublicationsInOps)
-          .set({ status: 'failed', expiresAt: new Date(), updatedAt: new Date() })
+          .set({
+            status: 'failed',
+            expiresAt: sql`clock_timestamp()`,
+            updatedAt: sql`clock_timestamp()`,
+          })
           .where(
             and(
               eq(datasetPublicationsInOps.publicationId, publicationId),
@@ -784,8 +845,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             .set({
               status: 'failed',
               errorSummary: summary.slice(0, 4_000),
-              completedAt: new Date(),
-              updatedAt: new Date(),
+              completedAt: sql`clock_timestamp()`,
+              updatedAt: sql`clock_timestamp()`,
             })
             .where(
               and(
@@ -819,14 +880,13 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
     skipPublication: async (publicationId: string, reason: string): Promise<void> => {
       const db = await getDbInstance();
       await db.transaction(async (tx) => {
-        const now = new Date();
         const rows = await tx
           .update(datasetPublicationsInOps)
           .set({
             status: 'retired',
-            retiredAt: now,
-            expiresAt: new Date(now.getTime() + 15 * 60 * 1_000),
-            updatedAt: now,
+            retiredAt: sql`clock_timestamp()`,
+            expiresAt: sql`clock_timestamp() + interval '15 minutes'`,
+            updatedAt: sql`clock_timestamp()`,
           })
           .where(
             and(
@@ -843,8 +903,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               status: 'skipped',
               dataChanged: false,
               errorSummary: reason.slice(0, 4_000),
-              completedAt: now,
-              updatedAt: now,
+              completedAt: sql`clock_timestamp()`,
+              updatedAt: sql`clock_timestamp()`,
             })
             .where(
               and(
@@ -896,6 +956,43 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         )
         .limit(1);
       return rows[0] ?? null;
+    },
+
+    findStagingPublication: async (
+      dataset: DataPublicationDataset,
+      season: FplSeasonRef,
+      eventId?: number,
+    ): Promise<{
+      publicationId: string;
+      revision: number;
+      sourceRunId: string;
+      manifest: DataPublicationManifest;
+    } | null> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          publicationId: datasetPublicationsInOps.publicationId,
+          revision: datasetPublicationsInOps.revision,
+          sourceRunId: datasetPublicationsInOps.sourceRunId,
+          manifest: datasetPublicationsInOps.manifest,
+        })
+        .from(datasetPublicationsInOps)
+        .where(
+          and(
+            publicationScope(dataset, season, eventId),
+            eq(datasetPublicationsInOps.status, 'staging'),
+          ),
+        )
+        .orderBy(desc(datasetPublicationsInOps.revision))
+        .limit(1);
+      const row = rows[0];
+      if (!row?.sourceRunId || !isRecord(row.manifest)) return null;
+      return {
+        publicationId: row.publicationId,
+        revision: row.revision,
+        sourceRunId: row.sourceRunId,
+        manifest: row.manifest as unknown as DataPublicationManifest,
+      };
     },
 
     findActiveLiveEventLives: async (

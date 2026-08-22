@@ -63,6 +63,10 @@ load_backup_settings() {
 
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
+DEPLOY_MIGRATION_STARTED=false
+DEPLOY_OLD_IMAGE=''
+DEPLOY_OLD_REVISION=''
+DEPLOY_LEDGER_BEFORE=''
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -105,21 +109,58 @@ compose() {
   (cd "${PROJECT_DIR}" && "${COMPOSE_CMD[@]}" -f "${COMPOSE_FILE}" "$@")
 }
 
+# Keep local/manual deploys on the same host lock, migration plan and staged
+# startup state machine as the GitHub workflow.
+source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
+
 restore_stopped_services() {
   log_warn "Restoring existing services because migration has not started"
-  if ! compose start api worker content-worker; then
-    log_error "Existing services could not be restarted; manual recovery is required."
+  # The API container is deliberately removed after it stops so a delayed
+  # listener cannot retain port 3000.  `compose start` cannot recreate that
+  # exact container, therefore recovery must use `up`; pin the last image when
+  # one was captured so a pre-migration failure never boots the new release.
+  if [[ -n "${DEPLOY_OLD_IMAGE:-}" ]]; then
+    if ! APP_IMAGE="$DEPLOY_OLD_IMAGE" compose up -d --remove-orphans --no-build \
+      scheduler worker content-worker api; then
+      log_error "Last-known-healthy services could not be restored; manual recovery is required."
+    fi
+  elif ! compose up -d --remove-orphans --no-build scheduler worker content-worker api; then
+    log_error "Existing services could not be restored; manual recovery is required."
   fi
 }
 
 deploy() {
+  acquire_deploy_lock
+  deploy_on_exit() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [[ "$status" -ne 0 ]]; then
+      if [[ "$DEPLOY_MIGRATION_STARTED" = true ]]; then
+        if ! restore_last_known_healthy_if_ledger_unchanged \
+          "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION"; then
+          log_error "Migration changed or obscured the ledger; leaving services stopped for forward recovery."
+        fi
+      else
+        restore_stopped_services || true
+      fi
+    fi
+    release_deploy_lock || true
+    exit "$status"
+  }
+  trap deploy_on_exit EXIT
   require_compose
   require_files
+  DEPLOY_OLD_REVISION=$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf '')
+  old_container=$(compose ps -aq api | head -n 1)
+  if [[ -n "$old_container" ]]; then
+    DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$old_container")
+  fi
   start_stage pull
   if [[ -n "${APP_IMAGE:-}" ]]; then
     export APP_IMAGE
     log_info "Pulling the configured application image"
-    compose --profile migration pull api worker content-worker migration backup
+    compose --profile migration pull api scheduler worker content-worker migration backup
   else
     log_info "Building containers"
     compose build --pull
@@ -154,9 +195,22 @@ deploy() {
   fi
   finish_stage
   start_stage quiescence
+  log_info "Validating migration plan before stopping services"
+  if ! run_migration_plan; then
+    log_error "Migration plan failed; services were not stopped."
+    exit 1
+  fi
+  DEPLOY_LEDGER_BEFORE=$(migration_ledger_fingerprint)
+  [[ -n "$DEPLOY_LEDGER_BEFORE" ]] || { log_error "Could not capture migration ledger fingerprint"; exit 1; }
+  log_info "Migration ledger before=${DEPLOY_LEDGER_BEFORE}"
   log_info "Stopping services and waiting for workers to settle"
   if ! compose stop -t 45 api worker; then
     log_error "Services did not stop cleanly; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  if ! compose stop -t 45 scheduler; then
+    log_error "Scheduler did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi
@@ -165,6 +219,8 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
+  remove_exact_stopped_container api
+  wait_for_port_3000_free 30 2
   if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only; then
     log_error "Database work is not quiescent; migration was not started."
     restore_stopped_services
@@ -183,6 +239,7 @@ deploy() {
   fi
   finish_stage
   start_stage migration
+  DEPLOY_MIGRATION_STARTED=true
   log_info "Running migrations"
   if ! compose run --rm -T migration bun run db:migrate; then
     log_error "SQL migrations failed; aborting deploy before services start."
@@ -211,7 +268,7 @@ deploy() {
   finish_stage
   start_stage serviceReady
   log_info "Starting services"
-  compose up -d --remove-orphans
+  start_runtime_services
   log_info "Current service status"
   compose ps
   if ! PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \

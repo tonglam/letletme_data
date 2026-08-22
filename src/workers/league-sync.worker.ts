@@ -16,9 +16,17 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
+import { isTerminalJobFailure } from '../utils/worker-failure';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
 import type { WorkerRuntime } from './worker-runtime';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
+import {
+  completeSchedulerObligation,
+  completeSchedulerObligationByBullJobId,
+  failSchedulerObligation,
+  failSchedulerObligationByBullJobId,
+} from '../repositories/scheduler-obligations';
 
 /**
  * League Sync Worker
@@ -91,8 +99,8 @@ export function createLeagueSyncWorker(): WorkerRuntime {
   const worker = new Worker<LeagueSyncJobData>(leagueSyncQueueName, processLeagueSyncJob, {
     connection,
     concurrency: 10,
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 50 },
+    removeOnComplete: BULL_COMPLETED_RETENTION,
+    removeOnFail: BULL_FAILED_RETENTION,
     lockDuration: 120_000,
     maxStalledCount: 2,
     stalledInterval: 15_000,
@@ -106,6 +114,20 @@ export function createLeagueSyncWorker(): WorkerRuntime {
       eventId: job.data.eventId,
       tournamentId: job.data.tournamentId,
     });
+    if (job.id !== undefined) {
+      const completion = job.data.obligationId
+        ? completeSchedulerObligation({
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+            status: 'succeeded',
+            evidence: { queue: leagueSyncQueueName, jobName: job.name, eventId: job.data.eventId },
+          })
+        : completeSchedulerObligationByBullJobId({
+            bullJobId: job.id,
+            evidence: { queue: leagueSyncQueueName, jobName: job.name, eventId: job.data.eventId },
+          });
+      void completion.catch(() => undefined);
+    }
   });
   worker.on('failed', (job, err) => {
     logError('League sync worker failed job', err, {
@@ -115,6 +137,17 @@ export function createLeagueSyncWorker(): WorkerRuntime {
       tournamentId: job?.data.tournamentId,
     });
     if (job) void alertOnFinalFailure(job, err);
+    if (job && isTerminalJobFailure(job, err) && job.data.obligationId) {
+      void failSchedulerObligation({
+        obligationId: job.data.obligationId,
+        generation: job.data.obligationGeneration,
+        error: err,
+      }).catch(() => undefined);
+    } else if (job?.id !== undefined && isTerminalJobFailure(job, err)) {
+      void failSchedulerObligationByBullJobId({ bullJobId: job.id, error: err }).catch(
+        () => undefined,
+      );
+    }
   });
   worker.on('error', (err) => logError('League sync worker error', err));
 

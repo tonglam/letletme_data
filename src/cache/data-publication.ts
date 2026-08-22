@@ -77,6 +77,8 @@ export interface PublishDataRevisionInput extends DataPublicationScope {
 
 export interface PublishDataRevisionOptions {
   readonly redis?: Redis;
+  /** Stage immutable payloads only; the caller activates DB/outbox first. */
+  readonly activate?: boolean;
   readonly beforeActivate?: () => Promise<boolean | void>;
   readonly afterStage?: (manifest: DataPublicationManifest) => Promise<void>;
 }
@@ -91,6 +93,8 @@ type SerializedItem = {
   readonly manifest: DataPublicationManifestItem;
   readonly payload: string;
 };
+
+export type DataPublicationDeliveryItem = SerializedItem;
 
 const MANIFEST_FIELDS = [
   'dataset',
@@ -260,6 +264,26 @@ redis.call('DEL', KEYS[1])
 return {1, current_raw}
 `;
 
+const COMPARE_AND_SWAP_ACTIVE_REVISION_SCRIPT = `
+local current_raw = redis.call('GET', KEYS[1])
+if not current_raw then return {'missing'} end
+local decoded, current = pcall(cjson.decode, current_raw)
+if not decoded or not current.publicationId then return {'invalid'} end
+if current.publicationId ~= ARGV[1] then return {'changed', current_raw} end
+local candidate_raw = ARGV[2]
+if candidate_raw == '' then
+  redis.call('DEL', KEYS[1])
+  return {'removed', current_raw}
+end
+local candidate = cjson.decode(candidate_raw)
+for _, item in ipairs(candidate.items) do
+  if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
+  redis.call('PERSIST', item.key)
+end
+redis.call('SET', KEYS[1], candidate_raw)
+return {'replaced', current_raw}
+`;
+
 function assertScope(scope: DataPublicationScope): void {
   if (!/^\d{4}$/.test(scope.seasonCode)) {
     throw new CacheError('Invalid publication season', 'DATA_PUBLICATION_SEASON_INVALID');
@@ -398,6 +422,149 @@ function createManifest(
   };
 }
 
+/**
+ * Build the immutable publication proof without touching Redis.  Callers that
+ * persist canonical facts in PostgreSQL can store this manifest and dispatch
+ * it after commit, which guarantees Redis never leads an uncommitted DB row.
+ */
+export function prepareDataPublication(input: PublishDataRevisionInput): {
+  readonly manifest: DataPublicationManifest;
+  readonly items: readonly DataPublicationDeliveryItem[];
+} {
+  assertScope(input);
+  const items = serializeItems(input);
+  return { manifest: createManifest(input, items), items };
+}
+
+async function stageDataPublicationItems(
+  manifest: DataPublicationManifest,
+  items: readonly DataPublicationDeliveryItem[],
+  redis: Redis,
+): Promise<void> {
+  const stage = redis.pipeline();
+  for (const item of items) {
+    stage.set(item.manifest.key, item.payload, 'PX', DATA_PUBLICATION_STAGING_TTL_MS, 'NX');
+  }
+  const stageResults = await stage.exec();
+  if (!stageResults) {
+    throw new CacheError('Publication staging returned no result', 'DATA_PUBLICATION_STAGE_FAILED');
+  }
+  const stageError = stageResults.find(([error]) => error)?.[0];
+  if (stageError) throw stageError;
+
+  const stagedPayloads = await redis.mget(...items.map((item) => item.manifest.key));
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (stagedPayloads[index] !== item.payload) {
+      throw new CacheError(
+        `Publication stage conflicts with immutable item ${item.manifest.name}`,
+        'DATA_PUBLICATION_STAGE_CONFLICT',
+      );
+    }
+  }
+
+  if (
+    !hasAcceptedItemNames(
+      manifest.dataset,
+      items.map((item) => item.manifest.name),
+    )
+  ) {
+    throw new CacheError(
+      `Publication item set does not match ${manifest.dataset}`,
+      'DATA_PUBLICATION_ITEM_SET_INVALID',
+    );
+  }
+}
+
+export async function stageDataPublication(
+  prepared: {
+    readonly manifest: DataPublicationManifest;
+    readonly items: readonly DataPublicationDeliveryItem[];
+  },
+  redisClient?: Redis,
+): Promise<void> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  await stageDataPublicationItems(prepared.manifest, prepared.items, redis);
+}
+
+export async function activateDataPublicationPointer(
+  manifest: DataPublicationManifest,
+  redisClient?: Redis,
+): Promise<PublishDataRevisionResult> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const rawResult = (await redis.eval(
+    ACTIVATE_REVISION_SCRIPT,
+    1,
+    activeDataPublicationKey({
+      dataset: manifest.dataset,
+      seasonCode: manifest.seasonCode,
+      ...(manifest.eventId === null ? {} : { eventId: manifest.eventId }),
+    }),
+    JSON.stringify(manifest),
+    String(DATA_PUBLICATION_RETIRED_TTL_MS),
+  )) as [string, string?];
+  const [status, detail = ''] = rawResult;
+  if (status === 'idempotent') {
+    const activeManifest = parseDataPublicationManifest(detail);
+    if (!activeManifest) {
+      throw new CacheError(
+        'Idempotent publication returned an invalid active manifest',
+        'DATA_PUBLICATION_ACTIVATION_FAILED',
+      );
+    }
+    return { status: 'published', manifest: activeManifest, previousManifest: null };
+  }
+  if (status === 'stale') {
+    return {
+      status: 'stale',
+      manifest,
+      previousManifest: parseDataPublicationManifest(detail),
+    };
+  }
+  if (status !== 'published') {
+    throw new CacheError(
+      `Atomic publication failed: ${status}${detail ? ` (${detail})` : ''}`,
+      'DATA_PUBLICATION_ACTIVATION_FAILED',
+    );
+  }
+  return {
+    status: 'published',
+    manifest,
+    previousManifest: parseDataPublicationManifest(detail),
+  };
+}
+
+/** Replace a cache pointer only when it still names the expected publication. */
+export async function compareAndSwapDataPublicationPointer(
+  scope: DataPublicationScope,
+  expectedPublicationId: string,
+  replacement: DataPublicationManifest | null,
+  redisClient?: Redis,
+): Promise<'replaced' | 'removed' | 'missing' | 'changed'> {
+  assertScope(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const result = (await redis.eval(
+    COMPARE_AND_SWAP_ACTIVE_REVISION_SCRIPT,
+    1,
+    activeDataPublicationKey(scope),
+    expectedPublicationId,
+    replacement ? JSON.stringify(replacement) : '',
+  )) as [string, string?];
+  const status = result[0];
+  if (
+    status === 'replaced' ||
+    status === 'removed' ||
+    status === 'missing' ||
+    status === 'changed'
+  ) {
+    return status;
+  }
+  throw new CacheError(
+    `Compare-and-swap publication failed: ${status}`,
+    'DATA_PUBLICATION_CAS_FAILED',
+  );
+}
+
 export function parseDataPublicationManifest(raw: string | null): DataPublicationManifest | null {
   if (!raw) return null;
   try {
@@ -488,83 +655,27 @@ export async function publishDataRevision(
   input: PublishDataRevisionInput,
   options: PublishDataRevisionOptions = {},
 ): Promise<PublishDataRevisionResult> {
-  assertScope(input);
   const redis = options.redis ?? (await redisSingleton.getClient());
-  const serialized = serializeItems(input);
-  const manifest = createManifest(input, serialized);
-  const activeKey = activeDataPublicationKey(input);
-
-  const stage = redis.pipeline();
-  for (const item of serialized) {
-    // Revision item keys are immutable. NX prevents an idempotent retry from
-    // overwriting an already-active item and accidentally adding a staging TTL.
-    stage.set(item.manifest.key, item.payload, 'PX', DATA_PUBLICATION_STAGING_TTL_MS, 'NX');
-  }
-  const stageResults = await stage.exec();
-  if (!stageResults) {
-    throw new CacheError('Publication staging returned no result', 'DATA_PUBLICATION_STAGE_FAILED');
-  }
-  const stageError = stageResults?.find(([error]) => error)?.[0];
-  if (stageError) throw stageError;
-
-  // Existing keys are valid only for an exact idempotent retry. This also
-  // rejects partial/colliding stages before the manifest pointer can move.
-  const stagedPayloads = await redis.mget(...serialized.map((item) => item.manifest.key));
-  for (let index = 0; index < serialized.length; index += 1) {
-    if (stagedPayloads[index] !== serialized[index].payload) {
-      throw new CacheError(
-        `Publication stage conflicts with immutable item ${serialized[index].manifest.name}`,
-        'DATA_PUBLICATION_STAGE_CONFLICT',
-      );
-    }
-  }
+  const prepared = prepareDataPublication(input);
+  const { manifest } = prepared;
+  await stageDataPublicationItems(manifest, prepared.items, redis);
   await options.afterStage?.(manifest);
 
   const accepted = (await options.beforeActivate?.()) !== false;
   if (!accepted) {
     return { status: 'stale', manifest, previousManifest: null };
   }
-
-  const rawResult = (await redis.eval(
-    ACTIVATE_REVISION_SCRIPT,
-    1,
-    activeKey,
-    JSON.stringify(manifest),
-    String(DATA_PUBLICATION_RETIRED_TTL_MS),
-  )) as [string, string?];
-  const [status, detail = ''] = rawResult;
-  if (status === 'idempotent') {
-    const activeManifest = parseDataPublicationManifest(detail);
-    if (!activeManifest || !assertManifestMatchesScope(activeManifest, input)) {
-      throw new CacheError(
-        'Idempotent publication returned an invalid active manifest',
-        'DATA_PUBLICATION_ACTIVATION_FAILED',
-      );
-    }
-    return {
-      status: 'published',
-      manifest: activeManifest,
-      previousManifest: null,
-    };
+  if (options.activate === false) {
+    return { status: 'published', manifest, previousManifest: null };
   }
-  if (status === 'stale') {
-    return {
-      status: 'stale',
-      manifest,
-      previousManifest: parseDataPublicationManifest(detail),
-    };
-  }
-  if (status !== 'published') {
+  const result = await activateDataPublicationPointer(manifest, redis);
+  if (result.status === 'published' && !assertManifestMatchesScope(result.manifest, input)) {
     throw new CacheError(
-      `Atomic publication failed: ${status}${detail ? ` (${detail})` : ''}`,
+      'Idempotent publication returned a manifest for another scope',
       'DATA_PUBLICATION_ACTIVATION_FAILED',
     );
   }
-  return {
-    status: 'published',
-    manifest,
-    previousManifest: parseDataPublicationManifest(detail),
-  };
+  return result;
 }
 
 export async function readActiveDataPublication(

@@ -7,6 +7,7 @@ import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError } from '../utils/logger';
 import { notifyTwoBots } from '../utils/notify';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export async function runPlayerMarketFreshnessWatchdog(now: Date = new Date()) {
   try {
@@ -30,6 +31,7 @@ export function registerPlayerMarketFreshnessJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('player-market-freshness-watchdog', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             await runPlayerMarketFreshnessWatchdog();
           });
         } catch {

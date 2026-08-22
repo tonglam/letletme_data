@@ -5,6 +5,7 @@ import { runBugReportCleanup } from '../services/bug-report-cleanup.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError } from '../utils/logger';
 import { BUG_REPORT_CLEANUP_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const BUG_REPORT_CLEANUP_CRON_PATTERN = '15 3 * * *';
 
@@ -17,6 +18,7 @@ export function registerBugReportCleanupJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('bug-report-cleanup', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             const result = await runBugReportCleanup();
             if (result.retried > 0) {
               throw new Error(`Bug report cleanup left ${result.retried} row(s) for retry`);

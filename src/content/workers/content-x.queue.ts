@@ -9,6 +9,7 @@ import { getContentRuntimeFlags } from '../config';
 import { logError, logInfo } from '../../utils/logger';
 import { getQueueConnection } from '../../utils/queue';
 import { runFormalXWorker, type GrokBuildExecutorLike } from './formal-x.worker';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../../queues/retention';
 
 export const contentXScanQueueName = 'content-x-scan';
 
@@ -19,8 +20,8 @@ export function getContentXScanQueue(): Queue<AcquisitionJobV1> {
     connection: getQueueConnection(),
     defaultJobOptions: {
       attempts: 1,
-      removeOnComplete: { age: 86_400, count: 1_000 },
-      removeOnFail: { age: 172_800, count: 1_000 },
+      removeOnComplete: BULL_COMPLETED_RETENTION,
+      removeOnFail: BULL_FAILED_RETENTION,
     },
   });
   return queue;

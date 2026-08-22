@@ -1,0 +1,100 @@
+import { randomUUID } from 'node:crypto';
+
+import type { FplSeasonRef } from '../domain/fpl-season';
+import {
+  MAINTENANCE_JOBS,
+  maintenanceQueue,
+  type MaintenanceJobData,
+  type MaintenanceJobName,
+  type MaintenanceJobSource,
+} from '../queues/maintenance.queue';
+import { maintenanceQueueName } from '../queues/names';
+import { logError, logInfo } from '../utils/logger';
+
+export type MaintenanceEnqueueOptions = Readonly<{
+  jobId?: string;
+  runId?: string;
+  obligationId?: string;
+  obligationGeneration?: number;
+}>;
+
+export async function enqueueMaintenanceJob(
+  season: FplSeasonRef,
+  jobName: MaintenanceJobName,
+  source: MaintenanceJobSource,
+  options: MaintenanceEnqueueOptions = {},
+) {
+  const runId = options.runId ?? randomUUID();
+  const data: MaintenanceJobData = {
+    jobName,
+    source,
+    seasonId: season.seasonId,
+    seasonCode: season.seasonCode,
+    triggeredAt: new Date().toISOString(),
+    runId,
+    ...(options.obligationId ? { obligationId: options.obligationId } : {}),
+    ...(options.obligationGeneration === undefined
+      ? {}
+      : { obligationGeneration: options.obligationGeneration }),
+  };
+  try {
+    const job = await maintenanceQueue.add(jobName, data, {
+      jobId: options.jobId,
+      ...(source === 'manual' ? { removeOnComplete: true, removeOnFail: true } : {}),
+    });
+    logInfo('Maintenance job enqueued', {
+      queue: maintenanceQueueName,
+      jobId: job.id,
+      jobName,
+      source,
+      runId: job.data.runId,
+    });
+    return job;
+  } catch (error) {
+    logError('Failed to enqueue maintenance job', error, { jobName, source });
+    throw error;
+  }
+}
+
+export const enqueuePlayerMarketFreshness = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS, source, options);
+
+export const enqueuePlayerSeasonSummaryRepair = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY, source, options);
+
+export const enqueueTournamentTrendsRepair = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.TOURNAMENT_TRENDS, source, options);
+
+export const enqueueBugReportCleanup = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.BUG_REPORT_CLEANUP, source, options);
+
+export const enqueueBugReportScreenshotRetention = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) =>
+  enqueueMaintenanceJob(season, MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION, source, options);
+
+export const enqueueLaunchMonitor = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.LAUNCH_MONITOR, source, options);
+
+export const enqueuePostMatchConsolidation = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION, source, options);

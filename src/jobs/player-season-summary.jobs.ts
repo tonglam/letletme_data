@@ -4,6 +4,7 @@ import type { Elysia } from 'elysia';
 import { repairPlayerSeasonSummaries } from '../services/player-season-summaries.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const PLAYER_SEASON_SUMMARY_REPAIR_SCHEDULE = '17 * * * *';
 
@@ -16,6 +17,7 @@ export function registerPlayerSeasonSummaryJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('player-season-summary-repair', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             await repairPlayerSeasonSummaries();
           });
         } catch {

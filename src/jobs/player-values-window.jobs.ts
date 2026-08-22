@@ -12,6 +12,7 @@ import {
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { CRON_TIMEZONE, formatCronDateKey, getCronMinute } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export type PlayerValuesWindowDependencies = {
   resolvePlayerSyncEvent: (date: Date) => Promise<PlayerSyncEvent | null>;
@@ -71,6 +72,7 @@ export function registerPlayerValuesWindowJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('player-values-sync', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             const now = new Date();
             if (!(await shouldRunPlayerValuesSync(now))) {
               return;

@@ -10,6 +10,7 @@ import { seasonRepository } from '../repositories/seasons';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 /**
  * Entry Event Transfers Cron Jobs
@@ -26,6 +27,7 @@ export function registerEntryTransfersJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('entry-event-transfers-daily', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             const now = new Date();
             const season = await seasonRepository.findCurrent();
             if (!(await isFPLSeason(season, now))) {

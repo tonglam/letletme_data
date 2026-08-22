@@ -110,7 +110,7 @@ describe('player price reconciliation', () => {
     );
     expect(enqueueCoreSnapshot).toHaveBeenCalledWith(TEST_SEASON, 'cascade', {
       jobId: 'core-after-price-20260803',
-      removeOnSettle: true,
+      removeOnSettle: false,
     });
   });
 

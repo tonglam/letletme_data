@@ -143,7 +143,7 @@ describe('daily player market snapshot synchronization', () => {
     expect(enqueuePlayerPrices).toHaveBeenCalledWith(TEST_SEASON, 'cascade', {
       changeDate,
       jobId: `player-prices-${changeDate}-immediate`,
-      removeOnSettle: true,
+      removeOnSettle: false,
     });
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify.mock.calls[0]?.[0]).toContain('Haaland (MCI)');
@@ -162,6 +162,21 @@ describe('daily player market snapshot synchronization', () => {
       sync(TEST_SEASON, changeDate, { deferPriceSyncEnqueue: true }),
     ).resolves.toMatchObject({ count: 1 });
     expect(enqueuePlayerPrices).not.toHaveBeenCalled();
+  });
+
+  test('can defer notifications until publication is committed', async () => {
+    const notify = mock(async (_message: string) => undefined);
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        findByChangeDate: async () => [storedValue('Rise')],
+        notify,
+      }),
+    );
+
+    const result = await sync(TEST_SEASON, changeDate, { deferNotification: true });
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(result.notificationMessage).toContain('Haaland (MCI)');
   });
 
   test('does not treat Start rows as a price change', async () => {

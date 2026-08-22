@@ -31,6 +31,7 @@ import {
 import { databaseSingleton } from './db/singleton';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
+import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 
 const FORMAL_SCHEDULER_INTERVAL_MS = 30_000;
 const ACQUISITION_JOB_OUTBOX_INTERVAL_MS = 5_000;
@@ -42,6 +43,7 @@ assertContentRuntimeFlags(flags);
 const stopHeartbeat = startWorkerHeartbeat({
   path: process.env.WORKER_HEARTBEAT_PATH ?? '/tmp/content-worker-heartbeat',
 });
+const stopRuntimeHeartbeat = startRuntimeHeartbeat('contentWorker');
 
 let manifestBundle: BriefingManifestBundle | null = null;
 let xBudgetPolicy: XBudgetPolicy | null = null;
@@ -223,6 +225,7 @@ async function shutdown(signal: string): Promise<void> {
   if (acquisitionJobOutboxDispatcher) clearInterval(acquisitionJobOutboxDispatcher);
   if (publicationOutboxDispatcher) clearInterval(publicationOutboxDispatcher);
   stopHeartbeat();
+  stopRuntimeHeartbeat();
   await Promise.allSettled([
     formalScheduleInFlight,
     acquisitionJobOutboxDispatchInFlight,

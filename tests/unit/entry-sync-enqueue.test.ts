@@ -227,7 +227,7 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(addCalls[1].data.runId).toBe('scan-b');
   });
 
-  test('carries settlement removal through a deterministic cron continuation', async () => {
+  test('retains failure evidence through a deterministic cron continuation', async () => {
     const root = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
       runId: 'daily-scan',
       removeOnSettle: true,
@@ -240,9 +240,11 @@ describe('entry-sync enqueue runId propagation', () => {
 
     expect(root.id).toBe('entry-picks-2627-daily-scan-chunk-0');
     expect(continuation.id).toBe('entry-picks-2627-daily-scan-chunk-500');
-    expect(rootData.removeOnSettle).toBe(true);
-    expect(addCalls[0].opts).toMatchObject({ removeOnComplete: true, removeOnFail: true });
-    expect(addCalls[1].data.removeOnSettle).toBe(true);
-    expect(addCalls[1].opts).toMatchObject({ removeOnComplete: true, removeOnFail: true });
+    expect(rootData.removeOnSettle).toBe(false);
+    expect(addCalls[0].opts.removeOnComplete).toBeUndefined();
+    expect(addCalls[0].opts.removeOnFail).toBeUndefined();
+    expect(addCalls[1].data.removeOnSettle).toBe(false);
+    expect(addCalls[1].opts.removeOnComplete).toBeUndefined();
+    expect(addCalls[1].opts.removeOnFail).toBeUndefined();
   });
 });

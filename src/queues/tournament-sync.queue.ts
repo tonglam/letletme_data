@@ -3,6 +3,7 @@ import { Queue } from 'bullmq';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { getQueueConnection } from '../utils/queue';
 import { tournamentSyncQueueName } from './names';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { tournamentSyncQueueName } from './names';
 
@@ -34,8 +35,12 @@ export interface TournamentSyncJobData {
   seasonId: number;
   seasonCode: string;
   eventId: number;
-  source: 'cron' | 'manual' | 'cascade' | 'watchdog';
+  source: 'cron' | 'manual' | 'cascade' | 'watchdog' | 'catchup' | 'reconcile';
   triggeredAt: string;
+  runId?: string;
+  /** Durable scheduler obligation identity carried through the root job. */
+  obligationId?: string;
+  obligationGeneration?: number;
   /** Stable database-clock reuse cutoff retained across BullMQ attempts. */
   freshAfter?: string;
   /**
@@ -68,14 +73,8 @@ export const tournamentSyncQueue = new Queue<TournamentSyncJobData>(tournamentSy
       type: 'exponential',
       delay: 60_000, // 1 minute
     },
-    removeOnComplete: {
-      age: 86400, // 24 hours
-      count: 100,
-    },
-    removeOnFail: {
-      age: 172800, // 48 hours
-      count: 50,
-    },
+    removeOnComplete: BULL_COMPLETED_RETENTION,
+    removeOnFail: BULL_FAILED_RETENTION,
   },
 });
 

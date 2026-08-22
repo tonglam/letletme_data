@@ -14,6 +14,7 @@ import { getQueueConnection } from '../utils/queue';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { logError, logInfo } from '../utils/logger';
 import type { WorkerRuntime } from './worker-runtime';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 
 const REPAIR_WATCHDOG_INTERVAL_MS = 6 * 60 * 60_000;
 const REPAIR_BACKOFF_MS = 5 * 60_000;
@@ -47,8 +48,8 @@ export function createTournamentRepairWorker(): WorkerRuntime {
       lockDuration: 120_000,
       maxStalledCount: 2,
       stalledInterval: 15_000,
-      removeOnComplete: { count: 200 },
-      removeOnFail: { count: 100 },
+      removeOnComplete: BULL_COMPLETED_RETENTION,
+      removeOnFail: BULL_FAILED_RETENTION,
     },
   );
 

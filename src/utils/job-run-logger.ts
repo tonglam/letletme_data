@@ -1,6 +1,7 @@
 import { logDebug, logJobError } from './logger';
 import { runWithJobLogContext } from './job-log-context';
 import { formatUtc8Timestamp } from './timezone';
+import { isCompatibilitySchedulerEnabled } from './scheduler-mode';
 
 type JobRunType = 'cron' | 'queue';
 type JobRunStatus = 'started' | 'success' | 'failed';
@@ -96,5 +97,20 @@ export async function executeTrackedCron(
   };
 
   logJobTriggered(context, meta);
-  await runTrackedJob(context, runner, meta);
+  await runTrackedJob(
+    context,
+    async () => {
+      if (isCompatibilitySchedulerEnabled()) {
+        // Dynamic import avoids making the logger -> scheduler registry import
+        // cycle part of API startup. The scheduler service deduplicates
+        // concurrent compatibility ticks in-process, while the DB unique key
+        // deduplicates them across API replicas.
+        const { runCompatibilitySchedulerPass } = await import('../scheduler/scheduler.service');
+        await runCompatibilitySchedulerPass();
+        return;
+      }
+      await runner();
+    },
+    meta,
+  );
 }

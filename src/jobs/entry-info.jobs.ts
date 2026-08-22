@@ -9,6 +9,7 @@ import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export function registerEntryInfoJobs(app: Elysia) {
   return app.use(
@@ -19,6 +20,7 @@ export function registerEntryInfoJobs(app: Elysia) {
       async run() {
         try {
           await executeTrackedCron('entry-info-daily', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
             const now = new Date();
             const season = await seasonRepository.findCurrent();
             if (!(await isFPLSeason(season, now))) {

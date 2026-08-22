@@ -3,12 +3,21 @@ import { randomUUID } from 'node:crypto';
 import type { DataSyncJobName } from '../queues/data-sync.queue';
 import type { FplSeasonRef } from '../domain/fpl-season';
 
-export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
+export type DataSyncJobSource =
+  | 'cron'
+  | 'manual'
+  | 'api'
+  | 'event-transition'
+  | 'cascade'
+  | 'catchup'
+  | 'reconcile';
 
 export interface DataSyncEnqueueOptions {
   jobId?: string;
   eventId?: number;
   changeDate?: string;
+  obligationId?: string;
+  obligationGeneration?: number;
   /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
   removeOnSettle?: boolean;
 }
@@ -43,6 +52,10 @@ export function createDataSyncJobData(
     source,
     triggeredAt: new Date().toISOString(),
     runId: randomUUID(),
+    ...(options.obligationId ? { obligationId: options.obligationId } : {}),
+    ...(options.obligationGeneration === undefined
+      ? {}
+      : { obligationGeneration: options.obligationGeneration }),
     ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
     ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
   };

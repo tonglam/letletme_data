@@ -110,7 +110,7 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
     if (winningPriceUpdates.length > 0) {
       await dependencies.enqueueCoreSnapshot(season, 'cascade', {
         jobId: `core-after-price-${changeDate}`,
-        removeOnSettle: true,
+        removeOnSettle: false,
       });
     }
     logInfo('Player prices updated; coherent core rebuild queued', {

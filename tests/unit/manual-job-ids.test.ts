@@ -163,9 +163,10 @@ describe('entry-sync entry-list job IDs', () => {
     expect(first!.id).toMatch(/^entry-picks-2627-entry-list-[0-9a-f]{8}$/);
     // Same entries in any order dedupe to the same job
     expect(second!.id).toBe(first!.id as string);
-    // Entry-list jobs clean up on settle so repeat API calls after completion re-run
-    expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
-    expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
+    // API entry-list jobs retain bounded queue evidence; a new correlation ID
+    // can be used when an operator intentionally wants a fresh replay.
+    expect(entrySyncAddCalls[0].opts.removeOnComplete).toBeUndefined();
+    expect(entrySyncAddCalls[0].opts.removeOnFail).toBeUndefined();
   });
 
   test('different entry lists or events produce different IDs', async () => {
@@ -230,7 +231,7 @@ describe('entry-sync entry-list job IDs', () => {
     expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
   });
 
-  test('an explicit daily root ID is removable so an incomplete chain can restart', async () => {
+  test('an explicit daily root ID retains failed evidence for recovery', async () => {
     const job = await enqueueEntryInfoSyncJob(TEST_SEASON, 'cron', {
       eventId: 10,
       runId: 'daily-20260804',
@@ -239,8 +240,8 @@ describe('entry-sync entry-list job IDs', () => {
     });
 
     expect(job.id).toBe('entry-info-daily-20260804');
-    expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
-    expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
+    expect(entrySyncAddCalls[0].opts.removeOnComplete).toBeUndefined();
+    expect(entrySyncAddCalls[0].opts.removeOnFail).toBeUndefined();
   });
 });
 
@@ -250,7 +251,7 @@ describe('deterministic result job retention', () => {
     leagueSyncAddCalls.length = 0;
   });
 
-  test('retains successful jobs for dedupe but removes failed jobs for cron retry', async () => {
+  test('retains successful and failed jobs for bounded incident evidence', async () => {
     await enqueueTournamentEventResults(TEST_SEASON, 12, 'cron', {
       jobId: 'tournament-event-results-e12-final-10',
     });
@@ -259,8 +260,8 @@ describe('deterministic result job retention', () => {
     });
 
     for (const call of [tournamentSyncAddCalls[0], leagueSyncAddCalls[0]]) {
-      expect(call.opts.removeOnComplete).toEqual({ age: 86_400 });
-      expect(call.opts.removeOnFail).toBe(true);
+      expect(call.opts.removeOnComplete).toEqual({ age: 86_400, count: 500 });
+      expect(call.opts.removeOnFail).toEqual({ age: 7 * 86_400, count: 500 });
     }
   });
 

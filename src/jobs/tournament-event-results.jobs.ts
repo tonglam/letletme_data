@@ -9,6 +9,7 @@ import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { enqueueTournamentEventResults } from './tournament-sync.jobs';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 /**
  * Tournament Event Results Sync Trigger
@@ -57,6 +58,7 @@ export function registerTournamentEventResultsJobs(app: Elysia) {
       timezone: CRON_TIMEZONE,
       async run() {
         try {
+          if (isStandaloneSchedulerEnabled()) return;
           await executeTrackedCron('tournament-event-results-sync', runTournamentEventResultsSync);
         } catch {
           // Failure details are already emitted by runTrackedJob.

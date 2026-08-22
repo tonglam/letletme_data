@@ -6,6 +6,7 @@ import {
 } from '../domain/tournament-setup-retry';
 import { getQueueConnection } from '../utils/queue';
 import { tournamentSetupQueueName } from './names';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { tournamentSetupQueueName } from './names';
 export {
@@ -32,14 +33,8 @@ export const tournamentSetupQueue = new Queue<TournamentSetupJobData>(tournament
       type: 'exponential',
       delay: TOURNAMENT_SETUP_BACKOFF_DELAY_MS,
     },
-    removeOnComplete: {
-      age: 86400,
-      count: 100,
-    },
-    removeOnFail: {
-      age: 172800,
-      count: 50,
-    },
+    removeOnComplete: BULL_COMPLETED_RETENTION,
+    removeOnFail: BULL_FAILED_RETENTION,
   },
 });
 

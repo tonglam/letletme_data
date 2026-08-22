@@ -10,6 +10,7 @@ import { logInfo } from '../utils/logger';
 import { enqueueLeagueEventResults } from './league-sync.jobs';
 import type { LeagueSyncJobSource } from './league-sync.jobs';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 /**
  * League Event Results Sync Trigger
@@ -69,6 +70,7 @@ export function registerLeagueEventResultsJobs(app: Elysia) {
       timezone: CRON_TIMEZONE,
       async run() {
         try {
+          if (isStandaloneSchedulerEnabled()) return;
           await executeTrackedCron('league-event-results-sync', runLeagueEventResultsSync);
         } catch {
           // Failure details are already emitted by runTrackedJob.

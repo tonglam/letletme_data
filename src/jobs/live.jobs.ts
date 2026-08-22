@@ -12,6 +12,7 @@ import { CRON_TIMEZONE } from '../utils/timezone';
 import { enqueueLiveSnapshot } from './live-data.jobs';
 import { enqueuePlayerStatsSyncJob } from './data-sync-enqueue';
 import { LIVE_POLL_MS, registerLiveLifecycleTimer } from '../services/live-lifecycle-orchestrator';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const LIVE_SNAPSHOT_SCHEDULES = {
   lifecycle: { name: 'live-lifecycle', intervalMs: LIVE_POLL_MS },
@@ -110,6 +111,7 @@ export function registerLiveJobs(app: Elysia) {
       timezone: CRON_TIMEZONE,
       async run() {
         try {
+          if (isStandaloneSchedulerEnabled()) return;
           await executeTrackedCron('post-match-consolidation', async () => {
             await runPostMatchConsolidation();
           });

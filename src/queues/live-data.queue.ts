@@ -2,6 +2,7 @@ import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
 import { liveDataQueueName } from './names';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { liveDataQueueName } from './names';
 
@@ -15,8 +16,12 @@ export interface LiveDataJobData {
   seasonId: number;
   seasonCode: string;
   eventId: number;
-  source: 'cron' | 'manual' | 'cascade';
+  source: 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
   triggeredAt: string;
+  runId?: string;
+  /** Durable scheduler obligation identity carried through worker completion. */
+  obligationId?: string;
+  obligationGeneration?: number;
   /** Large event-live/explain UPSERTs run every ten minutes and at consolidation. */
   persistEventLives?: boolean;
   /** Only the post-match consolidation may publish terminal live authority. */
@@ -31,14 +36,8 @@ export const liveDataQueue = new Queue<LiveDataJobData>(liveDataQueueName, {
       type: 'exponential',
       delay: 60_000, // 1 minute
     },
-    removeOnComplete: {
-      age: 86400, // 24 hours
-      count: 100,
-    },
-    removeOnFail: {
-      age: 172800, // 48 hours
-      count: 50,
-    },
+    removeOnComplete: BULL_COMPLETED_RETENTION,
+    removeOnFail: BULL_FAILED_RETENTION,
   },
 });
 

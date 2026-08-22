@@ -7,6 +7,7 @@ import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { publishTournamentTrendScopes } from '../services/tournament-trends-publication.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const TOURNAMENT_TRENDS_REPAIR_SCHEDULE = '*/5 * * * *';
 
@@ -32,7 +33,10 @@ export function registerTournamentTrendsRepairJobs(app: Elysia) {
       timezone: CRON_TIMEZONE,
       async run() {
         try {
-          await executeTrackedCron('tournament-trends-repair', repairTournamentTrendScopes);
+          await executeTrackedCron('tournament-trends-repair', async () => {
+            if (isStandaloneSchedulerEnabled()) return;
+            await repairTournamentTrendScopes();
+          });
         } catch {
           // executeTrackedCron records the bounded failure.
         }

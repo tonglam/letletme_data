@@ -20,7 +20,15 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
+import { isTerminalJobFailure } from '../utils/worker-failure';
+import {
+  completeSchedulerObligation,
+  completeSchedulerObligationByBullJobId,
+  failSchedulerObligation,
+  failSchedulerObligationByBullJobId,
+} from '../repositories/scheduler-obligations';
 import type { WorkerRuntime } from './worker-runtime';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 
 /**
  * Live Data Worker
@@ -86,8 +94,8 @@ export function createLiveDataWorker(): WorkerRuntime {
     // Publication persistence owns the small DB pool; FPL request admission
     // separately caps the host at five and reserves live slots.
     concurrency: 2,
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 50 },
+    removeOnComplete: BULL_COMPLETED_RETENTION,
+    removeOnFail: BULL_FAILED_RETENTION,
     lockDuration: 120_000,
     maxStalledCount: 2,
     stalledInterval: 15_000,
@@ -100,6 +108,20 @@ export function createLiveDataWorker(): WorkerRuntime {
       jobName: job.name,
       eventId: job.data.eventId,
     });
+    if (job.id !== undefined) {
+      const completion = job.data.obligationId
+        ? completeSchedulerObligation({
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+            status: 'succeeded',
+            evidence: { queue: liveDataQueueName, jobName: job.name, eventId: job.data.eventId },
+          })
+        : completeSchedulerObligationByBullJobId({
+            bullJobId: job.id,
+            evidence: { queue: liveDataQueueName, jobName: job.name, eventId: job.data.eventId },
+          });
+      void completion.catch(() => undefined);
+    }
   });
   worker.on('failed', (job, err) => {
     logError('Live data worker failed job', err, {
@@ -107,7 +129,20 @@ export function createLiveDataWorker(): WorkerRuntime {
       jobName: job?.name,
       eventId: job?.data.eventId,
     });
-    if (job) void alertOnFinalFailure(job, err);
+    if (job) {
+      void alertOnFinalFailure(job, err);
+      if (isTerminalJobFailure(job, err) && job.data.obligationId) {
+        void failSchedulerObligation({
+          obligationId: job.data.obligationId,
+          generation: job.data.obligationGeneration,
+          error: err,
+        }).catch(() => undefined);
+      } else if (job.id !== undefined && isTerminalJobFailure(job, err)) {
+        void failSchedulerObligationByBullJobId({ bullJobId: job.id, error: err }).catch(
+          () => undefined,
+        );
+      }
+    }
   });
   worker.on('error', (err) => logError('Live data worker error', err));
 

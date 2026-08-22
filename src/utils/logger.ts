@@ -34,6 +34,11 @@ export function serializeError(error: unknown, depth = 0): unknown {
       cause?: unknown;
       code?: unknown;
       status?: unknown;
+      constraint?: unknown;
+      schema?: unknown;
+      table?: unknown;
+      detail?: unknown;
+      hint?: unknown;
     };
     const serialized: Record<string, unknown> = {
       name: error.name,
@@ -49,6 +54,10 @@ export function serializeError(error: unknown, depth = 0): unknown {
     if (errorWithMetadata.status !== undefined) {
       serialized.status = errorWithMetadata.status;
     }
+    for (const field of ['constraint', 'schema', 'table', 'detail', 'hint'] as const) {
+      const value = errorWithMetadata[field];
+      if (typeof value === 'string') serialized[field] = truncate(value, MAX_ERROR_MESSAGE_LENGTH);
+    }
     if (errorWithMetadata.cause !== undefined && depth < MAX_ERROR_CAUSE_DEPTH) {
       serialized.cause = serializeError(errorWithMetadata.cause, depth + 1);
     }
@@ -60,6 +69,13 @@ export function serializeError(error: unknown, depth = 0): unknown {
     const metadataEntries: Array<[string, string | number | boolean | null]> = Object.entries(error)
       .slice(0, 20)
       .flatMap(([key, value]): Array<[string, string | number | boolean | null]> => {
+        if (
+          /^(query|params?|parameters|payload|body|sql|statement|token|secret|password|apiKey)/i.test(
+            key,
+          )
+        ) {
+          return [];
+        }
         if (typeof value === 'string') {
           return [[key, truncate(value, MAX_ERROR_MESSAGE_LENGTH)]];
         }

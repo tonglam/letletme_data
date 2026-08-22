@@ -18,6 +18,7 @@ import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { CRON_TIMEZONE, formatCronDateKey } from '../utils/timezone';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 /**
  * The complete core snapshot runs year-round so a newly published FPL season
@@ -34,6 +35,7 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('core-snapshot-sync', async () => {
+              if (isStandaloneSchedulerEnabled()) return;
               const season = await seasonRepository.findCurrent();
               const job = await enqueueCoreSnapshotJob(season, 'cron');
               logInfo('Core snapshot job enqueued via cron', { jobId: job.id });
@@ -52,6 +54,7 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('player-stats-active-sync', async () => {
+              if (isStandaloneSchedulerEnabled()) return;
               const season = await seasonRepository.findCurrent();
               const syncEvent = await resolvePlayerSyncEvent(season);
               if (!syncEvent || syncEvent.phase !== 'current') return;
@@ -90,6 +93,7 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('player-prices-sync', async () => {
+              if (isStandaloneSchedulerEnabled()) return;
               const season = await seasonRepository.findCurrent();
               if (!(await resolvePlayerSyncEvent(season))) {
                 return;
@@ -116,6 +120,7 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('player-stats-sync', async () => {
+              if (isStandaloneSchedulerEnabled()) return;
               const season = await seasonRepository.findCurrent();
               if (season.lifecycleState !== 'preseason') return;
               if (!(await resolvePlayerSyncEvent(season))) {

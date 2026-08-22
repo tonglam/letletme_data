@@ -8,6 +8,8 @@ import {
   getPublicErrorMessage,
 } from '../utils/errors';
 import { logError } from '../utils/logger';
+import { getJobsStatus } from '../services/jobs-status.service';
+import { apiKeyFailureHttpResponse, verifyRequestApiKey } from './auth.guard';
 
 /**
  * Jobs Management API Routes
@@ -20,6 +22,19 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
   .get('/', () => {
     const jobs = listTriggerableJobs();
     return { success: true, jobs, count: jobs.length };
+  })
+
+  .get('/status', async ({ request, set }) => {
+    // This endpoint includes queue, scheduler and publication state. Keep it
+    // service-only even when the broader mutation guard is disabled in a local
+    // environment.
+    const verification = await verifyRequestApiKey(request);
+    if (verification.status !== 'ok') {
+      const failure = apiKeyFailureHttpResponse(verification.status);
+      set.status = failure.httpStatus;
+      return { success: false, error: failure.error };
+    }
+    return { success: true, ...(await getJobsStatus()) };
   })
 
   .post('/:name/trigger', async ({ params, body, request, set }) => {

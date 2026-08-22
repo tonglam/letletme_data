@@ -20,6 +20,7 @@ import { createFixtureRepository, fixtureRepository } from '../repositories/fixt
 import { createPlayerRepository } from '../repositories/players';
 import { createTeamRepository } from '../repositories/teams';
 import { syncOperationsRepository } from '../repositories/sync-operations';
+import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
 import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
 import { postgresJsonbCanonicalJson } from '../utils/content-hash';
@@ -120,7 +121,7 @@ export interface LiveSnapshotDependencies {
 export interface LiveSnapshotSyncOptions {
   readonly persistEventLives?: boolean;
   readonly finalizeEvent?: boolean;
-  readonly trigger?: 'cron' | 'manual' | 'cascade' | 'queue';
+  readonly trigger?: 'cron' | 'manual' | 'cascade' | 'queue' | 'catchup' | 'reconcile';
   readonly mutationScopes?: readonly string[];
   readonly dependencies?: LiveSnapshotDependencies;
 }
@@ -491,10 +492,19 @@ export async function recoverPendingLiveSnapshotPublication(
     pending.revision !== cached.manifest.revision ||
     !pending.sourceRunId
   ) {
-    throw new DatabaseError(
-      'Active live cache manifest has no recoverable ops publication',
-      'LIVE_PUBLICATION_RECOVERY_CONTRACT_MISMATCH',
+    logError(
+      'Active live cache manifest has no recoverable DB publication; refusing promotion',
+      new DatabaseError(
+        'Active live cache manifest has no recoverable ops publication',
+        'LIVE_PUBLICATION_RECOVERY_CONTRACT_MISMATCH',
+      ),
+      {
+        season: season.seasonCode,
+        eventId,
+        publicationId: cached.manifest.publicationId,
+      },
     );
+    return 'none';
   }
   await syncOperationsRepository.activatePublication({
     publicationId: pending.publicationId,
@@ -503,7 +513,9 @@ export async function recoverPendingLiveSnapshotPublication(
     eventId,
     sourceRunId: pending.sourceRunId,
     manifest: cached.manifest,
+    outbox: { outboxId: randomUUID() },
   });
+  await dispatchDataPublicationOutbox({ limit: 1, publicationId: pending.publicationId });
   return 'activated';
 }
 
@@ -631,36 +643,40 @@ export async function syncLiveSnapshot(
       return result;
     }
 
-    publicationId = randomUUID();
-    const staging = await syncOperationsRepository.preparePublication({
-      publicationId,
-      dataset: 'fpl:live',
-      season,
-      eventId,
-      sourceRunId,
-      manifest: {
-        state: 'staging',
-        sourceCheckedAt: checkedAt.toISOString(),
-      },
-    });
+    const livePublicationId = randomUUID();
+    publicationId = livePublicationId;
     let persistedFixtures = false;
     let persistedEventLives = false;
     const publishStartedAt = Date.now();
-    const published = await dependencies.publish(payload, {
-      revision: staging.revision,
-      publicationId: staging.publicationId,
-      sourceCheckedAt: checkedAt,
-      afterStage: async (manifest) => {
-        await syncOperationsRepository.stagePublicationItems(staging.publicationId, [
-          publicationItemProof('eventLive', prepared.eventLives.eventLives),
-          publicationItemProof('fixtures', prepared.fixtures),
-        ]);
-        if (manifest.items.some((item) => item.name !== 'eventLive' && item.name !== 'fixtures')) {
-          throw new DatabaseError('Live publication contains unsupported items');
-        }
+    // Keep the DB staging publication, immutable item proof, and canonical
+    // fixture/event-live facts in one mutation transaction. A crash can now
+    // leave either a complete recoverable DB staging row or nothing at all;
+    // Redis is still touched only after this transaction commits.
+    const { staging, durable } = await withMutationScopes(
+      {
+        queueName: 'live-data',
+        jobName: 'live-snapshot',
+        eventId,
+        scopes: [
+          ...(options.mutationScopes ?? ['data-core:fixtures', `live-snapshot:event:${eventId}`]),
+        ],
       },
-      beforeActivate: async () => {
-        const durable = await persistDurably({
+      async () => {
+        const staging = await syncOperationsRepository.preparePublication({
+          publicationId: livePublicationId,
+          dataset: 'fpl:live',
+          season,
+          eventId,
+          sourceRunId,
+          manifest: {
+            state: 'staging',
+            sourceCheckedAt: checkedAt.toISOString(),
+          },
+        });
+        // The surrounding scope already pins the transaction for this whole
+        // canonical phase; call the dependency directly to avoid nesting a
+        // second scope transaction around the same write set.
+        const durable = await dependencies.persistDurably({
           season,
           eventId,
           checkedAt,
@@ -669,10 +685,54 @@ export async function syncLiveSnapshot(
           persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
           finalizeEvent: options.finalizeEvent,
         });
-        persistedFixtures = durable.persistedFixtures;
-        persistedEventLives = durable.persistedEventLives;
-        return durable.accepted;
+        if (!durable.accepted) {
+          // Do not commit a proof-bearing staging row for a snapshot that lost
+          // the ordering fence. Leaving it as `staging` would allow the
+          // scheduler reconciler to promote stale payloads in the small window
+          // before this worker could mark it skipped.
+          await syncOperationsRepository.skipPublication(
+            staging.publicationId,
+            'A newer live snapshot already owns the ordering fence',
+          );
+          return { staging, durable };
+        }
+        await syncOperationsRepository.stagePublicationItems(staging.publicationId, [
+          publicationItemProof('eventLive', prepared.eventLives.eventLives),
+          publicationItemProof('fixtures', prepared.fixtures),
+        ]);
+        return { staging, durable };
       },
+    );
+    persistedFixtures = durable.persistedFixtures;
+    persistedEventLives = durable.persistedEventLives;
+    if (!durable.accepted) {
+      return {
+        eventId,
+        changed: false,
+        stale: true,
+        revision: null,
+        publicationId: null,
+        state: prepared.state,
+        eventLiveCount: prepared.eventLives.eventLives.length,
+        fixtureCount: prepared.fixtures.length,
+        fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
+        bonusTeamCount: bonusTeamCount(),
+        persistedFixtures,
+        persistedEventLives,
+      };
+    }
+    const published = await dependencies.publish(payload, {
+      revision: staging.revision,
+      publicationId: staging.publicationId,
+      sourceCheckedAt: checkedAt,
+      activate: false,
+      afterStage: async (manifest) => {
+        if (manifest.items.some((item) => item.name !== 'eventLive' && item.name !== 'fixtures')) {
+          throw new DatabaseError('Live publication contains unsupported items');
+        }
+      },
+      // Canonical persistence and DB item proof already committed above.
+      beforeActivate: async () => durable.accepted,
     });
     if (!published.published) {
       await syncOperationsRepository.skipPublication(
@@ -725,7 +785,17 @@ export async function syncLiveSnapshot(
       eventId,
       sourceRunId,
       manifest: published.manifest,
+      outbox: { outboxId: randomUUID() },
     });
+    const delivered = await dispatchDataPublicationOutbox({
+      limit: 1,
+      publicationId: staging.publicationId,
+    });
+    if (delivered.delivered !== 1) {
+      throw new Error(
+        `Live publication ${staging.publicationId} is canonical but Redis delivery is pending`,
+      );
+    }
 
     const result: LiveSnapshotSyncResult = {
       eventId,

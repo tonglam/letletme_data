@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   tournamentSyncQueue,
   TOURNAMENT_JOBS,
@@ -8,8 +9,15 @@ import type { TournamentFinalizationTarget } from '../domain/tournament';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { queueRedisSingleton } from '../queues/redis';
 import { logError, logInfo, logWarn } from '../utils/logger';
+import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 
-export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade' | 'watchdog';
+export type TournamentSyncJobSource =
+  | 'cron'
+  | 'manual'
+  | 'cascade'
+  | 'watchdog'
+  | 'catchup'
+  | 'reconcile';
 
 export type TournamentSyncEnqueueOptions = {
   delay?: number;
@@ -24,6 +32,8 @@ export type TournamentSyncEnqueueOptions = {
   allowUnlockedOfficialH2HRecovery?: boolean;
   expectedProgressMarker?: string | null;
   operationId?: string;
+  obligationId?: string;
+  obligationGeneration?: number;
 };
 
 async function hasPendingOfficialH2HJob(season: FplSeasonRef, eventId: number): Promise<boolean> {
@@ -282,6 +292,11 @@ async function enqueueTournamentSyncJob(
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
+      runId: randomUUID(),
+      ...(options.obligationId ? { obligationId: options.obligationId } : {}),
+      ...(options.obligationGeneration === undefined
+        ? {}
+        : { obligationGeneration: options.obligationGeneration }),
       ...(options.cascadeId ? { cascadeId: options.cascadeId } : {}),
       ...(options.finalizationTargets
         ? {
@@ -319,13 +334,14 @@ async function enqueueTournamentSyncJob(
       ? `${season.seasonCode}-${options.jobId}`
       : `${jobName}-${season.seasonCode}-e${eventId}-${Date.now()}`;
 
+    const manualCleanup = source === 'manual';
     const job = await queue.add(jobName, jobData, {
       jobId,
       delay: options.delay,
       ...(options.jobId
         ? {
-            removeOnComplete: { age: 86_400 },
-            removeOnFail: true,
+            removeOnComplete: manualCleanup ? true : BULL_COMPLETED_RETENTION,
+            removeOnFail: manualCleanup ? true : BULL_FAILED_RETENTION,
           }
         : {}),
     });
@@ -438,26 +454,31 @@ export const enqueueTournamentEventPicks = (
   season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.EVENT_PICKS, season, eventId, source);
+  options?: TournamentSyncEnqueueOptions,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.EVENT_PICKS, season, eventId, source, options);
 
 export const enqueueTournamentTransfersPre = (
   season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.TRANSFERS_PRE, season, eventId, source);
+  options?: TournamentSyncEnqueueOptions,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.TRANSFERS_PRE, season, eventId, source, options);
 
 export const enqueueTournamentInfo = (
   season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.INFO, season, eventId, source);
+  options?: TournamentSyncEnqueueOptions,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.INFO, season, eventId, source, options);
 
 export const enqueueTournamentRosterSync = (
   season: FplSeasonRef,
   source?: TournamentSyncJobSource,
+  options?: TournamentSyncEnqueueOptions,
 ) =>
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_SYNC, season, 0, source, {
-    jobId: `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
+    ...options,
+    jobId: options?.jobId ?? `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
   });
 
 export const enqueueTournamentRosterReconcile = async (

@@ -1,14 +1,20 @@
 import { randomUUID } from 'node:crypto';
 
 import {
-  publishDataRevision,
+  prepareDataPublication,
   readActiveDataPublication,
   type MarketSnapshotContextPayload,
 } from '../cache/data-publication';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { playerMarketSnapshotsRepository } from '../repositories/player-market-snapshots';
 import { syncOperationsRepository } from '../repositories/sync-operations';
+import {
+  dispatchDataPublicationOutbox,
+  loadDataPublicationDelivery,
+} from '../repositories/data-publication-outbox';
+import { contentHash } from '../utils/content-hash';
 import { logInfo } from '../utils/logger';
+import { formatCronDateKey } from '../utils/timezone';
 
 export type MarketPublicationResult = {
   readonly status: 'published' | 'unchanged' | 'empty';
@@ -22,8 +28,40 @@ const marketScope = (season: FplSeasonRef) => ({
   seasonCode: season.seasonCode,
 });
 
+export type MarketPublicationOptions = Readonly<{
+  /**
+   * Keep DB activation and the outbox receipt in the caller's mutation
+   * transaction. The caller must dispatch the receipt after that transaction
+   * commits; Redis is never touched while the canonical transaction is open.
+   */
+  deferDelivery?: boolean;
+}>;
+
+async function ensureMarketPublicationDelivered(
+  season: FplSeasonRef,
+  publicationId: string,
+  revision: number,
+): Promise<void> {
+  const delivered = await dispatchDataPublicationOutbox({
+    limit: 1,
+    publicationId,
+  });
+  if (delivered.delivered === 1) return;
+
+  // A retry may observe an already-delivered receipt (or a legacy active
+  // publication created before the outbox migration).  Re-read the active
+  // pointer before reporting a delivery failure; DB and Redis parity is the
+  // success evidence, not whether this particular dispatch claimed a row.
+  const active = await readActiveDataPublication(marketScope(season));
+  if (active?.manifest.publicationId === publicationId && active.manifest.revision === revision) {
+    return;
+  }
+  throw new Error(`Market publication ${publicationId} is canonical but Redis delivery is pending`);
+}
+
 export async function ensureMarketPublication(
   season: FplSeasonRef,
+  options: MarketPublicationOptions = {},
 ): Promise<MarketPublicationResult> {
   const source = await playerMarketSnapshotsRepository.getLatestCompleteSnapshot(season);
   if (!source) return { status: 'empty' };
@@ -39,6 +77,13 @@ export async function ensureMarketPublication(
   };
   const active = await readActiveDataPublication(marketScope(season));
   const opsActive = await syncOperationsRepository.findActivePublication('fpl:market', season);
+  if (!opsActive && active && context.snapshotDate.replaceAll('-', '') !== formatCronDateKey()) {
+    // A Redis-only publication for a past UTC+8 date is a ghost. Do not
+    // promote an older mutable snapshot merely to make readiness green; the
+    // current-day scheduler obligation must first obtain an authoritative
+    // snapshot or record the date as irrecoverable.
+    return { status: 'empty' };
+  }
   const activeContext = active?.items.context as Partial<MarketSnapshotContextPayload> | undefined;
   if (
     active &&
@@ -57,6 +102,38 @@ export async function ensureMarketPublication(
     };
   }
 
+  // A prior worker may have committed the canonical publication and then
+  // died before delivering its outbox row. Reuse that proof rather than
+  // creating another revision for the same snapshot. This path is safe even
+  // when Redis is stale because the outbox is delivered only after the DB row
+  // is already active.
+  if (opsActive && (!active || opsActive.publicationId !== active.manifest.publicationId)) {
+    const committed = await loadDataPublicationDelivery(opsActive.publicationId).catch(() => null);
+    const committedContext = committed?.items.find((item) => item.manifest.name === 'context');
+    let committedContextValue: Partial<MarketSnapshotContextPayload> | null = null;
+    try {
+      committedContextValue = committedContext
+        ? (JSON.parse(committedContext.payload) as Partial<MarketSnapshotContextPayload>)
+        : null;
+    } catch {
+      committedContextValue = null;
+    }
+    if (
+      committedContextValue?.snapshotDate === context.snapshotDate &&
+      committedContextValue.capturedAt === context.capturedAt
+    ) {
+      if (!options.deferDelivery) {
+        await ensureMarketPublicationDelivered(season, opsActive.publicationId, opsActive.revision);
+      }
+      return {
+        status: 'published',
+        revision: opsActive.revision,
+        publicationId: opsActive.publicationId,
+        context,
+      };
+    }
+  }
+
   const sourceRunId = randomUUID();
   await syncOperationsRepository.startRun({
     runId: sourceRunId,
@@ -69,7 +146,8 @@ export async function ensureMarketPublication(
     expectedItems: 1,
   });
   const publicationId = randomUUID();
-  let cachePublished = false;
+  const outboxId = randomUUID();
+  let dbActivated = false;
   try {
     const prepared = await syncOperationsRepository.preparePublication({
       publicationId,
@@ -78,7 +156,7 @@ export async function ensureMarketPublication(
       sourceRunId,
       manifest: { state: 'staging', sourceCheckedAt: source.capturedAt.toISOString() },
     });
-    const published = await publishDataRevision({
+    const preparedData = prepareDataPublication({
       dataset: 'fpl:market',
       seasonCode: season.seasonCode,
       revision: prepared.revision,
@@ -87,39 +165,28 @@ export async function ensureMarketPublication(
       state: 'active',
       items: [{ name: 'context', value: context }],
     });
-    if (published.status === 'stale') {
-      await syncOperationsRepository.skipPublication(
-        prepared.publicationId,
-        'A newer market publication already owns the cache scope',
-      );
-      await syncOperationsRepository.finishRun(sourceRunId, {
-        status: 'skipped',
-        completedItems: 0,
-        skippedItems: 1,
-        dataChanged: false,
-      });
-      return { status: 'unchanged', context };
-    }
-    cachePublished = true;
+    const contextItem = preparedData.items[0];
+    if (!contextItem) throw new Error('Market publication context proof is missing');
+    await syncOperationsRepository.stagePublicationItems(prepared.publicationId, [
+      {
+        name: 'context',
+        payload: context,
+        count: contextItem.manifest.count,
+        checksum: contentHash(context),
+      },
+    ]);
     await syncOperationsRepository.activatePublication({
       publicationId: prepared.publicationId,
       dataset: 'fpl:market',
       season,
       sourceRunId,
-      manifest: published.manifest,
+      manifest: preparedData.manifest,
+      outbox: { outboxId },
     });
-    await syncOperationsRepository.finishRun(sourceRunId, {
-      status: 'published',
-      completedItems: 1,
-      skippedItems: 0,
-      dataChanged: true,
-      publicationId: prepared.publicationId,
-      metadata: {
-        snapshotDate: context.snapshotDate,
-        rowCount: context.rowCount,
-        revision: prepared.revision,
-      },
-    });
+    dbActivated = true;
+    if (!options.deferDelivery) {
+      await ensureMarketPublicationDelivered(season, prepared.publicationId, prepared.revision);
+    }
     logInfo('Market Data publication activated', {
       season: season.seasonCode,
       revision: prepared.revision,
@@ -133,7 +200,7 @@ export async function ensureMarketPublication(
       context,
     };
   } catch (error) {
-    if (!cachePublished)
+    if (!dbActivated)
       await syncOperationsRepository.failPublication(publicationId, error).catch(() => undefined);
     throw error;
   }

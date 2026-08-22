@@ -7,6 +7,7 @@ import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
 import { seasonRepository } from '../repositories/seasons';
 import { enqueueTournamentInfo, enqueueTournamentRosterSync } from './tournament-sync.jobs';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export async function runTournamentInfoSync() {
   const now = new Date();
@@ -37,6 +38,7 @@ export function registerTournamentInfoJobs(app: Elysia) {
       timezone: CRON_TIMEZONE,
       async run() {
         try {
+          if (isStandaloneSchedulerEnabled()) return;
           await executeTrackedCron('tournament-info-sync', runTournamentInfoSync);
         } catch {
           // Failure details are already emitted by runTrackedJob.

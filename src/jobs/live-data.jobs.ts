@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { liveDataQueue, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
 import { logError, logInfo } from '../utils/logger';
 
-export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
+export type LiveDataJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
 const LIVE_SNAPSHOT_PERSISTENCE_BUCKET_MS = 10 * 60_000;
 
@@ -70,6 +71,10 @@ export async function enqueueLiveSnapshot(
     finalizeEvent?: boolean;
     now?: Date;
     jobId?: string;
+    obligationId?: string;
+    obligationGeneration?: number;
+    /** Scheduler reconciliation may join an already-enqueued deterministic job. */
+    reuseExisting?: boolean;
   } = {},
 ) {
   const persistEventLives = options.persistEventLives ?? false;
@@ -77,14 +82,37 @@ export async function enqueueLiveSnapshot(
   try {
     const queue = liveDataQueue;
     const explicitJobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : null;
-    if (explicitJobId && (await queue.getJob(explicitJobId))) {
-      logInfo('Live snapshot job already exists; skipping enqueue', {
-        jobId: explicitJobId,
-        season: season.seasonCode,
-        eventId,
-        persistEventLives,
-      });
-      return null;
+    let replacementJobId: string | null = null;
+    const existingExplicitJob = explicitJobId ? await queue.getJob(explicitJobId) : null;
+    if (existingExplicitJob) {
+      if (!options.reuseExisting) {
+        logInfo('Live snapshot job already exists; skipping enqueue', {
+          jobId: explicitJobId,
+          season: season.seasonCode,
+          eventId,
+          persistEventLives,
+        });
+        return null;
+      }
+      const state = await existingExplicitJob.getState();
+      const activeStates = ['waiting', 'waiting-children', 'delayed', 'active', 'paused'];
+      if (options.reuseExisting && !activeStates.includes(state)) {
+        // A retained completed/failed record cannot provide a future worker
+        // completion event for a newly reclaimed scheduler lease. Keep that
+        // evidence and use a one-off retry ID; scheduler generations normally
+        // already provide a fresh deterministic ID, while this fallback also
+        // covers an enqueue-success/DB-confirmation-loss race.
+        replacementJobId = `${explicitJobId}-retry-${randomUUID()}`;
+      } else if (activeStates.includes(state)) {
+        logInfo('Live snapshot job already exists; skipping enqueue', {
+          jobId: explicitJobId,
+          season: season.seasonCode,
+          eventId,
+          persistEventLives,
+          state,
+        });
+        return options.reuseExisting ? existingExplicitJob : null;
+      }
     }
     if (
       source === 'cron' &&
@@ -110,6 +138,11 @@ export async function enqueueLiveSnapshot(
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
+      runId: randomUUID(),
+      ...(options.obligationId ? { obligationId: options.obligationId } : {}),
+      ...(options.obligationGeneration === undefined
+        ? {}
+        : { obligationGeneration: options.obligationGeneration }),
       persistEventLives,
       ...(options.finalizeEvent !== undefined ? { finalizeEvent: options.finalizeEvent } : {}),
     };
@@ -118,7 +151,7 @@ export async function enqueueLiveSnapshot(
       source === 'cron'
         ? `live-snapshot-${season.seasonCode}-e${eventId}-${liveSnapshotMinuteBucket(options.now ?? new Date())}-${suffix}`
         : `live-snapshot-${season.seasonCode}-e${eventId}-${source}-${suffix}`;
-    const jobId = explicitJobId ?? generatedJobId;
+    const jobId = replacementJobId ?? explicitJobId ?? generatedJobId;
     const job = await queue.add(jobName, jobData, {
       jobId,
       ...(source === 'manual' ? { removeOnComplete: true, removeOnFail: true } : {}),
