@@ -1683,7 +1683,10 @@ export async function deferFormalRunForCapacity(input: {
             runMetrics: metrics,
             enqueueConfirmedAt: null,
             completedAt: null,
-            leaseExpiresAt: new Date(dbNow.getTime() + 6 * 60_000),
+            // The run stays pending until the outbox becomes eligible. Anchor
+            // its execution lease to that eligibility time so a retry has the
+            // full provider deadline after it can actually be claimed.
+            leaseExpiresAt: new Date(nextEligibleAtDate.getTime() + 6 * 60_000),
             checkpointAdvanced: false,
           })
           .where(

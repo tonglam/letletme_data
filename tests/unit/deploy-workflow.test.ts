@@ -105,6 +105,7 @@ describe('release workflow gates', () => {
     expect(controlProbeScript).toContain('CONTROL_PROBE_INTERRUPTED');
     expect(controlProbeScript).toContain('controlProbeRecovery');
     expect(controlProbeScript).toContain('\\o /dev/null');
+    expect(controlProbeScript).toContain('psql "$DATABASE_URL"');
     expect(hostRunnerDeployScript).toContain('rollback_on_failure');
     expect(hostRunnerDeployScript).toContain('prune_old_releases');
     expect(hostRunnerDeployScript).toContain('keep_recent=3');
@@ -114,6 +115,8 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('deploy-host-grok-runner.sh');
     expect(deployScript).toContain('run-briefing-control-probe.sh');
     expect(deployScript).toContain('DEPLOY_RUNNER_UPDATED');
+    expect(deployScript).toContain('CONTENT_REAL_GROK_ENABLED');
+    expect(workflow).toContain('CONTENT_REAL_GROK_ENABLED');
     expect(composeFile).toContain('/run/letletme-grok-runner:/run/letletme-grok-runner:ro');
     expect(composeFile).toContain(['group_add:', `      - ${quote}1555${quote}`].join('\n'));
     expect(rearmScript).toContain(

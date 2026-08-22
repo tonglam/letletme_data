@@ -50,8 +50,9 @@ idempotency_key="briefing-control-probe:${release_sha}:${run_id}"
 
 psql_exec() {
   MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
-    --rm -T --no-deps --entrypoint psql backup \
-    -X -qAt --set=ON_ERROR_STOP=1 "$@"
+    --rm -T --no-deps --entrypoint sh backup -euc \
+    'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 "$@"' \
+    -- "$@"
 }
 
 reservation_state=$(psql_exec \

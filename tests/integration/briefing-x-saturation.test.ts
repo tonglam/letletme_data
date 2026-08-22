@@ -258,6 +258,9 @@ test('creates one bounded saturation follow-up and turns a second saturation int
     .where(eq(contentAcquisitionJobOutbox.runId, child.runId));
   expect(requeuedJob?.deliveredAt).toBeNull();
   expect(requeuedJob?.availableAt.getTime()).toBeGreaterThan(Date.now() - 1_000);
+  expect(requeuedChild?.leaseExpiresAt?.getTime() ?? 0).toBeGreaterThanOrEqual(
+    (requeuedJob?.availableAt.getTime() ?? 0) + 6 * 60_000,
+  );
   const requeuedReservations = await db
     .select({ status: contentAcquisitionBudgetReservations.status })
     .from(contentAcquisitionBudgetReservations)

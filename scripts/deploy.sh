@@ -251,7 +251,9 @@ deploy() {
   fi
   finish_stage
   x_scan_setting=$(read_env_setting CONTENT_X_SCAN_ENABLED "$ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
-  if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]]; then
+  real_grok_setting=$(read_env_setting CONTENT_REAL_GROK_ENABLED "$ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
+  if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
+    [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
     start_stage hostRunner
     runner_root=/home/workspace/letletme-grok-runner
     DEPLOY_RUNNER_PREVIOUS_TARGET=$(readlink -f "$runner_root/current" 2>/dev/null || true)
@@ -267,7 +269,7 @@ deploy() {
       "$ENV_FILE" "$MIGRATION_ENV_FILE" "$DEPLOY_SHA"
     finish_stage
   else
-    log_info 'Host Grok runner is not required while X scanning is disabled'
+    log_info 'Host Grok runner is not required while X scanning or the real Grok provider is disabled'
   fi
   start_stage migration
   DEPLOY_MIGRATION_STARTED=true
@@ -308,7 +310,8 @@ deploy() {
     exit 1
   fi
   finish_stage
-  if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]]; then
+  if [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
+    [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
     test -x "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh"
     "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh" "$ENV_FILE" "$MIGRATION_ENV_FILE"
   fi
