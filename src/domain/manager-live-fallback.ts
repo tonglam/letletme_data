@@ -1,6 +1,41 @@
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
 
+export const createManagerSummaryFetchGate = (
+  maxConcurrent = MAX_SUMMARY_FETCH_CONCURRENCY,
+): (<T>(task: () => Promise<T>) => Promise<T>) => {
+  if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent <= 0) {
+    throw new RangeError('maxConcurrent must be a positive integer');
+  }
+
+  let active = 0;
+  const waiters: Array<() => void> = [];
+
+  const acquire = (): Promise<void> =>
+    new Promise((resolve) => {
+      const start = (): void => {
+        active += 1;
+        resolve();
+      };
+
+      if (active < maxConcurrent) {
+        start();
+      } else {
+        waiters.push(start);
+      }
+    });
+
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    await acquire();
+    try {
+      return await task();
+    } finally {
+      active -= 1;
+      waiters.shift()?.();
+    }
+  };
+};
+
 export const managerSummaryFetchBatches = (
   entryIds: readonly number[],
 ): readonly (readonly number[])[] => {

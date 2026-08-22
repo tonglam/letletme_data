@@ -19,6 +19,7 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  createManagerSummaryFetchGate,
   managerSummaryFetchBatches,
   planClassicManagerFallback,
 } from '../domain/manager-live-fallback';
@@ -314,6 +315,10 @@ const isWithinStaleWindow = (row: CachedRow, now = Date.now()): boolean =>
   Number.isFinite(Date.parse(row.checkedAt)) && ageSeconds(row.checkedAt, now) >= 0;
 
 const managerLiveBackgroundInFlight = new Map<string, Promise<void>>();
+// This gate is shared by every live-desk refresh in the process. Per-request
+// batching alone is insufficient because distinct tournaments can refresh at
+// the same time and otherwise multiply FPL entry-summary concurrency.
+const runManagerSummaryFetch = createManagerSummaryFetchGate();
 
 const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void => {
   if (managerLiveBackgroundInFlight.has(key)) return;
@@ -344,14 +349,14 @@ const refreshEntrySummaries = async (
     .slice(0, options.maxFetches ?? Number.POSITIVE_INFINITY);
   if (targets.length === 0) return null;
 
-  const checkedAt = nowIso();
   const refreshed: ManagerLiveScoreRow[] = [];
   let refreshErrorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null = null;
   for (const batch of managerSummaryFetchBatches(targets)) {
     await Promise.all(
       batch.map(async (entryId) => {
         try {
-          const summary = await fplClient.getEntrySummary(entryId);
+          const summary = await runManagerSummaryFetch(() => fplClient.getEntrySummary(entryId));
+          const checkedAt = nowIso();
           refreshed.push(
             toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt),
           );
@@ -370,6 +375,10 @@ const refreshEntrySummaries = async (
       }),
     );
   }
+  const checkedAt = refreshed.reduce(
+    (latest, row) => (row.checkedAt > latest ? row.checkedAt : latest),
+    nowIso(),
+  );
   await writeRows(
     redis,
     season.seasonCode,

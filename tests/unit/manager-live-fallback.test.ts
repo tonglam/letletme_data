@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  createManagerSummaryFetchGate,
   managerSummaryFetchBatches,
   planClassicManagerFallback,
 } from '../../src/domain/manager-live-fallback';
@@ -37,5 +38,41 @@ describe('classic manager live fallback', () => {
 
     expect(batches.map((batch) => batch.length)).toEqual([4, 4, 3]);
     expect(batches.flat()).toEqual(entryIds);
+  });
+
+  test('shares one concurrency cap across simultaneous refresh groups', async () => {
+    const run = createManagerSummaryFetchGate(2);
+    let active = 0;
+    let maximumActive = 0;
+    let releaseFirstWave: (() => void) | undefined;
+    const firstWave = new Promise<void>((resolve) => {
+      releaseFirstWave = resolve;
+    });
+
+    const refreshGroup = (entryIds: readonly number[]) =>
+      Promise.all(
+        entryIds.map((entryId) =>
+          run(async () => {
+            active += 1;
+            maximumActive = Math.max(maximumActive, active);
+            await firstWave;
+            active -= 1;
+            return entryId;
+          }),
+        ),
+      );
+
+    const pending = Promise.all([refreshGroup([1, 2, 3]), refreshGroup([4, 5, 6])]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(active).toBe(2);
+    releaseFirstWave?.();
+    expect((await pending).flat()).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(maximumActive).toBe(2);
+  });
+
+  test('rejects an invalid shared concurrency limit', () => {
+    expect(() => createManagerSummaryFetchGate(0)).toThrow(RangeError);
   });
 });
