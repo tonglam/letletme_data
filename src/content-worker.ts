@@ -207,6 +207,7 @@ async function startFormalAcquisition(): Promise<void> {
         coverage: bundle.coverage,
         globalRolling24hLimit: flags.dailyXCallLimit,
         final90Rolling90mLimit: flags.final90XCallLimit,
+        identityRolling24hLimit: flags.identityXCallLimit,
       });
     }
     logInfo('Briefing source manifest reconciled', {
