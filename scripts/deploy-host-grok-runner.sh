@@ -93,5 +93,28 @@ printf '%s' "$health" | jq -e \
   --arg sha "$release_sha" \
   '.ok == true and .runnerReleaseSha == $sha and .grokVersion == "1.0.5" and .sandbox == "strict"' \
   >/dev/null
+prune_old_releases() {
+  local candidate
+  local candidate_name
+  local kept_recent=0
+  local keep_recent=3
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    candidate_name=${candidate##*/}
+    [[ "$candidate_name" =~ ^[0-9a-f]{7,128}$ ]] || continue
+    if [[ "$candidate" == "$release_path" || "$candidate" == "$previous_target" ]]; then
+      continue
+    fi
+    if (( kept_recent < keep_recent )); then
+      kept_recent=$((kept_recent + 1))
+      continue
+    fi
+    rm -f -- "$candidate" "$candidate.sha256"
+  done < <(
+    find "$release_root/releases" -mindepth 1 -maxdepth 1 -type f -printf '%T@ %p\n' |
+      sort -rn | sed 's/^[^ ]* //'
+  )
+}
+prune_old_releases
 trap - EXIT
 cleanup

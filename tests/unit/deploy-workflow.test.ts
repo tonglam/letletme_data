@@ -88,6 +88,8 @@ describe('release workflow gates', () => {
     expect(controlProbeScript).toContain('controlProbeRecovery');
     expect(controlProbeScript).toContain('\\o /dev/null');
     expect(hostRunnerDeployScript).toContain('rollback_on_failure');
+    expect(hostRunnerDeployScript).toContain('prune_old_releases');
+    expect(hostRunnerDeployScript).toContain('keep_recent=3');
     expect(hostRunnerRollbackScript).toContain('/home/workspace/letletme-grok-runner');
   });
 
