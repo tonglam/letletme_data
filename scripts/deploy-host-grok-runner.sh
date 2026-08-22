@@ -74,9 +74,20 @@ chmod 0640 "$release_root/current.release"
 sudo systemctl restart letletme-grok-runner.service
 sudo systemctl is-active --quiet letletme-grok-runner.service
 
-health=$(curl --silent --show-error \
-  --unix-socket /run/letletme-grok-runner/runner.sock \
-  http://localhost/v1/health)
+health=''
+runner_health_deadline=$((SECONDS + 60))
+while (( SECONDS < runner_health_deadline )); do
+  if health=$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
+    --unix-socket /run/letletme-grok-runner/runner.sock \
+    http://localhost/v1/health); then
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$health" ]]; then
+  echo 'host Grok runner socket did not become ready within 60 seconds' >&2
+  exit 1
+fi
 printf '%s\n' "$health"
 printf '%s' "$health" | jq -e \
   --arg sha "$release_sha" \

@@ -75,6 +75,10 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).not.toContain('tar -C "$HOME/.grok"');
     expect(briefingRolloutWorkflow).not.toContain('script_stop:');
     expect(hostRunnerDeployScript).toContain('--self-test');
+    expect(hostRunnerDeployScript).toContain('runner_health_deadline=$((SECONDS + 60))');
+    expect(hostRunnerDeployScript).toContain(
+      'runner socket did not become ready within 60 seconds',
+    );
     expect(hostRunnerDeployScript).not.toContain('/v1/probes/x');
     expect(controlProbeScript).toContain('GLOBAL:GROK_BUILD_X');
     expect(controlProbeScript).toContain('content.acquisition_budget_reservations');

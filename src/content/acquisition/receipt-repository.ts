@@ -806,6 +806,17 @@ export async function persistAcquisitionResult(
       );
     }
 
+    const priorProviderTraceRows = await tx.execute<{ count: string | number }>(sql`
+      SELECT count(*)::integer AS count
+      FROM content.acquisition_provider_traces
+      WHERE run_id = ${input.runId}::uuid
+        AND provider = 'grok-build'
+    `);
+    const priorGrokTraceCount = Number(priorProviderTraceRows[0]?.count ?? 0);
+    if (!Number.isSafeInteger(priorGrokTraceCount) || priorGrokTraceCount < 0) {
+      throw new Error('Persisted Grok provider trace count is invalid');
+    }
+
     if (input.providerTraces?.length) {
       const sequences = input.providerTraces.map((trace) => trace.sequence);
       if (new Set(sequences).size !== sequences.length || sequences.some((value) => value < 0)) {
@@ -1179,7 +1190,8 @@ export async function persistAcquisitionResult(
             ? undefined
             : String(input.providerResult.providerUnits),
         xCallCount:
-          input.providerTraces?.filter((trace) => trace.provider === 'grok-build').length ?? 0,
+          priorGrokTraceCount +
+          (input.providerTraces?.filter((trace) => trace.provider === 'grok-build').length ?? 0),
         traceVerified:
           input.providerTraces?.some(
             (trace) => trace.provider === 'grok-build' && trace.terminalState === 'ATTESTED_FINAL',

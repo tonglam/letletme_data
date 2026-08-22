@@ -314,6 +314,65 @@ export async function releaseOneXRunBudgetUnit(input: {
   return true;
 }
 
+/** Commit one unit from each targeted reservation, retaining any execution units. */
+export async function commitOneXRunBudgetUnit(input: {
+  tx: TransactionHandle;
+  runId: string;
+  dbNow: Date;
+  reservationIds: readonly string[];
+}): Promise<boolean> {
+  const reservationIds = [...new Set(input.reservationIds)];
+  if (reservationIds.length === 0) return false;
+  await input.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'))`);
+  const reservations = await input.tx
+    .select({
+      reservationId: contentAcquisitionBudgetReservations.reservationId,
+      ledgerId: contentAcquisitionBudgetReservations.ledgerId,
+      units: contentAcquisitionBudgetReservations.units,
+    })
+    .from(contentAcquisitionBudgetReservations)
+    .where(
+      and(
+        eq(contentAcquisitionBudgetReservations.runId, input.runId),
+        inArray(contentAcquisitionBudgetReservations.reservationId, reservationIds),
+        eq(contentAcquisitionBudgetReservations.status, 'RESERVED'),
+      ),
+    )
+    .for('update');
+  if (reservations.length !== reservationIds.length) {
+    throw new Error('X probe budget reservation disappeared before commit');
+  }
+  for (const reservation of reservations) {
+    const units = Number(reservation.units);
+    if (!Number.isSafeInteger(units) || units < 1) {
+      throw new Error('X budget reservation is invalid');
+    }
+    if (units === 1) {
+      await input.tx
+        .update(contentAcquisitionBudgetReservations)
+        .set({ status: 'COMMITTED', updatedAt: input.dbNow })
+        .where(eq(contentAcquisitionBudgetReservations.reservationId, reservation.reservationId));
+    } else {
+      await input.tx
+        .update(contentAcquisitionBudgetReservations)
+        .set({
+          units: String(units - 1),
+          updatedAt: input.dbNow,
+        })
+        .where(eq(contentAcquisitionBudgetReservations.reservationId, reservation.reservationId));
+    }
+    await input.tx
+      .update(contentAcquisitionBudgetLedgers)
+      .set({
+        reservedUnits: sql`${contentAcquisitionBudgetLedgers.reservedUnits} - 1`,
+        committedUnits: sql`${contentAcquisitionBudgetLedgers.committedUnits} + 1`,
+        updatedAt: input.dbNow,
+      })
+      .where(eq(contentAcquisitionBudgetLedgers.ledgerId, reservation.ledgerId));
+  }
+  return true;
+}
+
 /** Release all reserved units for a run except rows belonging to a started provider call. */
 export async function releaseXRunBudgetsExcept(input: {
   tx: TransactionHandle;

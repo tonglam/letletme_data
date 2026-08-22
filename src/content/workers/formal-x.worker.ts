@@ -28,6 +28,7 @@ import {
 } from '../acquisition/x-post-adapter';
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
 import {
+  commitOneXRunBudgetUnit,
   releaseOneXRunBudgetUnit,
   releaseXRunBudgetsExcept,
   reserveXRunBudgets,
@@ -123,6 +124,7 @@ export async function runFormalXWorker(
   let probeIncrementedReservationIds: readonly string[] = [];
   let probeProcessStarted = false;
   let releaseProbeBudget: (() => Promise<void>) | null = null;
+  let commitProbeBudget: (() => Promise<void>) | null = null;
   let releaseMainBudgetAfterProbe: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
@@ -223,6 +225,22 @@ export async function runFormalXWorker(
         if (!released) throw new Error('X probe budget reservation disappeared before release');
       });
       probeReservationIds = null;
+    };
+    commitProbeBudget = async (): Promise<void> => {
+      if (probeReservationIds === null) return;
+      const reservationIds = probeReservationIds;
+      await db.transaction(async (tx) => {
+        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
+        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
+        const committed = await commitOneXRunBudgetUnit({
+          tx,
+          runId: job.runId,
+          dbNow,
+          reservationIds,
+        });
+        if (!committed) throw new Error('X probe budget reservation disappeared before commit');
+      });
     };
     releaseMainBudgetAfterProbe = async (): Promise<void> => {
       if (probeReservationIds === null) return;
@@ -383,6 +401,8 @@ export async function runFormalXWorker(
       throw new Error('Persisted X profile has no valid budget lane');
     }
     const checkpointComplete = run.scheduleId !== null && state !== 'PARTIAL' && state !== 'GAP';
+    const providerTraceStart = run.providerTraceSequence;
+    const totalProviderUnits = run.providerUnits + 1 + (probeProcessStarted ? 1 : 0);
     const persisted = await persistAcquisitionResult({
       runId: job.runId,
       state,
@@ -429,7 +449,7 @@ export async function runFormalXWorker(
         ...(probeProcessStarted
           ? [
               {
-                sequence: 0,
+                sequence: providerTraceStart,
                 provider: 'grok-build',
                 operation: 'x_user_search',
                 requestMetadataHash: HOST_X_PROBE_REQUEST_METADATA_HASH,
@@ -441,7 +461,7 @@ export async function runFormalXWorker(
             ]
           : []),
         {
-          sequence: probeProcessStarted ? 1 : 0,
+          sequence: providerTraceStart + (probeProcessStarted ? 1 : 0),
           provider: 'grok-build',
           operation: execution.toolName,
           requestMetadataHash: execution.requestMetadataHash,
@@ -453,7 +473,7 @@ export async function runFormalXWorker(
       ],
       providerResult: {
         provider: 'grok-build',
-        providerUnits: 1 + (probeProcessStarted ? 1 : 0),
+        providerUnits: totalProviderUnits,
       },
       runMetrics: {
         durationMs: Math.round(execution.durationMs),
@@ -495,18 +515,20 @@ export async function runFormalXWorker(
       const probeEvidence = probeProcessStarted
         ? hostXProbeEvidence('CONTROL_PLANE_PROBE_FAILED')
         : undefined;
-      if (probeOnly) {
-        await releaseMainBudgetAfterProbe?.();
-      }
-      if (
-        failure.failureClass === 'RUNNER_CAPACITY' &&
-        !mainProviderProcessStarted &&
-        !probeProcessStarted
-      ) {
-        await releaseProbeBudget?.();
+      if (failure.failureClass === 'RUNNER_CAPACITY' && !mainProviderProcessStarted) {
+        if (probeOnly) {
+          // Commit the probe unit but leave the original execution unit
+          // reserved so capacity deferral can safely requeue a saturation
+          // follow-up. Ordinary scheduled runs release that original unit in
+          // deferFormalRunForCapacity; a follow-up keeps it for the retry.
+          await commitProbeBudget?.();
+        } else {
+          await releaseProbeBudget?.();
+        }
         const deferred = await deferFormalRunForCapacity({
           runId: job.runId,
           metrics: { failureClass: failure.failureClass },
+          probeEvidence,
           db,
         });
         if (deferred) {
@@ -520,6 +542,9 @@ export async function runFormalXWorker(
             rejectedCount: 0,
           };
         }
+      }
+      if (probeOnly) {
+        await releaseMainBudgetAfterProbe?.();
       }
       if (identityRun) {
         await failXIdentityRun({

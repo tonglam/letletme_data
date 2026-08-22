@@ -1125,9 +1125,36 @@ export async function failFormalRun(input: {
       input.providerEvidence !== undefined ||
       input.probeEvidence !== undefined ||
       input.providerProcessStarted === true;
-    const grokProviderUnits =
+    const currentGrokProviderUnits =
       (input.providerEvidence?.providerUnits ?? (input.providerProcessStarted ? 1 : 0)) +
       (input.probeEvidence?.providerUnits ?? 0);
+    const priorGrokProviderUnits = Number(run.providerUnits ?? 0);
+    if (!Number.isFinite(priorGrokProviderUnits) || priorGrokProviderUnits < 0) {
+      throw new Error('Failed formal run has invalid persisted Grok provider units');
+    }
+    const grokProviderUnits = priorGrokProviderUnits + currentGrokProviderUnits;
+    let priorGrokTraceCount = 0;
+    let maximumGrokTraceSequence = -1;
+    if (grokProviderAttempted) {
+      const traceRows = await tx.execute<{
+        maximum: number | string | null;
+        count: number | string;
+      }>(sql`
+        SELECT max(sequence) AS maximum,
+               count(*) FILTER (WHERE provider = 'grok-build')::integer AS count
+        FROM content.acquisition_provider_traces
+        WHERE run_id = ${input.runId}::uuid
+      `);
+      maximumGrokTraceSequence = Number(traceRows[0]?.maximum ?? -1);
+      priorGrokTraceCount = Number(traceRows[0]?.count ?? 0);
+      if (
+        !Number.isSafeInteger(maximumGrokTraceSequence) ||
+        !Number.isSafeInteger(priorGrokTraceCount) ||
+        priorGrokTraceCount < 0
+      ) {
+        throw new Error('Failed formal run has invalid persisted provider trace state');
+      }
+    }
     if (input.probeEvidence) {
       if (
         !/^[0-9a-f]{64}$/.test(input.probeEvidence.requestMetadataHash) ||
@@ -1158,7 +1185,10 @@ export async function failFormalRun(input: {
         }
       }
       const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
-      if (committedReservations === 0) {
+      if (
+        committedReservations === 0 &&
+        !(input.probeEvidence && priorGrokProviderUnits >= input.probeEvidence.providerUnits)
+      ) {
         throw new Error('Billed formal X failure has no reserved budget');
       }
       await tx.insert(contentAcquisitionProviderTraces).values([
@@ -1167,7 +1197,7 @@ export async function failFormalRun(input: {
               {
                 traceId: randomUUID(),
                 runId: input.runId,
-                sequence: 0,
+                sequence: maximumGrokTraceSequence + 1,
                 provider: input.probeEvidence.provider,
                 operation: input.probeEvidence.operation,
                 requestMetadataHash: input.probeEvidence.requestMetadataHash,
@@ -1183,7 +1213,7 @@ export async function failFormalRun(input: {
               {
                 traceId: randomUUID(),
                 runId: input.runId,
-                sequence: input.probeEvidence ? 1 : 0,
+                sequence: maximumGrokTraceSequence + 1 + (input.probeEvidence ? 1 : 0),
                 provider: input.providerEvidence.provider,
                 operation: input.providerEvidence.operation,
                 requestMetadataHash: input.providerEvidence.requestMetadataHash,
@@ -1385,7 +1415,14 @@ export async function failFormalRun(input: {
                 ? String(grokProviderUnits || 1)
                 : undefined
             : String(supadataTotalProviderUnits),
-        xCallCount: grokProviderAttempted ? Math.max(1, grokProviderUnits) : 0,
+        xCallCount: grokProviderAttempted
+          ? priorGrokTraceCount +
+            (input.providerEvidence ? 1 : 0) +
+            (input.probeEvidence ? 1 : 0) +
+            (!input.providerEvidence && !input.probeEvidence && input.providerProcessStarted
+              ? 1
+              : 0)
+          : priorGrokTraceCount,
         traceVerified: input.providerEvidence !== undefined,
         runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify(
           input.supadataFailureEvidence
@@ -1500,6 +1537,7 @@ export async function deferFormalRunForBudget(input: {
 export async function deferFormalRunForCapacity(input: {
   runId: string;
   metrics: Readonly<Record<string, unknown>>;
+  probeEvidence?: FormalRunProbeEvidence;
   retryDelayMs?: number;
   db?: DbHandle;
 }): Promise<boolean> {
@@ -1516,8 +1554,11 @@ export async function deferFormalRunForCapacity(input: {
         parentRunId: contentAcquisitionRuns.parentRunId,
         sourcePartitionId: contentAcquisitionRuns.sourcePartitionId,
         jobKind: contentAcquisitionRuns.jobKind,
+        adapterKind: contentAcquisitionRuns.adapterKind,
         windowStart: contentAcquisitionRuns.windowStart,
         windowEnd: contentAcquisitionRuns.windowEnd,
+        providerUnits: contentAcquisitionRuns.providerUnits,
+        xCallCount: contentAcquisitionRuns.xCallCount,
       })
       .from(contentAcquisitionRuns)
       .where(eq(contentAcquisitionRuns.runId, input.runId))
@@ -1533,7 +1574,51 @@ export async function deferFormalRunForCapacity(input: {
       ...input.metrics,
       deferredReason: 'RUNNER_CAPACITY',
       nextEligibleAt,
+      ...(input.probeEvidence?.runMetrics ?? {}),
+      ...(input.probeEvidence ? { probeCallCount: 1 } : {}),
     };
+
+    let providerUnits = Number(run.providerUnits ?? 0);
+    if (!Number.isFinite(providerUnits) || providerUnits < 0) {
+      throw new Error('Deferred formal run provider units are invalid');
+    }
+    if (input.probeEvidence) {
+      if (
+        (run.adapterKind !== 'X_ACCOUNT' && run.adapterKind !== 'X_SEMANTIC') ||
+        !/^[0-9a-f]{64}$/.test(input.probeEvidence.requestMetadataHash) ||
+        (input.probeEvidence.responseMetadataHash !== null &&
+          !/^[0-9a-f]{64}$/.test(input.probeEvidence.responseMetadataHash)) ||
+        (input.probeEvidence.providerJobIdHash !== null &&
+          !/^[0-9a-f]{64}$/.test(input.probeEvidence.providerJobIdHash))
+      ) {
+        throw new Error('Deferred formal run has invalid X probe evidence');
+      }
+      const traceRows = await tx
+        .select({ maximum: max(contentAcquisitionProviderTraces.sequence) })
+        .from(contentAcquisitionProviderTraces)
+        .where(eq(contentAcquisitionProviderTraces.runId, input.runId));
+      await tx.insert(contentAcquisitionProviderTraces).values({
+        traceId: randomUUID(),
+        runId: input.runId,
+        sequence: Number(traceRows[0]?.maximum ?? -1) + 1,
+        provider: input.probeEvidence.provider,
+        operation: input.probeEvidence.operation,
+        requestMetadataHash: input.probeEvidence.requestMetadataHash,
+        responseMetadataHash: input.probeEvidence.responseMetadataHash,
+        providerJobIdHash: input.probeEvidence.providerJobIdHash,
+        providerUnits: String(input.probeEvidence.providerUnits),
+        terminalState: input.probeEvidence.terminalState,
+      });
+      providerUnits += input.probeEvidence.providerUnits;
+    }
+    const providerPatch = input.probeEvidence
+      ? {
+          provider: 'grok-build' as const,
+          providerUnits: String(providerUnits),
+          xCallCount: (run.xCallCount ?? 0) + 1,
+          traceVerified: false,
+        }
+      : {};
 
     const isTriggeredXSaturationFollowUp =
       run.parentRunId !== null &&
@@ -1559,7 +1644,8 @@ export async function deferFormalRunForCapacity(input: {
         .for('update');
       const hasReservedBudget =
         reservations.length > 0 &&
-        reservations.every((reservation) => reservation.status === 'RESERVED');
+        reservations.some((reservation) => reservation.status === 'RESERVED') &&
+        reservations.every((reservation) => ['RESERVED', 'COMMITTED'].includes(reservation.status));
 
       if (outbox?.queueName === 'content-x-scan' && hasReservedBudget) {
         const retryJobId = `content-x-capacity-retry-${sha256CanonicalJson({
@@ -1570,6 +1656,7 @@ export async function deferFormalRunForCapacity(input: {
           .update(contentAcquisitionRuns)
           .set({
             status: 'PENDING',
+            ...providerPatch,
             failureClass: 'RUNNER_CAPACITY',
             failureDetailsHash: sha256CanonicalJson(metrics),
             errorSummary: 'Host Grok runner capacity was unavailable; X follow-up will retry',
@@ -1618,6 +1705,7 @@ export async function deferFormalRunForCapacity(input: {
         .update(contentAcquisitionRuns)
         .set({
           status: 'GAP',
+          ...providerPatch,
           failureClass: gapReason,
           failureDetailsHash: sha256CanonicalJson(gapDetails),
           errorSummary: 'X saturation follow-up could not be safely requeued',
@@ -1655,6 +1743,7 @@ export async function deferFormalRunForCapacity(input: {
       .update(contentAcquisitionRuns)
       .set({
         status: 'BUDGET_DEFERRED',
+        ...providerPatch,
         failureClass: 'RUNNER_CAPACITY',
         failureDetailsHash: sha256CanonicalJson(metrics),
         errorSummary: 'Host Grok runner capacity was unavailable before provider start',
