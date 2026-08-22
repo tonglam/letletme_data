@@ -54,7 +54,7 @@ jobs:
                 --deny 'Write(*)' \
                 --deny 'Glob(*)' \
                 --deny 'WebSearch(*)' \
-                -p 'Use x_thread_fetch exactly once with post_id 2091144605710647466. Return only one JSON object and no prose: {"posts":[{"postId":"string","authorHandle":"string","createdAt":"ISO-8601","text":"full exact post text","url":"https://x.com/...","media":[{"kind":"IMAGE|VIDEO|OTHER","url":"public media URL or null","mimeType":"string or null","altText":"exact alt text or null"}]}]}. Copy media only when the X tool provides it. If the tool does not provide media metadata, return media as an empty array; never invent a URL or visual fact. Do not use any other tool.' \
+                -p 'Use x_thread_fetch exactly once with post_id 2091144605710647466. Return only one JSON object and no prose: {"posts":[{"postId":"string","authorHandle":"string","createdAt":"ISO-8601","text":"full exact post text","url":"https://x.com/...","media":[{"kind":"IMAGE|VIDEO|OTHER","url":"public media URL or null","mimeType":"string or null","altText":"exact alt text or null"}],"visualEvidence":{"status":"OBSERVED|NOT_AVAILABLE","description":"literal description of visible media or null","textInImage":"literal readable text or null"}}]}. Report visualEvidence only when the X tool actually exposes the media to your context; otherwise use NOT_AVAILABLE and null fields. Never invent a media URL or visual fact. Do not use any other tool.' \
               >"$output_file" 2>"$trace_file"
             status=$?
             set -e
