@@ -14,9 +14,10 @@ import {
 } from '../../src/content/acquisition/formal-run-repository';
 import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/manifest-reconciler';
 import { compileXBudgetPolicy } from '../../src/content/acquisition/x-budget';
-import type {
-  GrokBuildExecutionResult,
-  GrokBuildXPostV1,
+import {
+  GrokBuildExecutionError,
+  type GrokBuildExecutionResult,
+  type GrokBuildXPostV1,
 } from '../../src/content/acquisition/grok-build-executor';
 import type { XToolRequestV1 } from '../../src/content/acquisition/x-query-compiler';
 import { getContentRuntimeFlags } from '../../src/content/config';
@@ -25,6 +26,7 @@ import {
   contentAcquisitionBudgetReservations,
   contentAcquisitionGaps,
   contentAcquisitionJobOutbox,
+  contentAcquisitionProviderTraces,
   contentAcquisitionRuns,
   contentSourceEndpoints,
   contentSourcePartitions,
@@ -190,6 +192,87 @@ test('creates one bounded saturation follow-up and turns a second saturation int
   expect(childReservations.length).toBeGreaterThanOrEqual(2);
   expect(childReservations.every((reservation) => reservation.status === 'RESERVED')).toBe(true);
 
+  const probeRejected = await runFormalXWorker(
+    { schemaVersion: 1, runId: child.runId },
+    {
+      flags,
+      executor: {
+        execute: async (_request, hooks) => {
+          await hooks?.onProbeRequest?.();
+          throw new GrokBuildExecutionError(
+            'RUNNER_NOT_READY',
+            'synthetic readiness probe rejection before provider start',
+          );
+        },
+      },
+      xBudgetPolicy: budgetPolicy,
+    },
+  );
+  expect(probeRejected.status).toBe('BUDGET_DEFERRED');
+  const probeRejectedReservations = await db
+    .select({ status: contentAcquisitionBudgetReservations.status })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, child.runId));
+  expect(probeRejectedReservations.some((reservation) => reservation.status === 'RELEASED')).toBe(
+    true,
+  );
+  expect(probeRejectedReservations.some((reservation) => reservation.status === 'RESERVED')).toBe(
+    true,
+  );
+
+  const capacityDeferred = await runFormalXWorker(
+    { schemaVersion: 1, runId: child.runId },
+    {
+      flags,
+      executor: {
+        execute: async () => {
+          throw new GrokBuildExecutionError(
+            'RUNNER_CAPACITY',
+            'synthetic host runner capacity exhaustion',
+          );
+        },
+      },
+      xBudgetPolicy: budgetPolicy,
+    },
+  );
+  expect(capacityDeferred.status).toBe('BUDGET_DEFERRED');
+  const [requeuedChild] = await db
+    .select({
+      status: contentAcquisitionRuns.status,
+      completedAt: contentAcquisitionRuns.completedAt,
+      leaseExpiresAt: contentAcquisitionRuns.leaseExpiresAt,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, child.runId));
+  expect(requeuedChild).toMatchObject({
+    status: 'PENDING',
+    completedAt: null,
+  });
+  expect(requeuedChild?.leaseExpiresAt).not.toBeNull();
+  expect(requeuedChild?.leaseExpiresAt?.getTime() ?? 0).toBeGreaterThan(Date.now());
+  const [requeuedJob] = await db
+    .select({
+      deliveredAt: contentAcquisitionJobOutbox.deliveredAt,
+      availableAt: contentAcquisitionJobOutbox.availableAt,
+    })
+    .from(contentAcquisitionJobOutbox)
+    .where(eq(contentAcquisitionJobOutbox.runId, child.runId));
+  expect(requeuedJob?.deliveredAt).toBeNull();
+  expect(requeuedJob?.availableAt.getTime()).toBeGreaterThan(Date.now() - 1_000);
+  expect(requeuedChild?.leaseExpiresAt?.getTime() ?? 0).toBeGreaterThanOrEqual(
+    (requeuedJob?.availableAt.getTime() ?? 0) + 6 * 60_000,
+  );
+  const requeuedReservations = await db
+    .select({ status: contentAcquisitionBudgetReservations.status })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, child.runId));
+  expect(requeuedReservations.some((reservation) => reservation.status === 'RELEASED')).toBe(true);
+  expect(
+    requeuedReservations
+      .filter((reservation) => reservation.status !== 'RELEASED')
+      .every((reservation) => reservation.status === 'RESERVED'),
+  ).toBe(true);
+
   const followUp = await runFormalXWorker(
     { schemaVersion: 1, runId: child.runId },
     { flags, executor, xBudgetPolicy: budgetPolicy },
@@ -211,8 +294,13 @@ test('creates one bounded saturation follow-up and turns a second saturation int
     .select({ status: contentAcquisitionBudgetReservations.status })
     .from(contentAcquisitionBudgetReservations)
     .where(eq(contentAcquisitionBudgetReservations.runId, child.runId));
+  expect(committedChildReservations.some((reservation) => reservation.status === 'RELEASED')).toBe(
+    true,
+  );
   expect(
-    committedChildReservations.every((reservation) => reservation.status === 'COMMITTED'),
+    committedChildReservations
+      .filter((reservation) => reservation.status !== 'RELEASED')
+      .every((reservation) => reservation.status === 'COMMITTED'),
   ).toBe(true);
 
   await db
@@ -275,4 +363,103 @@ test('creates one bounded saturation follow-up and turns a second saturation int
   expect((exhaustedSchedule?.checkpoint as { windowEnd?: string }).windowEnd).toBe(
     exhaustedRun?.windowEnd?.toISOString(),
   );
+});
+
+test('commits a started probe and releases the main reservation atomically on pre-provider failure', async () => {
+  await resetBriefingAcquisitionState();
+  const bundle = await loadBriefingManifest();
+  const budgetPolicy = compileXBudgetPolicy({
+    coverage: bundle.coverage,
+    globalRolling24hLimit: 2_400,
+    final90Rolling90mLimit: 300,
+  });
+  await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'x-probe-failure-test' });
+  const db = await getDb();
+  const [endpoint] = await db
+    .select({ endpointId: contentSourceEndpoints.endpointId })
+    .from(contentSourceEndpoints)
+    .where(eq(contentSourceEndpoints.endpointKey, 'official-fpl-x'))
+    .limit(1);
+  const [partition] = await db
+    .select({ partitionId: contentSourcePartitions.partitionId })
+    .from(contentSourcePartitions)
+    .where(eq(contentSourcePartitions.partitionKey, 'official-fpl'))
+    .limit(1);
+  if (!endpoint || !partition) throw new Error('OfficialFPL manifest rows are missing');
+
+  await db
+    .update(contentSourceEndpoints)
+    .set({
+      stableExternalId: '761568335138058240',
+      identityStatus: 'VERIFIED',
+      identityCheckedAt: new Date(),
+      identityNextCheckAt: new Date(Date.now() + 30 * 24 * 60 * 60_000),
+    })
+    .where(eq(contentSourceEndpoints.endpointId, endpoint.endpointId));
+  await db
+    .update(contentSourceSchedules)
+    .set({ status: 'paused' })
+    .where(ne(contentSourceSchedules.partitionId, partition.partitionId));
+  await db
+    .update(contentSourceSchedules)
+    .set({
+      status: 'active',
+      nextDueAt: new Date(Date.now() - 60_000),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    })
+    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+
+  const [claimed] = await claimDueFormalRuns({
+    enabledAdapters: ['X_ACCOUNT'],
+    claimLimit: 1,
+    xBudgetPolicy: budgetPolicy,
+  });
+  if (!claimed) throw new Error('OfficialFPL recurring run was not claimed');
+  expect(await confirmFormalRunEnqueued({ runId: claimed.runId })).toBe(true);
+  const flags = {
+    ...getContentRuntimeFlags(),
+    pipelineEnabled: true,
+    acquisitionShadowMode: true,
+    xScanEnabled: true,
+    realGrokEnabled: true,
+  };
+
+  await expect(
+    runFormalXWorker(
+      { schemaVersion: 1, runId: claimed.runId },
+      {
+        flags,
+        executor: {
+          execute: async (_request, hooks) => {
+            await hooks?.onProbeRequest?.();
+            hooks?.onProbeProcessStart?.();
+            throw new GrokBuildExecutionError(
+              'RUNNER_RELEASE_MISMATCH',
+              'synthetic release mismatch after probe process start',
+            );
+          },
+        },
+        xBudgetPolicy: budgetPolicy,
+      },
+    ),
+  ).rejects.toMatchObject({ failureClass: 'RUNNER_RELEASE_MISMATCH' });
+
+  const [run] = await db
+    .select({ status: contentAcquisitionRuns.status })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, claimed.runId));
+  expect(run?.status).toBe('FAILED');
+  const reservations = await db
+    .select({ status: contentAcquisitionBudgetReservations.status })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, claimed.runId));
+  expect(reservations.some((reservation) => reservation.status === 'COMMITTED')).toBe(true);
+  expect(reservations.some((reservation) => reservation.status === 'RELEASED')).toBe(true);
+  expect(reservations.every((reservation) => reservation.status !== 'RESERVED')).toBe(true);
+  const traces = await db
+    .select({ terminalState: contentAcquisitionProviderTraces.terminalState })
+    .from(contentAcquisitionProviderTraces)
+    .where(eq(contentAcquisitionProviderTraces.runId, claimed.runId));
+  expect(traces).toEqual([{ terminalState: 'CONTROL_PLANE_PROBE_FAILED' }]);
 });

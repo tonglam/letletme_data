@@ -137,10 +137,13 @@ services:
       - TZ=Asia/Shanghai
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
       - WORKER_HEARTBEAT_PATH=/tmp/content-worker-heartbeat
-      - GROK_HOME=/home/appuser/.grok
       - CONTENT_MANIFEST_GIT_REVISION=${CONTENT_MANIFEST_GIT_REVISION:-unknown}
+      - CONTENT_GROK_RUNNER_SOCKET=${CONTENT_GROK_RUNNER_SOCKET:-/run/letletme-grok-runner/runner.sock}
+      - CONTENT_GROK_RUNNER_RELEASE_SHA=${CONTENT_GROK_RUNNER_RELEASE_SHA:-unknown}
     volumes:
-      - grok-home:/home/appuser/.grok
+      - /run/letletme-grok-runner:/run/letletme-grok-runner:ro
+    group_add:
+      - '1555'
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700
@@ -156,6 +159,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-
-volumes:
-  grok-home:

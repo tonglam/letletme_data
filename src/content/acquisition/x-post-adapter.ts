@@ -290,15 +290,19 @@ export function adaptGrokBuildPosts(input: {
   execution: GrokBuildExecutionResult;
   checkedAt: Date;
 }): XPostAdapterResult {
-  if (input.request.jobKind !== 'X_KEYWORD_SCAN') {
+  if (input.request.jobKind !== 'X_KEYWORD_SCAN' && input.request.jobKind !== 'X_THREAD_FETCH') {
     throw new XPostQualityError(
       'X_SEMANTIC_MAPPING_UNAVAILABLE',
       'Semantic X posts require discovered-author source mapping before persistence',
     );
   }
   if (
-    input.request.toolRequest.toolName !== 'x_keyword_search' ||
-    input.execution.toolName !== 'x_keyword_search'
+    (input.request.jobKind === 'X_KEYWORD_SCAN' &&
+      (input.request.toolRequest.toolName !== 'x_keyword_search' ||
+        input.execution.toolName !== 'x_keyword_search')) ||
+    (input.request.jobKind === 'X_THREAD_FETCH' &&
+      (input.request.toolRequest.toolName !== 'x_thread_fetch' ||
+        input.execution.toolName !== 'x_thread_fetch'))
   ) {
     throw new XPostQualityError('X_TOOL_MISMATCH', 'Keyword run did not use x_keyword_search');
   }
@@ -315,7 +319,10 @@ export function adaptGrokBuildPosts(input: {
   const fallbackEndpointKey = input.request.partition.members[0]!.endpointKey;
   return adaptMappedPosts({
     ...input,
-    limit: input.request.toolRequest.limit,
+    limit:
+      input.request.toolRequest.toolName === 'x_keyword_search'
+        ? input.request.toolRequest.limit
+        : 101,
     fallbackEndpointKey,
     resolveAuthor: (post) => {
       if (!allowedHandles.has(post.authorHandle.toLowerCase())) {

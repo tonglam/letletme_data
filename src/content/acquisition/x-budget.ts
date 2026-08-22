@@ -24,6 +24,9 @@ export type XBudgetReservationResult = Readonly<{
   reserved: boolean;
   deferredScope: string | null;
   remainingBeforeReservation: number;
+  reservationIds: readonly string[];
+  createdReservationIds: readonly string[];
+  incrementedReservationIds: readonly string[];
 }>;
 
 type BudgetScope = Readonly<{
@@ -117,7 +120,14 @@ export async function reserveXRunBudgets(input: {
   lane: XBudgetLane;
   dbNow: Date;
   policy: XBudgetPolicy;
+  units?: number;
+  /** Keep an independently billable control-plane call in its own row. */
+  separateReservation?: boolean;
 }): Promise<XBudgetReservationResult> {
+  const requestedUnits = input.units ?? 1;
+  if (!Number.isSafeInteger(requestedUnits) || requestedUnits < 1) {
+    throw new Error('X budget reservation units must be a positive integer');
+  }
   await input.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'))`);
   const scopes = budgetScopes(input);
   const usage: Array<{ scope: BudgetScope; used: number }> = [];
@@ -138,16 +148,22 @@ export async function reserveXRunBudgets(input: {
     const used = Number(rows[0]?.used ?? 0);
     if (!Number.isFinite(used) || used < 0) throw new Error('X budget usage is invalid');
     usage.push({ scope, used });
-    if (used + 1 > scope.limit) {
+    if (used + requestedUnits > scope.limit) {
       return {
         reserved: false,
         deferredScope: `${scope.scopeKind}:${scope.scopeKey}`,
         remainingBeforeReservation: Math.max(0, scope.limit - used),
+        reservationIds: [],
+        createdReservationIds: [],
+        incrementedReservationIds: [],
       };
     }
   }
 
   const bucket = hourBucket(input.dbNow);
+  const reservationIds: string[] = [];
+  const createdReservationIds: string[] = [];
+  const incrementedReservationIds: string[] = [];
   for (const { scope, used } of usage) {
     const ledgerRows = await input.tx
       .insert(contentAcquisitionBudgetLedgers)
@@ -183,28 +199,270 @@ export async function reserveXRunBudgets(input: {
     await input.tx
       .update(contentAcquisitionBudgetLedgers)
       .set({
-        reservedUnits: sql`${contentAcquisitionBudgetLedgers.reservedUnits} + 1`,
+        reservedUnits: sql`${contentAcquisitionBudgetLedgers.reservedUnits} + ${requestedUnits}`,
         updatedAt: input.dbNow,
       })
       .where(eq(contentAcquisitionBudgetLedgers.ledgerId, ledger.ledgerId));
-    await input.tx.insert(contentAcquisitionBudgetReservations).values({
-      reservationId: randomUUID(),
-      ledgerId: ledger.ledgerId,
-      runId: input.runId,
-      units: '1',
-      status: 'RESERVED',
-      createdAt: input.dbNow,
-      updatedAt: input.dbNow,
-    });
-    if (used + 1 > scope.limit) throw new Error('X budget reservation exceeded its hard cap');
+    const existing = input.separateReservation
+      ? []
+      : await input.tx
+          .select({
+            reservationId: contentAcquisitionBudgetReservations.reservationId,
+            status: contentAcquisitionBudgetReservations.status,
+          })
+          .from(contentAcquisitionBudgetReservations)
+          .where(
+            and(
+              eq(contentAcquisitionBudgetReservations.runId, input.runId),
+              eq(contentAcquisitionBudgetReservations.ledgerId, ledger.ledgerId),
+              eq(contentAcquisitionBudgetReservations.status, 'RESERVED'),
+            ),
+          )
+          .for('update')
+          .limit(1);
+    if (existing[0]) {
+      if (existing[0].status !== 'RESERVED') {
+        throw new Error('X budget reservation cannot be increased after transition');
+      }
+      await input.tx
+        .update(contentAcquisitionBudgetReservations)
+        .set({
+          units: sql`${contentAcquisitionBudgetReservations.units} + ${requestedUnits}`,
+          updatedAt: input.dbNow,
+        })
+        .where(eq(contentAcquisitionBudgetReservations.reservationId, existing[0].reservationId));
+      reservationIds.push(existing[0].reservationId);
+      incrementedReservationIds.push(existing[0].reservationId);
+    } else {
+      const reservationId = randomUUID();
+      await input.tx.insert(contentAcquisitionBudgetReservations).values({
+        reservationId,
+        ledgerId: ledger.ledgerId,
+        runId: input.runId,
+        units: String(requestedUnits),
+        status: 'RESERVED',
+        createdAt: input.dbNow,
+        updatedAt: input.dbNow,
+      });
+      reservationIds.push(reservationId);
+      createdReservationIds.push(reservationId);
+    }
+    if (used + requestedUnits > scope.limit)
+      throw new Error('X budget reservation exceeded its hard cap');
   }
   return {
     reserved: true,
     deferredScope: null,
+    reservationIds,
+    createdReservationIds,
+    incrementedReservationIds,
     remainingBeforeReservation: Math.min(
-      ...usage.map(({ scope, used }) => Math.max(0, scope.limit - used - 1)),
+      ...usage.map(({ scope, used }) => Math.max(0, scope.limit - used - requestedUnits)),
     ),
   };
+}
+
+export async function releaseOneXRunBudgetUnit(input: {
+  tx: TransactionHandle;
+  runId: string;
+  dbNow: Date;
+  reservationIds: readonly string[];
+}): Promise<boolean> {
+  const reservationIds = [...new Set(input.reservationIds)];
+  if (reservationIds.length === 0) return false;
+  await input.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'))`);
+  const reservations = await input.tx
+    .select({
+      reservationId: contentAcquisitionBudgetReservations.reservationId,
+      ledgerId: contentAcquisitionBudgetReservations.ledgerId,
+      units: contentAcquisitionBudgetReservations.units,
+    })
+    .from(contentAcquisitionBudgetReservations)
+    .where(
+      and(
+        eq(contentAcquisitionBudgetReservations.runId, input.runId),
+        inArray(contentAcquisitionBudgetReservations.reservationId, reservationIds),
+        eq(contentAcquisitionBudgetReservations.status, 'RESERVED'),
+      ),
+    )
+    .for('update');
+  if (reservations.length !== reservationIds.length) {
+    throw new Error('X probe budget reservation disappeared before release');
+  }
+  for (const reservation of reservations) {
+    const units = Number(reservation.units);
+    if (!Number.isSafeInteger(units) || units < 1) {
+      throw new Error('X budget reservation is invalid');
+    }
+    if (units === 1) {
+      await input.tx
+        .update(contentAcquisitionBudgetReservations)
+        .set({ status: 'RELEASED', updatedAt: input.dbNow })
+        .where(eq(contentAcquisitionBudgetReservations.reservationId, reservation.reservationId));
+    } else {
+      await input.tx
+        .update(contentAcquisitionBudgetReservations)
+        .set({
+          units: String(units - 1),
+          updatedAt: input.dbNow,
+        })
+        .where(eq(contentAcquisitionBudgetReservations.reservationId, reservation.reservationId));
+    }
+    await input.tx
+      .update(contentAcquisitionBudgetLedgers)
+      .set({
+        reservedUnits: sql`${contentAcquisitionBudgetLedgers.reservedUnits} - 1`,
+        updatedAt: input.dbNow,
+      })
+      .where(eq(contentAcquisitionBudgetLedgers.ledgerId, reservation.ledgerId));
+  }
+  return true;
+}
+
+/** Commit one unit from each targeted reservation, retaining any execution units. */
+export async function commitOneXRunBudgetUnit(input: {
+  tx: TransactionHandle;
+  runId: string;
+  dbNow: Date;
+  reservationIds: readonly string[];
+}): Promise<boolean> {
+  const reservationIds = [...new Set(input.reservationIds)];
+  if (reservationIds.length === 0) return false;
+  await input.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'))`);
+  const reservations = await input.tx
+    .select({
+      reservationId: contentAcquisitionBudgetReservations.reservationId,
+      ledgerId: contentAcquisitionBudgetReservations.ledgerId,
+      units: contentAcquisitionBudgetReservations.units,
+    })
+    .from(contentAcquisitionBudgetReservations)
+    .where(
+      and(
+        eq(contentAcquisitionBudgetReservations.runId, input.runId),
+        inArray(contentAcquisitionBudgetReservations.reservationId, reservationIds),
+        eq(contentAcquisitionBudgetReservations.status, 'RESERVED'),
+      ),
+    )
+    .for('update');
+  if (reservations.length !== reservationIds.length) {
+    throw new Error('X probe budget reservation disappeared before commit');
+  }
+  for (const reservation of reservations) {
+    const units = Number(reservation.units);
+    if (!Number.isSafeInteger(units) || units < 1) {
+      throw new Error('X budget reservation is invalid');
+    }
+    if (units === 1) {
+      await input.tx
+        .update(contentAcquisitionBudgetReservations)
+        .set({ status: 'COMMITTED', updatedAt: input.dbNow })
+        .where(eq(contentAcquisitionBudgetReservations.reservationId, reservation.reservationId));
+    } else {
+      await input.tx
+        .update(contentAcquisitionBudgetReservations)
+        .set({
+          units: String(units - 1),
+          updatedAt: input.dbNow,
+        })
+        .where(eq(contentAcquisitionBudgetReservations.reservationId, reservation.reservationId));
+    }
+    await input.tx
+      .update(contentAcquisitionBudgetLedgers)
+      .set({
+        reservedUnits: sql`${contentAcquisitionBudgetLedgers.reservedUnits} - 1`,
+        committedUnits: sql`${contentAcquisitionBudgetLedgers.committedUnits} + 1`,
+        updatedAt: input.dbNow,
+      })
+      .where(eq(contentAcquisitionBudgetLedgers.ledgerId, reservation.ledgerId));
+  }
+  return true;
+}
+
+/** Release all reserved units for a run except rows belonging to a started provider call. */
+export async function releaseXRunBudgetsExcept(input: {
+  tx: TransactionHandle;
+  runId: string;
+  dbNow: Date;
+  keepReservationIds: readonly string[];
+}): Promise<number> {
+  const keepReservationIds = [...new Set(input.keepReservationIds)];
+  await input.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'))`);
+  const exclusion = keepReservationIds.length
+    ? sql`AND reservation.reservation_id NOT IN (${sql.join(
+        keepReservationIds.map((reservationId) => sql`${reservationId}::uuid`),
+        sql`, `,
+      )})`
+    : sql``;
+  const reservations = await input.tx.execute<{
+    reservationId: string;
+    ledgerId: string;
+    units: string | number;
+  }>(sql`
+    SELECT reservation.reservation_id AS "reservationId",
+           reservation.ledger_id AS "ledgerId",
+           reservation.units
+    FROM content.acquisition_budget_reservations AS reservation
+    WHERE reservation.run_id = ${input.runId}::uuid
+      AND reservation.status = 'RESERVED'
+      ${exclusion}
+    FOR UPDATE
+  `);
+  for (const reservation of reservations) {
+    const units = Number(reservation.units);
+    if (!Number.isSafeInteger(units) || units < 1) {
+      throw new Error('X budget reservation is invalid');
+    }
+    await input.tx
+      .update(contentAcquisitionBudgetReservations)
+      .set({ status: 'RELEASED', updatedAt: input.dbNow })
+      .where(eq(contentAcquisitionBudgetReservations.reservationId, reservation.reservationId));
+    await input.tx
+      .update(contentAcquisitionBudgetLedgers)
+      .set({
+        reservedUnits: sql`${contentAcquisitionBudgetLedgers.reservedUnits} - ${units}`,
+        updatedAt: input.dbNow,
+      })
+      .where(eq(contentAcquisitionBudgetLedgers.ledgerId, reservation.ledgerId));
+  }
+  return reservations.length;
+}
+
+/** Commit the independently reserved probe unit while releasing the run's
+ * execution reservation in the same transaction. */
+export async function commitProbeAndReleaseXRunBudgets(input: {
+  tx: TransactionHandle;
+  runId: string;
+  dbNow: Date;
+  probeReservationIds: readonly string[];
+  probeIncrementedReservationIds?: readonly string[];
+}): Promise<boolean> {
+  const probeReservationIds = [...new Set(input.probeReservationIds)];
+  const incrementedReservationIds = [...new Set(input.probeIncrementedReservationIds ?? [])];
+  if (probeReservationIds.length === 0) return false;
+  const keepReservationIds = [...new Set([...probeReservationIds, ...incrementedReservationIds])];
+  await releaseXRunBudgetsExcept({
+    tx: input.tx,
+    runId: input.runId,
+    dbNow: input.dbNow,
+    keepReservationIds,
+  });
+  if (incrementedReservationIds.length > 0) {
+    const released = await releaseOneXRunBudgetUnit({
+      tx: input.tx,
+      runId: input.runId,
+      dbNow: input.dbNow,
+      reservationIds: incrementedReservationIds,
+    });
+    if (!released) throw new Error('Original X execution budget disappeared after probe');
+  }
+  const committed = await commitOneXRunBudgetUnit({
+    tx: input.tx,
+    runId: input.runId,
+    dbNow: input.dbNow,
+    reservationIds: probeReservationIds,
+  });
+  if (!committed) throw new Error('X probe budget reservation disappeared before commit');
+  return true;
 }
 
 async function transitionRunBudgets(input: {

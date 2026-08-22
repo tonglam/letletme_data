@@ -7,9 +7,14 @@ import {
 } from '../acquisition/acquisition-profiles';
 import { sha256CanonicalJson } from '../acquisition/canonicalization';
 import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
-import { beginFormalRun, failFormalRun } from '../acquisition/formal-run-repository';
 import {
-  GrokBuildExecutor,
+  beginFormalRun,
+  deferFormalRunForCapacity,
+  failFormalRun,
+  type FormalRunProbeEvidence,
+} from '../acquisition/formal-run-repository';
+import {
+  GrokBuildExecutionError,
   type GrokBuildExecutionResult,
   type GrokBuildExecutionHooks,
 } from '../acquisition/grok-build-executor';
@@ -22,8 +27,14 @@ import {
   XPostQualityError,
 } from '../acquisition/x-post-adapter';
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
-import type { XBudgetPolicy } from '../acquisition/x-budget';
-import { compileXKeywordRequest } from '../acquisition/x-query-compiler';
+import {
+  releaseOneXRunBudgetUnit,
+  reserveXRunBudgets,
+  type XBudgetLane,
+  type XBudgetPolicy,
+} from '../acquisition/x-budget';
+import { compileXKeywordRequest, compileXUserRequest } from '../acquisition/x-query-compiler';
+import type { XToolRequestV1 } from '../acquisition/x-query-compiler';
 import { getContentRuntimeFlags, type ContentRuntimeFlags } from '../config';
 import { getDb, type DbHandle } from '../../db/singleton';
 
@@ -37,6 +48,7 @@ export type FormalXWorkerResult = Readonly<{
     | 'PARTIAL'
     | 'SATURATED'
     | 'GAP'
+    | 'BUDGET_DEFERRED'
     | 'CONTENT_DEFERRED'
     | 'FAILED';
   receiptCount: number;
@@ -48,7 +60,7 @@ export type FormalXWorkerResult = Readonly<{
 
 export type GrokBuildExecutorLike = Readonly<{
   execute: (
-    request: Parameters<GrokBuildExecutor['execute']>[0],
+    request: XToolRequestV1,
     hooks?: GrokBuildExecutionHooks,
   ) => Promise<GrokBuildExecutionResult>;
 }>;
@@ -59,6 +71,27 @@ function errorFacts(error: unknown): { failureClass: string; summary: string } {
     failureClass:
       typeof candidate?.failureClass === 'string' ? candidate.failureClass : 'X_ADAPTER_FAILED',
     summary: typeof candidate?.message === 'string' ? candidate.message : 'Formal X adapter failed',
+  };
+}
+
+const HOST_X_PROBE_REQUEST_METADATA_HASH = sha256CanonicalJson({
+  toolName: compileXUserRequest('OfficialFPL').toolName,
+  input: { query: 'OfficialFPL', count: 3 },
+});
+
+function hostXProbeEvidence(terminalState: string): FormalRunProbeEvidence {
+  return {
+    provider: 'grok-build',
+    operation: 'x_user_search',
+    requestMetadataHash: HOST_X_PROBE_REQUEST_METADATA_HASH,
+    responseMetadataHash: null,
+    providerJobIdHash: null,
+    providerUnits: 1,
+    terminalState,
+    runMetrics: {
+      controlPlaneProbe: true,
+      probeTarget: 'OfficialFPL',
+    },
   };
 }
 
@@ -85,6 +118,11 @@ export async function runFormalXWorker(
   let began = false;
   let identityRun = false;
   let providerProcessStarted = false;
+  let probeReservationIds: readonly string[] | null = null;
+  let probeIncrementedReservationIds: readonly string[] = [];
+  let probeProcessStarted = false;
+  let probeCompletedSuccessfully = false;
+  let releaseProbeBudget: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
   let scanAccounting: Readonly<{
@@ -114,7 +152,8 @@ export async function runFormalXWorker(
     if (
       run.request.jobKind !== 'X_IDENTITY' &&
       run.request.jobKind !== 'X_KEYWORD_SCAN' &&
-      run.request.jobKind !== 'X_SEMANTIC_SCAN'
+      run.request.jobKind !== 'X_SEMANTIC_SCAN' &&
+      run.request.jobKind !== 'X_THREAD_FETCH'
     ) {
       throw new Error(`X worker cannot execute ${run.request.jobKind}`);
     }
@@ -122,21 +161,83 @@ export async function runFormalXWorker(
     if (!profile || profile.revision !== run.request.profileRevision) {
       throw new Error('Persisted X profile no longer matches versioned code');
     }
-    const executor =
-      dependencies?.executor ??
-      new GrokBuildExecutor({
-        expectedVersion: flags.grokExpectedVersion,
-        timeoutMs: flags.grokTimeoutMs,
-        maximumOutputBytes: flags.grokMaxOutputBytes,
+    const budgetLane: XBudgetLane = identityRun ? 'IDENTITY' : (profile.lane as XAcquisitionLane);
+    if (!identityRun && !X_ACQUISITION_LANES.includes(budgetLane as XAcquisitionLane)) {
+      throw new Error('Persisted X profile has no valid budget lane');
+    }
+    const reserveProbeBudget = async (): Promise<void> => {
+      if (probeReservationIds !== null) return;
+      if (!dependencies?.xBudgetPolicy) {
+        throw new GrokBuildExecutionError(
+          'RUNNER_CAPACITY',
+          'X probe requires an explicit budget policy',
+        );
+      }
+      const budget = await db.transaction(async (tx) => {
+        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
+        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
+        return reserveXRunBudgets({
+          tx,
+          runId: job.runId,
+          phase: run.request.phase,
+          lane: budgetLane,
+          dbNow,
+          policy: dependencies.xBudgetPolicy!,
+          units: 1,
+          separateReservation: true,
+        });
       });
+      if (!budget.reserved) {
+        throw new GrokBuildExecutionError(
+          'RUNNER_CAPACITY',
+          `X probe budget is unavailable (${budget.deferredScope ?? 'unknown scope'})`,
+        );
+      }
+      probeReservationIds = budget.reservationIds;
+      probeIncrementedReservationIds = budget.incrementedReservationIds;
+    };
+    const executionHooks: GrokBuildExecutionHooks = {
+      runId: job.runId,
+      onProviderProcessStart: () => {
+        providerProcessStarted = true;
+      },
+      onProbeRequest: reserveProbeBudget,
+      onProbeProcessStart: () => {
+        probeProcessStarted = true;
+      },
+      onProbeCompleted: () => {
+        probeCompletedSuccessfully = true;
+      },
+    };
+    releaseProbeBudget = async (): Promise<void> => {
+      if (probeReservationIds === null) return;
+      const reservationIds = probeReservationIds;
+      await db.transaction(async (tx) => {
+        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
+        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
+        const released = await releaseOneXRunBudgetUnit({
+          tx,
+          runId: job.runId,
+          dbNow,
+          reservationIds,
+        });
+        if (!released) throw new Error('X probe budget reservation disappeared before release');
+      });
+      probeReservationIds = null;
+    };
+    const executor = dependencies?.executor;
+    if (!executor) throw new Error('Host Grok runner executor is not configured');
     if (run.request.jobKind === 'X_IDENTITY') {
-      const execution = await executor.execute(run.request.toolRequest, {
-        onProviderProcessStart: () => {
-          providerProcessStarted = true;
-        },
-      });
+      const execution = await executor.execute(run.request.toolRequest, executionHooks);
       identityExecution = execution;
-      const identity = await persistXIdentityResult({ runId: job.runId, execution, db });
+      const identity = await persistXIdentityResult({
+        runId: job.runId,
+        execution,
+        probeEvidence: probeProcessStarted ? hostXProbeEvidence('CONTROL_PLANE_PROBE') : undefined,
+        db,
+      });
       return {
         runId: job.runId,
         status: identity.status,
@@ -152,15 +253,13 @@ export async function runFormalXWorker(
       (scanRequest.jobKind === 'X_KEYWORD_SCAN' &&
         scanRequest.toolRequest.toolName !== 'x_keyword_search') ||
       (scanRequest.jobKind === 'X_SEMANTIC_SCAN' &&
-        scanRequest.toolRequest.toolName !== 'x_semantic_search')
+        scanRequest.toolRequest.toolName !== 'x_semantic_search') ||
+      (scanRequest.jobKind === 'X_THREAD_FETCH' &&
+        scanRequest.toolRequest.toolName !== 'x_thread_fetch')
     ) {
       throw new Error('Persisted X scan job and tool request do not agree');
     }
-    const execution = await executor.execute(scanRequest.toolRequest, {
-      onProviderProcessStart: () => {
-        providerProcessStarted = true;
-      },
-    });
+    const execution = await executor.execute(scanRequest.toolRequest, executionHooks);
     scanExecution = execution;
     const checkedAt = await databaseNow(db);
     const semanticAuthors =
@@ -258,6 +357,8 @@ export async function runFormalXWorker(
       throw new Error('Persisted X profile has no valid budget lane');
     }
     const checkpointComplete = run.scheduleId !== null && state !== 'PARTIAL' && state !== 'GAP';
+    const providerTraceStart = run.providerTraceSequence;
+    const totalProviderUnits = run.providerUnits + 1 + (probeProcessStarted ? 1 : 0);
     const persisted = await persistAcquisitionResult({
       runId: job.runId,
       state,
@@ -301,8 +402,22 @@ export async function runFormalXWorker(
           : undefined,
       acquisitionGap,
       providerTraces: [
+        ...(probeProcessStarted
+          ? [
+              {
+                sequence: providerTraceStart,
+                provider: 'grok-build',
+                operation: 'x_user_search',
+                requestMetadataHash: HOST_X_PROBE_REQUEST_METADATA_HASH,
+                responseMetadataHash: null,
+                providerJobIdHash: null,
+                providerUnits: 1,
+                terminalState: 'CONTROL_PLANE_PROBE',
+              },
+            ]
+          : []),
         {
-          sequence: 0,
+          sequence: providerTraceStart + (probeProcessStarted ? 1 : 0),
           provider: 'grok-build',
           operation: execution.toolName,
           requestMetadataHash: execution.requestMetadataHash,
@@ -312,17 +427,25 @@ export async function runFormalXWorker(
           terminalState: 'ATTESTED_FINAL',
         },
       ],
-      providerResult: { provider: 'grok-build', providerUnits: 1 },
+      providerResult: {
+        provider: 'grok-build',
+        providerUnits: totalProviderUnits,
+      },
       runMetrics: {
         durationMs: Math.round(execution.durationMs),
         eventCount: execution.eventCount,
         inputTokens: execution.inputTokens,
         outputTokens: execution.outputTokens,
         totalCostUsd: execution.totalCostUsd,
+        executionLocation: execution.executionLocation,
+        runnerReleaseSha: execution.runnerReleaseSha,
+        grokVersion: execution.grokVersion,
+        runnerBinaryHash: execution.runnerBinaryHash,
         returned: adapted.returnedCount,
         accepted: adapted.acceptedCount,
         rejected: adapted.rejections.length,
         saturated: adapted.saturated,
+        probeCallCount: probeProcessStarted ? 1 : 0,
         rawPostEvidenceAvailable: execution.rawPostEvidenceAvailable,
         traceHash: execution.traceHash,
       },
@@ -340,13 +463,57 @@ export async function runFormalXWorker(
   } catch (error) {
     if (began) {
       const failure = errorFacts(error);
+      // The control-plane probe and the requested scan are separate billable
+      // operations. A successful probe followed by a pre-dispatch scan
+      // failure must commit only the probe unit and release the scan unit.
+      const mainProviderProcessStarted = providerProcessStarted;
+      const probeOnly = probeProcessStarted && !mainProviderProcessStarted;
+      const probeEvidence = probeProcessStarted
+        ? hostXProbeEvidence(
+            probeCompletedSuccessfully ? 'CONTROL_PLANE_PROBE' : 'CONTROL_PLANE_PROBE_FAILED',
+          )
+        : undefined;
+      const transientPreProviderFailure = [
+        'RUNNER_CAPACITY',
+        'RUNNER_UNAVAILABLE',
+        'RUNNER_TIMEOUT',
+        'RUNNER_NOT_READY',
+      ].includes(failure.failureClass);
+      if (transientPreProviderFailure && !mainProviderProcessStarted) {
+        if (!probeOnly) {
+          await releaseProbeBudget?.();
+        }
+        const deferred = await deferFormalRunForCapacity({
+          runId: job.runId,
+          metrics: { failureClass: failure.failureClass },
+          failureClass: failure.failureClass,
+          probeEvidence,
+          probeReservationIds: probeOnly ? (probeReservationIds ?? undefined) : undefined,
+          db,
+        });
+        if (deferred) {
+          return {
+            runId: job.runId,
+            status: 'BUDGET_DEFERRED',
+            receiptCount: 0,
+            revisionCount: 0,
+            outboxCount: 0,
+            returnedCount: 0,
+            rejectedCount: 0,
+          };
+        }
+      }
       if (identityRun) {
         await failXIdentityRun({
           runId: job.runId,
           failureClass: failure.failureClass,
           errorSummary: failure.summary,
-          providerProcessStarted,
+          providerProcessStarted: mainProviderProcessStarted,
           providerExecution: identityExecution ?? undefined,
+          probeEvidence,
+          releaseExecutionBudgetAfterProbe: probeOnly,
+          probeReservationIds: probeOnly ? (probeReservationIds ?? undefined) : undefined,
+          probeIncrementedReservationIds: probeOnly ? probeIncrementedReservationIds : undefined,
           db,
         });
       } else {
@@ -376,16 +543,25 @@ export async function runFormalXWorker(
                   inputTokens: scanExecution.inputTokens,
                   outputTokens: scanExecution.outputTokens,
                   totalCostUsd: scanExecution.totalCostUsd,
+                  executionLocation: scanExecution.executionLocation,
+                  runnerReleaseSha: scanExecution.runnerReleaseSha,
+                  grokVersion: scanExecution.grokVersion,
+                  runnerBinaryHash: scanExecution.runnerBinaryHash,
                   returned: scanExecution.posts.length,
                   ...(scanAccounting ?? {}),
                   rejected: rejections?.length ?? scanAccounting?.rejected ?? 0,
+                  probeCallCount: probeProcessStarted ? 1 : 0,
                   rawPostEvidenceAvailable: scanExecution.rawPostEvidenceAvailable,
                   traceHash: scanExecution.traceHash,
                 },
               }
             : undefined,
           rejections,
-          providerProcessStarted,
+          providerProcessStarted: mainProviderProcessStarted,
+          probeEvidence,
+          releaseExecutionBudgetAfterProbe: probeOnly,
+          probeReservationIds: probeOnly ? (probeReservationIds ?? undefined) : undefined,
+          probeIncrementedReservationIds: probeOnly ? probeIncrementedReservationIds : undefined,
           db,
         });
       }

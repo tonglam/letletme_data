@@ -1,0 +1,49 @@
+[Unit]
+Description=LetLetMe host-side Grok Build X runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=letletme-grok-bridge
+WorkingDirectory=/home/deploy
+Environment=HOME=/home/deploy
+Environment=GROK_HOME=/home/deploy/.grok
+Environment=GROK_NO_AUTO_UPDATE=1
+Environment=GROK_RUNNER_BINARY=/home/deploy/.grok/bin/grok
+Environment=GROK_RUNNER_SOCKET=/run/letletme-grok-runner/runner.sock
+Environment=GROK_RUNNER_RUNTIME_DIR=/run/letletme-grok-runner
+Environment=GROK_RUNNER_RELEASE_FILE=/home/workspace/letletme-grok-runner/current.release
+Environment=CONTENT_GROK_EXPECTED_VERSION=1.0.5
+Environment=CONTENT_GROK_TIMEOUT_MS=240000
+Environment=CONTENT_GROK_MAX_OUTPUT_BYTES=4194304
+RuntimeDirectory=letletme-grok-runner
+RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
+UMask=0007
+ExecStartPre=/usr/bin/test -x /home/deploy/.grok/bin/grok
+ExecStartPre=/bin/sh -c "test -x /usr/bin/bwrap || test -x /bin/bwrap"
+ExecStart=/home/workspace/letletme-grok-runner/current
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+BindReadWritePaths=/home/deploy/.grok
+ReadWritePaths=/home/deploy/.grok /run/letletme-grok-runner
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

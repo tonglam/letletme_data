@@ -616,10 +616,6 @@ export const contentAcquisitionBudgetReservations = content.table(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
-    unique('content_acquisition_budget_reservations_run_ledger_key').on(
-      table.runId,
-      table.ledgerId,
-    ),
     index('content_acquisition_budget_reservations_ledger_status_idx').on(
       table.ledgerId,
       table.status,

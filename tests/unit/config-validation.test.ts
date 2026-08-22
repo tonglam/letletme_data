@@ -177,6 +177,10 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('APP_IMAGE="$DEPLOY_OLD_IMAGE"');
     expect(deployScript).toContain('load_backup_settings');
     expect(deployScript).toContain('read_env_setting DATABASE_BACKUP_DIR "$ENV_FILE"');
+    expect(deployScript).toContain('DEPLOY_COMMITTED=false');
+    expect(deployScript).toContain('deploy-host-grok-runner.sh');
+    expect(deployScript).toContain('run-briefing-control-probe.sh');
+    expect(deployScript).toContain('rearm-briefing-x-after-probe.sh');
   });
 
   test('keeps ordinary workflows passwordless and proves verifier immutability in CI', () => {

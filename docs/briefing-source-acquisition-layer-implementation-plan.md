@@ -98,10 +98,13 @@ conflict gates。run 保存 `evidence_mode=GROK_ATTESTED_FINAL`，不能对外�
 现有 Grok Build 上伪造这项保证。
 
 Grok Build 1.0.5 的 strict sandbox 依赖 nested bubblewrap namespace；普通非特权 Docker 无法提供，
-而为此授予 `--privileged` 不可接受。目标运行合同改为外层非 root/read-only/cap-drop/
-no-new-privileges 容器、私有 `noexec,nosuid,nodev` 临时目录、sanitized child env、版本化
-`--disallowed-tools`/deny、`--no-subagents` 和启动 tool inventory gate。CLI 在容器内使用
-`--sandbox none`；这必须描述为“容器隔离 + 固定工具面”，不能描述为 Grok strict sandbox。
+而为此授予 `--privileged` 不可接受。生产执行边界因此固定为宿主机窄 Runner：content-worker
+通过只读 Unix socket 请求 `letletme-grok-runner.service`，Runner 以 `deploy` 用户直接 spawn
+宿主机 Grok，并在宿主机使用 `--sandbox strict`。容器只保留非 root/read-only/cap-drop/
+no-new-privileges 的 worker 和固定 bridge group；不安装 Grok、不挂载 Grok HOME 或认证文件。
+Runner 保留 sanitized child env、版本化 `--disallowed-tools`/deny、`--no-subagents`、启动 tool
+inventory gate 和 2 个全局并发上限。strict sandbox、bubblewrap、版本或 Runner release 不匹配时
+fail closed，不能退回 `--sandbox none`。
 
 ### 2.7 首次启用不是历史归档
 
@@ -123,7 +126,8 @@ no-new-privileges 容器、私有 `noexec,nosuid,nodev` 临时目录、sanitized
 - `content.sources` 把一个来源绑定到一个 platform/external ID，不能表达多 Endpoint Entity。
 - source/group/member 仍由运行时 editorial API 修改，不是 Git manifest 管理。
 - scheduler 只有一个全局 partition，queue input 携带 group、phase 和 window 等可漂移字段。
-- Grok runner 是 skill-driven generic runner，不是四种 Build X tool 的严格 single-call contract。
+- X 执行器必须是 `HostGrokRunnerClient`，通过 Unix socket 调用宿主机窄 Runner；不能再由容器内
+  generic runner 直接 spawn Grok，也不能绕过四种 Build X tool 的严格 single-call contract。
 - BullMQ `attempts=3` 与 PostgreSQL run 状态会形成两套重试状态机。
 - run 状态缺少 `CHECKED_NO_CHANGE / SATURATED / GAP / BUDGET_DEFERRED /
   CONTENT_DEFERRED`。
@@ -167,9 +171,12 @@ publication outbox/revalidation 必须继续独立运行。任何 manifest、Gro
 
 - 在执行时从最新 `origin/main` 建立干净的 `codex/briefing-source-acquisition` worktree。
 - 纳入本实施计划和 live probe checklist，不混入其他 worktree 的 tournament/live 改动。
-- 所有 migration 增量加入；当前 main 已占用 `0024`，本层使用 `0025`–`0029`。
+- 本次宿主机 Runner 执行边界整改不新增 migration；继续使用 main 已有的 acquisition
+  schema、budget、ReceiptRevision、Observation、gap、outbox 和 health view。任何控制面
+  schema 变更必须另开 migration 评审，不能借 Runner 发布顺带修改。
 - 所有新能力默认关闭；fixture/shadow 不得生成公开 Briefing 内容。
-- VPS Grok auth 已存在，不重复安装或导出认证。
+- VPS 上不由代码管理认证；部署阶段由运维以 `deploy` 用户完成一次 attended device auth，
+  代码、容器和 workflow 不读取、复制或导出认证。
 - Supadata key、Hermes credential 或其他 provider secret 只从运行环境注入，不写入 manifest、
   run snapshot、日志或 fixture。
 
@@ -652,8 +659,9 @@ discovery 可以先形成 metadata-only ReceiptRevision；article body、publish
 
 ### 10.1 X / Grok Build
 
-生产锁定 `@xai-official/grok@1.0.5`，启动用 `grok inspect --json` 验证版本并设置
-`GROK_NO_AUTO_UPDATE=1`。版本漂移 fail closed，重新采集 fixtures 后才可升级。
+宿主机 Runner 锁定 Grok Build 1.0.5，启动用 `grok inspect --json` 验证版本，设置
+`GROK_NO_AUTO_UPDATE=1`，并通过 bubblewrap/strict preflight。版本漂移、Runner release 漂移或
+strict sandbox 不可用时 fail closed，重新采集 fixtures 后才可升级。
 
 四个 job kind 分别只允许：
 
@@ -672,19 +680,31 @@ limit 与 persisted request 完全一致；成功 completion 必须发生在 fin
 不是 raw-result verification。模型 final 无法通过任一确定性 post gate 时整批失败；不能选择性
 修补或让另一个模型猜值。
 
-运行使用独立临时 cwd、参数数组、`shell=false`、输出上限和 240 秒 timeout。child env 采用 allowlist，
-不继承 Data/Redis/Supabase/provider secret。启动 event 的工具 inventory 只能包含当前 1.0.5 已知的
+宿主机 Runner 使用独立临时 cwd、参数数组、`shell=false`、输出上限和 240 秒 timeout。child env 采用
+allowlist，不继承 Data/Redis/Supabase/provider secret。启动 event 的工具 inventory 只能包含当前 1.0.5 已知的
 四个 residual command-control tool；它们再由 deny 和 `--no-subagents` 阻断。出现新增工具、版本
 漂移、第二次调用或 exact request 不匹配都 fail closed。
+
+Data 只通过 `HostGrokRunnerClient` 访问 `/v1/executions`；请求不接受任意 prompt、command、cwd、
+path 或 environment。Runner 通过 `/v1/health` 暴露 release、版本、strict sandbox 和最近 X probe，
+通过 `/v1/probes/x` 执行真实 `OfficialFPL` probe。应用 image 只携带供部署提取的 glibc standalone
+artifact，不在容器内运行它。
+
+部署和 status 流程不能直接 POST probe 绕过 X 调用预算。它们使用
+`scripts/run-briefing-control-probe.sh`：先在 PostgreSQL 中创建 control-plane run、锁定
+`GLOBAL:GROK_BUILD_X` 的一个 CALL reservation，再调用 Unix socket；成功或 provider 已可能启动时
+提交 reservation 并写 provider trace，明确的 pre-provider capacity/rate-limit 则释放并记为
+`BUDGET_DEFERRED`。因此 runner 重启后的探针仍计入同一 rolling-day hard cap，且不会和正式 run
+的 `provider_units` 统计脱节。
 
 同参数的对抗性实测还分别诱导 `run_terminal_command` 与 `spawn_subagent`；两次均由 permission
 policy 拒绝，且 attempt 会留在 streaming trace 中。预算边界也以真实 `grok -p` process launch 为
 准：launch 前失败释放 reservation；launch 后 timeout、损坏输出或 trace/schema 失败保守提交一次
 调用额度，run 保持 `FAILED + traceVerified=false`，不前移 checkpoint。
 
-2026-08-22 的完整隔离 sweep 已让 49/49 run 通过该合同。生产镜像增加 Node.js，并在 build stage
-执行 `grok inspect --json`；但由于本机 Docker daemon 在最终镜像 rebuild 时失去响应，当前仍需由
-CI/部署环境验证新镜像、既有 VPS auth 和实际 worker runtime，不能写成 production pass。
+旧容器内 Grok sweep 只作为历史诊断，不是当前生产证据。当前实现必须由 CI/部署环境验证
+standalone host-runner artifact、VPS systemd Runner、`deploy` 用户 1.0.5、strict sandbox、Unix
+socket 连接和四种真实工具 probe；未完成前不能写成 production pass。
 
 ### 10.2 RSS/Atom/Substack
 
@@ -864,6 +884,8 @@ CONTENT_HERMES_TRANSCRIPT_CONCURRENCY=1
 CONTENT_GROK_TIMEOUT_MS=240000
 CONTENT_GROK_MAX_OUTPUT_BYTES=4194304
 CONTENT_GROK_EXPECTED_VERSION=1.0.5
+CONTENT_GROK_RUNNER_SOCKET=/run/letletme-grok-runner/runner.sock
+CONTENT_GROK_RUNNER_RELEASE_SHA=<deployed-release-sha-or-unknown>
 CONTENT_HTTP_TIMEOUT_MS=40000
 CONTENT_HTTP_MAX_OUTPUT_BYTES=8388608
 CONTENT_SUPADATA_TIMEOUT_MS=75000
@@ -918,8 +940,8 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 - Grok 四种显式 job kind、single-tool trace、query compiler 和 canonical X adapter。
 - `GROK_ATTESTED_FINAL` evidence mode、strict whole-result JSON 和确定性 post gates；不得声称
   raw-result verified。
-- 在 production container 验证 Grok 1.0.5、既有 auth、外层容器隔离、sanitized env 和固定工具面；
-  不为 nested bubblewrap 授予 privileged container。
+- 在宿主机 Runner 验证 Grok 1.0.5、deploy 用户认证、strict sandbox、sanitized env、固定工具面和
+  Unix socket 隔离；Data 容器只验证 UDS transport 和 release/version contract，不运行 Grok。
 
 ### PR 3：Feed、Substack 与 article adapter
 
