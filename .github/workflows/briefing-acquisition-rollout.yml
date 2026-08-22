@@ -71,10 +71,13 @@ jobs:
             test -n "$current_container"
             current_image=$(docker inspect --format '{{.Config.Image}}' "$current_container")
             test -n "$current_image"
+            image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$current_image")
+            test "$image_revision" = "$ROLLOUT_SHA"
             runner_root=/home/workspace/letletme-grok-runner
             runner_updated=false
             runner_previous_target=""
             runner_previous_release=""
+            services_quiesced=false
 
             rollback_runner() {
               scripts/rollback-host-grok-runner.sh "$runner_root" \
@@ -161,6 +164,11 @@ jobs:
             fi
 
             if [ "$ROLLOUT_MODE" = host-shadow ]; then
+              if ! docker compose stop -t 45 scheduler content-worker; then
+                docker compose up -d --no-build scheduler content-worker || true
+                exit 1
+              fi
+              services_quiesced=true
               runner_previous_target=$(readlink -f "$runner_root/current" 2>/dev/null || true)
               runner_previous_release=$(cat "$runner_root/current.release" 2>/dev/null || printf unknown)
               runner_previous_release=${runner_previous_release:-unknown}
@@ -168,15 +176,18 @@ jobs:
               test -x scripts/deploy-host-grok-runner.sh
               if ! scripts/deploy-host-grok-runner.sh "$current_image" "$ROLLOUT_SHA" "$runner_root"; then
                 rollback_runner
+                docker compose up -d --no-build scheduler content-worker || true
                 exit 1
               fi
               if ! runner_probe || ! runner_health; then
                 rollback_runner
+                docker compose up -d --no-build scheduler content-worker || true
                 exit 1
               fi
               test -x scripts/rearm-briefing-x-after-probe.sh
               if ! scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"; then
                 rollback_runner
+                docker compose up -d --no-build scheduler content-worker || true
                 exit 1
               fi
             fi
@@ -191,13 +202,13 @@ jobs:
               trap - EXIT
               set +e
               if [ "$original_status" -ne 0 ] && [ "$runner_updated" = true ]; then
+                export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 rollback_runner
               fi
-              if [ "$original_status" -ne 0 ] && [ "$mutation_started" = true ] \
-                && [ "$rollout_committed" = false ]; then
+              if [ "$original_status" -ne 0 ] && [ "$services_quiesced" = true ]; then
                 mv "$backup_file" "$env_file"
                 APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate \
-                  content-worker || true
+                  scheduler content-worker || true
               fi
               rm -f -- "$backup_file"
               exit "$original_status"
@@ -207,6 +218,9 @@ jobs:
             mutation_started=true
             scripts/configure-briefing-acquisition-env.sh "$ROLLOUT_MODE" "$env_file"
             APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate content-worker
+            if [ "$services_quiesced" = true ]; then
+              APP_IMAGE="$current_image" docker compose up -d --no-build scheduler
+            fi
             PROJECT_DIR="$expected_workdir" COMPOSE_FILE=docker-compose.yml \
               COMPOSE_BIN='docker compose' scripts/verify-runtime-health.sh
             report_acquisition_health

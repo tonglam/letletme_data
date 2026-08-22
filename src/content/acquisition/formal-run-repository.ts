@@ -1430,6 +1430,80 @@ export async function deferFormalRunForBudget(input: {
   });
 }
 
+export async function deferFormalRunForCapacity(input: {
+  runId: string;
+  metrics: Readonly<Record<string, unknown>>;
+  retryDelayMs?: number;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+    const dbNow = dateValue(clockRows[0]?.dbNow);
+    if (!dbNow) throw new Error('Database clock is invalid');
+    const rows = await tx
+      .select({
+        status: contentAcquisitionRuns.status,
+        scheduleId: contentAcquisitionRuns.scheduleId,
+        endpointId: contentAcquisitionRuns.endpointId,
+      })
+      .from(contentAcquisitionRuns)
+      .where(eq(contentAcquisitionRuns.runId, input.runId))
+      .for('update')
+      .limit(1);
+    const run = rows[0];
+    if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
+
+    await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+    const retryDelayMs = Math.max(1_000, input.retryDelayMs ?? 60_000);
+    const nextEligibleAt = new Date(dbNow.getTime() + retryDelayMs).toISOString();
+    const metrics = {
+      ...input.metrics,
+      deferredReason: 'RUNNER_CAPACITY',
+      nextEligibleAt,
+    };
+    await tx
+      .update(contentAcquisitionRuns)
+      .set({
+        status: 'BUDGET_DEFERRED',
+        failureClass: 'RUNNER_CAPACITY',
+        failureDetailsHash: sha256CanonicalJson(metrics),
+        errorSummary: 'Host Grok runner capacity was unavailable before provider start',
+        runMetrics: metrics,
+        completedAt: dbNow,
+        leaseExpiresAt: null,
+        checkpointAdvanced: false,
+      })
+      .where(
+        and(
+          eq(contentAcquisitionRuns.runId, input.runId),
+          inArray(contentAcquisitionRuns.status, ['PENDING', 'RUNNING']),
+        ),
+      );
+
+    if (run.scheduleId) {
+      await tx
+        .update(contentSourceSchedules)
+        .set({
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          nextDueAt: new Date(dbNow.getTime() + retryDelayMs),
+          updatedAt: dbNow,
+        })
+        .where(eq(contentSourceSchedules.scheduleId, run.scheduleId));
+    } else if (run.endpointId) {
+      await tx
+        .update(contentSourceEndpoints)
+        .set({
+          identityNextCheckAt: new Date(dbNow.getTime() + retryDelayMs),
+          updatedAt: dbNow,
+        })
+        .where(eq(contentSourceEndpoints.endpointId, run.endpointId));
+    }
+    return true;
+  });
+}
+
 export async function parkFormalRunForProviderPoll(input: {
   runId: string;
   providerJobId: string;

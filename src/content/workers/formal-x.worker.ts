@@ -7,7 +7,11 @@ import {
 } from '../acquisition/acquisition-profiles';
 import { sha256CanonicalJson } from '../acquisition/canonicalization';
 import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
-import { beginFormalRun, failFormalRun } from '../acquisition/formal-run-repository';
+import {
+  beginFormalRun,
+  deferFormalRunForCapacity,
+  failFormalRun,
+} from '../acquisition/formal-run-repository';
 import {
   type GrokBuildExecutionResult,
   type GrokBuildExecutionHooks,
@@ -37,6 +41,7 @@ export type FormalXWorkerResult = Readonly<{
     | 'PARTIAL'
     | 'SATURATED'
     | 'GAP'
+    | 'BUDGET_DEFERRED'
     | 'CONTENT_DEFERRED'
     | 'FAILED';
   receiptCount: number;
@@ -344,6 +349,24 @@ export async function runFormalXWorker(
   } catch (error) {
     if (began) {
       const failure = errorFacts(error);
+      if (failure.failureClass === 'RUNNER_CAPACITY' && !providerProcessStarted) {
+        const deferred = await deferFormalRunForCapacity({
+          runId: job.runId,
+          metrics: { failureClass: failure.failureClass },
+          db,
+        });
+        if (deferred) {
+          return {
+            runId: job.runId,
+            status: 'BUDGET_DEFERRED',
+            receiptCount: 0,
+            revisionCount: 0,
+            outboxCount: 0,
+            returnedCount: 0,
+            rejectedCount: 0,
+          };
+        }
+      }
       if (identityRun) {
         await failXIdentityRun({
           runId: job.runId,

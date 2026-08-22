@@ -28,6 +28,29 @@ const hostGrokHealthSchema = z
   })
   .strict();
 
+const hostGrokProbeResponseSchema = z.discriminatedUnion('ok', [
+  z
+    .object({
+      ok: z.literal(true),
+      runnerReleaseSha: z.string().min(1).max(128),
+      grokVersion: z.string().min(1).max(64),
+      toolName: z.literal('x_user_search'),
+      userCount: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      ok: z.literal(false),
+      runnerReleaseSha: z.string().min(1).max(128),
+      grokVersion: z.string().min(1).max(64),
+      toolName: z.literal('x_user_search'),
+      failureClass: z.string().min(1).max(128),
+      errorDigest: z.string().regex(/^[0-9a-f]{64}$/),
+      providerProcessStarted: z.boolean(),
+    })
+    .strict(),
+]);
+
 const HEALTH_CHECK_CACHE_MS = 5 * 60_000;
 
 type HostGrokRunnerClientOptions = Readonly<{
@@ -161,6 +184,7 @@ export class HostGrokRunnerClient {
   private readonly timeoutMs: number;
   private readonly maximumResponseBytes: number;
   private versionCheck: Readonly<{ promise: Promise<void>; expiresAt: number }> | null = null;
+  private probeCheck: Promise<void> | null = null;
 
   constructor(input: HostGrokRunnerClientOptions) {
     this.socketPath = input.socketPath;
@@ -190,43 +214,119 @@ export class HostGrokRunnerClient {
   }
 
   private async inspectHealth(): Promise<void> {
-    let response: JsonResponse;
-    try {
-      response = await requestJson({
-        socketPath: this.socketPath,
-        path: '/v1/health',
-        method: 'GET',
-        timeoutMs: Math.min(this.timeoutMs, 30_000),
-        maximumResponseBytes: 32 * 1024,
-      });
-    } catch (error) {
-      throw new GrokBuildExecutionError('RUNNER_UNAVAILABLE', errorMessage(error));
-    }
-    const health = hostGrokHealthSchema.safeParse(response.body);
+    const readHealth = async (): Promise<{
+      response: JsonResponse;
+      health: z.infer<typeof hostGrokHealthSchema>;
+    }> => {
+      try {
+        const response = await requestJson({
+          socketPath: this.socketPath,
+          path: '/v1/health',
+          method: 'GET',
+          timeoutMs: Math.min(this.timeoutMs, 30_000),
+          maximumResponseBytes: 32 * 1024,
+        });
+        const health = hostGrokHealthSchema.safeParse(response.body);
+        if (!health.success) {
+          throw new GrokBuildExecutionError(
+            'RUNNER_NOT_READY',
+            'Host Grok runner health response is invalid',
+          );
+        }
+        return { response, health: health.data };
+      } catch (error) {
+        if (error instanceof GrokBuildExecutionError) throw error;
+        throw new GrokBuildExecutionError('RUNNER_UNAVAILABLE', errorMessage(error));
+      }
+    };
+
+    const assertIdentity = (health: z.infer<typeof hostGrokHealthSchema>): void => {
+      if (health.grokVersion !== this.expectedVersion) {
+        throw new GrokBuildExecutionError(
+          'GROK_VERSION_MISMATCH',
+          `Expected Grok Build ${this.expectedVersion}, observed ${health.grokVersion}`,
+        );
+      }
+      if (
+        this.expectedRunnerReleaseSha &&
+        this.expectedRunnerReleaseSha !== 'unknown' &&
+        health.runnerReleaseSha !== this.expectedRunnerReleaseSha
+      ) {
+        throw new GrokBuildExecutionError(
+          'RUNNER_RELEASE_MISMATCH',
+          `Expected runner release ${this.expectedRunnerReleaseSha}, observed ${health.runnerReleaseSha}`,
+        );
+      }
+    };
+
+    let healthResponse = await readHealth();
+    assertIdentity(healthResponse.health);
     if (
-      response.statusCode !== 200 ||
-      !health.success ||
-      !health.data.ok ||
-      !health.data.ready ||
-      health.data.lastXProbeOk !== true
+      healthResponse.response.statusCode !== 200 ||
+      !healthResponse.health.ready ||
+      healthResponse.health.lastXProbeOk !== true
+    ) {
+      await this.refreshProbe();
+      healthResponse = await readHealth();
+      assertIdentity(healthResponse.health);
+    }
+    if (
+      healthResponse.response.statusCode !== 200 ||
+      !healthResponse.health.ready ||
+      healthResponse.health.lastXProbeOk !== true
     ) {
       throw new GrokBuildExecutionError('RUNNER_NOT_READY', 'Host Grok runner health is not ready');
     }
-    if (health.data.grokVersion !== this.expectedVersion) {
-      throw new GrokBuildExecutionError(
-        'GROK_VERSION_MISMATCH',
-        `Expected Grok Build ${this.expectedVersion}, observed ${health.data.grokVersion}`,
-      );
-    }
-    if (
-      this.expectedRunnerReleaseSha &&
-      this.expectedRunnerReleaseSha !== 'unknown' &&
-      health.data.runnerReleaseSha !== this.expectedRunnerReleaseSha
-    ) {
-      throw new GrokBuildExecutionError(
-        'RUNNER_RELEASE_MISMATCH',
-        `Expected runner release ${this.expectedRunnerReleaseSha}, observed ${health.data.runnerReleaseSha}`,
-      );
+  }
+
+  private async refreshProbe(): Promise<void> {
+    if (this.probeCheck) return this.probeCheck;
+    const probe = (async () => {
+      let response: JsonResponse;
+      try {
+        response = await requestJson({
+          socketPath: this.socketPath,
+          path: '/v1/probes/x',
+          method: 'POST',
+          body: { schemaVersion: 1 },
+          timeoutMs: this.timeoutMs,
+          maximumResponseBytes: 32 * 1024,
+        });
+      } catch (error) {
+        throw new GrokBuildExecutionError('RUNNER_UNAVAILABLE', errorMessage(error));
+      }
+      const parsed = hostGrokProbeResponseSchema.safeParse(response.body);
+      if (!parsed.success || response.statusCode !== 200 || !parsed.data.ok) {
+        if (parsed.success && !parsed.data.ok && parsed.data.failureClass === 'RUNNER_CAPACITY') {
+          throw new GrokBuildExecutionError('RUNNER_CAPACITY', 'Host Grok runner is at capacity');
+        }
+        throw new GrokBuildExecutionError(
+          'RUNNER_NOT_READY',
+          'Host Grok runner is not ready after the X probe failed',
+        );
+      }
+      if (parsed.data.grokVersion !== this.expectedVersion) {
+        throw new GrokBuildExecutionError(
+          'GROK_VERSION_MISMATCH',
+          `Expected Grok Build ${this.expectedVersion}, observed ${parsed.data.grokVersion}`,
+        );
+      }
+      if (
+        this.expectedRunnerReleaseSha &&
+        this.expectedRunnerReleaseSha !== 'unknown' &&
+        parsed.data.runnerReleaseSha !== this.expectedRunnerReleaseSha
+      ) {
+        throw new GrokBuildExecutionError(
+          'RUNNER_RELEASE_MISMATCH',
+          `Expected runner release ${this.expectedRunnerReleaseSha}, observed ${parsed.data.runnerReleaseSha}`,
+        );
+      }
+    })();
+    this.probeCheck = probe;
+    try {
+      await probe;
+    } finally {
+      if (this.probeCheck === probe) this.probeCheck = null;
     }
   }
 

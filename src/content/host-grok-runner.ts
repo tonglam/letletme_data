@@ -437,6 +437,13 @@ export async function startHostGrokRunner(): Promise<{
       inFlightExecutions.set(executionRequest.runId, { requestHash, promise: executionPromise });
       try {
         const result = await executionPromise;
+        if (result.ok) {
+          // A successful, trace-verified X execution is itself a fresh provider
+          // liveness signal. The dedicated OfficialFPL probe still runs when
+          // the runner has been idle long enough for this signal to expire.
+          lastXProbeAt = new Date().toISOString();
+          lastXProbeOk = true;
+        }
         executions.set(executionRequest.runId, {
           requestHash,
           response: result,

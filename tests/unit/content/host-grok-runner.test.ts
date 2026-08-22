@@ -25,10 +25,12 @@ async function fakeRunner(input: {
   failBeforeStart?: boolean;
   metadataMismatch?: boolean;
   probeReady?: boolean;
+  probeRefreshSucceeds?: boolean;
 }) {
   const directory = mkdtempSync(join(tmpdir(), 'host-grok-runner-test-'));
   const socketPath = join(directory, 'runner.sock');
   const releaseSha = input.releaseSha ?? 'abc1234';
+  let probeReady = input.probeReady !== false;
   const server = createServer((request, response) => {
     const send = (status: number, value: unknown) => {
       const body = JSON.stringify(value);
@@ -39,20 +41,43 @@ async function fakeRunner(input: {
       response.end(body);
     };
     if (request.method === 'GET' && request.url === '/v1/health') {
-      send(200, {
+      send(probeReady ? 200 : 503, {
         ok: true,
-        ready: true,
+        ready: probeReady,
         runnerReleaseSha: releaseSha,
         grokVersion: '1.0.5',
         sandbox: 'strict',
-        lastXProbeAt: input.probeReady === false ? null : new Date().toISOString(),
-        lastXProbeOk: input.probeReady === false ? null : true,
+        lastXProbeAt: probeReady ? new Date().toISOString() : null,
+        lastXProbeOk: probeReady ? true : null,
       });
       return;
     }
     const chunks: Buffer[] = [];
     request.on('data', (chunk: Buffer) => chunks.push(chunk));
     request.on('end', () => {
+      if (request.method === 'POST' && request.url === '/v1/probes/x') {
+        if (input.probeRefreshSucceeds === true) {
+          probeReady = true;
+          send(200, {
+            ok: true,
+            runnerReleaseSha: releaseSha,
+            grokVersion: '1.0.5',
+            toolName: 'x_user_search',
+            userCount: 1,
+          });
+        } else {
+          send(503, {
+            ok: false,
+            runnerReleaseSha: releaseSha,
+            grokVersion: '1.0.5',
+            toolName: 'x_user_search',
+            failureClass: 'X_PROBE_FAILED',
+            errorDigest: 'e'.repeat(64),
+            providerProcessStarted: false,
+          });
+        }
+        return;
+      }
       const parsed = hostGrokExecutionRequestV1Schema.parse(
         JSON.parse(Buffer.concat(chunks).toString()),
       );
@@ -226,6 +251,17 @@ describe('host Grok runner client contract', () => {
       timeoutMs: 2_000,
     });
     await expect(client.assertVersion()).rejects.toThrow('not ready');
+  });
+
+  test('refreshes a stale probe before executing the next X request', async () => {
+    const runner = await fakeRunner({ probeReady: false, probeRefreshSucceeds: true });
+    const client = new HostGrokRunnerClient({
+      socketPath: runner.socketPath,
+      expectedVersion: '1.0.5',
+      expectedRunnerReleaseSha: 'abc1234',
+      timeoutMs: 2_000,
+    });
+    await expect(client.assertVersion()).resolves.toBeUndefined();
   });
 
   test('commits provider budget when the host runner reports a failed tool after spawn', async () => {
