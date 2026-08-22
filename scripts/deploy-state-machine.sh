@@ -110,8 +110,13 @@ start_runtime_services() {
   compose up -d --remove-orphans --no-build api || {
     echo 'API start failed; preserving scheduler/worker/content-worker for recovery' >&2
     port_3000_owner >&2
-    assert_port_3000_free
+    # A failed Docker bind can leave the exact Compose API container in
+    # `created` state while its network namespace/port proxy is being torn
+    # down. Remove that recoverable container before deciding that a listener
+    # is external; otherwise the safety check prevents the retry from ever
+    # recreating the required host port mapping.
     remove_exact_stopped_container api
+    assert_port_3000_free
     wait_for_port_3000_free 30 2
     compose up -d --remove-orphans --no-build api
   }
