@@ -29,6 +29,7 @@ import {
   contentSourceTranscriptSegments,
 } from '../../src/db/schemas/content.schema';
 import { databaseSingleton, getDb } from '../../src/db/singleton';
+import { resetBriefingAcquisitionState } from './helpers/briefing-acquisition-reset';
 
 afterAll(async () => {
   await databaseSingleton.disconnect();
@@ -49,6 +50,7 @@ const flags = {
 };
 
 test('discovers, gates and resumes one asynchronous YouTube transcript without resubmission', async () => {
+  await resetBriefingAcquisitionState();
   const bundle = await loadBriefingManifest();
   await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'youtube-transcript-test' });
   const db = await getDb();
@@ -290,6 +292,7 @@ test('discovers, gates and resumes one asynchronous YouTube transcript without r
 });
 
 test('plans the second native attempt and reclaims a stale triggered lease', async () => {
+  await resetBriefingAcquisitionState();
   const bundle = await loadBriefingManifest();
   await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'youtube-retry-test' });
   const db = await getDb();

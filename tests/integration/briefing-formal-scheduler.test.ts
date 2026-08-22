@@ -18,12 +18,14 @@ import {
   contentSourceSchedules,
 } from '../../src/db/schemas/content.schema';
 import { databaseSingleton, getDb } from '../../src/db/singleton';
+import { resetBriefingAcquisitionState } from './helpers/briefing-acquisition-reset';
 
 afterAll(async () => {
   await databaseSingleton.disconnect();
 });
 
 test('concurrent formal schedulers claim each due feed exactly once with runId-only jobs', async () => {
+  await resetBriefingAcquisitionState();
   const bundle = await loadBriefingManifest();
   const expectedFeedCount =
     bundle.coverage.endpointCounts.RSS_ATOM +
@@ -34,6 +36,7 @@ test('concurrent formal schedulers claim each due feed exactly once with runId-o
   await db
     .update(contentSourceSchedules)
     .set({
+      status: 'active',
       nextDueAt: new Date(Date.now() - 60_000),
       leaseOwner: null,
       leaseExpiresAt: null,

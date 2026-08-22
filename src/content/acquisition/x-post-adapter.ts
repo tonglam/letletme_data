@@ -33,11 +33,13 @@ export type ResolvedSemanticXAuthor = Readonly<{
 
 export class XPostQualityError extends Error {
   readonly failureClass: string;
+  readonly rejections: readonly XPostRejection[];
 
-  constructor(failureClass: string, message: string) {
+  constructor(failureClass: string, message: string, rejections: readonly XPostRejection[] = []) {
     super(message);
     this.name = 'XPostQualityError';
     this.failureClass = failureClass;
+    this.rejections = rejections;
   }
 }
 
@@ -249,6 +251,7 @@ function adaptMappedPosts(input: {
     throw new XPostQualityError(
       'X_ALL_POSTS_REJECTED',
       `All ${rejections.length} Grok posts failed deterministic validation`,
+      rejections,
     );
   }
   const saturated = input.execution.posts.length >= input.limit;

@@ -24,12 +24,14 @@ import {
   contentSourceSchedules,
 } from '../../src/db/schemas/content.schema';
 import { databaseSingleton, getDb } from '../../src/db/singleton';
+import { resetBriefingAcquisitionState } from './helpers/briefing-acquisition-reset';
 
 afterAll(async () => {
   await databaseSingleton.disconnect();
 });
 
 test('executes a claimed feed run from only its run ID and commits the formal result atomically', async () => {
+  await resetBriefingAcquisitionState();
   const bundle = await loadBriefingManifest();
   await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'formal-http-worker-test' });
   const db = await getDb();

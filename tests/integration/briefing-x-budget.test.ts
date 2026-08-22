@@ -20,12 +20,14 @@ import {
   contentSourceEndpoints,
 } from '../../src/db/schemas/content.schema';
 import { databaseSingleton, getDb } from '../../src/db/singleton';
+import { resetBriefingAcquisitionState } from './helpers/briefing-acquisition-reset';
 
 afterAll(async () => {
   await databaseSingleton.disconnect();
 });
 
 test('atomically defers X work beyond the rolling cap and commits only executed calls', async () => {
+  await resetBriefingAcquisitionState();
   const bundle = await loadBriefingManifest();
   await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'x-budget-test' });
   const db = await getDb();

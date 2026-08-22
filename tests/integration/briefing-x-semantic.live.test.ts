@@ -17,8 +17,8 @@ import { runFormalXWorker } from '../../src/content/workers/formal-x.worker';
 import {
   contentAcquisitionProviderTraces,
   contentAcquisitionRuns,
+  contentSourceObservations,
   contentSourcePartitions,
-  contentSourceReceipts,
   contentSourceSchedules,
   contentSources,
 } from '../../src/db/schemas/content.schema';
@@ -56,6 +56,9 @@ test.skipIf(process.env.RUN_LIVE_X !== '1')(
         nextDueAt: new Date(Date.now() - 60_000),
         leaseOwner: null,
         leaseExpiresAt: null,
+        failureStreak: 0,
+        circuitState: 'CLOSED',
+        probeAfter: null,
       })
       .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
 
@@ -89,10 +92,10 @@ test.skipIf(process.env.RUN_LIVE_X !== '1')(
       .select({ operation: contentAcquisitionProviderTraces.operation })
       .from(contentAcquisitionProviderTraces)
       .where(eq(contentAcquisitionProviderTraces.runId, claimed.runId));
-    const receipts = await db
-      .select({ receiptId: contentSourceReceipts.receiptId })
-      .from(contentSourceReceipts)
-      .where(eq(contentSourceReceipts.runId, claimed.runId));
+    const acceptedObservations = await db
+      .select({ receiptId: contentSourceObservations.receiptId })
+      .from(contentSourceObservations)
+      .where(eq(contentSourceObservations.runId, claimed.runId));
     const discovered = await db
       .select({ status: contentSources.status })
       .from(contentSources)
@@ -102,7 +105,10 @@ test.skipIf(process.env.RUN_LIVE_X !== '1')(
       (terminal?.runMetrics as { rawPostEvidenceAvailable?: boolean })?.rawPostEvidenceAvailable,
     ).toBe(false);
     expect(traces).toEqual([{ operation: 'x_semantic_search' }]);
-    expect(receipts).toHaveLength(result.receiptCount);
+    expect(acceptedObservations).toHaveLength(result.receiptCount + result.rejectedCount);
+    expect(
+      acceptedObservations.filter((observation) => observation.receiptId !== null),
+    ).toHaveLength(result.receiptCount);
     expect(discovered.every((source) => source.status === 'observed')).toBe(true);
   },
   300_000,

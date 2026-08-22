@@ -6,6 +6,7 @@ import {
   adaptGrokBuildPosts,
   adaptGrokBuildSemanticPosts,
   prevalidateGrokBuildPostsForAuthorResolution,
+  XPostQualityError,
   xSnowflakeTimestamp,
 } from '../../../src/content/acquisition/x-post-adapter';
 
@@ -111,13 +112,26 @@ describe('Grok Build X post adapter gates', () => {
   });
 
   test('fails the run when every returned post is outside the persisted window', () => {
-    expect(() =>
+    try {
       adaptGrokBuildPosts({
         request,
         execution: execution([{ ...posts[0], createdAt: '2026-08-21T20:00:00Z' }]),
         checkedAt: new Date('2026-08-21T21:16:00.000Z'),
-      }),
-    ).toThrow('All 1 Grok posts failed deterministic validation');
+      });
+      throw new Error('Expected all-rejected adapter failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(XPostQualityError);
+      expect(error).toMatchObject({
+        failureClass: 'X_ALL_POSTS_REJECTED',
+        rejections: [
+          {
+            endpointKey: 'official-fpl-x',
+            externalItemId: posts[0].postId,
+            reasonCode: 'X_POST_OUTSIDE_WINDOW',
+          },
+        ],
+      });
+    }
   });
 
   test('does not resolve semantic authors for posts that fail deterministic post gates', () => {

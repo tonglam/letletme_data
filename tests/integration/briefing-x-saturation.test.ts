@@ -31,6 +31,7 @@ import {
   contentSourceSchedules,
 } from '../../src/db/schemas/content.schema';
 import { databaseSingleton, getDb } from '../../src/db/singleton';
+import { resetBriefingAcquisitionState } from './helpers/briefing-acquisition-reset';
 
 const X_SNOWFLAKE_EPOCH_MS = 1_288_834_974_657n;
 
@@ -92,6 +93,7 @@ function saturatedExecution(request: XToolRequestV1): GrokBuildExecutionResult {
 }
 
 test('creates one bounded saturation follow-up and turns a second saturation into a GAP', async () => {
+  await resetBriefingAcquisitionState();
   const bundle = await loadBriefingManifest();
   const budgetPolicy = compileXBudgetPolicy({
     coverage: bundle.coverage,

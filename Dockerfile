@@ -31,7 +31,8 @@ FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b4
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN apk upgrade --no-cache libcrypto3 libssl3
+RUN apk upgrade --no-cache libcrypto3 libssl3 \
+    && apk add --no-cache nodejs
 
 # Copy runtime files
 COPY --from=build /app/package.json ./
@@ -51,6 +52,15 @@ RUN addgroup -S -g 1001 appuser \
     && mkdir -p /home/appuser/.grok /tmp \
     && chown -R appuser:appuser /app /home/appuser
 USER appuser
+ENV HOME=/home/appuser \
+    GROK_HOME=/home/appuser/.grok
+
+# The npm entrypoint needs Node to unpack the pinned native binary. Keep this
+# build-time smoke check under the same UID and HOME used by the production
+# content worker; real X runs are additionally constrained by its unprivileged,
+# read-only Docker service and the executor's pinned tool-removal contract.
+RUN test "$(GROK_NO_AUTO_UPDATE=1 /app/node_modules/.bin/grok inspect --json | \
+      node -e 'let value=""; process.stdin.on("data", chunk => value += chunk); process.stdin.on("end", () => { const parsed = JSON.parse(value); process.stdout.write(parsed.grokVersion); });')" = "1.0.5"
 
 EXPOSE 3000
 

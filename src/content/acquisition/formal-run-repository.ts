@@ -10,6 +10,7 @@ import {
   contentSourceEndpoints,
   contentSourcePartitionMembers,
   contentSourcePartitions,
+  contentSourceObservations,
   contentSourceSchedules,
   contentSources,
 } from '../../db/schemas/content.schema';
@@ -71,6 +72,24 @@ export type BegunFormalRun = Readonly<{
   providerUnits: number;
   providerTraceSequence: number;
   status: 'RUNNING' | 'TERMINAL';
+}>;
+
+export type FormalRunProviderEvidence = Readonly<{
+  provider: 'grok-build';
+  operation: string;
+  requestMetadataHash: string;
+  responseMetadataHash: string;
+  providerJobIdHash: string;
+  providerUnits: 1;
+  terminalState: string;
+  runMetrics: Readonly<Record<string, unknown>>;
+}>;
+
+export type FormalRunFailureRejection = Readonly<{
+  endpointKey: string;
+  externalItemId: string;
+  reasonCode: string;
+  nativeItemHash?: string | null;
 }>;
 
 type JsonRecord = Record<string, unknown>;
@@ -238,8 +257,12 @@ function requestWindow(input: {
     const defaultStart = new Date(windowEnd.getTime() - input.lookbackMinutes * 60_000);
     const overlapped = checkpointEnd ? new Date(checkpointEnd.getTime() - 120_000) : defaultStart;
     const maximumStart = new Date(windowEnd.getTime() - 24 * 60 * 60_000);
+    const boundedStart = overlapped < maximumStart ? maximumStart : overlapped;
+    if (input.adapterKind === 'X_SEMANTIC') {
+      boundedStart.setUTCHours(0, 0, 0, 0);
+    }
     return {
-      windowStart: overlapped < maximumStart ? maximumStart : overlapped,
+      windowStart: boundedStart,
       windowEnd,
     };
   }
@@ -935,6 +958,9 @@ export async function failFormalRun(input: {
   failureClass: string;
   errorSummary: string;
   retryDelayMs?: number;
+  providerEvidence?: FormalRunProviderEvidence;
+  providerProcessStarted?: boolean;
+  rejections?: readonly FormalRunFailureRejection[];
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -951,6 +977,7 @@ export async function failFormalRun(input: {
         adapterKind: contentAcquisitionRuns.adapterKind,
         windowStart: contentAcquisitionRuns.windowStart,
         windowEnd: contentAcquisitionRuns.windowEnd,
+        requestSnapshot: contentAcquisitionRuns.requestSnapshot,
         status: contentAcquisitionRuns.status,
       })
       .from(contentAcquisitionRuns)
@@ -959,7 +986,106 @@ export async function failFormalRun(input: {
       .limit(1);
     const run = rows[0];
     if (!run || !['PENDING', 'RUNNING'].includes(run.status)) return false;
-    await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+    if (input.rejections?.length && !input.providerEvidence) {
+      throw new Error('Rejected provider items require persisted provider evidence');
+    }
+    const request = parseFormalRunRequestV1(run.requestSnapshot);
+    const providerAttempted = input.providerEvidence !== undefined || input.providerProcessStarted;
+    if (input.providerEvidence) {
+      if (run.adapterKind !== 'X_ACCOUNT' && run.adapterKind !== 'X_SEMANTIC') {
+        throw new Error('Grok provider evidence is only valid for formal X runs');
+      }
+      if (
+        !('toolRequest' in request) ||
+        request.toolRequest.toolName !== input.providerEvidence.operation ||
+        !/^[0-9a-f]{64}$/.test(input.providerEvidence.requestMetadataHash) ||
+        !/^[0-9a-f]{64}$/.test(input.providerEvidence.responseMetadataHash) ||
+        !/^[0-9a-f]{64}$/.test(input.providerEvidence.providerJobIdHash) ||
+        !input.providerEvidence.terminalState.trim()
+      ) {
+        throw new Error('Failed formal run has invalid provider evidence');
+      }
+      const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
+      if (committedReservations === 0) {
+        throw new Error('Billed formal X failure has no reserved budget');
+      }
+      await tx.insert(contentAcquisitionProviderTraces).values({
+        traceId: randomUUID(),
+        runId: input.runId,
+        sequence: 0,
+        provider: input.providerEvidence.provider,
+        operation: input.providerEvidence.operation,
+        requestMetadataHash: input.providerEvidence.requestMetadataHash,
+        responseMetadataHash: input.providerEvidence.responseMetadataHash,
+        providerJobIdHash: input.providerEvidence.providerJobIdHash,
+        providerUnits: String(input.providerEvidence.providerUnits),
+        terminalState: input.providerEvidence.terminalState,
+      });
+    } else if (input.providerProcessStarted) {
+      const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
+      if (committedReservations === 0) {
+        throw new Error('Started formal X provider process has no reserved budget');
+      }
+    } else {
+      await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+    }
+    if (input.rejections?.length) {
+      const immutableEndpoints =
+        'endpoint' in request ? [request.endpoint] : request.partition.members;
+      const immutableEndpointByKey = new Map(
+        immutableEndpoints.map((endpoint) => [endpoint.endpointKey, endpoint]),
+      );
+      const rejectionKeys = [
+        ...new Set(input.rejections.map((rejection) => rejection.endpointKey)),
+      ];
+      const endpointRows = await tx
+        .select({
+          endpointId: contentSourceEndpoints.endpointId,
+          endpointKey: contentSourceEndpoints.endpointKey,
+          sourceId: contentSourceEndpoints.sourceId,
+        })
+        .from(contentSourceEndpoints)
+        .where(inArray(contentSourceEndpoints.endpointKey, rejectionKeys));
+      const endpointByKey = new Map(
+        endpointRows.map((endpoint) => [endpoint.endpointKey, endpoint]),
+      );
+      if (endpointRows.length !== rejectionKeys.length) {
+        throw new Error('Failed formal run rejection references an unknown endpoint');
+      }
+      const uniqueItems = new Set<string>();
+      for (const rejection of input.rejections) {
+        const endpoint = endpointByKey.get(rejection.endpointKey);
+        const immutableEndpoint = immutableEndpointByKey.get(rejection.endpointKey);
+        if (
+          !endpoint ||
+          !immutableEndpoint ||
+          endpoint.endpointId !== immutableEndpoint.endpointId ||
+          endpoint.sourceId !== immutableEndpoint.sourceId
+        ) {
+          throw new Error('Failed formal run rejection escaped its immutable request snapshot');
+        }
+        if (!rejection.externalItemId.trim() || !rejection.reasonCode.trim()) {
+          throw new Error('Failed formal run rejection is incomplete');
+        }
+        const uniqueItem = `${endpoint.endpointId}\u001f${rejection.externalItemId}`;
+        if (uniqueItems.has(uniqueItem)) {
+          throw new Error('Failed formal run contains duplicate rejection observations');
+        }
+        uniqueItems.add(uniqueItem);
+        await tx.insert(contentSourceObservations).values({
+          observationId: randomUUID(),
+          runId: input.runId,
+          endpointId: endpoint.endpointId,
+          externalItemId: rejection.externalItemId,
+          receiptId: null,
+          receiptRevisionId: null,
+          outcome: 'REJECTED',
+          nativeItemHash: rejection.nativeItemHash ?? null,
+          reasonCode: rejection.reasonCode,
+          observedAt: dbNow,
+        });
+      }
+    }
     let failureStreak = 0;
     let scheduleCheckpoint: JsonRecord = {};
     if (run.scheduleId) {
@@ -985,12 +1111,24 @@ export async function failFormalRun(input: {
       throw new Error('Exhausted X retry has no immutable acquisition window');
     }
     const failureClass = input.failureClass.slice(0, 200);
+    const errorSummary = input.errorSummary.replace(/\s+/g, ' ').trim().slice(0, 1_000);
     await tx
       .update(contentAcquisitionRuns)
       .set({
         status: exhaustedXWindow ? 'GAP' : 'FAILED',
         failureClass,
-        errorSummary: input.errorSummary.replace(/\s+/g, ' ').trim().slice(0, 1_000),
+        failureDetailsHash: sha256CanonicalJson({ failureClass, errorSummary }),
+        errorSummary,
+        rejectedCount: input.rejections?.length ?? 0,
+        provider: providerAttempted ? 'grok-build' : undefined,
+        providerUnits: providerAttempted ? '1' : undefined,
+        xCallCount: providerAttempted ? 1 : 0,
+        traceVerified: input.providerEvidence !== undefined,
+        runMetrics:
+          input.providerEvidence?.runMetrics ??
+          (input.providerProcessStarted
+            ? { providerProcessStarted: true, providerTraceVerified: false }
+            : {}),
         completedAt: dbNow,
         leaseExpiresAt: null,
         checkpointAdvanced: exhaustedXWindow,

@@ -344,11 +344,31 @@ export async function persistAcquisitionResult(
       if (run.adapterKind !== 'X_SEMANTIC') {
         throw new Error('Semantic author evidence is only valid for X_SEMANTIC runs');
       }
-      const evidenceKeys = Object.keys(input.semanticAuthorEvidence).sort();
-      if (sha256CanonicalJson(evidenceKeys) !== sha256CanonicalJson(requestedEndpointKeys)) {
-        throw new Error('Semantic author evidence must cover exactly the returned endpoints');
+      if (!('partition' in request) || request.partition.partitionId !== run.partitionId) {
+        throw new Error('Semantic partition run does not match its immutable request snapshot');
       }
-      for (const endpoint of endpointRows) {
+      const returnedEndpointKeys = [...new Set(batches.map((batch) => batch.endpointKey))].sort();
+      const evidenceKeys = Object.keys(input.semanticAuthorEvidence).sort();
+      if (sha256CanonicalJson(evidenceKeys) !== sha256CanonicalJson(returnedEndpointKeys)) {
+        throw new Error('Semantic author evidence must cover exactly the accepted endpoints');
+      }
+      const immutableSemanticKeys = new Set(
+        request.partition.members.map((member) => member.endpointKey),
+      );
+      for (const rejection of input.rejections ?? []) {
+        if (
+          !input.semanticAuthorEvidence[rejection.endpointKey] &&
+          !immutableSemanticKeys.has(rejection.endpointKey)
+        ) {
+          throw new Error(
+            'Semantic rejection escaped resolved authors and its immutable partition',
+          );
+        }
+      }
+      for (const endpointKey of evidenceKeys) {
+        const endpoint = endpointByKey.get(endpointKey);
+        if (!endpoint)
+          throw new Error(`Semantic evidence references unknown endpoint ${endpointKey}`);
         const evidence = input.semanticAuthorEvidence[endpoint.endpointKey];
         const locator =
           endpoint.locator &&
@@ -365,6 +385,19 @@ export async function persistAcquisitionResult(
           handle.toLowerCase() !== evidence.authorHandle.toLowerCase()
         ) {
           throw new Error('Semantic result is not bound to its resolved X author endpoint');
+        }
+      }
+      for (const endpoint of endpointRows) {
+        if (!immutableSemanticKeys.has(endpoint.endpointKey)) continue;
+        const immutableEndpoint = immutableEndpointByKey.get(endpoint.endpointKey);
+        if (
+          !immutableEndpoint ||
+          endpoint.endpointId !== immutableEndpoint.endpointId ||
+          endpoint.sourceId !== immutableEndpoint.sourceId ||
+          endpoint.sourceKey !== immutableEndpoint.sourceKey ||
+          endpoint.adapterKind !== 'X_SEMANTIC'
+        ) {
+          throw new Error('Semantic rejection endpoint escaped its immutable partition snapshot');
         }
       }
     } else if (run.partitionId) {
@@ -967,8 +1000,8 @@ export async function persistAcquisitionResult(
     }
 
     if (input.acquisitionGap) {
-      if (input.state !== 'GAP' && input.state !== 'SATURATED') {
-        throw new Error('Acquisition gap requires terminal GAP or SATURATED state');
+      if (input.state !== 'GAP' && input.state !== 'PARTIAL' && input.state !== 'SATURATED') {
+        throw new Error('Acquisition gap requires terminal PARTIAL, GAP, or SATURATED state');
       }
       const gapStart = new Date(input.acquisitionGap.windowStart);
       const gapEnd = new Date(input.acquisitionGap.windowEnd);
@@ -1018,7 +1051,10 @@ export async function persistAcquisitionResult(
         dbNow,
       });
     }
-    await commitRunBudgets({ tx, runId: input.runId, dbNow });
+    const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
+    if (input.providerResult?.provider === 'grok-build' && committedReservations === 0) {
+      throw new Error('Attested formal X result has no reserved budget');
+    }
 
     let checkpointAdvanced = false;
     if (run.scheduleId) {
@@ -1069,6 +1105,12 @@ export async function persistAcquisitionResult(
           input.providerResult?.providerUnits === undefined
             ? undefined
             : String(input.providerResult.providerUnits),
+        xCallCount:
+          input.providerTraces?.filter((trace) => trace.provider === 'grok-build').length ?? 0,
+        traceVerified:
+          input.providerTraces?.some(
+            (trace) => trace.provider === 'grok-build' && trace.terminalState === 'ATTESTED_FINAL',
+          ) ?? false,
         checkpointAdvanced,
         completedAt: dbNow,
         leaseExpiresAt: null,

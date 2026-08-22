@@ -27,6 +27,7 @@ import {
   contentSources,
 } from '../../src/db/schemas/content.schema';
 import { databaseSingleton, getDb } from '../../src/db/singleton';
+import { resetBriefingAcquisitionState } from './helpers/briefing-acquisition-reset';
 
 afterAll(async () => {
   await databaseSingleton.disconnect();
@@ -34,6 +35,7 @@ afterAll(async () => {
 
 describe('Briefing source registry reconciliation', () => {
   test('atomically applies the manifest and makes the same hash an unchanged no-op', async () => {
+    await resetBriefingAcquisitionState();
     const bundle = await loadBriefingManifest();
     const first = await reconcileBriefingSourceRegistry({
       bundle,
@@ -87,6 +89,9 @@ describe('Briefing source registry reconciliation', () => {
   });
 
   test('atomically creates, reuses and revises a stable Receipt', async () => {
+    await resetBriefingAcquisitionState();
+    const bundle = await loadBriefingManifest();
+    await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'receipt-revision-test' });
     const db = await getDb();
     const endpointRows = await db
       .select({

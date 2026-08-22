@@ -26,6 +26,7 @@ import {
   contentSourceTranscriptSegments,
 } from '../../src/db/schemas/content.schema';
 import { databaseSingleton, getDb } from '../../src/db/singleton';
+import { resetBriefingAcquisitionState } from './helpers/briefing-acquisition-reset';
 
 afterAll(async () => {
   await databaseSingleton.disconnect();
@@ -72,6 +73,7 @@ async function claimPodcastFeed() {
 }
 
 test('upgrades Podcast receipts from pending to publisher and Hermes timestamped transcripts', async () => {
+  await resetBriefingAcquisitionState();
   const bundle = await loadBriefingManifest();
   await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'podcast-transcript-test' });
   const db = await getDb();

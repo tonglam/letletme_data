@@ -66,7 +66,14 @@ async function failIdentityResult(input: {
   execution: GrokBuildExecutionResult;
 }): Promise<IdentityTerminalResult> {
   const summary = sanitizeError(input.summary);
-  await commitXRunBudgets({ tx: input.tx, runId: input.runId, dbNow: input.dbNow });
+  const committedReservations = await commitXRunBudgets({
+    tx: input.tx,
+    runId: input.runId,
+    dbNow: input.dbNow,
+  });
+  if (committedReservations === 0) {
+    throw new Error('Attested X identity result has no reserved budget');
+  }
   await insertProviderTrace({
     tx: input.tx,
     runId: input.runId,
@@ -95,6 +102,8 @@ async function failIdentityResult(input: {
       failureDetailsHash: sha256CanonicalJson({ failureClass: input.failureClass, summary }),
       provider: 'grok-build',
       providerUnits: '1',
+      xCallCount: 1,
+      traceVerified: true,
       resultCount: 0,
       rejectedCount: input.execution.users.length,
       runMetrics: {
@@ -235,7 +244,10 @@ export async function persistXIdentityResult(input: {
       execution: input.execution,
       terminalState: 'VERIFIED',
     });
-    await commitXRunBudgets({ tx, runId: input.runId, dbNow });
+    const committedReservations = await commitXRunBudgets({ tx, runId: input.runId, dbNow });
+    if (committedReservations === 0) {
+      throw new Error('Verified X identity result has no reserved budget');
+    }
     await tx
       .update(contentSourceEndpoints)
       .set({
@@ -257,6 +269,8 @@ export async function persistXIdentityResult(input: {
         status: 'COMPLETED',
         provider: 'grok-build',
         providerUnits: '1',
+        xCallCount: 1,
+        traceVerified: true,
         resultCount: 1,
         rejectedCount: 0,
         runMetrics: {
@@ -293,6 +307,8 @@ export async function failXIdentityRun(input: {
   runId: string;
   failureClass: string;
   errorSummary: string;
+  providerProcessStarted?: boolean;
+  providerExecution?: GrokBuildExecutionResult;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -302,6 +318,7 @@ export async function failXIdentityRun(input: {
     const rows = await tx
       .select({
         endpointId: contentAcquisitionRuns.endpointId,
+        requestSnapshot: contentAcquisitionRuns.requestSnapshot,
         status: contentAcquisitionRuns.status,
       })
       .from(contentAcquisitionRuns)
@@ -311,7 +328,31 @@ export async function failXIdentityRun(input: {
     const run = rows[0];
     if (!run?.endpointId || !['PENDING', 'RUNNING'].includes(run.status)) return false;
     const summary = sanitizeError(input.errorSummary);
-    await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+    const request = parseFormalRunRequestV1(run.requestSnapshot);
+    if (request.jobKind !== 'X_IDENTITY' || request.toolRequest.toolName !== 'x_user_search') {
+      throw new Error('Failed X identity run has an invalid immutable request');
+    }
+    if (input.providerExecution && input.providerExecution.toolName !== 'x_user_search') {
+      throw new Error('Failed X identity provider evidence used the wrong tool');
+    }
+    const providerAttempted =
+      input.providerExecution !== undefined || input.providerProcessStarted === true;
+    if (providerAttempted) {
+      const committedReservations = await commitXRunBudgets({ tx, runId: input.runId, dbNow });
+      if (committedReservations === 0) {
+        throw new Error('Started X identity provider process has no reserved budget');
+      }
+    } else {
+      await releaseXRunBudgets({ tx, runId: input.runId, dbNow });
+    }
+    if (input.providerExecution) {
+      await insertProviderTrace({
+        tx,
+        runId: input.runId,
+        execution: input.providerExecution,
+        terminalState: 'ATTESTED_PROCESSING_FAILED',
+      });
+    }
     await tx
       .update(contentSourceEndpoints)
       .set({
@@ -337,6 +378,23 @@ export async function failXIdentityRun(input: {
           failureClass: input.failureClass,
           summary,
         }),
+        provider: providerAttempted ? 'grok-build' : undefined,
+        providerUnits: providerAttempted ? '1' : undefined,
+        xCallCount: providerAttempted ? 1 : 0,
+        traceVerified: input.providerExecution !== undefined,
+        runMetrics: input.providerExecution
+          ? {
+              durationMs: Math.round(input.providerExecution.durationMs),
+              eventCount: input.providerExecution.eventCount,
+              inputTokens: input.providerExecution.inputTokens,
+              outputTokens: input.providerExecution.outputTokens,
+              totalCostUsd: input.providerExecution.totalCostUsd,
+              rawPostEvidenceAvailable: input.providerExecution.rawPostEvidenceAvailable,
+              traceHash: input.providerExecution.traceHash,
+            }
+          : providerAttempted
+            ? { providerProcessStarted: true, providerTraceVerified: false }
+            : {},
         completedAt: dbNow,
         leaseExpiresAt: null,
         checkpointAdvanced: false,

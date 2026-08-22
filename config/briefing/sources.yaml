@@ -35,7 +35,7 @@ entities:
     endpoints:
       - endpointKey: aston-villa-x
         adapterKind: X_ACCOUNT
-        locator: { handle: AVFCOfficial }
+        locator: { handle: AstonVilla }
         profileKey: x-club-v1
 
   - sourceKey: bournemouth
@@ -65,7 +65,7 @@ entities:
     endpoints:
       - endpointKey: brighton-x
         adapterKind: X_ACCOUNT
-        locator: { handle: OfficialBHAFC }
+        locator: { handle: BHAFC }
         profileKey: x-club-v1
 
   - sourceKey: chelsea
@@ -85,7 +85,7 @@ entities:
     endpoints:
       - endpointKey: coventry-x
         adapterKind: X_ACCOUNT
-        locator: { handle: Coventry_City }
+        locator: { handle: CoventryCityFC }
         profileKey: x-club-v1
 
   - sourceKey: crystal-palace

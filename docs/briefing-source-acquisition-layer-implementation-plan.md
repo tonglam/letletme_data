@@ -6,7 +6,8 @@
 > [Briefing 多来源采集案例验证 Checklist](./briefing-source-acquisition-checklist.md)
 > 的 2026-08-22 live probes 修订。当前实施分支已经加入 manifest、schema、queue、adapter、
 > ReceiptRevision、pipeline outbox、预算与 health view，但默认开关仍关闭；这些能力不能被描述为
-> 已部署或 production ready。真实 Supadata key、全量 X identity 和 VPS rollout 仍是明确 gate。
+> 已部署或 production ready。真实 Supadata key、目标镜像验证和 VPS rollout 仍是明确 gate；全量
+> X identity 与 partition sweep 已在隔离测试数据库完成。
 
 ## 1. 目标与边界
 
@@ -96,6 +97,12 @@ conflict gates。run 保存 `evidence_mode=GROK_ATTESTED_FINAL`，不能对外�
 如果未来业务必须取得 provider 原始帖子 payload，则需要更换为能返回 raw result 的接口，不能在
 现有 Grok Build 上伪造这项保证。
 
+Grok Build 1.0.5 的 strict sandbox 依赖 nested bubblewrap namespace；普通非特权 Docker 无法提供，
+而为此授予 `--privileged` 不可接受。目标运行合同改为外层非 root/read-only/cap-drop/
+no-new-privileges 容器、私有 `noexec,nosuid,nodev` 临时目录、sanitized child env、版本化
+`--disallowed-tools`/deny、`--no-subagents` 和启动 tool inventory gate。CLI 在容器内使用
+`--sandbox none`；这必须描述为“容器隔离 + 固定工具面”，不能描述为 Grok strict sandbox。
+
 ### 2.7 首次启用不是历史归档
 
 首次 poll 只为当前 Briefing 建立有界上下文，不导入 Endpoint 返回的全部历史。profile 必须同时
@@ -132,20 +139,26 @@ conflict gates。run 保存 `evidence_mode=GROK_ATTESTED_FINAL`，不能对外�
   `fullRolloutEligible=true`。
 - migration `0025`–`0029`、manifest reconcile、run/lease/budget/outbox、immutable
   ReceiptRevision、Observation、transcript segments 和 acquisition health views。
-- Grok Build 1.0.5 strict single-tool worker，以及 RSS/Atom、article、Podcast/Hermes、YouTube
+- Grok Build 1.0.5 single-tool-gated worker，以及 RSS/Atom、article、Podcast/Hermes、YouTube
   metadata 和 Supadata transcript adapter。
 - PostgreSQL 15.18 fresh database 上，正式 scheduler/worker 跑完 21 个非 X recurring Endpoint：
   19 个 `COMPLETED`、2 个 `CHECKED_NO_CHANGE`、0 个 `FAILED/EMPTY`，生成 155 个 Receipt、
   155 个 immutable ReceiptRevision、155 个 pipeline outbox event 和 29 个有界 triggered job。
 - OfficialFPL 两次有界扫描取得 20 条 Receipt，并在第二次饱和后写 `GAP` 停止；Aston Villa
   双记者 partition 用两次 identity call 加一次合并 keyword call 取得 6 条帖子，验证多账号只扫一次。
+- 83/83 X account Endpoint 已通过真实 `x_user_search` 绑定数字 user ID；Aston Villa、Brighton、
+  Coventry 的变更 handle 已按 stable Endpoint key 修正，没有静默换绑。
+- 全新 PostgreSQL 15 数据库的完整 X sweep 执行 44 个唯一 recurring partition 和 5 个 keyword
+  bounded follow-up：49/49 provider trace、0 failure、0 rejected，接收 177 条；状态为 26
+  `COMPLETED`、15 `EMPTY`、7 `SATURATED`、1 `GAP`，p50 19,226 ms、p95 47,903 ms，已知成本
+  USD 0.49916666。四个 semantic partition 为 2 `COMPLETED`、2 `SATURATED`。
 - 11 个真实 YouTube Atom feed 均通过 persisted channel ID identity gate；Podcast 的 16 MiB 专用
   body cap 已覆盖 13,294,897-byte Planet FPL feed，未放宽 RSS/YouTube 的 8 MiB cap。
 - recurring retry 会复用失败 run 的 exact request、window、source snapshot 和 endpoint snapshot；
   attempt 3 的 X window 明确落 `GAP`、写 gap record、推进该 X checkpoint 并打开 circuit。
 
-这些结果只证明当前 worktree 和测试基础设施可运行，不代表 VPS service、secret、全量 identity、
-长期吞吐或第二层消费已经启用。
+这些结果只证明当前 worktree 和测试基础设施可运行，不代表 VPS service、secret、目标 Docker
+镜像、长期吞吐或第二层消费已经启用。
 
 publication outbox/revalidation 必须继续独立运行。任何 manifest、Grok、feed、provider 或 Hermes
 故障都不能拖停已有 publication dispatcher。
@@ -313,7 +326,10 @@ X 继续使用“高流量单账号、低流量小分区”的原则，但 parti
 - `x_keyword_search` known-source query 只包含 author、时间和 `-is:retweet` 等噪音约束。
 - 四个 semantic profile 继续覆盖官方变化、availability、lineup/role、analysis/longform。
 - 当前实测单次 keyword 返回 10 条；parser 允许未来超过 10，当前 `10` 是 saturation threshold。
-- 返回 10 条只补一个更早窗口；补偿 run 再饱和则记录 gap，不无限翻页。
+- keyword 返回 10 条只补一个更早窗口；补偿 run 再饱和则记录 gap，不无限翻页。
+- semantic tool 只支持日期边界且结果不是可靠的时间分页流。persisted semantic window start 对齐
+  `fromDate` 的 UTC 00:00；返回 10 条直接保存并记录 `SEMANTIC_RESULT_CAP`，不追加第二次
+  semantic 搜索。
 
 ### 6.3 多维预算
 
@@ -349,7 +365,8 @@ Supadata generated 请求在提交前必须已知 video duration，并原子 res
 
 2026-08-22 两次本机 1.0.5 X shadow 的内部计量分别约为 USD 0.0148（10 条）和 USD 0.0177
 （2 条格式验证）。返回更少不代表调用更便宜，因此容量和成本优化以减少 Grok process/tool call
-次数为主，不为省输出条数拆小 query。
+次数为主，不为省输出条数拆小 query。完整 sweep 的 49 次调用已知成本 USD 0.49916666，p50
+19.2 秒、p95 47.9 秒；该短期样本用于 admission 基线，不代表长期账单上界。
 
 ### 6.4 Bootstrap policy
 
@@ -357,7 +374,8 @@ Supadata generated 请求在提交前必须已知 video duration，并原子 res
 
 | Profile | Lookback | Max metadata items | Max triggered content jobs |
 | --- | ---: | ---: | ---: |
-| X account/semantic | 6 小时 | 10，另按 saturation 规则补一次 | 0 |
+| X account | 6 小时 | 10；keyword 饱和时补一次 | 0 |
+| X semantic | 逻辑 6 小时，持久化起点按 UTC 日期对齐 | 10；不分页 | 0 |
 | News/publication RSS | 14 天 | 50 | 20 |
 | Substack public | 14 天 | 20 | 20 |
 | Podcast feed | 14 天 | 3 | 1 |
@@ -654,9 +672,19 @@ limit 与 persisted request 完全一致；成功 completion 必须发生在 fin
 不是 raw-result verification。模型 final 无法通过任一确定性 post gate 时整批失败；不能选择性
 修补或让另一个模型猜值。
 
-运行使用独立临时 cwd、参数数组、`shell=false`、输出上限和 240 秒 timeout。2026-08-22 本机
-Grok 1.0.5 已在 strict sandbox 下完成 single-tool shadow；VPS SSH 本轮不可达，之前宿主机仍为
-1.0.3 且缺 bubblewrap，因此 production container 的 1.0.5/auth/sandbox gate 仍未通过。
+运行使用独立临时 cwd、参数数组、`shell=false`、输出上限和 240 秒 timeout。child env 采用 allowlist，
+不继承 Data/Redis/Supabase/provider secret。启动 event 的工具 inventory 只能包含当前 1.0.5 已知的
+四个 residual command-control tool；它们再由 deny 和 `--no-subagents` 阻断。出现新增工具、版本
+漂移、第二次调用或 exact request 不匹配都 fail closed。
+
+同参数的对抗性实测还分别诱导 `run_terminal_command` 与 `spawn_subagent`；两次均由 permission
+policy 拒绝，且 attempt 会留在 streaming trace 中。预算边界也以真实 `grok -p` process launch 为
+准：launch 前失败释放 reservation；launch 后 timeout、损坏输出或 trace/schema 失败保守提交一次
+调用额度，run 保持 `FAILED + traceVerified=false`，不前移 checkpoint。
+
+2026-08-22 的完整隔离 sweep 已让 49/49 run 通过该合同。生产镜像增加 Node.js，并在 build stage
+执行 `grok inspect --json`；但由于本机 Docker daemon 在最终镜像 rebuild 时失去响应，当前仍需由
+CI/部署环境验证新镜像、既有 VPS auth 和实际 worker runtime，不能写成 production pass。
 
 ### 10.2 RSS/Atom/Substack
 
@@ -785,9 +813,10 @@ Hermes 集成必须是固定、认证、结构化的 service/CLI contract，不�
 
 `COMPLETED / CHECKED_NO_CHANGE / EMPTY` 才能正常推进对应 schedule checkpoint。`PARTIAL` 只有
 在 adapter 能证明请求窗口已完整检查、rejected item 不影响游标时推进；否则不推进。
-`SATURATED` 主 run 保存当前结果并推进主窗口，唯一 follow-up 负责较早窗口；follow-up 再饱和
-必须写 `GAP`。不同 stage 的 checkpoint 独立，feed discovery 成功不能替 transcript job 声称
-完成。
+keyword `SATURATED` 主 run 保存当前结果并推进主窗口，唯一 follow-up 负责较早窗口；follow-up
+再饱和必须写 `GAP`。semantic `SATURATED` 保存当前 10 条并写 `SEMANTIC_RESULT_CAP`，不伪造
+日期级搜索的时间分页。不同 stage 的 checkpoint 独立，feed discovery 成功不能替 transcript
+job 声称完成。
 
 `NOT_DUE` 只存在于 health projection，不创建假 run。
 
@@ -807,7 +836,8 @@ Hermes 集成必须是固定、认证、结构化的 service/CLI contract，不�
 - feed due lag 超过最大回看时仍处理当前 feed item，并记录无法保证的历史 gap。
 - bootstrap 有界跳过属于明确产品范围，不是 gap；bootstrap cutoff、上限和 skipped metrics 必须
   可查询。FML FPL 当前 feed 返回 590 集并跨 2015–2026，禁止首次启用时全量建 Receipt/STT job。
-- X saturation 只追补一次；两次连续主扫描低于 threshold 后清除 saturated acceleration。
+- X keyword saturation 只追补一次；semantic saturation 不追补。两次连续 keyword 主扫描低于
+  threshold 后清除 saturated acceleration。
 - article fetch 不可读保留 metadata Receipt 和明确 body availability；不能把导航文本当正文。
 - Podcast/YouTube pending transcript 不重复下载或提交；只轮询已持久化 provider job/chunk。
 - provider job terminal failure 永远不能转换成空 transcript。
@@ -888,7 +918,8 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 - Grok 四种显式 job kind、single-tool trace、query compiler 和 canonical X adapter。
 - `GROK_ATTESTED_FINAL` evidence mode、strict whole-result JSON 和确定性 post gates；不得声称
   raw-result verified。
-- 在 production container 修复/验证 Grok 1.0.5 与 bubblewrap。
+- 在 production container 验证 Grok 1.0.5、既有 auth、外层容器隔离、sanitized env 和固定工具面；
+  不为 nested bubblewrap 授予 privileged container。
 
 ### PR 3：Feed、Substack 与 article adapter
 
@@ -953,7 +984,7 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 
 ### 16.3 Live opt-in probes
 
-- X：四种 Build tools、严格 sandbox/version/trace。
+- X：四种 Build tools、版本、外层容器隔离、tool inventory/deny 和 single-call trace。
 - RSS：有 validator 和无 validator 各一个。
 - Substack、article、Podcast：使用 checklist 的真实案例。
 - YouTube native：`Xef37ImWz3M`，验证 105 segments canonical hash。
@@ -980,12 +1011,18 @@ bun run db:migrate:status
   `CHECKED_NO_CHANGE`、155 ReceiptRevision、0 `FAILED/EMPTY`。
 - 正式 X live：OfficialFPL 饱和主 run + 一次 bounded follow-up；双记者 partition 的 identity 与
   combined keyword 共 3 calls，均满足 single-tool/exact-request contract。
+- 83 个 X account Endpoint 完成真实 exact identity resolution；三项变更 handle 已修正后达到
+  83/83 verified。
+- 全新 PostgreSQL 15 上 44 个唯一 X partition + 5 个 keyword follow-up 全部完成：49/49 trace、
+  0 `FAILED`、0 rejected、177 ReceiptRevision/outbox；semantic 2 `COMPLETED` + 2 `SATURATED`，
+  两个 cap gap 均未触发无效 pagination。p50 19,226 ms、p95 47,903 ms，已知成本 USD
+  0.49916666。
 - 隔离数据库 integration：HTTP run-ID worker、Podcast publisher/Hermes、X semantic unknown-source
   attribution、YouTube async submit/poll/resume 全部通过。
 - retry integration：HTTP attempt 2 复用完整 immutable request/snapshots；X attempts 1–3 保持同一
   request hash，第三次为 `GAP` 且 checkpoint/circuit 状态与 gap evidence 一致。
 - YouTube provider integration 使用受控 response fixture；本机没有 Supadata/YouTube API key，不能
-  把它写成 live provider pass。VPS service、83 个 X identity 全量 resolution 和长期容量仍未验收。
+  把它写成 live provider pass。VPS service、目标 Docker image 和长期容量仍未验收。
 
 ## 17. 验收标准
 

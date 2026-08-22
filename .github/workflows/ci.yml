@@ -82,6 +82,18 @@ jobs:
           QUEUE_REDIS_DB: '10'
         run: bun run build
 
+      - name: Build production runtime image
+        run: docker build --target runner --tag letletme-data:ci .
+
+      - name: Verify production runtime identity and Grok CLI
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' letletme-data:ci)" = "appuser"
+          test "$(docker run --rm --entrypoint id letletme-data:ci -u)" = "1001"
+          docker run --rm --entrypoint sh letletme-data:ci -c \
+            'test "$HOME" = /home/appuser && test "$GROK_HOME" = /home/appuser/.grok'
+          docker run --rm --entrypoint sh letletme-data:ci -c \
+            "grok inspect --json | grep -Eq '\"grokVersion\"[[:space:]]*:[[:space:]]*\"1\\.0\\.5\"'"
+
       - name: Production dependency audit
         run: bun audit --production
 

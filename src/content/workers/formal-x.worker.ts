@@ -11,6 +11,7 @@ import { beginFormalRun, failFormalRun } from '../acquisition/formal-run-reposit
 import {
   GrokBuildExecutor,
   type GrokBuildExecutionResult,
+  type GrokBuildExecutionHooks,
 } from '../acquisition/grok-build-executor';
 import { persistAcquisitionResult } from '../acquisition/receipt-repository';
 import { resolveSemanticXAuthors } from '../acquisition/semantic-author-resolver';
@@ -18,10 +19,11 @@ import {
   adaptGrokBuildPosts,
   adaptGrokBuildSemanticPosts,
   prevalidateGrokBuildPostsForAuthorResolution,
+  XPostQualityError,
 } from '../acquisition/x-post-adapter';
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
 import type { XBudgetPolicy } from '../acquisition/x-budget';
-import { compileXKeywordRequest, compileXSemanticRequest } from '../acquisition/x-query-compiler';
+import { compileXKeywordRequest } from '../acquisition/x-query-compiler';
 import { getContentRuntimeFlags, type ContentRuntimeFlags } from '../config';
 import { getDb, type DbHandle } from '../../db/singleton';
 
@@ -47,6 +49,7 @@ export type FormalXWorkerResult = Readonly<{
 export type GrokBuildExecutorLike = Readonly<{
   execute: (
     request: Parameters<GrokBuildExecutor['execute']>[0],
+    hooks?: GrokBuildExecutionHooks,
   ) => Promise<GrokBuildExecutionResult>;
 }>;
 
@@ -81,6 +84,15 @@ export async function runFormalXWorker(
   const db = dependencies?.db ?? (await getDb());
   let began = false;
   let identityRun = false;
+  let providerProcessStarted = false;
+  let identityExecution: GrokBuildExecutionResult | null = null;
+  let scanExecution: GrokBuildExecutionResult | null = null;
+  let scanAccounting: Readonly<{
+    returned: number;
+    accepted: number;
+    rejected: number;
+    saturated: boolean;
+  }> | null = null;
   try {
     const run = await beginFormalRun({ runId: job.runId, db });
     if (run.status === 'TERMINAL') {
@@ -118,7 +130,12 @@ export async function runFormalXWorker(
         maximumOutputBytes: flags.grokMaxOutputBytes,
       });
     if (run.request.jobKind === 'X_IDENTITY') {
-      const execution = await executor.execute(run.request.toolRequest);
+      const execution = await executor.execute(run.request.toolRequest, {
+        onProviderProcessStart: () => {
+          providerProcessStarted = true;
+        },
+      });
+      identityExecution = execution;
       const identity = await persistXIdentityResult({ runId: job.runId, execution, db });
       return {
         runId: job.runId,
@@ -139,7 +156,12 @@ export async function runFormalXWorker(
     ) {
       throw new Error('Persisted X scan job and tool request do not agree');
     }
-    const execution = await executor.execute(scanRequest.toolRequest);
+    const execution = await executor.execute(scanRequest.toolRequest, {
+      onProviderProcessStart: () => {
+        providerProcessStarted = true;
+      },
+    });
+    scanExecution = execution;
     const checkedAt = await databaseNow(db);
     const semanticAuthors =
       scanRequest.jobKind === 'X_SEMANTIC_SCAN'
@@ -159,6 +181,12 @@ export async function runFormalXWorker(
           authors: semanticAuthors,
         })
       : adaptGrokBuildPosts({ request: scanRequest, execution, checkedAt });
+    scanAccounting = {
+      returned: adapted.returnedCount,
+      accepted: adapted.acceptedCount,
+      rejected: adapted.rejections.length,
+      saturated: adapted.saturated,
+    };
     let state: 'EMPTY' | 'COMPLETED' | 'PARTIAL' | 'SATURATED' | 'GAP' = adapted.stateHint;
     let acquisitionGap:
       | { windowStart: string; windowEnd: string; reason: string; detailsHash: string }
@@ -168,7 +196,17 @@ export async function runFormalXWorker(
     const hasEarlierWindow =
       earlierWindowEnd !== null &&
       earlierWindowEnd.getTime() >= Date.parse(scanRequest.windowStart);
-    if (adapted.saturated && run.parentRunId) {
+    if (adapted.saturated && scanRequest.jobKind === 'X_SEMANTIC_SCAN') {
+      acquisitionGap = {
+        windowStart: scanRequest.windowStart,
+        windowEnd: scanRequest.windowEnd,
+        reason: 'SEMANTIC_RESULT_CAP',
+        detailsHash: sha256CanonicalJson({
+          returned: adapted.returnedCount,
+          toolRequest: scanRequest.toolRequest,
+        }),
+      };
+    } else if (adapted.saturated && run.parentRunId) {
       state = 'GAP';
       acquisitionGap = {
         windowStart: scanRequest.windowStart,
@@ -182,53 +220,25 @@ export async function runFormalXWorker(
       };
     }
     const followUpCandidate =
-      adapted.saturated && !run.parentRunId && hasEarlierWindow
+      adapted.saturated &&
+      scanRequest.jobKind === 'X_KEYWORD_SCAN' &&
+      !run.parentRunId &&
+      hasEarlierWindow
         ? {
             ...scanRequest,
             windowEnd: earlierWindowEnd.toISOString(),
-            toolRequest:
-              scanRequest.jobKind === 'X_KEYWORD_SCAN'
-                ? compileXKeywordRequest({
-                    handles: scanRequest.partition.members.map(
-                      (member) => member.locator.handle ?? '',
-                    ),
-                    windowStart: new Date(scanRequest.windowStart),
-                    windowEnd: earlierWindowEnd,
-                    limit:
-                      scanRequest.toolRequest.toolName === 'x_keyword_search'
-                        ? scanRequest.toolRequest.limit
-                        : 10,
-                  })
-                : compileXSemanticRequest({
-                    semanticProfileKey:
-                      scanRequest.partition.members[0]?.locator.semanticProfileKey ?? '',
-                    windowStart: new Date(scanRequest.windowStart),
-                    windowEnd: earlierWindowEnd,
-                    limit:
-                      scanRequest.toolRequest.toolName === 'x_semantic_search'
-                        ? scanRequest.toolRequest.limit
-                        : 10,
-                  }),
+            toolRequest: compileXKeywordRequest({
+              handles: scanRequest.partition.members.map((member) => member.locator.handle ?? ''),
+              windowStart: new Date(scanRequest.windowStart),
+              windowEnd: earlierWindowEnd,
+              limit:
+                scanRequest.toolRequest.toolName === 'x_keyword_search'
+                  ? scanRequest.toolRequest.limit
+                  : 10,
+            }),
           }
         : null;
-    const semanticDatePrecisionLimited =
-      followUpCandidate !== null &&
-      scanRequest.jobKind === 'X_SEMANTIC_SCAN' &&
-      sha256CanonicalJson(followUpCandidate.toolRequest) ===
-        sha256CanonicalJson(scanRequest.toolRequest);
-    if (semanticDatePrecisionLimited && earlierWindowEnd) {
-      acquisitionGap = {
-        windowStart: scanRequest.windowStart,
-        windowEnd: earlierWindowEnd.toISOString(),
-        reason: 'SEMANTIC_DATE_PRECISION_LIMIT',
-        detailsHash: sha256CanonicalJson({
-          returned: adapted.returnedCount,
-          oldestAcceptedAt: adapted.oldestAcceptedAt,
-          toolRequest: scanRequest.toolRequest,
-        }),
-      };
-    }
-    const followUpRequest = semanticDatePrecisionLimited ? null : followUpCandidate;
+    const followUpRequest = followUpCandidate;
     if (followUpRequest && !dependencies?.xBudgetPolicy) {
       throw new Error(
         'Saturated X run cannot create a follow-up without an explicit budget policy',
@@ -325,13 +335,47 @@ export async function runFormalXWorker(
           runId: job.runId,
           failureClass: failure.failureClass,
           errorSummary: failure.summary,
+          providerProcessStarted,
+          providerExecution: identityExecution ?? undefined,
           db,
         });
       } else {
+        const rejections =
+          error instanceof XPostQualityError && error.rejections.length > 0
+            ? error.rejections
+            : undefined;
         await failFormalRun({
           runId: job.runId,
           failureClass: failure.failureClass,
           errorSummary: failure.summary,
+          providerEvidence: scanExecution
+            ? {
+                provider: 'grok-build',
+                operation: scanExecution.toolName,
+                requestMetadataHash: scanExecution.requestMetadataHash,
+                responseMetadataHash: scanExecution.responseMetadataHash,
+                providerJobIdHash: scanExecution.toolCallIdHash,
+                providerUnits: 1,
+                terminalState:
+                  failure.failureClass === 'X_ALL_POSTS_REJECTED'
+                    ? 'ATTESTED_ALL_POSTS_REJECTED'
+                    : 'ATTESTED_PROCESSING_FAILED',
+                runMetrics: {
+                  durationMs: Math.round(scanExecution.durationMs),
+                  eventCount: scanExecution.eventCount,
+                  inputTokens: scanExecution.inputTokens,
+                  outputTokens: scanExecution.outputTokens,
+                  totalCostUsd: scanExecution.totalCostUsd,
+                  returned: scanExecution.posts.length,
+                  ...(scanAccounting ?? {}),
+                  rejected: rejections?.length ?? scanAccounting?.rejected ?? 0,
+                  rawPostEvidenceAvailable: scanExecution.rawPostEvidenceAvailable,
+                  traceHash: scanExecution.traceHash,
+                },
+              }
+            : undefined,
+          rejections,
+          providerProcessStarted,
           db,
         });
       }
