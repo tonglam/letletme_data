@@ -51,8 +51,6 @@ const hostGrokProbeResponseSchema = z.discriminatedUnion('ok', [
     .strict(),
 ]);
 
-const HEALTH_CHECK_CACHE_MS = 5 * 60_000;
-
 type HostGrokRunnerClientOptions = Readonly<{
   socketPath: string;
   expectedVersion: string;
@@ -160,6 +158,7 @@ async function requestJson(input: {
           }
           resolve({ statusCode: response.statusCode ?? 0, body: parsed });
         } catch (error) {
+          if (dispatched) input.onTransportLossAfterDispatch?.();
           reject(error);
         }
       },
@@ -183,7 +182,7 @@ export class HostGrokRunnerClient {
   private readonly expectedRunnerReleaseSha: string | null;
   private readonly timeoutMs: number;
   private readonly maximumResponseBytes: number;
-  private versionCheck: Readonly<{ promise: Promise<void>; expiresAt: number }> | null = null;
+  private healthCheck: Promise<void> | null = null;
   private probeCheck: Promise<void> | null = null;
 
   constructor(input: HostGrokRunnerClientOptions) {
@@ -198,18 +197,18 @@ export class HostGrokRunnerClient {
   }
 
   async assertVersion(): Promise<void> {
-    const now = Date.now();
-    if (this.versionCheck && this.versionCheck.expiresAt > now) {
-      return this.versionCheck.promise;
-    }
-    const promise = this.inspectHealth();
-    const check = { promise, expiresAt: now + HEALTH_CHECK_CACHE_MS };
-    this.versionCheck = check;
+    // Health is deliberately checked on every execution. The runner's probe
+    // state is process-local and resets on a systemd restart; a TTL cache here
+    // could otherwise start a provider call before the new process has passed
+    // its real X probe. Coalesce concurrent checks, but never reuse a completed
+    // check across executions.
+    if (this.healthCheck) return this.healthCheck;
+    const check = this.inspectHealth();
+    this.healthCheck = check;
     try {
-      await promise;
-    } catch (error) {
-      if (this.versionCheck === check) this.versionCheck = null;
-      throw error;
+      await check;
+    } finally {
+      if (this.healthCheck === check) this.healthCheck = null;
     }
   }
 

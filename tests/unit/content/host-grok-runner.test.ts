@@ -26,6 +26,7 @@ async function fakeRunner(input: {
   metadataMismatch?: boolean;
   probeReady?: boolean;
   probeRefreshSucceeds?: boolean;
+  malformedResponse?: boolean;
 }) {
   const directory = mkdtempSync(join(tmpdir(), 'host-grok-runner-test-'));
   const socketPath = join(directory, 'runner.sock');
@@ -82,6 +83,14 @@ async function fakeRunner(input: {
         JSON.parse(Buffer.concat(chunks).toString()),
       );
       const requestHash = sha256CanonicalJson(parsed);
+      if (input.malformedResponse) {
+        response.writeHead(200, {
+          'content-type': 'application/json',
+          'content-length': 4,
+        });
+        response.end('{bad');
+        return;
+      }
       const requestedHandle =
         parsed.toolRequest.toolName === 'x_user_search' ? parsed.toolRequest.handle : 'OfficialFPL';
       const toolInput: Record<string, string | number> =
@@ -173,7 +182,7 @@ async function fakeRunner(input: {
     rmSync(directory, { recursive: true, force: true });
   };
   servers.push({ close, directory });
-  return { socketPath, close };
+  return { socketPath, close, setProbeReady: (ready: boolean) => (probeReady = ready) };
 }
 
 afterEach(async () => {
@@ -264,6 +273,19 @@ describe('host Grok runner client contract', () => {
     await expect(client.assertVersion()).resolves.toBeUndefined();
   });
 
+  test('rechecks process-local probe state after a prior successful health check', async () => {
+    const runner = await fakeRunner({});
+    const client = new HostGrokRunnerClient({
+      socketPath: runner.socketPath,
+      expectedVersion: '1.0.5',
+      expectedRunnerReleaseSha: 'abc1234',
+      timeoutMs: 2_000,
+    });
+    await expect(client.assertVersion()).resolves.toBeUndefined();
+    runner.setProbeReady(false);
+    await expect(client.assertVersion()).rejects.toThrow('not ready');
+  });
+
   test('commits provider budget when the host runner reports a failed tool after spawn', async () => {
     const runner = await fakeRunner({ fail: true });
     const client = new HostGrokRunnerClient({
@@ -302,6 +324,26 @@ describe('host Grok runner client contract', () => {
       }),
     ).rejects.toThrow('e'.repeat(64));
     expect(providerStarted).toBe(false);
+  });
+
+  test('charges provider budget when the runner response cannot be decoded', async () => {
+    const runner = await fakeRunner({ malformedResponse: true });
+    const client = new HostGrokRunnerClient({
+      socketPath: runner.socketPath,
+      expectedVersion: '1.0.5',
+      expectedRunnerReleaseSha: 'abc1234',
+      timeoutMs: 2_000,
+    });
+    let providerStarted = false;
+    await expect(
+      client.execute(compileXUserRequest('OfficialFPL'), {
+        runId: randomUUID(),
+        onProviderProcessStart: () => {
+          providerStarted = true;
+        },
+      }),
+    ).rejects.toThrow('Runner response is not JSON');
+    expect(providerStarted).toBe(true);
   });
 
   test('rejects a runner response whose tool metadata drifts', async () => {

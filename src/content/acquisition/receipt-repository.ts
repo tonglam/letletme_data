@@ -1184,6 +1184,9 @@ export async function persistAcquisitionResult(
           input.providerTraces?.some(
             (trace) => trace.provider === 'grok-build' && trace.terminalState === 'ATTESTED_FINAL',
           ) ?? false,
+        failureClass: null,
+        failureDetailsHash: null,
+        errorSummary: null,
         checkpointAdvanced,
         completedAt: dbNow,
         leaseExpiresAt: null,

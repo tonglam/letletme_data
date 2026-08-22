@@ -54,6 +54,9 @@ let formalHttpRuntime: ReturnType<typeof createFormalHttpWorkerRuntime> | null =
 let formalXRuntime: ReturnType<typeof createFormalXWorkerRuntime> | null = null;
 let formalMediaRuntime: ReturnType<typeof createFormalMediaWorkerRuntime> | null = null;
 let formalScheduleInFlight: Promise<void> | null = null;
+let formalXInitializationInFlight: Promise<void> | null = null;
+let formalXRetryNotBefore = 0;
+let formalXRetryDelayMs = FORMAL_SCHEDULER_INTERVAL_MS;
 let acquisitionJobOutboxDispatchInFlight: Promise<void> | null = null;
 let publicationOutboxDispatchInFlight: Promise<void> | null = null;
 
@@ -128,11 +131,50 @@ async function dispatchPendingAcquisitionJobOutbox(): Promise<void> {
   return dispatch;
 }
 
+async function ensureFormalXRuntime(): Promise<void> {
+  if (
+    !flags.pipelineEnabled ||
+    !flags.xScanEnabled ||
+    !flags.realGrokEnabled ||
+    !manifestBundle ||
+    formalXRuntime
+  ) {
+    return;
+  }
+  if (Date.now() < formalXRetryNotBefore) return;
+  if (formalXInitializationInFlight) return formalXInitializationInFlight;
+
+  const initialization = (async () => {
+    try {
+      const executor = createConfiguredHostGrokRunner();
+      await executor.assertVersion();
+      formalXRuntime = createFormalXWorkerRuntime(executor, xBudgetPolicy ?? undefined);
+      formalXRetryNotBefore = 0;
+      formalXRetryDelayMs = FORMAL_SCHEDULER_INTERVAL_MS;
+      logInfo('Host Grok runner initialized; X acquisition enabled');
+      await dispatchPendingAcquisitionJobOutbox();
+    } catch (error) {
+      formalXRetryNotBefore = Date.now() + formalXRetryDelayMs;
+      formalXRetryDelayMs = Math.min(5 * 60_000, formalXRetryDelayMs * 2);
+      logError('Grok Build version/provider check failed; X acquisition will retry', error, {
+        retryAt: new Date(formalXRetryNotBefore).toISOString(),
+      });
+    }
+  })();
+  formalXInitializationInFlight = initialization;
+  try {
+    await initialization;
+  } finally {
+    if (formalXInitializationInFlight === initialization) formalXInitializationInFlight = null;
+  }
+}
+
 async function schedulePendingFormalAcquisition(): Promise<void> {
   if (formalScheduleInFlight) return formalScheduleInFlight;
   if (!manifestBundle) return;
 
   const schedule = (async () => {
+    await ensureFormalXRuntime();
     const result = await scheduleFormalAcquisition({
       fullRolloutEligible: manifestBundle.coverage.fullRolloutEligible,
       flags: formalXRuntime ? flags : { ...flags, xScanEnabled: false, realGrokEnabled: false },
@@ -188,16 +230,6 @@ async function startFormalAcquisition(): Promise<void> {
 
   if (flags.httpAcquisitionEnabled) formalHttpRuntime = createFormalHttpWorkerRuntime();
   if (flags.podcastTranscriptEnabled) formalMediaRuntime = createFormalMediaWorkerRuntime();
-  if (flags.xScanEnabled && flags.realGrokEnabled) {
-    try {
-      const executor = createConfiguredHostGrokRunner();
-      await executor.assertVersion();
-      formalXRuntime = createFormalXWorkerRuntime(executor, xBudgetPolicy ?? undefined);
-    } catch (error) {
-      logError('Grok Build version/provider check failed; X acquisition remains stopped', error);
-    }
-  }
-
   await dispatchPendingAcquisitionJobOutbox();
   await schedulePendingFormalAcquisition();
   acquisitionJobOutboxDispatcher = setInterval(() => {
