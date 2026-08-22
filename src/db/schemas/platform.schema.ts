@@ -3259,13 +3259,13 @@ export const entriesInCompetition = competition.table(
       withTimezone: true,
       mode: 'date',
     }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     pastSeasonsCheckedAt: timestamp('past_seasons_checked_at', {
       withTimezone: true,
       mode: 'date',
     }),
     pastSeasonsCount: integer('past_seasons_count'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
     index('entries_entry_id_idx').using(
