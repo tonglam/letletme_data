@@ -562,7 +562,7 @@ const writeCheckpointRows = async (
   overallRankPublicationStartedAtByEntryId: ReadonlyMap<number, string> = new Map(),
 ): Promise<boolean> => {
   try {
-    await managerScoreCheckpointRepository.upsertBatch(
+    const acceptedRowCount = await managerScoreCheckpointRepository.upsertBatch(
       season,
       eventId,
       scope,
@@ -573,6 +573,15 @@ const writeCheckpointRows = async (
         ),
       ),
     );
+    if (acceptedRowCount !== rows.length) {
+      logWarn('Official manager checkpoint publication was partially accepted', {
+        eventId,
+        scope: scopeKey(scope),
+        expectedRows: rows.length,
+        acceptedRows: acceptedRowCount,
+      });
+      return false;
+    }
     return true;
   } catch (error) {
     logWarn('Official manager checkpoint write failed', {
@@ -820,6 +829,7 @@ const fetchDistributedManagerSummary = (
   entryId: number,
   priority: ManagerSummaryFetchPriority = 'foreground',
   publicationKey?: string,
+  publicationOrderingRequired = false,
 ): Promise<ManagerSummaryObservation> => {
   const coordinator = requireManagerSummaryCoordinator(redis);
   return runClassicStandingsRefresh(
@@ -852,9 +862,17 @@ const fetchDistributedManagerSummary = (
               publicationKey
                 ? fplClient.getEntrySummary(entryId, {
                     beforeAttempt: async (_attempt, { signal }) => {
-                      publicationOrder = (
-                        await reserveManagerLivePublicationStartedAt(publicationKey, signal)
-                      ).exact;
+                      try {
+                        publicationOrder = (
+                          await reserveManagerLivePublicationStartedAt(publicationKey, signal)
+                        ).exact;
+                      } catch (error) {
+                        if (publicationOrderingRequired) throw error;
+                        logWarn('Official manager summary ordering reservation failed', {
+                          entryId,
+                          error: error instanceof Error ? error.message : 'unknown',
+                        });
+                      }
                     },
                   })
                 : fplClient.getEntrySummary(entryId),
@@ -1007,9 +1025,11 @@ const refreshEntrySummaries = async (
             options.priority,
             // Every shared observation needs a scope-independent ordering
             // marker. A summary fetched through the ENTRY scope may later be
-            // reused by the Classic scope, so leaving this unset would make
-            // that otherwise valid Overall Rank impossible to accept.
+            // reused by the Classic scope. If the best-effort reservation is
+            // unavailable, the null marker is rejected by Classic rather than
+            // blocking this direct-entry refresh.
             publicationKey,
+            classicScope,
           );
           return {
             entryId,
