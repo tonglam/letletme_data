@@ -33,6 +33,8 @@ import {
   enqueueMyFplSnapshotOutbox,
   enqueueTournamentTrendsRepair,
 } from '../jobs/maintenance.jobs';
+import { enqueueUnderstatPlayerSync, enqueueUnderstatTeamSync } from '../jobs/understat-enqueue';
+import { enqueueUnderstatOrphanReconciler } from '../jobs/understat-recovery.jobs';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import {
@@ -48,6 +50,7 @@ import { syncOperationsRepository } from '../repositories/sync-operations';
 import { isMatchDayTime } from '../utils/conditions';
 import { decideLiveLifecycle } from '../services/live-lifecycle-orchestrator';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
+import { getConfig } from '../utils/config';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -98,12 +101,16 @@ export type ScheduledJobDefinition = Readonly<{
   queueName: string;
   successPredicate: string;
   manualTrigger?: boolean;
+  /** Scheduler-only definitions can be excluded from claims while disabled. */
+  isEnabled?: () => boolean;
   resolve: (context: SchedulerContext) => Promise<readonly SchedulerObligationPlan[]>;
   enqueue: (input: {
     context: SchedulerContext;
     plan: SchedulerObligationPlan;
     obligationId: string;
     generation: number;
+    /** Provider-specific season selected by a scheduler definition. */
+    seasonCode?: string;
   }) => Promise<{ bullJobId?: string | number; runId?: string } | void>;
 }>;
 
@@ -207,6 +214,72 @@ function dailyDefinition(input: {
       };
       return [...terminalPlans, ...(context.now >= todayDueAt ? [currentDayPlan] : [])];
     },
+  };
+}
+
+export function understatDailyDefinition(
+  input: {
+    name: string;
+    hour: number;
+    minute: number;
+    queueName: string;
+    successPredicate: string;
+    enqueue: ScheduledJobDefinition['enqueue'];
+  },
+  isEnabled: () => boolean = () => getConfig().UNDERSTAT_ENABLED,
+  resolveSeasonCode: () => string = () => getConfig().UNDERSTAT_SEASON,
+): ScheduledJobDefinition {
+  const definition = dailyDefinition({
+    ...input,
+    cadence: 'daily UTC+8 incremental',
+    catchUpPolicy: 'latest-authoritative',
+    criticality: 'normal',
+  });
+  return {
+    ...definition,
+    manualTrigger: false,
+    isEnabled,
+    resolve: async (context) => {
+      if (!isEnabled()) return [];
+      const seasonCode = resolveSeasonCode();
+      return (await definition.resolve(context)).map((plan) => ({
+        ...plan,
+        scopeKey: seasonCode,
+      }));
+    },
+    enqueue: async (enqueueInput) =>
+      definition.enqueue({
+        ...enqueueInput,
+        // Carry the exact season selected when this obligation was reserved.
+        // This prevents a process-level config change/restart from enqueueing
+        // an older obligation into a different Understat season.
+        seasonCode: enqueueInput.plan.scopeKey,
+      }),
+  };
+}
+
+function understatOrphanReconcilerDefinition(): ScheduledJobDefinition {
+  const isEnabled = () => getConfig().UNDERSTAT_ENABLED;
+  const definition = periodicMaintenanceDefinition({
+    name: MAINTENANCE_JOBS.UNDERSTAT_ORPHAN_RECONCILER,
+    cadence: 'every 30 minutes',
+    periodMs: 30 * 60_000,
+    criticality: 'maintenance',
+    successPredicate: 'active Understat runs without progress are reconciled safely',
+    enqueue: async ({ context, obligationId, generation }) => {
+      const job = await enqueueUnderstatOrphanReconciler(context.season, 'catchup', {
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        obligationId,
+        obligationGeneration: generation,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  });
+  return {
+    ...definition,
+    manualTrigger: false,
+    isEnabled,
+    resolve: async (context) => (isEnabled() ? definition.resolve(context) : []),
   };
 }
 
@@ -862,6 +935,43 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
         return { bullJobId: job.id, runId: job.data.runId };
       },
     }),
+    understatDailyDefinition({
+      name: 'understat-team-incremental',
+      hour: 11,
+      minute: 15,
+      queueName: 'understat-team-sync',
+      successPredicate: 'Understat team incremental finalizer completes the daily lane',
+      enqueue: async ({ seasonCode, obligationId, generation }) => {
+        if (!seasonCode) throw new Error('Understat team obligation has no season code');
+        const result = await enqueueUnderstatTeamSync({
+          season: seasonCode,
+          mode: 'incremental',
+          trigger: 'cron',
+          obligationId,
+          obligationGeneration: generation,
+        });
+        return { bullJobId: result.job.id, runId: result.runId };
+      },
+    }),
+    understatDailyDefinition({
+      name: 'understat-player-incremental',
+      hour: 12,
+      minute: 15,
+      queueName: 'understat-player-sync',
+      successPredicate: 'Understat player incremental finalizer completes the daily lane',
+      enqueue: async ({ seasonCode, obligationId, generation }) => {
+        if (!seasonCode) throw new Error('Understat player obligation has no season code');
+        const result = await enqueueUnderstatPlayerSync({
+          season: seasonCode,
+          mode: 'incremental',
+          trigger: 'cron',
+          obligationId,
+          obligationGeneration: generation,
+        });
+        return { bullJobId: result.job.id, runId: result.runId };
+      },
+    }),
+    understatOrphanReconcilerDefinition(),
     dailyDefinition({
       name: MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS,
       hour: 9,

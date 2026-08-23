@@ -64,9 +64,10 @@ does not open an Understat queue connection.
 All Understat jobs take the provider-reference mutation scope. This serializes shared season/team/
 match mutations across both lanes and replicas. Detail jobs also take a resource-specific scope.
 
-There are no routine Understat cron schedules. The dataset is low-frequency and is
-refreshed through explicit internal API/manual queue commands. This avoids ongoing provider,
-compute, and storage cost for pages that are rarely read.
+When `UNDERSTAT_ENABLED=true`, the scheduler runs only incremental lanes on the UTC+8 staggered
+schedule: Team at 11:15 and Player at 12:15. Full and reconcile modes remain API/manual-only. A
+30-minute maintenance job reconciles active runs that have made no database progress for 30
+minutes; it defers while either Understat queue still has waiting, delayed, active, or paused work.
 
 ## 5. Durable run and staging state
 
@@ -78,6 +79,8 @@ Understat uses the shared operations tables:
 - `lane = 'team' | 'player'`
 - `scope = 'understat.team' | 'understat.player'`
 - explicit `season_code`, mode, trigger, counters, timestamps, error, and metadata
+- scheduler `obligationId` and `obligationGeneration` when launched by the daily scheduler;
+  finalizer completion is the only successful obligation evidence
 
 ### `ops.sync_items`
 
@@ -96,7 +99,8 @@ Resource types are:
 
 The shared ops status `ready_to_publish` means “all required staging items settled and ready for the
 Understat finalizer.” It does not mean Redis publication. A successful Understat finalizer moves the
-run to `completed`; an incomplete but internally valid snapshot moves it to `skipped`.
+run to `completed`; an incomplete but internally valid snapshot moves it to `skipped`. The status
+response includes each run's `updatedAt` plus lane-level `stale` and `recovery` fields.
 
 ## 6. Staging envelope contract
 
@@ -193,6 +197,11 @@ manual-review states remain explicit; no name-only join is silently promoted to 
   only inside the final transaction.
 - Team and Player runs may complete at different times. Consumers must not claim cross-lane atomicity.
 - A failed or incomplete run cannot partially replace the previous complete PostgreSQL snapshot.
+- A completeness skip retries the current scheduler generation after 30 minutes, up to three
+  generations; the third incomplete generation ends that day as `skipped`.
+- A terminal provider/schema failure ends the current scheduler obligation immediately. A terminal
+  retryable failure starts a fresh generation, while old-generation completion/failure is fenced by
+  the obligation generation.
 
 ## 11. Redis contract
 
@@ -233,6 +242,9 @@ and Player runs independently and counts facts directly from the provider tables
 - A terminal detail failure marks that item failed; the run does not finalize.
 - A finalizer infrastructure or constraint error marks the run failed after terminal retry.
 - A completeness failure rolls back facts and marks the run skipped with a durable reason.
+- The worker records terminal item/run failure before throwing; the BullMQ `failed` listener is an
+  idempotent fallback. If a run is active with no database progress for 30 minutes and both queues
+  are empty, the maintenance reconciler fails unfinished items and the run in one transaction.
 - Recovery retries or starts a new scoped run. It does not truncate provider tables or clear Redis.
 - PostgreSQL backup/restore is the recovery path for durable Understat data; Redis restoration is not.
 

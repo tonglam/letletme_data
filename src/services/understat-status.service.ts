@@ -12,6 +12,24 @@ import {
 import { getDb } from '../db/singleton';
 import { understatSyncRepository } from '../repositories/understat-sync';
 
+const ORPHAN_CUTOFF_MS = 30 * 60_000;
+
+function laneRecoveryStatus(
+  run: Awaited<ReturnType<typeof understatSyncRepository.findLatestRuns>>['team'],
+) {
+  const stale = Boolean(
+    run &&
+      ['pending', 'running', 'ready_to_publish'].includes(run.status) &&
+      run.updatedAt.getTime() <= Date.now() - ORPHAN_CUTOFF_MS,
+  );
+  const recovery = run?.metadata.recovery;
+  return {
+    stale,
+    recovery:
+      recovery && typeof recovery === 'object' ? recovery : { state: stale ? 'stale' : 'none' },
+  };
+}
+
 interface CountAndUpdatedAt {
   count: number;
   updatedAt: Date | null;
@@ -105,16 +123,23 @@ export async function getUnderstatStatus(season: string) {
         )
       : [],
   };
+  const teamRecovery = laneRecoveryStatus(runs.team);
+  const playerRecovery = laneRecoveryStatus(runs.player);
 
   return {
     season,
     storage: 'postgresql' as const,
     dataCache: 'disabled' as const,
     lanes: {
-      team: { latestRun: runs.team, failedItems: failedItems.team },
+      team: {
+        latestRun: runs.team,
+        failedItems: failedItems.team,
+        ...teamRecovery,
+      },
       player: {
         latestRun: runs.player,
         failedItems: failedItems.player,
+        ...playerRecovery,
       },
     },
     resources: resourceCounts,

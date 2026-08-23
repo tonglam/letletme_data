@@ -54,6 +54,18 @@ const LEAGUE_RESOURCE_TYPE = 'league';
 const TEAM_RESOURCE_TYPE = 'team-participants';
 const MATCH_RESOURCE_TYPE = 'match-roster';
 
+function obligationFields(job: UnderstatPlayerJobData): {
+  obligationId?: string;
+  obligationGeneration?: number;
+} {
+  return {
+    ...(job.obligationId ? { obligationId: job.obligationId } : {}),
+    ...(job.obligationGeneration === undefined
+      ? {}
+      : { obligationGeneration: job.obligationGeneration }),
+  };
+}
+
 function requireJobValue<T>(value: T | undefined, name: string): T {
   if (value === undefined) throw new Error(`Understat player job requires ${name}`);
   return value;
@@ -75,6 +87,7 @@ async function finalizeWhenReady(job: UnderstatPlayerJobData, ready: boolean): P
     season: job.season,
     mode: job.mode,
     trigger: job.trigger,
+    ...obligationFields(job),
   });
 }
 
@@ -96,6 +109,7 @@ async function enqueuePlayerDetailJobs(
           season: job.season,
           mode: job.mode,
           trigger: job.trigger,
+          ...obligationFields(job),
           resourceId: teamId,
           teamTitle: team.title,
         });
@@ -110,6 +124,7 @@ async function enqueuePlayerDetailJobs(
           season: job.season,
           mode: job.mode,
           trigger: job.trigger,
+          ...obligationFields(job),
           resourceId: matchId,
         });
       },
@@ -133,6 +148,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     season: job.season,
     mode: job.mode,
     trigger: job.trigger,
+    ...obligationFields(job),
   });
   await understatSyncRepository.addItems(job.runId, [
     { resourceType: LEAGUE_RESOURCE_TYPE, resourceId: league },
@@ -475,7 +491,9 @@ export async function finalizeUnderstatPlayerRun(job: UnderstatPlayerJobData): P
     }
   } catch (error) {
     if (error instanceof IncompleteUnderstatPlayerSnapshotError) {
-      await understatSyncRepository.markRunSkipped(job.runId, error.message);
+      await understatSyncRepository.markRunSkipped(job.runId, error.message, {
+        completeness: 'skipped',
+      });
       return;
     }
     throw error;

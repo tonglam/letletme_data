@@ -2,9 +2,12 @@ import { seasonRepository } from '../repositories/seasons';
 import {
   claimSchedulerObligations,
   confirmSchedulerObligationEnqueued,
+  deferSchedulerObligationByIdentity,
   failSchedulerObligation,
+  hasEarlierInFlightSchedulerObligation,
   markSchedulerObligationIrrecoverable,
   reserveSchedulerObligation,
+  supersedeSchedulerObligations,
 } from '../repositories/scheduler-obligations';
 import {
   resolveSchedulerContext,
@@ -21,6 +24,16 @@ import { logError, logInfo } from '../utils/logger';
 // database-driven. The terminal status is part of the key: a current-day plan
 // observed as active must still be revisited as irrecoverable after its window.
 const MAX_OBSERVED_PLAN_KEYS = 20_000;
+const UNDERSTAT_SCHEDULER_GENERATION_CAP = 3;
+const UNDERSTAT_IN_FLIGHT_DEFER_MS = 60_000;
+const UNDERSTAT_LATEST_AUTHORITATIVE_JOBS = [
+  'understat-team-incremental',
+  'understat-player-incremental',
+] as const;
+const UNDERSTAT_SCHEDULER_JOB_NAMES = [
+  ...UNDERSTAT_LATEST_AUTHORITATIVE_JOBS,
+  'understat-orphan-reconciler',
+] as const;
 const observedPlanKeys = new Map<string, true>();
 
 export function schedulerPlanKey(
@@ -82,6 +95,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
   const context = await resolveSchedulerContext(season, now);
   let reserved = 0;
   let failed = 0;
+  const latestUnderstatPeriods = new Map<string, { periodKey: string; scopeKey: string }>();
   for (const definition of schedulerRegistry) {
     const resolution = await resolveSchedulerDefinition(definition, context);
     if (!resolution.ok) {
@@ -90,6 +104,23 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         jobName: definition.name,
       });
       continue;
+    }
+    if (
+      UNDERSTAT_LATEST_AUTHORITATIVE_JOBS.includes(
+        definition.name as (typeof UNDERSTAT_LATEST_AUTHORITATIVE_JOBS)[number],
+      ) &&
+      definition.isEnabled?.()
+    ) {
+      const latestPlan = resolution.plans
+        .filter((plan) => plan.terminalStatus === undefined)
+        .sort((left, right) => left.periodKey.localeCompare(right.periodKey))
+        .at(-1);
+      if (latestPlan) {
+        latestUnderstatPeriods.set(definition.name, {
+          periodKey: latestPlan.periodKey,
+          scopeKey: latestPlan.scopeKey,
+        });
+      }
     }
     for (const plan of resolution.plans) {
       const planKey = schedulerPlanKey(definition, plan);
@@ -122,7 +153,46 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     }
   }
 
-  const claimed = await claimSchedulerObligations();
+  for (const [jobName, latest] of latestUnderstatPeriods) {
+    try {
+      await supersedeSchedulerObligations({
+        jobName,
+        beforePeriodKey: latest.periodKey,
+        evidence: { supersededByPeriodKey: latest.periodKey },
+      });
+      if (
+        await hasEarlierInFlightSchedulerObligation({
+          jobName,
+          beforePeriodKey: latest.periodKey,
+        })
+      ) {
+        await deferSchedulerObligationByIdentity({
+          jobName,
+          scopeKey: latest.scopeKey,
+          periodKey: latest.periodKey,
+          delayMs: UNDERSTAT_IN_FLIGHT_DEFER_MS,
+          error: 'Waiting for an earlier Understat daily obligation to drain',
+        });
+      }
+    } catch (error) {
+      failed += 1;
+      logError('Understat stale obligation coalescing failed', error, {
+        jobName,
+        periodKey: latest.periodKey,
+      });
+    }
+  }
+
+  const disabledJobNames = schedulerRegistry
+    .filter((definition) => definition.isEnabled && !definition.isEnabled())
+    .map((definition) => definition.name);
+  const generationCaps = Object.fromEntries(
+    UNDERSTAT_SCHEDULER_JOB_NAMES.map((jobName) => [jobName, UNDERSTAT_SCHEDULER_GENERATION_CAP]),
+  );
+  const claimed = await claimSchedulerObligations({
+    excludedJobNames: disabledJobNames,
+    generationCaps,
+  });
   let enqueued = 0;
   await Promise.all(
     claimed.map(async ({ obligation, owner }) => {

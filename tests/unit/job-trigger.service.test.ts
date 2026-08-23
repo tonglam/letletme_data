@@ -35,6 +35,19 @@ describe('job-trigger service', () => {
     }
   });
 
+  test('does not expose scheduler-only Understat jobs as manual triggers', async () => {
+    const schedulerOnly = [
+      'understat-team-incremental',
+      'understat-player-incremental',
+      'understat-orphan-reconciler',
+    ];
+    const triggerableNames = listTriggerableJobs().map((job) => job.name);
+    for (const name of schedulerOnly) {
+      expect(triggerableNames).not.toContain(name);
+      await expect(triggerJob(name)).rejects.toThrow(JobNotFoundError);
+    }
+  });
+
   test('JobNotFoundError carries the job name', () => {
     const error = new JobNotFoundError('foo');
     expect(error.message).toContain('foo');
