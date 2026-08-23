@@ -77,6 +77,10 @@ Instagram 和 TikTok 明确不做。六个案例验证的是 adapter 能力，�
 - migration `0025`–`0029` 已在 PostgreSQL 15.18 fresh database 全量应用；malformed historical
   checkpoint timestamp 会在 health view 中安全投影为 `NULL`，不会拖垮整张 view，且该内部 view/
   helper 不授予 GraphQL reader。
+- Source-media v1 已在目标 worktree 中把 X 页面和图片处理从 Grok run 解耦：ReceiptRevision、唯一
+  media gate 与延迟 20 分钟 outbox 同事务创建，独立 `media-worker` 负责 target article inventory、
+  静态图字节验证和私有 Storage 归档。当前证据仍是本地 PostgreSQL/fixture integration，不是 VPS
+  或生产 Storage 验收；retention 默认关闭。
 
 状态定义：
 
@@ -194,6 +198,10 @@ type AcquisitionItemV1 = {
 };
 ```
 
+X adapter 的新版本固定输出 `media: []`；上面的通用 `media` 仍供其他 source-native adapter 和旧
+ReceiptRevision 兼容读取。X 图片的权威状态、DOM ordinal、实际 MIME、尺寸、bytes、SHA-256 和私有
+object key 均来自 `content.source_media_*`，不能再从 Receipt 中的旧 CDN URL 推断。
+
 `canonicalItemHash` 由规范化后的单个 item 事实计算，控制 Receipt revision。
 `transportBodyHash` 只是整次 HTTP/provider 响应的诊断证据，不能控制 item revision：同一 feed
 可能因 tracking、排序或生成字段变化而出现不同 raw bytes，但实际 item 没有变化。
@@ -284,6 +292,44 @@ scheduler；当前宿主机 Runner、认证和工具面合同见 3.2、3.3 和
 - [ ] 四种 X tool 均通过 UDS single-tool/exact-request/structured-output contract。
 - [ ] cgroup/parent 证据证明 Grok 子进程运行在宿主机 Runner，不在 Docker。
 - [ ] host-shadow 之前 publication/public 保持关闭；失败不能变成 `EMPTY` 或推进 checkpoint。
+
+### 3.4 X source-media archive 验收（当前目标）
+
+运行边界固定为 `media-worker` Docker service；它与 `content-worker` 共用 repo 和 PostgreSQL 内容域，
+但没有 Grok socket、bridge GID 或 Grok auth。worker 使用 PostgreSQL gate 作为 durable queue，pool
+上限 1、抓取并发 2；网络请求不在 DB transaction 内。
+
+- [x] 本地 fixture：目标 article 缺失得到 `UNAVAILABLE/TARGET_ARTICLE_MISSING`，不会成为
+  `CHECKED_NONE`；`tweetPhoto`/video 占位无法解析时为 `MEDIA_EVIDENCE_UNPARSABLE`；只有准确 article
+  存在且确认无媒体才能成为 `CHECKED_NONE`。
+- [x] 本地 fixture：carousel 保持 DOM ordinal 和 alt text；排除 profile、emoji、嵌套 quote/reply
+  和外链 preview；video poster 与匹配 stream 进入 inventory，stream 不下载。
+- [x] 本地 fixture：普通图片先取 `name=orig`，失败才回退页面 variant；MIME 以 magic bytes 为准，
+  JPEG/PNG/WebP/GIF 的尺寸由格式专用有界头部解析器读取，不解码图片或启用额外格式；24 MiB、
+  8192×8192、67,108,864 pixels 由确定性 gate 校验。
+- [x] 本地 fixture：bucket 必须回读为 private、exact 24 MiB 和固定 MIME；Supabase project global
+  limit 若低于 24 MiB，会因无法设置该 bucket limit 而 fail closed。
+- [x] 本地 integration：ReceiptRevision、gate 与延迟 outbox 原子提交；两个 worker 不能重复 claim；
+  Storage upload 后 DB crash 可通过 authenticated GET + SHA-256 恢复；deadline 后改善只产生幂等
+  `receipt.media.updated.v1`；过期 lease 的 worker 不能更新 item，清单证据和已归档 asset facts 写后不可变。
+- [x] 部署合同：镜像包含 `dist/media-worker.js`；Compose 使用 read-only root、cap-drop、
+  no-new-privileges、独立 `/tmp` heartbeat 和 `.env.media`；quiescence 覆盖全部 BullMQ queue 与
+  RUNNING media lease。
+- [ ] VPS `provision`：私有 `briefing-source-media` bucket 的 exact restrictions、upload/download/hash/
+  delete roundtrip 全部通过且无 probe 残留。
+- [ ] 生产 backfill：所有现有 X ReceiptRevision 有 gate，零未知 `PENDING`、零过期 lease、零
+  `RESERVED` asset；变化后的原帖或 CDN 明确记录 `UNAVAILABLE`，不能静默成为无媒体。
+- [ ] 冻结审计样本：68 个静态 image/poster 已归档，16 个 video/HLS 仅进入 inventory，52 个普通
+  图片优先获得 orig，全部 Storage MIME 与实际字节一致。
+- [ ] 再跑一次 12 小时全账号 X scan：Grok run 无 X page/media latency，图片失败不重跑 Grok、不
+  阻止 checkpoint，每个新 revision 有 gate，且 20 分钟后没有 outbox 被媒体无限阻塞。
+- [ ] 上述 backfill 与一致性 gate 通过后才使用受保护的 `enable-retention` mode；Hermes、Candidate、
+  GraphQL、Web/public exposure 继续关闭。
+
+受保护的 `Briefing source media rollout` workflow 只接受 `status / provision / enable /
+enable-retention / disable`。`provision` 不修改 worker 状态；`enable` 始终保持 retention 关闭；
+`enable-retention` 在停稳 worker 后 fail-close 检查 backlog、lease 和 `RESERVED` asset。每次配置修改
+都备份并可恢复 `.env.media`，且只重启 `media-worker`。
 
 ## 4. RSS/Atom 案例：Fantasy Football Scout
 

@@ -61,7 +61,6 @@ COPY --from=host-runner-build /out/letletme-grok-runner /app/letletme-grok-runne
 RUN addgroup -S -g 1555 letletme-grok-bridge \
     && addgroup -S -g 1001 appuser \
     && adduser -S -D -H -u 1001 -G appuser appuser \
-    && addgroup appuser letletme-grok-bridge \
     && mkdir -p /home/appuser /tmp \
     && chown appuser:appuser /home/appuser \
     && chown -R appuser:appuser /app

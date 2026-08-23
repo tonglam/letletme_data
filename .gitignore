@@ -82,6 +82,7 @@ bun.lockb
 !.env.example
 !.env.deploy.example
 !.env.migrate.example
+!.env.media.example
 .deploy-state/
 
 # parcel-bundler cache (https://parceljs.org/)

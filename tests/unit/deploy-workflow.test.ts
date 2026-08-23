@@ -9,6 +9,10 @@ const briefingRolloutWorkflow = readFileSync(
   '.github/workflows/briefing-acquisition-rollout.yml',
   'utf8',
 );
+const sourceMediaRolloutWorkflow = readFileSync(
+  '.github/workflows/briefing-source-media-rollout.yml',
+  'utf8',
+);
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
 const dockerfile = readFileSync('Dockerfile', 'utf8');
@@ -21,6 +25,9 @@ const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 const runtimeHealthScript = readFileSync('scripts/verify-runtime-health.sh', 'utf8');
 const composeFile = readFileSync('docker-compose.yml', 'utf8');
+const mediaWorker = readFileSync('src/media-worker.ts', 'utf8');
+const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'utf8');
+const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
 const quote = String.fromCharCode(39);
 
 describe('release workflow gates', () => {
@@ -28,6 +35,33 @@ describe('release workflow gates', () => {
     expect(contentWorker).toContain('publicationOutboxDispatcher = setInterval');
     expect(contentWorker).not.toContain('publicationOutboxDispatcher.unref?.()');
     expect(contentWorker).not.toContain('scheduler.unref?.()');
+  });
+
+  test('isolates the durable media worker and includes it in deployment gates', () => {
+    const mediaServiceStart = composeFile.indexOf('  media-worker:');
+    const mediaService = composeFile.slice(mediaServiceStart);
+    expect(mediaServiceStart).toBeGreaterThan(0);
+    expect(mediaService).toContain('command: bun dist/media-worker.js');
+    expect(mediaService).toContain('${CONTENT_MEDIA_ENV_FILE:-.env.media}');
+    expect(mediaService).toContain('DATABASE_POOL_MAX=1');
+    expect(mediaService).toContain('read_only: true');
+    expect(mediaService).toContain('cap_drop:\n      - ALL');
+    expect(mediaService).toContain('no-new-privileges:true');
+    expect(mediaService).not.toContain('/run/letletme-grok-runner');
+    expect(mediaService).not.toContain('group_add:');
+    expect(mediaConfig).toContain('CONTENT_MEDIA_WORKER_ENABLED');
+    expect(mediaWorker).toContain('releaseSourceMediaGateLeases');
+    expect(mediaWorker).toContain('controller.abort');
+    expect(mediaWorker).toContain('retentionController?.abort');
+    expect(queueQuiescence).toContain('allQueueNames.map');
+    expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
+    expect(deployScript).toContain('--provision-and-probe');
+    expect(deployScript).toContain('briefing_source_media_health');
+    expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
+    expect(workflow).toContain('"$old_media_present" || true');
+    expect(deployStateMachine).toContain(
+      'export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"',
+    );
   });
 
   test('allows only session-mode pooler connections for the external backup', () => {
@@ -43,6 +77,7 @@ describe('release workflow gates', () => {
     expect(ciWorkflow).not.toMatch(mutableAction);
     expect(securityWorkflow).not.toMatch(mutableAction);
     expect(briefingRolloutWorkflow).not.toMatch(mutableAction);
+    expect(sourceMediaRolloutWorkflow).not.toMatch(mutableAction);
     expect(ciWorkflow).not.toContain(`bun-version: [${quote}1.3.3${quote}]`);
     expect(ciWorkflow).toContain(`bun-version: [${quote}1.3.14${quote}]`);
     expect(ciWorkflow).toContain('test -x /app/letletme-grok-runner');
@@ -52,6 +87,33 @@ describe('release workflow gates', () => {
     expect(dockerfile).toContain('COPY --from=build /app/config/briefing ./config/briefing');
     expect(ciWorkflow).toContain('test -r /app/config/briefing/sources.yaml');
     expect(ciWorkflow).toContain('test -r /app/config/briefing/acquisition-plan.yaml');
+    expect(ciWorkflow).toContain('test -f /app/dist/media-worker.js');
+    expect(ciWorkflow).toContain('! id -Gn');
+    expect(dockerfile).not.toContain('addgroup appuser letletme-grok-bridge');
+  });
+
+  test('keeps source-media rollout protected, reversible, and Storage-gated', () => {
+    expect(sourceMediaRolloutWorkflow).toContain(
+      `if: github.ref == ${quote}refs/heads/main${quote}`,
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('test "$main_sha" = "$GITHUB_SHA"');
+    expect(sourceMediaRolloutWorkflow).toContain('test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"');
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'options:\n          - status\n          - provision\n          - enable\n          - enable-retention\n          - disable',
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('configure-briefing-source-media-env.sh');
+    expect(sourceMediaRolloutWorkflow).toContain('acquire_deploy_lock');
+    expect(sourceMediaRolloutWorkflow).toContain('release_deploy_lock');
+    expect(sourceMediaRolloutWorkflow).toContain('--provision-and-probe');
+    expect(sourceMediaRolloutWorkflow).toContain('briefing_source_media_health');
+    expect(sourceMediaRolloutWorkflow).toContain('retention_preflight');
+    expect(sourceMediaRolloutWorkflow).toContain(String.raw`storage_state = 'RESERVED'`);
+    expect(sourceMediaRolloutWorkflow).toContain('mv "$backup_file" "$media_env_file"');
+    expect(sourceMediaRolloutWorkflow).toContain('--force-recreate media-worker');
+    expect(sourceMediaRolloutWorkflow).toContain('CONTENT_PUBLICATION_ENABLED');
+    expect(sourceMediaRolloutWorkflow).toContain('BRIEFING_PUBLIC_ENABLED');
+    expect(sourceMediaRolloutWorkflow).not.toContain('CONTENT_MEDIA_SUPABASE_SECRET_KEY:');
+    expect(sourceMediaRolloutWorkflow).not.toContain('script_stop:');
   });
 
   test('keeps Briefing acquisition rollout on protected main with rollback and fixed modes', () => {

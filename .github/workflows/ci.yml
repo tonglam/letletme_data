@@ -91,8 +91,10 @@ jobs:
           test "$(docker run --rm --entrypoint id letletme-data:ci -u)" = "1001"
           docker run --rm --entrypoint sh letletme-data:ci -c \
             'test "$HOME" = /home/appuser && test -x /app/letletme-grok-runner && \
+             test -f /app/dist/media-worker.js && \
              test ! -e /app/node_modules/.bin/grok && test ! -e /home/appuser/.grok && \
              test "$(getent group letletme-grok-bridge | cut -d: -f3)" = 1555 && \
+             ! id -Gn | tr " " "\n" | grep -qx letletme-grok-bridge && \
              test -r /app/config/briefing/sources.yaml && \
              test -r /app/config/briefing/acquisition-plan.yaml'
 
