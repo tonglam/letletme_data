@@ -132,6 +132,7 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
           }),
         ),
     );
+    await settleFinalizerOutcome(job);
   } catch (error) {
     try {
       await recordTerminalFailure(job, error);
@@ -140,11 +141,7 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
     }
     throw error;
   }
-  try {
-    await settleFinalizerOutcome(job);
-  } finally {
-    stopLeaseHeartbeat();
-  }
+  stopLeaseHeartbeat();
 }
 
 async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void> {
@@ -184,6 +181,7 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
           }),
         ),
     );
+    await settleFinalizerOutcome(job);
   } catch (error) {
     try {
       await recordTerminalFailure(job, error);
@@ -192,11 +190,7 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
     }
     throw error;
   }
-  try {
-    await settleFinalizerOutcome(job);
-  } finally {
-    stopLeaseHeartbeat();
-  }
+  stopLeaseHeartbeat();
 }
 
 async function settleFinalizerOutcome(
