@@ -6,26 +6,81 @@ export type ManagerSummaryFetchPriority = 'foreground' | 'background';
 export const createKeyedTaskSerializer = (): (<T>(
   key: string,
   task: () => Promise<T>,
+  priority?: ManagerSummaryFetchPriority,
 ) => Promise<T>) => {
-  const tails = new Map<string, Promise<void>>();
-
-  return async <T>(key: string, task: () => Promise<T>): Promise<T> => {
-    const previous = tails.get(key) ?? Promise.resolve();
-    let release: (() => void) | undefined;
-    const current = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.catch(() => undefined).then(() => current);
-    tails.set(key, tail);
-
-    await previous.catch(() => undefined);
-    try {
-      return await task();
-    } finally {
-      release?.();
-      if (tails.get(key) === tail) tails.delete(key);
-    }
+  type QueuedTask = {
+    task: () => Promise<unknown>;
+    resolve: (value: unknown) => void;
+    reject: (reason: unknown) => void;
   };
+  type KeyState = {
+    active: boolean;
+    foreground: QueuedTask[];
+    background: QueuedTask[];
+  };
+  const states = new Map<string, KeyState>();
+
+  const startNext = (key: string, state: KeyState): void => {
+    if (state.active) return;
+    const next = state.foreground.shift() ?? state.background.shift();
+    if (!next) {
+      states.delete(key);
+      return;
+    }
+    state.active = true;
+    void Promise.resolve()
+      .then(next.task)
+      .then(next.resolve, next.reject)
+      .finally(() => {
+        state.active = false;
+        startNext(key, state);
+      });
+  };
+
+  return <T>(
+    key: string,
+    task: () => Promise<T>,
+    priority: ManagerSummaryFetchPriority = 'foreground',
+  ): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const state = states.get(key) ?? {
+        active: false,
+        foreground: [],
+        background: [],
+      };
+      states.set(key, state);
+      state[priority].push({
+        task,
+        resolve: (value) => resolve(value as T),
+        reject,
+      });
+      startNext(key, state);
+    });
+};
+
+export const readLatestRowsWithFallback = async <T extends { checkedAt: string }>(
+  entryIds: readonly number[],
+  capturedRows: ReadonlyMap<number, T>,
+  readRows: () => Promise<ReadonlyMap<number, T>>,
+  onReadError?: (error: unknown) => void,
+): Promise<Map<number, T>> => {
+  const rows = new Map<number, T>();
+  for (const entryId of entryIds) {
+    const captured = capturedRows.get(entryId);
+    if (captured) rows.set(entryId, captured);
+  }
+  try {
+    const cachedRows = await readRows();
+    for (const [entryId, cached] of cachedRows) {
+      const captured = rows.get(entryId);
+      if (!captured || Date.parse(cached.checkedAt) > Date.parse(captured.checkedAt)) {
+        rows.set(entryId, cached);
+      }
+    }
+  } catch (error) {
+    onReadError?.(error);
+  }
+  return rows;
 };
 
 export const preserveClassicOverallRank = (

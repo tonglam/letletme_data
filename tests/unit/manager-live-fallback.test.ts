@@ -9,6 +9,7 @@ import {
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
+  readLatestRowsWithFallback,
 } from '../../src/domain/manager-live-fallback';
 
 describe('manager live refresh targets', () => {
@@ -145,16 +146,24 @@ describe('classic manager live fallback', () => {
       releaseFirst = resolve;
     });
 
-    const first = run('2025:1:99', async () => {
-      order.push('first:start');
-      await firstBlocked;
-      order.push('first:end');
-      return [1];
-    });
-    const second = run('2025:1:99', async () => {
-      order.push('second:start');
-      return [2];
-    });
+    const first = run(
+      '2025:1:99',
+      async () => {
+        order.push('first:start');
+        await firstBlocked;
+        order.push('first:end');
+        return [1];
+      },
+      'background',
+    );
+    const second = run(
+      '2025:1:99',
+      async () => {
+        order.push('second:start');
+        return [2];
+      },
+      'background',
+    );
     const otherLeague = run('2025:1:100', async () => {
       order.push('other:start');
       return [3];
@@ -166,6 +175,70 @@ describe('classic manager live fallback', () => {
     releaseFirst?.();
     expect(await Promise.all([first, second, otherLeague])).toEqual([[1], [2], [3]]);
     expect(order).toEqual(['first:start', 'other:start', 'first:end', 'second:start']);
+  });
+
+  test('admits a foreground league crawl before queued background work', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseActive: (() => void) | undefined;
+    const active = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+
+    const runningBackground = run(
+      '2025:1:99',
+      async () => {
+        order.push('background-active');
+        await active;
+      },
+      'background',
+    );
+    await Promise.resolve();
+    const queuedBackground = run(
+      '2025:1:99',
+      async () => {
+        order.push('background-queued');
+      },
+      'background',
+    );
+    const foreground = run('2025:1:99', async () => {
+      order.push('foreground');
+    });
+
+    releaseActive?.();
+    await Promise.all([runningBackground, queuedBackground, foreground]);
+    expect(order).toEqual(['background-active', 'foreground', 'background-queued']);
+  });
+
+  test('keeps captured checkpoint rows when a background Redis read fails', async () => {
+    const captured = new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'checkpoint' }]]);
+    let observedError: unknown;
+
+    const rows = await readLatestRowsWithFallback(
+      [1],
+      captured,
+      async () => {
+        throw new Error('redis unavailable');
+      },
+      (error) => {
+        observedError = error;
+      },
+    );
+
+    expect(rows.get(1)?.value).toBe('checkpoint');
+    expect(observedError).toBeInstanceOf(Error);
+  });
+
+  test('prefers a newer Redis row over a captured checkpoint row', async () => {
+    const captured = new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'checkpoint' }]]);
+
+    const rows = await readLatestRowsWithFallback(
+      [1],
+      captured,
+      async () => new Map([[1, { checkedAt: '2026-08-23T10:01:00.000Z', value: 'redis' }]]),
+    );
+
+    expect(rows.get(1)?.value).toBe('redis');
   });
 
   test('admits foreground work before queued background batches', async () => {
