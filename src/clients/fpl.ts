@@ -21,6 +21,11 @@ const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5_000;
 const USER_AGENT = 'letletme-data/1.0.0 (+https://github.com/tonglam/letletme_data)';
 
+export type FPLRequestOptions = {
+  /** Optional wall-clock cap for this logical request, including retries/backoff. */
+  deadlineMs?: number;
+};
+
 // Env overrides exist for tests (keep retry waits in the millisecond range);
 // production uses the constants above.
 function getEnvMs(name: string, fallback: number): number {
@@ -635,12 +640,15 @@ class FPLClient {
    * - other non-ok (e.g. 404): return immediately without buffering so hung 404
    *   bodies do not flip cup lookups to UNKNOWN_ERROR
    */
-  private async request(url: string): Promise<Response> {
+  private async request(url: string, options: FPLRequestOptions = {}): Promise<Response> {
     const priority: FplRequestPriority =
       /\/event\/\d+\/live\/?$/.test(url) || /\/fixtures\/?(?:\?event=\d+)?$/.test(url)
         ? 'live'
         : 'bulk';
-    const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
+    const deadlineMs = Math.max(
+      1,
+      options.deadlineMs ?? getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS),
+    );
     const started = Date.now();
     const releaseAdmission = await acquireFplRequest(priority, {
       deadlineAt: started + deadlineMs,
@@ -925,12 +933,12 @@ class FPLClient {
     }
   }
 
-  async getEntrySummary(entryId: number) {
+  async getEntrySummary(entryId: number, requestOptions: FPLRequestOptions = {}) {
     const url = `${this.baseUrl}/entry/${entryId}/`;
     try {
       logDebug('Fetching entry summary', { entryId, url });
 
-      const response = await this.request(url);
+      const response = await this.request(url, requestOptions);
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,
@@ -1015,11 +1023,12 @@ class FPLClient {
     leagueId: number,
     page: number,
     leagueType: 'classic' | 'h2h',
+    requestOptions: FPLRequestOptions = {},
   ): Promise<RawFPLLeagueStandingsResponse> {
     try {
       logDebug('Fetching league standings', { leagueId, page, leagueType, url });
 
-      const response = await this.request(url);
+      const response = await this.request(url, requestOptions);
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,
@@ -1065,9 +1074,10 @@ class FPLClient {
     leagueId: number,
     standingsPage: number,
     newEntriesPage = 1,
+    requestOptions: FPLRequestOptions = {},
   ): Promise<RawFPLLeagueStandingsResponse> {
     const url = `${this.baseUrl}/leagues-classic/${leagueId}/standings/?page_standings=${standingsPage}&page_new_entries=${newEntriesPage}`;
-    return this.getLeagueStandings(url, leagueId, standingsPage, 'classic');
+    return this.getLeagueStandings(url, leagueId, standingsPage, 'classic', requestOptions);
   }
 
   async getLeagueH2HStandings(

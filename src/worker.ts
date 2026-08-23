@@ -15,7 +15,7 @@ import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { closeUnderstatPermitClient } from './utils/understat-rate-limit';
-import type { WorkerRuntime } from './workers/worker-runtime';
+import { WORKER_SHUTDOWN_TIMEOUT_MS, type WorkerRuntime } from './workers/worker-runtime';
 
 getConfig();
 
@@ -53,8 +53,6 @@ const allQueueEvents = runtimes.flatMap((runtime) => runtime.queueEvents);
 const stopHeartbeat = startWorkerHeartbeat();
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('queueWorker');
 
-const SHUTDOWN_TIMEOUT_MS = 30_000;
-
 async function shutdown(signal: string) {
   logInfo('Worker shutting down', { signal });
   stopHeartbeat();
@@ -69,7 +67,7 @@ async function shutdown(signal: string) {
   ]);
 
   const timeout = new Promise<void>((_, reject) => {
-    setTimeout(() => reject(new Error('Shutdown timed out')), SHUTDOWN_TIMEOUT_MS).unref?.();
+    setTimeout(() => reject(new Error('Shutdown timed out')), WORKER_SHUTDOWN_TIMEOUT_MS).unref?.();
   });
 
   try {

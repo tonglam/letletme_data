@@ -4,6 +4,16 @@ export const MANAGER_LIVE_HOT_SCOPE_SECONDS = 6 * 60 * 60;
 export const MANAGER_LIVE_REFRESH_BUCKET_MS = 30_000;
 export const MANAGER_LIVE_ATTEMPTS = 4;
 export const MANAGER_LIVE_RETRY_BASE_DELAY_MS = 30_000;
+// A manager-live job must leave enough time for cache/checkpoint writes before
+// the process-wide 30 second graceful-shutdown deadline. Each logical FPL
+// request uses this shorter wall-clock budget, and one job processes only the
+// bounded number of summary requests/pages below. Remaining entries stay hot
+// and continue in a later 30 second bucket.
+export const MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS = 3_000;
+export const MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE = 12;
+export const MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT = MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE;
+export const MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT = 2;
+export const MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT = 4;
 
 export type ManagerLiveRefreshScope = {
   seasonId: number;
@@ -21,6 +31,15 @@ type ManagerLiveHotRedis = {
 export const normalizeManagerLiveEntryIds = (entryIds: readonly number[]): number[] =>
   Array.from(new Set(entryIds)).sort((left, right) => left - right);
 
+export const managerLiveEntryChunks = (entryIds: readonly number[]): number[][] => {
+  const normalized = normalizeManagerLiveEntryIds(entryIds);
+  const chunks: number[][] = [];
+  for (let offset = 0; offset < normalized.length; offset += MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE) {
+    chunks.push(normalized.slice(offset, offset + MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE));
+  }
+  return chunks;
+};
+
 const entrySetDigest = (entryIds: readonly number[]): string =>
   createHash('sha1')
     .update(normalizeManagerLiveEntryIds(entryIds).join(','))
@@ -30,7 +49,7 @@ const entrySetDigest = (entryIds: readonly number[]): string =>
 const scopeSegment = (scope: Pick<ManagerLiveRefreshScope, 'entryIds' | 'tournamentId'>): string =>
   scope.tournamentId === undefined
     ? `entries-${entrySetDigest(scope.entryIds)}`
-    : `t${scope.tournamentId}`;
+    : `t${scope.tournamentId}-entries-${entrySetDigest(scope.entryIds)}`;
 
 export const managerLiveHotScopeKey = (scope: ManagerLiveRefreshScope): string =>
   `llm:queue:manager-live:hot:v1:${scope.seasonCode}:e${scope.eventId}:${scopeSegment(scope)}`;

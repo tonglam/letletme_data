@@ -3,6 +3,7 @@ import type { Job } from 'bullmq';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   loadManagerLiveHotScope,
+  managerLiveEntryChunks,
   MANAGER_LIVE_REFRESH_BUCKET_MS,
   managerLiveRefreshJobId,
   normalizeManagerLiveEntryIds,
@@ -86,6 +87,23 @@ export async function enqueueManagerLiveRefresh(input: {
     });
     throw error;
   }
+}
+
+export async function enqueueManagerLiveRefreshBatches(input: {
+  season: FplSeasonRef;
+  eventId: number;
+  entryIds: readonly number[];
+  tournamentId?: number;
+  runAt?: Date;
+  markHot?: boolean;
+  source?: ManagerLiveJobData['source'];
+}): Promise<Job<ManagerLiveJobData>[]> {
+  const runAt = input.runAt ?? new Date();
+  return Promise.all(
+    managerLiveEntryChunks(input.entryIds).map((entryIds) =>
+      enqueueManagerLiveRefresh({ ...input, entryIds, runAt }),
+    ),
+  );
 }
 
 export async function scheduleNextManagerLiveRefresh(

@@ -11,6 +11,6 @@ export async function dispatchManagerLiveRefresh(input: {
   entryIds: readonly number[];
   tournamentId?: number;
 }): Promise<void> {
-  const { enqueueManagerLiveRefresh } = await import('../jobs/manager-live.jobs');
-  await enqueueManagerLiveRefresh(input);
+  const { enqueueManagerLiveRefreshBatches } = await import('../jobs/manager-live.jobs');
+  await enqueueManagerLiveRefreshBatches(input);
 }

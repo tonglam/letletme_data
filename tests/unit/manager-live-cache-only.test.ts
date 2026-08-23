@@ -35,6 +35,7 @@ spyOn(redisSingleton, 'getClient').mockImplementation(
 spyOn(managerScoreCheckpointRepository, 'findByScopeAndEntryIds').mockImplementation(
   async () => postgresRows as never,
 );
+spyOn(managerScoreCheckpointRepository, 'upsertBatch').mockImplementation(async () => undefined);
 const dispatchRefresh = spyOn(dispatchModule, 'dispatchManagerLiveRefresh').mockImplementation(
   async () => undefined,
 );
@@ -224,6 +225,45 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result.rows).toHaveLength(1);
     expect(result.refreshQueued).toBe(false);
     expect(durationMs).toBeLessThan(250);
+  });
+});
+
+describe('manager live READ_THROUGH source reporting', () => {
+  beforeEach(() => {
+    redisRows.clear();
+    redisReadFails = false;
+    postgresRows = [];
+    dispatchRefresh.mockClear();
+    getEntrySummary.mockReset();
+    getEntrySummary.mockImplementation(async () => {
+      throw new Error('unexpected FPL request');
+    });
+  });
+
+  test('does not claim Redis when an upstream row could not be persisted', async () => {
+    getEntrySummary.mockImplementationOnce(
+      async () =>
+        ({
+          summary_event_points: 55,
+          summary_overall_points: 1_234,
+          summary_event_rank: 2_345,
+          summary_overall_rank: 34_567,
+        }) as never,
+    );
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'READ_THROUGH',
+    });
+
+    expect(result).toMatchObject({
+      dataAvailability: 'FRESH',
+      servedFrom: 'NONE',
+      partial: false,
+      missingEntryIds: [],
+    });
+    expect(getEntrySummary).toHaveBeenCalledTimes(1);
   });
 });
 

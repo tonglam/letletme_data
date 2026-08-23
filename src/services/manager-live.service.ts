@@ -24,6 +24,12 @@ import {
   type ManagerSummaryFetchPriority,
   planClassicManagerFallback,
 } from '../domain/manager-live-fallback';
+import {
+  MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
+  MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
+  MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
+  MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT,
+} from '../domain/manager-live-refresh';
 import { dispatchManagerLiveRefresh } from './manager-live-refresh-dispatch';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
@@ -328,7 +334,7 @@ const isWithinStaleWindow = (row: CachedRow, now = Date.now()): boolean =>
   // replaces it; it must not disappear merely because 90 seconds elapsed.
   Number.isFinite(Date.parse(row.checkedAt)) && ageSeconds(row.checkedAt, now) >= 0;
 
-type ManagerLiveRowBacking = Exclude<ManagerLiveServedFrom, 'MIXED' | 'NONE'>;
+type ManagerLiveRowBacking = 'REDIS' | 'POSTGRES' | 'UPSTREAM';
 
 const managerRevision = (
   season: string,
@@ -377,6 +383,12 @@ const managerServedFrom = (
       .filter((source): source is ManagerLiveRowBacking => source !== undefined),
   );
   if (sources.size === 0) return 'NONE';
+  // The public contract intentionally describes durable last-good backing and
+  // does not add an UPSTREAM enum. A read-through row that has not been read
+  // back from Redis/PostgreSQL therefore reports NONE; a response combining
+  // upstream rows with durable rows reports MIXED. Never claim REDIS merely
+  // because a best-effort cache write was attempted.
+  if (sources.has('UPSTREAM')) return sources.size === 1 ? 'NONE' : 'MIXED';
   if (sources.size > 1) return 'MIXED';
   return sources.has('REDIS') ? 'REDIS' : 'POSTGRES';
 };
@@ -471,6 +483,7 @@ const refreshEntrySummaries = async (
     priority?: ManagerSummaryFetchPriority;
     force?: boolean;
     preserveClassicStanding?: boolean;
+    requestDeadlineMs?: number;
   } = {},
 ): Promise<'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null> => {
   const targets = entryIds
@@ -486,7 +499,13 @@ const refreshEntrySummaries = async (
       batch.map(async (entryId) => {
         try {
           const summary = await runManagerSummaryFetch(
-            () => fplClient.getEntrySummary(entryId),
+            () =>
+              fplClient.getEntrySummary(
+                entryId,
+                options.requestDeadlineMs === undefined
+                  ? undefined
+                  : { deadlineMs: options.requestDeadlineMs },
+              ),
             options.priority,
           );
           const checkedAt = nowIso();
@@ -574,7 +593,7 @@ const refreshClassicStandings = async (
   targetIds: ReadonlySet<number>,
   rows: Map<number, CachedRow>,
   redis: Redis | null,
-  options: { startPage?: number; maxPages?: number } = {},
+  options: { startPage?: number; maxPages?: number; requestDeadlineMs?: number } = {},
 ): Promise<{
   complete: boolean;
   nextPage: number;
@@ -595,7 +614,14 @@ const refreshClassicStandings = async (
       page += 1
     ) {
       nextPage = page + 1;
-      const response = await fplClient.getLeagueClassicStandings(leagueId, page);
+      const response = await fplClient.getLeagueClassicStandings(
+        leagueId,
+        page,
+        1,
+        options.requestDeadlineMs === undefined
+          ? undefined
+          : { deadlineMs: options.requestDeadlineMs },
+      );
       const pageRows = toClassicRows(season.seasonCode, eventId, response, checkedAt);
       for (const row of pageRows) {
         if (!targetIds.has(row.entryId)) continue;
@@ -858,9 +884,18 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       sourceByEntry.set(checkpoint.entryId, 'POSTGRES');
     }
   }
-  const staleOrMissing = uniqueEntryIds.filter(
-    (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
-  );
+  // Fill true gaps before refreshing last-good rows. Within stale rows, oldest
+  // first prevents a bounded worker from repeatedly refreshing the same prefix
+  // of a large tournament while later entries starve.
+  const staleOrMissing = [
+    ...uniqueEntryIds.filter((entryId) => !rows.has(entryId)),
+    ...uniqueEntryIds
+      .filter((entryId) => rows.has(entryId) && !isFresh(rows.get(entryId)!))
+      .sort(
+        (left, right) =>
+          Date.parse(rows.get(left)!.checkedAt) - Date.parse(rows.get(right)!.checkedAt),
+      ),
+  ];
   const classicOverallRankMissing =
     input.tournamentId !== undefined &&
     tournament?.leagueType === 'classic' &&
@@ -910,20 +945,36 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     [...rows].map(([entryId, row]) => [entryId, `${row.revision}:${row.checkedAt}`] as const),
   );
   const completeRefresh = input.completeRefresh === true;
+  let workerSummaryBudget = completeRefresh ? MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT : 0;
+  const takeWorkerSummaryTargets = (entryIds: readonly number[], limit = workerSummaryBudget) => {
+    if (!completeRefresh) return [...entryIds];
+    const selected = entryIds.slice(0, Math.min(workerSummaryBudget, limit));
+    workerSummaryBudget -= selected.length;
+    return selected;
+  };
+  const workerRequestDeadlineMs = completeRefresh
+    ? MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS
+    : undefined;
 
   if (input.tournamentId !== undefined && tournament?.leagueType === 'h2h') {
     // FPL does not expose a live H2H table, but its official entry summary is
     // still a well-defined event score. Use it for provisional pairings and
     // let the final database result replace it after finalization.
     if (staleOrMissing.length > 0) {
+      const summaryTargets = completeRefresh
+        ? takeWorkerSummaryTargets(staleOrMissing)
+        : staleOrMissing;
       refreshErrorCode = await refreshEntrySummaries(
         season,
         input.eventId,
-        staleOrMissing,
+        summaryTargets,
         rows,
         redis,
         entryScope,
-        { maxFetches: completeRefresh ? undefined : MAX_FOREGROUND_SUMMARY_FETCHES },
+        {
+          maxFetches: completeRefresh ? undefined : MAX_FOREGROUND_SUMMARY_FETCHES,
+          requestDeadlineMs: workerRequestDeadlineMs,
+        },
       );
       const pending = staleOrMissing.filter(
         (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
@@ -971,7 +1022,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       new Set(staleOrMissing),
       rows,
       redis,
-      completeRefresh ? { maxPages: MAX_STANDINGS_PAGES } : undefined,
+      completeRefresh
+        ? {
+            maxPages: MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
+            requestDeadlineMs: workerRequestDeadlineMs,
+          }
+        : undefined,
     );
     refreshErrorCode = standings.errorCode;
 
@@ -985,7 +1041,10 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     );
     if (classicOverallRankTargets.length > 0) {
       const foregroundTargets = completeRefresh
-        ? classicOverallRankTargets
+        ? takeWorkerSummaryTargets(
+            classicOverallRankTargets,
+            MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
+          )
         : classicOverallRankTargets.slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
       const summaryError = await refreshEntrySummaries(
         season,
@@ -994,7 +1053,11 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         rows,
         redis,
         scope,
-        { force: true, preserveClassicStanding: true },
+        {
+          force: true,
+          preserveClassicStanding: true,
+          requestDeadlineMs: workerRequestDeadlineMs,
+        },
       );
       refreshErrorCode = refreshErrorCode ?? summaryError;
 
@@ -1029,7 +1092,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     );
     const fallbackPlan = completeRefresh
       ? {
-          foregroundSummaryEntryIds: pending,
+          foregroundSummaryEntryIds: takeWorkerSummaryTargets(pending),
           backgroundEntryIds: [] as number[],
           continueStandings: false,
         }
@@ -1042,6 +1105,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         rows,
         redis,
         scope,
+        { requestDeadlineMs: workerRequestDeadlineMs },
       );
       refreshErrorCode = refreshErrorCode ?? summaryError;
       pending = fallbackPlan.backgroundEntryIds.filter(
@@ -1094,7 +1158,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   }
 
   if (input.tournamentId === undefined && staleOrMissing.length > 0) {
-    const summaryTargets = staleOrMissing;
+    const summaryTargets = completeRefresh
+      ? takeWorkerSummaryTargets(staleOrMissing)
+      : staleOrMissing;
     refreshErrorCode = await refreshEntrySummaries(
       season,
       input.eventId,
@@ -1104,6 +1170,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       entryScope,
       {
         maxFetches: completeRefresh ? undefined : MAX_FOREGROUND_SUMMARY_FETCHES,
+        requestDeadlineMs: workerRequestDeadlineMs,
       },
     );
     const pending = summaryTargets.filter(
@@ -1140,11 +1207,16 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   const missingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
   for (const row of resolvedRows) {
     if (initialRevisionByEntry.get(row.entryId) !== `${row.revision}:${row.checkedAt}`) {
-      sourceByEntry.set(row.entryId, 'REDIS');
+      sourceByEntry.set(row.entryId, 'UPSTREAM');
     }
   }
   if (!errorCode && refreshErrorCode) errorCode = refreshErrorCode;
-  if (!errorCode && missingEntryIds.length > 0) errorCode = 'UPSTREAM_UNAVAILABLE';
+  // A bounded worker may intentionally leave entries for the next hot-scope
+  // bucket. That is progress, not an upstream failure. Request-path reads and
+  // actual FPL failures retain the existing error semantics.
+  if (!errorCode && missingEntryIds.length > 0 && !completeRefresh) {
+    errorCode = 'UPSTREAM_UNAVAILABLE';
+  }
 
   return buildManagerLiveResult({
     season: season.seasonCode,
