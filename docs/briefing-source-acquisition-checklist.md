@@ -329,7 +329,9 @@ scheduler；当前宿主机 Runner、认证和工具面合同见 3.2、3.3 和
 受保护的 `Briefing source media rollout` workflow 只接受 `status / provision / enable /
 enable-retention / disable`。`provision` 不修改 worker 状态；`enable` 始终保持 retention 关闭；
 `enable-retention` 在停稳 worker 后 fail-close 检查 backlog、lease 和 `RESERVED` asset。每次配置修改
-都备份并可恢复 `.env.media`，且只重启 `media-worker`。
+都备份并可恢复 `.env.media`，且只重启 `media-worker`。首次部署会在文件不存在时，以 VPS 已通过
+私有 Storage probe 的 server-side Supabase URL/key 原子建立 mode `0600` 的 `.env.media`；初始化值固定
+为 worker/retention 都关闭，不打印 secret、不读取或修改 bug-report bucket，且已有文件永不覆盖。
 
 ## 4. RSS/Atom 案例：Fantasy Football Scout
 

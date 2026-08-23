@@ -221,6 +221,11 @@ deploy() {
     log_error "Bug-report screenshot storage contract failed; services were not stopped."
     exit 1
   fi
+  if ! "${PROJECT_DIR}/scripts/bootstrap-briefing-source-media-env.sh" \
+    "${ENV_FILE}" "${CONTENT_MEDIA_ENV_FILE}"; then
+    log_error "Could not establish the private source-media environment file."
+    exit 1
+  fi
   media_worker_setting=false
   if [[ -f "${CONTENT_MEDIA_ENV_FILE}" ]]; then
     media_worker_setting=$(read_env_setting CONTENT_MEDIA_WORKER_ENABLED "$CONTENT_MEDIA_ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
