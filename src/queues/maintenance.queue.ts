@@ -12,12 +12,13 @@ export const MAINTENANCE_JOBS = {
   BUG_REPORT_SCREENSHOT_RETENTION: 'bug-report-screenshot-retention',
   LAUNCH_MONITOR: 'launch-monitor',
   POST_MATCH_CONSOLIDATION: 'post-match-consolidation',
+  ENTRY_ONBOARDING: 'entry-onboarding',
   MY_FPL_SNAPSHOT: 'my-fpl-snapshot',
   MY_FPL_SNAPSHOT_OUTBOX: 'my-fpl-snapshot-outbox',
 } as const;
 
 export type MaintenanceJobName = (typeof MAINTENANCE_JOBS)[keyof typeof MAINTENANCE_JOBS];
-export type MaintenanceJobSource = 'schedule' | 'catchup' | 'reconcile' | 'manual' | 'cron';
+export type MaintenanceJobSource = 'schedule' | 'catchup' | 'reconcile' | 'manual' | 'cron' | 'api';
 
 export type MaintenanceJobData = {
   jobName: MaintenanceJobName;
@@ -28,6 +29,7 @@ export type MaintenanceJobData = {
   runId: string;
   obligationId?: string;
   obligationGeneration?: number;
+  entryId?: number;
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
   snapshotActor?: string;

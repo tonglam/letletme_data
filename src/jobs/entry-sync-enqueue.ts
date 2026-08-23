@@ -12,7 +12,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { getCurrentEvent } from '../services/events.service';
 import { logError, logInfo } from '../utils/logger';
 import { stableHash } from '../utils/stable-hash';
-import { trackMyFplRefreshJob } from '../services/my-fpl-refresh-tracker';
+import { trackQueueRunJob } from '../services/queue-run-tracker';
 
 export interface EntrySyncJobOptions {
   entryIds?: number[];
@@ -66,6 +66,11 @@ function hashEntryListKey(
   // swallow one another's continuation.
   const retryScope = (retryCount ?? 0) > 0 ? `|run${runId ?? ''}` : '';
   return stableHash(`${sorted}|e${eventId ?? ''}|r${retryCount ?? 0}${retryScope}`);
+}
+
+function hashEntryListContentKey(entryIds: readonly number[], eventId?: number): string {
+  const sorted = [...entryIds].sort((a, b) => a - b).join(',');
+  return stableHash(`${sorted}|e${eventId ?? ''}`);
 }
 
 function sanitizePositiveInt(value: number | undefined, fallback: number) {
@@ -149,6 +154,11 @@ async function enqueueEntrySyncJob(
     const runId = options.runId ?? (source === 'cron' ? `${Date.now()}` : randomUUID());
     const tableScanQueueKey = options.queueKey ?? (source === 'manual' ? 'manual' : runId);
     const isEntryList = options.entryIds !== undefined;
+    const lifecycleDedupeEntryList =
+      source === 'api' &&
+      isEntryList &&
+      (options.retryCount ?? 0) === 0 &&
+      options.jobId === undefined;
     // Keep queue evidence for every non-manual trigger, including explicit
     // entry-list/API scans. Manual one-shots may still clean up on settle.
     const removeOnSettle = source === 'manual' && options.removeOnSettle !== false;
@@ -177,12 +187,15 @@ async function enqueueEntrySyncJob(
       options.eventId !== undefined
         ? `${afterEntryId}-event-${options.eventId}`
         : `${afterEntryId}`;
-    // Entry-list jobs (API with explicit IDs) keep their content-based ID.
-    // Table-scan chunks get deterministic IDs keyed by the trigger lane + cursor
-    // so correlation IDs can vary without forking parallel manual chains.
-    const defaultJobId = isEntryList
-      ? `${jobName}-${season.seasonCode}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount, runId)}`
-      : `${jobName}-${season.seasonCode}-${tableScanQueueKey}-chunk-${chunkKey}`;
+    const entryListContentKey = hashEntryListContentKey(options.entryIds ?? [], options.eventId);
+    // Explicit API entry lists use BullMQ's lifecycle deduplication key while
+    // keeping a unique job record for every terminal re-trigger. Internal
+    // retries and coordinator-owned jobs retain their run-scoped IDs.
+    const defaultJobId = lifecycleDedupeEntryList
+      ? `${jobName}-${season.seasonCode}-entry-list-${entryListContentKey}-run-${randomUUID()}`
+      : isEntryList
+        ? `${jobName}-${season.seasonCode}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount, runId)}`
+        : `${jobName}-${season.seasonCode}-${tableScanQueueKey}-chunk-${chunkKey}`;
     const jobId = options.jobId ?? defaultJobId;
     // Deterministic IDs must not block re-triggers after settle.
     const job = await queue.add(jobName, jobData, {
@@ -193,6 +206,13 @@ async function enqueueEntrySyncJob(
       },
       jobId,
       delay: options.delayMs,
+      ...(lifecycleDedupeEntryList
+        ? {
+            deduplication: {
+              id: `${jobName}-${season.seasonCode}-entry-list-${entryListContentKey}`,
+            },
+          }
+        : {}),
       ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
 
@@ -205,7 +225,7 @@ async function enqueueEntrySyncJob(
       chunkSize,
       runId: job.data.runId ?? runId,
     });
-    await trackMyFplRefreshJob(job.data.runId ?? runId, queue.name, job.id);
+    await trackQueueRunJob(job.data.runId ?? runId, queue.name, job.id);
     return job;
   } catch (error) {
     logError('Failed to enqueue entry sync job', error, { jobName, source });

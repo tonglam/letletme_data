@@ -16,6 +16,7 @@ export type MaintenanceEnqueueOptions = Readonly<{
   runId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  entryId?: number;
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
   snapshotActor?: string;
@@ -23,6 +24,7 @@ export type MaintenanceEnqueueOptions = Readonly<{
   snapshotIdempotencyKey?: string;
   attempts?: number;
   backoffDelayMs?: number;
+  deduplicationId?: string;
 }>;
 
 export async function enqueueMaintenanceJob(
@@ -43,6 +45,7 @@ export async function enqueueMaintenanceJob(
     ...(options.obligationGeneration === undefined
       ? {}
       : { obligationGeneration: options.obligationGeneration }),
+    ...(options.entryId === undefined ? {} : { entryId: options.entryId }),
     ...(options.eventId === undefined ? {} : { eventId: options.eventId }),
     ...(options.snapshotKind === undefined ? {} : { snapshotKind: options.snapshotKind }),
     ...(options.snapshotActor === undefined ? {} : { snapshotActor: options.snapshotActor }),
@@ -58,6 +61,9 @@ export async function enqueueMaintenanceJob(
       ...(options.backoffDelayMs === undefined
         ? {}
         : { backoff: { type: 'fixed' as const, delay: options.backoffDelayMs } }),
+      ...(options.deduplicationId === undefined
+        ? {}
+        : { deduplication: { id: options.deduplicationId } }),
       ...(source === 'manual' ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
     logInfo('Maintenance job enqueued', {
@@ -116,6 +122,25 @@ export const enqueuePostMatchConsolidation = (
   source: MaintenanceJobSource,
   options?: MaintenanceEnqueueOptions,
 ) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION, source, options);
+
+export const enqueueEntryOnboarding = (
+  season: FplSeasonRef,
+  source: Extract<MaintenanceJobSource, 'api'>,
+  options: MaintenanceEnqueueOptions & { entryId: number },
+) => {
+  const runId = options.runId ?? randomUUID();
+  const eventScope = options.eventId ?? 'preseason';
+  return enqueueMaintenanceJob(season, MAINTENANCE_JOBS.ENTRY_ONBOARDING, source, {
+    ...options,
+    runId,
+    jobId:
+      options.jobId ??
+      `entry-onboarding-${season.seasonCode}-e${eventScope}-entry-${options.entryId}-run-${runId}`,
+    deduplicationId:
+      options.deduplicationId ??
+      `entry-onboarding-${season.seasonCode}-e${eventScope}-entry-${options.entryId}`,
+  });
+};
 
 export const enqueueMyFplSnapshot = (
   season: FplSeasonRef,

@@ -227,6 +227,46 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(addCalls[1].data.runId).toBe('scan-b');
   });
 
+  test('deduplicates concurrent API entry lists only for the active lifecycle', async () => {
+    const first = await enqueueEntryPicksSyncJob(TEST_SEASON, 'api', {
+      entryIds: [20, 10],
+      eventId: 20,
+    });
+    const second = await enqueueEntryPicksSyncJob(TEST_SEASON, 'api', {
+      entryIds: [10, 20],
+      eventId: 20,
+    });
+
+    expect(first.id).not.toBe(second.id);
+    expect(first.id).toMatch(/^entry-picks-2627-entry-list-[0-9a-f]{8}-run-/);
+    expect(second.id).toMatch(/^entry-picks-2627-entry-list-[0-9a-f]{8}-run-/);
+    expect(addCalls[0].opts.deduplication).toEqual(addCalls[1].opts.deduplication);
+    expect(addCalls[0].opts.deduplication).toEqual({
+      id: expect.stringMatching(/^entry-picks-2627-entry-list-[0-9a-f]{8}$/),
+    });
+    expect(addCalls[0].opts.removeOnComplete).toBeUndefined();
+    expect(addCalls[0].opts.removeOnFail).toBeUndefined();
+  });
+
+  test('does not lifecycle-dedupe coordinator-owned or exact retry jobs', async () => {
+    await enqueueEntryPicksSyncJob(TEST_SEASON, 'api', {
+      entryIds: [10],
+      eventId: 20,
+      jobId: 'entry-onboarding-attempt-entry-picks-10',
+      runId: 'entry-onboarding-attempt',
+    });
+    await enqueueEntryPicksSyncJob(TEST_SEASON, 'api', {
+      entryIds: [10],
+      eventId: 20,
+      retryCount: 1,
+      runId: 'entry-onboarding-attempt',
+    });
+
+    expect(addCalls[0].opts.jobId).toBe('entry-onboarding-attempt-entry-picks-10');
+    expect(addCalls[0].opts.deduplication).toBeUndefined();
+    expect(addCalls[1].opts.deduplication).toBeUndefined();
+  });
+
   test('retains failure evidence through a deterministic cron continuation', async () => {
     const root = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
       runId: 'daily-scan',

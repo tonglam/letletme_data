@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, test } from 'bun:test';
 
-import { myFplSnapshotRedisManifestKey } from '../../src/services/my-fpl-snapshot-publication.service';
+import {
+  isMatchingProvisionalMyFplPublication,
+  myFplSnapshotRedisManifestKey,
+  resolveMyFplSnapshotCoverageState,
+  type MyFplSnapshotPublication,
+} from '../../src/services/my-fpl-snapshot-publication.service';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
 const publicationService = readFileSync(
@@ -11,6 +16,7 @@ const publicationService = readFileSync(
 );
 const scheduler = readFileSync('src/scheduler/job-registry.ts', 'utf8');
 const worker = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
+const queueRunBarrier = readFileSync('src/services/queue-run-barrier.ts', 'utf8');
 const transaction = readFileSync('src/db/singleton.ts', 'utf8');
 const trends = readFileSync('src/services/tournament-trends-publication.service.ts', 'utf8');
 const tournamentWorker = readFileSync('src/workers/tournament-sync.worker.ts', 'utf8');
@@ -60,12 +66,87 @@ describe('My FPL daily snapshot publication contract', () => {
   });
 
   test('allows the full current-season refresh barrier to settle', () => {
-    expect(worker).toContain('const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 30 * 60_000');
-    expect(worker).not.toContain('const MY_FPL_REFRESH_WAIT_TIMEOUT_MS = 10 * 60_000');
+    expect(queueRunBarrier).toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 30 * 60_000');
+    expect(queueRunBarrier).not.toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 10 * 60_000');
     expect(worker).toContain('renewSchedulerObligation');
     expect(worker).toContain('SCHEDULER_LEASE_HEARTBEAT_MS = 60_000');
-    expect(worker).toContain('runMyFplRefreshPhase(attemptKey');
+    expect(worker).toContain('runQueueRunPhase(attemptKey');
     expect(worker).not.toContain('await Promise.all([\n          enqueueCoreSnapshotJob');
+  });
+
+  test('decides same-day provisional noops only after normalized content hashing', () => {
+    const contentHash = publicationService.indexOf('const contentSha256 = createHash');
+    const matchingGuard = publicationService.lastIndexOf(
+      'isMatchingProvisionalMyFplPublication(active',
+    );
+    const publicationInsert = publicationService.indexOf(
+      'INSERT INTO competition.my_fpl_snapshot_publications',
+    );
+    expect(contentHash).toBeGreaterThan(0);
+    expect(matchingGuard).toBeGreaterThan(contentHash);
+    expect(publicationInsert).toBeGreaterThan(matchingGuard);
+    expect(publicationService).not.toContain(
+      'active.snapshotDate === snapshotDate &&\n        kind === \u0027PROVISIONAL\u0027',
+    );
+  });
+
+  test('acquires the cross-process capture lock before opening the repeatable-read snapshot', () => {
+    const helper = publicationService.slice(
+      publicationService.indexOf('async function runMyFplCaptureTransaction'),
+      publicationService.indexOf('type EntryIdentity'),
+    );
+    const sessionLock = helper.indexOf('SELECT pg_advisory_lock');
+    const transactionBegin = helper.indexOf('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    expect(sessionLock).toBeGreaterThan(0);
+    expect(transactionBegin).toBeGreaterThan(sessionLock);
+    expect(helper).toContain('await reserved`COMMIT`');
+    expect(helper).toContain('await reserved`ROLLBACK`');
+    expect(helper).toContain('SELECT pg_advisory_unlock');
+    expect(helper).not.toContain('reserved.begin');
+    expect(helper).not.toContain('pg_advisory_xact_lock');
+  });
+
+  test('reuses only an identical provisional revision and reports coverage state', () => {
+    const active: MyFplSnapshotPublication = {
+      seasonId: 2026,
+      eventId: 20,
+      revision: 7,
+      snapshotDate: '2026-08-23',
+      sourceCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
+      publishedAt: new Date('2026-08-23T02:05:00.000Z'),
+      kind: 'PROVISIONAL',
+      expectedEntryCount: 10,
+      readyEntryCount: 10,
+      emptyEntryCount: 0,
+      expectedTournamentCount: 1,
+      readyTournamentCount: 1,
+      contentSha256: 'a'.repeat(64),
+    };
+    expect(
+      isMatchingProvisionalMyFplPublication(active, {
+        kind: 'PROVISIONAL',
+        snapshotDate: active.snapshotDate,
+        contentSha256: active.contentSha256,
+      }),
+    ).toBe(true);
+    expect(
+      isMatchingProvisionalMyFplPublication(active, {
+        kind: 'PROVISIONAL',
+        snapshotDate: active.snapshotDate,
+        contentSha256: 'b'.repeat(64),
+      }),
+    ).toBe(false);
+    expect(
+      isMatchingProvisionalMyFplPublication(active, {
+        kind: 'FINAL',
+        snapshotDate: active.snapshotDate,
+        contentSha256: active.contentSha256,
+      }),
+    ).toBe(false);
+    expect(resolveMyFplSnapshotCoverageState(null, 0)).toBe('NO_PUBLICATION');
+    expect(resolveMyFplSnapshotCoverageState('FINAL', 1)).toBe('IMMUTABLE_FINAL');
+    expect(resolveMyFplSnapshotCoverageState('PROVISIONAL', 1)).toBe('CORRECTION_PENDING');
+    expect(resolveMyFplSnapshotCoverageState('PROVISIONAL', 0)).toBe('COMPLETE');
   });
 
   test('serializes tournament result and transfer writes', () => {

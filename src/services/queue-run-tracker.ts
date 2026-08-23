@@ -1,17 +1,17 @@
 import { queueRedisSingleton } from '../queues/redis';
 
-const MY_FPL_REFRESH_TRACKER_TTL_SECONDS = 2 * 60 * 60;
+const QUEUE_RUN_TRACKER_TTL_SECONDS = 2 * 60 * 60;
 
-type MyFplRefreshJobReference = Readonly<{
+export type QueueRunJobReference = Readonly<{
   queueName: string;
   jobId: string;
 }>;
 
-const trackerKey = (runId: string): string => `llm:queue:coordination:my-fpl-refresh:${runId}:jobs`;
+const trackerKey = (runId: string): string => `llm:queue:coordination:run:${runId}:jobs`;
 
-const encodeReference = (reference: MyFplRefreshJobReference): string => JSON.stringify(reference);
+const encodeReference = (reference: QueueRunJobReference): string => JSON.stringify(reference);
 
-const decodeReference = (value: string): MyFplRefreshJobReference | null => {
+const decodeReference = (value: string): QueueRunJobReference | null => {
   try {
     const parsed: unknown = JSON.parse(value);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
@@ -24,11 +24,11 @@ const decodeReference = (value: string): MyFplRefreshJobReference | null => {
 };
 
 /**
- * Register a BullMQ job before its worker can complete. Snapshot coordinators
- * wait on this exact set rather than scanning queue states independently,
- * which closes the gap where a cascade child is enqueued between two scans.
+ * Register a BullMQ job before its worker can complete. Coordinators wait on
+ * this exact set rather than scanning queue states independently, which closes
+ * the gap where a cascade child is enqueued between two scans.
  */
-export async function trackMyFplRefreshJob(
+export async function trackQueueRunJob(
   runId: string | undefined,
   queueName: string,
   jobId: string | number | undefined,
@@ -37,12 +37,10 @@ export async function trackMyFplRefreshJob(
   const redis = await queueRedisSingleton.getClient();
   const key = trackerKey(runId);
   await redis.sadd(key, encodeReference({ queueName, jobId: String(jobId) }));
-  await redis.expire(key, MY_FPL_REFRESH_TRACKER_TTL_SECONDS);
+  await redis.expire(key, QUEUE_RUN_TRACKER_TTL_SECONDS);
 }
 
-export async function listMyFplRefreshJobs(
-  runId: string,
-): Promise<readonly MyFplRefreshJobReference[]> {
+export async function listQueueRunJobs(runId: string): Promise<readonly QueueRunJobReference[]> {
   const redis = await queueRedisSingleton.getClient();
   const values = await redis.smembers(trackerKey(runId));
   return values.flatMap((value) => {
@@ -51,7 +49,7 @@ export async function listMyFplRefreshJobs(
   });
 }
 
-export async function clearMyFplRefreshJobs(runId: string): Promise<void> {
+export async function clearQueueRunJobs(runId: string): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
   await redis.del(trackerKey(runId));
 }
