@@ -32,7 +32,52 @@ export type OfficialH2HSourceSnapshot = {
 export type OfficialH2HSyncOptions = {
   /** Allow score fallback for matches at or before a finalized event. */
   finalizedThroughEventId?: number | null;
+  /**
+   * Allow score fallback for one non-final event after its complete, atomic
+   * score batch has been validated against the tournament roster.
+   */
+  provisionalEventId?: number | null;
+  /** Suppress every outcome shape for an incomplete provisional event. */
+  suppressedEventId?: number | null;
 };
+
+export function resolveFinalizedThroughEventId(
+  latestFinalizedEventId: number | null | undefined,
+  requestedEventId: number,
+  requestedEventIsFinalized: boolean,
+): number | null {
+  const finalizedThroughEventId = Math.max(
+    latestFinalizedEventId ?? 0,
+    requestedEventIsFinalized ? requestedEventId : 0,
+  );
+  return finalizedThroughEventId > 0 ? finalizedThroughEventId : null;
+}
+
+export function resolveOfficialH2HSyncOptionsFromEventState(
+  eventId: number,
+  event: { finished: boolean; dataChecked: boolean; isCurrent: boolean } | null,
+  currentEvent: { id: number } | null,
+  latestFinalizedEvent: { id: number } | null,
+): OfficialH2HSyncOptions {
+  const eventIsFinalized = event?.finished === true && event.dataChecked === true;
+  const finalizedThroughEventId = resolveFinalizedThroughEventId(
+    latestFinalizedEvent?.id,
+    eventId,
+    eventIsFinalized,
+  );
+  return {
+    // These rows are read concurrently. Either finalized signal must prevent
+    // the same event from being treated as provisional.
+    finalizedThroughEventId,
+    provisionalEventId:
+      event &&
+      !eventIsFinalized &&
+      (finalizedThroughEventId ?? 0) < eventId &&
+      (event.isCurrent || currentEvent?.id === eventId)
+        ? eventId
+        : null,
+  };
+}
 
 function isRealOfficialH2HStanding(
   standing: RawFPLLeagueStandingsResult,
@@ -48,21 +93,43 @@ function integerOrZero(value: number | null | undefined): number {
   return Number.isInteger(value) ? Number(value) : 0;
 }
 
+function matchPointsFromScore(match: RawFPLLeagueH2HMatch): {
+  home: number | null;
+  away: number | null;
+} {
+  if (typeof match.entry_1_points !== 'number' || typeof match.entry_2_points !== 'number') {
+    return { home: null, away: null };
+  }
+  if (match.entry_1_points > match.entry_2_points) return { home: 3, away: 0 };
+  if (match.entry_1_points < match.entry_2_points) return { home: 0, away: 3 };
+  return { home: 1, away: 1 };
+}
+
 function matchPoints(
   match: RawFPLLeagueH2HMatch,
   options: OfficialH2HSyncOptions = {},
 ): { home: number | null; away: number | null } {
-  const explicitOutcomeFields = [
-    match.entry_1_win,
-    match.entry_1_draw,
-    match.entry_1_loss,
-    match.entry_1_total,
-    match.entry_2_win,
-    match.entry_2_draw,
-    match.entry_2_loss,
-    match.entry_2_total,
-  ];
-  const hasExplicitOutcomeContract = explicitOutcomeFields.some((value) => value !== undefined);
+  if (match.is_bye === true || options.suppressedEventId === match.event) {
+    return { home: null, away: null };
+  }
+  if (options.provisionalEventId === match.event) {
+    // The complete score batch is the newest live evidence. FPL's explicit
+    // outcome fields can still describe the preceding score snapshot.
+    return matchPointsFromScore(match);
+  }
+  const hasFinalizedScoreEvidence =
+    options.finalizedThroughEventId !== null &&
+    options.finalizedThroughEventId !== undefined &&
+    match.event <= options.finalizedThroughEventId;
+  if (
+    hasFinalizedScoreEvidence &&
+    typeof match.entry_1_points === 'number' &&
+    typeof match.entry_2_points === 'number'
+  ) {
+    // Keep the validated score authoritative while FPL's outcome fields catch
+    // up with a just-finalized round.
+    return matchPointsFromScore(match);
+  }
   if (
     typeof match.entry_1_total === 'number' &&
     typeof match.entry_2_total === 'number' &&
@@ -91,25 +158,76 @@ function matchPoints(
     };
   }
   // FPL currently returns the outcome fields as an all-zero placeholder while
-  // the points fields are already populated. Only treat that shape as
-  // scoreable after the local event has finished and been data-checked; live
-  // entry points can still move during a gameweek.
+  // the points fields are already populated. Treat that shape as scoreable for
+  // finalized events, or for one live event whose complete batch has already
+  // been validated against the roster by syncOfficialH2HTournament.
   const allowScoreFallback =
-    options.finalizedThroughEventId !== null &&
-    options.finalizedThroughEventId !== undefined &&
-    match.event <= options.finalizedThroughEventId;
+    hasFinalizedScoreEvidence || options.provisionalEventId === match.event;
   if (!allowScoreFallback) return { home: null, away: null };
-  const hasNonZeroScores =
-    typeof match.entry_1_points === 'number' &&
-    typeof match.entry_2_points === 'number' &&
-    (match.entry_1_points !== 0 || match.entry_2_points !== 0);
-  if (hasExplicitOutcomeContract && !hasNonZeroScores) return { home: null, away: null };
-  if (typeof match.entry_1_points !== 'number' || typeof match.entry_2_points !== 'number') {
-    return { home: null, away: null };
+  return matchPointsFromScore(match);
+}
+
+/**
+ * FPL publishes the current H2H round as one snapshot. Do not activate live
+ * score fallback unless every real roster entry appears exactly once, every
+ * non-bye matchup has both scores, and the batch has moved beyond the all-zero
+ * pre-match placeholder.
+ */
+export function hasCompleteOfficialH2HScoreBatch(
+  entryIds: ReadonlySet<number>,
+  matches: readonly RawFPLLeagueH2HMatch[],
+  eventId: number,
+): boolean {
+  if (entryIds.size === 0) return false;
+  const eventMatches = matches.filter(
+    (match) => match.event === eventId && !isOfficialKnockoutMatch(match),
+  );
+  if (eventMatches.length === 0) return false;
+
+  const seenEntries = new Set<number>();
+  let hasNonZeroScore = false;
+  for (const match of eventMatches) {
+    const realSides = [match.entry_1_entry, match.entry_2_entry].filter(
+      (entryId): entryId is number => entryId !== null,
+    );
+    if (new Set(realSides).size !== realSides.length) return false;
+    for (const entryId of realSides) {
+      if (!entryIds.has(entryId) || seenEntries.has(entryId)) return false;
+      seenEntries.add(entryId);
+    }
+
+    if (match.is_bye === true) {
+      if (realSides.length !== 1) return false;
+      continue;
+    }
+    // A regular matchup is either two real entries, or one real entry against
+    // FPL's synthetic Average Team (the nullable side).
+    if (realSides.length < 1 || typeof match.entry_1_points !== 'number') return false;
+    if (typeof match.entry_2_points !== 'number') return false;
+    if (match.entry_1_points !== 0 || match.entry_2_points !== 0) hasNonZeroScore = true;
   }
-  if (match.entry_1_points > match.entry_2_points) return { home: 3, away: 0 };
-  if (match.entry_1_points < match.entry_2_points) return { home: 0, away: 3 };
-  return { home: 1, away: 1 };
+
+  return seenEntries.size === entryIds.size && hasNonZeroScore;
+}
+
+export function validatedOfficialH2HSyncOptions(
+  entryIds: ReadonlySet<number>,
+  matches: readonly RawFPLLeagueH2HMatch[],
+  options: OfficialH2HSyncOptions,
+): OfficialH2HSyncOptions {
+  const provisionalEventId = options.provisionalEventId;
+  const completeProvisionalBatch =
+    provisionalEventId !== null &&
+    provisionalEventId !== undefined &&
+    hasCompleteOfficialH2HScoreBatch(entryIds, matches, provisionalEventId);
+  return {
+    finalizedThroughEventId: options.finalizedThroughEventId ?? null,
+    provisionalEventId: completeProvisionalBatch ? provisionalEventId : null,
+    suppressedEventId:
+      provisionalEventId !== null && provisionalEventId !== undefined && !completeProvisionalBatch
+        ? provisionalEventId
+        : null,
+  };
 }
 
 function serializeTiebreak(value: unknown): string | null {
@@ -314,6 +432,102 @@ export function projectOfficialH2HStandingsFromMatches(
     previousKey = key;
     return { ...standing, rank };
   });
+}
+
+function standingsPlayedCoverage(standings: readonly OfficialH2HStanding[]): number {
+  return standings.reduce(
+    (total, standing) => total + nonNegativeInteger(standing.matches_played),
+    0,
+  );
+}
+
+export function minimumOfficialPlayedCoverageForSuppressedEvent(
+  matchDerivedStandings: readonly OfficialH2HStanding[],
+  matches: readonly RawFPLLeagueH2HMatch[],
+  suppressedEventId: number | null | undefined,
+): ReadonlyMap<number, number> | undefined {
+  if (suppressedEventId === null || suppressedEventId === undefined) return undefined;
+  const minimumPlayedByEntry = new Map(
+    matchDerivedStandings.map((standing) => [
+      standing.entry,
+      nonNegativeInteger(standing.matches_played),
+    ]),
+  );
+  for (const match of matches) {
+    if (
+      match.event !== suppressedEventId ||
+      isOfficialKnockoutMatch(match) ||
+      match.is_bye === true
+    ) {
+      continue;
+    }
+    for (const entryId of [match.entry_1_entry, match.entry_2_entry]) {
+      if (entryId === null || !minimumPlayedByEntry.has(entryId)) continue;
+      minimumPlayedByEntry.set(entryId, (minimumPlayedByEntry.get(entryId) ?? 0) + 1);
+    }
+  }
+  return minimumPlayedByEntry;
+}
+
+export function selectOfficialH2HStandings(
+  officialStandings: readonly OfficialH2HStanding[],
+  matchDerivedStandings: readonly OfficialH2HStanding[],
+  minimumOfficialPlayedByEntry?: ReadonlyMap<number, number>,
+  preferMatchDerivedAtEqualCoverage = false,
+): {
+  standings: readonly OfficialH2HStanding[];
+  usedMatchDerivedStandings: boolean;
+  officialPlayed: number;
+  derivedPlayed: number;
+} {
+  const officialPlayed = standingsPlayedCoverage(officialStandings);
+  const derivedPlayed = standingsPlayedCoverage(matchDerivedStandings);
+  const officialPlayedByEntry = new Map(
+    officialStandings.map((standing) => [
+      standing.entry,
+      nonNegativeInteger(standing.matches_played),
+    ]),
+  );
+  // FPL can refresh only some rows first. Keep the atomic match-derived table
+  // until every real entry reaches both its derived coverage and, while a
+  // score-incomplete round is suppressed, that round's scheduled coverage.
+  const officialCoverageLags = matchDerivedStandings.some((standing) => {
+    const officialEntryPlayed = officialPlayedByEntry.get(standing.entry) ?? -1;
+    const minimumPlayed = Math.max(
+      nonNegativeInteger(standing.matches_played),
+      minimumOfficialPlayedByEntry?.get(standing.entry) ?? 0,
+    );
+    return officialEntryPlayed < minimumPlayed;
+  });
+  const officialByEntry = new Map(
+    officialStandings.map((standing) => [standing.entry, standing] as const),
+  );
+  const hasEqualPerEntryCoverage = matchDerivedStandings.every(
+    (standing) =>
+      (officialPlayedByEntry.get(standing.entry) ?? -1) ===
+      nonNegativeInteger(standing.matches_played),
+  );
+  const aggregateDiffersAtEqualCoverage =
+    preferMatchDerivedAtEqualCoverage &&
+    hasEqualPerEntryCoverage &&
+    matchDerivedStandings.some((derived) => {
+      const official = officialByEntry.get(derived.entry);
+      return (
+        !official ||
+        nonNegativeInteger(official.total) !== nonNegativeInteger(derived.total) ||
+        nonNegativeInteger(official.matches_won) !== nonNegativeInteger(derived.matches_won) ||
+        nonNegativeInteger(official.matches_drawn) !== nonNegativeInteger(derived.matches_drawn) ||
+        nonNegativeInteger(official.matches_lost) !== nonNegativeInteger(derived.matches_lost) ||
+        integerOrZero(official.points_for) !== integerOrZero(derived.points_for)
+      );
+    });
+  const usedMatchDerivedStandings = officialCoverageLags || aggregateDiffersAtEqualCoverage;
+  return {
+    standings: usedMatchDerivedStandings ? matchDerivedStandings : officialStandings,
+    usedMatchDerivedStandings,
+    officialPlayed,
+    derivedPlayed,
+  };
 }
 
 function assertMatchSides(match: RawFPLLeagueH2HMatch, entryIds: ReadonlySet<number>): void {
@@ -643,8 +857,16 @@ export async function syncOfficialH2HTournament(
       }
     }
   }
+  const effectiveOptions = validatedOfficialH2HSyncOptions(entryIdSet, snapshot.matches, options);
+  const provisionalEventId = effectiveOptions.provisionalEventId ?? null;
   const checkedAt = new Date();
-  const officialRows = buildOfficialH2HRows(tournament, entryIdSet, snapshot, checkedAt, options);
+  const officialRows = buildOfficialH2HRows(
+    tournament,
+    entryIdSet,
+    snapshot,
+    checkedAt,
+    effectiveOptions,
+  );
   const aggregateTotals = await entryEventResultsRepository.aggregateTotalsByEntry(
     season,
     entryIds,
@@ -655,28 +877,34 @@ export async function syncOfficialH2HTournament(
   const matchDerivedStandings = projectOfficialH2HStandingsFromMatches(
     entryIdSet,
     snapshot.matches,
-    options,
+    effectiveOptions,
   );
-  const officialStandingsHaveScores = snapshot.standings.some(
-    (standing) =>
-      (standing.total ?? standing.points_total ?? 0) !== 0 ||
-      (standing.matches_played ?? 0) !== 0 ||
-      (standing.matches_won ?? 0) !== 0 ||
-      (standing.matches_drawn ?? 0) !== 0 ||
-      (standing.matches_lost ?? 0) !== 0 ||
-      (standing.points_for ?? 0) !== 0,
+  const minimumOfficialPlayedByEntry = minimumOfficialPlayedCoverageForSuppressedEvent(
+    matchDerivedStandings,
+    snapshot.matches,
+    effectiveOptions.suppressedEventId,
   );
-  const useMatchDerivedStandings =
-    !officialStandingsHaveScores &&
-    matchDerivedStandings.some((standing) => (standing.matches_played ?? 0) > 0);
-  const effectiveStandings = useMatchDerivedStandings ? matchDerivedStandings : snapshot.standings;
-  if (useMatchDerivedStandings) {
+  const standingsSelection = selectOfficialH2HStandings(
+    snapshot.standings,
+    matchDerivedStandings,
+    minimumOfficialPlayedByEntry,
+    effectiveOptions.provisionalEventId !== null ||
+      effectiveOptions.finalizedThroughEventId !== null,
+  );
+  if (standingsSelection.usedMatchDerivedStandings) {
     logWarn('FPL H2H standings lagged match scores; projecting standings from official matches', {
       tournamentId: tournament.id,
       leagueId: tournament.leagueId,
+      provisionalEventId,
+      officialPlayed: standingsSelection.officialPlayed,
+      derivedPlayed: standingsSelection.derivedPlayed,
     });
   }
-  const groupRows = projectOfficialH2HStandings(currentGroups, effectiveStandings, totalsByEntry);
+  const groupRows = projectOfficialH2HStandings(
+    currentGroups,
+    standingsSelection.standings,
+    totalsByEntry,
+  );
   const published = await tournamentOfficialH2HRepository.publish(season, tournament.id, {
     ...officialRows,
     checkedAt,
