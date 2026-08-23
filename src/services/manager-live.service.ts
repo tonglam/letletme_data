@@ -1718,6 +1718,7 @@ export const refreshClassicStandings = async (
         eventId,
         leagueId,
         error: error instanceof Error ? error.name : 'unknown',
+        errorMessage: error instanceof Error ? error.message : String(error),
       });
     }
   }
