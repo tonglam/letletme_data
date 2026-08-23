@@ -1,7 +1,54 @@
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
+// A Classic board enriches at most 20 managers synchronously. Larger rosters
+// keep the same upstream request budget and finish through the background gate.
+const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
 
 export type ManagerSummaryFetchPriority = 'foreground' | 'background';
+
+export const isPositiveOverallRank = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+
+export const preserveLastKnownOverallRank = (
+  incoming: number | null | undefined,
+  previous: number | null | undefined,
+): number | null => {
+  if (isPositiveOverallRank(incoming)) return incoming;
+  return isPositiveOverallRank(previous) ? previous : null;
+};
+
+export const shouldRefreshClassicOverallRank = (
+  row:
+    | Readonly<{
+        source: string;
+        overallRank: number | null | undefined;
+      }>
+    | undefined,
+  standingsRowExpired: boolean,
+): boolean =>
+  row?.source === 'FPL_CLASSIC_STANDINGS' &&
+  (standingsRowExpired || !isPositiveOverallRank(row.overallRank));
+
+export const planClassicOverallRankRefresh = (
+  entryIds: readonly number[],
+): Readonly<{
+  entryIds: readonly number[];
+  foregroundEntryIds: readonly number[];
+}> => {
+  const uniqueEntryIds = Array.from(new Set(entryIds));
+  return {
+    entryIds: uniqueEntryIds,
+    foregroundEntryIds: uniqueEntryIds.slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES),
+  };
+};
+
+export const pendingOverallRankRefreshEntryIds = (
+  requestedEntryIds: readonly number[],
+  refreshedEntryIds: readonly number[],
+): readonly number[] => {
+  const refreshed = new Set(refreshedEntryIds);
+  return requestedEntryIds.filter((entryId) => !refreshed.has(entryId));
+};
 
 export const createManagerSummaryFetchGate = (
   maxConcurrent = MAX_SUMMARY_FETCH_CONCURRENCY,

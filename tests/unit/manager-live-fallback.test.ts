@@ -2,11 +2,61 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   createManagerSummaryFetchGate,
+  isPositiveOverallRank,
   managerSummaryFetchBatches,
+  pendingOverallRankRefreshEntryIds,
   planClassicManagerFallback,
+  planClassicOverallRankRefresh,
+  preserveLastKnownOverallRank,
+  shouldRefreshClassicOverallRank,
 } from '../../src/domain/manager-live-fallback';
 
 describe('classic manager live fallback', () => {
+  test('keeps the last positive overall rank until a newer positive rank arrives', () => {
+    expect(preserveLastKnownOverallRank(null, 640_000)).toBe(640_000);
+    expect(preserveLastKnownOverallRank(0, 640_000)).toBe(640_000);
+    expect(preserveLastKnownOverallRank(-1, 640_000)).toBe(640_000);
+    expect(preserveLastKnownOverallRank(undefined, 640_000)).toBe(640_000);
+    expect(preserveLastKnownOverallRank(620_000, 640_000)).toBe(620_000);
+    expect(preserveLastKnownOverallRank(null, null)).toBeNull();
+    expect(isPositiveOverallRank(620_000)).toBeTrue();
+    expect(isPositiveOverallRank(0)).toBeFalse();
+  });
+
+  test('keeps the foreground rank budget while retaining deferred and failed work', () => {
+    const entryIds = Array.from({ length: 98 }, (_, index) => index + 1);
+    const plan = planClassicOverallRankRefresh(entryIds);
+
+    expect(plan.entryIds).toHaveLength(98);
+    expect(plan.foregroundEntryIds).toEqual(entryIds.slice(0, 20));
+    expect(pendingOverallRankRefreshEntryIds(plan.entryIds, plan.foregroundEntryIds)).toEqual(
+      entryIds.slice(20),
+    );
+    expect(
+      pendingOverallRankRefreshEntryIds(plan.entryIds, plan.foregroundEntryIds.slice(1)),
+    ).toEqual([1, ...entryIds.slice(20)]);
+  });
+
+  test('deduplicates overall-rank refresh targets without changing their order', () => {
+    expect(planClassicOverallRankRefresh([3, 1, 3, 2, 1]).entryIds).toEqual([3, 1, 2]);
+  });
+
+  test('refreshes expired Classic ranks and fresh Classic rows that still lack a rank', () => {
+    const positiveClassicRow = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      overallRank: 640_000,
+    };
+
+    expect(shouldRefreshClassicOverallRank(positiveClassicRow, true)).toBeTrue();
+    expect(
+      shouldRefreshClassicOverallRank({ ...positiveClassicRow, overallRank: null }, false),
+    ).toBeTrue();
+    expect(shouldRefreshClassicOverallRank(positiveClassicRow, false)).toBeFalse();
+    expect(
+      shouldRefreshClassicOverallRank({ source: 'FPL_ENTRY_SUMMARY', overallRank: null }, true),
+    ).toBeFalse();
+  });
+
   test('uses official entry summaries after standings pagination is exhausted', () => {
     expect(planClassicManagerFallback([97_001], true)).toEqual({
       foregroundSummaryEntryIds: [97_001],
