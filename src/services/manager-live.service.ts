@@ -78,6 +78,7 @@ type CachedRow = ManagerLiveScoreRow;
 type ManagerSummaryRefreshError = 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null;
 type EntrySummaryRefreshResult = {
   errorCode: ManagerSummaryRefreshError;
+  refreshedEntryIds: readonly number[];
   overallRankRefreshedEntryIds: readonly number[];
 };
 
@@ -130,6 +131,22 @@ const withPreservedOverallRank = (
 
   const { revision: _revision, ...withoutRevision } = row;
   return withRevision({ ...withoutRevision, overallRank });
+};
+
+const mergeLatestManagerLiveRow = (
+  current: CachedRow | undefined,
+  candidate: CachedRow,
+): CachedRow => {
+  if (!current) return candidate;
+
+  const currentTime = Date.parse(current.checkedAt);
+  const candidateTime = Date.parse(candidate.checkedAt);
+  const candidateIsNewer =
+    Number.isFinite(candidateTime) &&
+    (!Number.isFinite(currentTime) || candidateTime > currentTime);
+  return candidateIsNewer
+    ? withPreservedOverallRank(candidate, current.overallRank)
+    : withPreservedOverallRank(current, candidate.overallRank);
 };
 
 const toManagerScoreCheckpoint = (row: ManagerLiveScoreRow): ManagerScoreCheckpoint => ({
@@ -221,6 +238,53 @@ const readCachedRows = async (
   for (let index = 0; index < entryIds.length; index += 1) {
     const row = parseCachedRow(values[index] ?? null);
     if (row) rows.set(entryIds[index], row);
+  }
+  return rows;
+};
+
+const readCachedAndCheckpointRows = async (
+  redis: Redis | null,
+  season: FplSeasonRef,
+  eventId: number,
+  scope: ManagerScoreScope,
+  entryIds: readonly number[],
+  seedRows?: ReadonlyMap<number, CachedRow>,
+): Promise<Map<number, CachedRow>> => {
+  const wantedEntryIds = new Set(entryIds);
+  const rows = new Map<number, CachedRow>();
+  for (const [entryId, row] of seedRows ?? []) {
+    if (wantedEntryIds.has(entryId)) rows.set(entryId, row);
+  }
+
+  try {
+    const cachedRows = await readCachedRows(redis, season.seasonCode, eventId, scope, entryIds);
+    for (const [entryId, row] of cachedRows) {
+      rows.set(entryId, mergeLatestManagerLiveRow(rows.get(entryId), row));
+    }
+  } catch (error) {
+    logWarn('Official manager Redis read failed; using PostgreSQL checkpoint', {
+      eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+  }
+
+  const checkpoints = await managerScoreCheckpointRepository
+    .findByScopeAndEntryIds(season, eventId, scope, entryIds)
+    .catch((error) => {
+      logWarn('Official manager PostgreSQL checkpoint read failed', {
+        eventId,
+        scope: scopeKey(scope),
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+      return [];
+    });
+  for (const checkpoint of checkpoints) {
+    const checkpointRow = fromManagerScoreCheckpoint(checkpoint, season.seasonCode);
+    rows.set(
+      checkpoint.entryId,
+      mergeLatestManagerLiveRow(rows.get(checkpoint.entryId), checkpointRow),
+    );
   }
   return rows;
 };
@@ -375,10 +439,11 @@ const refreshEntrySummaries = async (
     .filter((entryId) => options.force || !rows.has(entryId) || !isFresh(rows.get(entryId)!))
     .slice(0, options.maxFetches ?? Number.POSITIVE_INFINITY);
   if (targets.length === 0) {
-    return { errorCode: null, overallRankRefreshedEntryIds: [] };
+    return { errorCode: null, refreshedEntryIds: [], overallRankRefreshedEntryIds: [] };
   }
 
   const refreshed: ManagerLiveScoreRow[] = [];
+  const refreshedEntryIds: number[] = [];
   const overallRankRefreshedEntryIds: number[] = [];
   let refreshErrorCode: ManagerSummaryRefreshError = null;
   for (const batch of managerSummaryFetchBatches(targets)) {
@@ -410,6 +475,7 @@ const refreshEntrySummaries = async (
           if (isPositiveOverallRank(summary.summary_overall_rank)) {
             overallRankRefreshedEntryIds.push(entryId);
           }
+          refreshedEntryIds.push(entryId);
           completedBatch.push(row);
           refreshed.push(row);
           rows.set(row.entryId, row);
@@ -471,6 +537,7 @@ const refreshEntrySummaries = async (
   }
   return {
     errorCode: refreshErrorCode,
+    refreshedEntryIds,
     overallRankRefreshedEntryIds,
   };
 };
@@ -487,6 +554,7 @@ const refreshClassicStandings = async (
   complete: boolean;
   nextPage: number;
   errorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null;
+  refreshedEntryIds: readonly number[];
 }> => {
   const checkedAt = nowIso();
   const fetchedRows: ManagerLiveScoreRow[] = [];
@@ -502,8 +570,8 @@ const refreshClassicStandings = async (
       page <= MAX_STANDINGS_PAGES && page < startPage + maxPages && found < targetIds.size;
       page += 1
     ) {
-      nextPage = page + 1;
       const response = await fplClient.getLeagueClassicStandings(leagueId, page);
+      nextPage = page + 1;
       const pageRows = toClassicRows(season.seasonCode, eventId, response, checkedAt);
       for (const row of pageRows) {
         if (!targetIds.has(row.entryId)) continue;
@@ -562,6 +630,7 @@ const refreshClassicStandings = async (
       complete: exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES,
       nextPage,
       errorCode: null,
+      refreshedEntryIds: fetchedRows.map((row) => row.entryId),
     };
   } catch (error) {
     refreshErrorCode =
@@ -573,7 +642,12 @@ const refreshClassicStandings = async (
       leagueId,
       error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
     });
-    return { complete: false, nextPage, errorCode: refreshErrorCode };
+    return {
+      complete: false,
+      nextPage,
+      errorCode: refreshErrorCode,
+      refreshedEntryIds: fetchedRows.map((row) => row.entryId),
+    };
   }
 };
 
@@ -726,41 +800,13 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       error: error instanceof Error ? error.message : 'unknown',
     });
   }
-  let rows = new Map<number, CachedRow>();
-  try {
-    rows = await readCachedRows(redis, season.seasonCode, input.eventId, scope, uniqueEntryIds);
-  } catch (error) {
-    logWarn('Official manager Redis read failed; using PostgreSQL checkpoint', {
-      eventId: input.eventId,
-      scope: scopeKey(scope),
-      error: error instanceof Error ? error.message : 'unknown',
-    });
-  }
-  const checkpoints = await managerScoreCheckpointRepository
-    .findByScopeAndEntryIds(season, input.eventId, scope, uniqueEntryIds)
-    .catch((error) => {
-      logWarn('Official manager PostgreSQL checkpoint read failed', {
-        eventId: input.eventId,
-        scope: scopeKey(scope),
-        error: error instanceof Error ? error.message : 'unknown',
-      });
-      return [];
-    });
-  for (const checkpoint of checkpoints) {
-    const cached = rows.get(checkpoint.entryId);
-    const checkpointRow = fromManagerScoreCheckpoint(checkpoint, season.seasonCode);
-    const checkpointTime = checkpoint.checkedAt.getTime();
-    const cachedTime = cached ? Date.parse(cached.checkedAt) : Number.NaN;
-    if (
-      !cached ||
-      !Number.isFinite(cachedTime) ||
-      (Number.isFinite(checkpointTime) && checkpointTime > cachedTime)
-    ) {
-      rows.set(checkpoint.entryId, withPreservedOverallRank(checkpointRow, cached?.overallRank));
-    } else {
-      rows.set(checkpoint.entryId, withPreservedOverallRank(cached, checkpointRow.overallRank));
-    }
-  }
+  const rows = await readCachedAndCheckpointRows(
+    redis,
+    season,
+    input.eventId,
+    scope,
+    uniqueEntryIds,
+  );
   const staleOrMissing = uniqueEntryIds.filter(
     (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
   );
@@ -839,58 +885,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     );
     refreshErrorCode = standings.errorCode;
 
-    // FPL classic standings expose the event/phase totals and the league
-    // position, but not the season-wide Overall Rank (OR). Enrich each row
-    // from the entry summary while preserving its last positive OR until a
-    // newer positive OR arrives.
-    const classicOverallRankTargets = uniqueEntryIds.filter((entryId) => {
-      const row = rows.get(entryId);
-      return shouldRefreshClassicOverallRank(row, staleOrMissingIds.has(entryId));
-    });
-    const overallRankPlan = planClassicOverallRankRefresh(classicOverallRankTargets);
-    if (overallRankPlan.entryIds.length > 0) {
-      const summaryRefresh = await refreshEntrySummaries(
-        season,
-        input.eventId,
-        overallRankPlan.foregroundEntryIds,
-        rows,
-        redis,
-        scope,
-        { force: true, preserveClassicStanding: true },
-      );
-      refreshErrorCode = refreshErrorCode ?? summaryRefresh.errorCode;
-
-      const pendingOverallRank = pendingOverallRankRefreshEntryIds(
-        overallRankPlan.entryIds,
-        summaryRefresh.overallRankRefreshedEntryIds,
-      );
-      if (pendingOverallRank.length > 0) {
-        const backgroundKey = `classic-or:${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
-        scheduleBackgroundRefresh(backgroundKey, async () => {
-          const backgroundRows = await readCachedRows(
-            redis,
-            season.seasonCode,
-            input.eventId,
-            scope,
-            pendingOverallRank,
-          );
-          await refreshEntrySummaries(
-            season,
-            input.eventId,
-            pendingOverallRank,
-            backgroundRows,
-            redis,
-            scope,
-            { force: true, priority: 'background', preserveClassicStanding: true },
-          );
-        });
-      }
-    }
-
-    let pending = staleOrMissing.filter(
-      (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+    const standingsRefreshedEntryIds = new Set(standings.refreshedEntryIds);
+    let pendingStandings = staleOrMissing.filter(
+      (entryId) => !standingsRefreshedEntryIds.has(entryId),
     );
-    const fallbackPlan = planClassicManagerFallback(pending, standings.complete);
+    const fallbackPlan = planClassicManagerFallback(pendingStandings, standings.complete);
+    const fallbackSummaryRefreshedEntryIds = new Set<number>();
     if (fallbackPlan.foregroundSummaryEntryIds.length > 0) {
       const summaryRefresh = await refreshEntrySummaries(
         season,
@@ -901,50 +901,123 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         scope,
       );
       refreshErrorCode = refreshErrorCode ?? summaryRefresh.errorCode;
-      pending = fallbackPlan.backgroundEntryIds.filter(
-        (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+      for (const entryId of summaryRefresh.refreshedEntryIds) {
+        fallbackSummaryRefreshedEntryIds.add(entryId);
+      }
+      pendingStandings = fallbackPlan.backgroundEntryIds.filter(
+        (entryId) => !fallbackSummaryRefreshedEntryIds.has(entryId),
       );
     }
-    if (pending.length > 0) {
+
+    // FPL classic standings expose the event/phase totals and the league
+    // position, but not the season-wide Overall Rank (OR). Enrich only rows
+    // whose standings refresh has completed; deeper standings rows stay in a
+    // separate pending set so an OR-only timestamp cannot mark them fresh.
+    const classicOverallRankTargets = uniqueEntryIds.filter(
+      (entryId) =>
+        !fallbackSummaryRefreshedEntryIds.has(entryId) &&
+        shouldRefreshClassicOverallRank(rows.get(entryId), staleOrMissingIds.has(entryId)),
+    );
+    const pendingStandingsEntryIds = new Set(pendingStandings);
+    const overallRankPlan = planClassicOverallRankRefresh(
+      classicOverallRankTargets,
+      classicOverallRankTargets.filter(
+        (entryId) =>
+          !pendingStandingsEntryIds.has(entryId) &&
+          rows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
+      ),
+    );
+    let pendingOverallRank = overallRankPlan.entryIds;
+    if (overallRankPlan.foregroundEntryIds.length > 0) {
+      const summaryRefresh = await refreshEntrySummaries(
+        season,
+        input.eventId,
+        overallRankPlan.foregroundEntryIds,
+        rows,
+        redis,
+        scope,
+        { force: true, preserveClassicStanding: true },
+      );
+      refreshErrorCode = refreshErrorCode ?? summaryRefresh.errorCode;
+      pendingOverallRank = pendingOverallRankRefreshEntryIds(
+        overallRankPlan.entryIds,
+        summaryRefresh.overallRankRefreshedEntryIds,
+      );
+    }
+
+    const backgroundEntryIds = Array.from(new Set([...pendingStandings, ...pendingOverallRank]));
+    if (backgroundEntryIds.length > 0) {
       const backgroundKey = `classic:${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
+      const backgroundSeedRows = new Map(rows);
       scheduleBackgroundRefresh(backgroundKey, async () => {
-        const backgroundRows = await readCachedRows(
+        const backgroundRows = await readCachedAndCheckpointRows(
           redis,
-          season.seasonCode,
+          season,
           input.eventId,
           scope,
-          pending,
+          backgroundEntryIds,
+          backgroundSeedRows,
         );
-        const backgroundResult = fallbackPlan.continueStandings
-          ? await refreshClassicStandings(
-              season,
-              input.eventId,
-              classicLeagueId,
-              new Set(pending),
-              backgroundRows,
-              redis,
-              { startPage: standings.nextPage, maxPages: MAX_STANDINGS_PAGES },
-            )
-          : { complete: true, nextPage: standings.nextPage, errorCode: null };
-        const summaryTargets = pending.filter(
-          (entryId) => !backgroundRows.has(entryId) || !isFresh(backgroundRows.get(entryId)!),
-        );
-        if (backgroundResult.complete && summaryTargets.length > 0) {
-          await refreshEntrySummaries(
+
+        let unresolvedStandings = pendingStandings;
+        let standingsComplete = standings.complete;
+        if (fallbackPlan.continueStandings && unresolvedStandings.length > 0) {
+          const backgroundStandings = await refreshClassicStandings(
             season,
             input.eventId,
-            summaryTargets,
+            classicLeagueId,
+            new Set(unresolvedStandings),
+            backgroundRows,
+            redis,
+            { startPage: standings.nextPage, maxPages: MAX_STANDINGS_PAGES },
+          );
+          standingsComplete = backgroundStandings.complete;
+          const refreshedStandings = new Set(backgroundStandings.refreshedEntryIds);
+          unresolvedStandings = unresolvedStandings.filter(
+            (entryId) => !refreshedStandings.has(entryId),
+          );
+        }
+
+        if (standingsComplete && unresolvedStandings.length > 0) {
+          const fallbackRefresh = await refreshEntrySummaries(
+            season,
+            input.eventId,
+            unresolvedStandings,
             backgroundRows,
             redis,
             scope,
             { priority: 'background' },
           );
+          const fallbackRefreshed = new Set(fallbackRefresh.refreshedEntryIds);
+          unresolvedStandings = unresolvedStandings.filter(
+            (entryId) => !fallbackRefreshed.has(entryId),
+          );
         }
+
+        const unresolvedStandingsEntryIds = new Set(unresolvedStandings);
+        const overallRankTargets = pendingOverallRank.filter(
+          (entryId) =>
+            !unresolvedStandingsEntryIds.has(entryId) &&
+            backgroundRows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
+        );
+        if (overallRankTargets.length > 0) {
+          await refreshEntrySummaries(
+            season,
+            input.eventId,
+            overallRankTargets,
+            backgroundRows,
+            redis,
+            scope,
+            { force: true, priority: 'background', preserveClassicStanding: true },
+          );
+        }
+
         logDebug('Official classic manager background refresh completed', {
           eventId: input.eventId,
           leagueId: classicLeagueId,
-          remaining: summaryTargets.length,
-          complete: backgroundResult.complete,
+          remainingStandings: unresolvedStandings.length,
+          overallRankTargets: overallRankTargets.length,
+          complete: standingsComplete,
         });
       });
     }

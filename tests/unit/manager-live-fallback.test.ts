@@ -41,7 +41,17 @@ describe('classic manager live fallback', () => {
     expect(planClassicOverallRankRefresh([3, 1, 3, 2, 1]).entryIds).toEqual([3, 1, 2]);
   });
 
-  test('refreshes expired Classic ranks and fresh Classic rows that still lack a rank', () => {
+  test('does not spend the foreground OR budget on unresolved standings rows', () => {
+    const entryIds = Array.from({ length: 98 }, (_, index) => index + 1);
+    const standingsResolvedEntryIds = entryIds.slice(20);
+    const plan = planClassicOverallRankRefresh(entryIds, standingsResolvedEntryIds);
+
+    expect(plan.entryIds).toEqual(entryIds);
+    expect(plan.foregroundEntryIds).toEqual(entryIds.slice(20, 40));
+    expect(plan.foregroundEntryIds.some((entryId) => entryId <= 20)).toBeFalse();
+  });
+
+  test('refreshes expired rows and fresh Classic rows that still lack a rank', () => {
     const positiveClassicRow = {
       source: 'FPL_CLASSIC_STANDINGS',
       overallRank: 640_000,
@@ -54,7 +64,8 @@ describe('classic manager live fallback', () => {
     expect(shouldRefreshClassicOverallRank(positiveClassicRow, false)).toBeFalse();
     expect(
       shouldRefreshClassicOverallRank({ source: 'FPL_ENTRY_SUMMARY', overallRank: null }, true),
-    ).toBeFalse();
+    ).toBeTrue();
+    expect(shouldRefreshClassicOverallRank(undefined, true)).toBeTrue();
   });
 
   test('uses official entry summaries after standings pagination is exhausted', () => {

@@ -26,19 +26,27 @@ export const shouldRefreshClassicOverallRank = (
     | undefined,
   standingsRowExpired: boolean,
 ): boolean =>
-  row?.source === 'FPL_CLASSIC_STANDINGS' &&
-  (standingsRowExpired || !isPositiveOverallRank(row.overallRank));
+  standingsRowExpired ||
+  (row?.source === 'FPL_CLASSIC_STANDINGS' && !isPositiveOverallRank(row.overallRank));
 
 export const planClassicOverallRankRefresh = (
   entryIds: readonly number[],
+  foregroundEligibleEntryIds: readonly number[] = entryIds,
 ): Readonly<{
   entryIds: readonly number[];
   foregroundEntryIds: readonly number[];
 }> => {
   const uniqueEntryIds = Array.from(new Set(entryIds));
+  const requestedEntryIds = new Set(uniqueEntryIds);
+  const uniqueForegroundEligibleEntryIds = Array.from(new Set(foregroundEligibleEntryIds)).filter(
+    (entryId) => requestedEntryIds.has(entryId),
+  );
   return {
     entryIds: uniqueEntryIds,
-    foregroundEntryIds: uniqueEntryIds.slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES),
+    foregroundEntryIds: uniqueForegroundEligibleEntryIds.slice(
+      0,
+      MAX_FOREGROUND_OVERALL_RANK_FETCHES,
+    ),
   };
 };
 
