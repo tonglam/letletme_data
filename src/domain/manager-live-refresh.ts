@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export const MANAGER_LIVE_HOT_SCOPE_SECONDS = 6 * 60 * 60;
 export const MANAGER_LIVE_REFRESH_BUCKET_MS = 30_000;
@@ -29,6 +29,16 @@ type ManagerLiveHotRedis = {
   get(key: string): Promise<string | null>;
 };
 
+type ManagerLiveHotStateRedis = ManagerLiveHotRedis & {
+  eval(script: string, numberOfKeys: number, ...args: string[]): Promise<unknown>;
+};
+
+export type ManagerLiveHotScopeState = ManagerLiveRefreshScope & {
+  generation: string;
+  summaryRotationCursor: number;
+  classicStandingsPage: number | null;
+};
+
 export const normalizeManagerLiveEntryIds = (entryIds: readonly number[]): number[] =>
   Array.from(new Set(entryIds)).sort((left, right) => left - right);
 
@@ -56,6 +66,12 @@ const scopeSegment = (scope: Pick<ManagerLiveRefreshScope, 'entryIds' | 'tournam
 export const managerLiveHotScopeKey = (scope: ManagerLiveRefreshScope): string =>
   `llm:queue:manager-live:hot:v1:${scope.seasonCode}:e${scope.eventId}:${scopeSegment(scope)}`;
 
+// v2 keeps the hot marker and both logical refresh cursors in one Redis value.
+// The v1 keys remain readable for one release so older test/operational tooling
+// can be drained safely, but queue jobs only use this generation-aware state.
+export const managerLiveHotStateKey = (scope: ManagerLiveRefreshScope): string =>
+  `llm:queue:manager-live:hot:v2:${scope.seasonCode}:e${scope.eventId}:${scopeSegment(scope)}`;
+
 export const managerLiveClassicCursorKey = (scope: ManagerLiveRefreshScope): string =>
   `llm:queue:manager-live:classic-cursor:v1:${scope.seasonCode}:e${scope.eventId}:${scopeSegment(scope)}`;
 
@@ -68,6 +84,14 @@ export function managerLiveRefreshBucket(date: Date): string {
 
 export function managerLiveRefreshJobId(scope: ManagerLiveRefreshScope, date: Date): string {
   return `manager-live-v1-${scope.seasonCode}-e${scope.eventId}-${scopeSegment(scope)}-${managerLiveRefreshBucket(date)}`;
+}
+
+export function managerLiveRefreshJobIdForState(
+  scope: ManagerLiveRefreshScope,
+  date: Date,
+  generation: string,
+): string {
+  return `manager-live-v2-${scope.seasonCode}-e${scope.eventId}-${scopeSegment(scope)}-g${generation}-${managerLiveRefreshBucket(date)}`;
 }
 
 export const parseManagerLiveClassicCursor = (value: string | null): number | null | undefined => {
@@ -112,6 +136,158 @@ export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefre
   }
 };
 
+const parseManagerLiveHotScopeState = (value: string | null): ManagerLiveHotScopeState | null => {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<ManagerLiveHotScopeState>;
+    const scope = parseManagerLiveHotScope(JSON.stringify(parsed));
+    if (
+      !scope ||
+      typeof parsed.generation !== 'string' ||
+      parsed.generation.length === 0 ||
+      !Number.isSafeInteger(parsed.summaryRotationCursor) ||
+      (parsed.summaryRotationCursor ?? -1) < 0 ||
+      (parsed.classicStandingsPage !== null &&
+        (!Number.isSafeInteger(parsed.classicStandingsPage) ||
+          (parsed.classicStandingsPage ?? 0) < 1 ||
+          (parsed.classicStandingsPage ?? 0) > MANAGER_LIVE_CLASSIC_MAX_PAGE))
+    ) {
+      return null;
+    }
+    return {
+      ...scope,
+      generation: parsed.generation,
+      summaryRotationCursor: parsed.summaryRotationCursor as number,
+      classicStandingsPage: parsed.classicStandingsPage ?? null,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const INITIALIZE_HOT_SCOPE_STATE_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if current then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+  return current
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
+return ARGV[2]
+`;
+
+const ADVANCE_HOT_SCOPE_STATE_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if not current then return nil end
+local state = cjson.decode(current)
+if state['generation'] ~= ARGV[1] then return nil end
+
+local completedCursor = tonumber(ARGV[2])
+local currentCursor = tonumber(state['summaryRotationCursor']) or 0
+-- A follow-up owns exactly the cursor it processed. Do not let a replay or a
+-- malformed job jump over logical chunks that have not run yet.
+if completedCursor and currentCursor == completedCursor then
+  state['summaryRotationCursor'] = completedCursor + 1
+end
+
+if ARGV[3] ~= '' then
+  local expectedPage = tonumber(ARGV[4])
+  local currentPage = tonumber(state['classicStandingsPage'])
+  if not currentPage then currentPage = 1 end
+  if not expectedPage or currentPage == expectedPage then
+    if ARGV[3] == '0' then
+      state['classicStandingsPage'] = cjson.null
+    else
+      state['classicStandingsPage'] = tonumber(ARGV[3])
+    end
+  end
+end
+
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl <= 0 then return nil end
+local encoded = cjson.encode(state)
+redis.call('SET', KEYS[1], encoded, 'PX', ttl)
+return encoded
+`;
+
+export const parseManagerLiveHotState = parseManagerLiveHotScopeState;
+
+export async function initializeManagerLiveHotState(
+  redis: ManagerLiveHotStateRedis,
+  scope: ManagerLiveRefreshScope,
+): Promise<ManagerLiveHotScopeState> {
+  const normalizedScope = {
+    ...scope,
+    entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
+  };
+  const candidate: ManagerLiveHotScopeState = {
+    ...normalizedScope,
+    generation: randomUUID(),
+    summaryRotationCursor: 0,
+    classicStandingsPage: null,
+  };
+  const raw = await redis.eval(
+    INITIALIZE_HOT_SCOPE_STATE_SCRIPT,
+    1,
+    managerLiveHotStateKey(scope),
+    String(MANAGER_LIVE_HOT_SCOPE_SECONDS),
+    JSON.stringify(candidate),
+  );
+  const state = parseManagerLiveHotScopeState(typeof raw === 'string' ? raw : null);
+  if (!state) throw new Error('Manager live hot scope state is malformed');
+  return state;
+}
+
+export async function loadManagerLiveHotState(
+  redis: ManagerLiveHotRedis,
+  scope: ManagerLiveRefreshScope,
+): Promise<ManagerLiveHotScopeState | null> {
+  return parseManagerLiveHotScopeState(await redis.get(managerLiveHotStateKey(scope)));
+}
+
+export async function advanceManagerLiveHotState(
+  redis: ManagerLiveHotStateRedis,
+  scope: ManagerLiveRefreshScope,
+  generation: string,
+  completedSummaryCursor: number,
+  classicStandingsNextPage?: number | null,
+  expectedClassicStandingsPage?: number | null,
+): Promise<ManagerLiveHotScopeState | null> {
+  if (!generation || !Number.isSafeInteger(completedSummaryCursor) || completedSummaryCursor < 0) {
+    throw new Error('Invalid manager live hot state advancement');
+  }
+  if (
+    classicStandingsNextPage !== undefined &&
+    classicStandingsNextPage !== null &&
+    (!Number.isSafeInteger(classicStandingsNextPage) ||
+      classicStandingsNextPage < 1 ||
+      classicStandingsNextPage > MANAGER_LIVE_CLASSIC_MAX_PAGE)
+  ) {
+    throw new Error(
+      `Invalid manager live classic standings page: ${String(classicStandingsNextPage)}`,
+    );
+  }
+  const classicUpdate =
+    classicStandingsNextPage === undefined
+      ? ''
+      : classicStandingsNextPage === null
+        ? '0'
+        : String(classicStandingsNextPage);
+  const expectedPage =
+    expectedClassicStandingsPage === undefined || expectedClassicStandingsPage === null
+      ? ''
+      : String(expectedClassicStandingsPage);
+  const raw = await redis.eval(
+    ADVANCE_HOT_SCOPE_STATE_SCRIPT,
+    1,
+    managerLiveHotStateKey(scope),
+    generation,
+    String(completedSummaryCursor),
+    classicUpdate,
+    expectedPage,
+  );
+  return parseManagerLiveHotScopeState(typeof raw === 'string' ? raw : null);
+}
+
 export const shouldStopManagerLiveRefresh = (event: {
   finished: boolean;
   dataChecked: boolean;
@@ -137,11 +313,9 @@ export async function loadManagerLiveHotScope(
 }
 
 /**
- * Keep the standings cursor outside BullMQ job data. A request and a
- * continuation in the same 30-second bucket intentionally share one job id;
- * the persisted cursor lets that single job observe the latest page without
- * spawning a second recurring chain. `0` is an explicit completed marker so
- * an older queued job cannot revive a stale cursor from its legacy payload.
+ * Legacy v1 cursor helpers retained for one release while old queue data drains.
+ * v2 workers use the generation-aware hot state above, so this key is never
+ * consulted for a live continuation and cannot race a restarted scope.
  */
 export async function writeManagerLiveClassicCursor(
   redis: ManagerLiveHotRedis,

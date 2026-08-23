@@ -26,7 +26,6 @@ import {
 } from '../domain/manager-live-fallback';
 import {
   MANAGER_LIVE_CLASSIC_MAX_PAGE,
-  MANAGER_LIVE_REFRESH_BUCKET_MS,
   MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
@@ -837,14 +836,14 @@ const classicStandingNeedsOverallRank = (
 export const selectWorkerSummaryRefreshTargets = (
   entryIds: readonly number[],
   limit: number,
-  rotationBucket: number,
+  rotationCursor: number,
 ): number[] => {
   if (!Number.isSafeInteger(limit) || limit <= 0) return [];
   const normalized = Array.from(new Set(entryIds));
   if (normalized.length <= limit) return normalized;
   const chunkCount = Math.ceil(normalized.length / limit);
-  const bucket = Number.isSafeInteger(rotationBucket) ? Math.max(0, rotationBucket) : 0;
-  const start = (bucket % chunkCount) * limit;
+  const cursor = Number.isSafeInteger(rotationCursor) ? Math.max(0, rotationCursor) : 0;
+  const start = (cursor % chunkCount) * limit;
   return normalized.slice(start, start + limit);
 };
 
@@ -852,7 +851,7 @@ export const selectClassicOverallRankRefreshTargets = (
   entryIds: readonly number[],
   rows: ReadonlyMap<number, Pick<CachedRow, 'source' | 'overallRank'>>,
   limit: number,
-  rotationBucket: number,
+  rotationCursor: number,
 ): number[] => {
   if (!Number.isSafeInteger(limit) || limit <= 0) return [];
   const normalized = Array.from(new Set(entryIds)).sort((left, right) => left - right);
@@ -868,19 +867,19 @@ export const selectClassicOverallRankRefreshTargets = (
       row.overallRank > 0
     );
   });
-  const bucket = Number.isSafeInteger(rotationBucket) ? Math.max(0, rotationBucket) : 0;
+  const cursor = Number.isSafeInteger(rotationCursor) ? Math.max(0, rotationCursor) : 0;
 
   const rotatedTake = (values: readonly number[], count: number): number[] => {
     if (values.length === 0 || count <= 0) return [];
     const take = Math.min(values.length, count);
-    const start = ((bucket % values.length) * take) % values.length;
+    const start = ((cursor % values.length) * take) % values.length;
     return Array.from({ length: take }, (_, offset) => values[(start + offset) % values.length]!);
   };
 
   // Missing OR remains the priority, but permanently failing entries must not
   // freeze every already-enriched manager forever. Reserve one slot for the
   // positive-OR rotation whenever both sets exist, and rotate both sets by the
-  // 30-second worker bucket so every manager is eventually revisited.
+  // persisted logical worker cursor so every manager is eventually revisited.
   const missingLimit = enriched.length > 0 ? Math.max(1, limit - 1) : limit;
   const selected = rotatedTake(missing, missingLimit);
   selected.push(...rotatedTake(enriched, limit - selected.length));
@@ -941,7 +940,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   readMode?: ManagerLiveReadMode;
   completeRefresh?: boolean;
   classicStandingsStartPage?: number;
-  summaryRotationBucket?: number;
+  summaryRotationCursor?: number;
 }): Promise<ManagerLiveResolveResult> => {
   const season = await seasonRepository.findCurrent();
   const uniqueEntryIds = Array.from(new Set(input.entryIds));
@@ -1153,16 +1152,16 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   );
   const completeRefresh = input.completeRefresh === true;
   let workerSummaryBudget = completeRefresh ? MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT : 0;
-  const workerRotationBucket =
-    completeRefresh && Number.isSafeInteger(input.summaryRotationBucket)
-      ? Math.max(0, input.summaryRotationBucket ?? 0)
-      : Math.floor(Date.now() / MANAGER_LIVE_REFRESH_BUCKET_MS);
+  const workerRotationCursor =
+    completeRefresh && Number.isSafeInteger(input.summaryRotationCursor)
+      ? Math.max(0, input.summaryRotationCursor ?? 0)
+      : 0;
   const takeWorkerSummaryTargets = (entryIds: readonly number[], limit = workerSummaryBudget) => {
     if (!completeRefresh) return [...entryIds];
     const selected = selectWorkerSummaryRefreshTargets(
       entryIds,
       Math.min(workerSummaryBudget, limit),
-      workerRotationBucket,
+      workerRotationCursor,
     );
     workerSummaryBudget -= selected.length;
     return selected;
@@ -1271,7 +1270,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           uniqueEntryIds,
           rows,
           MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
-          Math.floor(Date.now() / MANAGER_LIVE_REFRESH_BUCKET_MS),
+          workerRotationCursor,
         )
       : uniqueEntryIds.filter((entryId) => classicStandingNeedsOverallRank(rows.get(entryId)));
     if (classicOverallRankTargets.length > 0) {
@@ -1501,14 +1500,14 @@ export async function refreshManagerLiveScores(input: {
   entryIds: readonly number[];
   tournamentId?: number;
   classicStandingsStartPage?: number;
-  summaryRotationBucket?: number;
+  summaryRotationCursor?: number;
 }): Promise<ManagerLiveResolveResult> {
   const key = JSON.stringify({
     eventId: input.eventId,
     entryIds: Array.from(new Set(input.entryIds)).sort((left, right) => left - right),
     tournamentId: input.tournamentId ?? null,
     classicStandingsStartPage: input.classicStandingsStartPage ?? null,
-    summaryRotationBucket: input.summaryRotationBucket ?? null,
+    summaryRotationCursor: input.summaryRotationCursor ?? null,
     readMode: 'READ_THROUGH',
     completeRefresh: true,
   });

@@ -13,6 +13,8 @@ import {
   managerLiveDispatchEntryChunks,
   managerLiveHotScopeKey,
   managerLiveRefreshJobId,
+  managerLiveRefreshJobIdForState,
+  parseManagerLiveHotState,
   parseManagerLiveClassicCursor,
   parseManagerLiveHotScope,
   shouldStopManagerLiveRefresh,
@@ -59,6 +61,21 @@ describe('manager live refresh policy', () => {
 
     expect(sameScope).toBe(request);
     expect(managerLiveRefreshJobId(scope, new Date('2026-08-23T08:34:29.999Z'))).toBe(sameScope);
+  });
+
+  test('binds v2 jobs to a hot-scope generation while preserving bucket deduplication', () => {
+    const date = new Date('2026-08-23T08:34:01.000Z');
+    const first = managerLiveRefreshJobIdForState(scope, date, 'generation-a');
+    const duplicate = managerLiveRefreshJobIdForState(
+      scope,
+      new Date('2026-08-23T08:34:29.999Z'),
+      'generation-a',
+    );
+    const restarted = managerLiveRefreshJobIdForState(scope, date, 'generation-b');
+
+    expect(first).toBe(duplicate);
+    expect(restarted).not.toBe(first);
+    expect(first).toContain('-ggeneration-a-');
   });
 
   test('keeps one normalized recurring hot scope for a 500-entry roster', () => {
@@ -123,6 +140,17 @@ describe('manager live refresh policy', () => {
     };
     await expect(loadManagerLiveHotScope(expiredRedis as never, scope)).resolves.toBeNull();
     expect(parseManagerLiveHotScope('{"eventId":1}')).toBeNull();
+    expect(parseManagerLiveHotState('{"eventId":1}')).toBeNull();
+    expect(
+      parseManagerLiveHotState(
+        JSON.stringify({
+          ...scope,
+          generation: 'generation-a',
+          summaryRotationCursor: 2,
+          classicStandingsPage: null,
+        }),
+      ),
+    ).toMatchObject({ generation: 'generation-a', summaryRotationCursor: 2 });
   });
 
   test('propagates a hot-scope Redis read failure to its caller', async () => {

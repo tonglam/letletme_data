@@ -1,14 +1,8 @@
 import { Job, QueueEvents, Worker } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
-import {
-  MANAGER_LIVE_REFRESH_BUCKET_MS,
-  shouldStopManagerLiveRefresh,
-} from '../domain/manager-live-refresh';
-import {
-  readManagerLiveClassicCursor,
-  scheduleNextManagerLiveRefresh,
-} from '../jobs/manager-live.jobs';
+import { shouldStopManagerLiveRefresh } from '../domain/manager-live-refresh';
+import { readManagerLiveHotState, scheduleNextManagerLiveRefresh } from '../jobs/manager-live.jobs';
 import {
   MANAGER_LIVE_JOBS,
   MANAGER_LIVE_JOB_VERSION,
@@ -46,16 +40,6 @@ export async function scheduleManagerLiveContinuation(
   }
 }
 
-export function managerLiveSummaryRotationBucket(
-  triggeredAt: string,
-  fallbackTimestamp = Date.now(),
-): number {
-  const timestamp = Date.parse(triggeredAt);
-  return Math.floor(
-    (Number.isFinite(timestamp) ? timestamp : fallbackTimestamp) / MANAGER_LIVE_REFRESH_BUCKET_MS,
-  );
-}
-
 export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
   if (job.name !== MANAGER_LIVE_JOBS.REFRESH || job.data.version !== MANAGER_LIVE_JOB_VERSION) {
     throw new Error(`Unsupported manager live job: ${job.name}@${job.data.version}`);
@@ -85,16 +69,27 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       return { stopped: 'event-finalized' as const };
     }
 
-    const persistedClassicCursor = await readManagerLiveClassicCursor(job.data);
+    const hotState = await readManagerLiveHotState(job.data);
+    if (!hotState) {
+      logInfo('Manager live refresh stopped for stale or missing hot generation', {
+        eventId: job.data.eventId,
+        tournamentId: job.data.tournamentId ?? null,
+        generation: job.data.generation ?? null,
+      });
+      return { stopped: 'stale-hot-generation' as const };
+    }
+    const persistedClassicCursor = hotState.classicStandingsPage;
     const classicStandingsStartPage =
       persistedClassicCursor === undefined ? job.data.classicStandingsPage : persistedClassicCursor;
     // BullMQ retries reuse the same job data, so they retry the same bounded
-    // summary chunk. A newly scheduled follow-up receives a new triggeredAt
-    // and advances the rotation without starving later managers.
-    const summaryRotationBucket = managerLiveSummaryRotationBucket(
-      job.data.triggeredAt,
-      job.timestamp,
-    );
+    // summary chunk. The atomic hot state advances this logical cursor only
+    // when the follow-up is scheduled; wall-clock parity cannot starve a
+    // permanently failing manager when the event uses 60-second refreshes.
+    const summaryRotationCursor =
+      Number.isSafeInteger(job.data.summaryRotationCursor) &&
+      (job.data.summaryRotationCursor ?? -1) >= 0
+        ? job.data.summaryRotationCursor
+        : hotState.summaryRotationCursor;
     const result = await refreshManagerLiveScores({
       eventId: job.data.eventId,
       entryIds: job.data.entryIds,
@@ -102,7 +97,7 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       ...(classicStandingsStartPage === undefined || classicStandingsStartPage === null
         ? {}
         : { classicStandingsStartPage }),
-      summaryRotationBucket,
+      summaryRotationCursor,
     });
     await scheduleManagerLiveContinuation(job.data, result);
     return result;
