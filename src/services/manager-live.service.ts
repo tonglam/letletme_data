@@ -1004,11 +1004,19 @@ const refreshEntrySummaries = async (
             eventId,
             entryId,
             options.priority,
-            classicScope ? publicationKey : undefined,
+            // Every shared observation needs a scope-independent ordering
+            // marker. A summary fetched through the ENTRY scope may later be
+            // reused by the Classic scope, so leaving this unset would make
+            // that otherwise valid Overall Rank impossible to accept.
+            publicationKey,
           );
           return {
             entryId,
             summary: observation.summary,
+            // A waiter must preserve the upstream observation time from the
+            // shared result. Stamping a fresh local time here would extend a
+            // nearly-expired summary for another full refresh interval.
+            observedAt: observation.observedAt,
             publicationOrder: observation.publicationOrder,
           };
         } catch (error) {
@@ -1065,7 +1073,7 @@ const refreshEntrySummaries = async (
         publicationState?.overallRankPublicationStartedAtByEntryId ?? [],
       );
       const publishedRows = successful.map(
-        ({ entryId, summary, publicationOrder: summaryPublicationOrder }) => {
+        ({ entryId, summary, observedAt, publicationOrder: summaryPublicationOrder }) => {
           const existing = latestRows.get(entryId) ?? rows.get(entryId);
           // Every Classic publication re-reads the checkpoint. Explicit OR
           // enrichment always retains standings; fallback does so only when a
@@ -1086,7 +1094,7 @@ const refreshEntrySummaries = async (
                   overallRank: summary.summary_overall_rank ?? null,
                 });
               })()
-            : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, publicationCheckedAt);
+            : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, observedAt);
           batchRefreshedEntryIds.push(entryId);
           if (isPositiveOverallRank(summary.summary_overall_rank)) {
             batchOverallRankRefreshedEntryIds.push(entryId);
