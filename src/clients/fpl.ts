@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { FPLClientError } from '../utils/errors';
+import { withTimeout } from '../utils/async';
 import {
   beginFplLogicalRequest,
   classifyFplRequestError,
@@ -620,8 +621,14 @@ export const EventExplainFixtureSchema = z.object({
 export type RawFPLEventExplainStat = z.infer<typeof EventExplainStatSchema>;
 export type RawFPLEventExplainFixture = z.infer<typeof EventExplainFixtureSchema>;
 
+type FPLRequestAttemptContext = Readonly<{
+  deadlineAt: number;
+  remainingMs: number;
+  signal: AbortSignal;
+}>;
+
 type FPLRequestAttemptOptions = Readonly<{
-  beforeAttempt?: (attempt: number) => void | Promise<void>;
+  beforeAttempt?: (attempt: number, context: FPLRequestAttemptContext) => void | Promise<void>;
 }>;
 
 class FPLClient {
@@ -686,7 +693,27 @@ class FPLClient {
         // Endpoint-specific ordering hooks run after retry backoff and directly
         // before the actual attempt. Errors abort the logical request instead
         // of being mistaken for retryable network failures.
-        await options.beforeAttempt?.(attempt);
+        if (options.beforeAttempt) {
+          const controller = new AbortController();
+          try {
+            await withTimeout(
+              Promise.resolve(
+                options.beforeAttempt(attempt, {
+                  deadlineAt: started + deadlineMs,
+                  remainingMs: remaining,
+                  signal: controller.signal,
+                }),
+              ),
+              remaining,
+              'FPL pre-attempt hook exceeded the logical request deadline',
+            );
+          } catch (error) {
+            // Abort first so endpoint-specific work can cancel a queued DB lock
+            // before this request releases its distributed admission lease.
+            controller.abort(error);
+            throw error;
+          }
+        }
         remaining = remainingMs();
         if (remaining <= 0) break;
 

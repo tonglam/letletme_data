@@ -11,6 +11,7 @@ import {
   planClassicManagerFallback,
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
+  reconcileMonotonicCachePublicationRows,
   selectLatestCheckedRow,
   shouldAcceptClassicOverallRankPublication,
   shouldPreserveClassicStandingForRank,
@@ -84,6 +85,27 @@ describe('classic manager live fallback', () => {
     expect(preserveLastKnownOverallRank(null, null)).toBeNull();
     expect(isPositiveOverallRank(620_000)).toBeTrue();
     expect(isPositiveOverallRank(0)).toBeFalse();
+  });
+
+  test('never returns a Classic row rejected by monotonic cache publication', () => {
+    const publishedRows = [
+      { entryId: 1, overallRank: 100, revision: 'accepted' },
+      { entryId: 2, overallRank: 200, revision: 'rejected-stale' },
+      { entryId: 3, overallRank: 300, revision: 'rejected-unreadable' },
+    ];
+    const authoritativeRejectedRows = new Map([
+      [2, { entryId: 2, overallRank: 220, revision: 'newer-authoritative' }],
+    ]);
+
+    expect(
+      reconcileMonotonicCachePublicationRows(publishedRows, [1], authoritativeRejectedRows),
+    ).toEqual([
+      publishedRows[0],
+      { entryId: 2, overallRank: 220, revision: 'newer-authoritative' },
+    ]);
+    expect(reconcileMonotonicCachePublicationRows(publishedRows, null, new Map())).toEqual(
+      publishedRows,
+    );
   });
 
   test('advances durable Classic OR evidence only for a newer valid publication', () => {

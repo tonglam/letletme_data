@@ -61,6 +61,27 @@ export const preserveLastKnownOverallRank = (
   return isPositiveOverallRank(previous) ? previous : null;
 };
 
+export const reconcileMonotonicCachePublicationRows = <T extends Readonly<{ entryId: number }>>(
+  publishedRows: readonly T[],
+  cacheUpdatedEntryIds: readonly number[] | null,
+  authoritativeRejectedRows: ReadonlyMap<number, T>,
+): T[] => {
+  // A null result means Redis was unavailable, so the just-committed
+  // PostgreSQL rows remain the best response-local evidence. A concrete list
+  // comes from the monotonic Lua publication and identifies exactly which
+  // rows were accepted by Redis.
+  if (cacheUpdatedEntryIds === null) return [...publishedRows];
+
+  const cacheUpdated = new Set(cacheUpdatedEntryIds);
+  return publishedRows.flatMap((row) => {
+    if (cacheUpdated.has(row.entryId)) return [row];
+    const authoritative = authoritativeRejectedRows.get(row.entryId);
+    // Never expose the rejected stale publication. If its newer Redis/DB row
+    // cannot be re-read, leave the caller's existing response row untouched.
+    return authoritative ? [authoritative] : [];
+  });
+};
+
 const normalizeOrderingTimestamp = (value: string | null | undefined): string | null => {
   if (!value || !Number.isFinite(Date.parse(value))) return null;
   const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.)(\d{1,6})Z$/.exec(value);

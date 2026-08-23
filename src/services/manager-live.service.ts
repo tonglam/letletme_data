@@ -37,6 +37,7 @@ import {
   planClassicManagerFallback,
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
+  reconcileMonotonicCachePublicationRows,
   selectLatestCheckedRow,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
@@ -422,10 +423,10 @@ const writeClassicRowsMonotonically = async (
   metadataField: string,
   publicationOrder: string,
   overallRankPublicationOrders: ReadonlyMap<number, string>,
-): Promise<boolean> => {
-  if (!redis) return false;
+): Promise<readonly number[] | null> => {
+  if (!redis) return null;
   try {
-    await publishManagerLiveCacheMonotonically(redis, {
+    return await publishManagerLiveCacheMonotonically(redis, {
       rowKey: cacheKey(season, eventId, scope),
       metadataKey: metaCacheKey(season, eventId, scope),
       rowOrderKey: cacheOrderKey(season, eventId, scope),
@@ -442,7 +443,6 @@ const writeClassicRowsMonotonically = async (
       metadataPayload: JSON.stringify(metadata),
       ttlSeconds: CACHE_TTL_SECONDS,
     });
-    return true;
   } catch (error) {
     logWarn('Official manager monotonic Redis write failed; PostgreSQL remains authoritative', {
       season,
@@ -450,8 +450,38 @@ const writeClassicRowsMonotonically = async (
       scope: scopeKey(scope),
       error: error instanceof Error ? error.message : 'unknown',
     });
-    return false;
+    return null;
   }
+};
+
+const reconcileClassicRowsAfterCachePublication = async (
+  redis: Redis | null,
+  season: FplSeasonRef,
+  eventId: number,
+  scope: ManagerScoreScope,
+  publishedRows: readonly ManagerLiveScoreRow[],
+  cacheUpdatedEntryIds: readonly number[] | null,
+): Promise<ManagerLiveScoreRow[]> => {
+  if (cacheUpdatedEntryIds === null || cacheUpdatedEntryIds.length === publishedRows.length) {
+    return [...publishedRows];
+  }
+
+  const cacheUpdated = new Set(cacheUpdatedEntryIds);
+  const rejectedEntryIds = publishedRows
+    .map((row) => row.entryId)
+    .filter((entryId) => !cacheUpdated.has(entryId));
+  const authoritativeRejectedRows = await readCachedAndCheckpointRows(
+    redis,
+    season,
+    eventId,
+    scope,
+    rejectedEntryIds,
+  );
+  return reconcileMonotonicCachePublicationRows(
+    publishedRows,
+    cacheUpdatedEntryIds,
+    authoritativeRejectedRows,
+  );
 };
 
 const writeCheckpointRows = async (
@@ -602,11 +632,25 @@ const runManagerSummaryFetch = createManagerSummaryFetchGate();
 // External FPL calls happen between a brief ordering reservation and this
 // reconciliation lock, so a slow upstream never occupies the database pool.
 const runManagerLivePublicationInProcess = createKeyedSerialTaskGate();
-const runManagerLivePublication = <T>(key: string, task: () => Promise<T>): Promise<T> =>
+const runManagerLivePublication = <T>(
+  key: string,
+  task: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> =>
   runManagerLivePublicationInProcess(key, async (): Promise<T> => {
+    if (signal?.aborted) throw signal.reason;
     const client = await getDbClient();
     return (await client.begin(async (transaction) => {
-      await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`manager-live:${key}`}, 0))`;
+      if (signal?.aborted) throw signal.reason;
+      const lockQuery = transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`manager-live:${key}`}, 0))`;
+      const cancelLock = (): void => lockQuery.cancel();
+      signal?.addEventListener('abort', cancelLock, { once: true });
+      try {
+        await lockQuery;
+      } finally {
+        signal?.removeEventListener('abort', cancelLock);
+      }
+      if (signal?.aborted) throw signal.reason;
       const lockedDb = drizzle(transaction as unknown as postgres.Sql, {
         schema: databaseSchema,
       });
@@ -615,8 +659,9 @@ const runManagerLivePublication = <T>(key: string, task: () => Promise<T>): Prom
   });
 const reserveManagerLivePublicationStartedAt = (
   key: string,
+  signal: AbortSignal,
 ): Promise<Awaited<ReturnType<typeof readDatabaseOrderingTimestamp>>> =>
-  runManagerLivePublication(key, () => readDatabaseOrderingTimestamp());
+  runManagerLivePublication(key, () => readDatabaseOrderingTimestamp(), signal);
 const managerLivePublicationKey = (
   season: string,
   eventId: number,
@@ -697,9 +742,9 @@ const refreshEntrySummaries = async (
             // therefore belongs to the attempt that produced the response.
             const summary = classicScope
               ? await fplClient.getEntrySummary(entryId, {
-                  beforeAttempt: async () => {
+                  beforeAttempt: async (_attempt, { signal }) => {
                     publicationOrder = (
-                      await reserveManagerLivePublicationStartedAt(publicationKey)
+                      await reserveManagerLivePublicationStartedAt(publicationKey, signal)
                     ).exact;
                   },
                 })
@@ -887,8 +932,9 @@ const refreshEntrySummaries = async (
       continue;
     }
     if (!classicScope) await writeCheckpointRows(season, eventId, scope, publishedBatch.rows);
+    let responseRows = publishedBatch.rows;
     if (classicScope) {
-      await writeClassicRowsMonotonically(
+      const cacheUpdatedEntryIds = await writeClassicRowsMonotonically(
         redis,
         season.seasonCode,
         eventId,
@@ -899,11 +945,19 @@ const refreshEntrySummaries = async (
         publishedBatch.cachePublicationOrder!,
         publishedBatch.overallRankPublicationOrders,
       );
+      responseRows = await reconcileClassicRowsAfterCachePublication(
+        redis,
+        season,
+        eventId,
+        scope,
+        publishedBatch.rows,
+        cacheUpdatedEntryIds,
+      );
     }
-    for (const row of publishedBatch.rows) rows.set(row.entryId, row);
+    for (const row of responseRows) rows.set(row.entryId, row);
     refreshedEntryIds.push(...publishedBatch.refreshedEntryIds);
     overallRankRefreshedEntryIds.push(...publishedBatch.overallRankRefreshedEntryIds);
-    refreshed.push(...publishedBatch.rows);
+    refreshed.push(...responseRows);
   }
   return {
     errorCode: refreshErrorCode,
@@ -1020,7 +1074,7 @@ const refreshClassicStandings = async (
         },
       );
       publishedRows = publication.rows;
-      await writeClassicRowsMonotonically(
+      const cacheUpdatedEntryIds = await writeClassicRowsMonotonically(
         redis,
         season.seasonCode,
         eventId,
@@ -1040,7 +1094,15 @@ const refreshClassicStandings = async (
         publication.cachePublicationOrder,
         publication.overallRankPublicationOrders,
       );
-      for (const row of publishedRows) rows.set(row.entryId, row);
+      const responseRows = await reconcileClassicRowsAfterCachePublication(
+        redis,
+        season,
+        eventId,
+        classicScope,
+        publishedRows,
+        cacheUpdatedEntryIds,
+      );
+      for (const row of responseRows) rows.set(row.entryId, row);
     } catch (error) {
       refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
       // No row can be reported refreshed unless its durable checkpoint write
