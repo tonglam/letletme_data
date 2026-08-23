@@ -346,17 +346,54 @@ export const planManagerLiveRefreshTargets = (
   requestedEntryIds: readonly number[],
   cachedEntryIds: ReadonlySet<number>,
   freshEntryIds: ReadonlySet<number>,
+  options: { foregroundStale?: boolean } = {},
 ): Readonly<{
   foregroundEntryIds: readonly number[];
   backgroundEntryIds: readonly number[];
 }> => ({
   // Missing rows still need a bounded request-path attempt so a cold cache can
-  // return useful data. Existing last-good rows must never wait on FPL.
-  foregroundEntryIds: requestedEntryIds.filter((entryId) => !cachedEntryIds.has(entryId)),
+  // return useful data. Live Classic competition boards also foreground stale
+  // rows: their event score is the ranking metric, so serving an old last-good
+  // standings row while a newer entry summary is visible creates a
+  // user-visible source split.
+  foregroundEntryIds: requestedEntryIds.filter(
+    (entryId) =>
+      !cachedEntryIds.has(entryId) ||
+      (options.foregroundStale === true && !freshEntryIds.has(entryId)),
+  ),
   // Background work includes both missing and stale rows, but excludes rows
   // refreshed inside the current freshness window.
   backgroundEntryIds: requestedEntryIds.filter((entryId) => !freshEntryIds.has(entryId)),
 });
+
+type ClassicHeadlineObservation = Readonly<{
+  source: string;
+  checkedAt: string;
+  upstreamUpdatedAt?: string | null;
+}>;
+
+const managerLiveContentTimestamp = (row: ClassicHeadlineObservation): number => {
+  const upstreamTimestamp = Date.parse(row.upstreamUpdatedAt ?? '');
+  return Number.isFinite(upstreamTimestamp) ? upstreamTimestamp : Date.parse(row.checkedAt);
+};
+
+export const shouldPreferEntrySummaryForClassicHeadline = (
+  classicRow: ClassicHeadlineObservation | undefined,
+  entrySummaryRow: ClassicHeadlineObservation | undefined,
+): boolean => {
+  if (entrySummaryRow?.source !== 'FPL_ENTRY_SUMMARY') return false;
+  const summaryContentAt = managerLiveContentTimestamp(entrySummaryRow);
+  if (!Number.isFinite(summaryContentAt)) return false;
+  if (!classicRow) return true;
+  // A missing Classic standings row is represented by an Entry Summary
+  // fallback. Allow a newer summary to converge that fallback as well; only a
+  // real standings row contributes the league-rank preservation in the merge.
+  if (classicRow.source !== 'FPL_CLASSIC_STANDINGS' && classicRow.source !== 'FPL_ENTRY_SUMMARY') {
+    return false;
+  }
+  const classicContentAt = managerLiveContentTimestamp(classicRow);
+  return !Number.isFinite(classicContentAt) || summaryContentAt >= classicContentAt;
+};
 
 export const pendingManagerRefreshEntryIds = <T>(
   requestedEntryIds: readonly number[],
@@ -793,6 +830,26 @@ export const managerLiveBackgroundRefreshKey = (
   `${prefix}:${Array.from(new Set(entryIds))
     .sort((left, right) => left - right)
     .join(',')}`;
+
+export const rotateManagerLiveEntryIds = (
+  entryIds: readonly number[],
+  offset: number,
+  limit: number,
+): readonly number[] => {
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new RangeError('offset must be a non-negative safe integer');
+  }
+  if (!Number.isSafeInteger(limit) || limit < 0) {
+    throw new RangeError('limit must be a non-negative safe integer');
+  }
+  if (entryIds.length === 0 || limit === 0) return [];
+
+  const start = offset % entryIds.length;
+  return Array.from(
+    { length: Math.min(limit, entryIds.length) },
+    (_, index) => entryIds[(start + index) % entryIds.length]!,
+  );
+};
 
 export const classicManagerSummaryFallbackEntryIds = (
   directSummaryEntryIds: readonly number[],

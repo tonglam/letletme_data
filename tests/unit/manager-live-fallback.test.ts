@@ -25,6 +25,7 @@ import {
   readThroughManagerSummaryResult,
   readLatestRowsWithFallback,
   requireManagerSummaryCoordinator,
+  rotateManagerLiveEntryIds,
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectClassicSummaryOverallRank,
@@ -34,6 +35,7 @@ import {
   shouldAcceptClassicOverallRankPublication,
   shouldEnrichClassicOverallRank,
   shouldPreserveClassicStandingForRank,
+  shouldPreferEntrySummaryForClassicHeadline,
   shouldRefreshClassicOverallRank,
   shouldRetryPendingClassicOverallRank,
   shouldReplaceManagerLiveRow,
@@ -44,6 +46,17 @@ describe('manager live refresh targets', () => {
     expect(planManagerLiveRefreshTargets([1, 2], new Set([1, 2]), new Set())).toEqual({
       foregroundEntryIds: [],
       backgroundEntryIds: [1, 2],
+    });
+  });
+
+  test('foregrounds stale rows when a Classic board needs a coherent score projection', () => {
+    expect(
+      planManagerLiveRefreshTargets([1, 2], new Set([1, 2]), new Set([2]), {
+        foregroundStale: true,
+      }),
+    ).toEqual({
+      foregroundEntryIds: [1],
+      backgroundEntryIds: [1],
     });
   });
 
@@ -181,6 +194,70 @@ describe('manager live refresh targets', () => {
 
     expect(shouldReplaceManagerLiveRow(classic, summary)).toBe(false);
     expect(shouldReplaceManagerLiveRow(summary, classic)).toBe(true);
+  });
+
+  test('prefers a same-or-newer entry summary for a Classic headline', () => {
+    const classic = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T12:34:15.000Z',
+      upstreamUpdatedAt: '2026-08-23T12:33:36.000Z',
+    };
+
+    expect(
+      shouldPreferEntrySummaryForClassicHeadline(classic, {
+        source: 'FPL_ENTRY_SUMMARY',
+        checkedAt: '2026-08-23T14:54:20.000Z',
+      }),
+    ).toBe(true);
+    expect(
+      shouldPreferEntrySummaryForClassicHeadline(classic, {
+        source: 'FPL_ENTRY_SUMMARY',
+        checkedAt: '2026-08-23T12:34:15.000Z',
+      }),
+    ).toBe(true);
+    expect(
+      shouldPreferEntrySummaryForClassicHeadline(classic, {
+        source: 'FPL_ENTRY_SUMMARY',
+        checkedAt: '2026-08-23T12:33:35.000Z',
+      }),
+    ).toBe(false);
+    expect(
+      shouldPreferEntrySummaryForClassicHeadline(classic, {
+        source: 'FPL_CLASSIC_STANDINGS',
+        checkedAt: '2026-08-23T14:54:20.000Z',
+      }),
+    ).toBe(false);
+  });
+
+  test('allows a newer entry summary to converge a summary fallback', () => {
+    expect(
+      shouldPreferEntrySummaryForClassicHeadline(
+        {
+          source: 'FPL_ENTRY_SUMMARY',
+          checkedAt: '2026-08-23T12:34:15.000Z',
+          upstreamUpdatedAt: null,
+        },
+        {
+          source: 'FPL_ENTRY_SUMMARY',
+          checkedAt: '2026-08-23T12:34:16.000Z',
+          upstreamUpdatedAt: null,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      shouldPreferEntrySummaryForClassicHeadline(
+        {
+          source: 'FPL_ENTRY_SUMMARY',
+          checkedAt: '2026-08-23T12:34:16.000Z',
+          upstreamUpdatedAt: null,
+        },
+        {
+          source: 'FPL_ENTRY_SUMMARY',
+          checkedAt: '2026-08-23T12:34:15.000Z',
+          upstreamUpdatedAt: null,
+        },
+      ),
+    ).toBe(false);
   });
 
   test('falls back to serialized check time when upstream standings metadata is absent', () => {
@@ -685,6 +762,23 @@ describe('classic manager live fallback', () => {
     expect(managerLiveBackgroundRefreshKey('summary:2025:1', [2])).not.toBe(
       managerLiveBackgroundRefreshKey('summary:2025:1', [1]),
     );
+  });
+
+  test('rotates bounded summary refresh windows so later managers are reached', () => {
+    expect(rotateManagerLiveEntryIds([1, 2, 3, 4, 5, 6], 0, 4)).toEqual([1, 2, 3, 4]);
+    expect(rotateManagerLiveEntryIds([1, 2, 3, 4, 5, 6], 4, 4)).toEqual([5, 6, 1, 2]);
+    expect(rotateManagerLiveEntryIds([1, 2, 3, 4, 5, 6], 8, 4)).toEqual([3, 4, 5, 6]);
+    // A 60-second poll skips two 30-second refresh waves; using the wave
+    // itself (rather than wave * batch-size) still advances the window.
+    expect(rotateManagerLiveEntryIds([1, 2, 3, 4, 5, 6, 7, 8], 2, 4)).toEqual([3, 4, 5, 6]);
+    // The same holds for a 90-second poll over a twelve-manager board.
+    expect(
+      rotateManagerLiveEntryIds(
+        Array.from({ length: 12 }, (_, i) => i + 1),
+        3,
+        4,
+      ),
+    ).toEqual([4, 5, 6, 7]);
   });
 
   test('refreshes stale summary fallbacks without replacing stale standings rows', () => {
