@@ -13,6 +13,10 @@ import {
   understatTeamQueueName,
 } from '../queues/understat-team.queue';
 import {
+  completeSchedulerObligation,
+  renewSchedulerObligation,
+} from '../repositories/scheduler-obligations';
+import {
   discoverUnderstatPlayers,
   finalizeUnderstatPlayerRun,
   syncUnderstatPlayerMatch,
@@ -32,7 +36,12 @@ import { logError, logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { alertOnFinalFailure } from '../utils/notify';
 import { getQueueConnection } from '../utils/queue';
-import { isTerminalJobFailure } from '../utils/worker-failure';
+import { isTerminalJobAttemptFailure, isTerminalJobFailure } from '../utils/worker-failure';
+import {
+  isUnderstatNonRetryableError,
+  settleUnderstatCompleteness,
+  settleUnderstatObligationFailure,
+} from '../services/understat-recovery.service';
 import type { WorkerRuntime } from './worker-runtime';
 
 function lockScopes(
@@ -69,6 +78,28 @@ function understatBackoff(attemptsMade: number, type?: string, error?: Error): n
   return Math.floor(Math.random() * (ceiling + 1));
 }
 
+function startSchedulerLeaseHeartbeat(
+  job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
+): () => void {
+  if (!job.data.obligationId) return () => undefined;
+  const renew = () =>
+    renewSchedulerObligation({
+      obligationId: job.data.obligationId!,
+      generation: job.data.obligationGeneration,
+    }).catch((error) => {
+      logError('Failed to renew Understat scheduler obligation lease', error, {
+        runId: job.data.runId,
+        jobId: job.id,
+        generation: job.data.obligationGeneration,
+      });
+    });
+  // Most chained jobs complete in under a minute. Renew at the boundary as
+  // well as on the interval so a long fan-out cannot expire between jobs.
+  void renew();
+  const timer = setInterval(() => void renew(), 60_000);
+  return () => clearInterval(timer);
+}
+
 async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
   const context = {
     jobType: 'queue' as const,
@@ -79,29 +110,42 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
     attempt: job.attemptsMade + 1,
   };
   logJobTriggered(context);
-  await withMutationScopes(
-    {
-      queueName: job.queueName,
-      jobName: job.name,
-      jobId: String(job.id),
-      scopes: lockScopes('team', job.name, job.data),
-    },
-    () =>
-      runTrackedJob(context, () =>
-        runUnderstatOperation(async () => {
-          switch (job.name) {
-            case 'understat-team-discover':
-              return discoverUnderstatTeams(job.data);
-            case 'understat-team-detail':
-              return syncUnderstatTeamDetail(job.data);
-            case 'understat-team-finalize':
-              return finalizeUnderstatTeamRun(job.data);
-            default:
-              throw new Error(`Unknown Understat team job: ${job.name}`);
-          }
-        }),
-      ),
-  );
+  const stopLeaseHeartbeat = startSchedulerLeaseHeartbeat(job);
+  try {
+    await withMutationScopes(
+      {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId: String(job.id),
+        scopes: lockScopes('team', job.name, job.data),
+      },
+      () =>
+        runTrackedJob(context, () =>
+          runUnderstatOperation(async () => {
+            switch (job.name) {
+              case 'understat-team-discover':
+                return discoverUnderstatTeams(job.data);
+              case 'understat-team-detail':
+                return syncUnderstatTeamDetail(job.data);
+              case 'understat-team-finalize':
+                return finalizeUnderstatTeamRun(job.data);
+              default:
+                throw new Error(`Unknown Understat team job: ${job.name}`);
+            }
+          }),
+        ),
+    );
+    await settleFinalizerOutcome(job);
+    await settleDeferredUnderstatRunFailure(job);
+  } catch (error) {
+    try {
+      await recordTerminalFailure(job, error);
+    } finally {
+      stopLeaseHeartbeat();
+    }
+    throw error;
+  }
+  stopLeaseHeartbeat();
 }
 
 async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void> {
@@ -114,35 +158,148 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
     attempt: job.attemptsMade + 1,
   };
   logJobTriggered(context);
-  await withMutationScopes(
-    {
-      queueName: job.queueName,
-      jobName: job.name,
-      jobId: String(job.id),
-      scopes: lockScopes('player', job.name, job.data),
-    },
-    () =>
-      runTrackedJob(context, () =>
-        runUnderstatOperation(async () => {
-          switch (job.name) {
-            case 'understat-player-discover':
-              return discoverUnderstatPlayers(job.data);
-            case 'understat-player-team-detail':
-              return syncUnderstatPlayerTeamDetail(job.data);
-            case 'understat-player-match':
-              return syncUnderstatPlayerMatch(job.data);
-            case 'understat-player-finalize':
-              return finalizeUnderstatPlayerRun(job.data);
-            default:
-              throw new Error(`Unknown Understat player job: ${job.name}`);
-          }
-        }),
-      ),
-  );
+  const stopLeaseHeartbeat = startSchedulerLeaseHeartbeat(job);
+  try {
+    await withMutationScopes(
+      {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId: String(job.id),
+        scopes: lockScopes('player', job.name, job.data),
+      },
+      () =>
+        runTrackedJob(context, () =>
+          runUnderstatOperation(async () => {
+            switch (job.name) {
+              case 'understat-player-discover':
+                return discoverUnderstatPlayers(job.data);
+              case 'understat-player-team-detail':
+                return syncUnderstatPlayerTeamDetail(job.data);
+              case 'understat-player-match':
+                return syncUnderstatPlayerMatch(job.data);
+              case 'understat-player-finalize':
+                return finalizeUnderstatPlayerRun(job.data);
+              default:
+                throw new Error(`Unknown Understat player job: ${job.name}`);
+            }
+          }),
+        ),
+    );
+    await settleFinalizerOutcome(job);
+    await settleDeferredUnderstatRunFailure(job);
+  } catch (error) {
+    try {
+      await recordTerminalFailure(job, error);
+    } finally {
+      stopLeaseHeartbeat();
+    }
+    throw error;
+  }
+  stopLeaseHeartbeat();
 }
 
-async function recordTeamFailure(job: Job<UnderstatTeamJobData>, error: Error): Promise<void> {
-  if (!isTerminalJobFailure(job, error)) return;
+async function settleFinalizerOutcome(
+  job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
+): Promise<void> {
+  if (!job.name.endsWith('-finalize') || !job.data.obligationId) return;
+  const run = await understatSyncRepository.findRun(job.data.runId);
+  if (!run)
+    throw new Error(`Understat run ${job.data.runId} disappeared before finalization settlement`);
+  if (run.status === 'completed') {
+    await completeSchedulerObligation({
+      obligationId: job.data.obligationId,
+      generation: job.data.obligationGeneration,
+      status: 'succeeded',
+      evidence: {
+        provider: 'understat',
+        lane: run.lane,
+        runId: run.runId,
+        completionStage: 'finalizer',
+      },
+    });
+    return;
+  }
+  if (run.status === 'skipped' && run.metadata.completeness === 'skipped') {
+    await settleUnderstatCompleteness({
+      obligationId: job.data.obligationId,
+      generation: job.data.obligationGeneration,
+      reason:
+        run.errorSummary ??
+        (typeof run.metadata.reason === 'string' ? run.metadata.reason : 'snapshot incomplete'),
+    });
+  }
+}
+
+const ACTIVE_UNDERSTAT_RUN_STATUSES = new Set(['pending', 'running', 'ready_to_publish']);
+const UNDERSTAT_DRAIN_LEASE_EXTENSION_MS = 30 * 60_000;
+
+/**
+ * A terminal detail failure is durable immediately, but the scheduler retry
+ * must wait until every sibling item has drained. Otherwise the next
+ * generation races the still-active predecessor and its discovery job is
+ * rejected by findActiveRun().
+ */
+async function settleUnderstatFailureAfterRunDrained(
+  job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
+  error: unknown,
+  forceForTerminalRun = false,
+): Promise<void> {
+  const run = await understatSyncRepository.findRun(job.data.runId);
+  const nonRetryable = isUnderstatNonRetryableError(error);
+  if (run && ACTIVE_UNDERSTAT_RUN_STATUSES.has(run.status) && !nonRetryable) {
+    if (job.data.obligationId) {
+      await renewSchedulerObligation({
+        obligationId: job.data.obligationId,
+        generation: job.data.obligationGeneration,
+        additionalLeaseMs: UNDERSTAT_DRAIN_LEASE_EXTENSION_MS,
+      }).catch((renewError) =>
+        logError('Failed to extend Understat drain lease', renewError, {
+          runId: run.runId,
+          jobId: job.id,
+          generation: job.data.obligationGeneration,
+        }),
+      );
+    }
+    logInfo('Deferring Understat obligation retry until run drains', {
+      runId: run.runId,
+      jobId: job.id,
+      status: run.status,
+      generation: job.data.obligationGeneration,
+    });
+    return;
+  }
+  if (!forceForTerminalRun && run && run.status !== 'failed') return;
+  const settledError =
+    error instanceof Error
+      ? error
+      : new Error(run?.errorSummary ?? 'Understat run failed after worker drain');
+  await settleUnderstatObligationFailure({
+    obligationId: job.data.obligationId,
+    generation: job.data.obligationGeneration,
+    error: settledError,
+    nonRetryable,
+  });
+}
+
+async function settleDeferredUnderstatRunFailure(
+  job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
+): Promise<void> {
+  const run = await understatSyncRepository.findRun(job.data.runId);
+  if (!run || run.status !== 'failed') return;
+  await settleUnderstatObligationFailure({
+    obligationId: job.data.obligationId,
+    generation: job.data.obligationGeneration,
+    error: new Error(run.errorSummary ?? 'Understat run failed after worker drain'),
+    nonRetryable: false,
+  });
+}
+
+async function recordTeamFailure(
+  job: Job<UnderstatTeamJobData>,
+  error: Error,
+  terminal = isTerminalJobFailure(job, error),
+): Promise<void> {
+  if (!terminal) return;
   const item = understatTeamItemForJob(job.data, job.name);
   if (item) {
     const persisted = await understatSyncRepository.findItem(
@@ -151,7 +308,7 @@ async function recordTeamFailure(job: Job<UnderstatTeamJobData>, error: Error): 
       item.resourceId,
     );
     if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
-      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
       return;
     }
     await understatSyncRepository.failItem(
@@ -162,11 +319,15 @@ async function recordTeamFailure(job: Job<UnderstatTeamJobData>, error: Error): 
     );
     return;
   }
-  await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+  await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
 }
 
-async function recordPlayerFailure(job: Job<UnderstatPlayerJobData>, error: Error): Promise<void> {
-  if (!isTerminalJobFailure(job, error)) return;
+async function recordPlayerFailure(
+  job: Job<UnderstatPlayerJobData>,
+  error: Error,
+  terminal = isTerminalJobFailure(job, error),
+): Promise<void> {
+  if (!terminal) return;
   const item = understatPlayerItemForJob(job.data, job.name);
   if (item) {
     const persisted = await understatSyncRepository.findItem(
@@ -175,7 +336,7 @@ async function recordPlayerFailure(job: Job<UnderstatPlayerJobData>, error: Erro
       item.resourceId,
     );
     if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
-      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
       return;
     }
     await understatSyncRepository.failItem(
@@ -186,7 +347,29 @@ async function recordPlayerFailure(job: Job<UnderstatPlayerJobData>, error: Erro
     );
     return;
   }
-  await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+  await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+}
+
+async function recordTerminalFailure(
+  job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
+  error: unknown,
+): Promise<void> {
+  const terminal = isTerminalJobAttemptFailure(job, error, job.attemptsMade + 1);
+  if (!terminal) return;
+  const typedError = error instanceof Error ? error : new Error(String(error));
+  try {
+    if (job.name.startsWith('understat-player-')) {
+      await recordPlayerFailure(job as Job<UnderstatPlayerJobData>, typedError, true);
+    } else {
+      await recordTeamFailure(job as Job<UnderstatTeamJobData>, typedError, true);
+    }
+    await settleUnderstatFailureAfterRunDrained(job, typedError, true);
+  } catch (bookkeepingError) {
+    logError('Understat terminal failure bookkeeping failed in worker path', bookkeepingError, {
+      runId: job.data.runId,
+      jobId: job.id,
+    });
+  }
 }
 
 export function createUnderstatWorker(): WorkerRuntime {
@@ -237,6 +420,13 @@ export function createUnderstatWorker(): WorkerRuntime {
           runId: job.data.runId,
         }),
       );
+      if (isTerminalJobFailure(job, error)) {
+        void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
+          logError('Understat team obligation failure bookkeeping failed', bookkeepingError, {
+            runId: job.data.runId,
+          }),
+        );
+      }
       void alertOnFinalFailure(job, error);
     }
   });
@@ -252,6 +442,13 @@ export function createUnderstatWorker(): WorkerRuntime {
           runId: job.data.runId,
         }),
       );
+      if (isTerminalJobFailure(job, error)) {
+        void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
+          logError('Understat player obligation failure bookkeeping failed', bookkeepingError, {
+            runId: job.data.runId,
+          }),
+        );
+      }
       void alertOnFinalFailure(job, error);
     }
   });

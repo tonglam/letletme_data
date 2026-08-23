@@ -224,6 +224,7 @@ export interface UnderstatSyncRun {
   metadata: Record<string, unknown>;
   errorSummary: string | null;
   startedAt: Date;
+  updatedAt: Date;
   completedAt: Date | null;
 }
 

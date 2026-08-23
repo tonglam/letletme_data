@@ -439,10 +439,12 @@ describe('Briefing source registry reconciliation', () => {
       bootstrapCompletedAt: null,
       underLimitStreak: 0,
     });
-    expect(resetTarget?.nextDueAt.getTime()).toBeGreaterThanOrEqual(reconcileStartedAt);
-    expect(resetTarget?.bootstrapCutoffAt?.getTime() ?? 0).toBeGreaterThanOrEqual(
-      reconcileStartedAt,
-    );
+    // The authoritative reset timestamp comes from PostgreSQL's clock, which
+    // can trail the application wall clock by a few milliseconds in the
+    // disposable integration container.
+    const minimumResetTime = reconcileStartedAt - 100;
+    expect(resetTarget?.nextDueAt.getTime()).toBeGreaterThanOrEqual(minimumResetTime);
+    expect(resetTarget?.bootstrapCutoffAt?.getTime() ?? 0).toBeGreaterThanOrEqual(minimumResetTime);
 
     const [preservedUnrelated] = await db
       .select({

@@ -7,6 +7,7 @@ import { runPlayerMarketFreshnessWatchdog } from '../jobs/player-market-freshnes
 import { repairTournamentTrendScopes } from '../jobs/tournament-trends-repair.jobs';
 import { runLaunchMonitor } from '../jobs/launch.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
+import { reconcileUnderstatOrphanedRuns } from '../services/understat-recovery.service';
 import { enqueueCoreSnapshotJob, enqueuePlayerStatsSyncJob } from '../jobs/data-sync-enqueue';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
@@ -103,6 +104,8 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           return runLaunchMonitor({ source: 'cron' });
         case MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION:
           return runPostMatchConsolidation();
+        case MAINTENANCE_JOBS.UNDERSTAT_ORPHAN_RECONCILER:
+          return reconcileUnderstatOrphanedRuns();
         case MAINTENANCE_JOBS.ENTRY_ONBOARDING: {
           if (!Number.isSafeInteger(job.data.entryId) || (job.data.entryId ?? 0) <= 0) {
             throw new Error('Entry onboarding job is missing a valid entryId');

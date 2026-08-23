@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -125,10 +125,102 @@ export async function reserveSchedulerObligation(input: {
   return mapRow(row);
 }
 
+/**
+ * Latest-authoritative daily lanes supersede an older pending/failed date
+ * after a feature-disabled outage. In-flight work is left intact; its run
+ * must drain or be recovered before a newer generation is allowed to write.
+ */
+export async function supersedeSchedulerObligations(input: {
+  jobName: string;
+  beforePeriodKey: string;
+  evidence?: Record<string, unknown>;
+  db?: DbHandle;
+}): Promise<number> {
+  const db = input.db ?? (await getDb());
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      status: 'skipped',
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+        provider: 'understat',
+        terminal: true,
+        reason: 'superseded-by-latest-authoritative',
+        ...input.evidence,
+      })}::jsonb`,
+      completedAt: sql`clock_timestamp()`,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        sql`${schedulerObligationsInOps.periodKey} < ${input.beforePeriodKey}`,
+        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length;
+}
+
+export async function hasEarlierInFlightSchedulerObligation(input: {
+  jobName: string;
+  beforePeriodKey: string;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  const [row] = await db
+    .select({ obligationId: schedulerObligationsInOps.obligationId })
+    .from(schedulerObligationsInOps)
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        sql`${schedulerObligationsInOps.periodKey} < ${input.beforePeriodKey}`,
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
+export async function deferSchedulerObligationByIdentity(input: {
+  jobName: string;
+  scopeKey: string;
+  periodKey: string;
+  delayMs: number;
+  error?: string;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  const delayMs = Math.max(1_000, Math.floor(input.delayMs));
+  if (!Number.isSafeInteger(delayMs)) throw new Error('Scheduler defer delay must be an integer');
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
+      ...(input.error ? { lastError: input.error } : {}),
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
+        eq(schedulerObligationsInOps.periodKey, input.periodKey),
+        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length === 1;
+}
+
 export async function claimSchedulerObligations(
   input: {
     limit?: number;
     leaseMs?: number;
+    /** Keep scheduler-only obligations pending while their provider is disabled. */
+    excludedJobNames?: readonly string[];
+    /** Terminal generation caps for provider-specific lease recovery. */
+    generationCaps?: Readonly<Record<string, number>>;
     db?: DbHandle;
   } = {},
 ): Promise<readonly { obligation: SchedulerObligation; owner: string }[]> {
@@ -140,6 +232,9 @@ export async function claimSchedulerObligations(
   if (!Number.isSafeInteger(leaseMs) || leaseMs < 1)
     throw new Error('Scheduler lease must be positive');
   const db = input.db ?? (await getDb());
+  const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
+    (name) => name.length > 0,
+  );
   const owner = randomUUID();
   return db.transaction(async (tx) => {
     const clockRows = await tx.execute<{ dbNow: Date | string }>(
@@ -164,6 +259,9 @@ export async function claimSchedulerObligations(
               ),
             ),
           ),
+          excludedJobNames.length > 0
+            ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
+            : undefined,
         ),
       )
       .orderBy(asc(schedulerObligationsInOps.dueAt), asc(schedulerObligationsInOps.obligationId))
@@ -179,6 +277,25 @@ export async function claimSchedulerObligations(
         row.status === 'failed' || row.status === 'enqueued' || row.status === 'running'
           ? row.generation + 1
           : row.generation;
+      const generationCap = input.generationCaps?.[row.jobName];
+      if (generationCap !== undefined && nextGeneration >= generationCap) {
+        await tx
+          .update(schedulerObligationsInOps)
+          .set({
+            status: 'skipped',
+            evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+              provider: 'understat',
+              terminal: true,
+              reason: 'generation-limit',
+            })}::jsonb`,
+            completedAt: dbNow,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: dbNow,
+          })
+          .where(eq(schedulerObligationsInOps.obligationId, row.obligationId));
+        continue;
+      }
       const updated = await tx
         .update(schedulerObligationsInOps)
         .set({
@@ -311,6 +428,7 @@ export async function completeSchedulerObligation(input: {
 export async function markSchedulerObligationIrrecoverable(input: {
   obligationId: string;
   status?: Extract<SchedulerObligationStatus, 'skipped' | 'irrecoverable'>;
+  generation?: number;
   evidence?: Record<string, unknown>;
   includeInFlight?: boolean;
   db?: DbHandle;
@@ -332,6 +450,9 @@ export async function markSchedulerObligationIrrecoverable(input: {
     .where(
       and(
         eq(schedulerObligationsInOps.obligationId, input.obligationId),
+        input.generation === undefined
+          ? undefined
+          : eq(schedulerObligationsInOps.generation, input.generation),
         inArray(schedulerObligationsInOps.status, closeableStatuses),
       ),
     )

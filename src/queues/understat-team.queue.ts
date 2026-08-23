@@ -17,6 +17,8 @@ export interface UnderstatTeamJobData {
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
+  obligationId?: string;
+  obligationGeneration?: number;
   teamId?: number;
   teamTitle?: string;
   teamIds?: number[];

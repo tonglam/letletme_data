@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, notInArray, sql } from 'drizzle-orm';
 
 import {
   syncItemsInOps as understatSyncItems,
@@ -71,6 +71,7 @@ function mapRun(row: typeof understatSyncRuns.$inferSelect): UnderstatSyncRun {
     metadata: row.metadata as Record<string, unknown>,
     errorSummary: row.errorSummary,
     startedAt: row.startedAt,
+    updatedAt: row.updatedAt,
     completedAt: row.completedAt,
   };
 }
@@ -99,6 +100,8 @@ export interface CreateUnderstatRunInput {
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
   dataChanged?: boolean;
+  obligationId?: string;
+  obligationGeneration?: number;
 }
 
 export interface CreateUnderstatItemInput {
@@ -121,7 +124,16 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         trigger: input.trigger,
         status: 'running',
         dataChanged: input.dataChanged ?? false,
-        metadata: {},
+        metadata: {
+          ...(input.obligationId
+            ? {
+                obligationId: input.obligationId,
+                ...(input.obligationGeneration === undefined
+                  ? {}
+                  : { obligationGeneration: input.obligationGeneration }),
+              }
+            : {}),
+        },
         startedAt: sql`clock_timestamp()`,
       })
       .onConflictDoNothing({ target: understatSyncRuns.runId });
@@ -323,17 +335,59 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       );
   },
 
+  /**
+   * Mark a run failed only after every staged item has settled. A terminal
+   * BullMQ attempt may arrive while sibling detail jobs are still active;
+   * leaving the run active in that window prevents the scheduler from
+   * starting a replacement generation against the same season.
+   */
+  async markRunFailedIfSettled(runId: string, error: string): Promise<boolean> {
+    const db = await getDatabase(dbInstance);
+    const updated = await db
+      .update(understatSyncRuns)
+      .set({
+        status: 'failed',
+        errorSummary: error,
+        completedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+          sql`not exists (
+            select 1
+            from ${understatSyncItems} as active_item
+            where active_item.run_id = ${understatSyncRuns.runId}
+              and active_item.status in ('pending', 'running')
+          )`,
+        ),
+      )
+      .returning({ runId: understatSyncRuns.runId });
+    return updated.length === 1;
+  },
+
   async markRunCompleted(
     runId: string,
     metadata: Record<string, unknown> = {},
     dataChanged?: boolean,
   ): Promise<void> {
     const db = await getDatabase(dbInstance);
+    const [current] = await db
+      .select({ metadata: understatSyncRuns.metadata })
+      .from(understatSyncRuns)
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      )
+      .limit(1);
     await db
       .update(understatSyncRuns)
       .set({
         status: 'completed',
-        metadata,
+        metadata: { ...((current?.metadata ?? {}) as Record<string, unknown>), ...metadata },
         ...(dataChanged === undefined ? {} : { dataChanged }),
         completedAt: sql`clock_timestamp()`,
         updatedAt: sql`clock_timestamp()`,
@@ -346,13 +400,32 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       );
   },
 
-  async markRunSkipped(runId: string, reason: string): Promise<void> {
+  async markRunSkipped(
+    runId: string,
+    reason: string,
+    metadata: Record<string, unknown> = {},
+  ): Promise<void> {
     const db = await getDatabase(dbInstance);
+    const [current] = await db
+      .select({ metadata: understatSyncRuns.metadata })
+      .from(understatSyncRuns)
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      )
+      .limit(1);
     await db
       .update(understatSyncRuns)
       .set({
         status: 'skipped',
-        metadata: { finalized: false, reason },
+        metadata: {
+          ...((current?.metadata ?? {}) as Record<string, unknown>),
+          finalized: false,
+          reason,
+          ...metadata,
+        },
         dataChanged: false,
         completedAt: sql`clock_timestamp()`,
         updatedAt: sql`clock_timestamp()`,
@@ -395,6 +468,95 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       .orderBy(desc(understatSyncRuns.startedAt))
       .limit(1);
     return row ? mapRun(row) : null;
+  },
+
+  async findOrphanedRuns(cutoff: Date): Promise<UnderstatSyncRun[]> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select()
+      .from(understatSyncRuns)
+      .where(
+        and(
+          eq(understatSyncRuns.provider, 'understat'),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+          lte(understatSyncRuns.updatedAt, cutoff),
+        ),
+      )
+      .orderBy(asc(understatSyncRuns.updatedAt));
+    return rows.map(mapRun);
+  },
+
+  async markOrphanedRun(input: {
+    runId: string;
+    error: string;
+    recoveredAt?: Date;
+  }): Promise<{ run: UnderstatSyncRun; failedItems: number } | null> {
+    const db = await getDatabase(dbInstance);
+    return db.transaction(async (tx) => {
+      const [run] = await tx
+        .select()
+        .from(understatSyncRuns)
+        .where(
+          and(
+            eq(understatSyncRuns.runId, input.runId),
+            inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!run) return null;
+
+      const failedRows = await tx
+        .update(understatSyncItems)
+        .set({
+          status: 'failed',
+          lastError: input.error,
+          completedAt: sql`clock_timestamp()`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(understatSyncItems.runId, input.runId),
+            inArray(understatSyncItems.status, ['pending', 'running']),
+          ),
+        )
+        .returning({ runId: understatSyncItems.runId });
+      const counts = await tx
+        .select({ status: understatSyncItems.status, count: sql<number>`count(*)::int` })
+        .from(understatSyncItems)
+        .where(eq(understatSyncItems.runId, input.runId))
+        .groupBy(understatSyncItems.status);
+      const countByStatus = new Map(counts.map((row) => [row.status, row.count]));
+      const recovery = {
+        state: 'orphaned',
+        failedAt: (input.recoveredAt ?? new Date()).toISOString(),
+        failedItems: failedRows.length,
+      };
+      const [updated] = await tx
+        .update(understatSyncRuns)
+        .set({
+          completedItems: countByStatus.get('completed') ?? 0,
+          skippedItems: countByStatus.get('skipped') ?? 0,
+          failedItems: countByStatus.get('failed') ?? 0,
+          status: 'failed',
+          errorSummary: input.error,
+          metadata: {
+            ...((run.metadata ?? {}) as Record<string, unknown>),
+            recovery,
+          },
+          completedAt: sql`clock_timestamp()`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(understatSyncRuns.runId, input.runId),
+            inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+          ),
+        )
+        .returning();
+      if (!updated) return null;
+      return { run: mapRun(updated), failedItems: failedRows.length };
+    });
   },
 
   async findItems(runId: string): Promise<UnderstatSyncItem[]> {
