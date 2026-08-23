@@ -1,6 +1,7 @@
 import { UnrecoverableError } from 'bullmq';
 
 import { UnderstatClientError } from '../clients/understat';
+import type { UnderstatSyncRun } from '../domain/understat';
 import { getUnderstatPlayerQueue } from '../queues/understat-player.queue';
 import { getUnderstatTeamQueue } from '../queues/understat-team.queue';
 import { understatSyncRepository } from '../repositories/understat-sync';
@@ -9,11 +10,13 @@ import {
   markSchedulerObligationIrrecoverable,
 } from '../repositories/scheduler-obligations';
 import { logInfo, logWarn } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { notifyTwoBots } from '../utils/notify';
 
 export const UNDERSTAT_MAX_SCHEDULER_GENERATIONS = 3;
 export const UNDERSTAT_COMPLETENESS_RETRY_DELAY_MS = 30 * 60_000;
 export const UNDERSTAT_ORPHAN_CUTOFF_MS = 30 * 60_000;
+const ACTIVE_UNDERSTAT_RUN_STATUSES = new Set(['pending', 'running', 'ready_to_publish']);
 
 export function understatObligationFailureDisposition(
   generation: number | undefined,
@@ -141,24 +144,52 @@ export async function reconcileUnderstatOrphanedRuns(
   if (candidates.length === 0) {
     return { candidates: 0, recovered: 0, skippedBecauseQueueBusy: false };
   }
-  if (await understatQueueHasWork()) {
+  const scoped = await withMutationScopes(
+    {
+      queueName: 'maintenance',
+      jobName: 'understat-orphan-reconciler',
+      scopes: ['understat:reference:all'],
+    },
+    async () => {
+      // Every Understat worker holds this scope across its database mutation.
+      // Holding it across the queue check and stale-run transaction prevents
+      // a valid worker from entering the write path between those operations.
+      if (await understatQueueHasWork()) {
+        return { queueBusy: true, recovered: [] as { run: UnderstatSyncRun; error: string }[] };
+      }
+
+      const recovered: { run: UnderstatSyncRun; error: string }[] = [];
+      for (const candidate of candidates) {
+        // Re-read after acquiring the scope so a run that advanced since the
+        // initial candidate scan is not incorrectly marked orphaned.
+        const current = await understatSyncRepository.findRun(candidate.runId);
+        if (
+          !current ||
+          !ACTIVE_UNDERSTAT_RUN_STATUSES.has(current.status) ||
+          current.updatedAt.getTime() > cutoff.getTime()
+        ) {
+          continue;
+        }
+        const error = `Understat ${current.lane} run ${current.runId} made no database progress for 30 minutes`;
+        const settled = await understatSyncRepository.markOrphanedRun({
+          runId: current.runId,
+          error,
+          recoveredAt: now,
+        });
+        if (settled) recovered.push({ run: settled.run, error });
+      }
+      return { queueBusy: false, recovered };
+    },
+  );
+  if (scoped.queueBusy) {
     logInfo('Understat orphan recovery deferred while queues still have work', {
       candidates: candidates.length,
     });
     return { candidates: candidates.length, recovered: 0, skippedBecauseQueueBusy: true };
   }
 
-  let recovered = 0;
-  for (const candidate of candidates) {
-    const error = `Understat ${candidate.lane} run ${candidate.runId} made no database progress for 30 minutes`;
-    const settled = await understatSyncRepository.markOrphanedRun({
-      runId: candidate.runId,
-      error,
-      recoveredAt: now,
-    });
-    if (!settled) continue;
-    recovered += 1;
-    const obligation = metadataObligation(candidate.metadata);
+  for (const { run, error } of scoped.recovered) {
+    const obligation = metadataObligation(run.metadata);
     if (obligation.obligationId) {
       await settleUnderstatObligationFailure({
         obligationId: obligation.obligationId,
@@ -167,17 +198,21 @@ export async function reconcileUnderstatOrphanedRuns(
       });
     } else {
       await notifyTwoBots(
-        `⚠️ Understat orphan run recovered\nLane: ${candidate.lane}\nSeason: ${candidate.season}\nRun: ${candidate.runId}\nError: ${error}`,
-        { idempotencyKey: `understat-orphan:${candidate.runId}` },
+        `⚠️ Understat orphan run recovered\nLane: ${run.lane}\nSeason: ${run.season}\nRun: ${run.runId}\nError: ${error}`,
+        { idempotencyKey: `understat-orphan:${run.runId}` },
       );
     }
     logWarn('Understat orphan run marked failed', {
-      runId: candidate.runId,
-      lane: candidate.lane,
-      season: candidate.season,
+      runId: run.runId,
+      lane: run.lane,
+      season: run.season,
       obligationId: obligation.obligationId,
       generation: obligation.generation,
     });
   }
-  return { candidates: candidates.length, recovered, skippedBecauseQueueBusy: false };
+  return {
+    candidates: candidates.length,
+    recovered: scoped.recovered.length,
+    skippedBecauseQueueBusy: false,
+  };
 }

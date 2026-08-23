@@ -82,18 +82,21 @@ function startSchedulerLeaseHeartbeat(
   job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
 ): () => void {
   if (!job.data.obligationId) return () => undefined;
-  const timer = setInterval(() => {
-    void renewSchedulerObligation({
+  const renew = () =>
+    renewSchedulerObligation({
       obligationId: job.data.obligationId!,
       generation: job.data.obligationGeneration,
-    }).catch((error) =>
+    }).catch((error) => {
       logError('Failed to renew Understat scheduler obligation lease', error, {
         runId: job.data.runId,
         jobId: job.id,
         generation: job.data.obligationGeneration,
-      }),
-    );
-  }, 60_000);
+      });
+    });
+  // Most chained jobs complete in under a minute. Renew at the boundary as
+  // well as on the interval so a long fan-out cannot expire between jobs.
+  void renew();
+  const timer = setInterval(() => void renew(), 60_000);
   return () => clearInterval(timer);
 }
 

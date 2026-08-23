@@ -10,6 +10,7 @@ import {
   completeSchedulerObligation,
   failSchedulerObligation,
   markSchedulerObligationIrrecoverable,
+  supersedeSchedulerObligations,
 } from '../../src/repositories/scheduler-obligations';
 
 const OBLIGATION_ID = '30000000-0000-4000-8000-000000000001';
@@ -218,5 +219,110 @@ describe('scheduler obligation generation fencing', () => {
     });
     expect(claimed).toHaveLength(1);
     expect(claimed[0]?.obligation.jobName).toBe('understat-team-incremental');
+  });
+
+  test('coalesces an older pending Understat daily checkpoint', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'understat-team-incremental',
+        'integration:understat',
+        '20260822',
+        'daily UTC+8 incremental',
+        'Asia/Shanghai',
+        'pending',
+        'catchup',
+        clock_timestamp() - interval '1 day',
+        0,
+        0,
+        '{}'::jsonb
+      )
+    `;
+
+    expect(
+      await supersedeSchedulerObligations({
+        jobName: 'understat-team-incremental',
+        beforePeriodKey: '20260823',
+        evidence: { supersededByPeriodKey: '20260823' },
+      }),
+    ).toBe(1);
+    const rows = await sql<Array<{ status: string; reason: string }>>`
+      SELECT status, evidence->>'reason' AS reason
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      status: 'skipped',
+      reason: 'superseded-by-latest-authoritative',
+    });
+  });
+
+  test('terminalizes an expired Understat lease at the generation cap', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        lease_owner,
+        lease_expires_at,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'understat-player-incremental',
+        'integration:understat',
+        '20260823',
+        'daily UTC+8 incremental',
+        'Asia/Shanghai',
+        'running',
+        'catchup',
+        clock_timestamp() - interval '1 minute',
+        2,
+        3,
+        'expired-understat-owner',
+        clock_timestamp() - interval '1 minute',
+        '{}'::jsonb
+      )
+    `;
+
+    expect(
+      await claimSchedulerObligations({
+        generationCaps: { 'understat-player-incremental': 3 },
+      }),
+    ).toHaveLength(0);
+    const rows = await sql<Array<{ status: string; reason: string; lease_owner: string | null }>>`
+      SELECT status, evidence->>'reason' AS reason, lease_owner
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      status: 'skipped',
+      reason: 'generation-limit',
+      lease_owner: null,
+    });
   });
 });

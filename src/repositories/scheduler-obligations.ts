@@ -125,12 +125,102 @@ export async function reserveSchedulerObligation(input: {
   return mapRow(row);
 }
 
+/**
+ * Latest-authoritative daily lanes supersede an older pending/failed date
+ * after a feature-disabled outage. In-flight work is left intact; its run
+ * must drain or be recovered before a newer generation is allowed to write.
+ */
+export async function supersedeSchedulerObligations(input: {
+  jobName: string;
+  beforePeriodKey: string;
+  evidence?: Record<string, unknown>;
+  db?: DbHandle;
+}): Promise<number> {
+  const db = input.db ?? (await getDb());
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      status: 'skipped',
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+        provider: 'understat',
+        terminal: true,
+        reason: 'superseded-by-latest-authoritative',
+        ...input.evidence,
+      })}::jsonb`,
+      completedAt: sql`clock_timestamp()`,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        sql`${schedulerObligationsInOps.periodKey} < ${input.beforePeriodKey}`,
+        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length;
+}
+
+export async function hasEarlierInFlightSchedulerObligation(input: {
+  jobName: string;
+  beforePeriodKey: string;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  const [row] = await db
+    .select({ obligationId: schedulerObligationsInOps.obligationId })
+    .from(schedulerObligationsInOps)
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        sql`${schedulerObligationsInOps.periodKey} < ${input.beforePeriodKey}`,
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
+export async function deferSchedulerObligationByIdentity(input: {
+  jobName: string;
+  scopeKey: string;
+  periodKey: string;
+  delayMs: number;
+  error?: string;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  const delayMs = Math.max(1_000, Math.floor(input.delayMs));
+  if (!Number.isSafeInteger(delayMs)) throw new Error('Scheduler defer delay must be an integer');
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
+      ...(input.error ? { lastError: input.error } : {}),
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
+        eq(schedulerObligationsInOps.periodKey, input.periodKey),
+        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length === 1;
+}
+
 export async function claimSchedulerObligations(
   input: {
     limit?: number;
     leaseMs?: number;
     /** Keep scheduler-only obligations pending while their provider is disabled. */
     excludedJobNames?: readonly string[];
+    /** Terminal generation caps for provider-specific lease recovery. */
+    generationCaps?: Readonly<Record<string, number>>;
     db?: DbHandle;
   } = {},
 ): Promise<readonly { obligation: SchedulerObligation; owner: string }[]> {
@@ -187,6 +277,25 @@ export async function claimSchedulerObligations(
         row.status === 'failed' || row.status === 'enqueued' || row.status === 'running'
           ? row.generation + 1
           : row.generation;
+      const generationCap = input.generationCaps?.[row.jobName];
+      if (generationCap !== undefined && nextGeneration >= generationCap) {
+        await tx
+          .update(schedulerObligationsInOps)
+          .set({
+            status: 'skipped',
+            evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+              provider: 'understat',
+              terminal: true,
+              reason: 'generation-limit',
+            })}::jsonb`,
+            completedAt: dbNow,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: dbNow,
+          })
+          .where(eq(schedulerObligationsInOps.obligationId, row.obligationId));
+        continue;
+      }
       const updated = await tx
         .update(schedulerObligationsInOps)
         .set({
