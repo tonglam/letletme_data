@@ -318,6 +318,8 @@ jobs:
               /home/workspace/letletme-grok-runner/current.release 2>/dev/null || printf unknown)
             old_runner_release_sha=${old_runner_release_sha:-unknown}
             acquire_deploy_lock
+            test -x scripts/bootstrap-briefing-source-media-env.sh
+            scripts/bootstrap-briefing-source-media-env.sh "$env_file" "$media_env_file"
             image_pull_attempted=true
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker media-worker migration backup
             image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_REF")
