@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { sourceYearFromSeason } from '../domain/understat';
 import { getConfig } from '../utils/config';
 import { logDebug, logWarn } from '../utils/logger';
 import { acquireUnderstatRequestPermit } from '../utils/understat-rate-limit';
@@ -460,7 +461,20 @@ export class UnderstatClient {
       `/getTeamData/${encodeURIComponent(teamTitle)}/${sourceYear}`,
       UnderstatTeamResponseSchema,
       ['dates', 'players', 'statistics'],
-    );
+    ).then((response) => {
+      const hasCompletedMatch = response.dates.some((date) => date.isResult);
+      const hasStatistics = Object.values(
+        response.statistics as Record<string, Record<string, unknown>>,
+      ).some((value) => Object.keys(value).length > 0);
+      const activeSourceYear = sourceYearFromSeason(getConfig().UNDERSTAT_SEASON);
+      if (!hasStatistics && (hasCompletedMatch || sourceYear !== activeSourceYear)) {
+        throw new UnderstatClientError(
+          'Understat team statistics are empty for a completed or historical season',
+          'VALIDATION_ERROR',
+        );
+      }
+      return response;
+    });
   }
 
   getMatchData(matchId: number): Promise<UnderstatMatchResponse> {

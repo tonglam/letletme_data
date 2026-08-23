@@ -62,6 +62,44 @@ describe('Understat client boundary', () => {
     });
   });
 
+  test('accepts empty team statistics only for the active result-free season', async () => {
+    const client = new UnderstatClient({
+      enabled: true,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            ...UNDERSTAT_TEAM_FIXTURE,
+            dates: [{ ...UNDERSTAT_TEAM_FIXTURE.dates[0], isResult: false }],
+            statistics: [],
+          }),
+        ),
+    });
+
+    await expect(client.getTeamData('Chelsea', 2026)).resolves.toMatchObject({
+      statistics: { situation: {} },
+    });
+  });
+
+  test('rejects empty team statistics for completed or historical responses', async () => {
+    const client = new UnderstatClient({
+      enabled: true,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            ...UNDERSTAT_TEAM_FIXTURE,
+            statistics: [],
+          }),
+        ),
+    });
+
+    await expect(client.getTeamData('Chelsea', 2026)).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+    await expect(client.getTeamData('Chelsea', 2025)).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+  });
+
   test('is a hard no-network gate when disabled', async () => {
     let calls = 0;
     const client = new UnderstatClient({
