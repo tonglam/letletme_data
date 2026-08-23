@@ -300,7 +300,7 @@ const toManagerScoreCheckpoint = (
 const fromManagerScoreCheckpoint = (
   row: typeof managerEventScoreSnapshotsInFpl.$inferSelect,
   seasonCode: string,
-): CachedRow => ({
+): CachedRow & { revisionAt: string } => ({
   season: seasonCode,
   eventId: row.eventId,
   entryId: row.entryId,
@@ -318,6 +318,11 @@ const fromManagerScoreCheckpoint = (
   upstreamUpdatedAt: row.upstreamUpdatedAt?.toISOString() ?? null,
   staleAt: plusSeconds(row.checkedAt.toISOString(), STALE_SECONDS),
   revision: row.contentRevision,
+  // `checkedAt` is the upstream observation identity and can legitimately be
+  // unchanged when a later Classic overall-rank enrichment is persisted.
+  // Keep the durable row's write ordering so it can beat an older Redis-only
+  // enrichment with the same observation timestamp.
+  revisionAt: row.updatedAt.toISOString(),
 });
 
 const parseCachedRow = (value: string | null): CachedRow | null => {

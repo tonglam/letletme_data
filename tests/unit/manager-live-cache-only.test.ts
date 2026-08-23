@@ -330,7 +330,7 @@ describe('manager live CACHE_ONLY reads', () => {
       overallRank: 765_432,
       revision: 'postgres-durable-revision',
     });
-    expect(result.rows[0]).not.toHaveProperty('revisionAt');
+    expect(result.rows[0]).toHaveProperty('revisionAt', checkedAt);
   });
 
   test('keeps a newer Redis enrichment when the matching checkpoint write failed', async () => {
@@ -368,14 +368,23 @@ describe('manager live CACHE_ONLY reads', () => {
 
   test('uses a newer checkpoint enrichment when the matching Redis write failed', async () => {
     const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
-    const revisionAt = new Date(Date.parse(checkedAt) + 60_000);
-    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    const redisRevisionAt = new Date(Date.parse(checkedAt) + 30_000).toISOString();
+    const checkpointRevisionAt = new Date(Date.parse(checkedAt) + 60_000);
+    redisRows.set(
+      101,
+      JSON.stringify({
+        ...cachedRow(101, checkedAt),
+        overallRank: 123_456,
+        revision: 'redis-older-enrichment',
+        revisionAt: redisRevisionAt,
+      }),
+    );
     postgresRows = [
       {
         ...checkpointRow(101, checkedAt),
         overallRank: 765_432,
         contentRevision: 'postgres-newer-revision',
-        updatedAt: revisionAt,
+        updatedAt: checkpointRevisionAt,
       },
     ];
 
@@ -389,6 +398,7 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result.rows[0]).toMatchObject({
       overallRank: 765_432,
       revision: 'postgres-newer-revision',
+      revisionAt: checkpointRevisionAt.toISOString(),
     });
   });
 });

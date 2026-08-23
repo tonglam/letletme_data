@@ -293,6 +293,17 @@ export async function advanceManagerLiveHotState(
       `Invalid manager live classic standings cursor epoch: ${String(expectedClassicStandingsCursorEpoch)}`,
     );
   }
+  if (
+    expectedClassicStandingsPage !== undefined &&
+    expectedClassicStandingsPage !== null &&
+    (!Number.isSafeInteger(expectedClassicStandingsPage) ||
+      expectedClassicStandingsPage < 1 ||
+      expectedClassicStandingsPage > MANAGER_LIVE_CLASSIC_MAX_PAGE)
+  ) {
+    throw new Error(
+      `Invalid expected manager live classic standings page: ${String(expectedClassicStandingsPage)}`,
+    );
+  }
   const classicUpdate =
     classicStandingsNextPage === undefined
       ? ''
