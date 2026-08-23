@@ -468,6 +468,30 @@ test('decouples X receipts from durable media processing and reuses legacy core 
     .update(contentSourceMediaAssets)
     .set({ uploadLeaseOwner: null, uploadLeaseExpiresAt: null })
     .where(eq(contentSourceMediaAssets.assetId, recoveredAsset.assetId));
+  // Simulate retention deleting the object and crashing before it can persist
+  // DELETED. AVAILABLE with the expired retention marker must take the
+  // authenticated recovery path rather than being trusted as present.
+  await db
+    .update(contentSourceMediaAssets)
+    .set({
+      uploadLeaseOwner: 'crashed-retention-worker',
+      uploadLeaseExpiresAt: new Date(Date.now() - 1_000),
+    })
+    .where(eq(contentSourceMediaAssets.assetId, recoveredAsset.assetId));
+  storedObjects.delete(objectKey);
+  const crashRecoveryReservation = await reserveSourceMediaAsset({
+    gateId: replacementClaim.gateId,
+    image,
+    objectKey,
+    bucket: 'briefing-source-media',
+    workerId: replacementClaim.leaseOwner,
+    leaseMs: 5 * 60_000,
+  });
+  expect(crashRecoveryReservation).toMatchObject({
+    assetId: recoveredAsset.assetId,
+    storageState: 'RESERVED',
+    needsRecoveryCheck: true,
+  });
   secondImageFails = false;
   const complete = await processSourceMediaGate(replacementClaim, {
     bucket: 'briefing-source-media',
@@ -476,7 +500,8 @@ test('decouples X receipts from durable media processing and reuses legacy core 
     downloadImage: async () => image,
   });
   expect(complete.status).toBe('COMPLETE');
-  expect(uploadCalls).toBe(0);
+  expect(uploadCalls).toBe(1);
+  expect(storedObjects.has(objectKey)).toBe(true);
   const mediaUpdates = await db
     .select({ eventKey: contentPipelineOutbox.eventKey })
     .from(contentPipelineOutbox)
@@ -807,11 +832,28 @@ test('decouples X receipts from durable media processing and reuses legacy core 
       ),
     );
   expect(retentionLeaseRaceStates.filter((asset) => asset.state === 'DELETED')).toHaveLength(1);
-  expect(retentionLeaseRaceStates.filter((asset) => asset.state === 'AVAILABLE')).toHaveLength(1);
+  expect(retentionLeaseRaceStates.filter((asset) => asset.state === 'FAILED')).toHaveLength(1);
   expect(retentionLeaseRaceStates.every((asset) => asset.leaseOwner === null)).toBe(true);
   expect(
     retentionLeaseRaceAssets.filter((asset) => storedObjects.has(asset.objectKey)),
   ).toHaveLength(1);
+  expect(
+    await runSourceMediaRetention({
+      workerId: 'retention-lease-race-recovery',
+      storage,
+    }),
+  ).toEqual({ claimed: 1, deleted: 1, failed: 0 });
+  const recoveredRetentionStates = await db
+    .select({ state: contentSourceMediaAssets.storageState })
+    .from(contentSourceMediaAssets)
+    .where(
+      inArray(
+        contentSourceMediaAssets.assetId,
+        retentionLeaseRaceAssets.map((asset) => asset.assetId),
+      ),
+    );
+  expect(recoveredRetentionStates.every((asset) => asset.state === 'DELETED')).toBe(true);
+  expect(retentionLeaseRaceAssets.some((asset) => storedObjects.has(asset.objectKey))).toBe(false);
 
   await db
     .update(contentSourceMediaAssets)

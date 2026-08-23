@@ -476,17 +476,11 @@ export async function reserveSourceMediaAsset(input: {
       ) {
         throw new Error('SOURCE_MEDIA_ASSET_BUSY');
       }
-      if (existing.storageState === 'AVAILABLE') {
-        if (existing.uploadLeaseOwner || existing.uploadLeaseExpiresAt) {
-          await tx
-            .update(contentSourceMediaAssets)
-            .set({
-              uploadLeaseOwner: null,
-              uploadLeaseExpiresAt: null,
-              updatedAt: dbNow,
-            })
-            .where(eq(contentSourceMediaAssets.assetId, existing.assetId));
-        }
+      if (
+        existing.storageState === 'AVAILABLE' &&
+        existing.uploadLeaseOwner === null &&
+        existing.uploadLeaseExpiresAt === null
+      ) {
         return {
           assetId: existing.assetId,
           objectKey: existing.objectKey,
@@ -494,6 +488,11 @@ export async function reserveSourceMediaAsset(input: {
           needsRecoveryCheck: false,
         };
       }
+      // AVAILABLE with a stale upload lease is a durable retention-delete
+      // marker. The object may have been removed before a worker crash, so it
+      // must not take the trusted fast path. Move it back through RESERVED and
+      // require the authenticated object/hash recovery used by other
+      // non-AVAILABLE states.
       await tx
         .update(contentSourceMediaAssets)
         .set({

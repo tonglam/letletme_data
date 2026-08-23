@@ -48,8 +48,12 @@ async function claimSourceMediaRetentionAssets(workerId: string): Promise<Retent
     if (!lockAcquired) return [];
     await lockClient`
       UPDATE content.source_media_assets
-      SET upload_lease_owner = NULL,
+      SET storage_state = 'FAILED',
+          upload_lease_owner = NULL,
           upload_lease_expires_at = NULL,
+          last_failure_hash = ${sha256CanonicalJson({
+            failureClass: 'SOURCE_MEDIA_RETENTION_LEASE_EXPIRED',
+          })},
           updated_at = now()
       WHERE storage_state = 'AVAILABLE'
         AND upload_lease_expires_at <= now()
@@ -59,7 +63,7 @@ async function claimSourceMediaRetentionAssets(workerId: string): Promise<Retent
       FROM content.source_media_assets AS asset
       LEFT JOIN content.source_media_items AS item ON item.asset_id = asset.asset_id
       LEFT JOIN content.source_media_gates AS gate ON gate.gate_id = item.gate_id
-      WHERE asset.storage_state = 'AVAILABLE'
+      WHERE asset.storage_state IN ('AVAILABLE', 'FAILED')
         AND asset.upload_lease_owner IS NULL
       GROUP BY asset.asset_id
       HAVING (
@@ -81,7 +85,7 @@ async function claimSourceMediaRetentionAssets(workerId: string): Promise<Retent
           SELECT asset_id AS "assetId"
           FROM content.source_media_assets
           WHERE asset_id = ${candidate.assetId}::uuid
-            AND storage_state = 'AVAILABLE'
+            AND storage_state IN ('AVAILABLE', 'FAILED')
             AND upload_lease_owner IS NULL
           FOR UPDATE SKIP LOCKED
         `;
@@ -101,13 +105,14 @@ async function claimSourceMediaRetentionAssets(workerId: string): Promise<Retent
             WHERE item.asset_id = ${candidate.assetId}::uuid
           )
           UPDATE content.source_media_assets AS asset
-          SET upload_lease_owner = ${workerId},
+          SET storage_state = 'AVAILABLE',
+              upload_lease_owner = ${workerId},
               upload_lease_expires_at =
                 now() + (${RETENTION_LEASE_MS}::bigint * interval '1 millisecond'),
               updated_at = now()
           FROM refs
           WHERE asset.asset_id = ${candidate.assetId}::uuid
-            AND asset.storage_state = 'AVAILABLE'
+            AND asset.storage_state IN ('AVAILABLE', 'FAILED')
             AND asset.upload_lease_owner IS NULL
             AND (
               (refs.reference_count = 0 AND asset.available_at < now() - interval '24 hours')
@@ -171,6 +176,7 @@ export async function runSourceMediaRetention(input: {
         WHERE asset_id = ${asset.assetId}::uuid
           AND storage_state = 'AVAILABLE'
           AND upload_lease_owner = ${input.workerId}
+          AND upload_lease_expires_at > clock_timestamp()
         RETURNING asset_id AS "assetId"
       `;
       if (completed.length !== 1) throw new Error('Source-media retention lease was lost');
@@ -183,7 +189,8 @@ export async function runSourceMediaRetention(input: {
       const failureHash = sha256CanonicalJson({ failureClass });
       await client`
         UPDATE content.source_media_assets
-        SET upload_lease_owner = NULL,
+        SET storage_state = 'FAILED',
+            upload_lease_owner = NULL,
             upload_lease_expires_at = NULL,
             last_failure_hash = ${failureHash},
             updated_at = now()
