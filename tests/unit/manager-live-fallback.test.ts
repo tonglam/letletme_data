@@ -12,6 +12,8 @@ import {
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
   readLatestRowsWithFallback,
+  selectForegroundClassicRankEntryIds,
+  shouldReplaceManagerLiveRow,
 } from '../../src/domain/manager-live-fallback';
 
 describe('manager live refresh targets', () => {
@@ -50,6 +52,63 @@ describe('manager live refresh targets', () => {
     expect(preserveClassicOverallRank(null, 0)).toBeNull();
     expect(preserveClassicOverallRank(54_321, undefined)).toBe(54_321);
     expect(preserveClassicOverallRank(54_321, 12_345)).toBe(54_321);
+  });
+
+  test('enriches fresh rank-missing classic rows in the bounded foreground plan', () => {
+    const rows = new Map([
+      [1, { fresh: true, overallRank: null }],
+      [2, { fresh: false, overallRank: null }],
+      [3, { fresh: true, overallRank: 123 }],
+      [4, { fresh: true, overallRank: 0 }],
+      [5, { fresh: true, overallRank: null }],
+    ]);
+
+    expect(
+      selectForegroundClassicRankEntryIds(
+        [1, 2, 3, 4, 5],
+        rows,
+        (row) => row.fresh,
+        (row) => !row.overallRank || row.overallRank <= 0,
+        2,
+      ),
+    ).toEqual([1, 4]);
+  });
+
+  test('rejects a later local completion from an older upstream standings snapshot', () => {
+    const current = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T10:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T09:59:00.000Z',
+    };
+    const slowerOlderReplica = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T10:01:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T09:58:00.000Z',
+    };
+    const newerUpstreamSnapshot = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T09:59:30.000Z',
+      upstreamUpdatedAt: '2026-08-23T10:00:00.000Z',
+    };
+
+    expect(shouldReplaceManagerLiveRow(current, slowerOlderReplica)).toBe(false);
+    expect(shouldReplaceManagerLiveRow(current, newerUpstreamSnapshot)).toBe(true);
+  });
+
+  test('keeps classic standings ahead of a later summary fallback', () => {
+    const classic = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T10:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T09:59:00.000Z',
+    };
+    const summary = {
+      source: 'FPL_ENTRY_SUMMARY' as const,
+      checkedAt: '2026-08-23T10:01:00.000Z',
+      upstreamUpdatedAt: null,
+    };
+
+    expect(shouldReplaceManagerLiveRow(classic, summary)).toBe(false);
+    expect(shouldReplaceManagerLiveRow(summary, classic)).toBe(true);
   });
 });
 

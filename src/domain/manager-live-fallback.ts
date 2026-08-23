@@ -3,6 +3,54 @@ const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
 
 export type ManagerSummaryFetchPriority = 'foreground' | 'background';
 
+export type ComparableManagerLiveRow = Readonly<{
+  source: 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
+  checkedAt: string;
+  upstreamUpdatedAt: string | null;
+}>;
+
+const managerLiveSourcePriority = (source: ComparableManagerLiveRow['source']): number =>
+  source === 'FPL_FINAL_RESULT' ? 3 : source === 'FPL_CLASSIC_STANDINGS' ? 2 : 1;
+
+export const shouldReplaceManagerLiveRow = (
+  current: ComparableManagerLiveRow,
+  incoming: ComparableManagerLiveRow,
+): boolean => {
+  const currentPriority = managerLiveSourcePriority(current.source);
+  const incomingPriority = managerLiveSourcePriority(incoming.source);
+  if (currentPriority !== incomingPriority) return incomingPriority > currentPriority;
+
+  if (current.source === 'FPL_CLASSIC_STANDINGS') {
+    const currentUpstream = Date.parse(current.upstreamUpdatedAt ?? '');
+    const incomingUpstream = Date.parse(incoming.upstreamUpdatedAt ?? '');
+    if (Number.isFinite(currentUpstream) && !Number.isFinite(incomingUpstream)) return false;
+    if (!Number.isFinite(currentUpstream) && Number.isFinite(incomingUpstream)) return true;
+    if (
+      Number.isFinite(currentUpstream) &&
+      Number.isFinite(incomingUpstream) &&
+      currentUpstream !== incomingUpstream
+    ) {
+      return incomingUpstream > currentUpstream;
+    }
+  }
+
+  return Date.parse(incoming.checkedAt) >= Date.parse(current.checkedAt);
+};
+
+export const selectForegroundClassicRankEntryIds = <T>(
+  requestedEntryIds: readonly number[],
+  rows: ReadonlyMap<number, T>,
+  isFresh: (row: T) => boolean,
+  needsOverallRank: (row: T) => boolean,
+  maxFetches: number,
+): readonly number[] =>
+  requestedEntryIds
+    .filter((entryId) => {
+      const row = rows.get(entryId);
+      return row !== undefined && isFresh(row) && needsOverallRank(row);
+    })
+    .slice(0, maxFetches);
+
 export const createKeyedTaskSerializer = (): (<T>(
   key: string,
   task: () => Promise<T>,

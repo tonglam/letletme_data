@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import type Redis from 'ioredis';
 
@@ -30,7 +30,8 @@ import {
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
-  readLatestRowsWithFallback,
+  selectForegroundClassicRankEntryIds,
+  shouldReplaceManagerLiveRow,
 } from '../domain/manager-live-fallback';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
@@ -46,6 +47,22 @@ const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 // response. Larger leagues remain bounded and finish through the background
 // refresh below.
 const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
+const CLASSIC_REFRESH_LOCK_SECONDS = 30;
+const CLASSIC_REFRESH_LOCK_WAIT_MS = 100;
+const CLASSIC_REFRESH_LOCK_MAX_WAIT_MS = 60_000;
+
+const RELEASE_CLASSIC_REFRESH_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+const RENEW_CLASSIC_REFRESH_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+`;
 
 export type ManagerLiveSource = 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
 export type ManagerLiveTotalScope = 'OVERALL' | 'CLASSIC_PHASE';
@@ -216,37 +233,65 @@ const readCachedRows = async (
   return rows;
 };
 
-const readBackgroundRows = async (
-  redis: Redis | null,
-  season: string,
-  eventId: number,
-  scope: ManagerScoreScope,
-  entryIds: readonly number[],
-  capturedRows: ReadonlyMap<number, CachedRow>,
-): Promise<Map<number, CachedRow>> =>
-  readLatestRowsWithFallback(
-    entryIds,
-    capturedRows,
-    () => readCachedRows(redis, season, eventId, scope, entryIds),
-    (error) =>
-      logWarn('Official manager background Redis read failed; using captured last-good rows', {
-        season,
-        eventId,
-        scope: scopeKey(scope),
-        error: error instanceof Error ? error.message : 'unknown',
-      }),
-  );
-
 const mergeLatestRows = (
   target: Map<number, CachedRow>,
   incoming: ReadonlyMap<number, CachedRow>,
 ): void => {
   for (const [entryId, row] of incoming) {
     const current = target.get(entryId);
-    if (!current || Date.parse(row.checkedAt) >= Date.parse(current.checkedAt)) {
-      target.set(entryId, row);
-    }
+    if (!current || shouldReplaceManagerLiveRow(current, row)) target.set(entryId, row);
   }
+};
+
+const readBackgroundRows = async (
+  redis: Redis | null,
+  season: FplSeasonRef,
+  eventId: number,
+  scope: ManagerScoreScope,
+  entryIds: readonly number[],
+  capturedRows: ReadonlyMap<number, CachedRow>,
+): Promise<Map<number, CachedRow>> => {
+  const rows = new Map<number, CachedRow>();
+  mergeLatestRows(rows, capturedRows);
+  try {
+    mergeLatestRows(rows, await readCachedRows(redis, season.seasonCode, eventId, scope, entryIds));
+  } catch (error) {
+    logWarn('Official manager background Redis read failed; checking PostgreSQL checkpoint', {
+      season: season.seasonCode,
+      eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+  }
+
+  // PostgreSQL is the durable publication boundary. Re-read it after entering
+  // each serialized lane so a Redis outage (or a failed cache write) cannot
+  // make a yielded background batch overwrite an intervening publication.
+  try {
+    const checkpoints = await managerScoreCheckpointRepository.findByScopeAndEntryIds(
+      season,
+      eventId,
+      scope,
+      entryIds,
+    );
+    mergeLatestRows(
+      rows,
+      new Map(
+        checkpoints.map((checkpoint) => [
+          checkpoint.entryId,
+          fromManagerScoreCheckpoint(checkpoint, season.seasonCode),
+        ]),
+      ),
+    );
+  } catch (error) {
+    logWarn('Official manager background checkpoint read failed; retaining latest live rows', {
+      season: season.seasonCode,
+      eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+  }
+  return rows;
 };
 
 const writeRows = async (
@@ -369,7 +414,82 @@ const runManagerSummaryFetch = createManagerSummaryFetchGate();
 // lane for a season/event/league. Foreground misses jump ahead of queued
 // background work; disjoint jobs remain queued and different leagues proceed
 // independently.
-const runClassicStandingsRefresh = createKeyedTaskSerializer();
+const runClassicStandingsRefreshLocal = createKeyedTaskSerializer();
+
+const classicRefreshLockKey = (key: string): string =>
+  `OfficialManagerLiveRefreshLock:${createHash('sha256').update(key).digest('hex')}`;
+
+const runClassicStandingsRefresh = <T>(
+  redis: Redis | null,
+  key: string,
+  task: () => Promise<T>,
+  priority: ManagerSummaryFetchPriority = 'foreground',
+): Promise<T> =>
+  runClassicStandingsRefreshLocal(
+    key,
+    async () => {
+      if (!redis) return task();
+
+      const lockKey = classicRefreshLockKey(key);
+      const lockToken = randomBytes(16).toString('hex');
+      const waitStartedAt = Date.now();
+      let lockOwner = false;
+      try {
+        while (!lockOwner) {
+          lockOwner =
+            (await redis.set(lockKey, lockToken, 'EX', CLASSIC_REFRESH_LOCK_SECONDS, 'NX')) ===
+            'OK';
+          if (lockOwner) break;
+          if (Date.now() - waitStartedAt >= CLASSIC_REFRESH_LOCK_MAX_WAIT_MS) {
+            // The durable checkpoint and upstream timestamp guard below still
+            // prevent regression in this degraded path. Avoid leaving a cold
+            // request blocked forever behind a wedged remote lease owner.
+            logWarn('Official classic manager distributed refresh lock wait timed out', {
+              key,
+              waitedMs: Date.now() - waitStartedAt,
+            });
+            return task();
+          }
+          await new Promise((resolve) => setTimeout(resolve, CLASSIC_REFRESH_LOCK_WAIT_MS));
+        }
+      } catch (error) {
+        // Redis is an acceleration and coordination layer, not the source of
+        // truth. Continue through the PostgreSQL checkpoint guard when it is
+        // unavailable so live scores remain serviceable.
+        logWarn('Official classic manager distributed refresh lock unavailable', {
+          key,
+          error: error instanceof Error ? error.message : 'unknown',
+        });
+        return task();
+      }
+
+      const renewTimer = setInterval(
+        () => {
+          void redis
+            .eval(
+              RENEW_CLASSIC_REFRESH_LOCK_SCRIPT,
+              1,
+              lockKey,
+              lockToken,
+              CLASSIC_REFRESH_LOCK_SECONDS,
+            )
+            .catch(() => undefined);
+        },
+        Math.max(1_000, Math.floor((CLASSIC_REFRESH_LOCK_SECONDS * 1000) / 3)),
+      );
+      renewTimer.unref?.();
+
+      try {
+        return await task();
+      } finally {
+        clearInterval(renewTimer);
+        await redis
+          .eval(RELEASE_CLASSIC_REFRESH_LOCK_SCRIPT, 1, lockKey, lockToken)
+          .catch(() => undefined);
+      }
+    },
+    priority,
+  );
 
 const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void => {
   if (managerLiveBackgroundInFlight.has(key)) return;
@@ -493,6 +613,27 @@ const refreshEntrySummaries = async (
           error: error instanceof Error ? error.message : 'unknown',
         }),
       );
+    const durableRows = await managerScoreCheckpointRepository
+      .findByScopeAndEntryIds(
+        season,
+        eventId,
+        scope,
+        completedBatch.map((row) => row.entryId),
+      )
+      .catch((error) => {
+        logWarn('Official manager checkpoint verification read failed', {
+          eventId,
+          scope: scopeKey(scope),
+          error: error instanceof Error ? error.message : 'unknown',
+        });
+        return [];
+      });
+    mergeLatestRows(
+      rows,
+      new Map(
+        durableRows.map((row) => [row.entryId, fromManagerScoreCheckpoint(row, season.seasonCode)]),
+      ),
+    );
   }
   return refreshErrorCode;
 };
@@ -534,6 +675,10 @@ const refreshClassicStandings = async (
         if (!targetIds.has(row.entryId)) continue;
         const existing = rows.get(row.entryId);
         foundEntryIds.add(row.entryId);
+        // Upstream's publication clock outranks this replica's local fetch
+        // completion time. A slower replica must never re-stamp an older FPL
+        // standings snapshot with a newer checkedAt and regress totals.
+        if (existing && !shouldReplaceManagerLiveRow(existing, row)) continue;
         const overallRank = preserveClassicOverallRank(row.overallRank, existing?.overallRank);
         const publishedRow =
           overallRank !== row.overallRank
@@ -599,6 +744,27 @@ const refreshClassicStandings = async (
         error: error instanceof Error ? error.message : 'unknown',
       }),
     );
+  const durableRows = await managerScoreCheckpointRepository
+    .findByScopeAndEntryIds(
+      season,
+      eventId,
+      { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
+      fetchedRows.map((row) => row.entryId),
+    )
+    .catch((error) => {
+      logWarn('Official classic manager checkpoint verification read failed', {
+        eventId,
+        leagueId,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+      return [];
+    });
+  mergeLatestRows(
+    rows,
+    new Map(
+      durableRows.map((row) => [row.entryId, fromManagerScoreCheckpoint(row, season.seasonCode)]),
+    ),
+  );
   logDebug('Official classic manager live refresh completed', {
     eventId,
     leagueId,
@@ -791,14 +957,15 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       });
       return [];
     });
-  for (const checkpoint of checkpoints) {
-    const cached = rows.get(checkpoint.entryId);
-    const checkpointTime = checkpoint.checkedAt.getTime();
-    const cachedTime = cached ? Date.parse(cached.checkedAt) : Number.NaN;
-    if (!cached || (Number.isFinite(checkpointTime) && checkpointTime > cachedTime)) {
-      rows.set(checkpoint.entryId, fromManagerScoreCheckpoint(checkpoint, season.seasonCode));
-    }
-  }
+  mergeLatestRows(
+    rows,
+    new Map(
+      checkpoints.map((checkpoint) => [
+        checkpoint.entryId,
+        fromManagerScoreCheckpoint(checkpoint, season.seasonCode),
+      ]),
+    ),
+  );
   const refreshNow = Date.now();
   const usableCachedEntryIds = new Set(
     uniqueEntryIds.filter((entryId) => {
@@ -866,7 +1033,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       scheduleBackgroundRefresh(backgroundKey, async () => {
         const backgroundRows = await readBackgroundRows(
           redis,
-          season.seasonCode,
+          season,
           input.eventId,
           entryScope,
           pending,
@@ -901,16 +1068,27 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       errorCode: null,
       refreshedEntryIds: [],
     };
-    if (foregroundRefreshTargets.length > 0) {
+    const foregroundRankMissingEntryIds = selectForegroundClassicRankEntryIds(
+      uniqueEntryIds,
+      rows,
+      isFresh,
+      classicStandingNeedsOverallRank,
+      MAX_FOREGROUND_OVERALL_RANK_FETCHES,
+    );
+    const foregroundLaneEntryIds = Array.from(
+      new Set([...foregroundRefreshTargets, ...foregroundRankMissingEntryIds]),
+    );
+    if (foregroundLaneEntryIds.length > 0) {
       const foregroundRefresh = await runClassicStandingsRefresh(
+        redis,
         classicRefreshKey,
         async () => {
           const latestRows = await readBackgroundRows(
             redis,
-            season.seasonCode,
+            season,
             input.eventId,
             scope,
-            foregroundRefreshTargets,
+            foregroundLaneEntryIds,
             rows,
           );
           mergeLatestRows(rows, latestRows);
@@ -937,14 +1115,16 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                 };
           // The lane remains held through OR enrichment so an older standings
           // snapshot cannot be re-published after a newer same-league crawl.
-          const rankTargets = Array.from(
-            new Set([
-              ...nextStandings.refreshedEntryIds,
-              ...foregroundRefreshTargets.filter((entryId) =>
-                classicStandingNeedsOverallRank(rows.get(entryId)),
-              ),
-            ]),
-          ).slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
+          const rankCandidateIds = new Set([
+            ...foregroundRankMissingEntryIds,
+            ...nextStandings.refreshedEntryIds,
+          ]);
+          const rankTargets = uniqueEntryIds
+            .filter(
+              (entryId) =>
+                rankCandidateIds.has(entryId) && classicStandingNeedsOverallRank(rows.get(entryId)),
+            )
+            .slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
           const rankError =
             rankTargets.length > 0
               ? await refreshEntrySummaries(
@@ -973,11 +1153,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     const foregroundFallbackPlan = planClassicManagerFallback(pendingCold, [], standings.complete);
     if (foregroundFallbackPlan.foregroundSummaryEntryIds.length > 0) {
       const summaryError = await runClassicStandingsRefresh(
+        redis,
         classicRefreshKey,
         async () => {
           const latestRows = await readBackgroundRows(
             redis,
-            season.seasonCode,
+            season,
             input.eventId,
             scope,
             foregroundFallbackPlan.foregroundSummaryEntryIds,
@@ -1053,13 +1234,14 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         let backgroundRankTargets: readonly number[] = [];
         if (backgroundPlan.backgroundStandingsEntryIds.length > 0 || rankOnlyTargets.length > 0) {
           const crawl = await runClassicStandingsRefresh(
+            redis,
             classicRefreshKey,
             async () => {
               // Read after entering the league lane so a queued crawl starts
               // from the publication completed by the preceding task.
               backgroundRows = await readBackgroundRows(
                 redis,
-                season.seasonCode,
+                season,
                 input.eventId,
                 scope,
                 backgroundEntryIds,
@@ -1109,11 +1291,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         // while every merge still observes the latest serialized standings row.
         for (const batch of managerSummaryFetchBatches(backgroundRankTargets)) {
           await runClassicStandingsRefresh(
+            redis,
             classicRefreshKey,
             async () => {
               const batchRows = await readBackgroundRows(
                 redis,
-                season.seasonCode,
+                season,
                 input.eventId,
                 scope,
                 batch,
@@ -1148,11 +1331,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         );
         for (const batch of managerSummaryFetchBatches(summaryCandidates)) {
           await runClassicStandingsRefresh(
+            redis,
             classicRefreshKey,
             async () => {
               const batchRows = await readBackgroundRows(
                 redis,
-                season.seasonCode,
+                season,
                 input.eventId,
                 scope,
                 batch,
@@ -1216,7 +1400,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       scheduleBackgroundRefresh(backgroundKey, async () => {
         const backgroundRows = await readBackgroundRows(
           redis,
-          season.seasonCode,
+          season,
           input.eventId,
           entryScope,
           pending,
