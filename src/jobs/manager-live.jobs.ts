@@ -2,11 +2,13 @@ import type { Job } from 'bullmq';
 
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  loadManagerLiveClassicCursor,
   loadManagerLiveHotScope,
   managerLiveDispatchEntryChunks,
   MANAGER_LIVE_REFRESH_BUCKET_MS,
   managerLiveRefreshJobId,
   normalizeManagerLiveEntryIds,
+  writeManagerLiveClassicCursor,
   writeManagerLiveHotScope,
   type ManagerLiveRefreshScope,
 } from '../domain/manager-live-refresh';
@@ -21,7 +23,12 @@ import { logError, logInfo } from '../utils/logger';
 
 export async function markManagerLiveScopeHot(scope: ManagerLiveRefreshScope): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
+  const existingHotScope = await loadManagerLiveHotScope(redis, scope);
   await writeManagerLiveHotScope(redis, scope);
+  // A cursor can briefly outlive its hot marker when the final delayed job is
+  // already queued. A later, genuinely new access must start at page one
+  // instead of reviving that old crawl position.
+  if (!existingHotScope) await writeManagerLiveClassicCursor(redis, scope, null);
 }
 
 export async function readHotManagerLiveScope(
@@ -29,6 +36,21 @@ export async function readHotManagerLiveScope(
 ): Promise<ManagerLiveRefreshScope | null> {
   const redis = await queueRedisSingleton.getClient();
   return loadManagerLiveHotScope(redis, scope);
+}
+
+const managerLiveScopeFromJobData = (jobData: ManagerLiveJobData): ManagerLiveRefreshScope => ({
+  seasonId: jobData.seasonId,
+  seasonCode: jobData.seasonCode,
+  eventId: jobData.eventId,
+  entryIds: normalizeManagerLiveEntryIds(jobData.entryIds),
+  ...(jobData.tournamentId === undefined ? {} : { tournamentId: jobData.tournamentId }),
+});
+
+export async function readManagerLiveClassicCursor(
+  jobData: ManagerLiveJobData,
+): Promise<number | null | undefined> {
+  const redis = await queueRedisSingleton.getClient();
+  return loadManagerLiveClassicCursor(redis, managerLiveScopeFromJobData(jobData));
 }
 
 async function addManagerLiveRefresh(
@@ -52,11 +74,10 @@ async function addManagerLiveRefresh(
     triggeredAt: new Date(now).toISOString(),
   };
   const job = await managerLiveQueue.add(MANAGER_LIVE_JOBS.REFRESH, data, {
-    // A Classic standings continuation must not deduplicate against a normal
-    // cache-only access job in the same 30-second bucket. The page belongs to
-    // the continuation identity so an ordinary request can never discard the
-    // cursor needed to converge managers beyond the first bounded page window.
-    jobId: managerLiveRefreshJobId(scope, runAt, classicStandingsPage),
+    // One scope owns one refresh lane per 30-second bucket. The Classic page
+    // cursor is persisted separately, so a request cannot create a competing
+    // continuation chain or swallow the page the shared job must process.
+    jobId: managerLiveRefreshJobId(scope, runAt),
     delay: Math.max(0, runAt.getTime() - now),
   });
   logInfo('Manager live refresh job enqueued', {
@@ -119,18 +140,16 @@ export async function scheduleNextManagerLiveRefresh(
   nextRefreshAt: string,
   classicStandingsNextPage?: number | null,
 ): Promise<Job<ManagerLiveJobData> | null> {
-  const scope: ManagerLiveRefreshScope = {
-    seasonId: jobData.seasonId,
-    seasonCode: jobData.seasonCode,
-    eventId: jobData.eventId,
-    entryIds: normalizeManagerLiveEntryIds(jobData.entryIds),
-    ...(jobData.tournamentId === undefined ? {} : { tournamentId: jobData.tournamentId }),
-  };
+  const scope = managerLiveScopeFromJobData(jobData);
   // Do not swallow Redis failures here. Propagating them fails the current
   // worker attempt, allowing BullMQ's configured 30/60/120-second retries to
   // restore the recurring chain once queue Redis recovers.
   const hotScope = await readHotManagerLiveScope(scope);
   if (!hotScope) return null;
+  if (classicStandingsNextPage !== undefined) {
+    const redis = await queueRedisSingleton.getClient();
+    await writeManagerLiveClassicCursor(redis, hotScope, classicStandingsNextPage);
+  }
   const requestedRunAt = new Date(nextRefreshAt);
   const runAt = Number.isFinite(requestedRunAt.getTime())
     ? new Date(Math.max(Date.now() + 1_000, requestedRunAt.getTime()))

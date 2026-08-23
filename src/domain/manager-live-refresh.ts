@@ -14,6 +14,7 @@ export const MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE = 12;
 export const MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT = MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE;
 export const MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT = 2;
 export const MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT = 4;
+export const MANAGER_LIVE_CLASSIC_MAX_PAGE = 20;
 
 export type ManagerLiveRefreshScope = {
   seasonId: number;
@@ -55,6 +56,9 @@ const scopeSegment = (scope: Pick<ManagerLiveRefreshScope, 'entryIds' | 'tournam
 export const managerLiveHotScopeKey = (scope: ManagerLiveRefreshScope): string =>
   `llm:queue:manager-live:hot:v1:${scope.seasonCode}:e${scope.eventId}:${scopeSegment(scope)}`;
 
+export const managerLiveClassicCursorKey = (scope: ManagerLiveRefreshScope): string =>
+  `llm:queue:manager-live:classic-cursor:v1:${scope.seasonCode}:e${scope.eventId}:${scopeSegment(scope)}`;
+
 export function managerLiveRefreshBucket(date: Date): string {
   const bucket = new Date(
     Math.floor(date.getTime() / MANAGER_LIVE_REFRESH_BUCKET_MS) * MANAGER_LIVE_REFRESH_BUCKET_MS,
@@ -62,17 +66,18 @@ export function managerLiveRefreshBucket(date: Date): string {
   return bucket.toISOString().replace(/\D/g, '').slice(0, 14);
 }
 
-export function managerLiveRefreshJobId(
-  scope: ManagerLiveRefreshScope,
-  date: Date,
-  classicStandingsPage?: number | null,
-): string {
-  const continuation =
-    Number.isSafeInteger(classicStandingsPage) && (classicStandingsPage ?? 0) > 0
-      ? `-classic-page-${classicStandingsPage}`
-      : '';
-  return `manager-live-v1-${scope.seasonCode}-e${scope.eventId}-${scopeSegment(scope)}${continuation}-${managerLiveRefreshBucket(date)}`;
+export function managerLiveRefreshJobId(scope: ManagerLiveRefreshScope, date: Date): string {
+  return `manager-live-v1-${scope.seasonCode}-e${scope.eventId}-${scopeSegment(scope)}-${managerLiveRefreshBucket(date)}`;
 }
+
+export const parseManagerLiveClassicCursor = (value: string | null): number | null | undefined => {
+  if (value === null) return undefined;
+  if (value === '0') return null;
+  const page = Number(value);
+  return Number.isSafeInteger(page) && page >= 1 && page <= MANAGER_LIVE_CLASSIC_MAX_PAGE
+    ? page
+    : undefined;
+};
 
 export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefreshScope | null => {
   if (!value) return null;
@@ -129,4 +134,37 @@ export async function loadManagerLiveHotScope(
   scope: ManagerLiveRefreshScope,
 ): Promise<ManagerLiveRefreshScope | null> {
   return parseManagerLiveHotScope(await redis.get(managerLiveHotScopeKey(scope)));
+}
+
+/**
+ * Keep the standings cursor outside BullMQ job data. A request and a
+ * continuation in the same 30-second bucket intentionally share one job id;
+ * the persisted cursor lets that single job observe the latest page without
+ * spawning a second recurring chain. `0` is an explicit completed marker so
+ * an older queued job cannot revive a stale cursor from its legacy payload.
+ */
+export async function writeManagerLiveClassicCursor(
+  redis: ManagerLiveHotRedis,
+  scope: ManagerLiveRefreshScope,
+  page: number | null,
+): Promise<void> {
+  if (
+    page !== null &&
+    (!Number.isSafeInteger(page) || page < 1 || page > MANAGER_LIVE_CLASSIC_MAX_PAGE)
+  ) {
+    throw new Error(`Invalid manager live classic standings page: ${String(page)}`);
+  }
+  await redis.set(
+    managerLiveClassicCursorKey(scope),
+    page === null ? '0' : String(page),
+    'EX',
+    MANAGER_LIVE_HOT_SCOPE_SECONDS,
+  );
+}
+
+export async function loadManagerLiveClassicCursor(
+  redis: ManagerLiveHotRedis,
+  scope: ManagerLiveRefreshScope,
+): Promise<number | null | undefined> {
+  return parseManagerLiveClassicCursor(await redis.get(managerLiveClassicCursorKey(scope)));
 }

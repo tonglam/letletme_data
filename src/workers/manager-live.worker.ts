@@ -2,7 +2,10 @@ import { Job, QueueEvents, Worker } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { shouldStopManagerLiveRefresh } from '../domain/manager-live-refresh';
-import { scheduleNextManagerLiveRefresh } from '../jobs/manager-live.jobs';
+import {
+  readManagerLiveClassicCursor,
+  scheduleNextManagerLiveRefresh,
+} from '../jobs/manager-live.jobs';
 import {
   MANAGER_LIVE_JOBS,
   MANAGER_LIVE_JOB_VERSION,
@@ -69,13 +72,16 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       return { stopped: 'event-finalized' as const };
     }
 
+    const persistedClassicCursor = await readManagerLiveClassicCursor(job.data);
+    const classicStandingsStartPage =
+      persistedClassicCursor === undefined ? job.data.classicStandingsPage : persistedClassicCursor;
     const result = await refreshManagerLiveScores({
       eventId: job.data.eventId,
       entryIds: job.data.entryIds,
       ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
-      ...(job.data.classicStandingsPage === undefined
+      ...(classicStandingsStartPage === undefined || classicStandingsStartPage === null
         ? {}
-        : { classicStandingsStartPage: job.data.classicStandingsPage }),
+        : { classicStandingsStartPage }),
     });
     await scheduleManagerLiveContinuation(job.data, result);
     return result;

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  loadManagerLiveClassicCursor,
   loadManagerLiveHotScope,
   MANAGER_LIVE_ATTEMPTS,
   MANAGER_LIVE_HOT_SCOPE_SECONDS,
@@ -8,11 +9,14 @@ import {
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
   MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT,
+  managerLiveClassicCursorKey,
   managerLiveDispatchEntryChunks,
   managerLiveHotScopeKey,
   managerLiveRefreshJobId,
+  parseManagerLiveClassicCursor,
   parseManagerLiveHotScope,
   shouldStopManagerLiveRefresh,
+  writeManagerLiveClassicCursor,
   writeManagerLiveHotScope,
   type ManagerLiveRefreshScope,
 } from '../../src/domain/manager-live-refresh';
@@ -48,15 +52,13 @@ describe('manager live refresh policy', () => {
     expect(managerLiveHotScopeKey(otherSubset)).not.toBe(managerLiveHotScopeKey(scope));
   });
 
-  test('keeps classic standings continuations distinct from request jobs in the same bucket', () => {
+  test('deduplicates classic standings continuations with request jobs in the same bucket', () => {
     const date = new Date('2026-08-23T08:34:01.000Z');
     const request = managerLiveRefreshJobId(scope, date);
-    const pageSeven = managerLiveRefreshJobId(scope, date, 7);
+    const sameScope = managerLiveRefreshJobId(scope, date);
 
-    expect(pageSeven).not.toBe(request);
-    expect(pageSeven).toContain('-classic-page-7-');
-    expect(managerLiveRefreshJobId(scope, new Date('2026-08-23T08:34:29.999Z'), 7)).toBe(pageSeven);
-    expect(managerLiveRefreshJobId(scope, date, 9)).not.toBe(pageSeven);
+    expect(sameScope).toBe(request);
+    expect(managerLiveRefreshJobId(scope, new Date('2026-08-23T08:34:29.999Z'))).toBe(sameScope);
   });
 
   test('keeps one normalized recurring hot scope for a 500-entry roster', () => {
@@ -89,6 +91,29 @@ describe('manager live refresh policy', () => {
       ...scope,
       entryIds: [11, 22, 33],
     });
+  });
+
+  test('persists one classic cursor alongside the hot scope, including an explicit completion', async () => {
+    const values = new Map<string, string>();
+    const calls: unknown[][] = [];
+    const redis = {
+      set: async (...args: [string, string, 'EX', number]) => {
+        calls.push(args);
+        values.set(args[0], args[1]);
+        return 'OK';
+      },
+      get: async (key: string) => values.get(key) ?? null,
+    };
+
+    await writeManagerLiveClassicCursor(redis, scope, 7);
+    await expect(loadManagerLiveClassicCursor(redis, scope)).resolves.toBe(7);
+    await writeManagerLiveClassicCursor(redis, scope, null);
+    await expect(loadManagerLiveClassicCursor(redis, scope)).resolves.toBeNull();
+    expect(calls).toEqual([
+      [managerLiveClassicCursorKey(scope), '7', 'EX', MANAGER_LIVE_HOT_SCOPE_SECONDS],
+      [managerLiveClassicCursorKey(scope), '0', 'EX', MANAGER_LIVE_HOT_SCOPE_SECONDS],
+    ]);
+    expect(parseManagerLiveClassicCursor('21')).toBeUndefined();
   });
 
   test('stops follow-up eligibility when the hot scope expires or is malformed', async () => {

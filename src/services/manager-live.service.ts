@@ -25,6 +25,7 @@ import {
   planClassicManagerFallback,
 } from '../domain/manager-live-fallback';
 import {
+  MANAGER_LIVE_CLASSIC_MAX_PAGE,
   MANAGER_LIVE_REFRESH_BUCKET_MS,
   MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
@@ -39,7 +40,6 @@ const CACHE_TTL_SECONDS = 48 * 60 * 60;
 // transient refresh miss from being presented as stale immediately.
 const REFRESH_SECONDS = 30;
 const STALE_SECONDS = Math.max(90, 3 * REFRESH_SECONDS);
-const MAX_STANDINGS_PAGES = 20;
 const MAX_FOREGROUND_STANDINGS_PAGES = 4;
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 // A small classic roster should receive a complete OR column in the initial
@@ -468,21 +468,27 @@ const buildManagerLiveResult = (input: {
 
 const dispatchManagerLiveRefreshBounded = async (
   input: Parameters<typeof dispatchManagerLiveRefresh>[0],
-): Promise<void> => {
+): Promise<'QUEUED' | 'PENDING'> => {
   let timeout: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  const dispatch = dispatchManagerLiveRefresh(input).catch((error) => {
+    if (timedOut) {
+      logWarn('Manager live refresh dispatch failed after response deadline', {
+        eventId: input.eventId,
+        tournamentId: input.tournamentId ?? null,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+    }
+    throw error;
+  });
   try {
-    await Promise.race([
-      dispatchManagerLiveRefresh(input),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(
-          () =>
-            reject(
-              new Error(
-                `Manager live refresh dispatch timed out after ${REFRESH_DISPATCH_DEADLINE_MS}ms`,
-              ),
-            ),
-          REFRESH_DISPATCH_DEADLINE_MS,
-        );
+    return await Promise.race([
+      dispatch.then(() => 'QUEUED' as const),
+      new Promise<'PENDING'>((resolve) => {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          resolve('PENDING');
+        }, REFRESH_DISPATCH_DEADLINE_MS);
       }),
     ]);
   } finally {
@@ -616,7 +622,7 @@ const refreshEntrySummaries = async (
   return refreshErrorCode;
 };
 
-const refreshClassicStandings = async (
+export const refreshClassicStandings = async (
   season: FplSeasonRef,
   eventId: number,
   leagueId: number,
@@ -640,10 +646,11 @@ const refreshClassicStandings = async (
   try {
     for (
       let page = startPage;
-      page <= MAX_STANDINGS_PAGES && page < startPage + maxPages && found < targetIds.size;
+      page <= MANAGER_LIVE_CLASSIC_MAX_PAGE &&
+      page < startPage + maxPages &&
+      found < targetIds.size;
       page += 1
     ) {
-      nextPage = page + 1;
       const response = await fplClient.getLeagueClassicStandings(
         leagueId,
         page,
@@ -661,56 +668,14 @@ const refreshClassicStandings = async (
         fetchedRows.push(publishedRow);
         rows.set(publishedRow.entryId, publishedRow);
       }
+      // Advance only after the page was fetched and processed successfully.
+      // A 429/network failure must retry the failed page, not skip it forever.
+      nextPage = page + 1;
       if (!response.standings.has_next) {
         exhausted = true;
         break;
       }
     }
-    await writeRows(
-      redis,
-      season.seasonCode,
-      eventId,
-      { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
-      fetchedRows,
-      fetchedRows.length > 0
-        ? {
-            season: season.seasonCode,
-            eventId,
-            source: 'FPL_CLASSIC_STANDINGS',
-            leagueId,
-            rowCount: fetchedRows.length,
-            checkedAt,
-            revision: fetchedRows[0]?.revision ?? null,
-            nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-          }
-        : undefined,
-      `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
-    );
-    await managerScoreCheckpointRepository
-      .upsertBatch(
-        season,
-        eventId,
-        { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
-        fetchedRows.map((row) => toManagerScoreCheckpoint(row)),
-      )
-      .catch((error) =>
-        logWarn('Official manager checkpoint write failed', {
-          eventId,
-          leagueId,
-          error: error instanceof Error ? error.message : 'unknown',
-        }),
-      );
-    logDebug('Official classic manager live refresh completed', {
-      eventId,
-      leagueId,
-      requested: targetIds.size,
-      fetched: fetchedRows.length,
-    });
-    return {
-      complete: exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES,
-      nextPage,
-      errorCode: null,
-    };
   } catch (error) {
     refreshErrorCode =
       error instanceof FPLClientError && error.status === 429
@@ -721,8 +686,58 @@ const refreshClassicStandings = async (
       leagueId,
       error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
     });
-    return { complete: false, nextPage, errorCode: refreshErrorCode };
   }
+  // Persist every page that completed before a later page failed. Advancing
+  // the cursor without these writes would make the successful pages vanish
+  // from the next worker run even though it correctly retries the failed page.
+  await writeRows(
+    redis,
+    season.seasonCode,
+    eventId,
+    { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
+    fetchedRows,
+    fetchedRows.length > 0
+      ? {
+          season: season.seasonCode,
+          eventId,
+          source: 'FPL_CLASSIC_STANDINGS',
+          leagueId,
+          rowCount: fetchedRows.length,
+          checkedAt,
+          revision: fetchedRows[0]?.revision ?? null,
+          nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+        }
+      : undefined,
+    `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
+  );
+  await managerScoreCheckpointRepository
+    .upsertBatch(
+      season,
+      eventId,
+      { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
+      fetchedRows.map((row) => toManagerScoreCheckpoint(row)),
+    )
+    .catch((error) =>
+      logWarn('Official manager checkpoint write failed', {
+        eventId,
+        leagueId,
+        error: error instanceof Error ? error.message : 'unknown',
+      }),
+    );
+  logDebug('Official classic manager live refresh completed', {
+    eventId,
+    leagueId,
+    requested: targetIds.size,
+    fetched: fetchedRows.length,
+    errorCode: refreshErrorCode,
+  });
+  return {
+    complete:
+      refreshErrorCode === null &&
+      (exhausted || found >= targetIds.size || nextPage > MANAGER_LIVE_CLASSIC_MAX_PAGE),
+    nextPage,
+    errorCode: refreshErrorCode,
+  };
 };
 
 const classicStandingNeedsOverallRank = (
@@ -953,7 +968,13 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     const cached = rows.get(checkpoint.entryId);
     const checkpointTime = checkpoint.checkedAt.getTime();
     const cachedTime = cached ? Date.parse(cached.checkedAt) : Number.NaN;
-    if (!cached || (Number.isFinite(checkpointTime) && checkpointTime > cachedTime)) {
+    const durableCheckpointWins =
+      !cached ||
+      !Number.isFinite(cachedTime) ||
+      (Number.isFinite(checkpointTime) &&
+        (checkpointTime > cachedTime ||
+          (checkpointTime === cachedTime && checkpoint.contentRevision !== cached.revision)));
+    if (durableCheckpointWins) {
       rows.set(checkpoint.entryId, fromManagerScoreCheckpoint(checkpoint, season.seasonCode));
       sourceByEntry.set(checkpoint.entryId, 'POSTGRES');
     }
@@ -1094,7 +1115,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       completeRefresh &&
       Number.isSafeInteger(input.classicStandingsStartPage) &&
       (input.classicStandingsStartPage ?? 0) >= 1 &&
-      (input.classicStandingsStartPage ?? 0) <= MAX_STANDINGS_PAGES
+      (input.classicStandingsStartPage ?? 0) <= MANAGER_LIVE_CLASSIC_MAX_PAGE
         ? input.classicStandingsStartPage
         : 1;
     const standings = await refreshClassicStandings(
@@ -1226,7 +1247,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
               new Set(pending),
               backgroundRows,
               redis,
-              { startPage: standings.nextPage, maxPages: MAX_STANDINGS_PAGES },
+              { startPage: standings.nextPage, maxPages: MANAGER_LIVE_CLASSIC_MAX_PAGE },
             )
           : { complete: true, nextPage: standings.nextPage, errorCode: null };
         const summaryTargets = pending.filter(

@@ -6,7 +6,10 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import {
   MANAGER_LIVE_HOT_SCOPE_SECONDS,
+  loadManagerLiveClassicCursor,
+  managerLiveClassicCursorKey,
   managerLiveHotScopeKey,
+  writeManagerLiveClassicCursor,
   type ManagerLiveRefreshScope,
 } from '../../src/domain/manager-live-refresh';
 import {
@@ -32,7 +35,7 @@ const createdJobIds = new Set<string>();
 
 async function cleanup(): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
-  await redis.unlink(managerLiveHotScopeKey(scope));
+  await redis.unlink(managerLiveHotScopeKey(scope), managerLiveClassicCursorKey(scope));
   await Promise.all([...createdJobIds].map((jobId) => managerLiveQueue.remove(jobId)));
   createdJobIds.clear();
 }
@@ -117,9 +120,11 @@ describe('manager live queue integration', () => {
 
     expect(followup).not.toBeNull();
     expect(followup?.data.classicStandingsPage).toBe(7);
+    const redis = await queueRedisSingleton.getClient();
+    await expect(loadManagerLiveClassicCursor(redis, scope)).resolves.toBe(7);
   });
 
-  test('does not let a request job in the same bucket swallow a classic cursor', async () => {
+  test('keeps one same-bucket job while persisting the continuation cursor', async () => {
     const nextBucket = Math.floor(Date.now() / 30_000) * 30_000 + 95_000;
     const runAt = new Date(nextBucket);
     const request = await enqueueManagerLiveRefresh({
@@ -145,9 +150,26 @@ describe('manager live queue integration', () => {
     if (continuation?.id) createdJobIds.add(continuation.id);
 
     expect(continuation).not.toBeNull();
-    expect(continuation?.id).not.toBe(request.id);
-    expect(continuation?.data.source).toBe('followup');
-    expect(continuation?.data.classicStandingsPage).toBe(7);
+    expect(continuation?.id).toBe(request.id);
     expect(request.data.classicStandingsPage).toBeUndefined();
+    const redis = await queueRedisSingleton.getClient();
+    await expect(loadManagerLiveClassicCursor(redis, scope)).resolves.toBe(7);
+  });
+
+  test('clears an orphaned cursor when a new hot scope begins', async () => {
+    const redis = await queueRedisSingleton.getClient();
+    await redis.unlink(managerLiveHotScopeKey(scope));
+    await writeManagerLiveClassicCursor(redis, scope, 7);
+
+    const job = await enqueueManagerLiveRefresh({
+      season: TEST_SEASON,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      runAt: new Date(Date.now() + 125_000),
+    });
+    if (job.id) createdJobIds.add(job.id);
+
+    await expect(loadManagerLiveClassicCursor(redis, scope)).resolves.toBeNull();
   });
 });

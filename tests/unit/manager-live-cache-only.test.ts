@@ -35,7 +35,9 @@ spyOn(redisSingleton, 'getClient').mockImplementation(
 spyOn(managerScoreCheckpointRepository, 'findByScopeAndEntryIds').mockImplementation(
   async () => postgresRows as never,
 );
-spyOn(managerScoreCheckpointRepository, 'upsertBatch').mockImplementation(async () => undefined);
+const upsertCheckpoint = spyOn(managerScoreCheckpointRepository, 'upsertBatch').mockImplementation(
+  async () => undefined,
+);
 const dispatchRefresh = spyOn(dispatchModule, 'dispatchManagerLiveRefresh').mockImplementation(
   async () => undefined,
 );
@@ -51,6 +53,7 @@ const getClassicStandings = spyOn(fplClient, 'getLeagueClassicStandings').mockIm
 const {
   enrichClassicStandingOverallRank,
   preserveClassicOverallRank,
+  refreshClassicStandings,
   resolveManagerLiveScores,
   selectClassicOverallRankRefreshTargets,
   selectWorkerClassicFallbackTargets,
@@ -229,8 +232,47 @@ describe('manager live CACHE_ONLY reads', () => {
     const durationMs = performance.now() - startedAt;
 
     expect(result.rows).toHaveLength(1);
-    expect(result.refreshQueued).toBe(false);
+    expect(result.refreshQueued).toBe(true);
     expect(durationMs).toBeLessThan(250);
+  });
+
+  test('reports a confirmed enqueue failure without discarding cached content', async () => {
+    const checkedAt = new Date().toISOString();
+    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    dispatchRefresh.mockRejectedValueOnce(new Error('queue unavailable'));
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'CACHE_ONLY',
+    });
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.refreshQueued).toBe(false);
+  });
+
+  test('prefers a differing durable checkpoint at the same checkedAt', async () => {
+    const checkedAt = new Date().toISOString();
+    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    postgresRows = [
+      {
+        ...checkpointRow(101, checkedAt),
+        overallRank: 765_432,
+        contentRevision: 'postgres-durable-revision',
+      },
+    ];
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'CACHE_ONLY',
+    });
+
+    expect(result).toMatchObject({ servedFrom: 'POSTGRES' });
+    expect(result.rows[0]).toMatchObject({
+      overallRank: 765_432,
+      revision: 'postgres-durable-revision',
+    });
   });
 });
 
@@ -274,6 +316,66 @@ describe('manager live READ_THROUGH source reporting', () => {
 });
 
 describe('manager live classic standings convergence', () => {
+  test('retries a standings page after that page fails', async () => {
+    getClassicStandings.mockImplementationOnce(async (_leagueId, page) => {
+      expect(page).toBe(5);
+      throw new Error('upstream unavailable');
+    });
+
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101]),
+      new Map(),
+      null,
+      { startPage: 5, maxPages: 2 },
+    );
+
+    expect(result).toMatchObject({
+      complete: false,
+      nextPage: 5,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
+  test('persists completed pages before retrying a later failed page', async () => {
+    upsertCheckpoint.mockClear();
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: true,
+            page: 5,
+            results: [{ entry: 101, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+    getClassicStandings.mockImplementationOnce(async () => {
+      throw new Error('page six unavailable');
+    });
+
+    const rows = new Map();
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101, 102]),
+      rows,
+      null,
+      { startPage: 5, maxPages: 2 },
+    );
+
+    expect(result).toMatchObject({
+      complete: false,
+      nextPage: 6,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
+    expect(rows.get(101)).toMatchObject({ eventPoints: 51, leagueRank: 7 });
+    expect(upsertCheckpoint).toHaveBeenCalledTimes(1);
+    expect(upsertCheckpoint.mock.calls[0]?.[3]).toHaveLength(1);
+  });
   test('does not mark old standings fresh when only overall rank is enriched', () => {
     const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
     const existing = {
