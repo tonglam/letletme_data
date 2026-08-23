@@ -51,11 +51,13 @@ const getClassicStandings = spyOn(fplClient, 'getLeagueClassicStandings').mockIm
 );
 
 const {
+  classicStandingsCursorAfterRefresh,
   enrichClassicStandingOverallRank,
   preserveClassicOverallRank,
   refreshClassicStandings,
   resolveManagerLiveScores,
   selectClassicOverallRankRefreshTargets,
+  selectWorkerSummaryRefreshTargets,
   selectWorkerClassicFallbackTargets,
 } = await import('../../src/services/manager-live.service');
 const { managerLiveAPI } = await import('../../src/api/manager-live.api');
@@ -378,6 +380,15 @@ describe('manager live READ_THROUGH source reporting', () => {
 });
 
 describe('manager live classic standings convergence', () => {
+  beforeEach(() => {
+    upsertCheckpoint.mockReset();
+    upsertCheckpoint.mockImplementation(async () => undefined);
+    getClassicStandings.mockReset();
+    getClassicStandings.mockImplementation(async () => {
+      throw new Error('unexpected FPL standings request');
+    });
+  });
+
   test('retries a standings page after that page fails', async () => {
     getClassicStandings.mockImplementationOnce(async (_leagueId, page) => {
       expect(page).toBe(5);
@@ -402,7 +413,6 @@ describe('manager live classic standings convergence', () => {
   });
 
   test('persists completed pages before retrying a later failed page', async () => {
-    upsertCheckpoint.mockClear();
     getClassicStandings.mockImplementationOnce(
       async () =>
         ({
@@ -437,6 +447,50 @@ describe('manager live classic standings convergence', () => {
     expect(rows.get(101)).toMatchObject({ eventPoints: 51, leagueRank: 7 });
     expect(upsertCheckpoint).toHaveBeenCalledTimes(1);
     expect(upsertCheckpoint.mock.calls[0]?.[3]).toHaveLength(1);
+  });
+
+  test('does not advance a page when both durable publications fail', async () => {
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: true,
+            page: 5,
+            results: [{ entry: 101, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+    upsertCheckpoint.mockRejectedValueOnce(new Error('checkpoint unavailable'));
+
+    const rows = new Map();
+    const result = await refreshClassicStandings(TEST_SEASON, 1, 99, new Set([101]), rows, null, {
+      startPage: 5,
+      maxPages: 1,
+    });
+
+    expect(result).toEqual({
+      complete: false,
+      nextPage: 5,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
+    expect(rows.has(101)).toBe(false);
+  });
+
+  test('marks an empty standings pass complete so the queue clears its cursor', async () => {
+    const standings = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set(),
+      new Map(),
+      null,
+      { startPage: 7, maxPages: 2 },
+    );
+
+    expect(standings).toEqual({ complete: true, nextPage: 7, errorCode: null });
+    expect(classicStandingsCursorAfterRefresh(true, standings)).toBeNull();
+    expect(getClassicStandings).not.toHaveBeenCalled();
   });
   test('does not mark old standings fresh when only overall rank is enriched', () => {
     const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
@@ -535,6 +589,21 @@ describe('manager live classic standings convergence', () => {
     expect(selectClassicOverallRankRefreshTargets([...mixedRows.keys()], mixedRows, 4, 1)).toEqual([
       4, 5, 6, 8,
     ]);
+  });
+
+  test('rotates bounded summary chunks past a permanently failing prefix', () => {
+    const entryIds = Array.from({ length: 25 }, (_, index) => index + 1);
+
+    expect(selectWorkerSummaryRefreshTargets(entryIds, 12, 0)).toEqual(
+      Array.from({ length: 12 }, (_, index) => index + 1),
+    );
+    expect(selectWorkerSummaryRefreshTargets(entryIds, 12, 1)).toEqual(
+      Array.from({ length: 12 }, (_, index) => index + 13),
+    );
+    expect(selectWorkerSummaryRefreshTargets(entryIds, 12, 2)).toEqual([25]);
+    expect(selectWorkerSummaryRefreshTargets(entryIds, 12, 3)).toEqual(
+      Array.from({ length: 12 }, (_, index) => index + 1),
+    );
   });
 });
 

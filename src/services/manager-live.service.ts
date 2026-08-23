@@ -250,8 +250,8 @@ const writeRows = async (
   rows: readonly CachedRow[],
   metadata?: Record<string, unknown>,
   metadataField = 'publication',
-): Promise<void> => {
-  if (!redis || (rows.length === 0 && !metadata)) return;
+): Promise<boolean> => {
+  if (!redis || (rows.length === 0 && !metadata)) return false;
   try {
     const key = cacheKey(season, eventId, scope);
     // Use a Redis transaction so a row publication and its metadata become
@@ -264,7 +264,10 @@ const writeRows = async (
       pipeline.hset(metaKey, metadataField, JSON.stringify(metadata));
       pipeline.expire(metaKey, CACHE_TTL_SECONDS);
     }
-    await pipeline.exec();
+    const results = await pipeline.exec();
+    const commandError = results?.find(([error]) => error !== null)?.[0];
+    if (commandError) throw commandError;
+    return results !== null;
   } catch (error) {
     logWarn('Official manager Redis write failed; PostgreSQL checkpoint remains authoritative', {
       season,
@@ -272,6 +275,7 @@ const writeRows = async (
       scope: scopeKey(scope),
       error: error instanceof Error ? error.message : 'unknown',
     });
+    return false;
   }
 };
 
@@ -663,6 +667,7 @@ export const refreshClassicStandings = async (
 }> => {
   const checkedAt = nowIso();
   const fetchedRows: CachedRow[] = [];
+  const previousRows = new Map<number, CachedRow | undefined>();
   let found = 0;
   const startPage = options.startPage ?? 1;
   const maxPages = options.maxPages ?? MAX_FOREGROUND_STANDINGS_PAGES;
@@ -689,6 +694,7 @@ export const refreshClassicStandings = async (
       for (const row of pageRows) {
         if (!targetIds.has(row.entryId)) continue;
         const existing = rows.get(row.entryId);
+        if (!previousRows.has(row.entryId)) previousRows.set(row.entryId, existing);
         if (!existing || !isFresh(existing)) found += 1;
         const publishedRow = preserveClassicOverallRank(row, existing);
         fetchedRows.push(publishedRow);
@@ -716,7 +722,7 @@ export const refreshClassicStandings = async (
   // Persist every page that completed before a later page failed. Advancing
   // the cursor without these writes would make the successful pages vanish
   // from the next worker run even though it correctly retries the failed page.
-  await writeRows(
+  const redisPublished = await writeRows(
     redis,
     season.seasonCode,
     eventId,
@@ -736,20 +742,42 @@ export const refreshClassicStandings = async (
       : undefined,
     `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
   );
-  await managerScoreCheckpointRepository
-    .upsertBatch(
-      season,
+  const checkpointPublished =
+    fetchedRows.length === 0
+      ? true
+      : await managerScoreCheckpointRepository
+          .upsertBatch(
+            season,
+            eventId,
+            { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
+            fetchedRows.map((row) => toManagerScoreCheckpoint(row)),
+          )
+          .then(() => true)
+          .catch((error) => {
+            logWarn('Official manager checkpoint write failed', {
+              eventId,
+              leagueId,
+              error: error instanceof Error ? error.message : 'unknown',
+            });
+            return false;
+          });
+  const durablyPublished = fetchedRows.length === 0 || redisPublished || checkpointPublished;
+  if (!durablyPublished) {
+    // The queue cursor is itself durable. Never let it skip rows that exist
+    // only in this process after both publication stores rejected the page.
+    for (const [entryId, previous] of previousRows) {
+      if (previous) rows.set(entryId, previous);
+      else rows.delete(entryId);
+    }
+    nextPage = startPage;
+    refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+    logWarn('Official classic standings page had no durable publication', {
       eventId,
-      { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
-      fetchedRows.map((row) => toManagerScoreCheckpoint(row)),
-    )
-    .catch((error) =>
-      logWarn('Official manager checkpoint write failed', {
-        eventId,
-        leagueId,
-        error: error instanceof Error ? error.message : 'unknown',
-      }),
-    );
+      leagueId,
+      startPage,
+      fetched: fetchedRows.length,
+    });
+  }
   logDebug('Official classic manager live refresh completed', {
     eventId,
     leagueId,
@@ -766,6 +794,12 @@ export const refreshClassicStandings = async (
   };
 };
 
+export const classicStandingsCursorAfterRefresh = (
+  completeRefresh: boolean,
+  standings: Pick<Awaited<ReturnType<typeof refreshClassicStandings>>, 'complete' | 'nextPage'>,
+): number | null | undefined =>
+  completeRefresh ? (standings.complete ? null : standings.nextPage) : undefined;
+
 const classicStandingNeedsOverallRank = (
   row: Pick<CachedRow, 'source' | 'overallRank'> | undefined,
 ): boolean =>
@@ -773,6 +807,20 @@ const classicStandingNeedsOverallRank = (
   (typeof row.overallRank !== 'number' ||
     !Number.isSafeInteger(row.overallRank) ||
     row.overallRank <= 0);
+
+export const selectWorkerSummaryRefreshTargets = (
+  entryIds: readonly number[],
+  limit: number,
+  rotationBucket: number,
+): number[] => {
+  if (!Number.isSafeInteger(limit) || limit <= 0) return [];
+  const normalized = Array.from(new Set(entryIds));
+  if (normalized.length <= limit) return normalized;
+  const chunkCount = Math.ceil(normalized.length / limit);
+  const bucket = Number.isSafeInteger(rotationBucket) ? Math.max(0, rotationBucket) : 0;
+  const start = (bucket % chunkCount) * limit;
+  return normalized.slice(start, start + limit);
+};
 
 export const selectClassicOverallRankRefreshTargets = (
   entryIds: readonly number[],
@@ -1078,9 +1126,14 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   );
   const completeRefresh = input.completeRefresh === true;
   let workerSummaryBudget = completeRefresh ? MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT : 0;
+  const workerRotationBucket = Math.floor(Date.now() / MANAGER_LIVE_REFRESH_BUCKET_MS);
   const takeWorkerSummaryTargets = (entryIds: readonly number[], limit = workerSummaryBudget) => {
     if (!completeRefresh) return [...entryIds];
-    const selected = entryIds.slice(0, Math.min(workerSummaryBudget, limit));
+    const selected = selectWorkerSummaryRefreshTargets(
+      entryIds,
+      Math.min(workerSummaryBudget, limit),
+      workerRotationBucket,
+    );
     workerSummaryBudget -= selected.length;
     return selected;
   };
@@ -1170,8 +1223,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         : undefined,
     );
     refreshErrorCode = standings.errorCode;
-    if (completeRefresh && staleOrMissing.length > 0) {
-      classicStandingsNextPage = standings.complete ? null : standings.nextPage;
+    if (completeRefresh) {
+      // `null` is an explicit completion marker in queue Redis. Write it even
+      // when another overlapping refresh made every standings target fresh;
+      // otherwise a stale later-page cursor can be revived after those rows
+      // age again.
+      classicStandingsNextPage = classicStandingsCursorAfterRefresh(completeRefresh, standings);
     }
 
     // FPL classic standings expose the event/phase totals and the league
