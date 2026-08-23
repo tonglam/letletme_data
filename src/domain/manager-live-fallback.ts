@@ -3,6 +3,31 @@ const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
 
 export type ManagerSummaryFetchPriority = 'foreground' | 'background';
 
+export const createKeyedTaskSerializer = (): (<T>(
+  key: string,
+  task: () => Promise<T>,
+) => Promise<T>) => {
+  const tails = new Map<string, Promise<void>>();
+
+  return async <T>(key: string, task: () => Promise<T>): Promise<T> => {
+    const previous = tails.get(key) ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => undefined).then(() => current);
+    tails.set(key, tail);
+
+    await previous.catch(() => undefined);
+    try {
+      return await task();
+    } finally {
+      release?.();
+      if (tails.get(key) === tail) tails.delete(key);
+    }
+  };
+};
+
 export const preserveClassicOverallRank = (
   incomingOverallRank: number | null,
   existingOverallRank: number | null | undefined,

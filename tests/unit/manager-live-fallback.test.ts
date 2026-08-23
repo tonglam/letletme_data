@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   classicManagerSummaryFallbackEntryIds,
+  createKeyedTaskSerializer,
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
@@ -134,6 +135,37 @@ describe('classic manager live fallback', () => {
     releaseFirstWave?.();
     expect((await pending).flat()).toEqual([1, 2, 3, 4, 5, 6]);
     expect(maximumActive).toBe(2);
+  });
+
+  test('serializes league-scoped crawls while retaining disjoint work', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = run('2025:1:99', async () => {
+      order.push('first:start');
+      await firstBlocked;
+      order.push('first:end');
+      return [1];
+    });
+    const second = run('2025:1:99', async () => {
+      order.push('second:start');
+      return [2];
+    });
+    const otherLeague = run('2025:1:100', async () => {
+      order.push('other:start');
+      return [3];
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(order).toEqual(['first:start', 'other:start']);
+    releaseFirst?.();
+    expect(await Promise.all([first, second, otherLeague])).toEqual([[1], [2], [3]]);
+    expect(order).toEqual(['first:start', 'other:start', 'first:end', 'second:start']);
   });
 
   test('admits foreground work before queued background batches', async () => {

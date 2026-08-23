@@ -20,6 +20,7 @@ import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   classicManagerSummaryFallbackEntryIds,
+  createKeyedTaskSerializer,
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
@@ -328,6 +329,11 @@ const managerLiveBackgroundInFlight = new Map<string, Promise<void>>();
 // batching alone is insufficient because distinct tournaments can refresh at
 // the same time and otherwise multiply FPL entry-summary concurrency.
 const runManagerSummaryFetch = createManagerSummaryFetchGate();
+// Every classic standings crawl for the same season/event/league shares one
+// lane, including foreground misses and entry-set-specific background work.
+// Disjoint requests remain queued instead of being dropped, while identical
+// page-1..N walks can never multiply concurrently against FPL.
+const runClassicStandingsRefresh = createKeyedTaskSerializer();
 
 const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void => {
   if (managerLiveBackgroundInFlight.has(key)) return;
@@ -455,7 +461,7 @@ const refreshEntrySummaries = async (
   return refreshErrorCode;
 };
 
-const refreshClassicStandings = async (
+const refreshClassicStandingsUnserialized = async (
   season: FplSeasonRef,
   eventId: number,
   leagueId: number,
@@ -571,6 +577,19 @@ const refreshClassicStandings = async (
     refreshedEntryIds: fetchedRows.map((row) => row.entryId),
   };
 };
+
+const refreshClassicStandings = async (
+  season: FplSeasonRef,
+  eventId: number,
+  leagueId: number,
+  targetIds: ReadonlySet<number>,
+  rows: Map<number, CachedRow>,
+  redis: Redis | null,
+  options: { startPage?: number; maxPages?: number } = {},
+): ReturnType<typeof refreshClassicStandingsUnserialized> =>
+  runClassicStandingsRefresh(`${season.seasonCode}:${eventId}:${leagueId}`, () =>
+    refreshClassicStandingsUnserialized(season, eventId, leagueId, targetIds, rows, redis, options),
+  );
 
 const classicStandingNeedsOverallRank = (row: CachedRow | undefined): boolean =>
   row?.source === 'FPL_CLASSIC_STANDINGS' &&
