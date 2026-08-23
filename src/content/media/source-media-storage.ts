@@ -48,6 +48,12 @@ type TusResponseLike = Readonly<{
   getBody?: () => string;
 }>;
 
+type TusErrorLike = Readonly<{
+  originalResponse?: TusResponseLike | null;
+  causingError?: unknown;
+  message?: unknown;
+}>;
+
 export class SourceMediaStorageError extends Error {
   readonly failureClass: string;
   readonly status: number | null;
@@ -199,8 +205,31 @@ function tusFailureDetail(
   error: unknown,
 ): Readonly<{ status: number | null; detail: string | null }> {
   if (!error || typeof error !== 'object') return { status: null, detail: null };
-  const response = (error as { originalResponse?: TusResponseLike | null }).originalResponse;
-  if (!response) return { status: null, detail: null };
+  const errorLike = error as TusErrorLike;
+  const response = errorLike.originalResponse;
+  let detail: string | null = null;
+  const safeDetail = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const normalized = value
+      .replace(/https?:\/\/[^\s,)]+/gi, 'url')
+      .replace(/, originated from request.*$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120);
+    return /^[A-Za-z0-9][A-Za-z0-9 ._:/'()\-]{0,119}$/.test(normalized) ? normalized : null;
+  };
+  if (!response) {
+    const cause = errorLike.causingError;
+    if (cause && typeof cause === 'object') {
+      const causeLike = cause as { code?: unknown; name?: unknown; message?: unknown };
+      detail =
+        safeDetail(causeLike.code) ?? safeDetail(causeLike.message) ?? safeDetail(causeLike.name);
+    }
+    return {
+      status: null,
+      detail: detail ?? safeDetail(errorLike.message),
+    };
+  }
   const status = typeof response.getStatus === 'function' ? response.getStatus() : null;
   const rawBody = typeof response.getBody === 'function' ? response.getBody().slice(0, 1_024) : '';
   const { providerCode, providerDetail } = parseProviderErrorDetail(rawBody);
