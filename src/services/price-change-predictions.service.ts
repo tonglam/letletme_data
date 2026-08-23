@@ -632,6 +632,7 @@ export function parsePublishedPriceChangeBoard(
     return null;
   }
   const ageMs = now.getTime() - fetchedAt;
+  if (ageMs < 0) return null;
   if (ageMs > PRICE_CHANGE_MAX_AGE_MS) return unavailableBoard();
   const board: PriceChangeBoard = {
     status: ageMs < PRICE_CHANGE_READY_MS ? 'READY' : 'STALE',
@@ -664,27 +665,58 @@ function parseDelivery(
   return { manifest: delivery.manifest, items };
 }
 
+type CanonicalPriceChangeRead = Readonly<{
+  board: PriceChangeBoard | null;
+  hasActivePublication: boolean;
+}>;
+
 async function readCanonicalPriceChangePublication(
   season: FplSeasonRef,
-): Promise<PriceChangeBoard | null> {
+): Promise<CanonicalPriceChangeRead> {
   const scope = { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode } as const;
-  const redisPublication = await readActiveDataPublication(scope).catch(() => null);
-  if (redisPublication) {
-    const board = parsePublishedPriceChangeBoard(redisPublication);
-    if (board) return board;
+  let active: Awaited<ReturnType<typeof syncOperationsRepository.findActivePublication>> = null;
+  let databaseAvailable = true;
+  try {
+    active = await syncOperationsRepository.findActivePublication(PRICE_CHANGE_DATASET, season);
+  } catch {
+    databaseAvailable = false;
   }
 
-  const active = await syncOperationsRepository.findActivePublication(PRICE_CHANGE_DATASET, season);
-  if (!active) return null;
-  const delivery = await loadDataPublicationDelivery(active.publicationId).catch(() => null);
-  if (
-    !delivery ||
-    delivery.manifest.publicationId !== active.publicationId ||
-    delivery.manifest.revision !== active.revision
-  ) {
-    return null;
+  const redisPublication = await readActiveDataPublication(scope).catch(() => null);
+  if (active) {
+    // The DB active pointer is the canonical revision. Redis is only a
+    // delivery of that revision; a structurally valid older pointer must not
+    // be served while the outbox is catching up.
+    if (
+      redisPublication &&
+      redisPublication.manifest.publicationId === active.publicationId &&
+      redisPublication.manifest.revision === active.revision
+    ) {
+      const board = parsePublishedPriceChangeBoard(redisPublication);
+      if (board) return { board, hasActivePublication: true };
+    }
+
+    const delivery = await loadDataPublicationDelivery(active.publicationId).catch(() => null);
+    if (
+      !delivery ||
+      delivery.manifest.publicationId !== active.publicationId ||
+      delivery.manifest.revision !== active.revision
+    ) {
+      return { board: null, hasActivePublication: true };
+    }
+    return {
+      board: parsePublishedPriceChangeBoard(parseDelivery(delivery)),
+      hasActivePublication: true,
+    };
   }
-  return parsePublishedPriceChangeBoard(parseDelivery(delivery));
+
+  // If the DB itself is unavailable, retain the read-only Redis resilience
+  // path. When the DB is reachable and has no active publication, do not
+  // invent a canonical board from an orphaned pointer.
+  if (databaseAvailable || !redisPublication) {
+    return { board: null, hasActivePublication: false };
+  }
+  return { board: parsePublishedPriceChangeBoard(redisPublication), hasActivePublication: false };
 }
 
 async function readCorePlayerIds(season: FplSeasonRef): Promise<ReadonlySet<number>> {
@@ -777,8 +809,8 @@ async function readLegacyPriceChangeBoard(season: FplSeasonRef): Promise<PriceCh
 export async function getPriceChangePredictions(): Promise<PriceChangeBoard> {
   const season = await seasonRepository.findCurrent();
   const canonical = await readCanonicalPriceChangePublication(season);
-  if (canonical) return canonical;
-  const legacy = await readLegacyPriceChangeBoard(season);
+  if (canonical.board) return canonical.board;
+  const legacy = canonical.hasActivePublication ? null : await readLegacyPriceChangeBoard(season);
   return legacy ?? unavailableBoard();
 }
 
@@ -866,6 +898,33 @@ export async function persistPriceChangePublication(
   const outboxId = randomUUID();
   let dbActivated = false;
   try {
+    const active = await syncOperationsRepository.findActivePublication(
+      PRICE_CHANGE_DATASET,
+      season,
+    );
+    if (active) {
+      const activeManifest = await syncOperationsRepository.findActivePublicationManifest(
+        PRICE_CHANGE_DATASET,
+        season,
+      );
+      if (!activeManifest) {
+        throw new PriceChangePredictionUnavailableError(
+          'The active fpl:price-changes publication manifest is invalid',
+        );
+      }
+      const activeFetchedAt = Date.parse(activeManifest.sourceCheckedAt);
+      if (!Number.isFinite(activeFetchedAt)) {
+        throw new PriceChangePredictionUnavailableError(
+          'The active fpl:price-changes source timestamp is invalid',
+        );
+      }
+      if (fetchedAt.getTime() < activeFetchedAt) {
+        throw new PriceChangePredictionUnavailableError(
+          'The prepared price-change bootstrap is older than the active publication',
+        );
+      }
+    }
+
     const currentCorePlayerIds = await readCorePlayerIds(season);
     const publishedPlayerIds = new Set(board.players.map((player) => player.playerId));
     if (

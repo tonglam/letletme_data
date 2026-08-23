@@ -274,19 +274,32 @@ export function createDataSyncWorker(): WorkerRuntime {
   });
   const queueEvents = new QueueEvents(dataSyncQueueName, { connection });
 
-  worker.on('completed', (job) => {
+  worker.on('completed', (job, result) => {
     logInfo('Data sync job completed', { jobId: job.id, name: job.name });
     if (job.id !== undefined) {
+      const skippedPriceChange =
+        job.name === 'price-change-predictions' &&
+        result !== null &&
+        typeof result === 'object' &&
+        'outcome' in result &&
+        result.outcome === 'noop';
+      const status = skippedPriceChange ? 'skipped' : 'succeeded';
+      const evidence = {
+        queue: dataSyncQueueName,
+        jobName: job.name,
+        ...(skippedPriceChange ? { reason: 'official_fields_not_open' } : {}),
+      };
       const completion = job.data.obligationId
         ? completeSchedulerObligation({
             obligationId: job.data.obligationId,
             generation: job.data.obligationGeneration,
-            status: 'succeeded',
-            evidence: { queue: dataSyncQueueName, jobName: job.name },
+            status,
+            evidence,
           })
         : completeSchedulerObligationByBullJobId({
             bullJobId: job.id,
-            evidence: { queue: dataSyncQueueName, jobName: job.name },
+            status,
+            evidence,
           });
       void completion.catch(() => undefined);
     }

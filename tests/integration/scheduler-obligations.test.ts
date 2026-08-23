@@ -11,6 +11,7 @@ import {
   failSchedulerObligation,
   markSchedulerObligationIrrecoverable,
   supersedeSchedulerObligations,
+  supersedeSchedulerObligationsByDueAt,
 } from '../../src/repositories/scheduler-obligations';
 
 const OBLIGATION_ID = '30000000-0000-4000-8000-000000000001';
@@ -269,6 +270,59 @@ describe('scheduler obligation generation fencing', () => {
     expect(rows[0]).toEqual({
       status: 'skipped',
       reason: 'superseded-by-latest-authoritative',
+    });
+  });
+
+  test('coalesces an older failed price-change bucket by due time', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'price-change-predictions',
+        '2627',
+        'price-change-1',
+        'every five minutes at UTC minute 01/06/11...',
+        'UTC',
+        'failed',
+        'catchup',
+        '2026-08-23T00:01:00Z'::timestamptz,
+        0,
+        1,
+        '{}'::jsonb
+      )
+    `;
+
+    expect(
+      await supersedeSchedulerObligationsByDueAt({
+        jobName: 'price-change-predictions',
+        scopeKey: '2627',
+        beforeDueAt: new Date('2026-08-23T00:06:00Z'),
+        evidence: { supersededByPeriodKey: 'price-change-2' },
+      }),
+    ).toBe(1);
+    const rows = await sql<Array<{ status: string; reason: string; provider: string }>>`
+      SELECT status, evidence->>'reason' AS reason, evidence->>'provider' AS provider
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      status: 'skipped',
+      reason: 'superseded-by-latest-authoritative',
+      provider: 'fpl',
     });
   });
 

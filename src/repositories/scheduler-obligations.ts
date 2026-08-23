@@ -163,6 +163,46 @@ export async function supersedeSchedulerObligations(input: {
   return updated.length;
 }
 
+/**
+ * Latest-authoritative minute lanes use a timestamp bucket rather than a
+ * lexically sortable date key. Retire older pending/failed obligations while
+ * leaving an already-running fetch intact so it can drain normally.
+ */
+export async function supersedeSchedulerObligationsByDueAt(input: {
+  jobName: string;
+  scopeKey: string;
+  beforeDueAt: Date;
+  evidence?: Record<string, unknown>;
+  db?: DbHandle;
+}): Promise<number> {
+  const db = input.db ?? (await getDb());
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      status: 'skipped',
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+        provider: 'fpl',
+        terminal: true,
+        reason: 'superseded-by-latest-authoritative',
+        ...input.evidence,
+      })}::jsonb`,
+      completedAt: sql`clock_timestamp()`,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
+        sql`${schedulerObligationsInOps.dueAt} < ${input.beforeDueAt}`,
+        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length;
+}
+
 export async function hasEarlierInFlightSchedulerObligation(input: {
   jobName: string;
   beforePeriodKey: string;
@@ -462,6 +502,7 @@ export async function markSchedulerObligationIrrecoverable(input: {
 
 export async function completeSchedulerObligationByBullJobId(input: {
   bullJobId: string | number;
+  status?: Extract<SchedulerObligationStatus, 'succeeded' | 'skipped'>;
   evidence?: Record<string, unknown>;
   db?: DbHandle;
 }): Promise<boolean> {
@@ -469,7 +510,7 @@ export async function completeSchedulerObligationByBullJobId(input: {
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
-      status: 'succeeded',
+      status: input.status ?? 'succeeded',
       evidence: input.evidence ?? {},
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
