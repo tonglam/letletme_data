@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  createKeyedSerialTaskGate,
   createManagerSummaryFetchGate,
   isPositiveOverallRank,
   managerSummaryFetchBatches,
@@ -13,6 +14,34 @@ import {
 } from '../../src/domain/manager-live-fallback';
 
 describe('classic manager live fallback', () => {
+  test('serializes standings and rank publications for the same Classic scope', async () => {
+    const run = createKeyedSerialTaskGate();
+    const order: string[] = [];
+    let releaseStandings!: () => void;
+    const standingsActive = new Promise<void>((resolve) => {
+      releaseStandings = resolve;
+    });
+
+    const standings = run('classic:2627:1:8863', async () => {
+      order.push('standings-start');
+      await standingsActive;
+      order.push('standings-end');
+    });
+    await Promise.resolve();
+    const overallRank = run('classic:2627:1:8863', async () => {
+      order.push('overall-rank');
+    });
+    const otherLeague = run('classic:2627:1:9999', async () => {
+      order.push('other-league');
+    });
+    await otherLeague;
+
+    expect(order).toEqual(['standings-start', 'other-league']);
+    releaseStandings();
+    await Promise.all([standings, overallRank]);
+    expect(order).toEqual(['standings-start', 'other-league', 'standings-end', 'overall-rank']);
+  });
+
   test('keeps the last positive overall rank until a newer positive rank arrives', () => {
     expect(preserveLastKnownOverallRank(null, 640_000)).toBe(640_000);
     expect(preserveLastKnownOverallRank(0, 640_000)).toBe(640_000);

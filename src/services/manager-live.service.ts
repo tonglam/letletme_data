@@ -19,6 +19,7 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  createKeyedSerialTaskGate,
   createManagerSummaryFetchGate,
   isPositiveOverallRank,
   managerSummaryFetchBatches,
@@ -316,6 +317,28 @@ const writeRows = async (
   }
 };
 
+const writeCheckpointRows = async (
+  season: FplSeasonRef,
+  eventId: number,
+  scope: ManagerScoreScope,
+  rows: readonly ManagerLiveScoreRow[],
+): Promise<void> => {
+  await managerScoreCheckpointRepository
+    .upsertBatch(
+      season,
+      eventId,
+      scope,
+      rows.map((row) => toManagerScoreCheckpoint(row)),
+    )
+    .catch((error) =>
+      logWarn('Official manager checkpoint write failed', {
+        eventId,
+        scope: scopeKey(scope),
+        error: error instanceof Error ? error.message : 'unknown',
+      }),
+    );
+};
+
 const nowIso = (): string => new Date().toISOString();
 
 const plusSeconds = (checkedAt: string, seconds: number): string =>
@@ -399,6 +422,16 @@ const managerLiveBackgroundInFlight = new Map<string, Promise<void>>();
 // batching alone is insufficient because distinct tournaments can refresh at
 // the same time and otherwise multiply FPL entry-summary concurrency.
 const runManagerSummaryFetch = createManagerSummaryFetchGate();
+// FPL requests remain concurrent, but publication for one Classic scope is
+// serialized. This makes the latest-row read and the following Redis/Postgres
+// write one process-local critical section shared by foreground standings and
+// deferred rank enrichment.
+const runManagerLivePublication = createKeyedSerialTaskGate();
+const managerLivePublicationKey = (
+  season: string,
+  eventId: number,
+  scope: ManagerScoreScope,
+): string => `${season}:${eventId}:${scopeKey(scope)}`;
 
 const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void => {
   if (managerLiveBackgroundInFlight.has(key)) return;
@@ -440,8 +473,11 @@ const refreshEntrySummaries = async (
   const refreshedEntryIds: number[] = [];
   const overallRankRefreshedEntryIds: number[] = [];
   let refreshErrorCode: ManagerSummaryRefreshError = null;
+  const classicScope = scope.scopeType === 'CLASSIC_LEAGUE';
+  const publicationKey = managerLivePublicationKey(season.seasonCode, eventId, scope);
   for (const batch of managerSummaryFetchBatches(targets)) {
-    const completedBatch: ManagerLiveScoreRow[] = [];
+    const publishedBatch: ManagerLiveScoreRow[] = [];
+    const checkpointBatch: ManagerLiveScoreRow[] = [];
     await Promise.all(
       batch.map(async (entryId) => {
         try {
@@ -449,50 +485,57 @@ const refreshEntrySummaries = async (
             () => fplClient.getEntrySummary(entryId),
             options.priority,
           );
-          let existing = rows.get(entryId);
-          if (options.preserveClassicStanding) {
-            // A deferred OR crawl can overlap the next 30-second standings
-            // refresh. Re-read the authoritative row after the slow FPL
-            // summary request and immediately before composing the OR write,
-            // so the rank is applied to the newest points/league position.
-            const latestRows = await readCachedAndCheckpointRows(
-              redis,
-              season,
-              eventId,
-              scope,
-              [entryId],
-              rows,
-            );
-            existing = latestRows.get(entryId) ?? existing;
-            if (existing) rows.set(entryId, existing);
-          }
-          const checkedAt = nowIso();
-          const candidate =
-            options.preserveClassicStanding && existing?.source === 'FPL_CLASSIC_STANDINGS'
-              ? (() => {
-                  const { revision: _revision, ...classicRow } = existing;
-                  return withRevision({
-                    ...classicRow,
-                    // Classic standings owns event/phase totals and league rank;
-                    // the entry summary owns the season-wide FPL OR.
-                    overallRank: summary.summary_overall_rank ?? null,
-                    checkedAt,
-                    staleAt: plusSeconds(checkedAt, STALE_SECONDS),
-                  });
-                })()
-              : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
-          const row = withPreservedOverallRank(candidate, existing?.overallRank);
+          const composeAndPublish = async (reReadLatest: boolean): Promise<ManagerLiveScoreRow> => {
+            let existing = rows.get(entryId);
+            if (reReadLatest) {
+              // The shared Classic publication gate keeps the latest-row read,
+              // OR merge, Redis write and checkpoint upsert atomic relative to
+              // every foreground standings publication in this API process.
+              const latestRows = await readCachedAndCheckpointRows(
+                redis,
+                season,
+                eventId,
+                scope,
+                [entryId],
+                rows,
+              );
+              existing = latestRows.get(entryId) ?? existing;
+              if (existing) rows.set(entryId, existing);
+            }
+            const checkedAt = nowIso();
+            const candidate =
+              (options.preserveClassicStanding || classicScope) &&
+              existing?.source === 'FPL_CLASSIC_STANDINGS'
+                ? (() => {
+                    const { revision: _revision, ...classicRow } = existing;
+                    return withRevision({
+                      ...classicRow,
+                      // Classic standings owns event/phase totals and league rank;
+                      // the entry summary owns the season-wide FPL OR.
+                      overallRank: summary.summary_overall_rank ?? null,
+                      checkedAt,
+                      staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+                    });
+                  })()
+                : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
+            const row = withPreservedOverallRank(candidate, existing?.overallRank);
+            rows.set(row.entryId, row);
+            // Publish each completed response immediately. A slow sibling or
+            // later batch must not hide already-fetched official scores.
+            await writeRows(redis, season.seasonCode, eventId, scope, [row]);
+            if (classicScope) await writeCheckpointRows(season, eventId, scope, [row]);
+            return row;
+          };
+          const row = classicScope
+            ? await runManagerLivePublication(publicationKey, () => composeAndPublish(true))
+            : await composeAndPublish(false);
           if (isPositiveOverallRank(summary.summary_overall_rank)) {
             overallRankRefreshedEntryIds.push(entryId);
           }
           refreshedEntryIds.push(entryId);
-          completedBatch.push(row);
+          publishedBatch.push(row);
+          if (!classicScope) checkpointBatch.push(row);
           refreshed.push(row);
-          rows.set(row.entryId, row);
-          // Publish each completed response to the primary cache immediately.
-          // A slow sibling or later batch must not hide already-fetched
-          // official scores until the whole background crawl finishes.
-          await writeRows(redis, season.seasonCode, eventId, scope, [row]);
         } catch (error) {
           if (error instanceof FPLClientError && error.status === 429) {
             refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
@@ -507,7 +550,7 @@ const refreshEntrySummaries = async (
         }
       }),
     );
-    if (completedBatch.length === 0) continue;
+    if (publishedBatch.length === 0) continue;
 
     const checkedAt = refreshed.reduce(
       (latest, row) => (row.checkedAt > latest ? row.checkedAt : latest),
@@ -530,20 +573,7 @@ const refreshEntrySummaries = async (
       },
       'entry-summary',
     );
-    await managerScoreCheckpointRepository
-      .upsertBatch(
-        season,
-        eventId,
-        scope,
-        completedBatch.map((row) => toManagerScoreCheckpoint(row)),
-      )
-      .catch((error) =>
-        logWarn('Official manager checkpoint write failed', {
-          eventId,
-          scope: scopeKey(scope),
-          error: error instanceof Error ? error.message : 'unknown',
-        }),
-      );
+    await writeCheckpointRows(season, eventId, scope, checkpointBatch);
   }
   return {
     errorCode: refreshErrorCode,
@@ -568,6 +598,7 @@ const refreshClassicStandings = async (
 }> => {
   const checkedAt = nowIso();
   const fetchedRows: ManagerLiveScoreRow[] = [];
+  const classicScope: ManagerScoreScope = { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId };
   let found = 0;
   const startPage = options.startPage ?? 1;
   const maxPages = options.maxPages ?? MAX_FOREGROUND_STANDINGS_PAGES;
@@ -587,54 +618,65 @@ const refreshClassicStandings = async (
         if (!targetIds.has(row.entryId)) continue;
         const previous = rows.get(row.entryId);
         if (!previous || !isFresh(previous)) found += 1;
-        const mergedRow = withPreservedOverallRank(row, previous?.overallRank);
-        fetchedRows.push(mergedRow);
-        rows.set(mergedRow.entryId, mergedRow);
+        fetchedRows.push(row);
+        rows.set(row.entryId, withPreservedOverallRank(row, previous?.overallRank));
       }
       if (!response.standings.has_next) {
         exhausted = true;
         break;
       }
     }
-    await writeRows(
-      redis,
-      season.seasonCode,
-      eventId,
-      { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
-      fetchedRows,
-      fetchedRows.length > 0
-        ? {
-            season: season.seasonCode,
-            eventId,
-            source: 'FPL_CLASSIC_STANDINGS',
-            leagueId,
-            rowCount: fetchedRows.length,
-            checkedAt,
-            revision: fetchedRows[0]?.revision ?? null,
-            nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-          }
-        : undefined,
-      `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
-    );
-    await managerScoreCheckpointRepository
-      .upsertBatch(
-        season,
-        eventId,
-        { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
-        fetchedRows.map((row) => toManagerScoreCheckpoint(row)),
-      )
-      .catch((error) =>
-        logWarn('Official manager checkpoint write failed', {
+    const publishedRows = await runManagerLivePublication(
+      managerLivePublicationKey(season.seasonCode, eventId, classicScope),
+      async () => {
+        const latestRows = await readCachedAndCheckpointRows(
+          redis,
+          season,
           eventId,
-          leagueId,
-          error: error instanceof Error ? error.message : 'unknown',
-        }),
-      );
+          classicScope,
+          fetchedRows.map((row) => row.entryId),
+          rows,
+        );
+        const mergedRows = fetchedRows.map((row) => {
+          const latest = latestRows.get(row.entryId);
+          const candidate = withPreservedOverallRank(row, latest?.overallRank);
+          const merged = mergeLatestManagerLiveRow(latest, candidate);
+          rows.set(merged.entryId, merged);
+          return merged;
+        });
+        const publicationCheckedAt = mergedRows.reduce(
+          (latest, row) => (row.checkedAt > latest ? row.checkedAt : latest),
+          checkedAt,
+        );
+        await writeRows(
+          redis,
+          season.seasonCode,
+          eventId,
+          classicScope,
+          mergedRows,
+          mergedRows.length > 0
+            ? {
+                season: season.seasonCode,
+                eventId,
+                source: 'FPL_CLASSIC_STANDINGS',
+                leagueId,
+                rowCount: mergedRows.length,
+                checkedAt: publicationCheckedAt,
+                revision: mergedRows[0]?.revision ?? null,
+                nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+              }
+            : undefined,
+          `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
+        );
+        await writeCheckpointRows(season, eventId, classicScope, mergedRows);
+        return mergedRows;
+      },
+    );
     logDebug('Official classic manager live refresh completed', {
       eventId,
       leagueId,
       requested: targetIds.size,
-      fetched: fetchedRows.length,
+      fetched: publishedRows.length,
     });
     return {
       complete: exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES,

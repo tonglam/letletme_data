@@ -6,6 +6,30 @@ const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
 
 export type ManagerSummaryFetchPriority = 'foreground' | 'background';
 
+export const createKeyedSerialTaskGate = (): (<T>(
+  key: string,
+  task: () => Promise<T>,
+) => Promise<T>) => {
+  const tails = new Map<string, Promise<void>>();
+
+  return async <T>(key: string, task: () => Promise<T>): Promise<T> => {
+    const previous = tails.get(key) ?? Promise.resolve();
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    tails.set(key, turn);
+
+    await previous;
+    try {
+      return await task();
+    } finally {
+      releaseTurn();
+      if (tails.get(key) === turn) tails.delete(key);
+    }
+  };
+};
+
 export const isPositiveOverallRank = (value: number | null | undefined): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 
