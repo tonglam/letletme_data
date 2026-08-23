@@ -116,6 +116,8 @@ jobs:
             set -euo pipefail
             old_image=""
             old_revision=""
+            old_release_sha=unknown
+            old_runner_release_sha=unknown
             ledger_before=""
             image_pull_attempted=false
             deployment_started=false
@@ -204,9 +206,12 @@ jobs:
                   if [ -n "$old_revision" ]; then
                     git reset --hard "$old_revision" || true
                   fi
-                  APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build scheduler worker content-worker api || true
+                  restore_runtime_services \
+                    "$old_image" "$old_release_sha" "$old_runner_release_sha" || true
                 elif [ "$migration_started" = true ]; then
-                  if ! restore_last_known_healthy_if_ledger_unchanged "$old_image" "$ledger_before" "$old_revision"; then
+                  if ! restore_last_known_healthy_if_ledger_unchanged \
+                    "$old_image" "$ledger_before" "$old_revision" "$old_release_sha" \
+                    "$old_runner_release_sha"; then
                     echo "Data deployment failed after a ledger change or unverifiable ledger state; leaving services stopped for forward recovery" >&2
                   fi
                 fi
@@ -298,6 +303,10 @@ jobs:
             export APP_IMAGE="$IMAGE_REF"
             compose() { docker compose "$@"; }
             source scripts/deploy-state-machine.sh
+            old_release_sha=$(release_sha_for_image "$old_image")
+            old_runner_release_sha=$(cat \
+              /home/workspace/letletme-grok-runner/current.release 2>/dev/null || printf unknown)
+            old_runner_release_sha=${old_runner_release_sha:-unknown}
             acquire_deploy_lock
             image_pull_attempted=true
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker migration backup
@@ -324,7 +333,8 @@ jobs:
             migration_started=false
             restore_before_migration() {
               if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
-                APP_IMAGE="$old_image" docker compose up -d --remove-orphans --no-build scheduler worker content-worker api || true
+                restore_runtime_services \
+                  "$old_image" "$old_release_sha" "$old_runner_release_sha" || true
               fi
             }
             trap restore_before_migration ERR

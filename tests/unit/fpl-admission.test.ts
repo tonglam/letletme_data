@@ -30,4 +30,20 @@ describe('FPL admission reservations', () => {
 
     expect(getFplAdmissionStats().inflight).toBe(0);
   });
+
+  test('removes a queued request when its admission deadline expires', async () => {
+    resetFplAdmissionForTests();
+    const capacity = getFplAdmissionStats().bulkMaxInflight;
+    const activeReleases = await Promise.all(
+      Array.from({ length: capacity }, () => acquireFplRequest('bulk')),
+    );
+
+    await expect(acquireFplRequest('bulk', { deadlineAt: Date.now() + 20 })).rejects.toMatchObject({
+      code: 'FPL_ADMISSION_UNAVAILABLE',
+    });
+    expect(getFplAdmissionStats().queued).toBe(0);
+
+    activeReleases.forEach((release) => release());
+    expect(getFplAdmissionStats().inflight).toBe(0);
+  });
 });

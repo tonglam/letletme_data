@@ -18,6 +18,8 @@ const rearmScript = readFileSync('scripts/rearm-briefing-x-after-probe.sh', 'utf
 const hostRunnerRollbackScript = readFileSync('scripts/rollback-host-grok-runner.sh', 'utf8');
 const hostRunnerService = readFileSync('deploy/letletme-grok-runner.service', 'utf8');
 const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
+const runtimeHealthScript = readFileSync('scripts/verify-runtime-health.sh', 'utf8');
 const composeFile = readFileSync('docker-compose.yml', 'utf8');
 const quote = String.fromCharCode(39);
 
@@ -200,6 +202,24 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('done < <(docker ps -aq');
     expect(workflow).toContain('image_id_is_referenced "$digest_id"');
     expect(workflow).toContain('docker image rm "$image_ref"');
+  });
+
+  test('restores the rollback image with its own release identity', () => {
+    expect(deployStateMachine).toContain('release_sha_for_image');
+    expect(deployStateMachine).toContain('restore_runtime_services');
+    expect(deployStateMachine).toContain('export DEPLOY_SHA="$previous_release_sha"');
+    expect(deployStateMachine).toContain(
+      'export CONTENT_MANIFEST_GIT_REVISION="$previous_release_sha"',
+    );
+    expect(deployStateMachine).toContain(
+      'export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"',
+    );
+    expect(deployScript).toContain('DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_image');
+    expect(deployScript).toContain('DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat');
+    expect(workflow).toContain('old_release_sha=$(release_sha_for_image "$old_image")');
+    expect(workflow).toContain('old_runner_release_sha=$(cat');
+    expect(workflow).toContain('"$old_image" "$old_release_sha" "$old_runner_release_sha"');
+    expect(runtimeHealthScript).toContain('--max-time "$curl_timeout_seconds"');
   });
 
   test('weekly security workflow scans a freshly built production image', () => {

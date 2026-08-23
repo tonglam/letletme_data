@@ -11,6 +11,12 @@ export type WeChatNotificationOptions = {
   timeoutMs?: number;
 };
 
+export type TelegramNotificationOptions = {
+  timeoutMs?: number;
+};
+
+const TELEGRAM_NOTIFICATION_TIMEOUT_MS = 10_000;
+
 export class WeChatNotificationError extends Error {
   readonly status?: number;
   readonly category:
@@ -47,7 +53,10 @@ export class NotificationDeliveryRejectedError extends Error {
   }
 }
 
-export async function sendTelegramMessage(message: string): Promise<NotificationDeliveryResult> {
+export async function sendTelegramMessage(
+  message: string,
+  options: TelegramNotificationOptions = {},
+): Promise<NotificationDeliveryResult> {
   const config = getConfig();
   const token = config.TELEGRAM_BOT_TOKEN;
   const chatId = config.TELEGRAM_CHAT_ID;
@@ -64,6 +73,7 @@ export async function sendTelegramMessage(message: string): Promise<Notification
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text: message }),
+      signal: AbortSignal.timeout(options.timeoutMs ?? TELEGRAM_NOTIFICATION_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -78,7 +88,10 @@ export async function sendTelegramMessage(message: string): Promise<Notification
   }
 }
 
-export async function sendTelegramBotNotification(text: string): Promise<void> {
+export async function sendTelegramBotNotification(
+  text: string,
+  options: TelegramNotificationOptions = {},
+): Promise<void> {
   const config = getConfig();
   const url = config.TELEGRAM_NOTIFICATION_URL;
 
@@ -94,6 +107,7 @@ export async function sendTelegramBotNotification(text: string): Promise<void> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'text', text }),
+      signal: AbortSignal.timeout(options.timeoutMs ?? TELEGRAM_NOTIFICATION_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -243,14 +257,16 @@ export async function notifyTwoBots(
   text: string,
   options: WeChatNotificationOptions = {},
 ): Promise<void> {
-  await sendTelegramBotNotification(text).catch((error) =>
-    logWarn('Telegram secondary notification failed', {
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  );
-  await sendWeChatBotNotification(text, ['self'], options).catch((error) =>
-    logWarn('WeChat secondary notification failed', {
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  );
+  await Promise.all([
+    sendTelegramBotNotification(text, { timeoutMs: options.timeoutMs }).catch((error) =>
+      logWarn('Telegram secondary notification failed', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+    sendWeChatBotNotification(text, ['self'], options).catch((error) =>
+      logWarn('WeChat secondary notification failed', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+  ]);
 }

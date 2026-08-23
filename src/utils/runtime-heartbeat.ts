@@ -15,7 +15,7 @@ function heartbeatKey(role: RuntimeRole): string {
   return `ops:runtime-heartbeat:${role}`;
 }
 
-function releaseRevision(): string {
+export function runtimeReleaseRevision(): string {
   return (
     process.env.DEPLOY_SHA?.trim() ||
     process.env.GIT_SHA?.trim() ||
@@ -28,17 +28,30 @@ export async function writeRuntimeHeartbeat(role: RuntimeRole): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
   await redis.set(
     heartbeatKey(role),
-    JSON.stringify({ role, releaseSha: releaseRevision(), lastSeenAt: new Date().toISOString() }),
+    JSON.stringify({
+      role,
+      releaseSha: runtimeReleaseRevision(),
+      lastSeenAt: new Date().toISOString(),
+    }),
     'EX',
     RUNTIME_HEARTBEAT_TTL_SECONDS,
   );
 }
 
+export function isRuntimeHeartbeatHealthy(
+  heartbeat: RuntimeHeartbeat,
+  expectedReleaseSha = runtimeReleaseRevision(),
+  now = Date.now(),
+): boolean {
+  if (heartbeat.releaseSha !== expectedReleaseSha) return false;
+  const lastSeen = new Date(heartbeat.lastSeenAt).getTime();
+  return Number.isFinite(lastSeen) && now - lastSeen <= RUNTIME_HEARTBEAT_MAX_AGE_MS;
+}
+
 export async function checkRuntimeHeartbeat(role: RuntimeRole): Promise<boolean> {
   const heartbeat = await readRuntimeHeartbeat(role);
   if (!heartbeat) return false;
-  const lastSeen = new Date(heartbeat.lastSeenAt).getTime();
-  return Number.isFinite(lastSeen) && Date.now() - lastSeen <= RUNTIME_HEARTBEAT_MAX_AGE_MS;
+  return isRuntimeHeartbeatHealthy(heartbeat);
 }
 
 export async function readRuntimeHeartbeat(role: RuntimeRole): Promise<RuntimeHeartbeat | null> {

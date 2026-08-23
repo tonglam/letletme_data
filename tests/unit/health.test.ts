@@ -46,4 +46,20 @@ describe('data API readiness', () => {
       },
     });
   });
+
+  test('fails a dependency probe that exceeds the readiness deadline', async () => {
+    const started = Date.now();
+    const result = await checkReadiness({
+      postgres: () => new Promise<boolean>(() => undefined),
+      cacheRedis: async () => true,
+      queueRedis: async () => true,
+      activeSeason: async () => true,
+      screenshotRetentionConfigured: async () => true,
+      probeTimeoutMs: 10,
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.dependencies.postgres).toBe(false);
+    expect(Date.now() - started).toBeLessThan(250);
+  });
 });

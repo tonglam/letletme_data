@@ -111,7 +111,17 @@ end
 return limit
 `;
 
-type LocalWaiter = { priority: FplRequestPriority; resolve: () => void };
+export type FplAdmissionOptions = {
+  deadlineAt?: number;
+};
+
+type LocalWaiter = {
+  priority: FplRequestPriority;
+  deadlineAt?: number;
+  timeout: ReturnType<typeof setTimeout> | null;
+  resolve: (release: () => void) => void;
+  reject: (error: FplAdmissionUnavailableError) => void;
+};
 let localInflight = 0;
 let localLive = 0;
 let localBulk = 0;
@@ -129,57 +139,105 @@ function localCanStart(priority: FplRequestPriority): boolean {
   return true;
 }
 
-function localDrain(): void {
-  while (localWaiters.length) {
-    const liveIndex = localWaiters.findIndex((item) => item.priority === 'live');
-    const index = liveIndex >= 0 ? liveIndex : 0;
-    const selected = localWaiters[index];
-    if (!selected || !localCanStart(selected.priority)) return;
-    localWaiters.splice(index, 1);
-    localInflight += 1;
-    if (selected.priority === 'live') localLive += 1;
-    else localBulk += 1;
-    selected.resolve();
-  }
-}
-
-function localAcquire(priority: FplRequestPriority): Promise<() => void> {
-  if (!localCanStart(priority)) {
-    return new Promise<void>((resolve) => localWaiters.push({ priority, resolve })).then(() => {
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        localInflight -= 1;
-        if (priority === 'live') localLive -= 1;
-        else localBulk -= 1;
-        localDrain();
-      };
-    });
-  }
-  localInflight += 1;
-  if (priority === 'live') localLive += 1;
-  else localBulk += 1;
+function createLocalRelease(priority: FplRequestPriority): () => void {
   let released = false;
-  return Promise.resolve(() => {
+  return () => {
     if (released) return;
     released = true;
     localInflight -= 1;
     if (priority === 'live') localLive -= 1;
     else localBulk -= 1;
     localDrain();
-  });
+  };
 }
 
-async function distributedAcquire(priority: FplRequestPriority): Promise<() => void> {
+function localDrain(): void {
+  const now = Date.now();
+  for (let index = localWaiters.length - 1; index >= 0; index -= 1) {
+    const waiter = localWaiters[index];
+    if (waiter?.deadlineAt === undefined || waiter.deadlineAt > now) continue;
+    localWaiters.splice(index, 1);
+    if (waiter.timeout) clearTimeout(waiter.timeout);
+    waiter.reject(new FplAdmissionUnavailableError(new Error('Admission deadline exceeded')));
+  }
+  while (localWaiters.length) {
+    const liveIndex = localWaiters.findIndex((item) => item.priority === 'live');
+    const index = liveIndex >= 0 ? liveIndex : 0;
+    const selected = localWaiters[index];
+    if (!selected || !localCanStart(selected.priority)) return;
+    localWaiters.splice(index, 1);
+    if (selected.timeout) clearTimeout(selected.timeout);
+    localInflight += 1;
+    if (selected.priority === 'live') localLive += 1;
+    else localBulk += 1;
+    selected.resolve(createLocalRelease(selected.priority));
+  }
+}
+
+function localAcquire(
+  priority: FplRequestPriority,
+  options: FplAdmissionOptions,
+): Promise<() => void> {
+  if (options.deadlineAt !== undefined && options.deadlineAt <= Date.now()) {
+    return Promise.reject(
+      new FplAdmissionUnavailableError(new Error('Admission deadline exceeded')),
+    );
+  }
+  if (!localCanStart(priority)) {
+    return new Promise<() => void>((resolve, reject) => {
+      const waiter: LocalWaiter = {
+        priority,
+        deadlineAt: options.deadlineAt,
+        timeout: null,
+        resolve,
+        reject,
+      };
+      if (options.deadlineAt !== undefined) {
+        waiter.timeout = setTimeout(
+          () => {
+            const index = localWaiters.indexOf(waiter);
+            if (index < 0) return;
+            localWaiters.splice(index, 1);
+            reject(new FplAdmissionUnavailableError(new Error('Admission deadline exceeded')));
+            localDrain();
+          },
+          Math.max(options.deadlineAt - Date.now(), 0),
+        );
+      }
+      localWaiters.push(waiter);
+    });
+  }
+  localInflight += 1;
+  if (priority === 'live') localLive += 1;
+  else localBulk += 1;
+  return Promise.resolve(createLocalRelease(priority));
+}
+
+function remainingAdmissionMs(deadlineAt: number | undefined): number {
+  return deadlineAt === undefined ? Number.POSITIVE_INFINITY : deadlineAt - Date.now();
+}
+
+function assertAdmissionDeadline(deadlineAt: number | undefined): void {
+  if (remainingAdmissionMs(deadlineAt) <= 0) {
+    throw new FplAdmissionUnavailableError(new Error('Admission deadline exceeded'));
+  }
+}
+
+async function distributedAcquire(
+  priority: FplRequestPriority,
+  options: FplAdmissionOptions,
+): Promise<() => void> {
   const token = randomUUID();
   let redis: Awaited<ReturnType<typeof queueRedisSingleton.getClient>>;
   try {
+    assertAdmissionDeadline(options.deadlineAt);
     redis = await queueRedisSingleton.getClient();
+    assertAdmissionDeadline(options.deadlineAt);
   } catch (error) {
     throw new FplAdmissionUnavailableError(error);
   }
   for (;;) {
+    assertAdmissionDeadline(options.deadlineAt);
     let result: string[];
     try {
       result = (await redis.eval(
@@ -200,6 +258,22 @@ async function distributedAcquire(priority: FplRequestPriority): Promise<() => v
       throw new FplAdmissionUnavailableError(error);
     }
     if (result[0] === 'granted') {
+      if (remainingAdmissionMs(options.deadlineAt) <= 0) {
+        try {
+          await redis.eval(
+            RELEASE_SCRIPT,
+            4,
+            STATE_KEY,
+            LEASES_KEY,
+            LEASE_KEY_PREFIX,
+            LEASE_META_KEY,
+            token,
+          );
+        } catch {
+          // The expired lease is cleaned up by the next acquisition.
+        }
+        throw new FplAdmissionUnavailableError(new Error('Admission deadline exceeded'));
+      }
       logDebug('FPL request admitted by Redis lease', {
         priority,
         admissionVersion: ADMISSION_SCRIPT_VERSION,
@@ -223,15 +297,18 @@ async function distributedAcquire(priority: FplRequestPriority): Promise<() => v
         }
       };
     }
-    await new Promise<void>((resolve) =>
-      setTimeout(resolve, Math.max(10, Math.min(1_000, Number(result[2] ?? 100)))),
-    );
+    const waitMs = Math.max(10, Math.min(1_000, Number(result[2] ?? 100)));
+    const remaining = remainingAdmissionMs(options.deadlineAt);
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(waitMs, remaining)));
   }
 }
 
-export async function acquireFplRequest(priority: FplRequestPriority): Promise<() => void> {
-  if (useLocalTestScheduler()) return localAcquire(priority);
-  return distributedAcquire(priority);
+export async function acquireFplRequest(
+  priority: FplRequestPriority,
+  options: FplAdmissionOptions = {},
+): Promise<() => void> {
+  if (useLocalTestScheduler()) return localAcquire(priority, options);
+  return distributedAcquire(priority, options);
 }
 
 export function reportFplResponse(
@@ -281,5 +358,7 @@ export function resetFplAdmissionForTests(): void {
   localBulk = 0;
   localBulkLimit = BULK_MAX_INFLIGHT;
   localLastError = 0;
-  localWaiters.splice(0);
+  localWaiters.splice(0).forEach((waiter) => {
+    if (waiter.timeout) clearTimeout(waiter.timeout);
+  });
 }

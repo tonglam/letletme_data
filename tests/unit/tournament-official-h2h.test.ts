@@ -329,7 +329,7 @@ describe('official H2H source import', () => {
       new Set([1, 2]),
       snapshot,
       new Date('2026-08-13T01:00:00.000Z'),
-      { allowScoreFallback: true },
+      { finalizedThroughEventId: 1 },
     );
 
     expect(rows.battleRows[0]).toMatchObject({
@@ -363,7 +363,7 @@ describe('official H2H source import', () => {
     expect(unfinalized.every((standing) => standing.matches_played === 0)).toBe(true);
 
     const projected = projectOfficialH2HStandingsFromMatches(new Set([1, 2]), [match], {
-      allowScoreFallback: true,
+      finalizedThroughEventId: 1,
     });
 
     expect(projected).toEqual([
@@ -383,6 +383,72 @@ describe('official H2H source import', () => {
         matches_lost: 1,
         points_for: 24,
       }),
+    ]);
+  });
+
+  test('keeps later live-event outcomes unset when reconciling a finalized event', () => {
+    const matches = [
+      {
+        id: 9071,
+        event: 1,
+        entry_1_entry: 1,
+        entry_1_points: 50,
+        entry_1_win: 0,
+        entry_1_draw: 0,
+        entry_1_loss: 0,
+        entry_1_total: 0,
+        entry_2_entry: 2,
+        entry_2_points: 40,
+        entry_2_win: 0,
+        entry_2_draw: 0,
+        entry_2_loss: 0,
+        entry_2_total: 0,
+        winner: null,
+        is_bye: false,
+        knockout_name: null,
+        tiebreak: null,
+        sourceOrder: 0,
+      },
+      {
+        id: 9072,
+        event: 2,
+        entry_1_entry: 1,
+        entry_1_points: 12,
+        entry_1_win: 0,
+        entry_1_draw: 0,
+        entry_1_loss: 0,
+        entry_1_total: 0,
+        entry_2_entry: 2,
+        entry_2_points: 18,
+        entry_2_win: 0,
+        entry_2_draw: 0,
+        entry_2_loss: 0,
+        entry_2_total: 0,
+        winner: null,
+        is_bye: false,
+        knockout_name: null,
+        tiebreak: null,
+        sourceOrder: 1,
+      },
+    ];
+    const options = { finalizedThroughEventId: 1 };
+    const rows = buildOfficialH2HRows(
+      { ...singleEventTournament, totalTeamNum: 2, groupEndedEventId: 2 },
+      new Set([1, 2]),
+      { standings: [], matches },
+      new Date('2026-08-13T01:00:00.000Z'),
+      options,
+    );
+
+    expect(
+      rows.battleRows.map((row) => [row.eventId, row.homeMatchPoints, row.awayMatchPoints]),
+    ).toEqual([
+      [1, 3, 0],
+      [2, null, null],
+    ]);
+    expect(projectOfficialH2HStandingsFromMatches(new Set([1, 2]), matches, options)).toEqual([
+      expect.objectContaining({ entry: 1, total: 3, matches_played: 1, points_for: 50 }),
+      expect.objectContaining({ entry: 2, total: 0, matches_played: 1, points_for: 40 }),
     ]);
   });
 

@@ -19,6 +19,13 @@ const baseEnv = {
   BUG_REPORT_SCREENSHOT_RETENTION_DAYS: '90',
   BUG_REPORT_STORAGE_INTERNAL_URL: 'https://web.example.test/api/internal/bug-report-storage',
   BUG_REPORT_CLEANUP_SECRET: 'c'.repeat(64),
+  CONTENT_PIPELINE_ENABLED: 'false',
+  CONTENT_PUBLICATION_ENABLED: 'false',
+  BRIEFING_PUBLIC_ENABLED: 'false',
+  CONTENT_EDITOR_API_KEY_HASHES: '',
+  CONTENT_PUBLISHER_API_KEY_HASHES: '',
+  BRIEFING_REVALIDATE_URL: '',
+  BRIEFING_REVALIDATE_SECRET: '',
 };
 
 async function runEnvCheck(
@@ -54,6 +61,28 @@ describe('production environment preflight', () => {
 
   test('accepts a valid SHA-256 API key digest', async () => {
     expect(await runEnvCheck('a'.repeat(64))).toBe(0);
+  });
+
+  test('rejects malformed content role hashes and incomplete publication settings', async () => {
+    const digest = 'a'.repeat(64);
+    expect(await runEnvCheck(digest, { CONTENT_EDITOR_API_KEY_HASHES: 'not-a-digest' })).not.toBe(
+      0,
+    );
+    expect(
+      await runEnvCheck(digest, {
+        CONTENT_PIPELINE_ENABLED: 'true',
+        CONTENT_PUBLICATION_ENABLED: 'true',
+      }),
+    ).not.toBe(0);
+    expect(
+      await runEnvCheck(digest, {
+        CONTENT_PIPELINE_ENABLED: 'true',
+        CONTENT_PUBLICATION_ENABLED: 'true',
+        CONTENT_PUBLISHER_API_KEY_HASHES: 'b'.repeat(64),
+        BRIEFING_REVALIDATE_URL: 'https://web.example.test/api/briefing/revalidate',
+        BRIEFING_REVALIDATE_SECRET: 's'.repeat(32),
+      }),
+    ).toBe(0);
   });
 
   test('treats blank WeChat token as unset and still fail-closes production URL without token', async () => {
@@ -174,7 +203,9 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(
       /restore_stopped_services\(\)[\s\S]*?compose up -d --remove-orphans --no-build[\s\S]*?scheduler worker content-worker api/,
     );
-    expect(deployScript).toContain('APP_IMAGE="$DEPLOY_OLD_IMAGE"');
+    expect(deployScript).toContain(
+      '"$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"',
+    );
     expect(deployScript).toContain('load_backup_settings');
     expect(deployScript).toContain('read_env_setting DATABASE_BACKUP_DIR "$ENV_FILE"');
     expect(deployScript).toContain('DEPLOY_COMMITTED=false');

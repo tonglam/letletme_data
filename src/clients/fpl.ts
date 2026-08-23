@@ -640,7 +640,11 @@ class FPLClient {
       /\/event\/\d+\/live\/?$/.test(url) || /\/fixtures\/?(?:\?event=\d+)?$/.test(url)
         ? 'live'
         : 'bulk';
-    const releaseAdmission = await acquireFplRequest(priority);
+    const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
+    const started = Date.now();
+    const releaseAdmission = await acquireFplRequest(priority, {
+      deadlineAt: started + deadlineMs,
+    });
     const requestMetric = beginFplLogicalRequest(url);
     try {
       let lastError: unknown = null;
@@ -651,9 +655,6 @@ class FPLClient {
        * body buffering. Used if the body stalls so the catch path still honors it.
        */
       let pendingBackoffMs: number | null = null;
-      const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
-      const started = Date.now();
-
       const remainingMs = (): number => Math.max(deadlineMs - (Date.now() - started), 0);
 
       const statusOnlyResponse = (response: Response): Response =>

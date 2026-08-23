@@ -3,11 +3,21 @@ import {
   assertPrivateBugReportScreenshotBucket,
   createBugReportScreenshotStorage,
 } from './src/services/bug-report-screenshot-retention.service';
+import { assertContentRuntimeFlags, getContentRuntimeFlags } from './src/content/config';
 import { getConfig, validateEnvForCli } from './src/utils/config';
 import { logInfo } from './src/utils/logger';
 
 const result = validateEnvForCli();
 if (!result.ok) {
+  process.exit(1);
+}
+
+try {
+  assertContentRuntimeFlags(getContentRuntimeFlags());
+} catch (error) {
+  console.error('[env] content runtime validation FAILED', {
+    error: error instanceof Error ? error.message : 'UnknownError',
+  });
   process.exit(1);
 }
 
