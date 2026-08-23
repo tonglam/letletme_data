@@ -61,25 +61,35 @@ curl -X POST "$DATA_URL/event-lives/sync/1" -H "$DATA_AUTH_HEADER"
 `cache` publishes one coherent live revision. `sync` also persists event-live and explain facts.
 Both validate the complete current-season player and fixture identity baseline.
 
-## Official manager live read-through
+## Official manager live cache and refresh
 
 The GraphQL service uses this protected endpoint for official manager headlines. It is
 season-scoped, accepts at most 500 entries, and does not accept caller-supplied league
-identities. A tournament ID is checked against the current-season roster; H2H tournaments
-return `UNSUPPORTED_H2H_LIVE` and remain on the legacy GraphQL adapter.
+identities. A tournament ID is checked against the current-season roster.
+
+`readMode` defaults to `READ_THROUGH` for compatibility with older internal callers. Live GraphQL
+boards explicitly send `CACHE_ONLY`: that path reads only Redis and the PostgreSQL checkpoint,
+returns any durable last-good rows immediately, and makes no FPL request. It marks the scope hot
+for six hours and makes a bounded attempt to enqueue the independent `manager-live` worker. The
+worker refreshes Classic standings, H2H entry summaries, and missing Overall Rank asynchronously.
 
 ```bash
 curl -X POST "$DATA_URL/internal/manager-live/resolve" \
   -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
-  -d '{"eventId":1,"entryIds":[12345,67890],"tournamentId":42}'
+  -d '{"eventId":1,"entryIds":[12345,67890],"tournamentId":42,"readMode":"CACHE_ONLY"}'
 ```
 
 Rows are published under `OfficialManagerLive:{season}:{event}` with a 48-hour Redis
-retention window. Each row exposes `checkedAt` and `staleAt`. Rows outside the stale window
-are not returned; callers receive an explicit unavailable result instead of a locally
-calculated manager score. This is a forward-only contract: there is no local manager-score
-mode or rollback switch; an unavailable row is repaired by refreshing the official
-publication.
+retention window and in the PostgreSQL checkpoint. `staleAt` is a freshness signal, not a deletion
+boundary: an older official row is returned as `LAST_GOOD` until a newer official row replaces it.
+The response also exposes `managerRevision`, `dataAvailability`, `servedFrom`, `refreshQueued`,
+`checkedAt`, and `nextRefreshAt`. An entry with no durable official row remains unavailable; local
+lineup calculations never substitute for an official manager score.
+
+`manager-live` jobs deduplicate by scope and 30-second bucket, retry upstream 429/failures after
+30/60/120 seconds, and stop recurring after the six-hour hot marker expires or the event is both
+finished and data-checked. The queue participates in `/ready`, `/jobs/status`, worker heartbeat,
+quiescence, and final-failure alerting.
 
 ## Entries
 
