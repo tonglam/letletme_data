@@ -29,6 +29,10 @@ export type OfficialH2HSourceSnapshot = {
   matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
 };
 
+export type OfficialH2HSyncOptions = {
+  allowScoreFallback?: boolean;
+};
+
 function isRealOfficialH2HStanding(
   standing: RawFPLLeagueStandingsResult,
 ): standing is OfficialH2HStanding {
@@ -43,7 +47,10 @@ function integerOrZero(value: number | null | undefined): number {
   return Number.isInteger(value) ? Number(value) : 0;
 }
 
-function matchPoints(match: RawFPLLeagueH2HMatch): { home: number | null; away: number | null } {
+function matchPoints(
+  match: RawFPLLeagueH2HMatch,
+  allowScoreFallback = false,
+): { home: number | null; away: number | null } {
   const explicitOutcomeFields = [
     match.entry_1_win,
     match.entry_1_draw,
@@ -83,8 +90,10 @@ function matchPoints(match: RawFPLLeagueH2HMatch): { home: number | null; away: 
     };
   }
   // FPL currently returns the outcome fields as an all-zero placeholder while
-  // the points fields are already populated. Treat that shape as scoreable;
-  // keep a genuine 0-0 placeholder unplayed until FPL publishes an outcome.
+  // the points fields are already populated. Only treat that shape as
+  // scoreable after the local event has finished and been data-checked; live
+  // entry points can still move during a gameweek.
+  if (!allowScoreFallback) return { home: null, away: null };
   const hasNonZeroScores =
     typeof match.entry_1_points === 'number' &&
     typeof match.entry_2_points === 'number' &&
@@ -234,6 +243,7 @@ export function projectOfficialH2HStandings(
 export function projectOfficialH2HStandingsFromMatches(
   entryIds: ReadonlySet<number>,
   matches: readonly (RawFPLLeagueH2HMatch & { sourceOrder: number })[],
+  options: OfficialH2HSyncOptions = {},
 ): OfficialH2HStanding[] {
   const totals = new Map<
     number,
@@ -261,7 +271,7 @@ export function projectOfficialH2HStandingsFromMatches(
 
   for (const match of matches) {
     if (isOfficialKnockoutMatch(match)) continue;
-    const outcome = matchPoints(match);
+    const outcome = matchPoints(match, options.allowScoreFallback === true);
     if (outcome.home === null || outcome.away === null) continue;
     for (const side of [
       {
@@ -427,6 +437,7 @@ export function buildOfficialH2HRows(
   entryIds: ReadonlySet<number>,
   snapshot: OfficialH2HSourceSnapshot,
   checkedAt: Date,
+  options: OfficialH2HSyncOptions = {},
 ): {
   scheduleHash: string;
   battleRows: DbTournamentBattleGroupResultInsert[];
@@ -443,7 +454,7 @@ export function buildOfficialH2HRows(
   const configuredTeamCount = tournament.knockoutTeamNum ?? 0;
 
   for (const match of snapshot.matches) {
-    const points = matchPoints(match);
+    const points = matchPoints(match, options.allowScoreFallback === true);
     const knockoutName = officialKnockoutName(match);
     if (!isOfficialKnockoutMatch(match)) {
       battleRows.push({
@@ -555,6 +566,7 @@ export async function syncOfficialH2HTournament(
   season: FplSeasonRef,
   tournament: TournamentSyncContext,
   reconcileEventId?: number,
+  options: OfficialH2HSyncOptions = {},
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
   if (!isOfficialH2HTournament(tournament) || !tournament.leagueId) {
     throw new ValidationError(
@@ -627,7 +639,7 @@ export async function syncOfficialH2HTournament(
     }
   }
   const checkedAt = new Date();
-  const officialRows = buildOfficialH2HRows(tournament, entryIdSet, snapshot, checkedAt);
+  const officialRows = buildOfficialH2HRows(tournament, entryIdSet, snapshot, checkedAt, options);
   const aggregateTotals = await entryEventResultsRepository.aggregateTotalsByEntry(
     season,
     entryIds,
@@ -638,6 +650,7 @@ export async function syncOfficialH2HTournament(
   const matchDerivedStandings = projectOfficialH2HStandingsFromMatches(
     entryIdSet,
     snapshot.matches,
+    options,
   );
   const officialStandingsHaveScores = snapshot.standings.some(
     (standing) =>
