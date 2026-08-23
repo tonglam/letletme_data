@@ -178,17 +178,35 @@ describe('classic manager live fallback', () => {
     const preservedClassicRow = {
       source: 'FPL_CLASSIC_STANDINGS',
       overallRank: 640_000,
+      checkedAt: '2026-08-23T10:00:00.000Z',
     };
 
-    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, false, true)).toBeTrue();
-    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, false, false)).toBeFalse();
-    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, true, false)).toBeTrue();
+    expect(
+      shouldRetryPendingClassicOverallRank(preservedClassicRow, false, '2026-08-23T10:00:01.000Z'),
+    ).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, false, undefined)).toBeFalse();
+    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, true, undefined)).toBeTrue();
     expect(
       shouldRetryPendingClassicOverallRank(
         { ...preservedClassicRow, overallRank: null },
         false,
-        false,
+        undefined,
       ),
+    ).toBeTrue();
+  });
+
+  test('drops a failed OR retry after a later request publishes a positive row', () => {
+    const laterClassicRow = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      overallRank: 640_000,
+      checkedAt: '2026-08-23T10:00:02.000Z',
+    };
+
+    expect(
+      shouldRetryPendingClassicOverallRank(laterClassicRow, false, '2026-08-23T10:00:01.000Z'),
+    ).toBeFalse();
+    expect(
+      shouldRetryPendingClassicOverallRank(laterClassicRow, true, '2026-08-23T10:00:01.000Z'),
     ).toBeTrue();
   });
 

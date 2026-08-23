@@ -107,11 +107,26 @@ export const shouldRetryPendingClassicOverallRank = (
     | Readonly<{
         source: string;
         overallRank: number | null | undefined;
+        checkedAt: string;
       }>
     | undefined,
   standingsPending: boolean,
-  foregroundRetryPending: boolean,
-): boolean => foregroundRetryPending || shouldRefreshClassicOverallRank(row, standingsPending);
+  foregroundRetryCutoff: string | undefined,
+): boolean => {
+  if (standingsPending) return true;
+  if (foregroundRetryCutoff === undefined) {
+    return shouldRefreshClassicOverallRank(row, false);
+  }
+
+  const rowCheckedAt = Date.parse(row?.checkedAt ?? '');
+  const retryCutoff = Date.parse(foregroundRetryCutoff);
+  const supersededByLaterRefresh =
+    isPositiveOverallRank(row?.overallRank) &&
+    Number.isFinite(rowCheckedAt) &&
+    Number.isFinite(retryCutoff) &&
+    rowCheckedAt > retryCutoff;
+  return !supersededByLaterRefresh;
+};
 
 export const shouldPreserveClassicStandingForRank = <T extends Readonly<{ source: string }>>(
   requested: boolean | undefined,

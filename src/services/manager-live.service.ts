@@ -624,77 +624,12 @@ const refreshClassicStandings = async (
         const previous = rows.get(row.entryId);
         if (!previous || !isFresh(previous)) found += 1;
         fetchedRows.push(row);
-        rows.set(row.entryId, withPreservedOverallRank(row, previous?.overallRank));
       }
       if (!response.standings.has_next) {
         exhausted = true;
         break;
       }
     }
-    const publishedRows = await runManagerLivePublication(
-      managerLivePublicationKey(season.seasonCode, eventId, classicScope),
-      async () => {
-        // Network pagination happens outside the publication gate. Stamp the
-        // rows only after the gate is acquired so a crawl that finishes after
-        // an OR write is also ordered after that write during reconciliation.
-        const publicationCheckedAt = nowIso();
-        const latestRows = await readCachedAndCheckpointRows(
-          redis,
-          season,
-          eventId,
-          classicScope,
-          fetchedRows.map((row) => row.entryId),
-          rows,
-        );
-        const mergedRows = fetchedRows.map((row) => {
-          const latest = latestRows.get(row.entryId);
-          const { revision: _revision, ...withoutRevision } = row;
-          const restamped = withRevision({
-            ...withoutRevision,
-            checkedAt: publicationCheckedAt,
-            staleAt: plusSeconds(publicationCheckedAt, STALE_SECONDS),
-          });
-          const candidate = withPreservedOverallRank(restamped, latest?.overallRank);
-          const merged = mergeLatestManagerLiveRow(latest, candidate);
-          rows.set(merged.entryId, merged);
-          return merged;
-        });
-        await writeRows(
-          redis,
-          season.seasonCode,
-          eventId,
-          classicScope,
-          mergedRows,
-          mergedRows.length > 0
-            ? {
-                season: season.seasonCode,
-                eventId,
-                source: 'FPL_CLASSIC_STANDINGS',
-                leagueId,
-                rowCount: mergedRows.length,
-                checkedAt: publicationCheckedAt,
-                revision: mergedRows[0]?.revision ?? null,
-                nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-              }
-            : undefined,
-          `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
-        );
-        await writeCheckpointRows(season, eventId, classicScope, mergedRows);
-        return mergedRows;
-      },
-    );
-    logDebug('Official classic manager live refresh completed', {
-      eventId,
-      leagueId,
-      requested: targetIds.size,
-      fetched: publishedRows.length,
-    });
-    return {
-      complete: exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES,
-      nextPage,
-      errorCode: null,
-      refreshedEntryIds: fetchedRows.map((row) => row.entryId),
-    };
   } catch (error) {
     refreshErrorCode =
       error instanceof FPLClientError && error.status === 429
@@ -705,13 +640,90 @@ const refreshClassicStandings = async (
       leagueId,
       error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
     });
-    return {
-      complete: false,
-      nextPage,
-      errorCode: refreshErrorCode,
-      refreshedEntryIds: fetchedRows.map((row) => row.entryId),
-    };
   }
+
+  let publishedRows: ManagerLiveScoreRow[] = [];
+  if (fetchedRows.length > 0) {
+    try {
+      publishedRows = await runManagerLivePublication(
+        managerLivePublicationKey(season.seasonCode, eventId, classicScope),
+        async () => {
+          // Network pagination happens outside the publication gate. Stamp the
+          // rows only after the gate is acquired so a crawl that finishes after
+          // an OR write is also ordered after that write during reconciliation.
+          const publicationCheckedAt = nowIso();
+          const latestRows = await readCachedAndCheckpointRows(
+            redis,
+            season,
+            eventId,
+            classicScope,
+            fetchedRows.map((row) => row.entryId),
+            rows,
+          );
+          const mergedRows = fetchedRows.map((row) => {
+            const latest = latestRows.get(row.entryId);
+            const { revision: _revision, ...withoutRevision } = row;
+            const restamped = withRevision({
+              ...withoutRevision,
+              checkedAt: publicationCheckedAt,
+              staleAt: plusSeconds(publicationCheckedAt, STALE_SECONDS),
+            });
+            const candidate = withPreservedOverallRank(restamped, latest?.overallRank);
+            return mergeLatestManagerLiveRow(latest, candidate);
+          });
+          await writeRows(
+            redis,
+            season.seasonCode,
+            eventId,
+            classicScope,
+            mergedRows,
+            {
+              season: season.seasonCode,
+              eventId,
+              source: 'FPL_CLASSIC_STANDINGS',
+              leagueId,
+              rowCount: mergedRows.length,
+              checkedAt: publicationCheckedAt,
+              revision: mergedRows[0]?.revision ?? null,
+              nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+            },
+            `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
+          );
+          await writeCheckpointRows(season, eventId, classicScope, mergedRows);
+          for (const row of mergedRows) rows.set(row.entryId, row);
+          return mergedRows;
+        },
+      );
+    } catch (error) {
+      refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+      // No row can be reported refreshed unless both publication writes
+      // completed. Restart pagination from this batch's first page so a later
+      // retry cannot skip rows that existed only in process memory.
+      nextPage = startPage;
+      logWarn('Official classic manager standings publication failed', {
+        eventId,
+        leagueId,
+        error: error instanceof Error ? error.name : 'unknown',
+      });
+    }
+  }
+
+  logDebug('Official classic manager live refresh completed', {
+    eventId,
+    leagueId,
+    requested: targetIds.size,
+    fetched: fetchedRows.length,
+    published: publishedRows.length,
+    partial: refreshErrorCode !== null,
+  });
+  return {
+    complete:
+      refreshErrorCode === null &&
+      (exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES),
+    nextPage,
+    errorCode: refreshErrorCode,
+    refreshedEntryIds: publishedRows.map((row) => row.entryId),
+  };
 };
 
 const nextRefresh = (eventFinished: boolean): string =>
@@ -992,7 +1004,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       ),
     );
     let pendingOverallRank = overallRankPlan.entryIds;
-    let foregroundOverallRankRetryEntryIds = new Set<number>();
+    let foregroundOverallRankRetryCutoffs = new Map<number, string>();
     if (overallRankPlan.foregroundEntryIds.length > 0) {
       const summaryRefresh = await refreshEntrySummaries(
         season,
@@ -1008,11 +1020,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         overallRankPlan.entryIds,
         summaryRefresh.overallRankRefreshedEntryIds,
       );
-      foregroundOverallRankRetryEntryIds = new Set(
+      const foregroundRetryCutoff = nowIso();
+      foregroundOverallRankRetryCutoffs = new Map(
         pendingOverallRankRefreshEntryIds(
           overallRankPlan.foregroundEntryIds,
           summaryRefresh.overallRankRefreshedEntryIds,
-        ),
+        ).map((entryId) => [entryId, foregroundRetryCutoff]),
       );
     }
 
@@ -1049,7 +1062,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           shouldRetryPendingClassicOverallRank(
             backgroundRows.get(entryId),
             unresolvedStandingsAtStart.has(entryId),
-            foregroundOverallRankRetryEntryIds.has(entryId),
+            foregroundOverallRankRetryCutoffs.get(entryId),
           ),
         );
         if (unresolvedStandings.length === 0 && unresolvedOverallRank.length === 0) {
