@@ -15,6 +15,35 @@ describe('Understat client boundary', () => {
     expect(UnderstatLeagueResponseSchema.parse(UNDERSTAT_LEAGUE_FIXTURE).dates[0].id).toBe(28786);
   });
 
+  test('normalizes omitted forecasts for future fixtures', () => {
+    const { forecast, ...unplayedDate } = UNDERSTAT_LEAGUE_FIXTURE.dates[0];
+    expect(forecast).toBeDefined();
+
+    const parsed = UnderstatLeagueResponseSchema.parse({
+      ...UNDERSTAT_LEAGUE_FIXTURE,
+      dates: [{ ...unplayedDate, isResult: false }],
+    });
+
+    expect(parsed.dates[0].forecast).toEqual({ w: null, d: null, l: null });
+  });
+
+  test('rejects omitted forecasts for completed fixtures', () => {
+    const { forecast, ...completedDate } = UNDERSTAT_LEAGUE_FIXTURE.dates[0];
+    expect(forecast).toBeDefined();
+
+    const result = UnderstatLeagueResponseSchema.safeParse({
+      ...UNDERSTAT_LEAGUE_FIXTURE,
+      dates: [completedDate],
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toContainEqual(
+        expect.objectContaining({ path: ['dates', 0, 'forecast'] }),
+      );
+    }
+  });
+
   test('is a hard no-network gate when disabled', async () => {
     let calls = 0;
     const client = new UnderstatClient({

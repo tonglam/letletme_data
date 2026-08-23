@@ -28,6 +28,16 @@ export const UnderstatIdSchema = UnderstatIntegerSchema.refine((value) => value 
 const nullableNumber = UnderstatNumberSchema.nullable();
 const nullableInteger = UnderstatIntegerSchema.nullable();
 
+const UnderstatForecastSchema = z
+  .object({
+    w: nullableNumber,
+    d: nullableNumber,
+    l: nullableNumber,
+  })
+  .passthrough();
+
+const EMPTY_FORECAST = { w: null, d: null, l: null };
+
 export const UnderstatTeamReferenceSchema = z
   .object({
     id: UnderstatIdSchema,
@@ -45,17 +55,23 @@ export const UnderstatMatchDateSchema = z
     goals: z.object({ h: nullableInteger, a: nullableInteger }).passthrough(),
     xG: z.object({ h: nullableNumber, a: nullableNumber }).passthrough(),
     datetime: z.string().min(1),
-    forecast: z
-      .object({
-        w: nullableNumber,
-        d: nullableNumber,
-        l: nullableNumber,
-      })
-      .passthrough(),
+    // Understat omits forecasts for future/unplayed fixtures.  Keep the
+    // match row and normalize the absent provider field to nullable values.
+    forecast: UnderstatForecastSchema.nullish(),
     side: z.enum(['h', 'a']).optional(),
     result: z.enum(['w', 'd', 'l']).optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((value, context) => {
+    if (value.isResult && value.forecast == null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['forecast'],
+        message: 'Completed fixtures must include forecast',
+      });
+    }
+  })
+  .transform((value) => ({ ...value, forecast: value.forecast ?? EMPTY_FORECAST }));
 
 export const UnderstatTeamHistorySchema = z
   .object({
