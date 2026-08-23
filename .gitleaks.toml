@@ -8,3 +8,14 @@ description = "Explicit placeholder values used by tracked environment examples"
 regexes = [
   '''(?i)^(?:replace(?:_with)?_.*|your_.*|.*example.*|pass(?:word)?|secret|\[.*\])$''',
 ]
+
+[[allowlists]]
+description = "Historical migration ledger fixture contains only migration SHA-256 checksums"
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''^tests/fixtures/platform-production-ledger\.sql$''',
+]
+regexes = [
+  '''^\s*\('[0-9]{4}_[a-z0-9_]+\.sql', '[a-f0-9]{64}'\),?\s*$''',
+]

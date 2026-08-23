@@ -11,6 +11,10 @@ import {
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
+const retainedRevisionMigration = readFileSync(
+  'migrations/0038_my_fpl_retained_revision_reads.sql',
+  'utf8',
+);
 const publicationService = readFileSync(
   'src/services/my-fpl-snapshot-publication.service.ts',
   'utf8',
@@ -34,6 +38,25 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('24 * 60 * 60_000');
     expect(publicationService).toContain('publication.active = true');
     expect(publicationService).toContain('Publication is no longer the active My FPL revision');
+  });
+
+  test('keeps pinned superseded revisions readable for the bounded retention window', () => {
+    expect(retainedRevisionMigration).toMatch(
+      /published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'/,
+    );
+    expect(retainedRevisionMigration).toContain(
+      'CREATE POLICY my_fpl_snapshot_publications_graphql_readable',
+    );
+    expect(retainedRevisionMigration).toContain(
+      'CREATE POLICY my_fpl_snapshot_entries_graphql_readable',
+    );
+    expect(retainedRevisionMigration).toContain(
+      'CREATE POLICY my_fpl_snapshot_tournament_rows_graphql_readable',
+    );
+    expect(retainedRevisionMigration).toContain(
+      'CREATE POLICY my_fpl_snapshot_tournament_aggregates_graphql_readable',
+    );
+    expect(retainedRevisionMigration).not.toMatch(/USING\s*\(\s*true\s*\)/i);
   });
 
   test('captures official auto substitutions without inferring Bench Boost', () => {
