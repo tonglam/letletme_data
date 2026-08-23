@@ -48,8 +48,12 @@ const getClassicStandings = spyOn(fplClient, 'getLeagueClassicStandings').mockIm
   },
 );
 
-const { preserveClassicOverallRank, resolveManagerLiveScores, selectWorkerClassicFallbackTargets } =
-  await import('../../src/services/manager-live.service');
+const {
+  preserveClassicOverallRank,
+  resolveManagerLiveScores,
+  selectClassicOverallRankRefreshTargets,
+  selectWorkerClassicFallbackTargets,
+} = await import('../../src/services/manager-live.service');
 const { managerLiveAPI } = await import('../../src/api/manager-live.api');
 
 const cachedRow = (entryId: number, checkedAt: string) => ({
@@ -301,6 +305,43 @@ describe('manager live classic standings convergence', () => {
     expect(selectWorkerClassicFallbackTargets([101, 102, 103], rows as never, false)).toEqual([]);
     expect(selectWorkerClassicFallbackTargets([101, 102, 103], rows as never, true)).toEqual([
       102, 103,
+    ]);
+  });
+
+  test('rotates positive overall ranks while prioritizing missing values', () => {
+    const positiveRows = new Map(
+      Array.from(
+        { length: 8 },
+        (_, index) =>
+          [index + 1, { source: 'FPL_CLASSIC_STANDINGS', overallRank: 10_000 + index }] as const,
+      ),
+    );
+
+    expect(
+      selectClassicOverallRankRefreshTargets([...positiveRows.keys()], positiveRows, 4, 0),
+    ).toEqual([1, 2, 3, 4]);
+    expect(
+      selectClassicOverallRankRefreshTargets([...positiveRows.keys()], positiveRows, 4, 1),
+    ).toEqual([5, 6, 7, 8]);
+
+    const mixedRows = new Map(
+      Array.from(
+        { length: 10 },
+        (_, index) =>
+          [
+            index + 1,
+            {
+              source: 'FPL_CLASSIC_STANDINGS',
+              overallRank: index < 6 ? null : 20_000 + index,
+            },
+          ] as const,
+      ),
+    );
+    expect(selectClassicOverallRankRefreshTargets([...mixedRows.keys()], mixedRows, 4, 0)).toEqual([
+      1, 2, 3, 7,
+    ]);
+    expect(selectClassicOverallRankRefreshTargets([...mixedRows.keys()], mixedRows, 4, 1)).toEqual([
+      4, 5, 6, 8,
     ]);
   });
 });

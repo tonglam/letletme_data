@@ -17,7 +17,7 @@ import {
   type ManagerLiveJobData,
 } from '../queues/manager-live.queue';
 import { queueRedisSingleton } from '../queues/redis';
-import { logError, logInfo, logWarn } from '../utils/logger';
+import { logError, logInfo } from '../utils/logger';
 
 export async function markManagerLiveScopeHot(scope: ManagerLiveRefreshScope): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
@@ -98,14 +98,13 @@ export async function enqueueManagerLiveRefreshBatches(input: {
   eventId: number;
   entryIds: readonly number[];
   tournamentId?: number;
-  chunkEntries?: boolean;
   runAt?: Date;
   markHot?: boolean;
   source?: ManagerLiveJobData['source'];
 }): Promise<Job<ManagerLiveJobData>[]> {
   const runAt = input.runAt ?? new Date();
-  const entryChunks = managerLiveDispatchEntryChunks(input.entryIds, input.chunkEntries !== false);
-  const { chunkEntries: _chunkEntries, ...jobInput } = input;
+  const entryChunks = managerLiveDispatchEntryChunks(input.entryIds);
+  const jobInput = input;
   return Promise.all(
     entryChunks.map((entryIds) => enqueueManagerLiveRefresh({ ...jobInput, entryIds, runAt })),
   );
@@ -123,17 +122,10 @@ export async function scheduleNextManagerLiveRefresh(
     entryIds: normalizeManagerLiveEntryIds(jobData.entryIds),
     ...(jobData.tournamentId === undefined ? {} : { tournamentId: jobData.tournamentId }),
   };
-  let hotScope: ManagerLiveRefreshScope | null = null;
-  try {
-    hotScope = await readHotManagerLiveScope(scope);
-  } catch (error) {
-    logWarn('Could not read manager live hot scope; follow-up refresh stopped', {
-      eventId: jobData.eventId,
-      tournamentId: jobData.tournamentId ?? null,
-      error: error instanceof Error ? error.message : 'unknown',
-    });
-    return null;
-  }
+  // Do not swallow Redis failures here. Propagating them fails the current
+  // worker attempt, allowing BullMQ's configured 30/60/120-second retries to
+  // restore the recurring chain once queue Redis recovers.
+  const hotScope = await readHotManagerLiveScope(scope);
   if (!hotScope) return null;
   const requestedRunAt = new Date(nextRefreshAt);
   const runAt = Number.isFinite(requestedRunAt.getTime())

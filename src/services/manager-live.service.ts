@@ -25,6 +25,7 @@ import {
   planClassicManagerFallback,
 } from '../domain/manager-live-fallback';
 import {
+  MANAGER_LIVE_REFRESH_BUCKET_MS,
   MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
@@ -719,11 +720,52 @@ const refreshClassicStandings = async (
   }
 };
 
-const classicStandingNeedsOverallRank = (row: CachedRow | undefined): boolean =>
+const classicStandingNeedsOverallRank = (
+  row: Pick<CachedRow, 'source' | 'overallRank'> | undefined,
+): boolean =>
   row?.source === 'FPL_CLASSIC_STANDINGS' &&
   (typeof row.overallRank !== 'number' ||
     !Number.isSafeInteger(row.overallRank) ||
     row.overallRank <= 0);
+
+export const selectClassicOverallRankRefreshTargets = (
+  entryIds: readonly number[],
+  rows: ReadonlyMap<number, Pick<CachedRow, 'source' | 'overallRank'>>,
+  limit: number,
+  rotationBucket: number,
+): number[] => {
+  if (!Number.isSafeInteger(limit) || limit <= 0) return [];
+  const normalized = Array.from(new Set(entryIds)).sort((left, right) => left - right);
+  const missing = normalized.filter((entryId) =>
+    classicStandingNeedsOverallRank(rows.get(entryId)),
+  );
+  const enriched = normalized.filter((entryId) => {
+    const row = rows.get(entryId);
+    return (
+      row?.source === 'FPL_CLASSIC_STANDINGS' &&
+      typeof row.overallRank === 'number' &&
+      Number.isSafeInteger(row.overallRank) &&
+      row.overallRank > 0
+    );
+  });
+  const bucket = Number.isSafeInteger(rotationBucket) ? Math.max(0, rotationBucket) : 0;
+
+  const rotatedTake = (values: readonly number[], count: number): number[] => {
+    if (values.length === 0 || count <= 0) return [];
+    const take = Math.min(values.length, count);
+    const start = ((bucket % values.length) * take) % values.length;
+    return Array.from({ length: take }, (_, offset) => values[(start + offset) % values.length]!);
+  };
+
+  // Missing OR remains the priority, but permanently failing entries must not
+  // freeze every already-enriched manager forever. Reserve one slot for the
+  // positive-OR rotation whenever both sets exist, and rotate both sets by the
+  // 30-second worker bucket so every manager is eventually revisited.
+  const missingLimit = enriched.length > 0 ? Math.max(1, limit - 1) : limit;
+  const selected = rotatedTake(missing, missingLimit);
+  selected.push(...rotatedTake(enriched, limit - selected.length));
+  return selected;
+};
 
 const nextRefresh = (eventFinished: boolean): string =>
   new Date(Date.now() + (eventFinished ? 60_000 : 30_000)).toISOString();
@@ -948,10 +990,6 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         eventId: input.eventId,
         entryIds: uniqueEntryIds,
         ...(input.tournamentId === undefined ? {} : { tournamentId: input.tournamentId }),
-        // Classic standings are one paginated league feed and keep a cursor in
-        // one bounded tournament job. Entry-summary workloads are independent
-        // per manager and can be safely split for queue throughput.
-        chunkEntries: tournament?.leagueType !== 'classic',
       });
       refreshQueued = true;
     } catch (error) {
@@ -1043,7 +1081,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     }
   } else if (
     input.tournamentId !== undefined &&
-    (staleOrMissing.length > 0 || classicOverallRankMissing)
+    (completeRefresh || staleOrMissing.length > 0 || classicOverallRankMissing)
   ) {
     if (!tournament) throw new Error('Tournament validation unexpectedly missing');
     const classicLeagueId = tournament.leagueId;
@@ -1079,9 +1117,14 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     // GraphQL layer fall back to the stale rank captured when the manager
     // joined the tournament. Enrich the classic row with the current entry
     // summary rank while preserving its classic standings metrics.
-    const classicOverallRankTargets = uniqueEntryIds.filter((entryId) =>
-      classicStandingNeedsOverallRank(rows.get(entryId)),
-    );
+    const classicOverallRankTargets = completeRefresh
+      ? selectClassicOverallRankRefreshTargets(
+          uniqueEntryIds,
+          rows,
+          MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
+          Math.floor(Date.now() / MANAGER_LIVE_REFRESH_BUCKET_MS),
+        )
+      : uniqueEntryIds.filter((entryId) => classicStandingNeedsOverallRank(rows.get(entryId)));
     if (classicOverallRankTargets.length > 0) {
       const foregroundTargets = completeRefresh
         ? takeWorkerSummaryTargets(

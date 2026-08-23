@@ -31,20 +31,15 @@ type ManagerLiveHotRedis = {
 export const normalizeManagerLiveEntryIds = (entryIds: readonly number[]): number[] =>
   Array.from(new Set(entryIds)).sort((left, right) => left - right);
 
-export const managerLiveEntryChunks = (entryIds: readonly number[]): number[][] => {
+// Keep one recurring hot scope for the complete request. The worker service
+// itself consumes at most MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE summaries per
+// run and rotates stale/missing entries on later buckets. Splitting here would
+// create hundreds of independently recurring FPL requests for a 500-entry
+// tournament.
+export const managerLiveDispatchEntryChunks = (entryIds: readonly number[]): number[][] => {
   const normalized = normalizeManagerLiveEntryIds(entryIds);
-  const chunks: number[][] = [];
-  for (let offset = 0; offset < normalized.length; offset += MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE) {
-    chunks.push(normalized.slice(offset, offset + MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE));
-  }
-  return chunks;
+  return normalized.length === 0 ? [] : [normalized];
 };
-
-export const managerLiveDispatchEntryChunks = (
-  entryIds: readonly number[],
-  chunkEntries = true,
-): number[][] =>
-  chunkEntries ? managerLiveEntryChunks(entryIds) : [normalizeManagerLiveEntryIds(entryIds)];
 
 const entrySetDigest = (entryIds: readonly number[]): string =>
   createHash('sha1')

@@ -6,10 +6,8 @@ import {
   MANAGER_LIVE_HOT_SCOPE_SECONDS,
   MANAGER_LIVE_RETRY_BASE_DELAY_MS,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
-  MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
   MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT,
-  managerLiveEntryChunks,
   managerLiveDispatchEntryChunks,
   managerLiveHotScopeKey,
   managerLiveRefreshJobId,
@@ -50,22 +48,11 @@ describe('manager live refresh policy', () => {
     expect(managerLiveHotScopeKey(otherSubset)).not.toBe(managerLiveHotScopeKey(scope));
   });
 
-  test('splits a 500-entry request into deterministic bounded worker jobs', () => {
+  test('keeps one normalized recurring hot scope for a 500-entry roster', () => {
     const input = Array.from({ length: 500 }, (_, index) => 10_500 - index);
-    const chunks = managerLiveEntryChunks([...input, input[0]!]);
+    const chunks = managerLiveDispatchEntryChunks([...input, input[0]!]);
 
-    expect(chunks).toHaveLength(Math.ceil(500 / MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE));
-    expect(chunks.every((chunk) => chunk.length <= MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE)).toBe(
-      true,
-    );
-    expect(chunks.flat()).toEqual([...input].sort((left, right) => left - right));
-  });
-
-  test('keeps a classic standings feed in one cursor-bearing worker job', () => {
-    const input = Array.from({ length: 500 }, (_, index) => index + 1);
-
-    expect(managerLiveDispatchEntryChunks(input, false)).toEqual([input]);
-    expect(managerLiveDispatchEntryChunks(input, true).length).toBeGreaterThan(1);
+    expect(chunks).toEqual([[...input].sort((left, right) => left - right)]);
   });
 
   test('persists a normalized hot scope for exactly six hours', async () => {
@@ -100,6 +87,19 @@ describe('manager live refresh policy', () => {
     };
     await expect(loadManagerLiveHotScope(expiredRedis as never, scope)).resolves.toBeNull();
     expect(parseManagerLiveHotScope('{"eventId":1}')).toBeNull();
+  });
+
+  test('propagates a hot-scope Redis read failure to its caller', async () => {
+    const failedRedis = {
+      set: async () => 'OK',
+      get: async () => {
+        throw new Error('queue Redis unavailable');
+      },
+    };
+
+    await expect(loadManagerLiveHotScope(failedRedis as never, scope)).rejects.toThrow(
+      'queue Redis unavailable',
+    );
   });
 
   test('configures one attempt plus 30, 60, and 120 second retries', () => {
