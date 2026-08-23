@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 import {
+  isRetryableMyFplCaptureContention,
   isMatchingProvisionalMyFplPublication,
   myFplSnapshotRedisManifestKey,
   resolveMyFplSnapshotCoverageState,
@@ -90,20 +91,62 @@ describe('My FPL daily snapshot publication contract', () => {
     );
   });
 
-  test('acquires the cross-process capture lock before opening the repeatable-read snapshot', () => {
+  test('retries a fresh repeatable-read transaction when the pooler-safe lock is busy', () => {
     const helper = publicationService.slice(
       publicationService.indexOf('async function runMyFplCaptureTransaction'),
       publicationService.indexOf('type EntryIdentity'),
     );
-    const sessionLock = helper.indexOf('SELECT pg_advisory_lock');
-    const transactionBegin = helper.indexOf('BEGIN ISOLATION LEVEL REPEATABLE READ');
-    expect(sessionLock).toBeGreaterThan(0);
-    expect(transactionBegin).toBeGreaterThan(sessionLock);
-    expect(helper).toContain('await reserved`COMMIT`');
-    expect(helper).toContain('await reserved`ROLLBACK`');
-    expect(helper).toContain('SELECT pg_advisory_unlock');
-    expect(helper).not.toContain('reserved.begin');
-    expect(helper).not.toContain('pg_advisory_xact_lock');
+    expect(helper).toContain('client.begin(\u0027isolation level repeatable read\u0027');
+    expect(helper).toContain('pg_try_advisory_xact_lock');
+    expect(helper).toContain('throw new MyFplCaptureLockBusyError()');
+    expect(helper).toContain('record.code === \u002740001\u0027');
+    expect(helper).toContain('my_fpl_snapshot_publications_active_key');
+    expect(helper).toContain('my_fpl_snapshot_publications_idempotency_key');
+    expect(publicationService).toContain('MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS = 2 * 60_000');
+    expect(publicationService).toContain('MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3');
+    expect(helper).toContain('let lockWaitRemainingMs = MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS');
+    expect(helper).toContain('let commitBoundaryConflictRetries = 0');
+    expect(helper).toContain('let idempotencyConflictRetries = 0');
+    expect(helper.indexOf('const lockAttemptStartedAt = Date.now()')).toBeLessThan(
+      helper.indexOf('client.begin('),
+    );
+    expect(helper).toContain('lockWaitRemainingMs -= Date.now() - lockAttemptStartedAt');
+    expect(helper).toMatch(/contention === 'idempotency'/);
+    expect(helper).toContain('idempotencyConflictRetries >= 1');
+    expect(publicationService).toContain('loadPublicationByIdempotencyKey');
+    expect(helper).not.toContain('const deadline = Date.now()');
+    expect(helper).not.toContain('pg_advisory_lock(');
+    expect(helper).not.toContain('client.reserve()');
+  });
+
+  test('retries only the active-publication unique conflict from a stale snapshot', () => {
+    expect(isRetryableMyFplCaptureContention({ code: '40001' })).toBe(true);
+    expect(
+      isRetryableMyFplCaptureContention({
+        code: '23505',
+        constraint_name: 'my_fpl_snapshot_publications_active_key',
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableMyFplCaptureContention({
+        code: '23505',
+        constraint_name: 'my_fpl_snapshot_publications_idempotency_key',
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableMyFplCaptureContention({
+        cause: {
+          code: '23505',
+          constraint: 'my_fpl_snapshot_publications_active_key',
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableMyFplCaptureContention({
+        code: '23505',
+        constraint_name: 'some_other_unique_constraint',
+      }),
+    ).toBe(false);
   });
 
   test('reuses only an identical provisional revision and reports coverage state', () => {

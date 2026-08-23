@@ -337,5 +337,59 @@ describe('My FPL onboarding publication correction', () => {
       pendingCorrectionEntryCount: 0,
       coverageState: 'COMPLETE',
     });
+
+    await sql`
+      UPDATE fpl.events
+      SET finished = true, data_checked = true,
+          data_checked_at = ${CAPTURE_NOW.toISOString()}::timestamptz
+      WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}
+    `;
+    const finalOverride = {
+      snapshotDate: SNAPSHOT_DATE,
+      now: CAPTURE_NOW,
+      actor: 'integration-test',
+      reason: 'verify concurrent final idempotency',
+      idempotencyKey: 'my-fpl-concurrent-final-integration',
+    };
+    const concurrentFinal = await Promise.all([
+      captureMyFplSnapshot(SEASON, EVENT_ID, 'FINAL', finalOverride),
+      captureMyFplSnapshot(SEASON, EVENT_ID, 'FINAL', finalOverride),
+    ]);
+    expect(concurrentFinal.map((result) => result.status).sort()).toEqual(['noop', 'published']);
+    expect(concurrentFinal[0].publication.revision).toBe(concurrentFinal[1].publication.revision);
+    expect(concurrentFinal[0].publication).toMatchObject({
+      kind: 'FINAL',
+      idempotencyKey: finalOverride.idempotencyKey,
+    });
+
+    const originalFinalRevision = concurrentFinal[0].publication.revision;
+    const supersedingFinal = await captureMyFplSnapshot(SEASON, EVENT_ID, 'FINAL', {
+      ...finalOverride,
+      reason: 'supersede the first explicit final override',
+      idempotencyKey: 'my-fpl-superseding-final-integration',
+    });
+    expect(supersedingFinal.status).toBe('published');
+    expect(supersedingFinal.publication.revision).toBeGreaterThan(originalFinalRevision);
+
+    const historicalReplay = await captureMyFplSnapshot(SEASON, EVENT_ID, 'FINAL', finalOverride);
+    expect(historicalReplay).toMatchObject({
+      status: 'noop',
+      publication: {
+        revision: originalFinalRevision,
+        idempotencyKey: finalOverride.idempotencyKey,
+      },
+    });
+    const finalPublicationState = await sql<
+      { publication_count: number; active_revision: number }[]
+    >`
+      SELECT count(*)::integer AS publication_count,
+             max(revision) FILTER (WHERE active)::integer AS active_revision
+      FROM competition.my_fpl_snapshot_publications
+      WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}
+    `;
+    expect(finalPublicationState[0]).toEqual({
+      publication_count: 5,
+      active_revision: supersedingFinal.publication.revision,
+    });
   });
 });
