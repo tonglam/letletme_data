@@ -11,7 +11,10 @@ import {
   type ManagerLiveJobData,
 } from '../queues/manager-live.queue';
 import { eventRepository } from '../repositories/events';
-import { refreshManagerLiveScores } from '../services/manager-live.service';
+import {
+  refreshManagerLiveScores,
+  type ManagerLiveResolveResult,
+} from '../services/manager-live.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
@@ -19,6 +22,23 @@ import { getQueueConnection } from '../utils/queue';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 import type { WorkerRuntime } from './worker-runtime';
+
+export async function scheduleManagerLiveContinuation(
+  jobData: ManagerLiveJobData,
+  result: Pick<
+    ManagerLiveResolveResult,
+    'nextRefreshAt' | 'classicStandingsNextPage' | 'errorCode'
+  >,
+  schedule: typeof scheduleNextManagerLiveRefresh = scheduleNextManagerLiveRefresh,
+): Promise<void> {
+  // Preserve the six-hour hot chain even when one entry in a larger scope
+  // fails. The current job still fails below so BullMQ applies 30/60/120s
+  // retries, while the deduplicated follow-up keeps healthy managers fresh.
+  await schedule(jobData, result.nextRefreshAt, result.classicStandingsNextPage);
+  if (result.errorCode === 'UPSTREAM_RATE_LIMITED' || result.errorCode === 'UPSTREAM_UNAVAILABLE') {
+    throw new Error(`Manager live refresh failed: ${result.errorCode}`);
+  }
+}
 
 export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
   if (job.name !== MANAGER_LIVE_JOBS.REFRESH || job.data.version !== MANAGER_LIVE_JOB_VERSION) {
@@ -57,11 +77,7 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
         ? {}
         : { classicStandingsStartPage: job.data.classicStandingsPage }),
     });
-    await scheduleNextManagerLiveRefresh(
-      job.data,
-      result.nextRefreshAt,
-      result.classicStandingsNextPage,
-    );
+    await scheduleManagerLiveContinuation(job.data, result);
     return result;
   });
 }

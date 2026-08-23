@@ -333,6 +333,21 @@ export const preserveClassicOverallRank = (
   return withRevision({ ...classicRow, overallRank: existing.overallRank });
 };
 
+export const enrichClassicStandingOverallRank = (
+  existing: ManagerLiveScoreRow,
+  overallRank: number | null | undefined,
+): ManagerLiveScoreRow => {
+  const { revision: _revision, ...classicRow } = existing;
+  const nextOverallRank =
+    typeof overallRank === 'number' && Number.isSafeInteger(overallRank) && overallRank > 0
+      ? overallRank
+      : existing.overallRank;
+  // An entry-summary request owns only the season-wide OR. It must not advance
+  // the freshness clock for standings event points, phase totals, or league
+  // rank that were not fetched in the same request.
+  return withRevision({ ...classicRow, overallRank: nextOverallRank });
+};
+
 export const selectWorkerClassicFallbackTargets = (
   pendingEntryIds: readonly number[],
   rows: ReadonlyMap<number, Pick<CachedRow, 'source'>>,
@@ -537,17 +552,7 @@ const refreshEntrySummaries = async (
           const existing = rows.get(entryId);
           const row =
             options.preserveClassicStanding && existing?.source === 'FPL_CLASSIC_STANDINGS'
-              ? (() => {
-                  const { revision: _revision, ...classicRow } = existing;
-                  return withRevision({
-                    ...classicRow,
-                    // Classic standings owns event/phase totals and league rank;
-                    // the entry summary owns the season-wide FPL OR.
-                    overallRank: summary.summary_overall_rank ?? null,
-                    checkedAt,
-                    staleAt: plusSeconds(checkedAt, STALE_SECONDS),
-                  });
-                })()
+              ? enrichClassicStandingOverallRank(existing, summary.summary_overall_rank)
               : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
           completedBatch.push(row);
           refreshed.push(row);
@@ -1367,19 +1372,9 @@ export async function refreshManagerLiveScores(input: {
     ...input,
     readMode: 'READ_THROUGH',
     completeRefresh: true,
-  })
-    .then((result) => {
-      if (
-        result.errorCode === 'UPSTREAM_RATE_LIMITED' ||
-        result.errorCode === 'UPSTREAM_UNAVAILABLE'
-      ) {
-        throw new Error(`Manager live refresh failed: ${result.errorCode}`);
-      }
-      return result;
-    })
-    .finally(() => {
-      managerLiveInFlight.delete(key);
-    });
+  }).finally(() => {
+    managerLiveInFlight.delete(key);
+  });
   managerLiveInFlight.set(key, promise);
   return promise;
 }

@@ -49,6 +49,7 @@ const getClassicStandings = spyOn(fplClient, 'getLeagueClassicStandings').mockIm
 );
 
 const {
+  enrichClassicStandingOverallRank,
   preserveClassicOverallRank,
   resolveManagerLiveScores,
   selectClassicOverallRankRefreshTargets,
@@ -273,6 +274,32 @@ describe('manager live READ_THROUGH source reporting', () => {
 });
 
 describe('manager live classic standings convergence', () => {
+  test('does not mark old standings fresh when only overall rank is enriched', () => {
+    const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const existing = {
+      ...cachedRow(101, checkedAt),
+      source: 'FPL_CLASSIC_STANDINGS',
+      totalScope: 'CLASSIC_PHASE',
+      leagueRank: 8,
+      overallRank: 456_789,
+    };
+
+    const enriched = enrichClassicStandingOverallRank(existing as never, 123_456);
+
+    expect(enriched).toMatchObject({
+      source: 'FPL_CLASSIC_STANDINGS',
+      leagueRank: 8,
+      overallRank: 123_456,
+      checkedAt: existing.checkedAt,
+      staleAt: existing.staleAt,
+    });
+    expect(enriched.revision).not.toBe(existing.revision);
+
+    const missingRank = enrichClassicStandingOverallRank(enriched, null);
+    expect(missingRank.overallRank).toBe(123_456);
+    expect(missingRank.checkedAt).toBe(existing.checkedAt);
+  });
+
   test('preserves an enriched overall rank when standings refresh the phase row', () => {
     const checkedAt = new Date().toISOString();
     const existing = { ...cachedRow(101, checkedAt), overallRank: 456_789 };
