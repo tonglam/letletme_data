@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  acquireDistributedLease,
+  classicManagerBackgroundStandingsStartPage,
   classicManagerSummaryFallbackEntryIds,
   classicManagerSummaryFallbackNeedsRefresh,
   createKeyedTaskSerializer,
@@ -176,6 +178,14 @@ describe('classic manager live fallback', () => {
     });
   });
 
+  test('resumes a cold-only standings crawl at the foreground cursor', () => {
+    expect(classicManagerBackgroundStandingsStartPage([11, 12], new Set([11, 12]), 5)).toBe(5);
+  });
+
+  test('restarts standings at page one when stale rows share the background crawl', () => {
+    expect(classicManagerBackgroundStandingsStartPage([11, 21], new Set([11]), 5)).toBe(1);
+  });
+
   test('bounds foreground summary requests while retaining all background work', () => {
     expect(planClassicManagerFallback([1, 2, 3, 4, 5], [], true)).toEqual({
       foregroundSummaryEntryIds: [1, 2, 3, 4],
@@ -345,6 +355,30 @@ describe('classic manager live fallback', () => {
     );
 
     await expect(pending).rejects.toThrow('shared cache unavailable');
+  });
+
+  test('fails closed when an entry-summary lease acquisition is ambiguous', async () => {
+    let observedError: unknown;
+    const pending = acquireDistributedLease(
+      async () => {
+        throw new Error('redis write timed out');
+      },
+      'fail-closed',
+      (error) => {
+        observedError = error;
+      },
+    );
+
+    await expect(pending).rejects.toThrow('redis write timed out');
+    expect(observedError).toBeInstanceOf(Error);
+  });
+
+  test('retains the durable classic fallback when lease coordination is unavailable', async () => {
+    expect(
+      await acquireDistributedLease(async () => {
+        throw new Error('redis unavailable');
+      }, 'fail-open'),
+    ).toBe('uncoordinated');
   });
 
   test('starts a fresh keyed fetch after the shared request settles', async () => {

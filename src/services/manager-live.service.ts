@@ -19,6 +19,8 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  acquireDistributedLease,
+  classicManagerBackgroundStandingsStartPage,
   classicManagerSummaryFallbackEntryIds,
   classicManagerSummaryFallbackNeedsRefresh,
   createKeyedTaskSerializer,
@@ -437,6 +439,7 @@ const runClassicStandingsRefresh = <T>(
   key: string,
   task: () => Promise<T>,
   priority: ManagerSummaryFetchPriority = 'foreground',
+  options: { acquireFailureMode?: 'fail-open' | 'fail-closed' } = {},
 ): Promise<T> => {
   if (!redis) return runClassicStandingsRefreshLocal(key, task, priority);
 
@@ -446,22 +449,23 @@ const runClassicStandingsRefresh = <T>(
     key,
     async () => {
       const lockToken = randomBytes(16).toString('hex');
-      let lockOwner = false;
-      try {
-        lockOwner =
-          (await redis.set(lockKey, lockToken, 'EX', CLASSIC_REFRESH_LOCK_SECONDS, 'NX')) === 'OK';
-      } catch (error) {
-        // Redis is an acceleration and coordination layer, not the source of
-        // truth. Continue through the PostgreSQL checkpoint guard when it is
-        // unavailable so live scores remain serviceable.
-        logWarn('Official manager distributed refresh lock unavailable', {
-          key,
-          error: error instanceof Error ? error.message : 'unknown',
-        });
+      const acquisition = await acquireDistributedLease(
+        async () =>
+          (await redis.set(lockKey, lockToken, 'EX', CLASSIC_REFRESH_LOCK_SECONDS, 'NX')) === 'OK',
+        options.acquireFailureMode ?? 'fail-open',
+        (error) =>
+          logWarn('Official manager distributed refresh lock unavailable', {
+            key,
+            error: error instanceof Error ? error.message : 'unknown',
+          }),
+      );
+      if (acquisition === 'uncoordinated') {
+        // Classic standings have an upstream publication clock and a durable
+        // PostgreSQL ordering guard, so they remain serviceable if Redis is
+        // unavailable. Unversioned entry summaries opt into fail-closed below.
         return { complete: true, value: await task() };
       }
-
-      if (!lockOwner) {
+      if (acquisition === 'contended') {
         // A present lease is either actively renewed or will expire. Never
         // bypass an owner merely because this waiter is old: Redis expiry is
         // the takeover signal for a crashed/wedged owner, while an active
@@ -554,6 +558,7 @@ const fetchDistributedManagerSummary = (
         },
       ),
     priority,
+    { acquireFailureMode: 'fail-closed' },
   );
 };
 
@@ -1291,6 +1296,11 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         ...rankOnlyTargets,
       ]),
     );
+    const backgroundStandingsStartPage = classicManagerBackgroundStandingsStartPage(
+      backgroundPlan.backgroundStandingsEntryIds,
+      coldEntryIds,
+      standings.nextPage,
+    );
     if (backgroundEntryIds.length > 0) {
       const backgroundKey = managerLiveBackgroundRefreshKey(
         `classic:${season.seasonCode}:${input.eventId}:${classicLeagueId}`,
@@ -1306,46 +1316,49 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           refreshedEntryIds: [],
         };
         if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
-          backgroundResult = await runManagerStandingsPageSequence(1, MAX_STANDINGS_PAGES, (page) =>
-            runClassicStandingsRefresh(
-              redis,
-              classicRefreshKey,
-              async () => {
-                // Re-read after entering every page-sized lane. Foreground
-                // work can jump ahead between pages, and this crawl observes
-                // any publication that completed while it yielded.
-                backgroundRows = await readBackgroundRows(
-                  redis,
-                  season,
-                  input.eventId,
-                  scope,
-                  backgroundEntryIds,
-                  capturedBackgroundRows,
-                );
-                const standingsTargets = pendingManagerRefreshEntryIds(
-                  backgroundPlan.backgroundStandingsEntryIds,
-                  backgroundRows,
-                  isFresh,
-                );
-                return standingsTargets.length > 0
-                  ? refreshClassicStandings(
-                      season,
-                      input.eventId,
-                      classicLeagueId,
-                      new Set(standingsTargets),
-                      backgroundRows,
-                      redis,
-                      { startPage: page, maxPages: 1 },
-                    )
-                  : {
-                      complete: true,
-                      nextPage: page,
-                      errorCode: null,
-                      refreshedEntryIds: [],
-                    };
-              },
-              'background',
-            ),
+          backgroundResult = await runManagerStandingsPageSequence(
+            backgroundStandingsStartPage,
+            MAX_STANDINGS_PAGES,
+            (page) =>
+              runClassicStandingsRefresh(
+                redis,
+                classicRefreshKey,
+                async () => {
+                  // Re-read after entering every page-sized lane. Foreground
+                  // work can jump ahead between pages, and this crawl observes
+                  // any publication that completed while it yielded.
+                  backgroundRows = await readBackgroundRows(
+                    redis,
+                    season,
+                    input.eventId,
+                    scope,
+                    backgroundEntryIds,
+                    capturedBackgroundRows,
+                  );
+                  const standingsTargets = pendingManagerRefreshEntryIds(
+                    backgroundPlan.backgroundStandingsEntryIds,
+                    backgroundRows,
+                    isFresh,
+                  );
+                  return standingsTargets.length > 0
+                    ? refreshClassicStandings(
+                        season,
+                        input.eventId,
+                        classicLeagueId,
+                        new Set(standingsTargets),
+                        backgroundRows,
+                        redis,
+                        { startPage: page, maxPages: 1 },
+                      )
+                    : {
+                        complete: true,
+                        nextPage: page,
+                        errorCode: null,
+                        refreshedEntryIds: [],
+                      };
+                },
+                'background',
+              ),
           );
         }
 

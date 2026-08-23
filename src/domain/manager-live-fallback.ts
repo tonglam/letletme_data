@@ -64,6 +64,23 @@ export type YieldingKeyedTaskAttempt<T> =
   | Readonly<{ complete: false }>
   | Readonly<{ complete: true; value: T }>;
 
+export type DistributedLeaseAcquireFailureMode = 'fail-open' | 'fail-closed';
+export type DistributedLeaseAcquireResult = 'owned' | 'contended' | 'uncoordinated';
+
+export const acquireDistributedLease = async (
+  acquire: () => Promise<boolean>,
+  failureMode: DistributedLeaseAcquireFailureMode,
+  onError?: (error: unknown) => void,
+): Promise<DistributedLeaseAcquireResult> => {
+  try {
+    return (await acquire()) ? 'owned' : 'contended';
+  } catch (error) {
+    onError?.(error);
+    if (failureMode === 'fail-closed') throw error;
+    return 'uncoordinated';
+  }
+};
+
 export const runYieldingKeyedTask = async <T>(
   run: KeyedTaskSerializer,
   key: string,
@@ -126,6 +143,20 @@ export const runManagerStandingsPageSequence = async <TError>(
     errorCode,
     refreshedEntryIds: Array.from(refreshedEntryIds),
   };
+};
+
+export const classicManagerBackgroundStandingsStartPage = (
+  standingsEntryIds: readonly number[],
+  coldEntryIds: ReadonlySet<number>,
+  foregroundNextPage: number,
+): number => {
+  if (!Number.isSafeInteger(foregroundNextPage) || foregroundNextPage <= 0) {
+    throw new RangeError('foregroundNextPage must be a positive integer');
+  }
+  // Stale standings can change on page 1 and therefore require a fresh crawl.
+  // A cold-only continuation has already paid for the bounded foreground
+  // prefix, so resume at the exact upstream cursor instead of re-fetching it.
+  return standingsEntryIds.some((entryId) => !coldEntryIds.has(entryId)) ? 1 : foregroundNextPage;
 };
 
 export const readThroughManagerSummaryResult = async <T>(
