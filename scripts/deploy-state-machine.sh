@@ -79,10 +79,48 @@ migration_ledger_fingerprint() {
   printf '%s\n' "$plan_output" | awk -F'"' '/"ledgerFingerprint"[[:space:]]*:/ { print $4; exit }'
 }
 
+release_sha_for_image() {
+  local image=${1:-}
+  local release_sha
+  [[ -n "$image" ]] || { printf '%s\n' unknown; return 0; }
+  release_sha=$(docker image inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$image" 2>/dev/null || true)
+  if [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "$release_sha"
+  else
+    echo "rollback image has no valid exact revision label; using release identity unknown" >&2
+    printf '%s\n' unknown
+  fi
+}
+
+restore_runtime_services() {
+  local previous_image=${1:-}
+  local previous_release_sha=${2:-unknown}
+  local previous_runner_release_sha=${3:-unknown}
+  [[ -n "$previous_image" ]] || return 1
+  if [[ ! "$previous_release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    previous_release_sha=unknown
+  fi
+  if [[ "$previous_runner_release_sha" != unknown && \
+    ! "$previous_runner_release_sha" =~ ^[0-9a-f]{7,128}$ ]]; then
+    previous_runner_release_sha=unknown
+  fi
+  (
+    export APP_IMAGE="$previous_image"
+    export DEPLOY_SHA="$previous_release_sha"
+    export CONTENT_MANIFEST_GIT_REVISION="$previous_release_sha"
+    export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"
+    compose up -d --remove-orphans --no-build scheduler worker content-worker api
+  )
+}
+
 restore_last_known_healthy_if_ledger_unchanged() {
   local previous_image=${1:-}
   local ledger_before=${2:-}
   local previous_revision=${3:-}
+  local previous_release_sha=${4:-unknown}
+  local previous_runner_release_sha=${5:-unknown}
   local ledger_after
   [[ -n "$previous_image" && -n "$ledger_before" ]] || return 1
   ledger_after=$(migration_ledger_fingerprint 2>/dev/null || true)
@@ -91,7 +129,8 @@ restore_last_known_healthy_if_ledger_unchanged() {
     if [[ -n "$previous_revision" ]]; then
       git reset --hard "$previous_revision"
     fi
-    APP_IMAGE="$previous_image" compose up -d --remove-orphans --no-build scheduler worker content-worker api
+    restore_runtime_services \
+      "$previous_image" "$previous_release_sha" "$previous_runner_release_sha"
     return 0
   fi
   echo 'migration ledger changed or could not be proven unchanged; forward-only recovery required' >&2

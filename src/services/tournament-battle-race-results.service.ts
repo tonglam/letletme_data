@@ -20,12 +20,11 @@ import {
 
 const officialH2HRecoveryTargets = new WeakMap<IncompleteDataSyncError, number[]>();
 
-async function getOfficialH2HSyncOptions(
-  season: FplSeasonRef,
-  eventId: number,
-): Promise<OfficialH2HSyncOptions> {
-  const event = await eventRepository.findById(season, eventId);
-  return { allowScoreFallback: event?.finished === true && event.dataChecked === true };
+async function getOfficialH2HSyncOptions(season: FplSeasonRef): Promise<OfficialH2HSyncOptions> {
+  const latestFinalizedEvent = await eventRepository.findLatestFinalized(season);
+  return {
+    finalizedThroughEventId: latestFinalizedEvent?.id ?? null,
+  };
 }
 
 export function getOfficialH2HRecoveryTargets(error: unknown): readonly number[] {
@@ -394,8 +393,8 @@ export async function syncOfficialH2HTournaments(
   ).filter(isOfficialH2HTournament);
   const options =
     tournaments.length > 0
-      ? await getOfficialH2HSyncOptions(season, eventId)
-      : { allowScoreFallback: false };
+      ? await getOfficialH2HSyncOptions(season)
+      : { finalizedThroughEventId: null };
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
@@ -448,8 +447,8 @@ export async function syncTournamentBattleRaceResults(
   }
 
   const officialH2HOptions = tournaments.some(isOfficialH2HTournament)
-    ? await getOfficialH2HSyncOptions(season, eventId)
-    : { allowScoreFallback: false };
+    ? await getOfficialH2HSyncOptions(season)
+    : { finalizedThroughEventId: null };
 
   let updatedGroups = 0;
   let updatedResults = 0;

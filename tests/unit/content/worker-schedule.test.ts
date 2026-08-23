@@ -7,7 +7,11 @@ import {
   resolvePollPhase,
 } from '../../../src/content/poll-policy';
 import { isAcquisitionRunStale } from '../../../src/content/acquisition/run-lifecycle';
-import { assertContentRuntimeFlags, type ContentRuntimeFlags } from '../../../src/content/config';
+import {
+  assertContentRuntimeFlags,
+  parseContentApiKeyHashes,
+  type ContentRuntimeFlags,
+} from '../../../src/content/config';
 
 const now = new Date('2026-08-20T10:00:00.000Z');
 
@@ -87,6 +91,45 @@ describe('content worker poll policy', () => {
         hermesDailyAudioMinutes: 1,
       }),
     ).toThrow('HERMES_TRANSCRIPT_URL must be an HTTP(S) URL without credentials');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        grokConcurrency: 2,
+        publicationEnabled: true,
+      }),
+    ).toThrow('BRIEFING_REVALIDATE_URL');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        grokConcurrency: 2,
+        publicationEnabled: true,
+        revalidationUrl: 'https://web.example.test/api/revalidate',
+        revalidationSecret: 's'.repeat(32),
+      }),
+    ).toThrow('CONTENT_PUBLISHER_API_KEY_HASHES');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        grokConcurrency: 2,
+        publicationEnabled: true,
+        revalidationUrl: 'https://web.example.test/api/revalidate',
+        revalidationSecret: 's'.repeat(32),
+        publisherApiKeyHashes: ['a'.repeat(64)],
+      }),
+    ).not.toThrow();
+  });
+
+  test('rejects malformed content role key hashes instead of dropping them', () => {
+    expect(parseContentApiKeyHashes(undefined, 'CONTENT_EDITOR_API_KEY_HASHES')).toEqual([]);
+    expect(
+      parseContentApiKeyHashes(
+        `${'a'.repeat(64)},${'A'.repeat(64)}`,
+        'CONTENT_EDITOR_API_KEY_HASHES',
+      ),
+    ).toEqual(['a'.repeat(64)]);
+    expect(() => parseContentApiKeyHashes('not-a-digest', 'CONTENT_EDITOR_API_KEY_HASHES')).toThrow(
+      'CONTENT_EDITOR_API_KEY_HASHES',
+    );
   });
 
   test('keeps FINAL_90 disabled unless a future duty window and budget are recorded', () => {

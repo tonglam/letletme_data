@@ -41,11 +41,17 @@ export type ContentRuntimeFlags = Readonly<{
   publisherApiKeyHashes: readonly string[];
 }>;
 
-const apiKeyHashes = (value: string | undefined): readonly string[] =>
-  (value ?? '')
-    .split(',')
-    .map((item) => item.trim().toLowerCase())
-    .filter((item) => /^[0-9a-f]{64}$/.test(item));
+export function parseContentApiKeyHashes(
+  value: string | undefined,
+  name: string,
+): readonly string[] {
+  if (!value?.trim()) return [];
+  const hashes = value.split(',').map((item) => item.trim().toLowerCase());
+  if (hashes.some((item) => !/^[0-9a-f]{64}$/.test(item))) {
+    throw new Error(`${name} must contain only comma-separated SHA-256 hex digests`);
+  }
+  return [...new Set(hashes)];
+}
 
 const booleanEnv = (value: string | undefined, fallback: boolean): boolean => {
   if (value === undefined) return fallback;
@@ -137,8 +143,14 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
     youtubeDataApiKeyPresent: Boolean(process.env.YOUTUBE_DATA_API_KEY?.trim()),
     revalidationUrl: process.env.BRIEFING_REVALIDATE_URL?.trim() || null,
     revalidationSecret: process.env.BRIEFING_REVALIDATE_SECRET?.trim() || null,
-    editorApiKeyHashes: apiKeyHashes(process.env.CONTENT_EDITOR_API_KEY_HASHES),
-    publisherApiKeyHashes: apiKeyHashes(process.env.CONTENT_PUBLISHER_API_KEY_HASHES),
+    editorApiKeyHashes: parseContentApiKeyHashes(
+      process.env.CONTENT_EDITOR_API_KEY_HASHES,
+      'CONTENT_EDITOR_API_KEY_HASHES',
+    ),
+    publisherApiKeyHashes: parseContentApiKeyHashes(
+      process.env.CONTENT_PUBLISHER_API_KEY_HASHES,
+      'CONTENT_PUBLISHER_API_KEY_HASHES',
+    ),
   };
 }
 
@@ -204,6 +216,20 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   }
   if (flags.publicationEnabled && !flags.pipelineEnabled) {
     throw new Error('CONTENT_PUBLICATION_ENABLED requires CONTENT_PIPELINE_ENABLED');
+  }
+  if (flags.revalidationUrl) {
+    assertHttpUrlWithoutCredentials(flags.revalidationUrl, 'BRIEFING_REVALIDATE_URL');
+  }
+  if (
+    flags.publicationEnabled &&
+    (!flags.revalidationUrl || !flags.revalidationSecret || flags.revalidationSecret.length < 32)
+  ) {
+    throw new Error(
+      'CONTENT_PUBLICATION_ENABLED requires BRIEFING_REVALIDATE_URL and a secret of at least 32 characters',
+    );
+  }
+  if (flags.publicationEnabled && flags.publisherApiKeyHashes.length === 0) {
+    throw new Error('CONTENT_PUBLICATION_ENABLED requires CONTENT_PUBLISHER_API_KEY_HASHES');
   }
   if (flags.briefingPublicEnabled && !flags.publicationEnabled) {
     throw new Error('BRIEFING_PUBLIC_ENABLED requires CONTENT_PUBLICATION_ENABLED');

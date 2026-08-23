@@ -18,7 +18,12 @@ export function signRevalidationPayload(input: {
 
 export async function dispatchPublicationOutbox(limit = 20): Promise<number> {
   const flags = getContentRuntimeFlags();
-  if (!flags.revalidationUrl || !flags.revalidationSecret) return 0;
+  if (!flags.revalidationUrl || !flags.revalidationSecret) {
+    if (flags.publicationEnabled) {
+      throw new Error('Content publication revalidation is enabled but not configured');
+    }
+    return 0;
+  }
   const db = await getDb();
   const rows = await db
     .select({

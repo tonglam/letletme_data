@@ -25,6 +25,7 @@ export type ReadinessResult = {
 };
 
 type DependencyProbe = () => Promise<boolean>;
+export const READINESS_PROBE_TIMEOUT_MS = 5000;
 
 const postgresProbe: DependencyProbe = async () => {
   await databaseSingleton.connect();
@@ -98,11 +99,22 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   );
 };
 
-async function safeProbe(probe: DependencyProbe): Promise<boolean> {
+async function safeProbe(
+  probe: DependencyProbe,
+  timeoutMs = READINESS_PROBE_TIMEOUT_MS,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
-    return await probe();
+    return await Promise.race([
+      probe(),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
   } catch {
     return false;
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -117,6 +129,7 @@ export async function checkReadiness(
     queueWorker: DependencyProbe;
     contentWorker: DependencyProbe;
     publicationConsistency: DependencyProbe;
+    probeTimeoutMs: number;
   }>,
 ): Promise<ReadinessResult> {
   const includeRuntimeDependencies =
@@ -136,13 +149,14 @@ export async function checkReadiness(
     publicationConsistency: publicationConsistencyProbe,
     ...probes,
   };
+  const probeTimeoutMs = probes?.probeTimeoutMs ?? READINESS_PROBE_TIMEOUT_MS;
   const [postgres, cacheRedis, queueRedis, activeSeason, screenshotRetentionConfigured] =
     await Promise.all([
-      safeProbe(configured.postgres),
-      safeProbe(configured.cacheRedis),
-      safeProbe(configured.queueRedis),
-      safeProbe(configured.activeSeason),
-      safeProbe(configured.screenshotRetentionConfigured),
+      safeProbe(configured.postgres, probeTimeoutMs),
+      safeProbe(configured.cacheRedis, probeTimeoutMs),
+      safeProbe(configured.queueRedis, probeTimeoutMs),
+      safeProbe(configured.activeSeason, probeTimeoutMs),
+      safeProbe(configured.screenshotRetentionConfigured, probeTimeoutMs),
     ]);
   const baseDependencies = {
     postgres,
@@ -158,10 +172,10 @@ export async function checkReadiness(
     };
   }
   const [scheduler, queueWorker, contentWorker, publicationConsistency] = await Promise.all([
-    safeProbe(configured.scheduler),
-    safeProbe(configured.queueWorker),
-    safeProbe(configured.contentWorker),
-    safeProbe(configured.publicationConsistency),
+    safeProbe(configured.scheduler, probeTimeoutMs),
+    safeProbe(configured.queueWorker, probeTimeoutMs),
+    safeProbe(configured.contentWorker, probeTimeoutMs),
+    safeProbe(configured.publicationConsistency, probeTimeoutMs),
   ]);
   return {
     ready:

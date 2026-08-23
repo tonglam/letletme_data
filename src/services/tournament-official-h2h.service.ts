@@ -30,7 +30,6 @@ export type OfficialH2HSourceSnapshot = {
 };
 
 export type OfficialH2HSyncOptions = {
-  allowScoreFallback?: boolean;
   /** Allow score fallback for matches at or before a finalized event. */
   finalizedThroughEventId?: number | null;
 };
@@ -96,10 +95,9 @@ function matchPoints(
   // scoreable after the local event has finished and been data-checked; live
   // entry points can still move during a gameweek.
   const allowScoreFallback =
-    options.allowScoreFallback === true ||
-    (options.finalizedThroughEventId !== null &&
-      options.finalizedThroughEventId !== undefined &&
-      match.event <= options.finalizedThroughEventId);
+    options.finalizedThroughEventId !== null &&
+    options.finalizedThroughEventId !== undefined &&
+    match.event <= options.finalizedThroughEventId;
   if (!allowScoreFallback) return { home: null, away: null };
   const hasNonZeroScores =
     typeof match.entry_1_points === 'number' &&

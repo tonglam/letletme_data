@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 
 import { getConfig, resetConfigForTests } from '../../src/utils/config';
-import { sendWeChatBotNotification, WeChatNotificationError } from '../../src/utils/notify';
+import {
+  notifyTwoBots,
+  sendTelegramBotNotification,
+  sendTelegramMessage,
+  sendWeChatBotNotification,
+  WeChatNotificationError,
+} from '../../src/utils/notify';
 
 const originalFetch = globalThis.fetch;
 const ENV_KEYS = [
@@ -9,6 +15,9 @@ const ENV_KEYS = [
   'DATABASE_URL',
   'WECHAT_NOTIFICATION_URL',
   'WECHAT_NOTIFICATION_API_TOKEN',
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_CHAT_ID',
+  'TELEGRAM_NOTIFICATION_URL',
   'CACHE_REDIS_HOST',
   'CACHE_REDIS_PORT',
   'CACHE_REDIS_DB',
@@ -124,5 +133,51 @@ describe('WeChat notification caller', () => {
     await expect(sendWeChatBotNotification('alert', ['self'])).rejects.toThrow(
       'WECHAT_NOTIFICATION_API_TOKEN is required',
     );
+  });
+});
+
+describe('Telegram notification callers', () => {
+  test('bounds both Telegram HTTP request paths', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'telegram-token';
+    process.env.TELEGRAM_CHAT_ID = 'telegram-chat';
+    process.env.TELEGRAM_NOTIFICATION_URL = 'https://bot.example.test/telegram';
+    resetConfigForTests();
+    const fetchMock = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeDefined();
+      return new Response('{}', { status: 200 });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await sendTelegramMessage('primary alert', { timeoutMs: 20 });
+    await sendTelegramBotNotification('secondary alert', { timeoutMs: 20 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('starts Telegram and WeChat fan-out concurrently', async () => {
+    process.env.TELEGRAM_NOTIFICATION_URL = 'https://bot.example.test/telegram';
+    resetConfigForTests();
+    let releaseTelegram: (() => void) | undefined;
+    const calls: string[] = [];
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const target = String(url);
+      calls.push(target);
+      if (target.includes('/telegram')) {
+        await new Promise<void>((resolve) => {
+          releaseTelegram = resolve;
+        });
+      }
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const delivery = notifyTwoBots('parallel alert', { timeoutMs: 100 });
+    await Promise.resolve();
+    expect(calls).toEqual([
+      'https://bot.example.test/telegram',
+      'https://bot.example.test/notification',
+    ]);
+
+    releaseTelegram?.();
+    await delivery;
   });
 });

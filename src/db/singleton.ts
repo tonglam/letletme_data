@@ -30,7 +30,7 @@ class DatabaseSingleton {
   private client: postgres.Sql | null = null;
   private db: ReturnType<typeof drizzle> | null = null;
   private isConnected = false;
-  private isConnecting = false;
+  private connectPromise: Promise<void> | null = null;
 
   private constructor() {
     // Private constructor prevents direct instantiation
@@ -54,16 +54,20 @@ class DatabaseSingleton {
       return; // Already connected
     }
 
-    if (this.isConnecting) {
-      // Wait for existing connection attempt
-      while (this.isConnecting) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      return;
+    if (this.connectPromise) {
+      return this.connectPromise;
     }
 
+    const attempt = this.establishConnection();
+    const sharedAttempt = attempt.finally(() => {
+      if (this.connectPromise === sharedAttempt) this.connectPromise = null;
+    });
+    this.connectPromise = sharedAttempt;
+    return sharedAttempt;
+  }
+
+  private async establishConnection(): Promise<void> {
     try {
-      this.isConnecting = true;
       logInfo('Initializing database connection...');
 
       const config = getConfig();
@@ -99,8 +103,6 @@ class DatabaseSingleton {
       this.isConnected = false;
       logError('❌ Failed to connect to database', error);
       throw error;
-    } finally {
-      this.isConnecting = false;
     }
   }
 

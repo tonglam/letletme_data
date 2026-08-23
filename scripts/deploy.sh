@@ -69,6 +69,8 @@ DEPLOY_MIGRATION_STARTED=false
 DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
 DEPLOY_OLD_REVISION=''
+DEPLOY_OLD_RELEASE_SHA=unknown
+DEPLOY_OLD_RUNNER_RELEASE_SHA=unknown
 DEPLOY_LEDGER_BEFORE=''
 DEPLOY_RUNNER_UPDATED=false
 DEPLOY_RUNNER_PROBE_SUCCEEDED=false
@@ -129,8 +131,8 @@ restore_stopped_services() {
   # exact container, therefore recovery must use `up`; pin the last image when
   # one was captured so a pre-migration failure never boots the new release.
   if [[ -n "${DEPLOY_OLD_IMAGE:-}" ]]; then
-    if ! APP_IMAGE="$DEPLOY_OLD_IMAGE" compose up -d --remove-orphans --no-build \
-      scheduler worker content-worker api; then
+    if ! restore_runtime_services \
+      "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"; then
       log_error "Last-known-healthy services could not be restored; manual recovery is required."
     fi
   elif ! compose up -d --remove-orphans --no-build scheduler worker content-worker api; then
@@ -153,7 +155,8 @@ deploy() {
       fi
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = true ]]; then
         if ! restore_last_known_healthy_if_ledger_unchanged \
-          "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION"; then
+          "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \
+          "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"; then
           log_error "Migration changed or obscured the ledger; leaving services stopped for forward recovery."
         fi
       elif [[ "$DEPLOY_COMMITTED" = false ]]; then
@@ -167,9 +170,13 @@ deploy() {
   require_compose
   require_files
   DEPLOY_OLD_REVISION=$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf '')
+  DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat \
+    /home/workspace/letletme-grok-runner/current.release 2>/dev/null || printf unknown)
+  DEPLOY_OLD_RUNNER_RELEASE_SHA=${DEPLOY_OLD_RUNNER_RELEASE_SHA:-unknown}
   old_container=$(compose ps -aq api | head -n 1)
   if [[ -n "$old_container" ]]; then
     DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$old_container")
+    DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_image "$DEPLOY_OLD_IMAGE")
   fi
   start_stage pull
   if [[ -n "${APP_IMAGE:-}" ]]; then

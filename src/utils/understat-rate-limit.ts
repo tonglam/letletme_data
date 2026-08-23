@@ -12,6 +12,8 @@ const PERMIT_KEY = 'llm:queue:coordination:understat-request-permits';
 const PERMIT_LEASE_PADDING_MS = 5_000;
 const PERMIT_WAIT_TIMEOUT_MS = 120_000;
 const PERMIT_POLL_MS = 100;
+const PERMIT_REDIS_CONNECT_TIMEOUT_MS = 5_000;
+const PERMIT_REDIS_COMMAND_TIMEOUT_MS = 5_000;
 
 const ACQUIRE_SCRIPT = `
 local now = tonumber(ARGV[1])
@@ -51,7 +53,9 @@ function getPermitClient(): Redis {
     password: connection.password,
     db: connection.db,
     enableReadyCheck: false,
-    maxRetriesPerRequest: null,
+    connectTimeout: PERMIT_REDIS_CONNECT_TIMEOUT_MS,
+    commandTimeout: PERMIT_REDIS_COMMAND_TIMEOUT_MS,
+    maxRetriesPerRequest: 1,
   });
   return permitClient;
 }
@@ -90,7 +94,7 @@ export async function acquireUnderstatRequestPermit(): Promise<() => Promise<voi
         await redis.eval(RELEASE_SCRIPT, 1, PERMIT_KEY, token);
       };
     }
-    await sleep(PERMIT_POLL_MS);
+    await sleep(Math.min(PERMIT_POLL_MS, Math.max(deadline - Date.now(), 0)));
   }
 
   throw new Error('Timed out waiting for an Understat request permit');
