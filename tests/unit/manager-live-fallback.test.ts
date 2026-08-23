@@ -12,6 +12,7 @@ import {
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
   reconcileMonotonicCachePublicationRows,
+  selectClassicSummaryOverallRank,
   selectLatestCheckedRow,
   shouldAcceptClassicOverallRankPublication,
   shouldPreserveClassicStandingForRank,
@@ -46,6 +47,35 @@ describe('classic manager live fallback', () => {
     releaseStandings();
     await Promise.all([standings, overallRank]);
     expect(order).toEqual(['standings-start', 'other-league', 'standings-end', 'overall-rank']);
+  });
+
+  test('releases a keyed publication turn when its active task is aborted', async () => {
+    const run = createKeyedSerialTaskGate();
+    const controller = new AbortController();
+    const order: string[] = [];
+    let releaseUnderlying!: () => void;
+    const underlying = new Promise<void>((resolve) => {
+      releaseUnderlying = resolve;
+    });
+
+    const blocked = run(
+      'classic:2627:1:8863',
+      async () => {
+        order.push('blocked-start');
+        await underlying;
+      },
+      controller.signal,
+    );
+    await Promise.resolve();
+    const next = run('classic:2627:1:8863', async () => {
+      order.push('next');
+    });
+
+    controller.abort(new Error('deadline exceeded'));
+    await expect(blocked).rejects.toThrow('deadline exceeded');
+    await next;
+    expect(order).toEqual(['blocked-start', 'next']);
+    releaseUnderlying();
   });
 
   test('queues distinct background work while deduplicating the same work set', async () => {
@@ -106,6 +136,26 @@ describe('classic manager live fallback', () => {
     expect(reconcileMonotonicCachePublicationRows(publishedRows, null, new Map())).toEqual(
       publishedRows,
     );
+  });
+
+  test('publishes fallback fields while retaining a newer ordered rank', () => {
+    const existing = { eventPoints: 32, totalPoints: 32, overallRank: 620_000 };
+    const fallback = { eventPoints: 43, totalPoints: 43, overallRank: 640_000 };
+    const published = {
+      ...fallback,
+      overallRank: selectClassicSummaryOverallRank(
+        fallback.overallRank,
+        existing.overallRank,
+        false,
+      ),
+    };
+
+    expect(published).toEqual({ eventPoints: 43, totalPoints: 43, overallRank: 620_000 });
+    expect(selectClassicSummaryOverallRank(fallback.overallRank, existing.overallRank, true)).toBe(
+      640_000,
+    );
+    expect(selectClassicSummaryOverallRank(null, existing.overallRank, false)).toBe(620_000);
+    expect(selectClassicSummaryOverallRank(640_000, null, false)).toBeNull();
   });
 
   test('advances durable Classic OR evidence only for a newer valid publication', () => {

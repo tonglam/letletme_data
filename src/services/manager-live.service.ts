@@ -38,6 +38,7 @@ import {
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
   reconcileMonotonicCachePublicationRows,
+  selectClassicSummaryOverallRank,
   selectLatestCheckedRow,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
@@ -143,15 +144,22 @@ const withRevision = (row: Omit<ManagerLiveScoreRow, 'revision'>): ManagerLiveSc
   revision: stableRevision(row),
 });
 
+const withOverallRank = (
+  row: ManagerLiveScoreRow,
+  overallRank: number | null,
+): ManagerLiveScoreRow => {
+  if (overallRank === row.overallRank) return row;
+
+  const { revision: _revision, ...withoutRevision } = row;
+  return withRevision({ ...withoutRevision, overallRank });
+};
+
 const withPreservedOverallRank = (
   row: ManagerLiveScoreRow,
   previousOverallRank: number | null | undefined,
 ): ManagerLiveScoreRow => {
   const overallRank = preserveLastKnownOverallRank(row.overallRank, previousOverallRank);
-  if (overallRank === row.overallRank) return row;
-
-  const { revision: _revision, ...withoutRevision } = row;
-  return withRevision({ ...withoutRevision, overallRank });
+  return withOverallRank(row, overallRank);
 };
 
 const mergeLatestManagerLiveRow = (
@@ -637,26 +645,30 @@ const runManagerLivePublication = <T>(
   task: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> =>
-  runManagerLivePublicationInProcess(key, async (): Promise<T> => {
-    if (signal?.aborted) throw signal.reason;
-    const client = await getDbClient();
-    return (await client.begin(async (transaction) => {
+  runManagerLivePublicationInProcess(
+    key,
+    async (): Promise<T> => {
       if (signal?.aborted) throw signal.reason;
-      const lockQuery = transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`manager-live:${key}`}, 0))`;
-      const cancelLock = (): void => lockQuery.cancel();
-      signal?.addEventListener('abort', cancelLock, { once: true });
-      try {
-        await lockQuery;
-      } finally {
-        signal?.removeEventListener('abort', cancelLock);
-      }
-      if (signal?.aborted) throw signal.reason;
-      const lockedDb = drizzle(transaction as unknown as postgres.Sql, {
-        schema: databaseSchema,
-      });
-      return runInDatabaseTransaction(transaction, task, lockedDb);
-    })) as T;
-  });
+      const client = await getDbClient();
+      return (await client.begin(async (transaction) => {
+        if (signal?.aborted) throw signal.reason;
+        const lockQuery = transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`manager-live:${key}`}, 0))`;
+        const cancelLock = (): void => lockQuery.cancel();
+        signal?.addEventListener('abort', cancelLock, { once: true });
+        try {
+          await lockQuery;
+        } finally {
+          signal?.removeEventListener('abort', cancelLock);
+        }
+        if (signal?.aborted) throw signal.reason;
+        const lockedDb = drizzle(transaction as unknown as postgres.Sql, {
+          schema: databaseSchema,
+        });
+        return runInDatabaseTransaction(transaction, task, lockedDb);
+      })) as T;
+    },
+    signal,
+  );
 const reserveManagerLivePublicationStartedAt = (
   key: string,
   signal: AbortSignal,
@@ -840,10 +852,18 @@ const refreshEntrySummaries = async (
             );
           const acceptOverallRank =
             publicationOrderIsNewer && isPositiveOverallRank(summary.summary_overall_rank);
+          const orderedCandidate = reReadLatest
+            ? withOverallRank(
+                candidate,
+                selectClassicSummaryOverallRank(
+                  candidate.overallRank,
+                  existing?.overallRank,
+                  acceptOverallRank,
+                ),
+              )
+            : candidate;
           let merged = reReadLatest
-            ? publicationOrderIsNewer || !existing
-              ? mergeLatestManagerLiveRow(existing, candidate)
-              : existing
+            ? mergeLatestManagerLiveRow(existing, orderedCandidate)
             : withPreservedOverallRank(candidate, existing?.overallRank);
           if (
             acceptOverallRank &&

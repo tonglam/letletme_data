@@ -6,13 +6,40 @@ const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
 
 export type ManagerSummaryFetchPriority = 'foreground' | 'background';
 
+const abortReason = (signal: AbortSignal): Error =>
+  signal.reason instanceof Error ? signal.reason : new Error('Manager live task aborted');
+
+const awaitTaskOrAbort = <T>(task: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return task;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    task.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
+
 export const createKeyedSerialTaskGate = (): (<T>(
   key: string,
   task: () => Promise<T>,
+  signal?: AbortSignal,
 ) => Promise<T>) => {
   const tails = new Map<string, Promise<void>>();
 
-  return async <T>(key: string, task: () => Promise<T>): Promise<T> => {
+  return async <T>(key: string, task: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
     const previous = tails.get(key) ?? Promise.resolve();
     let releaseTurn!: () => void;
     const turn = new Promise<void>((resolve) => {
@@ -22,7 +49,8 @@ export const createKeyedSerialTaskGate = (): (<T>(
 
     await previous;
     try {
-      return await task();
+      if (signal?.aborted) throw abortReason(signal);
+      return await awaitTaskOrAbort(task(), signal);
     } finally {
       releaseTurn();
       if (tails.get(key) === turn) tails.delete(key);
@@ -59,6 +87,15 @@ export const preserveLastKnownOverallRank = (
 ): number | null => {
   if (isPositiveOverallRank(incoming)) return incoming;
   return isPositiveOverallRank(previous) ? previous : null;
+};
+
+export const selectClassicSummaryOverallRank = (
+  incoming: number | null | undefined,
+  existing: number | null | undefined,
+  acceptIncoming: boolean,
+): number | null => {
+  if (acceptIncoming && isPositiveOverallRank(incoming)) return incoming;
+  return isPositiveOverallRank(existing) ? existing : null;
 };
 
 export const reconcileMonotonicCachePublicationRows = <T extends Readonly<{ entryId: number }>>(
