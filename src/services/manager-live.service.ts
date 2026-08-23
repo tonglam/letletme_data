@@ -46,6 +46,7 @@ import {
   reconcileMonotonicCachePublicationRows,
   readThroughManagerSummaryResult,
   requireManagerSummaryCoordinator,
+  rotateManagerLiveEntryIds,
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectClassicSummaryOverallRank,
@@ -53,6 +54,7 @@ import {
   selectForegroundClassicRankEntryIds,
   selectLatestCheckedRow,
   shouldEnrichClassicOverallRank,
+  shouldPreferEntrySummaryForClassicHeadline,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
   shouldReplaceManagerLiveRow,
@@ -199,6 +201,32 @@ const withPreservedOverallRank = (
 ): ManagerLiveScoreRow => {
   const overallRank = preserveLastKnownOverallRank(row.overallRank, previousOverallRank);
   return withOverallRank(row, overallRank);
+};
+
+export const mergeClassicStandingWithEntrySummary = (
+  classicRow: CachedRow | undefined,
+  entrySummaryRow: CachedRow | undefined,
+): CachedRow | undefined => {
+  if (!classicRow) return entrySummaryRow;
+  if (!shouldPreferEntrySummaryForClassicHeadline(classicRow, entrySummaryRow)) {
+    return classicRow;
+  }
+  if (!entrySummaryRow) return classicRow;
+
+  const { revision: _revision, ...entrySummary } = entrySummaryRow;
+  const checkedAt = selectEarlierManagerLiveObservationAt(
+    classicRow.checkedAt,
+    entrySummaryRow.checkedAt,
+  );
+  return withRevision({
+    ...entrySummary,
+    checkedAt,
+    staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+    // Classic standings remains the authority for this tournament's league
+    // position. Entry Summary is the authority for the event/overall headline.
+    leagueRank: classicRow.leagueRank,
+    overallRank: preserveLastKnownOverallRank(entrySummary.overallRank, classicRow.overallRank),
+  });
 };
 
 const mergeLatestManagerLiveRow = (
@@ -1611,6 +1639,8 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     scope,
     uniqueEntryIds,
   );
+  const classicTournament =
+    input.tournamentId !== undefined && tournament?.leagueType === 'classic';
   const refreshNow = Date.now();
   const usableCachedEntryIds = new Set(
     uniqueEntryIds.filter((entryId) => {
@@ -1627,12 +1657,16 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         return row !== undefined && isFresh(row, refreshNow);
       }),
     ),
+    { foregroundStale: classicTournament },
   );
   const staleOrMissing = refreshPlan.backgroundEntryIds;
   const foregroundRefreshTargets = refreshPlan.foregroundEntryIds;
-  const coldEntryIds = new Set(foregroundRefreshTargets);
-  const staleLastGoodCount = staleOrMissing.filter((entryId) =>
-    usableCachedEntryIds.has(entryId),
+  const coldEntryIds = new Set(
+    uniqueEntryIds.filter((entryId) => !usableCachedEntryIds.has(entryId)),
+  );
+  const foregroundRefreshEntryIds = new Set(foregroundRefreshTargets);
+  const staleLastGoodCount = staleOrMissing.filter(
+    (entryId) => usableCachedEntryIds.has(entryId) && !foregroundRefreshEntryIds.has(entryId),
   ).length;
   if (staleLastGoodCount > 0) {
     logDebug('Serving last-good manager rows while refreshing in background', {
@@ -2176,6 +2210,78 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           entryScope,
           { priority: 'background' },
         );
+      });
+    }
+  }
+
+  if (classicTournament) {
+    // A Classic standings row carries the tournament league rank, while the
+    // entry summary is the shared official headline used by the detail page.
+    // Reuse that entry-scope observation when it is at least as new as the
+    // standings observation so both pages converge on one event score.
+    const entrySummaryRows = await readCachedAndCheckpointRows(
+      redis,
+      season,
+      input.eventId,
+      entryScope,
+      uniqueEntryIds,
+    );
+    for (const entryId of uniqueEntryIds) {
+      const merged = mergeClassicStandingWithEntrySummary(
+        rows.get(entryId),
+        entrySummaryRows.get(entryId),
+      );
+      if (merged) rows.set(entryId, merged);
+    }
+
+    // Keep this convergence wave bounded. Subsequent board polls advance to
+    // the next stale entries instead of creating a 98-request FPL burst.
+    // Rotate the bounded window by refresh cycle. A permanently unavailable
+    // first cohort must not prevent later managers from converging.
+    const summaryRefreshWave = Math.floor(refreshNow / (REFRESH_SECONDS * 1000));
+    const summaryRefreshOffset =
+      uniqueEntryIds.length === 0 ? 0 : summaryRefreshWave % uniqueEntryIds.length;
+    const summaryRefreshEntryIds = rotateManagerLiveEntryIds(
+      uniqueEntryIds,
+      summaryRefreshOffset,
+      uniqueEntryIds.length,
+    )
+      .filter((entryId) => {
+        const summary = entrySummaryRows.get(entryId);
+        return summary === undefined || !isFresh(summary);
+      })
+      .slice(0, MAX_FOREGROUND_SUMMARY_FETCHES);
+    if (summaryRefreshEntryIds.length > 0) {
+      const backgroundKey = managerLiveBackgroundRefreshKey(
+        `summary:${season.seasonCode}:${input.eventId}`,
+        summaryRefreshEntryIds,
+      );
+      const backgroundWorkKey = `${backgroundKey}:classic-headline`;
+      const capturedSummaryRows = new Map(entrySummaryRows);
+      scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
+        const backgroundRows = await readBackgroundRows(
+          redis,
+          season,
+          input.eventId,
+          entryScope,
+          summaryRefreshEntryIds,
+          capturedSummaryRows,
+        );
+        const targets = summaryRefreshEntryIds.filter((entryId) => {
+          const row = backgroundRows.get(entryId);
+          return row === undefined || !isFresh(row);
+        });
+        if (targets.length > 0) {
+          await refreshEntrySummaries(
+            season,
+            input.eventId,
+            targets,
+            backgroundRows,
+            redis,
+            entryScope,
+            { priority: 'background' },
+          );
+        }
       });
     }
   }
