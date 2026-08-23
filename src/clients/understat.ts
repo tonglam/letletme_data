@@ -28,6 +28,16 @@ export const UnderstatIdSchema = UnderstatIntegerSchema.refine((value) => value 
 const nullableNumber = UnderstatNumberSchema.nullable();
 const nullableInteger = UnderstatIntegerSchema.nullable();
 
+const UnderstatForecastSchema = z
+  .object({
+    w: nullableNumber,
+    d: nullableNumber,
+    l: nullableNumber,
+  })
+  .passthrough()
+  .nullish()
+  .transform((value) => value ?? { w: null, d: null, l: null });
+
 export const UnderstatTeamReferenceSchema = z
   .object({
     id: UnderstatIdSchema,
@@ -45,13 +55,9 @@ export const UnderstatMatchDateSchema = z
     goals: z.object({ h: nullableInteger, a: nullableInteger }).passthrough(),
     xG: z.object({ h: nullableNumber, a: nullableNumber }).passthrough(),
     datetime: z.string().min(1),
-    forecast: z
-      .object({
-        w: nullableNumber,
-        d: nullableNumber,
-        l: nullableNumber,
-      })
-      .passthrough(),
+    // Understat omits forecasts for future/unplayed fixtures.  Keep the
+    // match row and normalize the absent provider field to nullable values.
+    forecast: UnderstatForecastSchema,
     side: z.enum(['h', 'a']).optional(),
     result: z.enum(['w', 'd', 'l']).optional(),
   })
