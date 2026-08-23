@@ -321,7 +321,13 @@ export async function setupTournamentStructure(
     });
 
     if (isOfficialH2HTournament(tournament)) {
-      await syncOfficialH2HTournament(season, tournament);
+      // Setup may import a completed official schedule before the regular
+      // event-sync path runs. Reuse the latest finished + data-checked event
+      // as an event-aware guard so sparse completed match rows retain their
+      // score fallback without allowing live points to become results.
+      await syncOfficialH2HTournament(season, tournament, undefined, {
+        finalizedThroughEventId: finalizedEvent?.id ?? null,
+      });
     }
 
     phaseStartedAtMs = performance.now();

@@ -12,9 +12,21 @@ import { logError, logInfo, logWarn } from '../utils/logger';
 import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/tournament';
-import { OfficialH2HStrategy } from './tournament-official-h2h.service';
+import { eventRepository } from '../repositories/events';
+import {
+  OfficialH2HStrategy,
+  type OfficialH2HSyncOptions,
+} from './tournament-official-h2h.service';
 
 const officialH2HRecoveryTargets = new WeakMap<IncompleteDataSyncError, number[]>();
+
+async function getOfficialH2HSyncOptions(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<OfficialH2HSyncOptions> {
+  const event = await eventRepository.findById(season, eventId);
+  return { allowScoreFallback: event?.finished === true && event.dataChecked === true };
+}
 
 export function getOfficialH2HRecoveryTargets(error: unknown): readonly number[] {
   return error instanceof IncompleteDataSyncError
@@ -380,13 +392,17 @@ export async function syncOfficialH2HTournaments(
   const tournaments = (
     await tournamentInfoRepository.findBattleRaceByEvent(season, eventId)
   ).filter(isOfficialH2HTournament);
+  const options =
+    tournaments.length > 0
+      ? await getOfficialH2HSyncOptions(season, eventId)
+      : { allowScoreFallback: false };
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
   const recoveryTournamentIds: number[] = [];
   const results = await mapWithConcurrency(tournaments, 5, async (tournament) => {
     try {
-      return await OfficialH2HStrategy.sync(season, tournament, eventId);
+      return await OfficialH2HStrategy.sync(season, tournament, eventId, options);
     } catch (error) {
       if (
         error !== null &&
@@ -431,6 +447,10 @@ export async function syncTournamentBattleRaceResults(
     return { eventId, updatedGroups: 0, updatedResults: 0, skipped: 0 };
   }
 
+  const officialH2HOptions = tournaments.some(isOfficialH2HTournament)
+    ? await getOfficialH2HSyncOptions(season, eventId)
+    : { allowScoreFallback: false };
+
   let updatedGroups = 0;
   let updatedResults = 0;
   let skipped = 0;
@@ -438,7 +458,7 @@ export async function syncTournamentBattleRaceResults(
   const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
     try {
       return isOfficialH2HTournament(tournament)
-        ? await OfficialH2HStrategy.sync(season, tournament, eventId)
+        ? await OfficialH2HStrategy.sync(season, tournament, eventId, officialH2HOptions)
         : await LocalBattleStrategy.sync(season, tournament, eventId);
     } catch (error) {
       logError('Failed to sync battle race results', error, {
