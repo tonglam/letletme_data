@@ -18,7 +18,7 @@ export const entryInfoAPI = new Elysia({ prefix: '/entry-info' }).post(
       success: true,
       status: 'queued' as const,
       jobId: String(job.id),
-      message: 'Entry onboarding queued',
+      message: 'Entry info sync queued',
     };
   },
   {

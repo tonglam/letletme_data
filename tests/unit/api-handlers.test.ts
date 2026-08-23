@@ -644,6 +644,7 @@ describe('entryInfoAPI handlers', () => {
       success: true,
       status: 'queued',
       jobId: expect.any(String),
+      message: 'Entry info sync queued',
     });
     expect(entrySyncAddCalls).toHaveLength(0);
     expect(maintenanceAddCalls).toHaveLength(1);

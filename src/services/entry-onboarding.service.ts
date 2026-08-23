@@ -8,6 +8,7 @@ import {
 } from '../jobs/entry-sync-enqueue';
 import type { EntrySyncJobSource } from '../queues/entry-sync.queue';
 import { entryInfoRepository } from '../repositories/entry-infos';
+import { eventRepository } from '../repositories/events';
 import {
   captureMyFplSnapshot,
   dispatchMyFplSnapshotPublicationOutbox,
@@ -39,6 +40,11 @@ export type EntryOnboardingDependencies = Readonly<{
   enqueueEntryResults: EnqueueEntryJob;
   enqueueEntryTransfers: EnqueueEntryJob;
   findEntry: (season: FplSeasonRef, entryId: number) => Promise<OnboardingEntry | null>;
+  listFinalizedResultEventIds: (
+    season: FplSeasonRef,
+    firstEventId: number,
+    currentEventId: number,
+  ) => Promise<readonly number[]>;
   getActivePublication: (
     season: FplSeasonRef,
     eventId: number,
@@ -61,7 +67,7 @@ export type EntryOnboardingResult = Readonly<{
     eventDataStatus: 'completed' | 'skipped';
     eventDataSkipReason: 'PRESEASON' | 'NOT_STARTED' | null;
     picksJobId: string | null;
-    resultsJobId: string | null;
+    resultsJobIds: readonly string[];
     transfersJobId: string | null;
   }>;
   snapshot:
@@ -90,6 +96,16 @@ const runtimeDependencies: EntryOnboardingDependencies = {
     const entry = entries.find((candidate) => candidate.id === entryId);
     return entry ? { id: entry.id, startedEvent: entry.startedEvent } : null;
   },
+  listFinalizedResultEventIds: async (season, firstEventId, currentEventId) =>
+    (await eventRepository.findAll(season))
+      .filter(
+        (event) =>
+          event.id >= firstEventId &&
+          event.id <= currentEventId &&
+          event.finished &&
+          event.dataChecked,
+      )
+      .map((event) => event.id),
   getActivePublication: getActiveMyFplPublication,
   captureSnapshot: (season, eventId, kind) => captureMyFplSnapshot(season, eventId, kind),
   dispatchOutbox: () => dispatchMyFplSnapshotPublicationOutbox({ limit: 20 }),
@@ -106,12 +122,13 @@ function entryJobOptions(
   stage: 'entry-info' | 'entry-picks' | 'entry-results' | 'entry-transfers',
   eventId?: number,
 ): EntrySyncJobOptions {
+  const eventScope = eventId === undefined ? '' : `-e${eventId}`;
   return {
     entryIds: [entryId],
     ...(eventId === undefined ? {} : { eventId }),
-    jobId: `entry-onboarding-${attemptKey}-${stage}-${entryId}`,
+    jobId: `entry-onboarding-${attemptKey}-${stage}${eventScope}-${entryId}`,
     runId: attemptKey,
-    queueKey: `entry-onboarding-${attemptKey}-${stage}-${entryId}`,
+    queueKey: `entry-onboarding-${attemptKey}-${stage}${eventScope}-${entryId}`,
     removeOnSettle: false,
   };
 }
@@ -144,22 +161,41 @@ export async function runEntryOnboarding(
   let eventDataSkipReason: EntryOnboardingResult['stages']['eventDataSkipReason'] =
     input.eventId === undefined ? 'PRESEASON' : 'NOT_STARTED';
   let picksJobId: string | null = null;
-  let resultsJobId: string | null = null;
+  let resultsJobIds: readonly string[] = [];
   let transfersJobId: string | null = null;
   const participatesInEvent =
     input.eventId !== undefined && (entry.startedEvent ?? 1) <= input.eventId;
 
   if (participatesInEvent) {
+    const firstEventId = Math.max(1, entry.startedEvent ?? 1);
+    const finalizedResultEventIds = await dependencies.listFinalizedResultEventIds(
+      season,
+      firstEventId,
+      input.eventId!,
+    );
+    const resultEventIds = [
+      ...new Set([
+        ...finalizedResultEventIds.filter(
+          (eventId) =>
+            Number.isSafeInteger(eventId) && eventId >= firstEventId && eventId <= input.eventId!,
+        ),
+        input.eventId!,
+      ]),
+    ].sort((left, right) => left - right);
+    const resultJobStartIndex = 1;
+    const transfersJobIndex = resultJobStartIndex + resultEventIds.length;
     const eventJobs = await dependencies.runPhase(input.attemptKey, [
       dependencies.enqueueEntryPicks(
         season,
         'api',
         entryJobOptions(input.entryId, input.attemptKey, 'entry-picks', input.eventId),
       ),
-      dependencies.enqueueEntryResults(
-        season,
-        'api',
-        entryJobOptions(input.entryId, input.attemptKey, 'entry-results', input.eventId),
+      ...resultEventIds.map((resultEventId) =>
+        dependencies.enqueueEntryResults(
+          season,
+          'api',
+          entryJobOptions(input.entryId, input.attemptKey, 'entry-results', resultEventId),
+        ),
       ),
       dependencies.enqueueEntryTransfers(
         season,
@@ -170,8 +206,10 @@ export async function runEntryOnboarding(
     eventDataStatus = 'completed';
     eventDataSkipReason = null;
     picksJobId = requireJobId(eventJobs[0], 'entry-picks');
-    resultsJobId = requireJobId(eventJobs[1], 'entry-results');
-    transfersJobId = requireJobId(eventJobs[2], 'entry-transfers');
+    resultsJobIds = eventJobs
+      .slice(resultJobStartIndex, transfersJobIndex)
+      .map((job, index) => requireJobId(job, `entry-results event ${resultEventIds[index]}`));
+    transfersJobId = requireJobId(eventJobs[transfersJobIndex], 'entry-transfers');
   }
 
   const stages = {
@@ -179,7 +217,7 @@ export async function runEntryOnboarding(
     eventDataStatus,
     eventDataSkipReason,
     picksJobId,
-    resultsJobId,
+    resultsJobIds,
     transfersJobId,
   } as const;
 

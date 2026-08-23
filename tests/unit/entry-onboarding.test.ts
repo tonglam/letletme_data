@@ -33,6 +33,7 @@ function createDependencies(
     startedEvent?: number | null;
     active?: MyFplSnapshotPublication | null;
     failPhase?: number;
+    finalizedResultEventIds?: readonly number[];
   } = {},
 ) {
   const calls: string[] = [];
@@ -77,6 +78,10 @@ function createDependencies(
       calls.push('find-entry');
       return { id: entryId, startedEvent: options.startedEvent ?? 1 };
     },
+    listFinalizedResultEventIds: async () => {
+      calls.push('list-finalized-results');
+      return options.finalizedResultEventIds ?? [];
+    },
     getActivePublication: async () => {
       calls.push('active-publication');
       return options.active === undefined ? activePublication() : options.active;
@@ -102,6 +107,7 @@ describe('entry onboarding coordinator', () => {
       'phase-1-start',
       'phase-1-done',
       'find-entry',
+      'list-finalized-results',
       'enqueue-picks',
       'enqueue-results',
       'enqueue-transfers',
@@ -115,9 +121,9 @@ describe('entry onboarding coordinator', () => {
       eventId: 20,
       stages: {
         eventDataStatus: 'completed',
-        picksJobId: 'entry-onboarding-attempt-a1-entry-picks-42',
-        resultsJobId: 'entry-onboarding-attempt-a1-entry-results-42',
-        transfersJobId: 'entry-onboarding-attempt-a1-entry-transfers-42',
+        picksJobId: 'entry-onboarding-attempt-a1-entry-picks-e20-42',
+        resultsJobIds: ['entry-onboarding-attempt-a1-entry-results-e20-42'],
+        transfersJobId: 'entry-onboarding-attempt-a1-entry-transfers-e20-42',
       },
       snapshot: { status: 'published', revision: 8, contentSha256: 'b'.repeat(64) },
     });
@@ -158,6 +164,27 @@ describe('entry onboarding coordinator', () => {
       stages: { eventDataStatus: 'skipped', eventDataSkipReason: 'NOT_STARTED' },
       snapshot: { status: 'published' },
     });
+  });
+
+  test('backfills rich results from startedEvent through the current event before capture', async () => {
+    const { calls, dependencies } = createDependencies({
+      startedEvent: 18,
+      finalizedResultEventIds: [18, 19],
+    });
+
+    const result = await runEntryOnboarding(
+      TEST_SEASON,
+      { entryId: 42, eventId: 20, attemptKey: 'midseason-a1' },
+      dependencies,
+    );
+
+    expect(calls.filter((call) => call === 'enqueue-results')).toHaveLength(3);
+    expect(calls.indexOf('phase-2-done')).toBeLessThan(calls.indexOf('capture'));
+    expect(result.stages.resultsJobIds).toEqual([
+      'entry-onboarding-midseason-a1-entry-results-e18-42',
+      'entry-onboarding-midseason-a1-entry-results-e19-42',
+      'entry-onboarding-midseason-a1-entry-results-e20-42',
+    ]);
   });
 
   test('leaves FINAL immutable after completing required entry data', async () => {
