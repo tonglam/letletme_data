@@ -189,6 +189,37 @@ describe('manager live queue integration', () => {
     });
   });
 
+  test('compares a slow continuation against the page it actually processed', async () => {
+    const markerJob = await enqueueManagerLiveRefresh({
+      season: TEST_SEASON,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      runAt: new Date(Date.now() + 185_000),
+    });
+    if (markerJob.id) createdJobIds.add(markerJob.id);
+    const redis = await queueRedisSingleton.getClient();
+    const generation = markerJob.data.generation ?? 'missing-generation';
+    const epoch = markerJob.data.classicStandingsCursorEpoch ?? 0;
+
+    await advanceManagerLiveHotState(redis, scope, generation, 0, 3, 1, epoch);
+    await advanceManagerLiveHotState(redis, scope, generation, 1, 5, 3, epoch);
+
+    const staleFollowup = await scheduleNextManagerLiveRefresh(
+      markerJob.data,
+      new Date(Date.now() + 215_000).toISOString(),
+      3,
+      1,
+    );
+    if (staleFollowup?.id) createdJobIds.add(staleFollowup.id);
+
+    await expect(loadManagerLiveHotState(redis, scope)).resolves.toMatchObject({
+      classicStandingsPage: 5,
+      classicStandingsCursorEpoch: epoch,
+    });
+    expect(staleFollowup?.data.classicStandingsPage).toBe(5);
+  });
+
   test('keeps one same-bucket job while advancing the logical cursor', async () => {
     const nextBucket = Math.floor(Date.now() / 30_000) * 30_000 + 95_000;
     const runAt = new Date(nextBucket);

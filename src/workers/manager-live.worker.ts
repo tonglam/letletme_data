@@ -29,12 +29,18 @@ export async function scheduleManagerLiveContinuation(
     ManagerLiveResolveResult,
     'nextRefreshAt' | 'classicStandingsNextPage' | 'errorCode'
   >,
+  classicStandingsStartPage?: number,
   schedule: typeof scheduleNextManagerLiveRefresh = scheduleNextManagerLiveRefresh,
 ): Promise<void> {
   // Preserve the six-hour hot chain even when one entry in a larger scope
   // fails. The current job still fails below so BullMQ applies 30/60/120s
   // retries, while the deduplicated follow-up keeps healthy managers fresh.
-  await schedule(jobData, result.nextRefreshAt, result.classicStandingsNextPage);
+  await schedule(
+    jobData,
+    result.nextRefreshAt,
+    result.classicStandingsNextPage,
+    classicStandingsStartPage,
+  );
   if (result.errorCode === 'UPSTREAM_RATE_LIMITED' || result.errorCode === 'UPSTREAM_UNAVAILABLE') {
     throw new Error(`Manager live refresh failed: ${result.errorCode}`);
   }
@@ -80,7 +86,9 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
     }
     const persistedClassicCursor = hotState.classicStandingsPage;
     const classicStandingsStartPage =
-      persistedClassicCursor === undefined ? job.data.classicStandingsPage : persistedClassicCursor;
+      persistedClassicCursor === null
+        ? 1
+        : (persistedClassicCursor ?? job.data.classicStandingsPage ?? 1);
     // BullMQ retries reuse the same job data, so they retry the same bounded
     // summary chunk. The atomic hot state advances this logical cursor only
     // when the follow-up is scheduled; wall-clock parity cannot starve a
@@ -99,7 +107,7 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
         : { classicStandingsStartPage }),
       summaryRotationCursor,
     });
-    await scheduleManagerLiveContinuation(job.data, result);
+    await scheduleManagerLiveContinuation(job.data, result, classicStandingsStartPage);
     return result;
   });
 }

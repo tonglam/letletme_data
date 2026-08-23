@@ -27,6 +27,7 @@ describe('manager live worker continuation', () => {
         classicStandingsNextPage: undefined,
         errorCode: 'UPSTREAM_UNAVAILABLE',
       },
+      undefined,
       async (data) => {
         calls.push(data.summaryRotationCursor ?? -1);
         return null;
@@ -44,14 +45,15 @@ describe('manager live worker continuation', () => {
         classicStandingsNextPage: 3,
         errorCode: 'UPSTREAM_UNAVAILABLE',
       },
-      async (_data, nextRefreshAt, classicStandingsNextPage) => {
-        calls.push(`${nextRefreshAt}:${classicStandingsNextPage}`);
+      5,
+      async (_data, nextRefreshAt, classicStandingsNextPage, classicStandingsStartPage) => {
+        calls.push(`${nextRefreshAt}:${classicStandingsNextPage}:${classicStandingsStartPage}`);
         return null;
       },
     );
 
     await expect(promise).rejects.toThrow('UPSTREAM_UNAVAILABLE');
-    expect(calls).toEqual(['2026-08-23T00:00:30.000Z:3']);
+    expect(calls).toEqual(['2026-08-23T00:00:30.000Z:3:5']);
   });
 
   test('completes after scheduling when the refresh has no upstream error', async () => {
@@ -63,6 +65,7 @@ describe('manager live worker continuation', () => {
         classicStandingsNextPage: null,
         errorCode: null,
       },
+      1,
       async () => {
         scheduled = true;
         return null;
