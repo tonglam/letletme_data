@@ -99,6 +99,34 @@ describe('source-media private Storage client', () => {
     expect(sourceMediaStorageContract.bucketFileSizeLimit).toBe(24 * 1_024 * 1_024);
   });
 
+  test('treats Supabase 400 Bucket not found as a missing bucket', async () => {
+    let createCalls = 0;
+    let created = false;
+    const storage = createSourceMediaStorage(config, async (input, init = {}) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/storage/v1/bucket/briefing-source-media' && init.method === 'GET') {
+        return created
+          ? Response.json({
+              id: config.bucket,
+              name: config.bucket,
+              public: false,
+              file_size_limit: 24 * 1_024 * 1_024,
+              allowed_mime_types: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+            })
+          : Response.json({ statusCode: '400', error: 'Bucket not found' }, { status: 400 });
+      }
+      if (url.pathname === '/storage/v1/bucket' && init.method === 'POST') {
+        createCalls += 1;
+        created = true;
+        return Response.json({ name: config.bucket });
+      }
+      return Response.json({ message: 'unexpected request' }, { status: 500 });
+    });
+
+    await expect(storage.ensureBucket()).resolves.toMatchObject({ name: config.bucket });
+    expect(createCalls).toBe(1);
+  });
+
   test('routes objects above 6 MiB through direct-host TUS without upsert', async () => {
     let captured:
       | Parameters<NonNullable<Parameters<typeof createSourceMediaStorage>[2]>>[0]

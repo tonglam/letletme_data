@@ -198,6 +198,16 @@ async function storageError(
   );
 }
 
+async function isMissingBucketResponse(response: Response): Promise<boolean> {
+  if (response.status === 404) return true;
+  if (response.status !== 400) return false;
+  const bodyBytes = await boundedBody(response.clone(), undefined, 1_024).catch(
+    () => new Uint8Array(),
+  );
+  const body = new TextDecoder('utf-8', { fatal: false }).decode(bodyBytes).toLowerCase();
+  return /bucket[\s_-]+not[\s_-]+found/.test(body);
+}
+
 function assertBucket(bucket: SourceMediaBucket, expectedName: string): void {
   const limit = Number(bucket.file_size_limit);
   const mimeTypes = [...(bucket.allowed_mime_types ?? [])].sort();
@@ -291,7 +301,7 @@ export function createSourceMediaStorage(
       `${root}/bucket/${encodeURIComponent(config.bucket)}`,
       { method: 'GET', headers },
     );
-    if (response.status === 404) return null;
+    if (await isMissingBucketResponse(response)) return null;
     if (!response.ok) throw await storageError(response, 'bucket lookup');
     const responseBytes = await boundedBody(response, undefined, 64 * 1_024);
     let body: unknown;
