@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   createManagerSummaryFetchGate,
+  managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
@@ -39,27 +40,42 @@ describe('manager live refresh targets', () => {
 
 describe('classic manager live fallback', () => {
   test('uses official entry summaries after standings pagination is exhausted', () => {
-    expect(planClassicManagerFallback([97_001], true)).toEqual({
+    expect(planClassicManagerFallback([97_001], [], true)).toEqual({
       foregroundSummaryEntryIds: [97_001],
-      backgroundEntryIds: [97_001],
-      continueStandings: false,
+      backgroundStandingsEntryIds: [],
+      backgroundSummaryEntryIds: [97_001],
     });
   });
 
   test('continues bounded standings pagination before falling back to summaries', () => {
-    expect(planClassicManagerFallback([1, 2, 3, 4, 5], false)).toEqual({
+    expect(planClassicManagerFallback([1, 2, 3, 4, 5], [], false)).toEqual({
       foregroundSummaryEntryIds: [],
-      backgroundEntryIds: [1, 2, 3, 4, 5],
-      continueStandings: true,
+      backgroundStandingsEntryIds: [1, 2, 3, 4, 5],
+      backgroundSummaryEntryIds: [],
     });
   });
 
   test('bounds foreground summary requests while retaining all background work', () => {
-    expect(planClassicManagerFallback([1, 2, 3, 4, 5], true)).toEqual({
+    expect(planClassicManagerFallback([1, 2, 3, 4, 5], [], true)).toEqual({
       foregroundSummaryEntryIds: [1, 2, 3, 4],
-      backgroundEntryIds: [1, 2, 3, 4, 5],
-      continueStandings: false,
+      backgroundStandingsEntryIds: [],
+      backgroundSummaryEntryIds: [1, 2, 3, 4, 5],
     });
+  });
+
+  test('keeps stale classic rows on the standings path after a cold crawl completes', () => {
+    expect(planClassicManagerFallback([11], [21, 22], true)).toEqual({
+      foregroundSummaryEntryIds: [11],
+      backgroundStandingsEntryIds: [21, 22],
+      backgroundSummaryEntryIds: [11],
+    });
+  });
+
+  test('uses entry-set-specific background refresh keys', () => {
+    expect(managerLiveBackgroundRefreshKey('summary:2025:1', [3, 1, 3])).toBe('summary:2025:1:1,3');
+    expect(managerLiveBackgroundRefreshKey('summary:2025:1', [2])).not.toBe(
+      managerLiveBackgroundRefreshKey('summary:2025:1', [1]),
+    );
   });
 
   test('caps concurrent entry-summary work while retaining every target', () => {

@@ -82,19 +82,35 @@ export const managerSummaryFetchBatches = (
 };
 
 export const planClassicManagerFallback = (
-  pendingEntryIds: readonly number[],
+  pendingColdEntryIds: readonly number[],
+  pendingStaleEntryIds: readonly number[],
   standingsComplete: boolean,
 ): Readonly<{
   foregroundSummaryEntryIds: readonly number[];
-  backgroundEntryIds: readonly number[];
-  continueStandings: boolean;
+  backgroundStandingsEntryIds: readonly number[];
+  backgroundSummaryEntryIds: readonly number[];
 }> => ({
   // Once standings pagination is exhausted, a roster member can still be in
   // FPL's new-entries lane. Use the official entry summary instead of leaving
-  // that manager unavailable for the entire gameweek.
+  // that cold manager unavailable for the entire gameweek. Existing classic
+  // rows remain last-good standings and are never replaced by this fallback.
   foregroundSummaryEntryIds: standingsComplete
-    ? pendingEntryIds.slice(0, MAX_FOREGROUND_SUMMARY_FETCHES)
+    ? pendingColdEntryIds.slice(0, MAX_FOREGROUND_SUMMARY_FETCHES)
     : [],
-  backgroundEntryIds: pendingEntryIds,
-  continueStandings: !standingsComplete,
+  // A stale classic row must be refreshed from standings even when a separate
+  // cold-target crawl already completed. Cold rows continue standings only
+  // when that foreground crawl did not exhaust the league.
+  backgroundStandingsEntryIds: [
+    ...pendingStaleEntryIds,
+    ...(standingsComplete ? [] : pendingColdEntryIds),
+  ],
+  backgroundSummaryEntryIds: standingsComplete ? pendingColdEntryIds : [],
 });
+
+export const managerLiveBackgroundRefreshKey = (
+  prefix: string,
+  entryIds: readonly number[],
+): string =>
+  `${prefix}:${Array.from(new Set(entryIds))
+    .sort((left, right) => left - right)
+    .join(',')}`;
