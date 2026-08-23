@@ -15,6 +15,7 @@ export type ReadinessResult = {
     postgres: boolean;
     cacheRedis: boolean;
     queueRedis: boolean;
+    managerLiveQueue: boolean;
     activeSeason: boolean;
     screenshotRetentionConfigured: boolean;
     scheduler?: boolean;
@@ -39,6 +40,25 @@ const cacheRedisProbe: DependencyProbe = async () => {
 };
 
 const queueRedisProbe: DependencyProbe = () => queueRedisSingleton.healthCheck();
+
+const managerLiveQueueProbe: DependencyProbe = async () => {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const { managerLiveQueue } = await import('../queues/manager-live.queue');
+  try {
+    await Promise.race([
+      managerLiveQueue.getJobCounts('waiting', 'active', 'delayed'),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('Manager live queue readiness timed out after 5000ms')),
+          5_000,
+        );
+      }),
+    ]);
+    return true;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+};
 
 const activeSeasonProbe: DependencyProbe = async () => {
   const season = await seasonRepository.findCurrent();
@@ -125,6 +145,7 @@ export async function checkReadiness(
     postgres: DependencyProbe;
     cacheRedis: DependencyProbe;
     queueRedis: DependencyProbe;
+    managerLiveQueue: DependencyProbe;
     activeSeason: DependencyProbe;
     screenshotRetentionConfigured: DependencyProbe;
     scheduler: DependencyProbe;
@@ -144,6 +165,7 @@ export async function checkReadiness(
     postgres: postgresProbe,
     cacheRedis: cacheRedisProbe,
     queueRedis: queueRedisProbe,
+    managerLiveQueue: managerLiveQueueProbe,
     activeSeason: activeSeasonProbe,
     screenshotRetentionConfigured: screenshotRetentionConfiguredProbe,
     scheduler: schedulerProbe,
@@ -154,24 +176,38 @@ export async function checkReadiness(
     ...probes,
   };
   const probeTimeoutMs = probes?.probeTimeoutMs ?? READINESS_PROBE_TIMEOUT_MS;
-  const [postgres, cacheRedis, queueRedis, activeSeason, screenshotRetentionConfigured] =
-    await Promise.all([
-      safeProbe(configured.postgres, probeTimeoutMs),
-      safeProbe(configured.cacheRedis, probeTimeoutMs),
-      safeProbe(configured.queueRedis, probeTimeoutMs),
-      safeProbe(configured.activeSeason, probeTimeoutMs),
-      safeProbe(configured.screenshotRetentionConfigured, probeTimeoutMs),
-    ]);
+  const [
+    postgres,
+    cacheRedis,
+    queueRedis,
+    managerLiveQueueHealthy,
+    activeSeason,
+    screenshotRetentionConfigured,
+  ] = await Promise.all([
+    safeProbe(configured.postgres, probeTimeoutMs),
+    safeProbe(configured.cacheRedis, probeTimeoutMs),
+    safeProbe(configured.queueRedis, probeTimeoutMs),
+    safeProbe(configured.managerLiveQueue, probeTimeoutMs),
+    safeProbe(configured.activeSeason, probeTimeoutMs),
+    safeProbe(configured.screenshotRetentionConfigured, probeTimeoutMs),
+  ]);
   const baseDependencies = {
     postgres,
     cacheRedis,
     queueRedis,
+    managerLiveQueue: managerLiveQueueHealthy,
     activeSeason,
     screenshotRetentionConfigured,
   };
   if (!includeRuntimeDependencies) {
     return {
-      ready: postgres && cacheRedis && queueRedis && activeSeason && screenshotRetentionConfigured,
+      ready:
+        postgres &&
+        cacheRedis &&
+        queueRedis &&
+        managerLiveQueueHealthy &&
+        activeSeason &&
+        screenshotRetentionConfigured,
       dependencies: baseDependencies,
     };
   }
@@ -188,6 +224,7 @@ export async function checkReadiness(
       postgres &&
       cacheRedis &&
       queueRedis &&
+      managerLiveQueueHealthy &&
       activeSeason &&
       screenshotRetentionConfigured &&
       scheduler &&

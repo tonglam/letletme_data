@@ -15,6 +15,7 @@ export const managerLiveAPI = new Elysia({ prefix: '/internal/manager-live' }).p
       eventId: positiveInteger,
       entryIds: t.Array(positiveInteger, { minItems: 1, maxItems: 500 }),
       tournamentId: t.Optional(positiveInteger),
+      readMode: t.Optional(t.Union([t.Literal('CACHE_ONLY'), t.Literal('READ_THROUGH')])),
     }),
   },
 );
