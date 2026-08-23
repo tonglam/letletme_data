@@ -48,7 +48,8 @@ const getClassicStandings = spyOn(fplClient, 'getLeagueClassicStandings').mockIm
   },
 );
 
-const { resolveManagerLiveScores } = await import('../../src/services/manager-live.service');
+const { preserveClassicOverallRank, resolveManagerLiveScores, selectWorkerClassicFallbackTargets } =
+  await import('../../src/services/manager-live.service');
 const { managerLiveAPI } = await import('../../src/api/manager-live.api');
 
 const cachedRow = (entryId: number, checkedAt: string) => ({
@@ -264,6 +265,43 @@ describe('manager live READ_THROUGH source reporting', () => {
       missingEntryIds: [],
     });
     expect(getEntrySummary).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('manager live classic standings convergence', () => {
+  test('preserves an enriched overall rank when standings refresh the phase row', () => {
+    const checkedAt = new Date().toISOString();
+    const existing = { ...cachedRow(101, checkedAt), overallRank: 456_789 };
+    const incoming = {
+      ...cachedRow(101, checkedAt),
+      totalScope: 'CLASSIC_PHASE',
+      source: 'FPL_CLASSIC_STANDINGS',
+      overallRank: null,
+      leagueRank: 8,
+      revision: 'standings-without-overall-rank',
+    };
+
+    const merged = preserveClassicOverallRank(incoming as never, existing as never);
+
+    expect(merged).toMatchObject({
+      source: 'FPL_CLASSIC_STANDINGS',
+      totalScope: 'CLASSIC_PHASE',
+      leagueRank: 8,
+      overallRank: 456_789,
+    });
+    expect(merged.revision).not.toBe(incoming.revision);
+  });
+
+  test('continues standings before falling back and never overwrites a classic row', () => {
+    const rows = new Map([
+      [101, { source: 'FPL_CLASSIC_STANDINGS' }],
+      [102, { source: 'FPL_ENTRY_SUMMARY' }],
+    ]);
+
+    expect(selectWorkerClassicFallbackTargets([101, 102, 103], rows as never, false)).toEqual([]);
+    expect(selectWorkerClassicFallbackTargets([101, 102, 103], rows as never, true)).toEqual([
+      102, 103,
+    ]);
   });
 });
 

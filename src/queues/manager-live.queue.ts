@@ -23,6 +23,7 @@ export interface ManagerLiveJobData {
   eventId: number;
   entryIds: number[];
   tournamentId?: number;
+  classicStandingsPage?: number;
   source: 'request' | 'followup';
   triggeredAt: string;
 }

@@ -10,6 +10,7 @@ export async function dispatchManagerLiveRefresh(input: {
   eventId: number;
   entryIds: readonly number[];
   tournamentId?: number;
+  chunkEntries?: boolean;
 }): Promise<void> {
   const { enqueueManagerLiveRefreshBatches } = await import('../jobs/manager-live.jobs');
   await enqueueManagerLiveRefreshBatches(input);

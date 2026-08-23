@@ -10,6 +10,7 @@ import {
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
   MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT,
   managerLiveEntryChunks,
+  managerLiveDispatchEntryChunks,
   managerLiveHotScopeKey,
   managerLiveRefreshJobId,
   parseManagerLiveHotScope,
@@ -58,6 +59,13 @@ describe('manager live refresh policy', () => {
       true,
     );
     expect(chunks.flat()).toEqual([...input].sort((left, right) => left - right));
+  });
+
+  test('keeps a classic standings feed in one cursor-bearing worker job', () => {
+    const input = Array.from({ length: 500 }, (_, index) => index + 1);
+
+    expect(managerLiveDispatchEntryChunks(input, false)).toEqual([input]);
+    expect(managerLiveDispatchEntryChunks(input, true).length).toBeGreaterThan(1);
   });
 
   test('persists a normalized hot scope for exactly six hours', async () => {

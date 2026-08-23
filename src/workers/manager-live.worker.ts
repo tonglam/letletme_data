@@ -53,8 +53,15 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       eventId: job.data.eventId,
       entryIds: job.data.entryIds,
       ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+      ...(job.data.classicStandingsPage === undefined
+        ? {}
+        : { classicStandingsStartPage: job.data.classicStandingsPage }),
     });
-    await scheduleNextManagerLiveRefresh(job.data, result.nextRefreshAt);
+    await scheduleNextManagerLiveRefresh(
+      job.data,
+      result.nextRefreshAt,
+      result.classicStandingsNextPage,
+    );
     return result;
   });
 }

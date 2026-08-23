@@ -3,7 +3,7 @@ import type { Job } from 'bullmq';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   loadManagerLiveHotScope,
-  managerLiveEntryChunks,
+  managerLiveDispatchEntryChunks,
   MANAGER_LIVE_REFRESH_BUCKET_MS,
   managerLiveRefreshJobId,
   normalizeManagerLiveEntryIds,
@@ -35,6 +35,7 @@ async function addManagerLiveRefresh(
   scope: ManagerLiveRefreshScope,
   source: ManagerLiveJobData['source'],
   runAt: Date,
+  classicStandingsPage?: number | null,
 ): Promise<Job<ManagerLiveJobData>> {
   const now = Date.now();
   const data: ManagerLiveJobData = {
@@ -44,6 +45,9 @@ async function addManagerLiveRefresh(
     eventId: scope.eventId,
     entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
     ...(scope.tournamentId === undefined ? {} : { tournamentId: scope.tournamentId }),
+    ...(classicStandingsPage === undefined || classicStandingsPage === null
+      ? {}
+      : { classicStandingsPage }),
     source,
     triggeredAt: new Date(now).toISOString(),
   };
@@ -94,21 +98,23 @@ export async function enqueueManagerLiveRefreshBatches(input: {
   eventId: number;
   entryIds: readonly number[];
   tournamentId?: number;
+  chunkEntries?: boolean;
   runAt?: Date;
   markHot?: boolean;
   source?: ManagerLiveJobData['source'];
 }): Promise<Job<ManagerLiveJobData>[]> {
   const runAt = input.runAt ?? new Date();
+  const entryChunks = managerLiveDispatchEntryChunks(input.entryIds, input.chunkEntries !== false);
+  const { chunkEntries: _chunkEntries, ...jobInput } = input;
   return Promise.all(
-    managerLiveEntryChunks(input.entryIds).map((entryIds) =>
-      enqueueManagerLiveRefresh({ ...input, entryIds, runAt }),
-    ),
+    entryChunks.map((entryIds) => enqueueManagerLiveRefresh({ ...jobInput, entryIds, runAt })),
   );
 }
 
 export async function scheduleNextManagerLiveRefresh(
   jobData: ManagerLiveJobData,
   nextRefreshAt: string,
+  classicStandingsNextPage?: number | null,
 ): Promise<Job<ManagerLiveJobData> | null> {
   const scope: ManagerLiveRefreshScope = {
     seasonId: jobData.seasonId,
@@ -133,5 +139,5 @@ export async function scheduleNextManagerLiveRefresh(
   const runAt = Number.isFinite(requestedRunAt.getTime())
     ? new Date(Math.max(Date.now() + 1_000, requestedRunAt.getTime()))
     : new Date(Date.now() + MANAGER_LIVE_REFRESH_BUCKET_MS);
-  return addManagerLiveRefresh(hotScope, 'followup', runAt);
+  return addManagerLiveRefresh(hotScope, 'followup', runAt, classicStandingsNextPage);
 }

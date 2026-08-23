@@ -40,6 +40,12 @@ export const managerLiveEntryChunks = (entryIds: readonly number[]): number[][] 
   return chunks;
 };
 
+export const managerLiveDispatchEntryChunks = (
+  entryIds: readonly number[],
+  chunkEntries = true,
+): number[][] =>
+  chunkEntries ? managerLiveEntryChunks(entryIds) : [normalizeManagerLiveEntryIds(entryIds)];
+
 const entrySetDigest = (entryIds: readonly number[]): string =>
   createHash('sha1')
     .update(normalizeManagerLiveEntryIds(entryIds).join(','))

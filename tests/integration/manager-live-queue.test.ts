@@ -87,4 +87,35 @@ describe('manager live queue integration', () => {
       scheduleNextManagerLiveRefresh(data, new Date(Date.now() + 30_000).toISOString()),
     ).resolves.toBeNull();
   });
+
+  test('carries a bounded classic standings cursor into the next bucket', async () => {
+    const markerJob = await enqueueManagerLiveRefresh({
+      season: TEST_SEASON,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      runAt: new Date(Date.now() + 35_000),
+    });
+    if (markerJob.id) createdJobIds.add(markerJob.id);
+    const data: ManagerLiveJobData = {
+      version: MANAGER_LIVE_JOB_VERSION,
+      seasonId: scope.seasonId,
+      seasonCode: scope.seasonCode,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      source: 'followup',
+      triggeredAt: new Date().toISOString(),
+    };
+
+    const followup = await scheduleNextManagerLiveRefresh(
+      data,
+      new Date(Date.now() + 75_000).toISOString(),
+      7,
+    );
+    if (followup?.id) createdJobIds.add(followup.id);
+
+    expect(followup).not.toBeNull();
+    expect(followup?.data.classicStandingsPage).toBe(7);
+  });
 });
