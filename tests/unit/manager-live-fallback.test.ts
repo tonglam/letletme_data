@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   createKeyedSerialTaskGate,
+  createKeyedSerialTaskScheduler,
   createManagerSummaryFetchGate,
   isPositiveOverallRank,
   managerSummaryFetchBatches,
@@ -41,6 +42,34 @@ describe('classic manager live fallback', () => {
     releaseStandings();
     await Promise.all([standings, overallRank]);
     expect(order).toEqual(['standings-start', 'other-league', 'standings-end', 'overall-rank']);
+  });
+
+  test('queues distinct background work while deduplicating the same work set', async () => {
+    const schedule = createKeyedSerialTaskScheduler();
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstActive = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = schedule('classic:8863', 'classic:8863:1,2', async () => {
+      order.push('first-start');
+      await firstActive;
+      order.push('first-end');
+    });
+    await Promise.resolve();
+    const duplicate = schedule('classic:8863', 'classic:8863:1,2', async () => {
+      order.push('duplicate');
+    });
+    const distinct = schedule('classic:8863', 'classic:8863:3,4', async () => {
+      order.push('distinct');
+    });
+
+    expect(duplicate).toBe(first);
+    expect(order).toEqual(['first-start']);
+    releaseFirst();
+    await Promise.all([first, duplicate, distinct]);
+    expect(order).toEqual(['first-start', 'first-end', 'distinct']);
   });
 
   test('keeps the last positive overall rank until a newer positive rank arrives', () => {

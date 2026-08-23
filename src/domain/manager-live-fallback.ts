@@ -30,6 +30,26 @@ export const createKeyedSerialTaskGate = (): (<T>(
   };
 };
 
+export const createKeyedSerialTaskScheduler = (): ((
+  serialKey: string,
+  workKey: string,
+  task: () => Promise<void>,
+) => Promise<void>) => {
+  const runSerialTask = createKeyedSerialTaskGate();
+  const scheduledWork = new Map<string, Promise<void>>();
+
+  return (serialKey: string, workKey: string, task: () => Promise<void>): Promise<void> => {
+    const existing = scheduledWork.get(workKey);
+    if (existing) return existing;
+
+    const promise = runSerialTask(serialKey, task).finally(() => {
+      if (scheduledWork.get(workKey) === promise) scheduledWork.delete(workKey);
+    });
+    scheduledWork.set(workKey, promise);
+    return promise;
+  };
+};
+
 export const isPositiveOverallRank = (value: number | null | undefined): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 

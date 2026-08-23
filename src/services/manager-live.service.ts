@@ -20,6 +20,7 @@ import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   createKeyedSerialTaskGate,
+  createKeyedSerialTaskScheduler,
   createManagerSummaryFetchGate,
   isPositiveOverallRank,
   managerSummaryFetchBatches,
@@ -418,7 +419,7 @@ const isWithinStaleWindow = (row: CachedRow, now = Date.now()): boolean =>
   // replaces it; it must not disappear merely because 90 seconds elapsed.
   Number.isFinite(Date.parse(row.checkedAt)) && ageSeconds(row.checkedAt, now) >= 0;
 
-const managerLiveBackgroundInFlight = new Map<string, Promise<void>>();
+const runManagerLiveBackgroundRefresh = createKeyedSerialTaskScheduler();
 // This gate is shared by every live-desk refresh in the process. Per-request
 // batching alone is insufficient because distinct tournaments can refresh at
 // the same time and otherwise multiply FPL entry-summary concurrency.
@@ -434,19 +435,18 @@ const managerLivePublicationKey = (
   scope: ManagerScoreScope,
 ): string => `${season}:${eventId}:${scopeKey(scope)}`;
 
-const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void => {
-  if (managerLiveBackgroundInFlight.has(key)) return;
-  const promise = task()
-    .catch((error) => {
-      logWarn('Official manager live background refresh failed', {
-        key,
-        error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
-      });
-    })
-    .finally(() => {
-      managerLiveBackgroundInFlight.delete(key);
+const scheduleBackgroundRefresh = (
+  serialKey: string,
+  workKey: string,
+  task: () => Promise<void>,
+): void => {
+  void runManagerLiveBackgroundRefresh(serialKey, workKey, task).catch((error) => {
+    logWarn('Official manager live background refresh failed', {
+      key: serialKey,
+      workKey,
+      error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
     });
-  managerLiveBackgroundInFlight.set(key, promise);
+  });
 };
 
 const refreshEntrySummaries = async (
@@ -900,11 +900,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
       );
       if (pending.length > 0) {
-        const backgroundKey = `h2h:${season.seasonCode}:${input.eventId}:${input.tournamentId}:${pending
+        const backgroundKey = `h2h:${season.seasonCode}:${input.eventId}:${input.tournamentId}`;
+        const backgroundWorkKey = `${backgroundKey}:entries:${pending
           .slice()
           .sort((left, right) => left - right)
           .join(',')}`;
-        scheduleBackgroundRefresh(backgroundKey, async () => {
+        scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
           const backgroundRows = await readCachedRows(
             redis,
             season.seasonCode,
@@ -1008,8 +1009,15 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     const backgroundEntryIds = Array.from(new Set([...pendingStandings, ...pendingOverallRank]));
     if (backgroundEntryIds.length > 0) {
       const backgroundKey = `classic:${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
+      const backgroundWorkKey = `${backgroundKey}:standings:${pendingStandings
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}:overall-rank:${pendingOverallRank
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}:page:${standings.nextPage}:complete:${standings.complete}`;
       const backgroundSeedRows = new Map(rows);
-      scheduleBackgroundRefresh(backgroundKey, async () => {
+      scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
         const backgroundRows = await readCachedAndCheckpointRows(
           redis,
           season,
@@ -1102,7 +1110,11 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     );
     if (pending.length > 0) {
       const backgroundKey = `summary:${season.seasonCode}:${input.eventId}`;
-      scheduleBackgroundRefresh(backgroundKey, async () => {
+      const backgroundWorkKey = `${backgroundKey}:entries:${pending
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}`;
+      scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
         const backgroundRows = await readCachedRows(
           redis,
           season.seasonCode,
