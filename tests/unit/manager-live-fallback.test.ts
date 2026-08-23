@@ -15,6 +15,7 @@ import {
   preserveClassicOverallRank,
   readThroughManagerSummaryResult,
   readLatestRowsWithFallback,
+  requireManagerSummaryCoordinator,
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
@@ -321,8 +322,9 @@ describe('classic manager live fallback', () => {
 
   test('shares one official summary observation across distributed waiters', async () => {
     const runDistributed = createKeyedTaskSerializer();
-    let shared: { eventPoints: number } | null = null;
+    let shared: { summary: { eventPoints: number }; observedAt: string } | null = null;
     let officialFetches = 0;
+    const observedAt = '2026-08-23T13:00:00.000Z';
 
     const replicaRefresh = () =>
       runDistributed('entry-summary:7', () =>
@@ -330,7 +332,7 @@ describe('classic manager live fallback', () => {
           async () => shared,
           async () => {
             officialFetches += 1;
-            return { eventPoints: 42 };
+            return { summary: { eventPoints: 42 }, observedAt };
           },
           async (value) => {
             shared = value;
@@ -340,9 +342,16 @@ describe('classic manager live fallback', () => {
 
     const [first, second] = await Promise.all([replicaRefresh(), replicaRefresh()]);
 
-    expect(first).toEqual({ eventPoints: 42 });
-    expect(second).toEqual({ eventPoints: 42 });
+    expect(first).toEqual({ summary: { eventPoints: 42 }, observedAt });
+    expect(second).toEqual({ summary: { eventPoints: 42 }, observedAt });
     expect(officialFetches).toBe(1);
+  });
+
+  test('fails closed before an uncoordinated summary refresh can start', () => {
+    expect(() => requireManagerSummaryCoordinator(null)).toThrow(
+      'manager summary distributed coordination unavailable',
+    );
+    expect(requireManagerSummaryCoordinator({ available: true })).toEqual({ available: true });
   });
 
   test('fails closed when an official summary cannot be handed to other replicas', async () => {

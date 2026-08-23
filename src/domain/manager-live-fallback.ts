@@ -67,6 +67,13 @@ export type YieldingKeyedTaskAttempt<T> =
 export type DistributedLeaseAcquireFailureMode = 'fail-open' | 'fail-closed';
 export type DistributedLeaseAcquireResult = 'owned' | 'contended' | 'uncoordinated';
 
+export const requireManagerSummaryCoordinator = <T>(coordinator: T | null): T => {
+  if (coordinator === null) {
+    throw new Error('manager summary distributed coordination unavailable');
+  }
+  return coordinator;
+};
+
 export const acquireDistributedLease = async (
   acquire: () => Promise<boolean>,
   failureMode: DistributedLeaseAcquireFailureMode,

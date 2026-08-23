@@ -33,6 +33,7 @@ import {
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
   readThroughManagerSummaryResult,
+  requireManagerSummaryCoordinator,
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
@@ -434,6 +435,31 @@ const classicRefreshLockKey = (key: string): string =>
 const entrySummarySharedResultKey = (season: string, eventId: number, entryId: number): string =>
   `OfficialManagerLiveEntrySummaryResult:${season}:${eventId}:${entryId}`;
 
+type ManagerSummaryObservation = Readonly<{
+  summary: Awaited<ReturnType<typeof fplClient.getEntrySummary>>;
+  observedAt: string;
+}>;
+
+const parseManagerSummaryObservation = (value: string): ManagerSummaryObservation | null => {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const candidate = parsed as { summary?: unknown; observedAt?: unknown };
+    if (typeof candidate.observedAt !== 'string') return null;
+    const observedAtDate = new Date(candidate.observedAt);
+    if (
+      !Number.isFinite(observedAtDate.getTime()) ||
+      observedAtDate.toISOString() !== candidate.observedAt
+    ) {
+      return null;
+    }
+    const validated = EntrySummarySchema.safeParse(candidate.summary);
+    return validated.success ? { summary: validated.data, observedAt: candidate.observedAt } : null;
+  } catch {
+    return null;
+  }
+};
+
 const runClassicStandingsRefresh = <T>(
   redis: Redis | null,
   key: string,
@@ -509,23 +535,20 @@ const fetchDistributedManagerSummary = (
   eventId: number,
   entryId: number,
   priority: ManagerSummaryFetchPriority = 'foreground',
-): Promise<Awaited<ReturnType<typeof fplClient.getEntrySummary>>> => {
-  if (!redis) {
-    return runManagerSummaryFetch(() => fplClient.getEntrySummary(entryId), priority, entryId);
-  }
-
+): Promise<ManagerSummaryObservation> => {
+  const coordinator = requireManagerSummaryCoordinator(redis);
   return runClassicStandingsRefresh(
-    redis,
+    coordinator,
     `entry-summary:${season}:${eventId}:${entryId}`,
     () =>
       readThroughManagerSummaryResult(
         async () => {
           try {
-            const value = await redis.get(entrySummarySharedResultKey(season, eventId, entryId));
+            const value = await coordinator.get(
+              entrySummarySharedResultKey(season, eventId, entryId),
+            );
             if (!value) return null;
-            const parsed: unknown = JSON.parse(value);
-            const validated = EntrySummarySchema.safeParse(parsed);
-            return validated.success ? validated.data : null;
+            return parseManagerSummaryObservation(value);
           } catch (error) {
             logWarn('Official manager shared entry summary read failed', {
               entryId,
@@ -537,12 +560,19 @@ const fetchDistributedManagerSummary = (
             throw error;
           }
         },
-        () => runManagerSummaryFetch(() => fplClient.getEntrySummary(entryId), priority, entryId),
-        async (summary) => {
+        async () => ({
+          summary: await runManagerSummaryFetch(
+            () => fplClient.getEntrySummary(entryId),
+            priority,
+            entryId,
+          ),
+          observedAt: nowIso(),
+        }),
+        async (observation) => {
           try {
-            await redis.set(
+            await coordinator.set(
               entrySummarySharedResultKey(season, eventId, entryId),
-              JSON.stringify(summary),
+              JSON.stringify(observation),
               'EX',
               ENTRY_SUMMARY_SHARED_RESULT_SECONDS,
             );
@@ -603,14 +633,14 @@ const refreshEntrySummaries = async (
     await Promise.all(
       batch.map(async (entryId) => {
         try {
-          const summary = await fetchDistributedManagerSummary(
+          const observation = await fetchDistributedManagerSummary(
             redis,
             season.seasonCode,
             eventId,
             entryId,
             options.priority,
           );
-          const checkedAt = nowIso();
+          const { summary, observedAt: checkedAt } = observation;
           const existing = rows.get(entryId);
           const row =
             options.preserveClassicStanding && existing?.source === 'FPL_CLASSIC_STANDINGS'
