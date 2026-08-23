@@ -46,7 +46,9 @@ const getRedisClient = mock(async () => {
 redisSingleton.getClient = getRedisClient;
 const findCheckpointRows = mock(async () => postgresRows as never);
 managerScoreCheckpointRepository.findByScopeAndEntryIds = findCheckpointRows;
-const upsertCheckpoint = mock(async (..._args: unknown[]) => undefined);
+const successfulCheckpointWrite = async (...args: unknown[]): Promise<number> =>
+  Array.isArray(args[3]) ? args[3].length : 0;
+const upsertCheckpoint = mock(successfulCheckpointWrite);
 managerScoreCheckpointRepository.upsertBatch = upsertCheckpoint;
 const dispatchRefresh = spyOn(dispatchModule, 'dispatchManagerLiveRefresh').mockImplementation(
   async () => undefined,
@@ -403,7 +405,7 @@ describe('manager live READ_THROUGH source reporting', () => {
       throw new Error('unexpected FPL request');
     });
     upsertCheckpoint.mockReset();
-    upsertCheckpoint.mockImplementation(async () => undefined);
+    upsertCheckpoint.mockImplementation(successfulCheckpointWrite);
   });
 
   test('does not claim Redis when an upstream row could not be persisted', async () => {
@@ -493,7 +495,7 @@ describe('manager live READ_THROUGH source reporting', () => {
 describe('manager live classic standings convergence', () => {
   beforeEach(() => {
     upsertCheckpoint.mockReset();
-    upsertCheckpoint.mockImplementation(async () => undefined);
+    upsertCheckpoint.mockImplementation(successfulCheckpointWrite);
     getClassicStandings.mockReset();
     getClassicStandings.mockImplementation(async () => {
       throw new Error('unexpected FPL standings request');
