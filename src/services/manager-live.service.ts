@@ -742,15 +742,29 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       rows.set(checkpoint.entryId, fromManagerScoreCheckpoint(checkpoint, season.seasonCode));
     }
   }
+  const refreshNow = Date.now();
+  const usableCachedEntryIds = new Set(
+    uniqueEntryIds.filter((entryId) => {
+      const row = rows.get(entryId);
+      return row !== undefined && isWithinStaleWindow(row, refreshNow);
+    }),
+  );
   const refreshPlan = planManagerLiveRefreshTargets(
     uniqueEntryIds,
-    new Set(rows.keys()),
-    new Set(uniqueEntryIds.filter((entryId) => rows.has(entryId) && isFresh(rows.get(entryId)!))),
+    usableCachedEntryIds,
+    new Set(
+      uniqueEntryIds.filter((entryId) => {
+        const row = rows.get(entryId);
+        return row !== undefined && isFresh(row, refreshNow);
+      }),
+    ),
   );
   const staleOrMissing = refreshPlan.backgroundEntryIds;
   const foregroundRefreshTargets = refreshPlan.foregroundEntryIds;
   const coldEntryIds = new Set(foregroundRefreshTargets);
-  const staleLastGoodCount = staleOrMissing.filter((entryId) => rows.has(entryId)).length;
+  const staleLastGoodCount = staleOrMissing.filter((entryId) =>
+    usableCachedEntryIds.has(entryId),
+  ).length;
   if (staleLastGoodCount > 0) {
     logDebug('Serving last-good manager rows while refreshing in background', {
       eventId: input.eventId,
