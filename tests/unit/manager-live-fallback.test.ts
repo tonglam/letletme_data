@@ -7,6 +7,7 @@ import {
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
+  pendingManagerRefreshEntryIds,
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
@@ -33,6 +34,15 @@ describe('manager live refresh targets', () => {
       foregroundEntryIds: [],
       backgroundEntryIds: [],
     });
+  });
+
+  test('prunes targets that became fresh while waiting for a serialized lane', () => {
+    const rows = new Map([
+      [1, { fresh: true }],
+      [2, { fresh: false }],
+    ]);
+
+    expect(pendingManagerRefreshEntryIds([1, 2, 3], rows, (row) => row.fresh)).toEqual([2, 3]);
   });
 
   test('preserves an enriched OR when a standings refresh omits it', () => {

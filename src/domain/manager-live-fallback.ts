@@ -119,6 +119,16 @@ export const planManagerLiveRefreshTargets = (
   backgroundEntryIds: requestedEntryIds.filter((entryId) => !freshEntryIds.has(entryId)),
 });
 
+export const pendingManagerRefreshEntryIds = <T>(
+  requestedEntryIds: readonly number[],
+  rows: ReadonlyMap<number, T>,
+  isFresh: (row: T) => boolean,
+): readonly number[] =>
+  requestedEntryIds.filter((entryId) => {
+    const row = rows.get(entryId);
+    return !row || !isFresh(row);
+  });
+
 export const createManagerSummaryFetchGate = (
   maxConcurrent = MAX_SUMMARY_FETCH_CONCURRENCY,
 ): (<T>(task: () => Promise<T>, priority?: ManagerSummaryFetchPriority) => Promise<T>) => {

@@ -25,6 +25,7 @@ import {
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
+  pendingManagerRefreshEntryIds,
   type ManagerSummaryFetchPriority,
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
@@ -512,7 +513,7 @@ const refreshClassicStandings = async (
 }> => {
   const checkedAt = nowIso();
   const fetchedRows: ManagerLiveScoreRow[] = [];
-  let found = 0;
+  const foundEntryIds = new Set<number>();
   const startPage = options.startPage ?? 1;
   const maxPages = options.maxPages ?? MAX_FOREGROUND_STANDINGS_PAGES;
   let nextPage = startPage;
@@ -521,7 +522,9 @@ const refreshClassicStandings = async (
   try {
     for (
       let page = startPage;
-      page <= MAX_STANDINGS_PAGES && page < startPage + maxPages && found < targetIds.size;
+      page <= MAX_STANDINGS_PAGES &&
+      page < startPage + maxPages &&
+      foundEntryIds.size < targetIds.size;
       page += 1
     ) {
       const response = await fplClient.getLeagueClassicStandings(leagueId, page);
@@ -530,7 +533,7 @@ const refreshClassicStandings = async (
       for (const row of pageRows) {
         if (!targetIds.has(row.entryId)) continue;
         const existing = rows.get(row.entryId);
-        if (!existing || !isFresh(existing)) found += 1;
+        foundEntryIds.add(row.entryId);
         const overallRank = preserveClassicOverallRank(row.overallRank, existing?.overallRank);
         const publishedRow =
           overallRank !== row.overallRank
@@ -606,7 +609,7 @@ const refreshClassicStandings = async (
   return {
     complete:
       refreshErrorCode === null &&
-      (exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES),
+      (exhausted || foundEntryIds.size >= targetIds.size || nextPage > MAX_STANDINGS_PAGES),
     nextPage,
     errorCode: refreshErrorCode,
     refreshedEntryIds: fetchedRows.map((row) => row.entryId),
@@ -902,20 +905,46 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       const foregroundRefresh = await runClassicStandingsRefresh(
         classicRefreshKey,
         async () => {
-          const nextStandings = await refreshClassicStandings(
-            season,
-            input.eventId,
-            classicLeagueId,
-            new Set(foregroundRefreshTargets),
-            rows,
+          const latestRows = await readBackgroundRows(
             redis,
+            season.seasonCode,
+            input.eventId,
+            scope,
+            foregroundRefreshTargets,
+            rows,
           );
+          mergeLatestRows(rows, latestRows);
+          const standingsTargets = pendingManagerRefreshEntryIds(
+            foregroundRefreshTargets,
+            rows,
+            isFresh,
+          );
+          const nextStandings =
+            standingsTargets.length > 0
+              ? await refreshClassicStandings(
+                  season,
+                  input.eventId,
+                  classicLeagueId,
+                  new Set(standingsTargets),
+                  rows,
+                  redis,
+                )
+              : {
+                  complete: true,
+                  nextPage: 1,
+                  errorCode: null,
+                  refreshedEntryIds: [],
+                };
           // The lane remains held through OR enrichment so an older standings
           // snapshot cannot be re-published after a newer same-league crawl.
-          const rankTargets = nextStandings.refreshedEntryIds.slice(
-            0,
-            MAX_FOREGROUND_OVERALL_RANK_FETCHES,
-          );
+          const rankTargets = Array.from(
+            new Set([
+              ...nextStandings.refreshedEntryIds,
+              ...foregroundRefreshTargets.filter((entryId) =>
+                classicStandingNeedsOverallRank(rows.get(entryId)),
+              ),
+            ]),
+          ).slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
           const rankError =
             rankTargets.length > 0
               ? await refreshEntrySummaries(
@@ -1037,18 +1066,35 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                 capturedBackgroundRows,
               );
               if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
-                backgroundResult = await refreshClassicStandings(
-                  season,
-                  input.eventId,
-                  classicLeagueId,
-                  new Set(backgroundPlan.backgroundStandingsEntryIds),
+                const standingsTargets = pendingManagerRefreshEntryIds(
+                  backgroundPlan.backgroundStandingsEntryIds,
                   backgroundRows,
-                  redis,
-                  { startPage: 1, maxPages: MAX_STANDINGS_PAGES },
+                  isFresh,
                 );
+                backgroundResult =
+                  standingsTargets.length > 0
+                    ? await refreshClassicStandings(
+                        season,
+                        input.eventId,
+                        classicLeagueId,
+                        new Set(standingsTargets),
+                        backgroundRows,
+                        redis,
+                        { startPage: 1, maxPages: MAX_STANDINGS_PAGES },
+                      )
+                    : {
+                        complete: true,
+                        nextPage: 1,
+                        errorCode: null,
+                        refreshedEntryIds: [],
+                      };
               }
+              const skippedRankTargets = [
+                ...rankOnlyTargets,
+                ...backgroundPlan.backgroundStandingsEntryIds,
+              ].filter((entryId) => classicStandingNeedsOverallRank(backgroundRows.get(entryId)));
               return Array.from(
-                new Set([...rankOnlyTargets, ...backgroundResult.refreshedEntryIds]),
+                new Set([...skippedRankTargets, ...backgroundResult.refreshedEntryIds]),
               ).filter(
                 (entryId) => backgroundRows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
               );
