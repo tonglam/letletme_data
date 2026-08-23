@@ -477,67 +477,14 @@ const refreshEntrySummaries = async (
   const classicScope = scope.scopeType === 'CLASSIC_LEAGUE';
   const publicationKey = managerLivePublicationKey(season.seasonCode, eventId, scope);
   for (const batch of managerSummaryFetchBatches(targets)) {
-    const publishedBatch: ManagerLiveScoreRow[] = [];
-    const checkpointBatch: ManagerLiveScoreRow[] = [];
-    await Promise.all(
+    const completed = await Promise.all(
       batch.map(async (entryId) => {
         try {
           const summary = await runManagerSummaryFetch(
             () => fplClient.getEntrySummary(entryId),
             options.priority,
           );
-          const composeAndPublish = async (reReadLatest: boolean): Promise<ManagerLiveScoreRow> => {
-            let existing = rows.get(entryId);
-            if (reReadLatest) {
-              // The shared Classic publication gate keeps the latest-row read,
-              // OR merge, Redis write and checkpoint upsert atomic relative to
-              // every foreground standings publication in this API process.
-              const latestRows = await readCachedAndCheckpointRows(
-                redis,
-                season,
-                eventId,
-                scope,
-                [entryId],
-                rows,
-              );
-              existing = latestRows.get(entryId) ?? existing;
-              if (existing) rows.set(entryId, existing);
-            }
-            const checkedAt = nowIso();
-            const candidate = shouldPreserveClassicStandingForRank(
-              options.preserveClassicStanding,
-              existing,
-            )
-              ? (() => {
-                  const { revision: _revision, ...classicRow } = existing;
-                  return withRevision({
-                    ...classicRow,
-                    // Classic standings owns event/phase totals and league rank;
-                    // the entry summary owns the season-wide FPL OR.
-                    overallRank: summary.summary_overall_rank ?? null,
-                    checkedAt,
-                    staleAt: plusSeconds(checkedAt, STALE_SECONDS),
-                  });
-                })()
-              : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
-            const row = withPreservedOverallRank(candidate, existing?.overallRank);
-            rows.set(row.entryId, row);
-            // Publish each completed response immediately. A slow sibling or
-            // later batch must not hide already-fetched official scores.
-            await writeRows(redis, season.seasonCode, eventId, scope, [row]);
-            if (classicScope) await writeCheckpointRows(season, eventId, scope, [row]);
-            return row;
-          };
-          const row = classicScope
-            ? await runManagerLivePublication(publicationKey, () => composeAndPublish(true))
-            : await composeAndPublish(false);
-          if (isPositiveOverallRank(summary.summary_overall_rank)) {
-            overallRankRefreshedEntryIds.push(entryId);
-          }
-          refreshedEntryIds.push(entryId);
-          publishedBatch.push(row);
-          if (!classicScope) checkpointBatch.push(row);
-          refreshed.push(row);
+          return { entryId, summary };
         } catch (error) {
           if (error instanceof FPLClientError && error.status === 429) {
             refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
@@ -549,33 +496,88 @@ const refreshEntrySummaries = async (
             eventId,
             error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
           });
+          return null;
         }
       }),
     );
-    if (publishedBatch.length === 0) continue;
+    const successful = completed.filter(
+      (result): result is NonNullable<typeof result> => result !== null,
+    );
+    if (successful.length === 0) continue;
 
-    const checkedAt = refreshed.reduce(
-      (latest, row) => (row.checkedAt > latest ? row.checkedAt : latest),
-      refreshed[0]!.checkedAt,
-    );
-    await writeRows(
-      redis,
-      season.seasonCode,
-      eventId,
-      scope,
-      [],
-      {
-        season: season.seasonCode,
+    const composeAndPublishBatch = async (
+      reReadLatest: boolean,
+    ): Promise<ManagerLiveScoreRow[]> => {
+      const targetEntryIds = successful.map(({ entryId }) => entryId);
+      const latestRows = reReadLatest
+        ? await readCachedAndCheckpointRows(redis, season, eventId, scope, targetEntryIds, rows)
+        : rows;
+      if (reReadLatest) {
+        for (const [entryId, row] of latestRows) rows.set(entryId, row);
+      }
+
+      const checkedAt = nowIso();
+      const publishedRows = successful.map(({ entryId, summary }) => {
+        const existing = latestRows.get(entryId) ?? rows.get(entryId);
+        const candidate = shouldPreserveClassicStandingForRank(
+          options.preserveClassicStanding,
+          existing,
+        )
+          ? (() => {
+              const { revision: _revision, ...classicRow } = existing;
+              return withRevision({
+                ...classicRow,
+                // Classic standings owns event/phase totals and league rank;
+                // the entry summary owns the season-wide FPL OR.
+                overallRank: summary.summary_overall_rank ?? null,
+                checkedAt,
+                staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+              });
+            })()
+          : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
+        const row = withPreservedOverallRank(candidate, existing?.overallRank);
+        rows.set(row.entryId, row);
+        return row;
+      });
+
+      await writeRows(
+        redis,
+        season.seasonCode,
         eventId,
-        source: 'FPL_ENTRY_SUMMARY',
-        rowCount: refreshed.length,
-        checkedAt,
-        revision: refreshed[0]!.revision,
-        nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-      },
-      'entry-summary',
-    );
-    await writeCheckpointRows(season, eventId, scope, checkpointBatch);
+        scope,
+        publishedRows,
+        {
+          season: season.seasonCode,
+          eventId,
+          source: 'FPL_ENTRY_SUMMARY',
+          rowCount: refreshed.length + publishedRows.length,
+          checkedAt,
+          revision: publishedRows[0]!.revision,
+          nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+        },
+        'entry-summary',
+      );
+      if (classicScope) {
+        await writeCheckpointRows(season, eventId, scope, publishedRows);
+      }
+      return publishedRows;
+    };
+
+    // Reconcile and persist one completed concurrency batch per critical
+    // section. This keeps Classic enrichment to one checkpoint read/upsert per
+    // batch instead of one pair of PostgreSQL operations per manager.
+    const publishedBatch = classicScope
+      ? await runManagerLivePublication(publicationKey, () => composeAndPublishBatch(true))
+      : await composeAndPublishBatch(false);
+    if (!classicScope) await writeCheckpointRows(season, eventId, scope, publishedBatch);
+
+    for (const { entryId, summary } of successful) {
+      refreshedEntryIds.push(entryId);
+      if (isPositiveOverallRank(summary.summary_overall_rank)) {
+        overallRankRefreshedEntryIds.push(entryId);
+      }
+    }
+    refreshed.push(...publishedBatch);
   }
   return {
     errorCode: refreshErrorCode,
@@ -1027,7 +1029,27 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           backgroundSeedRows,
         );
 
-        let unresolvedStandings = pendingStandings;
+        // A distinct overlapping request may have queued while another task
+        // was refreshing this scope. Re-check the latest rows when this turn
+        // starts so queued subsets do not repeat standings or Summary calls.
+        let unresolvedStandings = pendingStandings.filter((entryId) => {
+          const row = backgroundRows.get(entryId);
+          return !row || !isFresh(row);
+        });
+        const unresolvedStandingsAtStart = new Set(unresolvedStandings);
+        const unresolvedOverallRank = pendingOverallRank.filter(
+          (entryId) =>
+            unresolvedStandingsAtStart.has(entryId) ||
+            shouldRefreshClassicOverallRank(backgroundRows.get(entryId), false),
+        );
+        if (unresolvedStandings.length === 0 && unresolvedOverallRank.length === 0) {
+          logDebug('Official classic manager background refresh already satisfied', {
+            eventId: input.eventId,
+            leagueId: classicLeagueId,
+          });
+          return;
+        }
+
         let standingsComplete = standings.complete;
         if (fallbackPlan.continueStandings && unresolvedStandings.length > 0) {
           const backgroundStandings = await refreshClassicStandings(
@@ -1063,7 +1085,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         }
 
         const unresolvedStandingsEntryIds = new Set(unresolvedStandings);
-        const overallRankTargets = pendingOverallRank.filter(
+        const overallRankTargets = unresolvedOverallRank.filter(
           (entryId) =>
             !unresolvedStandingsEntryIds.has(entryId) &&
             backgroundRows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',

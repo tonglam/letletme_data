@@ -103,6 +103,22 @@ describe('classic manager live fallback', () => {
     );
   });
 
+  test('orders standings rows by upstream snapshot before local completion time', () => {
+    const newerSnapshot = {
+      upstreamUpdatedAt: '2026-08-23T08:01:00.000Z',
+      checkedAt: '2026-08-23T08:01:01.000Z',
+      eventPoints: 43,
+    };
+    const delayedOlderSnapshot = {
+      upstreamUpdatedAt: '2026-08-23T08:00:00.000Z',
+      checkedAt: '2026-08-23T08:01:30.000Z',
+      eventPoints: 32,
+    };
+
+    expect(selectLatestCheckedRow(newerSnapshot, delayedOlderSnapshot)).toBe(newerSnapshot);
+    expect(selectLatestCheckedRow(delayedOlderSnapshot, newerSnapshot)).toBe(newerSnapshot);
+  });
+
   test('preserves Classic fields only for explicit overall-rank enrichment', () => {
     const classicRow = { source: 'FPL_CLASSIC_STANDINGS' };
 

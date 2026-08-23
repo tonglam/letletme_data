@@ -61,11 +61,26 @@ export const preserveLastKnownOverallRank = (
   return isPositiveOverallRank(previous) ? previous : null;
 };
 
-export const selectLatestCheckedRow = <T extends Readonly<{ checkedAt: string }>>(
+export const selectLatestCheckedRow = <
+  T extends Readonly<{
+    checkedAt: string;
+    upstreamUpdatedAt?: string | null;
+  }>,
+>(
   current: T | undefined,
   candidate: T,
 ): T => {
   if (!current) return candidate;
+
+  const currentUpstreamTime = Date.parse(current.upstreamUpdatedAt ?? '');
+  const candidateUpstreamTime = Date.parse(candidate.upstreamUpdatedAt ?? '');
+  if (
+    Number.isFinite(currentUpstreamTime) &&
+    Number.isFinite(candidateUpstreamTime) &&
+    currentUpstreamTime !== candidateUpstreamTime
+  ) {
+    return candidateUpstreamTime > currentUpstreamTime ? candidate : current;
+  }
 
   const currentTime = Date.parse(current.checkedAt);
   const candidateTime = Date.parse(candidate.checkedAt);
