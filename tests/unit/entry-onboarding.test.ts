@@ -37,6 +37,7 @@ function createDependencies(
   } = {},
 ) {
   const calls: string[] = [];
+  const entryInfoTargetEventIds: (number | undefined)[] = [];
   let phase = 0;
   const captureSnapshot = mock(async () => {
     calls.push('capture');
@@ -60,6 +61,7 @@ function createDependencies(
     },
     enqueueEntryInfo: async (_season, _source, jobOptions) => {
       calls.push('enqueue-info');
+      entryInfoTargetEventIds.push(jobOptions.eventId);
       return { id: jobOptions.jobId };
     },
     enqueueEntryPicks: async (_season, _source, jobOptions) => {
@@ -89,16 +91,21 @@ function createDependencies(
     captureSnapshot,
     dispatchOutbox,
   };
-  return { calls, dependencies, captureSnapshot, dispatchOutbox };
+  return { calls, entryInfoTargetEventIds, dependencies, captureSnapshot, dispatchOutbox };
 }
 
 describe('entry onboarding coordinator', () => {
   test('waits for parent creation before event jobs and publishes only after the second barrier', async () => {
-    const { calls, dependencies } = createDependencies();
+    const { calls, entryInfoTargetEventIds, dependencies } = createDependencies();
 
     const result = await runEntryOnboarding(
       TEST_SEASON,
-      { entryId: 42, eventId: 20, attemptKey: 'attempt-a1' },
+      {
+        entryId: 42,
+        eventId: 20,
+        entryInfoTargetEventId: 19,
+        attemptKey: 'attempt-a1',
+      },
       dependencies,
     );
 
@@ -117,6 +124,7 @@ describe('entry onboarding coordinator', () => {
       'capture',
       'outbox',
     ]);
+    expect(entryInfoTargetEventIds).toEqual([19]);
     expect(result).toMatchObject({
       eventId: 20,
       stages: {
@@ -134,7 +142,7 @@ describe('entry onboarding coordinator', () => {
 
     const result = await runEntryOnboarding(
       TEST_SEASON,
-      { entryId: 42, attemptKey: 'preseason-a1' },
+      { entryId: 42, entryInfoTargetEventId: 0, attemptKey: 'preseason-a1' },
       dependencies,
     );
 
@@ -152,7 +160,7 @@ describe('entry onboarding coordinator', () => {
 
     const result = await runEntryOnboarding(
       TEST_SEASON,
-      { entryId: 42, eventId: 20, attemptKey: 'late-a1' },
+      { entryId: 42, eventId: 20, entryInfoTargetEventId: 19, attemptKey: 'late-a1' },
       dependencies,
     );
 
@@ -174,7 +182,12 @@ describe('entry onboarding coordinator', () => {
 
     const result = await runEntryOnboarding(
       TEST_SEASON,
-      { entryId: 42, eventId: 20, attemptKey: 'midseason-a1' },
+      {
+        entryId: 42,
+        eventId: 20,
+        entryInfoTargetEventId: 19,
+        attemptKey: 'midseason-a1',
+      },
       dependencies,
     );
 
@@ -194,7 +207,7 @@ describe('entry onboarding coordinator', () => {
 
     const result = await runEntryOnboarding(
       TEST_SEASON,
-      { entryId: 42, eventId: 20, attemptKey: 'final-a1' },
+      { entryId: 42, eventId: 20, entryInfoTargetEventId: 20, attemptKey: 'final-a1' },
       dependencies,
     );
 
@@ -214,7 +227,12 @@ describe('entry onboarding coordinator', () => {
     await expect(
       runEntryOnboarding(
         TEST_SEASON,
-        { entryId: 42, eventId: 20, attemptKey: 'failure-a1' },
+        {
+          entryId: 42,
+          eventId: 20,
+          entryInfoTargetEventId: 19,
+          attemptKey: 'failure-a1',
+        },
         dependencies,
       ),
     ).rejects.toThrow('phase 2 failed');
@@ -228,12 +246,12 @@ describe('entry onboarding coordinator', () => {
 
     const firstResult = await runEntryOnboarding(
       TEST_SEASON,
-      { entryId: 42, eventId: 20, attemptKey: 'parent-a1' },
+      { entryId: 42, eventId: 20, entryInfoTargetEventId: 19, attemptKey: 'parent-a1' },
       first.dependencies,
     );
     const secondResult = await runEntryOnboarding(
       TEST_SEASON,
-      { entryId: 42, eventId: 20, attemptKey: 'parent-a2' },
+      { entryId: 42, eventId: 20, entryInfoTargetEventId: 19, attemptKey: 'parent-a2' },
       second.dependencies,
     );
 
