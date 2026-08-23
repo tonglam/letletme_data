@@ -78,6 +78,9 @@ async function addManagerLiveRefresh(
     ...(hotState?.summaryRotationCursor === undefined
       ? {}
       : { summaryRotationCursor: hotState.summaryRotationCursor }),
+    ...(hotState?.classicStandingsCursorEpoch === undefined
+      ? {}
+      : { classicStandingsCursorEpoch: hotState.classicStandingsCursorEpoch }),
     ...(classicStandingsPage === undefined || classicStandingsPage === null
       ? hotState?.classicStandingsPage === null || hotState?.classicStandingsPage === undefined
         ? {}
@@ -180,6 +183,10 @@ export async function scheduleNextManagerLiveRefresh(
     jobData.summaryRotationCursor ?? hotScope.summaryRotationCursor,
     classicStandingsNextPage,
     jobData.classicStandingsPage ?? hotScope.classicStandingsPage ?? 1,
+    Number.isSafeInteger(jobData.classicStandingsCursorEpoch) &&
+      (jobData.classicStandingsCursorEpoch ?? -1) >= 0
+      ? jobData.classicStandingsCursorEpoch
+      : 0,
   );
   if (!updatedState) return null;
   const requestedRunAt = new Date(nextRefreshAt);

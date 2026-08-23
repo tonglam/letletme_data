@@ -26,6 +26,7 @@ export interface ManagerLiveJobData {
   generation?: string;
   summaryRotationCursor?: number;
   classicStandingsPage?: number;
+  classicStandingsCursorEpoch?: number;
   source: 'request' | 'followup';
   triggeredAt: string;
 }

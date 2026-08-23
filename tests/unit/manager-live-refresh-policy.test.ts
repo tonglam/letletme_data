@@ -148,6 +148,7 @@ describe('manager live refresh policy', () => {
           generation: 'generation-a',
           summaryRotationCursor: 2,
           classicStandingsPage: null,
+          classicStandingsCursorEpoch: 0,
         }),
       ),
     ).toMatchObject({ generation: 'generation-a', summaryRotationCursor: 2 });

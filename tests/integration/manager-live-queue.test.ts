@@ -73,6 +73,7 @@ describe('manager live queue integration', () => {
     expect(ttl).toBeLessThanOrEqual(MANAGER_LIVE_HOT_SCOPE_SECONDS);
     expect(first.data.generation).toBeString();
     expect(first.data.summaryRotationCursor).toBe(0);
+    expect(first.data.classicStandingsCursorEpoch).toBe(0);
   });
 
   test('does not schedule a follow-up after the hot marker expires', async () => {
@@ -114,6 +115,7 @@ describe('manager live queue integration', () => {
     expect(followup).not.toBeNull();
     expect(followup?.data.classicStandingsPage).toBe(7);
     expect(followup?.data.summaryRotationCursor).toBe(1);
+    expect(followup?.data.classicStandingsCursorEpoch).toBe(0);
     const redis = await queueRedisSingleton.getClient();
     await expect(loadManagerLiveHotState(redis, scope)).resolves.toMatchObject({
       generation: markerJob.data.generation,
@@ -130,6 +132,61 @@ describe('manager live queue integration', () => {
         1,
       ),
     ).resolves.toMatchObject({ summaryRotationCursor: 1, classicStandingsPage: 7 });
+  });
+
+  test('keeps completed classic cursor closed across stale page-one order and races', async () => {
+    const markerJob = await enqueueManagerLiveRefresh({
+      season: TEST_SEASON,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      runAt: new Date(Date.now() + 155_000),
+    });
+    if (markerJob.id) createdJobIds.add(markerJob.id);
+    const redis = await queueRedisSingleton.getClient();
+    const generation = markerJob.data.generation ?? 'missing-generation';
+    const initialEpoch = markerJob.data.classicStandingsCursorEpoch ?? 0;
+
+    const completed = await advanceManagerLiveHotState(
+      redis,
+      scope,
+      generation,
+      markerJob.data.summaryRotationCursor ?? 0,
+      null,
+      1,
+      initialEpoch,
+    );
+    expect(completed).toMatchObject({
+      classicStandingsPage: null,
+      classicStandingsCursorEpoch: initialEpoch + 1,
+    });
+
+    // This is the delayed page-one job from the previous crawl. It must not
+    // turn the explicit completion marker back into a later-page cursor.
+    const stale = await advanceManagerLiveHotState(
+      redis,
+      scope,
+      generation,
+      markerJob.data.summaryRotationCursor ?? 0,
+      7,
+      1,
+      initialEpoch,
+    );
+    expect(stale).toMatchObject({
+      classicStandingsPage: null,
+      classicStandingsCursorEpoch: initialEpoch + 1,
+    });
+
+    // A new crawl carries the new epoch. Redis must accept it even when it
+    // races the stale update, while the stale epoch remains rejected.
+    await Promise.all([
+      advanceManagerLiveHotState(redis, scope, generation, 0, 7, 1, initialEpoch),
+      advanceManagerLiveHotState(redis, scope, generation, 0, 7, 1, initialEpoch + 1),
+    ]);
+    await expect(loadManagerLiveHotState(redis, scope)).resolves.toMatchObject({
+      classicStandingsPage: 7,
+      classicStandingsCursorEpoch: initialEpoch + 1,
+    });
   });
 
   test('keeps one same-bucket job while advancing the logical cursor', async () => {

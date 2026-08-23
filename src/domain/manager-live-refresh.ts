@@ -37,6 +37,10 @@ export type ManagerLiveHotScopeState = ManagerLiveRefreshScope & {
   generation: string;
   summaryRotationCursor: number;
   classicStandingsPage: number | null;
+  // Distinguishes the initial page-1 cursor from a completed crawl whose
+  // page is also null. The epoch advances atomically when a crawl completes,
+  // so an older page-1 job cannot reopen a completed cursor.
+  classicStandingsCursorEpoch: number;
 };
 
 export const normalizeManagerLiveEntryIds = (entryIds: readonly number[]): number[] =>
@@ -147,6 +151,9 @@ const parseManagerLiveHotScopeState = (value: string | null): ManagerLiveHotScop
       parsed.generation.length === 0 ||
       !Number.isSafeInteger(parsed.summaryRotationCursor) ||
       (parsed.summaryRotationCursor ?? -1) < 0 ||
+      (parsed.classicStandingsCursorEpoch !== undefined &&
+        (!Number.isSafeInteger(parsed.classicStandingsCursorEpoch) ||
+          (parsed.classicStandingsCursorEpoch ?? -1) < 0)) ||
       (parsed.classicStandingsPage !== null &&
         (!Number.isSafeInteger(parsed.classicStandingsPage) ||
           (parsed.classicStandingsPage ?? 0) < 1 ||
@@ -159,6 +166,9 @@ const parseManagerLiveHotScopeState = (value: string | null): ManagerLiveHotScop
       generation: parsed.generation,
       summaryRotationCursor: parsed.summaryRotationCursor as number,
       classicStandingsPage: parsed.classicStandingsPage ?? null,
+      // Older v2 hot states predate the epoch field and are the initial
+      // cursor, so they can be safely read as epoch zero for one release.
+      classicStandingsCursorEpoch: parsed.classicStandingsCursorEpoch ?? 0,
     };
   } catch {
     return null;
@@ -190,12 +200,18 @@ if completedCursor and currentCursor == completedCursor then
 end
 
 if ARGV[3] ~= '' then
+  local expectedEpoch = tonumber(ARGV[5]) or 0
+  local currentEpoch = tonumber(state['classicStandingsCursorEpoch']) or 0
   local expectedPage = tonumber(ARGV[4])
   local currentPage = tonumber(state['classicStandingsPage'])
   if not currentPage then currentPage = 1 end
-  if not expectedPage or currentPage == expectedPage then
+  -- A completed crawl has page=null just like the initial cursor. The epoch
+  -- makes those states distinct and rejects stale page-1 jobs after the
+  -- completion marker has been written.
+  if currentEpoch == expectedEpoch and (not expectedPage or currentPage == expectedPage) then
     if ARGV[3] == '0' then
       state['classicStandingsPage'] = cjson.null
+      state['classicStandingsCursorEpoch'] = currentEpoch + 1
     else
       state['classicStandingsPage'] = tonumber(ARGV[3])
     end
@@ -224,6 +240,7 @@ export async function initializeManagerLiveHotState(
     generation: randomUUID(),
     summaryRotationCursor: 0,
     classicStandingsPage: null,
+    classicStandingsCursorEpoch: 0,
   };
   const raw = await redis.eval(
     INITIALIZE_HOT_SCOPE_STATE_SCRIPT,
@@ -251,6 +268,7 @@ export async function advanceManagerLiveHotState(
   completedSummaryCursor: number,
   classicStandingsNextPage?: number | null,
   expectedClassicStandingsPage?: number | null,
+  expectedClassicStandingsCursorEpoch?: number,
 ): Promise<ManagerLiveHotScopeState | null> {
   if (!generation || !Number.isSafeInteger(completedSummaryCursor) || completedSummaryCursor < 0) {
     throw new Error('Invalid manager live hot state advancement');
@@ -264,6 +282,15 @@ export async function advanceManagerLiveHotState(
   ) {
     throw new Error(
       `Invalid manager live classic standings page: ${String(classicStandingsNextPage)}`,
+    );
+  }
+  if (
+    expectedClassicStandingsCursorEpoch !== undefined &&
+    (!Number.isSafeInteger(expectedClassicStandingsCursorEpoch) ||
+      expectedClassicStandingsCursorEpoch < 0)
+  ) {
+    throw new Error(
+      `Invalid manager live classic standings cursor epoch: ${String(expectedClassicStandingsCursorEpoch)}`,
     );
   }
   const classicUpdate =
@@ -284,6 +311,7 @@ export async function advanceManagerLiveHotState(
     String(completedSummaryCursor),
     classicUpdate,
     expectedPage,
+    String(expectedClassicStandingsCursorEpoch ?? 0),
   );
   return parseManagerLiveHotScopeState(typeof raw === 'string' ? raw : null);
 }
