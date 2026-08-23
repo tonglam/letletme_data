@@ -128,6 +128,21 @@ export const runManagerStandingsPageSequence = async <TError>(
   };
 };
 
+export const readThroughManagerSummaryResult = async <T>(
+  readShared: () => Promise<T | null>,
+  fetchOfficial: () => Promise<T>,
+  writeShared: (value: T) => Promise<void>,
+): Promise<T> => {
+  const shared = await readShared();
+  if (shared !== null) return shared;
+  const official = await fetchOfficial();
+  // The distributed owner publishes the validated response before releasing
+  // its lease. Waiters then reuse exactly the same upstream observation rather
+  // than issuing a second request whose snapshot has no version metadata.
+  await writeShared(official);
+  return official;
+};
+
 export const createKeyedTaskSerializer = (): KeyedTaskSerializer => {
   type QueuedTask = {
     task: () => Promise<unknown>;

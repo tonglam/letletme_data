@@ -11,6 +11,7 @@ import {
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
+  readThroughManagerSummaryResult,
   readLatestRowsWithFallback,
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
@@ -306,6 +307,44 @@ describe('classic manager live fallback', () => {
         [3, 1],
       ]),
     );
+  });
+
+  test('shares one official summary observation across distributed waiters', async () => {
+    const runDistributed = createKeyedTaskSerializer();
+    let shared: { eventPoints: number } | null = null;
+    let officialFetches = 0;
+
+    const replicaRefresh = () =>
+      runDistributed('entry-summary:7', () =>
+        readThroughManagerSummaryResult(
+          async () => shared,
+          async () => {
+            officialFetches += 1;
+            return { eventPoints: 42 };
+          },
+          async (value) => {
+            shared = value;
+          },
+        ),
+      );
+
+    const [first, second] = await Promise.all([replicaRefresh(), replicaRefresh()]);
+
+    expect(first).toEqual({ eventPoints: 42 });
+    expect(second).toEqual({ eventPoints: 42 });
+    expect(officialFetches).toBe(1);
+  });
+
+  test('fails closed when an official summary cannot be handed to other replicas', async () => {
+    const pending = readThroughManagerSummaryResult(
+      async () => null,
+      async () => ({ eventPoints: 42 }),
+      async () => {
+        throw new Error('shared cache unavailable');
+      },
+    );
+
+    await expect(pending).rejects.toThrow('shared cache unavailable');
   });
 
   test('starts a fresh keyed fetch after the shared request settles', async () => {

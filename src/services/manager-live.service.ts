@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import type Redis from 'ioredis';
 
-import { fplClient, type RawFPLLeagueStandingsResponse } from '../clients/fpl';
+import { EntrySummarySchema, fplClient, type RawFPLLeagueStandingsResponse } from '../clients/fpl';
 import { redisSingleton } from '../cache/singleton';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
@@ -30,6 +30,7 @@ import {
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
+  readThroughManagerSummaryResult,
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
@@ -49,11 +50,14 @@ const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 // response. Larger leagues remain bounded and finish through the background
 // refresh below.
 const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
-// One serialized background unit fetches at most one FPL standings page. Keep
-// its lease longer than the client's 40-second logical request deadline, and
-// renew it while the page publication/checkpoint finishes.
+// One serialized background unit fetches at most one FPL standings page or one
+// entry summary. Keep its lease longer than the client's 40-second logical
+// request deadline, and renew it while publication/checkpoint work finishes.
 const CLASSIC_REFRESH_LOCK_SECONDS = 60;
 const CLASSIC_REFRESH_LOCK_WAIT_MS = 100;
+// Match the manager-row freshness window. Every replica refreshing the same
+// season/event/entry during that window must reuse one unversioned observation.
+const ENTRY_SUMMARY_SHARED_RESULT_SECONDS = REFRESH_SECONDS;
 
 const RELEASE_CLASSIC_REFRESH_LOCK_SCRIPT = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -425,6 +429,9 @@ const runClassicStandingsRefreshLocal = createKeyedTaskSerializer();
 const classicRefreshLockKey = (key: string): string =>
   `OfficialManagerLiveRefreshLock:${createHash('sha256').update(key).digest('hex')}`;
 
+const entrySummarySharedResultKey = (season: string, eventId: number, entryId: number): string =>
+  `OfficialManagerLiveEntrySummaryResult:${season}:${eventId}:${entryId}`;
+
 const runClassicStandingsRefresh = <T>(
   redis: Redis | null,
   key: string,
@@ -447,7 +454,7 @@ const runClassicStandingsRefresh = <T>(
         // Redis is an acceleration and coordination layer, not the source of
         // truth. Continue through the PostgreSQL checkpoint guard when it is
         // unavailable so live scores remain serviceable.
-        logWarn('Official classic manager distributed refresh lock unavailable', {
+        logWarn('Official manager distributed refresh lock unavailable', {
           key,
           error: error instanceof Error ? error.message : 'unknown',
         });
@@ -492,6 +499,64 @@ const runClassicStandingsRefresh = <T>(
   );
 };
 
+const fetchDistributedManagerSummary = (
+  redis: Redis | null,
+  season: string,
+  eventId: number,
+  entryId: number,
+  priority: ManagerSummaryFetchPriority = 'foreground',
+): Promise<Awaited<ReturnType<typeof fplClient.getEntrySummary>>> => {
+  if (!redis) {
+    return runManagerSummaryFetch(() => fplClient.getEntrySummary(entryId), priority, entryId);
+  }
+
+  return runClassicStandingsRefresh(
+    redis,
+    `entry-summary:${season}:${eventId}:${entryId}`,
+    () =>
+      readThroughManagerSummaryResult(
+        async () => {
+          try {
+            const value = await redis.get(entrySummarySharedResultKey(season, eventId, entryId));
+            if (!value) return null;
+            const parsed: unknown = JSON.parse(value);
+            const validated = EntrySummarySchema.safeParse(parsed);
+            return validated.success ? validated.data : null;
+          } catch (error) {
+            logWarn('Official manager shared entry summary read failed', {
+              entryId,
+              error: error instanceof Error ? error.message : 'unknown',
+            });
+            // Without the shared handoff read, another replica's validated
+            // observation cannot be distinguished from a new unversioned
+            // response. Fail closed and keep last-good rows.
+            throw error;
+          }
+        },
+        () => runManagerSummaryFetch(() => fplClient.getEntrySummary(entryId), priority, entryId),
+        async (summary) => {
+          try {
+            await redis.set(
+              entrySummarySharedResultKey(season, eventId, entryId),
+              JSON.stringify(summary),
+              'EX',
+              ENTRY_SUMMARY_SHARED_RESULT_SECONDS,
+            );
+          } catch (error) {
+            logWarn('Official manager shared entry summary write failed', {
+              entryId,
+              error: error instanceof Error ? error.message : 'unknown',
+            });
+            // Do not publish a response that other replicas cannot reuse.
+            // Otherwise a subsequent unversioned fetch could still regress it.
+            throw error;
+          }
+        },
+      ),
+    priority,
+  );
+};
+
 const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void => {
   if (managerLiveBackgroundInFlight.has(key)) return;
   const promise = task()
@@ -533,10 +598,12 @@ const refreshEntrySummaries = async (
     await Promise.all(
       batch.map(async (entryId) => {
         try {
-          const summary = await runManagerSummaryFetch(
-            () => fplClient.getEntrySummary(entryId),
-            options.priority,
+          const summary = await fetchDistributedManagerSummary(
+            redis,
+            season.seasonCode,
+            eventId,
             entryId,
+            options.priority,
           );
           const checkedAt = nowIso();
           const existing = rows.get(entryId);
@@ -633,12 +700,14 @@ const refreshEntrySummaries = async (
         });
         return [];
       });
-    mergeLatestRows(
-      rows,
-      new Map(
-        durableRows.map((row) => [row.entryId, fromManagerScoreCheckpoint(row, season.seasonCode)]),
-      ),
+    const durableCacheRows = durableRows.map((row) =>
+      fromManagerScoreCheckpoint(row, season.seasonCode),
     );
+    mergeLatestRows(rows, new Map(durableCacheRows.map((row) => [row.entryId, row])));
+    // Redis writes happen before the timestamp-guarded PostgreSQL upsert. Put
+    // the durable winner back after arbitration so an older replica completion
+    // cannot remain visible in the primary cache.
+    await writeRows(redis, season.seasonCode, eventId, scope, durableCacheRows);
   }
   return refreshErrorCode;
 };
