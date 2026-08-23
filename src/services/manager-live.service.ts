@@ -1928,13 +1928,16 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     const missingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
     let refreshQueued = false;
     try {
-      await dispatchManagerLiveRefreshBounded({
+      const dispatchState = await dispatchManagerLiveRefreshBounded({
         season,
         eventId: input.eventId,
         entryIds: uniqueEntryIds,
         ...(input.tournamentId === undefined ? {} : { tournamentId: input.tournamentId }),
       });
-      refreshQueued = true;
+      // A dispatch that misses the response deadline is deliberately reported as
+      // PENDING. Do not advertise it as queued until enqueue has been confirmed;
+      // callers must be allowed to retry when the queue path is still unknown.
+      refreshQueued = dispatchState === 'QUEUED';
     } catch (error) {
       logWarn('Manager live cache-only response could not queue a refresh', {
         eventId: input.eventId,

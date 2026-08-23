@@ -265,7 +265,7 @@ describe('manager live CACHE_ONLY reads', () => {
     const durationMs = performance.now() - startedAt;
 
     expect(result.rows).toHaveLength(1);
-    expect(result.refreshQueued).toBe(true);
+    expect(result.refreshQueued).toBe(false);
     expect(durationMs).toBeLessThan(250);
   });
 
