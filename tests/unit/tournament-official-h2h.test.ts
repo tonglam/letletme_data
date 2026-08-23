@@ -190,6 +190,36 @@ describe('official H2H source import', () => {
       homeMatchPoints: 3,
       awayMatchPoints: 0,
     });
+
+    const finalizedRows = buildOfficialH2HRows(
+      { ...singleEventTournament, totalTeamNum: 2 },
+      new Set([2, 3]),
+      {
+        standings: [],
+        matches: [
+          {
+            id: 9002,
+            event: 1,
+            entry_1_entry: 2,
+            entry_1_points: 40,
+            entry_2_entry: 3,
+            entry_2_points: 40,
+            winner: null,
+            is_bye: false,
+            knockout_name: null,
+            tiebreak: null,
+            sourceOrder: 0,
+          },
+        ],
+      },
+      new Date('2026-08-13T01:00:00.000Z'),
+      { finalizedThroughEventId: 1 },
+    );
+
+    expect(finalizedRows.battleRows[0]).toMatchObject({
+      homeMatchPoints: 1,
+      awayMatchPoints: 1,
+    });
   });
 
   test('rejects a partial regular schedule before publishing or locking it', () => {

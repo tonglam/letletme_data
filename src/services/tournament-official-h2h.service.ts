@@ -31,6 +31,8 @@ export type OfficialH2HSourceSnapshot = {
 
 export type OfficialH2HSyncOptions = {
   allowScoreFallback?: boolean;
+  /** Allow score fallback for matches at or before a finalized event. */
+  finalizedThroughEventId?: number | null;
 };
 
 function isRealOfficialH2HStanding(
@@ -49,7 +51,7 @@ function integerOrZero(value: number | null | undefined): number {
 
 function matchPoints(
   match: RawFPLLeagueH2HMatch,
-  allowScoreFallback = false,
+  options: OfficialH2HSyncOptions = {},
 ): { home: number | null; away: number | null } {
   const explicitOutcomeFields = [
     match.entry_1_win,
@@ -93,6 +95,11 @@ function matchPoints(
   // the points fields are already populated. Only treat that shape as
   // scoreable after the local event has finished and been data-checked; live
   // entry points can still move during a gameweek.
+  const allowScoreFallback =
+    options.allowScoreFallback === true ||
+    (options.finalizedThroughEventId !== null &&
+      options.finalizedThroughEventId !== undefined &&
+      match.event <= options.finalizedThroughEventId);
   if (!allowScoreFallback) return { home: null, away: null };
   const hasNonZeroScores =
     typeof match.entry_1_points === 'number' &&
@@ -271,7 +278,7 @@ export function projectOfficialH2HStandingsFromMatches(
 
   for (const match of matches) {
     if (isOfficialKnockoutMatch(match)) continue;
-    const outcome = matchPoints(match, options.allowScoreFallback === true);
+    const outcome = matchPoints(match, options);
     if (outcome.home === null || outcome.away === null) continue;
     for (const side of [
       {
@@ -454,7 +461,7 @@ export function buildOfficialH2HRows(
   const configuredTeamCount = tournament.knockoutTeamNum ?? 0;
 
   for (const match of snapshot.matches) {
-    const points = matchPoints(match, options.allowScoreFallback === true);
+    const points = matchPoints(match, options);
     const knockoutName = officialKnockoutName(match);
     if (!isOfficialKnockoutMatch(match)) {
       battleRows.push({
