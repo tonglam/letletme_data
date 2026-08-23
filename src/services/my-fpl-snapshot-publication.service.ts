@@ -154,11 +154,32 @@ async function runMyFplCaptureTransaction(
 
 class MyFplCaptureLockBusyError extends Error {}
 
-function isRetryableMyFplCaptureContention(error: unknown): boolean {
-  return (
-    error instanceof MyFplCaptureLockBusyError ||
-    (typeof error === 'object' && error !== null && 'code' in error && error.code === '40001')
-  );
+const ACTIVE_MY_FPL_PUBLICATION_CONSTRAINT = 'my_fpl_snapshot_publications_active_key';
+
+export function isRetryableMyFplCaptureContention(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
+    if (current instanceof MyFplCaptureLockBusyError) return true;
+    if (seen.has(current)) break;
+    seen.add(current);
+    const record = current as {
+      code?: unknown;
+      constraint?: unknown;
+      constraint_name?: unknown;
+      cause?: unknown;
+    };
+    if (record.code === '40001') return true;
+    if (
+      record.code === '23505' &&
+      String(record.constraint_name ?? record.constraint ?? '') ===
+        ACTIVE_MY_FPL_PUBLICATION_CONSTRAINT
+    ) {
+      return true;
+    }
+    current = record.cause;
+  }
+  return false;
 }
 
 type EntryIdentity = {

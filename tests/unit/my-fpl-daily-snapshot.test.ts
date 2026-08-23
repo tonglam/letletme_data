@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 import {
+  isRetryableMyFplCaptureContention,
   isMatchingProvisionalMyFplPublication,
   myFplSnapshotRedisManifestKey,
   resolveMyFplSnapshotCoverageState,
@@ -98,9 +99,34 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(helper).toContain('client.begin(\u0027isolation level repeatable read\u0027');
     expect(helper).toContain('pg_try_advisory_xact_lock');
     expect(helper).toContain('throw new MyFplCaptureLockBusyError()');
-    expect(helper).toContain('error.code === \u002740001\u0027');
+    expect(helper).toContain('record.code === \u002740001\u0027');
+    expect(helper).toContain('my_fpl_snapshot_publications_active_key');
     expect(helper).not.toContain('pg_advisory_lock(');
     expect(helper).not.toContain('client.reserve()');
+  });
+
+  test('retries only the active-publication unique conflict from a stale snapshot', () => {
+    expect(isRetryableMyFplCaptureContention({ code: '40001' })).toBe(true);
+    expect(
+      isRetryableMyFplCaptureContention({
+        code: '23505',
+        constraint_name: 'my_fpl_snapshot_publications_active_key',
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableMyFplCaptureContention({
+        cause: {
+          code: '23505',
+          constraint: 'my_fpl_snapshot_publications_active_key',
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableMyFplCaptureContention({
+        code: '23505',
+        constraint_name: 'some_other_unique_constraint',
+      }),
+    ).toBe(false);
   });
 
   test('reuses only an identical provisional revision and reports coverage state', () => {
