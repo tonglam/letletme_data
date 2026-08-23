@@ -146,13 +146,16 @@ describe('source-media private Storage client', () => {
 
   test('retains a bounded provider error code for Storage diagnostics', async () => {
     const storage = createSourceMediaStorage(config, async () =>
-      Response.json({ code: 'InvalidBucketName', message: 'Bucket name invalid' }, { status: 400 }),
+      Response.json(
+        { statusCode: '400', error: 'InvalidRequest', message: 'Bucket request invalid' },
+        { status: 400 },
+      ),
     );
 
     await expect(storage.ensureBucket()).rejects.toMatchObject({
       failureClass: 'STORAGE_REQUEST_FAILED',
       status: 400,
-      message: 'bucket lookup failed with 400 (InvalidBucketName)',
+      message: 'bucket lookup failed with 400 (InvalidRequest)',
     });
   });
 });

@@ -171,7 +171,8 @@ async function storageError(
   try {
     const parsed: unknown = JSON.parse(rawBody);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const candidate = (parsed as { code?: unknown }).code;
+      const providerPayload = parsed as { code?: unknown; error?: unknown };
+      const candidate = providerPayload.error ?? providerPayload.code;
       if (typeof candidate === 'string' && /^[A-Za-z0-9_.-]{1,100}$/.test(candidate)) {
         providerCode = candidate;
       }
