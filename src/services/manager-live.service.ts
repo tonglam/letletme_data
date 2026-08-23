@@ -679,6 +679,13 @@ const runClassicStandingsRefreshLocal = createKeyedTaskSerializer();
 const classicRefreshLockKey = (key: string): string =>
   `OfficialManagerLiveRefreshLock:${createHash('sha256').update(key).digest('hex')}`;
 
+class ManagerLiveLeaseOwnershipError extends Error {
+  constructor(key: string, cause: unknown) {
+    super(`official manager refresh lease ownership lost for ${key}`, { cause });
+    this.name = 'ManagerLiveLeaseOwnershipError';
+  }
+}
+
 const entrySummarySharedResultKey = (season: string, eventId: number, entryId: number): string =>
   `OfficialManagerLiveEntrySummaryResult:${season}:${eventId}:${entryId}`;
 
@@ -782,6 +789,17 @@ const runClassicStandingsRefresh = <T>(
         const value = await task(leaseFence.assertOwned);
         await leaseFence.assertOwned();
         return { complete: true, value };
+      } catch (error) {
+        // A task may fail after a renewal was lost but before it reaches its
+        // final fence. Probe once more so request paths can distinguish lease
+        // loss from an ordinary upstream/publication failure and preserve
+        // last-good rows instead of throwing the request.
+        try {
+          await leaseFence.assertOwned();
+        } catch (leaseError) {
+          throw new ManagerLiveLeaseOwnershipError(key, leaseError);
+        }
+        throw error;
       } finally {
         clearInterval(renewTimer);
         await redis
@@ -938,6 +956,7 @@ const refreshEntrySummaries = async (
     priority?: ManagerSummaryFetchPriority;
     force?: boolean;
     preserveClassicStanding?: boolean;
+    assertLeaseOwned?: () => Promise<void>;
   } = {},
 ): Promise<EntrySummaryRefreshResult> => {
   const targets = entryIds
@@ -1122,6 +1141,7 @@ const refreshEntrySummaries = async (
         nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
       };
       if (classicScope) {
+        await options.assertLeaseOwned?.();
         const checkpointPublished = await writeCheckpointRows(
           season,
           eventId,
@@ -1182,6 +1202,7 @@ const refreshEntrySummaries = async (
     if (!classicScope) await writeCheckpointRows(season, eventId, scope, publishedBatch.rows);
     let responseRows = publishedBatch.rows;
     if (classicScope) {
+      await options.assertLeaseOwned?.();
       const cacheUpdatedEntryIds = await writeClassicRowsMonotonically(
         redis,
         season.seasonCode,
@@ -1222,6 +1243,7 @@ const refreshClassicStandings = async (
   rows: Map<number, CachedRow>,
   redis: Redis | null,
   options: { startPage?: number; maxPages?: number } = {},
+  assertLeaseOwned: () => Promise<void> = async () => undefined,
 ): Promise<{
   complete: boolean;
   nextPage: number;
@@ -1304,6 +1326,7 @@ const refreshClassicStandings = async (
             const candidate = withPreservedOverallRank(restamped, latest?.overallRank);
             return mergeLatestManagerLiveRow(latest, candidate);
           });
+          await assertLeaseOwned();
           const checkpointPublished = await writeCheckpointRows(
             season,
             eventId,
@@ -1321,6 +1344,7 @@ const refreshClassicStandings = async (
         },
       );
       publishedRows = publication.rows;
+      await assertLeaseOwned();
       const cacheUpdatedEntryIds = await writeClassicRowsMonotonically(
         redis,
         season.seasonCode,
@@ -1657,88 +1681,111 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       new Set([...foregroundRefreshTargets, ...foregroundRankMissingEntryIds]),
     );
     if (foregroundLaneEntryIds.length > 0) {
-      const foregroundRefresh = await runClassicStandingsRefresh(
-        redis,
-        classicRefreshKey,
-        async () => {
-          const latestRows = await readBackgroundRows(
-            redis,
-            season,
-            input.eventId,
-            scope,
-            foregroundLaneEntryIds,
-            rows,
-          );
-          mergeLatestRows(rows, latestRows);
-          const standingsTargets = pendingManagerRefreshEntryIds(
-            foregroundRefreshTargets,
-            rows,
-            isFresh,
-          );
-          const nextStandings =
-            standingsTargets.length > 0
-              ? await refreshClassicStandings(
-                  season,
-                  input.eventId,
-                  classicLeagueId,
-                  new Set(standingsTargets),
-                  rows,
-                  redis,
-                )
-              : {
-                  complete: true,
-                  nextPage: 1,
-                  errorCode: null,
-                  refreshedEntryIds: [],
-                };
-          // The lane remains held through OR enrichment so an older standings
-          // snapshot cannot be re-published after a newer same-league crawl.
-          const rankCandidateIds = new Set([
-            ...foregroundRankMissingEntryIds,
-            ...nextStandings.refreshedEntryIds,
-          ]);
-          const refreshedRankCandidateIds = new Set(nextStandings.refreshedEntryIds);
-          const rankOnlyCandidateIds = new Set(foregroundRankMissingEntryIds);
-          const rankTargets = uniqueEntryIds
-            .filter((entryId) => {
-              const row = rows.get(entryId);
-              return (
-                rankCandidateIds.has(entryId) &&
-                row?.source === 'FPL_CLASSIC_STANDINGS' &&
-                shouldEnrichClassicOverallRank(
-                  entryId,
-                  row,
-                  refreshedRankCandidateIds,
-                  rankOnlyCandidateIds,
-                  isFresh,
-                  classicStandingNeedsOverallRank,
-                )
-              );
-            })
-            .slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
-          const rankError =
-            rankTargets.length > 0
-              ? await refreshEntrySummaries(
-                  season,
-                  input.eventId,
-                  rankTargets,
-                  rows,
-                  redis,
-                  scope,
-                  { force: true, preserveClassicStanding: true },
-                )
-              : null;
-          // A partial wave does not identify which entry failed. Conservatively
-          // retry the whole refreshed set in the background; the shared result
-          // cache makes successful duplicates cheap and preserves one official
-          // observation across replicas.
-          foregroundRankEnrichedEntryIds = rankError === null ? rankTargets : [];
-          return { standings: nextStandings, rankError };
-        },
-        'foreground',
-      );
+      let foregroundRefresh: {
+        standings: Awaited<ReturnType<typeof refreshClassicStandings>>;
+        rankError: EntrySummaryRefreshResult | null;
+      } = {
+        standings,
+        rankError: null,
+      };
+      try {
+        foregroundRefresh = await runClassicStandingsRefresh(
+          redis,
+          classicRefreshKey,
+          async (assertLeaseOwned) => {
+            const latestRows = await readBackgroundRows(
+              redis,
+              season,
+              input.eventId,
+              scope,
+              foregroundLaneEntryIds,
+              rows,
+            );
+            mergeLatestRows(rows, latestRows);
+            const standingsTargets = pendingManagerRefreshEntryIds(
+              foregroundRefreshTargets,
+              rows,
+              isFresh,
+            );
+            const nextStandings =
+              standingsTargets.length > 0
+                ? await refreshClassicStandings(
+                    season,
+                    input.eventId,
+                    classicLeagueId,
+                    new Set(standingsTargets),
+                    rows,
+                    redis,
+                    {},
+                    assertLeaseOwned,
+                  )
+                : {
+                    complete: true,
+                    nextPage: 1,
+                    errorCode: null,
+                    refreshedEntryIds: [],
+                  };
+            // The lane remains held through OR enrichment so an older standings
+            // snapshot cannot be re-published after a newer same-league crawl.
+            const rankCandidateIds = new Set([
+              ...foregroundRankMissingEntryIds,
+              ...nextStandings.refreshedEntryIds,
+            ]);
+            const refreshedRankCandidateIds = new Set(nextStandings.refreshedEntryIds);
+            const rankOnlyCandidateIds = new Set(foregroundRankMissingEntryIds);
+            const rankTargets = uniqueEntryIds
+              .filter((entryId) => {
+                const row = rows.get(entryId);
+                return (
+                  rankCandidateIds.has(entryId) &&
+                  row?.source === 'FPL_CLASSIC_STANDINGS' &&
+                  shouldEnrichClassicOverallRank(
+                    entryId,
+                    row,
+                    refreshedRankCandidateIds,
+                    rankOnlyCandidateIds,
+                    isFresh,
+                    classicStandingNeedsOverallRank,
+                  )
+                );
+              })
+              .slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
+            const rankError =
+              rankTargets.length > 0
+                ? await refreshEntrySummaries(
+                    season,
+                    input.eventId,
+                    rankTargets,
+                    rows,
+                    redis,
+                    scope,
+                    {
+                      force: true,
+                      preserveClassicStanding: true,
+                      assertLeaseOwned,
+                    },
+                  )
+                : null;
+            // A partial wave does not identify which entry failed. Conservatively
+            // retry the whole refreshed set in the background; the shared result
+            // cache makes successful duplicates cheap and preserves one official
+            // observation across replicas.
+            foregroundRankEnrichedEntryIds = rankError === null ? rankTargets : [];
+            return { standings: nextStandings, rankError };
+          },
+          'foreground',
+        );
+      } catch (error) {
+        if (!(error instanceof ManagerLiveLeaseOwnershipError)) throw error;
+        refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
+        logWarn('Official classic manager foreground lease lost; preserving last-good rows', {
+          eventId: input.eventId,
+          leagueId: classicLeagueId,
+        });
+      }
       standings = foregroundRefresh.standings;
-      refreshErrorCode = standings.errorCode ?? foregroundRefresh.rankError?.errorCode ?? null;
+      refreshErrorCode =
+        refreshErrorCode ?? standings.errorCode ?? foregroundRefresh.rankError?.errorCode ?? null;
     } else {
       refreshErrorCode = standings.errorCode;
     }
@@ -1748,31 +1795,43 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     );
     const foregroundFallbackPlan = planClassicManagerFallback(pendingCold, [], standings.complete);
     if (foregroundFallbackPlan.foregroundSummaryEntryIds.length > 0) {
-      const summaryError = await runClassicStandingsRefresh(
-        redis,
-        classicRefreshKey,
-        async () => {
-          const latestRows = await readBackgroundRows(
-            redis,
-            season,
-            input.eventId,
-            scope,
-            foregroundFallbackPlan.foregroundSummaryEntryIds,
-            rows,
-          );
-          mergeLatestRows(rows, latestRows);
-          const summaryTargets = foregroundFallbackPlan.foregroundSummaryEntryIds.filter(
-            (entryId) => {
-              const row = rows.get(entryId);
-              return classicManagerSummaryFallbackNeedsRefresh(row, row ? isFresh(row) : false);
-            },
-          );
-          return summaryTargets.length > 0
-            ? refreshEntrySummaries(season, input.eventId, summaryTargets, rows, redis, scope)
-            : null;
-        },
-        'foreground',
-      );
+      let summaryError: EntrySummaryRefreshResult | null = null;
+      try {
+        summaryError = await runClassicStandingsRefresh(
+          redis,
+          classicRefreshKey,
+          async (assertLeaseOwned) => {
+            const latestRows = await readBackgroundRows(
+              redis,
+              season,
+              input.eventId,
+              scope,
+              foregroundFallbackPlan.foregroundSummaryEntryIds,
+              rows,
+            );
+            mergeLatestRows(rows, latestRows);
+            const summaryTargets = foregroundFallbackPlan.foregroundSummaryEntryIds.filter(
+              (entryId) => {
+                const row = rows.get(entryId);
+                return classicManagerSummaryFallbackNeedsRefresh(row, row ? isFresh(row) : false);
+              },
+            );
+            return summaryTargets.length > 0
+              ? refreshEntrySummaries(season, input.eventId, summaryTargets, rows, redis, scope, {
+                  assertLeaseOwned,
+                })
+              : null;
+          },
+          'foreground',
+        );
+      } catch (error) {
+        if (!(error instanceof ManagerLiveLeaseOwnershipError)) throw error;
+        refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+        logWarn('Official classic manager fallback lease lost; preserving last-good rows', {
+          eventId: input.eventId,
+          leagueId: classicLeagueId,
+        });
+      }
       refreshErrorCode = refreshErrorCode ?? summaryError?.errorCode ?? null;
       pendingCold = foregroundRefreshTargets.filter(
         (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
@@ -1851,7 +1910,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
               runClassicStandingsRefresh(
                 redis,
                 classicRefreshKey,
-                async () => {
+                async (assertLeaseOwned) => {
                   // Re-read after entering every page-sized lane. Foreground
                   // work can jump ahead between pages, and this crawl observes
                   // any publication that completed while it yielded.
@@ -1877,6 +1936,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                         backgroundRows,
                         redis,
                         { startPage: page, maxPages: 1 },
+                        assertLeaseOwned,
                       )
                     : {
                         complete: true,
@@ -1924,7 +1984,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           await runClassicStandingsRefresh(
             redis,
             classicRefreshKey,
-            async () => {
+            async (assertLeaseOwned) => {
               const batchRows = await readBackgroundRows(
                 redis,
                 season,
@@ -1955,7 +2015,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                   batchRows,
                   redis,
                   scope,
-                  { force: true, priority: 'background', preserveClassicStanding: true },
+                  {
+                    force: true,
+                    priority: 'background',
+                    preserveClassicStanding: true,
+                    assertLeaseOwned,
+                  },
                 );
               }
               mergeLatestRows(backgroundRows, batchRows);
@@ -1975,7 +2040,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           await runClassicStandingsRefresh(
             redis,
             classicRefreshKey,
-            async () => {
+            async (assertLeaseOwned) => {
               const batchRows = await readBackgroundRows(
                 redis,
                 season,
@@ -1998,7 +2063,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                   batchRows,
                   redis,
                   scope,
-                  { priority: 'background' },
+                  { priority: 'background', assertLeaseOwned },
                 );
               }
               mergeLatestRows(backgroundRows, batchRows);
