@@ -122,7 +122,10 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     }
   }
 
-  const claimed = await claimSchedulerObligations();
+  const disabledJobNames = schedulerRegistry
+    .filter((definition) => definition.isEnabled && !definition.isEnabled())
+    .map((definition) => definition.name);
+  const claimed = await claimSchedulerObligations({ excludedJobNames: disabledJobNames });
   let enqueued = 0;
   await Promise.all(
     claimed.map(async ({ obligation, owner }) => {

@@ -111,6 +111,8 @@ describe('standalone scheduler registry', () => {
       generation: 2,
     });
     expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(definition).toMatchObject({ manualTrigger: false });
+    expect(disabled).toMatchObject({ manualTrigger: false });
   });
 
   test('does not claim downstream completion for the post-match coordinator', () => {

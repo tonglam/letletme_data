@@ -133,6 +133,7 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
         ),
     );
     await settleFinalizerOutcome(job);
+    await settleDeferredUnderstatRunFailure(job);
   } catch (error) {
     try {
       await recordTerminalFailure(job, error);
@@ -182,6 +183,7 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
         ),
     );
     await settleFinalizerOutcome(job);
+    await settleDeferredUnderstatRunFailure(job);
   } catch (error) {
     try {
       await recordTerminalFailure(job, error);
@@ -225,6 +227,70 @@ async function settleFinalizerOutcome(
   }
 }
 
+const ACTIVE_UNDERSTAT_RUN_STATUSES = new Set(['pending', 'running', 'ready_to_publish']);
+const UNDERSTAT_DRAIN_LEASE_EXTENSION_MS = 30 * 60_000;
+
+/**
+ * A terminal detail failure is durable immediately, but the scheduler retry
+ * must wait until every sibling item has drained. Otherwise the next
+ * generation races the still-active predecessor and its discovery job is
+ * rejected by findActiveRun().
+ */
+async function settleUnderstatFailureAfterRunDrained(
+  job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
+  error: unknown,
+  forceForTerminalRun = false,
+): Promise<void> {
+  const run = await understatSyncRepository.findRun(job.data.runId);
+  const nonRetryable = isUnderstatNonRetryableError(error);
+  if (run && ACTIVE_UNDERSTAT_RUN_STATUSES.has(run.status) && !nonRetryable) {
+    if (job.data.obligationId) {
+      await renewSchedulerObligation({
+        obligationId: job.data.obligationId,
+        generation: job.data.obligationGeneration,
+        additionalLeaseMs: UNDERSTAT_DRAIN_LEASE_EXTENSION_MS,
+      }).catch((renewError) =>
+        logError('Failed to extend Understat drain lease', renewError, {
+          runId: run.runId,
+          jobId: job.id,
+          generation: job.data.obligationGeneration,
+        }),
+      );
+    }
+    logInfo('Deferring Understat obligation retry until run drains', {
+      runId: run.runId,
+      jobId: job.id,
+      status: run.status,
+      generation: job.data.obligationGeneration,
+    });
+    return;
+  }
+  if (!forceForTerminalRun && run && run.status !== 'failed') return;
+  const settledError =
+    error instanceof Error
+      ? error
+      : new Error(run?.errorSummary ?? 'Understat run failed after worker drain');
+  await settleUnderstatObligationFailure({
+    obligationId: job.data.obligationId,
+    generation: job.data.obligationGeneration,
+    error: settledError,
+    nonRetryable,
+  });
+}
+
+async function settleDeferredUnderstatRunFailure(
+  job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
+): Promise<void> {
+  const run = await understatSyncRepository.findRun(job.data.runId);
+  if (!run || run.status !== 'failed') return;
+  await settleUnderstatObligationFailure({
+    obligationId: job.data.obligationId,
+    generation: job.data.obligationGeneration,
+    error: new Error(run.errorSummary ?? 'Understat run failed after worker drain'),
+    nonRetryable: false,
+  });
+}
+
 async function recordTeamFailure(
   job: Job<UnderstatTeamJobData>,
   error: Error,
@@ -239,7 +305,7 @@ async function recordTeamFailure(
       item.resourceId,
     );
     if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
-      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
       return;
     }
     await understatSyncRepository.failItem(
@@ -250,7 +316,7 @@ async function recordTeamFailure(
     );
     return;
   }
-  await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+  await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
 }
 
 async function recordPlayerFailure(
@@ -267,7 +333,7 @@ async function recordPlayerFailure(
       item.resourceId,
     );
     if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
-      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
       return;
     }
     await understatSyncRepository.failItem(
@@ -278,7 +344,7 @@ async function recordPlayerFailure(
     );
     return;
   }
-  await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+  await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
 }
 
 async function recordTerminalFailure(
@@ -294,12 +360,7 @@ async function recordTerminalFailure(
     } else {
       await recordTeamFailure(job as Job<UnderstatTeamJobData>, typedError, true);
     }
-    await settleUnderstatObligationFailure({
-      obligationId: job.data.obligationId,
-      generation: job.data.obligationGeneration,
-      error: typedError,
-      nonRetryable: isUnderstatNonRetryableError(error),
-    });
+    await settleUnderstatFailureAfterRunDrained(job, typedError, true);
   } catch (bookkeepingError) {
     logError('Understat terminal failure bookkeeping failed in worker path', bookkeepingError, {
       runId: job.data.runId,
@@ -357,12 +418,7 @@ export function createUnderstatWorker(): WorkerRuntime {
         }),
       );
       if (isTerminalJobFailure(job, error)) {
-        void settleUnderstatObligationFailure({
-          obligationId: job.data.obligationId,
-          generation: job.data.obligationGeneration,
-          error,
-          nonRetryable: isUnderstatNonRetryableError(error),
-        }).catch((bookkeepingError) =>
+        void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
           logError('Understat team obligation failure bookkeeping failed', bookkeepingError, {
             runId: job.data.runId,
           }),
@@ -384,12 +440,7 @@ export function createUnderstatWorker(): WorkerRuntime {
         }),
       );
       if (isTerminalJobFailure(job, error)) {
-        void settleUnderstatObligationFailure({
-          obligationId: job.data.obligationId,
-          generation: job.data.obligationGeneration,
-          error,
-          nonRetryable: isUnderstatNonRetryableError(error),
-        }).catch((bookkeepingError) =>
+        void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
           logError('Understat player obligation failure bookkeeping failed', bookkeepingError, {
             runId: job.data.runId,
           }),

@@ -101,6 +101,8 @@ export type ScheduledJobDefinition = Readonly<{
   queueName: string;
   successPredicate: string;
   manualTrigger?: boolean;
+  /** Scheduler-only definitions can be excluded from claims while disabled. */
+  isEnabled?: () => boolean;
   resolve: (context: SchedulerContext) => Promise<readonly SchedulerObligationPlan[]>;
   enqueue: (input: {
     context: SchedulerContext;
@@ -232,11 +234,14 @@ export function understatDailyDefinition(
   });
   return {
     ...definition,
+    manualTrigger: false,
+    isEnabled,
     resolve: async (context) => (isEnabled() ? definition.resolve(context) : []),
   };
 }
 
 function understatOrphanReconcilerDefinition(): ScheduledJobDefinition {
+  const isEnabled = () => getConfig().UNDERSTAT_ENABLED;
   const definition = periodicMaintenanceDefinition({
     name: MAINTENANCE_JOBS.UNDERSTAT_ORPHAN_RECONCILER,
     cadence: 'every 30 minutes',
@@ -254,7 +259,9 @@ function understatOrphanReconcilerDefinition(): ScheduledJobDefinition {
   });
   return {
     ...definition,
-    resolve: async (context) => (getConfig().UNDERSTAT_ENABLED ? definition.resolve(context) : []),
+    manualTrigger: false,
+    isEnabled,
+    resolve: async (context) => (isEnabled() ? definition.resolve(context) : []),
   };
 }
 

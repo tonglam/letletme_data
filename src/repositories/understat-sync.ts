@@ -335,6 +335,38 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       );
   },
 
+  /**
+   * Mark a run failed only after every staged item has settled. A terminal
+   * BullMQ attempt may arrive while sibling detail jobs are still active;
+   * leaving the run active in that window prevents the scheduler from
+   * starting a replacement generation against the same season.
+   */
+  async markRunFailedIfSettled(runId: string, error: string): Promise<boolean> {
+    const db = await getDatabase(dbInstance);
+    const updated = await db
+      .update(understatSyncRuns)
+      .set({
+        status: 'failed',
+        errorSummary: error,
+        completedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+          sql`not exists (
+            select 1
+            from ${understatSyncItems} as active_item
+            where active_item.run_id = ${understatSyncRuns.runId}
+              and active_item.status in ('pending', 'running')
+          )`,
+        ),
+      )
+      .returning({ runId: understatSyncRuns.runId });
+    return updated.length === 1;
+  },
+
   async markRunCompleted(
     runId: string,
     metadata: Record<string, unknown> = {},

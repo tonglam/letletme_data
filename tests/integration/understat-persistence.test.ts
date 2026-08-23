@@ -970,6 +970,10 @@ describe('Understat persistence', () => {
     expect(inProgress?.failedItems).toBe(1);
     expect(inProgress?.completedAt).toBeNull();
     expect(inProgress?.errorSummary).toBe('first resource failed');
+    expect(await understatSyncRepository.markRunFailedIfSettled(runId, 'premature retry')).toBe(
+      false,
+    );
+    expect((await understatSyncRepository.findRun(runId))?.status).toBe('running');
 
     const staged = { test: true, teamId: teamIds[1] };
     expect(

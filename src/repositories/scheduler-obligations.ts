@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -129,6 +129,8 @@ export async function claimSchedulerObligations(
   input: {
     limit?: number;
     leaseMs?: number;
+    /** Keep scheduler-only obligations pending while their provider is disabled. */
+    excludedJobNames?: readonly string[];
     db?: DbHandle;
   } = {},
 ): Promise<readonly { obligation: SchedulerObligation; owner: string }[]> {
@@ -140,6 +142,9 @@ export async function claimSchedulerObligations(
   if (!Number.isSafeInteger(leaseMs) || leaseMs < 1)
     throw new Error('Scheduler lease must be positive');
   const db = input.db ?? (await getDb());
+  const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
+    (name) => name.length > 0,
+  );
   const owner = randomUUID();
   return db.transaction(async (tx) => {
     const clockRows = await tx.execute<{ dbNow: Date | string }>(
@@ -164,6 +169,9 @@ export async function claimSchedulerObligations(
               ),
             ),
           ),
+          excludedJobNames.length > 0
+            ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
+            : undefined,
         ),
       )
       .orderBy(asc(schedulerObligationsInOps.dueAt), asc(schedulerObligationsInOps.obligationId))

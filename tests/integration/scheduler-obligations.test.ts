@@ -6,6 +6,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 
 import { getDbClient } from '../../src/db/singleton';
 import {
+  claimSchedulerObligations,
   completeSchedulerObligation,
   failSchedulerObligation,
   markSchedulerObligationIrrecoverable,
@@ -165,5 +166,57 @@ describe('scheduler obligation generation fencing', () => {
       WHERE obligation_id = ${OBLIGATION_ID}::uuid
     `;
     expect(rows[0]).toEqual({ status: 'irrecoverable', lease_owner: null });
+  });
+
+  test('leaves disabled Understat obligations pending for a later enablement', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'understat-team-incremental',
+        'integration:understat',
+        '20260823',
+        'daily UTC+8 incremental',
+        'Asia/Shanghai',
+        'pending',
+        'catchup',
+        clock_timestamp() - interval '1 minute',
+        0,
+        0,
+        '{}'::jsonb
+      )
+    `;
+
+    expect(
+      await claimSchedulerObligations({
+        excludedJobNames: ['understat-team-incremental'],
+      }),
+    ).toHaveLength(0);
+    const pending = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(pending[0]?.status).toBe('pending');
+
+    const claimed = await claimSchedulerObligations({
+      excludedJobNames: ['understat-player-incremental'],
+    });
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]?.obligation.jobName).toBe('understat-team-incremental');
   });
 });
