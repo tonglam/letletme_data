@@ -20,6 +20,7 @@ import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   classicManagerSummaryFallbackEntryIds,
+  classicManagerSummaryFallbackNeedsRefresh,
   createKeyedTaskSerializer,
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
@@ -234,6 +235,18 @@ const readBackgroundRows = async (
         error: error instanceof Error ? error.message : 'unknown',
       }),
   );
+
+const mergeLatestRows = (
+  target: Map<number, CachedRow>,
+  incoming: ReadonlyMap<number, CachedRow>,
+): void => {
+  for (const [entryId, row] of incoming) {
+    const current = target.get(entryId);
+    if (!current || Date.parse(row.checkedAt) >= Date.parse(current.checkedAt)) {
+      target.set(entryId, row);
+    }
+  }
+};
 
 const writeRows = async (
   redis: Redis | null,
@@ -878,6 +891,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   ) {
     if (!tournament) throw new Error('Tournament validation unexpectedly missing');
     const classicLeagueId = tournament.leagueId;
+    const classicRefreshKey = `${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
     let standings: Awaited<ReturnType<typeof refreshClassicStandings>> = {
       complete: false,
       nextPage: 1,
@@ -886,7 +900,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     };
     if (foregroundRefreshTargets.length > 0) {
       const foregroundRefresh = await runClassicStandingsRefresh(
-        `${season.seasonCode}:${input.eventId}:${classicLeagueId}`,
+        classicRefreshKey,
         async () => {
           const nextStandings = await refreshClassicStandings(
             season,
@@ -929,13 +943,29 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     );
     const foregroundFallbackPlan = planClassicManagerFallback(pendingCold, [], standings.complete);
     if (foregroundFallbackPlan.foregroundSummaryEntryIds.length > 0) {
-      const summaryError = await refreshEntrySummaries(
-        season,
-        input.eventId,
-        foregroundFallbackPlan.foregroundSummaryEntryIds,
-        rows,
-        redis,
-        scope,
+      const summaryError = await runClassicStandingsRefresh(
+        classicRefreshKey,
+        async () => {
+          const latestRows = await readBackgroundRows(
+            redis,
+            season.seasonCode,
+            input.eventId,
+            scope,
+            foregroundFallbackPlan.foregroundSummaryEntryIds,
+            rows,
+          );
+          mergeLatestRows(rows, latestRows);
+          const summaryTargets = foregroundFallbackPlan.foregroundSummaryEntryIds.filter(
+            (entryId) => {
+              const row = rows.get(entryId);
+              return classicManagerSummaryFallbackNeedsRefresh(row, row ? isFresh(row) : false);
+            },
+          );
+          return summaryTargets.length > 0
+            ? refreshEntrySummaries(season, input.eventId, summaryTargets, rows, redis, scope)
+            : null;
+        },
+        'foreground',
       );
       refreshErrorCode = refreshErrorCode ?? summaryError;
       pendingCold = foregroundRefreshTargets.filter(
@@ -984,25 +1014,28 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       );
       const capturedBackgroundRows = new Map(rows);
       scheduleBackgroundRefresh(backgroundKey, async () => {
-        const backgroundRows = await readBackgroundRows(
-          redis,
-          season.seasonCode,
-          input.eventId,
-          scope,
-          backgroundEntryIds,
-          capturedBackgroundRows,
-        );
-
+        let backgroundRows = new Map(capturedBackgroundRows);
         let backgroundResult: Awaited<ReturnType<typeof refreshClassicStandings>> = {
           complete: standings.complete,
           nextPage: standings.nextPage,
           errorCode: null,
           refreshedEntryIds: [],
         };
+        let backgroundRankTargets: readonly number[] = [];
         if (backgroundPlan.backgroundStandingsEntryIds.length > 0 || rankOnlyTargets.length > 0) {
-          await runClassicStandingsRefresh(
-            `${season.seasonCode}:${input.eventId}:${classicLeagueId}`,
+          const crawl = await runClassicStandingsRefresh(
+            classicRefreshKey,
             async () => {
+              // Read after entering the league lane so a queued crawl starts
+              // from the publication completed by the preceding task.
+              backgroundRows = await readBackgroundRows(
+                redis,
+                season.seasonCode,
+                input.eventId,
+                scope,
+                backgroundEntryIds,
+                capturedBackgroundRows,
+              );
               if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
                 backgroundResult = await refreshClassicStandings(
                   season,
@@ -1014,52 +1047,97 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                   { startPage: 1, maxPages: MAX_STANDINGS_PAGES },
                 );
               }
-
-              const backgroundRankTargets = Array.from(
+              return Array.from(
                 new Set([...rankOnlyTargets, ...backgroundResult.refreshedEntryIds]),
               ).filter(
                 (entryId) => backgroundRows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
               );
-              if (backgroundRankTargets.length > 0) {
+            },
+            'background',
+          );
+          backgroundRankTargets = crawl;
+        }
+
+        // Hold the league lane for one four-entry upstream wave at a time.
+        // Foreground misses can therefore jump ahead between background waves,
+        // while every merge still observes the latest serialized standings row.
+        for (const batch of managerSummaryFetchBatches(backgroundRankTargets)) {
+          await runClassicStandingsRefresh(
+            classicRefreshKey,
+            async () => {
+              const batchRows = await readBackgroundRows(
+                redis,
+                season.seasonCode,
+                input.eventId,
+                scope,
+                batch,
+                backgroundRows,
+              );
+              const rankTargets = batch.filter(
+                (entryId) => batchRows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
+              );
+              if (rankTargets.length > 0) {
                 await refreshEntrySummaries(
                   season,
                   input.eventId,
-                  backgroundRankTargets,
-                  backgroundRows,
+                  rankTargets,
+                  batchRows,
                   redis,
                   scope,
                   { force: true, priority: 'background', preserveClassicStanding: true },
                 );
               }
+              mergeLatestRows(backgroundRows, batchRows);
             },
             'background',
           );
         }
 
-        const summaryTargets = classicManagerSummaryFallbackEntryIds(
+        const summaryCandidates = classicManagerSummaryFallbackEntryIds(
           backgroundPlan.backgroundSummaryEntryIds,
           backgroundPlan.backgroundStandingsEntryIds,
           coldEntryIds,
           staleSummaryFallbackIds,
           backgroundResult.complete,
-        ).filter(
-          (entryId) => !backgroundRows.has(entryId) || !isFresh(backgroundRows.get(entryId)!),
         );
-        if (summaryTargets.length > 0) {
-          await refreshEntrySummaries(
-            season,
-            input.eventId,
-            summaryTargets,
-            backgroundRows,
-            redis,
-            scope,
-            { priority: 'background' },
+        for (const batch of managerSummaryFetchBatches(summaryCandidates)) {
+          await runClassicStandingsRefresh(
+            classicRefreshKey,
+            async () => {
+              const batchRows = await readBackgroundRows(
+                redis,
+                season.seasonCode,
+                input.eventId,
+                scope,
+                batch,
+                backgroundRows,
+              );
+              const summaryTargets = batch.filter((entryId) => {
+                const row = batchRows.get(entryId);
+                // Summary is a new-entry fallback only. A classic row that
+                // appeared while this job waited owns phase totals and rank.
+                return classicManagerSummaryFallbackNeedsRefresh(row, row ? isFresh(row) : false);
+              });
+              if (summaryTargets.length > 0) {
+                await refreshEntrySummaries(
+                  season,
+                  input.eventId,
+                  summaryTargets,
+                  batchRows,
+                  redis,
+                  scope,
+                  { priority: 'background' },
+                );
+              }
+              mergeLatestRows(backgroundRows, batchRows);
+            },
+            'background',
           );
         }
         logDebug('Official classic manager background refresh completed', {
           eventId: input.eventId,
           leagueId: classicLeagueId,
-          remaining: summaryTargets.length,
+          remaining: summaryCandidates.length,
           complete: backgroundResult.complete,
         });
       });

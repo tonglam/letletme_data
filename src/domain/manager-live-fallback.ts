@@ -73,7 +73,9 @@ export const readLatestRowsWithFallback = async <T extends { checkedAt: string }
     const cachedRows = await readRows();
     for (const [entryId, cached] of cachedRows) {
       const captured = rows.get(entryId);
-      if (!captured || Date.parse(cached.checkedAt) > Date.parse(captured.checkedAt)) {
+      // The caller's live read is authoritative at the time it runs, so it
+      // wins timestamp ties over a request-captured snapshot.
+      if (!captured || Date.parse(cached.checkedAt) >= Date.parse(captured.checkedAt)) {
         rows.set(entryId, cached);
       }
     }
@@ -220,3 +222,8 @@ export const classicManagerSummaryFallbackEntryIds = (
         : []),
     ]),
   );
+
+export const classicManagerSummaryFallbackNeedsRefresh = (
+  row: Readonly<{ source: string }> | undefined,
+  fresh: boolean,
+): boolean => !row || (row.source === 'FPL_ENTRY_SUMMARY' && !fresh);

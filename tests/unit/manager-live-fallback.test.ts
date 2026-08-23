@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   classicManagerSummaryFallbackEntryIds,
+  classicManagerSummaryFallbackNeedsRefresh,
   createKeyedTaskSerializer,
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
@@ -95,6 +96,19 @@ describe('classic manager live fallback', () => {
         false,
       ),
     ).toEqual([11]);
+  });
+
+  test('publishes summary fallback only for missing or stale summary rows', () => {
+    expect(classicManagerSummaryFallbackNeedsRefresh(undefined, false)).toBe(true);
+    expect(classicManagerSummaryFallbackNeedsRefresh({ source: 'FPL_ENTRY_SUMMARY' }, false)).toBe(
+      true,
+    );
+    expect(classicManagerSummaryFallbackNeedsRefresh({ source: 'FPL_ENTRY_SUMMARY' }, true)).toBe(
+      false,
+    );
+    expect(
+      classicManagerSummaryFallbackNeedsRefresh({ source: 'FPL_CLASSIC_STANDINGS' }, false),
+    ).toBe(false);
   });
 
   test('caps concurrent entry-summary work while retaining every target', () => {
@@ -239,6 +253,50 @@ describe('classic manager live fallback', () => {
     );
 
     expect(rows.get(1)?.value).toBe('redis');
+  });
+
+  test('prefers the serialized cache publication when timestamps tie', async () => {
+    const captured = new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'captured' }]]);
+
+    const rows = await readLatestRowsWithFallback(
+      [1],
+      captured,
+      async () => new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'serialized' }]]),
+    );
+
+    expect(rows.get(1)?.value).toBe('serialized');
+  });
+
+  test('yields the league lane between background summary batches', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseFirstBatch: (() => void) | undefined;
+    const firstBatchBlocked = new Promise<void>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+
+    const background = (async () => {
+      for (const batch of managerSummaryFetchBatches([1, 2, 3, 4, 5, 6, 7, 8])) {
+        await run(
+          '2025:1:99',
+          async () => {
+            order.push(`background:${batch[0]}`);
+            if (batch[0] === 1) await firstBatchBlocked;
+          },
+          'background',
+        );
+      }
+    })();
+    await Promise.resolve();
+    await Promise.resolve();
+    const foreground = run('2025:1:99', async () => {
+      order.push('foreground');
+    });
+
+    releaseFirstBatch?.();
+    await Promise.all([background, foreground]);
+
+    expect(order).toEqual(['background:1', 'foreground', 'background:5']);
   });
 
   test('admits foreground work before queued background batches', async () => {
