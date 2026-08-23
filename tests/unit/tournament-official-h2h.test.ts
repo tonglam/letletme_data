@@ -6,6 +6,7 @@ import {
   buildOfficialH2HRows,
   fetchOfficialH2HSourceSnapshot,
   projectOfficialH2HStandings,
+  projectOfficialH2HStandingsFromMatches,
 } from '../../src/services/tournament-official-h2h.service';
 
 const tournament: TournamentSyncContext = {
@@ -254,6 +255,88 @@ describe('official H2H source import', () => {
       homeMatchPoints: null,
       awayMatchPoints: null,
     });
+  });
+
+  test('derives a published outcome when FPL sends zero outcome placeholders with scores', () => {
+    const rows = buildOfficialH2HRows(
+      { ...singleEventTournament, totalTeamNum: 2 },
+      new Set([1, 2]),
+      {
+        standings: [],
+        matches: [
+          {
+            id: 9060,
+            event: 1,
+            entry_1_entry: 1,
+            entry_1_points: 24,
+            entry_1_win: 0,
+            entry_1_draw: 0,
+            entry_1_loss: 0,
+            entry_1_total: 0,
+            entry_2_entry: 2,
+            entry_2_points: 43,
+            entry_2_win: 0,
+            entry_2_draw: 0,
+            entry_2_loss: 0,
+            entry_2_total: 0,
+            winner: null,
+            is_bye: false,
+            knockout_name: null,
+            sourceOrder: 0,
+          },
+        ],
+      },
+      new Date('2026-08-13T01:00:00.000Z'),
+    );
+
+    expect(rows.battleRows[0]).toMatchObject({
+      homeMatchPoints: 0,
+      awayMatchPoints: 3,
+    });
+  });
+
+  test('projects standings from official match scores when the upstream table is still zeroed', () => {
+    const projected = projectOfficialH2HStandingsFromMatches(new Set([1, 2]), [
+      {
+        id: 9061,
+        event: 1,
+        entry_1_entry: 1,
+        entry_1_points: 24,
+        entry_1_win: 0,
+        entry_1_draw: 0,
+        entry_1_loss: 0,
+        entry_1_total: 0,
+        entry_2_entry: 2,
+        entry_2_points: 43,
+        entry_2_win: 0,
+        entry_2_draw: 0,
+        entry_2_loss: 0,
+        entry_2_total: 0,
+        winner: null,
+        is_bye: false,
+        knockout_name: null,
+        sourceOrder: 0,
+      },
+    ]);
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        entry: 2,
+        rank: 1,
+        total: 3,
+        matches_played: 1,
+        matches_won: 1,
+        points_for: 43,
+      }),
+      expect.objectContaining({
+        entry: 1,
+        rank: 2,
+        total: 0,
+        matches_played: 1,
+        matches_lost: 1,
+        points_for: 24,
+      }),
+    ]);
   });
 
   test('keeps the locked schedule hash stable across scores and later knockout rows', () => {

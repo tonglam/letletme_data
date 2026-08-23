@@ -76,14 +76,21 @@ function matchPoints(match: RawFPLLeagueH2HMatch): { home: number | null; away: 
       away: match.entry_2_win ? 3 : match.entry_2_draw ? 1 : 0,
     };
   }
-  if (match.winner !== null) {
+  if (match.winner !== null && match.winner !== undefined) {
     return {
       home: match.winner === match.entry_1_entry ? 3 : 0,
       away: match.winner === match.entry_2_entry ? 3 : 0,
     };
   }
-  if (hasExplicitOutcomeContract) return { home: null, away: null };
-  if (match.entry_1_points === null || match.entry_2_points === null) {
+  // FPL currently returns the outcome fields as an all-zero placeholder while
+  // the points fields are already populated. Treat that shape as scoreable;
+  // keep a genuine 0-0 placeholder unplayed until FPL publishes an outcome.
+  const hasNonZeroScores =
+    typeof match.entry_1_points === 'number' &&
+    typeof match.entry_2_points === 'number' &&
+    (match.entry_1_points !== 0 || match.entry_2_points !== 0);
+  if (hasExplicitOutcomeContract && !hasNonZeroScores) return { home: null, away: null };
+  if (typeof match.entry_1_points !== 'number' || typeof match.entry_2_points !== 'number') {
     return { home: null, away: null };
   }
   if (match.entry_1_points > match.entry_2_points) return { home: 3, away: 0 };
@@ -216,6 +223,81 @@ export function projectOfficialH2HStandings(
         totalsByEntry === undefined ? stored.totalTransfersCost : (totals?.totalTransfersCost ?? 0),
       totalNetPoints: integerOrZero(standing.points_for),
     };
+  });
+}
+
+/**
+ * Rebuild H2H standings from the official match feed when FPL's standings
+ * endpoint is temporarily behind its match scores (as it can be just after
+ * the first gameweek is published).
+ */
+export function projectOfficialH2HStandingsFromMatches(
+  entryIds: ReadonlySet<number>,
+  matches: readonly (RawFPLLeagueH2HMatch & { sourceOrder: number })[],
+): OfficialH2HStanding[] {
+  const totals = new Map<
+    number,
+    {
+      entry: number;
+      total: number;
+      matches_played: number;
+      matches_won: number;
+      matches_drawn: number;
+      matches_lost: number;
+      points_for: number;
+    }
+  >();
+  for (const entry of entryIds) {
+    totals.set(entry, {
+      entry,
+      total: 0,
+      matches_played: 0,
+      matches_won: 0,
+      matches_drawn: 0,
+      matches_lost: 0,
+      points_for: 0,
+    });
+  }
+
+  for (const match of matches) {
+    if (isOfficialKnockoutMatch(match)) continue;
+    const outcome = matchPoints(match);
+    if (outcome.home === null || outcome.away === null) continue;
+    for (const side of [
+      {
+        entry: match.entry_1_entry,
+        points: match.entry_1_points,
+        matchPoints: outcome.home,
+      },
+      {
+        entry: match.entry_2_entry,
+        points: match.entry_2_points,
+        matchPoints: outcome.away,
+      },
+    ]) {
+      if (side.entry === null) continue;
+      const total = totals.get(side.entry);
+      if (!total) continue;
+      total.matches_played += 1;
+      total.total += side.matchPoints;
+      total.points_for += typeof side.points === 'number' ? side.points : 0;
+      if (side.matchPoints === 3) total.matches_won += 1;
+      else if (side.matchPoints === 1) total.matches_drawn += 1;
+      else total.matches_lost += 1;
+    }
+  }
+
+  const ordered = [...totals.values()].sort(
+    (left, right) =>
+      right.total - left.total || right.points_for - left.points_for || left.entry - right.entry,
+  );
+  let previousKey: string | null = null;
+  let rank = 0;
+  return ordered.map((standing, index) => {
+    const key = `${standing.total}:${standing.points_for}`;
+    if (key !== previousKey) rank = index + 1;
+    previousKey = key;
+    return { ...standing, rank };
   });
 }
 
@@ -553,7 +635,30 @@ export async function syncOfficialH2HTournament(
     tournament.groupEndedEventId ?? reconcileEventId ?? 38,
   );
   const totalsByEntry = new Map(aggregateTotals.map((row) => [row.entryId, row] as const));
-  const groupRows = projectOfficialH2HStandings(currentGroups, snapshot.standings, totalsByEntry);
+  const matchDerivedStandings = projectOfficialH2HStandingsFromMatches(
+    entryIdSet,
+    snapshot.matches,
+  );
+  const officialStandingsHaveScores = snapshot.standings.some(
+    (standing) =>
+      (standing.total ?? standing.points_total ?? 0) !== 0 ||
+      (standing.matches_played ?? 0) !== 0 ||
+      (standing.matches_won ?? 0) !== 0 ||
+      (standing.matches_drawn ?? 0) !== 0 ||
+      (standing.matches_lost ?? 0) !== 0 ||
+      (standing.points_for ?? 0) !== 0,
+  );
+  const useMatchDerivedStandings =
+    !officialStandingsHaveScores &&
+    matchDerivedStandings.some((standing) => (standing.matches_played ?? 0) > 0);
+  const effectiveStandings = useMatchDerivedStandings ? matchDerivedStandings : snapshot.standings;
+  if (useMatchDerivedStandings) {
+    logWarn('FPL H2H standings lagged match scores; projecting standings from official matches', {
+      tournamentId: tournament.id,
+      leagueId: tournament.leagueId,
+    });
+  }
+  const groupRows = projectOfficialH2HStandings(currentGroups, effectiveStandings, totalsByEntry);
   const published = await tournamentOfficialH2HRepository.publish(season, tournament.id, {
     ...officialRows,
     checkedAt,
