@@ -148,7 +148,7 @@ describe('entry-sync entry-list job IDs', () => {
     entrySyncAddCalls.length = 0;
   });
 
-  test('entry-list jobs get a deterministic content-based ID', async () => {
+  test('entry-list jobs use lifecycle deduplication with unique run IDs', async () => {
     const first = await enqueueEntryPicksSyncJob(TEST_SEASON, 'api', {
       entryIds: [3, 1, 2],
       eventId: 20,
@@ -160,11 +160,15 @@ describe('entry-sync entry-list job IDs', () => {
 
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
-    expect(first!.id).toMatch(/^entry-picks-2627-entry-list-[0-9a-f]{8}$/);
-    // Same entries in any order dedupe to the same job
-    expect(second!.id).toBe(first!.id as string);
-    // API entry-list jobs retain bounded queue evidence; a new correlation ID
-    // can be used when an operator intentionally wants a fresh replay.
+    expect(first!.id).toMatch(/^entry-picks-2627-entry-list-[0-9a-f]{8}-run-/);
+    expect(second!.id).toMatch(/^entry-picks-2627-entry-list-[0-9a-f]{8}-run-/);
+    expect(second!.id).not.toBe(first!.id as string);
+    // BullMQ coalesces concurrent runs by this stable content scope, then
+    // removes the deduplication key at completion/failure so a later repair
+    // gets the fresh unique job record above.
+    expect(entrySyncAddCalls[0].opts.deduplication).toEqual(
+      entrySyncAddCalls[1].opts.deduplication,
+    );
     expect(entrySyncAddCalls[0].opts.removeOnComplete).toBeUndefined();
     expect(entrySyncAddCalls[0].opts.removeOnFail).toBeUndefined();
   });
@@ -191,6 +195,15 @@ describe('entry-sync entry-list job IDs', () => {
     expect(otherIds!.id).not.toBe(base!.id as string);
     expect(otherEvent!.id).not.toBe(base!.id as string);
     expect(noEvent!.id).not.toBe(base!.id as string);
+    expect(entrySyncAddCalls[1].opts.deduplication).not.toEqual(
+      entrySyncAddCalls[0].opts.deduplication,
+    );
+    expect(entrySyncAddCalls[2].opts.deduplication).not.toEqual(
+      entrySyncAddCalls[0].opts.deduplication,
+    );
+    expect(entrySyncAddCalls[3].opts.deduplication).not.toEqual(
+      entrySyncAddCalls[0].opts.deduplication,
+    );
   });
 
   test('retryCount distinguishes delayed full-batch retries from the active job', async () => {

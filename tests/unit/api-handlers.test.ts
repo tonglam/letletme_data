@@ -56,6 +56,35 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   },
 }));
 
+type MaintenanceAddCall = {
+  name: string;
+  data: Record<string, unknown>;
+  opts: Record<string, unknown>;
+};
+const maintenanceAddCalls: MaintenanceAddCall[] = [];
+mock.module('../../src/queues/maintenance.queue', () => ({
+  MAINTENANCE_JOBS: {
+    PLAYER_MARKET_FRESHNESS: 'player-market-freshness-watchdog',
+    PLAYER_SEASON_SUMMARY: 'player-season-summary-repair',
+    TOURNAMENT_TRENDS: 'tournament-trends-repair',
+    BUG_REPORT_CLEANUP: 'bug-report-cleanup',
+    BUG_REPORT_SCREENSHOT_RETENTION: 'bug-report-screenshot-retention',
+    LAUNCH_MONITOR: 'launch-monitor',
+    POST_MATCH_CONSOLIDATION: 'post-match-consolidation',
+    ENTRY_ONBOARDING: 'entry-onboarding',
+    MY_FPL_SNAPSHOT: 'my-fpl-snapshot',
+    MY_FPL_SNAPSHOT_OUTBOX: 'my-fpl-snapshot-outbox',
+  },
+  maintenanceQueueName: 'maintenance',
+  maintenanceQueue: {
+    name: 'maintenance',
+    add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
+      maintenanceAddCalls.push({ name, data, opts });
+      return { id: opts.jobId as string, name, data };
+    },
+  },
+}));
+
 // Mock the live-data queue (not live-data.jobs) so real enqueue helpers run and
 // unit suites stay isolated from manual-job-ids.test.ts which also exercises
 // the real live-data.jobs module.
@@ -603,6 +632,7 @@ describe('tournamentsAPI handlers', () => {
 describe('entryInfoAPI handlers', () => {
   beforeEach(() => {
     entrySyncAddCalls.length = 0;
+    maintenanceAddCalls.length = 0;
   });
 
   test('POST /entry-info/:entryId/sync queues a numeric entry id', async () => {
@@ -614,12 +644,33 @@ describe('entryInfoAPI handlers', () => {
       success: true,
       status: 'queued',
       jobId: expect.any(String),
+      message: 'Entry info sync queued',
     });
-    expect(entrySyncAddCalls).toHaveLength(1);
-    expect(entrySyncAddCalls[0]).toMatchObject({
-      name: 'entry-info',
-      data: { source: 'api', entryIds: [42] },
+    expect(entrySyncAddCalls).toHaveLength(0);
+    expect(maintenanceAddCalls).toHaveLength(1);
+    expect(maintenanceAddCalls[0]).toMatchObject({
+      name: 'entry-onboarding',
+      data: { source: 'api', entryId: 42, eventId: 20 },
+      opts: {
+        deduplication: { id: 'entry-onboarding-2627-e20-entry-42' },
+      },
     });
+    expect(maintenanceAddCalls[0].opts.jobId).toMatch(/^entry-onboarding-2627-e20-entry-42-run-/);
+  });
+
+  test('uses stable lifecycle deduplication with a fresh parent job ID per trigger', async () => {
+    await entryInfoAPI.handle(
+      new Request('http://localhost/entry-info/42/sync', { method: 'POST' }),
+    );
+    await entryInfoAPI.handle(
+      new Request('http://localhost/entry-info/42/sync', { method: 'POST' }),
+    );
+
+    expect(maintenanceAddCalls).toHaveLength(2);
+    expect(maintenanceAddCalls[0].opts.deduplication).toEqual(
+      maintenanceAddCalls[1].opts.deduplication,
+    );
+    expect(maintenanceAddCalls[0].opts.jobId).not.toBe(maintenanceAddCalls[1].opts.jobId);
   });
 
   test('rejects non-numeric entryId params', async () => {
@@ -627,7 +678,7 @@ describe('entryInfoAPI handlers', () => {
       new Request('http://localhost/entry-info/abc/sync', { method: 'POST' }),
     );
     expect(response.status).toBe(422);
-    expect(entrySyncAddCalls).toHaveLength(0);
+    expect(maintenanceAddCalls).toHaveLength(0);
   });
 
   test('rejects non-positive and fractional entryId params', async () => {
@@ -637,7 +688,7 @@ describe('entryInfoAPI handlers', () => {
       );
       expect(response.status).toBe(422);
     }
-    expect(entrySyncAddCalls).toHaveLength(0);
+    expect(maintenanceAddCalls).toHaveLength(0);
   });
 });
 

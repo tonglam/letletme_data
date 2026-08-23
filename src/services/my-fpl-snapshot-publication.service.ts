@@ -52,6 +52,12 @@ export type MyFplSnapshotOutboxDispatchResult = Readonly<{
   failed: number;
 }>;
 
+export type MyFplSnapshotCoverageState =
+  | 'COMPLETE'
+  | 'CORRECTION_PENDING'
+  | 'NO_PUBLICATION'
+  | 'IMMUTABLE_FINAL';
+
 export type MyFplSnapshotOperationalStatus = Readonly<{
   eventId: number;
   deadlineTime: string | null;
@@ -68,6 +74,9 @@ export type MyFplSnapshotOperationalStatus = Readonly<{
   emptyEntryCount: number | null;
   expectedTournamentCount: number | null;
   readyTournamentCount: number | null;
+  currentEntryCount: number;
+  pendingCorrectionEntryCount: number;
+  coverageState: MyFplSnapshotCoverageState;
   pendingOutboxCount: number;
   outboxAttempts: number;
   finalSla: 'NOT_DUE' | 'DUE' | 'MET' | 'BREACHED';
@@ -79,6 +88,76 @@ export class MyFplSnapshotIncompleteError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'MyFplSnapshotIncompleteError';
+  }
+}
+
+export function resolveMyFplSnapshotCoverageState(
+  kind: MyFplSnapshotKind | null,
+  pendingCorrectionEntryCount: number,
+): MyFplSnapshotCoverageState {
+  if (kind === null) return 'NO_PUBLICATION';
+  if (kind === 'FINAL') return 'IMMUTABLE_FINAL';
+  return pendingCorrectionEntryCount > 0 ? 'CORRECTION_PENDING' : 'COMPLETE';
+}
+
+export function isMatchingProvisionalMyFplPublication(
+  active: MyFplSnapshotPublication | null,
+  candidate: Readonly<{
+    kind: MyFplSnapshotKind;
+    snapshotDate: string;
+    contentSha256: string;
+  }>,
+): active is MyFplSnapshotPublication {
+  return (
+    candidate.kind === 'PROVISIONAL' &&
+    active?.kind === candidate.kind &&
+    active.snapshotDate === candidate.snapshotDate &&
+    active.contentSha256 === candidate.contentSha256
+  );
+}
+
+async function runMyFplCaptureTransaction(
+  client: postgres.Sql,
+  lockScope: string,
+  operation: (transaction: postgres.TransactionSql) => Promise<MyFplSnapshotCaptureResult>,
+): Promise<MyFplSnapshotCaptureResult> {
+  // Acquire a session lock before opening the repeatable-read transaction.
+  // Taking a transaction advisory lock as the first SELECT can pin a stale
+  // MVCC snapshot while waiting, so the second concurrent capture would not
+  // observe the revision committed by the first one.
+  const reserved = await client.reserve();
+  let lockAcquired = false;
+  try {
+    await reserved`SELECT pg_advisory_lock(hashtextextended(${lockScope}, 0))`;
+    lockAcquired = true;
+    await reserved`BEGIN ISOLATION LEVEL REPEATABLE READ`;
+    let transactionOpen = true;
+    try {
+      const result = await operation(reserved as unknown as postgres.TransactionSql);
+      await reserved`COMMIT`;
+      transactionOpen = false;
+      return result;
+    } catch (error) {
+      if (transactionOpen) {
+        try {
+          await reserved`ROLLBACK`;
+        } catch (rollbackError) {
+          logWarn('Failed to roll back My FPL capture transaction', {
+            error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+            lockScope,
+          });
+        }
+      }
+      throw error;
+    }
+  } finally {
+    try {
+      if (lockAcquired) {
+        await reserved`SELECT pg_advisory_unlock(hashtextextended(${lockScope}, 0))`;
+      }
+    } finally {
+      reserved.release();
+    }
   }
 }
 
@@ -772,7 +851,7 @@ async function loadActivePublication(
     {
       season_id: number;
       event_id: number;
-      revision: number;
+      revision: number | string;
       snapshot_date: string;
       source_checked_at: Date | string;
       published_at: Date | string;
@@ -799,10 +878,14 @@ async function loadActivePublication(
   `;
   const row = rows[0];
   if (!row) return null;
+  const revision = Number(row.revision);
+  if (!Number.isSafeInteger(revision) || revision <= 0) {
+    throw new Error('Active My FPL publication has an invalid revision');
+  }
   return {
     seasonId: row.season_id,
     eventId: row.event_id,
-    revision: row.revision,
+    revision,
     snapshotDate: row.snapshot_date,
     sourceCheckedAt: new Date(row.source_checked_at),
     publishedAt: new Date(row.published_at),
@@ -845,7 +928,7 @@ export async function getMyFplSnapshotOperationalStatus(
       finished: boolean;
       data_checked: boolean;
       data_checked_at: Date | string | null;
-      revision: number | null;
+      revision: number | string | null;
       snapshot_date: string | null;
       kind: MyFplSnapshotKind | null;
       published_at: Date | string | null;
@@ -854,6 +937,8 @@ export async function getMyFplSnapshotOperationalStatus(
       empty_entry_count: number | null;
       expected_tournament_count: number | null;
       ready_tournament_count: number | null;
+      current_entry_count: number;
+      missing_active_entry_count: number;
       pending_outbox_count: number;
       outbox_attempts: number;
     }[]
@@ -863,6 +948,7 @@ export async function getMyFplSnapshotOperationalStatus(
            publication.kind, publication.published_at, publication.expected_entry_count,
            publication.ready_entry_count, publication.empty_entry_count,
            publication.expected_tournament_count, publication.ready_tournament_count,
+           coverage.current_entry_count, coverage.missing_active_entry_count,
            COALESCE(outbox.pending_outbox_count, 0)::integer AS pending_outbox_count,
            COALESCE(outbox.outbox_attempts, 0)::integer AS outbox_attempts
     FROM fpl.events event
@@ -870,6 +956,22 @@ export async function getMyFplSnapshotOperationalStatus(
       ON publication.season_id = event.season_id
      AND publication.event_id = event.event_id
      AND publication.active
+    LEFT JOIN LATERAL (
+      SELECT count(*)::integer AS current_entry_count,
+             count(*) FILTER (
+               WHERE publication.revision IS NOT NULL
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM competition.my_fpl_snapshot_entries snapshot_entry
+                   WHERE snapshot_entry.season_id = current_entry.season_id
+                     AND snapshot_entry.event_id = event.event_id
+                     AND snapshot_entry.revision = publication.revision
+                     AND snapshot_entry.entry_id = current_entry.entry_id
+                 )
+             )::integer AS missing_active_entry_count
+      FROM competition.entries current_entry
+      WHERE current_entry.season_id = event.season_id
+    ) coverage ON TRUE
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE status IN ('PENDING', 'PROCESSING'))::integer AS pending_outbox_count,
              COALESCE(max(attempts), 0)::integer AS outbox_attempts
@@ -894,13 +996,15 @@ export async function getMyFplSnapshotOperationalStatus(
           : finalDueAt && now.getTime() <= finalDueAt.getTime()
             ? 'DUE'
             : 'BREACHED';
+    const pendingCorrectionEntryCount =
+      row.kind === 'PROVISIONAL' ? row.missing_active_entry_count : 0;
     return {
       eventId: row.event_id,
       deadlineTime: iso(row.deadline_time),
       finished: row.finished,
       dataChecked: row.data_checked,
       dataCheckedAt,
-      activeRevision: row.revision,
+      activeRevision: row.revision === null ? null : Number(row.revision),
       activeSnapshotDate: row.snapshot_date,
       activeKind: row.kind,
       activePublishedAt: publishedAt,
@@ -912,6 +1016,9 @@ export async function getMyFplSnapshotOperationalStatus(
       emptyEntryCount: row.empty_entry_count,
       expectedTournamentCount: row.expected_tournament_count,
       readyTournamentCount: row.ready_tournament_count,
+      currentEntryCount: row.current_entry_count,
+      pendingCorrectionEntryCount,
+      coverageState: resolveMyFplSnapshotCoverageState(row.kind, pendingCorrectionEntryCount),
       pendingOutboxCount: row.pending_outbox_count,
       outboxAttempts: row.outbox_attempts,
       finalSla,
@@ -955,11 +1062,8 @@ export async function captureMyFplSnapshot(
   // template serializer (which rejects Date at runtime).
   const nowIso = now.toISOString();
   const supersededBeforeIso = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
-
-  return client.begin(async (tx) => {
-    await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`my-fpl:${season.seasonId}:${eventId}`}, 0))`;
-
+  const lockScope = `my-fpl:${season.seasonId}:${eventId}`;
+  return runMyFplCaptureTransaction(client, lockScope, async (tx) => {
     const eventRows = await tx<
       {
         finished: boolean;
@@ -984,14 +1088,11 @@ export async function captureMyFplSnapshot(
 
     const active = await loadActivePublication(tx, season.seasonId, eventId);
     if (
-      (active?.kind === 'FINAL' &&
-        (!overrideActor ||
-          !overrideReason ||
-          !idempotencyKey ||
-          active.idempotencyKey === idempotencyKey)) ||
-      (active?.kind === 'PROVISIONAL' &&
-        active.snapshotDate === snapshotDate &&
-        kind === 'PROVISIONAL')
+      active?.kind === 'FINAL' &&
+      (!overrideActor ||
+        !overrideReason ||
+        !idempotencyKey ||
+        active.idempotencyKey === idempotencyKey)
     ) {
       return { status: 'noop', publication: active };
     }
@@ -1505,6 +1606,16 @@ export async function captureMyFplSnapshot(
     const contentSha256 = createHash('sha256')
       .update(postgresJsonbCanonicalJson(content), 'utf8')
       .digest('hex');
+
+    if (
+      isMatchingProvisionalMyFplPublication(active, {
+        kind,
+        snapshotDate,
+        contentSha256,
+      })
+    ) {
+      return { status: 'noop', publication: active };
+    }
 
     const publicationRows = await tx<{ revision: number | string; published_at: Date | string }[]>`
       INSERT INTO competition.my_fpl_snapshot_publications

@@ -2,7 +2,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { dataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 import { formatCronDateKey } from '../utils/timezone';
-import { trackMyFplRefreshJob } from '../services/my-fpl-refresh-tracker';
+import { trackQueueRunJob } from '../services/queue-run-tracker';
 import {
   createDataSyncJobData,
   defaultDataSyncJobId,
@@ -61,7 +61,7 @@ async function enqueueDataSyncJob(
       source,
       queue: queue.name,
     });
-    await trackMyFplRefreshJob(job.data?.runId ?? jobData.runId, queue.name, job.id);
+    await trackQueueRunJob(job.data?.runId ?? jobData.runId, queue.name, job.id);
 
     return job;
   } catch (error) {
