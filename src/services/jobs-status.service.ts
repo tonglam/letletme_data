@@ -18,12 +18,14 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
     schedulerHeartbeat,
     queueWorkerHeartbeat,
     contentWorkerHeartbeat,
+    mediaWorkerHeartbeat,
     myFplSnapshots,
   ] = await Promise.all([
     schedulerObligationSummary(),
     readRuntimeHeartbeat('scheduler'),
     readRuntimeHeartbeat('queueWorker'),
     readRuntimeHeartbeat('contentWorker'),
+    readRuntimeHeartbeat('mediaWorker'),
     getMyFplSnapshotOperationalStatus(season),
   ]);
   const scheduler = Boolean(schedulerHeartbeat && (await checkRuntimeHeartbeat('scheduler')));
@@ -31,6 +33,7 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
   const contentWorker = Boolean(
     contentWorkerHeartbeat && (await checkRuntimeHeartbeat('contentWorker')),
   );
+  const mediaWorker = Boolean(mediaWorkerHeartbeat && (await checkRuntimeHeartbeat('mediaWorker')));
   const publicationConsistency: Record<string, boolean> = {};
   const currentEvent = await eventRepository.findCurrent(season);
   const publicationScopes = [
@@ -96,6 +99,7 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
       scheduler: { healthy: scheduler, heartbeat: schedulerHeartbeat },
       queueWorker: { healthy: queueWorker, heartbeat: queueWorkerHeartbeat },
       contentWorker: { healthy: contentWorker, heartbeat: contentWorkerHeartbeat },
+      mediaWorker: { healthy: mediaWorker, heartbeat: mediaWorkerHeartbeat },
     },
     obligations,
     myFplSnapshots,

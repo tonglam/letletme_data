@@ -3,6 +3,7 @@ export type RunnableQueueCounts = Readonly<Record<string, number>>;
 export type QueueQuiescenceSnapshot = {
   readonly nonTerminalSyncRuns: number;
   readonly stagingPublications: number;
+  readonly runningMediaLeases: number;
   readonly runnableQueues: Readonly<Record<string, RunnableQueueCounts>>;
   readonly unsettledCascadeIds: readonly string[];
 };
@@ -58,6 +59,9 @@ export function assertQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
   }
   if (snapshot.stagingPublications !== 0) {
     throw new Error(`Database has ${snapshot.stagingPublications} staging publication(s)`);
+  }
+  if (snapshot.runningMediaLeases !== 0) {
+    throw new Error(`Database has ${snapshot.runningMediaLeases} RUNNING source-media lease(s)`);
   }
 
   const runnable = Object.entries(snapshot.runnableQueues)

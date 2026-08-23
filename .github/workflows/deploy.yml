@@ -197,7 +197,7 @@ jobs:
               fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
                 if [ "$services_start_attempted" = true ]; then
-                  echo "Data deployment failed after service start; preserving scheduler/worker/content-worker for recovery" >&2
+                  echo "Data deployment failed after service start; preserving scheduler/worker/content-worker/media-worker for recovery" >&2
                   APP_IMAGE="$IMAGE_REF" docker compose ps || true
                   ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
@@ -207,11 +207,12 @@ jobs:
                     git reset --hard "$old_revision" || true
                   fi
                   restore_runtime_services \
-                    "$old_image" "$old_release_sha" "$old_runner_release_sha" || true
+                    "$old_image" "$old_release_sha" "$old_runner_release_sha" \
+                    "$old_media_present" || true
                 elif [ "$migration_started" = true ]; then
                   if ! restore_last_known_healthy_if_ledger_unchanged \
                     "$old_image" "$ledger_before" "$old_revision" "$old_release_sha" \
-                    "$old_runner_release_sha"; then
+                    "$old_runner_release_sha" "$old_media_present"; then
                     echo "Data deployment failed after a ledger change or unverifiable ledger state; leaving services stopped for forward recovery" >&2
                   fi
                 fi
@@ -248,6 +249,7 @@ jobs:
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
             env_file=${ENV_FILE:-.env.deploy}
             migration_env_file=${MIGRATION_ENV_FILE:-.env.migrate}
+            media_env_file=${CONTENT_MEDIA_ENV_FILE:-.env.media}
             read_env_setting() {
               key=$1
               file=$2
@@ -281,8 +283,13 @@ jobs:
             export CONTENT_GROK_RUNNER_RELEASE_SHA="$DEPLOY_SHA"
             export ENV_FILE="$env_file"
             export MIGRATION_ENV_FILE="$migration_env_file"
+            export CONTENT_MEDIA_ENV_FILE="$media_env_file"
             test -f "$env_file"
             test -f "$migration_env_file"
+            if grep -q '^[[:space:]]*CONTENT_MEDIA_SUPABASE_SECRET_KEY[[:space:]]*=' "$env_file"; then
+              echo "deploy preflight: source-media Storage secret must exist only in $media_env_file" >&2
+              exit 1
+            fi
             APP_IMAGE="$IMAGE_REF" docker compose config --quiet
             APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-size: 20m'
             APP_IMAGE="$IMAGE_REF" docker compose config | grep -Eq 'max-file: "5"$'
@@ -295,10 +302,13 @@ jobs:
 
             old_container=$(docker compose ps -aq api | head -n 1)
             old_image=""
+            old_media_present=false
             if [ -n "$old_container" ]; then
               old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
               test -n "$old_image"
             fi
+            old_media_container=$(docker compose ps -aq media-worker 2>/dev/null | head -n 1)
+            if [ -n "$old_media_container" ]; then old_media_present=true; fi
 
             export APP_IMAGE="$IMAGE_REF"
             compose() { docker compose "$@"; }
@@ -309,7 +319,7 @@ jobs:
             old_runner_release_sha=${old_runner_release_sha:-unknown}
             acquire_deploy_lock
             image_pull_attempted=true
-            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker migration backup
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker media-worker migration backup
             image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_REF")
             test "$image_revision" = "$DEPLOY_SHA"
             finish_stage
@@ -325,6 +335,16 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun validate-env.ts --probe-bug-report-storage
+            media_worker_setting=false
+            if [ -f "$media_env_file" ]; then
+              media_worker_setting=$(read_env_setting CONTENT_MEDIA_WORKER_ENABLED "$media_env_file" | tr '[:upper:]' '[:lower:]' || true)
+            fi
+            if [[ "$media_worker_setting" =~ ^(1|true|yes|on)$ ]]; then
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T media-worker \
+                bun dist/media-worker.js --provision-and-probe
+            else
+              echo 'deploy preflight: source-media worker disabled; Storage probe skipped'
+            fi
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
               bun scripts/wait-for-migration-login.ts
             finish_stage
@@ -334,7 +354,8 @@ jobs:
             restore_before_migration() {
               if [ "$migration_started" = false ] && [ -n "$old_image" ]; then
                 restore_runtime_services \
-                  "$old_image" "$old_release_sha" "$old_runner_release_sha" || true
+                  "$old_image" "$old_release_sha" "$old_runner_release_sha" \
+                  "$old_media_present" || true
               fi
             }
             trap restore_before_migration ERR
@@ -348,7 +369,7 @@ jobs:
             # Keep the API/worker gate explicit: API bind recovery must never
             # stop a healthy worker.  (The scheduler is stopped separately.)
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
-            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler content-worker
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler content-worker media-worker
             remove_exact_stopped_container api
             wait_for_port_3000_free 30 2
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \

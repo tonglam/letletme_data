@@ -98,6 +98,7 @@ restore_runtime_services() {
   local previous_image=${1:-}
   local previous_release_sha=${2:-unknown}
   local previous_runner_release_sha=${3:-unknown}
+  local previous_media_present=${4:-auto}
   [[ -n "$previous_image" ]] || return 1
   if [[ ! "$previous_release_sha" =~ ^[0-9a-f]{40}$ ]]; then
     previous_release_sha=unknown
@@ -111,7 +112,8 @@ restore_runtime_services() {
     export DEPLOY_SHA="$previous_release_sha"
     export CONTENT_MANIFEST_GIT_REVISION="$previous_release_sha"
     export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"
-    compose up -d --remove-orphans --no-build scheduler worker content-worker api
+    export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"
+    start_all_runtime_services
   )
 }
 
@@ -121,6 +123,7 @@ restore_last_known_healthy_if_ledger_unchanged() {
   local previous_revision=${3:-}
   local previous_release_sha=${4:-unknown}
   local previous_runner_release_sha=${5:-unknown}
+  local previous_media_present=${6:-auto}
   local ledger_after
   [[ -n "$previous_image" && -n "$ledger_before" ]] || return 1
   ledger_after=$(migration_ledger_fingerprint 2>/dev/null || true)
@@ -130,11 +133,29 @@ restore_last_known_healthy_if_ledger_unchanged() {
       git reset --hard "$previous_revision"
     fi
     restore_runtime_services \
-      "$previous_image" "$previous_release_sha" "$previous_runner_release_sha"
+      "$previous_image" "$previous_release_sha" "$previous_runner_release_sha" \
+      "$previous_media_present"
     return 0
   fi
   echo 'migration ledger changed or could not be proven unchanged; forward-only recovery required' >&2
   return 1
+}
+
+runtime_worker_services() {
+  local services=(scheduler worker content-worker)
+  if [[ "${RUNTIME_INCLUDE_MEDIA_WORKER:-auto}" != false ]] \
+    && compose config --services | grep -qx 'media-worker'; then
+    services+=(media-worker)
+  fi
+  printf '%s\n' "${services[@]}"
+}
+
+start_all_runtime_services() {
+  local services=()
+  while IFS= read -r service; do
+    [[ -n "$service" ]] && services+=("$service")
+  done < <(runtime_worker_services)
+  compose up -d --remove-orphans --no-build "${services[@]}" api
 }
 
 run_migration_plan() {
@@ -145,9 +166,13 @@ start_runtime_services() {
   # Scheduler and workers have no host port and must be healthy before API
   # startup.  An API bind failure may be retried once, but never tears down a
   # healthy worker that is already processing queued work.
-  compose up -d --remove-orphans --no-build scheduler worker content-worker
+  local services=()
+  while IFS= read -r service; do
+    [[ -n "$service" ]] && services+=("$service")
+  done < <(runtime_worker_services)
+  compose up -d --remove-orphans --no-build "${services[@]}"
   compose up -d --remove-orphans --no-build api || {
-    echo 'API start failed; preserving scheduler/worker/content-worker for recovery' >&2
+    echo 'API start failed; preserving scheduler/worker/content-worker/media-worker for recovery' >&2
     port_3000_owner >&2
     # A failed Docker bind can leave the exact Compose API container in
     # `created` state while its network namespace/port proxy is being torn

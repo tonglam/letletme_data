@@ -45,6 +45,19 @@ export function sha256CanonicalJson(value: JsonValue): string {
   return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
 }
 
+/**
+ * X media moved out of immutable ReceiptRevision payloads in source-media v1.
+ * This compatibility hash lets a legacy X revision containing media fields
+ * compare equal to the same post facts produced by the media-free adapter.
+ */
+export function xReceiptCoreHash(value: unknown): string {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('X receipt payload must be an object');
+  }
+  const { media: _media, mediaStatus: _mediaStatus, ...core } = value as Record<string, JsonValue>;
+  return sha256CanonicalJson(core);
+}
+
 export function canonicalizeTranscriptSegments(
   segments: readonly ProviderTranscriptSegment[],
 ): CanonicalTranscriptSegmentV1[] {

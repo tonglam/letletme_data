@@ -12,9 +12,11 @@ COMPOSE_BIN=${COMPOSE_BIN:-"docker compose"}
 COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml}
 ENV_FILE=${ENV_FILE:-.env.deploy}
 MIGRATION_ENV_FILE=${MIGRATION_ENV_FILE:-.env.migrate}
+CONTENT_MEDIA_ENV_FILE=${CONTENT_MEDIA_ENV_FILE:-.env.media}
 PROJECT_DIR=${PROJECT_DIR:-$(pwd)}
 DEPLOY_SHA=${DEPLOY_SHA:-$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)}
 export MIGRATION_ENV_FILE
+export CONTENT_MEDIA_ENV_FILE
 export DEPLOY_SHA
 export CONTENT_MANIFEST_GIT_REVISION="$DEPLOY_SHA"
 export CONTENT_GROK_RUNNER_RELEASE_SHA="$DEPLOY_SHA"
@@ -76,6 +78,7 @@ DEPLOY_RUNNER_UPDATED=false
 DEPLOY_RUNNER_PROBE_SUCCEEDED=false
 DEPLOY_RUNNER_PREVIOUS_TARGET=''
 DEPLOY_RUNNER_PREVIOUS_RELEASE=''
+DEPLOY_OLD_MEDIA_PRESENT=false
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -113,6 +116,10 @@ require_files() {
     log_error "${MIGRATION_ENV_FILE} not found. Copy .env.migrate.example and add a direct or session-mode Supabase postgres URL."
     exit 1
   fi
+  if grep -q '^[[:space:]]*CONTENT_MEDIA_SUPABASE_SECRET_KEY[[:space:]]*=' "${ENV_FILE}"; then
+    log_error "CONTENT_MEDIA_SUPABASE_SECRET_KEY must exist only in ${CONTENT_MEDIA_ENV_FILE}, not ${ENV_FILE}."
+    exit 1
+  fi
   load_backup_settings
 }
 
@@ -132,10 +139,11 @@ restore_stopped_services() {
   # one was captured so a pre-migration failure never boots the new release.
   if [[ -n "${DEPLOY_OLD_IMAGE:-}" ]]; then
     if ! restore_runtime_services \
-      "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"; then
+      "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
+      "$DEPLOY_OLD_MEDIA_PRESENT"; then
       log_error "Last-known-healthy services could not be restored; manual recovery is required."
     fi
-  elif ! compose up -d --remove-orphans --no-build scheduler worker content-worker api; then
+  elif ! start_all_runtime_services; then
     log_error "Existing services could not be restored; manual recovery is required."
   fi
 }
@@ -156,7 +164,8 @@ deploy() {
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = true ]]; then
         if ! restore_last_known_healthy_if_ledger_unchanged \
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \
-          "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"; then
+          "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
+          "$DEPLOY_OLD_MEDIA_PRESENT"; then
           log_error "Migration changed or obscured the ledger; leaving services stopped for forward recovery."
         fi
       elif [[ "$DEPLOY_COMMITTED" = false ]]; then
@@ -178,11 +187,13 @@ deploy() {
     DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$old_container")
     DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_image "$DEPLOY_OLD_IMAGE")
   fi
+  old_media_container=$(compose ps -aq media-worker 2>/dev/null | head -n 1)
+  if [[ -n "$old_media_container" ]]; then DEPLOY_OLD_MEDIA_PRESENT=true; fi
   start_stage pull
   if [[ -n "${APP_IMAGE:-}" ]]; then
     export APP_IMAGE
     log_info "Pulling the configured application image"
-    compose --profile migration pull api scheduler worker content-worker migration backup
+    compose --profile migration pull api scheduler worker content-worker media-worker migration backup
   else
     log_info "Building containers"
     compose build --pull
@@ -209,6 +220,19 @@ deploy() {
   if ! compose run --rm -T api bun validate-env.ts --probe-bug-report-storage; then
     log_error "Bug-report screenshot storage contract failed; services were not stopped."
     exit 1
+  fi
+  media_worker_setting=false
+  if [[ -f "${CONTENT_MEDIA_ENV_FILE}" ]]; then
+    media_worker_setting=$(read_env_setting CONTENT_MEDIA_WORKER_ENABLED "$CONTENT_MEDIA_ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
+  fi
+  if [[ "$media_worker_setting" =~ ^(1|true|yes|on)$ ]]; then
+    log_info "Provisioning and probing the private Briefing source-media bucket"
+    if ! compose run --rm -T media-worker bun dist/media-worker.js --provision-and-probe; then
+      log_error "Briefing source-media Storage contract failed; services were not stopped."
+      exit 1
+    fi
+  else
+    log_info "Briefing source-media worker is disabled; Storage provisioning is not required"
   fi
   log_info "Probing the migration LOGIN for at most 120 seconds"
   if ! compose run --rm -T migration bun scripts/wait-for-migration-login.ts; then
@@ -238,6 +262,11 @@ deploy() {
   fi
   if ! compose stop -t 45 content-worker; then
     log_error "Content worker did not stop cleanly; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  if ! compose stop -t 45 media-worker; then
+    log_error "Media worker did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi
@@ -357,6 +386,17 @@ status() {
   require_compose
   require_files
   compose ps
+  compose --profile migration run --rm -T --no-deps --entrypoint sh backup -euc \
+    'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<'SQL'
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout = '15s';
+SELECT jsonb_build_object(
+  'event', 'briefing_source_media_health',
+  'health', to_jsonb(health)
+)::text
+FROM content.source_media_health AS health;
+COMMIT;
+SQL
 }
 
 stream_logs() {
@@ -381,6 +421,7 @@ Environment:
   COMPOSE_FILE  Compose file to use (default: docker-compose.yml)
   ENV_FILE      Env file that must exist (default: .env.deploy)
   MIGRATION_ENV_FILE  One-shot migration env file (default: .env.migrate)
+  CONTENT_MEDIA_ENV_FILE  Media-worker-only env file (default: .env.media)
   PROJECT_DIR   Directory passed to compose (default: pwd)
 USAGE
 }

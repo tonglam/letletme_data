@@ -6,11 +6,12 @@ import {
   cascadeId,
   findUnsettledCascades,
 } from '../../scripts/queue-quiescence-gate';
-import { queueNames } from '../../src/queues/names';
+import { allQueueNames } from '../../src/queues/names';
 
 const accepted = () => ({
   nonTerminalSyncRuns: 0,
   stagingPublications: 0,
+  runningMediaLeases: 0,
   runnableQueues: {
     'data-sync': {
       waiting: 0,
@@ -32,7 +33,7 @@ describe('queue quiescence gate', () => {
     expect(() => assertQuiescenceCatalogPair(true, true)).not.toThrow();
   });
   test('covers every canonical BullMQ queue exactly once', () => {
-    expect(queueNames).toEqual([
+    expect(allQueueNames).toEqual([
       'data-sync',
       'entry-sync',
       'league-sync',
@@ -43,8 +44,11 @@ describe('queue quiescence gate', () => {
       'understat-team-sync',
       'tournament-repair',
       'maintenance',
+      'content-http-acquisition',
+      'content-media-transcript',
+      'content-x-scan',
     ]);
-    expect(new Set(queueNames).size).toBe(10);
+    expect(new Set(allQueueNames).size).toBe(13);
   });
 
   test('accepts a fully settled hard-cut boundary', () => {
@@ -54,6 +58,9 @@ describe('queue quiescence gate', () => {
   test('rejects database or queue work that could be orphaned', () => {
     expect(() => assertQueueQuiescence({ ...accepted(), nonTerminalSyncRuns: 1 })).toThrow(
       'non-terminal sync run',
+    );
+    expect(() => assertQueueQuiescence({ ...accepted(), runningMediaLeases: 1 })).toThrow(
+      'RUNNING source-media lease',
     );
     expect(() =>
       assertQueueQuiescence({
