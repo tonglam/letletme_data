@@ -323,7 +323,7 @@ describe('classic manager live fallback', () => {
     expect(maximumActive).toBe(2);
   });
 
-  test('admits foreground work before queued background batches', async () => {
+  test('assigns ordering work only after prioritized Summary admission', async () => {
     const run = createManagerSummaryFetchGate(1);
     const order: string[] = [];
     let releaseActive: (() => void) | undefined;
@@ -332,21 +332,25 @@ describe('classic manager live fallback', () => {
     });
 
     const runningBackground = run(async () => {
-      order.push('background-active');
+      order.push('background-active-reservation');
       await active;
     }, 'background');
     await Promise.resolve();
     const queuedBackground = run(async () => {
-      order.push('background-queued');
+      order.push('background-queued-reservation');
     }, 'background');
     const foreground = run(async () => {
-      order.push('foreground');
+      order.push('foreground-reservation');
     }, 'foreground');
 
     releaseActive?.();
     await Promise.all([runningBackground, queuedBackground, foreground]);
 
-    expect(order).toEqual(['background-active', 'foreground', 'background-queued']);
+    expect(order).toEqual([
+      'background-active-reservation',
+      'foreground-reservation',
+      'background-queued-reservation',
+    ]);
   });
 
   test('rejects an invalid shared concurrency limit', () => {
