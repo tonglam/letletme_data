@@ -411,6 +411,54 @@ describe('official H2H source import', () => {
     });
   });
 
+  test('uses the newest validated live scores instead of stale explicit outcome fields', () => {
+    const matches = [
+      {
+        id: 9062,
+        event: 1,
+        entry_1_entry: 1,
+        entry_1_points: 20,
+        entry_1_win: 1,
+        entry_1_draw: 0,
+        entry_1_loss: 0,
+        entry_1_total: 3,
+        entry_2_entry: 2,
+        entry_2_points: 50,
+        entry_2_win: 0,
+        entry_2_draw: 0,
+        entry_2_loss: 1,
+        entry_2_total: 0,
+        winner: 1,
+        is_bye: false,
+        knockout_name: null,
+        sourceOrder: 0,
+      },
+    ];
+    const entries = new Set([1, 2]);
+    const options = validatedOfficialH2HSyncOptions(entries, matches, {
+      provisionalEventId: 1,
+    });
+
+    expect(options).toEqual({
+      finalizedThroughEventId: null,
+      provisionalEventId: 1,
+      suppressedEventId: null,
+    });
+    expect(projectOfficialH2HStandingsFromMatches(entries, matches, options)).toEqual([
+      expect.objectContaining({ entry: 2, total: 3, matches_won: 1, points_for: 50 }),
+      expect.objectContaining({ entry: 1, total: 0, matches_lost: 1, points_for: 20 }),
+    ]);
+    expect(
+      buildOfficialH2HRows(
+        { ...singleEventTournament, totalTeamNum: 2 },
+        entries,
+        { standings: [], matches },
+        new Date('2026-08-13T01:00:00.000Z'),
+        options,
+      ).battleRows[0],
+    ).toMatchObject({ homeMatchPoints: 0, awayMatchPoints: 3 });
+  });
+
   test('projects standings from official match scores when the upstream table is still zeroed', () => {
     const match = {
       id: 9061,

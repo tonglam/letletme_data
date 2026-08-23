@@ -100,6 +100,16 @@ function matchPoints(
   if (match.is_bye === true || options.suppressedEventId === match.event) {
     return { home: null, away: null };
   }
+  if (options.provisionalEventId === match.event) {
+    // The complete score batch is the newest live evidence. FPL's explicit
+    // outcome fields can still describe the preceding score snapshot.
+    if (typeof match.entry_1_points !== 'number' || typeof match.entry_2_points !== 'number') {
+      return { home: null, away: null };
+    }
+    if (match.entry_1_points > match.entry_2_points) return { home: 3, away: 0 };
+    if (match.entry_1_points < match.entry_2_points) return { home: 0, away: 3 };
+    return { home: 1, away: 1 };
+  }
   if (
     typeof match.entry_1_total === 'number' &&
     typeof match.entry_2_total === 'number' &&
