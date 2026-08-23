@@ -67,6 +67,12 @@ export const shouldRefreshClassicOverallRank = (
   standingsRowExpired ||
   (row?.source === 'FPL_CLASSIC_STANDINGS' && !isPositiveOverallRank(row.overallRank));
 
+export const shouldPreserveClassicStandingForRank = <T extends Readonly<{ source: string }>>(
+  requested: boolean | undefined,
+  row: T | undefined,
+): row is T & { source: 'FPL_CLASSIC_STANDINGS' } =>
+  requested === true && row?.source === 'FPL_CLASSIC_STANDINGS';
+
 export const planClassicOverallRankRefresh = (
   entryIds: readonly number[],
   foregroundEligibleEntryIds: readonly number[] = entryIds,

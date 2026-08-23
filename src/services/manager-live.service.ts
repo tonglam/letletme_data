@@ -29,6 +29,7 @@ import {
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
   selectLatestCheckedRow,
+  shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
 } from '../domain/manager-live-fallback';
 
@@ -503,21 +504,22 @@ const refreshEntrySummaries = async (
               if (existing) rows.set(entryId, existing);
             }
             const checkedAt = nowIso();
-            const candidate =
-              (options.preserveClassicStanding || classicScope) &&
-              existing?.source === 'FPL_CLASSIC_STANDINGS'
-                ? (() => {
-                    const { revision: _revision, ...classicRow } = existing;
-                    return withRevision({
-                      ...classicRow,
-                      // Classic standings owns event/phase totals and league rank;
-                      // the entry summary owns the season-wide FPL OR.
-                      overallRank: summary.summary_overall_rank ?? null,
-                      checkedAt,
-                      staleAt: plusSeconds(checkedAt, STALE_SECONDS),
-                    });
-                  })()
-                : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
+            const candidate = shouldPreserveClassicStandingForRank(
+              options.preserveClassicStanding,
+              existing,
+            )
+              ? (() => {
+                  const { revision: _revision, ...classicRow } = existing;
+                  return withRevision({
+                    ...classicRow,
+                    // Classic standings owns event/phase totals and league rank;
+                    // the entry summary owns the season-wide FPL OR.
+                    overallRank: summary.summary_overall_rank ?? null,
+                    checkedAt,
+                    staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+                  });
+                })()
+              : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
             const row = withPreservedOverallRank(candidate, existing?.overallRank);
             rows.set(row.entryId, row);
             // Publish each completed response immediately. A slow sibling or
@@ -596,7 +598,7 @@ const refreshClassicStandings = async (
   errorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null;
   refreshedEntryIds: readonly number[];
 }> => {
-  const checkedAt = nowIso();
+  const crawlStartedAt = nowIso();
   const fetchedRows: ManagerLiveScoreRow[] = [];
   const classicScope: ManagerScoreScope = { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId };
   let found = 0;
@@ -613,7 +615,7 @@ const refreshClassicStandings = async (
     ) {
       const response = await fplClient.getLeagueClassicStandings(leagueId, page);
       nextPage = page + 1;
-      const pageRows = toClassicRows(season.seasonCode, eventId, response, checkedAt);
+      const pageRows = toClassicRows(season.seasonCode, eventId, response, crawlStartedAt);
       for (const row of pageRows) {
         if (!targetIds.has(row.entryId)) continue;
         const previous = rows.get(row.entryId);
@@ -629,6 +631,10 @@ const refreshClassicStandings = async (
     const publishedRows = await runManagerLivePublication(
       managerLivePublicationKey(season.seasonCode, eventId, classicScope),
       async () => {
+        // Network pagination happens outside the publication gate. Stamp the
+        // rows only after the gate is acquired so a crawl that finishes after
+        // an OR write is also ordered after that write during reconciliation.
+        const publicationCheckedAt = nowIso();
         const latestRows = await readCachedAndCheckpointRows(
           redis,
           season,
@@ -639,15 +645,17 @@ const refreshClassicStandings = async (
         );
         const mergedRows = fetchedRows.map((row) => {
           const latest = latestRows.get(row.entryId);
-          const candidate = withPreservedOverallRank(row, latest?.overallRank);
+          const { revision: _revision, ...withoutRevision } = row;
+          const restamped = withRevision({
+            ...withoutRevision,
+            checkedAt: publicationCheckedAt,
+            staleAt: plusSeconds(publicationCheckedAt, STALE_SECONDS),
+          });
+          const candidate = withPreservedOverallRank(restamped, latest?.overallRank);
           const merged = mergeLatestManagerLiveRow(latest, candidate);
           rows.set(merged.entryId, merged);
           return merged;
         });
-        const publicationCheckedAt = mergedRows.reduce(
-          (latest, row) => (row.checkedAt > latest ? row.checkedAt : latest),
-          checkedAt,
-        );
         await writeRows(
           redis,
           season.seasonCode,

@@ -10,6 +10,7 @@ import {
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
   selectLatestCheckedRow,
+  shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
 } from '../../src/domain/manager-live-fallback';
 
@@ -71,6 +72,15 @@ describe('classic manager live fallback', () => {
     expect(selectLatestCheckedRow(nextStandingsRefresh, deferredSnapshot)).toBe(
       nextStandingsRefresh,
     );
+  });
+
+  test('preserves Classic fields only for explicit overall-rank enrichment', () => {
+    const classicRow = { source: 'FPL_CLASSIC_STANDINGS' };
+
+    expect(shouldPreserveClassicStandingForRank(true, classicRow)).toBeTrue();
+    expect(shouldPreserveClassicStandingForRank(false, classicRow)).toBeFalse();
+    expect(shouldPreserveClassicStandingForRank(undefined, classicRow)).toBeFalse();
+    expect(shouldPreserveClassicStandingForRank(true, { source: 'FPL_ENTRY_SUMMARY' })).toBeFalse();
   });
 
   test('keeps the foreground rank budget while retaining deferred and failed work', () => {
