@@ -234,18 +234,18 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
                   ${managerEventScoreSnapshotsInFpl.source} = 'FPL_CLASSIC_STANDINGS'
                   AND (
                     (
-                      ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt} IS NULL
-                      AND excluded.upstream_updated_at IS NOT NULL
-                    )
-                    OR (
                       ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt} IS NOT NULL
                       AND excluded.upstream_updated_at IS NOT NULL
                       AND ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt}
                         < excluded.upstream_updated_at
                     )
                     OR (
-                      ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt}
-                        IS NOT DISTINCT FROM excluded.upstream_updated_at
+                      (
+                        ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt} IS NULL
+                        OR excluded.upstream_updated_at IS NULL
+                        OR ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt}
+                          = excluded.upstream_updated_at
+                      )
                       AND ${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at
                     )
                   )

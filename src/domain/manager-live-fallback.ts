@@ -23,8 +23,6 @@ export const shouldReplaceManagerLiveRow = (
   if (current.source === 'FPL_CLASSIC_STANDINGS') {
     const currentUpstream = Date.parse(current.upstreamUpdatedAt ?? '');
     const incomingUpstream = Date.parse(incoming.upstreamUpdatedAt ?? '');
-    if (Number.isFinite(currentUpstream) && !Number.isFinite(incomingUpstream)) return false;
-    if (!Number.isFinite(currentUpstream) && Number.isFinite(incomingUpstream)) return true;
     if (
       Number.isFinite(currentUpstream) &&
       Number.isFinite(incomingUpstream) &&
@@ -51,11 +49,34 @@ export const selectForegroundClassicRankEntryIds = <T>(
     })
     .slice(0, maxFetches);
 
-export const createKeyedTaskSerializer = (): (<T>(
+export type KeyedTaskSerializer = <T>(
   key: string,
   task: () => Promise<T>,
   priority?: ManagerSummaryFetchPriority,
-) => Promise<T>) => {
+) => Promise<T>;
+
+export type YieldingKeyedTaskAttempt<T> =
+  | Readonly<{ complete: false }>
+  | Readonly<{ complete: true; value: T }>;
+
+export const runYieldingKeyedTask = async <T>(
+  run: KeyedTaskSerializer,
+  key: string,
+  attempt: () => Promise<YieldingKeyedTaskAttempt<T>>,
+  priority: ManagerSummaryFetchPriority,
+  yieldBeforeRetry: () => Promise<void>,
+): Promise<T> => {
+  while (true) {
+    const result = await run(key, attempt, priority);
+    if (result.complete) return result.value;
+    // Wait outside the keyed serializer. A background lease poll must not
+    // remain the active local task and prevent a newly queued foreground miss
+    // from competing for the distributed lease.
+    await yieldBeforeRetry();
+  }
+};
+
+export const createKeyedTaskSerializer = (): KeyedTaskSerializer => {
   type QueuedTask = {
     task: () => Promise<unknown>;
     resolve: (value: unknown) => void;

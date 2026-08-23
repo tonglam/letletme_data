@@ -30,6 +30,7 @@ import {
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
+  runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
   shouldReplaceManagerLiveRow,
 } from '../domain/manager-live-fallback';
@@ -424,34 +425,20 @@ const runClassicStandingsRefresh = <T>(
   key: string,
   task: () => Promise<T>,
   priority: ManagerSummaryFetchPriority = 'foreground',
-): Promise<T> =>
-  runClassicStandingsRefreshLocal(
+): Promise<T> => {
+  if (!redis) return runClassicStandingsRefreshLocal(key, task, priority);
+
+  const lockKey = classicRefreshLockKey(key);
+  const waitStartedAt = Date.now();
+  return runYieldingKeyedTask<T>(
+    runClassicStandingsRefreshLocal,
     key,
     async () => {
-      if (!redis) return task();
-
-      const lockKey = classicRefreshLockKey(key);
       const lockToken = randomBytes(16).toString('hex');
-      const waitStartedAt = Date.now();
       let lockOwner = false;
       try {
-        while (!lockOwner) {
-          lockOwner =
-            (await redis.set(lockKey, lockToken, 'EX', CLASSIC_REFRESH_LOCK_SECONDS, 'NX')) ===
-            'OK';
-          if (lockOwner) break;
-          if (Date.now() - waitStartedAt >= CLASSIC_REFRESH_LOCK_MAX_WAIT_MS) {
-            // The durable checkpoint and upstream timestamp guard below still
-            // prevent regression in this degraded path. Avoid leaving a cold
-            // request blocked forever behind a wedged remote lease owner.
-            logWarn('Official classic manager distributed refresh lock wait timed out', {
-              key,
-              waitedMs: Date.now() - waitStartedAt,
-            });
-            return task();
-          }
-          await new Promise((resolve) => setTimeout(resolve, CLASSIC_REFRESH_LOCK_WAIT_MS));
-        }
+        lockOwner =
+          (await redis.set(lockKey, lockToken, 'EX', CLASSIC_REFRESH_LOCK_SECONDS, 'NX')) === 'OK';
       } catch (error) {
         // Redis is an acceleration and coordination layer, not the source of
         // truth. Continue through the PostgreSQL checkpoint guard when it is
@@ -460,7 +447,21 @@ const runClassicStandingsRefresh = <T>(
           key,
           error: error instanceof Error ? error.message : 'unknown',
         });
-        return task();
+        return { complete: true, value: await task() };
+      }
+
+      if (!lockOwner) {
+        if (Date.now() - waitStartedAt >= CLASSIC_REFRESH_LOCK_MAX_WAIT_MS) {
+          // The durable checkpoint and upstream timestamp guard below still
+          // prevent regression in this degraded path. Avoid leaving a cold
+          // request blocked forever behind a wedged remote lease owner.
+          logWarn('Official classic manager distributed refresh lock wait timed out', {
+            key,
+            waitedMs: Date.now() - waitStartedAt,
+          });
+          return { complete: true, value: await task() };
+        }
+        return { complete: false };
       }
 
       const renewTimer = setInterval(
@@ -480,7 +481,7 @@ const runClassicStandingsRefresh = <T>(
       renewTimer.unref?.();
 
       try {
-        return await task();
+        return { complete: true, value: await task() };
       } finally {
         clearInterval(renewTimer);
         await redis
@@ -489,7 +490,9 @@ const runClassicStandingsRefresh = <T>(
       }
     },
     priority,
+    () => new Promise((resolve) => setTimeout(resolve, CLASSIC_REFRESH_LOCK_WAIT_MS)),
   );
+};
 
 const scheduleBackgroundRefresh = (key: string, task: () => Promise<void>): void => {
   if (managerLiveBackgroundInFlight.has(key)) return;

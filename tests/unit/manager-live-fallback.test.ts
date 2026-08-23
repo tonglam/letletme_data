@@ -12,6 +12,7 @@ import {
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
   readLatestRowsWithFallback,
+  runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
   shouldReplaceManagerLiveRow,
 } from '../../src/domain/manager-live-fallback';
@@ -109,6 +110,29 @@ describe('manager live refresh targets', () => {
 
     expect(shouldReplaceManagerLiveRow(classic, summary)).toBe(false);
     expect(shouldReplaceManagerLiveRow(summary, classic)).toBe(true);
+  });
+
+  test('falls back to serialized check time when upstream standings metadata is absent', () => {
+    const current = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T10:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T09:59:00.000Z',
+    };
+
+    expect(
+      shouldReplaceManagerLiveRow(current, {
+        source: 'FPL_CLASSIC_STANDINGS',
+        checkedAt: '2026-08-23T10:01:00.000Z',
+        upstreamUpdatedAt: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldReplaceManagerLiveRow(current, {
+        source: 'FPL_CLASSIC_STANDINGS',
+        checkedAt: '2026-08-23T09:59:30.000Z',
+        upstreamUpdatedAt: null,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -291,6 +315,50 @@ describe('classic manager live fallback', () => {
     releaseActive?.();
     await Promise.all([runningBackground, queuedBackground, foreground]);
     expect(order).toEqual(['background-active', 'foreground', 'background-queued']);
+  });
+
+  test('releases the local lane between distributed lease attempts', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseBackgroundRetry: (() => void) | undefined;
+    const backgroundRetry = new Promise<void>((resolve) => {
+      releaseBackgroundRetry = resolve;
+    });
+    let backgroundAttempts = 0;
+
+    const background = runYieldingKeyedTask(
+      run,
+      '2025:1:99',
+      async () => {
+        backgroundAttempts += 1;
+        if (backgroundAttempts === 1) {
+          order.push('background:lease-contended');
+          return { complete: false };
+        }
+        order.push('background:run');
+        return { complete: true, value: 'background' };
+      },
+      'background',
+      () => backgroundRetry,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const foreground = runYieldingKeyedTask(
+      run,
+      '2025:1:99',
+      async () => {
+        order.push('foreground:run');
+        return { complete: true, value: 'foreground' };
+      },
+      'foreground',
+      async () => undefined,
+    );
+
+    expect(await foreground).toBe('foreground');
+    releaseBackgroundRetry?.();
+    expect(await background).toBe('background');
+    expect(order).toEqual(['background:lease-contended', 'foreground:run', 'background:run']);
   });
 
   test('keeps captured checkpoint rows when a background Redis read fails', async () => {
