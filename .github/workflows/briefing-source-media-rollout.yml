@@ -258,12 +258,17 @@ jobs:
             if [ "$ROLLOUT_MODE" = provision ] || [ "$ROLLOUT_MODE" = enable ] \
               || [ "$ROLLOUT_MODE" = enable-retention ]; then
               probe_flag='--probe-tus'
-              case "$PROBE_MODE" in
-                tus) probe_flag='--probe-tus' ;;
-                standard) probe_flag='--probe-standard' ;;
-                tus-no-create) probe_flag='--probe-tus-no-create' ;;
-                *) echo "unknown probe mode: $PROBE_MODE" >&2; exit 1 ;;
-              esac
+              if [ "$ROLLOUT_MODE" = provision ]; then
+                case "$PROBE_MODE" in
+                  tus) probe_flag='--probe-tus' ;;
+                  standard) probe_flag='--probe-standard' ;;
+                  tus-no-create) probe_flag='--probe-tus-no-create' ;;
+                  *) echo "unknown probe mode: $PROBE_MODE" >&2; exit 1 ;;
+                esac
+              elif [ "$PROBE_MODE" != tus ]; then
+                echo 'enable modes require the production TUS probe; use probe_mode=tus' >&2
+                exit 1
+              fi
               APP_IMAGE="$current_image" docker compose run --rm -T --no-deps media-worker \
                 bun dist/media-worker.js --provision-and-probe "$probe_flag"
             fi
