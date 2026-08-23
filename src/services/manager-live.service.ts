@@ -49,6 +49,7 @@ import {
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectClassicSummaryOverallRank,
+  selectEarlierManagerLiveObservationAt,
   selectForegroundClassicRankEntryIds,
   selectLatestCheckedRow,
   shouldEnrichClassicOverallRank,
@@ -588,9 +589,6 @@ const nowIso = (): string => new Date().toISOString();
 const plusSeconds = (checkedAt: string, seconds: number): string =>
   new Date(Date.parse(checkedAt) + seconds * 1000).toISOString();
 
-const earliestObservationAt = (left: string, right: string): string =>
-  Date.parse(left) <= Date.parse(right) ? left : right;
-
 const classicStandingNeedsOverallRank = (row: CachedRow | undefined): boolean =>
   row?.source === 'FPL_CLASSIC_STANDINGS' &&
   (!isPositiveOverallRank(row.overallRank) || row.overallRank <= 0);
@@ -1093,7 +1091,10 @@ const refreshEntrySummaries = async (
                 // A Classic row combines two independently observed sources:
                 // phase totals from standings and OR from Entry Summary. Its
                 // freshness cannot be newer than either observation.
-                const checkedAt = earliestObservationAt(classicRow.checkedAt, observedAt);
+                const checkedAt = selectEarlierManagerLiveObservationAt(
+                  classicRow.checkedAt,
+                  observedAt,
+                );
                 return withRevision({
                   ...classicRow,
                   checkedAt,
@@ -1129,16 +1130,27 @@ const refreshEntrySummaries = async (
           let merged = reReadLatest
             ? mergeLatestManagerLiveRow(existing, orderedCandidate)
             : withPreservedOverallRank(candidate, existing?.overallRank);
-          if (
-            acceptOverallRank &&
-            isPositiveOverallRank(summary.summary_overall_rank) &&
-            merged.overallRank !== summary.summary_overall_rank
-          ) {
-            const { revision: _revision, ...withoutRevision } = merged;
-            merged = withRevision({
-              ...withoutRevision,
-              overallRank: summary.summary_overall_rank,
-            });
+          if (acceptOverallRank && isPositiveOverallRank(summary.summary_overall_rank)) {
+            // mergeLatestManagerLiveRow may select a newer Classic standings
+            // row after the Summary rank was applied. Reapply the bounded
+            // observation time so the combined row cannot outlive either
+            // source's evidence.
+            const checkedAt = selectEarlierManagerLiveObservationAt(
+              merged.checkedAt,
+              orderedCandidate.checkedAt,
+            );
+            if (
+              merged.overallRank !== summary.summary_overall_rank ||
+              merged.checkedAt !== checkedAt
+            ) {
+              const { revision: _revision, ...withoutRevision } = merged;
+              merged = withRevision({
+                ...withoutRevision,
+                overallRank: summary.summary_overall_rank,
+                checkedAt,
+                staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+              });
+            }
           }
           if (acceptOverallRank && summaryPublicationOrder) {
             acceptedOverallRankPublicationOrders.set(entryId, summaryPublicationOrder);

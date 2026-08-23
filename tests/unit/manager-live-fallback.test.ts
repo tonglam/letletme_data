@@ -28,6 +28,7 @@ import {
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectClassicSummaryOverallRank,
+  selectEarlierManagerLiveObservationAt,
   selectForegroundClassicRankEntryIds,
   selectLatestCheckedRow,
   shouldAcceptClassicOverallRankPublication,
@@ -476,6 +477,15 @@ describe('classic manager live fallback', () => {
 
     expect(selectLatestCheckedRow(newerSnapshot, delayedOlderSnapshot)).toBe(newerSnapshot);
     expect(selectLatestCheckedRow(delayedOlderSnapshot, newerSnapshot)).toBe(newerSnapshot);
+  });
+
+  test('keeps the earlier observation when a newer standings row is enriched by Summary', () => {
+    expect(
+      selectEarlierManagerLiveObservationAt('2026-08-23T08:00:29.000Z', '2026-08-23T08:00:00.000Z'),
+    ).toBe('2026-08-23T08:00:00.000Z');
+    expect(
+      selectEarlierManagerLiveObservationAt('2026-08-23T08:00:00.000Z', '2026-08-23T08:00:29.000Z'),
+    ).toBe('2026-08-23T08:00:00.000Z');
   });
 
   test('preserves Classic fields for explicit overall-rank enrichment', () => {

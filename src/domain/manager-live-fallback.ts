@@ -546,6 +546,14 @@ export const selectLatestCheckedRow = <
     : current;
 };
 
+export const selectEarlierManagerLiveObservationAt = (left: string, right: string): string => {
+  const leftTime = Date.parse(left);
+  const rightTime = Date.parse(right);
+  if (!Number.isFinite(leftTime)) return right;
+  if (!Number.isFinite(rightTime)) return left;
+  return leftTime <= rightTime ? left : right;
+};
+
 export const shouldRefreshClassicOverallRank = (
   row:
     | Readonly<{
