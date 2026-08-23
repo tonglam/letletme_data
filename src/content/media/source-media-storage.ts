@@ -207,6 +207,19 @@ function tusFailureDetail(
   return { status, detail: providerCode ?? providerDetail };
 }
 
+function isMissingObjectCode(providerCode: string | null): boolean {
+  return providerCode === 'not_found' || providerCode?.toLowerCase() === 'nosuchkey';
+}
+
+function isMissingObjectError(error: unknown): boolean {
+  if (!(error instanceof SourceMediaStorageError)) return false;
+  return error.status === 404 || /\((?:not_found|nosuchkey)\)$/i.test(error.message);
+}
+
+async function waitForProbeCleanup(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 async function storageError(
   response: Response,
   operation: string,
@@ -460,7 +473,7 @@ export function createSourceMediaStorage(
         const rawBody = new TextDecoder('utf-8', { fatal: false }).decode(bodyBytes);
         const body = rawBody.toLowerCase();
         const { providerCode } = parseProviderErrorDetail(rawBody);
-        if (providerCode === 'not_found' && !/bucket[\s_-]+not[\s_-]+found/.test(body)) {
+        if (isMissingObjectCode(providerCode) && !/bucket[\s_-]+not[\s_-]+found/.test(body)) {
           return 'missing';
         }
         throw await storageError(response, 'object delete', bodyBytes);
@@ -481,40 +494,43 @@ export function createSourceMediaStorage(
       // trailing bytes, then verify the private roundtrip by content hash.
       const bytes = new Uint8Array(BUCKET_FILE_SIZE_LIMIT);
       bytes.set(pngPrefix);
-      let uploaded = false;
-      let probeError: unknown = null;
       try {
         await storage.upload(objectKey, bytes, 'image/png');
-        uploaded = true;
         const downloaded = await storage.download(objectKey);
         const expected = createHash('sha256').update(bytes).digest('hex');
         const actual = createHash('sha256').update(downloaded).digest('hex');
         if (actual !== expected) {
           throw new SourceMediaStorageError('STORAGE_PROBE_HASH', 'Storage probe hash mismatch');
         }
-      } catch (error) {
-        probeError = error;
-        throw error;
       } finally {
-        try {
-          const removed = await storage.remove(objectKey);
-          if (uploaded && removed !== 'deleted') {
-            throw new SourceMediaStorageError(
-              'STORAGE_PROBE_CLEANUP',
-              'Storage probe cleanup did not delete its uploaded object',
-            );
-          }
+        let cleanupError: unknown = null;
+        for (const delayMs of [0, 1_000, 3_000]) {
+          if (delayMs > 0) await waitForProbeCleanup(delayMs);
           try {
-            await storage.download(objectKey);
-            throw new SourceMediaStorageError(
-              'STORAGE_PROBE_CLEANUP',
-              'Storage probe object remains readable after deletion',
-            );
+            await storage.remove(objectKey);
+            try {
+              await storage.download(objectKey);
+              cleanupError = new SourceMediaStorageError(
+                'STORAGE_PROBE_CLEANUP',
+                'Storage probe object remains readable after deletion',
+              );
+            } catch (error) {
+              if (isMissingObjectError(error)) {
+                cleanupError = null;
+                break;
+              }
+              cleanupError = error;
+            }
           } catch (error) {
-            if (!(error instanceof SourceMediaStorageError) || error.status !== 404) throw error;
+            cleanupError = error;
           }
-        } catch (error) {
-          if (probeError === null) throw error;
+        }
+        if (cleanupError !== null) {
+          throw new SourceMediaStorageError(
+            'STORAGE_PROBE_CLEANUP',
+            'Storage probe cleanup could not prove the object was removed',
+            cleanupError instanceof SourceMediaStorageError ? cleanupError.status : null,
+          );
         }
       }
     },

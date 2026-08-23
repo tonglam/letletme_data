@@ -240,6 +240,48 @@ describe('source-media private Storage client', () => {
     await expect(storage.provisionAndProbe()).rejects.toThrow('upstream tus failed');
   });
 
+  test('accepts a 400 not_found delete only after the probe is unreadable', async () => {
+    let probeObjectPresent = false;
+    const storage = createSourceMediaStorage(
+      config,
+      async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === '/storage/v1/bucket/briefing-source-media' && init.method === 'GET') {
+          return Response.json({
+            id: config.bucket,
+            name: config.bucket,
+            public: false,
+            file_size_limit: 24 * 1_024 * 1_024,
+            allowed_mime_types: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+          });
+        }
+        if (url.pathname === '/storage/v1/bucket/briefing-source-media' && init.method === 'PUT') {
+          return Response.json({ message: 'updated' });
+        }
+        if (url.pathname.startsWith('/storage/v1/object/')) {
+          if (init.method === 'DELETE') {
+            probeObjectPresent = false;
+            return Response.json({ error: 'not_found' }, { status: 400 });
+          }
+          if (init.method === 'GET') {
+            return probeObjectPresent
+              ? new Response(new Uint8Array(24 * 1_024 * 1_024))
+              : Response.json({ error: 'not_found' }, { status: 404 });
+          }
+        }
+        return Response.json({ message: 'unexpected request' }, { status: 500 });
+      },
+      async (input) => {
+        probeObjectPresent = true;
+        // The probe only compares hashes when the fake returns a stable body.
+        input.bytes.fill(0);
+      },
+    );
+
+    await expect(storage.provisionAndProbe()).resolves.toBeUndefined();
+    expect(probeObjectPresent).toBeFalse();
+  });
+
   test('retains a bounded provider message when the error is not a code', async () => {
     const storage = createSourceMediaStorage(config, async () =>
       Response.json({ error: 'Bucket name invalid' }, { status: 400 }),
