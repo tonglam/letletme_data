@@ -604,6 +604,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const names = new Set(items.map((item) => item.name));
       const isLiveItems = items.length === 2 && names.has('eventLive') && names.has('fixtures');
       const isMarketItems = items.length === 1 && names.has('context');
+      const isPriceChangeItems = items.length === 2 && names.has('context') && names.has('players');
       const coreNames = new Set([
         'events',
         'teams',
@@ -625,7 +626,10 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         (items.length === coreNames.size || items.length === legacyCoreNames.size) &&
         [...names].every((name) => coreNames.has(name)) &&
         (items.length === coreNames.size || [...names].every((name) => legacyCoreNames.has(name)));
-      if ((!isLiveItems && !isMarketItems && !isCoreItems) || names.size !== items.length) {
+      if (
+        (!isLiveItems && !isMarketItems && !isPriceChangeItems && !isCoreItems) ||
+        names.size !== items.length
+      ) {
         throw new DatabaseError(
           'Publication item proof is incomplete',
           'DATASET_PUBLICATION_ITEMS_INCOMPLETE',

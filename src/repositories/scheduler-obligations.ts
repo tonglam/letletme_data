@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -582,5 +582,67 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
     running: Number(row?.running ?? 0),
     irrecoverable: Number(row?.irrecoverable ?? 0),
     succeeded: Number(row?.succeeded ?? 0),
+  };
+}
+
+export async function schedulerObligationStatus(input: {
+  jobName: string;
+  scopeKey: string;
+  db?: DbHandle;
+}): Promise<{
+  latest: {
+    periodKey: string;
+    status: SchedulerObligationStatus;
+    dueAt: Date;
+    generation: number;
+    attempts: number;
+    lastError: string | null;
+  } | null;
+  overdue: boolean;
+  consecutiveUnsuccessfulCycles: number;
+}> {
+  const db = input.db ?? (await getDb());
+  const rows = await db
+    .select({
+      periodKey: schedulerObligationsInOps.periodKey,
+      status: schedulerObligationsInOps.status,
+      dueAt: schedulerObligationsInOps.dueAt,
+      generation: schedulerObligationsInOps.generation,
+      attempts: schedulerObligationsInOps.attempts,
+      lastError: schedulerObligationsInOps.lastError,
+    })
+    .from(schedulerObligationsInOps)
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
+      ),
+    )
+    .orderBy(desc(schedulerObligationsInOps.dueAt), desc(schedulerObligationsInOps.updatedAt))
+    .limit(2);
+  const latest = rows[0]
+    ? {
+        periodKey: rows[0].periodKey,
+        status: rows[0].status as SchedulerObligationStatus,
+        dueAt: rows[0].dueAt,
+        generation: rows[0].generation,
+        attempts: rows[0].attempts,
+        lastError: rows[0].lastError,
+      }
+    : null;
+  let consecutiveUnsuccessfulCycles = 0;
+  for (const row of rows) {
+    if (row.status === 'succeeded' || row.status === 'skipped') break;
+    consecutiveUnsuccessfulCycles += 1;
+  }
+  return {
+    latest,
+    overdue: Boolean(
+      latest &&
+        latest.dueAt.getTime() <= Date.now() &&
+        latest.status !== 'succeeded' &&
+        latest.status !== 'skipped',
+    ),
+    consecutiveUnsuccessfulCycles,
   };
 }

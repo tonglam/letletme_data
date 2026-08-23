@@ -39,6 +39,32 @@ describe('standalone scheduler registry', () => {
     expect(transfers?.successPredicate).toContain('entry transfers checkpoint');
   });
 
+  test('schedules price changes as a critical five-minute latest-authoritative job', async () => {
+    const priceChanges = registry.find(
+      (definition) => definition.name === 'price-change-predictions',
+    );
+    expect(priceChanges).toMatchObject({
+      cadence: 'every five minutes at UTC minute 01/06/11...',
+      timezone: 'UTC',
+      catchUpPolicy: 'latest-authoritative',
+      criticality: 'critical',
+      queueName: 'data-sync',
+      manualTrigger: true,
+    });
+    const plans = await priceChanges!.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T00:07:00.000Z'),
+      events: [],
+    });
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toMatchObject({
+      scopeKey: TEST_SEASON.seasonCode,
+      dueAt: new Date('2026-08-23T00:06:00.000Z'),
+      source: 'catchup',
+      evidence: { cadence: 'five-minute', offsetMs: 60_000 },
+    });
+  });
+
   test('registers maintenance work on the queue-owned scheduler', () => {
     const maintenance = registry.filter((definition) => definition.queueName === 'maintenance');
     expect(maintenance.map((definition) => definition.name)).toEqual(

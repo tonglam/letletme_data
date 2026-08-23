@@ -17,7 +17,7 @@ export function isDataPublicationId(value: unknown): value is string {
   );
 }
 
-export type DataPublicationDataset = 'fpl:core' | 'fpl:live' | 'fpl:market';
+export type DataPublicationDataset = 'fpl:core' | 'fpl:live' | 'fpl:market' | 'fpl:price-changes';
 export type MarketSnapshotContextPayload = {
   readonly seasonCode: string;
   readonly snapshotDate: string;
@@ -131,6 +131,7 @@ const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
   ],
   'fpl:live': ['eventLive', 'fixtures'],
   'fpl:market': ['context'],
+  'fpl:price-changes': ['context', 'players'],
 };
 const LEGACY_CORE_ITEM_NAMES = [
   'events',
@@ -180,7 +181,8 @@ function isCanonicalState(
   dataset: DataPublicationDataset,
   state: unknown,
 ): state is DataPublicationState {
-  if (dataset === 'fpl:core' || dataset === 'fpl:market') return state === 'active';
+  if (dataset === 'fpl:core' || dataset === 'fpl:market' || dataset === 'fpl:price-changes')
+    return state === 'active';
   return state === 'scheduled' || state === 'live' || state === 'settled';
 }
 
@@ -593,7 +595,8 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
     if (
       value.dataset !== 'fpl:core' &&
       value.dataset !== 'fpl:live' &&
-      value.dataset !== 'fpl:market'
+      value.dataset !== 'fpl:market' &&
+      value.dataset !== 'fpl:price-changes'
     )
       return null;
     const dataset = value.dataset;
@@ -617,7 +620,8 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
       return null;
     }
     if (
-      ((dataset === 'fpl:core' || dataset === 'fpl:market') && value.eventId !== null) ||
+      ((dataset === 'fpl:core' || dataset === 'fpl:market' || dataset === 'fpl:price-changes') &&
+        value.eventId !== null) ||
       (dataset === 'fpl:live' &&
         (typeof value.eventId !== 'number' ||
           !Number.isSafeInteger(value.eventId) ||

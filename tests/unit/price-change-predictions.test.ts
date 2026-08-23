@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   normalizePriceChangeBoard,
+  PriceChangePredictionValidationError,
   PRICE_CHANGE_STALE_MS,
 } from '../../src/services/price-change-predictions.service';
 
@@ -110,6 +111,7 @@ describe('price-change prediction normalization', () => {
   it('maps lock and calibrating overrides before likelihood', () => {
     const locked = normalizePriceChangeBoard(
       bootstrapFixture({ price_change_locked_until: '2026-08-23T12:00:00Z' }),
+      new Date('2026-08-23T00:00:00Z'),
     );
     const calibrating = normalizePriceChangeBoard(
       bootstrapFixture({ price_change_calibrating: true }),
@@ -119,17 +121,26 @@ describe('price-change prediction normalization', () => {
     expect(calibrating.players[0]?.status).toBe('CALIBRATING');
   });
 
-  it('reports partial coverage when optional official fields are absent', () => {
-    const board = normalizePriceChangeBoard(
-      bootstrapFixture({ price_change_percent: undefined }),
-      new Date('2026-08-22T00:00:00Z'),
+  it('treats an expired lock as unlocked and fails closed on missing fields', () => {
+    const expired = normalizePriceChangeBoard(
+      bootstrapFixture({ price_change_locked_until: '2026-08-22T12:00:00Z' }),
+      new Date('2026-08-23T00:00:00Z'),
     );
+    expect(expired.players[0]?.status).toBe('VERY_LIKELY_RISE');
 
-    expect(board.status).toBe('PARTIAL');
-    expect(board.expectedPlayerCount).toBe(1);
-    expect(board.observedPlayerCount).toBe(0);
+    expect(() =>
+      normalizePriceChangeBoard(
+        bootstrapFixture({ price_change_percent: undefined }),
+        new Date('2026-08-22T00:00:00Z'),
+      ),
+    ).toThrow(PriceChangePredictionValidationError);
+  });
+
+  it('keeps the publication freshness window separate from the legacy constant', () => {
+    const board = normalizePriceChangeBoard(bootstrapFixture(), new Date('2026-08-22T00:00:00Z'));
     expect(board.staleAt).toBe(
-      new Date(Date.parse('2026-08-22T00:00:00Z') + PRICE_CHANGE_STALE_MS).toISOString(),
+      new Date(Date.parse('2026-08-22T00:00:00Z') + 10 * 60 * 1_000).toISOString(),
     );
+    expect(PRICE_CHANGE_STALE_MS).toBe(60 * 60 * 1_000);
   });
 });

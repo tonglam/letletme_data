@@ -70,6 +70,15 @@ describe('resolveMutationScopes', () => {
     ).toEqual(['data-core:players']);
   });
 
+  it('serializes price-change publication with the canonical player roster', () => {
+    expect(
+      resolveMutationScopes({
+        queueName: 'data-sync',
+        jobName: 'price-change-predictions',
+      }),
+    ).toEqual(['data-core:players', 'data-price-change:publication']);
+  });
+
   it('adds event-scoped conflict groups for league event results', () => {
     const scopes = resolveMutationScopes({
       queueName: 'league-sync',

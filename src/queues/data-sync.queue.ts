@@ -6,7 +6,12 @@ import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { dataSyncQueueName } from './names';
 
-export type DataSyncJobName = 'core-snapshot' | 'player-prices' | 'player-stats' | 'player-values';
+export type DataSyncJobName =
+  | 'core-snapshot'
+  | 'player-prices'
+  | 'player-stats'
+  | 'player-values'
+  | 'price-change-predictions';
 
 export interface DataSyncJobData {
   seasonId: number;
