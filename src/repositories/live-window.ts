@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, inArray, sql } from 'drizzle-orm';
 
 import {
   liveLifecycleStatusInOps,
@@ -110,7 +110,7 @@ export type ManagerScoreCheckpoint = {
   // Classic rows use the existing internal updated_at column as durable
   // ordering evidence for the last accepted positive OR fetch. Standings and
   // unusable Summary responses leave it unchanged.
-  overallRankPublicationStartedAt?: Date | null;
+  overallRankPublicationStartedAt?: string | null;
 };
 
 export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransaction) => {
@@ -126,7 +126,13 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
       if (entryIds.length === 0) return [];
       const db = await getDbInstance();
       return db
-        .select()
+        .select({
+          ...getTableColumns(managerEventScoreSnapshotsInFpl),
+          overallRankPublicationStartedAtExact: sql<string>`to_char(
+            ${managerEventScoreSnapshotsInFpl.updatedAt} AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+          )`,
+        })
         .from(managerEventScoreSnapshotsInFpl)
         .where(
           and(
@@ -193,7 +199,9 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
             upstreamUpdatedAt: row.upstreamUpdatedAt,
             updatedAt:
               scope.scopeType === 'CLASSIC_LEAGUE'
-                ? (row.overallRankPublicationStartedAt ?? new Date(0))
+                ? row.overallRankPublicationStartedAt
+                  ? sql`${row.overallRankPublicationStartedAt}::timestamptz`
+                  : new Date(0)
                 : row.checkedAt,
           })),
         )

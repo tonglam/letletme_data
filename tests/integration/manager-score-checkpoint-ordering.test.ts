@@ -36,9 +36,7 @@ const checkpoint = (
   contentRevision: 'same-rank-content',
   checkedAt: new Date(checkedAt),
   upstreamUpdatedAt: null,
-  overallRankPublicationStartedAt: overallRankPublicationStartedAt
-    ? new Date(overallRankPublicationStartedAt)
-    : null,
+  overallRankPublicationStartedAt,
 });
 
 async function seed(): Promise<void> {
@@ -81,23 +79,23 @@ describe('Classic manager checkpoint OR ordering', () => {
       checkpoint('2026-08-23T08:00:00.000Z', null),
     ]);
     await repository.upsertBatch(SEASON, EVENT_ID, SCOPE, [
-      checkpoint('2026-08-23T08:00:01.000Z', '2026-08-23T08:00:01.000Z'),
+      checkpoint('2026-08-23T08:00:01.000Z', '2026-08-23T08:00:01.000100Z'),
     ]);
     await repository.upsertBatch(SEASON, EVENT_ID, SCOPE, [
       checkpoint('2026-08-23T08:00:02.000Z', null),
     ]);
     await repository.upsertBatch(SEASON, EVENT_ID, SCOPE, [
-      checkpoint('2026-08-23T08:00:03.000Z', '2026-08-23T08:00:00.500Z'),
+      checkpoint('2026-08-23T08:00:03.000Z', '2026-08-23T08:00:01.000099Z'),
     ]);
 
     let [stored] = await repository.findByScopeAndEntryIds(SEASON, EVENT_ID, SCOPE, [ENTRY_ID]);
     expect(stored?.checkedAt.toISOString()).toBe('2026-08-23T08:00:03.000Z');
-    expect(stored?.updatedAt.toISOString()).toBe('2026-08-23T08:00:01.000Z');
+    expect(stored?.overallRankPublicationStartedAtExact).toBe('2026-08-23T08:00:01.000100Z');
 
     await repository.upsertBatch(SEASON, EVENT_ID, SCOPE, [
-      checkpoint('2026-08-23T08:00:04.000Z', '2026-08-23T08:00:04.000Z'),
+      checkpoint('2026-08-23T08:00:04.000Z', '2026-08-23T08:00:01.000101Z'),
     ]);
     [stored] = await repository.findByScopeAndEntryIds(SEASON, EVENT_ID, SCOPE, [ENTRY_ID]);
-    expect(stored?.updatedAt.toISOString()).toBe('2026-08-23T08:00:04.000Z');
+    expect(stored?.overallRankPublicationStartedAtExact).toBe('2026-08-23T08:00:01.000101Z');
   });
 });

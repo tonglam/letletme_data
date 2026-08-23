@@ -28,14 +28,15 @@ import {
   createKeyedSerialTaskScheduler,
   createManagerSummaryFetchGate,
   isPositiveOverallRank,
+  isNewerClassicOverallRankPublicationOrder,
   managerSummaryFetchBatches,
+  mergeUniqueTargetManagerRows,
   pendingOverallRankRefreshEntryIds,
   type ManagerSummaryFetchPriority,
   planClassicManagerFallback,
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
   selectLatestCheckedRow,
-  shouldAcceptClassicOverallRankPublication,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
   shouldRetryPendingClassicOverallRank,
@@ -160,7 +161,7 @@ const mergeLatestManagerLiveRow = (
 
 const toManagerScoreCheckpoint = (
   row: ManagerLiveScoreRow,
-  overallRankPublicationStartedAt?: Date | null,
+  overallRankPublicationStartedAt?: string | null,
 ): ManagerScoreCheckpoint => ({
   entryId: row.entryId,
   eventPoints: row.eventPoints,
@@ -349,7 +350,7 @@ const readClassicPublicationState = async (
     );
     overallRankPublicationStartedAtByEntryId.set(
       checkpoint.entryId,
-      checkpoint.updatedAt.toISOString(),
+      checkpoint.overallRankPublicationStartedAtExact,
     );
   }
   return { rows, overallRankPublicationStartedAtByEntryId };
@@ -399,7 +400,7 @@ const writeCheckpointRows = async (
   eventId: number,
   scope: ManagerScoreScope,
   rows: readonly ManagerLiveScoreRow[],
-  overallRankPublicationStartedAtByEntryId: ReadonlyMap<number, Date> = new Map(),
+  overallRankPublicationStartedAtByEntryId: ReadonlyMap<number, string> = new Map(),
 ): Promise<boolean> => {
   try {
     await managerScoreCheckpointRepository.upsertBatch(
@@ -586,11 +587,10 @@ const runManagerLivePublication = <T>(key: string, task: () => Promise<T>): Prom
       return runInDatabaseTransaction(transaction, task, lockedDb);
     })) as T;
   });
-const reserveManagerLivePublicationStartedAt = async (key: string): Promise<string> =>
-  runManagerLivePublication(key, async () => {
-    const reservation = await readDatabaseOrderingTimestamp();
-    return reservation.date.toISOString();
-  });
+const reserveManagerLivePublicationStartedAt = (
+  key: string,
+): Promise<Awaited<ReturnType<typeof readDatabaseOrderingTimestamp>>> =>
+  runManagerLivePublication(key, () => readDatabaseOrderingTimestamp());
 const managerLivePublicationKey = (
   season: string,
   eventId: number,
@@ -639,10 +639,11 @@ const refreshEntrySummaries = async (
   const classicScope = scope.scopeType === 'CLASSIC_LEAGUE';
   const publicationKey = managerLivePublicationKey(season.seasonCode, eventId, scope);
   for (const batch of managerSummaryFetchBatches(targets)) {
-    let publicationStartedAt = nowIso();
+    let publicationOrder: string | null = null;
     if (classicScope) {
       try {
-        publicationStartedAt = await reserveManagerLivePublicationStartedAt(publicationKey);
+        const reservation = await reserveManagerLivePublicationStartedAt(publicationKey);
+        publicationOrder = reservation.exact;
       } catch (error) {
         refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
         logWarn('Official manager entry-summary ordering reservation failed', {
@@ -684,6 +685,7 @@ const refreshEntrySummaries = async (
       (result): result is NonNullable<typeof result> => result !== null,
     );
     if (successful.length === 0) continue;
+    const publicationCheckedAt = nowIso();
 
     const composeAndPublishBatch = async (
       reReadLatest: boolean,
@@ -701,7 +703,7 @@ const refreshEntrySummaries = async (
       const batchRefreshedEntryIds: number[] = [];
       const batchOverallRankRefreshedEntryIds: number[] = [];
       const acceptedOverallRankEntryIds: number[] = [];
-      const acceptedOverallRankPublicationStartedAt = new Map<number, Date>();
+      const acceptedOverallRankPublicationOrders = new Map<number, string>();
       const publishedRows = successful.map(({ entryId, summary }) => {
         const existing = latestRows.get(entryId) ?? rows.get(entryId);
         const candidate = shouldPreserveClassicStandingForRank(
@@ -715,24 +717,27 @@ const refreshEntrySummaries = async (
                 // Classic standings owns event/phase totals and league rank;
                 // the entry summary owns the season-wide FPL OR.
                 overallRank: summary.summary_overall_rank ?? null,
-                checkedAt: publicationStartedAt,
-                staleAt: plusSeconds(publicationStartedAt, STALE_SECONDS),
+                checkedAt: publicationCheckedAt,
+                staleAt: plusSeconds(publicationCheckedAt, STALE_SECONDS),
               });
             })()
-          : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, publicationStartedAt);
+          : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, publicationCheckedAt);
         batchRefreshedEntryIds.push(entryId);
         if (isPositiveOverallRank(summary.summary_overall_rank)) {
           batchOverallRankRefreshedEntryIds.push(entryId);
         }
-        const acceptOverallRank =
+        const publicationOrderIsNewer =
           reReadLatest &&
-          shouldAcceptClassicOverallRankPublication(
-            summary.summary_overall_rank,
-            publicationStartedAt,
+          isNewerClassicOverallRankPublicationOrder(
+            publicationOrder ?? '',
             publicationState?.overallRankPublicationStartedAtByEntryId.get(entryId),
           );
+        const acceptOverallRank =
+          publicationOrderIsNewer && isPositiveOverallRank(summary.summary_overall_rank);
         let merged = reReadLatest
-          ? mergeLatestManagerLiveRow(existing, candidate)
+          ? publicationOrderIsNewer || !existing
+            ? mergeLatestManagerLiveRow(existing, candidate)
+            : existing
           : withPreservedOverallRank(candidate, existing?.overallRank);
         if (
           acceptOverallRank &&
@@ -745,9 +750,9 @@ const refreshEntrySummaries = async (
             overallRank: summary.summary_overall_rank,
           });
         }
-        if (acceptOverallRank) {
+        if (acceptOverallRank && publicationOrder) {
           acceptedOverallRankEntryIds.push(entryId);
-          acceptedOverallRankPublicationStartedAt.set(entryId, new Date(publicationStartedAt));
+          acceptedOverallRankPublicationOrders.set(entryId, publicationOrder);
         }
         return merged;
       });
@@ -757,7 +762,7 @@ const refreshEntrySummaries = async (
         eventId,
         source: 'FPL_ENTRY_SUMMARY',
         rowCount: refreshed.length + publishedRows.length,
-        checkedAt: publicationStartedAt,
+        checkedAt: publicationCheckedAt,
         revision: publishedRows[0]!.revision,
         nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
       };
@@ -767,7 +772,7 @@ const refreshEntrySummaries = async (
           eventId,
           scope,
           publishedRows,
-          acceptedOverallRankPublicationStartedAt,
+          acceptedOverallRankPublicationOrders,
         );
         if (!checkpointPublished) {
           throw new Error('Classic entry-summary checkpoint publication failed');
@@ -858,9 +863,8 @@ const refreshClassicStandings = async (
   refreshedEntryIds: readonly number[];
 }> => {
   const crawlStartedAt = nowIso();
-  const fetchedRows: ManagerLiveScoreRow[] = [];
+  let fetchedRows = new Map<number, ManagerLiveScoreRow>();
   const classicScope: ManagerScoreScope = { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId };
-  let found = 0;
   const startPage = options.startPage ?? 1;
   const maxPages = options.maxPages ?? MAX_FOREGROUND_STANDINGS_PAGES;
   let nextPage = startPage;
@@ -869,18 +873,17 @@ const refreshClassicStandings = async (
   try {
     for (
       let page = startPage;
-      page <= MAX_STANDINGS_PAGES && page < startPage + maxPages && found < targetIds.size;
+      page <= MAX_STANDINGS_PAGES &&
+      page < startPage + maxPages &&
+      fetchedRows.size < targetIds.size;
       page += 1
     ) {
       const response = await fplClient.getLeagueClassicStandings(leagueId, page);
       nextPage = page + 1;
       const pageRows = toClassicRows(season.seasonCode, eventId, response, crawlStartedAt);
-      for (const row of pageRows) {
-        if (!targetIds.has(row.entryId)) continue;
-        const previous = rows.get(row.entryId);
-        if (!previous || !isFresh(previous)) found += 1;
-        fetchedRows.push(row);
-      }
+      // A manager can move across the page boundary while a live crawl is in
+      // progress. Keep only the later occurrence and count unique target IDs.
+      fetchedRows = mergeUniqueTargetManagerRows(fetchedRows, pageRows, targetIds);
       if (!response.standings.has_next) {
         exhausted = true;
         break;
@@ -899,8 +902,9 @@ const refreshClassicStandings = async (
   }
 
   let publishedRows: ManagerLiveScoreRow[] = [];
-  if (fetchedRows.length > 0) {
+  if (fetchedRows.size > 0) {
     try {
+      const uniqueFetchedRows = Array.from(fetchedRows.values());
       publishedRows = await runManagerLivePublication(
         managerLivePublicationKey(season.seasonCode, eventId, classicScope),
         async () => {
@@ -913,10 +917,10 @@ const refreshClassicStandings = async (
             season,
             eventId,
             classicScope,
-            fetchedRows.map((row) => row.entryId),
+            uniqueFetchedRows.map((row) => row.entryId),
             rows,
           );
-          const mergedRows = fetchedRows.map((row) => {
+          const mergedRows = uniqueFetchedRows.map((row) => {
             const latest = latestRows.get(row.entryId);
             const { revision: _revision, ...withoutRevision } = row;
             const restamped = withRevision({
@@ -976,14 +980,14 @@ const refreshClassicStandings = async (
     eventId,
     leagueId,
     requested: targetIds.size,
-    fetched: fetchedRows.length,
+    fetched: fetchedRows.size,
     published: publishedRows.length,
     partial: refreshErrorCode !== null,
   });
   return {
     complete:
       refreshErrorCode === null &&
-      (exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES),
+      (exhausted || fetchedRows.size >= targetIds.size || nextPage > MAX_STANDINGS_PAGES),
     nextPage,
     errorCode: refreshErrorCode,
     refreshedEntryIds: publishedRows.map((row) => row.entryId),

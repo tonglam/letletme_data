@@ -61,17 +61,41 @@ export const preserveLastKnownOverallRank = (
   return isPositiveOverallRank(previous) ? previous : null;
 };
 
+const normalizeOrderingTimestamp = (value: string | null | undefined): string | null => {
+  if (!value || !Number.isFinite(Date.parse(value))) return null;
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.)(\d{1,6})Z$/.exec(value);
+  if (!match) return null;
+  return `${match[1]}${match[2].padEnd(6, '0')}Z`;
+};
+
+export const isNewerClassicOverallRankPublicationOrder = (
+  publicationOrder: string,
+  lastAcceptedPublicationOrder: string | null | undefined,
+): boolean => {
+  const incomingOrder = normalizeOrderingTimestamp(publicationOrder);
+  if (!incomingOrder) return false;
+  const acceptedOrder = normalizeOrderingTimestamp(lastAcceptedPublicationOrder);
+  return acceptedOrder === null || incomingOrder > acceptedOrder;
+};
+
 export const shouldAcceptClassicOverallRankPublication = (
   incoming: number | null | undefined,
-  publicationStartedAt: string,
-  lastAcceptedPublicationAt: string | null | undefined,
-): boolean => {
-  if (!isPositiveOverallRank(incoming)) return false;
+  publicationOrder: string,
+  lastAcceptedPublicationOrder: string | null | undefined,
+): boolean =>
+  isPositiveOverallRank(incoming) &&
+  isNewerClassicOverallRankPublicationOrder(publicationOrder, lastAcceptedPublicationOrder);
 
-  const incomingTime = Date.parse(publicationStartedAt);
-  if (!Number.isFinite(incomingTime)) return false;
-  const acceptedTime = Date.parse(lastAcceptedPublicationAt ?? '');
-  return !Number.isFinite(acceptedTime) || incomingTime > acceptedTime;
+export const mergeUniqueTargetManagerRows = <T extends Readonly<{ entryId: number }>>(
+  existing: ReadonlyMap<number, T>,
+  pageRows: readonly T[],
+  targetIds: ReadonlySet<number>,
+): Map<number, T> => {
+  const merged = new Map(existing);
+  for (const row of pageRows) {
+    if (targetIds.has(row.entryId)) merged.set(row.entryId, row);
+  }
+  return merged;
 };
 
 export const selectLatestCheckedRow = <

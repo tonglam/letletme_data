@@ -6,6 +6,7 @@ import {
   createManagerSummaryFetchGate,
   isPositiveOverallRank,
   managerSummaryFetchBatches,
+  mergeUniqueTargetManagerRows,
   pendingOverallRankRefreshEntryIds,
   planClassicManagerFallback,
   planClassicOverallRankRefresh,
@@ -102,6 +103,45 @@ describe('classic manager live fallback', () => {
       shouldAcceptClassicOverallRankPublication(0, '2026-08-23T08:00:02.000Z', acceptedAt),
     ).toBeFalse();
     expect(shouldAcceptClassicOverallRankPublication(620_000, 'invalid', acceptedAt)).toBeFalse();
+    expect(
+      shouldAcceptClassicOverallRankPublication(
+        620_000,
+        '2026-08-23T08:00:01.000101Z',
+        '2026-08-23T08:00:01.000100Z',
+      ),
+    ).toBeTrue();
+    expect(
+      shouldAcceptClassicOverallRankPublication(
+        620_000,
+        '2026-08-23T08:00:01.000099Z',
+        '2026-08-23T08:00:01.000100Z',
+      ),
+    ).toBeFalse();
+  });
+
+  test('counts a manager crossing standings pages only once and keeps the later row', () => {
+    const targets = new Set([1, 2]);
+    const firstPage = mergeUniqueTargetManagerRows(
+      new Map<number, { entryId: number; leagueRank: number }>(),
+      [
+        { entryId: 1, leagueRank: 50 },
+        { entryId: 3, leagueRank: 51 },
+      ],
+      targets,
+    );
+    const secondPage = mergeUniqueTargetManagerRows(
+      firstPage,
+      [
+        { entryId: 1, leagueRank: 49 },
+        { entryId: 2, leagueRank: 52 },
+      ],
+      targets,
+    );
+
+    expect(secondPage.size).toBe(2);
+    expect(secondPage.get(1)?.leagueRank).toBe(49);
+    expect(secondPage.get(2)?.leagueRank).toBe(52);
+    expect(secondPage.has(3)).toBeFalse();
   });
 
   test('rebases delayed overall-rank work onto the latest standings row', () => {
