@@ -17,6 +17,8 @@ describe('source-media private Storage client', () => {
     const objects = new Map<string, Uint8Array>();
     let sawNoUpsert = false;
     const probeSizes: number[] = [];
+    const probeUploadDataModes: Array<boolean | undefined> = [];
+    const standardProbeSizes: number[] = [];
     const fetchImpl = async (input: string | URL | Request, init: RequestInit = {}) => {
       const url = new URL(String(input));
       if (url.pathname === '/storage/v1/bucket/briefing-source-media' && init.method === 'GET') {
@@ -52,6 +54,7 @@ describe('source-media private Storage client', () => {
         if (init.method === 'POST') {
           sawNoUpsert = new Headers(init.headers).get('x-upsert') === 'false';
           const bytes = new Uint8Array(await new Response(init.body).arrayBuffer());
+          standardProbeSizes.push(bytes.byteLength);
           if (objects.has(key))
             return Response.json({ message: 'already exists' }, { status: 400 });
           objects.set(key, bytes);
@@ -74,10 +77,13 @@ describe('source-media private Storage client', () => {
     const storage = createSourceMediaStorage(config, fetchImpl, async (input) => {
       sawNoUpsert = input.headers['x-upsert'] === 'false';
       probeSizes.push(input.bytes.byteLength);
+      probeUploadDataModes.push(input.uploadDataDuringCreation);
       objects.set(input.metadata.objectName, input.bytes);
     });
     await storage.provisionAndProbe();
     await storage.provisionAndProbe();
+    await storage.provisionAndProbe('tus-no-create');
+    await storage.provisionAndProbe('standard');
     expect(bucket as Record<string, unknown> | null).toEqual({
       id: config.bucket,
       name: config.bucket,
@@ -89,7 +95,10 @@ describe('source-media private Storage client', () => {
     expect(probeSizes).toEqual([
       sourceMediaStorageContract.bucketFileSizeLimit,
       sourceMediaStorageContract.bucketFileSizeLimit,
+      sourceMediaStorageContract.bucketFileSizeLimit,
     ]);
+    expect(probeUploadDataModes).toEqual([true, true, false]);
+    expect(standardProbeSizes).toEqual([sourceMediaStorageContract.bucketFileSizeLimit]);
     expect(objects.size).toBe(0);
   });
 
@@ -149,6 +158,7 @@ describe('source-media private Storage client', () => {
       endpoint: 'https://project.storage.supabase.co/storage/v1/upload/resumable',
       chunkSize: 6 * 1_024 * 1_024,
       headers: { 'x-upsert': 'false' },
+      uploadDataDuringCreation: true,
       metadata: {
         bucketName: 'briefing-source-media',
         contentType: 'image/png',

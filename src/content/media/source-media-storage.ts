@@ -19,6 +19,8 @@ export type SourceMediaStorageFetch = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+export type SourceMediaProbeMode = 'tus' | 'standard' | 'tus-no-create';
+
 export type SourceMediaTusUpload = (
   input: Readonly<{
     endpoint: string;
@@ -26,6 +28,7 @@ export type SourceMediaTusUpload = (
     headers: Readonly<Record<string, string>>;
     metadata: Readonly<Record<string, string>>;
     chunkSize: number;
+    uploadDataDuringCreation?: boolean;
     signal?: AbortSignal;
   }>,
 ) => Promise<void>;
@@ -48,8 +51,14 @@ type TusResponseLike = Readonly<{
   getBody?: () => string;
 }>;
 
+type TusRequestLike = Readonly<{
+  getMethod?: () => string;
+  getHeader?: (header: string) => string | null;
+}>;
+
 type TusErrorLike = Readonly<{
   originalResponse?: TusResponseLike | null;
+  originalRequest?: TusRequestLike | null;
   causingError?: unknown;
   message?: unknown;
 }>;
@@ -225,9 +234,20 @@ function tusFailureDetail(
       detail =
         safeDetail(causeLike.code) ?? safeDetail(causeLike.message) ?? safeDetail(causeLike.name);
     }
+    const request = errorLike.originalRequest;
+    const method =
+      typeof request?.getMethod === 'function' ? safeDetail(request.getMethod()) : null;
+    const offset =
+      typeof request?.getHeader === 'function'
+        ? safeDetail(request.getHeader('Upload-Offset'))
+        : null;
+    const requestDetail = method ? `${method}${offset ? ` offset ${offset}` : ''}` : null;
     return {
       status: null,
-      detail: detail ?? safeDetail(errorLike.message),
+      detail:
+        [detail ?? safeDetail(errorLike.message), requestDetail]
+          .filter((value): value is string => value !== null)
+          .join(' at ') || null,
     };
   }
   const status = typeof response.getStatus === 'function' ? response.getStatus() : null;
@@ -301,7 +321,7 @@ const uploadWithTusClient: SourceMediaTusUpload = (input) =>
       endpoint: input.endpoint,
       retryDelays: [0, 3_000, 5_000, 10_000, 20_000],
       headers: { ...input.headers },
-      uploadDataDuringCreation: true,
+      uploadDataDuringCreation: input.uploadDataDuringCreation ?? true,
       removeFingerprintOnSuccess: true,
       storeFingerprintForResuming: false,
       chunkSize: input.chunkSize,
@@ -349,7 +369,7 @@ export interface SourceMediaStorage {
   ): Promise<void>;
   download(objectKey: string, signal?: AbortSignal): Promise<Uint8Array>;
   remove(objectKey: string, signal?: AbortSignal): Promise<'deleted' | 'missing'>;
-  provisionAndProbe(): Promise<void>;
+  provisionAndProbe(mode?: SourceMediaProbeMode): Promise<void>;
 }
 
 export function createSourceMediaStorage(
@@ -429,6 +449,7 @@ export function createSourceMediaStorage(
     bytes: Uint8Array,
     contentType: string,
     signal?: AbortSignal,
+    uploadDataDuringCreation = true,
   ): Promise<void> =>
     tusUploadImpl({
       endpoint: `${directStorageOrigin(config)}/storage/v1/upload/resumable`,
@@ -445,6 +466,7 @@ export function createSourceMediaStorage(
         cacheControl: '31536000',
       },
       chunkSize: TUS_CHUNK_SIZE,
+      uploadDataDuringCreation,
       signal,
     });
 
@@ -511,7 +533,7 @@ export function createSourceMediaStorage(
       return 'deleted';
     },
 
-    async provisionAndProbe() {
+    async provisionAndProbe(mode: SourceMediaProbeMode = 'tus') {
       await storage.ensureBucket();
       const objectKey = `probes/${randomUUID()}.png`;
       const pngPrefix = Buffer.from(
@@ -525,7 +547,13 @@ export function createSourceMediaStorage(
       bytes.set(pngPrefix);
       let primaryError: unknown = null;
       try {
-        await storage.upload(objectKey, bytes, 'image/png');
+        if (mode === 'standard') {
+          await uploadStandard(objectKey, bytes, 'image/png');
+        } else if (mode === 'tus-no-create') {
+          await uploadTus(objectKey, bytes, 'image/png', undefined, false);
+        } else {
+          await storage.upload(objectKey, bytes, 'image/png');
+        }
         const downloaded = await storage.download(objectKey);
         const expected = createHash('sha256').update(bytes).digest('hex');
         const actual = createHash('sha256').update(downloaded).digest('hex');

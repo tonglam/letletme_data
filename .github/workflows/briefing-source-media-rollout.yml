@@ -14,6 +14,15 @@ on:
           - enable
           - enable-retention
           - disable
+      probe_mode:
+        description: Upload path for provision diagnostics; ignored by other modes
+        required: true
+        default: tus
+        type: choice
+        options:
+          - tus
+          - standard
+          - tus-no-create
 
 permissions:
   contents: read
@@ -40,6 +49,7 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           ROLLOUT_MODE: ${{ inputs.mode }}
+          PROBE_MODE: ${{ inputs.probe_mode }}
           ROLLOUT_SHA: ${{ github.sha }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
         with:
@@ -47,7 +57,7 @@ jobs:
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 17m
-          envs: ROLLOUT_MODE,ROLLOUT_SHA,VPS_WORKDIR
+          envs: ROLLOUT_MODE,PROBE_MODE,ROLLOUT_SHA,VPS_WORKDIR
           script: |
             set -euo pipefail
 
@@ -247,8 +257,15 @@ jobs:
 
             if [ "$ROLLOUT_MODE" = provision ] || [ "$ROLLOUT_MODE" = enable ] \
               || [ "$ROLLOUT_MODE" = enable-retention ]; then
+              probe_flag='--probe-tus'
+              case "$PROBE_MODE" in
+                tus) probe_flag='--probe-tus' ;;
+                standard) probe_flag='--probe-standard' ;;
+                tus-no-create) probe_flag='--probe-tus-no-create' ;;
+                *) echo "unknown probe mode: $PROBE_MODE" >&2; exit 1 ;;
+              esac
               APP_IMAGE="$current_image" docker compose run --rm -T --no-deps media-worker \
-                bun dist/media-worker.js --provision-and-probe
+                bun dist/media-worker.js --provision-and-probe "$probe_flag"
             fi
             if [ "$ROLLOUT_MODE" = provision ]; then
               report_health
