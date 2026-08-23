@@ -192,6 +192,7 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
       !Number.isSafeInteger(row.eventId) ||
       !Number.isSafeInteger(row.entryId) ||
       typeof row.checkedAt !== 'string' ||
+      !Number.isFinite(Date.parse(row.checkedAt)) ||
       typeof row.revision !== 'string' ||
       (row.source !== 'FPL_ENTRY_SUMMARY' &&
         row.source !== 'FPL_CLASSIC_STANDINGS' &&
@@ -201,6 +202,7 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
     }
     if (
       typeof row.staleAt !== 'string' ||
+      !Number.isFinite(Date.parse(row.staleAt)) ||
       (row.netEventPoints !== undefined &&
         row.netEventPoints !== null &&
         typeof row.netEventPoints !== 'number') ||
@@ -538,6 +540,7 @@ const refreshEntrySummaries = async (
           const summary = await runManagerSummaryFetch(
             () => fplClient.getEntrySummary(entryId),
             options.priority,
+            entryId,
           );
           const checkedAt = nowIso();
           const existing = rows.get(entryId);

@@ -134,6 +134,27 @@ describe('manager live refresh targets', () => {
       }),
     ).toBe(false);
   });
+
+  test('replaces an invalid cached timestamp with a valid incoming row', () => {
+    const invalidCurrent = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: 'not-a-timestamp',
+      upstreamUpdatedAt: '2026-08-23T09:59:00.000Z',
+    };
+    const validIncoming = {
+      source: 'FPL_ENTRY_SUMMARY' as const,
+      checkedAt: '2026-08-23T10:01:00.000Z',
+      upstreamUpdatedAt: null,
+    };
+
+    expect(shouldReplaceManagerLiveRow(invalidCurrent, validIncoming)).toBe(true);
+    expect(
+      shouldReplaceManagerLiveRow(validIncoming, {
+        ...invalidCurrent,
+        source: 'FPL_FINAL_RESULT',
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('classic manager live fallback', () => {
@@ -243,6 +264,74 @@ describe('classic manager live fallback', () => {
     releaseFirstWave?.();
     expect((await pending).flat()).toEqual([1, 2, 3, 4, 5, 6]);
     expect(maximumActive).toBe(2);
+  });
+
+  test('coalesces the same manager across overlapping refresh groups', async () => {
+    const run = createManagerSummaryFetchGate(2);
+    const calls = new Map<number, number>();
+    let releaseFetches!: () => void;
+    const fetchesBlocked = new Promise<void>((resolve) => {
+      releaseFetches = resolve;
+    });
+
+    const refreshGroup = (entryIds: readonly number[]) =>
+      Promise.all(
+        entryIds.map((entryId) =>
+          run(
+            async () => {
+              calls.set(entryId, (calls.get(entryId) ?? 0) + 1);
+              await fetchesBlocked;
+              return entryId;
+            },
+            'background',
+            entryId,
+          ),
+        ),
+      );
+
+    const first = refreshGroup([1, 2]);
+    const second = refreshGroup([2, 3]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(calls.get(2)).toBe(1);
+    releaseFetches();
+    expect(await first).toEqual([1, 2]);
+    expect(await second).toEqual([2, 3]);
+    expect(calls).toEqual(
+      new Map([
+        [1, 1],
+        [2, 1],
+        [3, 1],
+      ]),
+    );
+  });
+
+  test('starts a fresh keyed fetch after the shared request settles', async () => {
+    const run = createManagerSummaryFetchGate(1);
+    let calls = 0;
+
+    expect(
+      await run(
+        async () => {
+          calls += 1;
+          return 'first';
+        },
+        'foreground',
+        7,
+      ),
+    ).toBe('first');
+    expect(
+      await run(
+        async () => {
+          calls += 1;
+          return 'second';
+        },
+        'foreground',
+        7,
+      ),
+    ).toBe('second');
+    expect(calls).toBe(2);
   });
 
   test('serializes league-scoped crawls while retaining disjoint work', async () => {
@@ -392,6 +481,18 @@ describe('classic manager live fallback', () => {
     expect(rows.get(1)?.value).toBe('redis');
   });
 
+  test('prefers a valid live cache row over a captured row with an invalid timestamp', async () => {
+    const captured = new Map([[1, { checkedAt: 'invalid', value: 'captured' }]]);
+
+    const rows = await readLatestRowsWithFallback(
+      [1],
+      captured,
+      async () => new Map([[1, { checkedAt: '2026-08-23T10:01:00.000Z', value: 'live' }]]),
+    );
+
+    expect(rows.get(1)?.value).toBe('live');
+  });
+
   test('prefers the serialized cache publication when timestamps tie', async () => {
     const captured = new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'captured' }]]);
 
@@ -460,6 +561,60 @@ describe('classic manager live fallback', () => {
     await Promise.all([runningBackground, queuedBackground, foreground]);
 
     expect(order).toEqual(['background-active', 'foreground', 'background-queued']);
+  });
+
+  test('promotes a coalesced background manager when foreground work joins it', async () => {
+    const run = createManagerSummaryFetchGate(1);
+    const order: string[] = [];
+    let releaseActive!: () => void;
+    const activeBlocked = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+
+    const active = run(
+      async () => {
+        order.push('active');
+        await activeBlocked;
+        return 'active';
+      },
+      'background',
+      1,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    const queuedManager = run(
+      async () => {
+        order.push('manager-2');
+        return 'shared';
+      },
+      'background',
+      2,
+    );
+    const queuedOther = run(
+      async () => {
+        order.push('manager-3');
+        return 'other';
+      },
+      'background',
+      3,
+    );
+    const joinedForeground = run(
+      async () => {
+        order.push('duplicate-manager-2');
+        return 'duplicate';
+      },
+      'foreground',
+      2,
+    );
+
+    releaseActive();
+    expect(await Promise.all([active, queuedManager, queuedOther, joinedForeground])).toEqual([
+      'active',
+      'shared',
+      'other',
+      'shared',
+    ]);
+    expect(order).toEqual(['active', 'manager-2', 'manager-3']);
   });
 
   test('rejects an invalid shared concurrency limit', () => {

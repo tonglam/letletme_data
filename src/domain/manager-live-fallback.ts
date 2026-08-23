@@ -16,6 +16,11 @@ export const shouldReplaceManagerLiveRow = (
   current: ComparableManagerLiveRow,
   incoming: ComparableManagerLiveRow,
 ): boolean => {
+  const currentCheckedAt = Date.parse(current.checkedAt);
+  const incomingCheckedAt = Date.parse(incoming.checkedAt);
+  if (!Number.isFinite(currentCheckedAt)) return Number.isFinite(incomingCheckedAt);
+  if (!Number.isFinite(incomingCheckedAt)) return false;
+
   const currentPriority = managerLiveSourcePriority(current.source);
   const incomingPriority = managerLiveSourcePriority(incoming.source);
   if (currentPriority !== incomingPriority) return incomingPriority > currentPriority;
@@ -32,7 +37,7 @@ export const shouldReplaceManagerLiveRow = (
     }
   }
 
-  return Date.parse(incoming.checkedAt) >= Date.parse(current.checkedAt);
+  return incomingCheckedAt >= currentCheckedAt;
 };
 
 export const selectForegroundClassicRankEntryIds = <T>(
@@ -144,7 +149,13 @@ export const readLatestRowsWithFallback = async <T extends { checkedAt: string }
       const captured = rows.get(entryId);
       // The caller's live read is authoritative at the time it runs, so it
       // wins timestamp ties over a request-captured snapshot.
-      if (!captured || Date.parse(cached.checkedAt) >= Date.parse(captured.checkedAt)) {
+      const capturedCheckedAt = captured ? Date.parse(captured.checkedAt) : Number.NaN;
+      const cachedCheckedAt = Date.parse(cached.checkedAt);
+      if (
+        !captured ||
+        (!Number.isFinite(capturedCheckedAt) && Number.isFinite(cachedCheckedAt)) ||
+        (Number.isFinite(cachedCheckedAt) && cachedCheckedAt >= capturedCheckedAt)
+      ) {
         rows.set(entryId, cached);
       }
     }
@@ -200,43 +211,91 @@ export const pendingManagerRefreshEntryIds = <T>(
 
 export const createManagerSummaryFetchGate = (
   maxConcurrent = MAX_SUMMARY_FETCH_CONCURRENCY,
-): (<T>(task: () => Promise<T>, priority?: ManagerSummaryFetchPriority) => Promise<T>) => {
+): (<T>(
+  task: () => Promise<T>,
+  priority?: ManagerSummaryFetchPriority,
+  coalesceKey?: string | number,
+) => Promise<T>) => {
   if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent <= 0) {
     throw new RangeError('maxConcurrent must be a positive integer');
   }
 
+  type FetchWaiter = {
+    task: () => Promise<unknown>;
+    resolve: (value: unknown) => void;
+    reject: (reason: unknown) => void;
+    priority: ManagerSummaryFetchPriority;
+    coalesceKey: string | number | undefined;
+    started: boolean;
+  };
+
   let active = 0;
-  const foregroundWaiters: Array<() => void> = [];
-  const backgroundWaiters: Array<() => void> = [];
+  const foregroundWaiters: FetchWaiter[] = [];
+  const backgroundWaiters: FetchWaiter[] = [];
+  const keyed = new Map<string | number, { waiter: FetchWaiter; promise: Promise<unknown> }>();
 
-  const acquire = (priority: ManagerSummaryFetchPriority): Promise<void> =>
-    new Promise((resolve) => {
-      const start = (): void => {
-        active += 1;
-        resolve();
-      };
+  const startNext = (): void => {
+    while (active < maxConcurrent) {
+      const waiter = foregroundWaiters.shift() ?? backgroundWaiters.shift();
+      if (!waiter) return;
+      waiter.started = true;
+      active += 1;
+      void Promise.resolve()
+        .then(waiter.task)
+        .finally(() => {
+          active -= 1;
+          if (
+            waiter.coalesceKey !== undefined &&
+            keyed.get(waiter.coalesceKey)?.waiter === waiter
+          ) {
+            keyed.delete(waiter.coalesceKey);
+          }
+          startNext();
+        })
+        .then(waiter.resolve, waiter.reject);
+    }
+  };
 
-      if (active < maxConcurrent) {
-        start();
-      } else {
-        (priority === 'foreground' ? foregroundWaiters : backgroundWaiters).push(start);
-      }
-    });
-
-  return async <T>(
+  return <T>(
     task: () => Promise<T>,
     priority: ManagerSummaryFetchPriority = 'foreground',
+    coalesceKey?: string | number,
   ): Promise<T> => {
-    await acquire(priority);
-    try {
-      return await task();
-    } finally {
-      active -= 1;
-      // A background crawl may queue hundreds of entries. Once an active
-      // permit completes, always admit a request-path refresh first so the
-      // desk waits for at most the currently running upstream wave.
-      (foregroundWaiters.shift() ?? backgroundWaiters.shift())?.();
+    if (coalesceKey !== undefined) {
+      const existing = keyed.get(coalesceKey);
+      if (existing) {
+        if (
+          priority === 'foreground' &&
+          !existing.waiter.started &&
+          existing.waiter.priority === 'background'
+        ) {
+          const queuedIndex = backgroundWaiters.indexOf(existing.waiter);
+          if (queuedIndex >= 0) backgroundWaiters.splice(queuedIndex, 1);
+          existing.waiter.priority = 'foreground';
+          foregroundWaiters.push(existing.waiter);
+        }
+        return existing.promise as Promise<T>;
+      }
     }
+
+    let resolvePromise: (value: T) => void = () => undefined;
+    let rejectPromise: (reason: unknown) => void = () => undefined;
+    const promise = new Promise<T>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    });
+    const waiter: FetchWaiter = {
+      task,
+      resolve: (value) => resolvePromise(value as T),
+      reject: rejectPromise,
+      priority,
+      coalesceKey,
+      started: false,
+    };
+    if (coalesceKey !== undefined) keyed.set(coalesceKey, { waiter, promise });
+    (priority === 'foreground' ? foregroundWaiters : backgroundWaiters).push(waiter);
+    startNext();
+    return promise;
   };
 };
 
