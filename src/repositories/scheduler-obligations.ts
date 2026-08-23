@@ -176,6 +176,10 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
   db?: DbHandle;
 }): Promise<number> {
   const db = input.db ?? (await getDb());
+  if (!Number.isFinite(input.beforeDueAt.getTime())) {
+    throw new Error('Scheduler supersede boundary must be a valid timestamp');
+  }
+  const beforeDueAt = input.beforeDueAt.toISOString();
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
@@ -195,7 +199,7 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
       and(
         eq(schedulerObligationsInOps.jobName, input.jobName),
         eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
-        sql`${schedulerObligationsInOps.dueAt} < ${input.beforeDueAt}`,
+        sql`${schedulerObligationsInOps.dueAt} < ${beforeDueAt}`,
         inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
       ),
     )
