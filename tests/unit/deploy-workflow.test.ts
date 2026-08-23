@@ -132,6 +132,14 @@ describe('release workflow gates', () => {
     expect(sourceMediaRolloutWorkflow).toContain('configure-briefing-source-media-env.sh');
     expect(sourceMediaRolloutWorkflow).toContain('"mediaEnvPresent":false');
     expect(sourceMediaRolloutWorkflow).toContain('bootstrap-briefing-source-media-env.sh');
+    expect(sourceMediaRolloutWorkflow).toContain('bun validate-env.ts --probe-bug-report-storage');
+    expect(
+      sourceMediaRolloutWorkflow.indexOf('bootstrap-briefing-source-media-env.sh'),
+    ).toBeGreaterThan(
+      sourceMediaRolloutWorkflow.indexOf('bun validate-env.ts --probe-bug-report-storage'),
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('read_container_boolean');
+    expect(sourceMediaRolloutWorkflow).toContain('"containerHealth":"%s"');
     expect(
       sourceMediaRolloutWorkflow.indexOf(
         'source-media rollout refused: Storage secret is present in .env.deploy',
