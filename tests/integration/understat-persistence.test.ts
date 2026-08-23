@@ -48,10 +48,17 @@ import { persistUnderstatTeamDiscovery } from '../../src/repositories/understat-
 import { createFplPlayerFixtureStatsRepository } from '../../src/repositories/fpl-player-fixture-stats';
 import { understatSyncRepository } from '../../src/repositories/understat-sync';
 import { providerIdentityRepository } from '../../src/repositories/provider-identity';
-import { closeUnderstatPlayerQueue } from '../../src/queues/understat-player.queue';
-import { closeUnderstatTeamQueue } from '../../src/queues/understat-team.queue';
+import {
+  closeUnderstatPlayerQueue,
+  getUnderstatPlayerQueue,
+} from '../../src/queues/understat-player.queue';
+import {
+  closeUnderstatTeamQueue,
+  getUnderstatTeamQueue,
+} from '../../src/queues/understat-team.queue';
 import { finalizeUnderstatPlayerRun } from '../../src/services/understat-player.service';
 import { getUnderstatStatus } from '../../src/services/understat-status.service';
+import { reconcileUnderstatOrphanedRuns } from '../../src/services/understat-recovery.service';
 import { finalizeUnderstatTeamRun } from '../../src/services/understat-team.service';
 import {
   stageUnderstatPlayerLeague,
@@ -747,6 +754,9 @@ describe('Understat persistence', () => {
     expect(status.resources.teamParticipants.count).toBe(20);
     expect(status.lanes.team.latestRun?.status).toBe('completed');
     expect(status.lanes.player.latestRun?.status).toBe('skipped');
+    expect(status.lanes.team.latestRun?.updatedAt).toBeInstanceOf(Date);
+    expect(status.lanes.team.stale).toBe(false);
+    expect(status.lanes.team.recovery).toMatchObject({ state: 'none' });
   });
 
   test('rolls back a failed scoped split replacement', async () => {
@@ -977,6 +987,56 @@ describe('Understat persistence', () => {
     expect(settled?.completedItems).toBe(1);
     expect(settled?.skippedItems).toBe(0);
     expect(settled?.completedAt).not.toBeNull();
+  });
+
+  test('reconciles an orphaned run only when both Understat queues are empty', async () => {
+    const teamQueue = getUnderstatTeamQueue();
+    const playerQueue = getUnderstatPlayerQueue();
+    await teamQueue.drain(true);
+    await playerQueue.drain(true);
+
+    const runId = randomUUID();
+    const obligationId = randomUUID();
+    runIds.push(runId);
+    await understatSyncRepository.createRun({
+      runId,
+      lane: 'team',
+      season,
+      mode: 'incremental',
+      trigger: 'cron',
+      obligationId,
+      obligationGeneration: 1,
+    });
+    await understatSyncRepository.addItems(runId, [
+      { resourceType: 'team-detail', resourceId: String(teamIds[0]) },
+    ]);
+    await understatSyncRepository.markItemRunning(runId, 'team-detail', String(teamIds[0]));
+    const db = await getDb();
+    await db
+      .update(understatSyncRuns)
+      .set({ updatedAt: new Date(Date.now() - 31 * 60_000) })
+      .where(eq(understatSyncRuns.runId, runId));
+
+    const queued = await teamQueue.add(
+      'understat-team-discover',
+      { runId: randomUUID(), season, mode: 'incremental', trigger: 'cron' },
+      { jobId: `understat-orphan-queue-${runId}` },
+    );
+    const deferred = await reconcileUnderstatOrphanedRuns(new Date());
+    expect(deferred.skippedBecauseQueueBusy).toBe(true);
+    expect((await understatSyncRepository.findRun(runId))?.status).toBe('running');
+    await queued.remove();
+
+    const recovered = await reconcileUnderstatOrphanedRuns(new Date());
+    expect(recovered.recovered).toBe(1);
+    const [run, item] = await Promise.all([
+      understatSyncRepository.findRun(runId),
+      understatSyncRepository.findItem(runId, 'team-detail', String(teamIds[0])),
+    ]);
+    expect(run?.status).toBe('failed');
+    expect(run?.metadata).toMatchObject({ obligationId, obligationGeneration: 1 });
+    expect(run?.metadata.recovery).toMatchObject({ state: 'orphaned', failedItems: 1 });
+    expect(item?.status).toBe('failed');
   });
 
   test('keeps provider-link season bounds monotonic during historical backfills', async () => {

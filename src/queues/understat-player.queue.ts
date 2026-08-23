@@ -18,6 +18,8 @@ export interface UnderstatPlayerJobData {
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
+  obligationId?: string;
+  obligationGeneration?: number;
   resourceId?: number;
   teamTitle?: string;
   teamIds?: number[];

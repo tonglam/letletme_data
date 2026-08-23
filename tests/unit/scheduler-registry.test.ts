@@ -7,6 +7,7 @@ import {
   officialH2HDefinition,
   resolveEntryInfoSnapshotTargetEventId,
   resolvePostMatchResultPlans,
+  understatDailyDefinition,
   type ScheduledJobDefinition,
 } from '../../src/scheduler/job-registry';
 import {
@@ -55,6 +56,61 @@ describe('standalone scheduler registry', () => {
       manualTrigger: false,
       queueName: 'content-*',
     });
+  });
+
+  test('schedules Understat lanes at staggered UTC+8 incremental checkpoints', async () => {
+    const enqueue = mock(async () => ({ id: 'understat-job', data: { runId: 'understat-run' } }));
+    const definition = understatDailyDefinition(
+      {
+        name: 'understat-team-incremental-test',
+        hour: 11,
+        minute: 15,
+        queueName: 'understat-team-sync',
+        successPredicate: 'finalizer',
+        enqueue: enqueue as never,
+      },
+      () => true,
+    );
+    const disabled = understatDailyDefinition(
+      {
+        name: 'understat-team-incremental-disabled-test',
+        hour: 11,
+        minute: 15,
+        queueName: 'understat-team-sync',
+        successPredicate: 'finalizer',
+        enqueue: enqueue as never,
+      },
+      () => false,
+    );
+    const before = await disabled.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T02:00:00.000Z'),
+      events: [],
+    });
+    expect(before).toEqual([]);
+    const plans = await definition.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T04:00:00.000Z'),
+      events: [],
+    });
+    expect(plans).toEqual([
+      expect.objectContaining({
+        periodKey: '20260823',
+        dueAt: new Date('2026-08-23T03:15:00.000Z'),
+        source: 'catchup',
+      }),
+    ]);
+    await definition.enqueue({
+      context: {
+        season: TEST_SEASON,
+        now: new Date('2026-08-23T04:00:00.000Z'),
+        events: [],
+      },
+      plan: plans[0]!,
+      obligationId: 'understat-obligation',
+      generation: 2,
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
   });
 
   test('does not claim downstream completion for the post-match coordinator', () => {

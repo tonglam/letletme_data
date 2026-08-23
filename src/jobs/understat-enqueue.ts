@@ -8,6 +8,8 @@ export interface UnderstatSyncRequest {
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
+  obligationId?: string;
+  obligationGeneration?: number;
   teamIds?: number[];
   matchIds?: number[];
   runId?: string;
@@ -22,6 +24,10 @@ export async function enqueueUnderstatTeamSync(request: UnderstatSyncRequest) {
       season: request.season,
       mode: request.mode,
       trigger: request.trigger,
+      ...(request.obligationId ? { obligationId: request.obligationId } : {}),
+      ...(request.obligationGeneration === undefined
+        ? {}
+        : { obligationGeneration: request.obligationGeneration }),
       teamIds: request.teamIds,
     },
     { jobId: `understat-team-discover-${runId}` },
@@ -38,6 +44,10 @@ export async function enqueueUnderstatPlayerSync(request: UnderstatSyncRequest) 
       season: request.season,
       mode: request.mode,
       trigger: request.trigger,
+      ...(request.obligationId ? { obligationId: request.obligationId } : {}),
+      ...(request.obligationGeneration === undefined
+        ? {}
+        : { obligationGeneration: request.obligationGeneration }),
       teamIds: request.teamIds,
       matchIds: request.matchIds,
     },
@@ -51,6 +61,8 @@ export async function enqueueUnderstatTeamDetail(input: {
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
+  obligationId?: string;
+  obligationGeneration?: number;
   teamId: number;
   teamTitle: string;
 }) {
@@ -64,6 +76,8 @@ export async function enqueueUnderstatTeamFinalize(input: {
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
+  obligationId?: string;
+  obligationGeneration?: number;
 }) {
   return getUnderstatTeamQueue().add('understat-team-finalize', input, {
     jobId: `understat-team-finalize-${input.runId}`,
@@ -75,6 +89,8 @@ export async function enqueueUnderstatPlayerTeamDetail(input: {
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
+  obligationId?: string;
+  obligationGeneration?: number;
   resourceId: number;
   teamTitle: string;
 }) {
@@ -88,6 +104,8 @@ export async function enqueueUnderstatPlayerMatch(input: {
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
+  obligationId?: string;
+  obligationGeneration?: number;
   resourceId: number;
 }) {
   return getUnderstatPlayerQueue().add('understat-player-match', input, {
@@ -100,6 +118,8 @@ export async function enqueueUnderstatPlayerFinalize(input: {
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
+  obligationId?: string;
+  obligationGeneration?: number;
 }) {
   return getUnderstatPlayerQueue().add('understat-player-finalize', input, {
     jobId: `understat-player-finalize-${input.runId}`,

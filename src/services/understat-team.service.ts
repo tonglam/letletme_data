@@ -43,6 +43,18 @@ import { enqueueUnderstatFanout, selectUnsettledUnderstatFanoutIds } from './und
 const LEAGUE_RESOURCE_TYPE = 'league';
 const TEAM_RESOURCE_TYPE = 'team-detail';
 
+function obligationFields(job: UnderstatTeamJobData): {
+  obligationId?: string;
+  obligationGeneration?: number;
+} {
+  return {
+    ...(job.obligationId ? { obligationId: job.obligationId } : {}),
+    ...(job.obligationGeneration === undefined
+      ? {}
+      : { obligationGeneration: job.obligationGeneration }),
+  };
+}
+
 function requireJobValue<T>(value: T | undefined, name: string): T {
   if (value === undefined) throw new Error(`Understat team job requires ${name}`);
   return value;
@@ -64,6 +76,7 @@ async function finalizeWhenReady(job: UnderstatTeamJobData, ready: boolean): Pro
     season: job.season,
     mode: job.mode,
     trigger: job.trigger,
+    ...obligationFields(job),
   });
 }
 
@@ -85,6 +98,7 @@ async function enqueueTeamDetailJobs(
           season: job.season,
           mode: job.mode,
           trigger: job.trigger,
+          ...obligationFields(job),
           teamId,
           teamTitle: team.title,
         });
@@ -108,6 +122,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
     season: job.season,
     mode: job.mode,
     trigger: job.trigger,
+    ...obligationFields(job),
   });
   await understatSyncRepository.addItems(job.runId, [
     { resourceType: LEAGUE_RESOURCE_TYPE, resourceId: league },
@@ -313,7 +328,9 @@ export async function finalizeUnderstatTeamRun(job: UnderstatTeamJobData): Promi
     );
   } catch (error) {
     if (error instanceof IncompleteUnderstatTeamSnapshotError) {
-      await understatSyncRepository.markRunSkipped(job.runId, error.message);
+      await understatSyncRepository.markRunSkipped(job.runId, error.message, {
+        completeness: 'skipped',
+      });
       return;
     }
     throw error;

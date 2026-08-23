@@ -15,6 +15,7 @@ export const MAINTENANCE_JOBS = {
   ENTRY_ONBOARDING: 'entry-onboarding',
   MY_FPL_SNAPSHOT: 'my-fpl-snapshot',
   MY_FPL_SNAPSHOT_OUTBOX: 'my-fpl-snapshot-outbox',
+  UNDERSTAT_ORPHAN_RECONCILER: 'understat-orphan-reconciler',
 } as const;
 
 export type MaintenanceJobName = (typeof MAINTENANCE_JOBS)[keyof typeof MAINTENANCE_JOBS];

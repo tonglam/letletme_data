@@ -311,6 +311,7 @@ export async function completeSchedulerObligation(input: {
 export async function markSchedulerObligationIrrecoverable(input: {
   obligationId: string;
   status?: Extract<SchedulerObligationStatus, 'skipped' | 'irrecoverable'>;
+  generation?: number;
   evidence?: Record<string, unknown>;
   includeInFlight?: boolean;
   db?: DbHandle;
@@ -332,6 +333,9 @@ export async function markSchedulerObligationIrrecoverable(input: {
     .where(
       and(
         eq(schedulerObligationsInOps.obligationId, input.obligationId),
+        input.generation === undefined
+          ? undefined
+          : eq(schedulerObligationsInOps.generation, input.generation),
         inArray(schedulerObligationsInOps.status, closeableStatuses),
       ),
     )
