@@ -269,6 +269,26 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(durationMs).toBeLessThan(250);
   });
 
+  test('does not confirm a dispatch that rejects after the response deadline', async () => {
+    const checkedAt = new Date().toISOString();
+    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    let rejectDispatch!: (reason: Error) => void;
+    const lateDispatch = new Promise<void>((_, reject) => {
+      rejectDispatch = reject;
+    });
+    dispatchRefresh.mockImplementationOnce(() => lateDispatch);
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'CACHE_ONLY',
+    });
+
+    expect(result.refreshQueued).toBe(false);
+    rejectDispatch(new Error('queue unavailable after response deadline'));
+    await lateDispatch.catch(() => undefined);
+  });
+
   test('reports a confirmed enqueue failure without discarding cached content', async () => {
     const checkedAt = new Date().toISOString();
     redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
