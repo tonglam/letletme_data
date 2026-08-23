@@ -12,6 +12,7 @@ import {
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
   readLatestRowsWithFallback,
+  runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
   shouldReplaceManagerLiveRow,
@@ -450,6 +451,29 @@ describe('classic manager live fallback', () => {
     expect(order).toEqual(['background:lease-contended', 'foreground:run', 'background:run']);
   });
 
+  test('keeps retrying an active distributed lease until ownership is available', async () => {
+    const run = createKeyedTaskSerializer();
+    let attempts = 0;
+    let taskRuns = 0;
+
+    const result = await runYieldingKeyedTask(
+      run,
+      '2025:1:99',
+      async () => {
+        attempts += 1;
+        if (attempts <= 75) return { complete: false };
+        taskRuns += 1;
+        return { complete: true, value: 'owned' };
+      },
+      'foreground',
+      async () => undefined,
+    );
+
+    expect(result).toBe('owned');
+    expect(attempts).toBe(76);
+    expect(taskRuns).toBe(1);
+  });
+
   test('keeps captured checkpoint rows when a background Redis read fails', async () => {
     const captured = new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'checkpoint' }]]);
     let observedError: unknown;
@@ -535,6 +559,77 @@ describe('classic manager live fallback', () => {
     await Promise.all([background, foreground]);
 
     expect(order).toEqual(['background:1', 'foreground', 'background:5']);
+  });
+
+  test('yields the league lane between background standings pages', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseFirstPage!: () => void;
+    const firstPageBlocked = new Promise<void>((resolve) => {
+      releaseFirstPage = resolve;
+    });
+
+    const background = runManagerStandingsPageSequence(1, 3, (page) =>
+      run(
+        '2025:1:99',
+        async () => {
+          order.push(`background:${page}`);
+          if (page === 1) await firstPageBlocked;
+          return {
+            complete: page === 3,
+            nextPage: page + 1,
+            errorCode: null,
+            refreshedEntryIds: [page],
+          };
+        },
+        'background',
+      ),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    const foreground = run('2025:1:99', async () => {
+      order.push('foreground');
+    });
+
+    releaseFirstPage();
+    const [result] = await Promise.all([background, foreground]);
+
+    expect(result).toEqual({
+      complete: true,
+      nextPage: 4,
+      errorCode: null,
+      refreshedEntryIds: [1, 2, 3],
+    });
+    expect(order).toEqual(['background:1', 'foreground', 'background:2', 'background:3']);
+  });
+
+  test('stops the standings page sequence after a partial failure', async () => {
+    const pages: number[] = [];
+
+    const result = await runManagerStandingsPageSequence(1, 20, async (page) => {
+      pages.push(page);
+      return page === 2
+        ? {
+            complete: false,
+            nextPage: 3,
+            errorCode: 'UPSTREAM_UNAVAILABLE' as const,
+            refreshedEntryIds: [22],
+          }
+        : {
+            complete: false,
+            nextPage: 2,
+            errorCode: null,
+            refreshedEntryIds: [11],
+          };
+    });
+
+    expect(pages).toEqual([1, 2]);
+    expect(result).toEqual({
+      complete: false,
+      nextPage: 3,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+      refreshedEntryIds: [11, 22],
+    });
   });
 
   test('admits foreground work before queued background batches', async () => {

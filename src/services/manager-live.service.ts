@@ -30,6 +30,7 @@ import {
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
+  runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
   shouldReplaceManagerLiveRow,
@@ -48,9 +49,11 @@ const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 // response. Larger leagues remain bounded and finish through the background
 // refresh below.
 const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
-const CLASSIC_REFRESH_LOCK_SECONDS = 30;
+// One serialized background unit fetches at most one FPL standings page. Keep
+// its lease longer than the client's 40-second logical request deadline, and
+// renew it while the page publication/checkpoint finishes.
+const CLASSIC_REFRESH_LOCK_SECONDS = 60;
 const CLASSIC_REFRESH_LOCK_WAIT_MS = 100;
-const CLASSIC_REFRESH_LOCK_MAX_WAIT_MS = 60_000;
 
 const RELEASE_CLASSIC_REFRESH_LOCK_SCRIPT = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -431,7 +434,6 @@ const runClassicStandingsRefresh = <T>(
   if (!redis) return runClassicStandingsRefreshLocal(key, task, priority);
 
   const lockKey = classicRefreshLockKey(key);
-  const waitStartedAt = Date.now();
   return runYieldingKeyedTask<T>(
     runClassicStandingsRefreshLocal,
     key,
@@ -453,16 +455,10 @@ const runClassicStandingsRefresh = <T>(
       }
 
       if (!lockOwner) {
-        if (Date.now() - waitStartedAt >= CLASSIC_REFRESH_LOCK_MAX_WAIT_MS) {
-          // The durable checkpoint and upstream timestamp guard below still
-          // prevent regression in this degraded path. Avoid leaving a cold
-          // request blocked forever behind a wedged remote lease owner.
-          logWarn('Official classic manager distributed refresh lock wait timed out', {
-            key,
-            waitedMs: Date.now() - waitStartedAt,
-          });
-          return { complete: true, value: await task() };
-        }
+        // A present lease is either actively renewed or will expire. Never
+        // bypass an owner merely because this waiter is old: Redis expiry is
+        // the takeover signal for a crashed/wedged owner, while an active
+        // renewal proves that concurrent publication would be unsafe.
         return { complete: false };
       }
 
@@ -556,8 +552,11 @@ const refreshEntrySummaries = async (
                       summary.summary_overall_rank ?? null,
                       existing.overallRank,
                     ),
-                    checkedAt,
-                    staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+                    // OR enrichment must not make an old standings snapshot
+                    // appear fresh. Keep the standings publication clock so a
+                    // failed/slow crawl remains eligible for the next refresh.
+                    checkedAt: existing.checkedAt,
+                    staleAt: existing.staleAt,
                   });
                 })()
               : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
@@ -1237,60 +1236,65 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           errorCode: null,
           refreshedEntryIds: [],
         };
-        let backgroundRankTargets: readonly number[] = [];
-        if (backgroundPlan.backgroundStandingsEntryIds.length > 0 || rankOnlyTargets.length > 0) {
-          const crawl = await runClassicStandingsRefresh(
-            redis,
-            classicRefreshKey,
-            async () => {
-              // Read after entering the league lane so a queued crawl starts
-              // from the publication completed by the preceding task.
-              backgroundRows = await readBackgroundRows(
-                redis,
-                season,
-                input.eventId,
-                scope,
-                backgroundEntryIds,
-                capturedBackgroundRows,
-              );
-              if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
+        if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
+          backgroundResult = await runManagerStandingsPageSequence(1, MAX_STANDINGS_PAGES, (page) =>
+            runClassicStandingsRefresh(
+              redis,
+              classicRefreshKey,
+              async () => {
+                // Re-read after entering every page-sized lane. Foreground
+                // work can jump ahead between pages, and this crawl observes
+                // any publication that completed while it yielded.
+                backgroundRows = await readBackgroundRows(
+                  redis,
+                  season,
+                  input.eventId,
+                  scope,
+                  backgroundEntryIds,
+                  capturedBackgroundRows,
+                );
                 const standingsTargets = pendingManagerRefreshEntryIds(
                   backgroundPlan.backgroundStandingsEntryIds,
                   backgroundRows,
                   isFresh,
                 );
-                backgroundResult =
-                  standingsTargets.length > 0
-                    ? await refreshClassicStandings(
-                        season,
-                        input.eventId,
-                        classicLeagueId,
-                        new Set(standingsTargets),
-                        backgroundRows,
-                        redis,
-                        { startPage: 1, maxPages: MAX_STANDINGS_PAGES },
-                      )
-                    : {
-                        complete: true,
-                        nextPage: 1,
-                        errorCode: null,
-                        refreshedEntryIds: [],
-                      };
-              }
-              const skippedRankTargets = [
-                ...rankOnlyTargets,
-                ...backgroundPlan.backgroundStandingsEntryIds,
-              ].filter((entryId) => classicStandingNeedsOverallRank(backgroundRows.get(entryId)));
-              return Array.from(
-                new Set([...skippedRankTargets, ...backgroundResult.refreshedEntryIds]),
-              ).filter(
-                (entryId) => backgroundRows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
-              );
-            },
-            'background',
+                return standingsTargets.length > 0
+                  ? refreshClassicStandings(
+                      season,
+                      input.eventId,
+                      classicLeagueId,
+                      new Set(standingsTargets),
+                      backgroundRows,
+                      redis,
+                      { startPage: page, maxPages: 1 },
+                    )
+                  : {
+                      complete: true,
+                      nextPage: page,
+                      errorCode: null,
+                      refreshedEntryIds: [],
+                    };
+              },
+              'background',
+            ),
           );
-          backgroundRankTargets = crawl;
         }
+
+        // Only rows refreshed by a successful page (plus rows that were
+        // already fresh rank-only targets) may receive OR enrichment. A failed
+        // crawl must not stamp an old standings row fresh through summary data.
+        const refreshedStandingsIds = new Set(backgroundResult.refreshedEntryIds);
+        const rankOnlyEntryIds = new Set(rankOnlyTargets);
+        const backgroundRankTargets = Array.from(
+          new Set([...rankOnlyTargets, ...backgroundResult.refreshedEntryIds]),
+        ).filter((entryId) => {
+          const row = backgroundRows.get(entryId);
+          return (
+            row?.source === 'FPL_CLASSIC_STANDINGS' &&
+            classicStandingNeedsOverallRank(row) &&
+            (refreshedStandingsIds.has(entryId) || (rankOnlyEntryIds.has(entryId) && isFresh(row)))
+          );
+        });
 
         // Hold the league lane for one four-entry upstream wave at a time.
         // Foreground misses can therefore jump ahead between background waves,
@@ -1308,9 +1312,15 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                 batch,
                 backgroundRows,
               );
-              const rankTargets = batch.filter(
-                (entryId) => batchRows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
-              );
+              const rankTargets = batch.filter((entryId) => {
+                const row = batchRows.get(entryId);
+                return (
+                  row?.source === 'FPL_CLASSIC_STANDINGS' &&
+                  classicStandingNeedsOverallRank(row) &&
+                  (refreshedStandingsIds.has(entryId) ||
+                    (rankOnlyEntryIds.has(entryId) && isFresh(row)))
+                );
+              });
               if (rankTargets.length > 0) {
                 await refreshEntrySummaries(
                   season,

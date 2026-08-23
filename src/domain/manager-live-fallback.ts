@@ -81,6 +81,53 @@ export const runYieldingKeyedTask = async <T>(
   }
 };
 
+export type ManagerStandingsPageResult<TError> = Readonly<{
+  complete: boolean;
+  nextPage: number;
+  errorCode: TError | null;
+  refreshedEntryIds: readonly number[];
+}>;
+
+export const runManagerStandingsPageSequence = async <TError>(
+  startPage: number,
+  maxPage: number,
+  runPage: (page: number) => Promise<ManagerStandingsPageResult<TError>>,
+): Promise<ManagerStandingsPageResult<TError>> => {
+  if (
+    !Number.isSafeInteger(startPage) ||
+    startPage <= 0 ||
+    !Number.isSafeInteger(maxPage) ||
+    maxPage <= 0
+  ) {
+    throw new RangeError('standings page bounds must be positive integers');
+  }
+
+  let nextPage = startPage;
+  let complete = startPage > maxPage;
+  let errorCode: TError | null = null;
+  const refreshedEntryIds = new Set<number>();
+
+  while (!complete && nextPage <= maxPage) {
+    const currentPage = nextPage;
+    const result = await runPage(currentPage);
+    for (const entryId of result.refreshedEntryIds) refreshedEntryIds.add(entryId);
+    nextPage = result.nextPage;
+    errorCode = result.errorCode;
+    complete = result.complete || (errorCode === null && nextPage > maxPage);
+    if (complete || errorCode !== null) break;
+    if (!Number.isSafeInteger(nextPage) || nextPage <= currentPage) {
+      throw new RangeError('standings page sequence must advance');
+    }
+  }
+
+  return {
+    complete,
+    nextPage,
+    errorCode,
+    refreshedEntryIds: Array.from(refreshedEntryIds),
+  };
+};
+
 export const createKeyedTaskSerializer = (): KeyedTaskSerializer => {
   type QueuedTask = {
     task: () => Promise<unknown>;
