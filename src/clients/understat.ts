@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { sourceYearFromSeason } from '../domain/understat';
+import { UNDERSTAT_SPLIT_DIMENSIONS, sourceYearFromSeason } from '../domain/understat';
 import { getConfig } from '../utils/config';
 import { logDebug, logWarn } from '../utils/logger';
 import { acquireUnderstatRequestPermit } from '../utils/understat-rate-limit';
@@ -463,9 +463,10 @@ export class UnderstatClient {
       ['dates', 'players', 'statistics'],
     ).then((response) => {
       const hasCompletedMatch = response.dates.some((date) => date.isResult);
-      const hasStatistics = Object.values(
-        response.statistics as Record<string, Record<string, unknown>>,
-      ).some((value) => Object.keys(value).length > 0);
+      const statistics = response.statistics as Record<string, Record<string, unknown>>;
+      const hasStatistics = UNDERSTAT_SPLIT_DIMENSIONS.some(
+        (dimension) => Object.keys(statistics[dimension] ?? {}).length > 0,
+      );
       const activeSourceYear = sourceYearFromSeason(getConfig().UNDERSTAT_SEASON);
       if (!hasStatistics && (hasCompletedMatch || sourceYear !== activeSourceYear)) {
         throw new UnderstatClientError(

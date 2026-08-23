@@ -100,6 +100,32 @@ describe('Understat client boundary', () => {
     });
   });
 
+  test('does not treat passthrough statistics as a populated split dimension', async () => {
+    const client = new UnderstatClient({
+      enabled: true,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            ...UNDERSTAT_TEAM_FIXTURE,
+            statistics: {
+              situation: {},
+              formation: {},
+              gameState: {},
+              timing: {},
+              shotZone: {},
+              attackSpeed: {},
+              result: {},
+              providerMetadata: { fetched: true },
+            },
+          }),
+        ),
+    });
+
+    await expect(client.getTeamData('Chelsea', 2026)).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+  });
+
   test('is a hard no-network gate when disabled', async () => {
     let calls = 0;
     const client = new UnderstatClient({
