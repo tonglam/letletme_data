@@ -8,6 +8,7 @@ import { getDbClient } from '../../src/db/singleton';
 import {
   completeSchedulerObligation,
   failSchedulerObligation,
+  markSchedulerObligationIrrecoverable,
 } from '../../src/repositories/scheduler-obligations';
 
 const OBLIGATION_ID = '30000000-0000-4000-8000-000000000001';
@@ -104,5 +105,65 @@ describe('scheduler obligation generation fencing', () => {
       generation: 2,
       completion_stage: 'materialized-view-finalizer',
     });
+  });
+
+  test('terminalizes an expired current-day lease before reclaim can launch it', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        lease_owner,
+        lease_expires_at,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'market-daily',
+        'integration:market',
+        '20260822',
+        'daily',
+        'Asia/Shanghai',
+        'running',
+        'catchup',
+        clock_timestamp() - interval '1 day',
+        1,
+        1,
+        'expired-market-owner',
+        clock_timestamp() - interval '1 minute',
+        '{}'::jsonb
+      )
+    `;
+
+    expect(
+      await markSchedulerObligationIrrecoverable({
+        obligationId: OBLIGATION_ID,
+        evidence: { reason: 'market-window-expired' },
+        includeInFlight: true,
+      }),
+    ).toBe(true);
+    expect(
+      await completeSchedulerObligation({
+        obligationId: OBLIGATION_ID,
+        generation: 1,
+        status: 'succeeded',
+      }),
+    ).toBe(false);
+
+    const rows = await sql<Array<{ status: string; lease_owner: string | null }>>`
+      SELECT status, lease_owner
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({ status: 'irrecoverable', lease_owner: null });
   });
 });

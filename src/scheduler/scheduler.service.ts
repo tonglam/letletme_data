@@ -101,6 +101,12 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
             obligationId: obligation.obligationId,
             status: plan.terminalStatus,
             evidence: plan.evidence,
+            // A current-day-only checkpoint becomes historical at the next
+            // pass. Close an enqueued/running prior generation before the
+            // reclaim query can create a new worker for that old date.
+            includeInFlight:
+              definition.catchUpPolicy === 'current-day-only' &&
+              plan.terminalStatus === 'irrecoverable',
           });
         }
         rememberObservedPlan(planKey);
