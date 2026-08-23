@@ -53,6 +53,8 @@ describe('release workflow gates', () => {
     expect(mediaWorker).toContain('releaseSourceMediaGateLeases');
     expect(mediaWorker).toContain('controller.abort');
     expect(mediaWorker).toContain('retentionController?.abort');
+    expect(mediaWorker).toContain('if (polling || shuttingDown || !flags.enabled) return;');
+    expect(mediaWorker).not.toContain('!flags.enabled || retentionInFlight');
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
     expect(deployScript).toContain('--provision-and-probe');

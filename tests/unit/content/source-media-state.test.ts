@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   effectiveSourceMediaDeliveryState,
+  sourceMediaRepairExhaustionTimestamp,
   sourceMediaRetryOffsetsMs,
 } from '../../../src/content/media/source-media-repository';
 import { getSourceMediaRuntimeConfig } from '../../../src/content/media/source-media-config';
+import { isUnsafeSourceMediaImageFailure } from '../../../src/content/media/source-media-processor';
 
 describe('source-media delivery state', () => {
   test('turns every non-terminal gate into effective PARTIAL at the 20-minute deadline', () => {
@@ -44,6 +46,26 @@ describe('source-media delivery state', () => {
       6 * 60 * 60_000,
       24 * 60 * 60_000,
     ]);
+  });
+
+  test('never records repair exhaustion before the 20-minute release deadline', () => {
+    const releaseDeadlineAt = new Date('2026-08-23T10:20:00.000Z');
+    expect(
+      sourceMediaRepairExhaustionTimestamp({
+        dbNow: new Date('2026-08-23T10:01:00.000Z'),
+        releaseDeadlineAt,
+      }),
+    ).toEqual(releaseDeadlineAt);
+    const afterDeadline = new Date('2026-08-23T10:21:00.000Z');
+    expect(
+      sourceMediaRepairExhaustionTimestamp({ dbNow: afterDeadline, releaseDeadlineAt }),
+    ).toEqual(afterDeadline);
+  });
+
+  test('treats transport-enforced image size failures as permanently unsafe', () => {
+    expect(isUnsafeSourceMediaImageFailure('IMAGE_BODY_TOO_LARGE')).toBe(true);
+    expect(isUnsafeSourceMediaImageFailure('IMAGE_TOO_LARGE')).toBe(true);
+    expect(isUnsafeSourceMediaImageFailure('IMAGE_HTTP_STATUS')).toBe(false);
   });
 
   test('keeps production fetch concurrency fixed at two', () => {

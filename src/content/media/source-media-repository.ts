@@ -83,6 +83,13 @@ function failureHash(failureClass: string): string {
   return sha256CanonicalJson({ failureClass });
 }
 
+export function sourceMediaRepairExhaustionTimestamp(input: {
+  dbNow: Date;
+  releaseDeadlineAt: Date;
+}): Date {
+  return new Date(Math.max(input.dbNow.getTime(), input.releaseDeadlineAt.getTime()));
+}
+
 function assetLeaseOwner(workerId: string, gateId: string): string {
   return `${workerId}:gate:${gateId}`;
 }
@@ -126,6 +133,28 @@ export async function claimSourceMediaGates(input: {
         and(
           eq(contentSourceMediaGates.status, 'RUNNING'),
           lte(contentSourceMediaGates.leaseExpiresAt, dbNow),
+        ),
+      );
+
+    // A process can die after reserving an asset (or even after uploading its
+    // object) but before committing AVAILABLE/FAILED. Once the bounded upload
+    // lease expires there is no live writer to protect. Reconcile the row now
+    // so a final-attempt crash cannot leave retention permanently blocked by a
+    // RESERVED asset. A later observation of the same hash moves FAILED back
+    // to RESERVED and performs the authenticated object/hash recovery check.
+    await tx
+      .update(contentSourceMediaAssets)
+      .set({
+        storageState: 'FAILED',
+        uploadLeaseOwner: null,
+        uploadLeaseExpiresAt: null,
+        lastFailureHash: failureHash('SOURCE_MEDIA_ASSET_RESERVATION_EXPIRED'),
+        updatedAt: dbNow,
+      })
+      .where(
+        and(
+          eq(contentSourceMediaAssets.storageState, 'RESERVED'),
+          lte(contentSourceMediaAssets.uploadLeaseExpiresAt, dbNow),
         ),
       );
 
@@ -792,7 +821,12 @@ export async function finalizeSourceMediaGate(input: {
             dbNow,
           });
     const repairExhaustedAt =
-      status === 'COMPLETE' || status === 'CHECKED_NONE' || nextAttemptAt ? null : dbNow;
+      status === 'COMPLETE' || status === 'CHECKED_NONE' || nextAttemptAt
+        ? null
+        : sourceMediaRepairExhaustionTimestamp({
+            dbNow,
+            releaseDeadlineAt: gate.releaseDeadlineAt,
+          });
 
     await tx
       .update(contentSourceMediaGates)
@@ -898,7 +932,12 @@ export async function recordSourceMediaGateFailure(input: {
       .set({
         status,
         nextAttemptAt,
-        repairExhaustedAt: nextAttemptAt ? null : dbNow,
+        repairExhaustedAt: nextAttemptAt
+          ? null
+          : sourceMediaRepairExhaustionTimestamp({
+              dbNow,
+              releaseDeadlineAt: gate.releaseDeadlineAt,
+            }),
         leaseOwner: null,
         leaseExpiresAt: null,
         lastFailureClass: input.failureClass,

@@ -8,11 +8,7 @@ const RETENTION_LEASE_MS = 10 * 60_000;
 
 type RetentionAsset = Readonly<{ assetId: string; objectKey: string }>;
 
-export async function runSourceMediaRetention(input: {
-  workerId: string;
-  storage: SourceMediaStorage;
-  signal?: AbortSignal;
-}): Promise<{ claimed: number; deleted: number; failed: number }> {
+async function claimSourceMediaRetentionAssets(workerId: string): Promise<RetentionAsset[]> {
   const client = await getDbClient();
   const lockClient = await client.reserve();
   let lockAcquired = false;
@@ -21,7 +17,7 @@ export async function runSourceMediaRetention(input: {
       SELECT pg_try_advisory_lock(hashtext('content-source-media-retention-v1')) AS acquired
     `;
     lockAcquired = rows[0]?.acquired === true;
-    if (!lockAcquired) return { claimed: 0, deleted: 0, failed: 0 };
+    if (!lockAcquired) return [];
     await lockClient`
       UPDATE content.source_media_assets
       SET upload_lease_owner = NULL,
@@ -77,7 +73,7 @@ export async function runSourceMediaRetention(input: {
             WHERE item.asset_id = ${candidate.assetId}::uuid
           )
           UPDATE content.source_media_assets AS asset
-          SET upload_lease_owner = ${input.workerId},
+          SET upload_lease_owner = ${workerId},
               upload_lease_expires_at =
                 now() + (${RETENTION_LEASE_MS}::bigint * interval '1 millisecond'),
               updated_at = now()
@@ -102,54 +98,7 @@ export async function runSourceMediaRetention(input: {
       await lockClient`ROLLBACK`.catch(() => undefined);
       throw error;
     }
-    let deleted = 0;
-    let failed = 0;
-    for (const asset of assets) {
-      try {
-        if (input.signal?.aborted) {
-          throw new SourceMediaStorageError('STORAGE_ABORTED', 'Retention pass was aborted');
-        }
-        await input.storage.remove(asset.objectKey, input.signal);
-        const completed = await lockClient<{ assetId: string }[]>`
-          UPDATE content.source_media_assets
-          SET storage_state = 'DELETED',
-              deleted_at = now(),
-              upload_lease_owner = NULL,
-              upload_lease_expires_at = NULL,
-              updated_at = now()
-          WHERE asset_id = ${asset.assetId}::uuid
-            AND storage_state = 'AVAILABLE'
-            AND upload_lease_owner = ${input.workerId}
-          RETURNING asset_id AS "assetId"
-        `;
-        if (completed.length !== 1) throw new Error('Source-media retention lease was lost');
-        deleted += 1;
-      } catch (error) {
-        const failureClass =
-          error instanceof SourceMediaStorageError
-            ? error.failureClass
-            : 'SOURCE_MEDIA_RETENTION_FAILED';
-        const failureHash = sha256CanonicalJson({ failureClass });
-        await lockClient`
-          UPDATE content.source_media_assets
-          SET upload_lease_owner = NULL,
-              upload_lease_expires_at = NULL,
-              last_failure_hash = ${failureHash},
-              updated_at = now()
-          WHERE asset_id = ${asset.assetId}::uuid
-            AND storage_state = 'AVAILABLE'
-            AND upload_lease_owner = ${input.workerId}
-        `.catch(() => undefined);
-        failed += 1;
-        logWarn('Source-media retention delete failed', {
-          assetId: asset.assetId,
-          failureClass,
-        });
-      }
-    }
-    const result = { claimed: assets.length, deleted, failed };
-    if (assets.length > 0) logInfo('Source-media retention pass completed', result);
-    return result;
+    return assets;
   } finally {
     if (lockAcquired) {
       await lockClient`
@@ -158,4 +107,64 @@ export async function runSourceMediaRetention(input: {
     }
     lockClient.release();
   }
+}
+
+export async function runSourceMediaRetention(input: {
+  workerId: string;
+  storage: SourceMediaStorage;
+  signal?: AbortSignal;
+}): Promise<{ claimed: number; deleted: number; failed: number }> {
+  // Hold the singleton connection only while selecting and leasing rows. The
+  // Storage network calls happen after it is released, so gate claims can
+  // preempt a slow daily retention pass even with DATABASE_POOL_MAX=1.
+  const assets = await claimSourceMediaRetentionAssets(input.workerId);
+  const client = await getDbClient();
+  let deleted = 0;
+  let failed = 0;
+  for (const asset of assets) {
+    try {
+      if (input.signal?.aborted) {
+        throw new SourceMediaStorageError('STORAGE_ABORTED', 'Retention pass was aborted');
+      }
+      await input.storage.remove(asset.objectKey, input.signal);
+      const completed = await client<{ assetId: string }[]>`
+        UPDATE content.source_media_assets
+        SET storage_state = 'DELETED',
+            deleted_at = now(),
+            upload_lease_owner = NULL,
+            upload_lease_expires_at = NULL,
+            updated_at = now()
+        WHERE asset_id = ${asset.assetId}::uuid
+          AND storage_state = 'AVAILABLE'
+          AND upload_lease_owner = ${input.workerId}
+        RETURNING asset_id AS "assetId"
+      `;
+      if (completed.length !== 1) throw new Error('Source-media retention lease was lost');
+      deleted += 1;
+    } catch (error) {
+      const failureClass =
+        error instanceof SourceMediaStorageError
+          ? error.failureClass
+          : 'SOURCE_MEDIA_RETENTION_FAILED';
+      const failureHash = sha256CanonicalJson({ failureClass });
+      await client`
+        UPDATE content.source_media_assets
+        SET upload_lease_owner = NULL,
+            upload_lease_expires_at = NULL,
+            last_failure_hash = ${failureHash},
+            updated_at = now()
+        WHERE asset_id = ${asset.assetId}::uuid
+          AND storage_state = 'AVAILABLE'
+          AND upload_lease_owner = ${input.workerId}
+      `.catch(() => undefined);
+      failed += 1;
+      logWarn('Source-media retention delete failed', {
+        assetId: asset.assetId,
+        failureClass,
+      });
+    }
+  }
+  const result = { claimed: assets.length, deleted, failed };
+  if (assets.length > 0) logInfo('Source-media retention pass completed', result);
+  return result;
 }

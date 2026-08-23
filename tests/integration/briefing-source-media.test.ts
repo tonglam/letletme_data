@@ -261,6 +261,8 @@ test('decouples X receipts from durable media processing and reuses legacy core 
   const storedObjects = new Map([[objectKey, image.bytes]]);
   let uploadCalls = 0;
   let secondImageFails = true;
+  let assertRetentionCanUseDb = false;
+  let retentionDbPreemptionChecks = 0;
   const storage: SourceMediaStorage = {
     ensureBucket: async () => ({}),
     upload: async (key, bytes) => {
@@ -274,7 +276,17 @@ test('decouples X receipts from durable media processing and reuses legacy core 
       }
       return bytes;
     },
-    remove: async (key) => (storedObjects.delete(key) ? 'deleted' : 'missing'),
+    remove: async (key) => {
+      if (assertRetentionCanUseDb) {
+        await claimSourceMediaGates({
+          workerId: 'retention-db-preemption-check',
+          limit: 0,
+          leaseMs: 5 * 60_000,
+        });
+        retentionDbPreemptionChecks += 1;
+      }
+      return storedObjects.delete(key) ? 'deleted' : 'missing';
+    },
     provisionAndProbe: async () => undefined,
   };
 
@@ -644,11 +656,14 @@ test('decouples X receipts from durable media processing and reuses legacy core 
   });
   storedObjects.set(expiredObjectKey, Uint8Array.of(1));
   storedObjects.set(orphanObjectKey, Uint8Array.of(1));
+  assertRetentionCanUseDb = true;
   expect(await runSourceMediaRetention({ workerId: 'retention-delete', storage })).toEqual({
     claimed: 2,
     deleted: 2,
     failed: 0,
   });
+  assertRetentionCanUseDb = false;
+  expect(retentionDbPreemptionChecks).toBe(2);
   const retentionStates = await db
     .select({
       assetId: contentSourceMediaAssets.assetId,
@@ -672,6 +687,46 @@ test('decouples X receipts from durable media processing and reuses legacy core 
   expect(storedObjects.has(objectKey)).toBe(true);
   expect(storedObjects.has(expiredObjectKey)).toBe(false);
   expect(storedObjects.has(orphanObjectKey)).toBe(false);
+
+  const staleReservationAssetId = randomUUID();
+  const staleReservationSha = 'c'.repeat(64);
+  await db.insert(contentSourceMediaAssets).values({
+    assetId: staleReservationAssetId,
+    sha256: staleReservationSha,
+    objectKey: `x/images/sha256/cc/${staleReservationSha}.png`,
+    actualMime: 'image/png',
+    byteSize: 1,
+    width: 1,
+    height: 1,
+    bucket: 'briefing-source-media',
+    storageState: 'RESERVED',
+    uploadLeaseOwner: 'dead-worker:gate:expired',
+    uploadLeaseExpiresAt: yesterday,
+  });
+  expect(
+    await claimSourceMediaGates({
+      workerId: 'reservation-reconciler',
+      limit: 0,
+      leaseMs: 5 * 60_000,
+    }),
+  ).toHaveLength(0);
+  const [reconciledReservation] = await db
+    .select({
+      state: contentSourceMediaAssets.storageState,
+      leaseOwner: contentSourceMediaAssets.uploadLeaseOwner,
+      leaseExpiresAt: contentSourceMediaAssets.uploadLeaseExpiresAt,
+      failureHash: contentSourceMediaAssets.lastFailureHash,
+    })
+    .from(contentSourceMediaAssets)
+    .where(eq(contentSourceMediaAssets.assetId, staleReservationAssetId))
+    .limit(1);
+  expect(reconciledReservation).toMatchObject({
+    state: 'FAILED',
+    leaseOwner: null,
+    leaseExpiresAt: null,
+    failureHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+  });
+
   await db
     .update(contentSourceMediaAssets)
     .set({ storageState: 'RESERVED', deletedAt: null })

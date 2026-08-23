@@ -33,9 +33,14 @@ const UNSAFE_IMAGE_FAILURES = new Set([
   'IMAGE_SVG_FORBIDDEN',
   'IMAGE_TYPE_UNRECOGNIZED',
   'IMAGE_TOO_LARGE',
+  'IMAGE_BODY_TOO_LARGE',
   'IMAGE_DIMENSIONS_INVALID',
   'IMAGE_DIMENSIONS_EXCEEDED',
 ]);
+
+export function isUnsafeSourceMediaImageFailure(failureClass: string): boolean {
+  return UNSAFE_IMAGE_FAILURES.has(failureClass);
+}
 
 export type SourceMediaProcessorDependencies = Readonly<{
   storage: SourceMediaStorage;
@@ -240,7 +245,7 @@ export async function processSourceMediaGate(
           gateId: gate.gateId,
           workerId: gate.leaseOwner,
           failureClass,
-          unsafe: UNSAFE_IMAGE_FAILURES.has(failureClass),
+          unsafe: isUnsafeSourceMediaImageFailure(failureClass),
         });
         logWarn('Source-media image archive failed', {
           gateId: gate.gateId,

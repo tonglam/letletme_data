@@ -128,7 +128,9 @@ function startGate(gate: ClaimedSourceMediaGate): void {
 }
 
 async function poll(): Promise<void> {
-  if (polling || shuttingDown || !flags.enabled || retentionInFlight) return;
+  // Retention claims and releases its database connection before deleting
+  // objects. Do not let a slow Storage retention pass block newly due gates.
+  if (polling || shuttingDown || !flags.enabled) return;
   const availableSlots = flags.concurrency - active.size;
   if (availableSlots <= 0) return;
   polling = true;
