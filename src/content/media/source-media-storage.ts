@@ -163,8 +163,10 @@ async function storageFetch(
 async function storageError(
   response: Response,
   operation: string,
+  bodyBytes?: Uint8Array,
 ): Promise<SourceMediaStorageError> {
-  const errorBytes = await boundedBody(response, undefined, 1_024).catch(() => new Uint8Array());
+  const errorBytes =
+    bodyBytes ?? (await boundedBody(response, undefined, 1_024).catch(() => new Uint8Array()));
   const rawBody = new TextDecoder('utf-8', { fatal: false }).decode(errorBytes);
   const body = rawBody.toLowerCase();
   let providerCode: string | null = null;
@@ -196,16 +198,6 @@ async function storageError(
     `${operation} failed with ${response.status}${providerCode ? ` (${providerCode})` : providerDetail ? ` (${providerDetail})` : ''}`,
     response.status,
   );
-}
-
-async function isMissingBucketResponse(response: Response): Promise<boolean> {
-  if (response.status === 404) return true;
-  if (response.status !== 400) return false;
-  const bodyBytes = await boundedBody(response.clone(), undefined, 1_024).catch(
-    () => new Uint8Array(),
-  );
-  const body = new TextDecoder('utf-8', { fatal: false }).decode(bodyBytes).toLowerCase();
-  return /bucket[\s_-]+not[\s_-]+found/.test(body);
 }
 
 function assertBucket(bucket: SourceMediaBucket, expectedName: string): void {
@@ -301,7 +293,13 @@ export function createSourceMediaStorage(
       `${root}/bucket/${encodeURIComponent(config.bucket)}`,
       { method: 'GET', headers },
     );
-    if (await isMissingBucketResponse(response)) return null;
+    if (response.status === 404) return null;
+    if (response.status === 400) {
+      const bodyBytes = await boundedBody(response, undefined, 1_024).catch(() => new Uint8Array());
+      const body = new TextDecoder('utf-8', { fatal: false }).decode(bodyBytes).toLowerCase();
+      if (/bucket[\s_-]+not[\s_-]+found/.test(body)) return null;
+      throw await storageError(response, 'bucket lookup', bodyBytes);
+    }
     if (!response.ok) throw await storageError(response, 'bucket lookup');
     const responseBytes = await boundedBody(response, undefined, 64 * 1_024);
     let body: unknown;

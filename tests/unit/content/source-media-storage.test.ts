@@ -187,6 +187,24 @@ describe('source-media private Storage client', () => {
     });
   });
 
+  test('does not hang or read a cloned branch for an oversized Storage error', async () => {
+    const oversizedBody = `${JSON.stringify({ error: 'Bucket request invalid' })}${'x'.repeat(2_048)}`;
+    const storage = createSourceMediaStorage(
+      config,
+      async () =>
+        new Response(oversizedBody, {
+          status: 400,
+          headers: { 'content-length': String(new TextEncoder().encode(oversizedBody).byteLength) },
+        }),
+    );
+
+    await expect(storage.ensureBucket()).rejects.toMatchObject({
+      failureClass: 'STORAGE_REQUEST_FAILED',
+      status: 400,
+      message: 'bucket lookup failed with 400',
+    });
+  });
+
   test('retains a bounded provider message when the error is not a code', async () => {
     const storage = createSourceMediaStorage(config, async () =>
       Response.json({ error: 'Bucket name invalid' }, { status: 400 }),
