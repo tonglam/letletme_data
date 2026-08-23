@@ -168,13 +168,21 @@ async function storageError(
   const rawBody = new TextDecoder('utf-8', { fatal: false }).decode(errorBytes);
   const body = rawBody.toLowerCase();
   let providerCode: string | null = null;
+  let providerDetail: string | null = null;
   try {
     const parsed: unknown = JSON.parse(rawBody);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const providerPayload = parsed as { code?: unknown; error?: unknown };
+      const providerPayload = parsed as { code?: unknown; error?: unknown; message?: unknown };
       const candidate = providerPayload.error ?? providerPayload.code;
       if (typeof candidate === 'string' && /^[A-Za-z0-9_.-]{1,100}$/.test(candidate)) {
         providerCode = candidate;
+      }
+      const detail = providerPayload.message ?? providerPayload.error ?? providerPayload.code;
+      if (
+        typeof detail === 'string' &&
+        /^[A-Za-z0-9][A-Za-z0-9 ._:/'()\-]{0,119}$/.test(detail.trim())
+      ) {
+        providerDetail = detail.trim();
       }
     }
   } catch {
@@ -185,7 +193,7 @@ async function storageError(
     (response.status === 400 && /already exists|duplicate|resource exists/.test(body));
   return new SourceMediaStorageError(
     alreadyExists ? 'STORAGE_OBJECT_EXISTS' : 'STORAGE_REQUEST_FAILED',
-    `${operation} failed with ${response.status}${providerCode ? ` (${providerCode})` : ''}`,
+    `${operation} failed with ${response.status}${providerCode ? ` (${providerCode})` : providerDetail ? ` (${providerDetail})` : ''}`,
     response.status,
   );
 }
