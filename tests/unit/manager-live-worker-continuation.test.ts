@@ -4,7 +4,9 @@ import type { ManagerLiveJobData } from '../../src/queues/manager-live.queue';
 
 process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
 
-const { scheduleManagerLiveContinuation } = await import('../../src/workers/manager-live.worker');
+const { managerLiveSummaryRotationBucket, scheduleManagerLiveContinuation } = await import(
+  '../../src/workers/manager-live.worker'
+);
 
 const jobData: ManagerLiveJobData = {
   version: 1,
@@ -18,6 +20,18 @@ const jobData: ManagerLiveJobData = {
 };
 
 describe('manager live worker continuation', () => {
+  test('keeps retries on one summary chunk and advances only with new job data', () => {
+    const first = '2026-08-23T00:00:00.000Z';
+    const next = '2026-08-23T00:00:30.000Z';
+
+    expect(managerLiveSummaryRotationBucket(first, Date.parse(next))).toBe(
+      managerLiveSummaryRotationBucket(first, Date.parse(next) + 120_000),
+    );
+    expect(managerLiveSummaryRotationBucket(next)).toBe(
+      managerLiveSummaryRotationBucket(first) + 1,
+    );
+  });
+
   test('schedules the hot follow-up before surfacing a partial upstream failure', async () => {
     const calls: string[] = [];
     const promise = scheduleManagerLiveContinuation(

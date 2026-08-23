@@ -11,6 +11,7 @@ const dispatchModule = await import('../../src/services/manager-live-refresh-dis
 
 const redisRows = new Map<number, string>();
 let redisReadFails = false;
+let redisWriteSucceeds = false;
 let postgresRows: Array<Record<string, unknown>> = [];
 
 spyOn(seasonRepository, 'findCurrent').mockImplementation(async () => TEST_SEASON as never);
@@ -23,15 +24,23 @@ spyOn(eventRepository, 'findById').mockImplementation(
       dataCheckedAt: null,
     }) as never,
 );
-spyOn(redisSingleton, 'getClient').mockImplementation(
-  async () =>
-    ({
-      hmget: async (_key: string, ...fields: string[]) =>
-        redisReadFails
-          ? Promise.reject(new Error('cache unavailable'))
-          : fields.map((field) => redisRows.get(Number(field)) ?? null),
-    }) as never,
-);
+spyOn(redisSingleton, 'getClient').mockImplementation(async () => {
+  const transaction = {
+    hset: () => transaction,
+    expire: () => transaction,
+    exec: async () =>
+      redisWriteSucceeds
+        ? ([[null, 1]] as const)
+        : ([[new Error('cache write unavailable'), null]] as const),
+  };
+  return {
+    hmget: async (_key: string, ...fields: string[]) =>
+      redisReadFails
+        ? Promise.reject(new Error('cache unavailable'))
+        : fields.map((field) => redisRows.get(Number(field)) ?? null),
+    multi: () => transaction,
+  } as never;
+});
 spyOn(managerScoreCheckpointRepository, 'findByScopeAndEntryIds').mockImplementation(
   async () => postgresRows as never,
 );
@@ -109,6 +118,7 @@ describe('manager live CACHE_ONLY reads', () => {
   beforeEach(() => {
     redisRows.clear();
     redisReadFails = false;
+    redisWriteSucceeds = false;
     postgresRows = [];
     dispatchRefresh.mockClear();
     getEntrySummary.mockClear();
@@ -344,12 +354,15 @@ describe('manager live READ_THROUGH source reporting', () => {
   beforeEach(() => {
     redisRows.clear();
     redisReadFails = false;
+    redisWriteSucceeds = false;
     postgresRows = [];
     dispatchRefresh.mockClear();
     getEntrySummary.mockReset();
     getEntrySummary.mockImplementation(async () => {
       throw new Error('unexpected FPL request');
     });
+    upsertCheckpoint.mockReset();
+    upsertCheckpoint.mockImplementation(async () => undefined);
   });
 
   test('does not claim Redis when an upstream row could not be persisted', async () => {
@@ -376,6 +389,59 @@ describe('manager live READ_THROUGH source reporting', () => {
       missingEntryIds: [],
     });
     expect(getEntrySummary).toHaveBeenCalledTimes(1);
+  });
+
+  test('retries a summary when neither durable store accepted it', async () => {
+    getEntrySummary.mockImplementationOnce(
+      async () =>
+        ({
+          summary_event_points: 55,
+          summary_overall_points: 1_234,
+          summary_event_rank: 2_345,
+          summary_overall_rank: 34_567,
+        }) as never,
+    );
+    upsertCheckpoint.mockRejectedValueOnce(new Error('checkpoint unavailable'));
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'READ_THROUGH',
+    });
+
+    expect(result).toMatchObject({
+      dataAvailability: 'UNAVAILABLE',
+      rows: [],
+      missingEntryIds: [101],
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
+  test('keeps a summary when Redis succeeded even if its checkpoint failed', async () => {
+    redisWriteSucceeds = true;
+    getEntrySummary.mockImplementationOnce(
+      async () =>
+        ({
+          summary_event_points: 55,
+          summary_overall_points: 1_234,
+          summary_event_rank: 2_345,
+          summary_overall_rank: 34_567,
+        }) as never,
+    );
+    upsertCheckpoint.mockRejectedValueOnce(new Error('checkpoint unavailable'));
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'READ_THROUGH',
+    });
+
+    expect(result).toMatchObject({
+      dataAvailability: 'FRESH',
+      missingEntryIds: [],
+      errorCode: null,
+    });
+    expect(result.rows).toHaveLength(1);
   });
 });
 

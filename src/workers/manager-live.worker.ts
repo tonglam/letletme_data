@@ -1,7 +1,10 @@
 import { Job, QueueEvents, Worker } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
-import { shouldStopManagerLiveRefresh } from '../domain/manager-live-refresh';
+import {
+  MANAGER_LIVE_REFRESH_BUCKET_MS,
+  shouldStopManagerLiveRefresh,
+} from '../domain/manager-live-refresh';
 import {
   readManagerLiveClassicCursor,
   scheduleNextManagerLiveRefresh,
@@ -43,6 +46,16 @@ export async function scheduleManagerLiveContinuation(
   }
 }
 
+export function managerLiveSummaryRotationBucket(
+  triggeredAt: string,
+  fallbackTimestamp = Date.now(),
+): number {
+  const timestamp = Date.parse(triggeredAt);
+  return Math.floor(
+    (Number.isFinite(timestamp) ? timestamp : fallbackTimestamp) / MANAGER_LIVE_REFRESH_BUCKET_MS,
+  );
+}
+
 export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
   if (job.name !== MANAGER_LIVE_JOBS.REFRESH || job.data.version !== MANAGER_LIVE_JOB_VERSION) {
     throw new Error(`Unsupported manager live job: ${job.name}@${job.data.version}`);
@@ -75,6 +88,13 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
     const persistedClassicCursor = await readManagerLiveClassicCursor(job.data);
     const classicStandingsStartPage =
       persistedClassicCursor === undefined ? job.data.classicStandingsPage : persistedClassicCursor;
+    // BullMQ retries reuse the same job data, so they retry the same bounded
+    // summary chunk. A newly scheduled follow-up receives a new triggeredAt
+    // and advances the rotation without starving later managers.
+    const summaryRotationBucket = managerLiveSummaryRotationBucket(
+      job.data.triggeredAt,
+      job.timestamp,
+    );
     const result = await refreshManagerLiveScores({
       eventId: job.data.eventId,
       entryIds: job.data.entryIds,
@@ -82,6 +102,7 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       ...(classicStandingsStartPage === undefined || classicStandingsStartPage === null
         ? {}
         : { classicStandingsStartPage }),
+      summaryRotationBucket,
     });
     await scheduleManagerLiveContinuation(job.data, result);
     return result;

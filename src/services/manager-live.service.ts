@@ -571,6 +571,8 @@ const refreshEntrySummaries = async (
   let refreshErrorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null = null;
   for (const batch of managerSummaryFetchBatches(targets)) {
     const completedBatch: CachedRow[] = [];
+    const previousBatchRows = new Map<number, CachedRow | undefined>();
+    const redisPublishedByEntry = new Map<number, boolean>();
     await Promise.all(
       batch.map(async (entryId) => {
         try {
@@ -590,13 +592,17 @@ const refreshEntrySummaries = async (
             options.preserveClassicStanding && existing?.source === 'FPL_CLASSIC_STANDINGS'
               ? enrichClassicStandingOverallRank(existing, summary.summary_overall_rank)
               : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
+          previousBatchRows.set(entryId, existing);
           completedBatch.push(row);
           refreshed.push(row);
           rows.set(row.entryId, row);
           // Publish each completed response to the primary cache immediately.
           // A slow sibling or later batch must not hide already-fetched
           // official scores until the whole background crawl finishes.
-          await writeRows(redis, season.seasonCode, eventId, scope, [row]);
+          redisPublishedByEntry.set(
+            entryId,
+            await writeRows(redis, season.seasonCode, eventId, scope, [row]),
+          );
         } catch (error) {
           if (error instanceof FPLClientError && error.status === 429) {
             refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
@@ -634,20 +640,40 @@ const refreshEntrySummaries = async (
       },
       'entry-summary',
     );
-    await managerScoreCheckpointRepository
+    const checkpointPublished = await managerScoreCheckpointRepository
       .upsertBatch(
         season,
         eventId,
         scope,
         completedBatch.map((row) => toManagerScoreCheckpoint(row)),
       )
-      .catch((error) =>
+      .then(() => true)
+      .catch((error) => {
         logWarn('Official manager checkpoint write failed', {
           eventId,
           scope: scopeKey(scope),
           error: error instanceof Error ? error.message : 'unknown',
-        }),
-      );
+        });
+        return false;
+      });
+    if (!checkpointPublished) {
+      const undurableEntryIds = completedBatch
+        .filter((row) => redisPublishedByEntry.get(row.entryId) !== true)
+        .map((row) => row.entryId);
+      for (const entryId of undurableEntryIds) {
+        const previous = previousBatchRows.get(entryId);
+        if (previous) rows.set(entryId, previous);
+        else rows.delete(entryId);
+      }
+      if (undurableEntryIds.length > 0) {
+        refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+        logWarn('Official manager summaries had no durable publication', {
+          eventId,
+          scope: scopeKey(scope),
+          entryCount: undurableEntryIds.length,
+        });
+      }
+    }
   }
   return refreshErrorCode;
 };
@@ -915,6 +941,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   readMode?: ManagerLiveReadMode;
   completeRefresh?: boolean;
   classicStandingsStartPage?: number;
+  summaryRotationBucket?: number;
 }): Promise<ManagerLiveResolveResult> => {
   const season = await seasonRepository.findCurrent();
   const uniqueEntryIds = Array.from(new Set(input.entryIds));
@@ -1126,7 +1153,10 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   );
   const completeRefresh = input.completeRefresh === true;
   let workerSummaryBudget = completeRefresh ? MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT : 0;
-  const workerRotationBucket = Math.floor(Date.now() / MANAGER_LIVE_REFRESH_BUCKET_MS);
+  const workerRotationBucket =
+    completeRefresh && Number.isSafeInteger(input.summaryRotationBucket)
+      ? Math.max(0, input.summaryRotationBucket ?? 0)
+      : Math.floor(Date.now() / MANAGER_LIVE_REFRESH_BUCKET_MS);
   const takeWorkerSummaryTargets = (entryIds: readonly number[], limit = workerSummaryBudget) => {
     if (!completeRefresh) return [...entryIds];
     const selected = selectWorkerSummaryRefreshTargets(
@@ -1471,12 +1501,14 @@ export async function refreshManagerLiveScores(input: {
   entryIds: readonly number[];
   tournamentId?: number;
   classicStandingsStartPage?: number;
+  summaryRotationBucket?: number;
 }): Promise<ManagerLiveResolveResult> {
   const key = JSON.stringify({
     eventId: input.eventId,
     entryIds: Array.from(new Set(input.entryIds)).sort((left, right) => left - right),
     tournamentId: input.tournamentId ?? null,
     classicStandingsStartPage: input.classicStandingsStartPage ?? null,
+    summaryRotationBucket: input.summaryRotationBucket ?? null,
     readMode: 'READ_THROUGH',
     completeRefresh: true,
   });
