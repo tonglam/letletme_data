@@ -240,6 +240,40 @@ describe('source-media private Storage client', () => {
     await expect(storage.provisionAndProbe()).rejects.toThrow('upstream tus failed');
   });
 
+  test('preserves the primary probe failure when cleanup cannot prove deletion', async () => {
+    let bucket = {
+      id: config.bucket,
+      name: config.bucket,
+      public: false,
+      file_size_limit: 24 * 1_024 * 1_024,
+      allowed_mime_types: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+    };
+    const storage = createSourceMediaStorage(
+      config,
+      async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === '/storage/v1/bucket/briefing-source-media' && init.method === 'GET') {
+          return Response.json(bucket);
+        }
+        if (url.pathname === '/storage/v1/bucket/briefing-source-media' && init.method === 'PUT') {
+          bucket = { ...bucket, ...(JSON.parse(String(init.body)) as Partial<typeof bucket>) };
+          return Response.json({ message: 'updated' });
+        }
+        if (url.pathname.startsWith('/storage/v1/object/')) {
+          if (init.method === 'DELETE')
+            return Response.json({ error: 'internal' }, { status: 500 });
+          if (init.method === 'GET') return Response.json({ error: 'internal' }, { status: 500 });
+        }
+        return Response.json({ message: 'unexpected request' }, { status: 500 });
+      },
+      async () => {
+        throw new Error('upstream tus failed');
+      },
+    );
+
+    await expect(storage.provisionAndProbe()).rejects.toThrow('upstream tus failed');
+  });
+
   test('accepts a 400 not_found delete only after the probe is unreadable', async () => {
     let probeObjectPresent = false;
     const storage = createSourceMediaStorage(

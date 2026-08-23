@@ -494,6 +494,7 @@ export function createSourceMediaStorage(
       // trailing bytes, then verify the private roundtrip by content hash.
       const bytes = new Uint8Array(BUCKET_FILE_SIZE_LIMIT);
       bytes.set(pngPrefix);
+      let primaryError: unknown = null;
       try {
         await storage.upload(objectKey, bytes, 'image/png');
         const downloaded = await storage.download(objectKey);
@@ -502,36 +503,40 @@ export function createSourceMediaStorage(
         if (actual !== expected) {
           throw new SourceMediaStorageError('STORAGE_PROBE_HASH', 'Storage probe hash mismatch');
         }
-      } finally {
-        let cleanupError: unknown = null;
-        for (const delayMs of [0, 1_000, 3_000]) {
-          if (delayMs > 0) await waitForProbeCleanup(delayMs);
+      } catch (error) {
+        primaryError = error;
+      }
+      let cleanupError: unknown = null;
+      for (const delayMs of [0, 1_000, 3_000]) {
+        if (delayMs > 0) await waitForProbeCleanup(delayMs);
+        try {
+          await storage.remove(objectKey);
           try {
-            await storage.remove(objectKey);
-            try {
-              await storage.download(objectKey);
-              cleanupError = new SourceMediaStorageError(
-                'STORAGE_PROBE_CLEANUP',
-                'Storage probe object remains readable after deletion',
-              );
-            } catch (error) {
-              if (isMissingObjectError(error)) {
-                cleanupError = null;
-                break;
-              }
-              cleanupError = error;
-            }
+            await storage.download(objectKey);
+            cleanupError = new SourceMediaStorageError(
+              'STORAGE_PROBE_CLEANUP',
+              'Storage probe object remains readable after deletion',
+            );
           } catch (error) {
+            if (isMissingObjectError(error)) {
+              cleanupError = null;
+              break;
+            }
             cleanupError = error;
           }
+        } catch (error) {
+          cleanupError = error;
         }
-        if (cleanupError !== null) {
-          throw new SourceMediaStorageError(
-            'STORAGE_PROBE_CLEANUP',
-            'Storage probe cleanup could not prove the object was removed',
-            cleanupError instanceof SourceMediaStorageError ? cleanupError.status : null,
-          );
-        }
+      }
+      if (cleanupError !== null && primaryError === null) {
+        throw new SourceMediaStorageError(
+          'STORAGE_PROBE_CLEANUP',
+          'Storage probe cleanup could not prove the object was removed',
+          cleanupError instanceof SourceMediaStorageError ? cleanupError.status : null,
+        );
+      }
+      if (primaryError !== null) {
+        throw primaryError;
       }
     },
   };
