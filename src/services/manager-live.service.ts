@@ -588,6 +588,9 @@ const nowIso = (): string => new Date().toISOString();
 const plusSeconds = (checkedAt: string, seconds: number): string =>
   new Date(Date.parse(checkedAt) + seconds * 1000).toISOString();
 
+const earliestObservationAt = (left: string, right: string): string =>
+  Date.parse(left) <= Date.parse(right) ? left : right;
+
 const classicStandingNeedsOverallRank = (row: CachedRow | undefined): boolean =>
   row?.source === 'FPL_CLASSIC_STANDINGS' &&
   (!isPositiveOverallRank(row.overallRank) || row.overallRank <= 0);
@@ -1087,8 +1090,14 @@ const refreshEntrySummaries = async (
           )
             ? (() => {
                 const { revision: _revision, ...classicRow } = existing;
+                // A Classic row combines two independently observed sources:
+                // phase totals from standings and OR from Entry Summary. Its
+                // freshness cannot be newer than either observation.
+                const checkedAt = earliestObservationAt(classicRow.checkedAt, observedAt);
                 return withRevision({
                   ...classicRow,
+                  checkedAt,
+                  staleAt: plusSeconds(checkedAt, STALE_SECONDS),
                   // Classic standings owns event/phase totals and league rank;
                   // the entry summary owns the season-wide FPL OR.
                   overallRank: summary.summary_overall_rank ?? null,
