@@ -15,7 +15,7 @@ import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/t
 import { eventRepository } from '../repositories/events';
 import {
   OfficialH2HStrategy,
-  resolveFinalizedThroughEventId,
+  resolveOfficialH2HSyncOptionsFromEventState,
   type OfficialH2HSyncOptions,
 } from './tournament-official-h2h.service';
 
@@ -30,21 +30,12 @@ async function getOfficialH2HSyncOptions(
     eventRepository.findCurrent(season),
     eventRepository.findLatestFinalized(season),
   ]);
-  const eventIsFinalized = event?.finished === true && event.dataChecked === true;
-  return {
-    // The event and latest-finalized reads are concurrent. If finalization
-    // lands between them, never let the older aggregate cutoff contradict the
-    // exact event row that already reports a finalized state.
-    finalizedThroughEventId: resolveFinalizedThroughEventId(
-      latestFinalizedEvent?.id,
-      eventId,
-      eventIsFinalized,
-    ),
-    provisionalEventId:
-      event && !eventIsFinalized && (event.isCurrent || currentEvent?.id === eventId)
-        ? eventId
-        : null,
-  };
+  return resolveOfficialH2HSyncOptionsFromEventState(
+    eventId,
+    event,
+    currentEvent,
+    latestFinalizedEvent,
+  );
 }
 
 export function getOfficialH2HRecoveryTargets(error: unknown): readonly number[] {

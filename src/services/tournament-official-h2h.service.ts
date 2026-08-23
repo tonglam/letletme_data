@@ -53,6 +53,32 @@ export function resolveFinalizedThroughEventId(
   return finalizedThroughEventId > 0 ? finalizedThroughEventId : null;
 }
 
+export function resolveOfficialH2HSyncOptionsFromEventState(
+  eventId: number,
+  event: { finished: boolean; dataChecked: boolean; isCurrent: boolean } | null,
+  currentEvent: { id: number } | null,
+  latestFinalizedEvent: { id: number } | null,
+): OfficialH2HSyncOptions {
+  const eventIsFinalized = event?.finished === true && event.dataChecked === true;
+  const finalizedThroughEventId = resolveFinalizedThroughEventId(
+    latestFinalizedEvent?.id,
+    eventId,
+    eventIsFinalized,
+  );
+  return {
+    // These rows are read concurrently. Either finalized signal must prevent
+    // the same event from being treated as provisional.
+    finalizedThroughEventId,
+    provisionalEventId:
+      event &&
+      !eventIsFinalized &&
+      (finalizedThroughEventId ?? 0) < eventId &&
+      (event.isCurrent || currentEvent?.id === eventId)
+        ? eventId
+        : null,
+  };
+}
+
 function isRealOfficialH2HStanding(
   standing: RawFPLLeagueStandingsResult,
 ): standing is OfficialH2HStanding {
@@ -393,9 +419,38 @@ function standingsPlayedCoverage(standings: readonly OfficialH2HStanding[]): num
   );
 }
 
+export function minimumOfficialPlayedCoverageForSuppressedEvent(
+  matchDerivedStandings: readonly OfficialH2HStanding[],
+  matches: readonly RawFPLLeagueH2HMatch[],
+  suppressedEventId: number | null | undefined,
+): ReadonlyMap<number, number> | undefined {
+  if (suppressedEventId === null || suppressedEventId === undefined) return undefined;
+  const minimumPlayedByEntry = new Map(
+    matchDerivedStandings.map((standing) => [
+      standing.entry,
+      nonNegativeInteger(standing.matches_played),
+    ]),
+  );
+  for (const match of matches) {
+    if (
+      match.event !== suppressedEventId ||
+      isOfficialKnockoutMatch(match) ||
+      match.is_bye === true
+    ) {
+      continue;
+    }
+    for (const entryId of [match.entry_1_entry, match.entry_2_entry]) {
+      if (entryId === null || !minimumPlayedByEntry.has(entryId)) continue;
+      minimumPlayedByEntry.set(entryId, (minimumPlayedByEntry.get(entryId) ?? 0) + 1);
+    }
+  }
+  return minimumPlayedByEntry;
+}
+
 export function selectOfficialH2HStandings(
   officialStandings: readonly OfficialH2HStanding[],
   matchDerivedStandings: readonly OfficialH2HStanding[],
+  minimumOfficialPlayedByEntry?: ReadonlyMap<number, number>,
 ): {
   standings: readonly OfficialH2HStanding[];
   usedMatchDerivedStandings: boolean;
@@ -410,15 +465,17 @@ export function selectOfficialH2HStandings(
       nonNegativeInteger(standing.matches_played),
     ]),
   );
-  // FPL can refresh only some rows first. Aggregate coverage can therefore be
-  // equal even while an individual entry is still behind (for example [2, 0]
-  // versus a complete [1, 1] match snapshot). Keep the atomic match-derived
-  // table until no real entry trails its derived coverage.
-  const usedMatchDerivedStandings = matchDerivedStandings.some(
-    (standing) =>
-      (officialPlayedByEntry.get(standing.entry) ?? -1) <
+  // FPL can refresh only some rows first. Keep the atomic match-derived table
+  // until every real entry reaches both its derived coverage and, while a
+  // score-incomplete round is suppressed, that round's scheduled coverage.
+  const usedMatchDerivedStandings = matchDerivedStandings.some((standing) => {
+    const officialEntryPlayed = officialPlayedByEntry.get(standing.entry) ?? -1;
+    const minimumPlayed = Math.max(
       nonNegativeInteger(standing.matches_played),
-  );
+      minimumOfficialPlayedByEntry?.get(standing.entry) ?? 0,
+    );
+    return officialEntryPlayed < minimumPlayed;
+  });
   return {
     standings: usedMatchDerivedStandings ? matchDerivedStandings : officialStandings,
     usedMatchDerivedStandings,
@@ -776,7 +833,16 @@ export async function syncOfficialH2HTournament(
     snapshot.matches,
     effectiveOptions,
   );
-  const standingsSelection = selectOfficialH2HStandings(snapshot.standings, matchDerivedStandings);
+  const minimumOfficialPlayedByEntry = minimumOfficialPlayedCoverageForSuppressedEvent(
+    matchDerivedStandings,
+    snapshot.matches,
+    effectiveOptions.suppressedEventId,
+  );
+  const standingsSelection = selectOfficialH2HStandings(
+    snapshot.standings,
+    matchDerivedStandings,
+    minimumOfficialPlayedByEntry,
+  );
   if (standingsSelection.usedMatchDerivedStandings) {
     logWarn('FPL H2H standings lagged match scores; projecting standings from official matches', {
       tournamentId: tournament.id,

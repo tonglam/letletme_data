@@ -6,9 +6,11 @@ import {
   buildOfficialH2HRows,
   fetchOfficialH2HSourceSnapshot,
   hasCompleteOfficialH2HScoreBatch,
+  minimumOfficialPlayedCoverageForSuppressedEvent,
   projectOfficialH2HStandings,
   projectOfficialH2HStandingsFromMatches,
   resolveFinalizedThroughEventId,
+  resolveOfficialH2HSyncOptionsFromEventState,
   selectOfficialH2HStandings,
   validatedOfficialH2HSyncOptions,
 } from '../../src/services/tournament-official-h2h.service';
@@ -78,6 +80,33 @@ describe('official H2H source import', () => {
     expect(resolveFinalizedThroughEventId(3, 4, true)).toBe(4);
     expect(resolveFinalizedThroughEventId(4, 4, false)).toBe(4);
     expect(resolveFinalizedThroughEventId(null, 1, false)).toBeNull();
+  });
+
+  test('does not mark an event provisional when either concurrent read has finalized it', () => {
+    expect(
+      resolveOfficialH2HSyncOptionsFromEventState(
+        4,
+        { finished: true, dataChecked: true, isCurrent: true },
+        { id: 4 },
+        { id: 3 },
+      ),
+    ).toEqual({ finalizedThroughEventId: 4, provisionalEventId: null });
+    expect(
+      resolveOfficialH2HSyncOptionsFromEventState(
+        4,
+        { finished: false, dataChecked: false, isCurrent: true },
+        { id: 4 },
+        { id: 4 },
+      ),
+    ).toEqual({ finalizedThroughEventId: 4, provisionalEventId: null });
+    expect(
+      resolveOfficialH2HSyncOptionsFromEventState(
+        4,
+        { finished: false, dataChecked: false, isCurrent: true },
+        { id: 4 },
+        { id: 3 },
+      ),
+    ).toEqual({ finalizedThroughEventId: 3, provisionalEventId: 4 });
   });
 
   test('ignores the official Average Team placeholder in standings', async () => {
@@ -744,6 +773,57 @@ describe('official H2H source import', () => {
       usedMatchDerivedStandings: true,
       officialPlayed: 2,
       derivedPlayed: 2,
+    });
+
+    const partiallyAdvancedOfficial = [
+      { ...official[0]!, matches_played: 2 },
+      { ...official[1]!, matches_played: 1 },
+    ];
+    const suppressedCoverageFloor = minimumOfficialPlayedCoverageForSuppressedEvent(
+      derivedEqualCoverage,
+      [
+        {
+          id: 9095,
+          event: 2,
+          entry_1_entry: 1,
+          entry_1_points: 10,
+          entry_2_entry: 2,
+          entry_2_points: null,
+          winner: null,
+          knockout_name: null,
+        },
+      ],
+      2,
+    );
+    expect(suppressedCoverageFloor).toEqual(
+      new Map([
+        [1, 2],
+        [2, 2],
+      ]),
+    );
+    expect(
+      selectOfficialH2HStandings(
+        partiallyAdvancedOfficial,
+        derivedEqualCoverage,
+        suppressedCoverageFloor,
+      ),
+    ).toMatchObject({
+      standings: derivedEqualCoverage,
+      usedMatchDerivedStandings: true,
+    });
+    const fullyAdvancedOfficial = official.map((standing) => ({
+      ...standing,
+      matches_played: 2,
+    }));
+    expect(
+      selectOfficialH2HStandings(
+        fullyAdvancedOfficial,
+        derivedEqualCoverage,
+        suppressedCoverageFloor,
+      ),
+    ).toMatchObject({
+      standings: fullyAdvancedOfficial,
+      usedMatchDerivedStandings: false,
     });
 
     const officialAhead = official.map((standing) => ({ ...standing, matches_played: 3 }));
