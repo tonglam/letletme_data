@@ -62,8 +62,16 @@ export function managerLiveRefreshBucket(date: Date): string {
   return bucket.toISOString().replace(/\D/g, '').slice(0, 14);
 }
 
-export function managerLiveRefreshJobId(scope: ManagerLiveRefreshScope, date: Date): string {
-  return `manager-live-v1-${scope.seasonCode}-e${scope.eventId}-${scopeSegment(scope)}-${managerLiveRefreshBucket(date)}`;
+export function managerLiveRefreshJobId(
+  scope: ManagerLiveRefreshScope,
+  date: Date,
+  classicStandingsPage?: number | null,
+): string {
+  const continuation =
+    Number.isSafeInteger(classicStandingsPage) && (classicStandingsPage ?? 0) > 0
+      ? `-classic-page-${classicStandingsPage}`
+      : '';
+  return `manager-live-v1-${scope.seasonCode}-e${scope.eventId}-${scopeSegment(scope)}${continuation}-${managerLiveRefreshBucket(date)}`;
 }
 
 export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefreshScope | null => {

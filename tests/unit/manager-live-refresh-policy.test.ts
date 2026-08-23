@@ -48,6 +48,17 @@ describe('manager live refresh policy', () => {
     expect(managerLiveHotScopeKey(otherSubset)).not.toBe(managerLiveHotScopeKey(scope));
   });
 
+  test('keeps classic standings continuations distinct from request jobs in the same bucket', () => {
+    const date = new Date('2026-08-23T08:34:01.000Z');
+    const request = managerLiveRefreshJobId(scope, date);
+    const pageSeven = managerLiveRefreshJobId(scope, date, 7);
+
+    expect(pageSeven).not.toBe(request);
+    expect(pageSeven).toContain('-classic-page-7-');
+    expect(managerLiveRefreshJobId(scope, new Date('2026-08-23T08:34:29.999Z'), 7)).toBe(pageSeven);
+    expect(managerLiveRefreshJobId(scope, date, 9)).not.toBe(pageSeven);
+  });
+
   test('keeps one normalized recurring hot scope for a 500-entry roster', () => {
     const input = Array.from({ length: 500 }, (_, index) => 10_500 - index);
     const chunks = managerLiveDispatchEntryChunks([...input, input[0]!]);

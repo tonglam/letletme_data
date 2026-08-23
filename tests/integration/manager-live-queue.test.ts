@@ -118,4 +118,36 @@ describe('manager live queue integration', () => {
     expect(followup).not.toBeNull();
     expect(followup?.data.classicStandingsPage).toBe(7);
   });
+
+  test('does not let a request job in the same bucket swallow a classic cursor', async () => {
+    const nextBucket = Math.floor(Date.now() / 30_000) * 30_000 + 95_000;
+    const runAt = new Date(nextBucket);
+    const request = await enqueueManagerLiveRefresh({
+      season: TEST_SEASON,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      runAt,
+    });
+    if (request.id) createdJobIds.add(request.id);
+    const data: ManagerLiveJobData = {
+      version: MANAGER_LIVE_JOB_VERSION,
+      seasonId: scope.seasonId,
+      seasonCode: scope.seasonCode,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      source: 'followup',
+      triggeredAt: new Date().toISOString(),
+    };
+
+    const continuation = await scheduleNextManagerLiveRefresh(data, runAt.toISOString(), 7);
+    if (continuation?.id) createdJobIds.add(continuation.id);
+
+    expect(continuation).not.toBeNull();
+    expect(continuation?.id).not.toBe(request.id);
+    expect(continuation?.data.source).toBe('followup');
+    expect(continuation?.data.classicStandingsPage).toBe(7);
+    expect(request.data.classicStandingsPage).toBeUndefined();
+  });
 });

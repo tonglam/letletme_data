@@ -52,7 +52,11 @@ async function addManagerLiveRefresh(
     triggeredAt: new Date(now).toISOString(),
   };
   const job = await managerLiveQueue.add(MANAGER_LIVE_JOBS.REFRESH, data, {
-    jobId: managerLiveRefreshJobId(scope, runAt),
+    // A Classic standings continuation must not deduplicate against a normal
+    // cache-only access job in the same 30-second bucket. The page belongs to
+    // the continuation identity so an ordinary request can never discard the
+    // cursor needed to converge managers beyond the first bounded page window.
+    jobId: managerLiveRefreshJobId(scope, runAt, classicStandingsPage),
     delay: Math.max(0, runAt.getTime() - now),
   });
   logInfo('Manager live refresh job enqueued', {
