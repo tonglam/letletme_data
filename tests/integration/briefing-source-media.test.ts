@@ -571,7 +571,9 @@ test('decouples X receipts from durable media processing and reuses legacy core 
   const orphanAssetId = randomUUID();
   const orphanSha = 'a'.repeat(64);
   const orphanObjectKey = `x/images/sha256/aa/${orphanSha}.png`;
-  const yesterday = new Date(Date.now() - 24 * 60 * 60_000);
+  // Keep the fixture comfortably beyond the 24-hour orphan threshold even if
+  // the local and PostgreSQL clocks differ slightly.
+  const yesterday = new Date(Date.now() - 25 * 60 * 60_000);
   const retentionSeasonId = seasonFacts?.seasonId ?? fallbackSeason?.seasonId;
   if (!retentionSeasonId) throw new Error('Retention fixture requires one FPL season');
   await db.transaction(async (tx) => {
@@ -726,6 +728,90 @@ test('decouples X receipts from durable media processing and reuses legacy core 
     leaseExpiresAt: null,
     failureHash: expect.stringMatching(/^[0-9a-f]{64}$/),
   });
+
+  const retentionLeaseRaceAssets = [
+    {
+      assetId: randomUUID(),
+      sha256: '6'.repeat(64),
+      objectKey: `x/images/sha256/66/${'6'.repeat(64)}.png`,
+    },
+    {
+      assetId: randomUUID(),
+      sha256: '7'.repeat(64),
+      objectKey: `x/images/sha256/77/${'7'.repeat(64)}.png`,
+    },
+  ] as const;
+  await db.insert(contentSourceMediaAssets).values(
+    retentionLeaseRaceAssets.map((asset) => ({
+      ...asset,
+      actualMime: 'image/png' as const,
+      byteSize: 1,
+      width: 1,
+      height: 1,
+      bucket: 'briefing-source-media',
+      storageState: 'AVAILABLE' as const,
+      availableAt: yesterday,
+    })),
+  );
+  for (const asset of retentionLeaseRaceAssets) {
+    storedObjects.set(asset.objectKey, Uint8Array.of(1));
+  }
+  const retentionLeaseRaceRemoveKeys: string[] = [];
+  const retentionLeaseRaceStorage: SourceMediaStorage = {
+    ...storage,
+    remove: async (key) => {
+      retentionLeaseRaceRemoveKeys.push(key);
+      if (retentionLeaseRaceRemoveKeys.length === 1) {
+        const expiredRows = await db.execute<{ objectKey: string }>(sql`
+          UPDATE content.source_media_assets
+          SET upload_lease_expires_at = ${yesterday.toISOString()}::timestamptz,
+              updated_at = now()
+          WHERE asset_id IN (
+            ${retentionLeaseRaceAssets[0].assetId}::uuid,
+            ${retentionLeaseRaceAssets[1].assetId}::uuid
+          )
+            AND object_key <> ${key}
+            AND upload_lease_owner = 'retention-lease-race'
+          RETURNING object_key AS "objectKey"
+        `);
+        expect(expiredRows).toHaveLength(1);
+        expect(expiredRows[0]?.objectKey).not.toBe(key);
+        const [expiredLease] = await db.execute<{ expired: boolean }>(sql`
+          SELECT upload_lease_expires_at <= clock_timestamp() AS expired
+          FROM content.source_media_assets
+          WHERE object_key = ${expiredRows[0]?.objectKey ?? ''}
+        `);
+        expect(expiredLease?.expired).toBe(true);
+      }
+      return storedObjects.delete(key) ? 'deleted' : 'missing';
+    },
+  };
+  expect(
+    await runSourceMediaRetention({
+      workerId: 'retention-lease-race',
+      storage: retentionLeaseRaceStorage,
+    }),
+  ).toEqual({ claimed: 2, deleted: 1, failed: 1 });
+  expect(retentionLeaseRaceRemoveKeys).toHaveLength(1);
+  const retentionLeaseRaceStates = await db
+    .select({
+      objectKey: contentSourceMediaAssets.objectKey,
+      state: contentSourceMediaAssets.storageState,
+      leaseOwner: contentSourceMediaAssets.uploadLeaseOwner,
+    })
+    .from(contentSourceMediaAssets)
+    .where(
+      inArray(
+        contentSourceMediaAssets.assetId,
+        retentionLeaseRaceAssets.map((asset) => asset.assetId),
+      ),
+    );
+  expect(retentionLeaseRaceStates.filter((asset) => asset.state === 'DELETED')).toHaveLength(1);
+  expect(retentionLeaseRaceStates.filter((asset) => asset.state === 'AVAILABLE')).toHaveLength(1);
+  expect(retentionLeaseRaceStates.every((asset) => asset.leaseOwner === null)).toBe(true);
+  expect(
+    retentionLeaseRaceAssets.filter((asset) => storedObjects.has(asset.objectKey)),
+  ).toHaveLength(1);
 
   await db
     .update(contentSourceMediaAssets)
