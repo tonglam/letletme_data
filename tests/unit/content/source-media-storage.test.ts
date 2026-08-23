@@ -205,6 +205,41 @@ describe('source-media private Storage client', () => {
     });
   });
 
+  test('does not mask a resumable upload failure with a missing probe cleanup', async () => {
+    let bucket = {
+      id: config.bucket,
+      name: config.bucket,
+      public: false,
+      file_size_limit: 24 * 1_024 * 1_024,
+      allowed_mime_types: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+    };
+    const storage = createSourceMediaStorage(
+      config,
+      async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === '/storage/v1/bucket/briefing-source-media' && init.method === 'GET') {
+          return Response.json(bucket);
+        }
+        if (url.pathname === '/storage/v1/bucket/briefing-source-media' && init.method === 'PUT') {
+          bucket = { ...bucket, ...(JSON.parse(String(init.body)) as Partial<typeof bucket>) };
+          return Response.json({ message: 'updated' });
+        }
+        if (url.pathname.startsWith('/storage/v1/object/')) {
+          if (init.method === 'DELETE') {
+            return Response.json({ error: 'not_found' }, { status: 400 });
+          }
+          if (init.method === 'GET') return Response.json({ error: 'not_found' }, { status: 404 });
+        }
+        return Response.json({ message: 'unexpected request' }, { status: 500 });
+      },
+      async () => {
+        throw new Error('upstream tus failed');
+      },
+    );
+
+    await expect(storage.provisionAndProbe()).rejects.toThrow('upstream tus failed');
+  });
+
   test('retains a bounded provider message when the error is not a code', async () => {
     const storage = createSourceMediaStorage(config, async () =>
       Response.json({ error: 'Bucket name invalid' }, { status: 400 }),

@@ -38,6 +38,16 @@ export type SourceMediaBucket = Readonly<{
   allowed_mime_types?: readonly string[] | null;
 }>;
 
+type ProviderErrorDetail = Readonly<{
+  providerCode: string | null;
+  providerDetail: string | null;
+}>;
+
+type TusResponseLike = Readonly<{
+  getStatus?: () => number;
+  getBody?: () => string;
+}>;
+
 export class SourceMediaStorageError extends Error {
   readonly failureClass: string;
   readonly status: number | null;
@@ -160,15 +170,7 @@ async function storageFetch(
   }
 }
 
-async function storageError(
-  response: Response,
-  operation: string,
-  bodyBytes?: Uint8Array,
-): Promise<SourceMediaStorageError> {
-  const errorBytes =
-    bodyBytes ?? (await boundedBody(response, undefined, 1_024).catch(() => new Uint8Array()));
-  const rawBody = new TextDecoder('utf-8', { fatal: false }).decode(errorBytes);
-  const body = rawBody.toLowerCase();
+function parseProviderErrorDetail(rawBody: string): ProviderErrorDetail {
   let providerCode: string | null = null;
   let providerDetail: string | null = null;
   try {
@@ -190,6 +192,31 @@ async function storageError(
   } catch {
     // Some Storage gateways return plain text. Keep the error bounded and generic.
   }
+  return { providerCode, providerDetail };
+}
+
+function tusFailureDetail(
+  error: unknown,
+): Readonly<{ status: number | null; detail: string | null }> {
+  if (!error || typeof error !== 'object') return { status: null, detail: null };
+  const response = (error as { originalResponse?: TusResponseLike | null }).originalResponse;
+  if (!response) return { status: null, detail: null };
+  const status = typeof response.getStatus === 'function' ? response.getStatus() : null;
+  const rawBody = typeof response.getBody === 'function' ? response.getBody().slice(0, 1_024) : '';
+  const { providerCode, providerDetail } = parseProviderErrorDetail(rawBody);
+  return { status, detail: providerCode ?? providerDetail };
+}
+
+async function storageError(
+  response: Response,
+  operation: string,
+  bodyBytes?: Uint8Array,
+): Promise<SourceMediaStorageError> {
+  const errorBytes =
+    bodyBytes ?? (await boundedBody(response, undefined, 1_024).catch(() => new Uint8Array()));
+  const rawBody = new TextDecoder('utf-8', { fatal: false }).decode(errorBytes);
+  const body = rawBody.toLowerCase();
+  const { providerCode, providerDetail } = parseProviderErrorDetail(rawBody);
   const alreadyExists =
     response.status === 409 ||
     (response.status === 400 && /already exists|duplicate|resource exists/.test(body));
@@ -239,12 +266,16 @@ const uploadWithTusClient: SourceMediaTusUpload = (input) =>
       metadata: { ...input.metadata },
       onError: (error) => {
         input.signal?.removeEventListener('abort', onAbort);
+        const { status, detail } = tusFailureDetail(error);
+        const statusText = status === null ? '' : ` with ${status}`;
+        const detailText = detail ? ` (${detail})` : '';
         reject(
           new SourceMediaStorageError(
-            /409|already exists/i.test(error.message)
+            status === 409 || /409|already exists/i.test(error.message)
               ? 'STORAGE_OBJECT_EXISTS'
               : 'STORAGE_TUS_FAILED',
-            'Resumable Storage upload failed',
+            `Resumable Storage upload failed${statusText}${detailText}`,
+            status,
           ),
         );
       },
@@ -424,6 +455,16 @@ export function createSourceMediaStorage(
         { method: 'DELETE', headers, signal },
       );
       if (response.status === 404) return 'missing';
+      if (response.status === 400) {
+        const bodyBytes = await boundedBody(response, signal, 1_024).catch(() => new Uint8Array());
+        const rawBody = new TextDecoder('utf-8', { fatal: false }).decode(bodyBytes);
+        const body = rawBody.toLowerCase();
+        const { providerCode } = parseProviderErrorDetail(rawBody);
+        if (providerCode === 'not_found' && !/bucket[\s_-]+not[\s_-]+found/.test(body)) {
+          return 'missing';
+        }
+        throw await storageError(response, 'object delete', bodyBytes);
+      }
       if (!response.ok) throw await storageError(response, 'object delete');
       return 'deleted';
     },
@@ -441,6 +482,7 @@ export function createSourceMediaStorage(
       const bytes = new Uint8Array(BUCKET_FILE_SIZE_LIMIT);
       bytes.set(pngPrefix);
       let uploaded = false;
+      let probeError: unknown = null;
       try {
         await storage.upload(objectKey, bytes, 'image/png');
         uploaded = true;
@@ -450,22 +492,29 @@ export function createSourceMediaStorage(
         if (actual !== expected) {
           throw new SourceMediaStorageError('STORAGE_PROBE_HASH', 'Storage probe hash mismatch');
         }
+      } catch (error) {
+        probeError = error;
+        throw error;
       } finally {
-        const removed = await storage.remove(objectKey);
-        if (uploaded && removed !== 'deleted') {
-          throw new SourceMediaStorageError(
-            'STORAGE_PROBE_CLEANUP',
-            'Storage probe cleanup did not delete its uploaded object',
-          );
-        }
         try {
-          await storage.download(objectKey);
-          throw new SourceMediaStorageError(
-            'STORAGE_PROBE_CLEANUP',
-            'Storage probe object remains readable after deletion',
-          );
+          const removed = await storage.remove(objectKey);
+          if (uploaded && removed !== 'deleted') {
+            throw new SourceMediaStorageError(
+              'STORAGE_PROBE_CLEANUP',
+              'Storage probe cleanup did not delete its uploaded object',
+            );
+          }
+          try {
+            await storage.download(objectKey);
+            throw new SourceMediaStorageError(
+              'STORAGE_PROBE_CLEANUP',
+              'Storage probe object remains readable after deletion',
+            );
+          } catch (error) {
+            if (!(error instanceof SourceMediaStorageError) || error.status !== 404) throw error;
+          }
         } catch (error) {
-          if (!(error instanceof SourceMediaStorageError) || error.status !== 404) throw error;
+          if (probeError === null) throw error;
         }
       }
     },
