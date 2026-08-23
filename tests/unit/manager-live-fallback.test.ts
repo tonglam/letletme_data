@@ -11,6 +11,7 @@ import {
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
   selectLatestCheckedRow,
+  shouldAcceptClassicOverallRankPublication,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
   shouldRetryPendingClassicOverallRank,
@@ -82,6 +83,25 @@ describe('classic manager live fallback', () => {
     expect(preserveLastKnownOverallRank(null, null)).toBeNull();
     expect(isPositiveOverallRank(620_000)).toBeTrue();
     expect(isPositiveOverallRank(0)).toBeFalse();
+  });
+
+  test('advances durable Classic OR evidence only for a newer valid publication', () => {
+    const acceptedAt = '2026-08-23T08:00:01.000Z';
+
+    expect(
+      shouldAcceptClassicOverallRankPublication(620_000, '2026-08-23T08:00:02.000Z', acceptedAt),
+    ).toBeTrue();
+    expect(
+      shouldAcceptClassicOverallRankPublication(620_000, '2026-08-23T08:00:00.000Z', acceptedAt),
+    ).toBeFalse();
+    expect(shouldAcceptClassicOverallRankPublication(620_000, acceptedAt, acceptedAt)).toBeFalse();
+    expect(
+      shouldAcceptClassicOverallRankPublication(null, '2026-08-23T08:00:02.000Z', acceptedAt),
+    ).toBeFalse();
+    expect(
+      shouldAcceptClassicOverallRankPublication(0, '2026-08-23T08:00:02.000Z', acceptedAt),
+    ).toBeFalse();
+    expect(shouldAcceptClassicOverallRankPublication(620_000, 'invalid', acceptedAt)).toBeFalse();
   });
 
   test('rebases delayed overall-rank work onto the latest standings row', () => {

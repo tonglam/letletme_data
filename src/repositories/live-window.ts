@@ -107,6 +107,10 @@ export type ManagerScoreCheckpoint = {
   contentRevision: string;
   checkedAt: Date;
   upstreamUpdatedAt: Date | null;
+  // Classic rows use the existing internal updated_at column as durable
+  // ordering evidence for the last accepted positive OR fetch. Standings and
+  // unusable Summary responses leave it unchanged.
+  overallRankPublicationStartedAt?: Date | null;
 };
 
 export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransaction) => {
@@ -187,7 +191,10 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
             contentRevision: row.contentRevision,
             checkedAt: row.checkedAt,
             upstreamUpdatedAt: row.upstreamUpdatedAt,
-            updatedAt: row.checkedAt,
+            updatedAt:
+              scope.scopeType === 'CLASSIC_LEAGUE'
+                ? (row.overallRankPublicationStartedAt ?? new Date(0))
+                : row.checkedAt,
           })),
         )
         .onConflictDoUpdate({
@@ -212,7 +219,10 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
             contentRevision: sql`excluded.content_revision`,
             checkedAt: sql`excluded.checked_at`,
             upstreamUpdatedAt: sql`excluded.upstream_updated_at`,
-            updatedAt: sql`excluded.updated_at`,
+            updatedAt:
+              scope.scopeType === 'CLASSIC_LEAGUE'
+                ? sql`greatest(${managerEventScoreSnapshotsInFpl.updatedAt}, excluded.updated_at)`
+                : sql`excluded.updated_at`,
           },
           setWhere: sql`${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at`,
         });

@@ -61,6 +61,19 @@ export const preserveLastKnownOverallRank = (
   return isPositiveOverallRank(previous) ? previous : null;
 };
 
+export const shouldAcceptClassicOverallRankPublication = (
+  incoming: number | null | undefined,
+  publicationStartedAt: string,
+  lastAcceptedPublicationAt: string | null | undefined,
+): boolean => {
+  if (!isPositiveOverallRank(incoming)) return false;
+
+  const incomingTime = Date.parse(publicationStartedAt);
+  if (!Number.isFinite(incomingTime)) return false;
+  const acceptedTime = Date.parse(lastAcceptedPublicationAt ?? '');
+  return !Number.isFinite(acceptedTime) || incomingTime > acceptedTime;
+};
+
 export const selectLatestCheckedRow = <
   T extends Readonly<{
     checkedAt: string;
