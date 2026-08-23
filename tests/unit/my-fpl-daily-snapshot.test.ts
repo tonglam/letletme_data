@@ -101,6 +101,12 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(helper).toContain('throw new MyFplCaptureLockBusyError()');
     expect(helper).toContain('record.code === \u002740001\u0027');
     expect(helper).toContain('my_fpl_snapshot_publications_active_key');
+    expect(helper).toContain('my_fpl_snapshot_publications_idempotency_key');
+    expect(publicationService).toContain('MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS = 2 * 60_000');
+    expect(publicationService).toContain('MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3');
+    expect(helper).toContain('let lockWaitRemainingMs = MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS');
+    expect(helper).toContain('let commitBoundaryConflictRetries = 0');
+    expect(helper).not.toContain('const deadline = Date.now()');
     expect(helper).not.toContain('pg_advisory_lock(');
     expect(helper).not.toContain('client.reserve()');
   });
@@ -111,6 +117,12 @@ describe('My FPL daily snapshot publication contract', () => {
       isRetryableMyFplCaptureContention({
         code: '23505',
         constraint_name: 'my_fpl_snapshot_publications_active_key',
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableMyFplCaptureContention({
+        code: '23505',
+        constraint_name: 'my_fpl_snapshot_publications_idempotency_key',
       }),
     ).toBe(true);
     expect(

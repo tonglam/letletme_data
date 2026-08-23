@@ -116,6 +116,11 @@ export function isMatchingProvisionalMyFplPublication(
   );
 }
 
+class MyFplCaptureLockBusyError extends Error {}
+
+const MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS = 2 * 60_000;
+const MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3;
+
 async function runMyFplCaptureTransaction(
   client: postgres.Sql,
   lockScope: string,
@@ -125,9 +130,11 @@ async function runMyFplCaptureTransaction(
   // statements, so a session-level advisory lock cannot protect the following
   // transaction. Try a transaction lock without waiting instead: every miss
   // rolls back immediately and opens a fresh repeatable-read snapshot. A
-  // serialization failure is the remaining commit-boundary race and is also
-  // retried from a new snapshot.
-  const deadline = Date.now() + 2 * 60_000;
+  // serialization or a publication-identity conflict can still occur at the
+  // commit boundary; those receive a bounded number of fresh-snapshot retries.
+  // Keep time spent building the snapshot outside the lock-wait budget.
+  let lockWaitRemainingMs = MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS;
+  let commitBoundaryConflictRetries = 0;
   while (true) {
     try {
       return await client.begin('isolation level repeatable read', async (tx) => {
@@ -140,21 +147,31 @@ async function runMyFplCaptureTransaction(
         return operation(tx);
       });
     } catch (error) {
-      if (!isRetryableMyFplCaptureContention(error)) throw error;
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) {
-        throw new Error(`Timed out waiting for My FPL capture lock ${lockScope}`, {
-          cause: error,
-        });
+      if (error instanceof MyFplCaptureLockBusyError) {
+        if (lockWaitRemainingMs <= 0) {
+          throw new Error(`Timed out waiting for My FPL capture lock ${lockScope}`, {
+            cause: error,
+          });
+        }
+        const waitStartedAt = Date.now();
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, lockWaitRemainingMs)));
+        lockWaitRemainingMs -= Date.now() - waitStartedAt;
+        continue;
       }
-      await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, remainingMs)));
+      if (!isRetryableMyFplCaptureContention(error)) throw error;
+      if (commitBoundaryConflictRetries >= MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES) {
+        throw new Error(
+          `My FPL capture commit-boundary contention did not converge for ${lockScope}`,
+          { cause: error },
+        );
+      }
+      commitBoundaryConflictRetries += 1;
     }
   }
 }
 
-class MyFplCaptureLockBusyError extends Error {}
-
 const ACTIVE_MY_FPL_PUBLICATION_CONSTRAINT = 'my_fpl_snapshot_publications_active_key';
+const IDEMPOTENT_MY_FPL_PUBLICATION_CONSTRAINT = 'my_fpl_snapshot_publications_idempotency_key';
 
 export function isRetryableMyFplCaptureContention(error: unknown): boolean {
   const seen = new Set<unknown>();
@@ -172,8 +189,9 @@ export function isRetryableMyFplCaptureContention(error: unknown): boolean {
     if (record.code === '40001') return true;
     if (
       record.code === '23505' &&
-      String(record.constraint_name ?? record.constraint ?? '') ===
-        ACTIVE_MY_FPL_PUBLICATION_CONSTRAINT
+      [ACTIVE_MY_FPL_PUBLICATION_CONSTRAINT, IDEMPOTENT_MY_FPL_PUBLICATION_CONSTRAINT].includes(
+        String(record.constraint_name ?? record.constraint ?? ''),
+      )
     ) {
       return true;
     }

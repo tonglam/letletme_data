@@ -337,5 +337,29 @@ describe('My FPL onboarding publication correction', () => {
       pendingCorrectionEntryCount: 0,
       coverageState: 'COMPLETE',
     });
+
+    await sql`
+      UPDATE fpl.events
+      SET finished = true, data_checked = true,
+          data_checked_at = ${CAPTURE_NOW.toISOString()}::timestamptz
+      WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}
+    `;
+    const finalOverride = {
+      snapshotDate: SNAPSHOT_DATE,
+      now: CAPTURE_NOW,
+      actor: 'integration-test',
+      reason: 'verify concurrent final idempotency',
+      idempotencyKey: 'my-fpl-concurrent-final-integration',
+    };
+    const concurrentFinal = await Promise.all([
+      captureMyFplSnapshot(SEASON, EVENT_ID, 'FINAL', finalOverride),
+      captureMyFplSnapshot(SEASON, EVENT_ID, 'FINAL', finalOverride),
+    ]);
+    expect(concurrentFinal.map((result) => result.status).sort()).toEqual(['noop', 'published']);
+    expect(concurrentFinal[0].publication.revision).toBe(concurrentFinal[1].publication.revision);
+    expect(concurrentFinal[0].publication).toMatchObject({
+      kind: 'FINAL',
+      idempotencyKey: finalOverride.idempotencyKey,
+    });
   });
 });
