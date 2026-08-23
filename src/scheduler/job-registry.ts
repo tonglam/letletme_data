@@ -19,6 +19,7 @@ import {
   enqueueTournamentOfficialH2H,
   enqueueTournamentRosterSync,
   enqueueTournamentTransfersPre,
+  hasPendingOfficialH2HJob,
 } from '../jobs/tournament-sync.jobs';
 import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import {
@@ -457,6 +458,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
 type OfficialH2HSchedulerDependencies = Readonly<{
   findEvent: typeof eventRepository.findById;
   findFixtures: typeof fixtureRepository.findByEvent;
+  hasPending: typeof hasPendingOfficialH2HJob;
   enqueue: typeof enqueueTournamentOfficialH2H;
 }>;
 
@@ -464,6 +466,7 @@ export function officialH2HDefinition(
   dependencies: OfficialH2HSchedulerDependencies = {
     findEvent: (season, eventId) => eventRepository.findById(season, eventId),
     findFixtures: (season, eventId) => fixtureRepository.findByEvent(season, eventId),
+    hasPending: hasPendingOfficialH2HJob,
     enqueue: enqueueTournamentOfficialH2H,
   },
 ): ScheduledJobDefinition {
@@ -483,6 +486,7 @@ export function officialH2HDefinition(
       const fixtures = await dependencies.findFixtures(context.season, event.id);
       const decision = decideLiveLifecycle(event, fixtures, context.now);
       if (!decision.shouldFetchLive || !isMatchDayTime(event, fixtures, context.now)) return [];
+      if (await dependencies.hasPending(context.season, event.id)) return [];
       const minuteStart = new Date(Math.floor(context.now.getTime() / 60_000) * 60_000);
       const minuteKey = minuteStart.toISOString().slice(0, 16).replace(/\D/g, '');
       return [
@@ -504,7 +508,8 @@ export function officialH2HDefinition(
         obligationId,
         obligationGeneration: generation,
       });
-      return { bullJobId: job?.id, runId: job?.data.runId };
+      if (!job) throw new Error('Official H2H job became pending before enqueue');
+      return { bullJobId: job.id, runId: job.data.runId };
     },
   };
 }

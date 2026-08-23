@@ -103,11 +103,19 @@ describe('standalone scheduler registry', () => {
         updatedAt: null,
       },
     ];
-    const enqueue = mock(async () => ({ id: 'official-job', data: { runId: 'official-run' } }));
+    let officialJobPending = false;
+    let returnPendingRace = false;
+    const hasPending = mock(async () => officialJobPending);
+    const enqueue = mock(async (..._args: unknown[]) => ({
+      id: 'official-job',
+      data: { runId: 'official-run' },
+    }));
     const definition = officialH2HDefinition({
       findEvent: async () => event,
       findFixtures: async () => fixtures,
-      enqueue: enqueue as never,
+      hasPending,
+      enqueue: (async (...args: unknown[]) =>
+        returnPendingRace ? null : enqueue(...args)) as never,
     });
     const context = {
       season: TEST_SEASON,
@@ -143,6 +151,25 @@ describe('standalone scheduler registry', () => {
       obligationId: 'official-obligation',
       obligationGeneration: 2,
     });
+    officialJobPending = true;
+    expect(
+      await definition.resolve({ ...context, now: new Date('2026-08-23T18:31:00.000Z') }),
+    ).toEqual([]);
+    expect(hasPending).toHaveBeenLastCalledWith(TEST_SEASON, 1);
+    officialJobPending = false;
+    returnPendingRace = true;
+    const racedPlans = await definition.resolve({
+      ...context,
+      now: new Date('2026-08-23T18:32:00.000Z'),
+    });
+    await expect(
+      definition.enqueue({
+        context,
+        plan: racedPlans[0]!,
+        obligationId: 'raced-official-obligation',
+        generation: 1,
+      }),
+    ).rejects.toThrow('Official H2H job became pending before enqueue');
     expect(
       await definition.resolve({ ...context, now: new Date('2026-08-24T01:00:00.000Z') }),
     ).toEqual([]);

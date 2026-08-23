@@ -7,6 +7,7 @@ type AddCall = { name: string; data: Record<string, unknown>; opts: Record<strin
 const liveDataAddCalls: AddCall[] = [];
 const entrySyncAddCalls: AddCall[] = [];
 const tournamentSyncAddCalls: AddCall[] = [];
+const pendingTournamentSyncJobs: Array<{ name: string; data: Record<string, unknown> }> = [];
 const leagueSyncAddCalls: AddCall[] = [];
 
 mock.module('../../src/queues/live-data.queue', () => ({
@@ -50,9 +51,11 @@ mock.module('../../src/queues/tournament-sync.queue', () => ({
     EVENT_PICKS: 'tournament-event-picks',
     TRANSFERS_PRE: 'tournament-transfers-pre',
     INFO: 'tournament-info',
+    OFFICIAL_H2H: 'tournament-official-h2h',
   },
   tournamentSyncQueue: {
     name: 'tournament-sync',
+    getJobs: async () => pendingTournamentSyncJobs,
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       tournamentSyncAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
@@ -78,7 +81,9 @@ const { enqueueLiveSnapshot } = await import('../../src/jobs/live-data.jobs');
 const { enqueueEntryInfoSyncJob, enqueueEntryPicksSyncJob } = await import(
   '../../src/jobs/entry-sync-enqueue'
 );
-const { enqueueTournamentEventResults } = await import('../../src/jobs/tournament-sync.jobs');
+const { enqueueTournamentEventResults, enqueueTournamentOfficialH2H } = await import(
+  '../../src/jobs/tournament-sync.jobs'
+);
 const { enqueueLeagueEventResults } = await import('../../src/jobs/league-sync.jobs');
 const { stableHash } = await import('../../src/utils/stable-hash');
 
@@ -261,6 +266,7 @@ describe('entry-sync entry-list job IDs', () => {
 describe('deterministic result job retention', () => {
   beforeEach(() => {
     tournamentSyncAddCalls.length = 0;
+    pendingTournamentSyncJobs.length = 0;
     leagueSyncAddCalls.length = 0;
   });
 
@@ -285,6 +291,22 @@ describe('deterministic result job retention', () => {
     });
 
     expect(leagueSyncAddCalls[0].data.runId).toBe('league-run-42');
+  });
+
+  test('coalesces cron and reconciled official H2H ticks behind pending work', async () => {
+    pendingTournamentSyncJobs.push({
+      name: 'tournament-official-h2h',
+      data: { seasonId: TEST_SEASON.seasonId, eventId: 12 },
+    });
+
+    expect(await enqueueTournamentOfficialH2H(TEST_SEASON, 12)).toBeNull();
+    expect(await enqueueTournamentOfficialH2H(TEST_SEASON, 12, 'cron')).toBeNull();
+    expect(await enqueueTournamentOfficialH2H(TEST_SEASON, 12, 'reconcile')).toBeNull();
+    expect(tournamentSyncAddCalls).toHaveLength(0);
+
+    const manual = await enqueueTournamentOfficialH2H(TEST_SEASON, 12, 'manual');
+    expect(manual).not.toBeNull();
+    expect(tournamentSyncAddCalls).toHaveLength(1);
   });
 });
 

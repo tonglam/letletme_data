@@ -40,7 +40,10 @@ export type TournamentSyncEnqueueOptions = {
   finalizedEventId?: number;
 };
 
-async function hasPendingOfficialH2HJob(season: FplSeasonRef, eventId: number): Promise<boolean> {
+export async function hasPendingOfficialH2HJob(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<boolean> {
   try {
     const jobs = await tournamentSyncQueue.getJobs(['waiting', 'delayed', 'active']);
     return jobs.some(
@@ -401,14 +404,24 @@ export const enqueueTournamentOfficialH2H = async (
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
 ) => {
-  if (source === 'cron' && (await hasPendingOfficialH2HJob(season, eventId))) {
+  const effectiveSource = source ?? 'cron';
+  if (
+    (effectiveSource === 'cron' || effectiveSource === 'reconcile') &&
+    (await hasPendingOfficialH2HJob(season, eventId))
+  ) {
     logInfo('Official H2H job already pending; skipping enqueue', {
       season: season.seasonCode,
       eventId,
     });
     return null;
   }
-  return enqueueTournamentSyncJob(TOURNAMENT_JOBS.OFFICIAL_H2H, season, eventId, source, options);
+  return enqueueTournamentSyncJob(
+    TOURNAMENT_JOBS.OFFICIAL_H2H,
+    season,
+    eventId,
+    effectiveSource,
+    options,
+  );
 };
 
 export const enqueueTournamentKnockout = (
