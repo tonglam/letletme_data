@@ -120,11 +120,6 @@ require_files() {
     log_error "CONTENT_MEDIA_SUPABASE_SECRET_KEY must exist only in ${CONTENT_MEDIA_ENV_FILE}, not ${ENV_FILE}."
     exit 1
   fi
-  if ! "${PROJECT_DIR}/scripts/bootstrap-briefing-source-media-env.sh" \
-    "${ENV_FILE}" "${CONTENT_MEDIA_ENV_FILE}"; then
-    log_error "Could not establish the private source-media environment file."
-    exit 1
-  fi
   load_backup_settings
 }
 
@@ -224,6 +219,11 @@ deploy() {
   log_info "Probing the private bug-report screenshot bucket"
   if ! compose run --rm -T api bun validate-env.ts --probe-bug-report-storage; then
     log_error "Bug-report screenshot storage contract failed; services were not stopped."
+    exit 1
+  fi
+  if ! "${PROJECT_DIR}/scripts/bootstrap-briefing-source-media-env.sh" \
+    "${ENV_FILE}" "${CONTENT_MEDIA_ENV_FILE}"; then
+    log_error "Could not establish the private source-media environment file."
     exit 1
   fi
   media_worker_setting=false

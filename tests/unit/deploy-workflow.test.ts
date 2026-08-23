@@ -67,11 +67,22 @@ describe('release workflow gates', () => {
     expect(workflow.indexOf('scripts/bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
       workflow.indexOf('acquire_deploy_lock'),
     );
+    expect(workflow.indexOf('scripts/bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
+      workflow.indexOf('bun validate-env.ts --probe-bug-report-storage'),
+    );
+    expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
+      deployScript.indexOf('bun validate-env.ts --probe-bug-report-storage'),
+    );
+    expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeLessThan(
+      deployScript.indexOf('status()'),
+    );
     expect(sourceMediaBootstrapScript).toContain('BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY');
     expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_WORKER_ENABLED=false');
     expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_RETENTION_ENABLED=false');
     expect(sourceMediaBootstrapScript).toContain('chmod 600');
-    expect(sourceMediaBootstrapScript).toContain('mv -n');
+    expect(sourceMediaBootstrapScript).toContain('-nT');
+    expect(sourceMediaBootstrapScript).toContain('--no-target-directory');
+    expect(sourceMediaBootstrapScript).toContain('! -f "$media_env_file"');
     expect(sourceMediaBootstrapScript).not.toContain('set -x');
     expect(deployScript).toContain('briefing_source_media_health');
     expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
@@ -121,6 +132,11 @@ describe('release workflow gates', () => {
     expect(sourceMediaRolloutWorkflow).toContain('configure-briefing-source-media-env.sh');
     expect(sourceMediaRolloutWorkflow).toContain('"mediaEnvPresent":false');
     expect(sourceMediaRolloutWorkflow).toContain('bootstrap-briefing-source-media-env.sh');
+    expect(
+      sourceMediaRolloutWorkflow.indexOf(
+        'source-media rollout refused: Storage secret is present in .env.deploy',
+      ),
+    ).toBeLessThan(sourceMediaRolloutWorkflow.indexOf('if [ ! -e "$media_env_file" ]'));
     expect(sourceMediaRolloutWorkflow).toContain('acquire_deploy_lock');
     expect(sourceMediaRolloutWorkflow).toContain('release_deploy_lock');
     expect(sourceMediaRolloutWorkflow).toContain('--provision-and-probe');

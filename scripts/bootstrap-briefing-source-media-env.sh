@@ -99,8 +99,20 @@ printf '%s\n' \
   >"$temporary_file"
 chmod 600 "$temporary_file"
 "$script_dir/configure-briefing-source-media-env.sh" status "$temporary_file" >/dev/null
-mv -n "$temporary_file" "$media_env_file"
-if [[ -f "$temporary_file" ]]; then
+strict_mv=mv
+if ! mv --help 2>&1 | grep -q -- '--no-target-directory'; then
+  if command -v gmv >/dev/null 2>&1 && gmv --help 2>&1 | grep -q -- '--no-target-directory'; then
+    strict_mv=gmv
+  else
+    echo 'source-media env bootstrap refused: mv --no-target-directory is required' >&2
+    exit 1
+  fi
+fi
+if ! "$strict_mv" -nT "$temporary_file" "$media_env_file"; then
+  echo 'source-media env bootstrap refused: media env target appeared concurrently' >&2
+  exit 1
+fi
+if [[ -f "$temporary_file" || ! -f "$media_env_file" || -L "$media_env_file" ]]; then
   echo 'source-media env bootstrap refused: media env target appeared concurrently' >&2
   exit 1
 fi

@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -126,5 +127,15 @@ describe('Briefing source-media env bootstrap', () => {
     expect(symlinkResult.exitCode).not.toBe(0);
     expect(symlinkResult.stderr).toContain('not a regular file');
     expect(lstatSync(symlinkTarget).isSymbolicLink()).toBe(true);
+
+    const directoryTargetDirectory = makeDirectory();
+    const directoryTargetDeployEnv = writeDeployEnv(directoryTargetDirectory);
+    const directoryTarget = join(directoryTargetDirectory, '.env.media');
+    mkdirSync(directoryTarget);
+
+    const directoryResult = await bootstrap(directoryTargetDeployEnv, directoryTarget);
+    expect(directoryResult.exitCode).not.toBe(0);
+    expect(directoryResult.stderr).toContain('not a regular file');
+    expect(lstatSync(directoryTarget).isDirectory()).toBe(true);
   });
 });

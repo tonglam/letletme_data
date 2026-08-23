@@ -68,6 +68,10 @@ jobs:
               test -f "$file"
               test ! -L "$file"
             done
+            if grep -q '^[[:space:]]*CONTENT_MEDIA_SUPABASE_SECRET_KEY[[:space:]]*=' "$env_file"; then
+              echo 'source-media rollout refused: Storage secret is present in .env.deploy' >&2
+              exit 1
+            fi
             if [ ! -e "$media_env_file" ] && [ ! -L "$media_env_file" ]; then
               if [ "$ROLLOUT_MODE" = status ]; then
                 printf '%s\n' \
@@ -80,10 +84,6 @@ jobs:
             fi
             test -f "$media_env_file"
             test ! -L "$media_env_file"
-            if grep -q '^[[:space:]]*CONTENT_MEDIA_SUPABASE_SECRET_KEY[[:space:]]*=' "$env_file"; then
-              echo 'source-media rollout refused: Storage secret is present in .env.deploy' >&2
-              exit 1
-            fi
 
             export CONTENT_MEDIA_ENV_FILE="$media_env_file"
             current_container=$(docker compose ps -q media-worker | head -n 1)
