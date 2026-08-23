@@ -5,8 +5,9 @@ import {
   UnderstatClientError,
   UnderstatLeagueResponseSchema,
   UnderstatNumberSchema,
+  UnderstatTeamResponseSchema,
 } from '../../src/clients/understat';
-import { UNDERSTAT_LEAGUE_FIXTURE } from '../fixtures/understat.fixtures';
+import { UNDERSTAT_LEAGUE_FIXTURE, UNDERSTAT_TEAM_FIXTURE } from '../fixtures/understat.fixtures';
 
 describe('Understat client boundary', () => {
   test('converts numeric strings but rejects empty values', () => {
@@ -42,6 +43,23 @@ describe('Understat client boundary', () => {
         expect.objectContaining({ path: ['dates', 0, 'forecast'] }),
       );
     }
+  });
+
+  test('normalizes an empty team statistics array for seasons without results', () => {
+    const parsed = UnderstatTeamResponseSchema.parse({
+      ...UNDERSTAT_TEAM_FIXTURE,
+      statistics: [],
+    });
+
+    expect(parsed.statistics).toEqual({
+      situation: {},
+      formation: {},
+      gameState: {},
+      timing: {},
+      shotZone: {},
+      attackSpeed: {},
+      result: {},
+    });
   });
 
   test('is a hard no-network gate when disabled', async () => {

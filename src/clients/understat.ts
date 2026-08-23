@@ -38,6 +38,16 @@ const UnderstatForecastSchema = z
 
 const EMPTY_FORECAST = { w: null, d: null, l: null };
 
+const EMPTY_TEAM_STATISTICS = {
+  situation: {},
+  formation: {},
+  gameState: {},
+  timing: {},
+  shotZone: {},
+  attackSpeed: {},
+  result: {},
+};
+
 export const UnderstatTeamReferenceSchema = z
   .object({
     id: UnderstatIdSchema,
@@ -157,21 +167,33 @@ const UnderstatSplitValueSchema = z
 
 const UnderstatSplitRecordSchema = z.record(UnderstatSplitValueSchema);
 
+const UnderstatTeamStatisticsObjectSchema = z
+  .object({
+    situation: UnderstatSplitRecordSchema,
+    formation: UnderstatSplitRecordSchema,
+    gameState: UnderstatSplitRecordSchema,
+    timing: UnderstatSplitRecordSchema,
+    shotZone: UnderstatSplitRecordSchema,
+    attackSpeed: UnderstatSplitRecordSchema,
+    result: UnderstatSplitRecordSchema,
+  })
+  .passthrough();
+
+const UnderstatTeamStatisticsSchema = z.union([
+  UnderstatTeamStatisticsObjectSchema,
+  // A season with no completed matches is returned as an empty array by
+  // Understat. Keep this narrow so a populated shape drift still fails.
+  z
+    .array(z.unknown())
+    .length(0)
+    .transform(() => EMPTY_TEAM_STATISTICS),
+]);
+
 export const UnderstatTeamResponseSchema = z
   .object({
     dates: z.array(UnderstatMatchDateSchema),
     players: z.array(UnderstatPlayerSummarySchema),
-    statistics: z
-      .object({
-        situation: UnderstatSplitRecordSchema,
-        formation: UnderstatSplitRecordSchema,
-        gameState: UnderstatSplitRecordSchema,
-        timing: UnderstatSplitRecordSchema,
-        shotZone: UnderstatSplitRecordSchema,
-        attackSpeed: UnderstatSplitRecordSchema,
-        result: UnderstatSplitRecordSchema,
-      })
-      .passthrough(),
+    statistics: UnderstatTeamStatisticsSchema,
   })
   .passthrough();
 
