@@ -4,7 +4,7 @@ import { logError } from './logger';
 export const RUNTIME_HEARTBEAT_TTL_SECONDS = 120;
 export const RUNTIME_HEARTBEAT_MAX_AGE_MS = 90_000;
 
-export type RuntimeRole = 'scheduler' | 'queueWorker' | 'contentWorker';
+export type RuntimeRole = 'scheduler' | 'queueWorker' | 'contentWorker' | 'mediaWorker';
 export type RuntimeHeartbeat = Readonly<{
   role: RuntimeRole;
   releaseSha: string;

@@ -213,6 +213,30 @@ async function readBoundedBody(response: Response, maximumBytes: number): Promis
   return result;
 }
 
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(new PublicHttpError('HTTP_ABORTED', 'Public HTTP request was aborted'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      reject(new PublicHttpError('HTTP_ABORTED', 'Public HTTP request was aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function fetchPublicResource(input: {
   url: string;
   validator?: Partial<HttpValidator>;
@@ -226,6 +250,7 @@ export async function fetchPublicResource(input: {
   now?: Date;
   fetchImpl?: PublicFetch;
   lookupImpl?: PublicDnsLookup;
+  signal?: AbortSignal;
 }): Promise<PublicHttpResult> {
   const timeoutMs = input.timeoutMs ?? 40_000;
   const maximumBytes = input.maximumBytes ?? 8 * 1_024 * 1_024;
@@ -256,8 +281,17 @@ export async function fetchPublicResource(input: {
   let currentUrl = requestUrl;
 
   for (let redirects = 0; redirects <= maximumRedirects; redirects += 1) {
+    if (input.signal?.aborted) {
+      throw new PublicHttpError('HTTP_ABORTED', 'Public HTTP request was aborted');
+    }
     const parsed = new URL(currentUrl);
-    const validatedTarget = await resolvePublicTarget(parsed, input.allowHttp ?? false, lookupImpl);
+    const validatedTarget = await abortable(
+      resolvePublicTarget(parsed, input.allowHttp ?? false, lookupImpl),
+      input.signal,
+    );
+    if (input.signal?.aborted) {
+      throw new PublicHttpError('HTTP_ABORTED', 'Public HTTP request was aborted');
+    }
     if (parsed.origin !== allowedOrigin) {
       throw new PublicHttpError('CROSS_ORIGIN_REDIRECT', 'Cross-origin redirect is forbidden');
     }
@@ -266,7 +300,18 @@ export async function fetchPublicResource(input: {
         ? currentUrl
         : pinnedUrl(parsed, validatedTarget.address);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const abortFromCaller = (): void => controller.abort(input.signal?.reason);
+    input.signal?.addEventListener('abort', abortFromCaller, { once: true });
+    if (input.signal?.aborted) abortFromCaller();
+    const clearRequestGuards = (): void => {
+      clearTimeout(timer);
+      input.signal?.removeEventListener('abort', abortFromCaller);
+    };
     let response: Response;
     try {
       response = await fetchImpl(transportUrl, {
@@ -289,17 +334,15 @@ export async function fetchPublicResource(input: {
           : {}),
       });
     } catch (error) {
-      clearTimeout(timer);
+      clearRequestGuards();
       throw new PublicHttpError(
-        error instanceof DOMException && error.name === 'AbortError'
-          ? 'HTTP_TIMEOUT'
-          : 'HTTP_FAILED',
+        controller.signal.aborted ? (timedOut ? 'HTTP_TIMEOUT' : 'HTTP_ABORTED') : 'HTTP_FAILED',
         error instanceof Error ? error.message : 'Public HTTP request failed',
       );
     }
 
     if ([301, 302, 303, 307, 308].includes(response.status)) {
-      clearTimeout(timer);
+      clearRequestGuards();
       if (redirects === maximumRedirects) {
         throw new PublicHttpError('TOO_MANY_REDIRECTS', 'HTTP redirect limit exceeded');
       }
@@ -315,7 +358,7 @@ export async function fetchPublicResource(input: {
     };
     const contentType = response.headers.get('content-type');
     if (response.status === 304 && acceptedStatusCodes.has(304)) {
-      clearTimeout(timer);
+      clearRequestGuards();
       return {
         requestUrl,
         finalUrl: currentUrl,
@@ -337,7 +380,7 @@ export async function fetchPublicResource(input: {
       };
     }
     if (!acceptedStatusCodes.has(response.status)) {
-      clearTimeout(timer);
+      clearRequestGuards();
       throw new PublicHttpError('HTTP_STATUS', `Unexpected HTTP status ${response.status}`);
     }
     if (
@@ -345,7 +388,7 @@ export async function fetchPublicResource(input: {
       input.acceptedContentTypes?.length &&
       (!contentType || !input.acceptedContentTypes.some((pattern) => pattern.test(contentType)))
     ) {
-      clearTimeout(timer);
+      clearRequestGuards();
       throw new PublicHttpError(
         'CONTENT_TYPE',
         `Unexpected content type ${contentType ?? 'missing'}`,
@@ -356,11 +399,14 @@ export async function fetchPublicResource(input: {
       body = await readBoundedBody(response, maximumBytes);
     } catch (error) {
       if (controller.signal.aborted) {
-        throw new PublicHttpError('HTTP_TIMEOUT', 'HTTP response body timed out');
+        throw new PublicHttpError(
+          timedOut ? 'HTTP_TIMEOUT' : 'HTTP_ABORTED',
+          timedOut ? 'HTTP response body timed out' : 'Public HTTP request was aborted',
+        );
       }
       throw error;
     } finally {
-      clearTimeout(timer);
+      clearRequestGuards();
     }
     const bodyHash = createHash('sha256').update(body).digest('hex');
     const metadata = {
