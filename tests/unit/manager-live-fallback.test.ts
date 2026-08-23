@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  classicManagerSummaryFallbackEntryIds,
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
@@ -35,6 +36,7 @@ describe('manager live refresh targets', () => {
     expect(preserveClassicOverallRank(null, 12_345)).toBe(12_345);
     expect(preserveClassicOverallRank(null, 0)).toBeNull();
     expect(preserveClassicOverallRank(54_321, undefined)).toBe(54_321);
+    expect(preserveClassicOverallRank(54_321, 12_345)).toBe(54_321);
   });
 });
 
@@ -76,6 +78,21 @@ describe('classic manager live fallback', () => {
     expect(managerLiveBackgroundRefreshKey('summary:2025:1', [2])).not.toBe(
       managerLiveBackgroundRefreshKey('summary:2025:1', [1]),
     );
+  });
+
+  test('refreshes stale summary fallbacks without replacing stale standings rows', () => {
+    expect(
+      classicManagerSummaryFallbackEntryIds([11], [21, 22, 23], new Set([21]), new Set([22]), true),
+    ).toEqual([11, 21, 22]);
+    expect(
+      classicManagerSummaryFallbackEntryIds(
+        [11],
+        [21, 22, 23],
+        new Set([21]),
+        new Set([22]),
+        false,
+      ),
+    ).toEqual([11]);
   });
 
   test('caps concurrent entry-summary work while retaining every target', () => {

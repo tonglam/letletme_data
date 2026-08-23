@@ -19,6 +19,7 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  classicManagerSummaryFallbackEntryIds,
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
@@ -383,7 +384,10 @@ const refreshEntrySummaries = async (
                     ...classicRow,
                     // Classic standings owns event/phase totals and league rank;
                     // the entry summary owns the season-wide FPL OR.
-                    overallRank: summary.summary_overall_rank ?? null,
+                    overallRank: preserveClassicOverallRank(
+                      summary.summary_overall_rank ?? null,
+                      existing.overallRank,
+                    ),
                     checkedAt,
                     staleAt: plusSeconds(checkedAt, STALE_SECONDS),
                   });
@@ -479,8 +483,8 @@ const refreshClassicStandings = async (
       page <= MAX_STANDINGS_PAGES && page < startPage + maxPages && found < targetIds.size;
       page += 1
     ) {
-      nextPage = page + 1;
       const response = await fplClient.getLeagueClassicStandings(leagueId, page);
+      nextPage = page + 1;
       const pageRows = toClassicRows(season.seasonCode, eventId, response, checkedAt);
       for (const row of pageRows) {
         if (!targetIds.has(row.entryId)) continue;
@@ -502,52 +506,6 @@ const refreshClassicStandings = async (
         break;
       }
     }
-    await writeRows(
-      redis,
-      season.seasonCode,
-      eventId,
-      { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
-      fetchedRows,
-      fetchedRows.length > 0
-        ? {
-            season: season.seasonCode,
-            eventId,
-            source: 'FPL_CLASSIC_STANDINGS',
-            leagueId,
-            rowCount: fetchedRows.length,
-            checkedAt,
-            revision: fetchedRows[0]?.revision ?? null,
-            nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-          }
-        : undefined,
-      `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
-    );
-    await managerScoreCheckpointRepository
-      .upsertBatch(
-        season,
-        eventId,
-        { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
-        fetchedRows.map((row) => toManagerScoreCheckpoint(row)),
-      )
-      .catch((error) =>
-        logWarn('Official manager checkpoint write failed', {
-          eventId,
-          leagueId,
-          error: error instanceof Error ? error.message : 'unknown',
-        }),
-      );
-    logDebug('Official classic manager live refresh completed', {
-      eventId,
-      leagueId,
-      requested: targetIds.size,
-      fetched: fetchedRows.length,
-    });
-    return {
-      complete: exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES,
-      nextPage,
-      errorCode: null,
-      refreshedEntryIds: fetchedRows.map((row) => row.entryId),
-    };
   } catch (error) {
     refreshErrorCode =
       error instanceof FPLClientError && error.status === 429
@@ -558,8 +516,60 @@ const refreshClassicStandings = async (
       leagueId,
       error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
     });
-    return { complete: false, nextPage, errorCode: refreshErrorCode, refreshedEntryIds: [] };
   }
+
+  // A later standings page can fail after earlier pages yielded useful rows.
+  // Publish that successful prefix and return its IDs for serialized OR
+  // enrichment instead of making the next poll fall back to the old cache.
+  await writeRows(
+    redis,
+    season.seasonCode,
+    eventId,
+    { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
+    fetchedRows,
+    fetchedRows.length > 0
+      ? {
+          season: season.seasonCode,
+          eventId,
+          source: 'FPL_CLASSIC_STANDINGS',
+          leagueId,
+          rowCount: fetchedRows.length,
+          checkedAt,
+          revision: fetchedRows[0]?.revision ?? null,
+          nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+        }
+      : undefined,
+    `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
+  );
+  await managerScoreCheckpointRepository
+    .upsertBatch(
+      season,
+      eventId,
+      { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId },
+      fetchedRows.map((row) => toManagerScoreCheckpoint(row)),
+    )
+    .catch((error) =>
+      logWarn('Official manager checkpoint write failed', {
+        eventId,
+        leagueId,
+        error: error instanceof Error ? error.message : 'unknown',
+      }),
+    );
+  logDebug('Official classic manager live refresh completed', {
+    eventId,
+    leagueId,
+    requested: targetIds.size,
+    fetched: fetchedRows.length,
+    partial: refreshErrorCode !== null,
+  });
+  return {
+    complete:
+      refreshErrorCode === null &&
+      (exhausted || found >= targetIds.size || nextPage > MAX_STANDINGS_PAGES),
+    nextPage,
+    errorCode: refreshErrorCode,
+    refreshedEntryIds: fetchedRows.map((row) => row.entryId),
+  };
 };
 
 const classicStandingNeedsOverallRank = (row: CachedRow | undefined): boolean =>
@@ -902,6 +912,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         usableCachedEntryIds.has(entryId) &&
         (!rows.has(entryId) || !isFresh(rows.get(entryId)!)),
     );
+    const staleSummaryFallbackIds = new Set(
+      pendingStale.filter((entryId) => rows.get(entryId)?.source === 'FPL_ENTRY_SUMMARY'),
+    );
     const backgroundPlan = planClassicManagerFallback(
       pendingCold,
       pendingStale,
@@ -987,13 +1000,13 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           );
         }
 
-        const coldSummaryCandidates = new Set(backgroundPlan.backgroundSummaryEntryIds);
-        if (backgroundResult.complete) {
-          for (const entryId of backgroundPlan.backgroundStandingsEntryIds) {
-            if (coldEntryIds.has(entryId)) coldSummaryCandidates.add(entryId);
-          }
-        }
-        const summaryTargets = Array.from(coldSummaryCandidates).filter(
+        const summaryTargets = classicManagerSummaryFallbackEntryIds(
+          backgroundPlan.backgroundSummaryEntryIds,
+          backgroundPlan.backgroundStandingsEntryIds,
+          coldEntryIds,
+          staleSummaryFallbackIds,
+          backgroundResult.complete,
+        ).filter(
           (entryId) => !backgroundRows.has(entryId) || !isFresh(backgroundRows.get(entryId)!),
         );
         if (summaryTargets.length > 0) {

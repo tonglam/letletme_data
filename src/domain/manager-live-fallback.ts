@@ -6,12 +6,20 @@ export type ManagerSummaryFetchPriority = 'foreground' | 'background';
 export const preserveClassicOverallRank = (
   incomingOverallRank: number | null,
   existingOverallRank: number | null | undefined,
-): number | null =>
-  typeof existingOverallRank === 'number' &&
-  Number.isSafeInteger(existingOverallRank) &&
-  existingOverallRank > 0
+): number | null => {
+  if (
+    typeof incomingOverallRank === 'number' &&
+    Number.isSafeInteger(incomingOverallRank) &&
+    incomingOverallRank > 0
+  ) {
+    return incomingOverallRank;
+  }
+  return typeof existingOverallRank === 'number' &&
+    Number.isSafeInteger(existingOverallRank) &&
+    existingOverallRank > 0
     ? existingOverallRank
     : incomingOverallRank;
+};
 
 export const planManagerLiveRefreshTargets = (
   requestedEntryIds: readonly number[],
@@ -114,3 +122,21 @@ export const managerLiveBackgroundRefreshKey = (
   `${prefix}:${Array.from(new Set(entryIds))
     .sort((left, right) => left - right)
     .join(',')}`;
+
+export const classicManagerSummaryFallbackEntryIds = (
+  directSummaryEntryIds: readonly number[],
+  standingsEntryIds: readonly number[],
+  coldEntryIds: ReadonlySet<number>,
+  staleSummaryEntryIds: ReadonlySet<number>,
+  standingsComplete: boolean,
+): readonly number[] =>
+  Array.from(
+    new Set([
+      ...directSummaryEntryIds,
+      ...(standingsComplete
+        ? standingsEntryIds.filter(
+            (entryId) => coldEntryIds.has(entryId) || staleSummaryEntryIds.has(entryId),
+          )
+        : []),
+    ]),
+  );
