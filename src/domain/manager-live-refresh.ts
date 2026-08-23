@@ -185,6 +185,15 @@ redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
 return ARGV[2]
 `;
 
+const REPLACE_MALFORMED_HOT_SCOPE_STATE_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if current and current ~= ARGV[1] then
+  return current
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+return ARGV[2]
+`;
+
 const ADVANCE_HOT_SCOPE_STATE_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
 if not current then return nil end
@@ -249,9 +258,27 @@ export async function initializeManagerLiveHotState(
     String(MANAGER_LIVE_HOT_SCOPE_SECONDS),
     JSON.stringify(candidate),
   );
-  const state = parseManagerLiveHotScopeState(typeof raw === 'string' ? raw : null);
-  if (!state) throw new Error('Manager live hot scope state is malformed');
-  return state;
+  const rawValue = typeof raw === 'string' ? raw : null;
+  const state = parseManagerLiveHotScopeState(rawValue);
+  if (state) return state;
+  if (rawValue === null) throw new Error('Manager live hot scope state is malformed');
+
+  // A corrupt marker must not become a permanent outage merely because every
+  // request renews its TTL. Replace only the exact malformed value we read;
+  // if another request already established a valid generation, reuse it.
+  const recoveredRaw = await redis.eval(
+    REPLACE_MALFORMED_HOT_SCOPE_STATE_SCRIPT,
+    1,
+    managerLiveHotStateKey(scope),
+    rawValue,
+    JSON.stringify(candidate),
+    String(MANAGER_LIVE_HOT_SCOPE_SECONDS),
+  );
+  const recoveredState = parseManagerLiveHotScopeState(
+    typeof recoveredRaw === 'string' ? recoveredRaw : null,
+  );
+  if (recoveredState) return recoveredState;
+  throw new Error('Manager live hot scope state is malformed');
 }
 
 export async function loadManagerLiveHotState(
