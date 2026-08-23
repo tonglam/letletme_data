@@ -19,7 +19,9 @@ unless the explicit test-only infrastructure variables are present.
 Integration tests are gated by `tests/integration/helpers/env-guard.ts`. They refuse to start unless **all** of the following are true:
 
 - `RUN_INTEGRATION=1`
-- `DATABASE_URL` points at `localhost`, `127.0.0.1`, or a database name ending in `_test`
+- `DATABASE_URL` parses as PostgreSQL and points at `localhost`, `127.0.0.1`,
+  IPv6 loopback, or a database whose decoded name ends in `_test` (credentials,
+  query parameters, and hostname substrings do not count)
 - `CACHE_REDIS_DB` and `QUEUE_REDIS_DB` are non-zero and distinct
 
 This prevents accidental runs against production infrastructure.

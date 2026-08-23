@@ -10,8 +10,44 @@ import {
   resolveSchedulerContext,
   schedulerRegistry,
   type ScheduledJobDefinition,
+  type SchedulerContext,
+  type SchedulerObligationPlan,
 } from './job-registry';
 import { logError, logInfo } from '../utils/logger';
+
+// Definitions intentionally resolve the same durable checkpoint on every
+// 30-second pass. Once this process has successfully reserved a plan, repeated
+// INSERT ON CONFLICT reads add no recovery value because claiming below remains
+// database-driven. The terminal status is part of the key: a current-day plan
+// observed as active must still be revisited as irrecoverable after its window.
+const MAX_OBSERVED_PLAN_KEYS = 20_000;
+const observedPlanKeys = new Map<string, true>();
+
+export function schedulerPlanKey(
+  definition: Pick<ScheduledJobDefinition, 'name'>,
+  plan: Pick<SchedulerObligationPlan, 'scopeKey' | 'periodKey' | 'terminalStatus'>,
+): string {
+  return JSON.stringify([
+    definition.name,
+    plan.scopeKey,
+    plan.periodKey,
+    plan.terminalStatus ?? 'active',
+  ]);
+}
+
+function wasPlanObserved(key: string): boolean {
+  if (!observedPlanKeys.has(key)) return false;
+  observedPlanKeys.delete(key);
+  observedPlanKeys.set(key, true);
+  return true;
+}
+
+function rememberObservedPlan(key: string): void {
+  observedPlanKeys.set(key, true);
+  if (observedPlanKeys.size <= MAX_OBSERVED_PLAN_KEYS) return;
+  const oldest = observedPlanKeys.keys().next().value;
+  if (typeof oldest === 'string') observedPlanKeys.delete(oldest);
+}
 
 export type SchedulerPassResult = Readonly<{
   definitions: number;
@@ -20,6 +56,20 @@ export type SchedulerPassResult = Readonly<{
   enqueued: number;
   failed: number;
 }>;
+
+export async function resolveSchedulerDefinition(
+  definition: ScheduledJobDefinition,
+  context: SchedulerContext,
+): Promise<
+  | Readonly<{ ok: true; plans: readonly SchedulerObligationPlan[] }>
+  | Readonly<{ ok: false; error: unknown }>
+> {
+  try {
+    return { ok: true, plans: await definition.resolve(context) };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
 
 let compatibilityPassInFlight: Promise<void> | null = null;
 
@@ -31,24 +81,49 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
   const season = await seasonRepository.findCurrent();
   const context = await resolveSchedulerContext(season, now);
   let reserved = 0;
+  let failed = 0;
   for (const definition of schedulerRegistry) {
-    const plans = await definition.resolve(context);
-    for (const plan of plans) {
-      const obligation = await reserveSchedulerObligation({ definition, plan });
-      if (plan.terminalStatus) {
-        await markSchedulerObligationIrrecoverable({
-          obligationId: obligation.obligationId,
-          status: plan.terminalStatus,
-          evidence: plan.evidence,
+    const resolution = await resolveSchedulerDefinition(definition, context);
+    if (!resolution.ok) {
+      failed += 1;
+      logError('Scheduler definition resolution failed', resolution.error, {
+        jobName: definition.name,
+      });
+      continue;
+    }
+    for (const plan of resolution.plans) {
+      const planKey = schedulerPlanKey(definition, plan);
+      if (wasPlanObserved(planKey)) continue;
+      try {
+        const obligation = await reserveSchedulerObligation({ definition, plan });
+        if (plan.terminalStatus) {
+          await markSchedulerObligationIrrecoverable({
+            obligationId: obligation.obligationId,
+            status: plan.terminalStatus,
+            evidence: plan.evidence,
+            // A current-day-only checkpoint becomes historical at the next
+            // pass. Close an enqueued/running prior generation before the
+            // reclaim query can create a new worker for that old date.
+            includeInFlight:
+              definition.catchUpPolicy === 'current-day-only' &&
+              plan.terminalStatus === 'irrecoverable',
+          });
+        }
+        rememberObservedPlan(planKey);
+        reserved += 1;
+      } catch (error) {
+        failed += 1;
+        logError('Scheduler plan reservation failed', error, {
+          jobName: definition.name,
+          scopeKey: plan.scopeKey,
+          periodKey: plan.periodKey,
         });
       }
-      reserved += 1;
     }
   }
 
   const claimed = await claimSchedulerObligations();
   let enqueued = 0;
-  let failed = 0;
   await Promise.all(
     claimed.map(async ({ obligation, owner }) => {
       const definition = definitionByName(obligation.jobName);

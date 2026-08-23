@@ -70,6 +70,7 @@ export const CASCADE_COMPLETION_BARRIER_JOBS = [
   TOURNAMENT_JOBS.CUP_RESULTS,
   TOURNAMENT_JOBS.SELECTION_STATS,
 ] as const;
+export type CascadeCompletionBarrierJob = (typeof CASCADE_COMPLETION_BARRIER_JOBS)[number];
 
 /**
  * Slot TTL: longer than the 24h post-match scheduling window and the 48h
@@ -100,8 +101,8 @@ function cascadeMetaKey(cascadeId: string): string {
   return `llm:queue:coordination:tournament-cascade:meta:${cascadeId}`;
 }
 
-export function createCascadeId(season: FplSeasonRef, eventId: number): string {
-  return `${season.seasonCode}-${eventId}-${Date.now()}`;
+export function createCascadeId(): string {
+  return randomUUID();
 }
 
 /**
@@ -124,11 +125,12 @@ export async function initCascadeStructureBarrier(cascadeId: string): Promise<vo
  *
  * KEYS[1] = this job's slot
  * KEYS[2] = refresh-pending
- * KEYS[3..] = for each role: success slot, enqueue-failed slot
+ * KEYS[3..] = one success slot for each required role
  * ARGV[1] = TTL seconds
  *
- * A role is done if either its success or enqueue-failed slot exists.
- * No shared DECR counter — immune to counter TTL expiry (Codex P2).
+ * Only a real successful role can finish the barrier. Enqueue or terminal job
+ * failures leave the cascade incomplete and cause the owning obligation to be
+ * retried; they can never authorize a partial materialized-view publication.
  *
  * Returns: -2 already claimed; 0 all roles done (pending set); >0 remaining roles
  */
@@ -138,20 +140,14 @@ if not claimed then
   return -2
 end
 local done = 0
-for i = 3, #KEYS, 2 do
+for i = 3, #KEYS do
   local okKey = KEYS[i]
-  local failKey = KEYS[i + 1]
-  if redis.call('EXISTS', okKey) == 1 or redis.call('EXISTS', failKey) == 1 then
+  if redis.call('EXISTS', okKey) == 1 then
     done = done + 1
-    if redis.call('EXISTS', okKey) == 1 then
-      redis.call('EXPIRE', okKey, ARGV[1])
-    end
-    if redis.call('EXISTS', failKey) == 1 then
-      redis.call('EXPIRE', failKey, ARGV[1])
-    end
+    redis.call('EXPIRE', okKey, ARGV[1])
   end
 end
-local required = (#KEYS - 2) / 2
+local required = #KEYS - 2
 if done >= required then
   redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
   return 0
@@ -186,21 +182,20 @@ return 1
 /**
  * Record that one structure barrier participant finished.
  *
- * `jobKey` must be stable per logical participant (e.g. job name, or
- * `enqueue-failed:tournament-points-race`). Uses per-role slot keys (not a
- * shared DECR counter) so long waits cannot expire the barrier state.
+ * `jobKey` is one of the six required successful roles. Uses per-role slot
+ * keys (not a shared DECR counter) so retries are idempotent and long waits do
+ * not expire a shared counter underneath the cascade.
  */
 export async function noteCascadeStructureJobComplete(
   cascadeId: string,
-  jobKey: string,
+  jobKey: CascadeCompletionBarrierJob,
 ): Promise<void> {
+  if (!CASCADE_COMPLETION_BARRIER_JOBS.includes(jobKey)) {
+    throw new Error(`Unknown tournament cascade completion role: ${jobKey}`);
+  }
   const redis = await queueRedisSingleton.getClient();
   const ttl = String(CASCADE_BARRIER_TTL_SECONDS);
-  const roles = CASCADE_COMPLETION_BARRIER_JOBS;
-  const roleKeys = roles.flatMap((role) => [
-    cascadeSlotKey(cascadeId, role),
-    cascadeSlotKey(cascadeId, `enqueue-failed:${role}`),
-  ]);
+  const roleKeys = CASCADE_COMPLETION_BARRIER_JOBS.map((role) => cascadeSlotKey(cascadeId, role));
   const result = (await redis.eval(
     NOTE_CASCADE_STRUCTURE_COMPLETE_LUA,
     2 + roleKeys.length,

@@ -1,6 +1,20 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, mock, test } from 'bun:test';
 
-import { createSchedulerRegistry, officialH2HDefinition } from '../../src/scheduler/job-registry';
+import {
+  createSchedulerRegistry,
+  officialH2HDefinition,
+  resolveEntryInfoSnapshotTargetEventId,
+  resolvePostMatchResultPlans,
+  type ScheduledJobDefinition,
+} from '../../src/scheduler/job-registry';
+import {
+  resolveSchedulerDefinition,
+  schedulerPlanKey,
+} from '../../src/scheduler/scheduler.service';
+import { resolvePlayerStatsActiveCadence } from '../../src/domain/job-schedules';
+import { mockFixture1 } from '../fixtures/fixtures.fixtures';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('standalone scheduler registry', () => {
@@ -49,6 +63,51 @@ describe('standalone scheduler registry', () => {
     );
     expect(coordinator?.successPredicate).toContain('enqueues downstream checkpoint jobs');
     expect(coordinator?.successPredicate).not.toContain('checkpoints advance');
+  });
+
+  test('isolates one resolver failure so unrelated definitions can continue', async () => {
+    const expectedError = new Error('source-specific read unavailable');
+    const definition: ScheduledJobDefinition = {
+      name: 'controlled-failure',
+      cadence: 'test-only',
+      timezone: 'UTC',
+      catchUpPolicy: 'none',
+      criticality: 'normal',
+      queueName: 'test-only',
+      successPredicate: 'never reached',
+      resolve: async () => {
+        throw expectedError;
+      },
+      enqueue: async () => undefined,
+    };
+    const resolution = await resolveSchedulerDefinition(definition, {
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T01:00:00.000Z'),
+      events: [],
+    });
+
+    expect(resolution).toEqual({ ok: false, error: expectedError });
+    const schedulerSource = readFileSync('src/scheduler.ts', 'utf8');
+    expect(schedulerSource).toContain('runIndependentSchedulerStage');
+    expect(schedulerSource).toContain('obligation-registry');
+  });
+
+  test('limits active player-stat refreshes to lifecycle states that can still change', () => {
+    const ordinaryMinute = new Date('2026-08-22T10:17:00.000Z');
+    const fiveMinuteBoundary = new Date('2026-08-22T10:20:00.000Z');
+
+    expect(resolvePlayerStatsActiveCadence('LIVE_ACTIVE', ordinaryMinute)).toBe('one-minute');
+    expect(resolvePlayerStatsActiveCadence('DAY_SETTLING', ordinaryMinute)).toBe('one-minute');
+    expect(resolvePlayerStatsActiveCadence('BETWEEN_FIXTURES', ordinaryMinute)).toBeNull();
+    expect(resolvePlayerStatsActiveCadence('BETWEEN_FIXTURES', fiveMinuteBoundary)).toBe(
+      'five-minute',
+    );
+    expect(resolvePlayerStatsActiveCadence('GW_REVIEW', fiveMinuteBoundary)).toBe('five-minute');
+    expect(resolvePlayerStatsActiveCadence('PICKS_SYNC', fiveMinuteBoundary)).toBe('five-minute');
+    expect(resolvePlayerStatsActiveCadence('PRE_DEADLINE', fiveMinuteBoundary)).toBeNull();
+    expect(resolvePlayerStatsActiveCadence('PICKS_WAIT', fiveMinuteBoundary)).toBeNull();
+    expect(resolvePlayerStatsActiveCadence('PICKS_PROBE', fiveMinuteBoundary)).toBeNull();
+    expect(resolvePlayerStatsActiveCadence('FINALIZED', fiveMinuteBoundary)).toBeNull();
   });
 
   test('runs official H2H through the durable standalone scheduler during match windows', async () => {
@@ -207,6 +266,163 @@ describe('standalone scheduler registry', () => {
       source: 'catchup',
     });
     expect(plans.find((plan) => plan.periodKey === '20260822')?.terminalStatus).toBeUndefined();
+  });
+
+  test('catches up the latest authoritative daily checkpoint before today is due', async () => {
+    const core = registry.find((definition) => definition.name === 'core-snapshot');
+    const plans = await core!.resolve({
+      season: TEST_SEASON,
+      // 05:00 UTC+8 on Aug 23 is before today's 06:35 checkpoint.
+      now: new Date('2026-08-22T21:00:00.000Z'),
+      events: [],
+    });
+
+    expect(plans).toEqual([
+      expect.objectContaining({
+        periodKey: '20260822',
+        dueAt: new Date('2026-08-21T22:35:00.000Z'),
+        source: 'catchup',
+      }),
+    ]);
+  });
+
+  test('never replays the market watchdog for an expired date', async () => {
+    const watchdog = registry.find(
+      (definition) => definition.name === 'player-market-freshness-watchdog',
+    );
+    const beforeDue = await watchdog!.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-22T21:00:00.000Z'),
+      events: [],
+    });
+    const afterDue = await watchdog!.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T01:37:00.000Z'),
+      events: [],
+    });
+
+    expect(beforeDue).toHaveLength(31);
+    expect(beforeDue.every((plan) => plan.terminalStatus === 'irrecoverable')).toBe(true);
+    expect(beforeDue.some((plan) => plan.periodKey === '20260823')).toBe(false);
+    const today = afterDue.find((plan) => plan.periodKey === '20260823');
+    expect(today).toMatchObject({
+      dueAt: new Date('2026-08-23T01:36:00.000Z'),
+    });
+    expect(today?.terminalStatus).toBeUndefined();
+  });
+
+  test('uses terminal status in the observed-plan LRU key', () => {
+    const definition = { name: 'market-daily' };
+    const active = schedulerPlanKey(definition, {
+      scopeKey: '2627',
+      periodKey: '20260823',
+    });
+    const expired = schedulerPlanKey(definition, {
+      scopeKey: '2627',
+      periodKey: '20260823',
+      terminalStatus: 'irrecoverable',
+    });
+
+    expect(active).not.toBe(expired);
+  });
+
+  test('targets entry snapshots at the latest finalized event', () => {
+    expect(resolveEntryInfoSnapshotTargetEventId({ latestFinalizedEventId: 8 })).toBe(8);
+    expect(resolveEntryInfoSnapshotTargetEventId({})).toBe(0);
+  });
+
+  test('opens result checkpoints only after the final fixture expected end', async () => {
+    const baseContext = {
+      season: TEST_SEASON,
+      now: new Date('2026-08-22T18:01:00.000Z'),
+      events: [
+        {
+          id: 1,
+          deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+          finished: false,
+          dataChecked: false,
+          dataCheckedAt: null,
+        },
+      ],
+    };
+    const fixtures = [{ ...mockFixture1, kickoffTime: new Date('2026-08-22T18:00:00.000Z') }];
+    const loadFixtures = async () => fixtures;
+
+    expect(await resolvePostMatchResultPlans(baseContext, loadFixtures)).toEqual([]);
+    expect(
+      await resolvePostMatchResultPlans(
+        { ...baseContext, now: new Date('2026-08-22T20:10:00.000Z') },
+        loadFixtures,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        periodKey: 'event-1-provisional-0',
+        eventId: 1,
+        source: 'reconcile',
+      }),
+    ]);
+  });
+
+  test('bounds hourly result slots to 24 hours', async () => {
+    const fixtures = [{ ...mockFixture1, kickoffTime: new Date('2026-08-22T18:00:00.000Z') }];
+    const context = {
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T19:59:59.000Z'),
+      events: [
+        {
+          id: 1,
+          deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+          finished: false,
+          dataChecked: false,
+        },
+      ],
+    };
+    const loadFixtures = async () => fixtures;
+
+    expect(await resolvePostMatchResultPlans(context, loadFixtures)).toEqual([
+      expect.objectContaining({ periodKey: 'event-1-provisional-23' }),
+    ]);
+    expect(
+      await resolvePostMatchResultPlans(
+        { ...context, now: new Date('2026-08-23T20:00:00.000Z') },
+        loadFixtures,
+      ),
+    ).toEqual([]);
+  });
+
+  test('keeps one permanent final result checkpoint for every finalized event', async () => {
+    let fixtureLoads = 0;
+    const checkedAt = new Date('2026-08-22T22:00:00.000Z');
+    const plans = await resolvePostMatchResultPlans(
+      {
+        season: TEST_SEASON,
+        now: new Date('2026-08-25T12:00:00.000Z'),
+        events: [
+          {
+            id: 2,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: checkedAt,
+          },
+          {
+            id: 1,
+            deadlineTime: new Date('2026-08-15T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: new Date('2026-08-15T22:00:00.000Z'),
+          },
+        ],
+      },
+      async () => {
+        fixtureLoads += 1;
+        return [];
+      },
+    );
+
+    expect(plans.map((plan) => plan.periodKey)).toEqual(['event-2-final', 'event-1-final']);
+    expect(plans[0]).toMatchObject({ dueAt: checkedAt, source: 'catchup' });
+    expect(fixtureLoads).toBe(0);
   });
 
   test('resolves picks and transfers to the same event checkpoint window', async () => {

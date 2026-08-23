@@ -20,15 +20,33 @@ const stopHeartbeat = startWorkerHeartbeat({
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('scheduler');
 let inFlight: Promise<unknown> | null = null;
 
+async function runIndependentSchedulerStage(
+  stage: string,
+  operation: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    // Each independent recovery path is retried by the next pass and retains
+    // its own durable evidence. One unavailable dependency must not suppress
+    // the other repair stages for this 30-second cycle.
+    logError('Scheduler stage failed; continuing independent recovery paths', error, { stage });
+  }
+}
+
 async function runPass(): Promise<void> {
   if (inFlight) return inFlight.then(() => undefined);
   const pass = (async () => {
     const now = new Date();
     const season = await seasonRepository.findCurrent();
-    await reconcileCoreAndMarketPublications(season);
-    await dispatchDataPublicationOutbox({ limit: 20 });
-    await persistLiveLifecycleStatus(now);
-    await runSchedulerPass(now);
+    await runIndependentSchedulerStage('core-market-publication-reconcile', () =>
+      reconcileCoreAndMarketPublications(season),
+    );
+    await runIndependentSchedulerStage('data-publication-outbox', () =>
+      dispatchDataPublicationOutbox({ limit: 20 }),
+    );
+    await runIndependentSchedulerStage('live-lifecycle', () => persistLiveLifecycleStatus(now));
+    await runIndependentSchedulerStage('obligation-registry', () => runSchedulerPass(now));
   })()
     .catch((error) => logError('Scheduler reconciliation pass failed', error))
     .finally(() => {
