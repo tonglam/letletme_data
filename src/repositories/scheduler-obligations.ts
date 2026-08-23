@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -616,10 +616,19 @@ export async function schedulerObligationStatus(input: {
       and(
         eq(schedulerObligationsInOps.jobName, input.jobName),
         eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
+        gte(
+          schedulerObligationsInOps.dueAt,
+          sql`COALESCE((
+            SELECT max(success.due_at)
+            FROM ops.scheduler_obligations AS success
+            WHERE success.job_name = ${input.jobName}
+              AND success.scope_key = ${input.scopeKey}
+              AND success.status IN ('succeeded', 'skipped')
+          ), '-infinity'::timestamptz)`,
+        ),
       ),
     )
-    .orderBy(desc(schedulerObligationsInOps.dueAt), desc(schedulerObligationsInOps.updatedAt))
-    .limit(2);
+    .orderBy(desc(schedulerObligationsInOps.dueAt), desc(schedulerObligationsInOps.updatedAt));
   const latest = rows[0]
     ? {
         periodKey: rows[0].periodKey,

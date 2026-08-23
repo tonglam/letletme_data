@@ -40,6 +40,14 @@ import {
   schedulerObligationStatus,
 } from '../repositories/scheduler-obligations';
 
+function priceChangeCoreRepairJobId(job: Job<DataSyncJobData>): string {
+  // Keep one repair per price-change attempt, not one repair forever.  The
+  // logical run ID is stable across Bull retries, while attemptsMade changes
+  // when a completed repair must be requested again after another mismatch.
+  const runId = job.data.runId ?? String(job.id ?? job.timestamp);
+  return `core-snapshot-price-change-repair-${runId}-attempt-${job.attemptsMade + 1}`;
+}
+
 async function alertPriceChangePublicationOverdue(
   job: Job<DataSyncJobData>,
   error: unknown,
@@ -175,7 +183,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
         } catch (error) {
           if (error instanceof PriceChangeCorePublicationRequiredError) {
             await enqueueCoreSnapshotJob(season, 'reconcile', {
-              jobId: 'core-snapshot-price-change-repair',
+              jobId: priceChangeCoreRepairJobId(job),
               removeOnSettle: false,
             }).catch((repairError) => {
               logError('Failed to enqueue core repair for price-change validation', repairError, {
@@ -198,7 +206,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             .catch(() => undefined);
           if (error instanceof PriceChangeCorePublicationRequiredError) {
             await enqueueCoreSnapshotJob(season, 'reconcile', {
-              jobId: 'core-snapshot-price-change-repair',
+              jobId: priceChangeCoreRepairJobId(job),
               removeOnSettle: false,
             }).catch((repairError) => {
               logError('Failed to enqueue core repair for price-change persistence', repairError, {
