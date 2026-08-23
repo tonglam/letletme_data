@@ -39,7 +39,9 @@ const probeMode: SourceMediaProbeMode =
     ? 'standard'
     : probeModes[0] === '--probe-tus-no-create'
       ? 'tus-no-create'
-      : 'tus';
+      : probeModes[0] === '--probe-tus'
+        ? 'tus'
+        : 'standard';
 const flags = getSourceMediaRuntimeConfig({ requireCredentials: provisionAndProbe });
 const storage =
   flags.supabaseUrl && flags.secretKey
