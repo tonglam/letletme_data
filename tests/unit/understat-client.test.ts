@@ -5,8 +5,9 @@ import {
   UnderstatClientError,
   UnderstatLeagueResponseSchema,
   UnderstatNumberSchema,
+  UnderstatTeamResponseSchema,
 } from '../../src/clients/understat';
-import { UNDERSTAT_LEAGUE_FIXTURE } from '../fixtures/understat.fixtures';
+import { UNDERSTAT_LEAGUE_FIXTURE, UNDERSTAT_TEAM_FIXTURE } from '../fixtures/understat.fixtures';
 
 describe('Understat client boundary', () => {
   test('converts numeric strings but rejects empty values', () => {
@@ -42,6 +43,87 @@ describe('Understat client boundary', () => {
         expect.objectContaining({ path: ['dates', 0, 'forecast'] }),
       );
     }
+  });
+
+  test('normalizes an empty team statistics array for seasons without results', () => {
+    const parsed = UnderstatTeamResponseSchema.parse({
+      ...UNDERSTAT_TEAM_FIXTURE,
+      statistics: [],
+    });
+
+    expect(parsed.statistics).toEqual({
+      situation: {},
+      formation: {},
+      gameState: {},
+      timing: {},
+      shotZone: {},
+      attackSpeed: {},
+      result: {},
+    });
+  });
+
+  test('accepts empty team statistics only for the active result-free season', async () => {
+    const client = new UnderstatClient({
+      enabled: true,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            ...UNDERSTAT_TEAM_FIXTURE,
+            dates: [{ ...UNDERSTAT_TEAM_FIXTURE.dates[0], isResult: false }],
+            statistics: [],
+          }),
+        ),
+    });
+
+    await expect(client.getTeamData('Chelsea', 2026)).resolves.toMatchObject({
+      statistics: { situation: {} },
+    });
+  });
+
+  test('rejects empty team statistics for completed or historical responses', async () => {
+    const client = new UnderstatClient({
+      enabled: true,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            ...UNDERSTAT_TEAM_FIXTURE,
+            statistics: [],
+          }),
+        ),
+    });
+
+    await expect(client.getTeamData('Chelsea', 2026)).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+    await expect(client.getTeamData('Chelsea', 2025)).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+  });
+
+  test('does not treat passthrough statistics as a populated split dimension', async () => {
+    const client = new UnderstatClient({
+      enabled: true,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            ...UNDERSTAT_TEAM_FIXTURE,
+            statistics: {
+              situation: {},
+              formation: {},
+              gameState: {},
+              timing: {},
+              shotZone: {},
+              attackSpeed: {},
+              result: {},
+              providerMetadata: { fetched: true },
+            },
+          }),
+        ),
+    });
+
+    await expect(client.getTeamData('Chelsea', 2026)).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
   });
 
   test('is a hard no-network gate when disabled', async () => {
