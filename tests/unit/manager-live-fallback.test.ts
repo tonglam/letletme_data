@@ -8,6 +8,7 @@ import {
   planClassicManagerFallback,
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
+  selectLatestCheckedRow,
   shouldRefreshClassicOverallRank,
 } from '../../src/domain/manager-live-fallback';
 
@@ -21,6 +22,26 @@ describe('classic manager live fallback', () => {
     expect(preserveLastKnownOverallRank(null, null)).toBeNull();
     expect(isPositiveOverallRank(620_000)).toBeTrue();
     expect(isPositiveOverallRank(0)).toBeFalse();
+  });
+
+  test('rebases delayed overall-rank work onto the latest standings row', () => {
+    const deferredSnapshot = {
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+    };
+    const nextStandingsRefresh = {
+      checkedAt: '2026-08-23T08:00:30.000Z',
+      eventPoints: 43,
+      leagueRank: 25,
+    };
+
+    expect(selectLatestCheckedRow(deferredSnapshot, nextStandingsRefresh)).toBe(
+      nextStandingsRefresh,
+    );
+    expect(selectLatestCheckedRow(nextStandingsRefresh, deferredSnapshot)).toBe(
+      nextStandingsRefresh,
+    );
   });
 
   test('keeps the foreground rank budget while retaining deferred and failed work', () => {

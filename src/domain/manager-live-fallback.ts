@@ -17,6 +17,20 @@ export const preserveLastKnownOverallRank = (
   return isPositiveOverallRank(previous) ? previous : null;
 };
 
+export const selectLatestCheckedRow = <T extends Readonly<{ checkedAt: string }>>(
+  current: T | undefined,
+  candidate: T,
+): T => {
+  if (!current) return candidate;
+
+  const currentTime = Date.parse(current.checkedAt);
+  const candidateTime = Date.parse(candidate.checkedAt);
+  return Number.isFinite(candidateTime) &&
+    (!Number.isFinite(currentTime) || candidateTime > currentTime)
+    ? candidate
+    : current;
+};
+
 export const shouldRefreshClassicOverallRank = (
   row:
     | Readonly<{

@@ -27,6 +27,7 @@ import {
   planClassicManagerFallback,
   planClassicOverallRankRefresh,
   preserveLastKnownOverallRank,
+  selectLatestCheckedRow,
   shouldRefreshClassicOverallRank,
 } from '../domain/manager-live-fallback';
 
@@ -137,16 +138,9 @@ const mergeLatestManagerLiveRow = (
   current: CachedRow | undefined,
   candidate: CachedRow,
 ): CachedRow => {
-  if (!current) return candidate;
-
-  const currentTime = Date.parse(current.checkedAt);
-  const candidateTime = Date.parse(candidate.checkedAt);
-  const candidateIsNewer =
-    Number.isFinite(candidateTime) &&
-    (!Number.isFinite(currentTime) || candidateTime > currentTime);
-  return candidateIsNewer
-    ? withPreservedOverallRank(candidate, current.overallRank)
-    : withPreservedOverallRank(current, candidate.overallRank);
+  const latest = selectLatestCheckedRow(current, candidate);
+  const other = latest === candidate ? current : candidate;
+  return withPreservedOverallRank(latest, other?.overallRank);
 };
 
 const toManagerScoreCheckpoint = (row: ManagerLiveScoreRow): ManagerScoreCheckpoint => ({
@@ -455,8 +449,24 @@ const refreshEntrySummaries = async (
             () => fplClient.getEntrySummary(entryId),
             options.priority,
           );
+          let existing = rows.get(entryId);
+          if (options.preserveClassicStanding) {
+            // A deferred OR crawl can overlap the next 30-second standings
+            // refresh. Re-read the authoritative row after the slow FPL
+            // summary request and immediately before composing the OR write,
+            // so the rank is applied to the newest points/league position.
+            const latestRows = await readCachedAndCheckpointRows(
+              redis,
+              season,
+              eventId,
+              scope,
+              [entryId],
+              rows,
+            );
+            existing = latestRows.get(entryId) ?? existing;
+            if (existing) rows.set(entryId, existing);
+          }
           const checkedAt = nowIso();
-          const existing = rows.get(entryId);
           const candidate =
             options.preserveClassicStanding && existing?.source === 'FPL_CLASSIC_STANDINGS'
               ? (() => {
