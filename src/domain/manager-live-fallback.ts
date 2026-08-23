@@ -3,6 +3,32 @@ const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
 
 export type ManagerSummaryFetchPriority = 'foreground' | 'background';
 
+export const preserveClassicOverallRank = (
+  incomingOverallRank: number | null,
+  existingOverallRank: number | null | undefined,
+): number | null =>
+  typeof existingOverallRank === 'number' &&
+  Number.isSafeInteger(existingOverallRank) &&
+  existingOverallRank > 0
+    ? existingOverallRank
+    : incomingOverallRank;
+
+export const planManagerLiveRefreshTargets = (
+  requestedEntryIds: readonly number[],
+  cachedEntryIds: ReadonlySet<number>,
+  freshEntryIds: ReadonlySet<number>,
+): Readonly<{
+  foregroundEntryIds: readonly number[];
+  backgroundEntryIds: readonly number[];
+}> => ({
+  // Missing rows still need a bounded request-path attempt so a cold cache can
+  // return useful data. Existing last-good rows must never wait on FPL.
+  foregroundEntryIds: requestedEntryIds.filter((entryId) => !cachedEntryIds.has(entryId)),
+  // Background work includes both missing and stale rows, but excludes rows
+  // refreshed inside the current freshness window.
+  backgroundEntryIds: requestedEntryIds.filter((entryId) => !freshEntryIds.has(entryId)),
+});
+
 export const createManagerSummaryFetchGate = (
   maxConcurrent = MAX_SUMMARY_FETCH_CONCURRENCY,
 ): (<T>(task: () => Promise<T>, priority?: ManagerSummaryFetchPriority) => Promise<T>) => {

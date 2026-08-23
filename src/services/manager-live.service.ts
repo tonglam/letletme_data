@@ -23,6 +23,8 @@ import {
   managerSummaryFetchBatches,
   type ManagerSummaryFetchPriority,
   planClassicManagerFallback,
+  planManagerLiveRefreshTargets,
+  preserveClassicOverallRank,
 } from '../domain/manager-live-fallback';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
@@ -480,9 +482,18 @@ const refreshClassicStandings = async (
       const pageRows = toClassicRows(season.seasonCode, eventId, response, checkedAt);
       for (const row of pageRows) {
         if (!targetIds.has(row.entryId)) continue;
-        if (!rows.has(row.entryId) || !isFresh(rows.get(row.entryId)!)) found += 1;
-        fetchedRows.push(row);
-        rows.set(row.entryId, row);
+        const existing = rows.get(row.entryId);
+        if (!existing || !isFresh(existing)) found += 1;
+        const overallRank = preserveClassicOverallRank(row.overallRank, existing?.overallRank);
+        const publishedRow =
+          overallRank !== row.overallRank
+            ? (() => {
+                const { revision: _revision, ...classicRow } = row;
+                return withRevision({ ...classicRow, overallRank });
+              })()
+            : row;
+        fetchedRows.push(publishedRow);
+        rows.set(publishedRow.entryId, publishedRow);
       }
       if (!response.standings.has_next) {
         exhausted = true;
@@ -731,9 +742,22 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       rows.set(checkpoint.entryId, fromManagerScoreCheckpoint(checkpoint, season.seasonCode));
     }
   }
-  const staleOrMissing = uniqueEntryIds.filter(
-    (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+  const refreshPlan = planManagerLiveRefreshTargets(
+    uniqueEntryIds,
+    new Set(rows.keys()),
+    new Set(uniqueEntryIds.filter((entryId) => rows.has(entryId) && isFresh(rows.get(entryId)!))),
   );
+  const staleOrMissing = refreshPlan.backgroundEntryIds;
+  const foregroundRefreshTargets = refreshPlan.foregroundEntryIds;
+  const coldEntryIds = new Set(foregroundRefreshTargets);
+  const staleLastGoodCount = staleOrMissing.filter((entryId) => rows.has(entryId)).length;
+  if (staleLastGoodCount > 0) {
+    logDebug('Serving last-good manager rows while refreshing in background', {
+      eventId: input.eventId,
+      scope: scopeKey(scope),
+      staleRowCount: staleLastGoodCount,
+    });
+  }
   const classicOverallRankMissing =
     input.tournamentId !== undefined &&
     tournament?.leagueType === 'classic' &&
@@ -748,48 +772,48 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     // FPL does not expose a live H2H table, but its official entry summary is
     // still a well-defined event score. Use it for provisional pairings and
     // let the final database result replace it after finalization.
-    if (staleOrMissing.length > 0) {
+    if (foregroundRefreshTargets.length > 0) {
       refreshErrorCode = await refreshEntrySummaries(
         season,
         input.eventId,
-        staleOrMissing,
+        foregroundRefreshTargets,
         rows,
         redis,
         entryScope,
         { maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES },
       );
-      const pending = staleOrMissing.filter(
-        (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
-      );
-      if (pending.length > 0) {
-        const backgroundKey = `h2h:${season.seasonCode}:${input.eventId}:${input.tournamentId}:${pending
-          .slice()
-          .sort((left, right) => left - right)
-          .join(',')}`;
-        scheduleBackgroundRefresh(backgroundKey, async () => {
-          const backgroundRows = await readCachedRows(
-            redis,
-            season.seasonCode,
-            input.eventId,
-            entryScope,
-            pending,
-          );
-          await refreshEntrySummaries(
-            season,
-            input.eventId,
-            pending,
-            backgroundRows,
-            redis,
-            entryScope,
-            { priority: 'background' },
-          );
-          logDebug('Official H2H manager background refresh completed', {
-            eventId: input.eventId,
-            tournamentId: input.tournamentId,
-            remaining: pending.length,
-          });
+    }
+    const pending = staleOrMissing.filter(
+      (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+    );
+    if (pending.length > 0) {
+      const backgroundKey = `h2h:${season.seasonCode}:${input.eventId}:${input.tournamentId}:${pending
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}`;
+      scheduleBackgroundRefresh(backgroundKey, async () => {
+        const backgroundRows = await readCachedRows(
+          redis,
+          season.seasonCode,
+          input.eventId,
+          entryScope,
+          pending,
+        );
+        await refreshEntrySummaries(
+          season,
+          input.eventId,
+          pending,
+          backgroundRows,
+          redis,
+          entryScope,
+          { priority: 'background' },
+        );
+        logDebug('Official H2H manager background refresh completed', {
+          eventId: input.eventId,
+          tournamentId: input.tournamentId,
+          remaining: pending.length,
         });
-      }
+      });
     }
   } else if (
     input.tournamentId !== undefined &&
@@ -797,14 +821,21 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   ) {
     if (!tournament) throw new Error('Tournament validation unexpectedly missing');
     const classicLeagueId = tournament.leagueId;
-    const standings = await refreshClassicStandings(
-      season,
-      input.eventId,
-      classicLeagueId,
-      new Set(staleOrMissing),
-      rows,
-      redis,
-    );
+    let standings: Awaited<ReturnType<typeof refreshClassicStandings>> = {
+      complete: false,
+      nextPage: 1,
+      errorCode: null,
+    };
+    if (foregroundRefreshTargets.length > 0) {
+      standings = await refreshClassicStandings(
+        season,
+        input.eventId,
+        classicLeagueId,
+        new Set(foregroundRefreshTargets),
+        rows,
+        redis,
+      );
+    }
     refreshErrorCode = standings.errorCode;
 
     // FPL classic standings expose the event/phase totals and the league
@@ -816,10 +847,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       classicStandingNeedsOverallRank(rows.get(entryId)),
     );
     if (classicOverallRankTargets.length > 0) {
-      const foregroundTargets = classicOverallRankTargets.slice(
-        0,
-        MAX_FOREGROUND_OVERALL_RANK_FETCHES,
-      );
+      const foregroundTargets = classicOverallRankTargets
+        .filter((entryId) => coldEntryIds.has(entryId))
+        .slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
       const summaryError = await refreshEntrySummaries(
         season,
         input.eventId,
@@ -921,19 +951,20 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   }
 
   if (input.tournamentId === undefined && staleOrMissing.length > 0) {
-    const summaryTargets = staleOrMissing;
-    refreshErrorCode = await refreshEntrySummaries(
-      season,
-      input.eventId,
-      summaryTargets,
-      rows,
-      redis,
-      entryScope,
-      {
-        maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES,
-      },
-    );
-    const pending = summaryTargets.filter(
+    if (foregroundRefreshTargets.length > 0) {
+      refreshErrorCode = await refreshEntrySummaries(
+        season,
+        input.eventId,
+        foregroundRefreshTargets,
+        rows,
+        redis,
+        entryScope,
+        {
+          maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES,
+        },
+      );
+    }
+    const pending = staleOrMissing.filter(
       (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
     );
     if (pending.length > 0) {

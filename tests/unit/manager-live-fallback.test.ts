@@ -4,7 +4,38 @@ import {
   createManagerSummaryFetchGate,
   managerSummaryFetchBatches,
   planClassicManagerFallback,
+  planManagerLiveRefreshTargets,
+  preserveClassicOverallRank,
 } from '../../src/domain/manager-live-fallback';
+
+describe('manager live refresh targets', () => {
+  test('serves stale last-good rows without foreground upstream work', () => {
+    expect(planManagerLiveRefreshTargets([1, 2], new Set([1, 2]), new Set())).toEqual({
+      foregroundEntryIds: [],
+      backgroundEntryIds: [1, 2],
+    });
+  });
+
+  test('keeps cold misses in both the bounded foreground and background plans', () => {
+    expect(planManagerLiveRefreshTargets([1, 2], new Set([1]), new Set([1]))).toEqual({
+      foregroundEntryIds: [2],
+      backgroundEntryIds: [2],
+    });
+  });
+
+  test('does no refresh work for fresh cached rows', () => {
+    expect(planManagerLiveRefreshTargets([1, 2], new Set([1, 2]), new Set([1, 2]))).toEqual({
+      foregroundEntryIds: [],
+      backgroundEntryIds: [],
+    });
+  });
+
+  test('preserves an enriched OR when a standings refresh omits it', () => {
+    expect(preserveClassicOverallRank(null, 12_345)).toBe(12_345);
+    expect(preserveClassicOverallRank(null, 0)).toBeNull();
+    expect(preserveClassicOverallRank(54_321, undefined)).toBe(54_321);
+  });
+});
 
 describe('classic manager live fallback', () => {
   test('uses official entry summaries after standings pagination is exhausted', () => {
