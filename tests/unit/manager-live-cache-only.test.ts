@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 import { redisSingleton } from '../../src/cache/singleton';
 import { fplClient } from '../../src/clients/fpl';
@@ -14,8 +14,9 @@ let redisReadFails = false;
 let redisWriteSucceeds = false;
 let postgresRows: Array<Record<string, unknown>> = [];
 
-spyOn(seasonRepository, 'findCurrent').mockImplementation(async () => TEST_SEASON as never);
-spyOn(eventRepository, 'findById').mockImplementation(
+const findCurrent = mock(async () => TEST_SEASON as never);
+seasonRepository.findCurrent = findCurrent;
+const findEventById = mock(
   async () =>
     ({
       id: 1,
@@ -24,7 +25,8 @@ spyOn(eventRepository, 'findById').mockImplementation(
       dataCheckedAt: null,
     }) as never,
 );
-spyOn(redisSingleton, 'getClient').mockImplementation(async () => {
+eventRepository.findById = findEventById;
+const getRedisClient = mock(async () => {
   const transaction = {
     hset: () => transaction,
     expire: () => transaction,
@@ -41,23 +43,39 @@ spyOn(redisSingleton, 'getClient').mockImplementation(async () => {
     multi: () => transaction,
   } as never;
 });
-spyOn(managerScoreCheckpointRepository, 'findByScopeAndEntryIds').mockImplementation(
-  async () => postgresRows as never,
-);
-const upsertCheckpoint = spyOn(managerScoreCheckpointRepository, 'upsertBatch').mockImplementation(
-  async () => undefined,
-);
+redisSingleton.getClient = getRedisClient;
+const findCheckpointRows = mock(async () => postgresRows as never);
+managerScoreCheckpointRepository.findByScopeAndEntryIds = findCheckpointRows;
+const upsertCheckpoint = mock(async (..._args: unknown[]) => undefined);
+managerScoreCheckpointRepository.upsertBatch = upsertCheckpoint;
 const dispatchRefresh = spyOn(dispatchModule, 'dispatchManagerLiveRefresh').mockImplementation(
   async () => undefined,
 );
-const getEntrySummary = spyOn(fplClient, 'getEntrySummary').mockImplementation(async () => {
+const getEntrySummary = mock(async () => {
   throw new Error('CACHE_ONLY must not call FPL entry summary');
 });
-const getClassicStandings = spyOn(fplClient, 'getLeagueClassicStandings').mockImplementation(
-  async () => {
-    throw new Error('CACHE_ONLY must not call FPL standings');
-  },
-);
+fplClient.getEntrySummary = getEntrySummary;
+const getClassicStandings = mock(async (..._args: unknown[]) => {
+  throw new Error('CACHE_ONLY must not call FPL standings');
+});
+fplClient.getLeagueClassicStandings = getClassicStandings;
+
+// A few legacy unit files call bun:test's global mock.restore() in afterEach.
+// Bun 1.2 can run those files in the same process, so reattach these stable
+// spies before every case; otherwise an unrelated test can restore one of the
+// service dependencies while this contract suite is still exercising it.
+const reattachManagerLiveSpies = (): void => {
+  seasonRepository.findCurrent = findCurrent;
+  eventRepository.findById = findEventById;
+  redisSingleton.getClient = getRedisClient;
+  managerScoreCheckpointRepository.findByScopeAndEntryIds = findCheckpointRows;
+  managerScoreCheckpointRepository.upsertBatch = upsertCheckpoint;
+  if (dispatchModule.dispatchManagerLiveRefresh !== dispatchRefresh) {
+    dispatchModule.dispatchManagerLiveRefresh = dispatchRefresh;
+  }
+  fplClient.getEntrySummary = getEntrySummary;
+  fplClient.getLeagueClassicStandings = getClassicStandings;
+};
 
 const {
   classicStandingsCursorAfterRefresh,
@@ -116,6 +134,7 @@ const checkpointRow = (entryId: number, checkedAt: string) => ({
 
 describe('manager live CACHE_ONLY reads', () => {
   beforeEach(() => {
+    reattachManagerLiveSpies();
     redisRows.clear();
     redisReadFails = false;
     redisWriteSucceeds = false;
@@ -253,7 +272,9 @@ describe('manager live CACHE_ONLY reads', () => {
   test('reports a confirmed enqueue failure without discarding cached content', async () => {
     const checkedAt = new Date().toISOString();
     redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
-    dispatchRefresh.mockRejectedValueOnce(new Error('queue unavailable'));
+    dispatchRefresh.mockImplementationOnce(async () => {
+      throw new Error('queue unavailable');
+    });
 
     const result = await resolveManagerLiveScores({
       eventId: 1,
@@ -401,7 +422,9 @@ describe('manager live READ_THROUGH source reporting', () => {
           summary_overall_rank: 34_567,
         }) as never,
     );
-    upsertCheckpoint.mockRejectedValueOnce(new Error('checkpoint unavailable'));
+    upsertCheckpoint.mockImplementationOnce(async () => {
+      throw new Error('checkpoint unavailable');
+    });
 
     const result = await resolveManagerLiveScores({
       eventId: 1,
@@ -428,7 +451,9 @@ describe('manager live READ_THROUGH source reporting', () => {
           summary_overall_rank: 34_567,
         }) as never,
     );
-    upsertCheckpoint.mockRejectedValueOnce(new Error('checkpoint unavailable'));
+    upsertCheckpoint.mockImplementationOnce(async () => {
+      throw new Error('checkpoint unavailable');
+    });
 
     const result = await resolveManagerLiveScores({
       eventId: 1,
@@ -527,7 +552,9 @@ describe('manager live classic standings convergence', () => {
           },
         }) as never,
     );
-    upsertCheckpoint.mockRejectedValueOnce(new Error('checkpoint unavailable'));
+    upsertCheckpoint.mockImplementationOnce(async () => {
+      throw new Error('checkpoint unavailable');
+    });
 
     const rows = new Map();
     const result = await refreshClassicStandings(TEST_SEASON, 1, 99, new Set([101]), rows, null, {

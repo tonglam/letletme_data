@@ -28,6 +28,7 @@ import {
 } from '../services/my-fpl-snapshot-publication.service';
 import { runEntryOnboarding } from '../services/entry-onboarding.service';
 import { runQueueRunPhase } from '../services/queue-run-barrier';
+import { eventRepository } from '../repositories/events';
 import {
   MAINTENANCE_JOBS,
   maintenanceQueue,
@@ -107,9 +108,12 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             throw new Error('Entry onboarding job is missing a valid entryId');
           }
           const season = await requireCurrentSeasonForJob(job.data);
+          const entryInfoTargetEventId =
+            (await eventRepository.findLatestFinalized(season))?.id ?? 0;
           return runEntryOnboarding(season, {
             entryId: job.data.entryId!,
             ...(job.data.eventId === undefined ? {} : { eventId: job.data.eventId }),
+            entryInfoTargetEventId,
             attemptKey: `${job.data.runId}-a${job.attemptsMade + 1}`,
           });
         }
@@ -137,6 +141,8 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           // serving while this job retries in 30 minutes.
           const attemptKey = `${job.data.runId}-a${job.attemptsMade + 1}`;
           const source = job.data.snapshotKind === 'FINAL' ? 'reconcile' : 'catchup';
+          const entryInfoTargetEventId =
+            (await eventRepository.findLatestFinalized(season))?.id ?? 0;
           await runQueueRunPhase(attemptKey, [
             enqueueCoreSnapshotJob(season, source, {
               jobId: `my-fpl-${attemptKey}-core`,
@@ -150,7 +156,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               removeOnSettle: false,
             }),
             enqueueEntryInfoSyncJob(season, source, {
-              eventId: job.data.eventId,
+              eventId: entryInfoTargetEventId,
               jobId: `my-fpl-${attemptKey}-entry-info`,
               runId: attemptKey,
               queueKey: `my-fpl-${attemptKey}-entry-info`,
@@ -225,8 +231,15 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           const redis = await dispatchMyFplSnapshotPublicationOutbox({ limit: 20 });
           return { ...capture, redis };
         }
-        case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX:
-          return dispatchMyFplSnapshotPublicationOutbox({ limit: 50 });
+        case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX: {
+          const result = await dispatchMyFplSnapshotPublicationOutbox({ limit: 50 });
+          if (result.failed > 0) {
+            throw new Error(
+              `My FPL snapshot outbox left ${result.failed} delivery receipt(s) for retry`,
+            );
+          }
+          return result;
+        }
         default:
           throw new Error(`Unknown maintenance job: ${job.name}`);
       }

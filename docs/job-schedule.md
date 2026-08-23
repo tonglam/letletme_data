@@ -63,11 +63,21 @@ changes remains a successful complete capture. After recovery, only the current
 UTC+8 market date is retried; older dates are explicitly recorded as
 `irrecoverable` rather than reconstructed from today's bootstrap.
 
+Daily latest-authoritative jobs recover yesterday's final due checkpoint before
+reserving today's checkpoint. Current-day-only jobs, including market capture
+and its watchdog, never synthesize an older date: missed historical periods are
+recorded explicitly as `irrecoverable` and only today's evidence is checked.
+
+The additional `player-stats-active` checkpoint runs every minute only during
+`LIVE_ACTIVE` and `DAY_SETTLING`, and every five minutes during `PICKS_SYNC`,
+`BETWEEN_FIXTURES`, and `GW_REVIEW`. Pre-match, finalized, and other static
+lifecycle states rely on the daily, transition, and final-repair checkpoints.
+
 ## Entry jobs
 
 | Job | Cadence | Gate / behavior |
 |---|---|---|
-| `entry-info` | daily obligation | `isFPLSeason`; once per UTC date marker |
+| `entry-info` | daily obligation | `isFPLSeason`; once per UTC date marker, scoped to the latest finalized event (or event `0` before one exists) |
 | `entry-picks` | event checkpoint after deadline + 30m | `isFPLSeason`; every due event is reconciled from the entry checkpoint, not only the current API process |
 | `entry-transfers` | same event checkpoint as picks | Uses the same deadline window and event scope as picks; a service restart cannot permanently lose transfers |
 | `entry-results` | event checkpoint | `isFPLSeason` and every due event |
@@ -75,7 +85,10 @@ UTC+8 market date is retried; older dates are explicitly recorded as
 Entry jobs operate only on known `competition.entries`; core season bootstrap does not
 create entry bindings. Scans use an entry-ID keyset cursor, failed-entry retries
 contain only exact failed IDs, and canonical snapshot/pick/result/transfer
-checkpoints prevent successful units from being fetched again.
+checkpoints prevent successful units from being fetched again. Picks, results,
+and transfers continue to use the current event; only entry-info freshness is
+bounded by the latest finalized event so an unfinished current event cannot
+invalidate otherwise complete history.
 
 ## Match-window live jobs
 
@@ -110,28 +123,46 @@ the post-deadline publication window for immutable picks and pre-event transfer 
 
 | Job | Cadence | Gate / behavior |
 |---|---|---|
-| `league-event-results-trigger` | post-match checkpoint | Current event plus bounded post-match slot |
-| `tournament-event-results-trigger` | post-match checkpoint | Current event plus bounded post-match slot |
+| `league-event-results-trigger` | post-match checkpoint | Every event after its last fixture, plus permanent final repair |
+| `tournament-event-results-trigger` | post-match checkpoint | Every event after its last fixture, plus permanent final repair |
 
-The result window starts after the final fixture's expected end
-(`latest kickoff + 2 hours`) and remains open for 24 hours. It intentionally
-does not use the calendar `isFPLSeason` gate, so the next-day GW38 finalization
-can still run.
+The provisional result window starts after the final fixture's expected end
+(`latest kickoff + 2 hours`) and remains open for 24 hours. Before that boundary
+no result checkpoint is created. It intentionally does not use the calendar
+`isFPLSeason` gate, so the next-day GW38 finalization can still run.
 
-Each hour maps to `provisional-N` or `final-N` according to the event's
-`data_checked` flag. Deterministic job IDs make repeated ten-minute ticks
-idempotent. Successful jobs remain in BullMQ for 24 hours and failed jobs for
-seven days (bounded to 500 per queue); a later scheduler generation retries the
-same slot without losing the previous failure evidence.
+Each hour maps to one deterministic provisional checkpoint, so repeated
+scheduler passes are idempotent. Once an event is both `finished` and
+`data_checked`, the registry also emits one permanent `event-N-final`
+checkpoint outside the 24-hour window. That checkpoint remains recoverable
+after downtime for every historical gameweek. Successful jobs remain in BullMQ
+for 24 hours and failed jobs for seven days (bounded to 500 per queue); a later
+scheduler generation retries the same slot without losing the previous failure
+evidence.
+
+The league coordinator keeps one scheduler obligation leased while it processes
+all active tournaments with bounded concurrency and one shared database
+freshness cutoff. It completes the obligation only after every required unit
+has converged; otherwise it throws one aggregate failure so a later generation
+can repair the incomplete set.
 
 The tournament event-results job starts its cascade only when at least one
 active tournament entry was processed. The cascade contains:
 
 - points-race, battle-race, and knockout structure jobs;
-- post-event transfer calculation and a completeness-gated selection-stats MV refresh;
+- post-event transfer calculation;
 - cup results;
-- one materialized-view refresh after the three structure jobs reach their
-  Redis-backed completion barrier.
+- selection-stats calculation;
+- one materialized-view refresh only after all six real success roles reach
+  their Redis-backed completion barrier.
+
+The scheduler obligation ID and generation follow every cascade job. Child
+settlement never completes the obligation; only the six-role materialized-view
+finalizer may complete it. Partial enqueue, terminal child failure, or finalizer
+enqueue failure fails the current generation before BullMQ settlement. A later
+generation can compensate it, while generation guards reject a late completion
+from an older attempt. Failed enqueue markers are not treated as barrier
+success and cannot publish a partial view.
 
 Tournament and league jobs audit canonical rows before returning. Missing
 required units fail the BullMQ attempt; a valid absence such as no transfer or
@@ -159,8 +190,9 @@ since that same job began and fetches only the remaining entry/event units.
 - `isSelectTime`: match day and 30–90 minutes after the event deadline. The live
   lifecycle's first upstream picks probe starts at deadline +60 minutes, but the
   downstream publication window remains open for late cron ticks and retries.
-- Post-match result slot: later than final kickoff +2h but earlier than 24
-  hours after that expected end.
+- Provisional post-match result slot: at or after final kickoff +2h but earlier
+  than 24 hours after that expected end; the permanent final checkpoint is not
+  window-limited once `finished + data_checked` is true.
 
 Manual triggers are listed by `GET /jobs`; scheduler definitions and their
 catch-up policies are included in that response. `GET /jobs/status` requires

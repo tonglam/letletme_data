@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, inArray, sql } from 'drizzle-orm';
 
 import {
   liveLifecycleStatusInOps,
@@ -106,9 +106,11 @@ export type ManagerScoreCheckpoint = {
   eventPointSemantics: 'GROSS' | 'NET' | 'ZERO_COST_EQUIVALENT' | 'UNKNOWN';
   contentRevision: string;
   checkedAt: Date;
-  /** Content ordering clock; may advance without changing standings freshness. */
-  revisionAt: Date;
   upstreamUpdatedAt: Date | null;
+  // Classic rows use the existing internal updated_at column as durable
+  // ordering evidence for the last accepted positive OR fetch. Standings and
+  // unusable Summary responses leave it unchanged.
+  overallRankPublicationStartedAt?: string | null;
 };
 
 export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransaction) => {
@@ -124,7 +126,13 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
       if (entryIds.length === 0) return [];
       const db = await getDbInstance();
       return db
-        .select()
+        .select({
+          ...getTableColumns(managerEventScoreSnapshotsInFpl),
+          overallRankPublicationStartedAtExact: sql<string>`to_char(
+            ${managerEventScoreSnapshotsInFpl.updatedAt} AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+          )`,
+        })
         .from(managerEventScoreSnapshotsInFpl)
         .where(
           and(
@@ -189,7 +197,12 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
             contentRevision: row.contentRevision,
             checkedAt: row.checkedAt,
             upstreamUpdatedAt: row.upstreamUpdatedAt,
-            updatedAt: row.revisionAt,
+            updatedAt:
+              scope.scopeType === 'CLASSIC_LEAGUE'
+                ? row.overallRankPublicationStartedAt
+                  ? sql`${row.overallRankPublicationStartedAt}::timestamptz`
+                  : new Date(0)
+                : row.checkedAt,
           })),
         )
         .onConflictDoUpdate({
@@ -214,13 +227,48 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
             contentRevision: sql`excluded.content_revision`,
             checkedAt: sql`excluded.checked_at`,
             upstreamUpdatedAt: sql`excluded.upstream_updated_at`,
-            updatedAt: sql`excluded.updated_at`,
+            updatedAt:
+              scope.scopeType === 'CLASSIC_LEAGUE'
+                ? sql`greatest(${managerEventScoreSnapshotsInFpl.updatedAt}, excluded.updated_at)`
+                : sql`excluded.updated_at`,
           },
           setWhere: sql`
-            ${managerEventScoreSnapshotsInFpl.checkedAt} < excluded.checked_at
+            (
+              ${managerEventScoreSnapshotsInFpl.source} = 'FPL_ENTRY_SUMMARY'
+              AND excluded.source IN ('FPL_CLASSIC_STANDINGS', 'FPL_FINAL_RESULT')
+            )
             OR (
-              ${managerEventScoreSnapshotsInFpl.checkedAt} = excluded.checked_at
-              AND ${managerEventScoreSnapshotsInFpl.updatedAt} <= excluded.updated_at
+              ${managerEventScoreSnapshotsInFpl.source} = 'FPL_CLASSIC_STANDINGS'
+              AND excluded.source = 'FPL_FINAL_RESULT'
+            )
+            OR (
+              ${managerEventScoreSnapshotsInFpl.source} = excluded.source
+              AND (
+                (
+                  ${managerEventScoreSnapshotsInFpl.source} <> 'FPL_CLASSIC_STANDINGS'
+                  AND ${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at
+                )
+                OR (
+                  ${managerEventScoreSnapshotsInFpl.source} = 'FPL_CLASSIC_STANDINGS'
+                  AND (
+                    (
+                      ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt} IS NOT NULL
+                      AND excluded.upstream_updated_at IS NOT NULL
+                      AND ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt}
+                        < excluded.upstream_updated_at
+                    )
+                    OR (
+                      (
+                        ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt} IS NULL
+                        OR excluded.upstream_updated_at IS NULL
+                        OR ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt}
+                          = excluded.upstream_updated_at
+                      )
+                      AND ${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at
+                    )
+                  )
+                )
+              )
             )
           `,
         });

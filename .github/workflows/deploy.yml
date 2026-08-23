@@ -335,6 +335,8 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun validate-env.ts --probe-bug-report-storage
+            test -x scripts/bootstrap-briefing-source-media-env.sh
+            scripts/bootstrap-briefing-source-media-env.sh "$env_file" "$media_env_file"
             media_worker_setting=false
             if [ -f "$media_env_file" ]; then
               media_worker_setting=$(read_env_setting CONTENT_MEDIA_WORKER_ENABLED "$media_env_file" | tr '[:upper:]' '[:lower:]' || true)

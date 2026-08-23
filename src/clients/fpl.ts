@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { FPLClientError } from '../utils/errors';
+import { withTimeout } from '../utils/async';
 import {
   beginFplLogicalRequest,
   classifyFplRequestError,
@@ -20,11 +21,6 @@ const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5_000;
 const USER_AGENT = 'letletme-data/1.0.0 (+https://github.com/tonglam/letletme_data)';
-
-export type FPLRequestOptions = {
-  /** Optional wall-clock cap for this logical request, including retries/backoff. */
-  deadlineMs?: number;
-};
 
 // Env overrides exist for tests (keep retry waits in the millisecond range);
 // production uses the constants above.
@@ -625,6 +621,18 @@ export const EventExplainFixtureSchema = z.object({
 export type RawFPLEventExplainStat = z.infer<typeof EventExplainStatSchema>;
 export type RawFPLEventExplainFixture = z.infer<typeof EventExplainFixtureSchema>;
 
+type FPLRequestAttemptContext = Readonly<{
+  deadlineAt: number;
+  remainingMs: number;
+  signal: AbortSignal;
+}>;
+
+export type FPLRequestOptions = Readonly<{
+  /** Optional wall-clock cap for this logical request, including retries/backoff. */
+  deadlineMs?: number;
+  beforeAttempt?: (attempt: number, context: FPLRequestAttemptContext) => void | Promise<void>;
+}>;
+
 class FPLClient {
   private readonly baseUrl = 'https://fantasy.premierleague.com/api';
 
@@ -682,10 +690,37 @@ class FPLClient {
       };
 
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        const remaining = remainingMs();
+        let remaining = remainingMs();
         if (remaining <= 0) {
           break;
         }
+
+        // Endpoint-specific ordering hooks run after retry backoff and directly
+        // before the actual attempt. Errors abort the logical request instead
+        // of being mistaken for retryable network failures.
+        if (options.beforeAttempt) {
+          const controller = new AbortController();
+          try {
+            await withTimeout(
+              Promise.resolve(
+                options.beforeAttempt(attempt, {
+                  deadlineAt: started + deadlineMs,
+                  remainingMs: remaining,
+                  signal: controller.signal,
+                }),
+              ),
+              remaining,
+              'FPL pre-attempt hook exceeded the logical request deadline',
+            );
+          } catch (error) {
+            // Abort first so endpoint-specific work can cancel a queued DB lock
+            // before this request releases its distributed admission lease.
+            controller.abort(error);
+            throw error;
+          }
+        }
+        remaining = remainingMs();
+        if (remaining <= 0) break;
 
         let attemptRecorded = false;
         try {
@@ -933,12 +968,12 @@ class FPLClient {
     }
   }
 
-  async getEntrySummary(entryId: number, requestOptions: FPLRequestOptions = {}) {
+  async getEntrySummary(entryId: number, options: FPLRequestOptions = {}) {
     const url = `${this.baseUrl}/entry/${entryId}/`;
     try {
       logDebug('Fetching entry summary', { entryId, url });
 
-      const response = await this.request(url, requestOptions);
+      const response = await this.request(url, options);
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,

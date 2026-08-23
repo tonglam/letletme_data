@@ -141,14 +141,21 @@ function entryJobOptions(
  */
 export async function runEntryOnboarding(
   season: FplSeasonRef,
-  input: Readonly<{ entryId: number; eventId?: number; attemptKey: string }>,
+  input: Readonly<{
+    entryId: number;
+    eventId?: number;
+    entryInfoTargetEventId: number;
+    attemptKey: string;
+  }>,
   dependencies: EntryOnboardingDependencies = runtimeDependencies,
 ): Promise<EntryOnboardingResult> {
   const entryInfoJobs = await dependencies.runPhase(input.attemptKey, [
     dependencies.enqueueEntryInfo(
       season,
       'api',
-      entryJobOptions(input.entryId, input.attemptKey, 'entry-info', input.eventId),
+      // Entry history is authoritative only through the latest finalized GW.
+      // Picks, rich results, and transfers below still target the current GW.
+      entryJobOptions(input.entryId, input.attemptKey, 'entry-info', input.entryInfoTargetEventId),
     ),
   ]);
   const entryInfoJobId = requireJobId(entryInfoJobs[0], 'entry-info');

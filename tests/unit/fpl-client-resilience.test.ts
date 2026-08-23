@@ -5,6 +5,7 @@ import { FPLClientError } from '../../src/utils/errors';
 
 const originalFetch = globalThis.fetch;
 const ENV_KEYS = [
+  'FPL_REQUEST_DEADLINE_MS',
   'FPL_REQUEST_TIMEOUT_MS',
   'FPL_RETRY_BASE_DELAY_MS',
   'FPL_RETRY_MAX_DELAY_MS',
@@ -115,6 +116,66 @@ describe('FPL client resilience (FP-18)', () => {
     const fixtures = await fplClient.getFixtures(1);
     expect(fixtures).toEqual([]);
     expect(calls).toBe(3);
+  });
+
+  test('runs the entry-summary ordering hook immediately before every retry attempt', async () => {
+    let calls = 0;
+    const attempts: number[] = [];
+    globalThis.fetch = mock(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response('retry', { status: 503, statusText: 'Service Unavailable' });
+      }
+      return new Response(
+        JSON.stringify({
+          id: 123,
+          name: 'Retry XI',
+          player_first_name: 'Retry',
+          player_last_name: 'Manager',
+          summary_overall_rank: 456_789,
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const summary = await fplClient.getEntrySummary(123, {
+      beforeAttempt: (attempt) => {
+        attempts.push(attempt);
+      },
+    });
+
+    expect(summary.summary_overall_rank).toBe(456_789);
+    expect(calls).toBe(2);
+    expect(attempts).toEqual([0, 1]);
+  });
+
+  test('aborts a blocked pre-attempt hook at the logical request deadline', async () => {
+    process.env.FPL_REQUEST_DEADLINE_MS = '25';
+    const fetchMock = mock(async () => new Response('{}', { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    let hookWasAborted = false;
+
+    const started = Date.now();
+    await expect(
+      fplClient.getEntrySummary(123, {
+        beforeAttempt: (_attempt, context) => {
+          return new Promise<void>((_resolve, reject) => {
+            context.signal.addEventListener(
+              'abort',
+              () => {
+                hookWasAborted = true;
+                reject(context.signal.reason);
+              },
+              { once: true },
+            );
+          });
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'UNKNOWN_ERROR' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(hookWasAborted).toBeTrue();
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   test('persistent 5xx exhausts retries and surfaces the last status', async () => {

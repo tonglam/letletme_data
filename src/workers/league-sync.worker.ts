@@ -26,13 +26,37 @@ import {
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
+  renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
+
+const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
+
+function startSchedulerLeaseHeartbeat(job: Job<LeagueSyncJobData>): () => void {
+  const obligationId = job.data.obligationId;
+  if (!obligationId) return () => undefined;
+
+  const timer = setInterval(() => {
+    void renewSchedulerObligation({
+      obligationId,
+      generation: job.data.obligationGeneration,
+    }).catch((error) => {
+      logError('Failed to renew league scheduler obligation lease', error, {
+        jobId: job.id,
+        jobName: job.name,
+        obligationId,
+        generation: job.data.obligationGeneration,
+      });
+    });
+  }, SCHEDULER_LEASE_HEARTBEAT_MS);
+
+  return () => clearInterval(timer);
+}
 
 /**
  * League Sync Worker
  *
  * Processes league sync jobs:
- * - Coordinator job (no tournamentId): Enqueues one job per tournament
+ * - Coordinator job (no tournamentId): Synchronizes active tournaments with bounded fan-out
  * - Tournament job (with tournamentId): Processes that specific tournament
  */
 async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
@@ -53,33 +77,30 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
 
   logJobTriggered(context);
 
-  return runDataSyncAttempt(
-    {
-      queue: job.queueName,
-      jobName: job.name,
-      runId,
-      source: tournamentId === undefined ? 'coordinator' : source,
-      attempt: job.attemptsMade + 1,
-      targetEventId: eventId,
-      queueWaitMs: context.queueWaitMs,
-    },
-    () =>
-      withMutationScopes(
-        {
-          queueName: job.queueName,
-          jobName: job.name,
-          jobId: String(job.id),
-          eventId,
-          tournamentId,
-        },
-        () =>
+  const stopLeaseHeartbeat = startSchedulerLeaseHeartbeat(job);
+  try {
+    return await runDataSyncAttempt(
+      {
+        queue: job.queueName,
+        jobName: job.name,
+        runId,
+        source: tournamentId === undefined ? 'coordinator' : source,
+        attempt: job.attemptsMade + 1,
+        targetEventId: eventId,
+        queueWaitMs: context.queueWaitMs,
+      },
+      () => {
+        const operation = () =>
           runTrackedJob(context, async () => {
             switch (job.name) {
               case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
                 return processLeagueEventPicksJob(season, eventId, tournamentId, runId);
 
               case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS: {
-                const freshAfter = tournamentId ? await resolveJobFreshAfter(job) : undefined;
+                // One coordinator attempt owns one database-clock boundary.
+                // Reusing it across tournaments avoids duplicate rich-result
+                // fetches for entries shared by multiple leagues.
+                const freshAfter = await resolveJobFreshAfter(job);
                 return processLeagueEventResultsJob(season, eventId, tournamentId, {
                   runId,
                   freshAfter,
@@ -89,9 +110,27 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
               default:
                 throw new Error(`Unknown job name: ${job.name}`);
             }
-          }),
-      ),
-  );
+          });
+
+        // Coordinators acquire a short transaction per tournament in the
+        // service. An outer transaction would retain event locks across the
+        // complete network-heavy fan-out.
+        if (tournamentId === undefined) return operation();
+        return withMutationScopes(
+          {
+            queueName: job.queueName,
+            jobName: job.name,
+            jobId: String(job.id),
+            eventId,
+            tournamentId,
+          },
+          operation,
+        );
+      },
+    );
+  } finally {
+    stopLeaseHeartbeat();
+  }
 }
 
 export function createLeagueSyncWorker(): WorkerRuntime {

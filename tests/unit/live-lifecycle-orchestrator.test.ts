@@ -9,7 +9,9 @@ import {
 describe('live lifecycle decisions', () => {
   test('standalone scheduler persists lifecycle independently of live publications', () => {
     const source = readFileSync('src/scheduler.ts', 'utf8');
-    expect(source).toContain('await persistLiveLifecycleStatus(now)');
+    expect(source).toContain('runIndependentSchedulerStage');
+    expect(source).toContain('live-lifecycle');
+    expect(source).toContain('persistLiveLifecycleStatus(now)');
     expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
       source.indexOf('runSchedulerPass(now)'),
     );
