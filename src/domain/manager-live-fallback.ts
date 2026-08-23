@@ -93,39 +93,23 @@ export const selectLatestCheckedRow = <
 export const shouldRefreshClassicOverallRank = (
   row:
     | Readonly<{
-        source: string;
         overallRank: number | null | undefined;
       }>
     | undefined,
   standingsRowExpired: boolean,
-): boolean =>
-  standingsRowExpired ||
-  (row?.source === 'FPL_CLASSIC_STANDINGS' && !isPositiveOverallRank(row.overallRank));
+): boolean => standingsRowExpired || !isPositiveOverallRank(row?.overallRank);
 
 export const shouldRetryPendingClassicOverallRank = (
-  row:
-    | Readonly<{
-        source: string;
-        overallRank: number | null | undefined;
-        checkedAt: string;
-      }>
-    | undefined,
+  entryId: number,
   standingsPending: boolean,
-  foregroundRetryCutoff: string | undefined,
+  baselineMarkers: ReadonlyMap<number, string> | null,
+  latestMarkers: ReadonlyMap<number, string> | null,
 ): boolean => {
   if (standingsPending) return true;
-  if (foregroundRetryCutoff === undefined) {
-    return shouldRefreshClassicOverallRank(row, false);
-  }
+  if (baselineMarkers === null || latestMarkers === null) return true;
 
-  const rowCheckedAt = Date.parse(row?.checkedAt ?? '');
-  const retryCutoff = Date.parse(foregroundRetryCutoff);
-  const supersededByLaterRefresh =
-    isPositiveOverallRank(row?.overallRank) &&
-    Number.isFinite(rowCheckedAt) &&
-    Number.isFinite(retryCutoff) &&
-    rowCheckedAt > retryCutoff;
-  return !supersededByLaterRefresh;
+  const latestMarker = latestMarkers.get(entryId);
+  return latestMarker === undefined || latestMarker === baselineMarkers.get(entryId);
 };
 
 export const shouldPreserveClassicStandingForRank = <T extends Readonly<{ source: string }>>(

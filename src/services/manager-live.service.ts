@@ -1,9 +1,13 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
+import { drizzle } from 'drizzle-orm/postgres-js';
 import type Redis from 'ioredis';
+import type postgres from 'postgres';
 
 import { fplClient, type RawFPLLeagueStandingsResponse } from '../clients/fpl';
 import { redisSingleton } from '../cache/singleton';
+import { getDbClient, runInDatabaseTransaction } from '../db/singleton';
+import * as databaseSchema from '../db/schemas/index.schema';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
@@ -95,6 +99,11 @@ const cacheKey = (season: string, eventId: number, scope: ManagerScoreScope): st
   `OfficialManagerLive:${season}:${eventId}:${scopeKey(scope)}`;
 const metaCacheKey = (season: string, eventId: number, scope: ManagerScoreScope): string =>
   `OfficialManagerLiveMeta:${season}:${eventId}:${scopeKey(scope)}`;
+const overallRankMarkerCacheKey = (
+  season: string,
+  eventId: number,
+  scope: ManagerScoreScope,
+): string => `OfficialManagerOverallRankMarker:${season}:${eventId}:${scopeKey(scope)}`;
 
 const stableRevision = (row: Omit<ManagerLiveScoreRow, 'revision'>): string => {
   const digest = createHash('sha1')
@@ -295,8 +304,9 @@ const writeRows = async (
   rows: readonly ManagerLiveScoreRow[],
   metadata?: Record<string, unknown>,
   metadataField = 'publication',
-): Promise<void> => {
-  if (!redis || (rows.length === 0 && !metadata)) return;
+): Promise<boolean> => {
+  if (!redis) return false;
+  if (rows.length === 0 && !metadata) return true;
   try {
     const key = cacheKey(season, eventId, scope);
     // Use a Redis transaction so a row publication and its metadata become
@@ -309,7 +319,11 @@ const writeRows = async (
       pipeline.hset(metaKey, metadataField, JSON.stringify(metadata));
       pipeline.expire(metaKey, CACHE_TTL_SECONDS);
     }
-    await pipeline.exec();
+    const results = await pipeline.exec();
+    if (results === null || results.some(([error]) => error !== null)) {
+      throw new Error('Redis manager publication transaction failed');
+    }
+    return true;
   } catch (error) {
     logWarn('Official manager Redis write failed; PostgreSQL checkpoint remains authoritative', {
       season,
@@ -317,6 +331,7 @@ const writeRows = async (
       scope: scopeKey(scope),
       error: error instanceof Error ? error.message : 'unknown',
     });
+    return false;
   }
 };
 
@@ -325,21 +340,87 @@ const writeCheckpointRows = async (
   eventId: number,
   scope: ManagerScoreScope,
   rows: readonly ManagerLiveScoreRow[],
-): Promise<void> => {
-  await managerScoreCheckpointRepository
-    .upsertBatch(
+): Promise<boolean> => {
+  try {
+    await managerScoreCheckpointRepository.upsertBatch(
       season,
       eventId,
       scope,
       rows.map((row) => toManagerScoreCheckpoint(row)),
-    )
-    .catch((error) =>
-      logWarn('Official manager checkpoint write failed', {
-        eventId,
-        scope: scopeKey(scope),
-        error: error instanceof Error ? error.message : 'unknown',
-      }),
     );
+    return true;
+  } catch (error) {
+    logWarn('Official manager checkpoint write failed', {
+      eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return false;
+  }
+};
+
+const readOverallRankRefreshMarkers = async (
+  redis: Redis | null,
+  season: string,
+  eventId: number,
+  scope: ManagerScoreScope,
+  entryIds: readonly number[],
+): Promise<Map<number, string> | null> => {
+  if (!redis) return null;
+  const uniqueEntryIds = Array.from(new Set(entryIds));
+  if (uniqueEntryIds.length === 0) return new Map();
+  try {
+    const values = await redis.hmget(
+      overallRankMarkerCacheKey(season, eventId, scope),
+      ...uniqueEntryIds.map(String),
+    );
+    const markers = new Map<number, string>();
+    uniqueEntryIds.forEach((entryId, index) => {
+      const marker = values[index];
+      if (marker) markers.set(entryId, marker);
+    });
+    return markers;
+  } catch (error) {
+    logWarn('Official manager overall-rank marker read failed', {
+      eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return null;
+  }
+};
+
+const writeOverallRankRefreshMarkers = async (
+  redis: Redis | null,
+  season: string,
+  eventId: number,
+  scope: ManagerScoreScope,
+  entryIds: readonly number[],
+): Promise<boolean> => {
+  if (!redis) return false;
+  const uniqueEntryIds = Array.from(new Set(entryIds));
+  if (uniqueEntryIds.length === 0) return true;
+  try {
+    const key = overallRankMarkerCacheKey(season, eventId, scope);
+    const marker = randomUUID();
+    const pipeline = redis.multi();
+    for (const entryId of uniqueEntryIds) pipeline.hset(key, String(entryId), marker);
+    pipeline.expire(key, CACHE_TTL_SECONDS);
+    const results = await pipeline.exec();
+    if (results === null || results.some(([error]) => error !== null)) {
+      throw new Error('Redis overall-rank marker transaction failed');
+    }
+    return true;
+  } catch (error) {
+    // A missing marker can only cause a conservative duplicate retry; it must
+    // never make a valid official rank publication fail.
+    logWarn('Official manager overall-rank marker write failed', {
+      eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return false;
+  }
 };
 
 const nowIso = (): string => new Date().toISOString();
@@ -425,11 +506,22 @@ const runManagerLiveBackgroundRefresh = createKeyedSerialTaskScheduler();
 // batching alone is insufficient because distinct tournaments can refresh at
 // the same time and otherwise multiply FPL entry-summary concurrency.
 const runManagerSummaryFetch = createManagerSummaryFetchGate();
-// FPL requests remain concurrent, but publication for one Classic scope is
-// serialized. This makes the latest-row read and the following Redis/Postgres
-// write one process-local critical section shared by foreground standings and
-// deferred rank enrichment.
-const runManagerLivePublication = createKeyedSerialTaskGate();
+// Classic Summary fetches and their publication share one PostgreSQL
+// transaction advisory lock across replicas. Standings pagination remains
+// outside the lock, then re-reads the pinned checkpoint before publication.
+// Both paths therefore reconcile Redis and PostgreSQL in one scope order.
+const runManagerLivePublicationInProcess = createKeyedSerialTaskGate();
+const runManagerLivePublication = <T>(key: string, task: () => Promise<T>): Promise<T> =>
+  runManagerLivePublicationInProcess(key, async (): Promise<T> => {
+    const client = await getDbClient();
+    return (await client.begin(async (transaction) => {
+      await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`manager-live:${key}`}, 0))`;
+      const lockedDb = drizzle(transaction as unknown as postgres.Sql, {
+        schema: databaseSchema,
+      });
+      return runInDatabaseTransaction(transaction, task, lockedDb);
+    })) as T;
+  });
 const managerLivePublicationKey = (
   season: string,
   eventId: number,
@@ -478,46 +570,55 @@ const refreshEntrySummaries = async (
   const classicScope = scope.scopeType === 'CLASSIC_LEAGUE';
   const publicationKey = managerLivePublicationKey(season.seasonCode, eventId, scope);
   for (const batch of managerSummaryFetchBatches(targets)) {
-    const completed = await Promise.all(
-      batch.map(async (entryId) => {
-        try {
-          const summary = await runManagerSummaryFetch(
-            () => fplClient.getEntrySummary(entryId),
-            options.priority,
-          );
-          return { entryId, summary };
-        } catch (error) {
-          if (error instanceof FPLClientError && error.status === 429) {
-            refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
-          } else {
-            refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
-          }
-          logWarn('Official manager entry summary refresh failed', {
-            entryId,
-            eventId,
-            error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
-          });
-          return null;
-        }
-      }),
-    );
-    const successful = completed.filter(
-      (result): result is NonNullable<typeof result> => result !== null,
-    );
-    if (successful.length === 0) continue;
-
-    const composeAndPublishBatch = async (
+    const fetchComposeAndPublishBatch = async (
       reReadLatest: boolean,
-    ): Promise<ManagerLiveScoreRow[]> => {
+    ): Promise<{
+      rows: ManagerLiveScoreRow[];
+      refreshedEntryIds: number[];
+      overallRankRefreshedEntryIds: number[];
+    }> => {
+      const completed = await Promise.all(
+        batch.map(async (entryId) => {
+          try {
+            const summary = await runManagerSummaryFetch(
+              () => fplClient.getEntrySummary(entryId),
+              options.priority,
+            );
+            return { entryId, summary };
+          } catch (error) {
+            if (error instanceof FPLClientError && error.status === 429) {
+              refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
+            } else {
+              refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+            }
+            logWarn('Official manager entry summary refresh failed', {
+              entryId,
+              eventId,
+              error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
+            });
+            return null;
+          }
+        }),
+      );
+      const successful = completed.filter(
+        (result): result is NonNullable<typeof result> => result !== null,
+      );
+      if (successful.length === 0) {
+        return {
+          rows: [],
+          refreshedEntryIds: [],
+          overallRankRefreshedEntryIds: [],
+        };
+      }
+
       const targetEntryIds = successful.map(({ entryId }) => entryId);
       const latestRows = reReadLatest
         ? await readCachedAndCheckpointRows(redis, season, eventId, scope, targetEntryIds, rows)
         : rows;
-      if (reReadLatest) {
-        for (const [entryId, row] of latestRows) rows.set(entryId, row);
-      }
 
       const checkedAt = nowIso();
+      const batchRefreshedEntryIds: number[] = [];
+      const batchOverallRankRefreshedEntryIds: number[] = [];
       const publishedRows = successful.map(({ entryId, summary }) => {
         const existing = latestRows.get(entryId) ?? rows.get(entryId);
         const candidate = shouldPreserveClassicStandingForRank(
@@ -536,10 +637,56 @@ const refreshEntrySummaries = async (
               });
             })()
           : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, checkedAt);
-        const row = withPreservedOverallRank(candidate, existing?.overallRank);
-        rows.set(row.entryId, row);
-        return row;
+        batchRefreshedEntryIds.push(entryId);
+        if (isPositiveOverallRank(summary.summary_overall_rank)) {
+          batchOverallRankRefreshedEntryIds.push(entryId);
+        }
+        return withPreservedOverallRank(candidate, existing?.overallRank);
       });
+
+      const metadata = {
+        season: season.seasonCode,
+        eventId,
+        source: 'FPL_ENTRY_SUMMARY',
+        rowCount: refreshed.length + publishedRows.length,
+        checkedAt,
+        revision: publishedRows[0]!.revision,
+        nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
+      };
+      if (classicScope) {
+        const checkpointPublished = await writeCheckpointRows(
+          season,
+          eventId,
+          scope,
+          publishedRows,
+        );
+        if (!checkpointPublished) {
+          throw new Error('Classic entry-summary checkpoint publication failed');
+        }
+        const cachePublished = await writeRows(
+          redis,
+          season.seasonCode,
+          eventId,
+          scope,
+          publishedRows,
+          metadata,
+          'entry-summary',
+        );
+        if (cachePublished) {
+          await writeOverallRankRefreshMarkers(
+            redis,
+            season.seasonCode,
+            eventId,
+            scope,
+            batchOverallRankRefreshedEntryIds,
+          );
+        }
+        return {
+          rows: publishedRows,
+          refreshedEntryIds: batchRefreshedEntryIds,
+          overallRankRefreshedEntryIds: batchOverallRankRefreshedEntryIds,
+        };
+      }
 
       await writeRows(
         redis,
@@ -547,38 +694,39 @@ const refreshEntrySummaries = async (
         eventId,
         scope,
         publishedRows,
-        {
-          season: season.seasonCode,
-          eventId,
-          source: 'FPL_ENTRY_SUMMARY',
-          rowCount: refreshed.length + publishedRows.length,
-          checkedAt,
-          revision: publishedRows[0]!.revision,
-          nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
-        },
+        metadata,
         'entry-summary',
       );
-      if (classicScope) {
-        await writeCheckpointRows(season, eventId, scope, publishedRows);
-      }
-      return publishedRows;
+      return {
+        rows: publishedRows,
+        refreshedEntryIds: batchRefreshedEntryIds,
+        overallRankRefreshedEntryIds: batchOverallRankRefreshedEntryIds,
+      };
     };
 
-    // Reconcile and persist one completed concurrency batch per critical
-    // section. This keeps Classic enrichment to one checkpoint read/upsert per
-    // batch instead of one pair of PostgreSQL operations per manager.
-    const publishedBatch = classicScope
-      ? await runManagerLivePublication(publicationKey, () => composeAndPublishBatch(true))
-      : await composeAndPublishBatch(false);
-    if (!classicScope) await writeCheckpointRows(season, eventId, scope, publishedBatch);
-
-    for (const { entryId, summary } of successful) {
-      refreshedEntryIds.push(entryId);
-      if (isPositiveOverallRank(summary.summary_overall_rank)) {
-        overallRankRefreshedEntryIds.push(entryId);
-      }
+    // A Classic batch acquires the cross-replica scope lock before starting
+    // its four concurrent FPL requests. A later request therefore cannot
+    // publish first and then be overwritten by an earlier delayed response,
+    // even when its OR is unchanged and Redis evidence is unavailable.
+    let publishedBatch: Awaited<ReturnType<typeof fetchComposeAndPublishBatch>>;
+    try {
+      publishedBatch = classicScope
+        ? await runManagerLivePublication(publicationKey, () => fetchComposeAndPublishBatch(true))
+        : await fetchComposeAndPublishBatch(false);
+    } catch (error) {
+      refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+      logWarn('Official manager entry-summary publication failed', {
+        eventId,
+        scope: scopeKey(scope),
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+      continue;
     }
-    refreshed.push(...publishedBatch);
+    if (!classicScope) await writeCheckpointRows(season, eventId, scope, publishedBatch.rows);
+    for (const row of publishedBatch.rows) rows.set(row.entryId, row);
+    refreshedEntryIds.push(...publishedBatch.refreshedEntryIds);
+    overallRankRefreshedEntryIds.push(...publishedBatch.overallRankRefreshedEntryIds);
+    refreshed.push(...publishedBatch.rows);
   }
   return {
     errorCode: refreshErrorCode,
@@ -671,6 +819,15 @@ const refreshClassicStandings = async (
             const candidate = withPreservedOverallRank(restamped, latest?.overallRank);
             return mergeLatestManagerLiveRow(latest, candidate);
           });
+          const checkpointPublished = await writeCheckpointRows(
+            season,
+            eventId,
+            classicScope,
+            mergedRows,
+          );
+          if (!checkpointPublished) {
+            throw new Error('Classic standings checkpoint publication failed');
+          }
           await writeRows(
             redis,
             season.seasonCode,
@@ -689,11 +846,10 @@ const refreshClassicStandings = async (
             },
             `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
           );
-          await writeCheckpointRows(season, eventId, classicScope, mergedRows);
-          for (const row of mergedRows) rows.set(row.entryId, row);
           return mergedRows;
         },
       );
+      for (const row of publishedRows) rows.set(row.entryId, row);
     } catch (error) {
       refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
       // No row can be reported refreshed unless both publication writes
@@ -951,6 +1107,17 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   ) {
     if (!tournament) throw new Error('Tournament validation unexpectedly missing');
     const classicLeagueId = tournament.leagueId;
+    // Capture OR-specific completion evidence before any work in this request.
+    // A standings publication also advances checkedAt, so row timestamps cannot
+    // distinguish deferred OR work from an OR refresh completed by another
+    // request or replica while this background task waits for its turn.
+    const overallRankMarkerBaseline = await readOverallRankRefreshMarkers(
+      redis,
+      season.seasonCode,
+      input.eventId,
+      scope,
+      uniqueEntryIds,
+    );
     const standings = await refreshClassicStandings(
       season,
       input.eventId,
@@ -967,6 +1134,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     );
     const fallbackPlan = planClassicManagerFallback(pendingStandings, standings.complete);
     const fallbackSummaryRefreshedEntryIds = new Set<number>();
+    const fallbackSummaryOverallRankRefreshedEntryIds = new Set<number>();
     if (fallbackPlan.foregroundSummaryEntryIds.length > 0) {
       const summaryRefresh = await refreshEntrySummaries(
         season,
@@ -980,6 +1148,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       for (const entryId of summaryRefresh.refreshedEntryIds) {
         fallbackSummaryRefreshedEntryIds.add(entryId);
       }
+      for (const entryId of summaryRefresh.overallRankRefreshedEntryIds) {
+        fallbackSummaryOverallRankRefreshedEntryIds.add(entryId);
+      }
       pendingStandings = fallbackPlan.backgroundEntryIds.filter(
         (entryId) => !fallbackSummaryRefreshedEntryIds.has(entryId),
       );
@@ -991,20 +1162,17 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     // separate pending set so an OR-only timestamp cannot mark them fresh.
     const classicOverallRankTargets = uniqueEntryIds.filter(
       (entryId) =>
-        !fallbackSummaryRefreshedEntryIds.has(entryId) &&
+        !fallbackSummaryOverallRankRefreshedEntryIds.has(entryId) &&
         shouldRefreshClassicOverallRank(rows.get(entryId), staleOrMissingIds.has(entryId)),
     );
     const pendingStandingsEntryIds = new Set(pendingStandings);
     const overallRankPlan = planClassicOverallRankRefresh(
       classicOverallRankTargets,
       classicOverallRankTargets.filter(
-        (entryId) =>
-          !pendingStandingsEntryIds.has(entryId) &&
-          rows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
+        (entryId) => !pendingStandingsEntryIds.has(entryId) && rows.has(entryId),
       ),
     );
     let pendingOverallRank = overallRankPlan.entryIds;
-    let foregroundOverallRankRetryCutoffs = new Map<number, string>();
     if (overallRankPlan.foregroundEntryIds.length > 0) {
       const summaryRefresh = await refreshEntrySummaries(
         season,
@@ -1019,13 +1187,6 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       pendingOverallRank = pendingOverallRankRefreshEntryIds(
         overallRankPlan.entryIds,
         summaryRefresh.overallRankRefreshedEntryIds,
-      );
-      const foregroundRetryCutoff = nowIso();
-      foregroundOverallRankRetryCutoffs = new Map(
-        pendingOverallRankRefreshEntryIds(
-          overallRankPlan.foregroundEntryIds,
-          summaryRefresh.overallRankRefreshedEntryIds,
-        ).map((entryId) => [entryId, foregroundRetryCutoff]),
       );
     }
 
@@ -1058,11 +1219,19 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           return !row || !isFresh(row);
         });
         const unresolvedStandingsAtStart = new Set(unresolvedStandings);
-        const unresolvedOverallRank = pendingOverallRank.filter((entryId) =>
+        const latestOverallRankMarkers = await readOverallRankRefreshMarkers(
+          redis,
+          season.seasonCode,
+          input.eventId,
+          scope,
+          pendingOverallRank,
+        );
+        let unresolvedOverallRank = pendingOverallRank.filter((entryId) =>
           shouldRetryPendingClassicOverallRank(
-            backgroundRows.get(entryId),
+            entryId,
             unresolvedStandingsAtStart.has(entryId),
-            foregroundOverallRankRetryCutoffs.get(entryId),
+            overallRankMarkerBaseline,
+            latestOverallRankMarkers,
           ),
         );
         if (unresolvedStandings.length === 0 && unresolvedOverallRank.length === 0) {
@@ -1102,16 +1271,18 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
             { priority: 'background' },
           );
           const fallbackRefreshed = new Set(fallbackRefresh.refreshedEntryIds);
+          const fallbackOverallRanks = new Set(fallbackRefresh.overallRankRefreshedEntryIds);
           unresolvedStandings = unresolvedStandings.filter(
             (entryId) => !fallbackRefreshed.has(entryId),
+          );
+          unresolvedOverallRank = unresolvedOverallRank.filter(
+            (entryId) => !fallbackOverallRanks.has(entryId),
           );
         }
 
         const unresolvedStandingsEntryIds = new Set(unresolvedStandings);
         const overallRankTargets = unresolvedOverallRank.filter(
-          (entryId) =>
-            !unresolvedStandingsEntryIds.has(entryId) &&
-            backgroundRows.get(entryId)?.source === 'FPL_CLASSIC_STANDINGS',
+          (entryId) => !unresolvedStandingsEntryIds.has(entryId) && backgroundRows.has(entryId),
         );
         if (overallRankTargets.length > 0) {
           await refreshEntrySummaries(

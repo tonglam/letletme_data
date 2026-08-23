@@ -168,46 +168,34 @@ describe('classic manager live fallback', () => {
       shouldRefreshClassicOverallRank({ ...positiveClassicRow, overallRank: null }, false),
     ).toBeTrue();
     expect(shouldRefreshClassicOverallRank(positiveClassicRow, false)).toBeFalse();
-    expect(
-      shouldRefreshClassicOverallRank({ source: 'FPL_ENTRY_SUMMARY', overallRank: null }, true),
-    ).toBeTrue();
+    expect(shouldRefreshClassicOverallRank({ overallRank: null }, true)).toBeTrue();
+    expect(shouldRefreshClassicOverallRank({ overallRank: null }, false)).toBeTrue();
     expect(shouldRefreshClassicOverallRank(undefined, true)).toBeTrue();
+    expect(shouldRefreshClassicOverallRank(undefined, false)).toBeTrue();
   });
 
-  test('retains explicit foreground OR failures for the background retry', () => {
-    const preservedClassicRow = {
-      source: 'FPL_CLASSIC_STANDINGS',
-      overallRank: 640_000,
-      checkedAt: '2026-08-23T10:00:00.000Z',
-    };
+  test('retains deferred and failed OR work until an OR-specific marker advances', () => {
+    const baseline = new Map([
+      [1, 'old-1'],
+      [2, 'old-2'],
+    ]);
 
-    expect(
-      shouldRetryPendingClassicOverallRank(preservedClassicRow, false, '2026-08-23T10:00:01.000Z'),
-    ).toBeTrue();
-    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, false, undefined)).toBeFalse();
-    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, true, undefined)).toBeTrue();
-    expect(
-      shouldRetryPendingClassicOverallRank(
-        { ...preservedClassicRow, overallRank: null },
-        false,
-        undefined,
-      ),
-    ).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(1, false, baseline, baseline)).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(3, false, baseline, new Map())).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(1, false, null, baseline)).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(1, false, baseline, null)).toBeTrue();
   });
 
-  test('drops a failed OR retry after a later request publishes a positive row', () => {
-    const laterClassicRow = {
-      source: 'FPL_CLASSIC_STANDINGS',
-      overallRank: 640_000,
-      checkedAt: '2026-08-23T10:00:02.000Z',
-    };
+  test('drops OR work only after a later valid OR publication changes its marker', () => {
+    const baseline = new Map([[1, 'old']]);
+    const laterMarkers = new Map([
+      [1, 'new'],
+      [2, 'first'],
+    ]);
 
-    expect(
-      shouldRetryPendingClassicOverallRank(laterClassicRow, false, '2026-08-23T10:00:01.000Z'),
-    ).toBeFalse();
-    expect(
-      shouldRetryPendingClassicOverallRank(laterClassicRow, true, '2026-08-23T10:00:01.000Z'),
-    ).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(1, false, baseline, laterMarkers)).toBeFalse();
+    expect(shouldRetryPendingClassicOverallRank(2, false, baseline, laterMarkers)).toBeFalse();
+    expect(shouldRetryPendingClassicOverallRank(1, true, baseline, laterMarkers)).toBeTrue();
   });
 
   test('uses official entry summaries after standings pagination is exhausted', () => {
