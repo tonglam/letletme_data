@@ -5,22 +5,36 @@ import {
   classicManagerBackgroundStandingsStartPage,
   classicManagerSummaryFallbackEntryIds,
   classicManagerSummaryFallbackNeedsRefresh,
-  createKeyedTaskSerializer,
   createDistributedLeaseFence,
+  createKeyedSerialTaskGate,
+  createKeyedSerialTaskScheduler,
+  createKeyedTaskSerializer,
   createManagerSummaryFetchGate,
+  isPositiveOverallRank,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
+  mergeUniqueTargetManagerRows,
   pendingManagerRefreshEntryIds,
+  pendingOverallRankRefreshEntryIds,
   planClassicManagerFallback,
+  planClassicOverallRankRefresh,
   planManagerLiveRefreshTargets,
   preserveClassicOverallRank,
+  preserveLastKnownOverallRank,
+  reconcileMonotonicCachePublicationRows,
   readThroughManagerSummaryResult,
   readLatestRowsWithFallback,
   requireManagerSummaryCoordinator,
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
+  selectClassicSummaryOverallRank,
   selectForegroundClassicRankEntryIds,
+  selectLatestCheckedRow,
+  shouldAcceptClassicOverallRankPublication,
   shouldEnrichClassicOverallRank,
+  shouldPreserveClassicStandingForRank,
+  shouldRefreshClassicOverallRank,
+  shouldRetryPendingClassicOverallRank,
   shouldReplaceManagerLiveRow,
 } from '../../src/domain/manager-live-fallback';
 
@@ -231,6 +245,389 @@ describe('classic manager live fallback', () => {
     });
 
     await expect(fence.assertOwned()).rejects.toThrow('redis unavailable');
+  });
+
+  test('serializes standings and rank publications for the same Classic scope', async () => {
+    const run = createKeyedSerialTaskGate();
+    const order: string[] = [];
+    let releaseStandings!: () => void;
+    const standingsActive = new Promise<void>((resolve) => {
+      releaseStandings = resolve;
+    });
+
+    const standings = run('classic:2627:1:8863', async () => {
+      order.push('standings-start');
+      await standingsActive;
+      order.push('standings-end');
+    });
+    await Promise.resolve();
+    const overallRank = run('classic:2627:1:8863', async () => {
+      order.push('overall-rank');
+    });
+    const otherLeague = run('classic:2627:1:9999', async () => {
+      order.push('other-league');
+    });
+    await otherLeague;
+
+    expect(order).toEqual(['standings-start', 'other-league']);
+    releaseStandings();
+    await Promise.all([standings, overallRank]);
+    expect(order).toEqual(['standings-start', 'other-league', 'standings-end', 'overall-rank']);
+  });
+
+  test('releases a keyed publication turn when its active task is aborted', async () => {
+    const run = createKeyedSerialTaskGate();
+    const controller = new AbortController();
+    const order: string[] = [];
+    let releaseUnderlying!: () => void;
+    const underlying = new Promise<void>((resolve) => {
+      releaseUnderlying = resolve;
+    });
+
+    const blocked = run(
+      'classic:2627:1:8863',
+      async () => {
+        order.push('blocked-start');
+        await underlying;
+      },
+      controller.signal,
+    );
+    await Promise.resolve();
+    const next = run('classic:2627:1:8863', async () => {
+      order.push('next');
+    });
+
+    controller.abort(new Error('deadline exceeded'));
+    await expect(blocked).rejects.toThrow('deadline exceeded');
+    await next;
+    expect(order).toEqual(['blocked-start', 'next']);
+    releaseUnderlying();
+  });
+
+  test('queues distinct background work while deduplicating the same work set', async () => {
+    const schedule = createKeyedSerialTaskScheduler();
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstActive = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = schedule('classic:8863', 'classic:8863:1,2', async () => {
+      order.push('first-start');
+      await firstActive;
+      order.push('first-end');
+    });
+    await Promise.resolve();
+    const duplicate = schedule('classic:8863', 'classic:8863:1,2', async () => {
+      order.push('duplicate');
+    });
+    const distinct = schedule('classic:8863', 'classic:8863:3,4', async () => {
+      order.push('distinct');
+    });
+
+    expect(duplicate).toBe(first);
+    expect(order).toEqual(['first-start']);
+    releaseFirst();
+    await Promise.all([first, duplicate, distinct]);
+    expect(order).toEqual(['first-start', 'first-end', 'distinct']);
+  });
+
+  test('keeps the last positive overall rank until a newer positive rank arrives', () => {
+    expect(preserveLastKnownOverallRank(null, 640_000)).toBe(640_000);
+    expect(preserveLastKnownOverallRank(0, 640_000)).toBe(640_000);
+    expect(preserveLastKnownOverallRank(-1, 640_000)).toBe(640_000);
+    expect(preserveLastKnownOverallRank(undefined, 640_000)).toBe(640_000);
+    expect(preserveLastKnownOverallRank(620_000, 640_000)).toBe(620_000);
+    expect(preserveLastKnownOverallRank(null, null)).toBeNull();
+    expect(isPositiveOverallRank(620_000)).toBeTrue();
+    expect(isPositiveOverallRank(0)).toBeFalse();
+  });
+
+  test('never returns a Classic row rejected by monotonic cache publication', () => {
+    const publishedRows = [
+      { entryId: 1, overallRank: 100, revision: 'accepted' },
+      { entryId: 2, overallRank: 200, revision: 'rejected-stale' },
+      { entryId: 3, overallRank: 300, revision: 'rejected-unreadable' },
+    ];
+    const authoritativeRejectedRows = new Map([
+      [2, { entryId: 2, overallRank: 220, revision: 'newer-authoritative' }],
+    ]);
+
+    expect(
+      reconcileMonotonicCachePublicationRows(publishedRows, [1], authoritativeRejectedRows),
+    ).toEqual([
+      publishedRows[0],
+      { entryId: 2, overallRank: 220, revision: 'newer-authoritative' },
+    ]);
+    expect(reconcileMonotonicCachePublicationRows(publishedRows, null, new Map())).toEqual(
+      publishedRows,
+    );
+  });
+
+  test('publishes fallback fields while retaining a newer ordered rank', () => {
+    const existing = { eventPoints: 32, totalPoints: 32, overallRank: 620_000 };
+    const fallback = { eventPoints: 43, totalPoints: 43, overallRank: 640_000 };
+    const published = {
+      ...fallback,
+      overallRank: selectClassicSummaryOverallRank(
+        fallback.overallRank,
+        existing.overallRank,
+        false,
+      ),
+    };
+
+    expect(published).toEqual({ eventPoints: 43, totalPoints: 43, overallRank: 620_000 });
+    expect(selectClassicSummaryOverallRank(fallback.overallRank, existing.overallRank, true)).toBe(
+      640_000,
+    );
+    expect(selectClassicSummaryOverallRank(null, existing.overallRank, false)).toBe(620_000);
+    expect(selectClassicSummaryOverallRank(640_000, null, false)).toBeNull();
+  });
+
+  test('advances durable Classic OR evidence only for a newer valid publication', () => {
+    const acceptedAt = '2026-08-23T08:00:01.000Z';
+
+    expect(
+      shouldAcceptClassicOverallRankPublication(620_000, '2026-08-23T08:00:02.000Z', acceptedAt),
+    ).toBeTrue();
+    expect(
+      shouldAcceptClassicOverallRankPublication(620_000, '2026-08-23T08:00:00.000Z', acceptedAt),
+    ).toBeFalse();
+    expect(shouldAcceptClassicOverallRankPublication(620_000, acceptedAt, acceptedAt)).toBeFalse();
+    expect(
+      shouldAcceptClassicOverallRankPublication(null, '2026-08-23T08:00:02.000Z', acceptedAt),
+    ).toBeFalse();
+    expect(
+      shouldAcceptClassicOverallRankPublication(0, '2026-08-23T08:00:02.000Z', acceptedAt),
+    ).toBeFalse();
+    expect(shouldAcceptClassicOverallRankPublication(620_000, 'invalid', acceptedAt)).toBeFalse();
+    expect(
+      shouldAcceptClassicOverallRankPublication(
+        620_000,
+        '2026-08-23T08:00:01.000101Z',
+        '2026-08-23T08:00:01.000100Z',
+      ),
+    ).toBeTrue();
+    expect(
+      shouldAcceptClassicOverallRankPublication(
+        620_000,
+        '2026-08-23T08:00:01.000099Z',
+        '2026-08-23T08:00:01.000100Z',
+      ),
+    ).toBeFalse();
+  });
+
+  test('counts a manager crossing standings pages only once and keeps the later row', () => {
+    const targets = new Set([1, 2]);
+    const firstPage = mergeUniqueTargetManagerRows(
+      new Map<number, { entryId: number; leagueRank: number }>(),
+      [
+        { entryId: 1, leagueRank: 50 },
+        { entryId: 3, leagueRank: 51 },
+      ],
+      targets,
+    );
+    const secondPage = mergeUniqueTargetManagerRows(
+      firstPage,
+      [
+        { entryId: 1, leagueRank: 49 },
+        { entryId: 2, leagueRank: 52 },
+      ],
+      targets,
+    );
+
+    expect(secondPage.size).toBe(2);
+    expect(secondPage.get(1)?.leagueRank).toBe(49);
+    expect(secondPage.get(2)?.leagueRank).toBe(52);
+    expect(secondPage.has(3)).toBeFalse();
+  });
+
+  test('rebases delayed overall-rank work onto the latest standings row', () => {
+    const deferredSnapshot = {
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+    };
+    const nextStandingsRefresh = {
+      checkedAt: '2026-08-23T08:00:30.000Z',
+      eventPoints: 43,
+      leagueRank: 25,
+    };
+
+    expect(selectLatestCheckedRow(deferredSnapshot, nextStandingsRefresh)).toBe(
+      nextStandingsRefresh,
+    );
+    expect(selectLatestCheckedRow(nextStandingsRefresh, deferredSnapshot)).toBe(
+      nextStandingsRefresh,
+    );
+  });
+
+  test('orders standings rows by upstream snapshot before local completion time', () => {
+    const newerSnapshot = {
+      upstreamUpdatedAt: '2026-08-23T08:01:00.000Z',
+      checkedAt: '2026-08-23T08:01:01.000Z',
+      eventPoints: 43,
+    };
+    const delayedOlderSnapshot = {
+      upstreamUpdatedAt: '2026-08-23T08:00:00.000Z',
+      checkedAt: '2026-08-23T08:01:30.000Z',
+      eventPoints: 32,
+    };
+
+    expect(selectLatestCheckedRow(newerSnapshot, delayedOlderSnapshot)).toBe(newerSnapshot);
+    expect(selectLatestCheckedRow(delayedOlderSnapshot, newerSnapshot)).toBe(newerSnapshot);
+  });
+
+  test('preserves Classic fields for explicit overall-rank enrichment', () => {
+    const classicRow = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+    };
+
+    expect(shouldPreserveClassicStandingForRank(true, classicRow)).toBeTrue();
+    expect(shouldPreserveClassicStandingForRank(false, classicRow)).toBeFalse();
+    expect(shouldPreserveClassicStandingForRank(undefined, classicRow)).toBeFalse();
+    expect(shouldPreserveClassicStandingForRank(true, { source: 'FPL_ENTRY_SUMMARY' })).toBeFalse();
+  });
+
+  test('does not preserve a stale standing that predates fallback Summary I/O', () => {
+    const staleStanding = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+      overallRank: 640_000,
+    };
+
+    expect(
+      shouldPreserveClassicStandingForRank(undefined, staleStanding, staleStanding),
+    ).toBeFalse();
+    expect(
+      shouldPreserveClassicStandingForRank(
+        undefined,
+        { ...staleStanding, overallRank: 620_000 },
+        staleStanding,
+      ),
+    ).toBeFalse();
+  });
+
+  test('preserves a standings publication that arrives during fallback Summary I/O', () => {
+    const staleStanding = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T07:59:55.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+    };
+    const freshStanding = {
+      ...staleStanding,
+      checkedAt: '2026-08-23T08:00:30.000Z',
+      upstreamUpdatedAt: '2026-08-23T08:00:25.000Z',
+      eventPoints: 43,
+      leagueRank: 25,
+    };
+
+    expect(
+      shouldPreserveClassicStandingForRank(undefined, freshStanding, staleStanding),
+    ).toBeTrue();
+    expect(shouldPreserveClassicStandingForRank(undefined, freshStanding, null)).toBeTrue();
+  });
+
+  test('recognizes a changed same-millisecond standings publication without using OR', () => {
+    const baseline = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T07:59:55.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+      overallRank: 640_000,
+    };
+
+    expect(
+      shouldPreserveClassicStandingForRank(
+        undefined,
+        { ...baseline, eventPoints: 43, leagueRank: 25 },
+        baseline,
+      ),
+    ).toBeTrue();
+    expect(
+      shouldPreserveClassicStandingForRank(
+        undefined,
+        { ...baseline, overallRank: 620_000 },
+        baseline,
+      ),
+    ).toBeFalse();
+  });
+
+  test('keeps the foreground rank budget while retaining deferred and failed work', () => {
+    const entryIds = Array.from({ length: 98 }, (_, index) => index + 1);
+    const plan = planClassicOverallRankRefresh(entryIds);
+
+    expect(plan.entryIds).toHaveLength(98);
+    expect(plan.foregroundEntryIds).toEqual(entryIds.slice(0, 20));
+    expect(pendingOverallRankRefreshEntryIds(plan.entryIds, plan.foregroundEntryIds)).toEqual(
+      entryIds.slice(20),
+    );
+    expect(
+      pendingOverallRankRefreshEntryIds(plan.entryIds, plan.foregroundEntryIds.slice(1)),
+    ).toEqual([1, ...entryIds.slice(20)]);
+  });
+
+  test('deduplicates overall-rank refresh targets without changing their order', () => {
+    expect(planClassicOverallRankRefresh([3, 1, 3, 2, 1]).entryIds).toEqual([3, 1, 2]);
+  });
+
+  test('does not spend the foreground OR budget on unresolved standings rows', () => {
+    const entryIds = Array.from({ length: 98 }, (_, index) => index + 1);
+    const standingsResolvedEntryIds = entryIds.slice(20);
+    const plan = planClassicOverallRankRefresh(entryIds, standingsResolvedEntryIds);
+
+    expect(plan.entryIds).toEqual(entryIds);
+    expect(plan.foregroundEntryIds).toEqual(entryIds.slice(20, 40));
+    expect(plan.foregroundEntryIds.some((entryId) => entryId <= 20)).toBeFalse();
+  });
+
+  test('refreshes expired rows and fresh Classic rows that still lack a rank', () => {
+    const positiveClassicRow = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      overallRank: 640_000,
+    };
+
+    expect(shouldRefreshClassicOverallRank(positiveClassicRow, true)).toBeTrue();
+    expect(
+      shouldRefreshClassicOverallRank({ ...positiveClassicRow, overallRank: null }, false),
+    ).toBeTrue();
+    expect(shouldRefreshClassicOverallRank(positiveClassicRow, false)).toBeFalse();
+    expect(shouldRefreshClassicOverallRank({ overallRank: null }, true)).toBeTrue();
+    expect(shouldRefreshClassicOverallRank({ overallRank: null }, false)).toBeTrue();
+    expect(shouldRefreshClassicOverallRank(undefined, true)).toBeTrue();
+    expect(shouldRefreshClassicOverallRank(undefined, false)).toBeTrue();
+  });
+
+  test('retains deferred and failed OR work until an OR-specific marker advances', () => {
+    const baseline = new Map([
+      [1, 'old-1'],
+      [2, 'old-2'],
+    ]);
+
+    expect(shouldRetryPendingClassicOverallRank(1, false, baseline, baseline)).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(3, false, baseline, new Map())).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(1, false, null, baseline)).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(1, false, baseline, null)).toBeTrue();
+  });
+
+  test('drops OR work only after a later valid OR publication changes its marker', () => {
+    const baseline = new Map([[1, 'old']]);
+    const laterMarkers = new Map([
+      [1, 'new'],
+      [2, 'first'],
+    ]);
+
+    expect(shouldRetryPendingClassicOverallRank(1, false, baseline, laterMarkers)).toBeFalse();
+    expect(shouldRetryPendingClassicOverallRank(2, false, baseline, laterMarkers)).toBeFalse();
+    expect(shouldRetryPendingClassicOverallRank(1, true, baseline, laterMarkers)).toBeTrue();
   });
 
   test('uses official entry summaries after standings pagination is exhausted', () => {
@@ -784,7 +1181,7 @@ describe('classic manager live fallback', () => {
     });
   });
 
-  test('admits foreground work before queued background batches', async () => {
+  test('assigns ordering work only after prioritized Summary admission', async () => {
     const run = createManagerSummaryFetchGate(1);
     const order: string[] = [];
     let releaseActive: (() => void) | undefined;
@@ -793,21 +1190,25 @@ describe('classic manager live fallback', () => {
     });
 
     const runningBackground = run(async () => {
-      order.push('background-active');
+      order.push('background-active-reservation');
       await active;
     }, 'background');
     await Promise.resolve();
     const queuedBackground = run(async () => {
-      order.push('background-queued');
+      order.push('background-queued-reservation');
     }, 'background');
     const foreground = run(async () => {
-      order.push('foreground');
+      order.push('foreground-reservation');
     }, 'foreground');
 
     releaseActive?.();
     await Promise.all([runningBackground, queuedBackground, foreground]);
 
-    expect(order).toEqual(['background-active', 'foreground', 'background-queued']);
+    expect(order).toEqual([
+      'background-active-reservation',
+      'foreground-reservation',
+      'background-queued-reservation',
+    ]);
   });
 
   test('promotes a coalesced background manager when foreground work joins it', async () => {
