@@ -68,13 +68,16 @@ async function claimSourceMediaRetentionAssets(workerId: string): Promise<Retent
       GROUP BY asset.asset_id
       HAVING (
         count(item.item_id) = 0
-        AND asset.available_at < now() - interval '24 hours'
+        AND COALESCE(asset.available_at, asset.created_at) < now() - interval '24 hours'
       ) OR (
         count(item.item_id) > 0
         AND bool_and(gate.retain_until IS NOT NULL)
         AND max(gate.retain_until) < current_date
       )
-      ORDER BY COALESCE(max(gate.retain_until), asset.available_at::date), asset.asset_id
+      ORDER BY COALESCE(
+        max(gate.retain_until),
+        COALESCE(asset.available_at, asset.created_at)::date
+      ), asset.asset_id
       LIMIT ${RETENTION_BATCH_SIZE}
     `;
     const assets: RetentionAsset[] = [];
@@ -106,6 +109,7 @@ async function claimSourceMediaRetentionAssets(workerId: string): Promise<Retent
           )
           UPDATE content.source_media_assets AS asset
           SET storage_state = 'AVAILABLE',
+              available_at = COALESCE(asset.available_at, asset.created_at),
               upload_lease_owner = ${workerId},
               upload_lease_expires_at =
                 now() + (${RETENTION_LEASE_MS}::bigint * interval '1 millisecond'),
@@ -115,7 +119,10 @@ async function claimSourceMediaRetentionAssets(workerId: string): Promise<Retent
             AND asset.storage_state IN ('AVAILABLE', 'FAILED')
             AND asset.upload_lease_owner IS NULL
             AND (
-              (refs.reference_count = 0 AND asset.available_at < now() - interval '24 hours')
+              (
+                refs.reference_count = 0
+                AND COALESCE(asset.available_at, asset.created_at) < now() - interval '24 hours'
+              )
               OR (
                 refs.reference_count > 0
                 AND refs.deadlines_known

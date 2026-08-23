@@ -567,9 +567,18 @@ CROSS JOIN (
         WHEN asset.available_at IS NULL THEN NULL
         ELSE GREATEST(0, EXTRACT(EPOCH FROM (asset.available_at - asset.created_at)) * 1000)
       END AS storage_latency_ms,
-      asset.storage_state = 'AVAILABLE'
-        AND bool_and(gate.retain_until IS NOT NULL)
-        AND max(gate.retain_until) < current_date AS retention_due,
+      asset.storage_state IN ('AVAILABLE', 'FAILED')
+        AND (
+          (
+            count(item.item_id) = 0
+            AND COALESCE(asset.available_at, asset.created_at) < now() - interval '24 hours'
+          )
+          OR (
+            count(item.item_id) > 0
+            AND bool_and(gate.retain_until IS NOT NULL)
+            AND max(gate.retain_until) < current_date
+          )
+        ) AS retention_due,
       asset.storage_state = 'AVAILABLE'
         AND bool_and(gate.retain_until IS NOT NULL)
         AND max(gate.retain_until) >= current_date

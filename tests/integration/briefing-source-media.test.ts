@@ -683,6 +683,11 @@ test('decouples X receipts from durable media processing and reuses legacy core 
   });
   storedObjects.set(expiredObjectKey, Uint8Array.of(1));
   storedObjects.set(orphanObjectKey, Uint8Array.of(1));
+  const [retentionHealthBeforeDelete] = await db.execute<{ retentionDueCount: number }>(sql`
+    SELECT retention_due_count::integer AS "retentionDueCount"
+    FROM content.source_media_health
+  `);
+  expect(retentionHealthBeforeDelete?.retentionDueCount).toBe(2);
   assertRetentionCanUseDb = true;
   expect(await runSourceMediaRetention({ workerId: 'retention-delete', storage })).toEqual({
     claimed: 2,
@@ -717,10 +722,11 @@ test('decouples X receipts from durable media processing and reuses legacy core 
 
   const staleReservationAssetId = randomUUID();
   const staleReservationSha = 'c'.repeat(64);
+  const staleReservationObjectKey = `x/images/sha256/cc/${staleReservationSha}.png`;
   await db.insert(contentSourceMediaAssets).values({
     assetId: staleReservationAssetId,
     sha256: staleReservationSha,
-    objectKey: `x/images/sha256/cc/${staleReservationSha}.png`,
+    objectKey: staleReservationObjectKey,
     actualMime: 'image/png',
     byteSize: 1,
     width: 1,
@@ -729,7 +735,9 @@ test('decouples X receipts from durable media processing and reuses legacy core 
     storageState: 'RESERVED',
     uploadLeaseOwner: 'dead-worker:gate:expired',
     uploadLeaseExpiresAt: yesterday,
+    createdAt: yesterday,
   });
+  storedObjects.set(staleReservationObjectKey, Uint8Array.of(1));
   expect(
     await claimSourceMediaGates({
       workerId: 'reservation-reconciler',
@@ -753,6 +761,20 @@ test('decouples X receipts from durable media processing and reuses legacy core 
     leaseExpiresAt: null,
     failureHash: expect.stringMatching(/^[0-9a-f]{64}$/),
   });
+  const [retentionHealthAfterReservationRecovery] = await db.execute<{
+    retentionDueCount: number;
+  }>(sql`
+    SELECT retention_due_count::integer AS "retentionDueCount"
+    FROM content.source_media_health
+  `);
+  expect(retentionHealthAfterReservationRecovery?.retentionDueCount).toBe(1);
+  expect(
+    await runSourceMediaRetention({
+      workerId: 'retention-failed-reservation',
+      storage,
+    }),
+  ).toEqual({ claimed: 1, deleted: 1, failed: 0 });
+  expect(storedObjects.has(staleReservationObjectKey)).toBe(false);
 
   const retentionLeaseRaceAssets = [
     {

@@ -154,6 +154,7 @@ describe('Briefing content migration contract', () => {
     expect(sql).toContain('content_source_media_items_archive_valid');
     expect(sql).toContain('IF OLD.available_at IS NOT NULL AND (');
     expect(sql).toContain('AND asset.upload_lease_owner IS NULL');
+    expect(sql).toContain('COALESCE(asset.available_at, asset.created_at)');
     expect(sql).toContain(String.raw`OLD.archive_status = 'ARCHIVED'`);
     expect(sql).toContain('REVOKE ALL ON content.source_media_assets FROM letletme_graphql_reader');
     expect(sql).toContain('REVOKE DELETE ON content.source_media_items FROM letletme_data_writer');
