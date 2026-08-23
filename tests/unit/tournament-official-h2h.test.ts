@@ -411,6 +411,116 @@ describe('official H2H source import', () => {
     });
   });
 
+  test('uses the newest validated live scores instead of stale explicit outcome fields', () => {
+    const matches = [
+      {
+        id: 9062,
+        event: 1,
+        entry_1_entry: 1,
+        entry_1_points: 20,
+        entry_1_win: 1,
+        entry_1_draw: 0,
+        entry_1_loss: 0,
+        entry_1_total: 3,
+        entry_2_entry: 2,
+        entry_2_points: 50,
+        entry_2_win: 0,
+        entry_2_draw: 0,
+        entry_2_loss: 1,
+        entry_2_total: 0,
+        winner: 1,
+        is_bye: false,
+        knockout_name: null,
+        sourceOrder: 0,
+      },
+    ];
+    const entries = new Set([1, 2]);
+    const options = validatedOfficialH2HSyncOptions(entries, matches, {
+      provisionalEventId: 1,
+    });
+
+    expect(options).toEqual({
+      finalizedThroughEventId: null,
+      provisionalEventId: 1,
+      suppressedEventId: null,
+    });
+    expect(projectOfficialH2HStandingsFromMatches(entries, matches, options)).toEqual([
+      expect.objectContaining({ entry: 2, total: 3, matches_won: 1, points_for: 50 }),
+      expect.objectContaining({ entry: 1, total: 0, matches_lost: 1, points_for: 20 }),
+    ]);
+    expect(
+      buildOfficialH2HRows(
+        { ...singleEventTournament, totalTeamNum: 2 },
+        entries,
+        { standings: [], matches },
+        new Date('2026-08-13T01:00:00.000Z'),
+        options,
+      ).battleRows[0],
+    ).toMatchObject({ homeMatchPoints: 0, awayMatchPoints: 3 });
+
+    const staleOfficial = [
+      {
+        entry: 1,
+        rank: 1,
+        total: 3,
+        matches_played: 1,
+        matches_won: 1,
+        matches_drawn: 0,
+        matches_lost: 0,
+        points_for: 20,
+      },
+      {
+        entry: 2,
+        rank: 2,
+        total: 0,
+        matches_played: 1,
+        matches_won: 0,
+        matches_drawn: 0,
+        matches_lost: 1,
+        points_for: 50,
+      },
+    ];
+    const corrected = projectOfficialH2HStandingsFromMatches(entries, matches, options);
+    expect(selectOfficialH2HStandings(staleOfficial, corrected, undefined, true)).toMatchObject({
+      standings: corrected,
+      usedMatchDerivedStandings: true,
+      officialPlayed: 2,
+      derivedPlayed: 2,
+    });
+  });
+
+  test('keeps score precedence when stale outcome fields survive event finalization', () => {
+    const match = {
+      id: 9063,
+      event: 1,
+      entry_1_entry: 1,
+      entry_1_points: 20,
+      entry_1_win: 1,
+      entry_1_draw: 0,
+      entry_1_loss: 0,
+      entry_1_total: 3,
+      entry_2_entry: 2,
+      entry_2_points: 50,
+      entry_2_win: 0,
+      entry_2_draw: 0,
+      entry_2_loss: 1,
+      entry_2_total: 0,
+      winner: 1,
+      is_bye: false,
+      knockout_name: null,
+      sourceOrder: 0,
+    };
+
+    expect(
+      projectOfficialH2HStandingsFromMatches(new Set([1, 2]), [match], {
+        finalizedThroughEventId: 1,
+      }),
+    ).toEqual([
+      expect.objectContaining({ entry: 2, total: 3, matches_won: 1, points_for: 50 }),
+      expect.objectContaining({ entry: 1, total: 0, matches_lost: 1, points_for: 20 }),
+    ]);
+  });
+
   test('projects standings from official match scores when the upstream table is still zeroed', () => {
     const match = {
       id: 9061,
@@ -757,6 +867,26 @@ describe('official H2H source import', () => {
     }));
     expect(selectOfficialH2HStandings(official, derivedEqualCoverage)).toMatchObject({
       standings: official,
+      usedMatchDerivedStandings: false,
+      officialPlayed: 2,
+      derivedPlayed: 2,
+    });
+    expect(
+      selectOfficialH2HStandings(official, derivedEqualCoverage, undefined, true),
+    ).toMatchObject({
+      standings: derivedEqualCoverage,
+      usedMatchDerivedStandings: true,
+      officialPlayed: 2,
+      derivedPlayed: 2,
+    });
+    const rankOnlyDifferentOfficial = derivedEqualCoverage.map((standing) => ({
+      ...standing,
+      rank: standing.rank === 1 ? 2 : 1,
+    }));
+    expect(
+      selectOfficialH2HStandings(rankOnlyDifferentOfficial, derivedEqualCoverage, undefined, true),
+    ).toMatchObject({
+      standings: rankOnlyDifferentOfficial,
       usedMatchDerivedStandings: false,
       officialPlayed: 2,
       derivedPlayed: 2,
