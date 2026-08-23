@@ -1,6 +1,6 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, mock, test } from 'bun:test';
 
-import { createSchedulerRegistry } from '../../src/scheduler/job-registry';
+import { createSchedulerRegistry, officialH2HDefinition } from '../../src/scheduler/job-registry';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('standalone scheduler registry', () => {
@@ -49,6 +49,103 @@ describe('standalone scheduler registry', () => {
     );
     expect(coordinator?.successPredicate).toContain('enqueues downstream checkpoint jobs');
     expect(coordinator?.successPredicate).not.toContain('checkpoints advance');
+  });
+
+  test('runs official H2H through the durable standalone scheduler during match windows', async () => {
+    const event = {
+      id: 1,
+      name: 'GW1',
+      deadlineTime: '2026-08-23T12:00:00.000Z',
+      averageEntryScore: null,
+      finished: false,
+      dataChecked: false,
+      highestScoringEntry: null,
+      deadlineTimeEpoch: null,
+      deadlineTimeGameOffset: null,
+      highestScore: null,
+      isPrevious: false,
+      isCurrent: true,
+      isNext: false,
+      cupLeagueCreate: false,
+      h2hKoMatchesCreated: false,
+      chipPlays: null,
+      mostSelected: null,
+      mostTransferredIn: null,
+      topElement: null,
+      topElementInfo: null,
+      transfersMade: null,
+      mostCaptained: null,
+      mostViceCaptained: null,
+      createdAt: null,
+      updatedAt: null,
+      dataCheckedAt: null,
+    };
+    const fixtures = [
+      {
+        id: 101,
+        code: 101,
+        event: 1,
+        finished: false,
+        finishedProvisional: false,
+        kickoffTime: new Date('2026-08-23T18:00:00.000Z'),
+        minutes: 30,
+        provisionalStartTime: false,
+        started: true,
+        teamA: 1,
+        teamAScore: 0,
+        teamH: 2,
+        teamHScore: 0,
+        stats: [],
+        teamHDifficulty: null,
+        teamADifficulty: null,
+        pulseId: 101,
+        createdAt: null,
+        updatedAt: null,
+      },
+    ];
+    const enqueue = mock(async () => ({ id: 'official-job', data: { runId: 'official-run' } }));
+    const definition = officialH2HDefinition({
+      findEvent: async () => event,
+      findFixtures: async () => fixtures,
+      enqueue: enqueue as never,
+    });
+    const context = {
+      season: TEST_SEASON,
+      currentEventId: 1,
+      now: new Date('2026-08-23T18:30:42.000Z'),
+      events: [{ id: 1, deadlineTime: new Date('2026-08-23T12:00:00.000Z') }],
+    };
+
+    expect(definition).toMatchObject({
+      name: 'tournament-official-h2h-live',
+      catchUpPolicy: 'latest-authoritative',
+      queueName: 'tournament-sync',
+      manualTrigger: false,
+    });
+    const plans = await definition.resolve(context);
+    expect(plans).toEqual([
+      expect.objectContaining({
+        scopeKey: '2627:event:1',
+        periodKey: 'official-h2h-1-202608231830',
+        dueAt: new Date('2026-08-23T18:30:00.000Z'),
+        eventId: 1,
+        source: 'reconcile',
+      }),
+    ]);
+    await definition.enqueue({
+      context,
+      plan: plans[0]!,
+      obligationId: 'official-obligation',
+      generation: 2,
+    });
+    expect(enqueue).toHaveBeenCalledWith(TEST_SEASON, 1, 'reconcile', {
+      jobId: 'scheduler-official-obligation-g2',
+      obligationId: 'official-obligation',
+      obligationGeneration: 2,
+    });
+    expect(
+      await definition.resolve({ ...context, now: new Date('2026-08-24T01:00:00.000Z') }),
+    ).toEqual([]);
   });
 
   test('catches up an hourly maintenance bucket after its scheduled minute', async () => {

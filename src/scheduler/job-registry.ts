@@ -16,6 +16,7 @@ import {
   enqueueTournamentEventPicks,
   enqueueTournamentEventResults,
   enqueueTournamentInfo,
+  enqueueTournamentOfficialH2H,
   enqueueTournamentRosterSync,
   enqueueTournamentTransfersPre,
 } from '../jobs/tournament-sync.jobs';
@@ -449,6 +450,61 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         obligationGeneration: generation,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
+    },
+  };
+}
+
+type OfficialH2HSchedulerDependencies = Readonly<{
+  findEvent: typeof eventRepository.findById;
+  findFixtures: typeof fixtureRepository.findByEvent;
+  enqueue: typeof enqueueTournamentOfficialH2H;
+}>;
+
+export function officialH2HDefinition(
+  dependencies: OfficialH2HSchedulerDependencies = {
+    findEvent: (season, eventId) => eventRepository.findById(season, eventId),
+    findFixtures: (season, eventId) => fixtureRepository.findByEvent(season, eventId),
+    enqueue: enqueueTournamentOfficialH2H,
+  },
+): ScheduledJobDefinition {
+  return {
+    name: 'tournament-official-h2h-live',
+    cadence: 'one-minute official H2H match-window sync',
+    timezone: 'UTC',
+    catchUpPolicy: 'latest-authoritative',
+    criticality: 'normal',
+    queueName: 'tournament-sync',
+    successPredicate: 'official H2H match snapshot and standings publish atomically',
+    manualTrigger: false,
+    resolve: async (context) => {
+      if (!context.currentEventId) return [];
+      const event = await dependencies.findEvent(context.season, context.currentEventId);
+      if (!event) return [];
+      const fixtures = await dependencies.findFixtures(context.season, event.id);
+      const decision = decideLiveLifecycle(event, fixtures, context.now);
+      if (!decision.shouldFetchLive || !isMatchDayTime(event, fixtures, context.now)) return [];
+      const minuteStart = new Date(Math.floor(context.now.getTime() / 60_000) * 60_000);
+      const minuteKey = minuteStart.toISOString().slice(0, 16).replace(/\D/g, '');
+      return [
+        {
+          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+          periodKey: `official-h2h-${event.id}-${minuteKey}`,
+          dueAt: minuteStart,
+          eventId: event.id,
+          source: 'reconcile',
+          evidence: { lifecycleState: decision.state },
+        },
+      ];
+    },
+    enqueue: async ({ context, plan, obligationId, generation }) => {
+      const eventId = plan.eventId ?? context.currentEventId;
+      if (!eventId) throw new Error('Official H2H obligation has no event checkpoint');
+      const job = await dependencies.enqueue(context.season, eventId, 'reconcile', {
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        obligationId,
+        obligationGeneration: generation,
+      });
+      return { bullJobId: job?.id, runId: job?.data.runId };
     },
   };
 }
@@ -986,6 +1042,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       },
     }),
     liveSnapshotDefinition(),
+    officialH2HDefinition(),
     liveFinalizationDefinition(),
     activePlayerStatsDefinition(),
     contentDefinition(),
