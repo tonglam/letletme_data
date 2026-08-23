@@ -1,7 +1,296 @@
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 const MAX_SUMMARY_FETCH_CONCURRENCY = 4;
+// A Classic board enriches at most 20 managers synchronously. Larger rosters
+// keep the same upstream request budget and finish through the background gate.
+const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
 
 export type ManagerSummaryFetchPriority = 'foreground' | 'background';
+
+const abortReason = (signal: AbortSignal): Error =>
+  signal.reason instanceof Error ? signal.reason : new Error('Manager live task aborted');
+
+const awaitTaskOrAbort = <T>(task: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return task;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    task.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
+
+export const createKeyedSerialTaskGate = (): (<T>(
+  key: string,
+  task: () => Promise<T>,
+  signal?: AbortSignal,
+) => Promise<T>) => {
+  const tails = new Map<string, Promise<void>>();
+
+  return async <T>(key: string, task: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
+    const previous = tails.get(key) ?? Promise.resolve();
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    tails.set(key, turn);
+
+    await previous;
+    try {
+      if (signal?.aborted) throw abortReason(signal);
+      return await awaitTaskOrAbort(task(), signal);
+    } finally {
+      releaseTurn();
+      if (tails.get(key) === turn) tails.delete(key);
+    }
+  };
+};
+
+export const createKeyedSerialTaskScheduler = (): ((
+  serialKey: string,
+  workKey: string,
+  task: () => Promise<void>,
+) => Promise<void>) => {
+  const runSerialTask = createKeyedSerialTaskGate();
+  const scheduledWork = new Map<string, Promise<void>>();
+
+  return (serialKey: string, workKey: string, task: () => Promise<void>): Promise<void> => {
+    const existing = scheduledWork.get(workKey);
+    if (existing) return existing;
+
+    const promise = runSerialTask(serialKey, task).finally(() => {
+      if (scheduledWork.get(workKey) === promise) scheduledWork.delete(workKey);
+    });
+    scheduledWork.set(workKey, promise);
+    return promise;
+  };
+};
+
+export const isPositiveOverallRank = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+
+export const preserveLastKnownOverallRank = (
+  incoming: number | null | undefined,
+  previous: number | null | undefined,
+): number | null => {
+  if (isPositiveOverallRank(incoming)) return incoming;
+  return isPositiveOverallRank(previous) ? previous : null;
+};
+
+export const selectClassicSummaryOverallRank = (
+  incoming: number | null | undefined,
+  existing: number | null | undefined,
+  acceptIncoming: boolean,
+): number | null => {
+  if (acceptIncoming && isPositiveOverallRank(incoming)) return incoming;
+  return isPositiveOverallRank(existing) ? existing : null;
+};
+
+export const reconcileMonotonicCachePublicationRows = <T extends Readonly<{ entryId: number }>>(
+  publishedRows: readonly T[],
+  cacheUpdatedEntryIds: readonly number[] | null,
+  authoritativeRejectedRows: ReadonlyMap<number, T>,
+): T[] => {
+  // A null result means Redis was unavailable, so the just-committed
+  // PostgreSQL rows remain the best response-local evidence. A concrete list
+  // comes from the monotonic Lua publication and identifies exactly which
+  // rows were accepted by Redis.
+  if (cacheUpdatedEntryIds === null) return [...publishedRows];
+
+  const cacheUpdated = new Set(cacheUpdatedEntryIds);
+  return publishedRows.flatMap((row) => {
+    if (cacheUpdated.has(row.entryId)) return [row];
+    const authoritative = authoritativeRejectedRows.get(row.entryId);
+    // Never expose the rejected stale publication. If its newer Redis/DB row
+    // cannot be re-read, leave the caller's existing response row untouched.
+    return authoritative ? [authoritative] : [];
+  });
+};
+
+const normalizeOrderingTimestamp = (value: string | null | undefined): string | null => {
+  if (!value || !Number.isFinite(Date.parse(value))) return null;
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.)(\d{1,6})Z$/.exec(value);
+  if (!match) return null;
+  return `${match[1]}${match[2].padEnd(6, '0')}Z`;
+};
+
+export const isNewerClassicOverallRankPublicationOrder = (
+  publicationOrder: string,
+  lastAcceptedPublicationOrder: string | null | undefined,
+): boolean => {
+  const incomingOrder = normalizeOrderingTimestamp(publicationOrder);
+  if (!incomingOrder) return false;
+  const acceptedOrder = normalizeOrderingTimestamp(lastAcceptedPublicationOrder);
+  return acceptedOrder === null || incomingOrder > acceptedOrder;
+};
+
+export const shouldAcceptClassicOverallRankPublication = (
+  incoming: number | null | undefined,
+  publicationOrder: string,
+  lastAcceptedPublicationOrder: string | null | undefined,
+): boolean =>
+  isPositiveOverallRank(incoming) &&
+  isNewerClassicOverallRankPublicationOrder(publicationOrder, lastAcceptedPublicationOrder);
+
+export const mergeUniqueTargetManagerRows = <T extends Readonly<{ entryId: number }>>(
+  existing: ReadonlyMap<number, T>,
+  pageRows: readonly T[],
+  targetIds: ReadonlySet<number>,
+): Map<number, T> => {
+  const merged = new Map(existing);
+  for (const row of pageRows) {
+    if (targetIds.has(row.entryId)) merged.set(row.entryId, row);
+  }
+  return merged;
+};
+
+export const selectLatestCheckedRow = <
+  T extends Readonly<{
+    checkedAt: string;
+    upstreamUpdatedAt?: string | null;
+  }>,
+>(
+  current: T | undefined,
+  candidate: T,
+): T => {
+  if (!current) return candidate;
+
+  const currentUpstreamTime = Date.parse(current.upstreamUpdatedAt ?? '');
+  const candidateUpstreamTime = Date.parse(candidate.upstreamUpdatedAt ?? '');
+  if (
+    Number.isFinite(currentUpstreamTime) &&
+    Number.isFinite(candidateUpstreamTime) &&
+    currentUpstreamTime !== candidateUpstreamTime
+  ) {
+    return candidateUpstreamTime > currentUpstreamTime ? candidate : current;
+  }
+
+  const currentTime = Date.parse(current.checkedAt);
+  const candidateTime = Date.parse(candidate.checkedAt);
+  return Number.isFinite(candidateTime) &&
+    (!Number.isFinite(currentTime) || candidateTime > currentTime)
+    ? candidate
+    : current;
+};
+
+export const shouldRefreshClassicOverallRank = (
+  row:
+    | Readonly<{
+        overallRank: number | null | undefined;
+      }>
+    | undefined,
+  standingsRowExpired: boolean,
+): boolean => standingsRowExpired || !isPositiveOverallRank(row?.overallRank);
+
+export const shouldRetryPendingClassicOverallRank = (
+  entryId: number,
+  standingsPending: boolean,
+  baselineMarkers: ReadonlyMap<number, string> | null,
+  latestMarkers: ReadonlyMap<number, string> | null,
+): boolean => {
+  if (standingsPending) return true;
+  if (baselineMarkers === null || latestMarkers === null) return true;
+
+  const latestMarker = latestMarkers.get(entryId);
+  return latestMarker === undefined || latestMarker === baselineMarkers.get(entryId);
+};
+
+type ClassicStandingObservation = Readonly<{
+  source: string;
+  checkedAt?: string;
+  upstreamUpdatedAt?: string | null;
+  eventPoints?: number | null;
+  netEventPoints?: number | null;
+  totalPoints?: number | null;
+  totalScope?: string;
+  eventRank?: number | null;
+  leagueRank?: number | null;
+  transferCost?: number | null;
+  eventPointSemantics?: string;
+}>;
+
+const classicStandingPhaseChanged = (
+  row: ClassicStandingObservation,
+  baseline: ClassicStandingObservation,
+): boolean =>
+  row.upstreamUpdatedAt !== baseline.upstreamUpdatedAt ||
+  row.eventPoints !== baseline.eventPoints ||
+  row.netEventPoints !== baseline.netEventPoints ||
+  row.totalPoints !== baseline.totalPoints ||
+  row.totalScope !== baseline.totalScope ||
+  row.eventRank !== baseline.eventRank ||
+  row.leagueRank !== baseline.leagueRank ||
+  row.transferCost !== baseline.transferCost ||
+  row.eventPointSemantics !== baseline.eventPointSemantics;
+
+export const shouldPreserveClassicStandingForRank = <T extends ClassicStandingObservation>(
+  requested: boolean | undefined,
+  row: T | undefined,
+  // undefined means this is not a fallback publication. null is supplied only
+  // after a locked durable read confirms fallback started without a standings
+  // row. A concrete row is the fallback-start snapshot.
+  fallbackBaseline?: T | null,
+): row is T & { source: 'FPL_CLASSIC_STANDINGS' } => {
+  if (row?.source !== 'FPL_CLASSIC_STANDINGS') return false;
+  if (requested === true) return true;
+  if (fallbackBaseline === undefined) return false;
+  if (fallbackBaseline === null || fallbackBaseline.source !== 'FPL_CLASSIC_STANDINGS') return true;
+
+  const rowCheckedAt = Date.parse(row.checkedAt ?? '');
+  const baselineCheckedAt = Date.parse(fallbackBaseline.checkedAt ?? '');
+  if (Number.isFinite(rowCheckedAt) && Number.isFinite(baselineCheckedAt)) {
+    if (rowCheckedAt > baselineCheckedAt) return true;
+    if (rowCheckedAt < baselineCheckedAt) return false;
+  } else if (Number.isFinite(rowCheckedAt) && !Number.isFinite(baselineCheckedAt)) {
+    return true;
+  }
+
+  // A same-millisecond standings publication can still carry a newer FPL
+  // snapshot or changed phase fields. OR itself is intentionally excluded so
+  // a concurrent rank-only enrichment cannot make an old standing look new.
+  return classicStandingPhaseChanged(row, fallbackBaseline);
+};
+
+export const planClassicOverallRankRefresh = (
+  entryIds: readonly number[],
+  foregroundEligibleEntryIds: readonly number[] = entryIds,
+): Readonly<{
+  entryIds: readonly number[];
+  foregroundEntryIds: readonly number[];
+}> => {
+  const uniqueEntryIds = Array.from(new Set(entryIds));
+  const requestedEntryIds = new Set(uniqueEntryIds);
+  const uniqueForegroundEligibleEntryIds = Array.from(new Set(foregroundEligibleEntryIds)).filter(
+    (entryId) => requestedEntryIds.has(entryId),
+  );
+  return {
+    entryIds: uniqueEntryIds,
+    foregroundEntryIds: uniqueForegroundEligibleEntryIds.slice(
+      0,
+      MAX_FOREGROUND_OVERALL_RANK_FETCHES,
+    ),
+  };
+};
+
+export const pendingOverallRankRefreshEntryIds = (
+  requestedEntryIds: readonly number[],
+  refreshedEntryIds: readonly number[],
+): readonly number[] => {
+  const refreshed = new Set(refreshedEntryIds);
+  return requestedEntryIds.filter((entryId) => !refreshed.has(entryId));
+};
 
 export const createManagerSummaryFetchGate = (
   maxConcurrent = MAX_SUMMARY_FETCH_CONCURRENCY,
