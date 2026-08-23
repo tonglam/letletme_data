@@ -64,13 +64,17 @@ jobs:
             env_file="$expected_workdir/.env.deploy"
             media_env_file="$expected_workdir/.env.media"
             migration_env_file="$expected_workdir/.env.migrate"
-            for file in "$env_file" "$media_env_file" "$migration_env_file"; do
+            for file in "$env_file" "$migration_env_file"; do
               test -f "$file"
               test ! -L "$file"
             done
             if grep -q '^[[:space:]]*CONTENT_MEDIA_SUPABASE_SECRET_KEY[[:space:]]*=' "$env_file"; then
               echo 'source-media rollout refused: Storage secret is present in .env.deploy' >&2
               exit 1
+            fi
+            media_env_missing=false
+            if [ ! -e "$media_env_file" ] && [ ! -L "$media_env_file" ]; then
+              media_env_missing=true
             fi
 
             export CONTENT_MEDIA_ENV_FILE="$media_env_file"
@@ -80,6 +84,26 @@ jobs:
             test -n "$current_image"
             image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$current_image")
             test "$image_revision" = "$ROLLOUT_SHA"
+
+            read_container_boolean() {
+              key=$1
+              value=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                "$current_container" | awk -v key="$key" '
+                $0 ~ "^" key "=" {
+                  sub("^" key "=", "", $0)
+                  gsub("^[[:space:]]+|[[:space:]]+$", "", $0)
+                  gsub("^\"|\"$", "", $0)
+                  gsub("^\047|\047$", "", $0)
+                  print tolower($0)
+                  exit
+                }
+              ')
+              case "$value" in
+                1 | true | yes | on) printf true ;;
+                '' | 0 | false | no | off) printf false ;;
+                *) return 1 ;;
+              esac
+            }
 
             read_boolean() {
               key=$1
@@ -143,6 +167,34 @@ jobs:
             COMMIT;
             SQL
             }
+
+            if [ "$media_env_missing" = true ]; then
+              if [ "$ROLLOUT_MODE" = status ]; then
+                container_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                  "$current_container")
+                test "$container_health" = healthy
+                container_worker_enabled=$(read_container_boolean CONTENT_MEDIA_WORKER_ENABLED)
+                container_retention_enabled=$(read_container_boolean CONTENT_MEDIA_RETENTION_ENABLED)
+                printf '{"event":"briefing_source_media_config","mediaEnvPresent":false,"workerEnabled":%s,"retentionEnabled":%s,"credentialsPresent":false,"containerHealth":"%s"}\n' \
+                  "$container_worker_enabled" "$container_retention_enabled" "$container_health"
+                report_health
+                release_deploy_lock
+                exit 0
+              fi
+              if ! APP_IMAGE="$current_image" docker compose run --rm -T --no-deps api \
+                bun validate-env.ts --probe-bug-report-storage; then
+                release_deploy_lock || true
+                exit 1
+              fi
+              test -x scripts/bootstrap-briefing-source-media-env.sh
+              if ! scripts/bootstrap-briefing-source-media-env.sh "$env_file" "$media_env_file"; then
+                release_deploy_lock || true
+                exit 1
+              fi
+              media_env_missing=false
+            fi
+            test -f "$media_env_file"
+            test ! -L "$media_env_file"
 
             retention_preflight() {
               result=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \

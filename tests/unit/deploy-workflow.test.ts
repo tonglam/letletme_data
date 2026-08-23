@@ -22,6 +22,10 @@ const rearmScript = readFileSync('scripts/rearm-briefing-x-after-probe.sh', 'utf
 const hostRunnerRollbackScript = readFileSync('scripts/rollback-host-grok-runner.sh', 'utf8');
 const hostRunnerService = readFileSync('deploy/letletme-grok-runner.service', 'utf8');
 const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+const sourceMediaBootstrapScript = readFileSync(
+  'scripts/bootstrap-briefing-source-media-env.sh',
+  'utf8',
+);
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 const runtimeHealthScript = readFileSync('scripts/verify-runtime-health.sh', 'utf8');
 const composeFile = readFileSync('docker-compose.yml', 'utf8');
@@ -58,6 +62,28 @@ describe('release workflow gates', () => {
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
     expect(deployScript).toContain('--provision-and-probe');
+    expect(deployScript).toContain('bootstrap-briefing-source-media-env.sh');
+    expect(workflow).toContain('bootstrap-briefing-source-media-env.sh');
+    expect(workflow.indexOf('scripts/bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
+      workflow.indexOf('acquire_deploy_lock'),
+    );
+    expect(workflow.indexOf('scripts/bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
+      workflow.indexOf('bun validate-env.ts --probe-bug-report-storage'),
+    );
+    expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
+      deployScript.indexOf('bun validate-env.ts --probe-bug-report-storage'),
+    );
+    expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeLessThan(
+      deployScript.indexOf('status()'),
+    );
+    expect(sourceMediaBootstrapScript).toContain('BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY');
+    expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_WORKER_ENABLED=false');
+    expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_RETENTION_ENABLED=false');
+    expect(sourceMediaBootstrapScript).toContain('chmod 600');
+    expect(sourceMediaBootstrapScript).toContain('-nT');
+    expect(sourceMediaBootstrapScript).toContain('--no-target-directory');
+    expect(sourceMediaBootstrapScript).toContain('! -f "$media_env_file"');
+    expect(sourceMediaBootstrapScript).not.toContain('set -x');
     expect(deployScript).toContain('briefing_source_media_health');
     expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
     expect(workflow).toContain('"$old_media_present" || true');
@@ -104,6 +130,21 @@ describe('release workflow gates', () => {
       'options:\n          - status\n          - provision\n          - enable\n          - enable-retention\n          - disable',
     );
     expect(sourceMediaRolloutWorkflow).toContain('configure-briefing-source-media-env.sh');
+    expect(sourceMediaRolloutWorkflow).toContain('"mediaEnvPresent":false');
+    expect(sourceMediaRolloutWorkflow).toContain('bootstrap-briefing-source-media-env.sh');
+    expect(sourceMediaRolloutWorkflow).toContain('bun validate-env.ts --probe-bug-report-storage');
+    expect(
+      sourceMediaRolloutWorkflow.indexOf('bootstrap-briefing-source-media-env.sh'),
+    ).toBeGreaterThan(
+      sourceMediaRolloutWorkflow.indexOf('bun validate-env.ts --probe-bug-report-storage'),
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('read_container_boolean');
+    expect(sourceMediaRolloutWorkflow).toContain('"containerHealth":"%s"');
+    expect(
+      sourceMediaRolloutWorkflow.indexOf(
+        'source-media rollout refused: Storage secret is present in .env.deploy',
+      ),
+    ).toBeLessThan(sourceMediaRolloutWorkflow.indexOf('if [ ! -e "$media_env_file" ]'));
     expect(sourceMediaRolloutWorkflow).toContain('acquire_deploy_lock');
     expect(sourceMediaRolloutWorkflow).toContain('release_deploy_lock');
     expect(sourceMediaRolloutWorkflow).toContain('--provision-and-probe');
