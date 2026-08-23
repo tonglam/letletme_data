@@ -109,6 +109,8 @@ export type ScheduledJobDefinition = Readonly<{
     plan: SchedulerObligationPlan;
     obligationId: string;
     generation: number;
+    /** Provider-specific season selected by a scheduler definition. */
+    seasonCode?: string;
   }) => Promise<{ bullJobId?: string | number; runId?: string } | void>;
 }>;
 
@@ -225,6 +227,7 @@ export function understatDailyDefinition(
     enqueue: ScheduledJobDefinition['enqueue'];
   },
   isEnabled: () => boolean = () => getConfig().UNDERSTAT_ENABLED,
+  resolveSeasonCode: () => string = () => getConfig().UNDERSTAT_SEASON,
 ): ScheduledJobDefinition {
   const definition = dailyDefinition({
     ...input,
@@ -236,7 +239,22 @@ export function understatDailyDefinition(
     ...definition,
     manualTrigger: false,
     isEnabled,
-    resolve: async (context) => (isEnabled() ? definition.resolve(context) : []),
+    resolve: async (context) => {
+      if (!isEnabled()) return [];
+      const seasonCode = resolveSeasonCode();
+      return (await definition.resolve(context)).map((plan) => ({
+        ...plan,
+        scopeKey: seasonCode,
+      }));
+    },
+    enqueue: async (enqueueInput) =>
+      definition.enqueue({
+        ...enqueueInput,
+        // Carry the exact season selected when this obligation was reserved.
+        // This prevents a process-level config change/restart from enqueueing
+        // an older obligation into a different Understat season.
+        seasonCode: enqueueInput.plan.scopeKey,
+      }),
   };
 }
 
@@ -923,9 +941,10 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       minute: 15,
       queueName: 'understat-team-sync',
       successPredicate: 'Understat team incremental finalizer completes the daily lane',
-      enqueue: async ({ context, obligationId, generation }) => {
+      enqueue: async ({ seasonCode, obligationId, generation }) => {
+        if (!seasonCode) throw new Error('Understat team obligation has no season code');
         const result = await enqueueUnderstatTeamSync({
-          season: context.season.seasonCode,
+          season: seasonCode,
           mode: 'incremental',
           trigger: 'cron',
           obligationId,
@@ -940,9 +959,10 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       minute: 15,
       queueName: 'understat-player-sync',
       successPredicate: 'Understat player incremental finalizer completes the daily lane',
-      enqueue: async ({ context, obligationId, generation }) => {
+      enqueue: async ({ seasonCode, obligationId, generation }) => {
+        if (!seasonCode) throw new Error('Understat player obligation has no season code');
         const result = await enqueueUnderstatPlayerSync({
-          season: context.season.seasonCode,
+          season: seasonCode,
           mode: 'incremental',
           trigger: 'cron',
           obligationId,

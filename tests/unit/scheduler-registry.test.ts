@@ -59,7 +59,10 @@ describe('standalone scheduler registry', () => {
   });
 
   test('schedules Understat lanes at staggered UTC+8 incremental checkpoints', async () => {
-    const enqueue = mock(async () => ({ id: 'understat-job', data: { runId: 'understat-run' } }));
+    const enqueue = mock(async (_input: { seasonCode?: string }) => ({
+      id: 'understat-job',
+      data: { runId: 'understat-run' },
+    }));
     const definition = understatDailyDefinition(
       {
         name: 'understat-team-incremental-test',
@@ -70,6 +73,7 @@ describe('standalone scheduler registry', () => {
         enqueue: enqueue as never,
       },
       () => true,
+      () => '2526',
     );
     const disabled = understatDailyDefinition(
       {
@@ -95,6 +99,7 @@ describe('standalone scheduler registry', () => {
     });
     expect(plans).toEqual([
       expect.objectContaining({
+        scopeKey: '2526',
         periodKey: '20260823',
         dueAt: new Date('2026-08-23T03:15:00.000Z'),
         source: 'catchup',
@@ -111,6 +116,7 @@ describe('standalone scheduler registry', () => {
       generation: 2,
     });
     expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue.mock.calls[0]?.[0]).toMatchObject({ seasonCode: '2526' });
     expect(definition).toMatchObject({ manualTrigger: false });
     expect(disabled).toMatchObject({ manualTrigger: false });
   });
