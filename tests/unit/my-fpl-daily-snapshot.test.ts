@@ -106,6 +106,14 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3');
     expect(helper).toContain('let lockWaitRemainingMs = MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS');
     expect(helper).toContain('let commitBoundaryConflictRetries = 0');
+    expect(helper).toContain('let idempotencyConflictRetries = 0');
+    expect(helper.indexOf('const lockAttemptStartedAt = Date.now()')).toBeLessThan(
+      helper.indexOf('client.begin('),
+    );
+    expect(helper).toContain('lockWaitRemainingMs -= Date.now() - lockAttemptStartedAt');
+    expect(helper).toMatch(/contention === 'idempotency'/);
+    expect(helper).toContain('idempotencyConflictRetries >= 1');
+    expect(publicationService).toContain('loadPublicationByIdempotencyKey');
     expect(helper).not.toContain('const deadline = Date.now()');
     expect(helper).not.toContain('pg_advisory_lock(');
     expect(helper).not.toContain('client.reserve()');

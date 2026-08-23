@@ -135,7 +135,9 @@ async function runMyFplCaptureTransaction(
   // Keep time spent building the snapshot outside the lock-wait budget.
   let lockWaitRemainingMs = MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS;
   let commitBoundaryConflictRetries = 0;
+  let idempotencyConflictRetries = 0;
   while (true) {
+    const lockAttemptStartedAt = Date.now();
     try {
       return await client.begin('isolation level repeatable read', async (tx) => {
         const lockRows = await tx<{ acquired: boolean }[]>`
@@ -147,7 +149,9 @@ async function runMyFplCaptureTransaction(
         return operation(tx);
       });
     } catch (error) {
-      if (error instanceof MyFplCaptureLockBusyError) {
+      const contention = classifyMyFplCaptureContention(error);
+      if (contention === 'lock-busy') {
+        lockWaitRemainingMs -= Date.now() - lockAttemptStartedAt;
         if (lockWaitRemainingMs <= 0) {
           throw new Error(`Timed out waiting for My FPL capture lock ${lockScope}`, {
             cause: error,
@@ -156,9 +160,23 @@ async function runMyFplCaptureTransaction(
         const waitStartedAt = Date.now();
         await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, lockWaitRemainingMs)));
         lockWaitRemainingMs -= Date.now() - waitStartedAt;
+        if (lockWaitRemainingMs <= 0) {
+          throw new Error(`Timed out waiting for My FPL capture lock ${lockScope}`, {
+            cause: error,
+          });
+        }
         continue;
       }
-      if (!isRetryableMyFplCaptureContention(error)) throw error;
+      if (contention === null) throw error;
+      if (contention === 'idempotency') {
+        if (idempotencyConflictRetries >= 1) {
+          throw new Error(`My FPL capture idempotency conflict did not converge for ${lockScope}`, {
+            cause: error,
+          });
+        }
+        idempotencyConflictRetries += 1;
+        continue;
+      }
       if (commitBoundaryConflictRetries >= MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES) {
         throw new Error(
           `My FPL capture commit-boundary contention did not converge for ${lockScope}`,
@@ -173,11 +191,13 @@ async function runMyFplCaptureTransaction(
 const ACTIVE_MY_FPL_PUBLICATION_CONSTRAINT = 'my_fpl_snapshot_publications_active_key';
 const IDEMPOTENT_MY_FPL_PUBLICATION_CONSTRAINT = 'my_fpl_snapshot_publications_idempotency_key';
 
-export function isRetryableMyFplCaptureContention(error: unknown): boolean {
+type MyFplCaptureContention = 'lock-busy' | 'serialization' | 'active-publication' | 'idempotency';
+
+function classifyMyFplCaptureContention(error: unknown): MyFplCaptureContention | null {
   const seen = new Set<unknown>();
   let current = error;
   for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
-    if (current instanceof MyFplCaptureLockBusyError) return true;
+    if (current instanceof MyFplCaptureLockBusyError) return 'lock-busy';
     if (seen.has(current)) break;
     seen.add(current);
     const record = current as {
@@ -186,18 +206,19 @@ export function isRetryableMyFplCaptureContention(error: unknown): boolean {
       constraint_name?: unknown;
       cause?: unknown;
     };
-    if (record.code === '40001') return true;
-    if (
-      record.code === '23505' &&
-      [ACTIVE_MY_FPL_PUBLICATION_CONSTRAINT, IDEMPOTENT_MY_FPL_PUBLICATION_CONSTRAINT].includes(
-        String(record.constraint_name ?? record.constraint ?? ''),
-      )
-    ) {
-      return true;
+    if (record.code === '40001') return 'serialization';
+    if (record.code === '23505') {
+      const constraint = String(record.constraint_name ?? record.constraint ?? '');
+      if (constraint === ACTIVE_MY_FPL_PUBLICATION_CONSTRAINT) return 'active-publication';
+      if (constraint === IDEMPOTENT_MY_FPL_PUBLICATION_CONSTRAINT) return 'idempotency';
     }
     current = record.cause;
   }
-  return false;
+  return null;
+}
+
+export function isRetryableMyFplCaptureContention(error: unknown): boolean {
+  return classifyMyFplCaptureContention(error) !== null;
 }
 
 type EntryIdentity = {
@@ -881,45 +902,29 @@ function groupBy<T>(rows: readonly T[], key: (row: T) => number): Map<number, T[
   return grouped;
 }
 
-async function loadActivePublication(
-  client: postgres.Sql | postgres.TransactionSql,
-  seasonId: number,
-  eventId: number,
-): Promise<MyFplSnapshotPublication | null> {
-  const rows = await client<
-    {
-      season_id: number;
-      event_id: number;
-      revision: number | string;
-      snapshot_date: string;
-      source_checked_at: Date | string;
-      published_at: Date | string;
-      kind: MyFplSnapshotKind;
-      expected_entry_count: number;
-      ready_entry_count: number;
-      empty_entry_count: number;
-      expected_tournament_count: number;
-      ready_tournament_count: number;
-      content_sha256: string;
-      override_actor: string | null;
-      override_reason: string | null;
-      idempotency_key: string | null;
-    }[]
-  >`
-    SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
-           published_at, kind, expected_entry_count, ready_entry_count,
-           empty_entry_count, expected_tournament_count, ready_tournament_count,
-           content_sha256, override_actor, override_reason, idempotency_key
-    FROM competition.my_fpl_snapshot_publications
-    WHERE season_id = ${seasonId} AND event_id = ${eventId} AND active
-    ORDER BY revision DESC
-    LIMIT 1
-  `;
-  const row = rows[0];
-  if (!row) return null;
+type MyFplPublicationRow = {
+  season_id: number;
+  event_id: number;
+  revision: number | string;
+  snapshot_date: string;
+  source_checked_at: Date | string;
+  published_at: Date | string;
+  kind: MyFplSnapshotKind;
+  expected_entry_count: number;
+  ready_entry_count: number;
+  empty_entry_count: number;
+  expected_tournament_count: number;
+  ready_tournament_count: number;
+  content_sha256: string;
+  override_actor: string | null;
+  override_reason: string | null;
+  idempotency_key: string | null;
+};
+
+function mapMyFplPublication(row: MyFplPublicationRow): MyFplSnapshotPublication {
   const revision = Number(row.revision);
   if (!Number.isSafeInteger(revision) || revision <= 0) {
-    throw new Error('Active My FPL publication has an invalid revision');
+    throw new Error('My FPL publication has an invalid revision');
   }
   return {
     seasonId: row.season_id,
@@ -939,6 +944,45 @@ async function loadActivePublication(
     overrideReason: row.override_reason,
     idempotencyKey: row.idempotency_key,
   };
+}
+
+async function loadActivePublication(
+  client: postgres.Sql | postgres.TransactionSql,
+  seasonId: number,
+  eventId: number,
+): Promise<MyFplSnapshotPublication | null> {
+  const rows = await client<MyFplPublicationRow[]>`
+    SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
+           published_at, kind, expected_entry_count, ready_entry_count,
+           empty_entry_count, expected_tournament_count, ready_tournament_count,
+           content_sha256, override_actor, override_reason, idempotency_key
+    FROM competition.my_fpl_snapshot_publications
+    WHERE season_id = ${seasonId} AND event_id = ${eventId} AND active
+    ORDER BY revision DESC
+    LIMIT 1
+  `;
+  const row = rows[0];
+  if (!row) return null;
+  return mapMyFplPublication(row);
+}
+
+async function loadPublicationByIdempotencyKey(
+  client: postgres.TransactionSql,
+  seasonId: number,
+  eventId: number,
+  idempotencyKey: string,
+): Promise<MyFplSnapshotPublication | null> {
+  const rows = await client<MyFplPublicationRow[]>`
+    SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
+           published_at, kind, expected_entry_count, ready_entry_count,
+           empty_entry_count, expected_tournament_count, ready_tournament_count,
+           content_sha256, override_actor, override_reason, idempotency_key
+    FROM competition.my_fpl_snapshot_publications
+    WHERE season_id = ${seasonId} AND event_id = ${eventId}
+      AND idempotency_key = ${idempotencyKey}
+    LIMIT 1
+  `;
+  return rows[0] ? mapMyFplPublication(rows[0]) : null;
 }
 
 export async function getActiveMyFplPublication(
@@ -1134,6 +1178,17 @@ export async function captureMyFplSnapshot(
         active.idempotencyKey === idempotencyKey)
     ) {
       return { status: 'noop', publication: active };
+    }
+    if (idempotencyKey) {
+      const priorOverride = await loadPublicationByIdempotencyKey(
+        tx,
+        season.seasonId,
+        eventId,
+        idempotencyKey,
+      );
+      if (priorOverride) {
+        return { status: 'noop', publication: priorOverride };
+      }
     }
 
     const entries = await tx<EntrySource[]>`
