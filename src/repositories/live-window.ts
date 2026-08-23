@@ -106,6 +106,8 @@ export type ManagerScoreCheckpoint = {
   eventPointSemantics: 'GROSS' | 'NET' | 'ZERO_COST_EQUIVALENT' | 'UNKNOWN';
   contentRevision: string;
   checkedAt: Date;
+  /** Content ordering clock; may advance without changing standings freshness. */
+  revisionAt: Date;
   upstreamUpdatedAt: Date | null;
 };
 
@@ -187,7 +189,7 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
             contentRevision: row.contentRevision,
             checkedAt: row.checkedAt,
             upstreamUpdatedAt: row.upstreamUpdatedAt,
-            updatedAt: row.checkedAt,
+            updatedAt: row.revisionAt,
           })),
         )
         .onConflictDoUpdate({
@@ -214,7 +216,13 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
             upstreamUpdatedAt: sql`excluded.upstream_updated_at`,
             updatedAt: sql`excluded.updated_at`,
           },
-          setWhere: sql`${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at`,
+          setWhere: sql`
+            ${managerEventScoreSnapshotsInFpl.checkedAt} < excluded.checked_at
+            OR (
+              ${managerEventScoreSnapshotsInFpl.checkedAt} = excluded.checked_at
+              AND ${managerEventScoreSnapshotsInFpl.updatedAt} <= excluded.updated_at
+            )
+          `,
         });
     },
   };

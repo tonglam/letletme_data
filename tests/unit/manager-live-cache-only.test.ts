@@ -76,6 +76,7 @@ const cachedRow = (entryId: number, checkedAt: string) => ({
   eventPointSemantics: 'GROSS',
   revision: `revision-${entryId}`,
   checkedAt,
+  revisionAt: checkedAt,
   upstreamUpdatedAt: null,
   staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
 });
@@ -98,6 +99,7 @@ const checkpointRow = (entryId: number, checkedAt: string) => ({
   eventPointSemantics: 'GROSS',
   contentRevision: `revision-${entryId}`,
   checkedAt: new Date(checkedAt),
+  updatedAt: new Date(checkedAt),
   upstreamUpdatedAt: null,
 });
 
@@ -273,6 +275,66 @@ describe('manager live CACHE_ONLY reads', () => {
       overallRank: 765_432,
       revision: 'postgres-durable-revision',
     });
+    expect(result.rows[0]).not.toHaveProperty('revisionAt');
+  });
+
+  test('keeps a newer Redis enrichment when the matching checkpoint write failed', async () => {
+    const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const revisionAt = new Date(Date.parse(checkedAt) + 60_000).toISOString();
+    redisRows.set(
+      101,
+      JSON.stringify({
+        ...cachedRow(101, checkedAt),
+        overallRank: 123_456,
+        revision: 'redis-newer-revision',
+        revisionAt,
+      }),
+    );
+    postgresRows = [
+      {
+        ...checkpointRow(101, checkedAt),
+        overallRank: 765_432,
+        contentRevision: 'postgres-older-revision',
+      },
+    ];
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'CACHE_ONLY',
+    });
+
+    expect(result).toMatchObject({ servedFrom: 'REDIS' });
+    expect(result.rows[0]).toMatchObject({
+      overallRank: 123_456,
+      revision: 'redis-newer-revision',
+    });
+  });
+
+  test('uses a newer checkpoint enrichment when the matching Redis write failed', async () => {
+    const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const revisionAt = new Date(Date.parse(checkedAt) + 60_000);
+    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    postgresRows = [
+      {
+        ...checkpointRow(101, checkedAt),
+        overallRank: 765_432,
+        contentRevision: 'postgres-newer-revision',
+        updatedAt: revisionAt,
+      },
+    ];
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'CACHE_ONLY',
+    });
+
+    expect(result).toMatchObject({ servedFrom: 'POSTGRES' });
+    expect(result.rows[0]).toMatchObject({
+      overallRank: 765_432,
+      revision: 'postgres-newer-revision',
+    });
   });
 });
 
@@ -396,6 +458,7 @@ describe('manager live classic standings convergence', () => {
       staleAt: existing.staleAt,
     });
     expect(enriched.revision).not.toBe(existing.revision);
+    expect(Date.parse(enriched.revisionAt)).toBeGreaterThan(Date.parse(existing.revisionAt));
 
     const missingRank = enrichClassicStandingOverallRank(enriched, null);
     expect(missingRank.overallRank).toBe(123_456);

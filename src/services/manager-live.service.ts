@@ -91,7 +91,11 @@ export type ManagerLiveResolveResult = {
   classicStandingsNextPage?: number | null;
 };
 
-type CachedRow = ManagerLiveScoreRow;
+// `revisionAt` orders content-only enrichments such as overall rank without
+// advancing `checkedAt`, which belongs to the Classic standings freshness
+// envelope. It is persisted in Redis and the checkpoint `updated_at` column,
+// but stripped from the internal API response below.
+type CachedRow = ManagerLiveScoreRow & { revisionAt: string };
 
 const entryScope: ManagerScoreScope = { scopeType: 'ENTRY', scopeId: 0 };
 
@@ -102,7 +106,7 @@ const cacheKey = (season: string, eventId: number, scope: ManagerScoreScope): st
 const metaCacheKey = (season: string, eventId: number, scope: ManagerScoreScope): string =>
   `OfficialManagerLiveMeta:${season}:${eventId}:${scopeKey(scope)}`;
 
-const stableRevision = (row: Omit<ManagerLiveScoreRow, 'revision'>): string => {
+const stableRevision = (row: Omit<CachedRow, 'revision'>): string => {
   const digest = createHash('sha1')
     .update(
       JSON.stringify({
@@ -128,12 +132,12 @@ const stableRevision = (row: Omit<ManagerLiveScoreRow, 'revision'>): string => {
   return digest;
 };
 
-const withRevision = (row: Omit<ManagerLiveScoreRow, 'revision'>): ManagerLiveScoreRow => ({
+const withRevision = (row: Omit<CachedRow, 'revision'>): CachedRow => ({
   ...row,
   revision: stableRevision(row),
 });
 
-const toManagerScoreCheckpoint = (row: ManagerLiveScoreRow): ManagerScoreCheckpoint => ({
+const toManagerScoreCheckpoint = (row: CachedRow): ManagerScoreCheckpoint => ({
   entryId: row.entryId,
   eventPoints: row.eventPoints,
   netEventPoints: row.netEventPoints,
@@ -147,6 +151,7 @@ const toManagerScoreCheckpoint = (row: ManagerLiveScoreRow): ManagerScoreCheckpo
   eventPointSemantics: row.eventPointSemantics,
   contentRevision: row.revision,
   checkedAt: new Date(row.checkedAt),
+  revisionAt: new Date(row.revisionAt),
   upstreamUpdatedAt: row.upstreamUpdatedAt ? new Date(row.upstreamUpdatedAt) : null,
 });
 
@@ -168,6 +173,10 @@ const fromManagerScoreCheckpoint = (
   transferCost: row.transferCost,
   eventPointSemantics: row.eventPointSemantics as ManagerLiveScoreRow['eventPointSemantics'],
   checkedAt: row.checkedAt.toISOString(),
+  revisionAt:
+    row.updatedAt instanceof Date && Number.isFinite(row.updatedAt.getTime())
+      ? row.updatedAt.toISOString()
+      : row.checkedAt.toISOString(),
   upstreamUpdatedAt: row.upstreamUpdatedAt?.toISOString() ?? null,
   staleAt: plusSeconds(row.checkedAt.toISOString(), STALE_SECONDS),
   revision: row.contentRevision,
@@ -184,6 +193,7 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
       !Number.isSafeInteger(row.eventId) ||
       !Number.isSafeInteger(row.entryId) ||
       typeof row.checkedAt !== 'string' ||
+      (row.revisionAt !== undefined && typeof row.revisionAt !== 'string') ||
       typeof row.revision !== 'string' ||
       (row.source !== 'FPL_ENTRY_SUMMARY' &&
         row.source !== 'FPL_CLASSIC_STANDINGS' &&
@@ -203,7 +213,13 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
     ) {
       return null;
     }
-    return { ...(row as CachedRow), netEventPoints: row.netEventPoints ?? null };
+    const revisionAt = row.revisionAt ?? row.checkedAt;
+    if (!Number.isFinite(Date.parse(revisionAt))) return null;
+    return {
+      ...(row as CachedRow),
+      netEventPoints: row.netEventPoints ?? null,
+      revisionAt,
+    };
   } catch {
     return null;
   }
@@ -231,7 +247,7 @@ const writeRows = async (
   season: string,
   eventId: number,
   scope: ManagerScoreScope,
-  rows: readonly ManagerLiveScoreRow[],
+  rows: readonly CachedRow[],
   metadata?: Record<string, unknown>,
   metadataField = 'publication',
 ): Promise<void> => {
@@ -270,7 +286,7 @@ const toEntrySummaryRow = (
   entryId: number,
   summary: Awaited<ReturnType<typeof fplClient.getEntrySummary>>,
   checkedAt: string,
-): ManagerLiveScoreRow =>
+): CachedRow =>
   withRevision({
     season,
     eventId,
@@ -286,6 +302,7 @@ const toEntrySummaryRow = (
     transferCost: null,
     eventPointSemantics: 'UNKNOWN',
     checkedAt,
+    revisionAt: checkedAt,
     upstreamUpdatedAt: null,
     staleAt: plusSeconds(checkedAt, STALE_SECONDS),
   });
@@ -295,7 +312,7 @@ const toClassicRows = (
   eventId: number,
   response: RawFPLLeagueStandingsResponse,
   checkedAt: string,
-): ManagerLiveScoreRow[] => {
+): CachedRow[] => {
   const upstreamUpdatedAt = response.last_updated_data ?? null;
   return response.standings.results
     .map((result) => {
@@ -317,26 +334,27 @@ const toClassicRows = (
         transferCost: null,
         eventPointSemantics: 'UNKNOWN',
         checkedAt,
+        revisionAt: checkedAt,
         upstreamUpdatedAt,
         staleAt: plusSeconds(checkedAt, STALE_SECONDS),
       });
     })
-    .filter((row): row is ManagerLiveScoreRow => row !== null);
+    .filter((row): row is CachedRow => row !== null);
 };
 
 export const preserveClassicOverallRank = (
-  row: ManagerLiveScoreRow,
+  row: CachedRow,
   existing: CachedRow | undefined,
-): ManagerLiveScoreRow => {
+): CachedRow => {
   if (typeof existing?.overallRank !== 'number' || existing.overallRank <= 0) return row;
   const { revision: _revision, ...classicRow } = row;
   return withRevision({ ...classicRow, overallRank: existing.overallRank });
 };
 
 export const enrichClassicStandingOverallRank = (
-  existing: ManagerLiveScoreRow,
+  existing: CachedRow,
   overallRank: number | null | undefined,
-): ManagerLiveScoreRow => {
+): CachedRow => {
   const { revision: _revision, ...classicRow } = existing;
   const nextOverallRank =
     typeof overallRank === 'number' && Number.isSafeInteger(overallRank) && overallRank > 0
@@ -345,7 +363,11 @@ export const enrichClassicStandingOverallRank = (
   // An entry-summary request owns only the season-wide OR. It must not advance
   // the freshness clock for standings event points, phase totals, or league
   // rank that were not fetched in the same request.
-  return withRevision({ ...classicRow, overallRank: nextOverallRank });
+  const existingRevisionTime = Date.parse(existing.revisionAt);
+  const revisionAt = new Date(
+    Math.max(Date.now(), Number.isFinite(existingRevisionTime) ? existingRevisionTime + 1 : 0),
+  ).toISOString();
+  return withRevision({ ...classicRow, overallRank: nextOverallRank, revisionAt });
 };
 
 export const selectWorkerClassicFallbackTargets = (
@@ -362,9 +384,12 @@ const ageSeconds = (checkedAt: string, now = Date.now()): number => {
   return Number.isFinite(timestamp) ? Math.max(0, (now - timestamp) / 1000) : Infinity;
 };
 
-const isFresh = (row: CachedRow, now = Date.now()): boolean =>
+const isFresh = (row: Pick<ManagerLiveScoreRow, 'checkedAt'>, now = Date.now()): boolean =>
   ageSeconds(row.checkedAt, now) <= REFRESH_SECONDS;
-const isWithinStaleWindow = (row: CachedRow, now = Date.now()): boolean =>
+const isWithinStaleWindow = (
+  row: Pick<ManagerLiveScoreRow, 'checkedAt'>,
+  now = Date.now(),
+): boolean =>
   // Redis expiry is an operational cleanup mechanism. A successful official
   // row remains the last-good value until a newer official or final result
   // replaces it; it must not disappear merely because 90 seconds elapsed.
@@ -432,7 +457,7 @@ const managerServedFrom = (
 const buildManagerLiveResult = (input: {
   season: string;
   eventId: number;
-  rows: ManagerLiveScoreRow[];
+  rows: CachedRow[];
   missingEntryIds: number[];
   errorCode: ManagerLiveResolveResult['errorCode'];
   nextRefreshAt: string;
@@ -442,6 +467,7 @@ const buildManagerLiveResult = (input: {
   classicStandingsNextPage?: number | null;
 }): ManagerLiveResolveResult => {
   const fallbackCheckedAt = input.checkedAt ?? nowIso();
+  const publicRows = input.rows.map(({ revisionAt: _revisionAt, ...row }) => row);
   return {
     season: input.season,
     eventId: input.eventId,
@@ -454,7 +480,7 @@ const buildManagerLiveResult = (input: {
     dataAvailability: managerDataAvailability(input.rows, input.missingEntryIds),
     servedFrom: managerServedFrom(input.rows, input.sourceByEntry),
     refreshQueued: input.refreshQueued ?? false,
-    rows: input.rows,
+    rows: publicRows,
     missingEntryIds: input.missingEntryIds,
     partial: input.missingEntryIds.length > 0,
     errorCode: input.errorCode,
@@ -537,10 +563,10 @@ const refreshEntrySummaries = async (
     .slice(0, options.maxFetches ?? Number.POSITIVE_INFINITY);
   if (targets.length === 0) return null;
 
-  const refreshed: ManagerLiveScoreRow[] = [];
+  const refreshed: CachedRow[] = [];
   let refreshErrorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null = null;
   for (const batch of managerSummaryFetchBatches(targets)) {
-    const completedBatch: ManagerLiveScoreRow[] = [];
+    const completedBatch: CachedRow[] = [];
     await Promise.all(
       batch.map(async (entryId) => {
         try {
@@ -636,7 +662,7 @@ export const refreshClassicStandings = async (
   errorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null;
 }> => {
   const checkedAt = nowIso();
-  const fetchedRows: ManagerLiveScoreRow[] = [];
+  const fetchedRows: CachedRow[] = [];
   let found = 0;
   const startPage = options.startPage ?? 1;
   const maxPages = options.maxPages ?? MAX_FOREGROUND_STANDINGS_PAGES;
@@ -825,6 +851,7 @@ const finalResultRows = async (
         transferCost: result.eventTransfersCost,
         eventPointSemantics: 'GROSS',
         checkedAt,
+        revisionAt: checkedAt,
         upstreamUpdatedAt: result.richSyncedAt?.toISOString() ?? null,
         staleAt: plusSeconds(checkedAt, STALE_SECONDS),
       }),
@@ -968,12 +995,21 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     const cached = rows.get(checkpoint.entryId);
     const checkpointTime = checkpoint.checkedAt.getTime();
     const cachedTime = cached ? Date.parse(cached.checkedAt) : Number.NaN;
+    const checkpointRevisionTime =
+      checkpoint.updatedAt instanceof Date && Number.isFinite(checkpoint.updatedAt.getTime())
+        ? checkpoint.updatedAt.getTime()
+        : checkpointTime;
+    const cachedRevisionTime = cached ? Date.parse(cached.revisionAt) : Number.NaN;
     const durableCheckpointWins =
       !cached ||
       !Number.isFinite(cachedTime) ||
       (Number.isFinite(checkpointTime) &&
         (checkpointTime > cachedTime ||
-          (checkpointTime === cachedTime && checkpoint.contentRevision !== cached.revision)));
+          (checkpointTime === cachedTime &&
+            (!Number.isFinite(cachedRevisionTime) ||
+              checkpointRevisionTime > cachedRevisionTime ||
+              (checkpointRevisionTime === cachedRevisionTime &&
+                checkpoint.contentRevision !== cached.revision)))));
     if (durableCheckpointWins) {
       rows.set(checkpoint.entryId, fromManagerScoreCheckpoint(checkpoint, season.seasonCode));
       sourceByEntry.set(checkpoint.entryId, 'POSTGRES');
