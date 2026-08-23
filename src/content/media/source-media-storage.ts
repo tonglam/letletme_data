@@ -495,11 +495,11 @@ export function createSourceMediaStorage(
       if (!ALLOWED_MIME_TYPES.includes(contentType as (typeof ALLOWED_MIME_TYPES)[number])) {
         throw new SourceMediaStorageError('STORAGE_MIME_FORBIDDEN', 'Object MIME is not allowed');
       }
-      if (bytes.byteLength <= STANDARD_UPLOAD_LIMIT) {
-        await uploadStandard(objectKey, bytes, contentType, signal);
-      } else {
-        await uploadTus(objectKey, bytes, contentType, signal);
-      }
+      // The VPS production probe verified a 24 MiB standard upload in ~14s,
+      // while the 6 MiB-chunk TUS path either reset or exceeded the media gate
+      // execution budget. Keep TUS available for explicit diagnostics, but do
+      // not make production archiving depend on that provider path.
+      await uploadStandard(objectKey, bytes, contentType, signal);
     },
 
     async download(objectKey, signal) {
@@ -533,7 +533,7 @@ export function createSourceMediaStorage(
       return 'deleted';
     },
 
-    async provisionAndProbe(mode: SourceMediaProbeMode = 'tus') {
+    async provisionAndProbe(mode: SourceMediaProbeMode = 'standard') {
       await storage.ensureBucket();
       const objectKey = `probes/${randomUUID()}.png`;
       const pngPrefix = Buffer.from(
@@ -551,6 +551,8 @@ export function createSourceMediaStorage(
           await uploadStandard(objectKey, bytes, 'image/png');
         } else if (mode === 'tus-no-create') {
           await uploadTus(objectKey, bytes, 'image/png', undefined, false);
+        } else if (mode === 'tus') {
+          await uploadTus(objectKey, bytes, 'image/png');
         } else {
           await storage.upload(objectKey, bytes, 'image/png');
         }
@@ -604,5 +606,6 @@ export const sourceMediaStorageContract = {
   bucketFileSizeLimit: BUCKET_FILE_SIZE_LIMIT,
   standardUploadLimit: STANDARD_UPLOAD_LIMIT,
   tusChunkSize: TUS_CHUNK_SIZE,
+  productionUploadMode: 'standard',
   allowedMimeTypes: ALLOWED_MIME_TYPES,
 } as const;
