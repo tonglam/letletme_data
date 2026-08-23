@@ -1,26 +1,252 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  acquireDistributedLease,
+  classicManagerBackgroundStandingsStartPage,
+  classicManagerSummaryFallbackEntryIds,
+  classicManagerSummaryFallbackNeedsRefresh,
+  createDistributedLeaseFence,
   createKeyedSerialTaskGate,
   createKeyedSerialTaskScheduler,
+  createKeyedTaskSerializer,
   createManagerSummaryFetchGate,
   isPositiveOverallRank,
+  managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
   mergeUniqueTargetManagerRows,
+  pendingManagerRefreshEntryIds,
   pendingOverallRankRefreshEntryIds,
   planClassicManagerFallback,
   planClassicOverallRankRefresh,
+  planManagerLiveRefreshTargets,
+  preserveClassicOverallRank,
   preserveLastKnownOverallRank,
   reconcileMonotonicCachePublicationRows,
+  readThroughManagerSummaryResult,
+  readLatestRowsWithFallback,
+  requireManagerSummaryCoordinator,
+  runManagerStandingsPageSequence,
+  runYieldingKeyedTask,
   selectClassicSummaryOverallRank,
+  selectForegroundClassicRankEntryIds,
   selectLatestCheckedRow,
   shouldAcceptClassicOverallRankPublication,
+  shouldEnrichClassicOverallRank,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
   shouldRetryPendingClassicOverallRank,
+  shouldReplaceManagerLiveRow,
 } from '../../src/domain/manager-live-fallback';
 
+describe('manager live refresh targets', () => {
+  test('serves stale last-good rows without foreground upstream work', () => {
+    expect(planManagerLiveRefreshTargets([1, 2], new Set([1, 2]), new Set())).toEqual({
+      foregroundEntryIds: [],
+      backgroundEntryIds: [1, 2],
+    });
+  });
+
+  test('keeps cold misses in both the bounded foreground and background plans', () => {
+    expect(planManagerLiveRefreshTargets([1, 2], new Set([1]), new Set([1]))).toEqual({
+      foregroundEntryIds: [2],
+      backgroundEntryIds: [2],
+    });
+  });
+
+  test('does no refresh work for fresh cached rows', () => {
+    expect(planManagerLiveRefreshTargets([1, 2], new Set([1, 2]), new Set([1, 2]))).toEqual({
+      foregroundEntryIds: [],
+      backgroundEntryIds: [],
+    });
+  });
+
+  test('prunes targets that became fresh while waiting for a serialized lane', () => {
+    const rows = new Map([
+      [1, { fresh: true }],
+      [2, { fresh: false }],
+    ]);
+
+    expect(pendingManagerRefreshEntryIds([1, 2, 3], rows, (row) => row.fresh)).toEqual([2, 3]);
+  });
+
+  test('preserves an enriched OR when a standings refresh omits it', () => {
+    expect(preserveClassicOverallRank(null, 12_345)).toBe(12_345);
+    expect(preserveClassicOverallRank(null, 0)).toBeNull();
+    expect(preserveClassicOverallRank(54_321, undefined)).toBe(54_321);
+    expect(preserveClassicOverallRank(54_321, 12_345)).toBe(54_321);
+  });
+
+  test('enriches fresh rank-missing classic rows in the bounded foreground plan', () => {
+    const rows = new Map([
+      [1, { fresh: true, overallRank: null }],
+      [2, { fresh: false, overallRank: null }],
+      [3, { fresh: true, overallRank: 123 }],
+      [4, { fresh: true, overallRank: 0 }],
+      [5, { fresh: true, overallRank: null }],
+    ]);
+
+    expect(
+      selectForegroundClassicRankEntryIds(
+        [1, 2, 3, 4, 5],
+        rows,
+        (row) => row.fresh,
+        (row) => !row.overallRank || row.overallRank <= 0,
+        2,
+      ),
+    ).toEqual([1, 4]);
+  });
+
+  test('forces OR enrichment for refreshed standings rows that retain a positive old rank', () => {
+    const refreshedEntryIds = new Set([1]);
+    const rankOnlyEntryIds = new Set([2, 3, 4]);
+    const isFresh = (row: { fresh: boolean }) => row.fresh;
+    const needsOverallRank = (row: { overallRank: number | null }) =>
+      !row.overallRank || row.overallRank <= 0;
+
+    expect(
+      shouldEnrichClassicOverallRank(
+        1,
+        { fresh: true, overallRank: 123 },
+        refreshedEntryIds,
+        rankOnlyEntryIds,
+        isFresh,
+        needsOverallRank,
+      ),
+    ).toBe(true);
+    expect(
+      shouldEnrichClassicOverallRank(
+        2,
+        { fresh: true, overallRank: null },
+        refreshedEntryIds,
+        rankOnlyEntryIds,
+        isFresh,
+        needsOverallRank,
+      ),
+    ).toBe(true);
+    expect(
+      shouldEnrichClassicOverallRank(
+        3,
+        { fresh: true, overallRank: 456 },
+        refreshedEntryIds,
+        rankOnlyEntryIds,
+        isFresh,
+        needsOverallRank,
+      ),
+    ).toBe(false);
+    expect(
+      shouldEnrichClassicOverallRank(
+        4,
+        { fresh: false, overallRank: null },
+        refreshedEntryIds,
+        rankOnlyEntryIds,
+        isFresh,
+        needsOverallRank,
+      ),
+    ).toBe(false);
+  });
+
+  test('rejects a later local completion from an older upstream standings snapshot', () => {
+    const current = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T10:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T09:59:00.000Z',
+    };
+    const slowerOlderReplica = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T10:01:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T09:58:00.000Z',
+    };
+    const newerUpstreamSnapshot = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T09:59:30.000Z',
+      upstreamUpdatedAt: '2026-08-23T10:00:00.000Z',
+    };
+
+    expect(shouldReplaceManagerLiveRow(current, slowerOlderReplica)).toBe(false);
+    expect(shouldReplaceManagerLiveRow(current, newerUpstreamSnapshot)).toBe(true);
+  });
+
+  test('keeps classic standings ahead of a later summary fallback', () => {
+    const classic = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T10:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T09:59:00.000Z',
+    };
+    const summary = {
+      source: 'FPL_ENTRY_SUMMARY' as const,
+      checkedAt: '2026-08-23T10:01:00.000Z',
+      upstreamUpdatedAt: null,
+    };
+
+    expect(shouldReplaceManagerLiveRow(classic, summary)).toBe(false);
+    expect(shouldReplaceManagerLiveRow(summary, classic)).toBe(true);
+  });
+
+  test('falls back to serialized check time when upstream standings metadata is absent', () => {
+    const current = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: '2026-08-23T10:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T09:59:00.000Z',
+    };
+
+    expect(
+      shouldReplaceManagerLiveRow(current, {
+        source: 'FPL_CLASSIC_STANDINGS',
+        checkedAt: '2026-08-23T10:01:00.000Z',
+        upstreamUpdatedAt: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldReplaceManagerLiveRow(current, {
+        source: 'FPL_CLASSIC_STANDINGS',
+        checkedAt: '2026-08-23T09:59:30.000Z',
+        upstreamUpdatedAt: null,
+      }),
+    ).toBe(false);
+  });
+
+  test('replaces an invalid cached timestamp with a valid incoming row', () => {
+    const invalidCurrent = {
+      source: 'FPL_CLASSIC_STANDINGS' as const,
+      checkedAt: 'not-a-timestamp',
+      upstreamUpdatedAt: '2026-08-23T09:59:00.000Z',
+    };
+    const validIncoming = {
+      source: 'FPL_ENTRY_SUMMARY' as const,
+      checkedAt: '2026-08-23T10:01:00.000Z',
+      upstreamUpdatedAt: null,
+    };
+
+    expect(shouldReplaceManagerLiveRow(invalidCurrent, validIncoming)).toBe(true);
+    expect(
+      shouldReplaceManagerLiveRow(validIncoming, {
+        ...invalidCurrent,
+        source: 'FPL_FINAL_RESULT',
+      }),
+    ).toBe(false);
+  });
+});
+
 describe('classic manager live fallback', () => {
+  test('permanently fences publication after distributed lease ownership is lost', async () => {
+    let ownsLease = true;
+    const fence = createDistributedLeaseFence(async () => ownsLease);
+
+    await expect(fence.assertOwned()).resolves.toBeUndefined();
+    ownsLease = false;
+    await expect(fence.assertOwned()).rejects.toThrow('distributed lease ownership lost');
+    ownsLease = true;
+    await expect(fence.assertOwned()).rejects.toThrow('distributed lease ownership lost');
+  });
+
+  test('fails the lease fence closed when renewal cannot be verified', async () => {
+    const fence = createDistributedLeaseFence(async () => {
+      throw new Error('redis unavailable');
+    });
+
+    await expect(fence.assertOwned()).rejects.toThrow('redis unavailable');
+  });
+
   test('serializes standings and rank publications for the same Classic scope', async () => {
     const run = createKeyedSerialTaskGate();
     const order: string[] = [];
@@ -405,27 +631,78 @@ describe('classic manager live fallback', () => {
   });
 
   test('uses official entry summaries after standings pagination is exhausted', () => {
-    expect(planClassicManagerFallback([97_001], true)).toEqual({
+    expect(planClassicManagerFallback([97_001], [], true)).toEqual({
       foregroundSummaryEntryIds: [97_001],
-      backgroundEntryIds: [97_001],
-      continueStandings: false,
+      backgroundStandingsEntryIds: [],
+      backgroundSummaryEntryIds: [97_001],
     });
   });
 
   test('continues bounded standings pagination before falling back to summaries', () => {
-    expect(planClassicManagerFallback([1, 2, 3, 4, 5], false)).toEqual({
+    expect(planClassicManagerFallback([1, 2, 3, 4, 5], [], false)).toEqual({
       foregroundSummaryEntryIds: [],
-      backgroundEntryIds: [1, 2, 3, 4, 5],
-      continueStandings: true,
+      backgroundStandingsEntryIds: [1, 2, 3, 4, 5],
+      backgroundSummaryEntryIds: [],
     });
   });
 
+  test('resumes a cold-only standings crawl at the foreground cursor', () => {
+    expect(classicManagerBackgroundStandingsStartPage([11, 12], new Set([11, 12]), 5)).toBe(5);
+  });
+
+  test('restarts standings at page one when stale rows share the background crawl', () => {
+    expect(classicManagerBackgroundStandingsStartPage([11, 21], new Set([11]), 5)).toBe(1);
+  });
+
   test('bounds foreground summary requests while retaining all background work', () => {
-    expect(planClassicManagerFallback([1, 2, 3, 4, 5], true)).toEqual({
+    expect(planClassicManagerFallback([1, 2, 3, 4, 5], [], true)).toEqual({
       foregroundSummaryEntryIds: [1, 2, 3, 4],
-      backgroundEntryIds: [1, 2, 3, 4, 5],
-      continueStandings: false,
+      backgroundStandingsEntryIds: [],
+      backgroundSummaryEntryIds: [1, 2, 3, 4, 5],
     });
+  });
+
+  test('keeps stale classic rows on the standings path after a cold crawl completes', () => {
+    expect(planClassicManagerFallback([11], [21, 22], true)).toEqual({
+      foregroundSummaryEntryIds: [11],
+      backgroundStandingsEntryIds: [21, 22],
+      backgroundSummaryEntryIds: [11],
+    });
+  });
+
+  test('uses entry-set-specific background refresh keys', () => {
+    expect(managerLiveBackgroundRefreshKey('summary:2025:1', [3, 1, 3])).toBe('summary:2025:1:1,3');
+    expect(managerLiveBackgroundRefreshKey('summary:2025:1', [2])).not.toBe(
+      managerLiveBackgroundRefreshKey('summary:2025:1', [1]),
+    );
+  });
+
+  test('refreshes stale summary fallbacks without replacing stale standings rows', () => {
+    expect(
+      classicManagerSummaryFallbackEntryIds([11], [21, 22, 23], new Set([21]), new Set([22]), true),
+    ).toEqual([11, 21, 22]);
+    expect(
+      classicManagerSummaryFallbackEntryIds(
+        [11],
+        [21, 22, 23],
+        new Set([21]),
+        new Set([22]),
+        false,
+      ),
+    ).toEqual([11]);
+  });
+
+  test('publishes summary fallback only for missing or stale summary rows', () => {
+    expect(classicManagerSummaryFallbackNeedsRefresh(undefined, false)).toBe(true);
+    expect(classicManagerSummaryFallbackNeedsRefresh({ source: 'FPL_ENTRY_SUMMARY' }, false)).toBe(
+      true,
+    );
+    expect(classicManagerSummaryFallbackNeedsRefresh({ source: 'FPL_ENTRY_SUMMARY' }, true)).toBe(
+      false,
+    );
+    expect(
+      classicManagerSummaryFallbackNeedsRefresh({ source: 'FPL_CLASSIC_STANDINGS' }, false),
+    ).toBe(false);
   });
 
   test('caps concurrent entry-summary work while retaining every target', () => {
@@ -469,6 +746,441 @@ describe('classic manager live fallback', () => {
     expect(maximumActive).toBe(2);
   });
 
+  test('coalesces the same manager across overlapping refresh groups', async () => {
+    const run = createManagerSummaryFetchGate(2);
+    const calls = new Map<number, number>();
+    let releaseFetches!: () => void;
+    const fetchesBlocked = new Promise<void>((resolve) => {
+      releaseFetches = resolve;
+    });
+
+    const refreshGroup = (entryIds: readonly number[]) =>
+      Promise.all(
+        entryIds.map((entryId) =>
+          run(
+            async () => {
+              calls.set(entryId, (calls.get(entryId) ?? 0) + 1);
+              await fetchesBlocked;
+              return entryId;
+            },
+            'background',
+            entryId,
+          ),
+        ),
+      );
+
+    const first = refreshGroup([1, 2]);
+    const second = refreshGroup([2, 3]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(calls.get(2)).toBe(1);
+    releaseFetches();
+    expect(await first).toEqual([1, 2]);
+    expect(await second).toEqual([2, 3]);
+    expect(calls).toEqual(
+      new Map([
+        [1, 1],
+        [2, 1],
+        [3, 1],
+      ]),
+    );
+  });
+
+  test('shares one official summary observation across distributed waiters', async () => {
+    const runDistributed = createKeyedTaskSerializer();
+    let shared: { summary: { eventPoints: number }; observedAt: string } | null = null;
+    let officialFetches = 0;
+    const observedAt = '2026-08-23T13:00:00.000Z';
+
+    const replicaRefresh = () =>
+      runDistributed('entry-summary:7', () =>
+        readThroughManagerSummaryResult(
+          async () => shared,
+          async () => {
+            officialFetches += 1;
+            return { summary: { eventPoints: 42 }, observedAt };
+          },
+          async (value) => {
+            shared = value;
+          },
+        ),
+      );
+
+    const [first, second] = await Promise.all([replicaRefresh(), replicaRefresh()]);
+
+    expect(first).toEqual({ summary: { eventPoints: 42 }, observedAt });
+    expect(second).toEqual({ summary: { eventPoints: 42 }, observedAt });
+    expect(officialFetches).toBe(1);
+  });
+
+  test('fails closed before an uncoordinated summary refresh can start', () => {
+    expect(() => requireManagerSummaryCoordinator(null)).toThrow(
+      'manager summary distributed coordination unavailable',
+    );
+    expect(requireManagerSummaryCoordinator({ available: true })).toEqual({ available: true });
+  });
+
+  test('fails closed when an official summary cannot be handed to other replicas', async () => {
+    const pending = readThroughManagerSummaryResult(
+      async () => null,
+      async () => ({ eventPoints: 42 }),
+      async () => {
+        throw new Error('shared cache unavailable');
+      },
+    );
+
+    await expect(pending).rejects.toThrow('shared cache unavailable');
+  });
+
+  test('fails closed when an entry-summary lease acquisition is ambiguous', async () => {
+    let observedError: unknown;
+    const pending = acquireDistributedLease(
+      async () => {
+        throw new Error('redis write timed out');
+      },
+      'fail-closed',
+      (error) => {
+        observedError = error;
+      },
+    );
+
+    await expect(pending).rejects.toThrow('redis write timed out');
+    expect(observedError).toBeInstanceOf(Error);
+  });
+
+  test('retains the durable classic fallback when lease coordination is unavailable', async () => {
+    expect(
+      await acquireDistributedLease(async () => {
+        throw new Error('redis unavailable');
+      }, 'fail-open'),
+    ).toBe('uncoordinated');
+  });
+
+  test('starts a fresh keyed fetch after the shared request settles', async () => {
+    const run = createManagerSummaryFetchGate(1);
+    let calls = 0;
+
+    expect(
+      await run(
+        async () => {
+          calls += 1;
+          return 'first';
+        },
+        'foreground',
+        7,
+      ),
+    ).toBe('first');
+    expect(
+      await run(
+        async () => {
+          calls += 1;
+          return 'second';
+        },
+        'foreground',
+        7,
+      ),
+    ).toBe('second');
+    expect(calls).toBe(2);
+  });
+
+  test('serializes league-scoped crawls while retaining disjoint work', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = run(
+      '2025:1:99',
+      async () => {
+        order.push('first:start');
+        await firstBlocked;
+        order.push('first:end');
+        return [1];
+      },
+      'background',
+    );
+    const second = run(
+      '2025:1:99',
+      async () => {
+        order.push('second:start');
+        return [2];
+      },
+      'background',
+    );
+    const otherLeague = run('2025:1:100', async () => {
+      order.push('other:start');
+      return [3];
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(order).toEqual(['first:start', 'other:start']);
+    releaseFirst?.();
+    expect(await Promise.all([first, second, otherLeague])).toEqual([[1], [2], [3]]);
+    expect(order).toEqual(['first:start', 'other:start', 'first:end', 'second:start']);
+  });
+
+  test('admits a foreground league crawl before queued background work', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseActive: (() => void) | undefined;
+    const active = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+
+    const runningBackground = run(
+      '2025:1:99',
+      async () => {
+        order.push('background-active');
+        await active;
+      },
+      'background',
+    );
+    await Promise.resolve();
+    const queuedBackground = run(
+      '2025:1:99',
+      async () => {
+        order.push('background-queued');
+      },
+      'background',
+    );
+    const foreground = run('2025:1:99', async () => {
+      order.push('foreground');
+    });
+
+    releaseActive?.();
+    await Promise.all([runningBackground, queuedBackground, foreground]);
+    expect(order).toEqual(['background-active', 'foreground', 'background-queued']);
+  });
+
+  test('releases the local lane between distributed lease attempts', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseBackgroundRetry: (() => void) | undefined;
+    const backgroundRetry = new Promise<void>((resolve) => {
+      releaseBackgroundRetry = resolve;
+    });
+    let backgroundAttempts = 0;
+
+    const background = runYieldingKeyedTask(
+      run,
+      '2025:1:99',
+      async () => {
+        backgroundAttempts += 1;
+        if (backgroundAttempts === 1) {
+          order.push('background:lease-contended');
+          return { complete: false };
+        }
+        order.push('background:run');
+        return { complete: true, value: 'background' };
+      },
+      'background',
+      () => backgroundRetry,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const foreground = runYieldingKeyedTask(
+      run,
+      '2025:1:99',
+      async () => {
+        order.push('foreground:run');
+        return { complete: true, value: 'foreground' };
+      },
+      'foreground',
+      async () => undefined,
+    );
+
+    expect(await foreground).toBe('foreground');
+    releaseBackgroundRetry?.();
+    expect(await background).toBe('background');
+    expect(order).toEqual(['background:lease-contended', 'foreground:run', 'background:run']);
+  });
+
+  test('keeps retrying an active distributed lease until ownership is available', async () => {
+    const run = createKeyedTaskSerializer();
+    let attempts = 0;
+    let taskRuns = 0;
+
+    const result = await runYieldingKeyedTask(
+      run,
+      '2025:1:99',
+      async () => {
+        attempts += 1;
+        if (attempts <= 75) return { complete: false };
+        taskRuns += 1;
+        return { complete: true, value: 'owned' };
+      },
+      'foreground',
+      async () => undefined,
+    );
+
+    expect(result).toBe('owned');
+    expect(attempts).toBe(76);
+    expect(taskRuns).toBe(1);
+  });
+
+  test('keeps captured checkpoint rows when a background Redis read fails', async () => {
+    const captured = new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'checkpoint' }]]);
+    let observedError: unknown;
+
+    const rows = await readLatestRowsWithFallback(
+      [1],
+      captured,
+      async () => {
+        throw new Error('redis unavailable');
+      },
+      (error) => {
+        observedError = error;
+      },
+    );
+
+    expect(rows.get(1)?.value).toBe('checkpoint');
+    expect(observedError).toBeInstanceOf(Error);
+  });
+
+  test('prefers a newer Redis row over a captured checkpoint row', async () => {
+    const captured = new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'checkpoint' }]]);
+
+    const rows = await readLatestRowsWithFallback(
+      [1],
+      captured,
+      async () => new Map([[1, { checkedAt: '2026-08-23T10:01:00.000Z', value: 'redis' }]]),
+    );
+
+    expect(rows.get(1)?.value).toBe('redis');
+  });
+
+  test('prefers a valid live cache row over a captured row with an invalid timestamp', async () => {
+    const captured = new Map([[1, { checkedAt: 'invalid', value: 'captured' }]]);
+
+    const rows = await readLatestRowsWithFallback(
+      [1],
+      captured,
+      async () => new Map([[1, { checkedAt: '2026-08-23T10:01:00.000Z', value: 'live' }]]),
+    );
+
+    expect(rows.get(1)?.value).toBe('live');
+  });
+
+  test('prefers the serialized cache publication when timestamps tie', async () => {
+    const captured = new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'captured' }]]);
+
+    const rows = await readLatestRowsWithFallback(
+      [1],
+      captured,
+      async () => new Map([[1, { checkedAt: '2026-08-23T10:00:00.000Z', value: 'serialized' }]]),
+    );
+
+    expect(rows.get(1)?.value).toBe('serialized');
+  });
+
+  test('yields the league lane between background summary batches', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseFirstBatch: (() => void) | undefined;
+    const firstBatchBlocked = new Promise<void>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+
+    const background = (async () => {
+      for (const batch of managerSummaryFetchBatches([1, 2, 3, 4, 5, 6, 7, 8])) {
+        await run(
+          '2025:1:99',
+          async () => {
+            order.push(`background:${batch[0]}`);
+            if (batch[0] === 1) await firstBatchBlocked;
+          },
+          'background',
+        );
+      }
+    })();
+    await Promise.resolve();
+    await Promise.resolve();
+    const foreground = run('2025:1:99', async () => {
+      order.push('foreground');
+    });
+
+    releaseFirstBatch?.();
+    await Promise.all([background, foreground]);
+
+    expect(order).toEqual(['background:1', 'foreground', 'background:5']);
+  });
+
+  test('yields the league lane between background standings pages', async () => {
+    const run = createKeyedTaskSerializer();
+    const order: string[] = [];
+    let releaseFirstPage!: () => void;
+    const firstPageBlocked = new Promise<void>((resolve) => {
+      releaseFirstPage = resolve;
+    });
+
+    const background = runManagerStandingsPageSequence(1, 3, (page) =>
+      run(
+        '2025:1:99',
+        async () => {
+          order.push(`background:${page}`);
+          if (page === 1) await firstPageBlocked;
+          return {
+            complete: page === 3,
+            nextPage: page + 1,
+            errorCode: null,
+            refreshedEntryIds: [page],
+          };
+        },
+        'background',
+      ),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    const foreground = run('2025:1:99', async () => {
+      order.push('foreground');
+    });
+
+    releaseFirstPage();
+    const [result] = await Promise.all([background, foreground]);
+
+    expect(result).toEqual({
+      complete: true,
+      nextPage: 4,
+      errorCode: null,
+      refreshedEntryIds: [1, 2, 3],
+    });
+    expect(order).toEqual(['background:1', 'foreground', 'background:2', 'background:3']);
+  });
+
+  test('stops the standings page sequence after a partial failure', async () => {
+    const pages: number[] = [];
+
+    const result = await runManagerStandingsPageSequence(1, 20, async (page) => {
+      pages.push(page);
+      return page === 2
+        ? {
+            complete: false,
+            nextPage: 3,
+            errorCode: 'UPSTREAM_UNAVAILABLE' as const,
+            refreshedEntryIds: [22],
+          }
+        : {
+            complete: false,
+            nextPage: 2,
+            errorCode: null,
+            refreshedEntryIds: [11],
+          };
+    });
+
+    expect(pages).toEqual([1, 2]);
+    expect(result).toEqual({
+      complete: false,
+      nextPage: 3,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+      refreshedEntryIds: [11, 22],
+    });
+  });
+
   test('assigns ordering work only after prioritized Summary admission', async () => {
     const run = createManagerSummaryFetchGate(1);
     const order: string[] = [];
@@ -497,6 +1209,60 @@ describe('classic manager live fallback', () => {
       'foreground-reservation',
       'background-queued-reservation',
     ]);
+  });
+
+  test('promotes a coalesced background manager when foreground work joins it', async () => {
+    const run = createManagerSummaryFetchGate(1);
+    const order: string[] = [];
+    let releaseActive!: () => void;
+    const activeBlocked = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+
+    const active = run(
+      async () => {
+        order.push('active');
+        await activeBlocked;
+        return 'active';
+      },
+      'background',
+      1,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    const queuedManager = run(
+      async () => {
+        order.push('manager-2');
+        return 'shared';
+      },
+      'background',
+      2,
+    );
+    const queuedOther = run(
+      async () => {
+        order.push('manager-3');
+        return 'other';
+      },
+      'background',
+      3,
+    );
+    const joinedForeground = run(
+      async () => {
+        order.push('duplicate-manager-2');
+        return 'duplicate';
+      },
+      'foreground',
+      2,
+    );
+
+    releaseActive();
+    expect(await Promise.all([active, queuedManager, queuedOther, joinedForeground])).toEqual([
+      'active',
+      'shared',
+      'other',
+      'shared',
+    ]);
+    expect(order).toEqual(['active', 'manager-2', 'manager-3']);
   });
 
   test('rejects an invalid shared concurrency limit', () => {

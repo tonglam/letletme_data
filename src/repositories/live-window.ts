@@ -232,7 +232,45 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
                 ? sql`greatest(${managerEventScoreSnapshotsInFpl.updatedAt}, excluded.updated_at)`
                 : sql`excluded.updated_at`,
           },
-          setWhere: sql`${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at`,
+          setWhere: sql`
+            (
+              ${managerEventScoreSnapshotsInFpl.source} = 'FPL_ENTRY_SUMMARY'
+              AND excluded.source IN ('FPL_CLASSIC_STANDINGS', 'FPL_FINAL_RESULT')
+            )
+            OR (
+              ${managerEventScoreSnapshotsInFpl.source} = 'FPL_CLASSIC_STANDINGS'
+              AND excluded.source = 'FPL_FINAL_RESULT'
+            )
+            OR (
+              ${managerEventScoreSnapshotsInFpl.source} = excluded.source
+              AND (
+                (
+                  ${managerEventScoreSnapshotsInFpl.source} <> 'FPL_CLASSIC_STANDINGS'
+                  AND ${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at
+                )
+                OR (
+                  ${managerEventScoreSnapshotsInFpl.source} = 'FPL_CLASSIC_STANDINGS'
+                  AND (
+                    (
+                      ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt} IS NOT NULL
+                      AND excluded.upstream_updated_at IS NOT NULL
+                      AND ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt}
+                        < excluded.upstream_updated_at
+                    )
+                    OR (
+                      (
+                        ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt} IS NULL
+                        OR excluded.upstream_updated_at IS NULL
+                        OR ${managerEventScoreSnapshotsInFpl.upstreamUpdatedAt}
+                          = excluded.upstream_updated_at
+                      )
+                      AND ${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at
+                    )
+                  )
+                )
+              )
+            )
+          `,
         });
     },
   };

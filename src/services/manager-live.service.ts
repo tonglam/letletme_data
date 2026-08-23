@@ -1,10 +1,10 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import { drizzle } from 'drizzle-orm/postgres-js';
 import type Redis from 'ioredis';
 import type postgres from 'postgres';
 
-import { fplClient, type RawFPLLeagueStandingsResponse } from '../clients/fpl';
+import { EntrySummarySchema, fplClient, type RawFPLLeagueStandingsResponse } from '../clients/fpl';
 import { publishManagerLiveCacheMonotonically } from '../cache/manager-live-publication';
 import { redisSingleton } from '../cache/singleton';
 import { getDbClient, runInDatabaseTransaction } from '../db/singleton';
@@ -25,24 +25,37 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  acquireDistributedLease,
+  classicManagerBackgroundStandingsStartPage,
+  classicManagerSummaryFallbackEntryIds,
+  classicManagerSummaryFallbackNeedsRefresh,
+  createDistributedLeaseFence,
   createKeyedSerialTaskGate,
   createKeyedSerialTaskScheduler,
+  createKeyedTaskSerializer,
   createManagerSummaryFetchGate,
-  isPositiveOverallRank,
   isNewerClassicOverallRankPublicationOrder,
+  isPositiveOverallRank,
+  managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
   mergeUniqueTargetManagerRows,
-  pendingOverallRankRefreshEntryIds,
-  type ManagerSummaryFetchPriority,
+  pendingManagerRefreshEntryIds,
   planClassicManagerFallback,
-  planClassicOverallRankRefresh,
+  planManagerLiveRefreshTargets,
   preserveLastKnownOverallRank,
   reconcileMonotonicCachePublicationRows,
+  readThroughManagerSummaryResult,
+  requireManagerSummaryCoordinator,
+  runManagerStandingsPageSequence,
+  runYieldingKeyedTask,
   selectClassicSummaryOverallRank,
+  selectForegroundClassicRankEntryIds,
   selectLatestCheckedRow,
+  shouldEnrichClassicOverallRank,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
-  shouldRetryPendingClassicOverallRank,
+  shouldReplaceManagerLiveRow,
+  type ManagerSummaryFetchPriority,
 } from '../domain/manager-live-fallback';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
@@ -54,6 +67,31 @@ const STALE_SECONDS = Math.max(90, 3 * REFRESH_SECONDS);
 const MAX_STANDINGS_PAGES = 20;
 const MAX_FOREGROUND_STANDINGS_PAGES = 4;
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
+// A small classic roster should receive a complete OR column in the initial
+// response. Larger leagues remain bounded and finish through the background
+// refresh below.
+const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
+// One serialized background unit fetches at most one FPL standings page or one
+// entry summary. Keep its lease longer than the client's 40-second logical
+// request deadline, and renew it while publication/checkpoint work finishes.
+const CLASSIC_REFRESH_LOCK_SECONDS = 60;
+const CLASSIC_REFRESH_LOCK_WAIT_MS = 100;
+// Match the manager-row freshness window. Every replica refreshing the same
+// season/event/entry during that window must reuse one unversioned observation.
+const ENTRY_SUMMARY_SHARED_RESULT_SECONDS = REFRESH_SECONDS;
+
+const RELEASE_CLASSIC_REFRESH_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+const RENEW_CLASSIC_REFRESH_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+`;
 
 export type ManagerLiveSource = 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
 export type ManagerLiveTotalScope = 'OVERALL' | 'CLASSIC_PHASE';
@@ -226,6 +264,7 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
       !Number.isSafeInteger(row.eventId) ||
       !Number.isSafeInteger(row.entryId) ||
       typeof row.checkedAt !== 'string' ||
+      !Number.isFinite(Date.parse(row.checkedAt)) ||
       typeof row.revision !== 'string' ||
       (row.source !== 'FPL_ENTRY_SUMMARY' &&
         row.source !== 'FPL_CLASSIC_STANDINGS' &&
@@ -235,6 +274,7 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
     }
     if (
       typeof row.staleAt !== 'string' ||
+      !Number.isFinite(Date.parse(row.staleAt)) ||
       (row.netEventPoints !== undefined &&
         row.netEventPoints !== null &&
         typeof row.netEventPoints !== 'number') ||
@@ -266,6 +306,18 @@ const readCachedRows = async (
     if (row) rows.set(entryIds[index], row);
   }
   return rows;
+};
+
+const mergeLatestRows = (
+  target: Map<number, CachedRow>,
+  incoming: ReadonlyMap<number, CachedRow>,
+): void => {
+  for (const [entryId, row] of incoming) {
+    const current = target.get(entryId);
+    if (!current || shouldReplaceManagerLiveRow(current, row)) {
+      target.set(entryId, current ? withPreservedOverallRank(row, current.overallRank) : row);
+    }
+  }
 };
 
 const readCachedRowsForPublication = async (
@@ -335,6 +387,16 @@ const readCachedAndCheckpointRows = async (
   return rows;
 };
 
+const readBackgroundRows = async (
+  redis: Redis | null,
+  season: FplSeasonRef,
+  eventId: number,
+  scope: ManagerScoreScope,
+  entryIds: readonly number[],
+  capturedRows: ReadonlyMap<number, CachedRow>,
+): Promise<Map<number, CachedRow>> =>
+  readCachedAndCheckpointRows(redis, season, eventId, scope, entryIds, capturedRows);
+
 const readClassicPublicationState = async (
   season: FplSeasonRef,
   eventId: number,
@@ -381,7 +443,6 @@ const readClassicPublicationState = async (
   }
   return { rows, overallRankPublicationStartedAtByEntryId };
 };
-
 const writeRows = async (
   redis: Redis | null,
   season: string,
@@ -522,41 +583,14 @@ const writeCheckpointRows = async (
   }
 };
 
-const readOverallRankRefreshMarkers = async (
-  redis: Redis | null,
-  season: string,
-  eventId: number,
-  scope: ManagerScoreScope,
-  entryIds: readonly number[],
-): Promise<Map<number, string> | null> => {
-  if (!redis) return null;
-  const uniqueEntryIds = Array.from(new Set(entryIds));
-  if (uniqueEntryIds.length === 0) return new Map();
-  try {
-    const values = await redis.hmget(
-      overallRankMarkerCacheKey(season, eventId, scope),
-      ...uniqueEntryIds.map(String),
-    );
-    const markers = new Map<number, string>();
-    uniqueEntryIds.forEach((entryId, index) => {
-      const marker = values[index];
-      if (marker) markers.set(entryId, marker);
-    });
-    return markers;
-  } catch (error) {
-    logWarn('Official manager overall-rank marker read failed', {
-      eventId,
-      scope: scopeKey(scope),
-      error: error instanceof Error ? error.message : 'unknown',
-    });
-    return null;
-  }
-};
-
 const nowIso = (): string => new Date().toISOString();
 
 const plusSeconds = (checkedAt: string, seconds: number): string =>
   new Date(Date.parse(checkedAt) + seconds * 1000).toISOString();
+
+const classicStandingNeedsOverallRank = (row: CachedRow | undefined): boolean =>
+  row?.source === 'FPL_CLASSIC_STANDINGS' &&
+  (!isPositiveOverallRank(row.overallRank) || row.overallRank <= 0);
 
 const toEntrySummaryRow = (
   season: string,
@@ -636,6 +670,222 @@ const runManagerLiveBackgroundRefresh = createKeyedSerialTaskScheduler();
 // batching alone is insufficient because distinct tournaments can refresh at
 // the same time and otherwise multiply FPL entry-summary concurrency.
 const runManagerSummaryFetch = createManagerSummaryFetchGate();
+// Every classic standings crawl and its OR enrichment share one prioritized
+// lane for a season/event/league. Foreground misses jump ahead of queued
+// background work; disjoint jobs remain queued and different leagues proceed
+// independently.
+const runClassicStandingsRefreshLocal = createKeyedTaskSerializer();
+
+const classicRefreshLockKey = (key: string): string =>
+  `OfficialManagerLiveRefreshLock:${createHash('sha256').update(key).digest('hex')}`;
+
+class ManagerLiveLeaseOwnershipError extends Error {
+  constructor(key: string, cause: unknown) {
+    super(`official manager refresh lease ownership lost for ${key}`, { cause });
+    this.name = 'ManagerLiveLeaseOwnershipError';
+  }
+}
+
+const entrySummarySharedResultKey = (season: string, eventId: number, entryId: number): string =>
+  `OfficialManagerLiveEntrySummaryResult:${season}:${eventId}:${entryId}`;
+
+type ManagerSummaryObservation = Readonly<{
+  summary: Awaited<ReturnType<typeof fplClient.getEntrySummary>>;
+  observedAt: string;
+  publicationOrder: string | null;
+}>;
+
+const parseManagerSummaryObservation = (value: string): ManagerSummaryObservation | null => {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const candidate = parsed as {
+      summary?: unknown;
+      observedAt?: unknown;
+      publicationOrder?: unknown;
+    };
+    if (typeof candidate.observedAt !== 'string') return null;
+    const observedAtDate = new Date(candidate.observedAt);
+    if (
+      !Number.isFinite(observedAtDate.getTime()) ||
+      observedAtDate.toISOString() !== candidate.observedAt
+    ) {
+      return null;
+    }
+    const publicationOrder = candidate.publicationOrder ?? null;
+    if (publicationOrder !== null && typeof publicationOrder !== 'string') return null;
+    const validated = EntrySummarySchema.safeParse(candidate.summary);
+    return validated.success
+      ? { summary: validated.data, observedAt: candidate.observedAt, publicationOrder }
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const runClassicStandingsRefresh = <T>(
+  redis: Redis | null,
+  key: string,
+  task: (assertLeaseOwned: () => Promise<void>) => Promise<T>,
+  priority: ManagerSummaryFetchPriority = 'foreground',
+  options: { acquireFailureMode?: 'fail-open' | 'fail-closed' } = {},
+): Promise<T> => {
+  if (!redis) {
+    return runClassicStandingsRefreshLocal(key, () => task(async () => undefined), priority);
+  }
+
+  const lockKey = classicRefreshLockKey(key);
+  return runYieldingKeyedTask<T>(
+    runClassicStandingsRefreshLocal,
+    key,
+    async () => {
+      const lockToken = randomBytes(16).toString('hex');
+      const acquisition = await acquireDistributedLease(
+        async () =>
+          (await redis.set(lockKey, lockToken, 'EX', CLASSIC_REFRESH_LOCK_SECONDS, 'NX')) === 'OK',
+        options.acquireFailureMode ?? 'fail-open',
+        (error) =>
+          logWarn('Official manager distributed refresh lock unavailable', {
+            key,
+            error: error instanceof Error ? error.message : 'unknown',
+          }),
+      );
+      if (acquisition === 'uncoordinated') {
+        // Classic standings have an upstream publication clock and a durable
+        // PostgreSQL ordering guard, so they remain serviceable if Redis is
+        // unavailable. Unversioned entry summaries opt into fail-closed below.
+        return { complete: true, value: await task(async () => undefined) };
+      }
+      if (acquisition === 'contended') {
+        // A present lease is either actively renewed or will expire. Never
+        // bypass an owner merely because this waiter is old: Redis expiry is
+        // the takeover signal for a crashed/wedged owner, while an active
+        // renewal proves that concurrent publication would be unsafe.
+        return { complete: false };
+      }
+
+      const leaseFence = createDistributedLeaseFence(
+        async () =>
+          (await redis.eval(
+            RENEW_CLASSIC_REFRESH_LOCK_SCRIPT,
+            1,
+            lockKey,
+            lockToken,
+            CLASSIC_REFRESH_LOCK_SECONDS,
+          )) === 1,
+        (error) =>
+          logWarn('Official manager distributed refresh lease lost', {
+            key,
+            error: error instanceof Error ? error.message : 'unknown',
+          }),
+      );
+      const renewTimer = setInterval(
+        leaseFence.renewInBackground,
+        Math.max(1_000, Math.floor((CLASSIC_REFRESH_LOCK_SECONDS * 1000) / 3)),
+      );
+      renewTimer.unref?.();
+
+      try {
+        const value = await task(leaseFence.assertOwned);
+        await leaseFence.assertOwned();
+        return { complete: true, value };
+      } catch (error) {
+        // A task may fail after a renewal was lost but before it reaches its
+        // final fence. Probe once more so request paths can distinguish lease
+        // loss from an ordinary upstream/publication failure and preserve
+        // last-good rows instead of throwing the request.
+        try {
+          await leaseFence.assertOwned();
+        } catch (leaseError) {
+          throw new ManagerLiveLeaseOwnershipError(key, leaseError);
+        }
+        throw error;
+      } finally {
+        clearInterval(renewTimer);
+        await redis
+          .eval(RELEASE_CLASSIC_REFRESH_LOCK_SCRIPT, 1, lockKey, lockToken)
+          .catch(() => undefined);
+      }
+    },
+    priority,
+    () => new Promise((resolve) => setTimeout(resolve, CLASSIC_REFRESH_LOCK_WAIT_MS)),
+  );
+};
+
+const fetchDistributedManagerSummary = (
+  redis: Redis | null,
+  season: string,
+  eventId: number,
+  entryId: number,
+  priority: ManagerSummaryFetchPriority = 'foreground',
+  publicationKey?: string,
+): Promise<ManagerSummaryObservation> => {
+  const coordinator = requireManagerSummaryCoordinator(redis);
+  return runClassicStandingsRefresh(
+    coordinator,
+    `entry-summary:${season}:${eventId}:${entryId}`,
+    (assertLeaseOwned) =>
+      readThroughManagerSummaryResult(
+        async () => {
+          try {
+            const value = await coordinator.get(
+              entrySummarySharedResultKey(season, eventId, entryId),
+            );
+            if (!value) return null;
+            return parseManagerSummaryObservation(value);
+          } catch (error) {
+            logWarn('Official manager shared entry summary read failed', {
+              entryId,
+              error: error instanceof Error ? error.message : 'unknown',
+            });
+            // Without the shared handoff read, another replica's validated
+            // observation cannot be distinguished from a new unversioned
+            // response. Fail closed and keep last-good rows.
+            throw error;
+          }
+        },
+        async () => {
+          let publicationOrder: string | null = null;
+          const summary = await runManagerSummaryFetch(
+            async () =>
+              publicationKey
+                ? fplClient.getEntrySummary(entryId, {
+                    beforeAttempt: async (_attempt, { signal }) => {
+                      publicationOrder = (
+                        await reserveManagerLivePublicationStartedAt(publicationKey, signal)
+                      ).exact;
+                    },
+                  })
+                : fplClient.getEntrySummary(entryId),
+            priority,
+            entryId,
+          );
+          return { summary, observedAt: nowIso(), publicationOrder };
+        },
+        async (observation) => {
+          try {
+            await assertLeaseOwned();
+            await coordinator.set(
+              entrySummarySharedResultKey(season, eventId, entryId),
+              JSON.stringify(observation),
+              'EX',
+              ENTRY_SUMMARY_SHARED_RESULT_SECONDS,
+            );
+          } catch (error) {
+            logWarn('Official manager shared entry summary write failed', {
+              entryId,
+              error: error instanceof Error ? error.message : 'unknown',
+            });
+            // Do not publish a response that other replicas cannot reuse.
+            // Otherwise a subsequent unversioned fetch could still regress it.
+            throw error;
+          }
+        },
+      ),
+    priority,
+    { acquireFailureMode: 'fail-closed' },
+  );
+};
 // Cross-replica publication uses a short PostgreSQL transaction advisory lock.
 // External FPL calls happen between a brief ordering reservation and this
 // reconciliation lock, so a slow upstream never occupies the database pool.
@@ -706,6 +956,7 @@ const refreshEntrySummaries = async (
     priority?: ManagerSummaryFetchPriority;
     force?: boolean;
     preserveClassicStanding?: boolean;
+    assertLeaseOwned?: () => Promise<void>;
   } = {},
 ): Promise<EntrySummaryRefreshResult> => {
   const targets = entryIds
@@ -747,23 +998,19 @@ const refreshEntrySummaries = async (
     const completed = await Promise.all(
       batch.map(async (entryId) => {
         try {
-          const fetched = await runManagerSummaryFetch(async () => {
-            let publicationOrder: string | null = null;
-            // The FPL client invokes this hook after every retry backoff and
-            // immediately before the corresponding fetch. The retained token
-            // therefore belongs to the attempt that produced the response.
-            const summary = classicScope
-              ? await fplClient.getEntrySummary(entryId, {
-                  beforeAttempt: async (_attempt, { signal }) => {
-                    publicationOrder = (
-                      await reserveManagerLivePublicationStartedAt(publicationKey, signal)
-                    ).exact;
-                  },
-                })
-              : await fplClient.getEntrySummary(entryId);
-            return { summary, publicationOrder };
-          }, options.priority);
-          return { entryId, ...fetched };
+          const observation = await fetchDistributedManagerSummary(
+            redis,
+            season.seasonCode,
+            eventId,
+            entryId,
+            options.priority,
+            classicScope ? publicationKey : undefined,
+          );
+          return {
+            entryId,
+            summary: observation.summary,
+            publicationOrder: observation.publicationOrder,
+          };
         } catch (error) {
           if (error instanceof FPLClientError && error.status === 429) {
             refreshErrorCode = 'UPSTREAM_RATE_LIMITED';
@@ -894,6 +1141,7 @@ const refreshEntrySummaries = async (
         nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
       };
       if (classicScope) {
+        await options.assertLeaseOwned?.();
         const checkpointPublished = await writeCheckpointRows(
           season,
           eventId,
@@ -954,6 +1202,7 @@ const refreshEntrySummaries = async (
     if (!classicScope) await writeCheckpointRows(season, eventId, scope, publishedBatch.rows);
     let responseRows = publishedBatch.rows;
     if (classicScope) {
+      await options.assertLeaseOwned?.();
       const cacheUpdatedEntryIds = await writeClassicRowsMonotonically(
         redis,
         season.seasonCode,
@@ -994,6 +1243,7 @@ const refreshClassicStandings = async (
   rows: Map<number, CachedRow>,
   redis: Redis | null,
   options: { startPage?: number; maxPages?: number } = {},
+  assertLeaseOwned: () => Promise<void> = async () => undefined,
 ): Promise<{
   complete: boolean;
   nextPage: number;
@@ -1038,7 +1288,6 @@ const refreshClassicStandings = async (
       error: error instanceof FPLClientError ? (error.code ?? error.status) : 'unknown',
     });
   }
-
   let publishedRows: ManagerLiveScoreRow[] = [];
   if (fetchedRows.size > 0) {
     try {
@@ -1077,6 +1326,7 @@ const refreshClassicStandings = async (
             const candidate = withPreservedOverallRank(restamped, latest?.overallRank);
             return mergeLatestManagerLiveRow(latest, candidate);
           });
+          await assertLeaseOwned();
           const checkpointPublished = await writeCheckpointRows(
             season,
             eventId,
@@ -1094,6 +1344,7 @@ const refreshClassicStandings = async (
         },
       );
       publishedRows = publication.rows;
+      await assertLeaseOwned();
       const cacheUpdatedEntryIds = await writeClassicRowsMonotonically(
         redis,
         season.seasonCode,
@@ -1311,10 +1562,36 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     scope,
     uniqueEntryIds,
   );
-  const staleOrMissing = uniqueEntryIds.filter(
-    (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+  const refreshNow = Date.now();
+  const usableCachedEntryIds = new Set(
+    uniqueEntryIds.filter((entryId) => {
+      const row = rows.get(entryId);
+      return row !== undefined && isWithinStaleWindow(row, refreshNow);
+    }),
   );
-  const staleOrMissingIds = new Set(staleOrMissing);
+  const refreshPlan = planManagerLiveRefreshTargets(
+    uniqueEntryIds,
+    usableCachedEntryIds,
+    new Set(
+      uniqueEntryIds.filter((entryId) => {
+        const row = rows.get(entryId);
+        return row !== undefined && isFresh(row, refreshNow);
+      }),
+    ),
+  );
+  const staleOrMissing = refreshPlan.backgroundEntryIds;
+  const foregroundRefreshTargets = refreshPlan.foregroundEntryIds;
+  const coldEntryIds = new Set(foregroundRefreshTargets);
+  const staleLastGoodCount = staleOrMissing.filter((entryId) =>
+    usableCachedEntryIds.has(entryId),
+  ).length;
+  if (staleLastGoodCount > 0) {
+    logDebug('Serving last-good manager rows while refreshing in background', {
+      eventId: input.eventId,
+      scope: scopeKey(scope),
+      staleRowCount: staleLastGoodCount,
+    });
+  }
   const classicOverallRankMissing =
     input.tournamentId !== undefined &&
     tournament?.leagueType === 'classic' &&
@@ -1329,50 +1606,55 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     // FPL does not expose a live H2H table, but its official entry summary is
     // still a well-defined event score. Use it for provisional pairings and
     // let the final database result replace it after finalization.
-    if (staleOrMissing.length > 0) {
+    if (foregroundRefreshTargets.length > 0) {
       const summaryRefresh = await refreshEntrySummaries(
         season,
         input.eventId,
-        staleOrMissing,
+        foregroundRefreshTargets,
         rows,
         redis,
         entryScope,
         { maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES },
       );
       refreshErrorCode = summaryRefresh.errorCode;
-      const pending = staleOrMissing.filter(
-        (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
-      );
-      if (pending.length > 0) {
-        const backgroundKey = `h2h:${season.seasonCode}:${input.eventId}:${input.tournamentId}`;
-        const backgroundWorkKey = `${backgroundKey}:entries:${pending
-          .slice()
-          .sort((left, right) => left - right)
-          .join(',')}`;
-        scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
-          const backgroundRows = await readCachedRows(
-            redis,
-            season.seasonCode,
-            input.eventId,
-            entryScope,
-            pending,
-          );
-          await refreshEntrySummaries(
-            season,
-            input.eventId,
-            pending,
-            backgroundRows,
-            redis,
-            entryScope,
-            { priority: 'background' },
-          );
-          logDebug('Official H2H manager background refresh completed', {
-            eventId: input.eventId,
-            tournamentId: input.tournamentId,
-            remaining: pending.length,
-          });
+    }
+    const pending = staleOrMissing.filter(
+      (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+    );
+    if (pending.length > 0) {
+      const backgroundKey = `h2h:${season.seasonCode}:${input.eventId}:${input.tournamentId}:${pending
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}`;
+      const backgroundWorkKey = `${backgroundKey}:entries:${pending
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}`;
+      const capturedBackgroundRows = new Map(rows);
+      scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
+        const backgroundRows = await readBackgroundRows(
+          redis,
+          season,
+          input.eventId,
+          entryScope,
+          pending,
+          capturedBackgroundRows,
+        );
+        await refreshEntrySummaries(
+          season,
+          input.eventId,
+          pending,
+          backgroundRows,
+          redis,
+          entryScope,
+          { priority: 'background' },
+        );
+        logDebug('Official H2H manager background refresh completed', {
+          eventId: input.eventId,
+          tournamentId: input.tournamentId,
+          remaining: pending.length,
         });
-      }
+      });
     }
   } else if (
     input.tournamentId !== undefined &&
@@ -1380,236 +1662,461 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   ) {
     if (!tournament) throw new Error('Tournament validation unexpectedly missing');
     const classicLeagueId = tournament.leagueId;
-    // Capture OR-specific completion evidence before any work in this request.
-    // A standings publication also advances checkedAt, so row timestamps cannot
-    // distinguish deferred OR work from an OR refresh completed by another
-    // request or replica while this background task waits for its turn.
-    const overallRankMarkerBaseline = await readOverallRankRefreshMarkers(
-      redis,
-      season.seasonCode,
-      input.eventId,
-      scope,
+    const classicRefreshKey = `${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
+    let standings: Awaited<ReturnType<typeof refreshClassicStandings>> = {
+      complete: false,
+      nextPage: 1,
+      errorCode: null,
+      refreshedEntryIds: [],
+    };
+    let foregroundRankEnrichedEntryIds: readonly number[] = [];
+    const foregroundRankMissingEntryIds = selectForegroundClassicRankEntryIds(
       uniqueEntryIds,
-    );
-    const standings = await refreshClassicStandings(
-      season,
-      input.eventId,
-      classicLeagueId,
-      new Set(staleOrMissing),
       rows,
-      redis,
+      isFresh,
+      classicStandingNeedsOverallRank,
+      MAX_FOREGROUND_OVERALL_RANK_FETCHES,
     );
-    refreshErrorCode = standings.errorCode;
-
-    const standingsRefreshedEntryIds = new Set(standings.refreshedEntryIds);
-    let pendingStandings = staleOrMissing.filter(
-      (entryId) => !standingsRefreshedEntryIds.has(entryId),
+    const foregroundLaneEntryIds = Array.from(
+      new Set([...foregroundRefreshTargets, ...foregroundRankMissingEntryIds]),
     );
-    const fallbackPlan = planClassicManagerFallback(pendingStandings, standings.complete);
-    const fallbackSummaryRefreshedEntryIds = new Set<number>();
-    const fallbackSummaryOverallRankRefreshedEntryIds = new Set<number>();
-    if (fallbackPlan.foregroundSummaryEntryIds.length > 0) {
-      const summaryRefresh = await refreshEntrySummaries(
-        season,
-        input.eventId,
-        fallbackPlan.foregroundSummaryEntryIds,
-        rows,
-        redis,
-        scope,
-      );
-      refreshErrorCode = refreshErrorCode ?? summaryRefresh.errorCode;
-      for (const entryId of summaryRefresh.refreshedEntryIds) {
-        fallbackSummaryRefreshedEntryIds.add(entryId);
-      }
-      for (const entryId of summaryRefresh.overallRankRefreshedEntryIds) {
-        fallbackSummaryOverallRankRefreshedEntryIds.add(entryId);
-      }
-      pendingStandings = fallbackPlan.backgroundEntryIds.filter(
-        (entryId) => !fallbackSummaryRefreshedEntryIds.has(entryId),
-      );
-    }
-
-    // FPL classic standings expose the event/phase totals and the league
-    // position, but not the season-wide Overall Rank (OR). Enrich only rows
-    // whose standings refresh has completed; deeper standings rows stay in a
-    // separate pending set so an OR-only timestamp cannot mark them fresh.
-    const classicOverallRankTargets = uniqueEntryIds.filter(
-      (entryId) =>
-        !fallbackSummaryOverallRankRefreshedEntryIds.has(entryId) &&
-        shouldRefreshClassicOverallRank(rows.get(entryId), staleOrMissingIds.has(entryId)),
-    );
-    const pendingStandingsEntryIds = new Set(pendingStandings);
-    const overallRankPlan = planClassicOverallRankRefresh(
-      classicOverallRankTargets,
-      classicOverallRankTargets.filter(
-        (entryId) => !pendingStandingsEntryIds.has(entryId) && rows.has(entryId),
-      ),
-    );
-    let pendingOverallRank = overallRankPlan.entryIds;
-    if (overallRankPlan.foregroundEntryIds.length > 0) {
-      const summaryRefresh = await refreshEntrySummaries(
-        season,
-        input.eventId,
-        overallRankPlan.foregroundEntryIds,
-        rows,
-        redis,
-        scope,
-        { force: true, preserveClassicStanding: true },
-      );
-      refreshErrorCode = refreshErrorCode ?? summaryRefresh.errorCode;
-      pendingOverallRank = pendingOverallRankRefreshEntryIds(
-        overallRankPlan.entryIds,
-        summaryRefresh.overallRankRefreshedEntryIds,
-      );
-    }
-
-    const backgroundEntryIds = Array.from(new Set([...pendingStandings, ...pendingOverallRank]));
-    if (backgroundEntryIds.length > 0) {
-      const backgroundKey = `classic:${season.seasonCode}:${input.eventId}:${classicLeagueId}`;
-      const backgroundWorkKey = `${backgroundKey}:standings:${pendingStandings
-        .slice()
-        .sort((left, right) => left - right)
-        .join(',')}:overall-rank:${pendingOverallRank
-        .slice()
-        .sort((left, right) => left - right)
-        .join(',')}:page:${standings.nextPage}:complete:${standings.complete}`;
-      const backgroundSeedRows = new Map(rows);
-      scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
-        const backgroundRows = await readCachedAndCheckpointRows(
+    if (foregroundLaneEntryIds.length > 0) {
+      let foregroundRefresh: {
+        standings: Awaited<ReturnType<typeof refreshClassicStandings>>;
+        rankError: EntrySummaryRefreshResult | null;
+      } = {
+        standings,
+        rankError: null,
+      };
+      try {
+        foregroundRefresh = await runClassicStandingsRefresh(
           redis,
-          season,
-          input.eventId,
-          scope,
-          backgroundEntryIds,
-          backgroundSeedRows,
+          classicRefreshKey,
+          async (assertLeaseOwned) => {
+            const latestRows = await readBackgroundRows(
+              redis,
+              season,
+              input.eventId,
+              scope,
+              foregroundLaneEntryIds,
+              rows,
+            );
+            mergeLatestRows(rows, latestRows);
+            const standingsTargets = pendingManagerRefreshEntryIds(
+              foregroundRefreshTargets,
+              rows,
+              isFresh,
+            );
+            const nextStandings =
+              standingsTargets.length > 0
+                ? await refreshClassicStandings(
+                    season,
+                    input.eventId,
+                    classicLeagueId,
+                    new Set(standingsTargets),
+                    rows,
+                    redis,
+                    {},
+                    assertLeaseOwned,
+                  )
+                : {
+                    complete: true,
+                    nextPage: 1,
+                    errorCode: null,
+                    refreshedEntryIds: [],
+                  };
+            // The lane remains held through OR enrichment so an older standings
+            // snapshot cannot be re-published after a newer same-league crawl.
+            const rankCandidateIds = new Set([
+              ...foregroundRankMissingEntryIds,
+              ...nextStandings.refreshedEntryIds,
+            ]);
+            const refreshedRankCandidateIds = new Set(nextStandings.refreshedEntryIds);
+            const rankOnlyCandidateIds = new Set(foregroundRankMissingEntryIds);
+            const rankTargets = uniqueEntryIds
+              .filter((entryId) => {
+                const row = rows.get(entryId);
+                return (
+                  rankCandidateIds.has(entryId) &&
+                  row?.source === 'FPL_CLASSIC_STANDINGS' &&
+                  shouldEnrichClassicOverallRank(
+                    entryId,
+                    row,
+                    refreshedRankCandidateIds,
+                    rankOnlyCandidateIds,
+                    isFresh,
+                    classicStandingNeedsOverallRank,
+                  )
+                );
+              })
+              .slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
+            const rankError =
+              rankTargets.length > 0
+                ? await refreshEntrySummaries(
+                    season,
+                    input.eventId,
+                    rankTargets,
+                    rows,
+                    redis,
+                    scope,
+                    {
+                      force: true,
+                      preserveClassicStanding: true,
+                      assertLeaseOwned,
+                    },
+                  )
+                : null;
+            // A partial wave does not identify which entry failed. Conservatively
+            // retry the whole refreshed set in the background; the shared result
+            // cache makes successful duplicates cheap and preserves one official
+            // observation across replicas.
+            foregroundRankEnrichedEntryIds = rankError === null ? rankTargets : [];
+            return { standings: nextStandings, rankError };
+          },
+          'foreground',
         );
-
-        // A distinct overlapping request may have queued while another task
-        // was refreshing this scope. Re-check the latest rows when this turn
-        // starts so queued subsets do not repeat standings or Summary calls.
-        let unresolvedStandings = pendingStandings.filter((entryId) => {
-          const row = backgroundRows.get(entryId);
-          return !row || !isFresh(row);
+      } catch (error) {
+        if (!(error instanceof ManagerLiveLeaseOwnershipError)) throw error;
+        refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
+        logWarn('Official classic manager foreground lease lost; preserving last-good rows', {
+          eventId: input.eventId,
+          leagueId: classicLeagueId,
         });
-        const unresolvedStandingsAtStart = new Set(unresolvedStandings);
-        const latestOverallRankMarkers = await readOverallRankRefreshMarkers(
+      }
+      standings = foregroundRefresh.standings;
+      refreshErrorCode =
+        refreshErrorCode ?? standings.errorCode ?? foregroundRefresh.rankError?.errorCode ?? null;
+    } else {
+      refreshErrorCode = standings.errorCode;
+    }
+
+    let pendingCold = foregroundRefreshTargets.filter(
+      (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+    );
+    const foregroundFallbackPlan = planClassicManagerFallback(pendingCold, [], standings.complete);
+    if (foregroundFallbackPlan.foregroundSummaryEntryIds.length > 0) {
+      let summaryError: EntrySummaryRefreshResult | null = null;
+      try {
+        summaryError = await runClassicStandingsRefresh(
           redis,
-          season.seasonCode,
-          input.eventId,
-          scope,
-          pendingOverallRank,
+          classicRefreshKey,
+          async (assertLeaseOwned) => {
+            const latestRows = await readBackgroundRows(
+              redis,
+              season,
+              input.eventId,
+              scope,
+              foregroundFallbackPlan.foregroundSummaryEntryIds,
+              rows,
+            );
+            mergeLatestRows(rows, latestRows);
+            const summaryTargets = foregroundFallbackPlan.foregroundSummaryEntryIds.filter(
+              (entryId) => {
+                const row = rows.get(entryId);
+                return classicManagerSummaryFallbackNeedsRefresh(row, row ? isFresh(row) : false);
+              },
+            );
+            return summaryTargets.length > 0
+              ? refreshEntrySummaries(season, input.eventId, summaryTargets, rows, redis, scope, {
+                  assertLeaseOwned,
+                })
+              : null;
+          },
+          'foreground',
         );
-        let unresolvedOverallRank = pendingOverallRank.filter((entryId) =>
-          shouldRetryPendingClassicOverallRank(
-            entryId,
-            unresolvedStandingsAtStart.has(entryId),
-            overallRankMarkerBaseline,
-            latestOverallRankMarkers,
-          ),
+      } catch (error) {
+        if (!(error instanceof ManagerLiveLeaseOwnershipError)) throw error;
+        refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+        logWarn('Official classic manager fallback lease lost; preserving last-good rows', {
+          eventId: input.eventId,
+          leagueId: classicLeagueId,
+        });
+      }
+      refreshErrorCode = refreshErrorCode ?? summaryError?.errorCode ?? null;
+      pendingCold = foregroundRefreshTargets.filter(
+        (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
+      );
+    }
+
+    const pendingStale = staleOrMissing.filter(
+      (entryId) =>
+        !coldEntryIds.has(entryId) &&
+        usableCachedEntryIds.has(entryId) &&
+        (!rows.has(entryId) || !isFresh(rows.get(entryId)!)),
+    );
+    const staleSummaryFallbackIds = new Set(
+      pendingStale.filter((entryId) => rows.get(entryId)?.source === 'FPL_ENTRY_SUMMARY'),
+    );
+    const backgroundPlan = planClassicManagerFallback(
+      pendingCold,
+      pendingStale,
+      standings.complete,
+    );
+    const foregroundRankEnrichedIds = new Set(foregroundRankEnrichedEntryIds);
+    const deferredForegroundRankTargets = standings.refreshedEntryIds.filter(
+      (entryId) => !foregroundRankEnrichedIds.has(entryId),
+    );
+    const pendingRefreshIds = new Set([...pendingCold, ...pendingStale]);
+    const rankOnlyTargets = Array.from(
+      new Set([
+        ...deferredForegroundRankTargets,
+        ...uniqueEntryIds.filter(
+          (entryId) =>
+            !pendingRefreshIds.has(entryId) && classicStandingNeedsOverallRank(rows.get(entryId)),
+        ),
+      ]),
+    );
+    const backgroundEntryIds = Array.from(
+      new Set([
+        ...backgroundPlan.backgroundStandingsEntryIds,
+        ...backgroundPlan.backgroundSummaryEntryIds,
+        ...rankOnlyTargets,
+      ]),
+    );
+    const backgroundStandingsStartPage = classicManagerBackgroundStandingsStartPage(
+      backgroundPlan.backgroundStandingsEntryIds,
+      coldEntryIds,
+      standings.nextPage,
+    );
+    if (backgroundEntryIds.length > 0) {
+      const backgroundKey = managerLiveBackgroundRefreshKey(
+        `classic:${season.seasonCode}:${input.eventId}:${classicLeagueId}`,
+        backgroundEntryIds,
+      );
+      const backgroundWorkKey = `${backgroundKey}:standings:${backgroundPlan.backgroundStandingsEntryIds
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}:summary:${backgroundPlan.backgroundSummaryEntryIds
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}:rank:${rankOnlyTargets
+        .slice()
+        .sort((left, right) => left - right)
+        .join(',')}`;
+      const capturedBackgroundRows = new Map(rows);
+      scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
+        let backgroundRows = new Map(capturedBackgroundRows);
+        let backgroundResult: Awaited<ReturnType<typeof refreshClassicStandings>> = {
+          complete: standings.complete,
+          nextPage: standings.nextPage,
+          errorCode: null,
+          refreshedEntryIds: [],
+        };
+        if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
+          backgroundResult = await runManagerStandingsPageSequence(
+            backgroundStandingsStartPage,
+            MAX_STANDINGS_PAGES,
+            (page) =>
+              runClassicStandingsRefresh(
+                redis,
+                classicRefreshKey,
+                async (assertLeaseOwned) => {
+                  // Re-read after entering every page-sized lane. Foreground
+                  // work can jump ahead between pages, and this crawl observes
+                  // any publication that completed while it yielded.
+                  backgroundRows = await readBackgroundRows(
+                    redis,
+                    season,
+                    input.eventId,
+                    scope,
+                    backgroundEntryIds,
+                    capturedBackgroundRows,
+                  );
+                  const standingsTargets = pendingManagerRefreshEntryIds(
+                    backgroundPlan.backgroundStandingsEntryIds,
+                    backgroundRows,
+                    isFresh,
+                  );
+                  return standingsTargets.length > 0
+                    ? refreshClassicStandings(
+                        season,
+                        input.eventId,
+                        classicLeagueId,
+                        new Set(standingsTargets),
+                        backgroundRows,
+                        redis,
+                        { startPage: page, maxPages: 1 },
+                        assertLeaseOwned,
+                      )
+                    : {
+                        complete: true,
+                        nextPage: page,
+                        errorCode: null,
+                        refreshedEntryIds: [],
+                      };
+                },
+                'background',
+              ),
+          );
+        }
+
+        // Only rows refreshed by a successful page (plus rows that were
+        // already fresh rank-only targets) may receive OR enrichment. A failed
+        // crawl must not stamp an old standings row fresh through summary data.
+        const refreshedStandingsIds = new Set([
+          ...deferredForegroundRankTargets,
+          ...backgroundResult.refreshedEntryIds,
+        ]);
+        const rankOnlyEntryIds = new Set(
+          rankOnlyTargets.filter((entryId) => !refreshedStandingsIds.has(entryId)),
         );
-        if (unresolvedStandings.length === 0 && unresolvedOverallRank.length === 0) {
-          logDebug('Official classic manager background refresh already satisfied', {
-            eventId: input.eventId,
-            leagueId: classicLeagueId,
-          });
-          return;
-        }
+        const backgroundRankTargets = Array.from(
+          new Set([...rankOnlyTargets, ...backgroundResult.refreshedEntryIds]),
+        ).filter((entryId) => {
+          const row = backgroundRows.get(entryId);
+          return (
+            row?.source === 'FPL_CLASSIC_STANDINGS' &&
+            shouldEnrichClassicOverallRank(
+              entryId,
+              row,
+              refreshedStandingsIds,
+              rankOnlyEntryIds,
+              isFresh,
+              classicStandingNeedsOverallRank,
+            )
+          );
+        });
 
-        let standingsComplete = standings.complete;
-        if (fallbackPlan.continueStandings && unresolvedStandings.length > 0) {
-          const backgroundStandings = await refreshClassicStandings(
-            season,
-            input.eventId,
-            classicLeagueId,
-            new Set(unresolvedStandings),
-            backgroundRows,
+        // Hold the league lane for one four-entry upstream wave at a time.
+        // Foreground misses can therefore jump ahead between background waves,
+        // while every merge still observes the latest serialized standings row.
+        for (const batch of managerSummaryFetchBatches(backgroundRankTargets)) {
+          await runClassicStandingsRefresh(
             redis,
-            { startPage: standings.nextPage, maxPages: MAX_STANDINGS_PAGES },
-          );
-          standingsComplete = backgroundStandings.complete;
-          const refreshedStandings = new Set(backgroundStandings.refreshedEntryIds);
-          unresolvedStandings = unresolvedStandings.filter(
-            (entryId) => !refreshedStandings.has(entryId),
+            classicRefreshKey,
+            async (assertLeaseOwned) => {
+              const batchRows = await readBackgroundRows(
+                redis,
+                season,
+                input.eventId,
+                scope,
+                batch,
+                backgroundRows,
+              );
+              const rankTargets = batch.filter((entryId) => {
+                const row = batchRows.get(entryId);
+                return (
+                  row?.source === 'FPL_CLASSIC_STANDINGS' &&
+                  shouldEnrichClassicOverallRank(
+                    entryId,
+                    row,
+                    refreshedStandingsIds,
+                    rankOnlyEntryIds,
+                    isFresh,
+                    classicStandingNeedsOverallRank,
+                  )
+                );
+              });
+              if (rankTargets.length > 0) {
+                await refreshEntrySummaries(
+                  season,
+                  input.eventId,
+                  rankTargets,
+                  batchRows,
+                  redis,
+                  scope,
+                  {
+                    force: true,
+                    priority: 'background',
+                    preserveClassicStanding: true,
+                    assertLeaseOwned,
+                  },
+                );
+              }
+              mergeLatestRows(backgroundRows, batchRows);
+            },
+            'background',
           );
         }
 
-        if (standingsComplete && unresolvedStandings.length > 0) {
-          const fallbackRefresh = await refreshEntrySummaries(
-            season,
-            input.eventId,
-            unresolvedStandings,
-            backgroundRows,
-            redis,
-            scope,
-            { priority: 'background' },
-          );
-          const fallbackRefreshed = new Set(fallbackRefresh.refreshedEntryIds);
-          const fallbackOverallRanks = new Set(fallbackRefresh.overallRankRefreshedEntryIds);
-          unresolvedStandings = unresolvedStandings.filter(
-            (entryId) => !fallbackRefreshed.has(entryId),
-          );
-          unresolvedOverallRank = unresolvedOverallRank.filter(
-            (entryId) => !fallbackOverallRanks.has(entryId),
-          );
-        }
-
-        const unresolvedStandingsEntryIds = new Set(unresolvedStandings);
-        const overallRankTargets = unresolvedOverallRank.filter(
-          (entryId) => !unresolvedStandingsEntryIds.has(entryId) && backgroundRows.has(entryId),
+        const summaryCandidates = classicManagerSummaryFallbackEntryIds(
+          backgroundPlan.backgroundSummaryEntryIds,
+          backgroundPlan.backgroundStandingsEntryIds,
+          coldEntryIds,
+          staleSummaryFallbackIds,
+          backgroundResult.complete,
         );
-        if (overallRankTargets.length > 0) {
-          await refreshEntrySummaries(
-            season,
-            input.eventId,
-            overallRankTargets,
-            backgroundRows,
+        for (const batch of managerSummaryFetchBatches(summaryCandidates)) {
+          await runClassicStandingsRefresh(
             redis,
-            scope,
-            { force: true, priority: 'background', preserveClassicStanding: true },
+            classicRefreshKey,
+            async (assertLeaseOwned) => {
+              const batchRows = await readBackgroundRows(
+                redis,
+                season,
+                input.eventId,
+                scope,
+                batch,
+                backgroundRows,
+              );
+              const summaryTargets = batch.filter((entryId) => {
+                const row = batchRows.get(entryId);
+                // Summary is a new-entry fallback only. A classic row that
+                // appeared while this job waited owns phase totals and rank.
+                return classicManagerSummaryFallbackNeedsRefresh(row, row ? isFresh(row) : false);
+              });
+              if (summaryTargets.length > 0) {
+                await refreshEntrySummaries(
+                  season,
+                  input.eventId,
+                  summaryTargets,
+                  batchRows,
+                  redis,
+                  scope,
+                  { priority: 'background', assertLeaseOwned },
+                );
+              }
+              mergeLatestRows(backgroundRows, batchRows);
+            },
+            'background',
           );
         }
-
         logDebug('Official classic manager background refresh completed', {
           eventId: input.eventId,
           leagueId: classicLeagueId,
-          remainingStandings: unresolvedStandings.length,
-          overallRankTargets: overallRankTargets.length,
-          complete: standingsComplete,
+          remaining: summaryCandidates.length,
+          complete: backgroundResult.complete,
         });
       });
     }
   }
 
   if (input.tournamentId === undefined && staleOrMissing.length > 0) {
-    const summaryTargets = staleOrMissing;
-    const summaryRefresh = await refreshEntrySummaries(
-      season,
-      input.eventId,
-      summaryTargets,
-      rows,
-      redis,
-      entryScope,
-      {
-        maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES,
-      },
-    );
-    refreshErrorCode = summaryRefresh.errorCode;
-    const pending = summaryTargets.filter(
+    if (foregroundRefreshTargets.length > 0) {
+      const summaryRefresh = await refreshEntrySummaries(
+        season,
+        input.eventId,
+        foregroundRefreshTargets,
+        rows,
+        redis,
+        entryScope,
+        {
+          maxFetches: MAX_FOREGROUND_SUMMARY_FETCHES,
+        },
+      );
+      refreshErrorCode = summaryRefresh.errorCode;
+    }
+    const pending = staleOrMissing.filter(
       (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
     );
     if (pending.length > 0) {
-      const backgroundKey = `summary:${season.seasonCode}:${input.eventId}`;
+      const backgroundKey = managerLiveBackgroundRefreshKey(
+        `summary:${season.seasonCode}:${input.eventId}`,
+        pending,
+      );
       const backgroundWorkKey = `${backgroundKey}:entries:${pending
         .slice()
         .sort((left, right) => left - right)
         .join(',')}`;
+      const capturedBackgroundRows = new Map(rows);
       scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
-        const backgroundRows = await readCachedRows(
+        const backgroundRows = await readBackgroundRows(
           redis,
-          season.seasonCode,
+          season,
           input.eventId,
           entryScope,
           pending,
+          capturedBackgroundRows,
         );
         await refreshEntrySummaries(
           season,
