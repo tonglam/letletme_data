@@ -1,6 +1,7 @@
 import { createDataSyncWorker } from './workers/data-sync.worker';
 import { createEntrySyncWorker } from './workers/entry-sync.worker';
 import { createLiveDataWorker } from './workers/live-data.worker';
+import { createManagerLiveWorker } from './workers/manager-live.worker';
 import { createLeagueSyncWorker } from './workers/league-sync.worker';
 import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
 import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
@@ -14,7 +15,7 @@ import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { closeUnderstatPermitClient } from './utils/understat-rate-limit';
-import type { WorkerRuntime } from './workers/worker-runtime';
+import { WORKER_SHUTDOWN_TIMEOUT_MS, type WorkerRuntime } from './workers/worker-runtime';
 
 getConfig();
 
@@ -26,6 +27,7 @@ const runtimes: WorkerRuntime[] = [
   createDataSyncWorker(),
   createEntrySyncWorker(),
   createLiveDataWorker(),
+  createManagerLiveWorker(),
   createLeagueSyncWorker(),
   createTournamentSyncWorker(),
   createTournamentSetupWorker(),
@@ -51,8 +53,6 @@ const allQueueEvents = runtimes.flatMap((runtime) => runtime.queueEvents);
 const stopHeartbeat = startWorkerHeartbeat();
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('queueWorker');
 
-const SHUTDOWN_TIMEOUT_MS = 30_000;
-
 async function shutdown(signal: string) {
   logInfo('Worker shutting down', { signal });
   stopHeartbeat();
@@ -67,7 +67,7 @@ async function shutdown(signal: string) {
   ]);
 
   const timeout = new Promise<void>((_, reject) => {
-    setTimeout(() => reject(new Error('Shutdown timed out')), SHUTDOWN_TIMEOUT_MS).unref?.();
+    setTimeout(() => reject(new Error('Shutdown timed out')), WORKER_SHUTDOWN_TIMEOUT_MS).unref?.();
   });
 
   try {

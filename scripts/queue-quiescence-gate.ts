@@ -23,6 +23,16 @@ export function runnableJobCount(counts: RunnableQueueCounts): number {
   return Object.values(counts).reduce((total, count) => total + count, 0);
 }
 
+export function blockingRunnableJobCount(queueName: string, counts: RunnableQueueCounts): number {
+  if (queueName !== 'manager-live') return runnableJobCount(counts);
+  // Manager-live jobs are versioned, idempotent cache/checkpoint refreshes.
+  // Waiting/delayed/prioritized work may safely survive a hard cut and resume
+  // on the new worker; active or structurally paused/parented work must still
+  // settle before migration. This keeps the queue visible to the gate without
+  // making a six-hour hot scope permanently block every deployment.
+  return (counts.active ?? 0) + (counts.paused ?? 0) + (counts['waiting-children'] ?? 0);
+}
+
 export function cascadeId(key: string): { id: string; settled: boolean } | null {
   const marker = ':tournament-cascade:';
   const markerIndex = key.indexOf(marker);
@@ -65,7 +75,7 @@ export function assertQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
   }
 
   const runnable = Object.entries(snapshot.runnableQueues)
-    .filter(([, counts]) => runnableJobCount(counts) !== 0)
+    .filter(([queueName, counts]) => blockingRunnableJobCount(queueName, counts) !== 0)
     .map(([queueName, counts]) => `${queueName}=${JSON.stringify(counts)}`);
   if (runnable.length > 0) {
     throw new Error(`Queues still have runnable jobs: ${runnable.join(', ')}`);

@@ -2,6 +2,7 @@ export const dataSyncQueueName = 'data-sync';
 export const entrySyncQueueName = 'entry-sync';
 export const leagueSyncQueueName = 'league-sync';
 export const liveDataQueueName = 'live-data';
+export const managerLiveQueueName = 'manager-live';
 export const tournamentSyncQueueName = 'tournament-sync';
 export const tournamentSetupQueueName = 'tournament-setup';
 export const tournamentRepairQueueName = 'tournament-repair';
@@ -18,6 +19,7 @@ export const queueNames = [
   entrySyncQueueName,
   leagueSyncQueueName,
   liveDataQueueName,
+  managerLiveQueueName,
   tournamentSyncQueueName,
   tournamentSetupQueueName,
   understatPlayerQueueName,
