@@ -180,13 +180,87 @@ describe('classic manager live fallback', () => {
     expect(selectLatestCheckedRow(delayedOlderSnapshot, newerSnapshot)).toBe(newerSnapshot);
   });
 
-  test('preserves Classic fields only for explicit overall-rank enrichment', () => {
-    const classicRow = { source: 'FPL_CLASSIC_STANDINGS' };
+  test('preserves Classic fields for explicit overall-rank enrichment', () => {
+    const classicRow = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+    };
 
     expect(shouldPreserveClassicStandingForRank(true, classicRow)).toBeTrue();
     expect(shouldPreserveClassicStandingForRank(false, classicRow)).toBeFalse();
     expect(shouldPreserveClassicStandingForRank(undefined, classicRow)).toBeFalse();
     expect(shouldPreserveClassicStandingForRank(true, { source: 'FPL_ENTRY_SUMMARY' })).toBeFalse();
+  });
+
+  test('does not preserve a stale standing that predates fallback Summary I/O', () => {
+    const staleStanding = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+      overallRank: 640_000,
+    };
+
+    expect(
+      shouldPreserveClassicStandingForRank(undefined, staleStanding, staleStanding),
+    ).toBeFalse();
+    expect(
+      shouldPreserveClassicStandingForRank(
+        undefined,
+        { ...staleStanding, overallRank: 620_000 },
+        staleStanding,
+      ),
+    ).toBeFalse();
+  });
+
+  test('preserves a standings publication that arrives during fallback Summary I/O', () => {
+    const staleStanding = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T07:59:55.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+    };
+    const freshStanding = {
+      ...staleStanding,
+      checkedAt: '2026-08-23T08:00:30.000Z',
+      upstreamUpdatedAt: '2026-08-23T08:00:25.000Z',
+      eventPoints: 43,
+      leagueRank: 25,
+    };
+
+    expect(
+      shouldPreserveClassicStandingForRank(undefined, freshStanding, staleStanding),
+    ).toBeTrue();
+    expect(shouldPreserveClassicStandingForRank(undefined, freshStanding, null)).toBeTrue();
+  });
+
+  test('recognizes a changed same-millisecond standings publication without using OR', () => {
+    const baseline = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      checkedAt: '2026-08-23T08:00:00.000Z',
+      upstreamUpdatedAt: '2026-08-23T07:59:55.000Z',
+      eventPoints: 32,
+      leagueRank: 40,
+      overallRank: 640_000,
+    };
+
+    expect(
+      shouldPreserveClassicStandingForRank(
+        undefined,
+        { ...baseline, eventPoints: 43, leagueRank: 25 },
+        baseline,
+      ),
+    ).toBeTrue();
+    expect(
+      shouldPreserveClassicStandingForRank(
+        undefined,
+        { ...baseline, overallRank: 620_000 },
+        baseline,
+      ),
+    ).toBeFalse();
   });
 
   test('keeps the foreground rank budget while retaining deferred and failed work', () => {

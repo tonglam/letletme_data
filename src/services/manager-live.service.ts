@@ -653,6 +653,15 @@ const refreshEntrySummaries = async (
   const classicScope = scope.scopeType === 'CLASSIC_LEAGUE';
   const publicationKey = managerLivePublicationKey(season.seasonCode, eventId, scope);
   for (const batch of managerSummaryFetchBatches(targets)) {
+    // Snapshot the state that existed when this fallback wave began. Classic
+    // publication re-reads the durable checkpoint after FPL I/O; only a
+    // standings row that advanced beyond this snapshot may supersede fallback
+    // Summary metrics.
+    const fallbackBaselineRows = classicScope
+      ? new Map<number, CachedRow | null>(
+          batch.map((entryId) => [entryId, rows.get(entryId) ?? null] as const),
+        )
+      : null;
     const completed = await Promise.all(
       batch.map(async (entryId) => {
         try {
@@ -720,12 +729,13 @@ const refreshEntrySummaries = async (
       const publishedRows = successful.map(
         ({ entryId, summary, publicationOrder: summaryPublicationOrder }) => {
           const existing = latestRows.get(entryId) ?? rows.get(entryId);
-          // Every Classic publication re-reads the checkpoint. If standings
-          // arrived while a fallback Summary request was in flight, retain its
-          // phase totals and league rank and use Summary only for OR.
+          // Every Classic publication re-reads the checkpoint. Explicit OR
+          // enrichment always retains standings; fallback does so only when a
+          // standing advanced after this Summary wave began.
           const candidate = shouldPreserveClassicStandingForRank(
-            options.preserveClassicStanding === true || reReadLatest,
+            options.preserveClassicStanding,
             existing,
+            reReadLatest ? (fallbackBaselineRows?.get(entryId) ?? null) : undefined,
           )
             ? (() => {
                 const { revision: _revision, ...classicRow } = existing;
@@ -734,8 +744,6 @@ const refreshEntrySummaries = async (
                   // Classic standings owns event/phase totals and league rank;
                   // the entry summary owns the season-wide FPL OR.
                   overallRank: summary.summary_overall_rank ?? null,
-                  checkedAt: publicationCheckedAt,
-                  staleAt: plusSeconds(publicationCheckedAt, STALE_SECONDS),
                 });
               })()
             : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, publicationCheckedAt);

@@ -149,11 +149,61 @@ export const shouldRetryPendingClassicOverallRank = (
   return latestMarker === undefined || latestMarker === baselineMarkers.get(entryId);
 };
 
-export const shouldPreserveClassicStandingForRank = <T extends Readonly<{ source: string }>>(
+type ClassicStandingObservation = Readonly<{
+  source: string;
+  checkedAt?: string;
+  upstreamUpdatedAt?: string | null;
+  eventPoints?: number | null;
+  netEventPoints?: number | null;
+  totalPoints?: number | null;
+  totalScope?: string;
+  eventRank?: number | null;
+  leagueRank?: number | null;
+  transferCost?: number | null;
+  eventPointSemantics?: string;
+}>;
+
+const classicStandingPhaseChanged = (
+  row: ClassicStandingObservation,
+  baseline: ClassicStandingObservation,
+): boolean =>
+  row.upstreamUpdatedAt !== baseline.upstreamUpdatedAt ||
+  row.eventPoints !== baseline.eventPoints ||
+  row.netEventPoints !== baseline.netEventPoints ||
+  row.totalPoints !== baseline.totalPoints ||
+  row.totalScope !== baseline.totalScope ||
+  row.eventRank !== baseline.eventRank ||
+  row.leagueRank !== baseline.leagueRank ||
+  row.transferCost !== baseline.transferCost ||
+  row.eventPointSemantics !== baseline.eventPointSemantics;
+
+export const shouldPreserveClassicStandingForRank = <T extends ClassicStandingObservation>(
   requested: boolean | undefined,
   row: T | undefined,
-): row is T & { source: 'FPL_CLASSIC_STANDINGS' } =>
-  requested === true && row?.source === 'FPL_CLASSIC_STANDINGS';
+  // undefined means this is not a fallback publication. null means fallback
+  // started without a standings row and one appeared while Summary was in
+  // flight. A concrete row is the fallback-start snapshot.
+  fallbackBaseline?: T | null,
+): row is T & { source: 'FPL_CLASSIC_STANDINGS' } => {
+  if (row?.source !== 'FPL_CLASSIC_STANDINGS') return false;
+  if (requested === true) return true;
+  if (fallbackBaseline === undefined) return false;
+  if (fallbackBaseline === null || fallbackBaseline.source !== 'FPL_CLASSIC_STANDINGS') return true;
+
+  const rowCheckedAt = Date.parse(row.checkedAt ?? '');
+  const baselineCheckedAt = Date.parse(fallbackBaseline.checkedAt ?? '');
+  if (Number.isFinite(rowCheckedAt) && Number.isFinite(baselineCheckedAt)) {
+    if (rowCheckedAt > baselineCheckedAt) return true;
+    if (rowCheckedAt < baselineCheckedAt) return false;
+  } else if (Number.isFinite(rowCheckedAt) && !Number.isFinite(baselineCheckedAt)) {
+    return true;
+  }
+
+  // A same-millisecond standings publication can still carry a newer FPL
+  // snapshot or changed phase fields. OR itself is intentionally excluded so
+  // a concurrent rank-only enrichment cannot make an old standing look new.
+  return classicStandingPhaseChanged(row, fallbackBaseline);
+};
 
 export const planClassicOverallRankRefresh = (
   entryIds: readonly number[],
