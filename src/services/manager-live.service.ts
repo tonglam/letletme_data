@@ -32,6 +32,7 @@ import {
   selectLatestCheckedRow,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
+  shouldRetryPendingClassicOverallRank,
 } from '../domain/manager-live-fallback';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
@@ -991,6 +992,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       ),
     );
     let pendingOverallRank = overallRankPlan.entryIds;
+    let foregroundOverallRankRetryEntryIds = new Set<number>();
     if (overallRankPlan.foregroundEntryIds.length > 0) {
       const summaryRefresh = await refreshEntrySummaries(
         season,
@@ -1005,6 +1007,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       pendingOverallRank = pendingOverallRankRefreshEntryIds(
         overallRankPlan.entryIds,
         summaryRefresh.overallRankRefreshedEntryIds,
+      );
+      foregroundOverallRankRetryEntryIds = new Set(
+        pendingOverallRankRefreshEntryIds(
+          overallRankPlan.foregroundEntryIds,
+          summaryRefresh.overallRankRefreshedEntryIds,
+        ),
       );
     }
 
@@ -1037,10 +1045,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           return !row || !isFresh(row);
         });
         const unresolvedStandingsAtStart = new Set(unresolvedStandings);
-        const unresolvedOverallRank = pendingOverallRank.filter(
-          (entryId) =>
-            unresolvedStandingsAtStart.has(entryId) ||
-            shouldRefreshClassicOverallRank(backgroundRows.get(entryId), false),
+        const unresolvedOverallRank = pendingOverallRank.filter((entryId) =>
+          shouldRetryPendingClassicOverallRank(
+            backgroundRows.get(entryId),
+            unresolvedStandingsAtStart.has(entryId),
+            foregroundOverallRankRetryEntryIds.has(entryId),
+          ),
         );
         if (unresolvedStandings.length === 0 && unresolvedOverallRank.length === 0) {
           logDebug('Official classic manager background refresh already satisfied', {

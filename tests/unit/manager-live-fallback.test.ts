@@ -13,6 +13,7 @@ import {
   selectLatestCheckedRow,
   shouldPreserveClassicStandingForRank,
   shouldRefreshClassicOverallRank,
+  shouldRetryPendingClassicOverallRank,
 } from '../../src/domain/manager-live-fallback';
 
 describe('classic manager live fallback', () => {
@@ -171,6 +172,24 @@ describe('classic manager live fallback', () => {
       shouldRefreshClassicOverallRank({ source: 'FPL_ENTRY_SUMMARY', overallRank: null }, true),
     ).toBeTrue();
     expect(shouldRefreshClassicOverallRank(undefined, true)).toBeTrue();
+  });
+
+  test('retains explicit foreground OR failures for the background retry', () => {
+    const preservedClassicRow = {
+      source: 'FPL_CLASSIC_STANDINGS',
+      overallRank: 640_000,
+    };
+
+    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, false, true)).toBeTrue();
+    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, false, false)).toBeFalse();
+    expect(shouldRetryPendingClassicOverallRank(preservedClassicRow, true, false)).toBeTrue();
+    expect(
+      shouldRetryPendingClassicOverallRank(
+        { ...preservedClassicRow, overallRank: null },
+        false,
+        false,
+      ),
+    ).toBeTrue();
   });
 
   test('uses official entry summaries after standings pagination is exhausted', () => {
