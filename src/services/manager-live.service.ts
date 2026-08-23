@@ -56,6 +56,7 @@ import {
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectClassicSummaryOverallRank,
+  selectEarlierManagerLiveObservationAt,
   selectForegroundClassicRankEntryIds,
   selectLatestCheckedRow,
   shouldEnrichClassicOverallRank,
@@ -607,7 +608,7 @@ const writeCheckpointRows = async (
   overallRankPublicationStartedAtByEntryId: ReadonlyMap<number, string> = new Map(),
 ): Promise<boolean> => {
   try {
-    await managerScoreCheckpointRepository.upsertBatch(
+    const acceptedRowCount = await managerScoreCheckpointRepository.upsertBatch(
       season,
       eventId,
       scope,
@@ -618,6 +619,15 @@ const writeCheckpointRows = async (
         ),
       ),
     );
+    if (acceptedRowCount !== rows.length) {
+      logWarn('Official manager checkpoint publication was partially accepted', {
+        eventId,
+        scope: scopeKey(scope),
+        expectedRows: rows.length,
+        acceptedRows: acceptedRowCount,
+      });
+      return false;
+    }
     return true;
   } catch (error) {
     logWarn('Official manager checkpoint write failed', {
@@ -986,6 +996,7 @@ const fetchDistributedManagerSummary = async (
   entryId: number,
   priority: ManagerSummaryFetchPriority = 'foreground',
   publicationKey?: string,
+  publicationOrderingRequired = false,
   requestDeadlineMs?: number,
 ): Promise<ManagerSummaryObservation> => {
   // Some deployments (and the lightweight unit harness) expose only the
@@ -1004,9 +1015,17 @@ const fetchDistributedManagerSummary = async (
           ? fplClient.getEntrySummary(entryId, {
               ...(requestDeadlineMs === undefined ? {} : { deadlineMs: requestDeadlineMs }),
               beforeAttempt: async (_attempt, { signal }) => {
-                publicationOrder = (
-                  await reserveManagerLivePublicationStartedAt(publicationKey, signal)
-                ).exact;
+                try {
+                  publicationOrder = (
+                    await reserveManagerLivePublicationStartedAt(publicationKey, signal)
+                  ).exact;
+                } catch (error) {
+                  if (publicationOrderingRequired) throw error;
+                  logWarn('Official manager summary ordering reservation failed', {
+                    entryId,
+                    error: error instanceof Error ? error.message : 'unknown',
+                  });
+                }
               },
             })
           : fplClient.getEntrySummary(
@@ -1050,9 +1069,17 @@ const fetchDistributedManagerSummary = async (
                 ? fplClient.getEntrySummary(entryId, {
                     ...(requestDeadlineMs === undefined ? {} : { deadlineMs: requestDeadlineMs }),
                     beforeAttempt: async (_attempt, { signal }) => {
-                      publicationOrder = (
-                        await reserveManagerLivePublicationStartedAt(publicationKey, signal)
-                      ).exact;
+                      try {
+                        publicationOrder = (
+                          await reserveManagerLivePublicationStartedAt(publicationKey, signal)
+                        ).exact;
+                      } catch (error) {
+                        if (publicationOrderingRequired) throw error;
+                        logWarn('Official manager summary ordering reservation failed', {
+                          entryId,
+                          error: error instanceof Error ? error.message : 'unknown',
+                        });
+                      }
                     },
                   })
                 : fplClient.getEntrySummary(
@@ -1207,12 +1234,22 @@ const refreshEntrySummaries = async (
             eventId,
             entryId,
             options.priority,
-            classicScope ? publicationKey : undefined,
+            // Every shared observation needs a scope-independent ordering
+            // marker. A summary fetched through the ENTRY scope may later be
+            // reused by the Classic scope. If the best-effort reservation is
+            // unavailable, the null marker is rejected by Classic rather than
+            // blocking this direct-entry refresh.
+            publicationKey,
+            classicScope,
             options.requestDeadlineMs,
           );
           return {
             entryId,
             summary: observation.summary,
+            // A waiter must preserve the upstream observation time from the
+            // shared result. Stamping a fresh local time here would extend a
+            // nearly-expired summary for another full refresh interval.
+            observedAt: observation.observedAt,
             publicationOrder: observation.publicationOrder,
           };
         } catch (error) {
@@ -1270,7 +1307,7 @@ const refreshEntrySummaries = async (
         publicationState?.overallRankPublicationStartedAtByEntryId ?? [],
       );
       const publishedRows = successful.map(
-        ({ entryId, summary, publicationOrder: summaryPublicationOrder }) => {
+        ({ entryId, summary, observedAt, publicationOrder: summaryPublicationOrder }) => {
           const existing = latestRows.get(entryId) ?? rows.get(entryId);
           // Every Classic publication re-reads the checkpoint. Explicit OR
           // enrichment always retains standings; fallback does so only when a
@@ -1284,14 +1321,23 @@ const refreshEntrySummaries = async (
           )
             ? (() => {
                 const { revision: _revision, ...classicRow } = existing;
+                // A Classic row combines two independently observed sources:
+                // phase totals from standings and OR from Entry Summary. Its
+                // freshness cannot be newer than either observation.
+                const checkedAt = selectEarlierManagerLiveObservationAt(
+                  classicRow.checkedAt,
+                  observedAt,
+                );
                 return withRevision({
                   ...classicRow,
+                  checkedAt,
+                  staleAt: plusSeconds(checkedAt, STALE_SECONDS),
                   // Classic standings owns event/phase totals and league rank;
                   // the entry summary owns the season-wide FPL OR.
                   overallRank: summary.summary_overall_rank ?? null,
                 });
               })()
-            : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, publicationCheckedAt);
+            : toEntrySummaryRow(season.seasonCode, eventId, entryId, summary, observedAt);
           batchRefreshedEntryIds.push(entryId);
           if (isPositiveOverallRank(summary.summary_overall_rank)) {
             batchOverallRankRefreshedEntryIds.push(entryId);
@@ -1317,16 +1363,27 @@ const refreshEntrySummaries = async (
           let merged = reReadLatest
             ? mergeLatestManagerLiveRow(existing, orderedCandidate)
             : withPreservedOverallRank(candidate, existing?.overallRank);
-          if (
-            acceptOverallRank &&
-            isPositiveOverallRank(summary.summary_overall_rank) &&
-            merged.overallRank !== summary.summary_overall_rank
-          ) {
-            const { revision: _revision, ...withoutRevision } = merged;
-            merged = withRevision({
-              ...withoutRevision,
-              overallRank: summary.summary_overall_rank,
-            });
+          if (acceptOverallRank && isPositiveOverallRank(summary.summary_overall_rank)) {
+            // mergeLatestManagerLiveRow may select a newer Classic standings
+            // row after the Summary rank was applied. Reapply the bounded
+            // observation time so the combined row cannot outlive either
+            // source's evidence.
+            const checkedAt = selectEarlierManagerLiveObservationAt(
+              merged.checkedAt,
+              orderedCandidate.checkedAt,
+            );
+            if (
+              merged.overallRank !== summary.summary_overall_rank ||
+              merged.checkedAt !== checkedAt
+            ) {
+              const { revision: _revision, ...withoutRevision } = merged;
+              merged = withRevision({
+                ...withoutRevision,
+                overallRank: summary.summary_overall_rank,
+                checkedAt,
+                staleAt: plusSeconds(checkedAt, STALE_SECONDS),
+              });
+            }
           }
           if (acceptOverallRank && summaryPublicationOrder) {
             acceptedOverallRankPublicationOrders.set(entryId, summaryPublicationOrder);

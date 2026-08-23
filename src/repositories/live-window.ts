@@ -172,10 +172,10 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
       eventId: number,
       scope: ManagerScoreScope,
       rows: readonly ManagerScoreCheckpoint[],
-    ): Promise<void> => {
-      if (rows.length === 0) return;
+    ): Promise<number> => {
+      if (rows.length === 0) return 0;
       const db = await getDbInstance();
-      await db
+      const acceptedRows = await db
         .insert(managerEventScoreSnapshotsInFpl)
         .values(
           rows.map((row) => ({
@@ -266,12 +266,15 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
                       )
                       AND ${managerEventScoreSnapshotsInFpl.checkedAt} <= excluded.checked_at
                     )
+                    OR excluded.updated_at > ${managerEventScoreSnapshotsInFpl.updatedAt}
                   )
                 )
-              )
+            )
             )
           `,
-        });
+        })
+        .returning({ entryId: managerEventScoreSnapshotsInFpl.entryId });
+      return acceptedRows.length;
     },
   };
 };

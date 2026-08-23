@@ -75,9 +75,11 @@ describe('Classic manager checkpoint OR ordering', () => {
     const db = drizzle(sql, { schema });
     const repository = createManagerScoreCheckpointRepository(db);
 
-    await repository.upsertBatch(SEASON, EVENT_ID, SCOPE, [
-      checkpoint('2026-08-23T08:00:00.000Z', null),
-    ]);
+    expect(
+      await repository.upsertBatch(SEASON, EVENT_ID, SCOPE, [
+        checkpoint('2026-08-23T08:00:00.000Z', null),
+      ]),
+    ).toBe(1);
     await repository.upsertBatch(SEASON, EVENT_ID, SCOPE, [
       checkpoint('2026-08-23T08:00:01.000Z', '2026-08-23T08:00:01.000100Z'),
     ]);
@@ -97,5 +99,14 @@ describe('Classic manager checkpoint OR ordering', () => {
     ]);
     [stored] = await repository.findByScopeAndEntryIds(SEASON, EVENT_ID, SCOPE, [ENTRY_ID]);
     expect(stored?.overallRankPublicationStartedAtExact).toBe('2026-08-23T08:00:01.000101Z');
+
+    expect(
+      await repository.upsertBatch(SEASON, EVENT_ID, SCOPE, [
+        checkpoint('2026-08-23T08:00:00.000Z', '2026-08-23T08:00:05.000000Z'),
+      ]),
+    ).toBe(1);
+    [stored] = await repository.findByScopeAndEntryIds(SEASON, EVENT_ID, SCOPE, [ENTRY_ID]);
+    expect(stored?.checkedAt.toISOString()).toBe('2026-08-23T08:00:00.000Z');
+    expect(stored?.overallRankPublicationStartedAtExact).toBe('2026-08-23T08:00:05.000000Z');
   });
 });
