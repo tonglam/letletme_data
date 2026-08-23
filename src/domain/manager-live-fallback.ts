@@ -180,9 +180,9 @@ const classicStandingPhaseChanged = (
 export const shouldPreserveClassicStandingForRank = <T extends ClassicStandingObservation>(
   requested: boolean | undefined,
   row: T | undefined,
-  // undefined means this is not a fallback publication. null means fallback
-  // started without a standings row and one appeared while Summary was in
-  // flight. A concrete row is the fallback-start snapshot.
+  // undefined means this is not a fallback publication. null is supplied only
+  // after a locked durable read confirms fallback started without a standings
+  // row. A concrete row is the fallback-start snapshot.
   fallbackBaseline?: T | null,
 ): row is T & { source: 'FPL_CLASSIC_STANDINGS' } => {
   if (row?.source !== 'FPL_CLASSIC_STANDINGS') return false;

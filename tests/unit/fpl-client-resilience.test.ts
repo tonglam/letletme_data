@@ -117,6 +117,37 @@ describe('FPL client resilience (FP-18)', () => {
     expect(calls).toBe(3);
   });
 
+  test('runs the entry-summary ordering hook immediately before every retry attempt', async () => {
+    let calls = 0;
+    const attempts: number[] = [];
+    globalThis.fetch = mock(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response('retry', { status: 503, statusText: 'Service Unavailable' });
+      }
+      return new Response(
+        JSON.stringify({
+          id: 123,
+          name: 'Retry XI',
+          player_first_name: 'Retry',
+          player_last_name: 'Manager',
+          summary_overall_rank: 456_789,
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const summary = await fplClient.getEntrySummary(123, {
+      beforeAttempt: (attempt) => {
+        attempts.push(attempt);
+      },
+    });
+
+    expect(summary.summary_overall_rank).toBe(456_789);
+    expect(calls).toBe(2);
+    expect(attempts).toEqual([0, 1]);
+  });
+
   test('persistent 5xx exhausts retries and surfaces the last status', async () => {
     const fetchMock = mock(
       async () => new Response('boom', { status: 503, statusText: 'Service Unavailable' }),

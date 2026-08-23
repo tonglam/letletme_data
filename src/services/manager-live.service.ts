@@ -1,10 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import { drizzle } from 'drizzle-orm/postgres-js';
 import type Redis from 'ioredis';
 import type postgres from 'postgres';
 
 import { fplClient, type RawFPLLeagueStandingsResponse } from '../clients/fpl';
+import { publishManagerLiveCacheMonotonically } from '../cache/manager-live-publication';
 import { redisSingleton } from '../cache/singleton';
 import { getDbClient, runInDatabaseTransaction } from '../db/singleton';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
@@ -102,6 +103,8 @@ const cacheKey = (season: string, eventId: number, scope: ManagerScoreScope): st
   `OfficialManagerLive:${season}:${eventId}:${scopeKey(scope)}`;
 const metaCacheKey = (season: string, eventId: number, scope: ManagerScoreScope): string =>
   `OfficialManagerLiveMeta:${season}:${eventId}:${scopeKey(scope)}`;
+const cacheOrderKey = (season: string, eventId: number, scope: ManagerScoreScope): string =>
+  `OfficialManagerLiveOrder:${season}:${eventId}:${scopeKey(scope)}`;
 const overallRankMarkerCacheKey = (
   season: string,
   eventId: number,
@@ -409,6 +412,48 @@ const writeRows = async (
   }
 };
 
+const writeClassicRowsMonotonically = async (
+  redis: Redis | null,
+  season: string,
+  eventId: number,
+  scope: ManagerScoreScope,
+  rows: readonly ManagerLiveScoreRow[],
+  metadata: Record<string, unknown>,
+  metadataField: string,
+  publicationOrder: string,
+  overallRankPublicationOrders: ReadonlyMap<number, string>,
+): Promise<boolean> => {
+  if (!redis) return false;
+  try {
+    await publishManagerLiveCacheMonotonically(redis, {
+      rowKey: cacheKey(season, eventId, scope),
+      metadataKey: metaCacheKey(season, eventId, scope),
+      rowOrderKey: cacheOrderKey(season, eventId, scope),
+      overallRankMarkerKey: overallRankMarkerCacheKey(season, eventId, scope),
+      publicationOrder,
+      rows: rows.map((row) => ({
+        entryId: row.entryId,
+        payload: JSON.stringify(row),
+        overallRankPublicationOrder: isPositiveOverallRank(row.overallRank)
+          ? (overallRankPublicationOrders.get(row.entryId) ?? null)
+          : null,
+      })),
+      metadataField,
+      metadataPayload: JSON.stringify(metadata),
+      ttlSeconds: CACHE_TTL_SECONDS,
+    });
+    return true;
+  } catch (error) {
+    logWarn('Official manager monotonic Redis write failed; PostgreSQL remains authoritative', {
+      season,
+      eventId,
+      scope: scopeKey(scope),
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return false;
+  }
+};
+
 const writeCheckpointRows = async (
   season: FplSeasonRef,
   eventId: number,
@@ -467,39 +512,6 @@ const readOverallRankRefreshMarkers = async (
       error: error instanceof Error ? error.message : 'unknown',
     });
     return null;
-  }
-};
-
-const writeOverallRankRefreshMarkers = async (
-  redis: Redis | null,
-  season: string,
-  eventId: number,
-  scope: ManagerScoreScope,
-  entryIds: readonly number[],
-): Promise<boolean> => {
-  if (!redis) return false;
-  const uniqueEntryIds = Array.from(new Set(entryIds));
-  if (uniqueEntryIds.length === 0) return true;
-  try {
-    const key = overallRankMarkerCacheKey(season, eventId, scope);
-    const marker = randomUUID();
-    const pipeline = redis.multi();
-    for (const entryId of uniqueEntryIds) pipeline.hset(key, String(entryId), marker);
-    pipeline.expire(key, CACHE_TTL_SECONDS);
-    const results = await pipeline.exec();
-    if (results === null || results.some(([error]) => error !== null)) {
-      throw new Error('Redis overall-rank marker transaction failed');
-    }
-    return true;
-  } catch (error) {
-    // A missing marker can only cause a conservative duplicate retry; it must
-    // never make a valid official rank publication fail.
-    logWarn('Official manager overall-rank marker write failed', {
-      eventId,
-      scope: scopeKey(scope),
-      error: error instanceof Error ? error.message : 'unknown',
-    });
-    return false;
   }
 };
 
@@ -653,26 +665,45 @@ const refreshEntrySummaries = async (
   const classicScope = scope.scopeType === 'CLASSIC_LEAGUE';
   const publicationKey = managerLivePublicationKey(season.seasonCode, eventId, scope);
   for (const batch of managerSummaryFetchBatches(targets)) {
-    // Snapshot the state that existed when this fallback wave began. Classic
-    // publication re-reads the durable checkpoint after FPL I/O; only a
-    // standings row that advanced beyond this snapshot may supersede fallback
-    // Summary metrics.
-    const fallbackBaselineRows = classicScope
-      ? new Map<number, CachedRow | null>(
-          batch.map((entryId) => [entryId, rows.get(entryId) ?? null] as const),
-        )
-      : null;
+    let fallbackBaselineRows: Map<number, CachedRow | null> | null = null;
+    if (classicScope && options.preserveClassicStanding !== true) {
+      try {
+        // Define fallback start with a successful durable read under the same
+        // scope lock used by publishers. A null row now means confirmed absent,
+        // never "unknown because the request-path checkpoint read failed".
+        const baselineState = await runManagerLivePublication(publicationKey, () =>
+          readClassicPublicationState(season, eventId, scope, batch, rows),
+        );
+        fallbackBaselineRows = new Map(
+          batch.map((entryId) => [entryId, baselineState.rows.get(entryId) ?? null] as const),
+        );
+      } catch (error) {
+        refreshErrorCode = refreshErrorCode ?? 'UPSTREAM_UNAVAILABLE';
+        logWarn('Official manager fallback baseline read failed', {
+          eventId,
+          scope: scopeKey(scope),
+          error: error instanceof Error ? error.message : 'unknown',
+        });
+        continue;
+      }
+    }
     const completed = await Promise.all(
       batch.map(async (entryId) => {
         try {
           const fetched = await runManagerSummaryFetch(async () => {
-            // Reserve only after this request owns a Summary permit. A later
-            // foreground admission can no longer overtake queued background
-            // work and receive an incorrectly newer upstream order.
-            const publicationOrder = classicScope
-              ? (await reserveManagerLivePublicationStartedAt(publicationKey)).exact
-              : null;
-            const summary = await fplClient.getEntrySummary(entryId);
+            let publicationOrder: string | null = null;
+            // The FPL client invokes this hook after every retry backoff and
+            // immediately before the corresponding fetch. The retained token
+            // therefore belongs to the attempt that produced the response.
+            const summary = classicScope
+              ? await fplClient.getEntrySummary(entryId, {
+                  beforeAttempt: async () => {
+                    publicationOrder = (
+                      await reserveManagerLivePublicationStartedAt(publicationKey)
+                    ).exact;
+                  },
+                })
+              : await fplClient.getEntrySummary(entryId);
             return { summary, publicationOrder };
           }, options.priority);
           return { entryId, ...fetched };
@@ -707,7 +738,8 @@ const refreshEntrySummaries = async (
       rows: ManagerLiveScoreRow[];
       refreshedEntryIds: number[];
       overallRankRefreshedEntryIds: number[];
-      acceptedOverallRankEntryIds: number[];
+      cachePublicationOrder: string | null;
+      overallRankPublicationOrders: Map<number, string>;
       metadata: Record<string, unknown>;
     }> => {
       const publicationState = reReadLatest
@@ -724,8 +756,10 @@ const refreshEntrySummaries = async (
 
       const batchRefreshedEntryIds: number[] = [];
       const batchOverallRankRefreshedEntryIds: number[] = [];
-      const acceptedOverallRankEntryIds: number[] = [];
       const acceptedOverallRankPublicationOrders = new Map<number, string>();
+      const overallRankPublicationOrders = new Map(
+        publicationState?.overallRankPublicationStartedAtByEntryId ?? [],
+      );
       const publishedRows = successful.map(
         ({ entryId, summary, publicationOrder: summaryPublicationOrder }) => {
           const existing = latestRows.get(entryId) ?? rows.get(entryId);
@@ -735,7 +769,9 @@ const refreshEntrySummaries = async (
           const candidate = shouldPreserveClassicStandingForRank(
             options.preserveClassicStanding,
             existing,
-            reReadLatest ? (fallbackBaselineRows?.get(entryId) ?? null) : undefined,
+            reReadLatest && options.preserveClassicStanding !== true
+              ? (fallbackBaselineRows?.get(entryId) ?? null)
+              : undefined,
           )
             ? (() => {
                 const { revision: _revision, ...classicRow } = existing;
@@ -776,8 +812,8 @@ const refreshEntrySummaries = async (
             });
           }
           if (acceptOverallRank && summaryPublicationOrder) {
-            acceptedOverallRankEntryIds.push(entryId);
             acceptedOverallRankPublicationOrders.set(entryId, summaryPublicationOrder);
+            overallRankPublicationOrders.set(entryId, summaryPublicationOrder);
           }
           return merged;
         },
@@ -803,11 +839,13 @@ const refreshEntrySummaries = async (
         if (!checkpointPublished) {
           throw new Error('Classic entry-summary checkpoint publication failed');
         }
+        const cachePublicationOrder = (await readDatabaseOrderingTimestamp()).exact;
         return {
           rows: publishedRows,
           refreshedEntryIds: batchRefreshedEntryIds,
           overallRankRefreshedEntryIds: batchOverallRankRefreshedEntryIds,
-          acceptedOverallRankEntryIds,
+          cachePublicationOrder,
+          overallRankPublicationOrders,
           metadata,
         };
       }
@@ -825,7 +863,8 @@ const refreshEntrySummaries = async (
         rows: publishedRows,
         refreshedEntryIds: batchRefreshedEntryIds,
         overallRankRefreshedEntryIds: batchOverallRankRefreshedEntryIds,
-        acceptedOverallRankEntryIds,
+        cachePublicationOrder: null,
+        overallRankPublicationOrders,
         metadata,
       };
     };
@@ -849,7 +888,7 @@ const refreshEntrySummaries = async (
     }
     if (!classicScope) await writeCheckpointRows(season, eventId, scope, publishedBatch.rows);
     if (classicScope) {
-      const cachePublished = await writeRows(
+      await writeClassicRowsMonotonically(
         redis,
         season.seasonCode,
         eventId,
@@ -857,16 +896,9 @@ const refreshEntrySummaries = async (
         publishedBatch.rows,
         publishedBatch.metadata,
         'entry-summary',
+        publishedBatch.cachePublicationOrder!,
+        publishedBatch.overallRankPublicationOrders,
       );
-      if (cachePublished) {
-        await writeOverallRankRefreshMarkers(
-          redis,
-          season.seasonCode,
-          eventId,
-          scope,
-          publishedBatch.acceptedOverallRankEntryIds,
-        );
-      }
     }
     for (const row of publishedBatch.rows) rows.set(row.entryId, row);
     refreshedEntryIds.push(...publishedBatch.refreshedEntryIds);
@@ -944,7 +976,7 @@ const refreshClassicStandings = async (
         classicScope,
         uniqueFetchedRows.map((row) => row.entryId),
       );
-      publishedRows = await runManagerLivePublication(
+      const publication = await runManagerLivePublication(
         managerLivePublicationKey(season.seasonCode, eventId, classicScope),
         async () => {
           // Network pagination happens outside the publication gate. Stamp the
@@ -980,10 +1012,15 @@ const refreshClassicStandings = async (
           if (!checkpointPublished) {
             throw new Error('Classic standings checkpoint publication failed');
           }
-          return mergedRows;
+          return {
+            rows: mergedRows,
+            cachePublicationOrder: (await readDatabaseOrderingTimestamp()).exact,
+            overallRankPublicationOrders: publicationState.overallRankPublicationStartedAtByEntryId,
+          };
         },
       );
-      await writeRows(
+      publishedRows = publication.rows;
+      await writeClassicRowsMonotonically(
         redis,
         season.seasonCode,
         eventId,
@@ -1000,6 +1037,8 @@ const refreshClassicStandings = async (
           nextRefreshAt: new Date(Date.now() + REFRESH_SECONDS * 1000).toISOString(),
         },
         `classic:${leagueId}:pages:${startPage}-${Math.max(startPage, nextPage - 1)}`,
+        publication.cachePublicationOrder,
+        publication.overallRankPublicationOrders,
       );
       for (const row of publishedRows) rows.set(row.entryId, row);
     } catch (error) {
