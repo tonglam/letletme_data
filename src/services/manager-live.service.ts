@@ -1,15 +1,13 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-import { drizzle } from 'drizzle-orm/postgres-js';
 import type Redis from 'ioredis';
 import type postgres from 'postgres';
 
 import { EntrySummarySchema, fplClient, type RawFPLLeagueStandingsResponse } from '../clients/fpl';
 import { publishManagerLiveCacheMonotonically } from '../cache/manager-live-publication';
 import { redisSingleton } from '../cache/singleton';
-import { getDbClient, runInDatabaseTransaction } from '../db/singleton';
+import { getDb, runInDatabaseTransaction } from '../db/singleton';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
-import * as databaseSchema from '../db/schemas/index.schema';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
@@ -302,7 +300,7 @@ const toManagerScoreCheckpoint = (
 const fromManagerScoreCheckpoint = (
   row: typeof managerEventScoreSnapshotsInFpl.$inferSelect,
   seasonCode: string,
-): CachedRow => ({
+): CachedRow & { revisionAt: string } => ({
   season: seasonCode,
   eventId: row.eventId,
   entryId: row.entryId,
@@ -320,6 +318,11 @@ const fromManagerScoreCheckpoint = (
   upstreamUpdatedAt: row.upstreamUpdatedAt?.toISOString() ?? null,
   staleAt: plusSeconds(row.checkedAt.toISOString(), STALE_SECONDS),
   revision: row.contentRevision,
+  // `checkedAt` is the upstream observation identity and can legitimately be
+  // unchanged when a later Classic overall-rank enrichment is persisted.
+  // Keep the durable row's write ordering so it can beat an older Redis-only
+  // enrichment with the same observation timestamp.
+  revisionAt: row.updatedAt.toISOString(),
 });
 
 const parseCachedRow = (value: string | null): CachedRow | null => {
@@ -1147,7 +1150,7 @@ const fetchDistributedManagerSummary = async (
 // External FPL calls happen between a brief ordering reservation and this
 // reconciliation lock, so a slow upstream never occupies the database pool.
 const runManagerLivePublicationInProcess = createKeyedSerialTaskGate();
-const runManagerLivePublication = <T>(
+export const runManagerLivePublication = <T>(
   key: string,
   task: () => Promise<T>,
   signal?: AbortSignal,
@@ -1156,8 +1159,16 @@ const runManagerLivePublication = <T>(
     key,
     async (): Promise<T> => {
       if (signal?.aborted) throw signal.reason;
-      const client = await getDbClient();
-      return (await client.begin(async (transaction) => {
+      const db = await getDb();
+      return (await db.transaction(async (drizzleTransaction) => {
+        const transaction = (
+          drizzleTransaction as unknown as {
+            session?: { client?: postgres.TransactionSql };
+          }
+        ).session?.client;
+        if (!transaction) {
+          throw new Error('Drizzle transaction did not expose its pinned postgres client');
+        }
         if (signal?.aborted) throw signal.reason;
         const lockQuery = transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`manager-live:${key}`}, 0))`;
         const cancelLock = (): void => lockQuery.cancel();
@@ -1168,10 +1179,7 @@ const runManagerLivePublication = <T>(
           signal?.removeEventListener('abort', cancelLock);
         }
         if (signal?.aborted) throw signal.reason;
-        const lockedDb = drizzle(transaction as unknown as postgres.Sql, {
-          schema: databaseSchema,
-        });
-        return runInDatabaseTransaction(transaction, task, lockedDb);
+        return runInDatabaseTransaction(transaction, task, drizzleTransaction);
       })) as T;
     },
     signal,

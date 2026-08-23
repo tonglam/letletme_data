@@ -165,6 +165,7 @@ export async function scheduleNextManagerLiveRefresh(
   jobData: ManagerLiveJobData,
   nextRefreshAt: string,
   classicStandingsNextPage?: number | null,
+  classicStandingsStartPage?: number,
 ): Promise<Job<ManagerLiveJobData> | null> {
   const scope = managerLiveScopeFromJobData(jobData);
   // Do not swallow Redis failures here. Propagating them fails the current
@@ -182,7 +183,10 @@ export async function scheduleNextManagerLiveRefresh(
     hotScope.generation,
     jobData.summaryRotationCursor ?? hotScope.summaryRotationCursor,
     classicStandingsNextPage,
-    jobData.classicStandingsPage ?? hotScope.classicStandingsPage ?? 1,
+    // Compare-and-set against the page this worker actually fetched. Reading
+    // the current hot cursor here would let a slow page-one job mistake a
+    // later page (advanced by faster jobs) for its own starting page.
+    classicStandingsStartPage ?? jobData.classicStandingsPage ?? 1,
     Number.isSafeInteger(jobData.classicStandingsCursorEpoch) &&
       (jobData.classicStandingsCursorEpoch ?? -1) >= 0
       ? jobData.classicStandingsCursorEpoch

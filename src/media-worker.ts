@@ -10,6 +10,7 @@ import {
   type ClaimedSourceMediaGate,
 } from './content/media/source-media-repository';
 import { createSourceMediaStorage } from './content/media/source-media-storage';
+import type { SourceMediaProbeMode } from './content/media/source-media-storage';
 import { runSourceMediaRetention } from './content/media/source-media-retention';
 import { databaseSingleton } from './db/singleton';
 import { queueRedisSingleton } from './queues/redis';
@@ -24,7 +25,21 @@ const LEASE_RENEW_INTERVAL_MS = 60_000;
 const GATE_EXECUTION_TIMEOUT_MS = 4 * 60_000;
 const RETENTION_POLL_INTERVAL_MS = 60 * 60_000;
 
-const provisionAndProbe = process.argv.slice(2).includes('--provision-and-probe');
+const cliArgs = process.argv.slice(2);
+const provisionAndProbe = cliArgs.includes('--provision-and-probe');
+const probeModes = cliArgs.filter(
+  (arg): arg is `--probe-${SourceMediaProbeMode}` =>
+    arg === '--probe-tus' || arg === '--probe-standard' || arg === '--probe-tus-no-create',
+);
+if (probeModes.length > 1 || (probeModes.length > 0 && !provisionAndProbe)) {
+  throw new Error('Source-media probe mode must be used exactly once with --provision-and-probe');
+}
+const probeMode: SourceMediaProbeMode =
+  probeModes[0] === '--probe-standard'
+    ? 'standard'
+    : probeModes[0] === '--probe-tus-no-create'
+      ? 'tus-no-create'
+      : 'tus';
 const flags = getSourceMediaRuntimeConfig({ requireCredentials: provisionAndProbe });
 const storage =
   flags.supabaseUrl && flags.secretKey
@@ -37,8 +52,11 @@ const storage =
 
 if (provisionAndProbe) {
   if (!storage) throw new Error('Source-media Storage credentials are missing');
-  await storage.provisionAndProbe();
-  logInfo('Source-media Storage provision and roundtrip probe passed', { bucket: flags.bucket });
+  await storage.provisionAndProbe(probeMode);
+  logInfo('Source-media Storage provision and roundtrip probe passed', {
+    bucket: flags.bucket,
+    probeMode,
+  });
   process.exit(0);
 }
 

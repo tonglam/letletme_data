@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { UNDERSTAT_SPLIT_DIMENSIONS, sourceYearFromSeason } from '../domain/understat';
 import { getConfig } from '../utils/config';
 import { logDebug, logWarn } from '../utils/logger';
 import { acquireUnderstatRequestPermit } from '../utils/understat-rate-limit';
@@ -28,6 +29,26 @@ export const UnderstatIdSchema = UnderstatIntegerSchema.refine((value) => value 
 const nullableNumber = UnderstatNumberSchema.nullable();
 const nullableInteger = UnderstatIntegerSchema.nullable();
 
+const UnderstatForecastSchema = z
+  .object({
+    w: nullableNumber,
+    d: nullableNumber,
+    l: nullableNumber,
+  })
+  .passthrough();
+
+const EMPTY_FORECAST = { w: null, d: null, l: null };
+
+const EMPTY_TEAM_STATISTICS = {
+  situation: {},
+  formation: {},
+  gameState: {},
+  timing: {},
+  shotZone: {},
+  attackSpeed: {},
+  result: {},
+};
+
 export const UnderstatTeamReferenceSchema = z
   .object({
     id: UnderstatIdSchema,
@@ -45,17 +66,23 @@ export const UnderstatMatchDateSchema = z
     goals: z.object({ h: nullableInteger, a: nullableInteger }).passthrough(),
     xG: z.object({ h: nullableNumber, a: nullableNumber }).passthrough(),
     datetime: z.string().min(1),
-    forecast: z
-      .object({
-        w: nullableNumber,
-        d: nullableNumber,
-        l: nullableNumber,
-      })
-      .passthrough(),
+    // Understat omits forecasts for future/unplayed fixtures.  Keep the
+    // match row and normalize the absent provider field to nullable values.
+    forecast: UnderstatForecastSchema.nullish(),
     side: z.enum(['h', 'a']).optional(),
     result: z.enum(['w', 'd', 'l']).optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((value, context) => {
+    if (value.isResult && value.forecast == null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['forecast'],
+        message: 'Completed fixtures must include forecast',
+      });
+    }
+  })
+  .transform((value) => ({ ...value, forecast: value.forecast ?? EMPTY_FORECAST }));
 
 export const UnderstatTeamHistorySchema = z
   .object({
@@ -141,21 +168,33 @@ const UnderstatSplitValueSchema = z
 
 const UnderstatSplitRecordSchema = z.record(UnderstatSplitValueSchema);
 
+const UnderstatTeamStatisticsObjectSchema = z
+  .object({
+    situation: UnderstatSplitRecordSchema,
+    formation: UnderstatSplitRecordSchema,
+    gameState: UnderstatSplitRecordSchema,
+    timing: UnderstatSplitRecordSchema,
+    shotZone: UnderstatSplitRecordSchema,
+    attackSpeed: UnderstatSplitRecordSchema,
+    result: UnderstatSplitRecordSchema,
+  })
+  .passthrough();
+
+const UnderstatTeamStatisticsSchema = z.union([
+  UnderstatTeamStatisticsObjectSchema,
+  // A season with no completed matches is returned as an empty array by
+  // Understat. Keep this narrow so a populated shape drift still fails.
+  z
+    .array(z.unknown())
+    .length(0)
+    .transform(() => EMPTY_TEAM_STATISTICS),
+]);
+
 export const UnderstatTeamResponseSchema = z
   .object({
     dates: z.array(UnderstatMatchDateSchema),
     players: z.array(UnderstatPlayerSummarySchema),
-    statistics: z
-      .object({
-        situation: UnderstatSplitRecordSchema,
-        formation: UnderstatSplitRecordSchema,
-        gameState: UnderstatSplitRecordSchema,
-        timing: UnderstatSplitRecordSchema,
-        shotZone: UnderstatSplitRecordSchema,
-        attackSpeed: UnderstatSplitRecordSchema,
-        result: UnderstatSplitRecordSchema,
-      })
-      .passthrough(),
+    statistics: UnderstatTeamStatisticsSchema,
   })
   .passthrough();
 
@@ -422,7 +461,21 @@ export class UnderstatClient {
       `/getTeamData/${encodeURIComponent(teamTitle)}/${sourceYear}`,
       UnderstatTeamResponseSchema,
       ['dates', 'players', 'statistics'],
-    );
+    ).then((response) => {
+      const hasCompletedMatch = response.dates.some((date) => date.isResult);
+      const statistics = response.statistics as Record<string, Record<string, unknown>>;
+      const hasStatistics = UNDERSTAT_SPLIT_DIMENSIONS.some(
+        (dimension) => Object.keys(statistics[dimension] ?? {}).length > 0,
+      );
+      const activeSourceYear = sourceYearFromSeason(getConfig().UNDERSTAT_SEASON);
+      if (!hasStatistics && (hasCompletedMatch || sourceYear !== activeSourceYear)) {
+        throw new UnderstatClientError(
+          'Understat team statistics are empty for a completed or historical season',
+          'VALIDATION_ERROR',
+        );
+      }
+      return response;
+    });
   }
 
   getMatchData(matchId: number): Promise<UnderstatMatchResponse> {
