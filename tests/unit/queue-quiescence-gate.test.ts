@@ -97,6 +97,24 @@ describe('queue quiescence gate', () => {
     ).toThrow('runnable jobs');
   });
 
+  test('allows durable delayed jobs but still rejects executing normal-queue work', () => {
+    expect(() =>
+      assertQueueQuiescence({
+        ...accepted(),
+        runnableQueues: {
+          'data-sync': { delayed: 7 },
+          'live-data': { delayed: 9 },
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertQueueQuiescence({
+        ...accepted(),
+        runnableQueues: { 'data-sync': { delayed: 7, active: 1 } },
+      }),
+    ).toThrow('runnable jobs');
+  });
+
   test('recognizes only a cascade with a terminal enqueue marker as settled', () => {
     const prefix = 'llm:queue:coordination:tournament-cascade';
     expect(cascadeId(`${prefix}:meta:2627-1-123`)).toEqual({

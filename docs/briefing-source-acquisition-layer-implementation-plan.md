@@ -715,6 +715,15 @@ Grok final 的 `media` 不能作为媒体存在性的证据：当前 Build 的 `
   对象以 SHA-256 内容地址保存到私有 `briefing-source-media` bucket，不生成
   public URL 或长期 signed URL。部署会把 bucket 限制写成并回读验证 exact 24 MiB；Supabase 不允许
   bucket limit 高于 project global limit，因此 project global 小于 24 MiB 时这一步直接失败。
+- Storage 上传策略以 VPS 实测为准，而不是只依据供应商对 TUS 的推荐：2026-08-24 在同一生产
+  宿主机和凭据上，24 MiB standard POST 完成私有上传、下载 hash 校验和清理（约 14 秒）；当前
+  TUS（创建请求携带首块）以 `ECONNRESET` 失败；TUS 先创建再 PATCH 虽最终成功，但同一 probe
+  用时约 10 分钟，超过 media gate 的 4 分钟执行预算。因此生产 `media-worker` 对所有不超过
+  24 MiB 的允许图片统一使用 standard POST，`x-upsert=false`；TUS 仅保留为显式 provision
+  诊断路径，不能作为生产成功条件。对应实测记录：
+  [standard probe](https://github.com/tonglam/letletme_data/actions/runs/32655941861)、
+  [TUS no-create probe](https://github.com/tonglam/letletme_data/actions/runs/32655982776)、
+  [TUS transport failure](https://github.com/tonglam/letletme_data/actions/runs/32653675966)。
 - 同一 gate 的重试只能复用完全一致的 ordinal、role 和 source URL 清单；页面媒体身份在处理中变化时
   记录 `SOURCE_MEDIA_INVENTORY_CHANGED`，不能把旧 asset 静默套到新 DOM 上。
 - 清单的 gate、ordinal、role、source URL 与 alt text 在数据库中写后不可变；item 归档/失败更新必须再次
@@ -1031,7 +1040,8 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 ### PR 6：Source media archive
 
 - 独立 `media-worker`、PostgreSQL gate/lease/retry、X target article inventory 和静态图片下载验证。
-- 私有 Supabase Storage 的 standard/TUS upload、内容 hash 去重、crash recovery 和 season+90 retention。
+- 私有 Supabase Storage 的 standard upload、内容 hash 去重、crash recovery 和 season+90 retention；
+  TUS 只作为显式诊断 fixture，不进入生产归档路径。
 - 20 分钟 outbox release deadline、`receipt.media.updated.v1` 和 source media health view。
 - 先在 retention 关闭时完成现有 X revision backfill 与对象一致性审计。
 
@@ -1056,7 +1066,7 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 - X source media：target article missing 不能成为 `CHECKED_NONE`、carousel ordinal/alt text、
   profile/emoji/reply/quote/external preview 排除、poster/stream inventory、orig fallback、magic-byte MIME、
   size/dimension/pixel/SVG gates、SSRF/redirect/DNS rebinding、重试和 20 分钟 effective `PARTIAL`。
-- Storage：content-addressed object key、hash dedupe、standard/TUS boundary、upload conflict/crash recovery、
+- Storage：content-addressed object key、hash dedupe、24 MiB standard upload、upload conflict/crash recovery、
   private bucket probe 和 shared-reference retention。
 - RSS/Atom namespace、CDATA、redirect、304、200 no-change、无 validator、parser-empty。
 - article robots、canonical、cross-origin redirect、body limit、Readability empty、paywall metadata。

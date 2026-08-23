@@ -81,7 +81,7 @@ describe('source-media private Storage client', () => {
       objects.set(input.metadata.objectName, input.bytes);
     });
     await storage.provisionAndProbe();
-    await storage.provisionAndProbe();
+    await storage.provisionAndProbe('tus');
     await storage.provisionAndProbe('tus-no-create');
     await storage.provisionAndProbe('standard');
     expect(bucket as Record<string, unknown> | null).toEqual({
@@ -95,17 +95,20 @@ describe('source-media private Storage client', () => {
     expect(probeSizes).toEqual([
       sourceMediaStorageContract.bucketFileSizeLimit,
       sourceMediaStorageContract.bucketFileSizeLimit,
+    ]);
+    expect(probeUploadDataModes).toEqual([true, false]);
+    expect(standardProbeSizes).toEqual([
+      sourceMediaStorageContract.bucketFileSizeLimit,
       sourceMediaStorageContract.bucketFileSizeLimit,
     ]);
-    expect(probeUploadDataModes).toEqual([true, true, false]);
-    expect(standardProbeSizes).toEqual([sourceMediaStorageContract.bucketFileSizeLimit]);
     expect(objects.size).toBe(0);
   });
 
-  test('locks the 6 MiB standard/TUS boundary and 24 MiB bucket cap', () => {
+  test('locks the diagnostic TUS chunk and 24 MiB production cap', () => {
     expect(sourceMediaStorageContract.standardUploadLimit).toBe(6 * 1_024 * 1_024);
     expect(sourceMediaStorageContract.tusChunkSize).toBe(6 * 1_024 * 1_024);
     expect(sourceMediaStorageContract.bucketFileSizeLimit).toBe(24 * 1_024 * 1_024);
+    expect(sourceMediaStorageContract.productionUploadMode).toBe('standard');
   });
 
   test('treats Supabase 400 Bucket not found as a missing bucket', async () => {
@@ -136,34 +139,24 @@ describe('source-media private Storage client', () => {
     expect(createCalls).toBe(1);
   });
 
-  test('routes objects above 6 MiB through direct-host TUS without upsert', async () => {
-    let captured:
-      | Parameters<NonNullable<Parameters<typeof createSourceMediaStorage>[2]>>[0]
-      | null = null;
-    const storage = createSourceMediaStorage(
-      config,
-      async () => {
-        throw new Error('standard Storage fetch must not run for a large object');
-      },
-      async (input) => {
-        captured = input;
-      },
-    );
+  test('routes large production objects through standard POST without upsert', async () => {
+    let capturedBytes = 0;
+    let capturedUpsert = '';
+    const storage = createSourceMediaStorage(config, async (input, init = {}) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toContain('/storage/v1/object/briefing-source-media/');
+      expect(init.method).toBe('POST');
+      capturedBytes = new Uint8Array(await new Response(init.body).arrayBuffer()).byteLength;
+      capturedUpsert = new Headers(init.headers).get('x-upsert') ?? '';
+      return Response.json({ Key: 'briefing-source-media/object.png' });
+    });
     await storage.upload(
       'x/images/sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png',
       new Uint8Array(sourceMediaStorageContract.standardUploadLimit + 1),
       'image/png',
     );
-    expect(captured).toMatchObject({
-      endpoint: 'https://project.storage.supabase.co/storage/v1/upload/resumable',
-      chunkSize: 6 * 1_024 * 1_024,
-      headers: { 'x-upsert': 'false' },
-      uploadDataDuringCreation: true,
-      metadata: {
-        bucketName: 'briefing-source-media',
-        contentType: 'image/png',
-      },
-    });
+    expect(capturedBytes).toBe(sourceMediaStorageContract.standardUploadLimit + 1);
+    expect(capturedUpsert).toBe('false');
   });
 
   test('does not start a Storage request after graceful shutdown aborts it', async () => {
@@ -247,7 +240,7 @@ describe('source-media private Storage client', () => {
       },
     );
 
-    await expect(storage.provisionAndProbe()).rejects.toThrow('upstream tus failed');
+    await expect(storage.provisionAndProbe('tus')).rejects.toThrow('upstream tus failed');
   });
 
   test('preserves the primary probe failure when cleanup cannot prove deletion', async () => {
@@ -281,7 +274,7 @@ describe('source-media private Storage client', () => {
       },
     );
 
-    await expect(storage.provisionAndProbe()).rejects.toThrow('upstream tus failed');
+    await expect(storage.provisionAndProbe('tus')).rejects.toThrow('upstream tus failed');
   });
 
   test('accepts a 400 not_found delete only after the probe is unreadable', async () => {
@@ -322,7 +315,7 @@ describe('source-media private Storage client', () => {
       },
     );
 
-    await expect(storage.provisionAndProbe()).resolves.toBeUndefined();
+    await expect(storage.provisionAndProbe('tus')).resolves.toBeUndefined();
     expect(probeObjectPresent).toBeFalse();
   });
 
