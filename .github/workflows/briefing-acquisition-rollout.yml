@@ -70,8 +70,12 @@ jobs:
             runner_socket=/run/letletme-grok-runner/runner.sock
             current_container=$(docker compose ps -q content-worker | head -n 1)
             test -n "$current_container"
+            current_media_container=$(docker compose ps -q media-worker | head -n 1)
+            test -n "$current_media_container"
             current_image=$(docker inspect --format '{{.Config.Image}}' "$current_container")
             test -n "$current_image"
+            media_image=$(docker inspect --format '{{.Config.Image}}' "$current_media_container")
+            test "$media_image" = "$current_image"
             image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$current_image")
             test "$image_revision" = "$ROLLOUT_SHA"
             runner_root=/home/workspace/letletme-grok-runner
@@ -146,6 +150,11 @@ jobs:
             )::text
             FROM content.acquisition_runs
             WHERE job_kind IS NOT NULL AND created_at >= now() - interval '30 minutes';
+            SELECT jsonb_build_object(
+              'event', 'briefing_source_media_health',
+              'health', to_jsonb(health)
+            )::text
+            FROM content.source_media_health AS health;
             COMMIT;
             SQL
             }
@@ -198,6 +207,7 @@ jobs:
             if [ "$ROLLOUT_MODE" = status ]; then
               scripts/configure-briefing-acquisition-env.sh status "$env_file"
               test "$(docker inspect --format '{{.State.Health.Status}}' "$current_container")" = healthy
+              test "$(docker inspect --format '{{.State.Health.Status}}' "$current_media_container")" = healthy
               # Status must still print the probe/health payload when the Runner is
               # unavailable or degraded; collect failures before returning the status.
               set +e

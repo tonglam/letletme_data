@@ -100,4 +100,23 @@ describe('public HTTP acquisition transport', () => {
       }),
     ).rejects.toMatchObject({ failureClass: 'CROSS_ORIGIN_REDIRECT' });
   });
+
+  test('stops before fetch when the caller aborts an in-flight DNS lookup', async () => {
+    const controller = new AbortController();
+    let fetchCalls = 0;
+    const request = fetchPublicResource({
+      url: 'https://feed.example.test/path',
+      signal: controller.signal,
+      lookupImpl: () => new Promise(() => undefined),
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response();
+      },
+    });
+
+    controller.abort('worker shutdown');
+
+    await expect(request).rejects.toMatchObject({ failureClass: 'HTTP_ABORTED' });
+    expect(fetchCalls).toBe(0);
+  });
 });

@@ -1,0 +1,247 @@
+name: Briefing source media rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect, probe Storage, enable archive, enable retention, or disable
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - provision
+          - enable
+          - enable-retention
+          - disable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Verify protected main dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          test "$main_sha" = "$GITHUB_SHA"
+
+      - name: Apply source-media mode
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          ROLLOUT_MODE: ${{ inputs.mode }}
+          ROLLOUT_SHA: ${{ github.sha }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 17m
+          envs: ROLLOUT_MODE,ROLLOUT_SHA,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+
+            expected_workdir=/home/workspace/letletme_data
+            test "$VPS_WORKDIR" = "$expected_workdir"
+            test "$(realpath --canonicalize-existing "$VPS_WORKDIR")" = "$expected_workdir"
+            cd "$expected_workdir"
+            test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"
+            test -x scripts/configure-briefing-source-media-env.sh
+            compose() { docker compose "$@"; }
+            source scripts/deploy-state-machine.sh
+            acquire_deploy_lock
+
+            env_file="$expected_workdir/.env.deploy"
+            media_env_file="$expected_workdir/.env.media"
+            migration_env_file="$expected_workdir/.env.migrate"
+            for file in "$env_file" "$media_env_file" "$migration_env_file"; do
+              test -f "$file"
+              test ! -L "$file"
+            done
+            if grep -q '^[[:space:]]*CONTENT_MEDIA_SUPABASE_SECRET_KEY[[:space:]]*=' "$env_file"; then
+              echo 'source-media rollout refused: Storage secret is present in .env.deploy' >&2
+              exit 1
+            fi
+
+            export CONTENT_MEDIA_ENV_FILE="$media_env_file"
+            current_container=$(docker compose ps -q media-worker | head -n 1)
+            test -n "$current_container"
+            current_image=$(docker inspect --format '{{.Config.Image}}' "$current_container")
+            test -n "$current_image"
+            image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$current_image")
+            test "$image_revision" = "$ROLLOUT_SHA"
+
+            read_boolean() {
+              key=$1
+              file=$2
+              value=$(awk -v key="$key" '
+                $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
+                  sub("^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=", "", $0)
+                  gsub("^[[:space:]]+|[[:space:]]+$", "", $0)
+                  gsub("^\"|\"$", "", $0)
+                  gsub("^\047|\047$", "", $0)
+                  print tolower($0)
+                  exit
+                }
+              ' "$file")
+              case "$value" in
+                1 | true | yes | on) printf true ;;
+                '' | 0 | false | no | off) printf false ;;
+                *) return 1 ;;
+              esac
+            }
+
+            report_health() {
+              MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
+                --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<'SQL'
+            BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+            SET LOCAL statement_timeout = '15s';
+            SET LOCAL lock_timeout = '2s';
+            SET LOCAL idle_in_transaction_session_timeout = '20s';
+            SELECT jsonb_build_object(
+              'event', 'briefing_source_media_health',
+              'health', to_jsonb(health)
+            )::text
+            FROM content.source_media_health AS health;
+            SELECT jsonb_build_object(
+              'event', 'briefing_source_media_integrity',
+              'gatesWithoutItems', count(*) FILTER (
+                WHERE gate.status IN ('COMPLETE', 'CHECKED_NONE')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM content.source_media_items AS item
+                    WHERE item.gate_id = gate.gate_id
+                  )
+                  AND gate.status <> 'CHECKED_NONE'
+              ),
+              'expiredRunningLeases', count(*) FILTER (
+                WHERE gate.status = 'RUNNING' AND gate.lease_expires_at <= now()
+              ),
+              'pastDeadlineBlockedOutbox', (
+                SELECT count(*) FROM content.pipeline_outbox AS outbox
+                WHERE outbox.media_gate_id IS NOT NULL
+                  AND outbox.status = 'PENDING'
+                  AND outbox.available_at > now()
+                  AND EXISTS (
+                    SELECT 1 FROM content.source_media_gates AS linked_gate
+                    WHERE linked_gate.gate_id = outbox.media_gate_id
+                      AND linked_gate.release_deadline_at <= now()
+                  )
+              )
+            )::text
+            FROM content.source_media_gates AS gate;
+            COMMIT;
+            SQL
+            }
+
+            retention_preflight() {
+              result=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose --profile migration run \
+                --rm -T --no-deps --entrypoint sh backup -euc \
+                'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<'SQL'
+            BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+            SET LOCAL statement_timeout = '15s';
+            SELECT CASE WHEN
+              NOT EXISTS (
+                SELECT 1 FROM content.source_media_gates
+                WHERE status IN ('PENDING', 'RUNNING')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM content.source_media_gates
+                WHERE status = 'RUNNING' AND lease_expires_at <= now()
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM content.source_media_assets
+                WHERE storage_state = 'RESERVED'
+              )
+            THEN 'ready' ELSE 'blocked' END;
+            COMMIT;
+            SQL
+              )
+              test "$result" = ready
+            }
+
+            wait_for_media_worker() {
+              container=$(docker compose ps -q media-worker | head -n 1)
+              test -n "$container"
+              test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$current_image"
+              for attempt in $(seq 1 30); do
+                health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
+                if [ "$health" = healthy ]; then return 0; fi
+                if [ "$attempt" -eq 30 ]; then
+                  docker compose logs --tail 100 media-worker || true
+                  return 1
+                fi
+                sleep 2
+              done
+            }
+
+            scripts/configure-briefing-source-media-env.sh status "$media_env_file"
+            if [ "$ROLLOUT_MODE" = status ]; then
+              wait_for_media_worker
+              report_health
+              release_deploy_lock
+              exit 0
+            fi
+
+            if [ "$ROLLOUT_MODE" = provision ] || [ "$ROLLOUT_MODE" = enable ] \
+              || [ "$ROLLOUT_MODE" = enable-retention ]; then
+              APP_IMAGE="$current_image" docker compose run --rm -T --no-deps media-worker \
+                bun dist/media-worker.js --provision-and-probe
+            fi
+            if [ "$ROLLOUT_MODE" = provision ]; then
+              report_health
+              release_deploy_lock
+              exit 0
+            fi
+
+            if [ "$ROLLOUT_MODE" = enable ] || [ "$ROLLOUT_MODE" = enable-retention ]; then
+              test "$(read_boolean CONTENT_PUBLICATION_ENABLED "$env_file")" = false
+              test "$(read_boolean BRIEFING_PUBLIC_ENABLED "$env_file")" = false
+            fi
+
+            backup_file=''
+            rollout_committed=false
+            worker_stopped=false
+            on_exit() {
+              original_status=$?
+              trap - EXIT
+              set +e
+              if [ "$original_status" -ne 0 ] && [ "$rollout_committed" = false ]; then
+                if [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
+                  mv "$backup_file" "$media_env_file"
+                fi
+                if [ "$worker_stopped" = true ]; then
+                  APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate media-worker || true
+                fi
+              fi
+              if [ -n "$backup_file" ]; then rm -f -- "$backup_file"; fi
+              release_deploy_lock || true
+              exit "$original_status"
+            }
+            trap on_exit EXIT
+
+            umask 077
+            backup_file=$(mktemp "$expected_workdir/.env.media.rollout-backup.XXXXXX")
+            cp -p "$media_env_file" "$backup_file"
+            docker compose stop -t 45 media-worker
+            worker_stopped=true
+            if [ "$ROLLOUT_MODE" = enable-retention ]; then retention_preflight; fi
+            scripts/configure-briefing-source-media-env.sh "$ROLLOUT_MODE" "$media_env_file"
+            APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate media-worker
+            wait_for_media_worker
+            report_health
+            rollout_committed=true
+            rm -f -- "$backup_file"
+            backup_file=''
+            release_deploy_lock
+            trap - EXIT

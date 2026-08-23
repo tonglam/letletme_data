@@ -12,6 +12,7 @@ export async function resetBriefingAcquisitionState(db?: DbHandle): Promise<void
     await tx.execute(sql`SET LOCAL client_min_messages = warning`);
     await tx.execute(sql`
       TRUNCATE TABLE
+        content.source_media_assets,
         content.sources,
         content.source_groups,
         content.source_partitions,

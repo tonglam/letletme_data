@@ -159,3 +159,36 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  media-worker:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    command: bun dist/media-worker.js
+    env_file:
+      - path: ${ENV_FILE:-.env.deploy}
+        required: false
+      - path: ${CONTENT_MEDIA_ENV_FILE:-.env.media}
+        required: false
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
+      - DATABASE_POOL_MAX=1
+      - WORKER_HEARTBEAT_PATH=/tmp/media-worker-heartbeat
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'test -n "$$(find /tmp/media-worker-heartbeat -mmin -2 2>/dev/null)"']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

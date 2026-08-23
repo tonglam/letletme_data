@@ -99,9 +99,11 @@ conflict gates。run 保存 `evidence_mode=GROK_ATTESTED_FINAL`，不能对外�
 
 媒体不能沿用“没有字段就当作没有图片”的默认值。2026-08-22 的宿主机实测使用
 `x_thread_fetch` 获取 `CPFC` 的 `2091144605710647466`：X 主帖页面实际是两张图的轮播，但 Grok
-Build final 仍返回 `media: []`，并且视觉证据为不可用。因而 X scan 在 Grok final 之后增加一个不
-消耗 Grok 调用的、受 host allowlist 和 body cap 保护的 X 公共页面 media enrichment；它只保存图片/
-视频公开 URL，不把 HTML 或二进制媒体写入 Receipt，也不声称已经完成图像理解。
+Build final 仍返回 `media: []`，并且视觉证据为不可用。X scan 因此只保存帖子核心事实，并在同一
+数据库事务中为 ReceiptRevision 创建 `SourceMediaGate` 和延迟 20 分钟可用的 pipeline outbox。
+独立 `media-worker` 随后读取 X 公共页面、下载并校验静态图片、归档到私有 Storage。页面或媒体
+失败不再改变 Grok run、ReceiptRevision 或 checkpoint；到期仍未完成时，下游明确得到
+`PARTIAL` 媒体覆盖，不能解释为无媒体成功。
 
 Grok Build 1.0.5 的 strict sandbox 依赖 nested bubblewrap namespace；普通非特权 Docker 无法提供，
 而为此授予 `--privileged` 不可接受。生产执行边界因此固定为宿主机窄 Runner：content-worker
@@ -554,8 +556,6 @@ type AcquisitionItemV1 = {
     mimeType: string | null;
     durationSeconds: number | null;
   }>;
-  // X items set this after public-page enrichment; other adapters may omit it.
-  mediaStatus?: 'FOUND' | 'CHECKED_NONE' | 'UNAVAILABLE';
   transcript: {
     status:
       | 'NOT_APPLICABLE'
@@ -576,6 +576,10 @@ type AcquisitionItemV1 = {
   };
 };
 ```
+
+新 X adapter 固定写 `media: []`，媒体权威状态来自规范化的 `source_media_*` 表。旧
+ReceiptRevision 中的 `media` 和 `mediaStatus` 继续可读，但 `xCoreHash` 比较会排除这两个 legacy
+字段，避免迁移期间只因媒体模型变化制造新的 immutable revision。
 
 adapter 只返回 source-native facts。Data 生成 captured time、receipt key、canonical payload、内容
 hash、segment hash 和内部 ID。
@@ -630,11 +634,10 @@ Segment V1 hash `fb159a11abccf8304b6ff224f180f562450f3d8d84390855e5544dbbf88e626
 6. 事务内 claim schedule、写 immutable run/request snapshot、reserve budget 和 lease。
 7. 事务外 enqueue；成功后短事务确认。明确 enqueue 失败立即释放 lease，1 分钟后重试。
 8. worker 用 run ID 执行一次 adapter operation。
-9. X 帖子通过 Grok final 的 deterministic post gates 后，以 canonical X post URL 做一次有界的
-   public-page media enrichment；成功找到媒体才写 `FOUND`，成功页面无媒体才写 `CHECKED_NONE`，
-   transport、status、parse 或 body-cap 失败写 `UNAVAILABLE` 并将 run 保持 `PARTIAL`。
-10. 通过 gates 后原子写 Observation、ReceiptRevision、checkpoint 和 outbox。
-11. crash 由 lease reclaimer 恢复；不同 adapter 使用各自合理 lease。
+9. X 帖子通过 Grok final 的 deterministic post gates 后，原子写 Observation、ReceiptRevision、
+   `SourceMediaGate`、延迟 20 分钟的 outbox、terminal run 和 checkpoint；网络媒体请求不在该事务中。
+10. `media-worker` 独立 claim gate 并处理媒体；它不占用 Grok queue，也不能回写 X run 结果。
+11. crash 由各自 lease reclaimer 恢复；不同 adapter 使用各自合理 lease。
 
 首次 schedule 还要把 persisted `bootstrap_completed_at` 和 profile revision 写入 request snapshot。
 只有 bootstrap terminal run 才能设置完成标记；失败重试复用相同 cutoff 和 item 上限，不能因时间
@@ -692,26 +695,36 @@ limit 与 persisted request 完全一致；成功 completion 必须发生在 fin
 不是 raw-result verification。模型 final 无法通过任一确定性 post gate 时整批失败；不能选择性
 修补或让另一个模型猜值。
 
-#### X media enrichment
+#### X source media archive
 
 Grok final 的 `media` 不能作为媒体存在性的证据：当前 Build 的 `x_keyword_search`、
-`x_semantic_search` 和 `x_thread_fetch` 结果可能只给帖文事实，即使 X 页面有图片或视频。对每条
-通过 post gate 的 X item，Data 使用 canonical X status URL 做一次 `GET`：
+`x_semantic_search` 和 `x_thread_fetch` 结果可能只给帖文事实，即使 X 页面有图片或视频。每个新的、
+非 legacy X ReceiptRevision 都必须拥有唯一 `SourceMediaGate`，由独立 `media-worker` 处理：
 
-- 只允许 `x.com`/`www.x.com`/`twitter.com` 页面，使用 `fetchPublicResource` 的 HTTPS、DNS、redirect、
-  content-type、20 秒 timeout 和 2 MiB body cap；不跟随跨 origin redirect。
-- 在目标 post 的 `<article>` 范围内收集全部 `pbs.twimg.com/media/*` 图片，轮播不能只保留
-  `og:image`；视频收集 poster 和同 ID 的一个 HLS/MP4 URL。
-- `FOUND` 表示至少一个真实、HTTPS、媒体 host allowlisted 的 URL；`CHECKED_NONE` 只表示页面
-  成功读取且目标 post 没有媒体；HTTP、解析、超限、429/5xx 等都写 `UNAVAILABLE`。
-- `UNAVAILABLE` 仍可保存帖文正文，但该 item 设置 `mediaStatus=UNAVAILABLE`、run 为 `PARTIAL`，
-  不得伪装成 `COMPLETED`、`EMPTY` 或推进未完成媒体覆盖的 checkpoint。成功的无媒体页面才允许
-  `CHECKED_NONE`。
-- 只保存媒体 URL、kind、mime type 和可选 duration；不保存 X HTML、图片二进制、signed URL、
-  auth/session 或视觉模型结论。Hermes/第二层后续可读取 `media` URL 做视觉/视频理解，但第一层
-  不分类、不摘要、不生成 visual fact。
-- enrichment 不调用 Grok，不按页面模块重复搜索；同一批帖文一次获取并以 Receipt canonical
-  hash 去重。媒体从 `UNAVAILABLE` 变为 `FOUND` 时形成新的 immutable ReceiptRevision/outbox。
+- canonical page 只允许 HTTPS `x.com`/`twitter.com` status URL。解析必须找到包含准确 post ID 的目标
+  `<article>`；目标 article 缺失是 `UNAVAILABLE/TARGET_ARTICLE_MISSING`，绝不是
+  `CHECKED_NONE`。article 中出现无法绑定到允许 CDN URL 的 `tweetPhoto` 或 video 占位时同样必须是
+  `UNAVAILABLE/MEDIA_EVIDENCE_UNPARSABLE`，不能把 parser 不认识的媒体伪装成无媒体。
+- 只从目标 article 按 DOM 顺序提取 `pbs.twimg.com/media/*`、
+  `pbs.twimg.com/amplify_video_thumb/*` 和对应 `video.twimg.com` stream；排除 profile、emoji、回复、
+  quote 和外链预览。视频 stream 只进入 inventory，不下载。
+- 普通图片优先请求 `name=orig`，失败才回退页面 variant。静态下载只允许 `pbs.twimg.com`，每次 DNS
+  和 redirect 都通过 SSRF gate；MIME 按 magic bytes 判断，不相信 URL 或响应 header。
+- 仅归档 JPEG、PNG、WebP、GIF；拒绝 SVG 和未知格式。尺寸只由四种允许格式的有界头部解析器读取，
+  不调用图片解码器或支持额外格式的通用尺寸库。上限为 24 MiB、8192×8192、67,108,864 pixels。
+  对象以 SHA-256 内容地址保存到私有 `briefing-source-media` bucket，不生成
+  public URL 或长期 signed URL。部署会把 bucket 限制写成并回读验证 exact 24 MiB；Supabase 不允许
+  bucket limit 高于 project global limit，因此 project global 小于 24 MiB 时这一步直接失败。
+- 同一 gate 的重试只能复用完全一致的 ordinal、role 和 source URL 清单；页面媒体身份在处理中变化时
+  记录 `SOURCE_MEDIA_INVENTORY_CHANGED`，不能把旧 asset 静默套到新 DOM 上。
+- 清单的 gate、ordinal、role、source URL 与 alt text 在数据库中写后不可变；item 归档/失败更新必须再次
+  证明 worker 仍持有对应 RUNNING gate lease，归档引用的 asset 也必须已经是 `AVAILABLE`。
+- gate 固定重试 `0m → 1m → 5m → 15m → 1h → 6h → 24h`。20 分钟内达到
+  `COMPLETE/CHECKED_NONE` 时提前放行尚未租用的原 Receipt event；20 分钟到期后原 event 自动可用，
+  非终态必须向下游解释为 `PARTIAL`。后续状态改善以 `media_state_hash` 幂等发送
+  `receipt.media.updated.v1`。
+- X scan 与 media worker 没有同步等待关系：媒体失败不改变 X run、不阻止 checkpoint、不重跑
+  Grok，也不制造新的 ReceiptRevision。Hermes 图片理解、OCR 和 Candidate 分类不属于第一层。
 
 宿主机 Runner 使用独立临时 cwd、参数数组、`shell=false`、输出上限和 240 秒 timeout。child env 采用
 allowlist，不继承 Data/Redis/Supabase/provider secret。启动 event 的工具 inventory 只能包含当前 1.0.5 已知的
@@ -853,23 +866,23 @@ Hermes 集成必须是固定、认证、结构化的 service/CLI contract，不�
 
 ### 11.3 X media gates
 
-- 每条通过确定性 post gate 的 X item 都必须有 media enrichment 结果；resolver 不存在或漏掉
-  post ID 是 worker contract failure，不能默认 `media=[]`。
-- `FOUND`、`CHECKED_NONE`、`UNAVAILABLE` 三种状态必须进入 item/run metrics；只有前两者是一次
-  成功的媒体检查。
-- 解析器只接受目标 `<article>` 中的 X media host URL，必须排除 profile image、emoji、回复和
-  外部页面图；carousel 的每一张 `pbs.twimg.com/media` 都保留。
-- `UNAVAILABLE` 的正文 Receipt 可以保存用于不丢事实，但 run 必须 `PARTIAL`，默认不推进 scan
-  checkpoint，并在下次有界窗口中重试；不能降级成 `CHECKED_NONE`。
-- 不下载媒体二进制，不写完整 X HTML，不持久化 signed media URL；来源仍由 canonical X status URL
-  直接打开。媒体 URL 改变或从不可用变可用时由 canonical payload hash 产生新 revision。
+- ReceiptRevision、gate 和延迟 outbox 必须同事务提交；相同 revision 只能创建一个 gate。
+- `CHECKED_NONE` 只允许“准确目标 article 已找到且其中没有媒体”；任何 fetch、status、parse、body
+  cap 或目标 article 缺失都必须是可查询失败，不能降级成无媒体成功。
+- carousel 必须按 DOM ordinal 保存；实际 MIME、尺寸、bytes 和内容 hash 来自下载字节。来源 URL
+  只能作为发现线索，不能成为 storage identity 或 MIME 证据。
+- Storage 上传成功、DB 更新前 crash 必须能通过 authenticated GET 和 SHA-256 恢复；对象 key 不得
+  overwrite。相同 hash 可跨帖子复用，同 hash 的任一引用仍需保留时 retention 不得删除。
+- `COMPLETE / CHECKED_NONE / PARTIAL / UNAVAILABLE` 全部与 X run 状态分离。到期非终态的有效媒体
+  coverage 是 `PARTIAL`；失败永远不能变成 `CHECKED_NONE`。
 
 ### 11.4 Result 语义
 
 - `EMPTY`：成功检查且 source-native 结果确实为零 item。
 - `CHECKED_NO_CHANGE`：304，或成功响应中的 item 全部已知且 hash 未变。
 - `COMPLETED`：全部 item/revision 通过。
-- `PARTIAL`：至少一个有效 item 保存，另有明确 rejected item 或 X media `UNAVAILABLE`；记录原因。
+- `PARTIAL`：至少一个有效 source-native item 保存，另有明确 rejected item；记录原因。X 媒体状态
+  由独立 gate 表达，不参与 acquisition run 结果。
 - `SATURATED`：X 达当前返回阈值。
 - `FAILED`：process/transport/schema/identity/trace 整体失败；不推进 checkpoint。
 - `GAP`：有明确无法追补的窗口并记录证据后才推进。
@@ -988,8 +1001,8 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 - Grok 四种显式 job kind、single-tool trace、query compiler 和 canonical X adapter。
 - `GROK_ATTESTED_FINAL` evidence mode、strict whole-result JSON 和确定性 post gates；不得声称
   raw-result verified。
-- X public-page media enrichment：解析目标 post article 的图片/视频 URL，写 `mediaStatus`，并把
-  media fetch failure 变成 `PARTIAL`，不把它当成空媒体成功。
+- X scan 原子创建 `SourceMediaGate` 和延迟 outbox；移除同步 public-page/media resolver，确保媒体
+  fetch failure 不改变 acquisition run 或 checkpoint。
 - 在宿主机 Runner 验证 Grok 1.0.5、deploy 用户认证、strict sandbox、sanitized env、固定工具面和
   Unix socket 隔离；Data 容器只验证 UDS transport 和 release/version contract，不运行 Grok。
 
@@ -1015,7 +1028,14 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 - native shadow 通过后才能打开 native；generated terminal/quality/cost gate 通过后才能单独开启
   generated。
 
-### PR 6：Shadow、容量与受控启用
+### PR 6：Source media archive
+
+- 独立 `media-worker`、PostgreSQL gate/lease/retry、X target article inventory 和静态图片下载验证。
+- 私有 Supabase Storage 的 standard/TUS upload、内容 hash 去重、crash recovery 和 season+90 retention。
+- 20 分钟 outbox release deadline、`receipt.media.updated.v1` 和 source media health view。
+- 先在 retention 关闭时完成现有 X revision backfill 与对象一致性审计。
+
+### PR 7：Shadow、容量与受控启用
 
 - 完成 core coverage/identity，不要求动态来源先晋级。
 - 每类 adapter 运行代表性 shadow batch 并记录 p50/p95、failure、no-change、yield 和成本。
@@ -1033,8 +1053,11 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 - schedule phase、cache floor、jitter、job ID、lease、retry、circuit、budget deferred。
 - X query/compiler/trace：无工具、错误工具、双工具、错误 query/mode、失败 completion、final 提前、
   timeout、超限、损坏 UTF-8。
-- X media enrichment：carousel 全图片、profile/emoji/reply 排除、video poster/HLS 配对、
-  `CHECKED_NONE` 与 `UNAVAILABLE` 区分、媒体 host/redirect/body cap 和批次并发上限。
+- X source media：target article missing 不能成为 `CHECKED_NONE`、carousel ordinal/alt text、
+  profile/emoji/reply/quote/external preview 排除、poster/stream inventory、orig fallback、magic-byte MIME、
+  size/dimension/pixel/SVG gates、SSRF/redirect/DNS rebinding、重试和 20 分钟 effective `PARTIAL`。
+- Storage：content-addressed object key、hash dedupe、standard/TUS boundary、upload conflict/crash recovery、
+  private bucket probe 和 shared-reference retention。
 - RSS/Atom namespace、CDATA、redirect、304、200 no-change、无 validator、parser-empty。
 - article robots、canonical、cross-origin redirect、body limit、Readability empty、paywall metadata。
 - Podcast GUID/enclosure/publisher transcript、media hash、chunk merge和单块重试。
@@ -1054,13 +1077,16 @@ raw trace。公开日志和 checklist 只记录 metadata、长度和 hash。
 - 内容变化产生 revision 2 和 `receipt.updated.v1`；相同 payload 不产生 revision/outbox。
 - revision/segment UPDATE/DELETE 被数据库拒绝。
 - pending Supadata job 重启后继续 poll，不重新提交。
+- ReceiptRevision、source media gate 和延迟 outbox 同事务；两个 media worker 只能 claim 一次。
+- 20 分钟内完成会提前放行，worker 停止时 deadline 后仍可用；修复只产生幂等 media update event。
+- Storage 成功但 DB 未提交可恢复；retention 不删除仍被其他 season 引用的对象。
 - acquisition 故障不影响 publication outbox dispatcher。
 
 ### 16.3 Live opt-in probes
 
 - X：四种 Build tools、版本、外层容器隔离、tool inventory/deny 和 single-call trace。
-- X media：宿主机读取一个已知两图 carousel 和一个视频 post；确认 media URL 数量、媒体类型、
-  Receipt `mediaStatus`、不可用时 `PARTIAL`，并确认没有新增 Grok call。
+- X source media：用已知两图 carousel 和一个视频 post 验证 target article、DOM ordinal、orig 静态图
+  归档和 stream inventory；不可用时 gate 显式失败，并确认 Grok run/checkpoint 不受影响。
 - RSS：有 validator 和无 validator 各一个。
 - Substack、article、Podcast：使用 checklist 的真实案例。
 - YouTube native：`Xef37ImWz3M`，验证 105 segments canonical hash。

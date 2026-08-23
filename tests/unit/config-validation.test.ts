@@ -187,6 +187,9 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 content-worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
+      /if ! compose stop -t 45 media-worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+    );
+    expect(deployScript).toMatch(
       /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
@@ -200,12 +203,17 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(
       /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
-    expect(deployScript).toMatch(
-      /restore_stopped_services\(\)[\s\S]*?compose up -d --remove-orphans --no-build[\s\S]*?scheduler worker content-worker api/,
-    );
     expect(deployScript).toContain(
       '"$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"',
     );
+    expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?start_all_runtime_services/);
+    const stateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
+    expect(stateMachine).toContain('runtime_worker_services');
+    expect(stateMachine).toContain(String.raw`grep -qx 'media-worker'`);
+    expect(stateMachine).toContain('RUNTIME_INCLUDE_MEDIA_WORKER');
+    expect(stateMachine).toContain('start_all_runtime_services');
+    expect(stateMachine).toContain('export APP_IMAGE="$previous_image"');
+    expect(deployScript).toContain('DEPLOY_OLD_MEDIA_PRESENT');
     expect(deployScript).toContain('load_backup_settings');
     expect(deployScript).toContain('read_env_setting DATABASE_BACKUP_DIR "$ENV_FILE"');
     expect(deployScript).toContain('DEPLOY_COMMITTED=false');

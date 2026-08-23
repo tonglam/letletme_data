@@ -28,7 +28,7 @@ for attempt in $(seq 1 "$attempts"); do
   sleep "$delay_seconds"
 done
 
-for service in scheduler worker content-worker; do
+for service in scheduler worker content-worker media-worker; do
   container=$(compose ps -q "$service" | head -n 1)
   test -n "$container"
   for attempt in $(seq 1 "$attempts"); do
