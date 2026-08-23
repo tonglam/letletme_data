@@ -121,44 +121,44 @@ async function runMyFplCaptureTransaction(
   lockScope: string,
   operation: (transaction: postgres.TransactionSql) => Promise<MyFplSnapshotCaptureResult>,
 ): Promise<MyFplSnapshotCaptureResult> {
-  // Acquire a session lock before opening the repeatable-read transaction.
-  // Taking a transaction advisory lock as the first SELECT can pin a stale
-  // MVCC snapshot while waiting, so the second concurrent capture would not
-  // observe the revision committed by the first one.
-  const reserved = await client.reserve();
-  let lockAcquired = false;
-  try {
-    await reserved`SELECT pg_advisory_lock(hashtextextended(${lockScope}, 0))`;
-    lockAcquired = true;
-    await reserved`BEGIN ISOLATION LEVEL REPEATABLE READ`;
-    let transactionOpen = true;
+  // A production transaction pool does not preserve session affinity between
+  // statements, so a session-level advisory lock cannot protect the following
+  // transaction. Try a transaction lock without waiting instead: every miss
+  // rolls back immediately and opens a fresh repeatable-read snapshot. A
+  // serialization failure is the remaining commit-boundary race and is also
+  // retried from a new snapshot.
+  const deadline = Date.now() + 2 * 60_000;
+  while (true) {
     try {
-      const result = await operation(reserved as unknown as postgres.TransactionSql);
-      await reserved`COMMIT`;
-      transactionOpen = false;
-      return result;
-    } catch (error) {
-      if (transactionOpen) {
-        try {
-          await reserved`ROLLBACK`;
-        } catch (rollbackError) {
-          logWarn('Failed to roll back My FPL capture transaction', {
-            error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
-            lockScope,
-          });
+      return await client.begin('isolation level repeatable read', async (tx) => {
+        const lockRows = await tx<{ acquired: boolean }[]>`
+          SELECT pg_try_advisory_xact_lock(hashtextextended(${lockScope}, 0)) AS acquired
+        `;
+        if (!lockRows[0]?.acquired) {
+          throw new MyFplCaptureLockBusyError();
         }
+        return operation(tx);
+      });
+    } catch (error) {
+      if (!isRetryableMyFplCaptureContention(error)) throw error;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`Timed out waiting for My FPL capture lock ${lockScope}`, {
+          cause: error,
+        });
       }
-      throw error;
-    }
-  } finally {
-    try {
-      if (lockAcquired) {
-        await reserved`SELECT pg_advisory_unlock(hashtextextended(${lockScope}, 0))`;
-      }
-    } finally {
-      reserved.release();
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, remainingMs)));
     }
   }
+}
+
+class MyFplCaptureLockBusyError extends Error {}
+
+function isRetryableMyFplCaptureContention(error: unknown): boolean {
+  return (
+    error instanceof MyFplCaptureLockBusyError ||
+    (typeof error === 'object' && error !== null && 'code' in error && error.code === '40001')
+  );
 }
 
 type EntryIdentity = {

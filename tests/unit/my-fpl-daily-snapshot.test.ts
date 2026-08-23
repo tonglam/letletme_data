@@ -90,20 +90,17 @@ describe('My FPL daily snapshot publication contract', () => {
     );
   });
 
-  test('acquires the cross-process capture lock before opening the repeatable-read snapshot', () => {
+  test('retries a fresh repeatable-read transaction when the pooler-safe lock is busy', () => {
     const helper = publicationService.slice(
       publicationService.indexOf('async function runMyFplCaptureTransaction'),
       publicationService.indexOf('type EntryIdentity'),
     );
-    const sessionLock = helper.indexOf('SELECT pg_advisory_lock');
-    const transactionBegin = helper.indexOf('BEGIN ISOLATION LEVEL REPEATABLE READ');
-    expect(sessionLock).toBeGreaterThan(0);
-    expect(transactionBegin).toBeGreaterThan(sessionLock);
-    expect(helper).toContain('await reserved`COMMIT`');
-    expect(helper).toContain('await reserved`ROLLBACK`');
-    expect(helper).toContain('SELECT pg_advisory_unlock');
-    expect(helper).not.toContain('reserved.begin');
-    expect(helper).not.toContain('pg_advisory_xact_lock');
+    expect(helper).toContain('client.begin(\u0027isolation level repeatable read\u0027');
+    expect(helper).toContain('pg_try_advisory_xact_lock');
+    expect(helper).toContain('throw new MyFplCaptureLockBusyError()');
+    expect(helper).toContain('error.code === \u002740001\u0027');
+    expect(helper).not.toContain('pg_advisory_lock(');
+    expect(helper).not.toContain('client.reserve()');
   });
 
   test('reuses only an identical provisional revision and reports coverage state', () => {
