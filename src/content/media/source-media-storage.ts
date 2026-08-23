@@ -165,13 +165,26 @@ async function storageError(
   operation: string,
 ): Promise<SourceMediaStorageError> {
   const errorBytes = await boundedBody(response, undefined, 1_024).catch(() => new Uint8Array());
-  const body = new TextDecoder('utf-8', { fatal: false }).decode(errorBytes).toLowerCase();
+  const rawBody = new TextDecoder('utf-8', { fatal: false }).decode(errorBytes);
+  const body = rawBody.toLowerCase();
+  let providerCode: string | null = null;
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const candidate = (parsed as { code?: unknown }).code;
+      if (typeof candidate === 'string' && /^[A-Za-z0-9_.-]{1,100}$/.test(candidate)) {
+        providerCode = candidate;
+      }
+    }
+  } catch {
+    // Some Storage gateways return plain text. Keep the error bounded and generic.
+  }
   const alreadyExists =
     response.status === 409 ||
     (response.status === 400 && /already exists|duplicate|resource exists/.test(body));
   return new SourceMediaStorageError(
     alreadyExists ? 'STORAGE_OBJECT_EXISTS' : 'STORAGE_REQUEST_FAILED',
-    `${operation} failed with ${response.status}`,
+    `${operation} failed with ${response.status}${providerCode ? ` (${providerCode})` : ''}`,
     response.status,
   );
 }
