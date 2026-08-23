@@ -20,10 +20,22 @@ import {
 
 const officialH2HRecoveryTargets = new WeakMap<IncompleteDataSyncError, number[]>();
 
-async function getOfficialH2HSyncOptions(season: FplSeasonRef): Promise<OfficialH2HSyncOptions> {
-  const latestFinalizedEvent = await eventRepository.findLatestFinalized(season);
+async function getOfficialH2HSyncOptions(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<OfficialH2HSyncOptions> {
+  const [event, currentEvent, latestFinalizedEvent] = await Promise.all([
+    eventRepository.findById(season, eventId),
+    eventRepository.findCurrent(season),
+    eventRepository.findLatestFinalized(season),
+  ]);
+  const eventIsFinalized = event?.finished === true && event.dataChecked === true;
   return {
     finalizedThroughEventId: latestFinalizedEvent?.id ?? null,
+    provisionalEventId:
+      event && !eventIsFinalized && (event.isCurrent || currentEvent?.id === eventId)
+        ? eventId
+        : null,
   };
 }
 
@@ -391,10 +403,7 @@ export async function syncOfficialH2HTournaments(
   const tournaments = (
     await tournamentInfoRepository.findBattleRaceByEvent(season, eventId)
   ).filter(isOfficialH2HTournament);
-  const options =
-    tournaments.length > 0
-      ? await getOfficialH2HSyncOptions(season)
-      : { finalizedThroughEventId: null };
+  const options = tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
@@ -447,8 +456,8 @@ export async function syncTournamentBattleRaceResults(
   }
 
   const officialH2HOptions = tournaments.some(isOfficialH2HTournament)
-    ? await getOfficialH2HSyncOptions(season)
-    : { finalizedThroughEventId: null };
+    ? await getOfficialH2HSyncOptions(season, eventId)
+    : {};
 
   let updatedGroups = 0;
   let updatedResults = 0;
