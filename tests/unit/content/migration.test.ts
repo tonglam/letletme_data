@@ -136,4 +136,26 @@ describe('Briefing content migration contract', () => {
       'DROP CONSTRAINT IF EXISTS content_acquisition_budget_reservations_run_ledger_key',
     );
   });
+
+  test('archives X media behind a bounded gate without exposing raw assets to GraphQL', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0037_content_source_media_archive.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('CREATE TABLE content.source_media_gates');
+    expect(sql).toContain('CREATE TABLE content.source_media_items');
+    expect(sql).toContain('CREATE TABLE content.source_media_assets');
+    expect(sql).toContain(String.raw`'receipt.media.updated.v1'`);
+    expect(sql).toContain('INSERT INTO content.source_media_gates');
+    expect(sql).toContain('available_at = GREATEST(outbox.available_at, gate.release_deadline_at)');
+    expect(sql).toContain('content_source_media_gates_identity_immutable');
+    expect(sql).toContain('content_source_media_assets_facts_immutable');
+    expect(sql).toContain('content_source_media_items_evidence_immutable');
+    expect(sql).toContain('content_source_media_gates_receipt_identity_valid');
+    expect(sql).toContain('content_source_media_items_archive_valid');
+    expect(sql).toContain('IF OLD.available_at IS NOT NULL AND (');
+    expect(sql).toContain('AND asset.upload_lease_owner IS NULL');
+    expect(sql).toContain(String.raw`OLD.archive_status = 'ARCHIVED'`);
+    expect(sql).toContain('REVOKE ALL ON content.source_media_assets FROM letletme_graphql_reader');
+    expect(sql).toContain('REVOKE DELETE ON content.source_media_items FROM letletme_data_writer');
+  });
 });

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
@@ -10,6 +10,7 @@ import {
   contentAcquisitionProviderTraces,
   contentPipelineOutbox,
   contentSourceEndpoints,
+  contentSourceMediaGates,
   contentSourceObservations,
   contentSourceReceiptRevisions,
   contentSourceReceipts,
@@ -18,6 +19,7 @@ import {
   contentSourceTranscriptSegments,
   contentSources,
 } from '../../db/schemas/content.schema';
+import { seasonsInFpl } from '../../db/schemas/platform.schema';
 import { getDb, type DbHandle } from '../../db/singleton';
 import {
   acquisitionBatchV1Schema,
@@ -25,7 +27,7 @@ import {
   type AcquisitionBatchV1,
   type AcquisitionItemV1,
 } from './acquisition-contract';
-import { sha256CanonicalJson, transcriptSegmentsHash } from './canonicalization';
+import { sha256CanonicalJson, transcriptSegmentsHash, xReceiptCoreHash } from './canonicalization';
 import type { CanonicalTranscriptSegmentV1, JsonValue } from './canonicalization';
 import {
   parseFormalRunRequestV1,
@@ -169,6 +171,35 @@ type CanonicalWorkItem = Readonly<{
   rightsPolicy: Readonly<Record<string, unknown>>;
   observationEndpoints: readonly string[];
 }>;
+
+const X_MEDIA_GATE_REQUEST_REVISION = 'x-page-media-v1';
+const X_MEDIA_RELEASE_DELAY_MS = 20 * 60_000;
+const X_MEDIA_REPAIR_WINDOW_MS = 24 * 60 * 60_000;
+
+function isXPostWorkItem(work: CanonicalWorkItem): boolean {
+  return work.item.contentKind === 'POST' && work.receiptKey.startsWith('x:');
+}
+
+function xMediaGateRequestHash(input: {
+  receiptRevisionId: string;
+  postId: string;
+  canonicalUrl: string;
+}): string {
+  return createHash('sha256')
+    .update(
+      `${X_MEDIA_GATE_REQUEST_REVISION}|${input.receiptRevisionId}|${input.postId}|${input.canonicalUrl}`,
+      'utf8',
+    )
+    .digest('hex');
+}
+
+function retainUntilDate(endsAt: string | Date | null): string | null {
+  if (!endsAt) return null;
+  const value = endsAt instanceof Date ? new Date(endsAt) : new Date(`${endsAt}T00:00:00.000Z`);
+  if (!Number.isFinite(value.getTime())) throw new Error('Current FPL season ends_at is invalid');
+  value.setUTCDate(value.getUTCDate() + 90);
+  return value.toISOString().slice(0, 10);
+}
 
 function receiptKey(input: {
   sourceKey: string;
@@ -571,12 +602,22 @@ export async function persistAcquisitionResult(
               receiptRevisionId: contentSourceReceiptRevisions.receiptRevisionId,
               revisionNumber: contentSourceReceiptRevisions.revisionNumber,
               canonicalHash: contentSourceReceiptRevisions.canonicalHash,
+              payload: contentSourceReceiptRevisions.payload,
             })
             .from(contentSourceReceiptRevisions)
             .where(inArray(contentSourceReceiptRevisions.receiptRevisionId, currentRevisionIds));
     const revisionById = new Map(
       currentRevisions.map((revision) => [revision.receiptRevisionId, revision]),
     );
+
+    const currentSeasonRows = workItems.some(isXPostWorkItem)
+      ? await tx
+          .select({ seasonId: seasonsInFpl.seasonId, endsAt: seasonsInFpl.endsAt })
+          .from(seasonsInFpl)
+          .where(eq(seasonsInFpl.isCurrent, true))
+          .limit(1)
+      : [];
+    const currentSeason = currentSeasonRows[0] ?? null;
 
     let revisionCount = 0;
     let unchangedCount = 0;
@@ -620,7 +661,17 @@ export async function persistAcquisitionResult(
       let receiptRevisionId = current?.receiptRevisionId ?? null;
       let outcome: 'ACCEPTED' | 'UNCHANGED' = 'UNCHANGED';
 
-      if (!existing || current?.canonicalHash !== work.canonicalHash) {
+      const legacyMediaOnlyDifference =
+        existing !== undefined &&
+        current !== undefined &&
+        isXPostWorkItem(work) &&
+        current.canonicalHash !== work.canonicalHash &&
+        xReceiptCoreHash(current.payload) === xReceiptCoreHash(work.payload);
+
+      if (
+        !existing ||
+        (current?.canonicalHash !== work.canonicalHash && !legacyMediaOnlyDifference)
+      ) {
         const revisionNumber = (current?.revisionNumber ?? 0) + 1;
         receiptRevisionId = randomUUID();
         outcome = 'ACCEPTED';
@@ -714,30 +765,7 @@ export async function persistAcquisitionResult(
           })
           .where(eq(contentSourceReceipts.receiptId, receiptId));
 
-        const eventType = existing ? 'receipt.updated.v1' : 'receipt.accepted.v1';
-        const eventKey = `${eventType}:${receiptRevisionId}`;
-        const occurredAt = dbNow.toISOString();
-        await tx.insert(contentPipelineOutbox).values({
-          outboxId: randomUUID(),
-          eventKey,
-          eventType,
-          receiptId,
-          receiptRevisionId,
-          runId: input.runId,
-          sourceId: work.sourceId,
-          endpointId: work.primaryEndpointId,
-          occurredAt: dbNow,
-          payload: {
-            receiptId,
-            receiptRevisionId,
-            runId: input.runId,
-            sourceId: work.sourceId,
-            endpointId: work.primaryEndpointId,
-            occurredAt,
-          },
-        });
         revisionCount += 1;
-        outboxCount += 1;
         revisedReceiptKeys.add(work.receiptKey);
       } else {
         if (
@@ -753,6 +781,91 @@ export async function persistAcquisitionResult(
       }
       if (!receiptRevisionId) {
         throw new Error(`Receipt ${work.receiptKey} has no current revision after persistence`);
+      }
+
+      let mediaGate: Readonly<{ gateId: string; releaseDeadlineAt: Date }> | undefined;
+      if (isXPostWorkItem(work)) {
+        const canonicalUrl = work.item.canonicalUrl;
+        if (!canonicalUrl) throw new Error('X media gate requires a canonical post URL');
+        const releaseDeadlineAt = new Date(dbNow.getTime() + X_MEDIA_RELEASE_DELAY_MS);
+        const repairUntilAt = new Date(dbNow.getTime() + X_MEDIA_REPAIR_WINDOW_MS);
+        const requestHash = xMediaGateRequestHash({
+          receiptRevisionId,
+          postId: work.externalItemId,
+          canonicalUrl,
+        });
+        await tx
+          .insert(contentSourceMediaGates)
+          .values({
+            gateId: randomUUID(),
+            receiptId,
+            receiptRevisionId,
+            postId: work.externalItemId,
+            canonicalUrl,
+            requestHash,
+            seasonId: currentSeason?.seasonId ?? null,
+            retainUntil: retainUntilDate(currentSeason?.endsAt ?? null),
+            status: 'PENDING',
+            releaseDeadlineAt,
+            nextAttemptAt: dbNow,
+            repairUntilAt,
+          })
+          .onConflictDoNothing({ target: contentSourceMediaGates.receiptRevisionId });
+        const existingGate = (
+          await tx
+            .select({
+              gateId: contentSourceMediaGates.gateId,
+              receiptId: contentSourceMediaGates.receiptId,
+              postId: contentSourceMediaGates.postId,
+              canonicalUrl: contentSourceMediaGates.canonicalUrl,
+              requestHash: contentSourceMediaGates.requestHash,
+              releaseDeadlineAt: contentSourceMediaGates.releaseDeadlineAt,
+            })
+            .from(contentSourceMediaGates)
+            .where(eq(contentSourceMediaGates.receiptRevisionId, receiptRevisionId))
+            .limit(1)
+        )[0];
+        if (!existingGate) throw new Error('X media gate disappeared after idempotent creation');
+        if (
+          existingGate.receiptId !== receiptId ||
+          existingGate.postId !== work.externalItemId ||
+          existingGate.canonicalUrl !== canonicalUrl ||
+          existingGate.requestHash !== requestHash
+        ) {
+          throw new Error(`X media gate identity conflict for revision ${receiptRevisionId}`);
+        }
+        mediaGate = {
+          gateId: existingGate.gateId,
+          releaseDeadlineAt: existingGate.releaseDeadlineAt,
+        };
+      }
+
+      if (outcome === 'ACCEPTED') {
+        const eventType = existing ? 'receipt.updated.v1' : 'receipt.accepted.v1';
+        const eventKey = `${eventType}:${receiptRevisionId}`;
+        const occurredAt = dbNow.toISOString();
+        await tx.insert(contentPipelineOutbox).values({
+          outboxId: randomUUID(),
+          eventKey,
+          eventType,
+          receiptId,
+          receiptRevisionId,
+          runId: input.runId,
+          sourceId: work.sourceId,
+          endpointId: work.primaryEndpointId,
+          mediaGateId: mediaGate?.gateId ?? null,
+          occurredAt: dbNow,
+          availableAt: mediaGate?.releaseDeadlineAt ?? dbNow,
+          payload: {
+            receiptId,
+            receiptRevisionId,
+            runId: input.runId,
+            sourceId: work.sourceId,
+            endpointId: work.primaryEndpointId,
+            occurredAt,
+          },
+        });
+        outboxCount += 1;
       }
       persistedReceiptByKey.set(work.receiptKey, { receiptId, receiptRevisionId });
 

@@ -9,6 +9,7 @@ import {
   numeric,
   pgSchema,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -16,6 +17,8 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
+
+import { seasonsInFpl } from './platform.schema';
 
 export const content = pgSchema('content');
 
@@ -787,6 +790,133 @@ export const contentSourceObservations = content.table(
   ],
 );
 
+export const contentSourceMediaGates = content.table(
+  'source_media_gates',
+  {
+    gateId: uuid('gate_id').primaryKey().notNull(),
+    receiptId: uuid('receipt_id')
+      .notNull()
+      .references(() => contentSourceReceipts.receiptId, { onDelete: 'restrict' }),
+    receiptRevisionId: uuid('receipt_revision_id')
+      .notNull()
+      .references(() => contentSourceReceiptRevisions.receiptRevisionId, {
+        onDelete: 'restrict',
+      }),
+    postId: text('post_id').notNull(),
+    canonicalUrl: text('canonical_url').notNull(),
+    requestHash: text('request_hash').notNull(),
+    seasonId: smallint('season_id').references(() => seasonsInFpl.seasonId, {
+      onDelete: 'restrict',
+    }),
+    retainUntil: date('retain_until'),
+    status: text().default('PENDING').notNull(),
+    releaseDeadlineAt: timestamp('release_deadline_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
+    repairUntilAt: timestamp('repair_until_at', { withTimezone: true, mode: 'date' }).notNull(),
+    repairExhaustedAt: timestamp('repair_exhausted_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    attemptCount: integer('attempt_count').default(0).notNull(),
+    leaseOwner: text('lease_owner'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
+    firstAttemptAt: timestamp('first_attempt_at', { withTimezone: true, mode: 'date' }),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true, mode: 'date' }),
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
+    lastFailureClass: text('last_failure_class'),
+    lastFailureHash: text('last_failure_hash'),
+    discoveredCount: integer('discovered_count').default(0).notNull(),
+    archivedCount: integer('archived_count').default(0).notNull(),
+    rejectedCount: integer('rejected_count').default(0).notNull(),
+    mediaStateHash: text('media_state_hash'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique('content_source_media_gates_revision_key').on(table.receiptRevisionId),
+    index('content_source_media_gates_receipt_idx').on(table.receiptId, table.createdAt.desc()),
+    index('content_source_media_gates_season_idx')
+      .on(table.seasonId, table.retainUntil)
+      .where(sql`season_id IS NOT NULL`),
+    index('content_source_media_gates_due_idx')
+      .on(table.nextAttemptAt, table.releaseDeadlineAt, table.gateId)
+      .where(
+        sql`status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE') AND next_attempt_at IS NOT NULL AND repair_exhausted_at IS NULL`,
+      ),
+    index('content_source_media_gates_reclaim_idx')
+      .on(table.leaseExpiresAt, table.gateId)
+      .where(sql`status = 'RUNNING'`),
+  ],
+);
+
+export const contentSourceMediaAssets = content.table(
+  'source_media_assets',
+  {
+    assetId: uuid('asset_id').primaryKey().notNull(),
+    sha256: text().notNull(),
+    objectKey: text('object_key').notNull(),
+    actualMime: text('actual_mime').notNull(),
+    byteSize: bigint('byte_size', { mode: 'number' }).notNull(),
+    width: integer().notNull(),
+    height: integer().notNull(),
+    bucket: text().notNull(),
+    storageState: text('storage_state').default('RESERVED').notNull(),
+    uploadLeaseOwner: text('upload_lease_owner'),
+    uploadLeaseExpiresAt: timestamp('upload_lease_expires_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    availableAt: timestamp('available_at', { withTimezone: true, mode: 'date' }),
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
+    lastFailureHash: text('last_failure_hash'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique('content_source_media_assets_sha_key').on(table.sha256),
+    unique('content_source_media_assets_object_key_key').on(table.objectKey),
+    index('content_source_media_assets_state_idx').on(table.storageState, table.updatedAt),
+    index('content_source_media_assets_upload_lease_idx')
+      .on(table.uploadLeaseExpiresAt, table.assetId)
+      .where(sql`upload_lease_expires_at IS NOT NULL`),
+  ],
+);
+
+export const contentSourceMediaItems = content.table(
+  'source_media_items',
+  {
+    itemId: uuid('item_id').primaryKey().notNull(),
+    gateId: uuid('gate_id')
+      .notNull()
+      .references(() => contentSourceMediaGates.gateId, { onDelete: 'restrict' }),
+    ordinal: integer().notNull(),
+    role: text().notNull(),
+    sourceUrl: text('source_url').notNull(),
+    altText: text('alt_text'),
+    sourceVariant: text('source_variant').notNull(),
+    actualMime: text('actual_mime'),
+    archiveStatus: text('archive_status').default('PENDING').notNull(),
+    assetId: uuid('asset_id').references(() => contentSourceMediaAssets.assetId, {
+      onDelete: 'restrict',
+    }),
+    failureClass: text('failure_class'),
+    failureHash: text('failure_hash'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique('content_source_media_items_gate_ordinal_key').on(table.gateId, table.ordinal),
+    index('content_source_media_items_gate_idx').on(table.gateId, table.ordinal),
+    index('content_source_media_items_asset_idx')
+      .on(table.assetId)
+      .where(sql`asset_id IS NOT NULL`),
+    index('content_source_media_items_archive_status_idx').on(table.archiveStatus, table.updatedAt),
+  ],
+);
+
 export const contentPipelineOutbox = content.table(
   'pipeline_outbox',
   {
@@ -810,6 +940,9 @@ export const contentPipelineOutbox = content.table(
     endpointId: uuid('endpoint_id')
       .notNull()
       .references(() => contentSourceEndpoints.endpointId, { onDelete: 'restrict' }),
+    mediaGateId: uuid('media_gate_id').references(() => contentSourceMediaGates.gateId, {
+      onDelete: 'restrict',
+    }),
     occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'date' }).notNull(),
     payload: jsonb().notNull(),
     status: text().default('PENDING').notNull(),
@@ -832,6 +965,9 @@ export const contentPipelineOutbox = content.table(
     index('content_pipeline_outbox_reclaim_idx')
       .on(table.leaseExpiresAt, table.outboxId)
       .where(sql`status = 'PENDING' AND lease_expires_at IS NOT NULL`),
+    index('content_pipeline_outbox_media_gate_idx')
+      .on(table.mediaGateId, table.status, table.availableAt)
+      .where(sql`media_gate_id IS NOT NULL`),
   ],
 );
 

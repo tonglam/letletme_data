@@ -9,7 +9,6 @@ import {
   XPostQualityError,
   xSnowflakeTimestamp,
 } from '../../../src/content/acquisition/x-post-adapter';
-import type { XPostMediaEvidence } from '../../../src/content/acquisition/x-media-resolver';
 
 const request: XScanRunRequestV1 = {
   schemaVersion: 1,
@@ -224,19 +223,14 @@ describe('Grok Build X post adapter gates', () => {
     ).toBeNull();
   });
 
-  test('persists media status and downgrades the run when page media is unavailable', () => {
-    const evidence = new Map<string, XPostMediaEvidence>([
-      [posts[0].postId, { status: 'UNAVAILABLE', media: [] }],
-      [posts[1].postId, { status: 'CHECKED_NONE', media: [] }],
-    ]);
+  test('leaves media to the asynchronous source-media gate', () => {
     const result = adaptGrokBuildPosts({
       request,
       execution: execution(posts),
       checkedAt: new Date('2026-08-21T21:16:00.000Z'),
-      mediaByPostId: evidence,
     });
-    expect(result.stateHint).toBe('PARTIAL');
-    expect(result.mediaUnavailableCount).toBe(1);
-    expect(result.batches[0]?.items[0]?.mediaStatus).toBe('UNAVAILABLE');
+    expect(result.stateHint).toBe('SATURATED');
+    expect(result.batches[0]?.items[0]?.media).toEqual([]);
+    expect(result.batches[0]?.items[0]?.mediaStatus).toBeUndefined();
   });
 });
