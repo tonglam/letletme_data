@@ -41,6 +41,18 @@ export type OfficialH2HSyncOptions = {
   suppressedEventId?: number | null;
 };
 
+export function resolveFinalizedThroughEventId(
+  latestFinalizedEventId: number | null | undefined,
+  requestedEventId: number,
+  requestedEventIsFinalized: boolean,
+): number | null {
+  const finalizedThroughEventId = Math.max(
+    latestFinalizedEventId ?? 0,
+    requestedEventIsFinalized ? requestedEventId : 0,
+  );
+  return finalizedThroughEventId > 0 ? finalizedThroughEventId : null;
+}
+
 function isRealOfficialH2HStanding(
   standing: RawFPLLeagueStandingsResult,
 ): standing is OfficialH2HStanding {
@@ -392,7 +404,21 @@ export function selectOfficialH2HStandings(
 } {
   const officialPlayed = standingsPlayedCoverage(officialStandings);
   const derivedPlayed = standingsPlayedCoverage(matchDerivedStandings);
-  const usedMatchDerivedStandings = derivedPlayed > officialPlayed;
+  const officialPlayedByEntry = new Map(
+    officialStandings.map((standing) => [
+      standing.entry,
+      nonNegativeInteger(standing.matches_played),
+    ]),
+  );
+  // FPL can refresh only some rows first. Aggregate coverage can therefore be
+  // equal even while an individual entry is still behind (for example [2, 0]
+  // versus a complete [1, 1] match snapshot). Keep the atomic match-derived
+  // table until no real entry trails its derived coverage.
+  const usedMatchDerivedStandings = matchDerivedStandings.some(
+    (standing) =>
+      (officialPlayedByEntry.get(standing.entry) ?? -1) <
+      nonNegativeInteger(standing.matches_played),
+  );
   return {
     standings: usedMatchDerivedStandings ? matchDerivedStandings : officialStandings,
     usedMatchDerivedStandings,

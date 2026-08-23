@@ -8,6 +8,7 @@ import {
   hasCompleteOfficialH2HScoreBatch,
   projectOfficialH2HStandings,
   projectOfficialH2HStandingsFromMatches,
+  resolveFinalizedThroughEventId,
   selectOfficialH2HStandings,
   validatedOfficialH2HSyncOptions,
 } from '../../src/services/tournament-official-h2h.service';
@@ -72,6 +73,13 @@ function group(entryId: number): DbTournamentGroup {
 }
 
 describe('official H2H source import', () => {
+  test('keeps a just-finalized requested event inside a lagging aggregate cutoff', () => {
+    expect(resolveFinalizedThroughEventId(null, 1, true)).toBe(1);
+    expect(resolveFinalizedThroughEventId(3, 4, true)).toBe(4);
+    expect(resolveFinalizedThroughEventId(4, 4, false)).toBe(4);
+    expect(resolveFinalizedThroughEventId(null, 1, false)).toBeNull();
+  });
+
   test('ignores the official Average Team placeholder in standings', async () => {
     const getLeagueH2HStandings = mock(async () => ({
       standings: {
@@ -721,6 +729,19 @@ describe('official H2H source import', () => {
     expect(selectOfficialH2HStandings(official, derivedEqualCoverage)).toMatchObject({
       standings: official,
       usedMatchDerivedStandings: false,
+      officialPlayed: 2,
+      derivedPlayed: 2,
+    });
+
+    const partiallyRefreshedOfficial = [
+      { ...official[0]!, matches_played: 2 },
+      { ...official[1]!, matches_played: 0 },
+    ];
+    expect(
+      selectOfficialH2HStandings(partiallyRefreshedOfficial, derivedEqualCoverage),
+    ).toMatchObject({
+      standings: derivedEqualCoverage,
+      usedMatchDerivedStandings: true,
       officialPlayed: 2,
       derivedPlayed: 2,
     });

@@ -15,6 +15,7 @@ import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/t
 import { eventRepository } from '../repositories/events';
 import {
   OfficialH2HStrategy,
+  resolveFinalizedThroughEventId,
   type OfficialH2HSyncOptions,
 } from './tournament-official-h2h.service';
 
@@ -31,7 +32,14 @@ async function getOfficialH2HSyncOptions(
   ]);
   const eventIsFinalized = event?.finished === true && event.dataChecked === true;
   return {
-    finalizedThroughEventId: latestFinalizedEvent?.id ?? null,
+    // The event and latest-finalized reads are concurrent. If finalization
+    // lands between them, never let the older aggregate cutoff contradict the
+    // exact event row that already reports a finalized state.
+    finalizedThroughEventId: resolveFinalizedThroughEventId(
+      latestFinalizedEvent?.id,
+      eventId,
+      eventIsFinalized,
+    ),
     provisionalEventId:
       event && !eventIsFinalized && (event.isCurrent || currentEvent?.id === eventId)
         ? eventId
