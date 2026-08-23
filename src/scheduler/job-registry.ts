@@ -39,6 +39,7 @@ import {
   coreLifecycleReconcilePeriodKey,
   coreSnapshotRefreshReason,
 } from '../domain/core-snapshot-refresh';
+import { resolvePlayerStatsActiveCadence } from '../domain/job-schedules';
 import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
@@ -72,11 +73,21 @@ export type SchedulerContext = Readonly<{
   season: FplSeasonRef;
   currentEventId?: number;
   currentEventDeadline?: Date;
+  latestFinalizedEventId?: number;
   events: readonly {
     id: number;
     deadlineTime: Date | null;
+    finished?: boolean;
+    dataChecked?: boolean;
+    dataCheckedAt?: Date | null;
   }[];
 }>;
+
+export function resolveEntryInfoSnapshotTargetEventId(
+  context: Pick<SchedulerContext, 'latestFinalizedEventId'>,
+): number {
+  return context.latestFinalizedEventId ?? 0;
+}
 
 export type ScheduledJobDefinition = Readonly<{
   name: string;
@@ -95,6 +106,42 @@ export type ScheduledJobDefinition = Readonly<{
     generation: number;
   }) => Promise<{ bullJobId?: string | number; runId?: string } | void>;
 }>;
+
+// A scheduler pass creates one context. Definitions share the same current
+// event row and one all-fixtures read through these context-scoped promises,
+// avoiding repeated PostgreSQL reads every 30 seconds without retaining stale
+// data across passes.
+const schedulerEventReads = new WeakMap<
+  SchedulerContext,
+  Map<number, ReturnType<typeof eventRepository.findById>>
+>();
+const schedulerAllFixtureReads = new WeakMap<
+  SchedulerContext,
+  ReturnType<typeof fixtureRepository.findAll>
+>();
+
+function loadSchedulerEvent(context: SchedulerContext, eventId: number) {
+  let reads = schedulerEventReads.get(context);
+  if (!reads) {
+    reads = new Map();
+    schedulerEventReads.set(context, reads);
+  }
+  let value = reads.get(eventId);
+  if (!value) {
+    value = eventRepository.findById(context.season, eventId);
+    reads.set(eventId, value);
+  }
+  return value;
+}
+
+async function loadSchedulerFixtures(context: SchedulerContext, eventId: number) {
+  let allFixtures = schedulerAllFixtureReads.get(context);
+  if (!allFixtures) {
+    allFixtures = fixtureRepository.findAll(context.season);
+    schedulerAllFixtureReads.set(context, allFixtures);
+  }
+  return (await allFixtures).filter((fixture) => fixture.event === eventId);
+}
 
 function utc8DueAt(date: Date, hour: number, minute: number): Date {
   const key = formatCronDateKey(date);
@@ -118,15 +165,22 @@ function dailyDefinition(input: {
     ...input,
     timezone: 'Asia/Shanghai',
     resolve: async (context) => {
-      const dueAt = utc8DueAt(context.now, input.hour, input.minute);
+      const todayDueAt = utc8DueAt(context.now, input.hour, input.minute);
+      const latestAuthoritativeDueAt =
+        context.now >= todayDueAt ? todayDueAt : new Date(todayDueAt.getTime() - 24 * 60 * 60_000);
       const current: SchedulerObligationPlan = {
         scopeKey: context.season.seasonCode,
-        periodKey: formatCronDateKey(context.now),
-        dueAt,
+        periodKey: formatCronDateKey(latestAuthoritativeDueAt),
+        dueAt: latestAuthoritativeDueAt,
         source: 'catchup',
       };
       if (input.catchUpPolicy !== 'current-day-only') {
-        if (context.now < dueAt) return [];
+        // Only latest-authoritative daily work replays yesterday's final
+        // checkpoint before today's due time. Checkpoint jobs retain their
+        // explicit daily boundary.
+        if (context.now < todayDueAt && input.catchUpPolicy !== 'latest-authoritative') {
+          return [];
+        }
         return [current];
       }
 
@@ -136,7 +190,7 @@ function dailyDefinition(input: {
       // restart), while never replaying a mutable historical market source.
       const terminalPlans: SchedulerObligationPlan[] = [];
       for (let daysAgo = 1; daysAgo <= 31; daysAgo += 1) {
-        const previousDueAt = new Date(dueAt.getTime() - daysAgo * 24 * 60 * 60_000);
+        const previousDueAt = new Date(todayDueAt.getTime() - daysAgo * 24 * 60 * 60_000);
         terminalPlans.push({
           scopeKey: context.season.seasonCode,
           periodKey: formatCronDateKey(previousDueAt),
@@ -146,7 +200,12 @@ function dailyDefinition(input: {
           evidence: { reason: 'market-window-expired', policy: input.catchUpPolicy },
         });
       }
-      return [...terminalPlans, ...(context.now >= dueAt ? [current] : [])];
+      const currentDayPlan: SchedulerObligationPlan = {
+        ...current,
+        periodKey: formatCronDateKey(todayDueAt),
+        dueAt: todayDueAt,
+      };
+      return [...terminalPlans, ...(context.now >= todayDueAt ? [currentDayPlan] : [])];
     },
   };
 }
@@ -208,6 +267,91 @@ function eventDefinition(input: {
   };
 }
 
+type PostMatchFixturesLoader = (
+  season: FplSeasonRef,
+  eventId: number,
+) => ReturnType<typeof fixtureRepository.findByEvent>;
+
+/**
+ * Results are meaningful only after the final fixture's expected end. During
+ * the first 24 hours each event gets one idempotent hourly checkpoint. Once
+ * FPL marks an event finished and data_checked, a stable final checkpoint
+ * remains eligible forever so scheduler downtime cannot strand historical GWs.
+ */
+export async function resolvePostMatchResultPlans(
+  context: SchedulerContext,
+  loadFixtures: PostMatchFixturesLoader = (_season, eventId) =>
+    loadSchedulerFixtures(context, eventId),
+): Promise<readonly SchedulerObligationPlan[]> {
+  const plans: SchedulerObligationPlan[] = [];
+  const unsettledEvents: SchedulerContext['events'][number][] = [];
+
+  for (const event of context.events) {
+    if (event.finished && event.dataChecked) {
+      const dueAt = event.dataCheckedAt ?? event.deadlineTime ?? context.now;
+      if (context.now < dueAt) continue;
+      plans.push({
+        scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+        periodKey: `event-${event.id}-final`,
+        dueAt,
+        eventId: event.id,
+        source: 'catchup',
+        evidence: {
+          resultSlot: 'final-checkpoint',
+          dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
+        },
+      });
+      continue;
+    }
+    unsettledEvents.push(event);
+  }
+
+  const provisional = await Promise.all(
+    unsettledEvents.map(async (event): Promise<SchedulerObligationPlan | null> => {
+      const fixtures = await loadFixtures(context.season, event.id);
+      const resultSlot = getPostMatchResultsSlot(
+        { dataChecked: event.dataChecked === true },
+        fixtures,
+        context.now,
+      );
+      if (!resultSlot) return null;
+      return {
+        scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+        periodKey: `event-${event.id}-${resultSlot}`,
+        dueAt: context.now,
+        eventId: event.id,
+        source: 'reconcile',
+        evidence: { resultSlot },
+      };
+    }),
+  );
+  return [
+    ...plans,
+    ...provisional.filter((plan): plan is SchedulerObligationPlan => plan !== null),
+  ];
+}
+
+const postMatchPlanCache = new WeakMap<
+  SchedulerContext,
+  Promise<readonly SchedulerObligationPlan[]>
+>();
+
+function resultEventDefinition(
+  input: Omit<ScheduledJobDefinition, 'timezone' | 'resolve'>,
+): ScheduledJobDefinition {
+  return {
+    ...input,
+    timezone: 'UTC',
+    resolve: (context) => {
+      const cached = postMatchPlanCache.get(context);
+      if (cached) return cached;
+      const plans = resolvePostMatchResultPlans(context);
+      postMatchPlanCache.set(context, plans);
+      return plans;
+    },
+  };
+}
+
 function myFplSnapshotDefinition(): ScheduledJobDefinition {
   return {
     name: MAINTENANCE_JOBS.MY_FPL_SNAPSHOT,
@@ -224,8 +368,7 @@ function myFplSnapshotDefinition(): ScheduledJobDefinition {
       const dateKey = formatCronDateKey(context.now);
       for (const event of context.events) {
         if (!event.deadlineTime || event.deadlineTime > context.now) continue;
-        const lifecycle = await eventRepository.findById(context.season, event.id);
-        if (!lifecycle || (lifecycle.finished && lifecycle.dataChecked)) continue;
+        if (event.finished && event.dataChecked) continue;
         if (await hasFinalMyFplPublication(context.season, event.id)) continue;
         plans.push({
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
@@ -265,10 +408,8 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
     resolve: async (context) => {
       const plans: SchedulerObligationPlan[] = [];
       for (const event of context.events) {
-        const lifecycle = await eventRepository.findById(context.season, event.id);
-        if (!lifecycle?.finished || !lifecycle.dataChecked) continue;
-        if (await hasFinalMyFplPublication(context.season, event.id)) continue;
-        const checkedAt = lifecycle.dataCheckedAt?.toISOString() ?? 'unknown';
+        if (!event.finished || !event.dataChecked) continue;
+        const checkedAt = event.dataCheckedAt?.toISOString() ?? 'unknown';
         plans.push({
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
           periodKey: `final-${event.id}-${checkedAt}`,
@@ -368,9 +509,9 @@ function postMatchMaintenanceDefinition(): ScheduledJobDefinition {
     successPredicate: 'post-match finalization coordinator enqueues downstream checkpoint jobs',
     resolve: async (context) => {
       if (!context.currentEventId) return [];
-      const event = await eventRepository.findById(context.season, context.currentEventId);
+      const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
-      const fixtures = await fixtureRepository.findByEvent(context.season, event.id);
+      const fixtures = await loadSchedulerFixtures(context, event.id);
       const resultSlot = getPostMatchResultsSlot(event, fixtures, context.now);
       if (!resultSlot) return [];
       const dateKey = formatCronDateKey(context.now);
@@ -420,9 +561,9 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       if (!context.currentEventId) return [];
       const currentEvent = context.events.find((event) => event.id === context.currentEventId);
       if (!currentEvent?.deadlineTime) return [];
-      const event = await eventRepository.findById(context.season, context.currentEventId);
+      const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
-      const fixtures = await fixtureRepository.findByEvent(context.season, event.id);
+      const fixtures = await loadSchedulerFixtures(context, event.id);
       if (!isMatchDayTime(event, fixtures, context.now)) return [];
       const bucket = Math.floor(context.now.getTime() / 30_000);
       const persistBucket = Math.floor(context.now.getTime() / (10 * 60_000));
@@ -463,12 +604,7 @@ type OfficialH2HSchedulerDependencies = Readonly<{
 }>;
 
 export function officialH2HDefinition(
-  dependencies: OfficialH2HSchedulerDependencies = {
-    findEvent: (season, eventId) => eventRepository.findById(season, eventId),
-    findFixtures: (season, eventId) => fixtureRepository.findByEvent(season, eventId),
-    hasPending: hasPendingOfficialH2HJob,
-    enqueue: enqueueTournamentOfficialH2H,
-  },
+  dependencies?: OfficialH2HSchedulerDependencies,
 ): ScheduledJobDefinition {
   return {
     name: 'tournament-official-h2h-live',
@@ -481,12 +617,18 @@ export function officialH2HDefinition(
     manualTrigger: false,
     resolve: async (context) => {
       if (!context.currentEventId) return [];
-      const event = await dependencies.findEvent(context.season, context.currentEventId);
+      const event = dependencies
+        ? await dependencies.findEvent(context.season, context.currentEventId)
+        : await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
-      const fixtures = await dependencies.findFixtures(context.season, event.id);
+      const fixtures = dependencies
+        ? await dependencies.findFixtures(context.season, event.id)
+        : await loadSchedulerFixtures(context, event.id);
       const decision = decideLiveLifecycle(event, fixtures, context.now);
       if (!decision.shouldFetchLive || !isMatchDayTime(event, fixtures, context.now)) return [];
-      if (await dependencies.hasPending(context.season, event.id)) return [];
+      if (await (dependencies?.hasPending ?? hasPendingOfficialH2HJob)(context.season, event.id)) {
+        return [];
+      }
       const minuteStart = new Date(Math.floor(context.now.getTime() / 60_000) * 60_000);
       const minuteKey = minuteStart.toISOString().slice(0, 16).replace(/\D/g, '');
       return [
@@ -503,11 +645,16 @@ export function officialH2HDefinition(
     enqueue: async ({ context, plan, obligationId, generation }) => {
       const eventId = plan.eventId ?? context.currentEventId;
       if (!eventId) throw new Error('Official H2H obligation has no event checkpoint');
-      const job = await dependencies.enqueue(context.season, eventId, 'reconcile', {
-        jobId: `scheduler-${obligationId}-g${generation}`,
-        obligationId,
-        obligationGeneration: generation,
-      });
+      const job = await (dependencies?.enqueue ?? enqueueTournamentOfficialH2H)(
+        context.season,
+        eventId,
+        'reconcile',
+        {
+          jobId: `scheduler-${obligationId}-g${generation}`,
+          obligationId,
+          obligationGeneration: generation,
+        },
+      );
       if (!job) throw new Error('Official H2H job became pending before enqueue');
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -525,10 +672,10 @@ function coreLifecycleReconcileDefinition(): ScheduledJobDefinition {
     successPredicate: 'core publication lifecycle matches canonical event and fixtures',
     resolve: async (context) => {
       const current = context.currentEventId
-        ? await eventRepository.findById(context.season, context.currentEventId)
+        ? await loadSchedulerEvent(context, context.currentEventId)
         : null;
       if (!current) return [];
-      const fixtures = await fixtureRepository.findByEvent(context.season, current.id);
+      const fixtures = await loadSchedulerFixtures(context, current.id);
       const publication = await readCoreSnapshotCache(context.season.seasonCode);
       const active = await syncOperationsRepository.findActivePublication(
         'fpl:core',
@@ -578,9 +725,9 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
     successPredicate: 'final live snapshot and event checkpoint persisted',
     resolve: async (context) => {
       if (!context.currentEventId) return [];
-      const event = await eventRepository.findById(context.season, context.currentEventId);
+      const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
-      const fixtures = await fixtureRepository.findByEvent(context.season, event.id);
+      const fixtures = await loadSchedulerFixtures(context, event.id);
       const resultSlot = getPostMatchResultsSlot(event, fixtures, context.now);
       if (!resultSlot?.startsWith('final-')) return [];
       return [
@@ -613,7 +760,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
 function activePlayerStatsDefinition(): ScheduledJobDefinition {
   return {
     name: 'player-stats-active',
-    cadence: 'one-minute live window / five-minute settling repair',
+    cadence: 'one-minute live/settling window; five-minute between-fixture/review repair',
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'normal',
@@ -621,12 +768,12 @@ function activePlayerStatsDefinition(): ScheduledJobDefinition {
     successPredicate: 'player stats for the active event persist for the current bucket',
     resolve: async (context) => {
       if (!context.currentEventId) return [];
-      const event = await eventRepository.findById(context.season, context.currentEventId);
+      const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
-      const fixtures = await fixtureRepository.findByEvent(context.season, event.id);
+      const fixtures = await loadSchedulerFixtures(context, event.id);
       const decision = decideLiveLifecycle(event, fixtures, context.now);
-      const liveWindow = decision.state === 'LIVE_ACTIVE' || decision.state === 'DAY_SETTLING';
-      if (!liveWindow && context.now.getUTCMinutes() % 5 !== 0) return [];
+      const cadence = resolvePlayerStatsActiveCadence(decision.state, context.now);
+      if (!cadence) return [];
       const bucket = Math.floor(context.now.getTime() / 60_000);
       return [
         {
@@ -635,7 +782,7 @@ function activePlayerStatsDefinition(): ScheduledJobDefinition {
           dueAt: context.now,
           eventId: event.id,
           source: 'reconcile' as const,
-          evidence: { lifecycleState: decision.state, liveWindow },
+          evidence: { lifecycleState: decision.state, cadence },
         },
       ];
     },
@@ -720,7 +867,10 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       hour: 9,
       minute: 36,
       cadence: 'daily',
-      catchUpPolicy: 'latest-authoritative',
+      // The watchdog only knows how to validate today's mutable market date.
+      // Missed historical windows are terminal evidence, never replayed as if
+      // the current snapshot represented an older date.
+      catchUpPolicy: 'current-day-only',
       criticality: 'normal',
       queueName: 'maintenance',
       successPredicate: 'market freshness watchdog verifies a complete current snapshot',
@@ -830,7 +980,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       successPredicate: 'entry info daily checkpoint advances',
       enqueue: async ({ context, obligationId, generation }) => {
         const job = await enqueueEntryInfoSyncJob(context.season, 'catchup', {
-          eventId: context.currentEventId ?? 0,
+          eventId: resolveEntryInfoSnapshotTargetEventId(context),
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
@@ -923,14 +1073,13 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
         return { bullJobId: job.id, runId: job.data.runId };
       },
     }),
-    eventDefinition({
+    resultEventDefinition({
       name: 'entry-results',
-      cadence: 'post-deadline event checkpoint',
+      cadence: 'hourly after final fixture plus permanent final checkpoint',
       catchUpPolicy: 'event-checkpoint',
       criticality: 'normal',
       queueName: 'entry-sync',
       successPredicate: 'entry results checkpoint covers known entries for event',
-      allDueEvents: true,
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Entry results obligation has no event checkpoint');
@@ -950,7 +1099,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       catchUpPolicy: 'event-checkpoint',
       criticality: 'normal',
       queueName: 'league-sync',
-      successPredicate: 'league picks coordinator enqueues every active-league checkpoint',
+      successPredicate: 'league picks converge for every active tournament',
       allDueEvents: true,
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
@@ -963,14 +1112,13 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
         return { bullJobId: job.id, runId: job.data.runId };
       },
     }),
-    eventDefinition({
+    resultEventDefinition({
       name: 'league-event-results',
-      cadence: 'post-deadline event checkpoint',
+      cadence: 'hourly after final fixture plus permanent final checkpoint',
       catchUpPolicy: 'event-checkpoint',
       criticality: 'critical',
       queueName: 'league-sync',
-      successPredicate: 'league results coordinator enqueues every active-league checkpoint',
-      allDueEvents: true,
+      successPredicate: 'league results converge for every active tournament',
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('League results obligation has no event checkpoint');
@@ -982,15 +1130,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
         return { bullJobId: job.id, runId: job.data.runId };
       },
     }),
-    eventDefinition({
+    resultEventDefinition({
       name: 'tournament-event-results',
-      cadence: 'post-deadline event checkpoint',
+      cadence: 'hourly after final fixture plus permanent final checkpoint',
       catchUpPolicy: 'event-checkpoint',
       criticality: 'critical',
       queueName: 'tournament-sync',
       successPredicate:
         'tournament result and cascade jobs enqueue; persistent barrier owns downstream completion',
-      allDueEvents: true,
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Tournament results obligation has no event checkpoint');
@@ -1061,23 +1208,31 @@ export async function resolveSchedulerContext(
   // Use the canonical event ledger for reconciliation.  A Redis core pointer
   // may be stale/ghost during recovery and must not decide which checkpoint is
   // eligible for catch-up.
-  const events = (await eventRepository.findAll(season))
+  const canonicalEvents = await eventRepository.findAll(season);
+  const events = canonicalEvents
     .filter((event) => Number.isInteger(event.id) && event.id > 0)
     .map((event) => ({
       id: event.id,
       deadlineTime: event.deadlineTime ? new Date(event.deadlineTime) : null,
+      finished: event.finished,
+      dataChecked: event.dataChecked,
+      dataCheckedAt: event.dataCheckedAt,
     }));
   const currentEvent = events
     .filter((event) => event.deadlineTime && event.deadlineTime.getTime() <= now.getTime())
     .sort(
       (left, right) => (right.deadlineTime?.getTime() ?? 0) - (left.deadlineTime?.getTime() ?? 0),
     )[0];
+  const latestFinalizedEvent = canonicalEvents
+    .filter((event) => event.finished && event.dataChecked)
+    .sort((left, right) => right.id - left.id)[0];
   return {
     now,
     season,
     events,
     ...(currentEvent?.id ? { currentEventId: currentEvent.id } : {}),
     ...(currentEvent?.deadlineTime ? { currentEventDeadline: currentEvent.deadlineTime } : {}),
+    ...(latestFinalizedEvent?.id ? { latestFinalizedEventId: latestFinalizedEvent.id } : {}),
   };
 }
 

@@ -1,4 +1,5 @@
 import { assertIntegrationEnv } from './helpers/env-guard';
+import { isSafeIntegrationDatabaseUrl } from './helpers/safe-database-target';
 
 assertIntegrationEnv();
 
@@ -187,7 +188,7 @@ persistenceTest(
     if (!SCHEMA_EXPORT_DATABASE_URL) {
       throw new Error('SCHEMA_EXPORT_DATABASE_URL is required for core persistence acceptance');
     }
-    if (!/localhost|127\.0\.0\.1|_test/i.test(SCHEMA_EXPORT_DATABASE_URL)) {
+    if (!isSafeIntegrationDatabaseUrl(SCHEMA_EXPORT_DATABASE_URL)) {
       throw new Error('SCHEMA_EXPORT_DATABASE_URL must point at disposable test infrastructure');
     }
 

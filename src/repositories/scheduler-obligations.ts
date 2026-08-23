@@ -302,16 +302,23 @@ export async function completeSchedulerObligation(input: {
 
 /**
  * Close a due obligation without enqueueing it when its policy explicitly
- * says the window is no longer recoverable.  Never overwrite an in-flight
- * generation: a concurrent scheduler/worker still owns the evidence path.
+ * says the window is no longer recoverable. In-flight generations are kept
+ * intact by default; current-day-only policies may explicitly close an
+ * enqueued/running row after its date boundary so lease reclaim cannot launch
+ * an off-date worker. Completion/failure remains generation-guarded and cannot
+ * overwrite the terminal state.
  */
 export async function markSchedulerObligationIrrecoverable(input: {
   obligationId: string;
   status?: Extract<SchedulerObligationStatus, 'skipped' | 'irrecoverable'>;
   evidence?: Record<string, unknown>;
+  includeInFlight?: boolean;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
+  const closeableStatuses: SchedulerObligationStatus[] = input.includeInFlight
+    ? ['pending', 'failed', 'enqueued', 'running']
+    : ['pending', 'failed'];
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
@@ -325,7 +332,7 @@ export async function markSchedulerObligationIrrecoverable(input: {
     .where(
       and(
         eq(schedulerObligationsInOps.obligationId, input.obligationId),
-        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+        inArray(schedulerObligationsInOps.status, closeableStatuses),
       ),
     )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });

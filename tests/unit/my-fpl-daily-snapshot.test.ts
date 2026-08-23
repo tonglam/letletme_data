@@ -62,8 +62,9 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scheduler).toContain('my-fpl-finalization');
     expect(scheduler).toContain('name: MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX');
     expect(scheduler).toContain('utc8DueAt(context.now, 10, 45)');
-    expect(scheduler).toContain('finished && lifecycle.dataChecked');
+    expect(scheduler).toContain('event.finished && event.dataChecked');
     expect(worker).toContain('dispatchMyFplSnapshotPublicationOutbox');
+    expect(worker).toContain('My FPL snapshot outbox left ${result.failed}');
   });
 
   test('allows the full current-season refresh barrier to settle', () => {
@@ -73,6 +74,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).toContain('SCHEDULER_LEASE_HEARTBEAT_MS = 60_000');
     expect(worker).toContain('runQueueRunPhase(attemptKey');
     expect(worker).not.toContain('await Promise.all([\n          enqueueCoreSnapshotJob');
+    expect(worker).toContain('eventRepository.findLatestFinalized(season)');
+    expect(worker).toContain('eventId: entryInfoTargetEventId');
   });
 
   test('decides same-day provisional noops only after normalized content hashing', () => {

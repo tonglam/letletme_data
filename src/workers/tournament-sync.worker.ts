@@ -41,7 +41,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { isTerminalJobFailure } from '../utils/worker-failure';
+import { isTerminalJobAttemptFailure, isTerminalJobFailure } from '../utils/worker-failure';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
 import {
@@ -59,6 +59,7 @@ import {
   enqueueTournamentMaterializedViewsRefresh,
   enqueueTournamentSelectionStats,
   enqueueTournamentRosterSync,
+  type CascadeCompletionBarrierJob,
 } from '../jobs/tournament-sync.jobs';
 import type { WorkerRuntime } from './worker-runtime';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
@@ -76,6 +77,45 @@ type PostCommitIntent = () => Promise<void>;
 type ScopedTournamentJobResult = {
   value: unknown;
   afterCommit?: PostCommitIntent;
+};
+
+type CascadeObligation = Readonly<{
+  obligationId?: string;
+  obligationGeneration?: number;
+}>;
+
+export type TournamentCascadeEnqueueDependencies = Readonly<{
+  createId: typeof createCascadeId;
+  initBarrier: typeof initCascadeStructureBarrier;
+  enqueuePointsRace: typeof enqueueTournamentPointsRace;
+  enqueueBattleRace: typeof enqueueTournamentBattleRace;
+  enqueueKnockout: typeof enqueueTournamentKnockout;
+  enqueueTransfersPost: typeof enqueueTournamentTransfersPost;
+  enqueueCupResults: typeof enqueueTournamentCupResults;
+}>;
+
+const tournamentCascadeEnqueueDependencies: TournamentCascadeEnqueueDependencies = {
+  createId: createCascadeId,
+  initBarrier: initCascadeStructureBarrier,
+  enqueuePointsRace: enqueueTournamentPointsRace,
+  enqueueBattleRace: enqueueTournamentBattleRace,
+  enqueueKnockout: enqueueTournamentKnockout,
+  enqueueTransfersPost: enqueueTournamentTransfersPost,
+  enqueueCupResults: enqueueTournamentCupResults,
+};
+
+export type CascadeRefreshDependencies = Readonly<{
+  claim: typeof tryClaimCascadeRefreshEnqueue;
+  enqueue: typeof enqueueTournamentMaterializedViewsRefresh;
+  markEnqueued: typeof markCascadeRefreshEnqueued;
+  releaseClaim: typeof releaseCascadeRefreshEnqueueClaim;
+}>;
+
+const cascadeRefreshDependencies: CascadeRefreshDependencies = {
+  claim: tryClaimCascadeRefreshEnqueue,
+  enqueue: enqueueTournamentMaterializedViewsRefresh,
+  markEnqueued: markCascadeRefreshEnqueued,
+  releaseClaim: releaseCascadeRefreshEnqueueClaim,
 };
 
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
@@ -101,6 +141,48 @@ function startSchedulerLeaseHeartbeat(job: Job<TournamentSyncJobData>): () => vo
   return () => clearInterval(timer);
 }
 
+async function completeTournamentCascadeObligation(
+  job: Job<TournamentSyncJobData>,
+  completionStage: 'no-active-tournaments' | 'materialized-view-finalizer',
+): Promise<void> {
+  if (!job.data.obligationId) return;
+  const completed = await completeSchedulerObligation({
+    obligationId: job.data.obligationId,
+    generation: job.data.obligationGeneration,
+    status: 'succeeded',
+    evidence: {
+      queue: tournamentSyncQueueName,
+      jobName: job.name,
+      eventId: job.data.eventId,
+      cascadeId: job.data.cascadeId,
+      completionStage,
+    },
+  });
+  if (!completed) {
+    logInfo('Ignored stale tournament obligation completion', {
+      obligationId: job.data.obligationId,
+      generation: job.data.obligationGeneration,
+      jobName: job.name,
+      completionStage,
+    });
+  }
+}
+
+export async function persistTournamentTerminalFailureBeforeSettlement(
+  job: Pick<Job<TournamentSyncJobData>, 'attemptsMade' | 'opts' | 'data'>,
+  error: unknown,
+  persist: typeof failSchedulerObligation = failSchedulerObligation,
+): Promise<boolean> {
+  if (!job.data.obligationId || !isTerminalJobAttemptFailure(job, error, job.attemptsMade + 1)) {
+    return false;
+  }
+  return persist({
+    obligationId: job.data.obligationId,
+    generation: job.data.obligationGeneration,
+    error,
+  });
+}
+
 /**
  * Enqueue cascade jobs after tournament-event-results completes.
  * These jobs depend on fresh tournament event results.
@@ -109,26 +191,37 @@ function startSchedulerLeaseHeartbeat(job: Job<TournamentSyncJobData>): () => vo
  * serialized structure jobs. Instead points/battle/knockout share a cascade
  * barrier and the last successful one enqueues the refresh (FP-07).
  */
-async function enqueueTournamentCascade(
+export async function enqueueTournamentCascade(
   season: FplSeasonRef,
   eventId: number,
   finalizationTargets: TournamentFinalizationTarget[],
   runId?: string,
+  obligation: CascadeObligation = {},
+  dependencies: TournamentCascadeEnqueueDependencies = tournamentCascadeEnqueueDependencies,
 ) {
   logInfo('Enqueueing tournament cascade jobs', { eventId });
 
   try {
-    const cascadeId = createCascadeId(season, eventId);
-    await initCascadeStructureBarrier(cascadeId);
-    const structureOpts = { cascadeId, finalizationTargets, runId };
+    const cascadeId = dependencies.createId();
+    await dependencies.initBarrier(cascadeId);
+    const structureOpts = {
+      cascadeId,
+      finalizationTargets,
+      runId,
+      ...(obligation.obligationId ? { obligationId: obligation.obligationId } : {}),
+      ...(obligation.obligationGeneration === undefined
+        ? {}
+        : { obligationGeneration: obligation.obligationGeneration }),
+    };
 
-    // Structure jobs carry cascadeId for the MV barrier; cup/transfers do not.
+    // All five roots carry the cascade and scheduler generation. Transfers
+    // enqueues the sixth role (selection stats) only after its own write.
     const results = await Promise.allSettled([
-      enqueueTournamentPointsRace(season, eventId, 'cascade', structureOpts),
-      enqueueTournamentBattleRace(season, eventId, 'cascade', structureOpts),
-      enqueueTournamentKnockout(season, eventId, 'cascade', structureOpts),
-      enqueueTournamentTransfersPost(season, eventId, 'cascade', structureOpts),
-      enqueueTournamentCupResults(season, eventId, 'cascade', structureOpts),
+      dependencies.enqueuePointsRace(season, eventId, 'cascade', structureOpts),
+      dependencies.enqueueBattleRace(season, eventId, 'cascade', structureOpts),
+      dependencies.enqueueKnockout(season, eventId, 'cascade', structureOpts),
+      dependencies.enqueueTransfersPost(season, eventId, 'cascade', structureOpts),
+      dependencies.enqueueCupResults(season, eventId, 'cascade', structureOpts),
     ]);
 
     const successful = results.filter((r) => r.status === 'fulfilled').length;
@@ -162,28 +255,6 @@ async function enqueueTournamentCascade(
         `Tournament cascade enqueue failed for ${failed} job(s) (eventId=${eventId})`,
       );
     }
-
-    // If a structure job failed to enqueue, the barrier would never reach 0.
-    // Claim a stable enqueue-failed slot per job so a partial cascade still refreshes.
-    const structureJobNames = [
-      TOURNAMENT_JOBS.POINTS_RACE,
-      TOURNAMENT_JOBS.BATTLE_RACE,
-      TOURNAMENT_JOBS.KNOCKOUT,
-    ];
-    for (let i = 0; i < 3; i++) {
-      if (results[i].status !== 'rejected') {
-        continue;
-      }
-      await noteCascadeStructureJobComplete(cascadeId, `enqueue-failed:${structureJobNames[i]}`);
-    }
-    await maybeEnqueueCascadeMaterializedRefresh(
-      season,
-      eventId,
-      cascadeId,
-      'structure-enqueue-gaps',
-      finalizationTargets,
-      runId,
-    );
   } catch (error) {
     logError('Failed to enqueue tournament cascade jobs', error, { eventId });
     throw error;
@@ -195,15 +266,17 @@ async function enqueueTournamentCascade(
  * Durable pending flag + lease: survives crashes after slot claim / failed queue.add.
  * If the lease is held by a dead worker, throw so BullMQ retries (Codex P2).
  */
-async function maybeEnqueueCascadeMaterializedRefresh(
+export async function maybeEnqueueCascadeMaterializedRefresh(
   season: FplSeasonRef,
   eventId: number,
   cascadeId: string,
   lastJob: string,
   finalizationTargets: TournamentFinalizationTarget[],
   runId?: string,
+  obligation: CascadeObligation = {},
+  dependencies: CascadeRefreshDependencies = cascadeRefreshDependencies,
 ): Promise<void> {
-  const claim = await tryClaimCascadeRefreshEnqueue(cascadeId);
+  const claim = await dependencies.claim(cascadeId);
   if (claim === 'already-enqueued' || claim === 'not-pending') {
     return;
   }
@@ -213,19 +286,23 @@ async function maybeEnqueueCascadeMaterializedRefresh(
     throw new Error(`Cascade MV refresh enqueue lease busy for cascadeId=${cascadeId}; will retry`);
   }
   try {
-    await enqueueTournamentMaterializedViewsRefresh(season, eventId, 'cascade', {
+    await dependencies.enqueue(season, eventId, 'cascade', {
       cascadeId,
       finalizationTargets,
       runId,
+      ...(obligation.obligationId ? { obligationId: obligation.obligationId } : {}),
+      ...(obligation.obligationGeneration === undefined
+        ? {}
+        : { obligationGeneration: obligation.obligationGeneration }),
     });
-    await markCascadeRefreshEnqueued(cascadeId);
+    await dependencies.markEnqueued(cascadeId);
     logInfo('Enqueued tournament materialized views refresh after structure cascade', {
       eventId,
       cascadeId,
       lastJob,
     });
   } catch (error) {
-    await releaseCascadeRefreshEnqueueClaim(cascadeId);
+    await dependencies.releaseClaim(cascadeId);
     logError('Failed to enqueue materialized views refresh after structure cascade', error, {
       eventId,
       cascadeId,
@@ -240,9 +317,10 @@ async function afterCascadeStructureJob(
   season: FplSeasonRef,
   eventId: number,
   cascadeId: string | undefined,
-  jobName: string,
+  jobName: CascadeCompletionBarrierJob,
   finalizationTargets: TournamentFinalizationTarget[],
   runId?: string,
+  obligation: CascadeObligation = {},
 ): Promise<void> {
   if (!cascadeId) {
     return;
@@ -257,6 +335,7 @@ async function afterCascadeStructureJob(
     jobName,
     finalizationTargets,
     runId,
+    obligation,
   );
 }
 
@@ -313,6 +392,12 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
   const season = await requireCurrentSeasonForJob(job.data);
   const { eventId, source, cascadeId } = job.data;
   const finalizationTargets = job.data.finalizationTargets ?? [];
+  const cascadeObligation: CascadeObligation = {
+    ...(job.data.obligationId ? { obligationId: job.data.obligationId } : {}),
+    ...(job.data.obligationGeneration === undefined
+      ? {}
+      : { obligationGeneration: job.data.obligationGeneration }),
+  };
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
@@ -370,6 +455,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 eventId,
                 result.finalizationTargets,
                 job.data.runId,
+                cascadeObligation,
               );
             } else {
               await enqueueOfficialRosterSyncAfterFinalization(season, eventId, job.data.runId);
@@ -379,6 +465,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 // derived-view refresh or cache invalidation.
                 refreshAlways: true,
               });
+              await completeTournamentCascadeObligation(job, 'no-active-tournaments');
             }
             return result;
           }
@@ -395,9 +482,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       season,
                       eventId,
                       cascadeId,
-                      job.name,
+                      TOURNAMENT_JOBS.POINTS_RACE,
                       finalizationTargets,
                       job.data.runId,
+                      cascadeObligation,
                     ),
                 };
               }
@@ -412,9 +500,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       season,
                       eventId,
                       cascadeId,
-                      job.name,
+                      TOURNAMENT_JOBS.BATTLE_RACE,
                       finalizationTargets,
                       job.data.runId,
+                      cascadeObligation,
                     ),
                 };
               }
@@ -432,9 +521,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       season,
                       eventId,
                       cascadeId,
-                      job.name,
+                      TOURNAMENT_JOBS.KNOCKOUT,
                       finalizationTargets,
                       job.data.runId,
+                      cascadeObligation,
                     ),
                 };
               }
@@ -448,14 +538,16 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       cascadeId,
                       finalizationTargets,
                       runId: job.data.runId,
+                      ...cascadeObligation,
                     });
                     await afterCascadeStructureJob(
                       season,
                       eventId,
                       cascadeId,
-                      job.name,
+                      TOURNAMENT_JOBS.TRANSFERS_POST,
                       finalizationTargets,
                       job.data.runId,
+                      cascadeObligation,
                     );
                   },
                 };
@@ -470,9 +562,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       season,
                       eventId,
                       cascadeId,
-                      job.name,
+                      TOURNAMENT_JOBS.CUP_RESULTS,
                       finalizationTargets,
                       job.data.runId,
+                      cascadeObligation,
                     ),
                 };
               }
@@ -486,9 +579,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                       season,
                       eventId,
                       cascadeId,
-                      job.name,
+                      TOURNAMENT_JOBS.SELECTION_STATS,
                       finalizationTargets,
                       job.data.runId,
+                      cascadeObligation,
                     ),
                 };
               }
@@ -505,6 +599,8 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                     ...tournamentEventFinalizationDependencies(season, finalizationTargets),
                     refreshAlways: true,
                   }),
+                  afterCommit: () =>
+                    completeTournamentCascadeObligation(job, 'materialized-view-finalizer'),
                 };
 
               case TOURNAMENT_JOBS.INFO:
@@ -624,9 +720,39 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           }
         }),
     );
+  } catch (error) {
+    if (job.data.obligationId) {
+      try {
+        await persistTournamentTerminalFailureBeforeSettlement(job, error);
+      } catch (bookkeepingError) {
+        // The BullMQ failed listener remains an idempotent fallback, but the
+        // main path attempts durable failure bookkeeping before settlement so
+        // process exit cannot leave a false active obligation.
+        logError(
+          'Failed to persist tournament obligation failure before settlement',
+          bookkeepingError,
+          {
+            jobId: job.id,
+            jobName: job.name,
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+          },
+        );
+      }
+    }
+    throw error;
   } finally {
     stopLeaseHeartbeat();
   }
+}
+
+export function shouldCompleteTournamentJobOnSettlement(
+  job: Pick<Job<TournamentSyncJobData>, 'name' | 'data'>,
+): boolean {
+  // Event-results either completes explicitly after the no-active finalizer or
+  // hands ownership to its cascade. Every cascade child, including the MV
+  // finalizer, persists its own guarded terminal state before BullMQ settles.
+  return job.name !== TOURNAMENT_JOBS.EVENT_RESULTS && job.data.source !== 'cascade';
 }
 
 export function createTournamentSyncWorker(): WorkerRuntime {
@@ -652,7 +778,7 @@ export function createTournamentSyncWorker(): WorkerRuntime {
       jobName: job.name,
       eventId: job.data.eventId,
     });
-    if (job.id !== undefined) {
+    if (job.id !== undefined && shouldCompleteTournamentJobOnSettlement(job)) {
       const completion = job.data.obligationId
         ? completeSchedulerObligation({
             obligationId: job.data.obligationId,

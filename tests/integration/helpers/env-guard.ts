@@ -20,12 +20,15 @@
  * Fails unless ALL of the following hold:
  *
  *   1. RUN_INTEGRATION=1 — integration tests only run via `bun run test:integration`.
- *   2. DATABASE_URL points at test infrastructure (matches localhost | 127.0.0.1 | _test).
- *   3. CACHE_REDIS_DB and QUEUE_REDIS_DB are non-zero and resolve to distinct
- *      endpoints, so cache cleanup and `queue.drain()` cannot cross-wire.
+ *   2. DATABASE_URL points at a local host or a database whose name ends in `_test`.
+ *   3. CACHE_REDIS_DB and QUEUE_REDIS_DB are non-zero and distinct, so cache
+ *      cleanup and `queue.drain()` cannot cross-wire through host aliases.
  */
 
-const SAFE_DATABASE_URL_PATTERN = /localhost|127\.0\.0\.1|_test/i;
+import {
+  areSafeIntegrationRedisDbIndexes,
+  isSafeIntegrationDatabaseUrl,
+} from './safe-database-target';
 
 function fail(reason: string): never {
   throw new Error(
@@ -53,8 +56,8 @@ export function assertIntegrationEnv(): void {
   }
 
   const databaseUrl = process.env.DATABASE_URL ?? '';
-  if (!SAFE_DATABASE_URL_PATTERN.test(databaseUrl)) {
-    fail('DATABASE_URL does not match test infrastructure (localhost | 127.0.0.1 | _test)');
+  if (!isSafeIntegrationDatabaseUrl(databaseUrl)) {
+    fail('DATABASE_URL is neither local nor named with a _test suffix');
   }
 
   const cacheDb = redisDbIndex(process.env.CACHE_REDIS_DB);
@@ -67,10 +70,8 @@ export function assertIntegrationEnv(): void {
     fail('QUEUE_REDIS_DB is unset or 0 (BullMQ would drain against a shared DB)');
   }
 
-  const cacheEndpoint = `${process.env.CACHE_REDIS_HOST ?? ''}:${process.env.CACHE_REDIS_PORT ?? ''}/${cacheDb}`;
-  const queueEndpoint = `${process.env.QUEUE_REDIS_HOST ?? ''}:${process.env.QUEUE_REDIS_PORT ?? ''}/${queueDb}`;
-  if (cacheEndpoint === queueEndpoint) {
-    fail('CACHE_REDIS_* and QUEUE_REDIS_* resolve to the same endpoint');
+  if (!areSafeIntegrationRedisDbIndexes(cacheDb, queueDb)) {
+    fail('CACHE_REDIS_DB and QUEUE_REDIS_DB must be distinct');
   }
 }
 
