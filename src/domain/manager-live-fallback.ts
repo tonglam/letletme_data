@@ -54,6 +54,17 @@ export const selectForegroundClassicRankEntryIds = <T>(
     })
     .slice(0, maxFetches);
 
+export const shouldEnrichClassicOverallRank = <T>(
+  entryId: number,
+  row: T,
+  refreshedEntryIds: ReadonlySet<number>,
+  rankOnlyEntryIds: ReadonlySet<number>,
+  isFresh: (row: T) => boolean,
+  needsOverallRank: (row: T) => boolean,
+): boolean =>
+  refreshedEntryIds.has(entryId) ||
+  (rankOnlyEntryIds.has(entryId) && isFresh(row) && needsOverallRank(row));
+
 export type KeyedTaskSerializer = <T>(
   key: string,
   task: () => Promise<T>,
@@ -86,6 +97,51 @@ export const acquireDistributedLease = async (
     if (failureMode === 'fail-closed') throw error;
     return 'uncoordinated';
   }
+};
+
+export type DistributedLeaseFence = Readonly<{
+  assertOwned: () => Promise<void>;
+  renewInBackground: () => void;
+}>;
+
+export const createDistributedLeaseFence = (
+  renew: () => Promise<boolean>,
+  onLost?: (error: unknown) => void,
+): DistributedLeaseFence => {
+  let lostError: Error | null = null;
+  let renewalInFlight: Promise<void> | null = null;
+
+  const renewLease = (): Promise<void> => {
+    if (lostError) return Promise.reject(lostError);
+    if (renewalInFlight) return renewalInFlight;
+
+    const active = (async () => {
+      try {
+        if (!(await renew())) throw new Error('distributed lease ownership lost');
+      } catch (error) {
+        lostError = error instanceof Error ? error : new Error('distributed lease renewal failed');
+        onLost?.(error);
+        throw lostError;
+      }
+    })();
+    renewalInFlight = active;
+    void active
+      .finally(() => {
+        if (renewalInFlight === active) renewalInFlight = null;
+      })
+      .catch(() => undefined);
+    return active;
+  };
+
+  return {
+    // Publication paths await this immediately before writing. The renewal
+    // both proves token ownership and extends the lease long enough for the
+    // following Redis write to remain fenced from a replacement owner.
+    assertOwned: renewLease,
+    renewInBackground: () => {
+      void renewLease().catch(() => undefined);
+    },
+  };
 };
 
 export const runYieldingKeyedTask = async <T>(

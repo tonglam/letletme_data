@@ -24,6 +24,7 @@ import {
   classicManagerSummaryFallbackEntryIds,
   classicManagerSummaryFallbackNeedsRefresh,
   createKeyedTaskSerializer,
+  createDistributedLeaseFence,
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
@@ -37,6 +38,7 @@ import {
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
+  shouldEnrichClassicOverallRank,
   shouldReplaceManagerLiveRow,
 } from '../domain/manager-live-fallback';
 
@@ -463,11 +465,13 @@ const parseManagerSummaryObservation = (value: string): ManagerSummaryObservatio
 const runClassicStandingsRefresh = <T>(
   redis: Redis | null,
   key: string,
-  task: () => Promise<T>,
+  task: (assertLeaseOwned: () => Promise<void>) => Promise<T>,
   priority: ManagerSummaryFetchPriority = 'foreground',
   options: { acquireFailureMode?: 'fail-open' | 'fail-closed' } = {},
 ): Promise<T> => {
-  if (!redis) return runClassicStandingsRefreshLocal(key, task, priority);
+  if (!redis) {
+    return runClassicStandingsRefreshLocal(key, () => task(async () => undefined), priority);
+  }
 
   const lockKey = classicRefreshLockKey(key);
   return runYieldingKeyedTask<T>(
@@ -489,7 +493,7 @@ const runClassicStandingsRefresh = <T>(
         // Classic standings have an upstream publication clock and a durable
         // PostgreSQL ordering guard, so they remain serviceable if Redis is
         // unavailable. Unversioned entry summaries opt into fail-closed below.
-        return { complete: true, value: await task() };
+        return { complete: true, value: await task(async () => undefined) };
       }
       if (acquisition === 'contended') {
         // A present lease is either actively renewed or will expire. Never
@@ -499,24 +503,31 @@ const runClassicStandingsRefresh = <T>(
         return { complete: false };
       }
 
+      const leaseFence = createDistributedLeaseFence(
+        async () =>
+          (await redis.eval(
+            RENEW_CLASSIC_REFRESH_LOCK_SCRIPT,
+            1,
+            lockKey,
+            lockToken,
+            CLASSIC_REFRESH_LOCK_SECONDS,
+          )) === 1,
+        (error) =>
+          logWarn('Official manager distributed refresh lease lost', {
+            key,
+            error: error instanceof Error ? error.message : 'unknown',
+          }),
+      );
       const renewTimer = setInterval(
-        () => {
-          void redis
-            .eval(
-              RENEW_CLASSIC_REFRESH_LOCK_SCRIPT,
-              1,
-              lockKey,
-              lockToken,
-              CLASSIC_REFRESH_LOCK_SECONDS,
-            )
-            .catch(() => undefined);
-        },
+        leaseFence.renewInBackground,
         Math.max(1_000, Math.floor((CLASSIC_REFRESH_LOCK_SECONDS * 1000) / 3)),
       );
       renewTimer.unref?.();
 
       try {
-        return { complete: true, value: await task() };
+        const value = await task(leaseFence.assertOwned);
+        await leaseFence.assertOwned();
+        return { complete: true, value };
       } finally {
         clearInterval(renewTimer);
         await redis
@@ -540,7 +551,7 @@ const fetchDistributedManagerSummary = (
   return runClassicStandingsRefresh(
     coordinator,
     `entry-summary:${season}:${eventId}:${entryId}`,
-    () =>
+    (assertLeaseOwned) =>
       readThroughManagerSummaryResult(
         async () => {
           try {
@@ -570,6 +581,7 @@ const fetchDistributedManagerSummary = (
         }),
         async (observation) => {
           try {
+            await assertLeaseOwned();
             await coordinator.set(
               entrySummarySharedResultKey(season, eventId, entryId),
               JSON.stringify(observation),
@@ -1177,6 +1189,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       errorCode: null,
       refreshedEntryIds: [],
     };
+    let foregroundRankEnrichedEntryIds: readonly number[] = [];
     const foregroundRankMissingEntryIds = selectForegroundClassicRankEntryIds(
       uniqueEntryIds,
       rows,
@@ -1228,11 +1241,24 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
             ...foregroundRankMissingEntryIds,
             ...nextStandings.refreshedEntryIds,
           ]);
+          const refreshedRankCandidateIds = new Set(nextStandings.refreshedEntryIds);
+          const rankOnlyCandidateIds = new Set(foregroundRankMissingEntryIds);
           const rankTargets = uniqueEntryIds
-            .filter(
-              (entryId) =>
-                rankCandidateIds.has(entryId) && classicStandingNeedsOverallRank(rows.get(entryId)),
-            )
+            .filter((entryId) => {
+              const row = rows.get(entryId);
+              return (
+                rankCandidateIds.has(entryId) &&
+                row?.source === 'FPL_CLASSIC_STANDINGS' &&
+                shouldEnrichClassicOverallRank(
+                  entryId,
+                  row,
+                  refreshedRankCandidateIds,
+                  rankOnlyCandidateIds,
+                  isFresh,
+                  classicStandingNeedsOverallRank,
+                )
+              );
+            })
             .slice(0, MAX_FOREGROUND_OVERALL_RANK_FETCHES);
           const rankError =
             rankTargets.length > 0
@@ -1246,6 +1272,11 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                   { force: true, preserveClassicStanding: true },
                 )
               : null;
+          // A partial wave does not identify which entry failed. Conservatively
+          // retry the whole refreshed set in the background; the shared result
+          // cache makes successful duplicates cheap and preserves one official
+          // observation across replicas.
+          foregroundRankEnrichedEntryIds = rankError === null ? rankTargets : [];
           return { standings: nextStandings, rankError };
         },
         'foreground',
@@ -1306,8 +1337,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       pendingStale,
       standings.complete,
     );
-    const deferredForegroundRankTargets = standings.refreshedEntryIds.slice(
-      MAX_FOREGROUND_OVERALL_RANK_FETCHES,
+    const foregroundRankEnrichedIds = new Set(foregroundRankEnrichedEntryIds);
+    const deferredForegroundRankTargets = standings.refreshedEntryIds.filter(
+      (entryId) => !foregroundRankEnrichedIds.has(entryId),
     );
     const pendingRefreshIds = new Set([...pendingCold, ...pendingStale]);
     const rankOnlyTargets = Array.from(
@@ -1395,16 +1427,27 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         // Only rows refreshed by a successful page (plus rows that were
         // already fresh rank-only targets) may receive OR enrichment. A failed
         // crawl must not stamp an old standings row fresh through summary data.
-        const refreshedStandingsIds = new Set(backgroundResult.refreshedEntryIds);
-        const rankOnlyEntryIds = new Set(rankOnlyTargets);
+        const refreshedStandingsIds = new Set([
+          ...deferredForegroundRankTargets,
+          ...backgroundResult.refreshedEntryIds,
+        ]);
+        const rankOnlyEntryIds = new Set(
+          rankOnlyTargets.filter((entryId) => !refreshedStandingsIds.has(entryId)),
+        );
         const backgroundRankTargets = Array.from(
           new Set([...rankOnlyTargets, ...backgroundResult.refreshedEntryIds]),
         ).filter((entryId) => {
           const row = backgroundRows.get(entryId);
           return (
             row?.source === 'FPL_CLASSIC_STANDINGS' &&
-            classicStandingNeedsOverallRank(row) &&
-            (refreshedStandingsIds.has(entryId) || (rankOnlyEntryIds.has(entryId) && isFresh(row)))
+            shouldEnrichClassicOverallRank(
+              entryId,
+              row,
+              refreshedStandingsIds,
+              rankOnlyEntryIds,
+              isFresh,
+              classicStandingNeedsOverallRank,
+            )
           );
         });
 
@@ -1428,9 +1471,14 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
                 const row = batchRows.get(entryId);
                 return (
                   row?.source === 'FPL_CLASSIC_STANDINGS' &&
-                  classicStandingNeedsOverallRank(row) &&
-                  (refreshedStandingsIds.has(entryId) ||
-                    (rankOnlyEntryIds.has(entryId) && isFresh(row)))
+                  shouldEnrichClassicOverallRank(
+                    entryId,
+                    row,
+                    refreshedStandingsIds,
+                    rankOnlyEntryIds,
+                    isFresh,
+                    classicStandingNeedsOverallRank,
+                  )
                 );
               });
               if (rankTargets.length > 0) {

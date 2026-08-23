@@ -6,6 +6,7 @@ import {
   classicManagerSummaryFallbackEntryIds,
   classicManagerSummaryFallbackNeedsRefresh,
   createKeyedTaskSerializer,
+  createDistributedLeaseFence,
   createManagerSummaryFetchGate,
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
@@ -19,6 +20,7 @@ import {
   runManagerStandingsPageSequence,
   runYieldingKeyedTask,
   selectForegroundClassicRankEntryIds,
+  shouldEnrichClassicOverallRank,
   shouldReplaceManagerLiveRow,
 } from '../../src/domain/manager-live-fallback';
 
@@ -78,6 +80,55 @@ describe('manager live refresh targets', () => {
         2,
       ),
     ).toEqual([1, 4]);
+  });
+
+  test('forces OR enrichment for refreshed standings rows that retain a positive old rank', () => {
+    const refreshedEntryIds = new Set([1]);
+    const rankOnlyEntryIds = new Set([2, 3, 4]);
+    const isFresh = (row: { fresh: boolean }) => row.fresh;
+    const needsOverallRank = (row: { overallRank: number | null }) =>
+      !row.overallRank || row.overallRank <= 0;
+
+    expect(
+      shouldEnrichClassicOverallRank(
+        1,
+        { fresh: true, overallRank: 123 },
+        refreshedEntryIds,
+        rankOnlyEntryIds,
+        isFresh,
+        needsOverallRank,
+      ),
+    ).toBe(true);
+    expect(
+      shouldEnrichClassicOverallRank(
+        2,
+        { fresh: true, overallRank: null },
+        refreshedEntryIds,
+        rankOnlyEntryIds,
+        isFresh,
+        needsOverallRank,
+      ),
+    ).toBe(true);
+    expect(
+      shouldEnrichClassicOverallRank(
+        3,
+        { fresh: true, overallRank: 456 },
+        refreshedEntryIds,
+        rankOnlyEntryIds,
+        isFresh,
+        needsOverallRank,
+      ),
+    ).toBe(false);
+    expect(
+      shouldEnrichClassicOverallRank(
+        4,
+        { fresh: false, overallRank: null },
+        refreshedEntryIds,
+        rankOnlyEntryIds,
+        isFresh,
+        needsOverallRank,
+      ),
+    ).toBe(false);
   });
 
   test('rejects a later local completion from an older upstream standings snapshot', () => {
@@ -163,6 +214,25 @@ describe('manager live refresh targets', () => {
 });
 
 describe('classic manager live fallback', () => {
+  test('permanently fences publication after distributed lease ownership is lost', async () => {
+    let ownsLease = true;
+    const fence = createDistributedLeaseFence(async () => ownsLease);
+
+    await expect(fence.assertOwned()).resolves.toBeUndefined();
+    ownsLease = false;
+    await expect(fence.assertOwned()).rejects.toThrow('distributed lease ownership lost');
+    ownsLease = true;
+    await expect(fence.assertOwned()).rejects.toThrow('distributed lease ownership lost');
+  });
+
+  test('fails the lease fence closed when renewal cannot be verified', async () => {
+    const fence = createDistributedLeaseFence(async () => {
+      throw new Error('redis unavailable');
+    });
+
+    await expect(fence.assertOwned()).rejects.toThrow('redis unavailable');
+  });
+
   test('uses official entry summaries after standings pagination is exhausted', () => {
     expect(planClassicManagerFallback([97_001], [], true)).toEqual({
       foregroundSummaryEntryIds: [97_001],
