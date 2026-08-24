@@ -49,6 +49,14 @@ type PlayerStateRefreshRow = {
   refreshed_at: Date | string;
 };
 
+type PlayerStateRefreshBase = {
+  revision: number;
+  playerCount: number;
+  understatPlayerCount: number;
+  sourceUpdatedAt: string;
+  refreshedAt: string;
+};
+
 type StaleSeasonRow = {
   season_id: number;
   season_code: string;
@@ -79,6 +87,7 @@ const iso = (value: Date | string): string =>
   (value instanceof Date ? value : new Date(value)).toISOString();
 
 const PLAYER_STATE_RECONCILIATION_LOCK_KEY = 'understat:player-state:reconciliation';
+const PLAYER_STATE_PROJECTION_LOCK_PREFIX = 'reporting:player-state-season:';
 
 export async function refreshPlayerSeasonSummaries(
   season: FplSeasonRef,
@@ -125,6 +134,20 @@ export async function refreshPlayerStateSeason(
   season: FplSeasonRef,
   options: PlayerStateRefreshOptions = {},
 ): Promise<PlayerStateSeasonRefresh> {
+  if (options.advanceSourceMarker && options.sourceWatermark) {
+    return refreshPlayerStateSeasonWithCapturedWatermark(season, options.sourceWatermark);
+  }
+
+  const base = await runPlayerStateSeasonRefresh(season);
+  const sourceMarker = options.advanceSourceMarker
+    ? await advancePlayerStateSourceMarker(season)
+    : undefined;
+  const result = buildPlayerStateSeasonRefresh(base, sourceMarker);
+  logPlayerStateSeasonRefresh(season, result);
+  return result;
+}
+
+async function runPlayerStateSeasonRefresh(season: FplSeasonRef): Promise<PlayerStateRefreshBase> {
   const client = await getDbClient();
   const rows = await client<PlayerStateRefreshRow[]>`
     SELECT revision, player_count, understat_player_count, source_updated_at, refreshed_at
@@ -134,28 +157,103 @@ export async function refreshPlayerStateSeason(
   if (!row) {
     throw new Error(`Player State refresh returned no metadata for ${season.seasonCode}`);
   }
-  const sourceMarker = options.advanceSourceMarker
-    ? await advancePlayerStateSourceMarker(season, options.sourceWatermark)
-    : undefined;
-  const result = {
+  return {
     revision: Number(row.revision),
     playerCount: row.player_count,
     understatPlayerCount: row.understat_player_count,
-    sourceUpdatedAt: iso(sourceMarker?.source_updated_at ?? row.source_updated_at),
+    sourceUpdatedAt: iso(row.source_updated_at),
     refreshedAt: iso(row.refreshed_at),
   };
+}
+
+function buildPlayerStateSeasonRefresh(
+  base: PlayerStateRefreshBase,
+  sourceMarker?: PlayerStateSourceMarkerRow,
+): PlayerStateSeasonRefresh {
+  return {
+    ...base,
+    sourceUpdatedAt: iso(sourceMarker?.source_updated_at ?? base.sourceUpdatedAt),
+  };
+}
+
+function logPlayerStateSeasonRefresh(season: FplSeasonRef, result: PlayerStateSeasonRefresh): void {
   logInfo('Player State season rows refreshed', {
     season: season.seasonCode,
     revision: result.revision,
     playerCount: result.playerCount,
     understatPlayerCount: result.understatPlayerCount,
   });
-  return result;
 }
 
 async function withPlayerStateProjectionSavepoint<T>(operation: () => Promise<T>): Promise<T> {
   if (!databaseTransactionStorage.getStore()) return operation();
   return withDatabaseSavepoint(operation);
+}
+
+async function withPlayerStateProjectionTransaction<T>(
+  season: FplSeasonRef,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const operationWithLock = async (): Promise<T> => {
+    const client = await getDbClient();
+    await client`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`${PLAYER_STATE_PROJECTION_LOCK_PREFIX}${season.seasonId}`}, 0)
+      )
+    `;
+    return operation();
+  };
+
+  if (databaseTransactionStorage.getStore()) {
+    return withDatabaseSavepoint(operationWithLock);
+  }
+
+  const db = await getDb();
+  return (await db.transaction(async (drizzleTransaction) => {
+    const transaction = (
+      drizzleTransaction as unknown as {
+        session?: { client?: postgres.TransactionSql };
+      }
+    ).session?.client;
+    if (!transaction) {
+      throw new Error('Drizzle transaction did not expose its pinned postgres client');
+    }
+    return runInDatabaseTransaction(transaction, operationWithLock, drizzleTransaction);
+  })) as T;
+}
+
+async function readPlayerStateSourceMarker(
+  season: FplSeasonRef,
+): Promise<PlayerStateSourceMarkerRow | null> {
+  const client = await getDbClient();
+  const rows = await client<PlayerStateSourceMarkerRow[]>`
+    SELECT
+      fpl_source_updated_at,
+      source_updated_at,
+      understat_source_updated_at,
+      bridge_source_updated_at
+    FROM reporting.player_state_season_refreshes
+    WHERE season_id = ${season.seasonId}::smallint
+  `;
+  return rows[0] ?? null;
+}
+
+async function refreshPlayerStateSeasonWithCapturedWatermark(
+  season: FplSeasonRef,
+  watermark: PlayerStateSourceWatermark,
+): Promise<PlayerStateSeasonRefresh> {
+  return withPlayerStateProjectionTransaction(season, async () => {
+    // The stored procedure derives marker columns from its own later snapshot.
+    // Keep the pre-projection marker as a floor, then restore the captured
+    // reconciliation watermark after the procedure returns so a concurrent
+    // FPL write cannot be mistaken for data consumed by this reconciliation.
+    const previousMarker = await readPlayerStateSourceMarker(season);
+    const base = await runPlayerStateSeasonRefresh(season);
+    const sourceMarker = await advancePlayerStateSourceMarker(season, watermark, previousMarker);
+    const result = buildPlayerStateSeasonRefresh(base, sourceMarker);
+    logPlayerStateSeasonRefresh(season, result);
+    return result;
+  });
 }
 
 /**
@@ -314,26 +412,47 @@ async function readPlayerStateSourceWatermark(
 async function advancePlayerStateSourceMarker(
   season: FplSeasonRef,
   watermark?: PlayerStateSourceWatermark,
+  previousMarker?: PlayerStateSourceMarkerRow | null,
 ): Promise<PlayerStateSourceMarkerRow> {
   const captured = watermark ?? (await readPlayerStateSourceWatermark(season));
+  const markerFloor = watermark
+    ? {
+        fpl: previousMarker?.fpl_source_updated_at ?? '-infinity',
+        understat: previousMarker?.understat_source_updated_at ?? '-infinity',
+        bridge: previousMarker?.bridge_source_updated_at ?? '-infinity',
+        source: previousMarker?.source_updated_at ?? '-infinity',
+      }
+    : null;
   const client = await getDbClient();
   const rows = await client<PlayerStateSourceMarkerRow[]>`
     UPDATE reporting.player_state_season_refreshes refresh
     SET
       fpl_source_updated_at = GREATEST(
-        refresh.fpl_source_updated_at,
+        COALESCE(
+          ${markerFloor?.fpl ?? null}::timestamptz,
+          refresh.fpl_source_updated_at
+        ),
         ${captured.fplSourceUpdatedAt}::timestamptz
       ),
       understat_source_updated_at = GREATEST(
-        refresh.understat_source_updated_at,
+        COALESCE(
+          ${markerFloor?.understat ?? null}::timestamptz,
+          refresh.understat_source_updated_at
+        ),
         ${captured.understatSourceUpdatedAt}::timestamptz
       ),
       bridge_source_updated_at = GREATEST(
-        refresh.bridge_source_updated_at,
+        COALESCE(
+          ${markerFloor?.bridge ?? null}::timestamptz,
+          refresh.bridge_source_updated_at
+        ),
         ${captured.bridgeSourceUpdatedAt}::timestamptz
       ),
       source_updated_at = GREATEST(
-        refresh.source_updated_at,
+        COALESCE(
+          ${markerFloor?.source ?? null}::timestamptz,
+          refresh.source_updated_at
+        ),
         ${captured.sourceUpdatedAt}::timestamptz
       )
     WHERE refresh.season_id = ${season.seasonId}::smallint
@@ -355,6 +474,9 @@ export async function refreshPlayerStateSeasonSafely(
   season: FplSeasonRef,
   options: PlayerStateRefreshOptions = {},
 ): Promise<PlayerStateSeasonRefresh> {
+  if (options.advanceSourceMarker && options.sourceWatermark) {
+    return refreshPlayerStateSeason(season, options);
+  }
   return withPlayerStateProjectionSavepoint(() => refreshPlayerStateSeason(season, options));
 }
 
@@ -374,12 +496,10 @@ export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise
     const mappings = await reconcileProviderMappings(season.seasonCode);
     return { mappings, watermark };
   });
-  const refresh = await withPlayerStateProjectionSavepoint(() =>
-    refreshPlayerStateSeason(season, {
-      advanceSourceMarker: true,
-      sourceWatermark: watermark,
-    }),
-  );
+  const refresh = await refreshPlayerStateSeasonSafely(season, {
+    advanceSourceMarker: true,
+    sourceWatermark: watermark,
+  });
   logInfo('Understat Player State published', {
     season: season.seasonCode,
     mappingMatches: mappings.matches.verified,
