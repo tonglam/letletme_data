@@ -6,7 +6,12 @@ compose_bin=${COMPOSE_BIN:-docker compose}
 compose_file=${COMPOSE_FILE:-docker-compose.yml}
 project_dir=${PROJECT_DIR:-$(pwd)}
 api_url=${API_HEALTH_URL:-http://127.0.0.1:3000}
-attempts=${HEALTH_ATTEMPTS:-30}
+# A cold restart after migrations can take longer than the container health
+# start period while Redis, the queue worker, and the content worker rebuild
+# their connections.  Keep the override for local/deployment-specific tests,
+# but make the default long enough to avoid rolling back a healthy release
+# merely because readiness is still converging.
+attempts=${HEALTH_ATTEMPTS:-90}
 delay_seconds=${HEALTH_DELAY_SECONDS:-2}
 curl_timeout_seconds=${HEALTH_CURL_TIMEOUT_SECONDS:-5}
 
