@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { entryEventPicksInCompetition } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
@@ -8,6 +8,17 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+
+export type EventLiveManagerPickRow = {
+  entryId: number;
+  position: number;
+  elementId: number;
+  multiplier: number;
+  isCaptain: boolean;
+  isViceCaptain: boolean;
+  transfersCost: number | null;
+  sourceUpdatedAt: Date;
+};
 
 function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -115,6 +126,57 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
   };
 
   return {
+    findScoringPicksByEventAndEntryIds: async (
+      season: FplSeasonRef,
+      eventId: number,
+      entryIds: readonly number[],
+    ): Promise<EventLiveManagerPickRow[]> => {
+      if (entryIds.length === 0) return [];
+      try {
+        const db = await getDbInstance();
+        const rows: EventLiveManagerPickRow[] = [];
+        for (const chunk of chunkArray(Array.from(new Set(entryIds)), 1000)) {
+          rows.push(
+            ...(await db
+              .select({
+                entryId: entryEventPicksInCompetition.entryId,
+                position: entryEventPicksInCompetition.position,
+                elementId: entryEventPicksInCompetition.elementId,
+                multiplier: entryEventPicksInCompetition.multiplier,
+                isCaptain: entryEventPicksInCompetition.isCaptain,
+                isViceCaptain: entryEventPicksInCompetition.isViceCaptain,
+                transfersCost: entryEventPicksInCompetition.transfersCost,
+                sourceUpdatedAt: entryEventPicksInCompetition.sourceUpdatedAt,
+              })
+              .from(entryEventPicksInCompetition)
+              .where(
+                and(
+                  eq(entryEventPicksInCompetition.seasonId, season.seasonId),
+                  eq(entryEventPicksInCompetition.eventId, eventId),
+                  inArray(entryEventPicksInCompetition.entryId, chunk),
+                ),
+              )
+              .orderBy(
+                asc(entryEventPicksInCompetition.entryId),
+                asc(entryEventPicksInCompetition.position),
+              )),
+          );
+        }
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve scoring picks by event and entries', error, {
+          season: season.seasonCode,
+          eventId,
+          entries: entryIds.length,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve scoring picks by event and entries',
+          'ENTRY_EVENT_PICKS_SCORING_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findEntryIdsByEvent: async (
       season: FplSeasonRef,
       eventId: number,

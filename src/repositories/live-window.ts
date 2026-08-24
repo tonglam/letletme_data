@@ -101,7 +101,7 @@ export type ManagerScoreCheckpoint = {
   eventRank: number | null;
   overallRank: number | null;
   leagueRank: number | null;
-  source: 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
+  source: 'FPL_EVENT_LIVE' | 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
   transferCost: number | null;
   eventPointSemantics: 'GROSS' | 'NET' | 'ZERO_COST_EQUIVALENT' | 'UNKNOWN';
   contentRevision: string;

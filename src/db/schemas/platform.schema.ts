@@ -4146,6 +4146,14 @@ export const leagueEventResultsInCompetition = competition.table(
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    sourceLiveCheckedAt: timestamp('source_live_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    sourcePicksCheckedAt: timestamp('source_picks_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
   },
   (table) => [
     index('league_event_results_captain_fk_idx').using(
@@ -4234,6 +4242,10 @@ export const leagueEventResultsInCompetition = competition.table(
     check(
       'league_event_results_transfer_counts_nonnegative',
       sql`(event_transfers >= 0) AND (event_transfers_cost >= 0)`,
+    ),
+    check(
+      'league_event_results_source_pair_valid',
+      sql`((source_live_checked_at IS NULL) AND (source_picks_checked_at IS NULL)) OR ((source_live_checked_at IS NOT NULL) AND (source_picks_checked_at IS NOT NULL))`,
     ),
   ],
 );

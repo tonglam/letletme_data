@@ -6,12 +6,16 @@ import {
   buildOfficialH2HRows,
   fetchOfficialH2HSourceSnapshot,
   hasCompleteOfficialH2HScoreBatch,
+  hasCompleteEntryEventTotalsCoverage,
+  isOfficialH2HGroupEvent,
   minimumOfficialPlayedCoverageForSuppressedEvent,
   projectOfficialH2HStandings,
   projectOfficialH2HStandingsFromMatches,
+  projectOfficialH2HEventLiveScores,
   resolveFinalizedThroughEventId,
   resolveOfficialH2HSyncOptionsFromEventState,
   selectOfficialH2HStandings,
+  suppressOfficialH2HActiveScores,
   validatedOfficialH2HSyncOptions,
 } from '../../src/services/tournament-official-h2h.service';
 
@@ -75,6 +79,261 @@ function group(entryId: number): DbTournamentGroup {
 }
 
 describe('official H2H source import', () => {
+  test('requires contiguous cumulative history before adding a provisional round', () => {
+    expect(
+      hasCompleteEntryEventTotalsCoverage({ eventCount: 2, firstEventId: 1, lastEventId: 2 }, 1, 2),
+    ).toBe(true);
+    expect(
+      hasCompleteEntryEventTotalsCoverage({ eventCount: 1, firstEventId: 1, lastEventId: 2 }, 1, 2),
+    ).toBe(false);
+    expect(hasCompleteEntryEventTotalsCoverage(undefined, 1, 2)).toBe(false);
+    expect(hasCompleteEntryEventTotalsCoverage(undefined, 1, 0)).toBe(true);
+  });
+
+  test('adds provisional cumulative totals only inside the configured group window', () => {
+    expect(isOfficialH2HGroupEvent(tournament, 1)).toBe(true);
+    expect(isOfficialH2HGroupEvent(tournament, 35)).toBe(true);
+    expect(isOfficialH2HGroupEvent(tournament, 36)).toBe(false);
+  });
+
+  test('uses event-live manager scores instead of a lagging official H2H score', () => {
+    const snapshot = {
+      standings: [],
+      matches: [
+        {
+          id: 2071743,
+          event: 1,
+          entry_1_entry: 109967,
+          entry_1_points: 23,
+          entry_2_entry: 34299,
+          entry_2_points: 17,
+          winner: 109967,
+          knockout_name: null,
+          sourceOrder: 0,
+        },
+      ],
+    };
+    const projected = projectOfficialH2HEventLiveScores(snapshot, 1, new Set([109967, 34299]), {
+      season: '2627',
+      eventId: 1,
+      state: 'live',
+      revision: 'fpl:live:publication-8:8',
+      publicationId: 'publication-8',
+      checkedAt: '2026-08-24T00:01:00.000Z',
+      sourceCheckedAt: '2026-08-24T00:00:59.000Z',
+      scores: new Map([
+        [
+          109967,
+          {
+            entryId: 109967,
+            eventPoints: 37,
+            netEventPoints: 37,
+            transferCost: 0,
+            totalPoints: 37,
+            picksCheckedAt: '2026-08-24T00:00:30.000Z',
+            revision: 'score-109967',
+          },
+        ],
+        [
+          34299,
+          {
+            entryId: 34299,
+            eventPoints: 31,
+            netEventPoints: 31,
+            transferCost: 0,
+            totalPoints: 31,
+            picksCheckedAt: '2026-08-24T00:00:30.000Z',
+            revision: 'score-34299',
+          },
+        ],
+      ]),
+    });
+
+    expect(projected?.matches[0]).toMatchObject({
+      entry_1_points: 37,
+      entry_2_points: 31,
+      winner: 109967,
+    });
+  });
+
+  test('rejects a complete all-zero event-live placeholder batch', () => {
+    const checkedAt = '2026-08-24T00:01:00.000Z';
+    expect(
+      projectOfficialH2HEventLiveScores(
+        {
+          standings: [],
+          matches: [
+            {
+              id: 2071743,
+              event: 1,
+              entry_1_entry: 109967,
+              entry_1_points: 23,
+              entry_2_entry: 34299,
+              entry_2_points: 17,
+              winner: 109967,
+              knockout_name: null,
+              sourceOrder: 0,
+            },
+          ],
+        },
+        1,
+        new Set([109967, 34299]),
+        {
+          season: '2627',
+          eventId: 1,
+          state: 'live',
+          revision: 'fpl:live:publication-placeholder',
+          publicationId: 'publication-placeholder',
+          checkedAt,
+          sourceCheckedAt: checkedAt,
+          scores: new Map(
+            [109967, 34299].map((entryId) => [
+              entryId,
+              {
+                entryId,
+                eventPoints: 0,
+                netEventPoints: 0,
+                transferCost: 0,
+                totalPoints: 0,
+                picksCheckedAt: checkedAt,
+                revision: `score-${entryId}`,
+              },
+            ]),
+          ),
+        },
+      ),
+    ).toBeNull();
+  });
+
+  test('preserves a validated knockout tiebreak winner when event-live scores are level', () => {
+    const snapshot = {
+      standings: [],
+      matches: [
+        {
+          id: 2071743,
+          event: 1,
+          entry_1_entry: 109967,
+          entry_1_points: 23,
+          entry_2_entry: 34299,
+          entry_2_points: 23,
+          winner: 34299,
+          is_knockout: true,
+          knockout_name: 'Final',
+          tiebreak: { goals: '2-1' },
+          sourceOrder: 0,
+        },
+      ],
+    };
+    const checkedAt = '2026-08-24T00:01:00.000Z';
+    const projected = projectOfficialH2HEventLiveScores(snapshot, 1, new Set([109967, 34299]), {
+      season: '2627',
+      eventId: 1,
+      state: 'live',
+      revision: 'fpl:live:publication-8:8',
+      publicationId: 'publication-8',
+      checkedAt,
+      sourceCheckedAt: checkedAt,
+      scores: new Map(
+        [109967, 34299].map((entryId) => [
+          entryId,
+          {
+            entryId,
+            eventPoints: 37,
+            netEventPoints: 37,
+            transferCost: 0,
+            totalPoints: 37,
+            picksCheckedAt: checkedAt,
+            revision: `score-${entryId}`,
+          },
+        ]),
+      ),
+    });
+
+    expect(projected?.matches[0]).toMatchObject({
+      entry_1_points: 37,
+      entry_2_points: 37,
+      winner: 34299,
+    });
+  });
+
+  test('fails closed for an Average Team side without event-live manager authority', () => {
+    const checkedAt = '2026-08-24T00:01:00.000Z';
+    expect(
+      projectOfficialH2HEventLiveScores(
+        {
+          standings: [],
+          matches: [
+            {
+              id: 2071743,
+              event: 1,
+              entry_1_entry: 109967,
+              entry_1_points: 23,
+              entry_2_entry: null,
+              entry_2_points: 31,
+              winner: null,
+              is_bye: false,
+              knockout_name: null,
+              sourceOrder: 0,
+            },
+          ],
+        },
+        1,
+        new Set([109967]),
+        {
+          season: '2627',
+          eventId: 1,
+          state: 'live',
+          revision: 'fpl:live:publication-8:8',
+          publicationId: 'publication-8',
+          checkedAt,
+          sourceCheckedAt: checkedAt,
+          scores: new Map([
+            [
+              109967,
+              {
+                entryId: 109967,
+                eventPoints: 37,
+                netEventPoints: 37,
+                transferCost: 0,
+                totalPoints: 37,
+                picksCheckedAt: checkedAt,
+                revision: 'score-109967',
+              },
+            ],
+          ]),
+        },
+      ),
+    ).toBeNull();
+  });
+
+  test('suppresses active official H2H points when a coherent event-live batch is unavailable', () => {
+    const snapshot = suppressOfficialH2HActiveScores(
+      {
+        standings: [],
+        matches: [
+          {
+            id: 2071743,
+            event: 1,
+            entry_1_entry: 109967,
+            entry_1_points: 23,
+            entry_2_entry: 34299,
+            entry_2_points: 17,
+            winner: 109967,
+            knockout_name: null,
+            sourceOrder: 0,
+          },
+        ],
+      },
+      1,
+    );
+
+    expect(snapshot.matches[0]).toMatchObject({
+      entry_1_points: null,
+      entry_2_points: null,
+      winner: null,
+    });
+  });
+
   test('keeps a just-finalized requested event inside a lagging aggregate cutoff', () => {
     expect(resolveFinalizedThroughEventId(null, 1, true)).toBe(1);
     expect(resolveFinalizedThroughEventId(3, 4, true)).toBe(4);

@@ -66,6 +66,10 @@ import {
   type ManagerSummaryFetchPriority,
 } from '../domain/manager-live-fallback';
 import { dispatchManagerLiveRefresh } from './manager-live-refresh-dispatch';
+import {
+  eventLiveManagerScoreService,
+  type EventLiveManagerScoreBatch,
+} from './event-live-manager-scores.service';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
 // Refresh at 30s while an event is active, but keep a successfully published
@@ -103,7 +107,11 @@ end
 return 0
 `;
 
-export type ManagerLiveSource = 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
+export type ManagerLiveSource =
+  | 'FPL_EVENT_LIVE'
+  | 'FPL_ENTRY_SUMMARY'
+  | 'FPL_CLASSIC_STANDINGS'
+  | 'FPL_FINAL_RESULT';
 export type ManagerLiveTotalScope = 'OVERALL' | 'CLASSIC_PHASE';
 export type ManagerLiveReadMode = 'CACHE_ONLY' | 'READ_THROUGH';
 export type ManagerLiveDataAvailability = 'FRESH' | 'LAST_GOOD' | 'PARTIAL' | 'UNAVAILABLE';
@@ -338,7 +346,8 @@ const parseCachedRow = (value: string | null): CachedRow | null => {
       typeof row.checkedAt !== 'string' ||
       !Number.isFinite(Date.parse(row.checkedAt)) ||
       typeof row.revision !== 'string' ||
-      (row.source !== 'FPL_ENTRY_SUMMARY' &&
+      (row.source !== 'FPL_EVENT_LIVE' &&
+        row.source !== 'FPL_ENTRY_SUMMARY' &&
         row.source !== 'FPL_CLASSIC_STANDINGS' &&
         row.source !== 'FPL_FINAL_RESULT')
     ) {
@@ -675,6 +684,69 @@ const nowIso = (): string => new Date().toISOString();
 const plusSeconds = (checkedAt: string, seconds: number): string =>
   new Date(Date.parse(checkedAt) + seconds * 1000).toISOString();
 
+/**
+ * Replace every active score field with a value derived from one coherent
+ * event-live publication. Entry Summary and Classic rows contribute ranks
+ * only; they can never override the active score.
+ */
+export const projectEventLiveManagerRows = (
+  season: string,
+  eventId: number,
+  entryIds: readonly number[],
+  metadataRows: readonly ManagerLiveScoreRow[],
+  batch: EventLiveManagerScoreBatch | null,
+): ManagerLiveScoreRow[] => {
+  if (!batch || batch.season !== season || batch.eventId !== eventId) return [];
+  const metadataByEntry = new Map(metadataRows.map((row) => [row.entryId, row] as const));
+  return entryIds.flatMap((entryId) => {
+    const score = batch.scores.get(entryId);
+    if (!score) return [];
+    const metadataCandidate = metadataByEntry.get(entryId);
+    const batchCheckedAt = Date.parse(batch.checkedAt);
+    const metadata =
+      metadataCandidate &&
+      Number.isFinite(batchCheckedAt) &&
+      isFresh(metadataCandidate, batchCheckedAt)
+        ? metadataCandidate
+        : undefined;
+    const metadataDigest = createHash('sha1')
+      .update(
+        JSON.stringify({
+          eventRank: metadata?.eventRank ?? null,
+          overallRank: metadata?.overallRank ?? null,
+          leagueRank: metadata?.leagueRank ?? null,
+        }),
+      )
+      .digest('hex')
+      .slice(0, 16);
+    return [
+      {
+        ...(metadata && 'revisionAt' in metadata
+          ? { revisionAt: (metadata as CachedRow & { revisionAt?: string }).revisionAt }
+          : {}),
+        season,
+        eventId,
+        entryId,
+        eventPoints: score.eventPoints,
+        netEventPoints: score.netEventPoints,
+        totalPoints: score.totalPoints,
+        totalScope: 'OVERALL' as const,
+        eventRank: metadata?.eventRank ?? null,
+        overallRank: metadata?.overallRank ?? null,
+        leagueRank: metadata?.leagueRank ?? null,
+        source: 'FPL_EVENT_LIVE' as const,
+        transferCost: score.transferCost,
+        eventPointSemantics:
+          score.transferCost === 0 ? ('ZERO_COST_EQUIVALENT' as const) : ('GROSS' as const),
+        revision: `${score.revision}:metadata:${metadataDigest}`,
+        checkedAt: batch.checkedAt,
+        upstreamUpdatedAt: batch.sourceCheckedAt,
+        staleAt: plusSeconds(batch.checkedAt, STALE_SECONDS),
+      },
+    ];
+  });
+};
+
 const classicStandingNeedsOverallRank = (
   row: Pick<CachedRow, 'source' | 'overallRank'> | undefined,
 ): boolean =>
@@ -841,6 +913,56 @@ const buildManagerLiveResult = (input: {
       ? {}
       : { classicStandingsNextPage: input.classicStandingsNextPage }),
   };
+};
+
+const buildActiveManagerLiveResult = async (input: {
+  season: FplSeasonRef;
+  eventId: number;
+  entryIds: readonly number[];
+  metadataRows: CachedRow[];
+  errorCode: ManagerLiveResolveResult['errorCode'];
+  nextRefreshAt: string;
+  sourceByEntry: ReadonlyMap<number, ManagerLiveRowBacking>;
+  refreshQueued?: boolean;
+  checkedAt?: string;
+  classicStandingsNextPage?: number | null;
+}): Promise<ManagerLiveResolveResult> => {
+  const batch = await eventLiveManagerScoreService
+    .load(input.season, input.eventId, input.entryIds)
+    .catch((error) => {
+      logWarn('Event-live manager score authority unavailable', {
+        eventId: input.eventId,
+        entries: input.entryIds.length,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+      return null;
+    });
+  const rows = projectEventLiveManagerRows(
+    input.season.seasonCode,
+    input.eventId,
+    input.entryIds,
+    input.metadataRows,
+    batch,
+  );
+  const resolvedIds = new Set(rows.map((row) => row.entryId));
+  const missingEntryIds = input.entryIds.filter((entryId) => !resolvedIds.has(entryId));
+  return buildManagerLiveResult({
+    season: input.season.seasonCode,
+    eventId: input.eventId,
+    rows,
+    missingEntryIds,
+    errorCode:
+      missingEntryIds.length > 0 ? (input.errorCode ?? 'UPSTREAM_UNAVAILABLE') : input.errorCode,
+    nextRefreshAt: input.nextRefreshAt,
+    // `servedFrom` remains the response/cache backing contract. Score
+    // authority is carried independently by row.source/revision/checkedAt.
+    sourceByEntry: input.sourceByEntry,
+    checkedAt: batch?.checkedAt ?? input.checkedAt,
+    ...(input.refreshQueued === undefined ? {} : { refreshQueued: input.refreshQueued }),
+    ...(input.classicStandingsNextPage === undefined
+      ? {}
+      : { classicStandingsNextPage: input.classicStandingsNextPage }),
+  });
 };
 
 const dispatchManagerLiveRefreshBounded = async (
@@ -1952,38 +2074,18 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       event.dataCheckedAt,
     );
     const resolvedIds = new Set(finalRows.map((row) => row.entryId));
-    const checkpointRows =
-      resolvedIds.size === uniqueEntryIds.length
-        ? []
-        : await managerScoreCheckpointRepository
-            .findByScopeAndEntryIds(
-              season,
-              input.eventId,
-              scope,
-              uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId)),
-            )
-            .catch((error) => {
-              logWarn('Final manager result fallback checkpoint read failed', {
-                eventId: input.eventId,
-                scope: scopeKey(scope),
-                error: error instanceof Error ? error.message : 'unknown',
-              });
-              return [];
-            });
-    const checkpointFallbackRows = checkpointRows
-      .filter((row) => !resolvedIds.has(row.entryId))
-      .map((row) => fromManagerScoreCheckpoint(row, season.seasonCode));
-    const rows = [...finalRows, ...checkpointFallbackRows];
-    const resolvedWithFallbackIds = new Set(rows.map((row) => row.entryId));
     return buildManagerLiveResult({
       season: season.seasonCode,
       eventId: input.eventId,
-      rows,
-      missingEntryIds: uniqueEntryIds.filter((entryId) => !resolvedWithFallbackIds.has(entryId)),
-      errorCode: null,
+      rows: finalRows,
+      // Once FPL marks the event data_checked, an older active/summary/league
+      // checkpoint is no longer a valid score fallback. Missing finalized rows
+      // stay unavailable until the persisted official result arrives.
+      missingEntryIds: uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId)),
+      errorCode: resolvedIds.size === uniqueEntryIds.length ? null : 'UPSTREAM_UNAVAILABLE',
       checkedAt: nowIso(),
       nextRefreshAt: nextRefresh(true),
-      sourceByEntry: new Map(rows.map((row) => [row.entryId, 'POSTGRES' as const])),
+      sourceByEntry: new Map(finalRows.map((row) => [row.entryId, 'POSTGRES' as const])),
     });
   }
 
@@ -2015,11 +2117,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   );
   if ((input.readMode ?? 'READ_THROUGH') === 'CACHE_ONLY') {
     const now = Date.now();
-    const resolvedRows = uniqueEntryIds
+    const metadataRows = uniqueEntryIds
       .map((entryId) => rows.get(entryId))
       .filter((row): row is CachedRow => row !== undefined && isWithinStaleWindow(row, now));
-    const resolvedIds = new Set(resolvedRows.map((row) => row.entryId));
-    const missingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
     let refreshQueued = false;
     try {
       const dispatchState = await dispatchManagerLiveRefreshBounded({
@@ -2039,12 +2139,12 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         error: error instanceof Error ? error.message : 'unknown',
       });
     }
-    return buildManagerLiveResult({
-      season: season.seasonCode,
+    return buildActiveManagerLiveResult({
+      season,
       eventId: input.eventId,
-      rows: resolvedRows,
-      missingEntryIds,
-      errorCode: missingEntryIds.length > 0 ? 'UPSTREAM_UNAVAILABLE' : null,
+      entryIds: uniqueEntryIds,
+      metadataRows,
+      errorCode: null,
       nextRefreshAt: nextRefresh(event.finished),
       sourceByEntry,
       refreshQueued,
@@ -2168,21 +2268,19 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       }
     }
 
-    const resolvedRows = uniqueEntryIds
+    const metadataRows = uniqueEntryIds
       .map((entryId) => rows.get(entryId))
       .filter((row): row is CachedRow => row !== undefined && isWithinStaleWindow(row));
-    const resolvedIds = new Set(resolvedRows.map((row) => row.entryId));
-    const missingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
-    for (const row of resolvedRows) {
+    for (const row of metadataRows) {
       if (initialRevisionByEntry.get(row.entryId) !== `${row.revision}:${row.checkedAt}`) {
         sourceByEntry.set(row.entryId, 'UPSTREAM');
       }
     }
-    return buildManagerLiveResult({
-      season: season.seasonCode,
+    return buildActiveManagerLiveResult({
+      season,
       eventId: input.eventId,
-      rows: resolvedRows,
-      missingEntryIds,
+      entryIds: uniqueEntryIds,
+      metadataRows,
       errorCode: refreshErrorCode,
       nextRefreshAt: nextRefresh(event.finished),
       sourceByEntry,
@@ -2845,24 +2943,21 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   }
 
   const now = Date.now();
-  const resolvedRows = uniqueEntryIds
+  const metadataRows = uniqueEntryIds
     .map((entryId) => rows.get(entryId))
     .filter((row): row is CachedRow => row !== undefined && isWithinStaleWindow(row, now));
-  const resolvedIds = new Set(resolvedRows.map((row) => row.entryId));
-  const missingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
-  for (const row of resolvedRows) {
+  for (const row of metadataRows) {
     if (initialRevisionByEntry.get(row.entryId) !== `${row.revision}:${row.checkedAt}`) {
       sourceByEntry.set(row.entryId, 'UPSTREAM');
     }
   }
   if (!errorCode && refreshErrorCode) errorCode = refreshErrorCode;
-  if (!errorCode && missingEntryIds.length > 0) errorCode = 'UPSTREAM_UNAVAILABLE';
 
-  return buildManagerLiveResult({
-    season: season.seasonCode,
+  return buildActiveManagerLiveResult({
+    season,
     eventId: input.eventId,
-    rows: resolvedRows,
-    missingEntryIds,
+    entryIds: uniqueEntryIds,
+    metadataRows,
     errorCode,
     checkedAt: nowIso(),
     nextRefreshAt: nextRefresh(event.finished),

@@ -764,6 +764,8 @@ persistenceTest(
         entryName: 'Renamed Runtime Entry',
         playerName: `Runtime ${entryIds[0]}`,
         sourceCheckedAt: new Date('2026-08-09T12:50:00.000Z'),
+        sourceLiveCheckedAt: new Date('2026-08-09T12:50:00.000Z'),
+        sourcePicksCheckedAt: new Date('2026-08-09T12:45:00.000Z'),
       };
       expect(await leagueResultRepository.upsertBatch(season, [leagueResult])).toBe(1);
       expect(
@@ -773,6 +775,29 @@ persistenceTest(
             eventPoints: 1,
             eventNetPoints: 1,
             sourceCheckedAt: new Date('2026-08-09T12:40:00.000Z'),
+          },
+        ]),
+      ).toBe(1);
+      expect(
+        await leagueResultRepository.upsertBatch(season, [
+          {
+            ...leagueResult,
+            eventPoints: 61,
+            eventNetPoints: 61,
+            sourceCheckedAt: new Date('2026-08-09T12:51:00.000Z'),
+            sourcePicksCheckedAt: new Date('2026-08-09T12:51:00.000Z'),
+          },
+        ]),
+      ).toBe(1);
+      expect(
+        await leagueResultRepository.upsertBatch(season, [
+          {
+            ...leagueResult,
+            eventPoints: 1,
+            eventNetPoints: 1,
+            sourceCheckedAt: new Date('2026-08-09T12:52:00.000Z'),
+            sourceLiveCheckedAt: new Date('2026-08-09T12:52:00.000Z'),
+            sourcePicksCheckedAt: new Date('2026-08-09T12:44:00.000Z'),
           },
         ]),
       ).toBe(1);
@@ -816,7 +841,7 @@ persistenceTest(
         league_type: 'classic',
         cup_rows: 2,
         league_result_rows: 1,
-        league_event_points: 60,
+        league_event_points: 61,
       });
 
       const tournamentRepository = createTournamentInfoRepository(db);
