@@ -99,6 +99,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         linkId: randomUUID(),
         ...identity,
         evidence: evidence ?? {},
+        updatedAt: sql`clock_timestamp()`,
         firstSeenSeason: season,
         lastSeenSeason: season,
         reviewedBy: reviewed ? reviewedBy : null,
@@ -182,6 +183,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         evidence: evidence ?? {},
         reviewedBy: reviewed ? reviewedBy : null,
         reviewedAt: reviewed ? new Date() : null,
+        updatedAt: sql`clock_timestamp()`,
       })
       .onConflictDoUpdate({
         target: [
@@ -198,7 +200,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
           evidence: input.evidence ?? {},
           reviewedBy: reviewed ? input.reviewedBy : null,
           reviewedAt: reviewed ? new Date() : null,
-          updatedAt: new Date(),
+          updatedAt: sql`clock_timestamp()`,
         },
       })
       .returning();
@@ -217,7 +219,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         status,
         reviewedBy: reviewedBy ?? null,
         reviewedAt: reviewedBy ? new Date() : null,
-        updatedAt: new Date(),
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(eq(providerEntityLinks.linkId, id))
       .returning();
@@ -236,7 +238,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         status,
         reviewedBy: reviewedBy ?? null,
         reviewedAt: reviewedBy ? new Date() : null,
-        updatedAt: new Date(),
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(eq(providerMatchLinks.linkId, id))
       .returning();

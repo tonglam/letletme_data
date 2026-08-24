@@ -496,6 +496,11 @@ export async function reconcileProviderPlayers(season: string) {
     const fpl = normalizedFpl.find((row) => row.playerCode === playerCode);
     const understat = understatRows.find((row) => row.playerId === understatPlayerId);
     if (!fpl || !understat) continue;
+    // The entity link is shared across seasons. Keep the durable evidence
+    // season-neutral and only append the newly confirmed season; otherwise a
+    // repair pass for one season rewrites shared evidence and makes every
+    // other season stale again.
+    const confirmedSeasons = confirmedPlayerSeasons(link, season);
     await providerIdentityRepository.upsertEntityLink({
       entityType: 'player',
       leftProvider: link.leftProvider,
@@ -510,11 +515,7 @@ export async function reconcileProviderPlayers(season: string) {
       reviewedAt: link.reviewedAt,
       evidence: {
         ...link.evidence,
-        understatName: understat.name,
-        fplName: fpl.name,
-        observedMatches,
-        playerEvidenceRows: evidenceCount.get(playerCode) ?? 0,
-        confirmedSeasons: confirmedPlayerSeasons(link, season),
+        confirmedSeasons,
       },
     });
     confirmed += 1;
