@@ -67,6 +67,7 @@ jobs:
             cd "$expected_workdir"
             test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"
             test -x scripts/configure-briefing-source-media-env.sh
+            export DEPLOY_SHA="$ROLLOUT_SHA"
             compose() { docker compose "$@"; }
             source scripts/deploy-state-machine.sh
             acquire_deploy_lock

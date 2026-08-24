@@ -57,6 +57,7 @@ jobs:
             test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"
             test -x scripts/configure-briefing-acquisition-env.sh
             test -x scripts/run-briefing-control-probe.sh
+            export DEPLOY_SHA="$ROLLOUT_SHA"
             export CONTENT_MANIFEST_GIT_REVISION="$ROLLOUT_SHA"
             export CONTENT_GROK_RUNNER_RELEASE_SHA="$ROLLOUT_SHA"
 

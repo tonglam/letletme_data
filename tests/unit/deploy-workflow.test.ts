@@ -158,6 +158,7 @@ describe('release workflow gates', () => {
     ).toBeLessThan(sourceMediaRolloutWorkflow.indexOf('if [ ! -e "$media_env_file" ]'));
     expect(sourceMediaRolloutWorkflow).toContain('acquire_deploy_lock');
     expect(sourceMediaRolloutWorkflow).toContain('release_deploy_lock');
+    expect(sourceMediaRolloutWorkflow).toContain('export DEPLOY_SHA="$ROLLOUT_SHA"');
     expect(sourceMediaRolloutWorkflow).toContain('--provision-and-probe');
     expect(sourceMediaRolloutWorkflow).toContain('briefing_source_media_health');
     expect(sourceMediaRolloutWorkflow).toContain('retention_preflight');
@@ -174,6 +175,7 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).toContain(`if: github.ref == ${quote}refs/heads/main${quote}`);
     expect(briefingRolloutWorkflow).toContain('test "$main_sha" = "$GITHUB_SHA"');
     expect(briefingRolloutWorkflow).toContain('test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"');
+    expect(briefingRolloutWorkflow).toContain('export DEPLOY_SHA="$ROLLOUT_SHA"');
     expect(briefingRolloutWorkflow).toContain(
       'options:\n          - status\n          - shadow-http\n          - host-shadow\n          - disabled',
     );
