@@ -3118,6 +3118,9 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       table.eventId,
       table.publishedAt.desc(),
     ),
+    index('my_fpl_snapshot_publications_retention_idx')
+      .on(table.seasonId, table.eventId, table.updatedAt.desc())
+      .where(sql`NOT active`),
     uniqueIndex('my_fpl_snapshot_publications_active_key')
       .on(table.seasonId, table.eventId)
       .where(sql`active`),
