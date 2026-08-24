@@ -238,7 +238,7 @@ export async function repairPlayerStateSeasons(): Promise<{
   const seasons = await findStalePlayerStateSeasons();
   if (seasons.length === 0) return { checked: 0, refreshed: 0 };
 
-  const results = await Promise.allSettled(seasons.map(refreshPlayerStateSeason));
+  const results = await Promise.allSettled(seasons.map(publishUnderstatPlayerState));
   const failures = results.flatMap((result, index) =>
     result.status === 'rejected' ? [{ season: seasons[index], reason: result.reason }] : [],
   );
