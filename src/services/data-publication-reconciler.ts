@@ -173,6 +173,7 @@ export async function reconcileCoreAndMarketPublications(
   const scopes: readonly DataPublicationScope[] = [
     { dataset: 'fpl:core', seasonCode: season.seasonCode },
     { dataset: 'fpl:market', seasonCode: season.seasonCode },
+    { dataset: 'fpl:price-changes', seasonCode: season.seasonCode },
     ...(currentEvent
       ? [{ dataset: 'fpl:live' as const, seasonCode: season.seasonCode, eventId: currentEvent.id }]
       : []),

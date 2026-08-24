@@ -10,16 +10,24 @@ import {
   completeSchedulerObligation,
   failSchedulerObligation,
   markSchedulerObligationIrrecoverable,
+  schedulerObligationStatus,
   supersedeSchedulerObligations,
+  supersedeSchedulerObligationsByDueAt,
 } from '../../src/repositories/scheduler-obligations';
 
 const OBLIGATION_ID = '30000000-0000-4000-8000-000000000001';
+const NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000002';
+const IN_FLIGHT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000003';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
   await sql`
     DELETE FROM ops.scheduler_obligations
-    WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    WHERE obligation_id IN (
+      ${OBLIGATION_ID}::uuid,
+      ${NEWER_OBLIGATION_ID}::uuid,
+      ${IN_FLIGHT_OBLIGATION_ID}::uuid
+    )
   `;
 }
 
@@ -270,6 +278,276 @@ describe('scheduler obligation generation fencing', () => {
       status: 'skipped',
       reason: 'superseded-by-latest-authoritative',
     });
+  });
+
+  test('coalesces an older failed price-change bucket by due time', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'price-change-predictions',
+        '2627',
+        'price-change-1',
+        'every five minutes at UTC minute 01/06/11...',
+        'UTC',
+        'failed',
+        'catchup',
+        '2026-08-23T00:01:00Z'::timestamptz,
+        0,
+        1,
+        '{}'::jsonb
+      )
+    `;
+
+    expect(
+      await supersedeSchedulerObligationsByDueAt({
+        jobName: 'price-change-predictions',
+        scopeKey: '2627',
+        beforeDueAt: new Date('2026-08-23T00:06:00Z'),
+        evidence: { supersededByPeriodKey: 'price-change-2' },
+      }),
+    ).toBe(1);
+    const rows = await sql<Array<{ status: string; reason: string; provider: string }>>`
+      SELECT status, evidence->>'reason' AS reason, evidence->>'provider' AS provider
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      status: 'skipped',
+      reason: 'superseded-by-latest-authoritative',
+      provider: 'fpl',
+    });
+  });
+
+  test('coalesces an older failed bucket after its retry due time crosses the boundary', async () => {
+    const sql = await getDbClient();
+    const scheduledDueAtMs = Date.parse('2026-08-23T00:01:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'price-change-predictions',
+        '2627',
+        'price-change-3',
+        'every five minutes at UTC minute 01/06/11...',
+        'UTC',
+        'failed',
+        'catchup',
+        '2026-08-23T00:07:00Z'::timestamptz,
+        1,
+        2,
+        jsonb_build_object('scheduledDueAtMs', ${scheduledDueAtMs}::bigint)
+      )
+    `;
+
+    expect(
+      await supersedeSchedulerObligationsByDueAt({
+        jobName: 'price-change-predictions',
+        scopeKey: '2627',
+        beforeDueAt: new Date('2026-08-23T00:06:00Z'),
+        evidence: { supersededByPeriodKey: 'price-change-4' },
+      }),
+    ).toBe(1);
+    const rows = await sql<Array<{ status: string; reason: string }>>`
+      SELECT status, evidence->>'reason' AS reason
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      status: 'skipped',
+      reason: 'superseded-by-latest-authoritative',
+    });
+  });
+
+  test('orders status by the immutable period and retains superseded failed cycles', async () => {
+    const sql = await getDbClient();
+    const olderScheduledDueAtMs = Date.parse('2026-08-23T00:01:00Z');
+    const newerScheduledDueAtMs = Date.parse('2026-08-23T00:06:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES
+        (
+          ${OBLIGATION_ID}::uuid,
+          'price-change-predictions',
+          '2627',
+          'price-change-older',
+          'every five minutes at UTC minute 01/06/11...',
+          'UTC',
+          'skipped',
+          'catchup',
+          '2026-08-23T00:08:00Z'::timestamptz,
+          1,
+          2,
+          jsonb_build_object(
+            'scheduledDueAtMs',
+            ${olderScheduledDueAtMs}::bigint,
+            'reason',
+            'superseded-by-latest-authoritative'
+          )
+        ),
+        (
+          ${NEWER_OBLIGATION_ID}::uuid,
+          'price-change-predictions',
+          '2627',
+          'price-change-newer',
+          'every five minutes at UTC minute 01/06/11...',
+          'UTC',
+          'failed',
+          'catchup',
+          '2026-08-23T00:07:00Z'::timestamptz,
+          1,
+          1,
+          jsonb_build_object('scheduledDueAtMs', ${newerScheduledDueAtMs}::bigint)
+        )
+    `;
+
+    const failed = await schedulerObligationStatus({
+      jobName: 'price-change-predictions',
+      scopeKey: '2627',
+    });
+    expect(failed.latest).toMatchObject({
+      periodKey: 'price-change-newer',
+      status: 'failed',
+      dueAt: new Date('2026-08-23T00:06:00Z'),
+    });
+    expect(failed.consecutiveUnsuccessfulCycles).toBe(2);
+
+    await sql`
+      UPDATE ops.scheduler_obligations
+      SET evidence = evidence || '{"reason":"official_fields_not_open"}'::jsonb
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    const benignSkip = await schedulerObligationStatus({
+      jobName: 'price-change-predictions',
+      scopeKey: '2627',
+    });
+    expect(benignSkip.consecutiveUnsuccessfulCycles).toBe(1);
+  });
+
+  test('excludes in-flight periods from failure streaks and overdue alarms', async () => {
+    const sql = await getDbClient();
+    const previousScheduledDueAtMs = Date.parse('2026-08-23T00:06:00Z');
+    const inFlightScheduledDueAtMs = Date.parse('2026-08-23T00:11:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        lease_owner,
+        lease_expires_at,
+        evidence
+      )
+      VALUES
+        (
+          ${OBLIGATION_ID}::uuid,
+          'price-change-predictions',
+          '2627',
+          'price-change-previous-failure',
+          'every five minutes at UTC minute 01/06/11...',
+          'UTC',
+          'failed',
+          'catchup',
+          '2026-08-23T00:06:00Z'::timestamptz,
+          1,
+          1,
+          NULL,
+          NULL,
+          jsonb_build_object('scheduledDueAtMs', ${previousScheduledDueAtMs}::bigint)
+        ),
+        (
+          ${IN_FLIGHT_OBLIGATION_ID}::uuid,
+          'price-change-predictions',
+          '2627',
+          'price-change-in-flight',
+          'every five minutes at UTC minute 01/06/11...',
+          'UTC',
+          'running',
+          'catchup',
+          '2026-08-23T00:11:00Z'::timestamptz,
+          1,
+          1,
+          'in-flight-worker',
+          clock_timestamp() + interval '15 minutes',
+          jsonb_build_object('scheduledDueAtMs', ${inFlightScheduledDueAtMs}::bigint)
+        )
+    `;
+
+    const running = await schedulerObligationStatus({
+      jobName: 'price-change-predictions',
+      scopeKey: '2627',
+    });
+    expect(running.latest).toMatchObject({
+      periodKey: 'price-change-in-flight',
+      status: 'running',
+      dueAt: new Date('2026-08-23T00:11:00Z'),
+    });
+    expect(running.consecutiveUnsuccessfulCycles).toBe(1);
+    expect(running.overdue).toBe(false);
+
+    await sql`
+      UPDATE ops.scheduler_obligations
+      SET status = 'failed',
+          last_error = 'in-flight failure',
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          evidence = evidence || '{"reason":"upstream"}'::jsonb
+      WHERE obligation_id = ${IN_FLIGHT_OBLIGATION_ID}::uuid
+    `;
+    const failed = await schedulerObligationStatus({
+      jobName: 'price-change-predictions',
+      scopeKey: '2627',
+    });
+    expect(failed.latest?.status).toBe('failed');
+    expect(failed.consecutiveUnsuccessfulCycles).toBe(2);
+    expect(failed.overdue).toBe(true);
   });
 
   test('terminalizes an expired Understat lease at the generation cap', async () => {

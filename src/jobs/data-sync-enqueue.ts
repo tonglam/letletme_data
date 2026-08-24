@@ -106,3 +106,9 @@ export const enqueuePlayerValuesSyncJob = (
     ...options,
     changeDate: options?.changeDate ?? formatCronDateKey(),
   });
+
+export const enqueuePriceChangePredictionsJob = (
+  season: FplSeasonRef,
+  source: DataSyncJobSource = 'cron',
+  options?: DataSyncEnqueueOptions,
+) => enqueueDataSyncJob(season, 'price-change-predictions', source, options);

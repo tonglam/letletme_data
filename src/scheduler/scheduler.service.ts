@@ -8,6 +8,7 @@ import {
   markSchedulerObligationIrrecoverable,
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
+  supersedeSchedulerObligationsByDueAt,
 } from '../repositories/scheduler-obligations';
 import {
   resolveSchedulerContext,
@@ -90,12 +91,23 @@ function definitionByName(name: string): ScheduledJobDefinition | undefined {
   return schedulerRegistry.find((definition) => definition.name === name);
 }
 
+/** Definitions without a feature flag are always enabled. */
+export function isSchedulerDefinitionEnabled(
+  definition: Pick<ScheduledJobDefinition, 'isEnabled'>,
+): boolean {
+  return definition.isEnabled?.() ?? true;
+}
+
 export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassResult> {
   const season = await seasonRepository.findCurrent();
   const context = await resolveSchedulerContext(season, now);
   let reserved = 0;
   let failed = 0;
   const latestUnderstatPeriods = new Map<string, { periodKey: string; scopeKey: string }>();
+  const latestPriceChangePeriods = new Map<
+    string,
+    { periodKey: string; scopeKey: string; dueAt: Date }
+  >();
   for (const definition of schedulerRegistry) {
     const resolution = await resolveSchedulerDefinition(definition, context);
     if (!resolution.ok) {
@@ -119,6 +131,22 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         latestUnderstatPeriods.set(definition.name, {
           periodKey: latestPlan.periodKey,
           scopeKey: latestPlan.scopeKey,
+        });
+      }
+    }
+    if (
+      definition.name === 'price-change-predictions' &&
+      isSchedulerDefinitionEnabled(definition)
+    ) {
+      const latestPlan = resolution.plans
+        .filter((plan) => plan.terminalStatus === undefined)
+        .sort((left, right) => left.dueAt.getTime() - right.dueAt.getTime())
+        .at(-1);
+      if (latestPlan) {
+        latestPriceChangePeriods.set(definition.name, {
+          periodKey: latestPlan.periodKey,
+          scopeKey: latestPlan.scopeKey,
+          dueAt: latestPlan.dueAt,
         });
       }
     }
@@ -178,6 +206,27 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       failed += 1;
       logError('Understat stale obligation coalescing failed', error, {
         jobName,
+        periodKey: latest.periodKey,
+      });
+    }
+  }
+
+  for (const [jobName, latest] of latestPriceChangePeriods) {
+    try {
+      await supersedeSchedulerObligationsByDueAt({
+        jobName,
+        scopeKey: latest.scopeKey,
+        beforeDueAt: latest.dueAt,
+        evidence: {
+          dataset: 'fpl:price-changes',
+          supersededByPeriodKey: latest.periodKey,
+        },
+      });
+    } catch (error) {
+      failed += 1;
+      logError('Price-change stale obligation coalescing failed', error, {
+        jobName,
+        scopeKey: latest.scopeKey,
         periodKey: latest.periodKey,
       });
     }
