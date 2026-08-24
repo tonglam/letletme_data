@@ -25,7 +25,11 @@ import {
   type XMediaInventoryOptions,
   type XMediaInventoryResult,
 } from './x-media-inventory';
-import { SourceMediaStorageError, type SourceMediaStorage } from './source-media-storage';
+import {
+  isMissingObjectError,
+  SourceMediaStorageError,
+  type SourceMediaStorage,
+} from './source-media-storage';
 
 const ASSET_LEASE_MS = 5 * 60_000;
 const UNSAFE_IMAGE_FAILURES = new Set([
@@ -107,7 +111,7 @@ async function recoverOrUploadAsset(input: {
         }
         objectRecovered = true;
       } catch (error) {
-        if (!(error instanceof SourceMediaStorageError) || error.status !== 404) throw error;
+        if (!isMissingObjectError(error)) throw error;
       }
     }
 
