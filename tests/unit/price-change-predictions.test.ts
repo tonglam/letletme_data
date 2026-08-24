@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   normalizePriceChangeBoard,
+  priceChangeBootstrapEdgeCacheKey,
   PriceChangePredictionValidationError,
   PRICE_CHANGE_STALE_MS,
 } from '../../src/services/price-change-predictions.service';
@@ -87,6 +88,18 @@ function bootstrapFixture(overrides: Record<string, unknown> = {}): FPLBootstrap
 }
 
 describe('price-change prediction normalization', () => {
+  it('rotates the official bootstrap edge-cache key once per five-minute bucket', () => {
+    expect(priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:01:00Z'))).toBe(
+      priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:04:59.999Z')),
+    );
+    expect(priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:05:00Z'))).not.toBe(
+      priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:04:59.999Z')),
+    );
+    expect(() => priceChangeBootstrapEdgeCacheKey(Number.NaN)).toThrow(
+      'requires a valid timestamp',
+    );
+  });
+
   it('keeps official preseason zero values as a usable board row', () => {
     const board = normalizePriceChangeBoard(
       bootstrapFixture({

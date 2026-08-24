@@ -25,6 +25,7 @@ export const PRICE_CHANGE_DATASET = 'fpl:price-changes' as const;
 
 const PRICE_CHANGE_CACHE_KEY = 'fpl:price-change-predictions:v1';
 const PRICE_CHANGE_CONTEXT_SCHEMA_VERSION = 1;
+const PRICE_CHANGE_SOURCE_CACHE_BUCKET_MS = 5 * 60 * 1000;
 
 export type PriceChangePredictionStatus =
   | 'VERY_LIKELY_RISE'
@@ -143,8 +144,15 @@ export class PriceChangePredictionUnavailableError extends Error {
   }
 }
 
+export function priceChangeBootstrapEdgeCacheKey(nowMs = Date.now()): string {
+  if (!Number.isFinite(nowMs)) {
+    throw new Error('Price-change bootstrap cache bucket requires a valid timestamp');
+  }
+  return `price-changes-${Math.floor(nowMs / PRICE_CHANGE_SOURCE_CACHE_BUCKET_MS)}`;
+}
+
 const defaultDependencies: PriceChangePublicationDependencies = {
-  getBootstrap: () => fplClient.getBootstrap(),
+  getBootstrap: () => fplClient.getBootstrap({ edgeCacheKey: priceChangeBootstrapEdgeCacheKey() }),
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
