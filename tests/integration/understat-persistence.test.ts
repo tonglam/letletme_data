@@ -483,8 +483,8 @@ describe('Understat persistence', () => {
       });
       await references.upsertTeams(teams());
       await references.upsertMatches([match()]);
-      const [started] = await tx.execute<{ startedAt: Date }>(sql`
-        SELECT transaction_timestamp() AS "startedAt"
+      const [started] = await tx.execute<{ startedMs: number }>(sql`
+        SELECT (EXTRACT(EPOCH FROM transaction_timestamp()) * 1000)::double precision AS "startedMs"
       `);
       await tx.execute(sql`SELECT pg_sleep(0.05)`);
       const refreshed = {
@@ -497,7 +497,7 @@ describe('Understat persistence', () => {
         .select({ updatedAt: understatMatches.updatedAt })
         .from(understatMatches)
         .where(eq(understatMatches.matchId, matchId));
-      expect(row?.updatedAt.getTime()).toBeGreaterThan(started?.startedAt.getTime() ?? 0);
+      expect(row?.updatedAt.getTime()).toBeGreaterThan(Number(started?.startedMs ?? 0));
     });
   });
 
