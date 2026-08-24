@@ -144,7 +144,8 @@ A mismatch is a hard failure before any business fact is written.
 8. Each team detail job hash-verifies and commits its own split resource in a short PostgreSQL
    transaction. A complete team is visible without waiting for other teams. An active partial
    discovery never replaces a team's season aggregate until every completed match row for that team
-   is present.
+   is present; if Understat withdraws a prior result, the affected aggregate is recomputed from the
+   surviving persisted match-stat rows before the discovery transaction ends.
 9. The finalizer replays any staged resources idempotently, records incomplete teams, and completes
    the run with partial-resource metadata instead of rolling back successful teams.
 

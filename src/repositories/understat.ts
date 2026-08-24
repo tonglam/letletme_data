@@ -115,6 +115,17 @@ function mapTeamSeason(row: typeof understatTeamSeasons.$inferSelect): Understat
   return { ...rest, season: seasonCode };
 }
 
+function mapTeamMatchStat(
+  row: typeof understatTeamMatchStats.$inferSelect,
+): UnderstatTeamMatchStat {
+  const { createdAt: _createdAt, updatedAt: _updatedAt, side, result, ...rest } = row;
+  return {
+    ...rest,
+    side: side as UnderstatTeamMatchStat['side'],
+    result: result as UnderstatTeamMatchStat['result'],
+  };
+}
+
 function mapTeamSplit(row: typeof understatTeamStatSplits.$inferSelect): UnderstatTeamStatSplit {
   const { seasonCode, createdAt: _createdAt, updatedAt: _updatedAt, ...rest } = row;
   const dimension = UNDERSTAT_SPLIT_DIMENSIONS.find((value) => value === row.dimension);
@@ -351,6 +362,16 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
       .innerJoin(understatMatches, eq(understatTeamMatchStats.matchId, understatMatches.matchId))
       .where(eq(understatMatches.seasonCode, season));
     return new Map(rows.map((row) => [`${row.matchId}:${row.teamId}`, row.sourceHash]));
+  },
+
+  async getMatchStatsBySeason(season: string): Promise<UnderstatTeamMatchStat[]> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({ stat: understatTeamMatchStats })
+      .from(understatTeamMatchStats)
+      .innerJoin(understatMatches, eq(understatTeamMatchStats.matchId, understatMatches.matchId))
+      .where(eq(understatMatches.seasonCode, season));
+    return rows.map(({ stat }) => mapTeamMatchStat(stat));
   },
 
   async upsertMatchStats(rows: UnderstatTeamMatchStat[]): Promise<number> {

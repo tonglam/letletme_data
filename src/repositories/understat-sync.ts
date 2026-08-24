@@ -623,11 +623,32 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
           eq(understatSyncRuns.provider, 'understat'),
           eq(understatSyncRuns.seasonCode, season),
           eq(understatSyncRuns.lane, lane),
-          inArray(understatSyncItems.status, ['failed', 'pending', 'running', 'skipped']),
+          inArray(understatSyncItems.status, [
+            'failed',
+            'pending',
+            'running',
+            'skipped',
+            'completed',
+          ]),
         ),
       )
-      .orderBy(desc(understatSyncItems.updatedAt));
-    return rows.map(({ item }) => mapItem(item));
+      .orderBy(desc(understatSyncItems.updatedAt), desc(understatSyncRuns.updatedAt));
+
+    // The query is newest-first. Once a resource has a newer completed item,
+    // older failed/skipped evidence is settled and must not be carried into
+    // every later matchday pass.
+    const completed = new Set<string>();
+    const unsettled: UnderstatSyncItem[] = [];
+    for (const { item } of rows) {
+      const mapped = mapItem(item);
+      const key = `${mapped.resourceType}:${mapped.resourceId}`;
+      if (mapped.status === 'completed') {
+        completed.add(key);
+      } else if (!completed.has(key)) {
+        unsettled.push(mapped);
+      }
+    }
+    return unsettled;
   },
 
   async findItem(

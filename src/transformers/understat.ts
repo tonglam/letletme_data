@@ -264,12 +264,19 @@ export function transformUnderstatTeamDiscovery(
   for (const match of matches.filter((candidate) => candidate.isResult)) {
     const rows = teamMatchStats.filter((row) => row.matchId === match.id);
     const identities = new Set(rows.map((row) => `${row.teamId}:${row.side}`));
+    const expectedIdentities = new Set([`${match.homeTeamId}:h`, `${match.awayTeamId}:a`]);
+    const hasDuplicateIdentity = rows.length !== identities.size;
+    const hasUnexpectedIdentity = [...identities].some(
+      (identity) => !expectedIdentities.has(identity),
+    );
+    const hasCompleteIdentities =
+      rows.length === 2 &&
+      identities.size === 2 &&
+      [...expectedIdentities].every((identity) => identities.has(identity));
     if (
-      !allowPartialResults &&
-      (rows.length !== 2 ||
-        identities.size !== 2 ||
-        !identities.has(`${match.homeTeamId}:h`) ||
-        !identities.has(`${match.awayTeamId}:a`))
+      hasDuplicateIdentity ||
+      hasUnexpectedIdentity ||
+      (!allowPartialResults && !hasCompleteIdentities)
     ) {
       throw new Error(
         `Understat completed match ${match.id} does not contain exactly two team history rows`,

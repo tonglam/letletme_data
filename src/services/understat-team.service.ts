@@ -19,6 +19,7 @@ import {
   enqueueUnderstatTeamFinalize,
 } from '../jobs/understat-enqueue';
 import {
+  aggregateUnderstatTeamSeason,
   transformUnderstatTeamDiscovery,
   transformUnderstatTeamSplits,
   validateUnderstatTeamDates,
@@ -92,6 +93,7 @@ async function persistUnderstatTeamDiscoverySnapshot(
   runId: string,
   season: string,
   discovery: UnderstatTeamDiscovery,
+  activeIncremental = false,
 ): Promise<boolean> {
   const db = await getDb();
   return db.transaction(async (tx) => {
@@ -103,8 +105,41 @@ async function persistUnderstatTeamDiscoverySnapshot(
     );
     const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
     const changed = await persistUnderstatTeamDiscovery(tx, discovery, withdrawnMatchIds);
-    if (changed) await createUnderstatSyncRepository(tx).markRunDataChanged(runId);
-    return changed;
+    let recomputedChanges = 0;
+    if (activeIncremental && withdrawnMatchIds.length > 0) {
+      const withdrawnMatchIdSet = new Set(withdrawnMatchIds);
+      const withdrawnTeamIds = [
+        ...new Set(
+          previousMatches
+            .filter((match) => withdrawnMatchIdSet.has(match.id))
+            .flatMap((match) => [match.homeTeamId, match.awayTeamId]),
+        ),
+      ];
+      const resultMatchIds = new Set(
+        discovery.matches.filter((match) => match.isResult).map((match) => match.id),
+      );
+      const persistedStats = await createUnderstatTeamRepository(tx).getMatchStatsBySeason(season);
+      const teamsById = new Map(discovery.teams.map((team) => [team.id, team]));
+      const recomputed = withdrawnTeamIds.flatMap((teamId) => {
+        const team = teamsById.get(teamId);
+        if (!team) return [];
+        return [
+          aggregateUnderstatTeamSeason(
+            season,
+            team,
+            persistedStats.filter(
+              (row) => row.teamId === teamId && resultMatchIds.has(row.matchId),
+            ),
+            discovery.season.lastSeenAt,
+          ),
+        ];
+      });
+      recomputedChanges = await createUnderstatTeamRepository(tx).upsertTeamSeasons(recomputed);
+    }
+    if (changed || recomputedChanges > 0) {
+      await createUnderstatSyncRepository(tx).markRunDataChanged(runId);
+    }
+    return changed || recomputedChanges > 0;
   });
 }
 
@@ -241,6 +276,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
       job.runId,
       job.season,
       discoveryForPersistence(discovery, activeIncremental),
+      activeIncremental,
     );
     const items = await understatSyncRepository.findItems(job.runId);
     await enqueueTeamDetailJobs(
@@ -326,6 +362,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
     job.runId,
     job.season,
     discoveryForPersistence(discovery, activeIncremental),
+    activeIncremental,
   );
   const staged = stageUnderstatTeamLeague(job.season, discovery);
   const ready = await understatSyncRepository.completeItem(
@@ -441,6 +478,7 @@ export async function finalizeUnderstatTeamRun(job: UnderstatTeamJobData): Promi
     job.runId,
     job.season,
     discoveryForPersistence(discovery, activeIncremental),
+    activeIncremental,
   );
 
   let changed = discoveryChanged;

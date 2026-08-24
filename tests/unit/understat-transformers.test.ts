@@ -100,6 +100,21 @@ describe('Understat transformers', () => {
     expect(result.teamMatchStats.some((row) => row.teamId === 89)).toBe(false);
   });
 
+  test('rejects duplicate team history identities even in active partial mode', () => {
+    const invalid = structuredClone(UNDERSTAT_LEAGUE_FIXTURE);
+    invalid.teams['83'].history.push(structuredClone(invalid.teams['83'].history[0]));
+    expect(() =>
+      transformUnderstatTeamDiscovery(
+        '2627',
+        2026,
+        'EPL',
+        UnderstatLeagueResponseSchema.parse(invalid),
+        now,
+        true,
+      ),
+    ).toThrow('does not contain exactly two team history rows');
+  });
+
   test('accepts an explicit UTC offset without appending another timezone', () => {
     const offset = structuredClone(UNDERSTAT_LEAGUE_FIXTURE);
     offset.dates[0].datetime = '2025-08-17T15:30:00+00:00';
