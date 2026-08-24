@@ -4,7 +4,7 @@ assertIntegrationEnv();
 
 import { afterAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   fixturesInFpl as eventFixtures,
@@ -467,6 +467,38 @@ describe('Understat persistence', () => {
 
     expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(true);
     expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(false);
+  });
+
+  test('stamps Understat source writes after a transaction waits', async () => {
+    const db = await getDb();
+    await db.transaction(async (tx) => {
+      const references = createUnderstatReferenceRepository(tx);
+      await references.upsertSeason({
+        season,
+        sourceYear: 2098,
+        league,
+        state: 'complete',
+        firstSeenAt: now,
+        lastSeenAt: now,
+      });
+      await references.upsertTeams(teams());
+      await references.upsertMatches([match()]);
+      const [started] = await tx.execute<{ startedAt: Date }>(sql`
+        SELECT transaction_timestamp() AS "startedAt"
+      `);
+      await tx.execute(sql`SELECT pg_sleep(0.05)`);
+      const refreshed = {
+        ...match(),
+        sourceCheckedAt: new Date(now.getTime() + 1_000),
+        lastSeenAt: new Date(now.getTime() + 1_000),
+      };
+      await references.upsertMatches([refreshed]);
+      const [row] = await tx
+        .select({ updatedAt: understatMatches.updatedAt })
+        .from(understatMatches)
+        .where(eq(understatMatches.matchId, matchId));
+      expect(row?.updatedAt.getTime()).toBeGreaterThan(started?.startedAt.getTime() ?? 0);
+    });
   });
 
   test('persists shared discovery before team detail resources settle', async () => {

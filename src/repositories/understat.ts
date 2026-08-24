@@ -187,16 +187,19 @@ function mapPlayerTeamSeason(
 export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction) => ({
   async ensureSeason(season: UnderstatSeason): Promise<void> {
     const db = await getDatabase(dbInstance);
-    await db.insert(understatSeasons).values(toSeasonRow(season)).onConflictDoNothing({
-      target: understatSeasons.seasonCode,
-    });
+    await db
+      .insert(understatSeasons)
+      .values({ ...toSeasonRow(season), updatedAt: sql`clock_timestamp()` })
+      .onConflictDoNothing({
+        target: understatSeasons.seasonCode,
+      });
   },
 
   async upsertSeason(season: UnderstatSeason): Promise<void> {
     const db = await getDatabase(dbInstance);
     await db
       .insert(understatSeasons)
-      .values(toSeasonRow(season))
+      .values({ ...toSeasonRow(season), updatedAt: sql`clock_timestamp()` })
       .onConflictDoUpdate({
         target: understatSeasons.seasonCode,
         set: {
@@ -209,7 +212,7 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
           END`,
           firstSeenAt: sql`LEAST(${understatSeasons.firstSeenAt}, excluded.first_seen_at)`,
           lastSeenAt: sql`GREATEST(${understatSeasons.lastSeenAt}, excluded.last_seen_at)`,
-          updatedAt: sql`NOW()`,
+          updatedAt: sql`clock_timestamp()`,
         },
       });
   },
@@ -218,7 +221,7 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
     const db = await getDatabase(dbInstance);
     await db
       .update(understatSeasons)
-      .set({ state: 'complete', updatedAt: new Date() })
+      .set({ state: 'complete', updatedAt: sql`clock_timestamp()` })
       .where(
         and(lt(understatSeasons.seasonCode, activeSeason), eq(understatSeasons.state, 'active')),
       );
@@ -229,7 +232,7 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
     const db = await getDatabase(dbInstance);
     const result = await db
       .insert(understatTeams)
-      .values(rows.map(toTeamRow))
+      .values(rows.map((row) => ({ ...toTeamRow(row), updatedAt: sql`clock_timestamp()` })))
       .onConflictDoUpdate({
         target: understatTeams.teamId,
         set: {
@@ -250,7 +253,7 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
               THEN excluded.source_hash
             ELSE ${understatTeams.sourceHash}
           END`,
-          updatedAt: sql`NOW()`,
+          updatedAt: sql`clock_timestamp()`,
         },
         setWhere: sql`
           ${understatTeams.firstSeenSeason} > excluded.first_seen_season
@@ -302,7 +305,7 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
     ).length;
     await db
       .insert(understatMatches)
-      .values(rows.map(toMatchRow))
+      .values(rows.map((row) => ({ ...toMatchRow(row), updatedAt: sql`clock_timestamp()` })))
       .onConflictDoUpdate({
         target: understatMatches.matchId,
         set: {
@@ -321,7 +324,7 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
           sourceHash: sql`excluded.source_hash`,
           sourceCheckedAt: sql`excluded.source_checked_at`,
           lastSeenAt: sql`excluded.last_seen_at`,
-          updatedAt: sql`NOW()`,
+          updatedAt: sql`clock_timestamp()`,
         },
         setWhere: sql`excluded.source_checked_at > ${understatMatches.sourceCheckedAt}`,
       });
@@ -379,7 +382,7 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
     const db = await getDatabase(dbInstance);
     const result = await db
       .insert(understatTeamMatchStats)
-      .values(rows)
+      .values(rows.map((row) => ({ ...row, updatedAt: sql`clock_timestamp()` })))
       .onConflictDoUpdate({
         target: [understatTeamMatchStats.matchId, understatTeamMatchStats.teamId],
         set: {
@@ -404,7 +407,7 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
           draws: sql`excluded.draws`,
           losses: sql`excluded.losses`,
           sourceHash: sql`excluded.source_hash`,
-          updatedAt: sql`NOW()`,
+          updatedAt: sql`clock_timestamp()`,
         },
         setWhere: sql`${understatTeamMatchStats.sourceHash} IS DISTINCT FROM excluded.source_hash`,
       })
@@ -417,7 +420,7 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
     const db = await getDatabase(dbInstance);
     const result = await db
       .insert(understatTeamSeasons)
-      .values(rows.map(toTeamSeasonRow))
+      .values(rows.map((row) => ({ ...toTeamSeasonRow(row), updatedAt: sql`clock_timestamp()` })))
       .onConflictDoUpdate({
         target: [understatTeamSeasons.seasonCode, understatTeamSeasons.teamId],
         set: {
@@ -444,7 +447,7 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
           ppdaAllowedDef: sql`excluded.ppda_allowed_def`,
           sourceHash: sql`excluded.source_hash`,
           lastSyncedAt: sql`excluded.last_synced_at`,
-          updatedAt: sql`NOW()`,
+          updatedAt: sql`clock_timestamp()`,
         },
         setWhere: sql`${understatTeamSeasons.sourceHash} IS DISTINCT FROM excluded.source_hash`,
       })
@@ -521,7 +524,9 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
         ),
       );
     if (rows.length > 0) {
-      await db.insert(understatTeamStatSplits).values(rows.map(toTeamSplitRow));
+      await db
+        .insert(understatTeamStatSplits)
+        .values(rows.map((row) => ({ ...toTeamSplitRow(row), updatedAt: sql`clock_timestamp()` })));
     }
     return true;
   },
@@ -606,7 +611,7 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     const db = await getDatabase(dbInstance);
     const result = await db
       .insert(understatPlayers)
-      .values(rows.map(toPlayerRow))
+      .values(rows.map((row) => ({ ...toPlayerRow(row), updatedAt: sql`clock_timestamp()` })))
       .onConflictDoUpdate({
         target: understatPlayers.playerId,
         set: {
@@ -623,7 +628,7 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
               THEN excluded.source_hash
             ELSE ${understatPlayers.sourceHash}
           END`,
-          updatedAt: sql`NOW()`,
+          updatedAt: sql`clock_timestamp()`,
         },
         setWhere: sql`
           ${understatPlayers.firstSeenSeason} > excluded.first_seen_season
@@ -682,7 +687,12 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     if (changedRows.length > 0) {
       await db
         .insert(understatPlayerSeasons)
-        .values(changedRows.map(toPlayerSeasonRow))
+        .values(
+          changedRows.map((row) => ({
+            ...toPlayerSeasonRow(row),
+            updatedAt: sql`clock_timestamp()`,
+          })),
+        )
         .onConflictDoUpdate({
           target: [understatPlayerSeasons.seasonCode, understatPlayerSeasons.playerId],
           set: {
@@ -704,7 +714,7 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
             xgBuildup: sql`excluded.xg_buildup`,
             position: sql`excluded.position`,
             sourceHash: sql`excluded.source_hash`,
-            updatedAt: sql`NOW()`,
+            updatedAt: sql`clock_timestamp()`,
           },
           setWhere: sql`${understatPlayerSeasons.sourceHash} IS DISTINCT FROM excluded.source_hash`,
         });
@@ -816,7 +826,12 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     if (changedRows.length > 0) {
       await db
         .insert(understatPlayerTeamSeasons)
-        .values(changedRows.map(toPlayerTeamSeasonRow))
+        .values(
+          changedRows.map((row) => ({
+            ...toPlayerTeamSeasonRow(row),
+            updatedAt: sql`clock_timestamp()`,
+          })),
+        )
         .onConflictDoUpdate({
           target: [
             understatPlayerTeamSeasons.seasonCode,
@@ -840,7 +855,7 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
             xgBuildup: sql`excluded.xg_buildup`,
             position: sql`excluded.position`,
             sourceHash: sql`excluded.source_hash`,
-            updatedAt: sql`NOW()`,
+            updatedAt: sql`clock_timestamp()`,
           },
           setWhere: sql`${understatPlayerTeamSeasons.sourceHash} IS DISTINCT FROM excluded.source_hash`,
         });
@@ -941,7 +956,11 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     await db
       .delete(understatPlayerMatchStats)
       .where(eq(understatPlayerMatchStats.matchId, matchId));
-    if (rows.length > 0) await db.insert(understatPlayerMatchStats).values(rows);
+    if (rows.length > 0) {
+      await db
+        .insert(understatPlayerMatchStats)
+        .values(rows.map((row) => ({ ...row, updatedAt: sql`clock_timestamp()` })));
+    }
     return true;
   },
 
