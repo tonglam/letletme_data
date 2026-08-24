@@ -11,6 +11,10 @@ import {
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
+const retainedRevisionMigration = readFileSync(
+  'migrations/0038_my_fpl_retained_revision_reads.sql',
+  'utf8',
+);
 const publicationService = readFileSync(
   'src/services/my-fpl-snapshot-publication.service.ts',
   'utf8',
@@ -36,6 +40,29 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('Publication is no longer the active My FPL revision');
   });
 
+  test('keeps pinned superseded revisions readable for the bounded retention window', () => {
+    expect(retainedRevisionMigration).toMatch(
+      /updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'/,
+    );
+    expect(retainedRevisionMigration).toContain('my_fpl_snapshot_publications_retention_idx');
+    expect(retainedRevisionMigration).toContain(
+      'CREATE POLICY my_fpl_snapshot_publications_graphql_readable',
+    );
+    expect(retainedRevisionMigration).toContain(
+      'CREATE POLICY my_fpl_snapshot_entries_graphql_readable',
+    );
+    expect(retainedRevisionMigration).toContain(
+      'CREATE POLICY my_fpl_snapshot_tournament_rows_graphql_readable',
+    );
+    expect(retainedRevisionMigration).toContain(
+      'CREATE POLICY my_fpl_snapshot_tournament_aggregates_graphql_readable',
+    );
+    expect(retainedRevisionMigration).not.toMatch(/USING\s*\(\s*true\s*\)/i);
+    expect(retainedRevisionMigration).not.toMatch(
+      /published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'/,
+    );
+  });
+
   test('captures official auto substitutions without inferring Bench Boost', () => {
     expect(publicationService).toContain('automatic_substitutions');
     expect(publicationService).toContain('element_in');
@@ -53,6 +80,9 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('${sourceCheckedAtIso}::timestamptz');
     expect(publicationService).toContain('${nowIso}::timestamptz');
     expect(publicationService).toContain('${supersededBeforeIso}::timestamptz');
+    expect(publicationService).toContain(
+      'active = false AND updated_at < ${supersededBeforeIso}::timestamptz',
+    );
     expect(publicationService).not.toContain('${sourceCheckedAt}, ${now},');
     expect(publicationService).not.toContain('${new Date(now.getTime() - 24 * 60 * 60_000)}');
   });

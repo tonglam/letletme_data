@@ -1826,7 +1826,7 @@ export async function captureMyFplSnapshot(
     await tx`
       DELETE FROM competition.my_fpl_snapshot_publications
       WHERE season_id = ${season.seasonId} AND event_id = ${eventId}
-        AND active = false AND published_at < ${supersededBeforeIso}::timestamptz
+        AND active = false AND updated_at < ${supersededBeforeIso}::timestamptz
     `;
 
     const publication: MyFplSnapshotPublication = {
