@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
+import { SQL } from 'drizzle-orm';
 
 import {
   getDifficultyForTeam,
@@ -239,7 +240,9 @@ describe('Fixtures Unit Tests', () => {
       expect(count).toBe(2);
       expect(updates).toHaveLength(1);
       expect(updates[0]?.eventId).toBeNull();
-      expect(updates[0]?.updatedAt).toBeInstanceOf(Date);
+      const updatedAt = updates[0]?.updatedAt;
+      expect(updatedAt).toBeInstanceOf(SQL);
+      expect((updatedAt as SQL).queryChunks[0]).toMatchObject({ value: ['clock_timestamp()'] });
     });
   });
 
