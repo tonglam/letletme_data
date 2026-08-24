@@ -126,7 +126,26 @@ async function persistUnderstatPlayerDiscoverySnapshot(
       throw new IncompleteUnderstatResourceError('player discovery', completeness.reason);
     }
     const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
-    const changed = await persistUnderstatPlayerDiscovery(tx, discovery, withdrawnMatchIds, {
+    const incomingPlayerIds = new Set(discovery.playerSeasons.map((player) => player.playerId));
+    const incomingMatchById = new Map(discovery.matches.map((match) => [match.id, match]));
+    const candidateMatchIds = [
+      ...new Set([
+        ...withdrawnMatchIds,
+        ...discovery.matches.filter((match) => !match.isResult).map((match) => match.id),
+      ]),
+    ];
+    const playerIdsByMatch = await players.getMatchPlayerIdsBySeason(season, candidateMatchIds);
+    const deletableMatchIds = [...playerIdsByMatch.entries()]
+      .filter(([matchId, playerIds]) => {
+        const match = incomingMatchById.get(matchId);
+        return (
+          match != null &&
+          !match.isResult &&
+          [...playerIds].every((playerId) => incomingPlayerIds.has(playerId))
+        );
+      })
+      .map(([matchId]) => matchId);
+    const changed = await persistUnderstatPlayerDiscovery(tx, discovery, deletableMatchIds, {
       preserveExistingPlayerSeasons: allowPartial,
     });
     if (changed) await createUnderstatSyncRepository(tx).markRunDataChanged(runId);
@@ -500,7 +519,24 @@ export async function syncUnderstatPlayerTeamDetail(job: UnderstatPlayerJobData)
     leagueItem.sourceHash,
     job.season,
   );
-  validateUnderstatTeamDates(response, teamId, discovery.matches, activeIncremental);
+  const missingCompletedMatchIds = validateUnderstatTeamDates(
+    response,
+    teamId,
+    discovery.matches,
+    activeIncremental,
+  );
+  if (activeIncremental && missingCompletedMatchIds.length > 0) {
+    await finalizeWhenReady(
+      job,
+      await understatSyncRepository.skipItem(
+        job.runId,
+        TEAM_RESOURCE_TYPE,
+        resourceId,
+        `team ${teamId} completed matches missing: ${missingCompletedMatchIds.join(',')}`,
+      ),
+    );
+    return;
+  }
   const transformed = transformUnderstatTeamParticipants(job.season, teamId, response);
   const staged = stageUnderstatPlayerTeamDetail(
     job.season,

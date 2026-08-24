@@ -398,7 +398,24 @@ export async function syncUnderstatTeamDetail(job: UnderstatTeamJobData): Promis
     leagueItem.sourceHash,
     job.season,
   );
-  validateUnderstatTeamDates(response, teamId, discovery.matches, activeIncremental);
+  const missingCompletedMatchIds = validateUnderstatTeamDates(
+    response,
+    teamId,
+    discovery.matches,
+    activeIncremental,
+  );
+  if (activeIncremental && missingCompletedMatchIds.length > 0) {
+    await finalizeWhenReady(
+      job,
+      await understatSyncRepository.skipItem(
+        job.runId,
+        TEAM_RESOURCE_TYPE,
+        resourceId,
+        `team ${teamId} completed matches missing: ${missingCompletedMatchIds.join(',')}`,
+      ),
+    );
+    return;
+  }
   const rows = transformUnderstatTeamSplits(
     job.season,
     teamId,

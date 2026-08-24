@@ -370,7 +370,7 @@ export function validateUnderstatTeamDates(
   expectedTeamId: number,
   leagueMatches: readonly UnderstatMatch[],
   allowMissingMatches = false,
-): void {
+): number[] {
   const matchesById = new Map(leagueMatches.map((match) => [match.id, match]));
   validateTeamPageIdentity(response, expectedTeamId, new Set(matchesById.keys()));
   const responseMatchIds = new Set(response.dates.map((date) => date.id));
@@ -386,6 +386,9 @@ export function validateUnderstatTeamDates(
       `Understat team page ${expectedTeamId} is missing league matches: ${missingMatchIds.join(', ')}`,
     );
   }
+  const missingCompletedMatchIds = missingMatchIds.filter(
+    (matchId) => matchesById.get(matchId)?.isResult,
+  );
 
   for (const date of response.dates) {
     const match = matchesById.get(date.id);
@@ -408,6 +411,7 @@ export function validateUnderstatTeamDates(
       );
     }
   }
+  return missingCompletedMatchIds;
 }
 
 export function transformUnderstatTeamSplits(

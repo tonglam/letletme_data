@@ -896,6 +896,34 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     return rows.map((row) => row.sourceHash).sort();
   },
 
+  async getMatchPlayerIdsBySeason(
+    season: string,
+    matchIds: readonly number[],
+  ): Promise<Map<number, Set<number>>> {
+    if (matchIds.length === 0) return new Map();
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({
+        matchId: understatPlayerMatchStats.matchId,
+        playerId: understatPlayerMatchStats.playerId,
+      })
+      .from(understatPlayerMatchStats)
+      .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.matchId))
+      .where(
+        and(
+          eq(understatMatches.seasonCode, season),
+          inArray(understatPlayerMatchStats.matchId, [...new Set(matchIds)]),
+        ),
+      );
+    const result = new Map<number, Set<number>>();
+    for (const row of rows) {
+      const playerIds = result.get(row.matchId) ?? new Set<number>();
+      playerIds.add(row.playerId);
+      result.set(row.matchId, playerIds);
+    }
+    return result;
+  },
+
   async replaceMatchStats(matchId: number, rows: UnderstatPlayerMatchStat[]): Promise<boolean> {
     const db = await getDatabase(dbInstance);
     const existing = await db

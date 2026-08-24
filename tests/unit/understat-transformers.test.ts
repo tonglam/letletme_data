@@ -147,13 +147,13 @@ describe('Understat transformers', () => {
     ).toThrow('is missing league matches');
   });
 
-  test('allows an active team page to omit a not-yet-available match', () => {
+  test('reports an active team page that omits a completed match', () => {
     const partial = structuredClone(UNDERSTAT_TEAM_FIXTURE);
     partial.dates = [];
     const matches = transformUnderstatTeamDiscovery('2627', 2026, 'EPL', league, now).matches;
-    expect(() =>
+    expect(
       validateUnderstatTeamDates(UnderstatTeamResponseSchema.parse(partial), 83, matches, true),
-    ).not.toThrow();
+    ).toEqual([28786]);
   });
 
   test('keeps team participants separate from league player aggregation', () => {
