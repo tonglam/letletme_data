@@ -1,6 +1,7 @@
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { logError, logInfo, logWarn } from '../utils/logger';
+import { reconcileProviderMappings } from './provider-matcher.service';
 
 export type PlayerSeasonSummaryRefresh = Readonly<{
   revision: number;
@@ -109,6 +110,30 @@ export async function refreshPlayerStateSeason(
     understatPlayerCount: result.understatPlayerCount,
   });
   return result;
+}
+
+/**
+ * Reconcile the verified provider bridge and publish the cross-provider read
+ * model after an Understat resource commits. A resource may be published
+ * while sibling resources are still running or have failed, so callers must
+ * treat this as a best-effort projection step and leave canonical facts
+ * untouched when it fails.
+ */
+export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise<{
+  mappings: Awaited<ReturnType<typeof reconcileProviderMappings>>;
+  refresh: PlayerStateSeasonRefresh;
+}> {
+  const mappings = await reconcileProviderMappings(season.seasonCode);
+  const refresh = await refreshPlayerStateSeason(season);
+  logInfo('Understat Player State published', {
+    season: season.seasonCode,
+    mappingMatches: mappings.matches.verified,
+    mappingPlayers: mappings.players.verified,
+    confirmedPlayers: mappings.players.confirmed,
+    revision: refresh.revision,
+    understatPlayerCount: refresh.understatPlayerCount,
+  });
+  return { mappings, refresh };
 }
 
 async function findStalePlayerSeasonSummaries(): Promise<FplSeasonRef[]> {

@@ -165,8 +165,16 @@ block other teams.
    skipped and retried on the next pass.
 4. Discovery is persisted before detail fanout. Each team-participant and match-roster resource is
    committed independently after its own completeness check.
-5. The finalizer replays staged resources idempotently, records incomplete teams/matches, and refreshes
-   the Player State read model after the run is settled.
+5. After each complete team-participant or match-roster resource commits, the worker reconciles the
+   verified provider bridge and attempts a Player State refresh. This makes a successful resource
+   visible while sibling resources are still running or have failed; a projection error is logged for
+   the bounded repair path and never rolls back the canonical resource.
+6. The finalizer replays staged resources idempotently, records incomplete teams/matches, and runs
+   the same bridge-plus-Player-State publication once more after the run is settled.
+
+Existing verified player links are extended to a new season only when current-season roster evidence
+observes the same provider pair. Current team links still require explicit season confirmation; the
+pipeline does not promote a name-only or unverified team join.
 
 For EPL, historical/full/reconcile player summaries are complete discovery facts. An active
 team-participant resource requires evidence for the incoming league players and preserves prior
