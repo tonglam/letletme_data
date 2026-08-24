@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const migration = readFileSync(
-  'migrations/0038_tournament_3_official_classic_roster_transition.sql',
+  'migrations/0039_tournament_3_official_classic_roster_transition.sql',
   'utf8',
 );
 const config = readFileSync('src/utils/config.ts', 'utf8');
