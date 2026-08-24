@@ -61,6 +61,8 @@ type PlayerStateSourceMarkerRow = {
 const iso = (value: Date | string): string =>
   (value instanceof Date ? value : new Date(value)).toISOString();
 
+const PLAYER_STATE_RECONCILIATION_LOCK_KEY = 'understat:player-state:reconciliation';
+
 export async function refreshPlayerSeasonSummaries(
   season: FplSeasonRef,
 ): Promise<PlayerSeasonSummaryRefresh> {
@@ -147,7 +149,22 @@ async function withPlayerStateProjectionSavepoint<T>(operation: () => Promise<T>
 async function withPlayerStateReconciliationTransaction<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (databaseTransactionStorage.getStore()) return withDatabaseSavepoint(operation);
+  const operationWithLock = async (): Promise<T> => {
+    const client = await getDbClient();
+    // confirmedSeasons is shared by every season's entity-link upsert. A
+    // season-local loop or mutation scope is not enough when an API repair,
+    // hourly repair, and Understat worker run in separate transactions.
+    await client`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${PLAYER_STATE_RECONCILIATION_LOCK_KEY}, 0)
+      )
+    `;
+    return operation();
+  };
+
+  if (databaseTransactionStorage.getStore()) {
+    return withDatabaseSavepoint(operationWithLock);
+  }
 
   const db = await getDb();
   return (await db.transaction(async (drizzleTransaction) => {
@@ -159,7 +176,7 @@ async function withPlayerStateReconciliationTransaction<T>(
     if (!transaction) {
       throw new Error('Drizzle transaction did not expose its pinned postgres client');
     }
-    return runInDatabaseTransaction(transaction, operation, drizzleTransaction);
+    return runInDatabaseTransaction(transaction, operationWithLock, drizzleTransaction);
   })) as T;
 }
 
@@ -175,6 +192,12 @@ async function advancePlayerStateSourceMarker(
           SELECT max(metrics.updated_at)
           FROM understat.player_seasons metrics
           WHERE metrics.season_code = ${season.seasonCode}
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(player.updated_at)
+          FROM understat.players player
+          WHERE player.first_seen_season <= ${season.seasonCode}
+            AND player.last_seen_season >= ${season.seasonCode}
         ), '-infinity'::timestamptz),
         COALESCE((
           SELECT max(provider_season.updated_at)
@@ -353,6 +376,12 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             SELECT max(metrics.updated_at)
             FROM understat.player_seasons metrics
             WHERE metrics.season_code = season.season_code
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(player.updated_at)
+            FROM understat.players player
+            WHERE player.first_seen_season <= season.season_code
+              AND player.last_seen_season >= season.season_code
           ), '-infinity'::timestamptz),
           COALESCE((
             SELECT max(provider_season.updated_at)
