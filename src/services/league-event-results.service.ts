@@ -221,7 +221,10 @@ export function buildEntryResultData(
     entryResult?.eventTransfersCost ?? fallbackPicks?.entry_history.event_transfers_cost ?? 0;
   const eventNetPoints = eventPoints - eventTransfersCost;
   const eventBenchPoints = picks
-    .filter((pick) => pick.position > 11)
+    // Official multipliers encode the effective post-substitution lineup.
+    // Position is only the original bench order and is wrong after auto-subs;
+    // Bench Boost correctly produces zero non-scoring picks.
+    .filter((pick) => pick.multiplier === 0)
     .reduce((total, pick) => total + (eventLiveMap.get(pick.element)?.totalPoints ?? 0), 0);
   const eventAutoSubPoints = getAutoSubPoints(autoSubs, eventLiveMap);
   const eventRank = entryResult?.eventRank ?? fallbackPicks?.entry_history.rank ?? null;

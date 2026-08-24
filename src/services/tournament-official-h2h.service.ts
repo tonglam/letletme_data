@@ -259,8 +259,8 @@ export function suppressOfficialH2HActiveScores(
 
 /**
  * Overlay real manager sides with net scores from one coherent event-live
- * batch. A nullable synthetic Average Team side has no manager picks and is
- * therefore the sole explicit exception: its official H2H score is retained.
+ * batch. Synthetic Average Team scores have no event/live manager authority,
+ * so a round containing one remains unavailable instead of mixing revisions.
  */
 export function projectOfficialH2HEventLiveScores(
   snapshot: OfficialH2HSourceSnapshot,
@@ -273,7 +273,13 @@ export function projectOfficialH2HEventLiveScores(
     batch.eventId !== eventId ||
     batch.state === 'scheduled' ||
     entryIds.size === 0 ||
-    [...entryIds].some((entryId) => !batch.scores.has(entryId))
+    [...entryIds].some((entryId) => !batch.scores.has(entryId)) ||
+    snapshot.matches.some(
+      (match) =>
+        match.event === eventId &&
+        match.is_bye !== true &&
+        (match.entry_1_entry === null || match.entry_2_entry === null),
+    )
   ) {
     return null;
   }
@@ -291,14 +297,18 @@ export function projectOfficialH2HEventLiveScores(
           ? match.entry_2_points
           : (batch.scores.get(match.entry_2_entry)?.netEventPoints ?? null);
       const winner =
-        match.is_bye === true ||
-        homePoints === null ||
-        awayPoints === null ||
-        homePoints === awayPoints
+        match.is_bye === true || homePoints === null || awayPoints === null
           ? null
-          : homePoints > awayPoints
-            ? match.entry_1_entry
-            : match.entry_2_entry;
+          : homePoints === awayPoints
+            ? isOfficialKnockoutMatch(match) &&
+              match.tiebreak !== null &&
+              match.tiebreak !== undefined &&
+              (match.winner === match.entry_1_entry || match.winner === match.entry_2_entry)
+              ? match.winner
+              : null
+            : homePoints > awayPoints
+              ? match.entry_1_entry
+              : match.entry_2_entry;
       return {
         ...match,
         entry_1_points: homePoints,

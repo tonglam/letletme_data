@@ -24,6 +24,48 @@ export type EventLiveManagerScoreBatch = {
   scores: ReadonlyMap<number, RevisionedEventLiveManagerScore>;
 };
 
+export const EVENT_LIVE_PICKS_MAX_AGE_MS = 15 * 60_000;
+
+export function hasCompleteAggregateCoverage(
+  row: { eventCount?: number; firstEventId?: number; lastEventId?: number },
+  startEventId: number,
+  endEventId: number,
+): boolean {
+  return (
+    endEventId >= startEventId &&
+    row.eventCount === endEventId - startEventId + 1 &&
+    row.firstEventId === startEventId &&
+    row.lastEventId === endEventId
+  );
+}
+
+export function eventLivePicksAreFresh(
+  picksCheckedAt: string,
+  liveCheckedAt: string,
+  maxAgeMs = EVENT_LIVE_PICKS_MAX_AGE_MS,
+): boolean {
+  const picksTimestamp = Date.parse(picksCheckedAt);
+  const liveTimestamp = Date.parse(liveCheckedAt);
+  return (
+    Number.isFinite(picksTimestamp) &&
+    Number.isFinite(liveTimestamp) &&
+    liveTimestamp - picksTimestamp <= maxAgeMs
+  );
+}
+
+export function buildEventLiveScoreRevision(input: {
+  authorityRevision: string;
+  entryId: number;
+  picksCheckedAt: string;
+  eventPoints: number;
+  transferCost: number;
+  previousTotal: number | null;
+  totalPoints: number | null;
+}): string {
+  const scoreHash = contentHash(input).slice(0, 16);
+  return `${input.authorityRevision}:entry:${input.entryId}:${scoreHash}`;
+}
+
 async function loadEventLiveManagerScoreBatch(
   season: FplSeasonRef,
   eventId: number,
@@ -64,7 +106,9 @@ async function loadEventLiveManagerScoreBatch(
     picksByEntry.set(pick.entryId, rows);
   }
   const previousTotalByEntry = new Map(
-    previousTotals.map((row) => [row.entryId, row.totalNetPoints] as const),
+    previousTotals
+      .filter((row) => hasCompleteAggregateCoverage(row, 1, eventId - 1))
+      .map((row) => [row.entryId, row.totalNetPoints] as const),
   );
 
   const authorityRevision = `fpl:live:${snapshot.manifest.publicationId}:${snapshot.manifest.revision}`;
@@ -77,19 +121,22 @@ async function loadEventLiveManagerScoreBatch(
       pointsByElement,
     );
     if (!score) continue;
+    if (!eventLivePicksAreFresh(score.picksCheckedAt, checkedAt)) continue;
     const previousTotal = eventId === 1 ? 0 : (previousTotalByEntry.get(entryId) ?? null);
     const totalPoints = previousTotal === null ? null : previousTotal + score.netEventPoints;
-    const scoreHash = contentHash({
+    const revision = buildEventLiveScoreRevision({
       authorityRevision,
       entryId,
       picksCheckedAt: score.picksCheckedAt,
       eventPoints: score.eventPoints,
       transferCost: score.transferCost,
-    }).slice(0, 16);
+      previousTotal,
+      totalPoints,
+    });
     scores.set(entryId, {
       ...score,
       totalPoints,
-      revision: `${authorityRevision}:entry:${entryId}:${scoreHash}`,
+      revision,
     });
   }
 

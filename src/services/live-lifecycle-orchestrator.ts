@@ -5,7 +5,6 @@ import type { Event } from '../domain/events';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { isCompleteEntryPicks } from '../domain/entry-picks';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
-import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
@@ -39,6 +38,9 @@ export const PICKS_RETRY_SCHEDULE_MS = (
   .filter((value) => Number.isFinite(value) && value > 0);
 export const FPL_BULK_MAX_INFLIGHT_DURING_LIVE = Number(
   process.env.FPL_BULK_MAX_INFLIGHT_DURING_LIVE ?? 3,
+);
+export const PICKS_REFRESH_INTERVAL_MS = Number(
+  process.env.PICKS_REFRESH_INTERVAL_MS ?? 10 * 60_000,
 );
 const BETWEEN_FIXTURES_POLL_MS = Number(process.env.BETWEEN_FIXTURES_POLL_MS ?? 5 * 60_000);
 const DAY_SETTLING_INITIAL_POLL_MS = Number(process.env.DAY_SETTLING_INITIAL_POLL_MS ?? 60_000);
@@ -153,7 +155,7 @@ export function decideLiveLifecycle(
       state: 'FINALIZED',
       shouldFetchLive: true,
       shouldProbePicks: false,
-      shouldSyncPicks: false,
+      shouldSyncPicks: true,
       recoverStaleFixtures: false,
       finalizeEvent: true,
       nextRetryAt: null,
@@ -168,7 +170,7 @@ export function decideLiveLifecycle(
       state: 'GW_REVIEW',
       shouldFetchLive: afterLast < 24 * 60 * 60_000,
       shouldProbePicks: false,
-      shouldSyncPicks: false,
+      shouldSyncPicks: true,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -190,12 +192,11 @@ export function decideLiveLifecycle(
     if (futureFixtures && quietFor >= DAY_SETTLING_STABLE_AFTER_MS) {
       return {
         state: 'BETWEEN_FIXTURES',
-        // Keep polling at the low cadence so a new official revision can be
-        // observed, but do not sync picks or manufacture a publication for a
-        // lifecycle-only transition.
+        // Keep polling at the low cadence so a new official revision and any
+        // multiplier changes can both be observed.
         shouldFetchLive: true,
         shouldProbePicks: false,
-        shouldSyncPicks: false,
+        shouldSyncPicks: true,
         recoverStaleFixtures: false,
         finalizeEvent: false,
         nextRetryAt: null,
@@ -294,6 +295,17 @@ function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: 
   return payload.entry_history.event === eventId && isCompleteEntryPicks(payload.picks);
 }
 
+export function findPicksRefreshEntryIds(
+  entryIds: readonly number[],
+  claims: ReadonlyMap<number, number>,
+  nowMs: number,
+): number[] {
+  return entryIds.filter(
+    (entryId) =>
+      !claims.has(entryId) || nowMs - (claims.get(entryId) ?? 0) >= PICKS_REFRESH_INTERVAL_MS,
+  );
+}
+
 export async function runPicksProbeAndSync(
   season: FplSeasonRef,
   eventId: number,
@@ -309,17 +321,12 @@ export async function runPicksProbeAndSync(
   if (now.getTime() < state.nextProbeAt) return { canaryCount: 0, synced: 0, pending: 0 };
   const entryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
   if (entryIds.length === 0) return { canaryCount: 0, synced: 0, pending: 0 };
-  const persisted = new Set(
-    await entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds),
-  );
   const fanoutClaims = picksFanoutClaims.get(key) ?? new Map<number, number>();
   const nowMs = now.getTime();
-  for (const entryId of persisted) fanoutClaims.delete(entryId);
-  const pending = entryIds.filter(
-    (entryId) =>
-      !persisted.has(entryId) &&
-      (!fanoutClaims.has(entryId) || nowMs - (fanoutClaims.get(entryId) ?? 0) >= 10 * 60_000),
-  );
+  // Complete picks are not immutable: FPL can update multipliers for automatic
+  // substitutions and vice-captain promotion. Refresh every active entry on a
+  // bounded cadence instead of treating one persisted 15-player rowset as final.
+  const pending = findPicksRefreshEntryIds(entryIds, fanoutClaims, nowMs);
   if (pending.length === 0) return { canaryCount: 0, synced: 0, pending: 0 };
 
   let canaries = state.canarySucceeded
@@ -343,8 +350,10 @@ export async function runPicksProbeAndSync(
   canaryResults.forEach((result, index) => {
     const entryId = canaries[index];
     if (entryId === undefined) return;
-    if (result.status === 'fulfilled') state.failedCanaryEntryIds.delete(entryId);
-    else state.failedCanaryEntryIds.add(entryId);
+    if (result.status === 'fulfilled') {
+      state.failedCanaryEntryIds.delete(entryId);
+      fanoutClaims.set(entryId, nowMs);
+    } else state.failedCanaryEntryIds.add(entryId);
   });
   if (!state.canarySucceeded && canaryCount === 0) {
     state.attempts += 1;
@@ -369,6 +378,9 @@ export async function runPicksProbeAndSync(
       concurrency: Math.max(1, Math.min(FPL_BULK_MAX_INFLIGHT_DURING_LIVE, 3)),
       throttleMs: 0,
       queueKey: `live-picks-${eventId}`,
+      // Entry-list cron IDs are otherwise content-stable and BullMQ would
+      // return the first completed job forever, defeating periodic refresh.
+      jobId: `entry-picks-${season.seasonCode}-live-refresh-${eventId}-${nowMs}`,
     });
     for (const entryId of remaining) fanoutClaims.set(entryId, nowMs);
   }

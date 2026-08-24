@@ -194,7 +194,7 @@ describe('league event result convergence', () => {
       picks: Array.from({ length: 15 }, (_, index) => ({
         element: index + 1,
         position: index + 1,
-        multiplier: index === 0 ? 0 : index === 1 ? 2 : index < 11 ? 1 : 0,
+        multiplier: index === 0 ? 0 : index === 1 ? 2 : index === 11 ? 1 : index < 11 ? 1 : 0,
         is_captain: index === 0,
         is_vice_captain: index === 1,
       })),
@@ -204,7 +204,8 @@ describe('league event result convergence', () => {
         pick.element,
         {
           elementId: pick.element,
-          totalPoints: pick.element === 1 ? 5 : pick.element === 2 ? 7 : 0,
+          totalPoints:
+            pick.element === 1 ? 5 : pick.element === 2 ? 7 : pick.element === 12 ? 6 : 0,
           minutes: pick.element === 1 ? 0 : 90,
         } as DbEventLive,
       ]),
@@ -216,6 +217,7 @@ describe('league event result convergence', () => {
       playedCaptainId: 2,
       captainPoints: 14,
       viceCaptainPoints: 7,
+      eventBenchPoints: 5,
     });
   });
 

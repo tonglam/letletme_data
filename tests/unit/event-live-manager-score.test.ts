@@ -4,6 +4,11 @@ import {
   deriveEventLiveManagerScore,
   type EventLiveManagerPick,
 } from '../../src/domain/event-live-manager-score';
+import {
+  buildEventLiveScoreRevision,
+  eventLivePicksAreFresh,
+  hasCompleteAggregateCoverage,
+} from '../../src/services/event-live-manager-scores.service';
 
 const PICKED_POINTS = new Map([
   [529, 1],
@@ -65,5 +70,38 @@ describe('event-live manager score authority', () => {
       sourceUpdatedAt: new Date('2026-08-24T00:00:31.000Z'),
     };
     expect(deriveEventLiveManagerScore(109967, mixedPicks, PICKED_POINTS)).toBeNull();
+  });
+
+  test('requires contiguous prior-event evidence before publishing an overall total', () => {
+    expect(
+      hasCompleteAggregateCoverage({ eventCount: 7, firstEventId: 1, lastEventId: 7 }, 1, 7),
+    ).toBe(true);
+    expect(
+      hasCompleteAggregateCoverage({ eventCount: 6, firstEventId: 1, lastEventId: 7 }, 1, 7),
+    ).toBe(false);
+  });
+
+  test('rejects picks that have not been refreshed near the live publication', () => {
+    expect(eventLivePicksAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:14:59.999Z')).toBe(
+      true,
+    );
+    expect(eventLivePicksAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:15:00.001Z')).toBe(
+      false,
+    );
+  });
+
+  test('changes the score revision when a prior total is corrected', () => {
+    const input = {
+      authorityRevision: 'fpl:live:publication-8:8',
+      entryId: 109967,
+      picksCheckedAt: '2026-08-24T00:00:30.000Z',
+      eventPoints: 37,
+      transferCost: 0,
+      previousTotal: 100,
+      totalPoints: 137,
+    };
+    expect(buildEventLiveScoreRevision(input)).not.toBe(
+      buildEventLiveScoreRevision({ ...input, previousTotal: 104, totalPoints: 141 }),
+    );
   });
 });

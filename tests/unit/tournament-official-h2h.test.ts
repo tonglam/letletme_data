@@ -137,6 +137,107 @@ describe('official H2H source import', () => {
     });
   });
 
+  test('preserves a validated knockout tiebreak winner when event-live scores are level', () => {
+    const snapshot = {
+      standings: [],
+      matches: [
+        {
+          id: 2071743,
+          event: 1,
+          entry_1_entry: 109967,
+          entry_1_points: 23,
+          entry_2_entry: 34299,
+          entry_2_points: 23,
+          winner: 34299,
+          is_knockout: true,
+          knockout_name: 'Final',
+          tiebreak: { goals: '2-1' },
+          sourceOrder: 0,
+        },
+      ],
+    };
+    const checkedAt = '2026-08-24T00:01:00.000Z';
+    const projected = projectOfficialH2HEventLiveScores(snapshot, 1, new Set([109967, 34299]), {
+      season: '2627',
+      eventId: 1,
+      state: 'live',
+      revision: 'fpl:live:publication-8:8',
+      publicationId: 'publication-8',
+      checkedAt,
+      sourceCheckedAt: checkedAt,
+      scores: new Map(
+        [109967, 34299].map((entryId) => [
+          entryId,
+          {
+            entryId,
+            eventPoints: 37,
+            netEventPoints: 37,
+            transferCost: 0,
+            totalPoints: 37,
+            picksCheckedAt: checkedAt,
+            revision: `score-${entryId}`,
+          },
+        ]),
+      ),
+    });
+
+    expect(projected?.matches[0]).toMatchObject({
+      entry_1_points: 37,
+      entry_2_points: 37,
+      winner: 34299,
+    });
+  });
+
+  test('fails closed for an Average Team side without event-live manager authority', () => {
+    const checkedAt = '2026-08-24T00:01:00.000Z';
+    expect(
+      projectOfficialH2HEventLiveScores(
+        {
+          standings: [],
+          matches: [
+            {
+              id: 2071743,
+              event: 1,
+              entry_1_entry: 109967,
+              entry_1_points: 23,
+              entry_2_entry: null,
+              entry_2_points: 31,
+              winner: null,
+              is_bye: false,
+              knockout_name: null,
+              sourceOrder: 0,
+            },
+          ],
+        },
+        1,
+        new Set([109967]),
+        {
+          season: '2627',
+          eventId: 1,
+          state: 'live',
+          revision: 'fpl:live:publication-8:8',
+          publicationId: 'publication-8',
+          checkedAt,
+          sourceCheckedAt: checkedAt,
+          scores: new Map([
+            [
+              109967,
+              {
+                entryId: 109967,
+                eventPoints: 37,
+                netEventPoints: 37,
+                transferCost: 0,
+                totalPoints: 37,
+                picksCheckedAt: checkedAt,
+                revision: 'score-109967',
+              },
+            ],
+          ]),
+        },
+      ),
+    ).toBeNull();
+  });
+
   test('suppresses active official H2H points when a coherent event-live batch is unavailable', () => {
     const snapshot = suppressOfficialH2HActiveScores(
       {

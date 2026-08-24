@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 
 import {
   decideLiveLifecycle,
+  findPicksRefreshEntryIds,
   PICKS_FIRST_PROBE_OFFSET_MS,
+  PICKS_REFRESH_INTERVAL_MS,
 } from '../../src/services/live-lifecycle-orchestrator';
 
 describe('live lifecycle decisions', () => {
@@ -112,7 +114,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'BETWEEN_FIXTURES',
       shouldFetchLive: true,
-      shouldSyncPicks: false,
+      shouldSyncPicks: true,
     });
   });
 
@@ -145,7 +147,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'BETWEEN_FIXTURES',
       shouldFetchLive: true,
-      shouldSyncPicks: false,
+      shouldSyncPicks: true,
     });
   });
 
@@ -166,6 +168,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'FINALIZED',
       shouldFetchLive: true,
+      shouldSyncPicks: true,
       finalizeEvent: true,
     });
   });
@@ -187,7 +190,18 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'GW_REVIEW',
       shouldFetchLive: false,
+      shouldSyncPicks: true,
       finalizeEvent: false,
     });
+  });
+
+  test('refreshes complete picks again after the bounded live interval', () => {
+    const now = Date.parse('2026-08-24T01:00:00.000Z');
+    const claims = new Map([
+      [1, now - PICKS_REFRESH_INTERVAL_MS + 1],
+      [2, now - PICKS_REFRESH_INTERVAL_MS],
+    ]);
+
+    expect(findPicksRefreshEntryIds([1, 2, 3], claims, now)).toEqual([2, 3]);
   });
 });

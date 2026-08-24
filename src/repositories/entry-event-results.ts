@@ -33,6 +33,10 @@ type EntryEventTotalsRow = {
   totalPoints: number;
   totalTransfersCost: number;
   totalNetPoints: number;
+  /** Coverage evidence for callers that must reject partial cumulative totals. */
+  eventCount?: number;
+  firstEventId?: number;
+  lastEventId?: number;
 };
 
 export type EventPointsPayload = {
@@ -235,6 +239,9 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               totalPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventPoints}), 0)::int`,
               totalTransfersCost: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventTransfersCost}), 0)::int`,
               totalNetPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventNetPoints}), 0)::int`,
+              eventCount: sql<number>`COUNT(*)::int`,
+              firstEventId: sql<number>`MIN(${entryEventResultsInCompetition.eventId})::int`,
+              lastEventId: sql<number>`MAX(${entryEventResultsInCompetition.eventId})::int`,
             })
             .from(entryEventResultsInCompetition)
             .where(
