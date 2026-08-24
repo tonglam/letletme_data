@@ -7,6 +7,7 @@ import {
   PICKS_FIRST_PROBE_OFFSET_MS,
   PICKS_REFRESH_INTERVAL_MS,
   resolveLiveLifecycleDelay,
+  shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
 
 describe('live lifecycle decisions', () => {
@@ -181,9 +182,10 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'FINALIZED',
       shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
       finalizeEvent: true,
     });
+    expect(shouldRefreshOfficialH2H(decision, true)).toBe(false);
   });
 
   test('keeps an unfinalized event in GW_REVIEW after the quiet polling window', () => {
@@ -206,6 +208,7 @@ describe('live lifecycle decisions', () => {
       shouldSyncPicks: true,
       finalizeEvent: false,
     });
+    expect(shouldRefreshOfficialH2H(decision, false)).toBe(true);
     expect(
       resolveLiveLifecycleDelay(
         decision,

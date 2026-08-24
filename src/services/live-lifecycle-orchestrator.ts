@@ -89,6 +89,17 @@ export type LiveLifecycleObservation = {
   publicationStarted?: boolean;
 };
 
+export function shouldRefreshOfficialH2H(
+  decision: LiveLifecycleDecision,
+  matchDayTime: boolean,
+): boolean {
+  return (
+    decision.shouldFetchLive &&
+    decision.state !== 'FINALIZED' &&
+    (matchDayTime || decision.state === 'GW_REVIEW')
+  );
+}
+
 type PicksProbeState = {
   attempts: number;
   nextProbeAt: number;
@@ -155,7 +166,10 @@ export function decideLiveLifecycle(
       state: 'FINALIZED',
       shouldFetchLive: true,
       shouldProbePicks: false,
-      shouldSyncPicks: true,
+      // GW_REVIEW owns recurring multiplier/automatic-sub refreshes. Once
+      // FPL marks the event data-checked, picks are immutable and the durable
+      // final snapshot is the only remaining one-shot obligation.
+      shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: true,
       nextRetryAt: null,
@@ -502,7 +516,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         });
       }
     }
-    if (isMatchDayTime(currentEvent, fixtures, now)) {
+    if (shouldRefreshOfficialH2H(decision, isMatchDayTime(currentEvent, fixtures, now))) {
       await enqueueTournamentOfficialH2H(season, currentEvent.id, 'cron', {
         jobId: `official-h2h-e${currentEvent.id}-${now.toISOString().slice(0, 16).replace(/\D/g, '')}`,
       }).catch((error) => {

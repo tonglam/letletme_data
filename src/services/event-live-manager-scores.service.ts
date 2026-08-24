@@ -106,13 +106,19 @@ export async function loadFreshEventLiveAuthoritySnapshot(
 export function buildEventLiveScoreRevision(input: {
   authorityRevision: string;
   entryId: number;
-  picksCheckedAt: string;
   eventPoints: number;
   transferCost: number;
   previousTotal: number | null;
   totalPoints: number | null;
 }): string {
-  const scoreHash = contentHash(input).slice(0, 16);
+  const scoreHash = contentHash({
+    authorityRevision: input.authorityRevision,
+    entryId: input.entryId,
+    eventPoints: input.eventPoints,
+    transferCost: input.transferCost,
+    previousTotal: input.previousTotal,
+    totalPoints: input.totalPoints,
+  }).slice(0, 16);
   return `${input.authorityRevision}:entry:${input.entryId}:${scoreHash}`;
 }
 
@@ -167,7 +173,6 @@ async function loadEventLiveManagerScoreBatch(
     const revision = buildEventLiveScoreRevision({
       authorityRevision,
       entryId,
-      picksCheckedAt: score.picksCheckedAt,
       eventPoints: score.eventPoints,
       transferCost: score.transferCost,
       previousTotal,

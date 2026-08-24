@@ -52,6 +52,7 @@ import { isMatchDayTime } from '../utils/conditions';
 import {
   decideLiveLifecycle,
   resolveLiveLifecycleDelay,
+  shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig } from '../utils/config';
@@ -751,8 +752,9 @@ export function officialH2HDefinition(
       const fixtures = dependencies
         ? await dependencies.findFixtures(context.season, event.id)
         : await loadSchedulerFixtures(context, event.id);
-      const decision = decideLiveLifecycle(event, fixtures, context.now);
-      if (!decision.shouldFetchLive || !isMatchDayTime(event, fixtures, context.now)) return [];
+      const matchDayTime = isMatchDayTime(event, fixtures, context.now);
+      const decision = decideLiveLifecycle(event, fixtures, context.now, { matchDayTime });
+      if (!shouldRefreshOfficialH2H(decision, matchDayTime)) return [];
       if (await (dependencies?.hasPending ?? hasPendingOfficialH2HJob)(context.season, event.id)) {
         return [];
       }

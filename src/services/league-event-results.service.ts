@@ -373,6 +373,29 @@ export function leagueEventLiveInputsAreFresh(
   );
 }
 
+export function findMissingLeagueResultSourceCheckpoints(
+  expected: ReadonlyArray<Pick<LeagueEventResultEvidenceInsert, 'entryId' | 'sourceCheckedAt'>>,
+  persisted: ReadonlyArray<{ entryId: number; sourceCheckedAt: Date | null }>,
+): number[] {
+  const persistedByEntry = new Map(persisted.map((row) => [row.entryId, row.sourceCheckedAt]));
+  return uniqueNumbers(
+    expected
+      .filter((row) => {
+        const expectedMs =
+          row.sourceCheckedAt instanceof Date
+            ? row.sourceCheckedAt.getTime()
+            : Date.parse(row.sourceCheckedAt);
+        if (!Number.isFinite(expectedMs)) {
+          throw new Error('A valid league result source timestamp is required');
+        }
+        const checkpoint = persistedByEntry.get(row.entryId);
+        const checkpointMs = checkpoint?.getTime() ?? Number.NaN;
+        return !Number.isFinite(checkpointMs) || checkpointMs < expectedMs;
+      })
+      .map((row) => row.entryId),
+  );
+}
+
 export async function syncLeagueEventResultsByTournament(
   season: FplSeasonRef,
   tournamentId: number,
@@ -428,16 +451,21 @@ export async function syncLeagueEventResultsByTournament(
       failedUnits: 0,
     };
   }
-  const reusedEntryIds = requiredRichFreshAfter
-    ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
-        season,
-        tournament.leagueId,
-        tournament.leagueType,
-        eventId,
-        entryIds,
-        requiredRichFreshAfter,
-      )
-    : [];
+  // Active rows are ordered by their paired official source timestamp, not by
+  // the database-clock token captured before the source reads. Rebuild them on
+  // every scheduled attempt; the guarded upsert will retain a concurrently
+  // published row backed by newer source evidence.
+  const reusedEntryIds =
+    finalizationCutoff && requiredRichFreshAfter
+      ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+          season,
+          tournament.leagueId,
+          tournament.leagueType,
+          eventId,
+          entryIds,
+          requiredRichFreshAfter,
+        )
+      : [];
   const reusedSet = new Set(reusedEntryIds);
   const entriesToBuild = entryIds.filter((entryId) => !reusedSet.has(entryId));
   if (entriesToBuild.length === 0) {
@@ -593,7 +621,7 @@ export async function syncLeagueEventResultsByTournament(
         ? new Date(
             Math.min(Date.parse(activeEventLiveCheckedAt), picksCheckedAt.getTime()),
           ).toISOString()
-        : sourceOrdering.exact;
+        : requiredRichFreshAfter;
     inserts.push({
       leagueId: tournament.leagueId,
       leagueType: tournament.leagueType,
@@ -654,20 +682,41 @@ export async function syncLeagueEventResultsByTournament(
     updated += await leagueEventResultsRepository.upsertBatch(season, batch);
   }
 
-  const persistedEntryIds = new Set(
-    await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
-      season,
-      tournament.leagueId,
-      tournament.leagueType,
-      eventId,
-      entriesToBuild,
-      requiredRichFreshAfter,
-    ),
-  );
-  const missingPersistedEntryIds = findMissingLeagueResultEntryIds(
-    entriesToBuild,
-    persistedEntryIds,
-  );
+  const builtEntryIds = new Set(inserts.map((insert) => insert.entryId));
+  const missingBuiltEntryIds = findMissingLeagueResultEntryIds(entriesToBuild, builtEntryIds);
+  const builtEntryIdList = [...builtEntryIds];
+  const missingWrittenEntryIds = finalizationCutoff
+    ? findMissingLeagueResultEntryIds(
+        builtEntryIdList,
+        new Set(
+          builtEntryIdList.length > 0
+            ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+                season,
+                tournament.leagueId,
+                tournament.leagueType,
+                eventId,
+                builtEntryIdList,
+                requiredRichFreshAfter,
+              )
+            : [],
+        ),
+      )
+    : findMissingLeagueResultSourceCheckpoints(
+        inserts,
+        builtEntryIdList.length > 0
+          ? await leagueEventResultsRepository.findSourceCheckpointsByLeagueEvent(
+              season,
+              tournament.leagueId,
+              tournament.leagueType,
+              eventId,
+              builtEntryIdList,
+            )
+          : [],
+      );
+  const missingPersistedEntryIds = uniqueNumbers([
+    ...missingBuiltEntryIds,
+    ...missingWrittenEntryIds,
+  ]);
   const succeeded = entriesToBuild.length - missingPersistedEntryIds.length;
   const errors = missingPersistedEntryIds.length;
 

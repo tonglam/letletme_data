@@ -137,6 +137,54 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
       }
     },
 
+    findSourceCheckpointsByLeagueEvent: async (
+      season: FplSeasonRef,
+      leagueId: number,
+      leagueType: LeagueEventResultInsert['leagueType'],
+      eventId: number,
+      entryIds: number[],
+    ): Promise<Array<{ entryId: number; sourceCheckedAt: Date | null }>> => {
+      if (entryIds.length === 0) return [];
+
+      try {
+        const db = await getDbInstance();
+        const uniqueIds = Array.from(new Set(entryIds));
+        const results: Array<{ entryId: number; sourceCheckedAt: Date | null }> = [];
+        for (let index = 0; index < uniqueIds.length; index += 1000) {
+          const chunk = uniqueIds.slice(index, index + 1000);
+          const rows = await db
+            .select({
+              entryId: leagueEventResultsInCompetition.entryId,
+              sourceCheckedAt: leagueEventResultsInCompetition.sourceCheckedAt,
+            })
+            .from(leagueEventResultsInCompetition)
+            .where(
+              and(
+                eq(leagueEventResultsInCompetition.seasonId, season.seasonId),
+                eq(leagueEventResultsInCompetition.leagueId, leagueId),
+                eq(leagueEventResultsInCompetition.leagueType, leagueType),
+                eq(leagueEventResultsInCompetition.eventId, eventId),
+                inArray(leagueEventResultsInCompetition.entryId, chunk),
+              ),
+            );
+          results.push(...rows);
+        }
+        return results;
+      } catch (error) {
+        logError('Failed to find league event result source checkpoints', error, {
+          season: season.seasonCode,
+          leagueId,
+          leagueType,
+          eventId,
+        });
+        throw new DatabaseError(
+          'Failed to find league event result source checkpoints',
+          'LEAGUE_EVENT_RESULTS_SOURCE_CHECKPOINT_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertBatch: async (
       season: FplSeasonRef,
       results: readonly LeagueEventResultEvidenceInsert[],

@@ -105,7 +105,6 @@ describe('event-live manager score authority', () => {
     const input = {
       authorityRevision: 'fpl:live:publication-8:8',
       entryId: 109967,
-      picksCheckedAt: '2026-08-24T00:00:30.000Z',
       eventPoints: 37,
       transferCost: 0,
       previousTotal: 100,
@@ -113,6 +112,29 @@ describe('event-live manager score authority', () => {
     };
     expect(buildEventLiveScoreRevision(input)).not.toBe(
       buildEventLiveScoreRevision({ ...input, previousTotal: 104, totalPoints: 141 }),
+    );
+  });
+
+  test('keeps a content revision stable across freshness-only picks observations', () => {
+    const content = {
+      authorityRevision: 'fpl:live:publication-8:8',
+      entryId: 109967,
+      eventPoints: 37,
+      transferCost: 0,
+      previousTotal: 100,
+      totalPoints: 137,
+    };
+    const firstObservation = {
+      ...content,
+      picksCheckedAt: '2026-08-24T00:00:30.000Z',
+    } as typeof content;
+    const laterObservation = {
+      ...content,
+      picksCheckedAt: '2026-08-24T00:10:30.000Z',
+    } as typeof content;
+
+    expect(buildEventLiveScoreRevision(firstObservation)).toBe(
+      buildEventLiveScoreRevision(laterObservation),
     );
   });
 });

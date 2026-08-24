@@ -332,6 +332,17 @@ describe('standalone scheduler registry', () => {
     expect(
       await definition.resolve({ ...context, now: new Date('2026-08-24T01:00:00.000Z') }),
     ).toEqual([]);
+
+    fixtures[0]!.finished = true;
+    expect(
+      await definition.resolve({ ...context, now: new Date('2026-08-24T01:01:00.000Z') }),
+    ).toEqual([
+      expect.objectContaining({
+        periodKey: 'official-h2h-1-202608240101',
+        eventId: 1,
+        evidence: { lifecycleState: 'GW_REVIEW' },
+      }),
+    ]);
   });
 
   test('catches up an hourly maintenance bucket after its scheduled minute', async () => {

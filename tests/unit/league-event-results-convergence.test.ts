@@ -9,6 +9,7 @@ import {
   buildEntryResultData,
   findEventEligibleEntryIds,
   findMissingLeagueResultEntryIds,
+  findMissingLeagueResultSourceCheckpoints,
   isEntryResultRichEnough,
   leagueEventLiveInputsAreFresh,
   latestFreshnessTimestamp,
@@ -27,6 +28,28 @@ describe('league event result convergence', () => {
     expect(
       leagueEventLiveInputsAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:15:00.001Z', now),
     ).toBe(false);
+  });
+
+  test('audits each active write against its own paired source boundary', () => {
+    expect(
+      findMissingLeagueResultSourceCheckpoints(
+        [
+          { entryId: 1, sourceCheckedAt: '2026-08-24T00:10:00.000Z' },
+          { entryId: 2, sourceCheckedAt: new Date('2026-08-24T00:08:00.000Z') },
+          { entryId: 3, sourceCheckedAt: '2026-08-24T00:09:00.000Z' },
+        ],
+        [
+          { entryId: 1, sourceCheckedAt: new Date('2026-08-24T00:09:59.999Z') },
+          { entryId: 2, sourceCheckedAt: new Date('2026-08-24T00:08:00.000Z') },
+        ],
+      ),
+    ).toEqual([1, 3]);
+    expect(() =>
+      findMissingLeagueResultSourceCheckpoints(
+        [{ entryId: 1, sourceCheckedAt: 'not-a-timestamp' }],
+        [],
+      ),
+    ).toThrow('valid league result source timestamp');
   });
 
   test('derives finalized bench points from effective multipliers', () => {
