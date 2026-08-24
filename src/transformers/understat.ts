@@ -250,6 +250,7 @@ export function transformUnderstatTeamDiscovery(
   league: string,
   response: UnderstatLeagueResponse,
   now = new Date(),
+  allowPartialResults = false,
 ): UnderstatTeamDiscovery {
   const matches = response.dates
     .map((date) => transformMatch(season, date, now))
@@ -263,11 +264,19 @@ export function transformUnderstatTeamDiscovery(
   for (const match of matches.filter((candidate) => candidate.isResult)) {
     const rows = teamMatchStats.filter((row) => row.matchId === match.id);
     const identities = new Set(rows.map((row) => `${row.teamId}:${row.side}`));
+    const expectedIdentities = new Set([`${match.homeTeamId}:h`, `${match.awayTeamId}:a`]);
+    const hasDuplicateIdentity = rows.length !== identities.size;
+    const hasUnexpectedIdentity = [...identities].some(
+      (identity) => !expectedIdentities.has(identity),
+    );
+    const hasCompleteIdentities =
+      rows.length === 2 &&
+      identities.size === 2 &&
+      [...expectedIdentities].every((identity) => identities.has(identity));
     if (
-      rows.length !== 2 ||
-      identities.size !== 2 ||
-      !identities.has(`${match.homeTeamId}:h`) ||
-      !identities.has(`${match.awayTeamId}:a`)
+      hasDuplicateIdentity ||
+      hasUnexpectedIdentity ||
+      (!allowPartialResults && !hasCompleteIdentities)
     ) {
       throw new Error(
         `Understat completed match ${match.id} does not contain exactly two team history rows`,
@@ -360,7 +369,8 @@ export function validateUnderstatTeamDates(
   response: UnderstatTeamResponse,
   expectedTeamId: number,
   leagueMatches: readonly UnderstatMatch[],
-): void {
+  allowMissingMatches = false,
+): number[] {
   const matchesById = new Map(leagueMatches.map((match) => [match.id, match]));
   validateTeamPageIdentity(response, expectedTeamId, new Set(matchesById.keys()));
   const responseMatchIds = new Set(response.dates.map((date) => date.id));
@@ -371,11 +381,14 @@ export function validateUnderstatTeamDates(
     .filter((match) => match.homeTeamId === expectedTeamId || match.awayTeamId === expectedTeamId)
     .map((match) => match.id)
     .filter((matchId) => !responseMatchIds.has(matchId));
-  if (missingMatchIds.length > 0) {
+  if (!allowMissingMatches && missingMatchIds.length > 0) {
     throw new Error(
       `Understat team page ${expectedTeamId} is missing league matches: ${missingMatchIds.join(', ')}`,
     );
   }
+  const missingCompletedMatchIds = missingMatchIds.filter(
+    (matchId) => matchesById.get(matchId)?.isResult,
+  );
 
   for (const date of response.dates) {
     const match = matchesById.get(date.id);
@@ -398,6 +411,7 @@ export function validateUnderstatTeamDates(
       );
     }
   }
+  return missingCompletedMatchIds;
 }
 
 export function transformUnderstatTeamSplits(
@@ -521,6 +535,7 @@ function transformRosterEntry(
 export function transformUnderstatMatchRoster(
   match: UnderstatMatch,
   response: UnderstatMatchResponse,
+  allowIncompleteStarters = false,
 ): { players: UnderstatPlayer[]; stats: UnderstatPlayerMatchStat[] } {
   const entries: UnderstatRosterEntry[] = [];
   for (const side of ['h', 'a'] as const) {
@@ -543,13 +558,15 @@ export function transformUnderstatMatchRoster(
   }
   for (const side of ['h', 'a'] as const) {
     const sideRows = transformed.filter(({ stat }) => stat.side === side);
-    if (sideRows.length === 0) throw new Error(`Understat match ${match.id} has no ${side} roster`);
+    if (sideRows.length === 0 && !allowIncompleteStarters) {
+      throw new Error(`Understat match ${match.id} has no ${side} roster`);
+    }
     const playerIds = new Set(sideRows.map(({ stat }) => stat.playerId));
     if (playerIds.size !== sideRows.length) {
       throw new Error(`Understat match ${match.id} contains duplicate ${side} player IDs`);
     }
     const starters = sideRows.filter(({ stat }) => stat.started);
-    if (starters.length !== 11) {
+    if (!allowIncompleteStarters && starters.length !== 11) {
       throw new Error(
         `Understat match ${match.id} ${side} roster has ${starters.length} starters instead of 11`,
       );

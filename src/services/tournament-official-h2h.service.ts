@@ -17,6 +17,10 @@ import { tournamentOfficialH2HRepository } from '../repositories/tournament-offi
 import { contentHash } from '../utils/content-hash';
 import { ValidationError } from '../utils/errors';
 import { logInfo, logWarn } from '../utils/logger';
+import {
+  eventLiveManagerScoreService,
+  type EventLiveManagerScoreBatch,
+} from './event-live-manager-scores.service';
 
 const MAX_H2H_PAGES = 100;
 
@@ -40,6 +44,35 @@ export type OfficialH2HSyncOptions = {
   /** Suppress every outcome shape for an incomplete provisional event. */
   suppressedEventId?: number | null;
 };
+
+type EntryEventTotalsCoverage = {
+  eventCount?: number;
+  firstEventId?: number;
+  lastEventId?: number;
+};
+
+export function hasCompleteEntryEventTotalsCoverage(
+  row: EntryEventTotalsCoverage | undefined,
+  startEventId: number,
+  endEventId: number,
+): boolean {
+  if (endEventId < startEventId) return true;
+  return Boolean(
+    row &&
+      row.eventCount === endEventId - startEventId + 1 &&
+      row.firstEventId === startEventId &&
+      row.lastEventId === endEventId,
+  );
+}
+
+export function isOfficialH2HGroupEvent(
+  tournament: Pick<TournamentSyncContext, 'groupStartedEventId' | 'groupEndedEventId'>,
+  eventId: number,
+): boolean {
+  const groupStartEventId = tournament.groupStartedEventId ?? 1;
+  const groupEndEventId = tournament.groupEndedEventId;
+  return groupEndEventId !== null && eventId >= groupStartEventId && eventId <= groupEndEventId;
+}
 
 export function resolveFinalizedThroughEventId(
   latestFinalizedEventId: number | null | undefined,
@@ -227,6 +260,98 @@ export function validatedOfficialH2HSyncOptions(
       provisionalEventId !== null && provisionalEventId !== undefined && !completeProvisionalBatch
         ? provisionalEventId
         : null,
+  };
+}
+
+/**
+ * Remove the separately refreshed official H2H points for one active event.
+ * The feed remains the schedule authority, but cannot be a live-score fallback.
+ */
+export function suppressOfficialH2HActiveScores(
+  snapshot: OfficialH2HSourceSnapshot,
+  eventId: number,
+): OfficialH2HSourceSnapshot {
+  return {
+    ...snapshot,
+    matches: snapshot.matches.map((match) =>
+      match.event !== eventId
+        ? match
+        : {
+            ...match,
+            entry_1_points: match.entry_1_entry === null ? match.entry_1_points : null,
+            entry_2_points: match.entry_2_entry === null ? match.entry_2_points : null,
+            winner: null,
+          },
+    ),
+  };
+}
+
+/**
+ * Overlay real manager sides with net scores from one coherent event-live
+ * batch. Synthetic Average Team scores have no event/live manager authority,
+ * so a round containing one remains unavailable instead of mixing revisions.
+ */
+export function projectOfficialH2HEventLiveScores(
+  snapshot: OfficialH2HSourceSnapshot,
+  eventId: number,
+  entryIds: ReadonlySet<number>,
+  batch: EventLiveManagerScoreBatch | null,
+): OfficialH2HSourceSnapshot | null {
+  if (
+    !batch ||
+    batch.eventId !== eventId ||
+    batch.state === 'scheduled' ||
+    entryIds.size === 0 ||
+    [...entryIds].some((entryId) => !batch.scores.has(entryId)) ||
+    ![...entryIds].some((entryId) => {
+      const score = batch.scores.get(entryId);
+      return (
+        score !== undefined &&
+        (score.eventPoints !== 0 || score.transferCost !== 0 || score.netEventPoints !== 0)
+      );
+    }) ||
+    snapshot.matches.some(
+      (match) =>
+        match.event === eventId &&
+        match.is_bye !== true &&
+        (match.entry_1_entry === null || match.entry_2_entry === null),
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    ...snapshot,
+    matches: snapshot.matches.map((match) => {
+      if (match.event !== eventId) return match;
+      const homePoints =
+        match.entry_1_entry === null
+          ? match.entry_1_points
+          : (batch.scores.get(match.entry_1_entry)?.netEventPoints ?? null);
+      const awayPoints =
+        match.entry_2_entry === null
+          ? match.entry_2_points
+          : (batch.scores.get(match.entry_2_entry)?.netEventPoints ?? null);
+      const winner =
+        match.is_bye === true || homePoints === null || awayPoints === null
+          ? null
+          : homePoints === awayPoints
+            ? isOfficialKnockoutMatch(match) &&
+              match.tiebreak !== null &&
+              match.tiebreak !== undefined &&
+              (match.winner === match.entry_1_entry || match.winner === match.entry_2_entry)
+              ? match.winner
+              : null
+            : homePoints > awayPoints
+              ? match.entry_1_entry
+              : match.entry_2_entry;
+      return {
+        ...match,
+        entry_1_points: homePoints,
+        entry_2_points: awayPoints,
+        winner,
+      };
+    }),
   };
 }
 
@@ -828,6 +953,52 @@ export async function syncOfficialH2HTournament(
       'TOURNAMENT_OFFICIAL_H2H_GROUP_MISMATCH',
     );
   }
+  const requestedProvisionalEventId = options.provisionalEventId ?? null;
+  const eventLiveBatch =
+    requestedProvisionalEventId === null
+      ? null
+      : await eventLiveManagerScoreService
+          .load(season, requestedProvisionalEventId, entryIds)
+          .catch((error) => {
+            logWarn('Official H2H event-live score batch unavailable', {
+              tournamentId: tournament.id,
+              eventId: requestedProvisionalEventId,
+              error: error instanceof Error ? error.message : 'unknown',
+            });
+            return null;
+          });
+  const eventLiveSnapshot =
+    requestedProvisionalEventId === null
+      ? null
+      : projectOfficialH2HEventLiveScores(
+          snapshot,
+          requestedProvisionalEventId,
+          entryIdSet,
+          eventLiveBatch,
+        );
+  const scoringSnapshot =
+    requestedProvisionalEventId === null
+      ? snapshot
+      : (eventLiveSnapshot ??
+        suppressOfficialH2HActiveScores(snapshot, requestedProvisionalEventId));
+  const effectiveOptions =
+    requestedProvisionalEventId === null
+      ? validatedOfficialH2HSyncOptions(entryIdSet, scoringSnapshot.matches, options)
+      : eventLiveSnapshot
+        ? {
+            finalizedThroughEventId: options.finalizedThroughEventId ?? null,
+            provisionalEventId: requestedProvisionalEventId,
+            suppressedEventId: null,
+          }
+        : {
+            finalizedThroughEventId: options.finalizedThroughEventId ?? null,
+            provisionalEventId: null,
+            suppressedEventId: requestedProvisionalEventId,
+          };
+  const provisionalEventId = effectiveOptions.provisionalEventId ?? null;
+  const checkedAt =
+    eventLiveSnapshot && eventLiveBatch ? new Date(eventLiveBatch.checkedAt) : new Date();
+
   if (reconcileEventId) {
     const localResults = await entryEventResultsRepository.findByEventAndEntryIds(
       season,
@@ -842,46 +1013,106 @@ export async function syncOfficialH2HTournament(
         [match.entry_1_entry, match.entry_1_points],
         [match.entry_2_entry, match.entry_2_points],
       ] as const) {
-        if (entryId === null || officialPoints === null) continue;
-        const local = localByEntry.get(entryId);
-        if (local && local.eventNetPoints !== officialPoints) {
-          logWarn('Official H2H score differs from local entry event result', {
+        if (entryId === null) continue;
+        const authoritativePoints =
+          eventLiveBatch?.eventId === reconcileEventId
+            ? (eventLiveBatch.scores.get(entryId)?.netEventPoints ?? null)
+            : officialPoints;
+        if (
+          officialPoints !== null &&
+          authoritativePoints !== null &&
+          officialPoints !== authoritativePoints
+        ) {
+          logWarn('Official H2H score differs from event-live authority', {
             tournamentId: tournament.id,
             eventId: reconcileEventId,
             officialMatchId: match.id,
             entryId,
             officialPoints,
+            eventLivePoints: authoritativePoints,
+            eventLiveRevision: eventLiveBatch?.revision ?? null,
+          });
+        }
+        if (authoritativePoints === null) continue;
+        const local = localByEntry.get(entryId);
+        if (local && local.eventNetPoints !== authoritativePoints) {
+          logWarn('Authoritative H2H score differs from local entry event result', {
+            tournamentId: tournament.id,
+            eventId: reconcileEventId,
+            officialMatchId: match.id,
+            entryId,
+            authoritativePoints,
             localPoints: local.eventNetPoints,
           });
         }
       }
     }
   }
-  const effectiveOptions = validatedOfficialH2HSyncOptions(entryIdSet, snapshot.matches, options);
-  const provisionalEventId = effectiveOptions.provisionalEventId ?? null;
-  const checkedAt = new Date();
   const officialRows = buildOfficialH2HRows(
     tournament,
     entryIdSet,
-    snapshot,
+    scoringSnapshot,
     checkedAt,
     effectiveOptions,
   );
-  const aggregateTotals = await entryEventResultsRepository.aggregateTotalsByEntry(
-    season,
-    entryIds,
-    tournament.groupStartedEventId ?? 1,
-    tournament.groupEndedEventId ?? reconcileEventId ?? 38,
-  );
+  const groupStartEventId = tournament.groupStartedEventId ?? 1;
+  const groupEndEventId = tournament.groupEndedEventId ?? reconcileEventId ?? 38;
+  const provisionalEventBelongsToGroup =
+    provisionalEventId !== null && isOfficialH2HGroupEvent(tournament, provisionalEventId);
+  const aggregateTotals =
+    eventLiveSnapshot && eventLiveBatch && provisionalEventBelongsToGroup
+      ? await (async () => {
+          const previousTotals =
+            provisionalEventId <= groupStartEventId
+              ? []
+              : await entryEventResultsRepository.aggregateTotalsByEntry(
+                  season,
+                  entryIds,
+                  groupStartEventId,
+                  provisionalEventId - 1,
+                );
+          const previousByEntry = new Map(previousTotals.map((row) => [row.entryId, row] as const));
+          const previousEndEventId = provisionalEventId - 1;
+          const incompleteEntryIds = entryIds.filter(
+            (entryId) =>
+              !hasCompleteEntryEventTotalsCoverage(
+                previousByEntry.get(entryId),
+                groupStartEventId,
+                previousEndEventId,
+              ),
+          );
+          if (incompleteEntryIds.length > 0) {
+            throw new ValidationError(
+              `Official H2H cumulative totals are incomplete for ${incompleteEntryIds.length} entries through GW${previousEndEventId}.`,
+              'TOURNAMENT_OFFICIAL_H2H_TOTALS_INCOMPLETE',
+            );
+          }
+          return entryIds.map((entryId) => {
+            const previous = previousByEntry.get(entryId);
+            const score = eventLiveBatch.scores.get(entryId)!;
+            return {
+              entryId,
+              totalPoints: (previous?.totalPoints ?? 0) + score.eventPoints,
+              totalTransfersCost: (previous?.totalTransfersCost ?? 0) + score.transferCost,
+              totalNetPoints: (previous?.totalNetPoints ?? 0) + score.netEventPoints,
+            };
+          });
+        })()
+      : await entryEventResultsRepository.aggregateTotalsByEntry(
+          season,
+          entryIds,
+          groupStartEventId,
+          groupEndEventId,
+        );
   const totalsByEntry = new Map(aggregateTotals.map((row) => [row.entryId, row] as const));
   const matchDerivedStandings = projectOfficialH2HStandingsFromMatches(
     entryIdSet,
-    snapshot.matches,
+    scoringSnapshot.matches,
     effectiveOptions,
   );
   const minimumOfficialPlayedByEntry = minimumOfficialPlayedCoverageForSuppressedEvent(
     matchDerivedStandings,
-    snapshot.matches,
+    scoringSnapshot.matches,
     effectiveOptions.suppressedEventId,
   );
   const standingsSelection = selectOfficialH2HStandings(
@@ -908,7 +1139,7 @@ export async function syncOfficialH2HTournament(
   const published = await tournamentOfficialH2HRepository.publish(season, tournament.id, {
     ...officialRows,
     checkedAt,
-    lockSchedule: snapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
+    lockSchedule: scoringSnapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
     groupRows,
   });
 
@@ -917,6 +1148,8 @@ export async function syncOfficialH2HTournament(
     leagueId: tournament.leagueId,
     standings: snapshot.standings.length,
     matches: snapshot.matches.length,
+    scoreSource: eventLiveSnapshot ? 'FPL_EVENT_LIVE' : 'FPL_H2H_FINAL_OR_UNAVAILABLE',
+    scoreRevision: eventLiveBatch?.revision ?? null,
   });
   return {
     updatedGroups: published.groupRows,

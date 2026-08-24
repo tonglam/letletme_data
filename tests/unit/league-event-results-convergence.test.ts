@@ -1,17 +1,106 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { DbEntryEventResult, DbEventLive } from '../../src/db/schemas/index.schema';
-import { validateAutomaticSubs } from '../../src/repositories/entry-event-results';
+import {
+  deriveBenchPointsFromEffectiveMultipliers,
+  validateAutomaticSubs,
+} from '../../src/repositories/entry-event-results';
 import {
   buildEntryResultData,
   findEventEligibleEntryIds,
   findMissingLeagueResultEntryIds,
+  findMissingLeagueResultSourceCheckpoints,
   isEntryResultRichEnough,
+  leagueEventLiveInputsAreFresh,
   latestFreshnessTimestamp,
 } from '../../src/services/league-event-results.service';
 import type { RawFPLEntryEventPicksResponse } from '../../src/types';
 
 describe('league event result convergence', () => {
+  test('requires one fresh, time-paired event-live and picks observation', () => {
+    const now = Date.parse('2026-08-24T00:15:00.000Z');
+    expect(
+      leagueEventLiveInputsAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:14:59.999Z', now),
+    ).toBe(true);
+    expect(
+      leagueEventLiveInputsAreFresh('2026-08-23T23:59:59.999Z', '2026-08-24T00:14:59.999Z', now),
+    ).toBe(false);
+    expect(
+      leagueEventLiveInputsAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:15:00.001Z', now),
+    ).toBe(false);
+  });
+
+  test('audits each active write against its own paired source boundary', () => {
+    expect(
+      findMissingLeagueResultSourceCheckpoints(
+        [
+          {
+            entryId: 1,
+            sourceLiveCheckedAt: '2026-08-24T00:10:00.000Z',
+            sourcePicksCheckedAt: '2026-08-24T00:10:00.000Z',
+          },
+          {
+            entryId: 2,
+            sourceLiveCheckedAt: new Date('2026-08-24T00:08:00.000Z'),
+            sourcePicksCheckedAt: new Date('2026-08-24T00:08:00.000Z'),
+          },
+          {
+            entryId: 3,
+            sourceLiveCheckedAt: '2026-08-24T00:09:00.000Z',
+            sourcePicksCheckedAt: '2026-08-24T00:09:00.000Z',
+          },
+        ],
+        [
+          {
+            entryId: 1,
+            sourceLiveCheckedAt: new Date('2026-08-24T00:10:00.000Z'),
+            sourcePicksCheckedAt: new Date('2026-08-24T00:09:59.999Z'),
+          },
+          {
+            entryId: 2,
+            sourceLiveCheckedAt: new Date('2026-08-24T00:08:01.000Z'),
+            sourcePicksCheckedAt: new Date('2026-08-24T00:08:00.000Z'),
+          },
+        ],
+      ),
+    ).toEqual([1, 3]);
+    expect(() =>
+      findMissingLeagueResultSourceCheckpoints(
+        [
+          {
+            entryId: 1,
+            sourceLiveCheckedAt: 'not-a-timestamp',
+            sourcePicksCheckedAt: '2026-08-24T00:10:00.000Z',
+          },
+        ],
+        [],
+      ),
+    ).toThrow('valid league result source timestamp');
+  });
+
+  test('derives finalized bench points from effective multipliers', () => {
+    const picks = Array.from({ length: 15 }, (_, index) => ({
+      element: index + 1,
+      position: index + 1,
+      multiplier: index === 0 ? 0 : index === 11 ? 1 : index < 11 ? 1 : 0,
+      is_captain: index === 1,
+      is_vice_captain: index === 2,
+    }));
+    const points = new Map([
+      [1, 5],
+      [12, 6],
+      [13, 3],
+    ]);
+
+    expect(deriveBenchPointsFromEffectiveMultipliers(picks, points)).toBe(8);
+    expect(
+      deriveBenchPointsFromEffectiveMultipliers(
+        picks.map((pick) => ({ ...pick, multiplier: Math.max(1, pick.multiplier) })),
+        points,
+      ),
+    ).toBe(0);
+  });
+
   test('rejects malformed fallback automatic substitutions', () => {
     const picks = Array.from({ length: 15 }, (_, index) => ({
       element: index + 1,
@@ -104,19 +193,19 @@ describe('league event result convergence', () => {
     expect(latestFreshnessTimestamp(later, earlier)).toBe(later);
   });
 
-  test('uses fetched picks when a baseline core row has no rich picks yet', () => {
+  test('recomputes a stale cached manager score from fetched picks and event-live', () => {
     const core = {
       eventPicks: null,
       eventAutoSub: null,
-      eventPoints: 55,
-      eventTransfers: 1,
-      eventTransfersCost: 4,
-      eventNetPoints: 51,
+      eventPoints: 23,
+      eventTransfers: 0,
+      eventTransfersCost: 0,
+      eventNetPoints: 23,
       eventBenchPoints: 3,
       eventAutoSubPoints: null,
       eventRank: 10,
       eventChip: null,
-      overallPoints: 500,
+      overallPoints: 100,
       overallRank: 1000,
       teamValue: 1005,
       bank: 5,
@@ -126,14 +215,14 @@ describe('league event result convergence', () => {
       automatic_subs: [],
       entry_history: {
         event: 9,
-        points: 55,
-        total_points: 500,
+        points: 23,
+        total_points: 100,
         rank: 10,
         overall_rank: 1000,
         bank: 5,
         value: 1005,
-        event_transfers: 1,
-        event_transfers_cost: 4,
+        event_transfers: 0,
+        event_transfers_cost: 0,
         points_on_bench: 3,
       },
       picks: Array.from({ length: 15 }, (_, index) => ({
@@ -149,7 +238,16 @@ describe('league event result convergence', () => {
         pick.element,
         {
           elementId: pick.element,
-          totalPoints: pick.element === 7 ? 8 : 0,
+          totalPoints:
+            pick.element === 7
+              ? 8
+              : pick.element === 8
+                ? 9
+                : pick.element === 9
+                  ? 10
+                  : pick.element === 10 || pick.element === 11
+                    ? 1
+                    : 0,
           minutes: 90,
         } as DbEventLive,
       ]),
@@ -157,10 +255,12 @@ describe('league event result convergence', () => {
 
     const result = buildEntryResultData(core, fallback, 9, eventLive, new Map([[7, 3]]));
     expect(result).toMatchObject({
-      eventNetPoints: 51,
+      eventPoints: 37,
+      eventNetPoints: 37,
+      overallPoints: 114,
       captainId: 7,
       captainPoints: 16,
-      highestScoreElementId: 7,
+      highestScoreElementId: 9,
     });
   });
 
@@ -183,7 +283,7 @@ describe('league event result convergence', () => {
       picks: Array.from({ length: 15 }, (_, index) => ({
         element: index + 1,
         position: index + 1,
-        multiplier: index === 0 ? 0 : index === 1 ? 2 : index < 11 ? 1 : 0,
+        multiplier: index === 0 ? 0 : index === 1 ? 2 : index === 11 ? 1 : index < 11 ? 1 : 0,
         is_captain: index === 0,
         is_vice_captain: index === 1,
       })),
@@ -193,7 +293,8 @@ describe('league event result convergence', () => {
         pick.element,
         {
           elementId: pick.element,
-          totalPoints: pick.element === 1 ? 5 : pick.element === 2 ? 7 : 0,
+          totalPoints:
+            pick.element === 1 ? 5 : pick.element === 2 ? 7 : pick.element === 12 ? 6 : 0,
           minutes: pick.element === 1 ? 0 : 90,
         } as DbEventLive,
       ]),
@@ -205,6 +306,7 @@ describe('league event result convergence', () => {
       playedCaptainId: 2,
       captainPoints: 14,
       viceCaptainPoints: 7,
+      eventBenchPoints: 5,
     });
   });
 

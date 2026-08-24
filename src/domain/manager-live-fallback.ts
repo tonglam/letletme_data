@@ -7,13 +7,19 @@ const MAX_FOREGROUND_OVERALL_RANK_FETCHES = 20;
 export type ManagerSummaryFetchPriority = 'foreground' | 'background';
 
 export type ComparableManagerLiveRow = Readonly<{
-  source: 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
+  source: 'FPL_EVENT_LIVE' | 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | 'FPL_FINAL_RESULT';
   checkedAt: string;
   upstreamUpdatedAt: string | null;
 }>;
 
 const managerLiveSourcePriority = (source: ComparableManagerLiveRow['source']): number =>
-  source === 'FPL_FINAL_RESULT' ? 3 : source === 'FPL_CLASSIC_STANDINGS' ? 2 : 1;
+  source === 'FPL_FINAL_RESULT'
+    ? 4
+    : source === 'FPL_EVENT_LIVE'
+      ? 3
+      : source === 'FPL_CLASSIC_STANDINGS'
+        ? 2
+        : 1;
 
 export const shouldReplaceManagerLiveRow = (
   current: ComparableManagerLiveRow,

@@ -462,15 +462,14 @@ export class UnderstatClient {
       UnderstatTeamResponseSchema,
       ['dates', 'players', 'statistics'],
     ).then((response) => {
-      const hasCompletedMatch = response.dates.some((date) => date.isResult);
       const statistics = response.statistics as Record<string, Record<string, unknown>>;
       const hasStatistics = UNDERSTAT_SPLIT_DIMENSIONS.some(
         (dimension) => Object.keys(statistics[dimension] ?? {}).length > 0,
       );
       const activeSourceYear = sourceYearFromSeason(getConfig().UNDERSTAT_SEASON);
-      if (!hasStatistics && (hasCompletedMatch || sourceYear !== activeSourceYear)) {
+      if (!hasStatistics && sourceYear !== activeSourceYear) {
         throw new UnderstatClientError(
-          'Understat team statistics are empty for a completed or historical season',
+          'Understat team statistics are empty for a historical season',
           'VALIDATION_ERROR',
         );
       }

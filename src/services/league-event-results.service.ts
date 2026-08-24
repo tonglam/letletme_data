@@ -20,6 +20,7 @@ import {
 import { eventLiveRepository } from '../repositories/event-lives';
 import { eventRepository } from '../repositories/events';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import type { EventLive } from '../domain/event-lives';
 import {
   leagueEventResultsRepository,
   type LeagueEventResultEvidenceInsert,
@@ -33,6 +34,12 @@ import { logError, logInfo } from '../utils/logger';
 import { resolveTournamentEntryIds } from './tournament-entry-resolver.service';
 import { resolveRichResultFreshnessCutoff } from '../domain/entry-sync';
 import { latestFreshnessTimestamp } from '../domain/freshness';
+import {
+  eventLiveAuthorityCheckedAt,
+  eventLiveHeartbeatIsFresh,
+  eventLivePicksAreFresh,
+  loadFreshEventLiveAuthoritySnapshot,
+} from './event-live-manager-scores.service';
 
 export { latestFreshnessTimestamp } from '../domain/freshness';
 
@@ -46,7 +53,10 @@ type AutoSubItem = {
 type MissingPickResult = {
   entryId: number;
   picks: RawFPLEntryEventPicksResponse | null;
+  checkedAt: Date | null;
 };
+
+type LeagueEventLive = EventLive | DbEventLive;
 
 type HighestScoreResult = {
   elementId: number | null;
@@ -69,7 +79,10 @@ function normalizeAutoSubs(raw: unknown): AutoSubItem[] {
   return raw as AutoSubItem[];
 }
 
-function getAutoSubPoints(autoSubs: AutoSubItem[], eventLiveMap: Map<number, DbEventLive>): number {
+function getAutoSubPoints(
+  autoSubs: AutoSubItem[],
+  eventLiveMap: ReadonlyMap<number, LeagueEventLive>,
+): number {
   return autoSubs.reduce((total, sub) => {
     const elementId = sub.element_in ?? sub.elementIn;
     if (!elementId) {
@@ -82,7 +95,7 @@ function getAutoSubPoints(autoSubs: AutoSubItem[], eventLiveMap: Map<number, DbE
 
 function getHighestScoreElement(
   picks: RawFPLEntryEventPickItem[],
-  eventLiveMap: Map<number, DbEventLive>,
+  eventLiveMap: ReadonlyMap<number, LeagueEventLive>,
 ): HighestScoreResult {
   let bestElement: number | null = null;
   let bestPoints: number | null = null;
@@ -98,7 +111,7 @@ function getHighestScoreElement(
   return { elementId: bestElement, points: bestPoints };
 }
 
-function isBlank(eventLive: DbEventLive | undefined, elementType: number | null): boolean {
+function isBlank(eventLive: LeagueEventLive | undefined, elementType: number | null): boolean {
   if (!eventLive) {
     return true;
   }
@@ -119,10 +132,6 @@ function isBlank(eventLive: DbEventLive | undefined, elementType: number | null)
   }
 
   return true;
-}
-
-function resolveEventNetPoints(eventPoints: number, transfersCost: number): number {
-  return eventPoints - transfersCost;
 }
 
 export function isEntryResultRichEnough(
@@ -148,14 +157,14 @@ async function fetchMissingEntryPicks(
       if (!isEntryPicksPayloadForEvent(picks, eventId)) {
         throw new Error(`Entry ${entryId} returned picks for an unexpected event`);
       }
-      return { entryId, picks } satisfies MissingPickResult;
+      return { entryId, picks, checkedAt: new Date() } satisfies MissingPickResult;
     } catch (error) {
       errors += 1;
       logError('Failed to fetch entry event picks for league results', error, {
         entryId,
         eventId,
       });
-      return { entryId, picks: null } satisfies MissingPickResult;
+      return { entryId, picks: null, checkedAt: null } satisfies MissingPickResult;
     }
   });
 
@@ -166,7 +175,7 @@ export function buildEntryResultData(
   entryResult: DbEntryEventResult | undefined,
   fallbackPicks: RawFPLEntryEventPicksResponse | null,
   eventId: number,
-  eventLiveMap: Map<number, DbEventLive>,
+  eventLiveMap: ReadonlyMap<number, LeagueEventLive>,
   elementTypeMap: Map<number, number>,
 ): {
   eventPoints: number;
@@ -215,21 +224,31 @@ export function buildEntryResultData(
       ? storedAutoSubs
       : normalizeAutoSubs(fallbackPicks?.automatic_subs ?? []);
 
-  const eventPoints = entryResult?.eventPoints ?? fallbackPicks?.entry_history.points ?? 0;
+  const eventPoints = picks.reduce(
+    (total, pick) => total + (eventLiveMap.get(pick.element)?.totalPoints ?? 0) * pick.multiplier,
+    0,
+  );
   const eventTransfers =
     entryResult?.eventTransfers ?? fallbackPicks?.entry_history.event_transfers ?? 0;
   const eventTransfersCost =
     entryResult?.eventTransfersCost ?? fallbackPicks?.entry_history.event_transfers_cost ?? 0;
-  const eventNetPoints =
-    entryResult?.eventNetPoints ?? resolveEventNetPoints(eventPoints, eventTransfersCost);
-  const eventBenchPoints =
-    entryResult?.eventBenchPoints ?? fallbackPicks?.entry_history.points_on_bench ?? null;
-  const eventAutoSubPoints =
-    entryResult?.eventAutoSubPoints ?? getAutoSubPoints(autoSubs, eventLiveMap);
+  const eventNetPoints = eventPoints - eventTransfersCost;
+  const eventBenchPoints = picks
+    // Official multipliers encode the effective post-substitution lineup.
+    // Position is only the original bench order and is wrong after auto-subs;
+    // Bench Boost correctly produces zero non-scoring picks.
+    .filter((pick) => pick.multiplier === 0)
+    .reduce((total, pick) => total + (eventLiveMap.get(pick.element)?.totalPoints ?? 0), 0);
+  const eventAutoSubPoints = getAutoSubPoints(autoSubs, eventLiveMap);
   const eventRank = entryResult?.eventRank ?? fallbackPicks?.entry_history.rank ?? null;
   const eventChip = entryResult?.eventChip ?? toNullableDbChip(fallbackPicks?.active_chip);
-  const overallPoints =
-    entryResult?.overallPoints ?? fallbackPicks?.entry_history.total_points ?? 0;
+  const previousOverallPoints = entryResult
+    ? entryResult.overallPoints - entryResult.eventNetPoints
+    : fallbackPicks
+      ? fallbackPicks.entry_history.total_points -
+        (fallbackPicks.entry_history.points - fallbackPicks.entry_history.event_transfers_cost)
+      : 0;
+  const overallPoints = previousOverallPoints + eventNetPoints;
   const overallRank = entryResult?.overallRank ?? fallbackPicks?.entry_history.overall_rank ?? 0;
   const teamValue = entryResult?.teamValue ?? fallbackPicks?.entry_history.value ?? null;
   const bank = entryResult?.bank ?? fallbackPicks?.entry_history.bank ?? null;
@@ -343,6 +362,57 @@ export function summarizeMissingLeagueEventLiveData(
   };
 }
 
+export function leagueEventLiveInputsAreFresh(
+  liveCheckedAt: string,
+  picksCheckedAt: string,
+  nowMs = Date.now(),
+): boolean {
+  return (
+    eventLiveHeartbeatIsFresh(liveCheckedAt, nowMs) &&
+    eventLivePicksAreFresh(picksCheckedAt, liveCheckedAt)
+  );
+}
+
+export function findMissingLeagueResultSourceCheckpoints(
+  expected: ReadonlyArray<
+    Pick<
+      LeagueEventResultEvidenceInsert,
+      'entryId' | 'sourceLiveCheckedAt' | 'sourcePicksCheckedAt'
+    >
+  >,
+  persisted: ReadonlyArray<{
+    entryId: number;
+    sourceLiveCheckedAt: Date | null;
+    sourcePicksCheckedAt: Date | null;
+  }>,
+): number[] {
+  const persistedByEntry = new Map(persisted.map((row) => [row.entryId, row]));
+  return uniqueNumbers(
+    expected
+      .filter((row) => {
+        const expectedLiveMs = sourceCheckpointMs(row.sourceLiveCheckedAt);
+        const expectedPicksMs = sourceCheckpointMs(row.sourcePicksCheckedAt);
+        if (!Number.isFinite(expectedLiveMs) || !Number.isFinite(expectedPicksMs)) {
+          throw new Error('A valid league result source timestamp is required');
+        }
+        const checkpoint = persistedByEntry.get(row.entryId);
+        const checkpointLiveMs = checkpoint?.sourceLiveCheckedAt?.getTime() ?? Number.NaN;
+        const checkpointPicksMs = checkpoint?.sourcePicksCheckedAt?.getTime() ?? Number.NaN;
+        return (
+          !Number.isFinite(checkpointLiveMs) ||
+          !Number.isFinite(checkpointPicksMs) ||
+          checkpointLiveMs < expectedLiveMs ||
+          checkpointPicksMs < expectedPicksMs
+        );
+      })
+      .map((row) => row.entryId),
+  );
+}
+
+function sourceCheckpointMs(value: Date | string): number {
+  return value instanceof Date ? value.getTime() : Date.parse(value);
+}
+
 export async function syncLeagueEventResultsByTournament(
   season: FplSeasonRef,
   tournamentId: number,
@@ -398,16 +468,21 @@ export async function syncLeagueEventResultsByTournament(
       failedUnits: 0,
     };
   }
-  const reusedEntryIds = requiredRichFreshAfter
-    ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
-        season,
-        tournament.leagueId,
-        tournament.leagueType,
-        eventId,
-        entryIds,
-        requiredRichFreshAfter,
-      )
-    : [];
+  // Active rows are ordered by their paired official source timestamp, not by
+  // the database-clock token captured before the source reads. Rebuild them on
+  // every scheduled attempt; the guarded upsert will retain a concurrently
+  // published row backed by newer source evidence.
+  const reusedEntryIds =
+    finalizationCutoff && requiredRichFreshAfter
+      ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+          season,
+          tournament.leagueId,
+          tournament.leagueType,
+          eventId,
+          entryIds,
+          requiredRichFreshAfter,
+        )
+      : [];
   const reusedSet = new Set(reusedEntryIds);
   const entriesToBuild = entryIds.filter((entryId) => !reusedSet.has(entryId));
   if (entriesToBuild.length === 0) {
@@ -425,9 +500,15 @@ export async function syncLeagueEventResultsByTournament(
     };
   }
 
+  const eventLiveAuthority = finalizationCutoff
+    ? null
+    : await loadFreshEventLiveAuthoritySnapshot(season, eventId);
   const eventLives = finalizationCutoff
     ? await eventLiveRepository.findFinalizedByEventId(season, eventId)
-    : await eventLiveRepository.findByEventId(season, eventId);
+    : (eventLiveAuthority?.eventLives ?? []);
+  const activeEventLiveCheckedAt = eventLiveAuthority
+    ? eventLiveAuthorityCheckedAt(eventLiveAuthority)
+    : null;
   if (eventLives.length === 0) {
     const summary = summarizeMissingLeagueEventLiveData(
       tournamentId,
@@ -465,14 +546,20 @@ export async function syncLeagueEventResultsByTournament(
     return !result || !isCompleteEntryPicks(result.eventPicks) || staleRichEntryIdSet.has(entryId);
   });
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
-  const missingPicksMap = new Map<number, RawFPLEntryEventPicksResponse>();
+  const missingPicksMap = new Map<
+    number,
+    { picks: RawFPLEntryEventPicksResponse; checkedAt: Date }
+  >();
   let skipped = 0;
 
   if (missingEntryIds.length > 0) {
     const { results } = await fetchMissingEntryPicks(missingEntryIds, eventId, concurrency);
     for (const result of results) {
-      if (result.picks) {
-        missingPicksMap.set(result.entryId, result.picks);
+      if (result.picks && result.checkedAt) {
+        missingPicksMap.set(result.entryId, {
+          picks: result.picks,
+          checkedAt: result.checkedAt,
+        });
       }
     }
   }
@@ -495,7 +582,25 @@ export async function syncLeagueEventResultsByTournament(
 
     const persistedEntryResult = entryResultsMap.get(entryId);
     const entryResult = !staleRichEntryIdSet.has(entryId) ? persistedEntryResult : undefined;
-    const fallbackPicks = missingPicksMap.get(entryId) ?? null;
+    const fallbackObservation = missingPicksMap.get(entryId);
+    const fallbackPicks = fallbackObservation?.picks ?? null;
+    const picksCheckedAt = fallbackObservation?.checkedAt ?? entryResult?.richSyncedAt ?? null;
+    if (
+      !finalizationCutoff &&
+      (!activeEventLiveCheckedAt ||
+        !picksCheckedAt ||
+        !leagueEventLiveInputsAreFresh(activeEventLiveCheckedAt, picksCheckedAt.toISOString()))
+    ) {
+      skipped += 1;
+      logInfo('Skipping league entry without a coherent event-live and picks observation', {
+        eventId,
+        entryId,
+        tournamentId,
+        liveCheckedAt: activeEventLiveCheckedAt,
+        picksCheckedAt: picksCheckedAt?.toISOString() ?? null,
+      });
+      continue;
+    }
     if (fallbackPicks) {
       try {
         validateAutomaticSubs(entryId, eventId, fallbackPicks);
@@ -528,6 +633,12 @@ export async function syncLeagueEventResultsByTournament(
       continue;
     }
 
+    const sourceLiveCheckedAt = finalizationCutoff
+      ? requiredRichFreshAfter
+      : activeEventLiveCheckedAt!;
+    const sourcePicksCheckedAt = finalizationCutoff
+      ? requiredRichFreshAfter
+      : picksCheckedAt!.toISOString();
     inserts.push({
       leagueId: tournament.leagueId,
       leagueType: tournament.leagueType,
@@ -557,8 +668,29 @@ export async function syncLeagueEventResultsByTournament(
       highestScoreElementId: data.highestScoreElementId,
       highestScorePoints: data.highestScorePoints,
       highestScoreBlank: data.highestScoreBlank,
-      sourceCheckedAt: sourceOrdering.exact,
+      sourceCheckedAt: requiredRichFreshAfter,
+      sourceLiveCheckedAt,
+      sourcePicksCheckedAt,
     });
+  }
+
+  if (
+    !finalizationCutoff &&
+    (!activeEventLiveCheckedAt || !eventLiveHeartbeatIsFresh(activeEventLiveCheckedAt))
+  ) {
+    const summary = summarizeMissingLeagueEventLiveData(
+      tournamentId,
+      eventId,
+      entriesToBuild.length,
+      reusedEntryIds.length,
+    );
+    throw new IncompleteDataSyncError(
+      'League event results require a fresh official event-live heartbeat',
+      summary.requiredUnits,
+      summary.reusedUnits,
+      summary.succeededUnits,
+      summary.failedUnits,
+    );
   }
 
   const batchSize = 500;
@@ -569,20 +701,41 @@ export async function syncLeagueEventResultsByTournament(
     updated += await leagueEventResultsRepository.upsertBatch(season, batch);
   }
 
-  const persistedEntryIds = new Set(
-    await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
-      season,
-      tournament.leagueId,
-      tournament.leagueType,
-      eventId,
-      entriesToBuild,
-      requiredRichFreshAfter,
-    ),
-  );
-  const missingPersistedEntryIds = findMissingLeagueResultEntryIds(
-    entriesToBuild,
-    persistedEntryIds,
-  );
+  const builtEntryIds = new Set(inserts.map((insert) => insert.entryId));
+  const missingBuiltEntryIds = findMissingLeagueResultEntryIds(entriesToBuild, builtEntryIds);
+  const builtEntryIdList = [...builtEntryIds];
+  const missingWrittenEntryIds = finalizationCutoff
+    ? findMissingLeagueResultEntryIds(
+        builtEntryIdList,
+        new Set(
+          builtEntryIdList.length > 0
+            ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+                season,
+                tournament.leagueId,
+                tournament.leagueType,
+                eventId,
+                builtEntryIdList,
+                requiredRichFreshAfter,
+              )
+            : [],
+        ),
+      )
+    : findMissingLeagueResultSourceCheckpoints(
+        inserts,
+        builtEntryIdList.length > 0
+          ? await leagueEventResultsRepository.findSourceCheckpointsByLeagueEvent(
+              season,
+              tournament.leagueId,
+              tournament.leagueType,
+              eventId,
+              builtEntryIdList,
+            )
+          : [],
+      );
+  const missingPersistedEntryIds = uniqueNumbers([
+    ...missingBuiltEntryIds,
+    ...missingWrittenEntryIds,
+  ]);
   const succeeded = entriesToBuild.length - missingPersistedEntryIds.length;
   const errors = missingPersistedEntryIds.length;
 

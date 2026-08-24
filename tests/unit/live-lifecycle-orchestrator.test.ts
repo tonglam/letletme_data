@@ -3,7 +3,11 @@ import { readFileSync } from 'node:fs';
 
 import {
   decideLiveLifecycle,
+  findPicksRefreshEntryIds,
   PICKS_FIRST_PROBE_OFFSET_MS,
+  PICKS_REFRESH_INTERVAL_MS,
+  resolveLiveLifecycleDelay,
+  shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
 
 describe('live lifecycle decisions', () => {
@@ -12,9 +16,21 @@ describe('live lifecycle decisions', () => {
     expect(source).toContain('runIndependentSchedulerStage');
     expect(source).toContain('live-lifecycle');
     expect(source).toContain('persistLiveLifecycleStatus(now)');
-    expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
-      source.indexOf('runSchedulerPass(now)'),
+    expect(source).toContain('live-picks-refresh');
+    expect(source).toContain(
+      'runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)',
     );
+    expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
+      source.indexOf('runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)'),
+    );
+    expect(
+      source.indexOf('runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)'),
+    ).toBeLessThan(source.indexOf('runSchedulerPass(now)'));
+    const registrySource = readFileSync('src/scheduler/job-registry.ts', 'utf8');
+    expect(registrySource).toContain('const decision = decideLiveLifecycle(event, fixtures');
+    expect(registrySource).toContain('decision.state ===');
+    expect(registrySource).toContain('FINALIZED');
+    expect(registrySource).toContain('resolveLiveLifecycleDelay(');
   });
 
   test('starts the first picks probe 60 minutes after the deadline', () => {
@@ -112,7 +128,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'BETWEEN_FIXTURES',
       shouldFetchLive: true,
-      shouldSyncPicks: false,
+      shouldSyncPicks: true,
     });
   });
 
@@ -145,7 +161,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'BETWEEN_FIXTURES',
       shouldFetchLive: true,
-      shouldSyncPicks: false,
+      shouldSyncPicks: true,
     });
   });
 
@@ -166,8 +182,10 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'FINALIZED',
       shouldFetchLive: true,
+      shouldSyncPicks: false,
       finalizeEvent: true,
     });
+    expect(shouldRefreshOfficialH2H(decision, true)).toBe(false);
   });
 
   test('keeps an unfinalized event in GW_REVIEW after the quiet polling window', () => {
@@ -186,8 +204,28 @@ describe('live lifecycle decisions', () => {
 
     expect(decision).toMatchObject({
       state: 'GW_REVIEW',
-      shouldFetchLive: false,
+      shouldFetchLive: true,
+      shouldSyncPicks: true,
       finalizeEvent: false,
     });
+    expect(shouldRefreshOfficialH2H(decision, false)).toBe(true);
+    expect(
+      resolveLiveLifecycleDelay(
+        decision,
+        { seasonId: 1, seasonCode: '2627' },
+        1,
+        new Date('2026-08-17T12:00:01.000Z'),
+      ),
+    ).toBe(10 * 60_000);
+  });
+
+  test('refreshes complete picks again after the bounded live interval', () => {
+    const now = Date.parse('2026-08-24T01:00:00.000Z');
+    const claims = new Map([
+      [1, now - PICKS_REFRESH_INTERVAL_MS + 1],
+      [2, now - PICKS_REFRESH_INTERVAL_MS],
+    ]);
+
+    expect(findPicksRefreshEntryIds([1, 2, 3], claims, now)).toEqual([2, 3]);
   });
 });

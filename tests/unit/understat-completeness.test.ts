@@ -3,12 +3,16 @@ import { describe, expect, test } from 'bun:test';
 import { UNDERSTAT_SPLIT_DIMENSIONS } from '../../src/domain/understat';
 import {
   assertUnderstatResourceHashes,
+  assertUnderstatResourceHashesIncluded,
   evaluateUnderstatPlayerDiscoveryCompleteness,
   evaluateUnderstatPlayerMatchResourceCompleteness,
   evaluateUnderstatPlayerTeamResourceCompleteness,
   evaluateUnderstatPlayerSnapshotCompleteness,
   evaluateUnderstatTeamResourceCompleteness,
+  expectedUnderstatPlayerIdsForTeam,
+  missingUnderstatDiscoveryTeamIds,
   evaluateUnderstatTeamSnapshotCompleteness,
+  selectCompleteUnderstatTeamSeasonRows,
 } from '../../src/services/understat-sync.service';
 
 const teams = Array.from({ length: 20 }, (_, index) => ({ team: { id: index + 1 } }));
@@ -35,6 +39,10 @@ describe('Understat PostgreSQL snapshot completeness guards', () => {
     const result = evaluateUnderstatPlayerDiscoveryCompleteness([101], [101, 102]);
     expect(result.complete).toBe(false);
     expect(result.reason).toContain('player summaries shrank');
+    expect(evaluateUnderstatPlayerDiscoveryCompleteness([101], [101, 102], true)).toEqual({
+      complete: true,
+      reason: 'complete',
+    });
   });
 
   test('rejects a scoped write that did not survive post-commit verification', () => {
@@ -44,6 +52,12 @@ describe('Understat PostgreSQL snapshot completeness guards', () => {
     expect(() =>
       assertUnderstatResourceHashes('team splits', ['b', 'a'], ['a', 'b']),
     ).not.toThrow();
+    expect(() =>
+      assertUnderstatResourceHashesIncluded('team participants', ['a'], ['a', 'stale']),
+    ).not.toThrow();
+    expect(() =>
+      assertUnderstatResourceHashesIncluded('team participants', ['a', 'a'], ['a']),
+    ).toThrow('expected hash missing');
   });
 
   test('does not publish a one-team smoke snapshot', () => {
@@ -207,5 +221,65 @@ describe('Understat PostgreSQL snapshot completeness guards', () => {
         roster,
       ),
     ).toEqual({ complete: true, reason: 'complete' });
+  });
+
+  test('preserves an incomplete active team aggregate', () => {
+    const teamSeasons = [1, 2].map((teamId) => ({
+      season: '2627',
+      teamId,
+      sourceTitle: `Team ${teamId}`,
+      sourceShortTitle: null,
+      games: 1,
+      wins: 1,
+      draws: 0,
+      losses: 0,
+      goalsFor: 1,
+      goalsAgainst: 0,
+      points: 3,
+      xg: 1,
+      xga: 0,
+      npxg: 1,
+      npxga: 0,
+      npxgd: 1,
+      xpoints: 3,
+      deep: 1,
+      deepAllowed: 0,
+      ppdaAtt: 1,
+      ppdaDef: 1,
+      ppdaAllowedAtt: 1,
+      ppdaAllowedDef: 1,
+      sourceHash: String(teamId),
+      lastSyncedAt: new Date(),
+    }));
+    const kept = selectCompleteUnderstatTeamSeasonRows(
+      [{ id: 10, homeTeamId: 1, awayTeamId: 2, isResult: true }],
+      [{ matchId: 10, teamId: 1, side: 'h' }],
+      teamSeasons,
+    );
+    expect(kept.map((row) => row.teamId)).toEqual([1]);
+  });
+
+  test('identifies team identities omitted from an active league payload', () => {
+    expect(
+      missingUnderstatDiscoveryTeamIds(
+        [{ id: 1 }],
+        [
+          { homeTeamId: 1, awayTeamId: 2 },
+          { homeTeamId: 2, awayTeamId: 3 },
+        ],
+      ),
+    ).toEqual([2, 3]);
+  });
+
+  test('expects a transferred player on every provider team named in the summary', () => {
+    expect(
+      expectedUnderstatPlayerIdsForTeam(1, {
+        teams: [
+          { id: 1, title: 'Crystal Palace' },
+          { id: 2, title: 'Arsenal' },
+        ],
+        playerSeasons: [{ playerId: 101, sourceTeamTitle: 'Crystal Palace, Arsenal' }],
+      }),
+    ).toEqual(new Set([101]));
   });
 });
