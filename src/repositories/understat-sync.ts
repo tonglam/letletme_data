@@ -219,6 +219,35 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       );
   },
 
+  async skipItem(
+    runId: string,
+    resourceType: string,
+    resourceId: string,
+    reason: string,
+  ): Promise<boolean> {
+    const db = await getDatabase(dbInstance);
+    const updated = await db
+      .update(understatSyncItems)
+      .set({
+        status: 'skipped',
+        lastError: reason,
+        completedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(understatSyncItems.runId, runId),
+          eq(understatSyncItems.resourceType, resourceType),
+          eq(understatSyncItems.resourceId, resourceId),
+          notInArray(understatSyncItems.status, ['completed', 'skipped']),
+          runIsActive(runId),
+        ),
+      )
+      .returning({ runId: understatSyncItems.runId });
+    if (updated.length === 0) return false;
+    return this.refreshRun(runId);
+  },
+
   async completeItem(
     runId: string,
     resourceType: string,

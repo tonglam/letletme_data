@@ -86,6 +86,20 @@ describe('Understat transformers', () => {
     ).toThrow('does not contain exactly two team history rows');
   });
 
+  test('allows active discovery to retain a partial completed-match history', () => {
+    const partial = structuredClone(UNDERSTAT_LEAGUE_FIXTURE);
+    partial.teams['89'].history = [];
+    const result = transformUnderstatTeamDiscovery(
+      '2627',
+      2026,
+      'EPL',
+      UnderstatLeagueResponseSchema.parse(partial),
+      now,
+      true,
+    );
+    expect(result.teamMatchStats.some((row) => row.teamId === 89)).toBe(false);
+  });
+
   test('accepts an explicit UTC offset without appending another timezone', () => {
     const offset = structuredClone(UNDERSTAT_LEAGUE_FIXTURE);
     offset.dates[0].datetime = '2025-08-17T15:30:00+00:00';
@@ -116,6 +130,15 @@ describe('Understat transformers', () => {
     expect(() =>
       validateUnderstatTeamDates(UnderstatTeamResponseSchema.parse(partial), 83, matches),
     ).toThrow('is missing league matches');
+  });
+
+  test('allows an active team page to omit a not-yet-available match', () => {
+    const partial = structuredClone(UNDERSTAT_TEAM_FIXTURE);
+    partial.dates = [];
+    const matches = transformUnderstatTeamDiscovery('2627', 2026, 'EPL', league, now).matches;
+    expect(() =>
+      validateUnderstatTeamDates(UnderstatTeamResponseSchema.parse(partial), 83, matches, true),
+    ).not.toThrow();
   });
 
   test('keeps team participants separate from league player aggregation', () => {

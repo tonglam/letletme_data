@@ -611,7 +611,11 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     return result.length;
   },
 
-  async replacePlayerSeasons(season: string, rows: UnderstatPlayerSeason[]): Promise<boolean> {
+  async replacePlayerSeasons(
+    season: string,
+    rows: UnderstatPlayerSeason[],
+    preserveExisting = false,
+  ): Promise<boolean> {
     const db = await getDatabase(dbInstance);
     const incomingIds = new Set(rows.map((row) => row.playerId));
     if (incomingIds.size !== rows.length) {
@@ -624,13 +628,14 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
       })
       .from(understatPlayerSeasons)
       .where(eq(understatPlayerSeasons.seasonCode, season));
-    if (existing.length > 0 && rows.length === 0) {
+    if (!preserveExisting && existing.length > 0 && rows.length === 0) {
       throw new Error(`Refusing to clear non-empty Understat player season ${season}`);
     }
+    if (preserveExisting && rows.length === 0) return false;
     const oldMap = new Map(existing.map((row) => [row.playerId, row.sourceHash]));
-    const staleIds = existing
-      .map((row) => row.playerId)
-      .filter((playerId) => !incomingIds.has(playerId));
+    const staleIds = preserveExisting
+      ? []
+      : existing.map((row) => row.playerId).filter((playerId) => !incomingIds.has(playerId));
     const changedRows = rows.filter((row) => oldMap.get(row.playerId) !== row.sourceHash);
     if (changedRows.length === 0 && staleIds.length === 0) return false;
     if (staleIds.length > 0) {
@@ -733,6 +738,7 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     season: string,
     teamId: number,
     rows: UnderstatPlayerTeamSeason[],
+    removeStale = true,
   ): Promise<boolean> {
     const db = await getDatabase(dbInstance);
     const incomingIds = new Set(rows.map((row) => row.playerId));
@@ -753,15 +759,16 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
           eq(understatPlayerTeamSeasons.teamId, teamId),
         ),
       );
-    if (existing.length > 0 && rows.length === 0) {
+    if (removeStale && existing.length > 0 && rows.length === 0) {
       throw new Error(
         `Refusing to clear non-empty Understat team participants: season=${season} team=${teamId}`,
       );
     }
+    if (!removeStale && rows.length === 0) return false;
     const oldMap = new Map(existing.map((row) => [row.playerId, row.sourceHash]));
-    const staleIds = existing
-      .map((row) => row.playerId)
-      .filter((playerId) => !incomingIds.has(playerId));
+    const staleIds = removeStale
+      ? existing.map((row) => row.playerId).filter((playerId) => !incomingIds.has(playerId))
+      : [];
     const changedRows = rows.filter((row) => oldMap.get(row.playerId) !== row.sourceHash);
     if (changedRows.length === 0 && staleIds.length === 0) return false;
     if (staleIds.length > 0) {

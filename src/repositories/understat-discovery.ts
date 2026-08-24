@@ -37,6 +37,7 @@ export async function persistUnderstatPlayerDiscovery(
   tx: DbOrTransaction,
   discovery: UnderstatPlayerDiscovery,
   withdrawnMatchIds: readonly number[] = [],
+  options: { preserveExistingPlayerSeasons?: boolean } = {},
 ): Promise<boolean> {
   const references = createUnderstatReferenceRepository(tx);
   const players = createUnderstatPlayerRepository(tx);
@@ -51,6 +52,7 @@ export async function persistUnderstatPlayerDiscovery(
   const seasonsChanged = await players.replacePlayerSeasons(
     discovery.season.season,
     discovery.playerSeasons,
+    options.preserveExistingPlayerSeasons ?? false,
   );
   return (
     withdrawnStats > 0 ||

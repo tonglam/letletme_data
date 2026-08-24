@@ -88,6 +88,16 @@ describe('Understat incremental selection', () => {
         ]),
       ),
     ).toEqual(new Set([101]));
+    expect(
+      changedUnderstatPlayerSeasonIds(
+        [{ playerId: 100, sourceHash: 'same' }],
+        new Map([
+          [100, 'same'],
+          [101, 'omitted-from-partial-response'],
+        ]),
+        false,
+      ),
+    ).toEqual(new Set());
   });
 
   test('adds the destination team for changed player memberships', () => {
