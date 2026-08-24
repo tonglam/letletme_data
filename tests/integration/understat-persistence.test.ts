@@ -602,7 +602,7 @@ describe('Understat persistence', () => {
     await finalizeUnderstatTeamRun({
       runId,
       season,
-      mode: 'full',
+      mode: 'incremental',
       trigger: 'manual',
     });
 
