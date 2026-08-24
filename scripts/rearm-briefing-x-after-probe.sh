@@ -4,7 +4,7 @@ set -euo pipefail
 
 env_file=${1:-.env.deploy}
 migration_env_file=${2:-.env.migrate}
-output_contract_revision=${3:-${CONTENT_GROK_OUTPUT_CONTRACT_REVISION:-2}}
+output_contract_revision=${3:-${CONTENT_GROK_OUTPUT_CONTRACT_REVISION:-3}}
 test -f "$env_file"
 test -f "$migration_env_file"
 test ! -L "$env_file"

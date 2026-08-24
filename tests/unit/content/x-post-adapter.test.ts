@@ -67,7 +67,7 @@ function execution(posts: GrokBuildExecutionResult['posts']): GrokBuildExecution
     outputTokens: 20,
     totalCostUsd: 0.01,
     rawPostEvidenceAvailable: false,
-    outputContractRevision: 2,
+    outputContractRevision: 3,
   };
 }
 
@@ -103,6 +103,21 @@ describe('Grok Build X post adapter gates', () => {
     expect(result.batches[0]?.items[0]?.canonicalUrl).toBe(
       'https://x.com/OfficialFPL/status/2090909465801371803',
     );
+  });
+
+  test('keeps a media-only post as metadata-only without inventing text', () => {
+    const result = adaptGrokBuildPosts({
+      request,
+      execution: execution([{ ...posts[0], text: '' }]),
+      checkedAt: new Date('2026-08-21T21:16:00.000Z'),
+    });
+    expect(result.stateHint).toBe('COMPLETED');
+    expect(result.acceptedCount).toBe(1);
+    expect(result.rejections).toHaveLength(0);
+    expect(result.batches[0]?.items[0]?.body).toEqual({
+      availability: 'METADATA_ONLY',
+      text: null,
+    });
   });
 
   test('derives a timestamp within five seconds of the attested createdAt', () => {

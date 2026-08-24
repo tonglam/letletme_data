@@ -107,9 +107,6 @@ function validatePostFacts(input: { post: GrokBuildXPostV1; request: XScanRunReq
       'X post Snowflake and createdAt differ by more than five seconds',
     );
   }
-  if (!normalizeCanonicalText(input.post.text)) {
-    throw new XPostQualityError('X_POST_TEXT_EMPTY', 'X post text is blank after normalization');
-  }
   validateReturnedUrl(input.post);
 }
 
@@ -119,6 +116,7 @@ function toAcquisitionItem(input: {
   stableExternalId: string | null;
 }): AcquisitionItemV1 {
   const canonicalUrl = canonicalXPostUrl(input.post.authorHandle, input.post.postId);
+  const normalizedText = normalizeCanonicalText(input.post.text);
   return {
     endpointKey: input.endpointKey,
     externalItemId: input.post.postId,
@@ -130,7 +128,10 @@ function toAcquisitionItem(input: {
     title: null,
     authorExternalId: input.stableExternalId,
     contentKind: 'POST',
-    body: { availability: 'FULL', text: input.post.text },
+    body: {
+      availability: normalizedText ? 'FULL' : 'METADATA_ONLY',
+      text: normalizedText ? input.post.text : null,
+    },
     media: [],
     transcript: {
       status: 'NOT_APPLICABLE',
