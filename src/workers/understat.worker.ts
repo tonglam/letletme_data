@@ -29,6 +29,7 @@ import {
   syncUnderstatTeamDetail,
   understatTeamItemForJob,
 } from '../services/understat-team.service';
+import { IncompleteUnderstatResourceError } from '../services/understat-sync.service';
 import { understatSyncRepository } from '../repositories/understat-sync';
 import { getConfig } from '../utils/config';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -230,6 +231,15 @@ async function settleFinalizerOutcome(
   }
 }
 
+function understatCompletenessReason(error: unknown): string | null {
+  if (error instanceof IncompleteUnderstatResourceError) return error.message;
+  if (error instanceof Error && error.name === 'IncompleteUnderstatResourceError') {
+    return error.message;
+  }
+  if (typeof error === 'string' && error.includes(' incomplete: ')) return error;
+  return null;
+}
+
 const ACTIVE_UNDERSTAT_RUN_STATUSES = new Set(['pending', 'running', 'ready_to_publish']);
 const UNDERSTAT_DRAIN_LEASE_EXTENSION_MS = 30 * 60_000;
 
@@ -273,6 +283,15 @@ async function settleUnderstatFailureAfterRunDrained(
     error instanceof Error
       ? error
       : new Error(run?.errorSummary ?? 'Understat run failed after worker drain');
+  const completenessReason = understatCompletenessReason(settledError);
+  if (completenessReason) {
+    await settleUnderstatCompleteness({
+      obligationId: job.data.obligationId,
+      generation: job.data.obligationGeneration,
+      reason: completenessReason,
+    });
+    return;
+  }
   await settleUnderstatObligationFailure({
     obligationId: job.data.obligationId,
     generation: job.data.obligationGeneration,
@@ -286,10 +305,20 @@ async function settleDeferredUnderstatRunFailure(
 ): Promise<void> {
   const run = await understatSyncRepository.findRun(job.data.runId);
   if (!run || run.status !== 'failed') return;
+  const error = run.errorSummary ?? 'Understat run failed after worker drain';
+  const completenessReason = understatCompletenessReason(error);
+  if (completenessReason) {
+    await settleUnderstatCompleteness({
+      obligationId: job.data.obligationId,
+      generation: job.data.obligationGeneration,
+      reason: completenessReason,
+    });
+    return;
+  }
   await settleUnderstatObligationFailure({
     obligationId: job.data.obligationId,
     generation: job.data.obligationGeneration,
-    error: new Error(run.errorSummary ?? 'Understat run failed after worker drain'),
+    error: new Error(error),
     nonRetryable: false,
   });
 }
