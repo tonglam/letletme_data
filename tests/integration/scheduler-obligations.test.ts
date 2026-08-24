@@ -481,6 +481,7 @@ describe('scheduler obligation generation fencing', () => {
         generation,
         attempts,
         lease_owner,
+        lease_expires_at,
         evidence
       )
       VALUES (
@@ -496,6 +497,7 @@ describe('scheduler obligation generation fencing', () => {
         1,
         1,
         'in-flight-worker',
+        clock_timestamp() + interval '15 minutes',
         jsonb_build_object('scheduledDueAtMs', ${inFlightScheduledDueAtMs}::bigint)
       )
     `;
@@ -517,6 +519,7 @@ describe('scheduler obligation generation fencing', () => {
       SET status = 'failed',
           last_error = 'in-flight failure',
           lease_owner = NULL,
+          lease_expires_at = NULL,
           evidence = evidence || '{"reason":"upstream"}'::jsonb
       WHERE obligation_id = ${IN_FLIGHT_OBLIGATION_ID}::uuid
     `;
