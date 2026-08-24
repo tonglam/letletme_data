@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { DbEntryEventResult, DbEventLive } from '../../src/db/schemas/index.schema';
-import { validateAutomaticSubs } from '../../src/repositories/entry-event-results';
+import {
+  deriveBenchPointsFromEffectiveMultipliers,
+  validateAutomaticSubs,
+} from '../../src/repositories/entry-event-results';
 import {
   buildEntryResultData,
   findEventEligibleEntryIds,
@@ -12,6 +15,29 @@ import {
 import type { RawFPLEntryEventPicksResponse } from '../../src/types';
 
 describe('league event result convergence', () => {
+  test('derives finalized bench points from effective multipliers', () => {
+    const picks = Array.from({ length: 15 }, (_, index) => ({
+      element: index + 1,
+      position: index + 1,
+      multiplier: index === 0 ? 0 : index === 11 ? 1 : index < 11 ? 1 : 0,
+      is_captain: index === 1,
+      is_vice_captain: index === 2,
+    }));
+    const points = new Map([
+      [1, 5],
+      [12, 6],
+      [13, 3],
+    ]);
+
+    expect(deriveBenchPointsFromEffectiveMultipliers(picks, points)).toBe(8);
+    expect(
+      deriveBenchPointsFromEffectiveMultipliers(
+        picks.map((pick) => ({ ...pick, multiplier: Math.max(1, pick.multiplier) })),
+        points,
+      ),
+    ).toBe(0);
+  });
+
   test('rejects malformed fallback automatic substitutions', () => {
     const picks = Array.from({ length: 15 }, (_, index) => ({
       element: index + 1,

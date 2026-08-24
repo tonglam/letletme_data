@@ -57,6 +57,15 @@ function getAutoSubPoints(autoSubs: AutoSubItem[], elementsPoints: Map<number, n
   return autoSubs.reduce((total, sub) => total + (elementsPoints.get(sub.element_in) ?? 0), 0);
 }
 
+export function deriveBenchPointsFromEffectiveMultipliers(
+  picks: readonly RawFPLEntryEventPicksResponse['picks'][number][],
+  elementsPoints: ReadonlyMap<number, number>,
+): number {
+  return picks
+    .filter((pick) => pick.multiplier === 0)
+    .reduce((total, pick) => total + (elementsPoints.get(pick.element) ?? 0), 0);
+}
+
 function hydrateResult(row: ResultStorage, picks: readonly PickStorage[]): DbEntryEventResult {
   return {
     ...row,
@@ -446,9 +455,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const previousOverallPoints =
           picks.entry_history.total_points -
           (picks.entry_history.points - picks.entry_history.event_transfers_cost);
-        const benchPoints = picks.picks
-          .filter((pick) => pick.position > 11)
-          .reduce((total, pick) => total + (elementsPoints.get(pick.element) ?? 0), 0);
+        const benchPoints = deriveBenchPointsFromEffectiveMultipliers(picks.picks, elementsPoints);
         const insert = {
           seasonId: season.seasonId,
           entryId,

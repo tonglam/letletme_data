@@ -6,6 +6,7 @@ import {
   buildOfficialH2HRows,
   fetchOfficialH2HSourceSnapshot,
   hasCompleteOfficialH2HScoreBatch,
+  hasCompleteEntryEventTotalsCoverage,
   minimumOfficialPlayedCoverageForSuppressedEvent,
   projectOfficialH2HStandings,
   projectOfficialH2HStandingsFromMatches,
@@ -77,6 +78,17 @@ function group(entryId: number): DbTournamentGroup {
 }
 
 describe('official H2H source import', () => {
+  test('requires contiguous cumulative history before adding a provisional round', () => {
+    expect(
+      hasCompleteEntryEventTotalsCoverage({ eventCount: 2, firstEventId: 1, lastEventId: 2 }, 1, 2),
+    ).toBe(true);
+    expect(
+      hasCompleteEntryEventTotalsCoverage({ eventCount: 1, firstEventId: 1, lastEventId: 2 }, 1, 2),
+    ).toBe(false);
+    expect(hasCompleteEntryEventTotalsCoverage(undefined, 1, 2)).toBe(false);
+    expect(hasCompleteEntryEventTotalsCoverage(undefined, 1, 0)).toBe(true);
+  });
+
   test('uses event-live manager scores instead of a lagging official H2H score', () => {
     const snapshot = {
       standings: [],

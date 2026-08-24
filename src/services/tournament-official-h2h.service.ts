@@ -45,6 +45,26 @@ export type OfficialH2HSyncOptions = {
   suppressedEventId?: number | null;
 };
 
+type EntryEventTotalsCoverage = {
+  eventCount?: number;
+  firstEventId?: number;
+  lastEventId?: number;
+};
+
+export function hasCompleteEntryEventTotalsCoverage(
+  row: EntryEventTotalsCoverage | undefined,
+  startEventId: number,
+  endEventId: number,
+): boolean {
+  if (endEventId < startEventId) return true;
+  return Boolean(
+    row &&
+      row.eventCount === endEventId - startEventId + 1 &&
+      row.firstEventId === startEventId &&
+      row.lastEventId === endEventId,
+  );
+}
+
 export function resolveFinalizedThroughEventId(
   latestFinalizedEventId: number | null | undefined,
   requestedEventId: number,
@@ -1033,6 +1053,21 @@ export async function syncOfficialH2HTournament(
                   provisionalEventId - 1,
                 );
           const previousByEntry = new Map(previousTotals.map((row) => [row.entryId, row] as const));
+          const previousEndEventId = provisionalEventId - 1;
+          const incompleteEntryIds = entryIds.filter(
+            (entryId) =>
+              !hasCompleteEntryEventTotalsCoverage(
+                previousByEntry.get(entryId),
+                groupStartEventId,
+                previousEndEventId,
+              ),
+          );
+          if (incompleteEntryIds.length > 0) {
+            throw new ValidationError(
+              `Official H2H cumulative totals are incomplete for ${incompleteEntryIds.length} entries through GW${previousEndEventId}.`,
+              'TOURNAMENT_OFFICIAL_H2H_TOTALS_INCOMPLETE',
+            );
+          }
           return entryIds.map((entryId) => {
             const previous = previousByEntry.get(entryId);
             const score = eventLiveBatch.scores.get(entryId)!;
