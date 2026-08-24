@@ -136,7 +136,8 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
           // transitions still use the generic branch below and advance the
           // revision, including a verified link moved back to pending.
           updatedAt: sql`CASE
-            WHEN ${providerEntityLinks.status} IN ('pending', 'ambiguous')
+            WHEN ${providerEntityLinks.status} IS NOT DISTINCT FROM excluded.status
+              AND ${providerEntityLinks.status} IN ('pending', 'ambiguous')
               AND excluded.status IN ('pending', 'ambiguous')
             THEN ${providerEntityLinks.updatedAt}
             WHEN ${providerEntityLinks.status} IS DISTINCT FROM excluded.status

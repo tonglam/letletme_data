@@ -1262,7 +1262,7 @@ describe('Understat persistence', () => {
       leftEntityId: identity,
       rightProvider: 'fpl',
       rightEntityId: identity,
-      status: 'ambiguous',
+      status: 'pending',
       method: 'integration-test',
       ruleId: 'test-rule',
       season: '2829',
@@ -1274,6 +1274,24 @@ describe('Understat persistence', () => {
       .from(providerEntityLinks)
       .where(eq(providerEntityLinks.linkId, initial.id));
     expect(candidate?.updatedAt).toEqual(before);
+
+    await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'ambiguous',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season: '2829',
+      evidence: { candidateCount: 2, observedMatches: 3 },
+    });
+    const [statusChanged] = await db
+      .select({ updatedAt: providerEntityLinks.updatedAt })
+      .from(providerEntityLinks)
+      .where(eq(providerEntityLinks.linkId, initial.id));
+    expect(statusChanged?.updatedAt.getTime()).toBeGreaterThan(before.getTime());
 
     const reviewed = await providerIdentityRepository.updateEntityStatus(initial.id, 'pending');
     expect(reviewed?.status).toBe('pending');

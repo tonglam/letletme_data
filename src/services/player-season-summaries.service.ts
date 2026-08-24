@@ -241,21 +241,16 @@ async function readPlayerStateSourceMarker(
   const client = await getDbClient();
   const rows = await client<PlayerStateSourceMarkerRow[]>`
     SELECT
-      fpl_source_updated_at,
-      source_updated_at,
-      understat_source_updated_at,
-      bridge_source_updated_at
+      fpl_source_updated_at::text AS fpl_source_updated_at,
+      source_updated_at::text AS source_updated_at,
+      understat_source_updated_at::text AS understat_source_updated_at,
+      bridge_source_updated_at::text AS bridge_source_updated_at
     FROM reporting.player_state_season_refreshes
     WHERE season_id = ${season.seasonId}::smallint
   `;
   const row = rows[0];
   if (!row) return null;
-  return {
-    fpl_source_updated_at: normalizeTimestamp(row.fpl_source_updated_at),
-    source_updated_at: normalizeTimestamp(row.source_updated_at),
-    understat_source_updated_at: normalizeTimestamp(row.understat_source_updated_at),
-    bridge_source_updated_at: normalizeTimestamp(row.bridge_source_updated_at),
-  };
+  return row;
 }
 
 async function restorePlayerStateSourceMarker(
@@ -439,12 +434,26 @@ async function readPlayerStateSourceWatermark(
     bridge_source AS (
       SELECT GREATEST(
         COALESCE((
-          SELECT max(link.updated_at)
-          FROM bridge.entity_links link
-          WHERE link.left_provider = 'understat'
-            AND link.right_provider = 'fpl'
-            AND (link.first_seen_season IS NULL OR link.first_seen_season <= ${season.seasonCode})
-            AND (link.last_seen_season IS NULL OR link.last_seen_season >= ${season.seasonCode})
+          SELECT max(team_link.updated_at)
+          FROM bridge.entity_links team_link
+          WHERE team_link.entity_type = 'team'
+            AND team_link.left_provider = 'understat'
+            AND team_link.right_provider = 'fpl'
+            AND (
+              team_link.first_seen_season IS NULL
+              OR team_link.first_seen_season <= ${season.seasonCode}
+            )
+            AND (
+              team_link.last_seen_season IS NULL
+              OR team_link.last_seen_season >= ${season.seasonCode}
+            )
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(player_link.updated_at)
+          FROM bridge.entity_links player_link
+          WHERE player_link.entity_type = 'player'
+            AND player_link.left_provider = 'understat'
+            AND player_link.right_provider = 'fpl'
         ), '-infinity'::timestamptz),
         COALESCE((
           SELECT max(match_link.updated_at)
@@ -456,14 +465,14 @@ async function readPlayerStateSourceWatermark(
       ) AS source_updated_at
     )
     SELECT
-      fpl_source.source_updated_at AS fpl_source_updated_at,
-      understat_source.source_updated_at AS understat_source_updated_at,
-      bridge_source.source_updated_at AS bridge_source_updated_at,
+      fpl_source.source_updated_at::text AS fpl_source_updated_at,
+      understat_source.source_updated_at::text AS understat_source_updated_at,
+      bridge_source.source_updated_at::text AS bridge_source_updated_at,
       GREATEST(
         fpl_source.source_updated_at,
         understat_source.source_updated_at,
         bridge_source.source_updated_at
-      ) AS source_updated_at
+      )::text AS source_updated_at
     FROM fpl_source, understat_source, bridge_source
   `;
   const row = rows[0];
@@ -471,23 +480,27 @@ async function readPlayerStateSourceWatermark(
     throw new Error(`Player State source watermark returned no row for ${season.seasonCode}`);
   }
   return {
-    fplSourceUpdatedAt: normalizeTimestamp(row.fpl_source_updated_at),
-    understatSourceUpdatedAt: normalizeTimestamp(row.understat_source_updated_at),
-    bridgeSourceUpdatedAt: normalizeTimestamp(row.bridge_source_updated_at),
-    sourceUpdatedAt: normalizeTimestamp(row.source_updated_at),
+    fplSourceUpdatedAt: row.fpl_source_updated_at,
+    understatSourceUpdatedAt: row.understat_source_updated_at,
+    bridgeSourceUpdatedAt: row.bridge_source_updated_at,
+    sourceUpdatedAt: row.source_updated_at,
   };
 }
 
-function sourceTimestampMillis(value: Date | string): number {
+function sourceTimestampMicros(value: Date | string): number {
   if (value === '-infinity') return Number.NEGATIVE_INFINITY;
   if (value === 'infinity') return Number.POSITIVE_INFINITY;
-  const millis = value instanceof Date ? value.getTime() : Date.parse(value);
-  return Number.isNaN(millis) ? Number.NEGATIVE_INFINITY : millis;
+  const text = value instanceof Date ? value.toISOString() : value;
+  const millis = Date.parse(text);
+  if (Number.isNaN(millis)) return Number.NEGATIVE_INFINITY;
+  const fraction = text.match(/\.(\d+)(?=(?:Z|[+-]\d{2}(?::?\d{2})?)$)/)?.[1] ?? '';
+  const micros = Number(fraction.padEnd(6, '0').slice(0, 6));
+  return Math.floor(millis / 1_000) * 1_000_000 + micros;
 }
 
 function maxSourceTimestamp(...values: Array<Date | string>): Date | string {
   return values.reduce((latest, value) =>
-    sourceTimestampMillis(value) > sourceTimestampMillis(latest) ? value : latest,
+    sourceTimestampMicros(value) > sourceTimestampMicros(latest) ? value : latest,
   );
 }
 
@@ -743,14 +756,6 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             WHERE link.entity_type = 'player'
               AND link.left_provider = 'understat'
               AND link.right_provider = 'fpl'
-              AND (
-                link.first_seen_season IS NULL
-                OR link.first_seen_season <= season.season_code
-              )
-              AND (
-                link.last_seen_season IS NULL
-                OR link.last_seen_season >= season.season_code
-              )
           ), '-infinity'::timestamptz)
         ) AS source_updated_at
       FROM fpl.seasons season
