@@ -31,10 +31,18 @@ export async function enqueueFormalXRun(
   claimed: Pick<ClaimedFormalRun | ClaimedAcquisitionJobOutbox, 'job' | 'jobId' | 'priority'>,
 ): Promise<Job<AcquisitionJobV1>> {
   const job = acquisitionJobV1Schema.parse(claimed.job);
-  return getContentXScanQueue().add('content-x-scan', job, {
+  const queued = await getContentXScanQueue().add('content-x-scan', job, {
     jobId: claimed.jobId,
     priority: claimed.priority,
   });
+  // BullMQ returns an existing job when a caller reuses a jobId.  Treat a
+  // different runId as an enqueue failure instead of confirming a durable
+  // hand-off for the wrong run.  The formal job ID includes requestHash, but
+  // this guard remains the fail-closed backstop for legacy/corrupt collisions.
+  if (queued.data.runId !== job.runId) {
+    throw new Error(`Content X queue job ID collision for ${claimed.jobId}`);
+  }
+  return queued;
 }
 
 export function createConfiguredHostGrokRunner(): HostGrokRunnerClient {

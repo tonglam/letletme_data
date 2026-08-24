@@ -146,12 +146,13 @@ function queueKind(adapterKind: string): FormalQueueKind {
   return 'HTTP';
 }
 
-function jobId(input: {
+export function formalAcquisitionJobId(input: {
   targetId: string;
   jobKind: string;
   windowEnd: Date;
   profileRevision: number;
   attemptNo: number;
+  requestHash: string;
 }): string {
   const value = [
     input.targetId,
@@ -159,6 +160,7 @@ function jobId(input: {
     input.windowEnd.getTime(),
     input.profileRevision,
     input.attemptNo,
+    input.requestHash,
   ].join('\u001f');
   return `content-acquisition-${createHash('sha256').update(value, 'utf8').digest('hex')}`;
 }
@@ -561,12 +563,13 @@ export async function claimDueXIdentityRuns(input: {
         scheduleKey: `identity:${endpoint.endpointKey}`,
         jobKind: request.jobKind,
         queueKind: 'X',
-        jobId: jobId({
+        jobId: formalAcquisitionJobId({
           targetId: endpoint.endpointId,
           jobKind: request.jobKind,
           windowEnd: dbNow,
           profileRevision: request.profileRevision,
           attemptNo,
+          requestHash,
         }),
         job,
         phase,
@@ -1053,12 +1056,13 @@ export async function claimDueFormalRuns(input: {
         scheduleKey: schedule.scheduleKey,
         jobKind: schedule.jobKind,
         queueKind: queueKind(schedule.adapterKind),
-        jobId: jobId({
+        jobId: formalAcquisitionJobId({
           targetId: schedule.scheduleId,
           jobKind: schedule.jobKind,
           windowEnd: requestWindowEnd,
           profileRevision: schedule.profileRevision,
           attemptNo,
+          requestHash,
         }),
         job,
         phase: request.phase,
