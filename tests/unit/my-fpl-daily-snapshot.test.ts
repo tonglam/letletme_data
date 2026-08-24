@@ -58,10 +58,12 @@ describe('My FPL daily snapshot publication contract', () => {
 
     const first = coalesceMyFplSnapshotCapture('same-capture', operation);
     const second = coalesceMyFplSnapshotCapture('same-capture', operation);
-    expect(first).toBe(second);
+    expect(first).not.toBe(second);
     expect(calls).toBe(1);
     release();
-    expect(await first).toEqual({ status: 'published', publication });
+    const [leader, follower] = await Promise.all([first, second]);
+    expect(leader).toEqual({ status: 'published', publication });
+    expect(follower).toEqual({ status: 'noop', publication });
 
     await expect(
       coalesceMyFplSnapshotCapture('failed-capture', async () => {

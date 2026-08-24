@@ -135,7 +135,12 @@ export function coalesceMyFplSnapshotCapture(
   operation: () => Promise<MyFplSnapshotCaptureResult>,
 ): Promise<MyFplSnapshotCaptureResult> {
   const existing = myFplCaptureInFlight.get(key);
-  if (existing) return existing;
+  if (existing) {
+    return existing.then((result): MyFplSnapshotCaptureResult => {
+      if (result.status !== 'published') return result;
+      return { status: 'noop', publication: result.publication };
+    });
+  }
 
   const promise = operation().finally(() => {
     if (myFplCaptureInFlight.get(key) === promise) {
