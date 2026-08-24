@@ -443,6 +443,7 @@ async function readPlayerStateSourceWatermark(
           FROM bridge.entity_links link
           WHERE link.left_provider = 'understat'
             AND link.right_provider = 'fpl'
+            AND link.status IN ('auto_verified', 'manual_verified', 'quarantined', 'rejected')
             AND (link.first_seen_season IS NULL OR link.first_seen_season <= ${season.seasonCode})
             AND (link.last_seen_season IS NULL OR link.last_seen_season >= ${season.seasonCode})
         ), '-infinity'::timestamptz),
@@ -721,6 +722,7 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             WHERE team_link.entity_type = 'team'
               AND team_link.left_provider = 'understat'
               AND team_link.right_provider = 'fpl'
+              AND team_link.status IN ('auto_verified', 'manual_verified', 'quarantined', 'rejected')
               AND (
                 team_link.first_seen_season IS NULL
                 OR team_link.first_seen_season <= season.season_code
@@ -743,6 +745,7 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             WHERE link.entity_type = 'player'
               AND link.left_provider = 'understat'
               AND link.right_provider = 'fpl'
+              AND link.status IN ('auto_verified', 'manual_verified', 'quarantined', 'rejected')
               AND (
                 link.first_seen_season IS NULL
                 OR link.first_seen_season <= season.season_code

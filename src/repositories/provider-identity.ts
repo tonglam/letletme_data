@@ -129,7 +129,34 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
           END`,
           reviewedBy: reviewed ? input.reviewedBy : null,
           reviewedAt: resolvedReviewedAt,
-          updatedAt: new Date(),
+          // Candidate links are re-observed on every season repair pass. Keep
+          // the source revision stable when the effective link is unchanged;
+          // otherwise a later season's pending/ambiguous candidate can make
+          // every earlier season look stale again.
+          updatedAt: sql`CASE
+            WHEN ${providerEntityLinks.status} IS DISTINCT FROM excluded.status
+              OR ${providerEntityLinks.method} IS DISTINCT FROM excluded.method
+              OR ${providerEntityLinks.ruleId} IS DISTINCT FROM excluded.rule_id
+              OR ${providerEntityLinks.evidence} IS DISTINCT FROM excluded.evidence
+              OR ${providerEntityLinks.firstSeenSeason} IS DISTINCT FROM (
+                CASE
+                  WHEN ${providerEntityLinks.firstSeenSeason} IS NULL THEN excluded.first_seen_season
+                  WHEN excluded.first_seen_season IS NULL THEN ${providerEntityLinks.firstSeenSeason}
+                  ELSE LEAST(${providerEntityLinks.firstSeenSeason}, excluded.first_seen_season)
+                END
+              )
+              OR ${providerEntityLinks.lastSeenSeason} IS DISTINCT FROM (
+                CASE
+                  WHEN ${providerEntityLinks.lastSeenSeason} IS NULL THEN excluded.last_seen_season
+                  WHEN excluded.last_seen_season IS NULL THEN ${providerEntityLinks.lastSeenSeason}
+                  ELSE GREATEST(${providerEntityLinks.lastSeenSeason}, excluded.last_seen_season)
+                END
+              )
+              OR ${providerEntityLinks.reviewedBy} IS DISTINCT FROM excluded.reviewed_by
+              OR ${providerEntityLinks.reviewedAt} IS DISTINCT FROM excluded.reviewed_at
+            THEN clock_timestamp()
+            ELSE ${providerEntityLinks.updatedAt}
+          END`,
         },
       })
       .returning();

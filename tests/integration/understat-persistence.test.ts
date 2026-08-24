@@ -1192,6 +1192,48 @@ describe('Understat persistence', () => {
     expect(latest.lastSeenSeason).toBe('2829');
   });
 
+  test('does not advance an unchanged provider-link revision on repeated candidate writes', async () => {
+    const identity = `${baseId + 100}`;
+    const initial = await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'pending',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season,
+      evidence: { candidateCount: 1 },
+    });
+    providerLinkIds.push(initial.id);
+    const db = await getDb();
+    const before = new Date('2098-08-08T12:00:00.000Z');
+    await db
+      .update(providerEntityLinks)
+      .set({ updatedAt: before })
+      .where(eq(providerEntityLinks.linkId, initial.id));
+
+    await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'pending',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season,
+      evidence: { candidateCount: 1 },
+    });
+
+    const [row] = await db
+      .select({ updatedAt: providerEntityLinks.updatedAt })
+      .from(providerEntityLinks)
+      .where(eq(providerEntityLinks.linkId, initial.id));
+    expect(row?.updatedAt).toEqual(before);
+  });
+
   test('reconciles only stale evidence from a completed FPL fixture', async () => {
     const db = await getDb();
     await db.insert(fplSeasons).values({
