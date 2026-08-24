@@ -81,7 +81,6 @@ function obligationFields(job: UnderstatPlayerJobData): {
 type UnderstatPlayerTeamDetailSnapshot = ReturnType<typeof readStagedUnderstatPlayerTeamDetail>;
 type UnderstatPlayerMatchDetailSnapshot = ReturnType<typeof readStagedUnderstatPlayerMatchDetail>;
 
-<<<<<<< HEAD
 async function recoverMissingDiscoveryTeams(
   discovery: UnderstatPlayerDiscovery,
   activeIncremental: boolean,

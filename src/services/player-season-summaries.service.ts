@@ -135,19 +135,19 @@ export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise
   mappings: Awaited<ReturnType<typeof reconcileProviderMappings>>;
   refresh: PlayerStateSeasonRefresh;
 }> {
-  return withPlayerStateProjectionSavepoint(async () => {
-    const mappings = await reconcileProviderMappings(season.seasonCode);
-    const refresh = await refreshPlayerStateSeason(season);
-    logInfo('Understat Player State published', {
-      season: season.seasonCode,
-      mappingMatches: mappings.matches.verified,
-      mappingPlayers: mappings.players.verified,
-      confirmedPlayers: mappings.players.confirmed,
-      revision: refresh.revision,
-      understatPlayerCount: refresh.understatPlayerCount,
-    });
-    return { mappings, refresh };
+  const mappings = await withPlayerStateProjectionSavepoint(() =>
+    reconcileProviderMappings(season.seasonCode),
+  );
+  const refresh = await withPlayerStateProjectionSavepoint(() => refreshPlayerStateSeason(season));
+  logInfo('Understat Player State published', {
+    season: season.seasonCode,
+    mappingMatches: mappings.matches.verified,
+    mappingPlayers: mappings.players.verified,
+    confirmedPlayers: mappings.players.confirmed,
+    revision: refresh.revision,
+    understatPlayerCount: refresh.understatPlayerCount,
   });
+  return { mappings, refresh };
 }
 
 async function findStalePlayerSeasonSummaries(): Promise<FplSeasonRef[]> {
