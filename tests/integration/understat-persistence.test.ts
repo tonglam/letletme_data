@@ -857,7 +857,7 @@ describe('Understat persistence', () => {
       partial: false,
       incompleteTeams: [],
       incompleteMatches: [],
-      counts: { players: 21, memberships: 0, playerMatchStats: 0 },
+      counts: { players: 21, memberships: 20, playerMatchStats: 0 },
     });
 
     const status = await getUnderstatStatus(completeSeason);
