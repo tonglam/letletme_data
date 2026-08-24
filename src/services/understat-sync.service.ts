@@ -74,6 +74,29 @@ export function evaluateUnderstatPlayerDiscoveryCompleteness(
   return complete();
 }
 
+export function expectedUnderstatPlayerIdsForTeam(
+  teamId: number,
+  discovery: {
+    teams: readonly Pick<UnderstatTeam, 'id' | 'title'>[];
+    playerSeasons: readonly Pick<UnderstatPlayerSeason, 'playerId' | 'sourceTeamTitle'>[];
+  },
+): Set<number> {
+  const team = discovery.teams.find((candidate) => candidate.id === teamId);
+  if (!team) return new Set();
+  return new Set(
+    discovery.playerSeasons
+      .filter((player) => {
+        const destinationTitle = player.sourceTeamTitle
+          .split(',')
+          .map((title) => title.trim())
+          .filter((title) => title.length > 0)
+          .at(-1);
+        return destinationTitle === team.title;
+      })
+      .map((player) => player.playerId),
+  );
+}
+
 export function evaluateUnderstatTeamResourceCompleteness(
   teamId: number,
   discovery: {
@@ -119,7 +142,10 @@ export function evaluateUnderstatTeamResourceCompleteness(
 
 export function evaluateUnderstatPlayerTeamResourceCompleteness(
   teamId: number,
-  discovery: { playerSeasons: readonly Pick<UnderstatPlayerSeason, 'playerId'>[] },
+  discovery: {
+    teams: readonly Pick<UnderstatTeam, 'id' | 'title'>[];
+    playerSeasons: readonly Pick<UnderstatPlayerSeason, 'playerId' | 'sourceTeamTitle'>[];
+  },
   rows: readonly Pick<UnderstatPlayerTeamSeason, 'playerId'>[],
   existingPlayerIds: ReadonlySet<number> = new Set(),
 ): UnderstatCompletenessResult {
@@ -141,12 +167,14 @@ export function evaluateUnderstatPlayerTeamResourceCompleteness(
       ].join(',')}`,
     );
   }
-  const omittedPlayerIds = [...existingPlayerIds].filter(
+  const expectedPlayerIds = expectedUnderstatPlayerIdsForTeam(teamId, discovery);
+  const requiredPlayerIds = new Set([...existingPlayerIds, ...expectedPlayerIds]);
+  const omittedPlayerIds = [...requiredPlayerIds].filter(
     (playerId) => !incomingPlayerIds.has(playerId),
   );
   if (omittedPlayerIds.length > 0) {
     return incomplete(
-      `team ${teamId} participant rows shrank: incoming=${incomingPlayerIds.size} existing=${existingPlayerIds.size} omitted=${omittedPlayerIds.join(',')}`,
+      `team ${teamId} participant rows incomplete: incoming=${incomingPlayerIds.size} required=${requiredPlayerIds.size} omitted=${omittedPlayerIds.join(',')}`,
     );
   }
   return complete();

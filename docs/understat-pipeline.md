@@ -250,7 +250,9 @@ and Player runs independently and counts facts directly from the provider tables
 - A resource completeness failure leaves that resource untouched, records it in partial-run metadata,
   and does not roll back other completed resources. A detail worker leaves an incomplete resource
   item unsettled; after terminal BullMQ retry, the failed resource ID is carried into the next
-  scheduler generation instead of allowing the generation to succeed.
+  scheduler generation instead of allowing the generation to succeed. Scheduler-backed detail
+  incompleteness uses the 30-minute completeness recovery delay and records completeness evidence
+  when the generation limit is reached.
 - Player discovery rejects empty, duplicate, or shrinking player-summary sets before replacing
   season summaries. Player-team persistence likewise rejects duplicate or shrinking participant
   sets before replacing memberships.

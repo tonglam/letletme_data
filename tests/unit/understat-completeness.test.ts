@@ -148,26 +148,44 @@ describe('Understat PostgreSQL snapshot completeness guards', () => {
   });
 
   test('evaluates player participants and rosters independently', () => {
+    const playerDiscovery = {
+      teams: [{ id: 1, title: 'Team 1' }],
+      playerSeasons: [{ playerId: 101, sourceTeamTitle: 'Team 1' }],
+    };
     expect(
-      evaluateUnderstatPlayerTeamResourceCompleteness(1, { playerSeasons: [{ playerId: 101 }] }, [
-        { playerId: 101 },
-      ]),
+      evaluateUnderstatPlayerTeamResourceCompleteness(1, playerDiscovery, [{ playerId: 101 }]),
     ).toEqual({ complete: true, reason: 'complete' });
-    expect(
-      evaluateUnderstatPlayerTeamResourceCompleteness(
-        2,
-        { playerSeasons: [{ playerId: 101 }] },
-        [],
-      ),
-    ).toMatchObject({ complete: false });
+    expect(evaluateUnderstatPlayerTeamResourceCompleteness(2, playerDiscovery, [])).toMatchObject({
+      complete: false,
+    });
     const shrinkingParticipants = evaluateUnderstatPlayerTeamResourceCompleteness(
       1,
-      { playerSeasons: [{ playerId: 101 }, { playerId: 102 }] },
+      {
+        teams: [{ id: 1, title: 'Team 1' }],
+        playerSeasons: [
+          { playerId: 101, sourceTeamTitle: 'Team 1' },
+          { playerId: 102, sourceTeamTitle: 'Team 1' },
+        ],
+      },
       [{ playerId: 101 }],
       new Set([101, 102]),
     );
     expect(shrinkingParticipants.complete).toBe(false);
-    expect(shrinkingParticipants.reason).toContain('participant rows shrank');
+    expect(shrinkingParticipants.reason).toContain('participant rows incomplete');
+    const newlyDiscoveredParticipant = evaluateUnderstatPlayerTeamResourceCompleteness(
+      1,
+      {
+        teams: [{ id: 1, title: 'Team 1' }],
+        playerSeasons: [
+          { playerId: 101, sourceTeamTitle: 'Team 1' },
+          { playerId: 102, sourceTeamTitle: 'Team 1' },
+        ],
+      },
+      [{ playerId: 101 }],
+      new Set([101]),
+    );
+    expect(newlyDiscoveredParticipant.complete).toBe(false);
+    expect(newlyDiscoveredParticipant.reason).toContain('omitted=102');
 
     const roster = [
       ...Array.from({ length: 11 }, () => ({
