@@ -254,6 +254,16 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
     return result.length;
   },
 
+  async findTeamsByIds(teamIds: readonly number[]): Promise<UnderstatTeam[]> {
+    if (teamIds.length === 0) return [];
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select()
+      .from(understatTeams)
+      .where(inArray(understatTeams.teamId, [...new Set(teamIds)]));
+    return rows.map(mapTeam);
+  },
+
   async getMatchHashes(season: string): Promise<Map<number, string>> {
     const db = await getDatabase(dbInstance);
     const rows = await db

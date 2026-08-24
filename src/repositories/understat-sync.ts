@@ -612,6 +612,24 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     return rows.map(mapItem);
   },
 
+  async findUnsettledItems(season: string, lane: UnderstatLane): Promise<UnderstatSyncItem[]> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({ item: understatSyncItems })
+      .from(understatSyncItems)
+      .innerJoin(understatSyncRuns, eq(understatSyncItems.runId, understatSyncRuns.runId))
+      .where(
+        and(
+          eq(understatSyncRuns.provider, 'understat'),
+          eq(understatSyncRuns.seasonCode, season),
+          eq(understatSyncRuns.lane, lane),
+          inArray(understatSyncItems.status, ['failed', 'pending', 'running', 'skipped']),
+        ),
+      )
+      .orderBy(desc(understatSyncItems.updatedAt));
+    return rows.map(({ item }) => mapItem(item));
+  },
+
   async findItem(
     runId: string,
     resourceType: string,

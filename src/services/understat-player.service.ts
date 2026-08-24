@@ -40,6 +40,7 @@ import {
   evaluateUnderstatPlayerMatchResourceCompleteness,
   evaluateUnderstatPlayerTeamResourceCompleteness,
   IncompleteUnderstatResourceError,
+  missingUnderstatDiscoveryTeamIds,
   mergeUnderstatTeamDetailIds,
   selectPlayerMatchIds,
   selectTeamDetailIds,
@@ -76,6 +77,30 @@ function obligationFields(job: UnderstatPlayerJobData): {
 
 type UnderstatPlayerTeamDetailSnapshot = ReturnType<typeof readStagedUnderstatPlayerTeamDetail>;
 type UnderstatPlayerMatchDetailSnapshot = ReturnType<typeof readStagedUnderstatPlayerMatchDetail>;
+
+async function recoverMissingDiscoveryTeams(
+  discovery: UnderstatPlayerDiscovery,
+  activeIncremental: boolean,
+): Promise<void> {
+  const missingTeamIds = missingUnderstatDiscoveryTeamIds(discovery.teams, discovery.matches);
+  if (missingTeamIds.length === 0) return;
+  if (!activeIncremental) {
+    throw new IncompleteUnderstatResourceError(
+      'player discovery',
+      `matches reference team IDs missing from league teams: ${missingTeamIds.join(',')}`,
+    );
+  }
+  const recovered = await understatReferenceRepository.findTeamsByIds(missingTeamIds);
+  const recoveredIds = new Set(recovered.map((team) => team.id));
+  const unresolved = missingTeamIds.filter((teamId) => !recoveredIds.has(teamId));
+  if (unresolved.length > 0) {
+    throw new IncompleteUnderstatResourceError(
+      'player discovery',
+      `matches reference team IDs missing from league payload and database: ${unresolved.join(',')}`,
+    );
+  }
+  discovery.teams = [...discovery.teams, ...recovered].sort((left, right) => left.id - right.id);
+}
 
 async function persistUnderstatPlayerDiscoverySnapshot(
   runId: string,
@@ -263,11 +288,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
   const config = getConfig();
   const activeSeason = job.season === config.UNDERSTAT_SEASON;
   const activeIncremental = activeSeason && job.mode === 'incremental';
-  const priorRun = (await understatSyncRepository.findLatestRuns(job.season)).player;
-  const priorItems =
-    priorRun && (priorRun.status === 'failed' || priorRun.status === 'completed')
-      ? await understatSyncRepository.findItems(priorRun.runId)
-      : [];
+  const priorItems = await understatSyncRepository.findUnsettledItems(job.season, 'player');
   const active = await understatSyncRepository.findActiveRun(job.season, 'player', job.runId);
   if (active) {
     throw new Error(`Understat player run ${active.runId} is already active for ${job.season}`);
@@ -328,6 +349,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     response,
     sourceCheckedAt,
   );
+  await recoverMissingDiscoveryTeams(discovery, activeIncremental);
   if (!activeIncremental) {
     assertUnderstatLeagueSnapshotComplete(league, discovery.teams.length, discovery.matches.length);
   }
@@ -422,7 +444,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     )
     .map((item) => Number(item.resourceId))
     .filter(Number.isInteger)
-    .filter((matchId) => discovery.matches.some((match) => match.id === matchId));
+    .filter((matchId) => discovery.matches.some((match) => match.id === matchId && match.isResult));
   const targetMatchIds = [
     ...new Set([...selectedMatchIds, ...priorMatchIds, ...sameRunMatchIds]),
   ].sort((left, right) => left - right);

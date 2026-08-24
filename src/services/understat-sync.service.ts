@@ -110,15 +110,28 @@ export function expectedUnderstatPlayerIdsForTeam(
   return new Set(
     discovery.playerSeasons
       .filter((player) => {
-        const destinationTitle = player.sourceTeamTitle
+        const teamTitles = player.sourceTeamTitle
           .split(',')
           .map((title) => title.trim())
-          .filter((title) => title.length > 0)
-          .at(-1);
-        return destinationTitle === team.title;
+          .filter((title) => title.length > 0);
+        return teamTitles.includes(team.title);
       })
       .map((player) => player.playerId),
   );
+}
+
+export function missingUnderstatDiscoveryTeamIds(
+  teams: readonly Pick<UnderstatTeam, 'id'>[],
+  matches: readonly Pick<UnderstatMatch, 'homeTeamId' | 'awayTeamId'>[],
+): number[] {
+  const knownTeamIds = new Set(teams.map((team) => team.id));
+  return [
+    ...new Set(
+      matches
+        .flatMap((match) => [match.homeTeamId, match.awayTeamId])
+        .filter((id) => !knownTeamIds.has(id)),
+    ),
+  ].sort((left, right) => left - right);
 }
 
 export function evaluateUnderstatTeamResourceCompleteness(
@@ -502,13 +515,14 @@ export function changedUnderstatPlayerTeamIds(
   const ids = new Set<number>();
   for (const row of rows) {
     if (!changedPlayerIds.has(row.playerId)) continue;
-    const destinationTitle = row.sourceTeamTitle
+    const teamTitles = row.sourceTeamTitle
       .split(',')
       .map((title) => title.trim())
-      .filter((title) => title.length > 0)
-      .at(-1);
-    const destinationId = destinationTitle ? teamIdsByTitle.get(destinationTitle) : undefined;
-    if (destinationId !== undefined) ids.add(destinationId);
+      .filter((title) => title.length > 0);
+    for (const teamTitle of teamTitles) {
+      const teamId = teamIdsByTitle.get(teamTitle);
+      if (teamId !== undefined) ids.add(teamId);
+    }
   }
   return ids;
 }

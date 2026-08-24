@@ -217,8 +217,9 @@ manual-review states remain explicit; no name-only join is silently promoted to 
   successfully completed resources remain available.
 - Active omitted player summaries do not fan out every previously persisted player; only included
   hash-changed players trigger correction work.
-- Incomplete detail IDs are carried into later scoped or unscoped runs, so a manual scoped run cannot
-  strand the next matchday retry.
+- Incomplete detail IDs are carried across all prior runs into later scoped or unscoped runs, so an
+  intervening failed discovery or manual scoped run cannot strand the next matchday retry. Withdrawn
+  matches are excluded from the carried roster backlog.
 - A completeness skip retries the current scheduler generation after 30 minutes, up to three
   generations; the third incomplete generation ends that day as `skipped`.
 - A terminal provider/schema failure ends the current scheduler obligation immediately. A terminal

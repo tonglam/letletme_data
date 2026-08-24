@@ -9,6 +9,8 @@ import {
   evaluateUnderstatPlayerTeamResourceCompleteness,
   evaluateUnderstatPlayerSnapshotCompleteness,
   evaluateUnderstatTeamResourceCompleteness,
+  expectedUnderstatPlayerIdsForTeam,
+  missingUnderstatDiscoveryTeamIds,
   evaluateUnderstatTeamSnapshotCompleteness,
   selectCompleteUnderstatTeamSeasonRows,
 } from '../../src/services/understat-sync.service';
@@ -255,5 +257,29 @@ describe('Understat PostgreSQL snapshot completeness guards', () => {
       teamSeasons,
     );
     expect(kept.map((row) => row.teamId)).toEqual([1]);
+  });
+
+  test('identifies team identities omitted from an active league payload', () => {
+    expect(
+      missingUnderstatDiscoveryTeamIds(
+        [{ id: 1 }],
+        [
+          { homeTeamId: 1, awayTeamId: 2 },
+          { homeTeamId: 2, awayTeamId: 3 },
+        ],
+      ),
+    ).toEqual([2, 3]);
+  });
+
+  test('expects a transferred player on every provider team named in the summary', () => {
+    expect(
+      expectedUnderstatPlayerIdsForTeam(1, {
+        teams: [
+          { id: 1, title: 'Crystal Palace' },
+          { id: 2, title: 'Arsenal' },
+        ],
+        playerSeasons: [{ playerId: 101, sourceTeamTitle: 'Crystal Palace, Arsenal' }],
+      }),
+    ).toEqual(new Set([101]));
   });
 });

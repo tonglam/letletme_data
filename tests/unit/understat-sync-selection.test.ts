@@ -100,7 +100,7 @@ describe('Understat incremental selection', () => {
     ).toEqual(new Set());
   });
 
-  test('adds the destination team for changed player memberships', () => {
+  test('adds every provider team for changed transfer memberships', () => {
     expect(
       changedUnderstatPlayerTeamIds(
         [
@@ -114,7 +114,7 @@ describe('Understat incremental selection', () => {
           { id: 12, title: 'Liverpool' },
         ],
       ),
-    ).toEqual(new Set([11]));
+    ).toEqual(new Set([10, 11]));
   });
 
   test('unions explicit, changed, and unsettled team detail targets', () => {

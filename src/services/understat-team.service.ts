@@ -31,6 +31,7 @@ import {
   changedUnderstatTeamStatIds,
   evaluateUnderstatTeamResourceCompleteness,
   IncompleteUnderstatResourceError,
+  missingUnderstatDiscoveryTeamIds,
   mergeUnderstatTeamDetailIds,
   selectCompleteUnderstatTeamSeasonRows,
   selectTeamDetailIds,
@@ -62,6 +63,30 @@ function obligationFields(job: UnderstatTeamJobData): {
 }
 
 type UnderstatTeamDetailSnapshot = ReturnType<typeof readStagedUnderstatTeamDetail>;
+
+async function recoverMissingDiscoveryTeams(
+  discovery: UnderstatTeamDiscovery,
+  activeIncremental: boolean,
+): Promise<void> {
+  const missingTeamIds = missingUnderstatDiscoveryTeamIds(discovery.teams, discovery.matches);
+  if (missingTeamIds.length === 0) return;
+  if (!activeIncremental) {
+    throw new IncompleteUnderstatResourceError(
+      'team discovery',
+      `matches reference team IDs missing from league teams: ${missingTeamIds.join(',')}`,
+    );
+  }
+  const recovered = await understatReferenceRepository.findTeamsByIds(missingTeamIds);
+  const recoveredIds = new Set(recovered.map((team) => team.id));
+  const unresolved = missingTeamIds.filter((teamId) => !recoveredIds.has(teamId));
+  if (unresolved.length > 0) {
+    throw new IncompleteUnderstatResourceError(
+      'team discovery',
+      `matches reference team IDs missing from league payload and database: ${unresolved.join(',')}`,
+    );
+  }
+  discovery.teams = [...discovery.teams, ...recovered].sort((left, right) => left.id - right.id);
+}
 
 async function persistUnderstatTeamDiscoverySnapshot(
   runId: string,
@@ -185,11 +210,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
   const config = getConfig();
   const activeSeason = job.season === config.UNDERSTAT_SEASON;
   const activeIncremental = activeSeason && job.mode === 'incremental';
-  const priorRun = (await understatSyncRepository.findLatestRuns(job.season)).team;
-  const priorItems =
-    priorRun && (priorRun.status === 'failed' || priorRun.status === 'completed')
-      ? await understatSyncRepository.findItems(priorRun.runId)
-      : [];
+  const priorItems = await understatSyncRepository.findUnsettledItems(job.season, 'team');
   const active = await understatSyncRepository.findActiveRun(job.season, 'team', job.runId);
   if (active) {
     throw new Error(`Understat team run ${active.runId} is already active for ${job.season}`);
@@ -248,6 +269,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
     sourceCheckedAt,
     activeIncremental,
   );
+  await recoverMissingDiscoveryTeams(discovery, activeIncremental);
   if (!activeIncremental) {
     assertUnderstatLeagueSnapshotComplete(league, discovery.teams.length, discovery.matches.length);
   }
