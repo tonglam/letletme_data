@@ -94,6 +94,55 @@ describe('bug report retention and diagnostics', () => {
     expect(urlBeforeQuotedSecretMessage).toContain('[url]');
   });
 
+  test('keeps only bounded GraphQL rate-limit diagnostics with allowlisted metadata', () => {
+    expect(
+      sanitizeBugReportClientMeta({
+        operations: [
+          { operation: 'dropped' },
+          { operation: 'old' },
+          {
+            at: '2026-08-20T00:00:00.000Z',
+            operation: 'PlayersForPicker',
+            requestId: 'request-1',
+            code: 'VIEWER_ENTRY_REQUIRED',
+            status: 429,
+            retryAfterSeconds: 15,
+            rateLimitPolicy: 'graphql-v4',
+            rateLimitScope: 'workload',
+            workload: 'player-stats',
+            message: 'token=secret',
+          },
+          {
+            operation: 'ignored',
+            code: 'not-safe',
+            status: 600,
+            retryAfterSeconds: -1,
+            rateLimitPolicy: 'unknown-policy',
+            rateLimitScope: 'unknown-scope',
+            workload: 'unknown-workload',
+          },
+        ],
+      }),
+    ).toEqual({
+      operations: [
+        { operation: 'old' },
+        {
+          at: '2026-08-20T00:00:00.000Z',
+          operation: 'PlayersForPicker',
+          requestId: 'request-1',
+          code: 'VIEWER_ENTRY_REQUIRED',
+          status: 429,
+          retryAfterSeconds: 15,
+          rateLimitPolicy: 'graphql-v4',
+          rateLimitScope: 'workload',
+          workload: 'player-stats',
+          message: '[redacted]',
+        },
+        { operation: 'ignored' },
+      ],
+    });
+  });
+
   test('retention tombstones hash completed screenshot locators', () => {
     const locator =
       'https://legacy.example.test/avatar/bug.png?signature=secret-token&expires=9999999999';

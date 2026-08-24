@@ -24,6 +24,28 @@ const DIAGNOSTIC_KEYS = new Set([
   'viewportBucket',
   'operations',
 ]);
+const GRAPHQL_RATE_LIMIT_POLICIES = new Set(['graphql-v2', 'graphql-v3', 'graphql-v4']);
+const GRAPHQL_RATE_LIMIT_SCOPES = new Set(['global', 'client', 'workload']);
+const GRAPHQL_WORKLOADS = new Set([
+  'interactive',
+  'home',
+  'fixtures',
+  'market',
+  'player-stats',
+  'gameweek',
+  'public-other',
+]);
+const SAFE_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,79}$/;
+const DIAGNOSTIC_FIELD_MAX_LENGTH: Record<string, number> = {
+  at: 40,
+  operation: 80,
+  requestId: 80,
+  code: 80,
+  message: 180,
+  rateLimitPolicy: 32,
+  rateLimitScope: 16,
+  workload: 32,
+};
 const SUBMISSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SCREENSHOT_OBJECT_KEY_PATTERN =
@@ -124,10 +146,53 @@ export function sanitizeBugReportClientMeta(value: unknown): Record<string, unkn
       if (!Array.isArray(entry)) continue;
       const operations = entry.slice(-3).flatMap((operation) => {
         if (!isRecord(operation)) return [];
-        const result: Record<string, string> = {};
-        for (const field of ['operation', 'requestId', 'code', 'message']) {
+        const result: Record<string, unknown> = {};
+        for (const field of [
+          'at',
+          'operation',
+          'requestId',
+          'code',
+          'message',
+          'rateLimitPolicy',
+          'rateLimitScope',
+          'workload',
+        ]) {
           const text = redactDiagnosticText(operation[field]);
-          if (text) result[field] = text;
+          if (!text) continue;
+          const maxLength = DIAGNOSTIC_FIELD_MAX_LENGTH[field] ?? 160;
+          const bounded = text.slice(0, maxLength);
+          if (field === 'code' && !SAFE_DIAGNOSTIC_CODE.test(bounded)) continue;
+          result[field] = bounded;
+        }
+        if (
+          typeof result.rateLimitPolicy === 'string' &&
+          !GRAPHQL_RATE_LIMIT_POLICIES.has(result.rateLimitPolicy)
+        )
+          delete result.rateLimitPolicy;
+        if (
+          typeof result.rateLimitScope === 'string' &&
+          !GRAPHQL_RATE_LIMIT_SCOPES.has(result.rateLimitScope)
+        )
+          delete result.rateLimitScope;
+        if (typeof result.workload === 'string' && !GRAPHQL_WORKLOADS.has(result.workload))
+          delete result.workload;
+        const status = operation.status;
+        if (
+          typeof status === 'number' &&
+          Number.isSafeInteger(status) &&
+          status >= 0 &&
+          status <= 599
+        ) {
+          result.status = status;
+        }
+        const retryAfterSeconds = operation.retryAfterSeconds;
+        if (
+          typeof retryAfterSeconds === 'number' &&
+          Number.isSafeInteger(retryAfterSeconds) &&
+          retryAfterSeconds >= 0 &&
+          retryAfterSeconds <= 120
+        ) {
+          result.retryAfterSeconds = retryAfterSeconds;
         }
         return Object.keys(result).length > 0 ? [result] : [];
       });
