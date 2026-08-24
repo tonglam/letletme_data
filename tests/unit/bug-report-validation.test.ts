@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createPublicBugReportId, validateBugReportCreateInput } from '../../src/domain/bug-report';
+import {
+  bugReportRequestHash,
+  createPublicBugReportId,
+  validateBugReportCreateInput,
+} from '../../src/domain/bug-report';
 import { createBugReport } from '../../src/services/bug-report.service';
 import { ValidationError } from '../../src/utils/errors';
 import { DatabaseError } from '../../src/utils/errors';
@@ -83,6 +87,27 @@ describe('bug report validation', () => {
     });
 
     expect(enriched.submissionRequestHash).toBe(legacy.submissionRequestHash);
+    expect(enriched.submissionRequestHash).toBe(
+      bugReportRequestHash({
+        source: 'website',
+        userId: null,
+        entryId: null,
+        body: '诊断字段升级仍应保持幂等',
+        submissionId,
+        screenshotObjectKey: null,
+        screenshotUrl: null,
+        clientMeta: {
+          operations: [
+            {
+              operation: 'PlayersForPicker',
+              requestId: 'request-1',
+              code: 'RATE_LIMITED',
+              message: 'Rate limit exceeded',
+            },
+          ],
+        },
+      }),
+    );
   });
 
   it('counts body length in Unicode code points', () => {

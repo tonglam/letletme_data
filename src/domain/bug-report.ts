@@ -105,14 +105,24 @@ type BugReportRequestIdentity = Pick<
   | 'submissionId'
   | 'screenshotObjectKey'
   | 'screenshotUrl'
->;
+> & { clientMeta: unknown };
 
-// Client metadata is diagnostic telemetry, not the submitted report identity.
-// Keep it out of the hash so adding a bounded diagnostic field cannot make a
-// retry of the same submission look like a different report.
+// Keep the v1 identity contract during rollout. The immediately previous
+// binary hashes the legacy diagnostic projection, so storing a v2-only hash
+// would make a request accepted during a failed deployment non-idempotent
+// after rollback. New diagnostic fields are deliberately projected out below.
 export const bugReportRequestHash = (input: BugReportRequestIdentity): string =>
   createHash('sha256')
-    .update(JSON.stringify(canonicalize({ version: 2, ...input })), 'utf8')
+    .update(
+      JSON.stringify(
+        canonicalize({
+          version: 1,
+          ...input,
+          clientMeta: legacyClientMetaForRequestIdentity(input.clientMeta),
+        }),
+      ),
+      'utf8',
+    )
     .digest('hex');
 
 const redactDiagnosticText = (value: unknown): string | null => {
@@ -137,6 +147,41 @@ const redactDiagnosticText = (value: unknown): string | null => {
     .trim()
     .slice(0, 160);
   return cleaned || null;
+};
+
+const legacyClientMetaForRequestIdentity = (value: unknown): Record<string, unknown> => {
+  if (!isRecord(value)) return {};
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!DIAGNOSTIC_KEYS.has(key)) continue;
+    if (key === 'operations') {
+      if (!Array.isArray(entry)) continue;
+      const operations = entry.slice(-3).flatMap((operation) => {
+        if (!isRecord(operation)) return [];
+        const result: Record<string, string> = {};
+        for (const field of ['operation', 'requestId', 'code', 'message']) {
+          const text = redactDiagnosticText(operation[field]);
+          if (text) result[field] = text;
+        }
+        return Object.keys(result).length > 0 ? [result] : [];
+      });
+      if (operations.length > 0) cleaned.operations = operations;
+      continue;
+    }
+    if (typeof entry === 'string') {
+      const text = redactDiagnosticText(entry);
+      if (text) cleaned[key] = text;
+      continue;
+    }
+    if (typeof entry === 'number' && Number.isFinite(entry)) {
+      cleaned[key] = entry;
+      continue;
+    }
+    if (typeof entry === 'boolean') cleaned[key] = entry;
+  }
+  if (Buffer.byteLength(JSON.stringify(cleaned), 'utf8') > CLIENT_META_MAX_BYTES)
+    return { truncated: true };
+  return cleaned;
 };
 
 export function sanitizeBugReportClientMeta(value: unknown): Record<string, unknown> {
@@ -306,6 +351,7 @@ export const validateBugReportCreateInput = (
       submissionId,
       screenshotObjectKey,
       screenshotUrl,
+      clientMeta: input.clientMeta,
     }),
     publicId: (options.publicIdGenerator ?? createPublicBugReportId)(),
     closedAt: null,
