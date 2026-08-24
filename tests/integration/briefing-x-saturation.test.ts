@@ -91,7 +91,7 @@ function saturatedExecution(request: XToolRequestV1): GrokBuildExecutionResult {
     outputTokens: 20,
     totalCostUsd: 0.01,
     rawPostEvidenceAvailable: false,
-    outputContractRevision: 2,
+    outputContractRevision: 3,
   };
 }
 
@@ -552,7 +552,7 @@ test('retries an output-contract failure once per immutable request after a tran
     providerUnits: 1 as const,
     terminalState: 'ATTESTED_FINAL_SCHEMA_REJECTED',
     runMetrics: {
-      outputContractRevision: 2,
+      outputContractRevision: 3,
       schemaFingerprint: 'd'.repeat(64),
       inputTokens: 100,
       outputTokens: 20,

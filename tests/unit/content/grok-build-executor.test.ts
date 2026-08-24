@@ -149,6 +149,47 @@ describe('Grok Build single-X-tool executor', () => {
     expect(parsed.posts).toHaveLength(1);
   });
 
+  test('accepts an empty text string for a media-only post', () => {
+    const mediaOnly = JSON.stringify({
+      posts: [
+        {
+          postId: '2090909465801371803',
+          authorHandle: 'OfficialFPL',
+          createdAt: '2026-08-21T21:10:38Z',
+          text: '',
+          url: 'https://x.com/OfficialFPL/status/2090909465801371803',
+        },
+      ],
+    });
+    const parsed = parseGrokBuildStreamingMessages({
+      output: trace(undefined, false, undefined, mediaOnly),
+      request,
+      durationMs: 123,
+    });
+    expect(parsed.posts[0]?.text).toBe('');
+  });
+
+  test('keeps whitespace text in the raw contract for the adapter gate', () => {
+    const whitespace = JSON.stringify({
+      posts: [
+        {
+          postId: '2090909465801371803',
+          authorHandle: 'OfficialFPL',
+          createdAt: '2026-08-21T21:10:38Z',
+          text: ' ',
+          url: 'https://x.com/OfficialFPL/status/2090909465801371803',
+        },
+      ],
+    });
+    expect(() =>
+      parseGrokBuildStreamingMessages({
+        output: trace(undefined, false, undefined, whitespace),
+        request,
+        durationMs: 123,
+      }),
+    ).not.toThrow();
+  });
+
   test('rejects a Grok init event that exposes a removed local tool', () => {
     expect(() =>
       parseGrokBuildStreamingMessages({
@@ -216,7 +257,7 @@ describe('Grok Build single-X-tool executor', () => {
     });
     expect(parsed.ignoredOutputKeyCount).toBe(1);
     expect(parsed.ignoredOutputKeysHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(parsed.outputContractRevision).toBe(2);
+    expect(parsed.outputContractRevision).toBe(3);
   });
 
   test('rejects numeric IDs, aliases, missing timezone and markdown with bounded evidence', () => {

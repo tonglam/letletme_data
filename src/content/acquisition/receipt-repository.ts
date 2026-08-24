@@ -180,6 +180,14 @@ function isXPostWorkItem(work: CanonicalWorkItem): boolean {
   return work.item.contentKind === 'POST' && work.receiptKey.startsWith('x:');
 }
 
+function bodyAvailability(value: unknown): 'FULL' | 'METADATA_ONLY' | null {
+  const record = asRecord(value);
+  const body = asRecord(record.body);
+  return body.availability === 'FULL' || body.availability === 'METADATA_ONLY'
+    ? body.availability
+    : null;
+}
+
 function xMediaGateRequestHash(input: {
   receiptRevisionId: string;
   postId: string;
@@ -668,10 +676,18 @@ export async function persistAcquisitionResult(
         isXPostWorkItem(work) &&
         current.canonicalHash !== work.canonicalHash &&
         xReceiptCoreHash(current.payload) === xReceiptCoreHash(work.payload);
+      const emptyAttestationCannotDowngrade =
+        existing !== undefined &&
+        current !== undefined &&
+        isXPostWorkItem(work) &&
+        work.item.body.availability === 'METADATA_ONLY' &&
+        bodyAvailability(current.payload) === 'FULL';
 
       if (
         !existing ||
-        (current?.canonicalHash !== work.canonicalHash && !legacyMediaOnlyDifference)
+        (current?.canonicalHash !== work.canonicalHash &&
+          !legacyMediaOnlyDifference &&
+          !emptyAttestationCannotDowngrade)
       ) {
         const revisionNumber = (current?.revisionNumber ?? 0) + 1;
         receiptRevisionId = randomUUID();

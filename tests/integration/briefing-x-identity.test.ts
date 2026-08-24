@@ -86,7 +86,7 @@ test('resolves a pending X endpoint through one runId-only x_user_search job', a
         outputTokens: 20,
         totalCostUsd: 0.01,
         rawPostEvidenceAvailable: false,
-        outputContractRevision: 2,
+        outputContractRevision: 3,
       }),
     },
   });
