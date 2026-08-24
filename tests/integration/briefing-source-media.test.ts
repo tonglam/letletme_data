@@ -272,7 +272,13 @@ test('decouples X receipts from durable media processing and reuses legacy core 
     download: async (key) => {
       const bytes = storedObjects.get(key);
       if (!bytes) {
-        throw new SourceMediaStorageError('STORAGE_REQUEST_FAILED', 'missing', 404);
+        // Supabase Storage returns 400 (not_found) for a missing object on
+        // some authenticated object reads; recovery must treat it like 404.
+        throw new SourceMediaStorageError(
+          'STORAGE_REQUEST_FAILED',
+          'authenticated download failed with 400 (not_found)',
+          400,
+        );
       }
       return bytes;
     },
