@@ -282,9 +282,13 @@ function completePreseasonDiscovery() {
 }
 
 function completeTeamSplits(teamId: number): UnderstatTeamStatSplit[] {
+  return completeTeamSplitsFor(completeSeason, teamId);
+}
+
+function completeTeamSplitsFor(seasonCode: string, teamId: number): UnderstatTeamStatSplit[] {
   return UNDERSTAT_SPLIT_DIMENSIONS.map((dimension) => {
     const source = {
-      season: completeSeason,
+      season: seasonCode,
       teamId,
       dimension,
       splitKey: 'all',
@@ -462,14 +466,14 @@ describe('Understat persistence', () => {
     expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(false);
   });
 
-  test('rolls back every fact when a staged finalizer snapshot is incomplete', async () => {
+  test('persists shared discovery before team detail resources settle', async () => {
     const runId = randomUUID();
     runIds.push(runId);
     const stats = matchStats();
     const originalTeams = teams();
     const changedTeamSource = {
       id: originalTeams[0]!.id,
-      title: 'This title must roll back',
+      title: 'This title must persist',
       shortTitle: originalTeams[0]!.shortTitle,
       firstSeenSeason: season,
       lastSeenSeason: season,
@@ -522,13 +526,109 @@ describe('Understat persistence', () => {
       .where(eq(understatTeams.teamId, originalTeams[0]!.id))
       .limit(1);
     const run = await understatSyncRepository.findRun(runId);
-    expect(persistedTeam?.title).toBe(originalTeams[0]!.title);
-    expect(run?.status).toBe('skipped');
-    expect(run?.dataChanged).toBe(false);
-    expect(run?.metadata.reason).toBe('team summaries 2/20');
+    expect(persistedTeam?.title).toBe('This title must persist');
+    expect(run?.status).toBe('completed');
+    expect(run?.dataChanged).toBe(true);
+    expect(run?.metadata).toEqual({
+      finalized: true,
+      storage: 'postgresql',
+      partial: false,
+      incompleteTeams: [],
+      counts: { teams: 2, matches: 1, teamMatchStats: 2, teamSplits: 0 },
+    });
   });
 
-  test('keeps a complete staged snapshot out of facts until one atomic finalizer commit', async () => {
+  test('commits a complete team without waiting for another team', async () => {
+    const runId = randomUUID();
+    runIds.push(runId);
+    const discovery = {
+      season: {
+        season,
+        sourceYear: 2098,
+        league,
+        state: 'active' as const,
+        firstSeenAt: now,
+        lastSeenAt: now,
+      },
+      teams: teams(),
+      matches: [match()],
+      teamMatchStats: matchStats(),
+      teamSeasons: teamSeasons(matchStats()),
+    };
+    const leaguePayload = stageUnderstatTeamLeague(season, discovery);
+    const completeTeamPayload = stageUnderstatTeamDetail(
+      season,
+      teamIds[0]!,
+      completeTeamSplitsFor(season, teamIds[0]!),
+    );
+    const incompleteTeamPayload = stageUnderstatTeamDetail(season, teamIds[1]!, []);
+
+    await understatSyncRepository.createRun({
+      runId,
+      lane: 'team',
+      season,
+      mode: 'full',
+      trigger: 'manual',
+    });
+    await understatSyncRepository.addItems(runId, [
+      { resourceType: 'league', resourceId: league },
+      ...teamIds.map((teamId) => ({
+        resourceType: 'team-detail',
+        resourceId: String(teamId),
+      })),
+    ]);
+    await understatSyncRepository.completeItem(
+      runId,
+      'league',
+      league,
+      understatStagingHash(leaguePayload),
+      leaguePayload,
+    );
+    await understatSyncRepository.completeItem(
+      runId,
+      'team-detail',
+      String(teamIds[0]),
+      understatStagingHash(completeTeamPayload),
+      completeTeamPayload,
+    );
+    await understatSyncRepository.completeItem(
+      runId,
+      'team-detail',
+      String(teamIds[1]),
+      understatStagingHash(incompleteTeamPayload),
+      incompleteTeamPayload,
+    );
+
+    await finalizeUnderstatTeamRun({
+      runId,
+      season,
+      mode: 'full',
+      trigger: 'manual',
+    });
+
+    const db = await getDb();
+    const snapshot = await createUnderstatTeamRepository(db).readSnapshot(season);
+    const run = await understatSyncRepository.findRun(runId);
+    expect(snapshot.splits.filter((row) => row.teamId === teamIds[0])).toHaveLength(
+      UNDERSTAT_SPLIT_DIMENSIONS.length,
+    );
+    expect(snapshot.splits.some((row) => row.teamId === teamIds[1])).toBe(false);
+    expect(run?.status).toBe('completed');
+    expect(run?.metadata).toEqual({
+      finalized: true,
+      storage: 'postgresql',
+      partial: true,
+      incompleteTeams: [
+        {
+          teamId: teamIds[1],
+          reason: `team ${teamIds[1]} split dimensions missing: ${UNDERSTAT_SPLIT_DIMENSIONS.join(',')}`,
+        },
+      ],
+      counts: { teams: 2, matches: 1, teamMatchStats: 2, teamSplits: 7 },
+    });
+  });
+
+  test('finalizes staged team resources with per-run completeness metadata', async () => {
     const runId = randomUUID();
     runIds.push(runId);
     const discovery = completePreseasonDiscovery();
@@ -589,11 +689,13 @@ describe('Understat persistence', () => {
     expect(run?.metadata).toEqual({
       finalized: true,
       storage: 'postgresql',
+      partial: false,
+      incompleteTeams: [],
       counts: { teams: 20, matches: 380, teamMatchStats: 0, teamSplits: 140 },
     });
   });
 
-  test('atomically finalizes a complete staged player snapshot', async () => {
+  test('finalizes complete staged player resources', async () => {
     const runId = randomUUID();
     runIds.push(runId);
     const discovery = completePlayerDiscovery();
@@ -660,18 +762,21 @@ describe('Understat persistence', () => {
     expect(run?.metadata).toEqual({
       finalized: true,
       storage: 'postgresql',
+      partial: false,
+      incompleteTeams: [],
+      incompleteMatches: [],
       counts: { players: 20, memberships: 20, playerMatchStats: 0 },
     });
   });
 
-  test('rolls back an incomplete player finalizer over a complete snapshot', async () => {
+  test('persists player discovery even when participant resources are not available yet', async () => {
     const runId = randomUUID();
     runIds.push(runId);
     const complete = completePlayerDiscovery();
     const originalPlayer = complete.players[0]!;
     const changedSource = {
       id: originalPlayer.id,
-      name: 'This player name must roll back',
+      name: 'This player name must persist',
       favoritePosition: originalPlayer.favoritePosition,
       firstSeenSeason: completeSeason,
       lastSeenSeason: completeSeason,
@@ -738,12 +843,19 @@ describe('Understat persistence', () => {
     const run = await understatSyncRepository.findRun(runId);
     expect(snapshot.players).toHaveLength(20);
     expect(snapshot.players.find((row) => row.player.id === originalPlayer.id)?.player.name).toBe(
-      originalPlayer.name,
+      'This player name must persist',
     );
-    expect(snapshot.players.some((row) => row.player.id === extraPlayer.id)).toBe(false);
-    expect(run?.status).toBe('skipped');
-    expect(run?.dataChanged).toBe(false);
-    expect(String(run?.metadata.reason)).toContain('participant mismatch');
+    expect(snapshot.players.some((row) => row.player.id === extraPlayer.id)).toBe(true);
+    expect(run?.status).toBe('completed');
+    expect(run?.dataChanged).toBe(true);
+    expect(run?.metadata).toEqual({
+      finalized: true,
+      storage: 'postgresql',
+      partial: false,
+      incompleteTeams: [],
+      incompleteMatches: [],
+      counts: { players: 21, memberships: 0, playerMatchStats: 0 },
+    });
 
     const status = await getUnderstatStatus(completeSeason);
     expect(status.storage).toBe('postgresql');
@@ -753,7 +865,7 @@ describe('Understat persistence', () => {
     expect(status.resources.players.count).toBe(20);
     expect(status.resources.teamParticipants.count).toBe(20);
     expect(status.lanes.team.latestRun?.status).toBe('completed');
-    expect(status.lanes.player.latestRun?.status).toBe('skipped');
+    expect(status.lanes.player.latestRun?.status).toBe('completed');
     expect(status.lanes.team.latestRun?.updatedAt).toBeInstanceOf(Date);
     expect(status.lanes.team.stale).toBe(false);
     expect(status.lanes.team.recovery).toMatchObject({ state: 'none' });

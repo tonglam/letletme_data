@@ -1,10 +1,14 @@
 import type {
   UnderstatMatch,
+  UnderstatPlayerMatchStat,
   UnderstatPlayerSeason,
+  UnderstatPlayerTeamSeason,
   UnderstatSeason,
   UnderstatSyncMode,
   UnderstatTeam,
   UnderstatTeamMatchStat,
+  UnderstatTeamSeason,
+  UnderstatTeamStatSplit,
 } from '../domain/understat';
 import { UNDERSTAT_SPLIT_DIMENSIONS, sourceYearFromSeason } from '../domain/understat';
 import { getConfig } from '../utils/config';
@@ -41,6 +45,92 @@ function incomplete(reason: string): UnderstatCompletenessResult {
 
 function complete(): UnderstatCompletenessResult {
   return { complete: true, reason: 'complete' };
+}
+
+export function evaluateUnderstatTeamResourceCompleteness(
+  teamId: number,
+  discovery: {
+    teams: readonly Pick<UnderstatTeam, 'id'>[];
+    matches: readonly Pick<UnderstatMatch, 'id' | 'homeTeamId' | 'awayTeamId' | 'isResult'>[];
+    teamMatchStats: readonly Pick<UnderstatTeamMatchStat, 'matchId' | 'teamId' | 'side'>[];
+    teamSeasons: readonly Pick<UnderstatTeamSeason, 'teamId'>[];
+  },
+  splits: readonly Pick<UnderstatTeamStatSplit, 'teamId' | 'dimension'>[],
+): UnderstatCompletenessResult {
+  if (!discovery.teams.some((team) => team.id === teamId)) {
+    return incomplete(`team ${teamId} is missing from league discovery`);
+  }
+  if (!discovery.teamSeasons.some((team) => team.teamId === teamId)) {
+    return incomplete(`team ${teamId} season summary is missing`);
+  }
+
+  const dimensions = new Set(
+    splits.filter((split) => split.teamId === teamId).map((split) => split.dimension),
+  );
+  const missingDimensions = UNDERSTAT_SPLIT_DIMENSIONS.filter(
+    (dimension) => !dimensions.has(dimension),
+  );
+  if (missingDimensions.length > 0) {
+    return incomplete(`team ${teamId} split dimensions missing: ${missingDimensions.join(',')}`);
+  }
+
+  const completedMatches = discovery.matches.filter(
+    (match) => match.isResult && (match.homeTeamId === teamId || match.awayTeamId === teamId),
+  );
+  for (const match of completedMatches) {
+    const expectedSide = match.homeTeamId === teamId ? 'h' : 'a';
+    const hasStat = discovery.teamMatchStats.some(
+      (stat) => stat.matchId === match.id && stat.teamId === teamId && stat.side === expectedSide,
+    );
+    if (!hasStat) {
+      return incomplete(`team ${teamId} completed match ${match.id} stats are missing`);
+    }
+  }
+
+  return complete();
+}
+
+export function evaluateUnderstatPlayerTeamResourceCompleteness(
+  teamId: number,
+  discovery: { playerSeasons: readonly Pick<UnderstatPlayerSeason, 'playerId'>[] },
+  rows: readonly Pick<UnderstatPlayerTeamSeason, 'playerId'>[],
+): UnderstatCompletenessResult {
+  if (rows.length === 0) {
+    return incomplete(`team ${teamId} participant rows are empty`);
+  }
+  const playerIds = new Set(discovery.playerSeasons.map((player) => player.playerId));
+  const unknownPlayerIds = rows
+    .filter((row) => !playerIds.has(row.playerId))
+    .map((row) => row.playerId);
+  if (unknownPlayerIds.length > 0) {
+    return incomplete(
+      `team ${teamId} has participant players missing from league discovery: ${[
+        ...new Set(unknownPlayerIds),
+      ].join(',')}`,
+    );
+  }
+  return complete();
+}
+
+export function evaluateUnderstatPlayerMatchResourceCompleteness(
+  match: Pick<UnderstatMatch, 'id' | 'homeTeamId' | 'awayTeamId'>,
+  rows: readonly Pick<UnderstatPlayerMatchStat, 'matchId' | 'teamId' | 'side' | 'started'>[],
+): UnderstatCompletenessResult {
+  const home = rows.filter(
+    (row) => row.matchId === match.id && row.teamId === match.homeTeamId && row.side === 'h',
+  );
+  const away = rows.filter(
+    (row) => row.matchId === match.id && row.teamId === match.awayTeamId && row.side === 'a',
+  );
+  if (
+    home.length === 0 ||
+    away.length === 0 ||
+    home.filter((row) => row.started).length !== 11 ||
+    away.filter((row) => row.started).length !== 11
+  ) {
+    return incomplete(`match ${match.id} roster is incomplete`);
+  }
+  return complete();
 }
 
 export function evaluateUnderstatTeamSnapshotCompleteness(
