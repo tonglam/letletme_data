@@ -37,6 +37,7 @@ import {
   selectCompleteUnderstatTeamSeasonRows,
   selectTeamDetailIds,
   teamById,
+  understatTeamStatsOnNonResultMatchIds,
   withdrawnUnderstatMatchIds,
 } from './understat-sync.service';
 import {
@@ -104,23 +105,33 @@ async function persistUnderstatTeamDiscoverySnapshot(
       discovery.matches,
     );
     const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
-    const changed = await persistUnderstatTeamDiscovery(tx, discovery, withdrawnMatchIds);
+    const teamRepository = createUnderstatTeamRepository(tx);
+    const staleNonResultMatchIds = activeIncremental
+      ? understatTeamStatsOnNonResultMatchIds(
+          discovery.matches,
+          await teamRepository.getMatchStatsBySeason(season),
+        )
+      : [];
+    const statsToRemove = [...new Set([...withdrawnMatchIds, ...staleNonResultMatchIds])].sort(
+      (left, right) => left - right,
+    );
+    const changed = await persistUnderstatTeamDiscovery(tx, discovery, statsToRemove);
     let recomputedChanges = 0;
-    if (activeIncremental && withdrawnMatchIds.length > 0) {
-      const withdrawnMatchIdSet = new Set(withdrawnMatchIds);
-      const withdrawnTeamIds = [
+    if (activeIncremental && statsToRemove.length > 0) {
+      const statsToRemoveSet = new Set(statsToRemove);
+      const affectedTeamIds = [
         ...new Set(
-          previousMatches
-            .filter((match) => withdrawnMatchIdSet.has(match.id))
+          [...previousMatches, ...discovery.matches]
+            .filter((match) => statsToRemoveSet.has(match.id))
             .flatMap((match) => [match.homeTeamId, match.awayTeamId]),
         ),
       ];
       const resultMatchIds = new Set(
         discovery.matches.filter((match) => match.isResult).map((match) => match.id),
       );
-      const persistedStats = await createUnderstatTeamRepository(tx).getMatchStatsBySeason(season);
+      const persistedStats = await teamRepository.getMatchStatsBySeason(season);
       const teamsById = new Map(discovery.teams.map((team) => [team.id, team]));
-      const recomputed = withdrawnTeamIds.flatMap((teamId) => {
+      const recomputed = affectedTeamIds.flatMap((teamId) => {
         const team = teamsById.get(teamId);
         if (!team) return [];
         return [

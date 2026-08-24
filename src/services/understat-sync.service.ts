@@ -421,6 +421,28 @@ export function withdrawnUnderstatMatchIds(
     .sort((left, right) => left - right);
 }
 
+/**
+ * Find team match-stat rows that cannot survive an authoritative non-result
+ * match. This is separate from true-to-false transition detection because the
+ * player lane may have already updated the shared match row before the team
+ * lane observes the withdrawal.
+ */
+export function understatTeamStatsOnNonResultMatchIds(
+  incomingMatches: readonly Pick<UnderstatMatch, 'id' | 'isResult'>[],
+  persistedStats: readonly Pick<UnderstatTeamMatchStat, 'matchId'>[],
+): number[] {
+  const nonResultMatchIds = new Set(
+    incomingMatches.filter((match) => !match.isResult).map((match) => match.id),
+  );
+  return [
+    ...new Set(
+      persistedStats
+        .filter((stat) => nonResultMatchIds.has(stat.matchId))
+        .map((stat) => stat.matchId),
+    ),
+  ].sort((left, right) => left - right);
+}
+
 export function assertUnderstatSyncAllowed(season: string): {
   league: string;
   sourceYear: number;

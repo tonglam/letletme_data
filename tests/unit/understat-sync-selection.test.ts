@@ -10,6 +10,7 @@ import {
   mergeUnderstatTeamDetailIds,
   selectPlayerMatchIds,
   selectTeamDetailIds,
+  understatTeamStatsOnNonResultMatchIds,
   withdrawnUnderstatMatchIds,
 } from '../../src/services/understat-sync.service';
 
@@ -64,6 +65,18 @@ describe('Understat incremental selection', () => {
         [match(1, 100, false), match(2, 100, false)],
       ),
     ).toEqual([1]);
+  });
+
+  test('finds stale team stats even when another lane already marked a match non-result', () => {
+    expect(
+      understatTeamStatsOnNonResultMatchIds(
+        [match(1, 100, false), match(2, 100, false)],
+        [{ matchId: 2 }, { matchId: 1 }, { matchId: 2 }],
+      ),
+    ).toEqual([1, 2]);
+    expect(understatTeamStatsOnNonResultMatchIds([match(1, 100, true)], [{ matchId: 1 }])).toEqual(
+      [],
+    );
   });
 
   test('detects lane-owned team and player changes independently', () => {
