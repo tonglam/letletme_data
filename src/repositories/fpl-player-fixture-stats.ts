@@ -185,7 +185,7 @@ export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransacti
             ? []
             : await db
                 .insert(playerFixtureStatsInFpl)
-                .values(rows)
+                .values(rows.map((row) => ({ ...row, updatedAt: sql`clock_timestamp()` })))
                 .onConflictDoUpdate({
                   target: [
                     playerFixtureStatsInFpl.seasonId,
@@ -207,7 +207,7 @@ export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransacti
                     yellowCards: sql`excluded.yellow_cards`,
                     redCards: sql`excluded.red_cards`,
                     sourceHash: sql`excluded.source_hash`,
-                    updatedAt: sql`NOW()`,
+                    updatedAt: sql`clock_timestamp()`,
                   },
                   setWhere: sql`${playerFixtureStatsInFpl.sourceHash} IS DISTINCT FROM excluded.source_hash`,
                 })
