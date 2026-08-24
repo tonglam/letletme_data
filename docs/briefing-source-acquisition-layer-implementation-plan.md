@@ -385,6 +385,12 @@ rolling-day、FINAL90 provider、runner concurrency、timeout 和 provider quota
 生产 recurring 模式仍保留 lane cap，并且只有 global/provider/capacity 等真正阻断调用的原因才能
 产生 `BUDGET_DEFERRED`。
 
+lane cap 不再只能通过 manifest snapshot 固定。运行时支持
+`CONTENT_X_LANE_CAP_MULTIPLIER`：它只按整数倍放大已编译的 phase/lane cap，不改变 manifest
+forecast、global rolling-day、FINAL90 或 provider ledger。默认值为 `1`；开发、shadow 和首次
+生产观察期可以临时提高，等取得真实调用量、饱和率和 due lag 后再调回。该倍率必须由环境配置
+显式提供并写入 worker 启动日志，不能在数据库里手工改 ledger（下一次 reconcile 会覆盖）。
+
 X capacity admission：
 
 ```text
@@ -991,6 +997,8 @@ CONTENT_X_DAILY_CALL_LIMIT=2400
 CONTENT_X_FINAL90_CALL_LIMIT=300
 # Rolling 24h cap reserved for x_user_search identity resolution.
 CONTENT_X_IDENTITY_CALL_LIMIT=100
+# Temporary integer multiplier for recurring phase/lane caps; default is 1.
+CONTENT_X_LANE_CAP_MULTIPLIER=1
 CONTENT_SUPADATA_DAILY_CREDIT_LIMIT=0
 CONTENT_HERMES_DAILY_AUDIO_MINUTES=0
 ```

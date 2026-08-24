@@ -16,6 +16,7 @@ export type XBudgetPolicy = Readonly<{
   globalRolling24hLimit: number;
   final90Rolling90mLimit: number;
   identityRolling24hLimit: number;
+  laneCapMultiplier: number;
   laneCaps: BriefingCoverageReport['xLaneCallCaps'];
   laneWindowMinutes: BriefingCoverageReport['xForecastWindowMinutes'];
   /**
@@ -48,13 +49,39 @@ function positiveInteger(name: string, value: number): number {
   return value;
 }
 
+function scaleLaneCaps(
+  caps: BriefingCoverageReport['xLaneCallCaps'],
+  multiplier: number,
+): BriefingCoverageReport['xLaneCallCaps'] {
+  const scaled = Object.fromEntries(
+    Object.entries(caps).map(([phase, phaseCaps]) => [
+      phase,
+      Object.fromEntries(
+        Object.entries(phaseCaps).map(([lane, cap]) => {
+          const scaledCap = cap * multiplier;
+          if (!Number.isSafeInteger(scaledCap) || scaledCap < 0) {
+            throw new Error(`X lane cap overflow for ${phase}:${lane}`);
+          }
+          return [lane, scaledCap];
+        }),
+      ),
+    ]),
+  );
+  return scaled as BriefingCoverageReport['xLaneCallCaps'];
+}
+
 export function compileXBudgetPolicy(input: {
   coverage: BriefingCoverageReport;
   globalRolling24hLimit: number;
   final90Rolling90mLimit: number;
   identityRolling24hLimit?: number;
+  laneCapMultiplier?: number;
   enforceLaneCaps?: boolean;
 }): XBudgetPolicy {
+  const laneCapMultiplier = positiveInteger(
+    'CONTENT_X_LANE_CAP_MULTIPLIER',
+    input.laneCapMultiplier ?? 1,
+  );
   return {
     globalRolling24hLimit: positiveInteger(
       'CONTENT_X_DAILY_CALL_LIMIT',
@@ -68,7 +95,8 @@ export function compileXBudgetPolicy(input: {
       'X identity rolling limit',
       input.identityRolling24hLimit ?? 100,
     ),
-    laneCaps: input.coverage.xLaneCallCaps,
+    laneCapMultiplier,
+    laneCaps: scaleLaneCaps(input.coverage.xLaneCallCaps, laneCapMultiplier),
     laneWindowMinutes: input.coverage.xForecastWindowMinutes,
     enforceLaneCaps: input.enforceLaneCaps ?? true,
   };

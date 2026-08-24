@@ -209,6 +209,7 @@ async function startFormalAcquisition(): Promise<void> {
         globalRolling24hLimit: flags.dailyXCallLimit,
         final90Rolling90mLimit: flags.final90XCallLimit,
         identityRolling24hLimit: flags.identityXCallLimit,
+        laneCapMultiplier: flags.xLaneCapMultiplier,
         // Shadow is used for controlled development/backfill runs. Do not
         // let the recurring production lane forecast block those runs; the
         // global and FINAL90 provider guards remain active.
@@ -220,6 +221,7 @@ async function startFormalAcquisition(): Promise<void> {
       fullRolloutEligible: bundle.coverage.fullRolloutEligible,
       status: reconciliation.status,
       xLaneCapsEnforced: xBudgetPolicy?.enforceLaneCaps ?? null,
+      xLaneCapMultiplier: xBudgetPolicy?.laneCapMultiplier ?? null,
       xBackstopEnabled: flags.xBackstopEnabled,
     });
   } catch (error) {
