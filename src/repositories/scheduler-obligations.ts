@@ -741,16 +741,18 @@ export async function schedulerObligationStatus(input: {
     ) {
       break;
     }
-    consecutiveUnsuccessfulCycles += 1;
+    if (
+      row.status === 'failed' ||
+      row.status === 'irrecoverable' ||
+      (row.status === 'skipped' && row.reason !== 'official_fields_not_open')
+    ) {
+      consecutiveUnsuccessfulCycles += 1;
+    }
   }
+  const latestIsOverdueState = latest?.status === 'pending' || latest?.status === 'failed';
   return {
     latest,
-    overdue: Boolean(
-      latest &&
-        latest.dueAt.getTime() <= Date.now() &&
-        latest.status !== 'succeeded' &&
-        latest.status !== 'skipped',
-    ),
+    overdue: Boolean(latest && latest.dueAt.getTime() <= Date.now() && latestIsOverdueState),
     consecutiveUnsuccessfulCycles,
   };
 }

@@ -314,18 +314,21 @@ export function createDataSyncWorker(): WorkerRuntime {
     if (job) {
       void alertOnFinalFailure(job, error);
       if (isTerminalJobFailure(job, error)) {
-        void alertPriceChangePublicationOverdue(job, error).catch(() => undefined);
-      }
-      if (isTerminalJobFailure(job, error) && job.data.obligationId) {
-        void failSchedulerObligation({
-          obligationId: job.data.obligationId,
-          generation: job.data.obligationGeneration,
-          error,
-        }).catch(() => undefined);
-      } else if (job.id !== undefined && isTerminalJobFailure(job, error)) {
-        void failSchedulerObligationByBullJobId({ bullJobId: job.id, error }).catch(
-          () => undefined,
-        );
+        // Persist the terminal failure before reading the streak. Otherwise
+        // the alert observes the previous database state and under-counts the
+        // current failed cycle.
+        void (async () => {
+          if (job.data.obligationId) {
+            await failSchedulerObligation({
+              obligationId: job.data.obligationId,
+              generation: job.data.obligationGeneration,
+              error,
+            });
+          } else if (job.id !== undefined) {
+            await failSchedulerObligationByBullJobId({ bullJobId: job.id, error });
+          }
+          await alertPriceChangePublicationOverdue(job, error);
+        })().catch(() => undefined);
       }
     }
   });
