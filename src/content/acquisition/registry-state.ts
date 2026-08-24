@@ -49,7 +49,7 @@ export type DesiredSourceSchedule = Readonly<{
   profileKey: string;
   profileRevision: number;
   priority: number;
-  status: 'active';
+  status: 'active' | 'paused';
   manifestRevision: string;
 }>;
 
@@ -79,6 +79,29 @@ export function nextBackstopDueAt(now: Date, scheduleKey: string): Date {
     );
   }
   return due;
+}
+
+/**
+ * Recover the slot represented by a due BACKSTOP schedule.  Using the
+ * current latest slot alone would skip a slot when the scheduler was down
+ * across a UTC boundary.  Keep recovery bounded to the last 24 hours; an
+ * older overdue schedule starts a fresh latest-slot window instead.
+ */
+export function backstopSlotEndForDueAt(input: {
+  now: Date;
+  scheduleKey: string;
+  dueAt: Date;
+}): Date {
+  const latestSlotEnd = latestBackstopSlotEndAt(input.now);
+  const inferredMs =
+    input.dueAt.getTime() -
+    BACKSTOP_START_DELAY_MS -
+    deterministicBackstopJitterMs(input.scheduleKey);
+  const inferredSlotEnd = new Date(Math.floor(inferredMs / BACKSTOP_SLOT_MS) * BACKSTOP_SLOT_MS);
+  if (!Number.isFinite(inferredSlotEnd.getTime())) return latestSlotEnd;
+  const oldestRecoverableSlotEnd = new Date(latestSlotEnd.getTime() - BACKSTOP_SLOT_MS);
+  if (inferredSlotEnd.getTime() < oldestRecoverableSlotEnd.getTime()) return latestSlotEnd;
+  return inferredSlotEnd.getTime() > latestSlotEnd.getTime() ? latestSlotEnd : inferredSlotEnd;
 }
 
 export type DesiredBriefingRegistryState = Readonly<{
@@ -212,26 +235,28 @@ export function compileBriefingRegistryState(
     };
   });
 
-  const backstopSchedules: DesiredSourceSchedule[] = options.includeXBackstop
-    ? partitions
-        .filter((partition) => partition.adapterKind === 'X_ACCOUNT')
-        .map((partition) => {
-          const profile = getAcquisitionProfile(partition.profileKey);
-          if (!profile) throw new Error(`Validated profile disappeared: ${partition.profileKey}`);
-          return {
-            scheduleKey: `partition-${partition.partitionKey}-backstop`,
-            scheduleRole: 'BACKSTOP' as const,
-            target: { kind: 'partition' as const, partitionKey: partition.partitionKey },
-            jobKind: 'X_KEYWORD_SCAN' as const,
-            adapterKind: 'X_ACCOUNT' as const,
-            profileKey: partition.profileKey,
-            profileRevision: profile.revision,
-            priority: 70,
-            status: 'active' as const,
-            manifestRevision: bundle.manifestHash,
-          };
-        })
-    : [];
+  // Keep the durable BACKSTOP identity present even while the rollout flag is
+  // off.  A disabled rollout pauses these rows; it must not make them
+  // disappear, otherwise enabling the flag creates a new schedule identity
+  // and loses the ability to audit or resume its slot/checkpoint history.
+  const backstopSchedules: DesiredSourceSchedule[] = partitions
+    .filter((partition) => partition.adapterKind === 'X_ACCOUNT')
+    .map((partition) => {
+      const profile = getAcquisitionProfile(partition.profileKey);
+      if (!profile) throw new Error(`Validated profile disappeared: ${partition.profileKey}`);
+      return {
+        scheduleKey: `partition-${partition.partitionKey}-backstop`,
+        scheduleRole: 'BACKSTOP' as const,
+        target: { kind: 'partition' as const, partitionKey: partition.partitionKey },
+        jobKind: 'X_KEYWORD_SCAN' as const,
+        adapterKind: 'X_ACCOUNT' as const,
+        profileKey: partition.profileKey,
+        profileRevision: profile.revision,
+        priority: 70,
+        status: options.includeXBackstop ? ('active' as const) : ('paused' as const),
+        manifestRevision: bundle.manifestHash,
+      };
+    });
 
   const endpointSchedules: DesiredSourceSchedule[] = endpoints
     .filter((endpoint) => endpoint.status === 'active' && isPublicFeedAdapter(endpoint.adapterKind))

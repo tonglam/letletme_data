@@ -347,8 +347,9 @@ X 继续使用“高流量单账号、低流量小分区”的原则，但 parti
   semantic 搜索。
 
 实现补充：每个 X_ACCOUNT partition 仍只有一个 PRIMARY 快线查询，不按页面模块拆分请求；开启
-`CONTENT_X_BACKSTOP_ENABLED` 后，manifest reconciler 为 40 个 X_ACCOUNT partition 各创建一个
-`schedule_role=BACKSTOP`。Backstop 固定在 UTC 00:00/12:00 slot 结束后 10 分钟开始，带 0–10 分钟
+manifest reconciler 始终为 40 个 X_ACCOUNT partition 保留一个 `schedule_role=BACKSTOP`；
+`CONTENT_X_BACKSTOP_ENABLED=false` 时这些行是 `paused`，开启后才变为 `active` 并参与 claim。
+Backstop 固定在 UTC 00:00/12:00 slot 结束后 10 分钟开始，带 0–10 分钟
 确定性 jitter，读取前 12 小时并重叠 120 秒，最多追补 24 小时。它的 request snapshot 明确写
 `coverageMode=BACKSTOP`，饱和只产生一个更早窗口 follow-up；PRIMARY 与 BACKSTOP 按 X post ID
 共享 Receipt 去重。开关关闭时不 claim backstop，PRIMARY cadence、checkpoint 和历史保持不变。

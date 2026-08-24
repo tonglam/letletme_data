@@ -44,7 +44,7 @@ import {
   reserveXRunBudgets,
   type XBudgetPolicy,
 } from './x-budget';
-import { latestBackstopSlotEndAt } from './registry-state';
+import { backstopSlotEndForDueAt, latestBackstopSlotEndAt } from './registry-state';
 
 export type RecurringAdapterKind =
   | 'X_ACCOUNT'
@@ -269,6 +269,8 @@ async function partitionSnapshot(tx: TransactionHandle, partitionId: string) {
 function requestWindow(input: {
   adapterKind: string;
   scheduleRole?: 'PRIMARY' | 'BACKSTOP';
+  scheduleKey?: string;
+  scheduleDueAt?: Date;
   dbNow: Date;
   checkpoint: JsonRecord;
   bootstrapCutoffAt: Date;
@@ -277,9 +279,15 @@ function requestWindow(input: {
 }): { windowStart: Date; windowEnd: Date } {
   if (input.adapterKind === 'X_ACCOUNT' || input.adapterKind === 'X_SEMANTIC') {
     const windowEnd =
-      input.scheduleRole === 'BACKSTOP'
-        ? latestBackstopSlotEndAt(input.dbNow)
-        : new Date(input.dbNow.getTime() - 60_000);
+      input.scheduleRole === 'BACKSTOP' && input.scheduleKey && input.scheduleDueAt
+        ? backstopSlotEndForDueAt({
+            now: input.dbNow,
+            scheduleKey: input.scheduleKey,
+            dueAt: input.scheduleDueAt,
+          })
+        : input.scheduleRole === 'BACKSTOP'
+          ? latestBackstopSlotEndAt(input.dbNow)
+          : new Date(input.dbNow.getTime() - 60_000);
     const checkpointEnd = dateValue(asString(input.checkpoint.windowEnd));
     const defaultStart = new Date(
       windowEnd.getTime() -
@@ -621,6 +629,7 @@ export async function claimDueFormalRuns(input: {
         profileKey: contentSourceSchedules.profileKey,
         profileRevision: contentSourceSchedules.profileRevision,
         scheduleRole: contentSourceSchedules.scheduleRole,
+        nextDueAt: contentSourceSchedules.nextDueAt,
         manifestRevision: contentSourceSchedules.manifestRevision,
         priority: contentSourceSchedules.priority,
         validator: contentSourceSchedules.validator,
@@ -759,6 +768,8 @@ export async function claimDueFormalRuns(input: {
       const window = requestWindow({
         adapterKind: schedule.adapterKind,
         scheduleRole: schedule.scheduleRole as 'PRIMARY' | 'BACKSTOP',
+        scheduleKey: schedule.scheduleKey,
+        scheduleDueAt: schedule.nextDueAt,
         dbNow,
         checkpoint: asRecord(schedule.checkpoint),
         bootstrapCutoffAt,

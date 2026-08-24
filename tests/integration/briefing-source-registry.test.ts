@@ -55,7 +55,7 @@ describe('Briefing source registry reconciliation', () => {
       entityCount: 85,
       endpointCount: 108,
       partitionCount: 44,
-      scheduleCount: 65,
+      scheduleCount: 105,
       fullRolloutEligible: true,
     });
     expect(second).toMatchObject({ status: 'UNCHANGED', manifestHash: first.manifestHash });
@@ -88,7 +88,7 @@ describe('Briefing source registry reconciliation', () => {
     expect(counts).toEqual({ entities: 85, endpoints: 108 });
     expect(partitionCount?.count).toBe(44);
     expect(memberCount?.count).toBe(87);
-    expect(scheduleCount?.count).toBe(65);
+    expect(scheduleCount?.count).toBe(105);
     expect(reconciliations.map((row) => row.status).sort()).toEqual(['APPLIED', 'UNCHANGED']);
   });
 

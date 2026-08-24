@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { loadBriefingManifest } from '../../../src/content/acquisition/acquisition-manifest';
 import {
+  backstopSlotEndForDueAt,
   compileBriefingRegistryState,
   latestBackstopSlotEndAt,
   nextBackstopDueAt,
@@ -15,8 +16,8 @@ describe('Briefing acquisition registry state', () => {
     expect(state.entities).toHaveLength(85);
     expect(state.endpoints).toHaveLength(108);
     expect(state.partitions).toHaveLength(44);
-    expect(state.schedules).toHaveLength(65);
-    expect(new Set(state.schedules.map((schedule) => schedule.scheduleKey)).size).toBe(65);
+    expect(state.schedules).toHaveLength(105);
+    expect(new Set(state.schedules.map((schedule) => schedule.scheduleKey)).size).toBe(105);
     expect(
       state.schedules.reduce<Record<string, number>>((counts, schedule) => {
         counts[schedule.jobKind] = (counts[schedule.jobKind] ?? 0) + 1;
@@ -24,9 +25,20 @@ describe('Briefing acquisition registry state', () => {
       }, {}),
     ).toEqual({
       FEED_POLL: 21,
-      X_KEYWORD_SCAN: 40,
+      X_KEYWORD_SCAN: 80,
       X_SEMANTIC_SCAN: 4,
     });
+    expect(state.schedules.filter((schedule) => schedule.scheduleRole === 'PRIMARY')).toHaveLength(
+      65,
+    );
+    expect(state.schedules.filter((schedule) => schedule.scheduleRole === 'BACKSTOP')).toHaveLength(
+      40,
+    );
+    expect(
+      state.schedules
+        .filter((schedule) => schedule.scheduleRole === 'BACKSTOP')
+        .every((schedule) => schedule.status === 'paused'),
+    ).toBe(true);
   });
 
   test('keeps the source entity separate from its channel endpoints', async () => {
@@ -71,9 +83,11 @@ describe('Briefing acquisition registry state', () => {
     expect(backstops.map((schedule) => schedule.scheduleKey).sort()).toEqual(
       accountPartitions.map((partition) => `partition-${partition.partitionKey}-backstop`).sort(),
     );
-    expect(state.schedules.filter((schedule) => schedule.scheduleRole === 'PRIMARY')).toHaveLength(
-      65,
-    );
+    expect(
+      state.schedules
+        .filter((schedule) => schedule.scheduleRole === 'BACKSTOP')
+        .every((schedule) => schedule.status === 'active'),
+    ).toBe(true);
   });
 
   test('anchors backstop windows to UTC slots with bounded deterministic jitter', () => {
@@ -83,5 +97,19 @@ describe('Briefing acquisition registry state', () => {
     expect(due.getTime()).toBeGreaterThan(new Date('2026-08-24T12:10:00.000Z').getTime());
     expect(due.getTime()).toBeLessThanOrEqual(new Date('2026-08-25T00:20:00.000Z').getTime());
     expect(nextBackstopDueAt(now, 'partition-creators-core-backstop')).toEqual(due);
+  });
+
+  test('recovers the overdue slot and bounds recovery to one missed 12-hour slot', () => {
+    const scheduleKey = 'partition-creators-core-backstop';
+    const now = new Date('2026-08-24T12:25:00.000Z');
+    const dueForMidnight = nextBackstopDueAt(new Date('2026-08-23T23:00:00.000Z'), scheduleKey);
+    expect(backstopSlotEndForDueAt({ now, scheduleKey, dueAt: dueForMidnight })).toEqual(
+      new Date('2026-08-24T00:00:00.000Z'),
+    );
+
+    const veryOldDue = nextBackstopDueAt(new Date('2026-08-21T23:00:00.000Z'), scheduleKey);
+    expect(backstopSlotEndForDueAt({ now, scheduleKey, dueAt: veryOldDue })).toEqual(
+      new Date('2026-08-24T12:00:00.000Z'),
+    );
   });
 });

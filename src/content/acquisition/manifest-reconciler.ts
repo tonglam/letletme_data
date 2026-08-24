@@ -221,6 +221,9 @@ export async function reconcileBriefingSourceRegistry(input: {
       const desiredEndpointKeys = state.endpoints.map((endpoint) => endpoint.endpointKey);
       const desiredPartitionKeys = state.partitions.map((partition) => partition.partitionKey);
       const desiredScheduleKeyList = state.schedules.map((schedule) => schedule.scheduleKey);
+      const desiredScheduleByKey = new Map(
+        state.schedules.map((schedule) => [schedule.scheduleKey, schedule]),
+      );
       const [
         sourceDesiredCount,
         endpointDesiredCount,
@@ -344,6 +347,22 @@ export async function reconcileBriefingSourceRegistry(input: {
           )
           .limit(1),
       ]);
+      const existingDesiredSchedules = await tx
+        .select({
+          scheduleKey: contentSourceSchedules.scheduleKey,
+          scheduleRole: contentSourceSchedules.scheduleRole,
+          status: contentSourceSchedules.status,
+        })
+        .from(contentSourceSchedules)
+        .where(inArray(contentSourceSchedules.scheduleKey, desiredScheduleKeyList));
+      const scheduleStateMismatch = existingDesiredSchedules.some((existing) => {
+        const desired = desiredScheduleByKey.get(existing.scheduleKey);
+        return (
+          desired === undefined ||
+          existing.scheduleRole !== desired.scheduleRole ||
+          existing.status !== desired.status
+        );
+      });
       if (
         sourceDesiredCount[0]?.count === desiredSourceKeys.length &&
         endpointDesiredCount[0]?.count === desiredEndpointKeys.length &&
@@ -356,7 +375,8 @@ export async function reconcileBriefingSourceRegistry(input: {
         partitionMismatch.length === 0 &&
         partitionExtra.length === 0 &&
         scheduleMismatch.length === 0 &&
-        scheduleExtra.length === 0
+        scheduleExtra.length === 0 &&
+        !scheduleStateMismatch
       ) {
         await tx
           .update(contentSourceRegistryReconciliations)
@@ -666,7 +686,8 @@ export async function reconcileBriefingSourceRegistry(input: {
           existing.adapterKind !== schedule.adapterKind ||
           existing.profileKey !== schedule.profileKey ||
           existing.profileRevision !== schedule.profileRevision ||
-          existing.scheduleRole !== schedule.scheduleRole;
+          existing.scheduleRole !== schedule.scheduleRole ||
+          existing.status !== schedule.status;
         const acquisitionTargetChanged =
           schedule.target.kind === 'endpoint'
             ? endpointContractChanged(schedule.target.endpointKey)

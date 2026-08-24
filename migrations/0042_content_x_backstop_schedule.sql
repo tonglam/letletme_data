@@ -1,7 +1,7 @@
 -- Backstop scans are a second durable schedule for X account partitions.
 -- Existing schedules keep their keys, checkpoints and history and become
--- PRIMARY by default.  The application only creates BACKSTOP rows after the
--- CONTENT_X_BACKSTOP_ENABLED rollout gate is deliberately enabled.
+-- PRIMARY by default.  The manifest reconciler always keeps BACKSTOP rows;
+-- CONTENT_X_BACKSTOP_ENABLED controls whether they are paused or active.
 
 ALTER TABLE content.source_schedules
   ADD COLUMN schedule_role text NOT NULL DEFAULT 'PRIMARY';
