@@ -110,7 +110,10 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 15m
+          # The runtime verifier allows up to 10.5 minutes for a cold restart;
+          # leave the SSH action enough time for preflight, migration, and
+          # rollback/recovery if readiness never converges.
+          command_timeout: 20m
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
@@ -435,7 +438,8 @@ jobs:
             # (`docker compose up -d ...`) and preserves healthy workers on a
             # first API bind failure.
             APP_IMAGE="$IMAGE_REF" start_runtime_services
-            PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
+            HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
+              PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
               scripts/verify-runtime-health.sh
 
             finish_stage
