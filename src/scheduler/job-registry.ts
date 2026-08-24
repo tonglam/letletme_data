@@ -49,7 +49,10 @@ import { fixtureRepository } from '../repositories/fixtures';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { isMatchDayTime } from '../utils/conditions';
-import { decideLiveLifecycle } from '../services/live-lifecycle-orchestrator';
+import {
+  decideLiveLifecycle,
+  resolveLiveLifecycleDelay,
+} from '../services/live-lifecycle-orchestrator';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig } from '../utils/config';
 
@@ -663,7 +666,7 @@ function postMatchMaintenanceDefinition(): ScheduledJobDefinition {
 function liveSnapshotDefinition(): ScheduledJobDefinition {
   return {
     name: 'live-snapshot',
-    cadence: '30-second lifecycle poll while match windows are open',
+    cadence: 'lifecycle-aware polling until the event is finalized',
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
@@ -676,19 +679,31 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
-      if (!isMatchDayTime(event, fixtures, context.now)) return [];
-      const bucket = Math.floor(context.now.getTime() / 30_000);
+      const decision = decideLiveLifecycle(event, fixtures, context.now);
+      // The permanent final checkpoint owns the finalized write. This lane
+      // keeps the mutable official heartbeat alive for every unsettled state.
+      if (!decision.shouldFetchLive || decision.state === 'FINALIZED') return [];
+      const pollIntervalMs = resolveLiveLifecycleDelay(
+        decision,
+        context.season,
+        event.id,
+        context.now,
+      );
+      if (pollIntervalMs === null) return [];
+      const bucket = Math.floor(context.now.getTime() / pollIntervalMs);
       const persistBucket = Math.floor(context.now.getTime() / (10 * 60_000));
       return [
         {
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-${event.id}-${bucket}`,
-          dueAt: context.now,
+          periodKey: `live-${event.id}-${decision.state}-${pollIntervalMs}-${bucket}`,
+          dueAt: new Date(bucket * pollIntervalMs),
           eventId: event.id,
           source: 'reconcile',
           evidence: {
             persistEventLives: context.now.getTime() % (10 * 60_000) < 30_000,
             persistBucket,
+            lifecycleState: decision.state,
+            pollIntervalMs,
           },
         },
       ];

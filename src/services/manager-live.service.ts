@@ -709,6 +709,16 @@ export const projectEventLiveManagerRows = (
       isFresh(metadataCandidate, batchCheckedAt)
         ? metadataCandidate
         : undefined;
+    const metadataDigest = createHash('sha1')
+      .update(
+        JSON.stringify({
+          eventRank: metadata?.eventRank ?? null,
+          overallRank: metadata?.overallRank ?? null,
+          leagueRank: metadata?.leagueRank ?? null,
+        }),
+      )
+      .digest('hex')
+      .slice(0, 16);
     return [
       {
         ...(metadata && 'revisionAt' in metadata
@@ -728,7 +738,7 @@ export const projectEventLiveManagerRows = (
         transferCost: score.transferCost,
         eventPointSemantics:
           score.transferCost === 0 ? ('ZERO_COST_EQUIVALENT' as const) : ('GROSS' as const),
-        revision: score.revision,
+        revision: `${score.revision}:metadata:${metadataDigest}`,
         checkedAt: batch.checkedAt,
         upstreamUpdatedAt: batch.sourceCheckedAt,
         staleAt: plusSeconds(batch.checkedAt, STALE_SECONDS),

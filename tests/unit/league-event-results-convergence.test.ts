@@ -10,11 +10,25 @@ import {
   findEventEligibleEntryIds,
   findMissingLeagueResultEntryIds,
   isEntryResultRichEnough,
+  leagueEventLiveInputsAreFresh,
   latestFreshnessTimestamp,
 } from '../../src/services/league-event-results.service';
 import type { RawFPLEntryEventPicksResponse } from '../../src/types';
 
 describe('league event result convergence', () => {
+  test('requires one fresh, time-paired event-live and picks observation', () => {
+    const now = Date.parse('2026-08-24T00:15:00.000Z');
+    expect(
+      leagueEventLiveInputsAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:14:59.999Z', now),
+    ).toBe(true);
+    expect(
+      leagueEventLiveInputsAreFresh('2026-08-23T23:59:59.999Z', '2026-08-24T00:14:59.999Z', now),
+    ).toBe(false);
+    expect(
+      leagueEventLiveInputsAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:15:00.001Z', now),
+    ).toBe(false);
+  });
+
   test('derives finalized bench points from effective multipliers', () => {
     const picks = Array.from({ length: 15 }, (_, index) => ({
       element: index + 1,

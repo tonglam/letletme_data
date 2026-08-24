@@ -6,6 +6,7 @@ import {
   findPicksRefreshEntryIds,
   PICKS_FIRST_PROBE_OFFSET_MS,
   PICKS_REFRESH_INTERVAL_MS,
+  resolveLiveLifecycleDelay,
 } from '../../src/services/live-lifecycle-orchestrator';
 
 describe('live lifecycle decisions', () => {
@@ -24,6 +25,11 @@ describe('live lifecycle decisions', () => {
     expect(
       source.indexOf('runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)'),
     ).toBeLessThan(source.indexOf('runSchedulerPass(now)'));
+    const registrySource = readFileSync('src/scheduler/job-registry.ts', 'utf8');
+    expect(registrySource).toContain('const decision = decideLiveLifecycle(event, fixtures');
+    expect(registrySource).toContain('decision.state ===');
+    expect(registrySource).toContain('FINALIZED');
+    expect(registrySource).toContain('resolveLiveLifecycleDelay(');
   });
 
   test('starts the first picks probe 60 minutes after the deadline', () => {
@@ -196,10 +202,18 @@ describe('live lifecycle decisions', () => {
 
     expect(decision).toMatchObject({
       state: 'GW_REVIEW',
-      shouldFetchLive: false,
+      shouldFetchLive: true,
       shouldSyncPicks: true,
       finalizeEvent: false,
     });
+    expect(
+      resolveLiveLifecycleDelay(
+        decision,
+        { seasonId: 1, seasonCode: '2627' },
+        1,
+        new Date('2026-08-17T12:00:01.000Z'),
+      ),
+    ).toBe(10 * 60_000);
   });
 
   test('refreshes complete picks again after the bounded live interval', () => {

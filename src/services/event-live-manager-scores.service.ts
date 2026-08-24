@@ -1,4 +1,7 @@
-import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
+import {
+  readLiveSnapshotCache,
+  type LiveSnapshotCacheContents,
+} from '../cache/live-snapshot-cache';
 import {
   deriveEventLiveManagerScore,
   type EventLiveManagerScore,
@@ -64,6 +67,42 @@ export function eventLiveHeartbeatIsFresh(
   return Number.isFinite(liveTimestamp) && ageMs >= 0 && ageMs <= maxAgeMs;
 }
 
+export function eventLiveAuthorityCheckedAt(snapshot: LiveSnapshotCacheContents): string {
+  return snapshot.manifest.lastSuccessfulFetchAt ?? snapshot.manifest.sourceCheckedAt;
+}
+
+/**
+ * Load the one active official player-live publication used by every
+ * provisional manager-score projection. Consumers must not independently
+ * combine mutable picks with older database player totals.
+ */
+export async function loadFreshEventLiveAuthoritySnapshot(
+  season: FplSeasonRef,
+  eventId: number,
+  nowMs = Date.now(),
+): Promise<LiveSnapshotCacheContents | null> {
+  const snapshot = await readLiveSnapshotCache(season.seasonCode, eventId);
+  if (!snapshot || snapshot.eventId !== eventId || snapshot.season !== season.seasonCode) {
+    return null;
+  }
+  if (!eventLiveHeartbeatIsFresh(eventLiveAuthorityCheckedAt(snapshot), nowMs)) return null;
+
+  const elementIds = new Set<number>();
+  for (const row of snapshot.eventLives) {
+    if (
+      row.eventId !== eventId ||
+      !Number.isSafeInteger(row.elementId) ||
+      row.elementId <= 0 ||
+      !Number.isSafeInteger(row.totalPoints) ||
+      elementIds.has(row.elementId)
+    ) {
+      return null;
+    }
+    elementIds.add(row.elementId);
+  }
+  return snapshot;
+}
+
 export function buildEventLiveScoreRevision(input: {
   authorityRevision: string;
   entryId: number;
@@ -85,27 +124,15 @@ async function loadEventLiveManagerScoreBatch(
   const uniqueEntryIds = Array.from(new Set(entryIds));
   if (uniqueEntryIds.length === 0) return null;
 
-  const snapshot = await readLiveSnapshotCache(season.seasonCode, eventId);
-  if (!snapshot || snapshot.eventId !== eventId || snapshot.season !== season.seasonCode) {
-    return null;
-  }
+  const snapshot = await loadFreshEventLiveAuthoritySnapshot(season, eventId);
+  if (!snapshot) return null;
 
   const pointsByElement = new Map<number, number>();
   for (const row of snapshot.eventLives) {
-    if (
-      row.eventId !== eventId ||
-      !Number.isSafeInteger(row.elementId) ||
-      row.elementId <= 0 ||
-      !Number.isSafeInteger(row.totalPoints) ||
-      pointsByElement.has(row.elementId)
-    ) {
-      return null;
-    }
     pointsByElement.set(row.elementId, row.totalPoints);
   }
 
-  const checkedAt = snapshot.manifest.lastSuccessfulFetchAt ?? snapshot.manifest.sourceCheckedAt;
-  if (!eventLiveHeartbeatIsFresh(checkedAt)) return null;
+  const checkedAt = eventLiveAuthorityCheckedAt(snapshot);
 
   const [pickRows, previousTotals] = await Promise.all([
     entryEventPicksRepository.findScoringPicksByEventAndEntryIds(season, eventId, uniqueEntryIds),

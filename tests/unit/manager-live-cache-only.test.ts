@@ -389,7 +389,9 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result).toMatchObject({ servedFrom: 'POSTGRES' });
     expect(result.rows[0]).toMatchObject({
       overallRank: 765_432,
-      revision: 'fpl:live:test-publication:8:entry:101',
+      revision: expect.stringMatching(
+        /^fpl:live:test-publication:8:entry:101:metadata:[0-9a-f]{16}$/,
+      ),
     });
     expect(result.rows[0]).toHaveProperty('revisionAt', checkedAt);
   });
@@ -423,7 +425,9 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result).toMatchObject({ servedFrom: 'REDIS' });
     expect(result.rows[0]).toMatchObject({
       overallRank: 123_456,
-      revision: 'fpl:live:test-publication:8:entry:101',
+      revision: expect.stringMatching(
+        /^fpl:live:test-publication:8:entry:101:metadata:[0-9a-f]{16}$/,
+      ),
     });
   });
 
@@ -458,7 +462,9 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result).toMatchObject({ servedFrom: 'POSTGRES' });
     expect(result.rows[0]).toMatchObject({
       overallRank: 765_432,
-      revision: 'fpl:live:test-publication:8:entry:101',
+      revision: expect.stringMatching(
+        /^fpl:live:test-publication:8:entry:101:metadata:[0-9a-f]{16}$/,
+      ),
       revisionAt: checkpointRevisionAt.toISOString(),
     });
   });

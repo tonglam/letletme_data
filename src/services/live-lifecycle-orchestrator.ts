@@ -162,13 +162,15 @@ export function decideLiveLifecycle(
     };
   }
   if (allFinished && lastKickoffMs !== null) {
-    const afterLast = nowMs - lastKickoffMs;
     return {
       // Time since the last kickoff controls polling cadence only.  It must
       // not manufacture FINALIZED before the event is explicitly marked
       // finished and data-checked.
       state: 'GW_REVIEW',
-      shouldFetchLive: afterLast < 24 * 60 * 60_000,
+      // Keep the official event-live heartbeat alive until the event reaches
+      // its explicit finalized boundary. A time limit here would make every
+      // provisional manager and H2H score disappear during a delayed review.
+      shouldFetchLive: true,
       shouldProbePicks: false,
       shouldSyncPicks: true,
       recoverStaleFixtures: false,
@@ -445,7 +447,7 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
     daySettlingStates.delete(`${season.seasonCode}:${currentEvent.id}`);
   }
 
-  const nextRefreshDelay = lifecycleDelay(decision, season, currentEvent.id, now);
+  const nextRefreshDelay = resolveLiveLifecycleDelay(decision, season, currentEvent.id, now);
   await liveLifecycleStatusRepository
     .upsert(season, {
       eventId: currentEvent.id,
@@ -531,7 +533,7 @@ function isUkFinalizationWindow(now: Date): boolean {
   return totalMinutes >= 8 * 60 + 50 && totalMinutes <= 9 * 60 + 15;
 }
 
-function lifecycleDelay(
+export function resolveLiveLifecycleDelay(
   decision: LiveLifecycleDecision,
   season: FplSeasonRef,
   eventId: number,
@@ -594,7 +596,7 @@ export function registerLiveLifecycleTimer(app: Elysia) {
             : null;
           schedule(
             decision && season
-              ? lifecycleDelay(decision, season, currentEvent?.id ?? 0, now)
+              ? resolveLiveLifecycleDelay(decision, season, currentEvent?.id ?? 0, now)
               : LIVE_POLL_MS,
           );
         }
@@ -619,7 +621,7 @@ export function registerLiveLifecycleTimer(app: Elysia) {
             : null;
           schedule(
             decision && season
-              ? lifecycleDelay(decision, season, currentEvent?.id ?? 0, now)
+              ? resolveLiveLifecycleDelay(decision, season, currentEvent?.id ?? 0, now)
               : LIVE_POLL_MS,
           );
         }

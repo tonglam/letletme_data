@@ -72,10 +72,12 @@ describe('Classic manager headline projection', () => {
         totalPoints: 37,
         source: 'FPL_EVENT_LIVE',
         leagueRank: 84,
-        revision: 'fpl:live:publication-8:8:entry:109967:score',
         checkedAt: '2026-08-24T00:01:00.000Z',
       }),
     ]);
+    expect(projected[0]?.revision).toStartWith(
+      'fpl:live:publication-8:8:entry:109967:score:metadata:',
+    );
   });
 
   test('does not stamp stale rank metadata with the fresh event-live timestamp', () => {
@@ -110,6 +112,46 @@ describe('Classic manager headline projection', () => {
       leagueRank: null,
       checkedAt: '2026-08-24T00:01:00.000Z',
     });
+  });
+
+  test('changes the projected row revision when fresh rank metadata changes', () => {
+    const batch = {
+      season: '2627',
+      eventId: 1,
+      state: 'live' as const,
+      revision: 'fpl:live:publication-8:8',
+      publicationId: 'publication-8',
+      checkedAt: '2026-08-24T00:01:00.000Z',
+      sourceCheckedAt: '2026-08-24T00:00:59.000Z',
+      scores: new Map([
+        [
+          109967,
+          {
+            entryId: 109967,
+            eventPoints: 37,
+            netEventPoints: 37,
+            transferCost: 0,
+            totalPoints: 37,
+            picksCheckedAt: '2026-08-24T00:00:30.000Z',
+            revision: 'fpl:live:publication-8:8:entry:109967:score',
+          },
+        ],
+      ]),
+    };
+    const metadata = row({
+      checkedAt: '2026-08-24T00:00:50.000Z',
+      staleAt: '2026-08-24T00:02:20.000Z',
+    });
+    const first = projectEventLiveManagerRows('2627', 1, [109967], [metadata], batch);
+    const changed = projectEventLiveManagerRows(
+      '2627',
+      1,
+      [109967],
+      [{ ...metadata, leagueRank: 83, revision: 'classic-revision-2' }],
+      batch,
+    );
+
+    expect(changed[0]?.revision).not.toBe(first[0]?.revision);
   });
 
   test('uses the newer Entry Summary headline while retaining Classic league rank', () => {
