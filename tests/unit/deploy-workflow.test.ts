@@ -86,7 +86,11 @@ describe('release workflow gates', () => {
     expect(sourceMediaBootstrapScript).not.toContain('set -x');
     expect(deployScript).toContain('briefing_source_media_health');
     expect(runtimeHealthScript).toContain('attempts=${HEALTH_ATTEMPTS:-90}');
-    expect(workflow).toContain('HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2');
+    expect(runtimeHealthScript).toContain('deadline_seconds=${HEALTH_DEADLINE_SECONDS:-300}');
+    expect(runtimeHealthScript).toContain('deadline_reached()');
+    expect(workflow).toContain(
+      'HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300',
+    );
     expect(workflow).toContain('command_timeout: 20m');
     expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
     expect(workflow).toContain('"$old_media_present" || true');
@@ -331,7 +335,8 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('old_release_sha=$(release_sha_for_image "$old_image")');
     expect(workflow).toContain('old_runner_release_sha=$(cat');
     expect(workflow).toContain('"$old_image" "$old_release_sha" "$old_runner_release_sha"');
-    expect(runtimeHealthScript).toContain('--max-time "$curl_timeout_seconds"');
+    expect(runtimeHealthScript).toContain('curl_timeout_with_deadline()');
+    expect(runtimeHealthScript).toContain('--max-time "$timeout"');
   });
 
   test('weekly security workflow scans a freshly built production image', () => {

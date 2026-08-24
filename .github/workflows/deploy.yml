@@ -438,7 +438,7 @@ jobs:
             # (`docker compose up -d ...`) and preserves healthy workers on a
             # first API bind failure.
             APP_IMAGE="$IMAGE_REF" start_runtime_services
-            HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 \
+            HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
               PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
               scripts/verify-runtime-health.sh
 
