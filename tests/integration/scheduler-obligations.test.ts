@@ -356,7 +356,7 @@ describe('scheduler obligation generation fencing', () => {
         '2026-08-23T00:07:00Z'::timestamptz,
         1,
         2,
-        jsonb_build_object('scheduledDueAtMs', ${scheduledDueAtMs})
+        jsonb_build_object('scheduledDueAtMs', ${scheduledDueAtMs}::bigint)
       )
     `;
 
