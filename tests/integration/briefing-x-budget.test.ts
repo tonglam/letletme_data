@@ -106,6 +106,7 @@ test('atomically defers X work beyond the rolling cap and commits only executed 
           outputTokens: 20,
           totalCostUsd: 0.01,
           rawPostEvidenceAvailable: false as const,
+          outputContractRevision: 2,
         };
       },
     },

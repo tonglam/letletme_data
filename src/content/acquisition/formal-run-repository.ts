@@ -44,6 +44,7 @@ import {
   reserveXRunBudgets,
   type XBudgetPolicy,
 } from './x-budget';
+import { backstopSlotEndForDueAt, latestBackstopSlotEndAt } from './registry-state';
 
 export type RecurringAdapterKind =
   | 'X_ACCOUNT'
@@ -70,6 +71,7 @@ export type ClaimedFormalRun = Readonly<{
 export type BegunFormalRun = Readonly<{
   runId: string;
   scheduleId: string | null;
+  scheduleKey: string | null;
   parentRunId: string | null;
   request: FormalRunRequestV1;
   providerJobId: string | null;
@@ -266,6 +268,9 @@ async function partitionSnapshot(tx: TransactionHandle, partitionId: string) {
 
 function requestWindow(input: {
   adapterKind: string;
+  scheduleRole?: 'PRIMARY' | 'BACKSTOP';
+  scheduleKey?: string;
+  scheduleDueAt?: Date;
   dbNow: Date;
   checkpoint: JsonRecord;
   bootstrapCutoffAt: Date;
@@ -273,10 +278,25 @@ function requestWindow(input: {
   lookbackMinutes: number;
 }): { windowStart: Date; windowEnd: Date } {
   if (input.adapterKind === 'X_ACCOUNT' || input.adapterKind === 'X_SEMANTIC') {
-    const windowEnd = new Date(input.dbNow.getTime() - 60_000);
+    const windowEnd =
+      input.scheduleRole === 'BACKSTOP' && input.scheduleKey && input.scheduleDueAt
+        ? backstopSlotEndForDueAt({
+            now: input.dbNow,
+            scheduleKey: input.scheduleKey,
+            dueAt: input.scheduleDueAt,
+          })
+        : input.scheduleRole === 'BACKSTOP'
+          ? latestBackstopSlotEndAt(input.dbNow)
+          : new Date(input.dbNow.getTime() - 60_000);
     const checkpointEnd = dateValue(asString(input.checkpoint.windowEnd));
-    const defaultStart = new Date(windowEnd.getTime() - input.lookbackMinutes * 60_000);
-    const overlapped = checkpointEnd ? new Date(checkpointEnd.getTime() - 120_000) : defaultStart;
+    const defaultStart = new Date(
+      windowEnd.getTime() -
+        input.lookbackMinutes * 60_000 -
+        (input.scheduleRole === 'BACKSTOP' ? 120_000 : 0),
+    );
+    const overlapped = checkpointEnd
+      ? new Date(Math.min(checkpointEnd.getTime() - 120_000, windowEnd.getTime()))
+      : defaultStart;
     const maximumStart = new Date(windowEnd.getTime() - 24 * 60 * 60_000);
     const boundedStart = overlapped < maximumStart ? maximumStart : overlapped;
     if (input.adapterKind === 'X_SEMANTIC') {
@@ -608,6 +628,8 @@ export async function claimDueFormalRuns(input: {
         adapterKind: contentSourceSchedules.adapterKind,
         profileKey: contentSourceSchedules.profileKey,
         profileRevision: contentSourceSchedules.profileRevision,
+        scheduleRole: contentSourceSchedules.scheduleRole,
+        nextDueAt: contentSourceSchedules.nextDueAt,
         manifestRevision: contentSourceSchedules.manifestRevision,
         priority: contentSourceSchedules.priority,
         validator: contentSourceSchedules.validator,
@@ -745,11 +767,15 @@ export async function claimDueFormalRuns(input: {
       const bootstrapEnabled = schedule.bootstrapCompletedAt === null;
       const window = requestWindow({
         adapterKind: schedule.adapterKind,
+        scheduleRole: schedule.scheduleRole as 'PRIMARY' | 'BACKSTOP',
+        scheduleKey: schedule.scheduleKey,
+        scheduleDueAt: schedule.nextDueAt,
         dbNow,
         checkpoint: asRecord(schedule.checkpoint),
         bootstrapCutoffAt,
         bootstrapEnabled,
-        lookbackMinutes: profile.bootstrap.lookbackMinutes,
+        lookbackMinutes:
+          schedule.scheduleRole === 'BACKSTOP' ? 12 * 60 : profile.bootstrap.lookbackMinutes,
       });
 
       let request: FormalRunRequestV1;
@@ -865,6 +891,7 @@ export async function claimDueFormalRuns(input: {
           profileRevision: schedule.profileRevision,
           windowStart: window.windowStart.toISOString(),
           windowEnd: window.windowEnd.toISOString(),
+          coverageMode: schedule.scheduleRole,
           partition: {
             partitionId: partition.partitionId,
             partitionKey: partition.partitionKey,
@@ -925,6 +952,9 @@ export async function claimDueFormalRuns(input: {
             throw new Error('Retry run no longer matches its recurring schedule contract');
           }
           request = parseFormalRunRequestV1(retry.requestSnapshot);
+          if ('coverageMode' in request && request.coverageMode !== schedule.scheduleRole) {
+            throw new Error('Retry run coverage mode no longer matches its recurring schedule');
+          }
           sourceSnapshot = retry.sourceSnapshot.map((item) => asRecord(item));
           endpointSnapshotValue = asRecord(retry.endpointSnapshot);
           sourceSnapshotRevision = retry.sourceSnapshotRevision ?? schedule.manifestRevision;
@@ -1069,6 +1099,7 @@ export async function failFormalRun(input: {
   failureClass: string;
   errorSummary: string;
   retryDelayMs?: number;
+  outputContractFailure?: boolean;
   providerEvidence?: FormalRunProviderEvidence;
   probeEvidence?: FormalRunProbeEvidence;
   supadataFailureEvidence?: SupadataFailureEvidence;
@@ -1096,6 +1127,7 @@ export async function failFormalRun(input: {
         windowStart: contentAcquisitionRuns.windowStart,
         windowEnd: contentAcquisitionRuns.windowEnd,
         requestSnapshot: contentAcquisitionRuns.requestSnapshot,
+        requestHash: contentAcquisitionRuns.requestHash,
         status: contentAcquisitionRuns.status,
         jobKind: contentAcquisitionRuns.jobKind,
         provider: contentAcquisitionRuns.provider,
@@ -1410,9 +1442,37 @@ export async function failFormalRun(input: {
       failureStreak = schedule.failureStreak + 1;
       scheduleCheckpoint = asRecord(schedule.checkpoint);
     }
+    const currentContractRevision =
+      input.providerEvidence &&
+      typeof input.providerEvidence.runMetrics.outputContractRevision === 'number'
+        ? String(input.providerEvidence.runMetrics.outputContractRevision)
+        : null;
+    const priorContractFailureRows =
+      input.outputContractFailure === true && run.scheduleId && run.requestHash
+        ? await tx
+            .select({ runId: contentAcquisitionRuns.runId })
+            .from(contentAcquisitionRuns)
+            .where(
+              and(
+                eq(contentAcquisitionRuns.scheduleId, run.scheduleId),
+                eq(contentAcquisitionRuns.status, 'FAILED'),
+                eq(contentAcquisitionRuns.requestHash, run.requestHash),
+                sql`${contentAcquisitionRuns.runMetrics} ->> 'outputContractFailure' = 'true'`,
+                ...(currentContractRevision
+                  ? [
+                      sql`${contentAcquisitionRuns.runMetrics} ->> 'outputContractRevision' = ${currentContractRevision}`,
+                    ]
+                  : []),
+              ),
+            )
+            .limit(1)
+        : [];
+    const outputContractBlocked =
+      input.outputContractFailure === true && priorContractFailureRows.length > 0;
     const exhaustedXWindow =
       run.scheduleId !== null &&
       failureStreak >= 3 &&
+      !outputContractBlocked &&
       (run.adapterKind === 'X_ACCOUNT' || run.adapterKind === 'X_SEMANTIC');
     if (exhaustedXWindow && (!run.windowStart || !run.windowEnd)) {
       throw new Error('Exhausted X retry has no immutable acquisition window');
@@ -1454,13 +1514,16 @@ export async function failFormalRun(input: {
                 providerFailureOperation: input.supadataFailureEvidence.operation,
                 providerFailureDurationMs: input.supadataFailureEvidence.durationMs,
               }
-            : (input.providerEvidence?.runMetrics ??
-                input.probeEvidence?.runMetrics ??
-                (input.hermesProviderAttempted
-                  ? { hermesProviderStarted: true, providerTraceVerified: false }
-                  : input.providerProcessStarted
-                    ? { providerProcessStarted: true, providerTraceVerified: false }
-                    : {})),
+            : {
+                ...(input.providerEvidence?.runMetrics ??
+                  input.probeEvidence?.runMetrics ??
+                  (input.hermesProviderAttempted
+                    ? { hermesProviderStarted: true, providerTraceVerified: false }
+                    : input.providerProcessStarted
+                      ? { providerProcessStarted: true, providerTraceVerified: false }
+                      : {})),
+                ...(input.outputContractFailure ? { outputContractFailure: true } : {}),
+              },
         )}::jsonb`,
         completedAt: dbNow,
         leaseExpiresAt: null,
@@ -1480,7 +1543,7 @@ export async function failFormalRun(input: {
       });
     }
     if (run.scheduleId) {
-      const circuitOpen = failureStreak >= 3;
+      const circuitOpen = outputContractBlocked || failureStreak >= 3;
       const retryDelayMs = circuitOpen
         ? 30 * 60_000
         : (input.retryDelayMs ?? (failureStreak === 1 ? 60_000 : 5 * 60_000));
@@ -1491,7 +1554,11 @@ export async function failFormalRun(input: {
           leaseExpiresAt: null,
           failureStreak,
           circuitState: circuitOpen ? 'OPEN' : 'CLOSED',
-          probeAfter: circuitOpen ? new Date(dbNow.getTime() + 30 * 60_000) : null,
+          // Output-contract failures require a new deployed contract before
+          // another billable call.  A null probe_after keeps the schedule
+          // blocked until the revision-aware rearm operation runs.
+          probeAfter:
+            circuitOpen && !outputContractBlocked ? new Date(dbNow.getTime() + 30 * 60_000) : null,
           nextDueAt: new Date(dbNow.getTime() + retryDelayMs),
           checkpoint: exhaustedXWindow
             ? {
@@ -1985,6 +2052,15 @@ export async function beginFormalRun(input: {
       .limit(1);
     const run = rows[0];
     if (!run) throw new Error(`Formal acquisition run not found: ${input.runId}`);
+    const scheduleKey = run.scheduleId
+      ? ((
+          await tx
+            .select({ scheduleKey: contentSourceSchedules.scheduleKey })
+            .from(contentSourceSchedules)
+            .where(eq(contentSourceSchedules.scheduleId, run.scheduleId))
+            .limit(1)
+        )[0]?.scheduleKey ?? null)
+      : null;
     const request = parseFormalRunRequestV1(run.requestSnapshot);
     const traceRows = await tx
       .select({ maximum: max(contentAcquisitionProviderTraces.sequence) })
@@ -1999,6 +2075,7 @@ export async function beginFormalRun(input: {
       return {
         runId: run.runId,
         scheduleId: run.scheduleId,
+        scheduleKey,
         parentRunId: run.parentRunId,
         request,
         providerJobId: run.providerJobId,
@@ -2024,6 +2101,7 @@ export async function beginFormalRun(input: {
     return {
       runId: run.runId,
       scheduleId: run.scheduleId,
+      scheduleKey,
       parentRunId: run.parentRunId,
       request,
       providerJobId: run.providerJobId,

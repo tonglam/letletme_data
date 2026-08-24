@@ -45,19 +45,22 @@ describe('Briefing acquisition manifest', () => {
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(1026);
+    ).toBe(1186);
     expect(
       Object.values(bundle.coverage.xLaneForecastCalls.FINAL90).reduce(
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(401);
+    ).toBe(561);
     expect(
       Object.values(bundle.coverage.xLaneCallCaps.FINAL90).reduce(
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(484);
+    ).toBe(677);
+    expect(bundle.coverage.backstopMainCalls).toBe(80);
+    expect(bundle.coverage.backstopSaturationFollowupCalls).toBe(80);
+    expect(bundle.coverage.backstopHeadroomCalls).toBe(32);
     expect(bundle.coverage.clubs.every((club) => club.officialMissing === 0)).toBe(true);
     expect(
       bundle.coverage.clubs.reduce((total, club) => total + club.primaryReportingMissing, 0),

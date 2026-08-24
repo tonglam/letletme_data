@@ -4,6 +4,7 @@ import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { z } from 'zod';
 
 import {
+  GROK_OUTPUT_CONTRACT_REVISION,
   GrokBuildExecutionError,
   type GrokBuildExecutionHooks,
   type GrokBuildExecutionResult,
@@ -25,6 +26,7 @@ const hostGrokHealthSchema = z
     sandbox: z.literal('strict'),
     lastXProbeAt: z.string().datetime({ offset: true }).nullable(),
     lastXProbeOk: z.boolean().nullable(),
+    outputContractRevision: z.number().int().positive(),
   })
   .strict();
 
@@ -279,6 +281,12 @@ export class HostGrokRunnerClient {
           `Expected runner release ${this.expectedRunnerReleaseSha}, observed ${health.runnerReleaseSha}`,
         );
       }
+      if (health.outputContractRevision !== GROK_OUTPUT_CONTRACT_REVISION) {
+        throw new GrokBuildExecutionError(
+          'RUNNER_IDENTITY_MISMATCH',
+          'Host Grok runner output contract revision is not supported',
+        );
+      }
     };
 
     let healthResponse = await readHealth();
@@ -455,7 +463,23 @@ export class HostGrokRunnerClient {
     }
     if (!parsed.data.ok) {
       if (parsed.data.providerProcessStarted) markProviderStarted();
-      throw new GrokBuildExecutionError(parsed.data.failureClass, parsed.data.errorDigest);
+      if (
+        (this.expectedRunnerReleaseSha &&
+          this.expectedRunnerReleaseSha !== 'unknown' &&
+          parsed.data.runnerReleaseSha !== this.expectedRunnerReleaseSha) ||
+        parsed.data.grokVersion !== this.expectedVersion ||
+        parsed.data.outputContractRevision !== GROK_OUTPUT_CONTRACT_REVISION
+      ) {
+        throw new GrokBuildExecutionError(
+          'RUNNER_IDENTITY_MISMATCH',
+          'Runner failure identity did not match the expected contract',
+        );
+      }
+      throw new GrokBuildExecutionError(
+        parsed.data.failureClass,
+        parsed.data.errorDigest,
+        parsed.data.failureEvidence ?? null,
+      );
     }
     markProviderStarted();
     if (
@@ -466,7 +490,8 @@ export class HostGrokRunnerClient {
       parsed.data.grokVersion !== this.expectedVersion ||
       parsed.data.result.executionLocation !== 'HOST_RUNNER' ||
       parsed.data.result.runnerReleaseSha !== parsed.data.runnerReleaseSha ||
-      parsed.data.result.grokVersion !== parsed.data.grokVersion
+      parsed.data.result.grokVersion !== parsed.data.grokVersion ||
+      parsed.data.result.outputContractRevision !== GROK_OUTPUT_CONTRACT_REVISION
     ) {
       throw new GrokBuildExecutionError(
         'RUNNER_IDENTITY_MISMATCH',

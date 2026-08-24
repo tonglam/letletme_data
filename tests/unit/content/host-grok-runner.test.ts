@@ -50,6 +50,7 @@ async function fakeRunner(input: {
         sandbox: 'strict',
         lastXProbeAt: probeReady ? new Date().toISOString() : null,
         lastXProbeOk: probeReady ? true : null,
+        outputContractRevision: 2,
       });
       return;
     }
@@ -122,6 +123,10 @@ async function fakeRunner(input: {
           providerProcessStarted: !input.failBeforeStart,
           failureClass: 'GROK_TOOL_FAILED',
           errorDigest: 'e'.repeat(64),
+          runnerReleaseSha: releaseSha,
+          grokVersion: '1.0.5',
+          runnerBinaryHash: 'e'.repeat(64),
+          outputContractRevision: 2,
         });
         return;
       }
@@ -154,6 +159,7 @@ async function fakeRunner(input: {
         outputTokens: 5,
         totalCostUsd: 0.01,
         rawPostEvidenceAvailable: false,
+        outputContractRevision: 2,
         executionLocation: 'HOST_RUNNER',
         runnerReleaseSha: releaseSha,
         grokVersion: '1.0.5',

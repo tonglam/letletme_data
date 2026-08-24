@@ -3,7 +3,7 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 assertIntegrationEnv();
 
 import { afterAll, expect, test } from 'bun:test';
-import { eq, ne } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 
 import { loadBriefingManifest } from '../../src/content/acquisition/acquisition-manifest';
 import {
@@ -91,6 +91,7 @@ function saturatedExecution(request: XToolRequestV1): GrokBuildExecutionResult {
     outputTokens: 20,
     totalCostUsd: 0.01,
     rawPostEvidenceAvailable: false,
+    outputContractRevision: 2,
   };
 }
 
@@ -137,7 +138,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
       leaseOwner: null,
       leaseExpiresAt: null,
     })
-    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+    .where(
+      and(
+        eq(contentSourceSchedules.partitionId, partition.partitionId),
+        eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+      ),
+    );
 
   const [claimed] = await claimDueFormalRuns({
     enabledAdapters: ['X_ACCOUNT'],
@@ -306,7 +312,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
   await db
     .update(contentSourceSchedules)
     .set({ nextDueAt: new Date(Date.now() - 1_000) })
-    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+    .where(
+      and(
+        eq(contentSourceSchedules.partitionId, partition.partitionId),
+        eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+      ),
+    );
   let failedRequestHash: string | null = null;
   let exhaustedRunId: string | null = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -332,7 +343,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
       await db
         .update(contentSourceSchedules)
         .set({ nextDueAt: new Date(Date.now() - 1_000) })
-        .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+        .where(
+          and(
+            eq(contentSourceSchedules.partitionId, partition.partitionId),
+            eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+          ),
+        );
     }
   }
   const [exhaustedRun] = await db
@@ -357,7 +373,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
       failureStreak: contentSourceSchedules.failureStreak,
     })
     .from(contentSourceSchedules)
-    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+    .where(
+      and(
+        eq(contentSourceSchedules.partitionId, partition.partitionId),
+        eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+      ),
+    );
   expect(exhaustedSchedule?.circuitState).toBe('OPEN');
   expect(exhaustedSchedule?.failureStreak).toBe(3);
   expect((exhaustedSchedule?.checkpoint as { windowEnd?: string }).windowEnd).toBe(
@@ -462,4 +483,151 @@ test('commits a started probe and releases the main reservation atomically on pr
     .from(contentAcquisitionProviderTraces)
     .where(eq(contentAcquisitionProviderTraces.runId, claimed.runId));
   expect(traces).toEqual([{ terminalState: 'CONTROL_PLANE_PROBE_FAILED' }]);
+});
+
+test('retries an output-contract failure once per immutable request after a transient failure', async () => {
+  await resetBriefingAcquisitionState();
+  const bundle = await loadBriefingManifest();
+  const budgetPolicy = compileXBudgetPolicy({
+    coverage: bundle.coverage,
+    globalRolling24hLimit: 2_400,
+    final90Rolling90mLimit: 300,
+  });
+  await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'x-contract-retry-test' });
+  const db = await getDb();
+  const [endpoint] = await db
+    .select({ endpointId: contentSourceEndpoints.endpointId })
+    .from(contentSourceEndpoints)
+    .where(eq(contentSourceEndpoints.endpointKey, 'official-fpl-x'))
+    .limit(1);
+  const [partition] = await db
+    .select({ partitionId: contentSourcePartitions.partitionId })
+    .from(contentSourcePartitions)
+    .where(eq(contentSourcePartitions.partitionKey, 'official-fpl'))
+    .limit(1);
+  if (!endpoint || !partition) throw new Error('OfficialFPL manifest rows are missing');
+
+  await db
+    .update(contentSourceEndpoints)
+    .set({
+      stableExternalId: '761568335138058240',
+      identityStatus: 'VERIFIED',
+      identityCheckedAt: new Date(),
+      identityNextCheckAt: new Date(Date.now() + 30 * 24 * 60 * 60_000),
+    })
+    .where(eq(contentSourceEndpoints.endpointId, endpoint.endpointId));
+  await db.update(contentSourceSchedules).set({ status: 'paused' });
+  await db
+    .update(contentSourceSchedules)
+    .set({
+      status: 'active',
+      nextDueAt: new Date(Date.now() - 60_000),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    })
+    .where(
+      and(
+        eq(contentSourceSchedules.partitionId, partition.partitionId),
+        eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+      ),
+    );
+
+  const [firstClaim] = await claimDueFormalRuns({
+    enabledAdapters: ['X_ACCOUNT'],
+    claimLimit: 1,
+    xBudgetPolicy: budgetPolicy,
+  });
+  if (!firstClaim) throw new Error('OfficialFPL recurring run was not claimed');
+  expect(await confirmFormalRunEnqueued({ runId: firstClaim.runId })).toBe(true);
+  const firstBegun = await beginFormalRun({ runId: firstClaim.runId });
+  expect(firstBegun.status).toBe('RUNNING');
+  if (!('toolRequest' in firstBegun.request)) throw new Error('Expected X tool request');
+
+  const contractEvidence = {
+    provider: 'grok-build' as const,
+    operation: firstBegun.request.toolRequest.toolName,
+    requestMetadataHash: 'a'.repeat(64),
+    responseMetadataHash: 'b'.repeat(64),
+    providerJobIdHash: 'c'.repeat(64),
+    providerUnits: 1 as const,
+    terminalState: 'ATTESTED_FINAL_SCHEMA_REJECTED',
+    runMetrics: {
+      outputContractRevision: 2,
+      schemaFingerprint: 'd'.repeat(64),
+      inputTokens: 100,
+      outputTokens: 20,
+      totalCostUsd: 0.01,
+    },
+  };
+  await failFormalRun({
+    runId: firstClaim.runId,
+    failureClass: 'GROK_FINAL_SCHEMA_INVALID',
+    errorSummary: 'synthetic contract failure after a valid provider call',
+    outputContractFailure: true,
+    providerEvidence: contractEvidence,
+  });
+
+  await db
+    .update(contentSourceSchedules)
+    .set({ nextDueAt: new Date(Date.now() - 1_000) })
+    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+  const [secondClaim] = await claimDueFormalRuns({
+    enabledAdapters: ['X_ACCOUNT'],
+    claimLimit: 1,
+    xBudgetPolicy: budgetPolicy,
+  });
+  if (!secondClaim) throw new Error('Contract retry was not claimed');
+  expect(secondClaim.requestHash).toBe(firstClaim.requestHash);
+  const secondBegun = await beginFormalRun({ runId: secondClaim.runId });
+  expect(secondBegun.status).toBe('RUNNING');
+  await failFormalRun({
+    runId: secondClaim.runId,
+    failureClass: 'GROK_FINAL_SCHEMA_INVALID',
+    errorSummary: 'synthetic repeated contract failure',
+    outputContractFailure: true,
+    providerEvidence: contractEvidence,
+  });
+
+  const [blockedSchedule] = await db
+    .select({
+      failureStreak: contentSourceSchedules.failureStreak,
+      circuitState: contentSourceSchedules.circuitState,
+      probeAfter: contentSourceSchedules.probeAfter,
+    })
+    .from(contentSourceSchedules)
+    .where(
+      and(
+        eq(contentSourceSchedules.partitionId, partition.partitionId),
+        eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+      ),
+    );
+  expect(blockedSchedule).toMatchObject({
+    failureStreak: 2,
+    circuitState: 'OPEN',
+    probeAfter: null,
+  });
+  const [blockedRun] = await db
+    .select({
+      status: contentAcquisitionRuns.status,
+      checkpointAdvanced: contentAcquisitionRuns.checkpointAdvanced,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, secondClaim.runId));
+  expect(blockedRun).toMatchObject({ status: 'FAILED', checkpointAdvanced: false });
+  const gaps = await db
+    .select({ runId: contentAcquisitionGaps.declaringRunId })
+    .from(contentAcquisitionGaps)
+    .where(eq(contentAcquisitionGaps.declaringRunId, secondClaim.runId));
+  expect(gaps).toHaveLength(0);
+
+  await db
+    .update(contentSourceSchedules)
+    .set({ nextDueAt: new Date(Date.now() - 1_000) })
+    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+  const blockedClaim = await claimDueFormalRuns({
+    enabledAdapters: ['X_ACCOUNT'],
+    claimLimit: 1,
+    xBudgetPolicy: budgetPolicy,
+  });
+  expect(blockedClaim).toHaveLength(0);
 });

@@ -200,6 +200,7 @@ async function startFormalAcquisition(): Promise<void> {
     const reconciliation = await reconcileBriefingSourceRegistry({
       bundle,
       gitRevision: runtimeGitRevision(),
+      includeXBackstop: flags.xBackstopEnabled,
     });
     manifestBundle = bundle;
     if (flags.xScanEnabled && flags.realGrokEnabled) {
@@ -219,6 +220,7 @@ async function startFormalAcquisition(): Promise<void> {
       fullRolloutEligible: bundle.coverage.fullRolloutEligible,
       status: reconciliation.status,
       xLaneCapsEnforced: xBudgetPolicy?.enforceLaneCaps ?? null,
+      xBackstopEnabled: flags.xBackstopEnabled,
     });
   } catch (error) {
     // Acquisition fails closed, but publication delivery remains independent.

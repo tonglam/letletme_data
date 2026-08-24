@@ -47,6 +47,7 @@ managed_keys=(
   CONTENT_PIPELINE_ENABLED
   CONTENT_ACQUISITION_SHADOW_MODE
   CONTENT_X_SCAN_ENABLED
+  CONTENT_X_BACKSTOP_ENABLED
   CONTENT_HTTP_ACQUISITION_ENABLED
   CONTENT_PODCAST_TRANSCRIPT_ENABLED
   CONTENT_YOUTUBE_DISCOVERY_ENABLED
@@ -156,10 +157,15 @@ if [[ "$mode" != status ]]; then
   fi
 
   if [[ "$mode" == shadow-http || "$mode" == host-shadow ]]; then
+    backstop_enabled=false
+    if [[ "$mode" == host-shadow ]]; then
+      backstop_enabled=$(boolean_setting CONTENT_X_BACKSTOP_ENABLED)
+    fi
     settings=(
       CONTENT_PIPELINE_ENABLED=true
       CONTENT_ACQUISITION_SHADOW_MODE=true
       "CONTENT_X_SCAN_ENABLED=$([[ "$mode" == host-shadow ]] && printf true || printf false)"
+      "CONTENT_X_BACKSTOP_ENABLED=$backstop_enabled"
       CONTENT_HTTP_ACQUISITION_ENABLED=true
       "CONTENT_PODCAST_TRANSCRIPT_ENABLED=$hermes_ready"
       CONTENT_YOUTUBE_DISCOVERY_ENABLED=true
@@ -176,6 +182,7 @@ if [[ "$mode" != status ]]; then
       "CONTENT_PIPELINE_ENABLED=$pipeline_after_disable"
       CONTENT_ACQUISITION_SHADOW_MODE=false
       CONTENT_X_SCAN_ENABLED=false
+      CONTENT_X_BACKSTOP_ENABLED=false
       CONTENT_HTTP_ACQUISITION_ENABLED=false
       CONTENT_PODCAST_TRANSCRIPT_ENABLED=false
       CONTENT_YOUTUBE_DISCOVERY_ENABLED=false
@@ -193,7 +200,7 @@ if [[ "$mode" != status ]]; then
   }
   trap cleanup_temporary_file EXIT
 
-  managed_pattern='^[[:space:]]*(export[[:space:]]+)?(CONTENT_PIPELINE_ENABLED|CONTENT_ACQUISITION_SHADOW_MODE|CONTENT_X_SCAN_ENABLED|CONTENT_HTTP_ACQUISITION_ENABLED|CONTENT_PODCAST_TRANSCRIPT_ENABLED|CONTENT_YOUTUBE_DISCOVERY_ENABLED|CONTENT_YOUTUBE_NATIVE_ENABLED|CONTENT_YOUTUBE_GENERATED_ENABLED|CONTENT_REAL_GROK_ENABLED)[[:space:]]*='
+  managed_pattern='^[[:space:]]*(export[[:space:]]+)?(CONTENT_PIPELINE_ENABLED|CONTENT_ACQUISITION_SHADOW_MODE|CONTENT_X_SCAN_ENABLED|CONTENT_X_BACKSTOP_ENABLED|CONTENT_HTTP_ACQUISITION_ENABLED|CONTENT_PODCAST_TRANSCRIPT_ENABLED|CONTENT_YOUTUBE_DISCOVERY_ENABLED|CONTENT_YOUTUBE_NATIVE_ENABLED|CONTENT_YOUTUBE_GENERATED_ENABLED|CONTENT_REAL_GROK_ENABLED)[[:space:]]*='
   awk -v pattern="$managed_pattern" '$0 !~ pattern { print }' "$env_file" >"$temporary_file"
   for setting in "${settings[@]}"; do
     printf '%s\n' "$setting" >>"$temporary_file"
@@ -213,12 +220,13 @@ if [[ "$mode" != status ]]; then
   trap - EXIT
 fi
 
-printf '{"event":"briefing_acquisition_config","mode":"%s","changed":%s,"pipeline":%s,"shadow":%s,"x":%s,"http":%s,"podcast":%s,"youtubeDiscovery":%s,"youtubeNative":%s,"youtubeGenerated":%s,"publication":%s,"public":%s,"hermesReady":%s,"youtubeNativeReady":%s,"secretValueExposed":false}\n' \
+printf '{"event":"briefing_acquisition_config","mode":"%s","changed":%s,"pipeline":%s,"shadow":%s,"x":%s,"xBackstop":%s,"http":%s,"podcast":%s,"youtubeDiscovery":%s,"youtubeNative":%s,"youtubeGenerated":%s,"publication":%s,"public":%s,"hermesReady":%s,"youtubeNativeReady":%s,"secretValueExposed":false}\n' \
   "$mode" \
   "$changed" \
   "$(boolean_setting CONTENT_PIPELINE_ENABLED)" \
   "$(boolean_setting CONTENT_ACQUISITION_SHADOW_MODE)" \
   "$(boolean_setting CONTENT_X_SCAN_ENABLED)" \
+  "$(boolean_setting CONTENT_X_BACKSTOP_ENABLED)" \
   "$(boolean_setting CONTENT_HTTP_ACQUISITION_ENABLED)" \
   "$(boolean_setting CONTENT_PODCAST_TRANSCRIPT_ENABLED)" \
   "$(boolean_setting CONTENT_YOUTUBE_DISCOVERY_ENABLED)" \

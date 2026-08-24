@@ -159,4 +159,24 @@ describe('Briefing content migration contract', () => {
     expect(sql).toContain('REVOKE ALL ON content.source_media_assets FROM letletme_graphql_reader');
     expect(sql).toContain('REVOKE DELETE ON content.source_media_items FROM letletme_data_writer');
   });
+
+  test('adds a role-aware X backstop schedule without changing primary keys', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0042_content_x_backstop_schedule.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain(String.raw`ADD COLUMN schedule_role text NOT NULL DEFAULT 'PRIMARY'`);
+    expect(sql).toContain('content_source_schedules_partition_target_role_idx');
+    expect(sql).toContain(String.raw`schedule_role = 'BACKSTOP'`);
+    expect(sql).toContain('CREATE VIEW content.acquisition_schedule_health');
+    expect(sql).toContain('GRANT SELECT ON content.acquisition_schedule_health');
+  });
+
+  test('keeps legacy endpoint health on PRIMARY schedules', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0043_content_x_primary_endpoint_health.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('RENAME TO acquisition_endpoint_health_with_roles');
+    expect(sql).toContain(String.raw`schedule.schedule_role = 'PRIMARY'`);
+    expect(sql).toContain('acquisition_schedule_health');
+  });
 });

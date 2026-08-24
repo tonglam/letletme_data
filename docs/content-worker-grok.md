@@ -59,7 +59,10 @@ type HostGrokExecutionRequestV1 = {
 ```
 
 Runner 只返回经过 Zod、single-tool、completion 顺序和 exact-input 校验的结构化
-结果。原始 trace、thoughts、认证信息和完整错误文本只在内存中存在，不进入日志或数据库。
+结果。final JSON 合同为 revision 2：成功响应必须带 `outputContractRevision=2`；合同失败
+只返回有界的 stage、schema fingerprint、trace/tool hash、字节数、token/cost 和 runner
+身份元数据。原始 trace、thoughts、认证信息、帖子正文和完整错误文本只在内存中存在，不进入
+日志或数据库。
 
 `runId + requestHash` 在 Runner 内存中做短期幂等；同一 run ID 的不同请求返回 409。
 Runner 发送响应前发生 timeout、断开或进程异常时，响应会标记

@@ -346,6 +346,21 @@ X 继续使用“高流量单账号、低流量小分区”的原则，但 parti
   `fromDate` 的 UTC 00:00；返回 10 条直接保存并记录 `SEMANTIC_RESULT_CAP`，不追加第二次
   semantic 搜索。
 
+实现补充：每个 X_ACCOUNT partition 仍只有一个 PRIMARY 快线查询，不按页面模块拆分请求；开启
+manifest reconciler 始终为 40 个 X_ACCOUNT partition 保留一个 `schedule_role=BACKSTOP`；
+`CONTENT_X_BACKSTOP_ENABLED=false` 时这些行是 `paused`，开启后才变为 `active` 并参与 claim。
+Backstop 固定在 UTC 00:00/12:00 slot 结束后 10 分钟开始，带 0–10 分钟
+确定性 jitter，读取前 12 小时并重叠 120 秒，最多追补 24 小时。它的 request snapshot 明确写
+`coverageMode=BACKSTOP`，饱和只产生一个更早窗口 follow-up；PRIMARY 与 BACKSTOP 按 X post ID
+共享 Receipt 去重。开关关闭时不 claim backstop，PRIMARY cadence、checkpoint 和历史保持不变。
+
+Grok final output contract 当前为 revision 2：根对象只能是 `posts` 或 `users`，帖文五个事实字段
+必须是字符串，`postId/userId` 不接受数字类型；Data 只去除一个前导 `@`、规范化明确时区到 UTC，
+并以 hash 记录被忽略的额外字段。`GROK_FINAL_INVALID`/`GROK_FINAL_SCHEMA_INVALID` 只对同一
+immutable request 重试一次；第二次合同失败保持 `FAILED`、不开 GAP、不推进 checkpoint，直到
+部署新的 contract revision 后由 rearm 脚本恢复。失败 evidence 只保存 stage、issue path/schema
+fingerprint、trace/tool hash、字节数、token/cost 和 runner identity，不保存 final 原文或 thoughts。
+
 ### 6.3 多维预算
 
 预算由 PostgreSQL 原子 reserve，不由 worker 内存计数：
@@ -357,6 +372,10 @@ X 继续使用“高流量单账号、低流量小分区”的原则，但 parti
 
 manifest compiler 根据未来 24 小时 cadence forecast 加 20% headroom 生成 CI snapshot。X 初始
 并发仍为 2；HTTP 可按 host 设较高并发，但同 host 首版不超过 2；Hermes 首版并发固定为 1。
+
+当前 coverage snapshot 另外记录 backstop 主调用 80 次、最坏 saturation follow-up 80 次和 32 次
+headroom；X lane forecast/cap 将这两个 backstop 调用纳入容量计算。它们不是新的页面查询，而是
+同一批账号事实的第二个 12 小时覆盖机会。
 
 lane forecast cap 只对 production recurring acquisition 强制执行。`CONTENT_ACQUISITION_SHADOW_MODE=true`
 时，shadow、开发验证和受控 backfill 不创建 phase/lane hard-cap reservation；仍然强制 global

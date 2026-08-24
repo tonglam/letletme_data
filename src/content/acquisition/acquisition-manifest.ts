@@ -158,6 +158,9 @@ export type BriefingCoverageReport = Readonly<{
     Record<AcquisitionPhase, Readonly<Record<XAcquisitionLane, number>>>
   >;
   xLaneCallCaps: Readonly<Record<AcquisitionPhase, Readonly<Record<XAcquisitionLane, number>>>>;
+  backstopMainCalls: number;
+  backstopSaturationFollowupCalls: number;
+  backstopHeadroomCalls: number;
   clubs: readonly ClubCoverageResult[];
   fullRolloutEligible: boolean;
 }>;
@@ -251,6 +254,9 @@ function xLaneForecasts(plan: BriefingAcquisitionPlan): {
   windowMinutes: Record<AcquisitionPhase, number>;
   calls: Record<AcquisitionPhase, Record<XAcquisitionLane, number>>;
   caps: Record<AcquisitionPhase, Record<XAcquisitionLane, number>>;
+  backstopMainCalls: number;
+  backstopSaturationFollowupCalls: number;
+  backstopHeadroomCalls: number;
 } {
   const windowMinutes: Record<AcquisitionPhase, number> = {
     NORMAL: 24 * 60,
@@ -267,12 +273,22 @@ function xLaneForecasts(plan: BriefingAcquisitionPlan): {
     APPROACHING: emptyLaneRecord(),
     FINAL90: emptyLaneRecord(),
   };
+  const accountPartitionCount = plan.partitions.filter((partition) => {
+    const profile = ACQUISITION_PROFILES[partition.profileKey];
+    return profile?.adapterKind === 'X_ACCOUNT';
+  }).length;
+  const backstopMainCalls = accountPartitionCount * 2;
+  const backstopSaturationFollowupCalls = backstopMainCalls;
+  const backstopHeadroomCalls = Math.ceil(
+    (backstopMainCalls + backstopSaturationFollowupCalls) * 0.2,
+  );
   for (const partition of plan.partitions) {
     const profile = ACQUISITION_PROFILES[partition.profileKey];
     if (!profile || !X_ACQUISITION_LANES.includes(profile.lane as XAcquisitionLane)) continue;
     const lane = profile.lane as XAcquisitionLane;
     for (const phase of Object.keys(calls) as AcquisitionPhase[]) {
       calls[phase][lane] += Math.ceil(windowMinutes[phase] / profile.cadenceMinutes[phase]);
+      if (profile.adapterKind === 'X_ACCOUNT') calls[phase][lane] += 4;
     }
   }
   const caps = Object.fromEntries(
@@ -283,7 +299,14 @@ function xLaneForecasts(plan: BriefingAcquisitionPlan): {
       ),
     ]),
   ) as Record<AcquisitionPhase, Record<XAcquisitionLane, number>>;
-  return { windowMinutes, calls, caps };
+  return {
+    windowMinutes,
+    calls,
+    caps,
+    backstopMainCalls,
+    backstopSaturationFollowupCalls,
+    backstopHeadroomCalls,
+  };
 }
 
 function validateBundle(sources: BriefingSourcesManifest, plan: BriefingAcquisitionPlan): string[] {
@@ -478,6 +501,9 @@ function compileCoverage(
     xForecastWindowMinutes: xForecasts.windowMinutes,
     xLaneForecastCalls: xForecasts.calls,
     xLaneCallCaps: xForecasts.caps,
+    backstopMainCalls: xForecasts.backstopMainCalls,
+    backstopSaturationFollowupCalls: xForecasts.backstopSaturationFollowupCalls,
+    backstopHeadroomCalls: xForecasts.backstopHeadroomCalls,
     clubs,
     fullRolloutEligible: clubs.every(
       (club) => club.officialMissing === 0 && club.primaryReportingMissing === 0,
