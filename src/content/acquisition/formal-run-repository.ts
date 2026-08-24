@@ -2001,7 +2001,6 @@ export async function beginFormalRun(input: {
       .select({
         runId: contentAcquisitionRuns.runId,
         scheduleId: contentAcquisitionRuns.scheduleId,
-        scheduleKey: contentSourceSchedules.scheduleKey,
         parentRunId: contentAcquisitionRuns.parentRunId,
         status: contentAcquisitionRuns.status,
         requestSnapshot: contentAcquisitionRuns.requestSnapshot,
@@ -2010,15 +2009,20 @@ export async function beginFormalRun(input: {
         providerUnits: contentAcquisitionRuns.providerUnits,
       })
       .from(contentAcquisitionRuns)
-      .leftJoin(
-        contentSourceSchedules,
-        eq(contentSourceSchedules.scheduleId, contentAcquisitionRuns.scheduleId),
-      )
       .where(eq(contentAcquisitionRuns.runId, input.runId))
       .for('update')
       .limit(1);
     const run = rows[0];
     if (!run) throw new Error(`Formal acquisition run not found: ${input.runId}`);
+    const scheduleKey = run.scheduleId
+      ? ((
+          await tx
+            .select({ scheduleKey: contentSourceSchedules.scheduleKey })
+            .from(contentSourceSchedules)
+            .where(eq(contentSourceSchedules.scheduleId, run.scheduleId))
+            .limit(1)
+        )[0]?.scheduleKey ?? null)
+      : null;
     const request = parseFormalRunRequestV1(run.requestSnapshot);
     const traceRows = await tx
       .select({ maximum: max(contentAcquisitionProviderTraces.sequence) })
@@ -2033,7 +2037,7 @@ export async function beginFormalRun(input: {
       return {
         runId: run.runId,
         scheduleId: run.scheduleId,
-        scheduleKey: run.scheduleKey,
+        scheduleKey,
         parentRunId: run.parentRunId,
         request,
         providerJobId: run.providerJobId,
@@ -2059,7 +2063,7 @@ export async function beginFormalRun(input: {
     return {
       runId: run.runId,
       scheduleId: run.scheduleId,
-      scheduleKey: run.scheduleKey,
+      scheduleKey,
       parentRunId: run.parentRunId,
       request,
       providerJobId: run.providerJobId,
