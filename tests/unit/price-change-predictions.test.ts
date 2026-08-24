@@ -6,6 +6,7 @@ import {
   priceChangeBootstrapEdgeCacheKey,
   PriceChangePredictionValidationError,
   PRICE_CHANGE_STALE_MS,
+  requestPriceChangeBootstrap,
 } from '../../src/services/price-change-predictions.service';
 
 function bootstrapFixture(overrides: Record<string, unknown> = {}): FPLBootstrapResponse {
@@ -100,23 +101,49 @@ describe('price-change prediction normalization', () => {
     );
   });
 
-  it('uses the request-start timestamp as the publication ordering fence', async () => {
-    const requestStartedAt: number[] = [];
+  it('retains request ordering when an older bootstrap completes last', async () => {
     const bootstrap = bootstrapFixture();
-    const dependencies = {
-      getBootstrap: async (requestStartedAtMs?: number) => {
-        requestStartedAt.push(requestStartedAtMs ?? Number.NaN);
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        return bootstrap;
-      },
-    };
+    let finishOlder: ((value: FPLBootstrapResponse) => void) | undefined;
+    const olderResponse = new Promise<FPLBootstrapResponse>((resolve) => {
+      finishOlder = resolve;
+    });
+    const olderTimes = [
+      Date.parse('2026-08-24T06:04:59.900Z'),
+      Date.parse('2026-08-24T06:05:10.000Z'),
+    ];
+    const newerTimes = [
+      Date.parse('2026-08-24T06:05:00.100Z'),
+      Date.parse('2026-08-24T06:05:01.000Z'),
+    ];
+    const requestedAt: number[] = [];
 
-    // The full publication path owns database state, so this assertion keeps
-    // the contract at the dependency boundary: the cache key and ordering
-    // fence receive the same timestamp before the provider await begins.
-    const startedAt = Date.now();
-    await dependencies.getBootstrap(startedAt);
-    expect(requestStartedAt).toEqual([startedAt]);
+    const olderPromise = requestPriceChangeBootstrap(
+      {
+        getBootstrap: async (requestStartedAtMs) => {
+          requestedAt.push(requestStartedAtMs);
+          return olderResponse;
+        },
+      },
+      () => olderTimes.shift() as number,
+    );
+    const newer = await requestPriceChangeBootstrap(
+      {
+        getBootstrap: async (requestStartedAtMs) => {
+          requestedAt.push(requestStartedAtMs);
+          return bootstrap;
+        },
+      },
+      () => newerTimes.shift() as number,
+    );
+    finishOlder?.(bootstrap);
+    const older = await olderPromise;
+
+    expect(requestedAt).toEqual([
+      Date.parse('2026-08-24T06:04:59.900Z'),
+      Date.parse('2026-08-24T06:05:00.100Z'),
+    ]);
+    expect(older.requestStartedAt.getTime()).toBeLessThan(newer.requestStartedAt.getTime());
+    expect(older.fetchedAt.getTime()).toBeGreaterThan(newer.fetchedAt.getTime());
   });
 
   it('keeps official preseason zero values as a usable board row', () => {

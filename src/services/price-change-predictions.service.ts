@@ -96,9 +96,8 @@ export type PriceChangePublicationDependencies = {
   /**
    * The caller supplies the immutable request-start timestamp so the default
    * client and the publication fence use the same cache bucket/order value.
-   * The argument remains optional for lightweight test dependencies.
    */
-  readonly getBootstrap: (requestStartedAtMs?: number) => Promise<FPLBootstrapResponse>;
+  readonly getBootstrap: (requestStartedAtMs: number) => Promise<FPLBootstrapResponse>;
 };
 
 export type PreparedPriceChangePublication = {
@@ -158,9 +157,26 @@ export function priceChangeBootstrapEdgeCacheKey(nowMs = Date.now()): string {
 }
 
 const defaultDependencies: PriceChangePublicationDependencies = {
-  getBootstrap: (requestStartedAtMs = Date.now()) =>
+  getBootstrap: (requestStartedAtMs) =>
     fplClient.getBootstrap({ edgeCacheKey: priceChangeBootstrapEdgeCacheKey(requestStartedAtMs) }),
 };
+
+export async function requestPriceChangeBootstrap(
+  dependencies: PriceChangePublicationDependencies = defaultDependencies,
+  now: () => number = Date.now,
+): Promise<{
+  readonly bootstrap: FPLBootstrapResponse;
+  readonly requestStartedAt: Date;
+  readonly fetchedAt: Date;
+}> {
+  const requestStartedAtMs = now();
+  const bootstrap = await dependencies.getBootstrap(requestStartedAtMs);
+  return {
+    bootstrap,
+    requestStartedAt: new Date(requestStartedAtMs),
+    fetchedAt: new Date(now()),
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -846,13 +862,8 @@ export async function preparePriceChangePublication(
     expectedItems: 2,
   });
   try {
-    // Capture ordering at request start. A slow earlier request may complete
-    // after a newer request; using completion time would let that stale
-    // payload pass the active-publication fence.
-    const requestStartedAtMs = Date.now();
-    const requestStartedAt = new Date(requestStartedAtMs);
-    const bootstrap = await dependencies.getBootstrap(requestStartedAtMs);
-    const fetchedAt = new Date();
+    const { bootstrap, requestStartedAt, fetchedAt } =
+      await requestPriceChangeBootstrap(dependencies);
     if (!bootstrap || !Array.isArray(bootstrap.elements) || bootstrap.elements.length === 0) {
       throw new PriceChangePredictionValidationError('FPL bootstrap contains no players');
     }
@@ -932,8 +943,8 @@ export async function persistPriceChangePublication(
           'The active fpl:price-changes publication manifest is invalid',
         );
       }
-      const activeFetchedAt = Date.parse(activeManifest.sourceCheckedAt);
-      if (!Number.isFinite(activeFetchedAt)) {
+      const activeRequestStartedAt = Date.parse(activeManifest.sourceCheckedAt);
+      if (!Number.isFinite(activeRequestStartedAt)) {
         throw new PriceChangePredictionUnavailableError(
           'The active fpl:price-changes source timestamp is invalid',
         );
@@ -944,7 +955,7 @@ export async function persistPriceChangePublication(
           'The prepared price-change request timestamp is invalid',
         );
       }
-      if (requestStartedAtMs < activeFetchedAt) {
+      if (requestStartedAtMs < activeRequestStartedAt) {
         throw new PriceChangePredictionUnavailableError(
           'The prepared price-change request started before the active publication',
         );
@@ -968,7 +979,7 @@ export async function persistPriceChangePublication(
       sourceRunId,
       manifest: {
         state: 'staging',
-        sourceCheckedAt: fetchedAt.toISOString(),
+        sourceCheckedAt: requestStartedAt.toISOString(),
         lastSuccessfulFetchAt: fetchedAt.toISOString(),
       },
     });
@@ -977,7 +988,7 @@ export async function persistPriceChangePublication(
       seasonCode: season.seasonCode,
       revision: publication.revision,
       publicationId: publication.publicationId,
-      sourceCheckedAt: fetchedAt,
+      sourceCheckedAt: requestStartedAt,
       lastSuccessfulFetchAt: fetchedAt,
       state: 'active',
       items: [
