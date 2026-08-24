@@ -169,6 +169,27 @@ describe('Grok Build single-X-tool executor', () => {
     expect(parsed.posts[0]?.text).toBe('');
   });
 
+  test('keeps whitespace text in the raw contract for the adapter gate', () => {
+    const whitespace = JSON.stringify({
+      posts: [
+        {
+          postId: '2090909465801371803',
+          authorHandle: 'OfficialFPL',
+          createdAt: '2026-08-21T21:10:38Z',
+          text: ' ',
+          url: 'https://x.com/OfficialFPL/status/2090909465801371803',
+        },
+      ],
+    });
+    expect(() =>
+      parseGrokBuildStreamingMessages({
+        output: trace(undefined, false, undefined, whitespace),
+        request,
+        durationMs: 123,
+      }),
+    ).not.toThrow();
+  });
+
   test('rejects a Grok init event that exposes a removed local tool', () => {
     expect(() =>
       parseGrokBuildStreamingMessages({

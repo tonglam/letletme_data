@@ -107,6 +107,9 @@ function validatePostFacts(input: { post: GrokBuildXPostV1; request: XScanRunReq
       'X post Snowflake and createdAt differ by more than five seconds',
     );
   }
+  if (input.post.text.length > 0 && !normalizeCanonicalText(input.post.text)) {
+    throw new XPostQualityError('X_POST_TEXT_EMPTY', 'X post text is blank after normalization');
+  }
   validateReturnedUrl(input.post);
 }
 

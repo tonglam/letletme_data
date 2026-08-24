@@ -354,8 +354,9 @@ Backstop 固定在 UTC 00:00/12:00 slot 结束后 10 分钟开始，带 0–10 �
 `coverageMode=BACKSTOP`，饱和只产生一个更早窗口 follow-up；PRIMARY 与 BACKSTOP 按 X post ID
 共享 Receipt 去重。开关关闭时不 claim backstop，PRIMARY cadence、checkpoint 和历史保持不变。
 
-Grok final output contract 当前为 revision 2：根对象只能是 `posts` 或 `users`，帖文五个事实字段
-必须是字符串，`postId/userId` 不接受数字类型；Data 只去除一个前导 `@`、规范化明确时区到 UTC，
+Grok final output contract 当前为 revision 3：根对象只能是 `posts` 或 `users`，帖文五个事实字段
+必须是字符串（媒体-only 帖子的 `text` 可以是字面量空字符串，空白字符串拒绝），
+`postId/userId` 不接受数字类型；Data 只去除一个前导 `@`、规范化明确时区到 UTC，
 并以 hash 记录被忽略的额外字段。`GROK_FINAL_INVALID`/`GROK_FINAL_SCHEMA_INVALID` 只对同一
 immutable request 重试一次；第二次合同失败保持 `FAILED`、不开 GAP、不推进 checkpoint，直到
 部署新的 contract revision 后由 rearm 脚本恢复。失败 evidence 只保存 stage、issue path/schema

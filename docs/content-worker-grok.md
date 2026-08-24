@@ -59,7 +59,9 @@ type HostGrokExecutionRequestV1 = {
 ```
 
 Runner 只返回经过 Zod、single-tool、completion 顺序和 exact-input 校验的结构化
-结果。final JSON 合同为 revision 2：成功响应必须带 `outputContractRevision=2`；合同失败
+结果。final JSON 合同为 revision 3：成功响应必须带 `outputContractRevision=3`；帖文的 `text`
+可以是字面量空字符串（媒体-only 帖子），Data 会把它投影为 `METADATA_ONLY`，但拒绝空白字符
+串；合同失败
 只返回有界的 stage、schema fingerprint、trace/tool hash、字节数、token/cost 和 runner
 身份元数据。原始 trace、thoughts、认证信息、帖子正文和完整错误文本只在内存中存在，不进入
 日志或数据库。

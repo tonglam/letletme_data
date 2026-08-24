@@ -109,6 +109,17 @@ function batch(mediaIncluded: boolean): AcquisitionBatchV1 {
   };
 }
 
+function metadataOnlyBatch(): AcquisitionBatchV1 {
+  const value = batch(false);
+  return {
+    ...value,
+    items: value.items.map((item) => ({
+      ...item,
+      body: { availability: 'METADATA_ONLY' as const, text: null },
+    })),
+  };
+}
+
 test('decouples X receipts from durable media processing and reuses legacy core revisions', async () => {
   await resetBriefingAcquisitionState();
   const bundle = await loadBriefingManifest();
@@ -552,6 +563,21 @@ test('decouples X receipts from durable media processing and reuses legacy core 
     unchangedCount: 2,
     outboxCount: 0,
   });
+
+  const thirdRunId = await createRun();
+  const third = await persist(thirdRunId, metadataOnlyBatch());
+  expect(third).toMatchObject({
+    state: 'CHECKED_NO_CHANGE',
+    revisionCount: 0,
+    unchangedCount: 2,
+    outboxCount: 0,
+  });
+  const currentBodies = await db
+    .select({ bodyAvailability: contentSourceReceiptRevisions.bodyAvailability })
+    .from(contentSourceReceiptRevisions);
+  expect(currentBodies).toHaveLength(2);
+  expect(currentBodies.every((row) => row.bodyAvailability === 'FULL')).toBe(true);
+
   const [counts] = await db
     .select({
       receipts: sql<number>`count(DISTINCT ${contentSourceReceipts.receiptId})::integer`,

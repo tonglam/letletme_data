@@ -120,6 +120,22 @@ describe('Grok Build X post adapter gates', () => {
     });
   });
 
+  test('rejects whitespace-only text instead of treating it as media-only', () => {
+    try {
+      adaptGrokBuildPosts({
+        request,
+        execution: execution([{ ...posts[0], text: ' ' }]),
+        checkedAt: new Date('2026-08-21T21:16:00.000Z'),
+      });
+      throw new Error('Expected whitespace-only post rejection');
+    } catch (error) {
+      expect(error).toMatchObject({
+        failureClass: 'X_ALL_POSTS_REJECTED',
+        rejections: [{ reasonCode: 'X_POST_TEXT_EMPTY' }],
+      });
+    }
+  });
+
   test('derives a timestamp within five seconds of the attested createdAt', () => {
     expect(
       Math.abs(
