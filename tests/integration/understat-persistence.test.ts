@@ -1234,6 +1234,56 @@ describe('Understat persistence', () => {
     expect(row?.updatedAt).toEqual(before);
   });
 
+  test('does not churn candidate revisions across seasons but tracks review transitions', async () => {
+    const identity = `${baseId + 200}`;
+    const initial = await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'pending',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season: '2728',
+      evidence: { candidateCount: 1 },
+    });
+    providerLinkIds.push(initial.id);
+    const db = await getDb();
+    const before = new Date('2000-08-08T12:00:00.000Z');
+    await db
+      .update(providerEntityLinks)
+      .set({ updatedAt: before })
+      .where(eq(providerEntityLinks.linkId, initial.id));
+
+    await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'ambiguous',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season: '2829',
+      evidence: { candidateCount: 2, observedMatches: 3 },
+    });
+
+    const [candidate] = await db
+      .select({ updatedAt: providerEntityLinks.updatedAt })
+      .from(providerEntityLinks)
+      .where(eq(providerEntityLinks.linkId, initial.id));
+    expect(candidate?.updatedAt).toEqual(before);
+
+    const reviewed = await providerIdentityRepository.updateEntityStatus(initial.id, 'pending');
+    expect(reviewed?.status).toBe('pending');
+    const [reviewedRow] = await db
+      .select({ updatedAt: providerEntityLinks.updatedAt })
+      .from(providerEntityLinks)
+      .where(eq(providerEntityLinks.linkId, initial.id));
+    expect(reviewedRow?.updatedAt.getTime()).toBeGreaterThan(before.getTime());
+  });
+
   test('reconciles only stale evidence from a completed FPL fixture', async () => {
     const db = await getDb();
     await db.insert(fplSeasons).values({

@@ -130,10 +130,15 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
           reviewedBy: reviewed ? input.reviewedBy : null,
           reviewedAt: resolvedReviewedAt,
           // Candidate links are re-observed on every season repair pass. Keep
-          // the source revision stable when the effective link is unchanged;
-          // otherwise a later season's pending/ambiguous candidate can make
-          // every earlier season look stale again.
+          // the source revision stable while a pending/ambiguous candidate is
+          // re-observed; otherwise a later season's candidate evidence can
+          // make every earlier season look stale again. Explicit review
+          // transitions still use the generic branch below and advance the
+          // revision, including a verified link moved back to pending.
           updatedAt: sql`CASE
+            WHEN ${providerEntityLinks.status} IN ('pending', 'ambiguous')
+              AND excluded.status IN ('pending', 'ambiguous')
+            THEN ${providerEntityLinks.updatedAt}
             WHEN ${providerEntityLinks.status} IS DISTINCT FROM excluded.status
               OR ${providerEntityLinks.method} IS DISTINCT FROM excluded.method
               OR ${providerEntityLinks.ruleId} IS DISTINCT FROM excluded.rule_id
