@@ -104,7 +104,7 @@ export const managerEventScoreSnapshotsInFpl = fpl.table(
     check('manager_event_score_snapshots_ids_positive', sql`event_id > 0 AND entry_id > 0`),
     check(
       'manager_event_score_snapshots_source_valid',
-      sql`source IN ('FPL_ENTRY_SUMMARY', 'FPL_CLASSIC_STANDINGS', 'FPL_FINAL_RESULT')`,
+      sql`source IN ('FPL_EVENT_LIVE', 'FPL_ENTRY_SUMMARY', 'FPL_CLASSIC_STANDINGS', 'FPL_FINAL_RESULT')`,
     ),
     check(
       'manager_event_score_snapshots_scope_total_valid',

@@ -7,6 +7,7 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
+import { deriveEventLiveManagerScore } from '../domain/event-live-manager-score';
 import {
   hasCompleteEntryPickLiveCoverage,
   isCompleteEntryPicks,
@@ -415,23 +416,48 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         for (const element of live.elements) {
           elementsPoints.set(element.id, element.stats.total_points);
         }
+        const eventLiveScore = deriveEventLiveManagerScore(
+          entryId,
+          picks.picks.map((pick) => ({
+            entryId,
+            position: pick.position,
+            elementId: pick.element,
+            multiplier: pick.multiplier,
+            isCaptain: pick.is_captain,
+            isViceCaptain: pick.is_vice_captain,
+            transfersCost: pick.position === 1 ? picks.entry_history.event_transfers_cost : null,
+            sourceUpdatedAt: exactRichSyncedAt,
+          })),
+          elementsPoints,
+        );
+        if (!eventLiveScore) {
+          throw new Error(
+            `Refusing untraceable event-live manager score for entry ${entryId}, event ${eventId}`,
+          );
+        }
         const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
+        const previousOverallPoints =
+          picks.entry_history.total_points -
+          (picks.entry_history.points - picks.entry_history.event_transfers_cost);
+        const benchPoints = picks.picks
+          .filter((pick) => pick.position > 11)
+          .reduce((total, pick) => total + (elementsPoints.get(pick.element) ?? 0), 0);
         const insert = {
           seasonId: season.seasonId,
           entryId,
           eventId,
-          eventPoints: entryHistory.points,
+          eventPoints: eventLiveScore.eventPoints,
           eventTransfers: entryHistory.event_transfers,
           eventTransfersCost: entryHistory.event_transfers_cost,
-          eventNetPoints: entryHistory.points - entryHistory.event_transfers_cost,
-          eventBenchPoints: entryHistory.points_on_bench ?? null,
+          eventNetPoints: eventLiveScore.netEventPoints,
+          eventBenchPoints: benchPoints,
           eventAutoSubPoints: getAutoSubPoints(autoSubs, elementsPoints),
           eventRank: entryHistory.rank ?? null,
           eventChip: toNullableDbChip(picks.active_chip),
           playedCaptainElementId: captainPick ? captainPick.element : null,
           captainPoints: captainPick ? captainPointsBase * captainPick.multiplier : null,
           automaticSubstitutions: autoSubs,
-          overallPoints: entryHistory.total_points,
+          overallPoints: previousOverallPoints + eventLiveScore.netEventPoints,
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,

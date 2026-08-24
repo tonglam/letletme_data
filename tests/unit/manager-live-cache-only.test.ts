@@ -5,6 +5,7 @@ import { fplClient } from '../../src/clients/fpl';
 import { eventRepository } from '../../src/repositories/events';
 import { managerScoreCheckpointRepository } from '../../src/repositories/live-window';
 import { seasonRepository } from '../../src/repositories/seasons';
+import { eventLiveManagerScoreService } from '../../src/services/event-live-manager-scores.service';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 const dispatchModule = await import('../../src/services/manager-live-refresh-dispatch');
@@ -13,6 +14,62 @@ const redisRows = new Map<number, string>();
 let redisReadFails = false;
 let redisWriteSucceeds = false;
 let postgresRows: Array<Record<string, unknown>> = [];
+let availableEventLiveEntryIds: Set<number> | null = null;
+
+const loadEventLiveManagerScores = mock(
+  async (_season: typeof TEST_SEASON, eventId: number, entryIds: readonly number[]) => {
+    const availableEntryIds = entryIds.filter(
+      (entryId) => availableEventLiveEntryIds?.has(entryId) ?? true,
+    );
+    if (availableEntryIds.length === 0) return null;
+    const metadataByEntry = new Map<number, Record<string, unknown>>();
+    for (const entryId of availableEntryIds) {
+      const redisValue = redisRows.get(entryId);
+      if (redisValue) metadataByEntry.set(entryId, JSON.parse(redisValue));
+      const postgresValue = postgresRows.find((row) => row.entryId === entryId);
+      if (postgresValue && !metadataByEntry.has(entryId))
+        metadataByEntry.set(entryId, postgresValue);
+    }
+    const checkedAt =
+      [...metadataByEntry.values()]
+        .map((row) => row.checkedAt)
+        .filter((value): value is string => typeof value === 'string')
+        .sort()[0] ?? new Date().toISOString();
+    return {
+      season: TEST_SEASON.seasonCode,
+      eventId,
+      state: 'live' as const,
+      revision: 'fpl:live:test-publication:8',
+      publicationId: 'test-publication',
+      checkedAt,
+      sourceCheckedAt: checkedAt,
+      scores: new Map(
+        availableEntryIds.map((entryId) => {
+          const metadata = metadataByEntry.get(entryId);
+          const eventPoints =
+            typeof metadata?.eventPoints === 'number' ? metadata.eventPoints : entryId % 100;
+          const netEventPoints =
+            typeof metadata?.netEventPoints === 'number' ? metadata.netEventPoints : eventPoints;
+          const totalPoints =
+            typeof metadata?.totalPoints === 'number' ? metadata.totalPoints : 1000 + entryId;
+          return [
+            entryId,
+            {
+              entryId,
+              eventPoints,
+              netEventPoints,
+              totalPoints,
+              transferCost: 0,
+              picksCheckedAt: checkedAt,
+              revision: `fpl:live:test-publication:8:entry:${entryId}`,
+            },
+          ] as const;
+        }),
+      ),
+    };
+  },
+);
+eventLiveManagerScoreService.load = loadEventLiveManagerScores as never;
 
 const findCurrent = mock(async () => TEST_SEASON as never);
 seasonRepository.findCurrent = findCurrent;
@@ -72,6 +129,7 @@ const reattachManagerLiveSpies = (): void => {
   redisSingleton.getClient = getRedisClient;
   managerScoreCheckpointRepository.findByScopeAndEntryIds = findCheckpointRows;
   managerScoreCheckpointRepository.upsertBatch = upsertCheckpoint;
+  eventLiveManagerScoreService.load = loadEventLiveManagerScores as never;
   if (dispatchModule.dispatchManagerLiveRefresh !== dispatchRefresh) {
     dispatchModule.dispatchManagerLiveRefresh = dispatchRefresh;
   }
@@ -141,6 +199,7 @@ describe('manager live CACHE_ONLY reads', () => {
     redisReadFails = false;
     redisWriteSucceeds = false;
     postgresRows = [];
+    availableEventLiveEntryIds = null;
     dispatchRefresh.mockClear();
     getEntrySummary.mockClear();
     getClassicStandings.mockClear();
@@ -202,6 +261,7 @@ describe('manager live CACHE_ONLY reads', () => {
     });
 
     postgresRows = [];
+    availableEventLiveEntryIds = new Set([101]);
     const partial = await resolveManagerLiveScores({
       eventId: 1,
       entryIds: [101, 102],
@@ -215,6 +275,7 @@ describe('manager live CACHE_ONLY reads', () => {
     });
 
     redisRows.clear();
+    availableEventLiveEntryIds = new Set();
     const unavailable = await resolveManagerLiveScores({
       eventId: 1,
       entryIds: [101, 102],
@@ -328,7 +389,7 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result).toMatchObject({ servedFrom: 'POSTGRES' });
     expect(result.rows[0]).toMatchObject({
       overallRank: 765_432,
-      revision: 'postgres-durable-revision',
+      revision: 'fpl:live:test-publication:8:entry:101',
     });
     expect(result.rows[0]).toHaveProperty('revisionAt', checkedAt);
   });
@@ -362,7 +423,7 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result).toMatchObject({ servedFrom: 'REDIS' });
     expect(result.rows[0]).toMatchObject({
       overallRank: 123_456,
-      revision: 'redis-newer-revision',
+      revision: 'fpl:live:test-publication:8:entry:101',
     });
   });
 
@@ -397,7 +458,7 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result).toMatchObject({ servedFrom: 'POSTGRES' });
     expect(result.rows[0]).toMatchObject({
       overallRank: 765_432,
-      revision: 'postgres-newer-revision',
+      revision: 'fpl:live:test-publication:8:entry:101',
       revisionAt: checkpointRevisionAt.toISOString(),
     });
   });
@@ -405,10 +466,12 @@ describe('manager live CACHE_ONLY reads', () => {
 
 describe('manager live READ_THROUGH source reporting', () => {
   beforeEach(() => {
+    reattachManagerLiveSpies();
     redisRows.clear();
     redisReadFails = false;
     redisWriteSucceeds = false;
     postgresRows = [];
+    availableEventLiveEntryIds = null;
     dispatchRefresh.mockClear();
     getEntrySummary.mockReset();
     getEntrySummary.mockImplementation(async () => {
@@ -444,7 +507,7 @@ describe('manager live READ_THROUGH source reporting', () => {
     expect(getEntrySummary).toHaveBeenCalledTimes(1);
   });
 
-  test('retries a summary when neither durable store accepted it', async () => {
+  test('keeps the event-live score available when rank metadata cannot be persisted', async () => {
     getEntrySummary.mockImplementationOnce(
       async () =>
         ({
@@ -465,9 +528,9 @@ describe('manager live READ_THROUGH source reporting', () => {
     });
 
     expect(result).toMatchObject({
-      dataAvailability: 'UNAVAILABLE',
-      rows: [],
-      missingEntryIds: [101],
+      dataAvailability: 'FRESH',
+      rows: [expect.objectContaining({ entryId: 101, source: 'FPL_EVENT_LIVE' })],
+      missingEntryIds: [],
       errorCode: 'UPSTREAM_UNAVAILABLE',
     });
   });
@@ -734,9 +797,11 @@ describe('manager live classic standings convergence', () => {
 
 describe('manager live API read mode contract', () => {
   beforeEach(() => {
+    reattachManagerLiveSpies();
     redisRows.clear();
     redisReadFails = false;
     postgresRows = [];
+    availableEventLiveEntryIds = null;
     dispatchRefresh.mockReset();
     dispatchRefresh.mockImplementation(async () => undefined);
     getEntrySummary.mockClear();

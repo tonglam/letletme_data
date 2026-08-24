@@ -121,10 +121,6 @@ function isBlank(eventLive: DbEventLive | undefined, elementType: number | null)
   return true;
 }
 
-function resolveEventNetPoints(eventPoints: number, transfersCost: number): number {
-  return eventPoints - transfersCost;
-}
-
 export function isEntryResultRichEnough(
   entryResult: Pick<DbEntryEventResult, 'richSyncedAt'> | undefined,
   freshAfter?: Date,
@@ -215,21 +211,28 @@ export function buildEntryResultData(
       ? storedAutoSubs
       : normalizeAutoSubs(fallbackPicks?.automatic_subs ?? []);
 
-  const eventPoints = entryResult?.eventPoints ?? fallbackPicks?.entry_history.points ?? 0;
+  const eventPoints = picks.reduce(
+    (total, pick) => total + (eventLiveMap.get(pick.element)?.totalPoints ?? 0) * pick.multiplier,
+    0,
+  );
   const eventTransfers =
     entryResult?.eventTransfers ?? fallbackPicks?.entry_history.event_transfers ?? 0;
   const eventTransfersCost =
     entryResult?.eventTransfersCost ?? fallbackPicks?.entry_history.event_transfers_cost ?? 0;
-  const eventNetPoints =
-    entryResult?.eventNetPoints ?? resolveEventNetPoints(eventPoints, eventTransfersCost);
-  const eventBenchPoints =
-    entryResult?.eventBenchPoints ?? fallbackPicks?.entry_history.points_on_bench ?? null;
-  const eventAutoSubPoints =
-    entryResult?.eventAutoSubPoints ?? getAutoSubPoints(autoSubs, eventLiveMap);
+  const eventNetPoints = eventPoints - eventTransfersCost;
+  const eventBenchPoints = picks
+    .filter((pick) => pick.position > 11)
+    .reduce((total, pick) => total + (eventLiveMap.get(pick.element)?.totalPoints ?? 0), 0);
+  const eventAutoSubPoints = getAutoSubPoints(autoSubs, eventLiveMap);
   const eventRank = entryResult?.eventRank ?? fallbackPicks?.entry_history.rank ?? null;
   const eventChip = entryResult?.eventChip ?? toNullableDbChip(fallbackPicks?.active_chip);
-  const overallPoints =
-    entryResult?.overallPoints ?? fallbackPicks?.entry_history.total_points ?? 0;
+  const previousOverallPoints = entryResult
+    ? entryResult.overallPoints - entryResult.eventNetPoints
+    : fallbackPicks
+      ? fallbackPicks.entry_history.total_points -
+        (fallbackPicks.entry_history.points - fallbackPicks.entry_history.event_transfers_cost)
+      : 0;
+  const overallPoints = previousOverallPoints + eventNetPoints;
   const overallRank = entryResult?.overallRank ?? fallbackPicks?.entry_history.overall_rank ?? 0;
   const teamValue = entryResult?.teamValue ?? fallbackPicks?.entry_history.value ?? null;
   const bank = entryResult?.bank ?? fallbackPicks?.entry_history.bank ?? null;

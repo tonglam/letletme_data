@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   mergeClassicStandingWithEntrySummary,
+  projectEventLiveManagerRows,
   type ManagerLiveScoreRow,
 } from '../../src/services/manager-live.service';
 
@@ -27,6 +28,45 @@ const row = (overrides: Partial<ManagerLiveScoreRow> = {}): ManagerLiveScoreRow 
 });
 
 describe('Classic manager headline projection', () => {
+  test('replaces a lagging 23-point summary with the traced 37-point event-live score', () => {
+    const projected = projectEventLiveManagerRows('2627', 1, [109967], [row()], {
+      season: '2627',
+      eventId: 1,
+      state: 'live',
+      revision: 'fpl:live:publication-8:8',
+      publicationId: 'publication-8',
+      checkedAt: '2026-08-24T00:01:00.000Z',
+      sourceCheckedAt: '2026-08-24T00:00:59.000Z',
+      scores: new Map([
+        [
+          109967,
+          {
+            entryId: 109967,
+            eventPoints: 37,
+            netEventPoints: 37,
+            transferCost: 0,
+            totalPoints: 37,
+            picksCheckedAt: '2026-08-24T00:00:30.000Z',
+            revision: 'fpl:live:publication-8:8:entry:109967:score',
+          },
+        ],
+      ]),
+    });
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        entryId: 109967,
+        eventPoints: 37,
+        netEventPoints: 37,
+        totalPoints: 37,
+        source: 'FPL_EVENT_LIVE',
+        leagueRank: 84,
+        revision: 'fpl:live:publication-8:8:entry:109967:score',
+        checkedAt: '2026-08-24T00:01:00.000Z',
+      }),
+    ]);
+  });
+
   test('uses the newer Entry Summary headline while retaining Classic league rank', () => {
     const projected = mergeClassicStandingWithEntrySummary(
       row(),
