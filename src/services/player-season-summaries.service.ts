@@ -1,4 +1,12 @@
-import { databaseTransactionStorage, getDbClient, withDatabaseSavepoint } from '../db/singleton';
+import type postgres from 'postgres';
+
+import {
+  databaseTransactionStorage,
+  getDb,
+  getDbClient,
+  runInDatabaseTransaction,
+  withDatabaseSavepoint,
+} from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { reconcileProviderMappings } from './provider-matcher.service';
@@ -38,6 +46,11 @@ type PlayerStateRefreshRow = {
 type StaleSeasonRow = {
   season_id: number;
   season_code: string;
+};
+
+type PlayerStateSourceMarkerRow = {
+  source_updated_at: Date | string;
+  understat_source_updated_at: Date | string;
 };
 
 const iso = (value: Date | string): string =>
@@ -96,11 +109,12 @@ export async function refreshPlayerStateSeason(
   if (!row) {
     throw new Error(`Player State refresh returned no metadata for ${season.seasonCode}`);
   }
+  const sourceMarker = await advancePlayerStateSourceMarker(season);
   const result = {
     revision: Number(row.revision),
     playerCount: row.player_count,
     understatPlayerCount: row.understat_player_count,
-    sourceUpdatedAt: iso(row.source_updated_at),
+    sourceUpdatedAt: iso(sourceMarker.source_updated_at),
     refreshedAt: iso(row.refreshed_at),
   };
   logInfo('Player State season rows refreshed', {
@@ -115,6 +129,85 @@ export async function refreshPlayerStateSeason(
 async function withPlayerStateProjectionSavepoint<T>(operation: () => Promise<T>): Promise<T> {
   if (!databaseTransactionStorage.getStore()) return operation();
   return withDatabaseSavepoint(operation);
+}
+
+/**
+ * Provider reconciliation mutates shared bridge rows. Keep an unscoped repair
+ * atomic as well as protecting resource mutations with a savepoint, otherwise
+ * a statement failure can leave an earlier quarantine or confirmation behind.
+ */
+async function withPlayerStateReconciliationTransaction<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (databaseTransactionStorage.getStore()) return withDatabaseSavepoint(operation);
+
+  const db = await getDb();
+  return (await db.transaction(async (drizzleTransaction) => {
+    const transaction = (
+      drizzleTransaction as unknown as {
+        session?: { client?: postgres.TransactionSql };
+      }
+    ).session?.client;
+    if (!transaction) {
+      throw new Error('Drizzle transaction did not expose its pinned postgres client');
+    }
+    return runInDatabaseTransaction(transaction, operation, drizzleTransaction);
+  })) as T;
+}
+
+/** Persist every Understat source timestamp consumed by the Player State repair selector. */
+async function advancePlayerStateSourceMarker(
+  season: FplSeasonRef,
+): Promise<PlayerStateSourceMarkerRow> {
+  const client = await getDbClient();
+  const rows = await client<PlayerStateSourceMarkerRow[]>`
+    WITH understat_source AS (
+      SELECT GREATEST(
+        COALESCE((
+          SELECT max(metrics.updated_at)
+          FROM understat.player_seasons metrics
+          WHERE metrics.season_code = ${season.seasonCode}
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(provider_season.updated_at)
+          FROM understat.seasons provider_season
+          WHERE provider_season.season_code = ${season.seasonCode}
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(understat_match.updated_at)
+          FROM understat.matches understat_match
+          WHERE understat_match.season_code = ${season.seasonCode}
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(team_season.updated_at)
+          FROM understat.player_team_seasons team_season
+          WHERE team_season.season_code = ${season.seasonCode}
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(match_stats.updated_at)
+          FROM understat.player_match_stats match_stats
+          INNER JOIN understat.matches understat_match
+            ON understat_match.match_id = match_stats.match_id
+          WHERE understat_match.season_code = ${season.seasonCode}
+        ), '-infinity'::timestamptz)
+      ) AS source_updated_at
+    )
+    UPDATE reporting.player_state_season_refreshes refresh
+    SET
+      understat_source_updated_at = GREATEST(
+        refresh.understat_source_updated_at,
+        understat_source.source_updated_at
+      ),
+      source_updated_at = GREATEST(refresh.source_updated_at, understat_source.source_updated_at)
+    FROM understat_source
+    WHERE refresh.season_id = ${season.seasonId}::smallint
+    RETURNING refresh.source_updated_at, refresh.understat_source_updated_at
+  `;
+  const row = rows[0];
+  if (!row) {
+    throw new Error(`Player State source marker update returned no row for ${season.seasonCode}`);
+  }
+  return row;
 }
 
 /** Refresh Player State without allowing a projection failure to abort its caller's write. */
@@ -135,7 +228,7 @@ export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise
   mappings: Awaited<ReturnType<typeof reconcileProviderMappings>>;
   refresh: PlayerStateSeasonRefresh;
 }> {
-  const mappings = await withPlayerStateProjectionSavepoint(() =>
+  const mappings = await withPlayerStateReconciliationTransaction(() =>
     reconcileProviderMappings(season.seasonCode),
   );
   const refresh = await withPlayerStateProjectionSavepoint(() => refreshPlayerStateSeason(season));
@@ -211,6 +304,11 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             WHERE provider_season.season_code = season.season_code
           ), '-infinity'::timestamptz),
           COALESCE((
+            SELECT max(understat_match.updated_at)
+            FROM understat.matches understat_match
+            WHERE understat_match.season_code = season.season_code
+          ), '-infinity'::timestamptz),
+          COALESCE((
             SELECT max(team_season.updated_at)
             FROM understat.player_team_seasons team_season
             WHERE team_season.season_code = season.season_code
@@ -250,10 +348,16 @@ export async function repairPlayerStateSeasons(): Promise<{
   const seasons = await findStalePlayerStateSeasons();
   if (seasons.length === 0) return { checked: 0, refreshed: 0 };
 
-  const results = await Promise.allSettled(seasons.map(publishUnderstatPlayerState));
-  const failures = results.flatMap((result, index) =>
-    result.status === 'rejected' ? [{ season: seasons[index], reason: result.reason }] : [],
-  );
+  const failures: { season: FplSeasonRef; reason: unknown }[] = [];
+  let refreshed = 0;
+  for (const season of seasons) {
+    try {
+      await publishUnderstatPlayerState(season);
+      refreshed += 1;
+    } catch (reason) {
+      failures.push({ season, reason });
+    }
+  }
   for (const failure of failures) {
     logError('Player State repair failed', failure.reason, {
       season: failure.season.seasonCode,
@@ -265,7 +369,7 @@ export async function repairPlayerStateSeasons(): Promise<{
       `Failed to repair ${failures.length} Player State season scope(s)`,
     );
   }
-  return { checked: seasons.length, refreshed: results.length };
+  return { checked: seasons.length, refreshed };
 }
 
 export async function repairPlayerSeasonSummaries(): Promise<{
