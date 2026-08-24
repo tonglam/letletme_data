@@ -32,6 +32,8 @@ export type ContentRuntimeFlags = Readonly<{
   dailyXCallLimit: number;
   final90XCallLimit: number;
   identityXCallLimit: number;
+  /** Temporary multiplier for recurring X lane caps; tune from observed usage. */
+  xLaneCapMultiplier: number;
   supadataDailyCreditLimit: number;
   hermesDailyAudioMinutes: number;
   supadataApiKeyPresent: boolean;
@@ -133,6 +135,7 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
     dailyXCallLimit: Math.max(0, Number(process.env.CONTENT_X_DAILY_CALL_LIMIT ?? 2_400)),
     final90XCallLimit: Math.max(0, Number(process.env.CONTENT_X_FINAL90_CALL_LIMIT ?? 300)),
     identityXCallLimit: Math.max(0, Number(process.env.CONTENT_X_IDENTITY_CALL_LIMIT ?? 100)),
+    xLaneCapMultiplier: Number(process.env.CONTENT_X_LANE_CAP_MULTIPLIER ?? 1),
     supadataDailyCreditLimit: Math.max(
       0,
       Number(process.env.CONTENT_SUPADATA_DAILY_CREDIT_LIMIT ?? 0),
@@ -268,6 +271,7 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
     ['CONTENT_GROK_MAX_OUTPUT_BYTES', flags.grokMaxOutputBytes],
     ['CONTENT_HTTP_TIMEOUT_MS', flags.httpTimeoutMs],
     ['CONTENT_HTTP_MAX_OUTPUT_BYTES', flags.httpMaxOutputBytes],
+    ['CONTENT_X_LANE_CAP_MULTIPLIER', flags.xLaneCapMultiplier],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 1) {
       throw new Error(`${name} must be a positive integer`);

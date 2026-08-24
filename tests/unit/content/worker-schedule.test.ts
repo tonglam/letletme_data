@@ -51,6 +51,7 @@ describe('content worker poll policy', () => {
       dailyXCallLimit: 2_400,
       final90XCallLimit: 300,
       identityXCallLimit: 100,
+      xLaneCapMultiplier: 1,
       supadataDailyCreditLimit: 0,
       hermesDailyAudioMinutes: 0,
       supadataApiKeyPresent: false,
