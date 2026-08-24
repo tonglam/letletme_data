@@ -87,6 +87,7 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('briefing_source_media_health');
     expect(runtimeHealthScript).toContain('attempts=${HEALTH_ATTEMPTS:-90}');
     expect(workflow).toContain('HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2');
+    expect(workflow).toContain('command_timeout: 20m');
     expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
     expect(workflow).toContain('"$old_media_present" || true');
     expect(deployStateMachine).toContain(
