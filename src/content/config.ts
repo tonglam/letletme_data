@@ -2,6 +2,7 @@ export type ContentRuntimeFlags = Readonly<{
   pipelineEnabled: boolean;
   acquisitionShadowMode: boolean;
   xScanEnabled: boolean;
+  xBackstopEnabled: boolean;
   httpAcquisitionEnabled: boolean;
   podcastTranscriptEnabled: boolean;
   youtubeDiscoveryEnabled: boolean;
@@ -80,6 +81,7 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
     pipelineEnabled: booleanEnv(process.env.CONTENT_PIPELINE_ENABLED, false),
     acquisitionShadowMode: booleanEnv(process.env.CONTENT_ACQUISITION_SHADOW_MODE, false),
     xScanEnabled: booleanEnv(process.env.CONTENT_X_SCAN_ENABLED, false),
+    xBackstopEnabled: booleanEnv(process.env.CONTENT_X_BACKSTOP_ENABLED, false),
     httpAcquisitionEnabled: booleanEnv(process.env.CONTENT_HTTP_ACQUISITION_ENABLED, false),
     podcastTranscriptEnabled: booleanEnv(process.env.CONTENT_PODCAST_TRANSCRIPT_ENABLED, false),
     youtubeDiscoveryEnabled: booleanEnv(process.env.CONTENT_YOUTUBE_DISCOVERY_ENABLED, false),
@@ -182,6 +184,9 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   }
   if (flags.realGrokEnabled && !flags.xScanEnabled) {
     throw new Error('CONTENT_REAL_GROK_ENABLED requires CONTENT_X_SCAN_ENABLED');
+  }
+  if (flags.xBackstopEnabled && (!flags.xScanEnabled || !flags.realGrokEnabled)) {
+    throw new Error('CONTENT_X_BACKSTOP_ENABLED requires real X scanning');
   }
   if (flags.youtubeDiscoveryEnabled && !flags.httpAcquisitionEnabled) {
     throw new Error('CONTENT_YOUTUBE_DISCOVERY_ENABLED requires CONTENT_HTTP_ACQUISITION_ENABLED');

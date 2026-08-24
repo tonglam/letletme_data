@@ -9,8 +9,10 @@ import {
   grokBuildCliArgs,
   grokBuildChildEnvironment,
   GrokBuildExecutionError,
+  GROK_OUTPUT_CONTRACT_REVISION,
   parseGrokBuildStreamingMessages,
   runBoundedProcess,
+  type GrokBuildFailureEvidence,
   type GrokBuildExecutionResult,
 } from './acquisition/grok-build-executor';
 import {
@@ -49,6 +51,7 @@ type RunnerFailure = Readonly<{
   failureClass: string;
   providerProcessStarted: boolean;
   errorDigest: string;
+  evidence: GrokBuildFailureEvidence | null;
 }>;
 
 type StoredExecution = Readonly<{
@@ -79,7 +82,10 @@ function boundedErrorDigest(error: unknown): string {
 }
 
 function failureFrom(error: unknown, providerProcessStarted: boolean): RunnerFailure {
-  const candidate = error as { failureClass?: unknown };
+  const candidate = error as {
+    failureClass?: unknown;
+    evidence?: GrokBuildFailureEvidence | null;
+  };
   return {
     failureClass:
       typeof candidate.failureClass === 'string'
@@ -87,6 +93,7 @@ function failureFrom(error: unknown, providerProcessStarted: boolean): RunnerFai
         : 'RUNNER_EXECUTION_FAILED',
     providerProcessStarted,
     errorDigest: boundedErrorDigest(error),
+    evidence: candidate.evidence ?? null,
   };
 }
 
@@ -238,6 +245,18 @@ async function executeOnHost(
       providerProcessStarted: failure.providerProcessStarted,
       failureClass: failure.failureClass,
       errorDigest: failure.errorDigest,
+      runnerReleaseSha: metadata.releaseSha,
+      grokVersion: metadata.grokVersion,
+      runnerBinaryHash: metadata.binaryHash,
+      outputContractRevision: GROK_OUTPUT_CONTRACT_REVISION,
+      failureEvidence: failure.evidence
+        ? {
+            ...failure.evidence,
+            runnerReleaseSha: metadata.releaseSha,
+            grokVersion: metadata.grokVersion,
+            runnerBinaryHash: metadata.binaryHash,
+          }
+        : undefined,
     };
   } finally {
     if (runDirectory) {
@@ -274,6 +293,10 @@ export async function startHostGrokRunner(): Promise<{
     providerProcessStarted,
     failureClass,
     errorDigest: digest(failureClass),
+    runnerReleaseSha: runnerMetadata.releaseSha,
+    grokVersion: runnerMetadata.grokVersion,
+    runnerBinaryHash: runnerMetadata.binaryHash,
+    outputContractRevision: GROK_OUTPUT_CONTRACT_REVISION,
   });
 
   const server = createServer(async (request, response) => {
@@ -288,6 +311,7 @@ export async function startHostGrokRunner(): Promise<{
           ready: probeFresh,
           runnerReleaseSha: releaseSha,
           grokVersion: metadata.grokVersion,
+          outputContractRevision: GROK_OUTPUT_CONTRACT_REVISION,
           sandbox: 'strict',
           lastXProbeAt,
           lastXProbeOk,
@@ -449,6 +473,10 @@ export async function startHostGrokRunner(): Promise<{
           providerProcessStarted: false,
           failureClass: 'RUNNER_CAPACITY',
           errorDigest: digest('runner capacity'),
+          runnerReleaseSha: runnerMetadata.releaseSha,
+          grokVersion: runnerMetadata.grokVersion,
+          runnerBinaryHash: runnerMetadata.binaryHash,
+          outputContractRevision: GROK_OUTPUT_CONTRACT_REVISION,
         };
         writeJson(response, 429, saturated);
         return;

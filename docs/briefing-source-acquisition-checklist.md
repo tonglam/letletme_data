@@ -28,7 +28,8 @@ Instagram 和 TikTok 明确不做。六个案例验证的是 adapter 能力，�
 
 当前 worktree 的版本化 manifest 编译结果：
 
-- 85 个 Entity、108 个 Endpoint、44 个 recurring X partition 和 65 个 schedule。
+- 85 个 Entity、108 个 Endpoint、44 个 recurring X partition、65 个 PRIMARY schedule；开启
+  `CONTENT_X_BACKSTOP_ENABLED` 后另有 40 个 X_ACCOUNT BACKSTOP schedule。
 - Endpoint：83 `X_ACCOUNT`、4 `X_SEMANTIC`、3 `RSS_ATOM`、7 `PODCAST_FEED`、
   11 `YOUTUBE_CHANNEL`。
 - 20 家俱乐部均有 1 个 official 和 2 个 primary reporting Entity；无 coverage 缺口。

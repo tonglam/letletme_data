@@ -11,10 +11,12 @@ import {
   beginFormalRun,
   deferFormalRunForCapacity,
   failFormalRun,
+  type FormalRunProviderEvidence,
   type FormalRunProbeEvidence,
 } from '../acquisition/formal-run-repository';
 import {
   GrokBuildExecutionError,
+  type GrokBuildFailureEvidence,
   type GrokBuildExecutionResult,
   type GrokBuildExecutionHooks,
 } from '../acquisition/grok-build-executor';
@@ -35,6 +37,7 @@ import {
 } from '../acquisition/x-budget';
 import { compileXKeywordRequest, compileXUserRequest } from '../acquisition/x-query-compiler';
 import type { XToolRequestV1 } from '../acquisition/x-query-compiler';
+import { nextBackstopDueAt } from '../acquisition/registry-state';
 import { getContentRuntimeFlags, type ContentRuntimeFlags } from '../config';
 import { getDb, type DbHandle } from '../../db/singleton';
 
@@ -65,12 +68,21 @@ export type GrokBuildExecutorLike = Readonly<{
   ) => Promise<GrokBuildExecutionResult>;
 }>;
 
-function errorFacts(error: unknown): { failureClass: string; summary: string } {
-  const candidate = error as { failureClass?: unknown; message?: unknown };
+function errorFacts(error: unknown): {
+  failureClass: string;
+  summary: string;
+  evidence: GrokBuildFailureEvidence | null;
+} {
+  const candidate = error as {
+    failureClass?: unknown;
+    message?: unknown;
+    evidence?: GrokBuildFailureEvidence | null;
+  };
   return {
     failureClass:
       typeof candidate?.failureClass === 'string' ? candidate.failureClass : 'X_ADAPTER_FAILED',
     summary: typeof candidate?.message === 'string' ? candidate.message : 'Formal X adapter failed',
+    evidence: candidate.evidence ?? null,
   };
 }
 
@@ -91,6 +103,54 @@ function hostXProbeEvidence(terminalState: string): FormalRunProbeEvidence {
     runMetrics: {
       controlPlaneProbe: true,
       probeTarget: 'OfficialFPL',
+    },
+  };
+}
+
+function failureProviderEvidence(
+  request: XToolRequestV1,
+  evidence: GrokBuildFailureEvidence,
+): FormalRunProviderEvidence {
+  const input: Record<string, string | number> =
+    request.toolName === 'x_keyword_search'
+      ? { query: request.query, limit: request.limit, mode: request.mode }
+      : request.toolName === 'x_semantic_search'
+        ? {
+            query: request.query,
+            from_date: request.fromDate,
+            to_date: request.toDate,
+            limit: request.limit,
+          }
+        : request.toolName === 'x_user_search'
+          ? { query: request.handle, count: 3 }
+          : { post_id: request.postId };
+  return {
+    provider: 'grok-build',
+    operation: request.toolName,
+    requestMetadataHash: sha256CanonicalJson({ toolName: request.toolName, input }),
+    responseMetadataHash: evidence.responseMetadataHash,
+    providerJobIdHash: evidence.toolCallIdHash,
+    providerUnits: 1,
+    terminalState: `ATTESTED_${evidence.failureStage}_REJECTED`,
+    runMetrics: {
+      failureStage: evidence.failureStage,
+      outputContractRevision: evidence.outputContractRevision,
+      responseBytes: evidence.responseBytes,
+      traceHash: evidence.traceHash,
+      eventCount: evidence.eventCount,
+      durationMs: Math.round(evidence.durationMs),
+      inputTokens: evidence.inputTokens,
+      outputTokens: evidence.outputTokens,
+      totalCostUsd: evidence.totalCostUsd,
+      issueCodes: evidence.issueCodes,
+      issuePaths: evidence.issuePaths,
+      schemaFingerprint: evidence.schemaFingerprint,
+      ignoredOutputKeyCount: evidence.ignoredOutputKeyCount,
+      ignoredOutputKeysHash: evidence.ignoredOutputKeysHash,
+      rawPostEvidenceAvailable: evidence.rawPostEvidenceAvailable,
+      runnerReleaseSha: evidence.runnerReleaseSha,
+      grokVersion: evidence.grokVersion,
+      runnerBinaryHash: evidence.runnerBinaryHash,
     },
   };
 }
@@ -125,6 +185,7 @@ export async function runFormalXWorker(
   let releaseProbeBudget: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
+  let activeRun: Awaited<ReturnType<typeof beginFormalRun>> | null = null;
   let scanAccounting: Readonly<{
     returned: number;
     accepted: number;
@@ -133,6 +194,7 @@ export async function runFormalXWorker(
   }> | null = null;
   try {
     const run = await beginFormalRun({ runId: job.runId, db });
+    activeRun = run;
     if (run.status === 'TERMINAL') {
       return {
         runId: job.runId,
@@ -387,7 +449,9 @@ export async function runFormalXWorker(
       nextDueAt:
         run.scheduleId === null
           ? undefined
-          : new Date(checkedAt.getTime() + profile.cadenceMinutes[run.request.phase] * 60_000),
+          : scanRequest.coverageMode === 'BACKSTOP'
+            ? nextBackstopDueAt(checkedAt, run.scheduleKey ?? run.scheduleId)
+            : new Date(checkedAt.getTime() + profile.cadenceMinutes[run.request.phase] * 60_000),
       triggeredJobs: followUpRequest
         ? [
             {
@@ -452,6 +516,9 @@ export async function runFormalXWorker(
         probeCallCount: probeProcessStarted ? 1 : 0,
         rawPostEvidenceAvailable: execution.rawPostEvidenceAvailable,
         traceHash: execution.traceHash,
+        outputContractRevision: execution.outputContractRevision,
+        ignoredOutputKeyCount: execution.ignoredOutputKeyCount,
+        ignoredOutputKeysHash: execution.ignoredOutputKeysHash,
       },
       db,
     });
@@ -529,6 +596,9 @@ export async function runFormalXWorker(
           runId: job.runId,
           failureClass: failure.failureClass,
           errorSummary: failure.summary,
+          outputContractFailure: ['GROK_FINAL_INVALID', 'GROK_FINAL_SCHEMA_INVALID'].includes(
+            failure.failureClass,
+          ),
           providerEvidence: scanExecution
             ? {
                 provider: 'grok-build',
@@ -559,7 +629,12 @@ export async function runFormalXWorker(
                   traceHash: scanExecution.traceHash,
                 },
               }
-            : undefined,
+            : failure.evidence &&
+                activeRun &&
+                activeRun.request.jobKind !== 'X_IDENTITY' &&
+                'toolRequest' in activeRun.request
+              ? failureProviderEvidence(activeRun.request.toolRequest, failure.evidence)
+              : undefined,
           rejections,
           providerProcessStarted: mainProviderProcessStarted,
           probeEvidence,

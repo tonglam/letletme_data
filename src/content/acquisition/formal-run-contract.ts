@@ -76,6 +76,7 @@ const xScanRunRequestV1Schema = commonSchema
   .extend({
     jobKind: z.enum(['X_KEYWORD_SCAN', 'X_SEMANTIC_SCAN', 'X_THREAD_FETCH']),
     adapterKind: z.enum(['X_ACCOUNT', 'X_SEMANTIC']),
+    coverageMode: z.enum(['PRIMARY', 'BACKSTOP']).default('PRIMARY'),
     partition: z
       .object({
         partitionId: z.string().uuid(),

@@ -91,6 +91,7 @@ function saturatedExecution(request: XToolRequestV1): GrokBuildExecutionResult {
     outputTokens: 20,
     totalCostUsd: 0.01,
     rawPostEvidenceAvailable: false,
+    outputContractRevision: 2,
   };
 }
 

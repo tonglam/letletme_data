@@ -21,6 +21,7 @@ describe('content worker poll policy', () => {
       pipelineEnabled: true,
       acquisitionShadowMode: true,
       xScanEnabled: false,
+      xBackstopEnabled: false,
       httpAcquisitionEnabled: false,
       podcastTranscriptEnabled: false,
       youtubeDiscoveryEnabled: false,

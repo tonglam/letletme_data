@@ -14,6 +14,7 @@ const request: XScanRunRequestV1 = {
   schemaVersion: 1,
   jobKind: 'X_KEYWORD_SCAN',
   adapterKind: 'X_ACCOUNT',
+  coverageMode: 'PRIMARY',
   phase: 'NORMAL',
   profileKey: 'x-official-core-v1',
   profileRevision: 1,
@@ -66,6 +67,7 @@ function execution(posts: GrokBuildExecutionResult['posts']): GrokBuildExecution
     outputTokens: 20,
     totalCostUsd: 0.01,
     rawPostEvidenceAvailable: false,
+    outputContractRevision: 2,
   };
 }
 

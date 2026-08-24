@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { getAcquisitionProfile, type AdapterKind, type SourceType } from './acquisition-profiles';
 import type { BriefingManifestBundle } from './acquisition-manifest';
 
@@ -38,6 +40,7 @@ export type AcquisitionJobKind = 'X_KEYWORD_SCAN' | 'X_SEMANTIC_SCAN' | 'FEED_PO
 
 export type DesiredSourceSchedule = Readonly<{
   scheduleKey: string;
+  scheduleRole: 'PRIMARY' | 'BACKSTOP';
   target: Readonly<
     { kind: 'endpoint'; endpointKey: string } | { kind: 'partition'; partitionKey: string }
   >;
@@ -49,6 +52,34 @@ export type DesiredSourceSchedule = Readonly<{
   status: 'active';
   manifestRevision: string;
 }>;
+
+export const BACKSTOP_SLOT_MS = 12 * 60 * 60_000;
+export const BACKSTOP_START_DELAY_MS = 10 * 60_000;
+export const BACKSTOP_JITTER_MAX_MS = 10 * 60_000;
+
+export function deterministicBackstopJitterMs(scheduleKey: string): number {
+  const digest = createHash('sha256').update(`backstop:${scheduleKey}`, 'utf8').digest();
+  return digest.readUInt32BE(0) % (BACKSTOP_JITTER_MAX_MS + 1);
+}
+
+export function latestBackstopSlotEndAt(now: Date): Date {
+  const eligibleAt = now.getTime() - BACKSTOP_START_DELAY_MS;
+  return new Date(Math.floor(eligibleAt / BACKSTOP_SLOT_MS) * BACKSTOP_SLOT_MS);
+}
+
+export function nextBackstopDueAt(now: Date, scheduleKey: string): Date {
+  let slotEnd = latestBackstopSlotEndAt(now);
+  let due = new Date(
+    slotEnd.getTime() + BACKSTOP_START_DELAY_MS + deterministicBackstopJitterMs(scheduleKey),
+  );
+  while (due.getTime() <= now.getTime()) {
+    slotEnd = new Date(slotEnd.getTime() + BACKSTOP_SLOT_MS);
+    due = new Date(
+      slotEnd.getTime() + BACKSTOP_START_DELAY_MS + deterministicBackstopJitterMs(scheduleKey),
+    );
+  }
+  return due;
+}
 
 export type DesiredBriefingRegistryState = Readonly<{
   manifestHash: string;
@@ -106,6 +137,7 @@ function locatorRecord(locator: {
 
 export function compileBriefingRegistryState(
   bundle: BriefingManifestBundle,
+  options: Readonly<{ includeXBackstop?: boolean }> = {},
 ): DesiredBriefingRegistryState {
   const entities = bundle.sources.entities
     .map((entity) => ({
@@ -168,6 +200,7 @@ export function compileBriefingRegistryState(
     if (!profile) throw new Error(`Validated profile disappeared: ${partition.profileKey}`);
     return {
       scheduleKey: `partition-${partition.partitionKey}`,
+      scheduleRole: 'PRIMARY',
       target: { kind: 'partition', partitionKey: partition.partitionKey },
       jobKind: xJobKind(partition.adapterKind),
       adapterKind: partition.adapterKind,
@@ -179,6 +212,27 @@ export function compileBriefingRegistryState(
     };
   });
 
+  const backstopSchedules: DesiredSourceSchedule[] = options.includeXBackstop
+    ? partitions
+        .filter((partition) => partition.adapterKind === 'X_ACCOUNT')
+        .map((partition) => {
+          const profile = getAcquisitionProfile(partition.profileKey);
+          if (!profile) throw new Error(`Validated profile disappeared: ${partition.profileKey}`);
+          return {
+            scheduleKey: `partition-${partition.partitionKey}-backstop`,
+            scheduleRole: 'BACKSTOP' as const,
+            target: { kind: 'partition' as const, partitionKey: partition.partitionKey },
+            jobKind: 'X_KEYWORD_SCAN' as const,
+            adapterKind: 'X_ACCOUNT' as const,
+            profileKey: partition.profileKey,
+            profileRevision: profile.revision,
+            priority: 70,
+            status: 'active' as const,
+            manifestRevision: bundle.manifestHash,
+          };
+        })
+    : [];
+
   const endpointSchedules: DesiredSourceSchedule[] = endpoints
     .filter((endpoint) => endpoint.status === 'active' && isPublicFeedAdapter(endpoint.adapterKind))
     .map((endpoint) => {
@@ -186,6 +240,7 @@ export function compileBriefingRegistryState(
       if (!profile) throw new Error(`Validated profile disappeared: ${endpoint.profileKey}`);
       return {
         scheduleKey: `endpoint-${endpoint.endpointKey}`,
+        scheduleRole: 'PRIMARY',
         target: { kind: 'endpoint' as const, endpointKey: endpoint.endpointKey },
         jobKind: endpointJobKind(
           endpoint.adapterKind as Exclude<AdapterKind, 'X_ACCOUNT' | 'X_SEMANTIC'>,
@@ -204,8 +259,8 @@ export function compileBriefingRegistryState(
     entities,
     endpoints,
     partitions,
-    schedules: [...partitionSchedules, ...endpointSchedules].sort((left, right) =>
-      left.scheduleKey.localeCompare(right.scheduleKey),
+    schedules: [...partitionSchedules, ...backstopSchedules, ...endpointSchedules].sort(
+      (left, right) => left.scheduleKey.localeCompare(right.scheduleKey),
     ),
   };
 }

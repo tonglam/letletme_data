@@ -302,6 +302,7 @@ export async function persistAcquisitionResult(
     if (!run) throw new Error(`Acquisition run not found: ${input.runId}`);
     if (run.status !== 'RUNNING') throw new Error(`Acquisition run is not RUNNING: ${run.status}`);
     const request = parseFormalRunRequestV1(run.requestSnapshot);
+    const parentCoverageMode = 'coverageMode' in request ? request.coverageMode : 'PRIMARY';
     if (
       request.jobKind !== run.jobKind ||
       request.adapterKind !== run.adapterKind ||
@@ -1076,6 +1077,7 @@ export async function persistAcquisitionResult(
           request.adapterKind !== run.adapterKind ||
           request.profileKey !== run.profileKey ||
           request.profileRevision !== run.profileRevision ||
+          request.coverageMode !== parentCoverageMode ||
           sha256CanonicalJson(request.partition) !==
             sha256CanonicalJson(run.endpointSnapshot as never)
         ) {

@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import { loadBriefingManifest } from '../../../src/content/acquisition/acquisition-manifest';
-import { compileBriefingRegistryState } from '../../../src/content/acquisition/registry-state';
+import {
+  compileBriefingRegistryState,
+  latestBackstopSlotEndAt,
+  nextBackstopDueAt,
+} from '../../../src/content/acquisition/registry-state';
 
 describe('Briefing acquisition registry state', () => {
   test('compiles one deterministic recurring schedule per X partition or public feed endpoint', async () => {
@@ -50,5 +54,34 @@ describe('Briefing acquisition registry state', () => {
         }),
       ]),
     );
+  });
+
+  test('adds exactly one 12-hour backstop for every X account partition', async () => {
+    const bundle = await loadBriefingManifest();
+    const state = compileBriefingRegistryState(bundle, { includeXBackstop: true });
+    const backstops = state.schedules.filter((schedule) => schedule.scheduleRole === 'BACKSTOP');
+    const accountPartitions = state.partitions.filter(
+      (partition) => partition.adapterKind === 'X_ACCOUNT',
+    );
+
+    expect(accountPartitions).toHaveLength(40);
+    expect(backstops).toHaveLength(accountPartitions.length);
+    expect(new Set(backstops.map((schedule) => schedule.scheduleKey)).size).toBe(40);
+    expect(backstops.every((schedule) => schedule.priority === 70)).toBe(true);
+    expect(backstops.map((schedule) => schedule.scheduleKey).sort()).toEqual(
+      accountPartitions.map((partition) => `partition-${partition.partitionKey}-backstop`).sort(),
+    );
+    expect(state.schedules.filter((schedule) => schedule.scheduleRole === 'PRIMARY')).toHaveLength(
+      65,
+    );
+  });
+
+  test('anchors backstop windows to UTC slots with bounded deterministic jitter', () => {
+    const now = new Date('2026-08-24T12:25:00.000Z');
+    expect(latestBackstopSlotEndAt(now)).toEqual(new Date('2026-08-24T12:00:00.000Z'));
+    const due = nextBackstopDueAt(now, 'partition-creators-core-backstop');
+    expect(due.getTime()).toBeGreaterThan(new Date('2026-08-24T12:10:00.000Z').getTime());
+    expect(due.getTime()).toBeLessThanOrEqual(new Date('2026-08-25T00:20:00.000Z').getTime());
+    expect(nextBackstopDueAt(now, 'partition-creators-core-backstop')).toEqual(due);
   });
 });

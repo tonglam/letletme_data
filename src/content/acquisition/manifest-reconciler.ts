@@ -12,10 +12,15 @@ import {
   contentSources,
 } from '../../db/schemas/content.schema';
 import { getDb, type DbHandle } from '../../db/singleton';
+import { getContentRuntimeFlags } from '../config';
 import { canonicalJson, sha256CanonicalJson, type JsonValue } from './canonicalization';
 import { getAcquisitionProfile, type AdapterKind } from './acquisition-profiles';
 import type { BriefingManifestBundle } from './acquisition-manifest';
-import { compileBriefingRegistryState, type DesiredSourceEndpoint } from './registry-state';
+import {
+  compileBriefingRegistryState,
+  nextBackstopDueAt,
+  type DesiredSourceEndpoint,
+} from './registry-state';
 import { releaseXRunBudgets } from './x-budget';
 
 const IDENTITY_REFRESH_MS = 30 * 24 * 60 * 60_000;
@@ -165,9 +170,11 @@ function errorSummary(error: unknown): string {
 export async function reconcileBriefingSourceRegistry(input: {
   bundle: BriefingManifestBundle;
   gitRevision?: string | null;
+  includeXBackstop?: boolean;
   db?: DbHandle;
 }): Promise<BriefingRegistryReconcileResult> {
-  const state = compileBriefingRegistryState(input.bundle);
+  const includeXBackstop = input.includeXBackstop ?? getContentRuntimeFlags().xBackstopEnabled;
+  const state = compileBriefingRegistryState(input.bundle, { includeXBackstop });
   const db = input.db ?? (await getDb());
   const counts = {
     entityCount: state.entities.length,
@@ -190,7 +197,10 @@ export async function reconcileBriefingSourceRegistry(input: {
         gitRevision: input.gitRevision ?? null,
         status: 'RUNNING',
         ...counts,
-        details: { fullRolloutEligible: input.bundle.coverage.fullRolloutEligible },
+        details: {
+          fullRolloutEligible: input.bundle.coverage.fullRolloutEligible,
+          includeXBackstop,
+        },
       });
 
       const existingSources = await tx
@@ -579,6 +589,7 @@ export async function reconcileBriefingSourceRegistry(input: {
           adapterKind: contentSourceSchedules.adapterKind,
           profileKey: contentSourceSchedules.profileKey,
           profileRevision: contentSourceSchedules.profileRevision,
+          scheduleRole: contentSourceSchedules.scheduleRole,
           status: contentSourceSchedules.status,
           manifestRevision: contentSourceSchedules.manifestRevision,
           nextDueAt: contentSourceSchedules.nextDueAt,
@@ -654,7 +665,8 @@ export async function reconcileBriefingSourceRegistry(input: {
           existing.jobKind !== schedule.jobKind ||
           existing.adapterKind !== schedule.adapterKind ||
           existing.profileKey !== schedule.profileKey ||
-          existing.profileRevision !== schedule.profileRevision;
+          existing.profileRevision !== schedule.profileRevision ||
+          existing.scheduleRole !== schedule.scheduleRole;
         const acquisitionTargetChanged =
           schedule.target.kind === 'endpoint'
             ? endpointContractChanged(schedule.target.endpointKey)
@@ -688,19 +700,22 @@ export async function reconcileBriefingSourceRegistry(input: {
           adapterKind: schedule.adapterKind,
           profileKey: schedule.profileKey,
           profileRevision: schedule.profileRevision,
+          scheduleRole: schedule.scheduleRole,
           priority: schedule.priority,
           status: schedule.status,
           nextDueAt:
             existing && !changedScheduleIds.has(existing.scheduleId)
               ? existing.nextDueAt
-              : new Date(
-                  dbNow.getTime() +
-                    deterministicScheduleJitterMs({
-                      scheduleKey: schedule.scheduleKey,
-                      adapterKind: schedule.adapterKind,
-                      profileKey: schedule.profileKey,
-                    }),
-                ),
+              : schedule.scheduleRole === 'BACKSTOP'
+                ? nextBackstopDueAt(dbNow, schedule.scheduleKey)
+                : new Date(
+                    dbNow.getTime() +
+                      deterministicScheduleJitterMs({
+                        scheduleKey: schedule.scheduleKey,
+                        adapterKind: schedule.adapterKind,
+                        profileKey: schedule.profileKey,
+                      }),
+                  ),
           manifestRevision: schedule.manifestRevision,
           updatedAt: dbNow,
         };
@@ -717,6 +732,7 @@ export async function reconcileBriefingSourceRegistry(input: {
             adapterKind: sql`excluded.adapter_kind`,
             profileKey: sql`excluded.profile_key`,
             profileRevision: sql`excluded.profile_revision`,
+            scheduleRole: sql`excluded.schedule_role`,
             priority: sql`excluded.priority`,
             status: sql`excluded.status`,
             manifestRevision: sql`excluded.manifest_revision`,
@@ -790,6 +806,7 @@ export async function reconcileBriefingSourceRegistry(input: {
           status: 'APPLIED',
           details: {
             fullRolloutEligible: input.bundle.coverage.fullRolloutEligible,
+            includeXBackstop,
             resetScheduleCount: changedScheduleIds.size,
             primaryReportingMissing: input.bundle.coverage.clubs.reduce(
               (total, club) => total + club.primaryReportingMissing,
