@@ -54,6 +54,26 @@ function complete(): UnderstatCompletenessResult {
   return { complete: true, reason: 'complete' };
 }
 
+export function evaluateUnderstatPlayerDiscoveryCompleteness(
+  incomingPlayerIds: readonly number[],
+  previousPlayerIds: Iterable<number>,
+): UnderstatCompletenessResult {
+  const incoming = new Set(incomingPlayerIds);
+  if (incoming.size !== incomingPlayerIds.length) {
+    return incomplete('player summaries contain duplicate player IDs');
+  }
+  if (incoming.size === 0) return incomplete('player summaries are empty');
+
+  const previous = new Set(previousPlayerIds);
+  const missing = [...previous].filter((playerId) => !incoming.has(playerId));
+  if (missing.length > 0) {
+    return incomplete(
+      `player summaries shrank ${incoming.size}/${previous.size}; missing=${missing.join(',')}`,
+    );
+  }
+  return complete();
+}
+
 export function evaluateUnderstatTeamResourceCompleteness(
   teamId: number,
   discovery: {
@@ -101,9 +121,14 @@ export function evaluateUnderstatPlayerTeamResourceCompleteness(
   teamId: number,
   discovery: { playerSeasons: readonly Pick<UnderstatPlayerSeason, 'playerId'>[] },
   rows: readonly Pick<UnderstatPlayerTeamSeason, 'playerId'>[],
+  existingPlayerIds: ReadonlySet<number> = new Set(),
 ): UnderstatCompletenessResult {
   if (rows.length === 0) {
     return incomplete(`team ${teamId} participant rows are empty`);
+  }
+  const incomingPlayerIds = new Set(rows.map((row) => row.playerId));
+  if (incomingPlayerIds.size !== rows.length) {
+    return incomplete(`team ${teamId} participant rows contain duplicate player IDs`);
   }
   const playerIds = new Set(discovery.playerSeasons.map((player) => player.playerId));
   const unknownPlayerIds = rows
@@ -114,6 +139,14 @@ export function evaluateUnderstatPlayerTeamResourceCompleteness(
       `team ${teamId} has participant players missing from league discovery: ${[
         ...new Set(unknownPlayerIds),
       ].join(',')}`,
+    );
+  }
+  const omittedPlayerIds = [...existingPlayerIds].filter(
+    (playerId) => !incomingPlayerIds.has(playerId),
+  );
+  if (omittedPlayerIds.length > 0) {
+    return incomplete(
+      `team ${teamId} participant rows shrank: incoming=${incomingPlayerIds.size} existing=${existingPlayerIds.size} omitted=${omittedPlayerIds.join(',')}`,
     );
   }
   return complete();

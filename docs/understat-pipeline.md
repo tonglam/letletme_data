@@ -251,6 +251,9 @@ and Player runs independently and counts facts directly from the provider tables
   and does not roll back other completed resources. A detail worker leaves an incomplete resource
   item unsettled; after terminal BullMQ retry, the failed resource ID is carried into the next
   scheduler generation instead of allowing the generation to succeed.
+- Player discovery rejects empty, duplicate, or shrinking player-summary sets before replacing
+  season summaries. Player-team persistence likewise rejects duplicate or shrinking participant
+  sets before replacing memberships.
 - The worker records terminal item/run failure before throwing; the BullMQ `failed` listener is an
   idempotent fallback. If a run is active with no database progress for 30 minutes and both queues
   are empty, the maintenance reconciler fails unfinished items and the run in one transaction.

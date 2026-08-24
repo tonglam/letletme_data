@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { UNDERSTAT_SPLIT_DIMENSIONS } from '../../src/domain/understat';
 import {
   assertUnderstatResourceHashes,
+  evaluateUnderstatPlayerDiscoveryCompleteness,
   evaluateUnderstatPlayerMatchResourceCompleteness,
   evaluateUnderstatPlayerTeamResourceCompleteness,
   evaluateUnderstatPlayerSnapshotCompleteness,
@@ -26,6 +27,16 @@ const completeTeamMatchRows = [
 ];
 
 describe('Understat PostgreSQL snapshot completeness guards', () => {
+  test('rejects a shrinking player discovery before replacing season summaries', () => {
+    expect(evaluateUnderstatPlayerDiscoveryCompleteness([101, 102], [101, 102])).toEqual({
+      complete: true,
+      reason: 'complete',
+    });
+    const result = evaluateUnderstatPlayerDiscoveryCompleteness([101], [101, 102]);
+    expect(result.complete).toBe(false);
+    expect(result.reason).toContain('player summaries shrank');
+  });
+
   test('rejects a scoped write that did not survive post-commit verification', () => {
     expect(() => assertUnderstatResourceHashes('team splits', ['a', 'b'], ['a'])).toThrow(
       'expected=2 persisted=1',
@@ -149,6 +160,14 @@ describe('Understat PostgreSQL snapshot completeness guards', () => {
         [],
       ),
     ).toMatchObject({ complete: false });
+    const shrinkingParticipants = evaluateUnderstatPlayerTeamResourceCompleteness(
+      1,
+      { playerSeasons: [{ playerId: 101 }, { playerId: 102 }] },
+      [{ playerId: 101 }],
+      new Set([101, 102]),
+    );
+    expect(shrinkingParticipants.complete).toBe(false);
+    expect(shrinkingParticipants.reason).toContain('participant rows shrank');
 
     const roster = [
       ...Array.from({ length: 11 }, () => ({

@@ -35,6 +35,7 @@ import {
   assertUnderstatSyncAllowed,
   changedUnderstatPlayerSeasonIds,
   changedUnderstatPlayerTeamIds,
+  evaluateUnderstatPlayerDiscoveryCompleteness,
   evaluateUnderstatPlayerMatchResourceCompleteness,
   evaluateUnderstatPlayerTeamResourceCompleteness,
   IncompleteUnderstatResourceError,
@@ -83,11 +84,19 @@ async function persistUnderstatPlayerDiscoverySnapshot(
   const db = await getDb();
   return db.transaction(async (tx) => {
     const references = createUnderstatReferenceRepository(tx);
+    const players = createUnderstatPlayerRepository(tx);
     const previousMatches = await references.findMatchesBySeason(season);
     assertNoUnderstatMatchesDisappeared(
       previousMatches.map((match) => match.id),
       discovery.matches,
     );
+    const completeness = evaluateUnderstatPlayerDiscoveryCompleteness(
+      discovery.playerSeasons.map((player) => player.playerId),
+      (await players.getPlayerSeasonHashes(season)).keys(),
+    );
+    if (!completeness.complete) {
+      throw new IncompleteUnderstatResourceError('player discovery', completeness.reason);
+    }
     const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
     const changed = await persistUnderstatPlayerDiscovery(tx, discovery, withdrawnMatchIds);
     if (changed) await createUnderstatSyncRepository(tx).markRunDataChanged(runId);
@@ -101,18 +110,18 @@ async function persistUnderstatPlayerTeamResource(
   discovery: UnderstatPlayerDiscovery,
   detail: UnderstatPlayerTeamDetailSnapshot,
 ): Promise<{ changed: boolean; complete: boolean; reason: string }> {
-  const completeness = evaluateUnderstatPlayerTeamResourceCompleteness(
-    detail.teamId,
-    discovery,
-    detail.rows,
-  );
-  if (!completeness.complete) {
-    return { changed: false, complete: false, reason: completeness.reason };
-  }
-
   const db = await getDb();
-  const changed = await db.transaction(async (tx) => {
+  return db.transaction(async (tx) => {
     const players = createUnderstatPlayerRepository(tx);
+    const completeness = evaluateUnderstatPlayerTeamResourceCompleteness(
+      detail.teamId,
+      discovery,
+      detail.rows,
+      await players.getTeamParticipantPlayerIds(season, detail.teamId),
+    );
+    if (!completeness.complete) {
+      return { changed: false, complete: false, reason: completeness.reason };
+    }
     const identityChanges = await players.upsertPlayers(detail.players);
     const participantsChanged = await players.replaceTeamParticipants(
       season,
@@ -127,9 +136,12 @@ async function persistUnderstatPlayerTeamResource(
     if (identityChanges > 0 || participantsChanged) {
       await createUnderstatSyncRepository(tx).markRunDataChanged(runId);
     }
-    return identityChanges > 0 || participantsChanged;
+    return {
+      changed: identityChanges > 0 || participantsChanged,
+      complete: true,
+      reason: completeness.reason,
+    };
   });
-  return { changed, complete: true, reason: completeness.reason };
 }
 
 async function persistUnderstatPlayerMatchResource(
@@ -283,6 +295,9 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     return;
   }
   await understatSyncRepository.markItemRunning(job.runId, LEAGUE_RESOURCE_TYPE, league);
+  const currentRunItems = await understatSyncRepository.findItems(job.runId);
+  const sameRunTeamIds = selectUnsettledUnderstatFanoutIds(currentRunItems, TEAM_RESOURCE_TYPE);
+  const sameRunMatchIds = selectUnsettledUnderstatFanoutIds(currentRunItems, MATCH_RESOURCE_TYPE);
 
   const sourceCheckedAt = new Date();
   const response = await understatClient.getLeagueData(league, sourceYear);
@@ -309,6 +324,13 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     previousMatches.map((match) => match.id),
     discovery.matches,
   );
+  const discoveryCompleteness = evaluateUnderstatPlayerDiscoveryCompleteness(
+    discovery.playerSeasons.map((player) => player.playerId),
+    previousPlayerHashes.keys(),
+  );
+  if (!discoveryCompleteness.complete) {
+    throw new IncompleteUnderstatResourceError('player discovery', discoveryCompleteness.reason);
+  }
   const changedPlayerIds = changedUnderstatPlayerSeasonIds(
     discovery.playerSeasons,
     previousPlayerHashes,
@@ -353,7 +375,10 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
         )
         .map((item) => Number(item.resourceId))
         .filter(Number.isInteger);
-  const targetTeamIds = mergeUnderstatTeamDetailIds(selectedTeamIds, changedTeams, priorTeamIds);
+  const targetTeamIds = mergeUnderstatTeamDetailIds(selectedTeamIds, changedTeams, [
+    ...priorTeamIds,
+    ...sameRunTeamIds,
+  ]);
   const selectedMatchIds = selectPlayerMatchIds({
     mode: job.mode,
     matches: discovery.matches,
@@ -372,9 +397,9 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
         )
         .map((item) => Number(item.resourceId))
         .filter(Number.isInteger);
-  const targetMatchIds = [...new Set([...selectedMatchIds, ...priorMatchIds])].sort(
-    (left, right) => left - right,
-  );
+  const targetMatchIds = [
+    ...new Set([...selectedMatchIds, ...priorMatchIds, ...sameRunMatchIds]),
+  ].sort((left, right) => left - right);
   const teams = teamById(discovery.teams);
   await understatSyncRepository.addItems(job.runId, [
     ...targetTeamIds.map((teamId) => ({

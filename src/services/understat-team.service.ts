@@ -210,6 +210,8 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
     return;
   }
   await understatSyncRepository.markItemRunning(job.runId, LEAGUE_RESOURCE_TYPE, league);
+  const currentRunItems = await understatSyncRepository.findItems(job.runId);
+  const sameRunTeamIds = selectUnsettledUnderstatFanoutIds(currentRunItems, TEAM_RESOURCE_TYPE);
 
   const sourceCheckedAt = new Date();
   const response = await understatClient.getLeagueData(league, sourceYear);
@@ -260,7 +262,10 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
         )
         .map((item) => Number(item.resourceId))
         .filter(Number.isInteger);
-  const targetIds = mergeUnderstatTeamDetailIds(selectedTargetIds, changedTeams, priorUnsettledIds);
+  const targetIds = mergeUnderstatTeamDetailIds(selectedTargetIds, changedTeams, [
+    ...priorUnsettledIds,
+    ...sameRunTeamIds,
+  ]);
   const teams = teamById(discovery.teams);
   await understatSyncRepository.addItems(
     job.runId,
