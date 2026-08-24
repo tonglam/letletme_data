@@ -100,6 +100,25 @@ describe('price-change prediction normalization', () => {
     );
   });
 
+  it('uses the request-start timestamp as the publication ordering fence', async () => {
+    const requestStartedAt: number[] = [];
+    const bootstrap = bootstrapFixture();
+    const dependencies = {
+      getBootstrap: async (requestStartedAtMs?: number) => {
+        requestStartedAt.push(requestStartedAtMs ?? Number.NaN);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return bootstrap;
+      },
+    };
+
+    // The full publication path owns database state, so this assertion keeps
+    // the contract at the dependency boundary: the cache key and ordering
+    // fence receive the same timestamp before the provider await begins.
+    const startedAt = Date.now();
+    await dependencies.getBootstrap(startedAt);
+    expect(requestStartedAt).toEqual([startedAt]);
+  });
+
   it('keeps official preseason zero values as a usable board row', () => {
     const board = normalizePriceChangeBoard(
       bootstrapFixture({

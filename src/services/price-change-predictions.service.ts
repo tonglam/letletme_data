@@ -93,13 +93,19 @@ export type PriceChangePublicationContext = {
 };
 
 export type PriceChangePublicationDependencies = {
-  readonly getBootstrap: () => Promise<FPLBootstrapResponse>;
+  /**
+   * The caller supplies the immutable request-start timestamp so the default
+   * client and the publication fence use the same cache bucket/order value.
+   * The argument remains optional for lightweight test dependencies.
+   */
+  readonly getBootstrap: (requestStartedAtMs?: number) => Promise<FPLBootstrapResponse>;
 };
 
 export type PreparedPriceChangePublication = {
   readonly outcome: 'ready';
   readonly season: FplSeasonRef;
   readonly sourceRunId: string;
+  readonly requestStartedAt: Date;
   readonly fetchedAt: Date;
   readonly board: PriceChangeBoard;
   readonly context: PriceChangePublicationContext;
@@ -152,7 +158,8 @@ export function priceChangeBootstrapEdgeCacheKey(nowMs = Date.now()): string {
 }
 
 const defaultDependencies: PriceChangePublicationDependencies = {
-  getBootstrap: () => fplClient.getBootstrap({ edgeCacheKey: priceChangeBootstrapEdgeCacheKey() }),
+  getBootstrap: (requestStartedAtMs = Date.now()) =>
+    fplClient.getBootstrap({ edgeCacheKey: priceChangeBootstrapEdgeCacheKey(requestStartedAtMs) }),
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -839,7 +846,12 @@ export async function preparePriceChangePublication(
     expectedItems: 2,
   });
   try {
-    const bootstrap = await dependencies.getBootstrap();
+    // Capture ordering at request start. A slow earlier request may complete
+    // after a newer request; using completion time would let that stale
+    // payload pass the active-publication fence.
+    const requestStartedAtMs = Date.now();
+    const requestStartedAt = new Date(requestStartedAtMs);
+    const bootstrap = await dependencies.getBootstrap(requestStartedAtMs);
     const fetchedAt = new Date();
     if (!bootstrap || !Array.isArray(bootstrap.elements) || bootstrap.elements.length === 0) {
       throw new PriceChangePredictionValidationError('FPL bootstrap contains no players');
@@ -872,7 +884,7 @@ export async function preparePriceChangePublication(
     const expectedPlayerIds = await readCorePlayerIds(season);
     const board = normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, expectedPlayerIds);
     const context = contextFromBoard(board, fetchedAt);
-    return { outcome: 'ready', season, sourceRunId, fetchedAt, board, context };
+    return { outcome: 'ready', season, sourceRunId, requestStartedAt, fetchedAt, board, context };
   } catch (error) {
     await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
     throw error;
@@ -901,7 +913,7 @@ export async function persistPriceChangePublication(
   prepared: PreparedPriceChangePublication,
   options: { readonly deferDelivery?: boolean } = {},
 ): Promise<PriceChangeSyncResult> {
-  const { season, sourceRunId, fetchedAt, board, context } = prepared;
+  const { season, sourceRunId, requestStartedAt, fetchedAt, board, context } = prepared;
   const publicationId = randomUUID();
   const outboxId = randomUUID();
   let dbActivated = false;
@@ -926,9 +938,15 @@ export async function persistPriceChangePublication(
           'The active fpl:price-changes source timestamp is invalid',
         );
       }
-      if (fetchedAt.getTime() < activeFetchedAt) {
+      const requestStartedAtMs = requestStartedAt.getTime();
+      if (!Number.isFinite(requestStartedAtMs)) {
         throw new PriceChangePredictionUnavailableError(
-          'The prepared price-change bootstrap is older than the active publication',
+          'The prepared price-change request timestamp is invalid',
+        );
+      }
+      if (requestStartedAtMs < activeFetchedAt) {
+        throw new PriceChangePredictionUnavailableError(
+          'The prepared price-change request started before the active publication',
         );
       }
     }
