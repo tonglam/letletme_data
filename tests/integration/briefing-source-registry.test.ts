@@ -3,13 +3,14 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 assertIntegrationEnv();
 
 import { afterAll, describe, expect, test } from 'bun:test';
-import { eq, ne, sql } from 'drizzle-orm';
+import { eq, inArray, ne, sql } from 'drizzle-orm';
 
 import type { AcquisitionBatchV1 } from '../../src/content/acquisition/acquisition-contract';
 import {
   loadBriefingManifest,
   parseBriefingManifest,
 } from '../../src/content/acquisition/acquisition-manifest';
+import { ACQUISITION_PROFILES } from '../../src/content/acquisition/acquisition-profiles';
 import {
   beginFormalRun,
   claimDueFormalRuns,
@@ -499,5 +500,52 @@ describe('Briefing source registry reconciliation', () => {
       validator: { etag: null, lastModified: null },
       bootstrap: { enabled: true },
     });
+  });
+
+  test('toggles durable X backstop rows without losing their schedule identity', async () => {
+    await resetBriefingAcquisitionState();
+    const bundle = await loadBriefingManifest();
+    const disabled = await reconcileBriefingSourceRegistry({
+      bundle,
+      gitRevision: 'backstop-disabled',
+      includeXBackstop: false,
+    });
+    expect(disabled.scheduleCount).toBe(105);
+    const db = await getDb();
+    const backstopKeys = bundle.plan.partitions
+      .filter(
+        (partition) => ACQUISITION_PROFILES[partition.profileKey]?.adapterKind === 'X_ACCOUNT',
+      )
+      .map((partition) => `partition-${partition.partitionKey}-backstop`);
+    const readBackstopStatuses = async () =>
+      db
+        .select({
+          scheduleKey: contentSourceSchedules.scheduleKey,
+          status: contentSourceSchedules.status,
+        })
+        .from(contentSourceSchedules)
+        .where(inArray(contentSourceSchedules.scheduleKey, backstopKeys));
+    const paused = await readBackstopStatuses();
+    expect(paused).toHaveLength(40);
+    expect(paused.every((row) => row.status === 'paused')).toBe(true);
+
+    await reconcileBriefingSourceRegistry({
+      bundle,
+      gitRevision: 'backstop-enabled',
+      includeXBackstop: true,
+    });
+    expect((await readBackstopStatuses()).every((row) => row.status === 'active')).toBe(true);
+    await reconcileBriefingSourceRegistry({
+      bundle,
+      gitRevision: 'backstop-disabled-again',
+      includeXBackstop: false,
+    });
+    expect((await readBackstopStatuses()).every((row) => row.status === 'paused')).toBe(true);
+    await reconcileBriefingSourceRegistry({
+      bundle,
+      gitRevision: 'backstop-enabled-again',
+      includeXBackstop: true,
+    });
+    expect((await readBackstopStatuses()).every((row) => row.status === 'active')).toBe(true);
   });
 });

@@ -138,7 +138,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
       leaseOwner: null,
       leaseExpiresAt: null,
     })
-    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+    .where(
+      and(
+        eq(contentSourceSchedules.partitionId, partition.partitionId),
+        eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+      ),
+    );
 
   const [claimed] = await claimDueFormalRuns({
     enabledAdapters: ['X_ACCOUNT'],
@@ -307,7 +312,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
   await db
     .update(contentSourceSchedules)
     .set({ nextDueAt: new Date(Date.now() - 1_000) })
-    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+    .where(
+      and(
+        eq(contentSourceSchedules.partitionId, partition.partitionId),
+        eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+      ),
+    );
   let failedRequestHash: string | null = null;
   let exhaustedRunId: string | null = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -333,7 +343,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
       await db
         .update(contentSourceSchedules)
         .set({ nextDueAt: new Date(Date.now() - 1_000) })
-        .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+        .where(
+          and(
+            eq(contentSourceSchedules.partitionId, partition.partitionId),
+            eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+          ),
+        );
     }
   }
   const [exhaustedRun] = await db
@@ -358,7 +373,12 @@ test('creates one bounded saturation follow-up and turns a second saturation int
       failureStreak: contentSourceSchedules.failureStreak,
     })
     .from(contentSourceSchedules)
-    .where(eq(contentSourceSchedules.partitionId, partition.partitionId));
+    .where(
+      and(
+        eq(contentSourceSchedules.partitionId, partition.partitionId),
+        eq(contentSourceSchedules.scheduleRole, 'PRIMARY'),
+      ),
+    );
   expect(exhaustedSchedule?.circuitState).toBe('OPEN');
   expect(exhaustedSchedule?.failureStreak).toBe(3);
   expect((exhaustedSchedule?.checkpoint as { windowEnd?: string }).windowEnd).toBe(

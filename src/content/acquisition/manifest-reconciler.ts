@@ -686,8 +686,7 @@ export async function reconcileBriefingSourceRegistry(input: {
           existing.adapterKind !== schedule.adapterKind ||
           existing.profileKey !== schedule.profileKey ||
           existing.profileRevision !== schedule.profileRevision ||
-          existing.scheduleRole !== schedule.scheduleRole ||
-          existing.status !== schedule.status;
+          existing.scheduleRole !== schedule.scheduleRole;
         const acquisitionTargetChanged =
           schedule.target.kind === 'endpoint'
             ? endpointContractChanged(schedule.target.endpointKey)
