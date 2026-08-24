@@ -105,12 +105,14 @@ type BugReportRequestIdentity = Pick<
   | 'submissionId'
   | 'screenshotObjectKey'
   | 'screenshotUrl'
-  | 'clientMeta'
 >;
 
+// Client metadata is diagnostic telemetry, not the submitted report identity.
+// Keep it out of the hash so adding a bounded diagnostic field cannot make a
+// retry of the same submission look like a different report.
 export const bugReportRequestHash = (input: BugReportRequestIdentity): string =>
   createHash('sha256')
-    .update(JSON.stringify(canonicalize({ version: 1, ...input })), 'utf8')
+    .update(JSON.stringify(canonicalize({ version: 2, ...input })), 'utf8')
     .digest('hex');
 
 const redactDiagnosticText = (value: unknown): string | null => {
@@ -304,7 +306,6 @@ export const validateBugReportCreateInput = (
       submissionId,
       screenshotObjectKey,
       screenshotUrl,
-      clientMeta,
     }),
     publicId: (options.publicIdGenerator ?? createPublicBugReportId)(),
     closedAt: null,

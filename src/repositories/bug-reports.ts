@@ -131,24 +131,21 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             .where(eq(bugReportsInOps.submissionId, report.submissionId))
             .limit(1);
           if (existingSubmission) {
-            const existingHash =
-              existingSubmission.submissionRequestHash ??
-              bugReportRequestHash({
-                source: existingSubmission.source as BugReportInsert['source'],
-                userId: existingSubmission.userId,
-                entryId: existingSubmission.entryId,
-                body: existingSubmission.body,
-                submissionId: existingSubmission.submissionId,
-                screenshotObjectKey: existingSubmission.screenshotObjectKey,
-                screenshotUrl: existingSubmission.screenshotUrl,
-                clientMeta: (existingSubmission.clientMeta ?? {}) as Record<string, unknown>,
-              });
+            const existingHash = bugReportRequestHash({
+              source: existingSubmission.source as BugReportInsert['source'],
+              userId: existingSubmission.userId,
+              entryId: existingSubmission.entryId,
+              body: existingSubmission.body,
+              submissionId: existingSubmission.submissionId,
+              screenshotObjectKey: existingSubmission.screenshotObjectKey,
+              screenshotUrl: existingSubmission.screenshotUrl,
+            });
             if (existingHash !== report.submissionRequestHash)
               throw new ConflictError(
                 'Submission ID was already used for a different bug report',
                 'BUG_REPORT_SUBMISSION_ID_REUSED',
               );
-            if (!existingSubmission.submissionRequestHash) {
+            if (existingSubmission.submissionRequestHash !== report.submissionRequestHash) {
               await connection
                 .update(bugReportsInOps)
                 .set({ submissionRequestHash: report.submissionRequestHash })
@@ -335,24 +332,21 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           .where(eq(bugReportsInOps.submissionId, report.submissionId))
           .limit(1);
         if (!existing) throw new DatabaseError('Bug report insert returned no row');
-        const existingHash =
-          existing.submissionRequestHash ??
-          bugReportRequestHash({
-            source: existing.source as BugReportInsert['source'],
-            userId: existing.userId,
-            entryId: existing.entryId,
-            body: existing.body,
-            submissionId: existing.submissionId,
-            screenshotObjectKey: existing.screenshotObjectKey,
-            screenshotUrl: existing.screenshotUrl,
-            clientMeta: (existing.clientMeta ?? {}) as Record<string, unknown>,
-          });
+        const existingHash = bugReportRequestHash({
+          source: existing.source as BugReportInsert['source'],
+          userId: existing.userId,
+          entryId: existing.entryId,
+          body: existing.body,
+          submissionId: existing.submissionId,
+          screenshotObjectKey: existing.screenshotObjectKey,
+          screenshotUrl: existing.screenshotUrl,
+        });
         if (existingHash !== report.submissionRequestHash)
           throw new ConflictError(
             'Submission ID was already used for a different bug report',
             'BUG_REPORT_SUBMISSION_ID_REUSED',
           );
-        if (!existing.submissionRequestHash) {
+        if (existing.submissionRequestHash !== report.submissionRequestHash) {
           await db
             .update(bugReportsInOps)
             .set({ submissionRequestHash: report.submissionRequestHash })
