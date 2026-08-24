@@ -466,6 +466,7 @@ describe('scheduler obligation generation fencing', () => {
 
   test('excludes in-flight periods from failure streaks and overdue alarms', async () => {
     const sql = await getDbClient();
+    const previousScheduledDueAtMs = Date.parse('2026-08-23T00:06:00Z');
     const inFlightScheduledDueAtMs = Date.parse('2026-08-23T00:11:00Z');
     await sql`
       INSERT INTO ops.scheduler_obligations (
@@ -484,22 +485,39 @@ describe('scheduler obligation generation fencing', () => {
         lease_expires_at,
         evidence
       )
-      VALUES (
-        ${IN_FLIGHT_OBLIGATION_ID}::uuid,
-        'price-change-predictions',
-        '2627',
-        'price-change-in-flight',
-        'every five minutes at UTC minute 01/06/11...',
-        'UTC',
-        'running',
-        'catchup',
-        '2026-08-23T00:11:00Z'::timestamptz,
-        1,
-        1,
-        'in-flight-worker',
-        clock_timestamp() + interval '15 minutes',
-        jsonb_build_object('scheduledDueAtMs', ${inFlightScheduledDueAtMs}::bigint)
-      )
+      VALUES
+        (
+          ${OBLIGATION_ID}::uuid,
+          'price-change-predictions',
+          '2627',
+          'price-change-previous-failure',
+          'every five minutes at UTC minute 01/06/11...',
+          'UTC',
+          'failed',
+          'catchup',
+          '2026-08-23T00:06:00Z'::timestamptz,
+          1,
+          1,
+          NULL,
+          NULL,
+          jsonb_build_object('scheduledDueAtMs', ${previousScheduledDueAtMs}::bigint)
+        ),
+        (
+          ${IN_FLIGHT_OBLIGATION_ID}::uuid,
+          'price-change-predictions',
+          '2627',
+          'price-change-in-flight',
+          'every five minutes at UTC minute 01/06/11...',
+          'UTC',
+          'running',
+          'catchup',
+          '2026-08-23T00:11:00Z'::timestamptz,
+          1,
+          1,
+          'in-flight-worker',
+          clock_timestamp() + interval '15 minutes',
+          jsonb_build_object('scheduledDueAtMs', ${inFlightScheduledDueAtMs}::bigint)
+        )
     `;
 
     const running = await schedulerObligationStatus({
@@ -511,7 +529,7 @@ describe('scheduler obligation generation fencing', () => {
       status: 'running',
       dueAt: new Date('2026-08-23T00:11:00Z'),
     });
-    expect(running.consecutiveUnsuccessfulCycles).toBe(2);
+    expect(running.consecutiveUnsuccessfulCycles).toBe(1);
     expect(running.overdue).toBe(false);
 
     await sql`
@@ -528,7 +546,7 @@ describe('scheduler obligation generation fencing', () => {
       scopeKey: '2627',
     });
     expect(failed.latest?.status).toBe('failed');
-    expect(failed.consecutiveUnsuccessfulCycles).toBe(3);
+    expect(failed.consecutiveUnsuccessfulCycles).toBe(2);
     expect(failed.overdue).toBe(true);
   });
 
