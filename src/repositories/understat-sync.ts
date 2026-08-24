@@ -388,10 +388,25 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       .set({
         status: 'completed',
         metadata: { ...((current?.metadata ?? {}) as Record<string, unknown>), ...metadata },
-        ...(dataChanged === undefined ? {} : { dataChanged }),
+        ...(dataChanged === undefined
+          ? {}
+          : { dataChanged: sql`${understatSyncRuns.dataChanged} OR ${dataChanged}` }),
         completedAt: sql`clock_timestamp()`,
         updatedAt: sql`clock_timestamp()`,
       })
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      );
+  },
+
+  async markRunDataChanged(runId: string): Promise<void> {
+    const db = await getDatabase(dbInstance);
+    await db
+      .update(understatSyncRuns)
+      .set({ dataChanged: true, updatedAt: sql`clock_timestamp()` })
       .where(
         and(
           eq(understatSyncRuns.runId, runId),

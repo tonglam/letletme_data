@@ -3,7 +3,11 @@ import { describe, expect, test } from 'bun:test';
 import { UNDERSTAT_SPLIT_DIMENSIONS } from '../../src/domain/understat';
 import {
   assertUnderstatResourceHashes,
+  evaluateUnderstatPlayerDiscoveryCompleteness,
+  evaluateUnderstatPlayerMatchResourceCompleteness,
+  evaluateUnderstatPlayerTeamResourceCompleteness,
   evaluateUnderstatPlayerSnapshotCompleteness,
+  evaluateUnderstatTeamResourceCompleteness,
   evaluateUnderstatTeamSnapshotCompleteness,
 } from '../../src/services/understat-sync.service';
 
@@ -23,6 +27,16 @@ const completeTeamMatchRows = [
 ];
 
 describe('Understat PostgreSQL snapshot completeness guards', () => {
+  test('rejects a shrinking player discovery before replacing season summaries', () => {
+    expect(evaluateUnderstatPlayerDiscoveryCompleteness([101, 102], [101, 102])).toEqual({
+      complete: true,
+      reason: 'complete',
+    });
+    const result = evaluateUnderstatPlayerDiscoveryCompleteness([101], [101, 102]);
+    expect(result.complete).toBe(false);
+    expect(result.reason).toContain('player summaries shrank');
+  });
+
   test('rejects a scoped write that did not survive post-commit verification', () => {
     expect(() => assertUnderstatResourceHashes('team splits', ['a', 'b'], ['a'])).toThrow(
       'expected=2 persisted=1',
@@ -67,6 +81,41 @@ describe('Understat PostgreSQL snapshot completeness guards', () => {
     ).toEqual({ complete: true, reason: 'complete' });
   });
 
+  test('accepts one complete team while another team is still unavailable', () => {
+    expect(
+      evaluateUnderstatTeamResourceCompleteness(
+        1,
+        {
+          teams: teams.map(({ team }) => team),
+          teamSeasons: teams.map(({ team }) => ({ teamId: team.id })),
+          matches,
+          teamMatchStats: completeTeamMatchRows.map(({ match, stat }) => ({
+            matchId: match.id,
+            teamId: stat.teamId,
+            side: stat.side as 'h' | 'a',
+          })),
+        },
+        splits.filter((row) => row.teamId === 1),
+      ),
+    ).toEqual({ complete: true, reason: 'complete' });
+    expect(
+      evaluateUnderstatTeamResourceCompleteness(
+        2,
+        {
+          teams: teams.map(({ team }) => team),
+          teamSeasons: teams.map(({ team }) => ({ teamId: team.id })),
+          matches,
+          teamMatchStats: completeTeamMatchRows.map(({ match, stat }) => ({
+            matchId: match.id,
+            teamId: stat.teamId,
+            side: stat.side as 'h' | 'a',
+          })),
+        },
+        [],
+      ),
+    ).toMatchObject({ complete: false });
+  });
+
   test('requires participants for all teams and two eleven-player starting sides', () => {
     const players = Array.from({ length: 20 }, (_, index) => ({ player: { id: index + 101 } }));
     const memberships = players.map(({ player }, index) => ({
@@ -95,6 +144,68 @@ describe('Understat PostgreSQL snapshot completeness guards', () => {
         memberships,
         matchStats: [...home, ...away],
       }),
+    ).toEqual({ complete: true, reason: 'complete' });
+  });
+
+  test('evaluates player participants and rosters independently', () => {
+    const playerDiscovery = {
+      teams: [{ id: 1, title: 'Team 1' }],
+      playerSeasons: [{ playerId: 101, sourceTeamTitle: 'Team 1' }],
+    };
+    expect(
+      evaluateUnderstatPlayerTeamResourceCompleteness(1, playerDiscovery, [{ playerId: 101 }]),
+    ).toEqual({ complete: true, reason: 'complete' });
+    expect(evaluateUnderstatPlayerTeamResourceCompleteness(2, playerDiscovery, [])).toMatchObject({
+      complete: false,
+    });
+    const shrinkingParticipants = evaluateUnderstatPlayerTeamResourceCompleteness(
+      1,
+      {
+        teams: [{ id: 1, title: 'Team 1' }],
+        playerSeasons: [
+          { playerId: 101, sourceTeamTitle: 'Team 1' },
+          { playerId: 102, sourceTeamTitle: 'Team 1' },
+        ],
+      },
+      [{ playerId: 101 }],
+      new Set([101, 102]),
+    );
+    expect(shrinkingParticipants.complete).toBe(false);
+    expect(shrinkingParticipants.reason).toContain('participant rows incomplete');
+    const newlyDiscoveredParticipant = evaluateUnderstatPlayerTeamResourceCompleteness(
+      1,
+      {
+        teams: [{ id: 1, title: 'Team 1' }],
+        playerSeasons: [
+          { playerId: 101, sourceTeamTitle: 'Team 1' },
+          { playerId: 102, sourceTeamTitle: 'Team 1' },
+        ],
+      },
+      [{ playerId: 101 }],
+      new Set([101]),
+    );
+    expect(newlyDiscoveredParticipant.complete).toBe(false);
+    expect(newlyDiscoveredParticipant.reason).toContain('omitted=102');
+
+    const roster = [
+      ...Array.from({ length: 11 }, () => ({
+        matchId: 1,
+        teamId: 1,
+        side: 'h' as const,
+        started: true,
+      })),
+      ...Array.from({ length: 11 }, () => ({
+        matchId: 1,
+        teamId: 2,
+        side: 'a' as const,
+        started: true,
+      })),
+    ];
+    expect(
+      evaluateUnderstatPlayerMatchResourceCompleteness(
+        { id: 1, homeTeamId: 1, awayTeamId: 2 },
+        roster,
+      ),
     ).toEqual({ complete: true, reason: 'complete' });
   });
 });

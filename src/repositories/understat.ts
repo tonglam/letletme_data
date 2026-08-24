@@ -691,6 +691,20 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     return row !== undefined;
   },
 
+  async getTeamParticipantPlayerIds(season: string, teamId: number): Promise<Set<number>> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({ playerId: understatPlayerTeamSeasons.playerId })
+      .from(understatPlayerTeamSeasons)
+      .where(
+        and(
+          eq(understatPlayerTeamSeasons.seasonCode, season),
+          eq(understatPlayerTeamSeasons.teamId, teamId),
+        ),
+      );
+    return new Set(rows.map((row) => row.playerId));
+  },
+
   async getTeamIdsWithParticipants(season: string): Promise<Set<number>> {
     const db = await getDatabase(dbInstance);
     const rows = await db
