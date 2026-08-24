@@ -16,7 +16,9 @@ Understat uses an independent DB-first ingestion pipeline and publishes no busin
 6. Redis is used only for BullMQ and short-lived worker coordination on `QUEUE_REDIS_*`.
 7. A detail/discovery job stages normalized evidence; only a lane finalizer may mutate Understat
    business facts.
-8. A finalizer commits one complete snapshot transaction or no business changes at all.
+8. Historical full/reconcile runs require a complete league discovery and complete resources;
+   active-season incremental runs accept a partial discovery and commit each independently complete
+   team/resource while preserving incomplete resources for the next matchday pass.
 
 The staged JSON in `ops.sync_items.normalized_payload` is normalized evidence, not a byte-for-byte
 HTTP raw-response archive. Immutable raw capture, if required, belongs to the separate Understat
@@ -128,37 +130,48 @@ A mismatch is a hard failure before any business fact is written.
 
 ## 7. Team lane
 
-1. Discovery fetches and validates the full league payload.
+1. Each matchday pass fetches the league payload once. Historical/full/reconcile runs require the
+   full league snapshot; active incremental runs may contain partial completed-match history.
 2. It computes changed/missing team-detail targets from PostgreSQL evidence.
 3. It creates every `ops.sync_items` row before marking league discovery complete.
 4. Discovery stages normalized season, teams, matches, team match stats, and team-season summaries.
 5. Each detail job reads the staged league item, validates provider dates, and stages one team's
-   seven split dimensions.
+   seven split dimensions. In the active season, missing history or split evidence skips only that
+   team; a complete team is committed independently.
 6. When all items settle, one finalizer job is enqueued.
 7. The discovery graph is persisted before detail fanout so every detail resource has its foreign-key
    parents available.
 8. Each team detail job hash-verifies and commits its own split resource in a short PostgreSQL
-   transaction. A complete team is visible without waiting for other teams.
+   transaction. A complete team is visible without waiting for other teams. An active partial
+   discovery never replaces a team's season aggregate until every completed match row for that team
+   is present; if Understat withdraws a prior result, the affected aggregate is recomputed from the
+   surviving persisted match-stat rows before the discovery transaction ends.
 9. The finalizer replays any staged resources idempotently, records incomplete teams, and completes
    the run with partial-resource metadata instead of rolling back successful teams.
 
-For EPL, the shared discovery requires exactly 20 teams and 380 matches. A team resource is complete
-when its season summary, all seven split dimensions, and its team-stat row for each completed match
-involving that team are present. An unavailable current-season team does not block other teams.
+For EPL, historical/full/reconcile discovery requires exactly 20 teams and 380 matches. A team
+resource is complete when its season summary, all seven split dimensions, and its team-stat row for
+each completed match involving that team are present. An unavailable current-season team does not
+block other teams.
 
 ## 8. Player lane
 
-1. Discovery fetches the league payload and stages player-season summaries plus shared references.
-2. Team detail jobs stage participant identities and per-team player-season rows.
-3. Match jobs stage complete rosters for selected completed matches.
+1. Each matchday pass fetches the league payload once and stages player-season summaries plus shared
+   references. Active incremental discovery preserves previously known player summaries when the
+   provider response omits them.
+2. Team detail jobs stage participant identities and per-team player-season rows. Active participant
+   writes merge non-destructively, and a partial roster skips only that team.
+3. Match jobs stage complete rosters for selected completed matches. An active incomplete roster is
+   skipped and retried on the next pass.
 4. Discovery is persisted before detail fanout. Each team-participant and match-roster resource is
    committed independently after its own completeness check.
 5. The finalizer replays staged resources idempotently, records incomplete teams/matches, and refreshes
    the Player State read model after the run is settled.
 
-For EPL, player summaries are shared discovery facts. A team-participant resource requires non-empty
-participant rows whose players exist in the league discovery; a match-roster resource requires 11
-starters on both sides. Preseason matches are retained but require no roster until `is_result = true`.
+For EPL, historical/full/reconcile player summaries are complete discovery facts. An active
+team-participant resource requires evidence for the incoming league players and preserves prior
+memberships; a match-roster resource requires 11 starters on both sides. Preseason matches are
+retained but require no roster until `is_result = true`.
 
 ## 9. PostgreSQL business model
 
@@ -203,6 +216,11 @@ manual-review states remain explicit; no name-only join is silently promoted to 
 - Team and Player runs may complete at different times. Consumers must not claim cross-lane atomicity.
 - A failed or incomplete resource cannot replace that resource's previous complete rows, while other
   successfully completed resources remain available.
+- Active omitted player summaries do not fan out every previously persisted player; only included
+  hash-changed players trigger correction work.
+- Incomplete detail IDs are carried across all prior runs into later scoped or unscoped runs, so an
+  intervening failed discovery or manual scoped run cannot strand the next matchday retry. Withdrawn
+  matches are excluded from the carried roster backlog.
 - A completeness skip retries the current scheduler generation after 30 minutes, up to three
   generations; the third incomplete generation ends that day as `skipped`.
 - A terminal provider/schema failure ends the current scheduler obligation immediately. A terminal
@@ -248,11 +266,10 @@ and Player runs independently and counts facts directly from the provider tables
 - A terminal detail failure marks that item failed; the run does not finalize.
 - A finalizer infrastructure or constraint error marks the run failed after terminal retry.
 - A resource completeness failure leaves that resource untouched, records it in partial-run metadata,
-  and does not roll back other completed resources. A detail worker leaves an incomplete resource
-  item unsettled; after terminal BullMQ retry, the failed resource ID is carried into the next
-  scheduler generation instead of allowing the generation to succeed. Scheduler-backed detail
-  incompleteness uses the 30-minute completeness recovery delay and records completeness evidence
-  when the generation limit is reached.
+  and does not roll back other completed resources. Active incremental detail workers mark the item
+  skipped so the lane finalizer can complete the pass; historical/full/reconcile detail failures
+  remain retryable failures. Scheduler-backed incompleteness uses the 30-minute completeness
+  recovery delay and records completeness evidence when the generation limit is reached.
 - Player discovery rejects empty, duplicate, or shrinking player-summary sets before replacing
   season summaries. Player-team persistence likewise rejects duplicate or shrinking participant
   sets before replacing memberships.
