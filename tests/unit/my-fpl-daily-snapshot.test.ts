@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 import {
+  coalesceMyFplSnapshotCapture,
   isRetryableMyFplCaptureContention,
   isMatchingProvisionalMyFplPublication,
   myFplSnapshotRedisManifestKey,
@@ -28,6 +29,52 @@ const tournamentWorker = readFileSync('src/workers/tournament-sync.worker.ts', '
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 
 describe('My FPL daily snapshot publication contract', () => {
+  test('coalesces matching in-process captures and clears failed work', async () => {
+    const publication: MyFplSnapshotPublication = {
+      seasonId: 2026,
+      eventId: 1,
+      revision: 1,
+      snapshotDate: '2026-08-24',
+      sourceCheckedAt: new Date('2026-08-24T00:00:00.000Z'),
+      publishedAt: new Date('2026-08-24T00:00:01.000Z'),
+      kind: 'PROVISIONAL',
+      expectedEntryCount: 1,
+      readyEntryCount: 1,
+      emptyEntryCount: 0,
+      expectedTournamentCount: 1,
+      readyTournamentCount: 1,
+      contentSha256: 'a'.repeat(64),
+    };
+    let calls = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const operation = async () => {
+      calls += 1;
+      await barrier;
+      return { status: 'published' as const, publication };
+    };
+
+    const first = coalesceMyFplSnapshotCapture('same-capture', operation);
+    const second = coalesceMyFplSnapshotCapture('same-capture', operation);
+    expect(first).toBe(second);
+    expect(calls).toBe(1);
+    release();
+    expect(await first).toEqual({ status: 'published', publication });
+
+    await expect(
+      coalesceMyFplSnapshotCapture('failed-capture', async () => {
+        throw new Error('capture failed');
+      }),
+    ).rejects.toThrow('capture failed');
+    await coalesceMyFplSnapshotCapture('failed-capture', async () => {
+      calls += 1;
+      return { status: 'noop', publication };
+    });
+    expect(calls).toBe(2);
+  });
+
   test('keeps one active revision and a durable Redis handoff per gameweek', () => {
     expect(migration).toContain('my_fpl_snapshot_publications_active_key');
     expect(migration).toContain('my_fpl_snapshot_publication_outbox');

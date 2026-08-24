@@ -33,6 +33,14 @@ export type MyFplSnapshotCaptureResult = Readonly<{
   publication: MyFplSnapshotPublication;
 }>;
 
+export type MyFplSnapshotCaptureOptions = {
+  snapshotDate?: string;
+  now?: Date;
+  actor?: string;
+  reason?: string;
+  idempotencyKey?: string;
+};
+
 export type MyFplSnapshotRedisManifest = Readonly<{
   dataset: 'fpl:my-fpl';
   seasonCode: string;
@@ -120,6 +128,23 @@ class MyFplCaptureLockBusyError extends Error {}
 
 const MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS = 2 * 60_000;
 const MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3;
+const myFplCaptureInFlight = new Map<string, Promise<MyFplSnapshotCaptureResult>>();
+
+export function coalesceMyFplSnapshotCapture(
+  key: string,
+  operation: () => Promise<MyFplSnapshotCaptureResult>,
+): Promise<MyFplSnapshotCaptureResult> {
+  const existing = myFplCaptureInFlight.get(key);
+  if (existing) return existing;
+
+  const promise = operation().finally(() => {
+    if (myFplCaptureInFlight.get(key) === promise) {
+      myFplCaptureInFlight.delete(key);
+    }
+  });
+  myFplCaptureInFlight.set(key, promise);
+  return promise;
+}
 
 async function runMyFplCaptureTransaction(
   client: postgres.Sql,
@@ -1109,17 +1134,11 @@ export async function getMyFplSnapshotOperationalStatus(
   });
 }
 
-export async function captureMyFplSnapshot(
+async function captureMyFplSnapshotUncoalesced(
   season: FplSeasonRef,
   eventId: number,
   kind: MyFplSnapshotKind,
-  options: {
-    snapshotDate?: string;
-    now?: Date;
-    actor?: string;
-    reason?: string;
-    idempotencyKey?: string;
-  } = {},
+  options: MyFplSnapshotCaptureOptions = {},
 ): Promise<MyFplSnapshotCaptureResult> {
   const now = options.now ?? new Date();
   const snapshotDate = options.snapshotDate ?? utc8DateKey(now);
@@ -1860,6 +1879,31 @@ export async function captureMyFplSnapshot(
     });
     return { status: 'published', publication };
   });
+}
+
+export function captureMyFplSnapshot(
+  season: FplSeasonRef,
+  eventId: number,
+  kind: MyFplSnapshotKind,
+  options: MyFplSnapshotCaptureOptions = {},
+): Promise<MyFplSnapshotCaptureResult> {
+  const now = options.now ?? new Date();
+  const captureKey = JSON.stringify([
+    season.seasonId,
+    eventId,
+    kind,
+    options.snapshotDate ?? utc8DateKey(now),
+    options.actor?.trim() || null,
+    options.reason?.trim() || null,
+    options.idempotencyKey?.trim() || null,
+    options.now ? now.toISOString() : 'runtime',
+  ]);
+  return coalesceMyFplSnapshotCapture(captureKey, () =>
+    captureMyFplSnapshotUncoalesced(season, eventId, kind, {
+      ...options,
+      now,
+    }),
+  );
 }
 
 function rankForBoard(rows: JsonRecord[], key: 'eventNetPoints' | 'previousEventNetPoints') {
