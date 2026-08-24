@@ -138,6 +138,10 @@ export async function refreshPlayerStateSeason(
     return refreshPlayerStateSeasonWithCapturedWatermark(season, options.sourceWatermark);
   }
 
+  if (!options.advanceSourceMarker) {
+    return refreshPlayerStateSeasonPreservingMarker(season);
+  }
+
   const base = await runPlayerStateSeasonRefresh(season);
   const sourceMarker = options.advanceSourceMarker
     ? await advancePlayerStateSourceMarker(season)
@@ -238,6 +242,38 @@ async function readPlayerStateSourceMarker(
   return rows[0] ?? null;
 }
 
+async function restorePlayerStateSourceMarker(
+  season: FplSeasonRef,
+  previousMarker: PlayerStateSourceMarkerRow | null,
+): Promise<PlayerStateSourceMarkerRow> {
+  const marker = previousMarker ?? {
+    fpl_source_updated_at: '-infinity',
+    source_updated_at: '-infinity',
+    understat_source_updated_at: '-infinity',
+    bridge_source_updated_at: '-infinity',
+  };
+  const client = await getDbClient();
+  const rows = await client<PlayerStateSourceMarkerRow[]>`
+    UPDATE reporting.player_state_season_refreshes
+    SET
+      fpl_source_updated_at = ${marker.fpl_source_updated_at}::timestamptz,
+      source_updated_at = ${marker.source_updated_at}::timestamptz,
+      understat_source_updated_at = ${marker.understat_source_updated_at}::timestamptz,
+      bridge_source_updated_at = ${marker.bridge_source_updated_at}::timestamptz
+    WHERE season_id = ${season.seasonId}::smallint
+    RETURNING
+      fpl_source_updated_at,
+      source_updated_at,
+      understat_source_updated_at,
+      bridge_source_updated_at
+  `;
+  const row = rows[0];
+  if (!row) {
+    throw new Error(`Player State source marker restore returned no row for ${season.seasonCode}`);
+  }
+  return row;
+}
+
 async function refreshPlayerStateSeasonWithCapturedWatermark(
   season: FplSeasonRef,
   watermark: PlayerStateSourceWatermark,
@@ -251,6 +287,22 @@ async function refreshPlayerStateSeasonWithCapturedWatermark(
     const base = await runPlayerStateSeasonRefresh(season);
     const sourceMarker = await advancePlayerStateSourceMarker(season, watermark, previousMarker);
     const result = buildPlayerStateSeasonRefresh(base, sourceMarker);
+    logPlayerStateSeasonRefresh(season, result);
+    return result;
+  });
+}
+
+async function refreshPlayerStateSeasonPreservingMarker(
+  season: FplSeasonRef,
+): Promise<PlayerStateSeasonRefresh> {
+  return withPlayerStateProjectionTransaction(season, async () => {
+    // Projection-only callers cannot prove that provider reconciliation ran.
+    // Keep their read-model refresh useful, but do not let the stored procedure
+    // advance a marker that a failed bridge reconciliation still needs.
+    const previousMarker = await readPlayerStateSourceMarker(season);
+    const base = await runPlayerStateSeasonRefresh(season);
+    const sourceMarker = await restorePlayerStateSourceMarker(season, previousMarker);
+    const result = buildPlayerStateSeasonRefresh(base, previousMarker ? sourceMarker : undefined);
     logPlayerStateSeasonRefresh(season, result);
     return result;
   });
@@ -408,6 +460,18 @@ async function readPlayerStateSourceWatermark(
   };
 }
 
+function sourceTimestampMillis(value: Date | string): number {
+  if (value === '-infinity') return Number.NEGATIVE_INFINITY;
+  const millis = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isNaN(millis) ? Number.NEGATIVE_INFINITY : millis;
+}
+
+function maxSourceTimestamp(...values: Array<Date | string>): Date | string {
+  return values.reduce((latest, value) =>
+    sourceTimestampMillis(value) > sourceTimestampMillis(latest) ? value : latest,
+  );
+}
+
 /** Persist only the source watermark consumed by the preceding reconciliation. */
 async function advancePlayerStateSourceMarker(
   season: FplSeasonRef,
@@ -492,9 +556,24 @@ export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise
   refresh: PlayerStateSeasonRefresh;
 }> {
   const { mappings, watermark } = await withPlayerStateReconciliationTransaction(async () => {
-    const watermark = await readPlayerStateSourceWatermark(season);
+    const capturedWatermark = await readPlayerStateSourceWatermark(season);
     const mappings = await reconcileProviderMappings(season.seasonCode);
-    return { mappings, watermark };
+    // Reconciliation itself upserts pending/ambiguous links. Include that
+    // committed bridge revision, while retaining the pre-read FPL/Understat
+    // values so a concurrent canonical write remains stale for repair.
+    const postReconciliationWatermark = await readPlayerStateSourceWatermark(season);
+    return {
+      mappings,
+      watermark: {
+        ...capturedWatermark,
+        bridgeSourceUpdatedAt: postReconciliationWatermark.bridgeSourceUpdatedAt,
+        sourceUpdatedAt: maxSourceTimestamp(
+          capturedWatermark.fplSourceUpdatedAt,
+          capturedWatermark.understatSourceUpdatedAt,
+          postReconciliationWatermark.bridgeSourceUpdatedAt,
+        ),
+      },
+    };
   });
   const refresh = await refreshPlayerStateSeasonSafely(season, {
     advanceSourceMarker: true,
