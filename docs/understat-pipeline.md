@@ -165,11 +165,14 @@ block other teams.
    skipped and retried on the next pass.
 4. Discovery is persisted before detail fanout. Each team-participant and match-roster resource is
    committed independently after its own completeness check.
-5. After each complete team-participant or match-roster resource commits, the worker reconciles the
-   verified provider bridge and attempts a Player State refresh. This makes a successful resource
-   visible while sibling resources are still running or have failed; a projection error is logged for
-   the bounded repair path and never rolls back the canonical resource.
-6. The finalizer replays staged resources idempotently, records incomplete teams/matches, and runs
+5. After each complete team-participant resource commits, the worker attempts a Player State refresh.
+   This makes facts for already verified player links visible while sibling resources are still
+   running or have failed.
+6. After each complete match-roster resource commits, the worker reconciles the verified provider
+   bridge and attempts a Player State refresh. Player reconciliation ignores matches without a
+   complete roster, so an early team or partial run cannot quarantine a valid existing link. A
+   projection error is logged for the bounded repair path and never rolls back the canonical resource.
+7. The finalizer replays staged resources idempotently, records incomplete teams/matches, and runs
    the same bridge-plus-Player-State publication once more after the run is settled.
 
 Existing verified player links are extended to a new season only when current-season roster evidence

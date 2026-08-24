@@ -67,6 +67,7 @@ export interface UpsertEntityLinkInput {
   evidence?: Record<string, unknown>;
   season?: string;
   reviewedBy?: string;
+  reviewedAt?: Date | null;
 }
 
 export interface UpsertMatchLinkInput {
@@ -86,7 +87,12 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
   async upsertEntityLink(input: UpsertEntityLinkInput): Promise<ProviderEntityLink> {
     const db = await getDatabase(dbInstance);
     const reviewed = input.status === 'manual_verified';
-    const { season, evidence, reviewedBy, ...identity } = input;
+    const { season, evidence, reviewedBy, reviewedAt, ...identity } = input;
+    const resolvedReviewedAt = reviewed
+      ? reviewedAt === undefined
+        ? new Date()
+        : reviewedAt
+      : null;
     const [row] = await db
       .insert(providerEntityLinks)
       .values({
@@ -96,7 +102,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         firstSeenSeason: season,
         lastSeenSeason: season,
         reviewedBy: reviewed ? reviewedBy : null,
-        reviewedAt: reviewed ? new Date() : null,
+        reviewedAt: resolvedReviewedAt,
       })
       .onConflictDoUpdate({
         target: [
@@ -122,7 +128,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
             ELSE GREATEST(${providerEntityLinks.lastSeenSeason}, excluded.last_seen_season)
           END`,
           reviewedBy: reviewed ? input.reviewedBy : null,
-          reviewedAt: reviewed ? new Date() : null,
+          reviewedAt: resolvedReviewedAt,
           updatedAt: new Date(),
         },
       })

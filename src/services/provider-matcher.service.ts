@@ -369,6 +369,15 @@ function intersect(values: Set<number>, candidates: Set<number>): Set<number> {
   return new Set([...values].filter((value) => candidates.has(value)));
 }
 
+function hasCompleteRosterEvidence(rows: readonly UnderstatRosterEvidence[]): boolean {
+  const startsByTeam = new Map<number, number>();
+  for (const row of rows) {
+    if (!row.started) continue;
+    startsByTeam.set(row.teamId, (startsByTeam.get(row.teamId) ?? 0) + 1);
+  }
+  return startsByTeam.size >= 2 && [...startsByTeam.values()].every((count) => count >= 11);
+}
+
 export async function reconcileProviderPlayers(season: string) {
   const db = await getDb();
   const [entityLinks, matchLinks, fplRows, understatRows, fplPlayers] = await Promise.all([
@@ -430,14 +439,16 @@ export async function reconcileProviderPlayers(season: string) {
   for (const fpl of normalizedFpl) {
     const matchId = matchMap.get(fpl.fixtureCode);
     if (!matchId) continue;
+    const roster = rosterByMatch.get(matchId);
+    if (!roster || !hasCompleteRosterEvidence(roster)) continue;
     let candidates = new Set(
-      (rosterByMatch.get(matchId) ?? [])
+      roster
         .filter((understat) => rosterEvidenceAligns(fpl, understat, teamMap.get(understat.teamId)))
         .map((understat) => understat.playerId),
     );
     if (candidates.size > 1) {
       const assistCandidates = new Set(
-        (rosterByMatch.get(matchId) ?? [])
+        roster
           .filter(
             (understat) => candidates.has(understat.playerId) && understat.assists === fpl.assists,
           )
@@ -496,6 +507,7 @@ export async function reconcileProviderPlayers(season: string) {
       ruleId: link.ruleId,
       season,
       ...(link.reviewedBy ? { reviewedBy: link.reviewedBy } : {}),
+      reviewedAt: link.reviewedAt,
       evidence: {
         ...link.evidence,
         understatName: understat.name,

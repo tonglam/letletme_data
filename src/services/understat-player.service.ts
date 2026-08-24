@@ -57,7 +57,10 @@ import {
   understatStagingHash,
 } from './understat-staging';
 import { enqueueUnderstatFanout, selectUnsettledUnderstatFanoutIds } from './understat-fanout';
-import { publishUnderstatPlayerState } from './player-season-summaries.service';
+import {
+  publishUnderstatPlayerState,
+  refreshPlayerStateSeasonSafely,
+} from './player-season-summaries.service';
 
 const LEAGUE_RESOURCE_TYPE = 'league';
 const TEAM_RESOURCE_TYPE = 'team-participants';
@@ -78,6 +81,7 @@ function obligationFields(job: UnderstatPlayerJobData): {
 type UnderstatPlayerTeamDetailSnapshot = ReturnType<typeof readStagedUnderstatPlayerTeamDetail>;
 type UnderstatPlayerMatchDetailSnapshot = ReturnType<typeof readStagedUnderstatPlayerMatchDetail>;
 
+<<<<<<< HEAD
 async function recoverMissingDiscoveryTeams(
   discovery: UnderstatPlayerDiscovery,
   activeIncremental: boolean,
@@ -102,7 +106,18 @@ async function recoverMissingDiscoveryTeams(
   discovery.teams = [...discovery.teams, ...recovered].sort((left, right) => left.id - right.id);
 }
 
-async function publishPlayerStateAfterResource(season: string): Promise<void> {
+async function refreshPlayerStateAfterTeamResource(season: string): Promise<void> {
+  try {
+    await refreshPlayerStateSeasonSafely(explicitSeasonRef(season));
+  } catch (error) {
+    logWarn('Player State refresh after Understat team resource failed; repair will retry', {
+      season,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function publishPlayerStateAfterMatchResource(season: string): Promise<void> {
   try {
     await publishUnderstatPlayerState(explicitSeasonRef(season));
   } catch (error) {
@@ -516,7 +531,7 @@ export async function syncUnderstatPlayerTeamDetail(job: UnderstatPlayerJobData)
   const teamTitle = requireJobValue(job.teamTitle, 'teamTitle');
   const resourceId = String(teamId);
   if (await alreadySettled(job.runId, TEAM_RESOURCE_TYPE, resourceId)) {
-    await publishPlayerStateAfterResource(job.season);
+    await refreshPlayerStateAfterTeamResource(job.season);
     await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }
@@ -592,7 +607,7 @@ export async function syncUnderstatPlayerTeamDetail(job: UnderstatPlayerJobData)
     understatStagingHash(staged),
     staged,
   );
-  await publishPlayerStateAfterResource(job.season);
+  await refreshPlayerStateAfterTeamResource(job.season);
   await finalizeWhenReady(job, ready);
 }
 
@@ -602,7 +617,7 @@ export async function syncUnderstatPlayerMatch(job: UnderstatPlayerJobData): Pro
   const matchId = requireJobValue(job.resourceId, 'resourceId');
   const resourceId = String(matchId);
   if (await alreadySettled(job.runId, MATCH_RESOURCE_TYPE, resourceId)) {
-    await publishPlayerStateAfterResource(job.season);
+    await publishPlayerStateAfterMatchResource(job.season);
     await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }
@@ -669,7 +684,7 @@ export async function syncUnderstatPlayerMatch(job: UnderstatPlayerJobData): Pro
     understatStagingHash(staged),
     staged,
   );
-  await publishPlayerStateAfterResource(job.season);
+  await publishPlayerStateAfterMatchResource(job.season);
   await finalizeWhenReady(job, ready);
 }
 

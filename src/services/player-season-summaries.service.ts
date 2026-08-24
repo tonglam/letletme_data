@@ -1,4 +1,4 @@
-import { getDbClient } from '../db/singleton';
+import { databaseTransactionStorage, getDbClient, withDatabaseSavepoint } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { reconcileProviderMappings } from './provider-matcher.service';
@@ -73,7 +73,7 @@ export async function refreshPlayerSeasonSummaries(
   // left for the bounded repair job instead of reporting the FPL refresh as a
   // failure after its transaction has committed.
   try {
-    await refreshPlayerStateSeason(season);
+    await refreshPlayerStateSeasonSafely(season);
   } catch (error) {
     logWarn('Player State refresh after FPL summary refresh failed; repair will retry', {
       season: season.seasonCode,
@@ -112,6 +112,18 @@ export async function refreshPlayerStateSeason(
   return result;
 }
 
+async function withPlayerStateProjectionSavepoint<T>(operation: () => Promise<T>): Promise<T> {
+  if (!databaseTransactionStorage.getStore()) return operation();
+  return withDatabaseSavepoint(operation);
+}
+
+/** Refresh Player State without allowing a projection failure to abort its caller's write. */
+export async function refreshPlayerStateSeasonSafely(
+  season: FplSeasonRef,
+): Promise<PlayerStateSeasonRefresh> {
+  return withPlayerStateProjectionSavepoint(() => refreshPlayerStateSeason(season));
+}
+
 /**
  * Reconcile the verified provider bridge and publish the cross-provider read
  * model after an Understat resource commits. A resource may be published
@@ -123,17 +135,19 @@ export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise
   mappings: Awaited<ReturnType<typeof reconcileProviderMappings>>;
   refresh: PlayerStateSeasonRefresh;
 }> {
-  const mappings = await reconcileProviderMappings(season.seasonCode);
-  const refresh = await refreshPlayerStateSeason(season);
-  logInfo('Understat Player State published', {
-    season: season.seasonCode,
-    mappingMatches: mappings.matches.verified,
-    mappingPlayers: mappings.players.verified,
-    confirmedPlayers: mappings.players.confirmed,
-    revision: refresh.revision,
-    understatPlayerCount: refresh.understatPlayerCount,
+  return withPlayerStateProjectionSavepoint(async () => {
+    const mappings = await reconcileProviderMappings(season.seasonCode);
+    const refresh = await refreshPlayerStateSeason(season);
+    logInfo('Understat Player State published', {
+      season: season.seasonCode,
+      mappingMatches: mappings.matches.verified,
+      mappingPlayers: mappings.players.verified,
+      confirmedPlayers: mappings.players.confirmed,
+      revision: refresh.revision,
+      understatPlayerCount: refresh.understatPlayerCount,
+    });
+    return { mappings, refresh };
   });
-  return { mappings, refresh };
 }
 
 async function findStalePlayerSeasonSummaries(): Promise<FplSeasonRef[]> {
