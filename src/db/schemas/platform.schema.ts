@@ -4144,6 +4144,8 @@ export const leagueEventResultsInCompetition = competition.table(
     highestScorePoints: integer('highest_score_points'),
     highestScoreBlank: boolean('highest_score_blank'),
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     sourceLiveCheckedAt: timestamp('source_live_checked_at', {
       withTimezone: true,
       mode: 'date',
@@ -4152,8 +4154,6 @@ export const leagueEventResultsInCompetition = competition.table(
       withTimezone: true,
       mode: 'date',
     }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
     index('league_event_results_captain_fk_idx').using(
