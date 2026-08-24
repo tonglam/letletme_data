@@ -1251,6 +1251,17 @@ describe('Understat persistence', () => {
     }));
 
     expect(await repository.upsertEvidence(seasonRef, evidence)).toBe(2);
+    const [fixtureBeforeDeletion] = await db
+      .select({ updatedAt: eventFixtures.updatedAt })
+      .from(eventFixtures)
+      .where(
+        and(
+          eq(eventFixtures.seasonId, seasonRef.seasonId),
+          eq(eventFixtures.fixtureId, fplFixtureId),
+        ),
+      );
+    if (!fixtureBeforeDeletion) throw new Error('Fixture row missing before evidence deletion');
+    await Bun.sleep(10);
     expect(await repository.upsertEvidence(seasonRef, [evidence[0]])).toBe(1);
     expect(await repository.upsertEvidence(seasonRef, [])).toBe(0);
     const rows = await db
@@ -1264,5 +1275,18 @@ describe('Understat persistence', () => {
       );
     expect(rows).toHaveLength(1);
     expect(rows[0].elementId).toBe(fplPlayerIds[0]);
+    const [fixtureAfterDeletion] = await db
+      .select({ updatedAt: eventFixtures.updatedAt })
+      .from(eventFixtures)
+      .where(
+        and(
+          eq(eventFixtures.seasonId, seasonRef.seasonId),
+          eq(eventFixtures.fixtureId, fplFixtureId),
+        ),
+      );
+    if (!fixtureAfterDeletion) throw new Error('Fixture row missing after evidence deletion');
+    expect(fixtureAfterDeletion.updatedAt.getTime()).toBeGreaterThan(
+      fixtureBeforeDeletion.updatedAt.getTime(),
+    );
   });
 });

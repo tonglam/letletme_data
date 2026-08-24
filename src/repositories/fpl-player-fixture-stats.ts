@@ -223,6 +223,7 @@ export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransacti
               );
         let deletedCount = 0;
         if (stale.length > 0) {
+          const staleFixtureIds = [...new Set(stale.map((row) => row.fixtureId))];
           const deleted = await db
             .delete(playerFixtureStatsInFpl)
             .where(
@@ -241,6 +242,22 @@ export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransacti
             )
             .returning({ elementId: playerFixtureStatsInFpl.elementId });
           deletedCount = deleted.length;
+          if (deletedCount > 0) {
+            // A deletion has no surviving player_fixture_stats.updated_at row
+            // to advance the Player State repair selector.  Touch the owning
+            // fixture in the same transaction as a durable deletion tombstone;
+            // fixture.updated_at is already part of that selector's FPL source
+            // watermark and needs no extra table or migration.
+            await db
+              .update(fixturesInFpl)
+              .set({ updatedAt: sql`clock_timestamp()` })
+              .where(
+                and(
+                  eq(fixturesInFpl.seasonId, season.seasonId),
+                  inArray(fixturesInFpl.fixtureId, staleFixtureIds),
+                ),
+              );
+          }
         }
 
         logInfo('FPL player fixture evidence reconciled', {

@@ -30,6 +30,7 @@ export type PlayerStateSeasonRefresh = Readonly<{
 
 type PlayerStateRefreshOptions = Readonly<{
   advanceSourceMarker?: boolean;
+  sourceWatermark?: PlayerStateSourceWatermark;
 }>;
 
 type RefreshRow = {
@@ -54,8 +55,24 @@ type StaleSeasonRow = {
 };
 
 type PlayerStateSourceMarkerRow = {
+  fpl_source_updated_at: Date | string;
   source_updated_at: Date | string;
   understat_source_updated_at: Date | string;
+  bridge_source_updated_at: Date | string;
+};
+
+type PlayerStateSourceWatermark = Readonly<{
+  fplSourceUpdatedAt: Date | string;
+  understatSourceUpdatedAt: Date | string;
+  bridgeSourceUpdatedAt: Date | string;
+  sourceUpdatedAt: Date | string;
+}>;
+
+type PlayerStateSourceWatermarkRow = {
+  fpl_source_updated_at: Date | string;
+  understat_source_updated_at: Date | string;
+  bridge_source_updated_at: Date | string;
+  source_updated_at: Date | string;
 };
 
 const iso = (value: Date | string): string =>
@@ -118,7 +135,7 @@ export async function refreshPlayerStateSeason(
     throw new Error(`Player State refresh returned no metadata for ${season.seasonCode}`);
   }
   const sourceMarker = options.advanceSourceMarker
-    ? await advancePlayerStateSourceMarker(season)
+    ? await advancePlayerStateSourceMarker(season, options.sourceWatermark)
     : undefined;
   const result = {
     revision: Number(row.revision),
@@ -180,13 +197,43 @@ async function withPlayerStateReconciliationTransaction<T>(
   })) as T;
 }
 
-/** Persist every Understat source timestamp consumed by the Player State repair selector. */
-async function advancePlayerStateSourceMarker(
+/**
+ * Capture the source watermark before provider reconciliation starts.  FPL
+ * live writers use different mutation scopes, so a fixture-stat commit can
+ * race the bridge read.  Advancing the marker from this snapshot leaves that
+ * later commit selected for the next repair pass instead of silently treating
+ * it as consumed.
+ */
+async function readPlayerStateSourceWatermark(
   season: FplSeasonRef,
-): Promise<PlayerStateSourceMarkerRow> {
+): Promise<PlayerStateSourceWatermark> {
   const client = await getDbClient();
-  const rows = await client<PlayerStateSourceMarkerRow[]>`
-    WITH understat_source AS (
+  const rows = await client<PlayerStateSourceWatermarkRow[]>`
+    WITH fpl_source AS (
+      SELECT GREATEST(
+        COALESCE((
+          SELECT max(player.updated_at)
+          FROM fpl.players player
+          WHERE player.season_id = ${season.seasonId}::smallint
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(summary.source_updated_at)
+          FROM reporting.player_season_summary_rows summary
+          WHERE summary.season_id = ${season.seasonId}::smallint
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(fixture.updated_at)
+          FROM fpl.fixtures fixture
+          WHERE fixture.season_id = ${season.seasonId}::smallint
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(fixture_stat.updated_at)
+          FROM fpl.player_fixture_stats fixture_stat
+          WHERE fixture_stat.season_id = ${season.seasonId}::smallint
+        ), '-infinity'::timestamptz)
+      ) AS source_updated_at
+    ),
+    understat_source AS (
       SELECT GREATEST(
         COALESCE((
           SELECT max(metrics.updated_at)
@@ -223,48 +270,78 @@ async function advancePlayerStateSourceMarker(
         ), '-infinity'::timestamptz)
       ) AS source_updated_at
     ),
-    all_source AS (
-      SELECT
-        understat_source.source_updated_at AS understat_source_updated_at,
-        GREATEST(
-          understat_source.source_updated_at,
-          COALESCE((
-            SELECT max(fixture.updated_at)
-            FROM fpl.fixtures fixture
-            WHERE fixture.season_id = ${season.seasonId}::smallint
-          ), '-infinity'::timestamptz),
-          COALESCE((
-            SELECT max(fixture_stat.updated_at)
-            FROM fpl.player_fixture_stats fixture_stat
-            WHERE fixture_stat.season_id = ${season.seasonId}::smallint
-          ), '-infinity'::timestamptz),
-          COALESCE((
-            SELECT max(team_link.updated_at)
-            FROM bridge.entity_links team_link
-            WHERE team_link.entity_type = 'team'
-              AND team_link.left_provider = 'understat'
-              AND team_link.right_provider = 'fpl'
-          ), '-infinity'::timestamptz),
-          COALESCE((
-            SELECT max(match_link.updated_at)
-            FROM bridge.match_links match_link
-            WHERE match_link.season_code = ${season.seasonCode}
-              AND match_link.left_provider = 'understat'
-              AND match_link.right_provider = 'fpl'
-          ), '-infinity'::timestamptz)
-        ) AS source_updated_at
-      FROM understat_source
+    bridge_source AS (
+      SELECT GREATEST(
+        COALESCE((
+          SELECT max(link.updated_at)
+          FROM bridge.entity_links link
+          WHERE link.left_provider = 'understat'
+            AND link.right_provider = 'fpl'
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT max(match_link.updated_at)
+          FROM bridge.match_links match_link
+          WHERE match_link.season_code = ${season.seasonCode}
+            AND match_link.left_provider = 'understat'
+            AND match_link.right_provider = 'fpl'
+        ), '-infinity'::timestamptz)
+      ) AS source_updated_at
     )
+    SELECT
+      fpl_source.source_updated_at AS fpl_source_updated_at,
+      understat_source.source_updated_at AS understat_source_updated_at,
+      bridge_source.source_updated_at AS bridge_source_updated_at,
+      GREATEST(
+        fpl_source.source_updated_at,
+        understat_source.source_updated_at,
+        bridge_source.source_updated_at
+      ) AS source_updated_at
+    FROM fpl_source, understat_source, bridge_source
+  `;
+  const row = rows[0];
+  if (!row) {
+    throw new Error(`Player State source watermark returned no row for ${season.seasonCode}`);
+  }
+  return {
+    fplSourceUpdatedAt: row.fpl_source_updated_at,
+    understatSourceUpdatedAt: row.understat_source_updated_at,
+    bridgeSourceUpdatedAt: row.bridge_source_updated_at,
+    sourceUpdatedAt: row.source_updated_at,
+  };
+}
+
+/** Persist only the source watermark consumed by the preceding reconciliation. */
+async function advancePlayerStateSourceMarker(
+  season: FplSeasonRef,
+  watermark?: PlayerStateSourceWatermark,
+): Promise<PlayerStateSourceMarkerRow> {
+  const captured = watermark ?? (await readPlayerStateSourceWatermark(season));
+  const client = await getDbClient();
+  const rows = await client<PlayerStateSourceMarkerRow[]>`
     UPDATE reporting.player_state_season_refreshes refresh
     SET
+      fpl_source_updated_at = GREATEST(
+        refresh.fpl_source_updated_at,
+        ${captured.fplSourceUpdatedAt}::timestamptz
+      ),
       understat_source_updated_at = GREATEST(
         refresh.understat_source_updated_at,
-        all_source.understat_source_updated_at
+        ${captured.understatSourceUpdatedAt}::timestamptz
       ),
-      source_updated_at = GREATEST(refresh.source_updated_at, all_source.source_updated_at)
-    FROM all_source
+      bridge_source_updated_at = GREATEST(
+        refresh.bridge_source_updated_at,
+        ${captured.bridgeSourceUpdatedAt}::timestamptz
+      ),
+      source_updated_at = GREATEST(
+        refresh.source_updated_at,
+        ${captured.sourceUpdatedAt}::timestamptz
+      )
     WHERE refresh.season_id = ${season.seasonId}::smallint
-    RETURNING refresh.source_updated_at, refresh.understat_source_updated_at
+    RETURNING
+      refresh.fpl_source_updated_at,
+      refresh.source_updated_at,
+      refresh.understat_source_updated_at,
+      refresh.bridge_source_updated_at
   `;
   const row = rows[0];
   if (!row) {
@@ -292,11 +369,16 @@ export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise
   mappings: Awaited<ReturnType<typeof reconcileProviderMappings>>;
   refresh: PlayerStateSeasonRefresh;
 }> {
-  const mappings = await withPlayerStateReconciliationTransaction(() =>
-    reconcileProviderMappings(season.seasonCode),
-  );
+  const { mappings, watermark } = await withPlayerStateReconciliationTransaction(async () => {
+    const watermark = await readPlayerStateSourceWatermark(season);
+    const mappings = await reconcileProviderMappings(season.seasonCode);
+    return { mappings, watermark };
+  });
   const refresh = await withPlayerStateProjectionSavepoint(() =>
-    refreshPlayerStateSeason(season, { advanceSourceMarker: true }),
+    refreshPlayerStateSeason(season, {
+      advanceSourceMarker: true,
+      sourceWatermark: watermark,
+    }),
   );
   logInfo('Understat Player State published', {
     season: season.seasonCode,
