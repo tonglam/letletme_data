@@ -260,7 +260,7 @@ function isMissingObjectCode(providerCode: string | null): boolean {
   return providerCode === 'not_found' || providerCode?.toLowerCase() === 'nosuchkey';
 }
 
-function isMissingObjectError(error: unknown): boolean {
+export function isMissingObjectError(error: unknown): boolean {
   if (!(error instanceof SourceMediaStorageError)) return false;
   return error.status === 404 || /\((?:not_found|nosuchkey)\)$/i.test(error.message);
 }

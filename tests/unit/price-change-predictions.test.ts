@@ -3,7 +3,10 @@ import { describe, expect, it } from 'bun:test';
 import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   normalizePriceChangeBoard,
+  priceChangeBootstrapEdgeCacheKey,
+  PriceChangePredictionValidationError,
   PRICE_CHANGE_STALE_MS,
+  requestPriceChangeBootstrap,
 } from '../../src/services/price-change-predictions.service';
 
 function bootstrapFixture(overrides: Record<string, unknown> = {}): FPLBootstrapResponse {
@@ -86,6 +89,63 @@ function bootstrapFixture(overrides: Record<string, unknown> = {}): FPLBootstrap
 }
 
 describe('price-change prediction normalization', () => {
+  it('rotates the official bootstrap edge-cache key once per five-minute bucket', () => {
+    expect(priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:01:00Z'))).toBe(
+      priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:04:59.999Z')),
+    );
+    expect(priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:05:00Z'))).not.toBe(
+      priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:04:59.999Z')),
+    );
+    expect(() => priceChangeBootstrapEdgeCacheKey(Number.NaN)).toThrow(
+      'requires a valid timestamp',
+    );
+  });
+
+  it('retains request ordering when an older bootstrap completes last', async () => {
+    const bootstrap = bootstrapFixture();
+    let finishOlder: ((value: FPLBootstrapResponse) => void) | undefined;
+    const olderResponse = new Promise<FPLBootstrapResponse>((resolve) => {
+      finishOlder = resolve;
+    });
+    const olderTimes = [
+      Date.parse('2026-08-24T06:04:59.900Z'),
+      Date.parse('2026-08-24T06:05:10.000Z'),
+    ];
+    const newerTimes = [
+      Date.parse('2026-08-24T06:05:00.100Z'),
+      Date.parse('2026-08-24T06:05:01.000Z'),
+    ];
+    const requestedAt: number[] = [];
+
+    const olderPromise = requestPriceChangeBootstrap(
+      {
+        getBootstrap: async (requestStartedAtMs) => {
+          requestedAt.push(requestStartedAtMs);
+          return olderResponse;
+        },
+      },
+      () => olderTimes.shift() as number,
+    );
+    const newer = await requestPriceChangeBootstrap(
+      {
+        getBootstrap: async (requestStartedAtMs) => {
+          requestedAt.push(requestStartedAtMs);
+          return bootstrap;
+        },
+      },
+      () => newerTimes.shift() as number,
+    );
+    finishOlder?.(bootstrap);
+    const older = await olderPromise;
+
+    expect(requestedAt).toEqual([
+      Date.parse('2026-08-24T06:04:59.900Z'),
+      Date.parse('2026-08-24T06:05:00.100Z'),
+    ]);
+    expect(older.requestStartedAt.getTime()).toBeLessThan(newer.requestStartedAt.getTime());
+    expect(older.fetchedAt.getTime()).toBeGreaterThan(newer.fetchedAt.getTime());
+  });
+
   it('keeps official preseason zero values as a usable board row', () => {
     const board = normalizePriceChangeBoard(
       bootstrapFixture({
@@ -110,6 +170,7 @@ describe('price-change prediction normalization', () => {
   it('maps lock and calibrating overrides before likelihood', () => {
     const locked = normalizePriceChangeBoard(
       bootstrapFixture({ price_change_locked_until: '2026-08-23T12:00:00Z' }),
+      new Date('2026-08-23T00:00:00Z'),
     );
     const calibrating = normalizePriceChangeBoard(
       bootstrapFixture({ price_change_calibrating: true }),
@@ -119,17 +180,26 @@ describe('price-change prediction normalization', () => {
     expect(calibrating.players[0]?.status).toBe('CALIBRATING');
   });
 
-  it('reports partial coverage when optional official fields are absent', () => {
-    const board = normalizePriceChangeBoard(
-      bootstrapFixture({ price_change_percent: undefined }),
-      new Date('2026-08-22T00:00:00Z'),
+  it('treats an expired lock as unlocked and fails closed on missing fields', () => {
+    const expired = normalizePriceChangeBoard(
+      bootstrapFixture({ price_change_locked_until: '2026-08-22T12:00:00Z' }),
+      new Date('2026-08-23T00:00:00Z'),
     );
+    expect(expired.players[0]?.status).toBe('VERY_LIKELY_RISE');
 
-    expect(board.status).toBe('PARTIAL');
-    expect(board.expectedPlayerCount).toBe(1);
-    expect(board.observedPlayerCount).toBe(0);
+    expect(() =>
+      normalizePriceChangeBoard(
+        bootstrapFixture({ price_change_percent: undefined }),
+        new Date('2026-08-22T00:00:00Z'),
+      ),
+    ).toThrow(PriceChangePredictionValidationError);
+  });
+
+  it('keeps the publication freshness window separate from the legacy constant', () => {
+    const board = normalizePriceChangeBoard(bootstrapFixture(), new Date('2026-08-22T00:00:00Z'));
     expect(board.staleAt).toBe(
-      new Date(Date.parse('2026-08-22T00:00:00Z') + PRICE_CHANGE_STALE_MS).toISOString(),
+      new Date(Date.parse('2026-08-22T00:00:00Z') + 10 * 60 * 1_000).toISOString(),
     );
+    expect(PRICE_CHANGE_STALE_MS).toBe(60 * 60 * 1_000);
   });
 });

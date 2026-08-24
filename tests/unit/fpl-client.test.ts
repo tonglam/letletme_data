@@ -3,6 +3,7 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { FixtureSchema, TeamSchema, fplClient } from '../../src/clients/fpl';
 import { toDbChip, toNullableDbChip } from '../../src/domain/chips';
 import { FPLClientError } from '../../src/utils/errors';
+import { buildCoreSnapshotFixture } from '../fixtures/core-snapshot.fixtures';
 import { preseasonRawFPLFixture } from '../fixtures/fixtures.fixtures';
 import { preseasonRawTeamFixture } from '../fixtures/teams.fixtures';
 
@@ -10,6 +11,23 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+describe('FPL bootstrap edge-cache control', () => {
+  test('adds an explicit caller cache bucket without changing the endpoint path', async () => {
+    const payload = buildCoreSnapshotFixture({ playerCount: 1 }).bootstrap;
+    let requestedUrl = '';
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify(payload), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await fplClient.getBootstrap({ edgeCacheKey: 'price-changes-123' });
+
+    const parsed = new URL(requestedUrl);
+    expect(parsed.pathname).toBe('/api/bootstrap-static/');
+    expect(parsed.searchParams.get('letletme_cache_bucket')).toBe('price-changes-123');
+  });
 });
 
 const eventLiveStats = {

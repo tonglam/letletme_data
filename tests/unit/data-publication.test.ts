@@ -34,13 +34,16 @@ function validManifest(): DataPublicationManifest {
 }
 
 describe('data publication contract', () => {
-  test('builds only canonical core and live keys', () => {
+  test('builds canonical core, live, and price-change keys', () => {
     expect(activeDataPublicationKey(scope)).toBe('llm:data:fpl:core:2627:active');
     expect(dataPublicationItemKey(scope, 7, 'currentEventId')).toBe(
       'llm:data:fpl:core:2627:7:currentEventId',
     );
     expect(activeDataPublicationKey({ dataset: 'fpl:live', seasonCode: '2627', eventId: 12 })).toBe(
       'llm:data:fpl:live:2627:12:active',
+    );
+    expect(activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: '2627' })).toBe(
+      'llm:data:fpl:price-changes:2627:active',
     );
   });
 
@@ -54,6 +57,32 @@ describe('data publication contract', () => {
   test('accepts an exact canonical manifest', () => {
     const manifest = validManifest();
     expect(parseDataPublicationManifest(JSON.stringify(manifest))).toEqual(manifest);
+  });
+
+  test('accepts the exact context and players item set for price changes', () => {
+    const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
+    const manifest: DataPublicationManifest = {
+      dataset: 'fpl:price-changes',
+      seasonCode: '2627',
+      eventId: null,
+      revision: 8,
+      publicationId: '00000000-0000-4000-8000-000000000008',
+      sourceCheckedAt: '2026-08-09T01:00:00.000Z',
+      publishedAt: '2026-08-09T01:00:01.000Z',
+      state: 'active',
+      items: ['context', 'players'].map((name) => ({
+        name,
+        key: dataPublicationItemKey(priceScope, 8, name),
+        type: 'string',
+        count: 1,
+        bytes: Buffer.byteLength(payload, 'utf8'),
+        sha256: createHash('sha256').update(payload).digest('hex'),
+      })),
+    };
+    expect(parseDataPublicationManifest(JSON.stringify(manifest))).toEqual(manifest);
+    expect(
+      parseDataPublicationManifest(JSON.stringify({ ...manifest, items: [manifest.items[0]] })),
+    ).toBeNull();
   });
 
   test('accepts the optional successful-fetch heartbeat without changing revision identity', () => {

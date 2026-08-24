@@ -4,6 +4,7 @@ import {
   enqueueCoreSnapshotJob,
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
+  enqueuePriceChangePredictionsJob,
 } from '../jobs/data-sync-enqueue';
 import {
   enqueueEntryInfoSyncJob,
@@ -567,6 +568,44 @@ function periodicMaintenanceDefinition(input: {
   };
 }
 
+function priceChangePredictionsDefinition(): ScheduledJobDefinition {
+  const periodMs = 5 * 60_000;
+  const offsetMs = 60_000;
+  return {
+    name: 'price-change-predictions',
+    cadence: 'every five minutes at UTC minute 01/06/11...',
+    timezone: 'UTC',
+    catchUpPolicy: 'latest-authoritative',
+    criticality: 'critical',
+    queueName: 'data-sync',
+    successPredicate: 'complete fpl:price-changes publication and deliver Redis pointer',
+    manualTrigger: true,
+    resolve: async (context) => {
+      const bucket = Math.floor((context.now.getTime() - offsetMs) / periodMs);
+      const dueAt = new Date(bucket * periodMs + offsetMs);
+      if (context.now < dueAt) return [];
+      return [
+        {
+          scopeKey: context.season.seasonCode,
+          periodKey: `price-change-${bucket}`,
+          dueAt,
+          source: 'catchup' as const,
+          evidence: { cadence: 'five-minute', offsetMs },
+        },
+      ];
+    },
+    enqueue: async ({ context, obligationId, generation }) => {
+      const job = await enqueuePriceChangePredictionsJob(context.season, 'catchup', {
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        removeOnSettle: false,
+        obligationId,
+        obligationGeneration: generation,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  };
+}
+
 function postMatchMaintenanceDefinition(): ScheduledJobDefinition {
   return {
     name: MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION,
@@ -877,6 +916,7 @@ function activePlayerStatsDefinition(): ScheduledJobDefinition {
 export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
   return [
     coreLifecycleReconcileDefinition(),
+    priceChangePredictionsDefinition(),
     dailyDefinition({
       name: 'core-snapshot',
       hour: 6,

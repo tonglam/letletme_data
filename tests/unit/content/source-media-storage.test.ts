@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   createSourceMediaStorage,
+  isMissingObjectError,
+  SourceMediaStorageError,
   sourceMediaStorageContract,
 } from '../../../src/content/media/source-media-storage';
 
@@ -12,6 +14,32 @@ const config = {
 };
 
 describe('source-media private Storage client', () => {
+  test('recognizes Supabase missing-object responses from authenticated reads', () => {
+    expect(
+      isMissingObjectError(
+        new SourceMediaStorageError(
+          'STORAGE_REQUEST_FAILED',
+          'authenticated download failed with 400 (not_found)',
+          400,
+        ),
+      ),
+    ).toBeTrue();
+    expect(
+      isMissingObjectError(
+        new SourceMediaStorageError('STORAGE_REQUEST_FAILED', 'authenticated download failed', 404),
+      ),
+    ).toBeTrue();
+    expect(
+      isMissingObjectError(
+        new SourceMediaStorageError(
+          'STORAGE_REQUEST_FAILED',
+          'authenticated download failed with 400 (invalid_request)',
+          400,
+        ),
+      ),
+    ).toBeFalse();
+  });
+
   test('provisions exact bucket restrictions and removes its roundtrip probe', async () => {
     let bucket: Record<string, unknown> | null = null;
     const objects = new Map<string, Uint8Array>();

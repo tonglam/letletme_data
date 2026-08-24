@@ -1,7 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
-import { enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
+import { enqueueCoreSnapshotJob, enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
 import { type DataSyncJobData, dataSyncQueue, dataSyncQueueName } from '../queues/data-sync.queue';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
@@ -12,7 +12,13 @@ import {
 import { ensureMarketPublication } from '../services/market-publication.service';
 import { readActiveDataPublication } from '../cache/data-publication';
 import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
+import { syncOperationsRepository } from '../repositories/sync-operations';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
+import {
+  preparePriceChangePublication,
+  persistPriceChangePublication,
+  PriceChangeCorePublicationRequiredError,
+} from '../services/price-change-predictions.service';
 import {
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
@@ -31,7 +37,40 @@ import {
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
+  schedulerObligationStatus,
 } from '../repositories/scheduler-obligations';
+
+function priceChangeCoreRepairJobId(job: Job<DataSyncJobData>): string {
+  // Keep one repair per price-change attempt, not one repair forever.  The
+  // logical run ID is stable across Bull retries, while attemptsMade changes
+  // when a completed repair must be requested again after another mismatch.
+  const runId = job.data.runId ?? String(job.id ?? job.timestamp);
+  return `core-snapshot-price-change-repair-${runId}-attempt-${job.attemptsMade + 1}`;
+}
+
+async function alertPriceChangePublicationOverdue(
+  job: Job<DataSyncJobData>,
+  error: unknown,
+): Promise<void> {
+  if (job.name !== 'price-change-predictions' || !job.data.obligationId) return;
+  const status = await schedulerObligationStatus({
+    jobName: 'price-change-predictions',
+    scopeKey: job.data.seasonCode,
+  }).catch(() => null);
+  if (!status || status.consecutiveUnsuccessfulCycles < 2) return;
+  const latestPeriod = status.latest?.periodKey ?? 'unknown-period';
+  const message = error instanceof Error ? error.message : String(error);
+  await notifyTwoBots(
+    [
+      'Price-change publication overdue',
+      `Season: ${job.data.seasonCode}`,
+      `Cycles without a successful publication: ${status.consecutiveUnsuccessfulCycles}`,
+      `Latest period: ${latestPeriod}`,
+      `Error: ${message}`,
+    ].join('\n'),
+    { idempotencyKey: `price-change-overdue:${job.data.seasonCode}:${latestPeriod}` },
+  );
+}
 
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
   const season = await requireCurrentSeasonForJob(job.data);
@@ -129,6 +168,76 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
       });
     }
 
+    if (job.name === 'price-change-predictions') {
+      return runTrackedJob(context, async () => {
+        // Bootstrap acquisition and all validation happen before the mutation
+        // scopes are acquired.  The short locked section only activates the
+        // immutable DB publication and its outbox receipt.
+        let prepared;
+        try {
+          prepared = await preparePriceChangePublication(
+            season,
+            undefined,
+            job.data.source === 'manual' ? 'manual' : 'queue',
+          );
+        } catch (error) {
+          if (error instanceof PriceChangeCorePublicationRequiredError) {
+            await enqueueCoreSnapshotJob(season, 'reconcile', {
+              jobId: priceChangeCoreRepairJobId(job),
+              removeOnSettle: false,
+            }).catch((repairError) => {
+              logError('Failed to enqueue core repair for price-change validation', repairError, {
+                season: season.seasonCode,
+              });
+            });
+          }
+          throw error;
+        }
+        if (prepared.outcome === 'noop') return { count: 0, outcome: 'noop' as const };
+
+        let persisted;
+        try {
+          persisted = await withMutationScopes(mutationInput, () =>
+            persistPriceChangePublication(prepared, { deferDelivery: true }),
+          );
+        } catch (error) {
+          await syncOperationsRepository
+            .failRun(prepared.sourceRunId, error)
+            .catch(() => undefined);
+          if (error instanceof PriceChangeCorePublicationRequiredError) {
+            await enqueueCoreSnapshotJob(season, 'reconcile', {
+              jobId: priceChangeCoreRepairJobId(job),
+              removeOnSettle: false,
+            }).catch((repairError) => {
+              logError('Failed to enqueue core repair for price-change persistence', repairError, {
+                season: season.seasonCode,
+              });
+            });
+          }
+          throw error;
+        }
+        const delivered = await dispatchDataPublicationOutbox({
+          limit: 1,
+          publicationId: persisted.publicationId,
+        });
+        if (delivered.delivered !== 1) {
+          const active = await readActiveDataPublication({
+            dataset: 'fpl:price-changes',
+            seasonCode: season.seasonCode,
+          });
+          if (
+            active?.manifest.publicationId !== persisted.publicationId ||
+            active?.manifest.revision !== persisted.revision
+          ) {
+            throw new Error(
+              `Price-change publication ${persisted.publicationId} is canonical but Redis delivery is pending`,
+            );
+          }
+        }
+        return persisted;
+      });
+    }
+
     const execute = () =>
       runTrackedJob(context, async () => {
         switch (job.name) {
@@ -165,19 +274,32 @@ export function createDataSyncWorker(): WorkerRuntime {
   });
   const queueEvents = new QueueEvents(dataSyncQueueName, { connection });
 
-  worker.on('completed', (job) => {
+  worker.on('completed', (job, result) => {
     logInfo('Data sync job completed', { jobId: job.id, name: job.name });
     if (job.id !== undefined) {
+      const skippedPriceChange =
+        job.name === 'price-change-predictions' &&
+        result !== null &&
+        typeof result === 'object' &&
+        'outcome' in result &&
+        result.outcome === 'noop';
+      const status = skippedPriceChange ? 'skipped' : 'succeeded';
+      const evidence = {
+        queue: dataSyncQueueName,
+        jobName: job.name,
+        ...(skippedPriceChange ? { reason: 'official_fields_not_open' } : {}),
+      };
       const completion = job.data.obligationId
         ? completeSchedulerObligation({
             obligationId: job.data.obligationId,
             generation: job.data.obligationGeneration,
-            status: 'succeeded',
-            evidence: { queue: dataSyncQueueName, jobName: job.name },
+            status,
+            evidence,
           })
         : completeSchedulerObligationByBullJobId({
             bullJobId: job.id,
-            evidence: { queue: dataSyncQueueName, jobName: job.name },
+            status,
+            evidence,
           });
       void completion.catch(() => undefined);
     }
@@ -191,16 +313,22 @@ export function createDataSyncWorker(): WorkerRuntime {
     });
     if (job) {
       void alertOnFinalFailure(job, error);
-      if (isTerminalJobFailure(job, error) && job.data.obligationId) {
-        void failSchedulerObligation({
-          obligationId: job.data.obligationId,
-          generation: job.data.obligationGeneration,
-          error,
-        }).catch(() => undefined);
-      } else if (job.id !== undefined && isTerminalJobFailure(job, error)) {
-        void failSchedulerObligationByBullJobId({ bullJobId: job.id, error }).catch(
-          () => undefined,
-        );
+      if (isTerminalJobFailure(job, error)) {
+        // Persist the terminal failure before reading the streak. Otherwise
+        // the alert observes the previous database state and under-counts the
+        // current failed cycle.
+        void (async () => {
+          if (job.data.obligationId) {
+            await failSchedulerObligation({
+              obligationId: job.data.obligationId,
+              generation: job.data.obligationGeneration,
+              error,
+            });
+          } else if (job.id !== undefined) {
+            await failSchedulerObligationByBullJobId({ bullJobId: job.id, error });
+          }
+          await alertPriceChangePublicationOverdue(job, error);
+        })().catch(() => undefined);
       }
     }
   });

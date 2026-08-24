@@ -3,6 +3,7 @@ import {
   enqueuePlayerPricesSyncJob,
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
+  enqueuePriceChangePredictionsJob,
 } from '../jobs/data-sync-enqueue';
 import {
   enqueueEntryInfoSyncJob,
@@ -242,6 +243,10 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     'player-stats': async () => {
       const season = await seasonRepository.findCurrent();
       return enqueuePlayerStatsSyncJob(season, 'manual');
+    },
+    'price-change-predictions': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePriceChangePredictionsJob(season, 'manual');
     },
     'entry-info-daily': async () => {
       const season = await seasonRepository.findCurrent();

@@ -582,6 +582,14 @@ export type RawFPLPhase = z.infer<typeof PhaseSchema>;
 export type RawFPLFixtureStat = z.infer<typeof FixtureStatSchema>;
 export type RawFPLFixture = z.infer<typeof FixtureSchema>;
 export type FPLBootstrapResponse = z.infer<typeof BootstrapResponseSchema>;
+export type FPLBootstrapRequestOptions = Readonly<{
+  /**
+   * Optional caller-owned edge-cache bucket. FPL's bootstrap CDN can serve a
+   * stale-while-revalidate response after max-age; authoritative producers may
+   * rotate this key at their own cadence while retries reuse the same key.
+   */
+  edgeCacheKey?: string;
+}>;
 export type RawFPLEventLiveStats = z.infer<typeof EventLiveStatsSchema>;
 export type RawFPLEventLiveElement = z.infer<typeof EventLiveElementSchema>;
 export type RawFPLEventLiveResponse = z.infer<typeof EventLiveResponseSchema>;
@@ -814,8 +822,11 @@ class FPLClient {
     }
   }
 
-  async getBootstrap(): Promise<FPLBootstrapResponse> {
-    const url = `${this.baseUrl}/bootstrap-static/`;
+  async getBootstrap(options: FPLBootstrapRequestOptions = {}): Promise<FPLBootstrapResponse> {
+    const requestUrl = new URL(`${this.baseUrl}/bootstrap-static/`);
+    const edgeCacheKey = options.edgeCacheKey?.trim();
+    if (edgeCacheKey) requestUrl.searchParams.set('letletme_cache_bucket', edgeCacheKey);
+    const url = requestUrl.toString();
 
     try {
       logDebug('Fetching FPL bootstrap data', { url });
