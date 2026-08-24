@@ -42,8 +42,9 @@ describe('My FPL daily snapshot publication contract', () => {
 
   test('keeps pinned superseded revisions readable for the bounded retention window', () => {
     expect(retainedRevisionMigration).toMatch(
-      /published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'/,
+      /updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'/,
     );
+    expect(retainedRevisionMigration).toContain('my_fpl_snapshot_publications_retention_idx');
     expect(retainedRevisionMigration).toContain(
       'CREATE POLICY my_fpl_snapshot_publications_graphql_readable',
     );
@@ -57,6 +58,9 @@ describe('My FPL daily snapshot publication contract', () => {
       'CREATE POLICY my_fpl_snapshot_tournament_aggregates_graphql_readable',
     );
     expect(retainedRevisionMigration).not.toMatch(/USING\s*\(\s*true\s*\)/i);
+    expect(retainedRevisionMigration).not.toMatch(
+      /published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'/,
+    );
   });
 
   test('captures official auto substitutions without inferring Bench Boost', () => {
@@ -76,6 +80,9 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('${sourceCheckedAtIso}::timestamptz');
     expect(publicationService).toContain('${nowIso}::timestamptz');
     expect(publicationService).toContain('${supersededBeforeIso}::timestamptz');
+    expect(publicationService).toContain(
+      'active = false AND updated_at < ${supersededBeforeIso}::timestamptz',
+    );
     expect(publicationService).not.toContain('${sourceCheckedAt}, ${now},');
     expect(publicationService).not.toContain('${new Date(now.getTime() - 24 * 60 * 60_000)}');
   });

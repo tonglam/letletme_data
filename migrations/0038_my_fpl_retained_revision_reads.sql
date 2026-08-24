@@ -2,7 +2,8 @@
 -- gameweek, transfer and competition requests. Keep superseded publications
 -- readable by the restricted GraphQL role for the same 24-hour window in
 -- which the writer retains them; active publications remain readable without
--- an age limit.
+-- an age limit. `updated_at` is the superseded-at timestamp because
+-- `published_at` may predate the active-pointer switch by more than 24 hours.
 
 DROP POLICY IF EXISTS my_fpl_snapshot_publications_graphql_active
   ON competition.my_fpl_snapshot_publications;
@@ -13,7 +14,7 @@ CREATE POLICY my_fpl_snapshot_publications_graphql_readable
   FOR SELECT TO letletme_graphql_reader
   USING (
     active
-    OR published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+    OR updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
   );
 
 DROP POLICY IF EXISTS my_fpl_snapshot_entries_graphql_active
@@ -31,7 +32,7 @@ CREATE POLICY my_fpl_snapshot_entries_graphql_readable
       AND publication.revision = my_fpl_snapshot_entries.revision
       AND (
         publication.active
-        OR publication.published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+        OR publication.updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
       )
   ));
 
@@ -50,7 +51,7 @@ CREATE POLICY my_fpl_snapshot_tournament_rows_graphql_readable
       AND publication.revision = my_fpl_snapshot_tournament_rows.revision
       AND (
         publication.active
-        OR publication.published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+        OR publication.updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
       )
   ));
 
@@ -69,7 +70,7 @@ CREATE POLICY my_fpl_snapshot_tournament_aggregates_graphql_readable
       AND publication.revision = my_fpl_snapshot_tournament_aggregates.revision
       AND (
         publication.active
-        OR publication.published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+        OR publication.updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
       )
   ));
 
@@ -77,3 +78,7 @@ COMMENT ON TABLE competition.my_fpl_snapshot_publications IS
   'Atomic My FPL product publications. GraphQL can read the active revision and superseded revisions retained for 24 hours.';
 COMMENT ON COLUMN competition.my_fpl_snapshot_publications.active IS
   'The sole active product revision for this season/gameweek; recently superseded revisions remain readable for pinned requests.';
+
+CREATE INDEX my_fpl_snapshot_publications_retention_idx
+  ON competition.my_fpl_snapshot_publications(season_id, event_id, updated_at DESC)
+  WHERE NOT active;
