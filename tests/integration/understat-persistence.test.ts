@@ -84,6 +84,7 @@ const completeSeason = '9798';
 const completeTeamIds = Array.from({ length: 20 }, (_, index) => baseId + 1_000 + index);
 const completeMatchIds = Array.from({ length: 380 }, (_, index) => baseId + 2_000 + index);
 const completePlayerIds = Array.from({ length: 20 }, (_, index) => baseId + 3_000 + index);
+const extraCompletePlayerId = baseId + 4_000;
 const runIds: string[] = [];
 const providerLinkIds: string[] = [];
 const now = new Date('2098-08-08T12:00:00.000Z');
@@ -412,7 +413,9 @@ afterAll(async () => {
   await db
     .delete(understatPlayerSeasons)
     .where(eq(understatPlayerSeasons.seasonCode, completeSeason));
-  await db.delete(understatPlayers).where(inArray(understatPlayers.playerId, completePlayerIds));
+  await db
+    .delete(understatPlayers)
+    .where(inArray(understatPlayers.playerId, [...completePlayerIds, extraCompletePlayerId]));
   await db
     .delete(understatTeamStatSplits)
     .where(eq(understatTeamStatSplits.seasonCode, completeSeason));
@@ -787,7 +790,7 @@ describe('Understat persistence', () => {
       sourceName: changedPlayer.name,
     };
     const extraPlayerSource = {
-      id: baseId + 4_000,
+      id: extraCompletePlayerId,
       name: 'Unlinked staged player',
       favoritePosition: null,
       firstSeenSeason: completeSeason,
@@ -841,7 +844,7 @@ describe('Understat persistence', () => {
     const db = await getDb();
     const snapshot = await createUnderstatPlayerRepository(db).readSnapshot(completeSeason);
     const run = await understatSyncRepository.findRun(runId);
-    expect(snapshot.players).toHaveLength(20);
+    expect(snapshot.players).toHaveLength(21);
     expect(snapshot.players.find((row) => row.player.id === originalPlayer.id)?.player.name).toBe(
       'This player name must persist',
     );
@@ -862,7 +865,7 @@ describe('Understat persistence', () => {
     expect(status.dataCache).toBe('disabled');
     expect(status.resources.teams.count).toBe(20);
     expect(status.resources.matches.count).toBe(380);
-    expect(status.resources.players.count).toBe(20);
+    expect(status.resources.players.count).toBe(21);
     expect(status.resources.teamParticipants.count).toBe(20);
     expect(status.lanes.team.latestRun?.status).toBe('completed');
     expect(status.lanes.player.latestRun?.status).toBe('completed');
