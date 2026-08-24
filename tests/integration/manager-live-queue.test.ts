@@ -76,6 +76,33 @@ describe('manager live queue integration', () => {
     expect(first.data.classicStandingsCursorEpoch).toBe(0);
   });
 
+  test('replaces a malformed hot state with one new fenced generation', async () => {
+    const redis = await queueRedisSingleton.getClient();
+    await redis.set(
+      managerLiveHotStateKey(scope),
+      '{"eventId":1}',
+      'EX',
+      MANAGER_LIVE_HOT_SCOPE_SECONDS,
+    );
+
+    const job = await enqueueManagerLiveRefresh({
+      season: TEST_SEASON,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      runAt: new Date(Date.now() + 45_000),
+    });
+    if (job.id) createdJobIds.add(job.id);
+
+    expect(job.data.generation).toBeString();
+    await expect(loadManagerLiveHotState(redis, scope)).resolves.toMatchObject({
+      generation: job.data.generation,
+      summaryRotationCursor: 0,
+      classicStandingsPage: null,
+      classicStandingsCursorEpoch: 0,
+    });
+  });
+
   test('does not schedule a follow-up after the hot marker expires', async () => {
     const redis = await queueRedisSingleton.getClient();
     await redis.unlink(managerLiveHotStateKey(scope));
