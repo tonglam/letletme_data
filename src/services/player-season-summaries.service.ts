@@ -211,6 +211,18 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             WHERE provider_season.season_code = season.season_code
           ), '-infinity'::timestamptz),
           COALESCE((
+            SELECT max(team_season.updated_at)
+            FROM understat.player_team_seasons team_season
+            WHERE team_season.season_code = season.season_code
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(match_stats.updated_at)
+            FROM understat.player_match_stats match_stats
+            INNER JOIN understat.matches understat_match
+              ON understat_match.match_id = match_stats.match_id
+            WHERE understat_match.season_code = season.season_code
+          ), '-infinity'::timestamptz),
+          COALESCE((
             SELECT max(link.updated_at)
             FROM bridge.entity_links link
             WHERE link.entity_type = 'player'
