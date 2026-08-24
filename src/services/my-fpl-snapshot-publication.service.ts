@@ -128,27 +128,25 @@ class MyFplCaptureLockBusyError extends Error {}
 
 const MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS = 2 * 60_000;
 const MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3;
-const myFplCaptureInFlight = new Map<string, Promise<MyFplSnapshotCaptureResult>>();
+const myFplCaptureTails = new Map<string, Promise<void>>();
 
-export function coalesceMyFplSnapshotCapture(
+export function serializeMyFplSnapshotCapture(
   key: string,
   operation: () => Promise<MyFplSnapshotCaptureResult>,
 ): Promise<MyFplSnapshotCaptureResult> {
-  const existing = myFplCaptureInFlight.get(key);
-  if (existing) {
-    return existing.then((result): MyFplSnapshotCaptureResult => {
-      if (result.status !== 'published') return result;
-      return { status: 'noop', publication: result.publication };
-    });
-  }
-
-  const promise = operation().finally(() => {
-    if (myFplCaptureInFlight.get(key) === promise) {
-      myFplCaptureInFlight.delete(key);
+  const prior = myFplCaptureTails.get(key);
+  const result = prior ? prior.then(operation) : Promise.resolve().then(operation);
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  myFplCaptureTails.set(key, settled);
+  void settled.then(() => {
+    if (myFplCaptureTails.get(key) === settled) {
+      myFplCaptureTails.delete(key);
     }
   });
-  myFplCaptureInFlight.set(key, promise);
-  return promise;
+  return result;
 }
 
 async function runMyFplCaptureTransaction(
@@ -1139,7 +1137,7 @@ export async function getMyFplSnapshotOperationalStatus(
   });
 }
 
-async function captureMyFplSnapshotUncoalesced(
+async function captureMyFplSnapshotOnce(
   season: FplSeasonRef,
   eventId: number,
   kind: MyFplSnapshotKind,
@@ -1892,22 +1890,8 @@ export function captureMyFplSnapshot(
   kind: MyFplSnapshotKind,
   options: MyFplSnapshotCaptureOptions = {},
 ): Promise<MyFplSnapshotCaptureResult> {
-  const now = options.now ?? new Date();
-  const captureKey = JSON.stringify([
-    season.seasonId,
-    eventId,
-    kind,
-    options.snapshotDate ?? utc8DateKey(now),
-    options.actor?.trim() || null,
-    options.reason?.trim() || null,
-    options.idempotencyKey?.trim() || null,
-    options.now ? now.toISOString() : 'runtime',
-  ]);
-  return coalesceMyFplSnapshotCapture(captureKey, () =>
-    captureMyFplSnapshotUncoalesced(season, eventId, kind, {
-      ...options,
-      now,
-    }),
+  return serializeMyFplSnapshotCapture(`my-fpl:${season.seasonId}:${eventId}`, () =>
+    captureMyFplSnapshotOnce(season, eventId, kind, options),
   );
 }
 
