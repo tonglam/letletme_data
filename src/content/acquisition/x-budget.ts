@@ -18,6 +18,11 @@ export type XBudgetPolicy = Readonly<{
   identityRolling24hLimit: number;
   laneCaps: BriefingCoverageReport['xLaneCallCaps'];
   laneWindowMinutes: BriefingCoverageReport['xForecastWindowMinutes'];
+  /**
+   * Recurring lane forecasts are a production guardrail, not a test or
+   * shadow-run quota. Global/provider limits remain enforced in either mode.
+   */
+  enforceLaneCaps: boolean;
 }>;
 
 export type XBudgetReservationResult = Readonly<{
@@ -48,6 +53,7 @@ export function compileXBudgetPolicy(input: {
   globalRolling24hLimit: number;
   final90Rolling90mLimit: number;
   identityRolling24hLimit?: number;
+  enforceLaneCaps?: boolean;
 }): XBudgetPolicy {
   return {
     globalRolling24hLimit: positiveInteger(
@@ -64,6 +70,7 @@ export function compileXBudgetPolicy(input: {
     ),
     laneCaps: input.coverage.xLaneCallCaps,
     laneWindowMinutes: input.coverage.xForecastWindowMinutes,
+    enforceLaneCaps: input.enforceLaneCaps ?? true,
   };
 }
 
@@ -72,12 +79,6 @@ function budgetScopes(input: {
   lane: XBudgetLane;
   policy: XBudgetPolicy;
 }): readonly BudgetScope[] {
-  const laneLimit =
-    input.lane === 'IDENTITY'
-      ? input.policy.identityRolling24hLimit
-      : input.policy.laneCaps[input.phase][input.lane];
-  const laneWindowMinutes =
-    input.lane === 'IDENTITY' ? 24 * 60 : input.policy.laneWindowMinutes[input.phase];
   const scopes: BudgetScope[] = [
     {
       scopeKind: 'GLOBAL',
@@ -85,17 +86,26 @@ function budgetScopes(input: {
       windowMinutes: 24 * 60,
       limit: input.policy.globalRolling24hLimit,
     },
-    {
+  ];
+  const enforceLaneCap = input.policy.enforceLaneCaps;
+  if (enforceLaneCap) {
+    const laneLimit =
+      input.lane === 'IDENTITY'
+        ? input.policy.identityRolling24hLimit
+        : input.policy.laneCaps[input.phase][input.lane];
+    const laneWindowMinutes =
+      input.lane === 'IDENTITY' ? 24 * 60 : input.policy.laneWindowMinutes[input.phase];
+    scopes.push({
       scopeKind: 'LANE',
-      // Lane caps are phase-specific.  Keeping one key would let a burst in
+      // Lane caps are phase-specific. Keeping one key would let a burst in
       // APPROACHING consume the same rolling bucket that FINAL90/NORMAL use,
       // making the configured cadence depend on whichever phase happened
-      // first.  The global and FINAL90 provider scopes remain shared guards.
+      // first. The global and FINAL90 provider scopes remain shared guards.
       scopeKey: input.lane === 'IDENTITY' ? input.lane : `${input.phase}:${input.lane}`,
       windowMinutes: laneWindowMinutes,
       limit: laneLimit,
-    },
-  ];
+    });
+  }
   if (input.phase === 'FINAL90') {
     scopes.push({
       scopeKind: 'PROVIDER',

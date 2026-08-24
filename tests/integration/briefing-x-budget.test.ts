@@ -2,6 +2,8 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
 
+import { randomUUID } from 'node:crypto';
+
 import { afterAll, expect, test } from 'bun:test';
 import { eq, inArray, notInArray, sql } from 'drizzle-orm';
 
@@ -11,7 +13,7 @@ import {
   confirmFormalRunEnqueued,
 } from '../../src/content/acquisition/formal-run-repository';
 import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/manifest-reconciler';
-import { compileXBudgetPolicy } from '../../src/content/acquisition/x-budget';
+import { compileXBudgetPolicy, reserveXRunBudgets } from '../../src/content/acquisition/x-budget';
 import { getContentRuntimeFlags } from '../../src/content/config';
 import { runFormalXWorker } from '../../src/content/workers/formal-x.worker';
 import {
@@ -115,4 +117,97 @@ test('atomically defers X work beyond the rolling cap and commits only executed 
     .where(eq(contentAcquisitionBudgetReservations.runId, claimed[0]!.runId));
   expect(reservations).toHaveLength(2);
   expect(reservations.every((reservation) => reservation.status === 'COMMITTED')).toBe(true);
+});
+
+test('shadow budget bypasses recurring lane caps but keeps the global guard', async () => {
+  await resetBriefingAcquisitionState();
+  const bundle = await loadBriefingManifest();
+  const db = await getDb();
+  const coverage = {
+    ...bundle.coverage,
+    xLaneCallCaps: {
+      ...bundle.coverage.xLaneCallCaps,
+      NORMAL: {
+        ...bundle.coverage.xLaneCallCaps.NORMAL,
+        OFFICIAL: 1,
+      },
+    },
+  };
+  const recurringPolicy = compileXBudgetPolicy({
+    coverage,
+    globalRolling24hLimit: 100,
+    final90Rolling90mLimit: 10,
+    identityRolling24hLimit: 1,
+    enforceLaneCaps: true,
+  });
+  const shadowPolicy = compileXBudgetPolicy({
+    coverage,
+    globalRolling24hLimit: 100,
+    final90Rolling90mLimit: 10,
+    identityRolling24hLimit: 1,
+    enforceLaneCaps: false,
+  });
+
+  const createRun = async (runId: string) => {
+    const now = new Date();
+    await db.insert(contentAcquisitionRuns).values({
+      runId,
+      windowStart: now,
+      windowEnd: now,
+      idempotencyKey: `shadow-budget-test:${runId}`,
+      status: 'PENDING',
+    });
+  };
+
+  const reserve = (policy: typeof recurringPolicy, runId: string, lane: 'IDENTITY' | 'OFFICIAL') =>
+    db.transaction(async (tx) => {
+      return reserveXRunBudgets({
+        tx,
+        runId,
+        phase: 'NORMAL',
+        lane,
+        dbNow: new Date(),
+        policy,
+      });
+    });
+
+  const firstRunId = randomUUID();
+  await createRun(firstRunId);
+  const first = await reserve(recurringPolicy, firstRunId, 'OFFICIAL');
+  expect(first.reserved).toBe(true);
+
+  const blockedRunId = randomUUID();
+  await createRun(blockedRunId);
+  const recurringBlocked = await reserve(recurringPolicy, blockedRunId, 'OFFICIAL');
+  expect(recurringBlocked).toMatchObject({
+    reserved: false,
+    deferredScope: 'LANE:NORMAL:OFFICIAL',
+    remainingBeforeReservation: 0,
+  });
+
+  const shadowRunId = randomUUID();
+  await createRun(shadowRunId);
+  const shadowAllowed = await reserve(shadowPolicy, shadowRunId, 'OFFICIAL');
+  expect(shadowAllowed.reserved).toBe(true);
+  expect(shadowAllowed.deferredScope).toBeNull();
+
+  const identityFirstRunId = randomUUID();
+  await createRun(identityFirstRunId);
+  const identityFirst = await reserve(recurringPolicy, identityFirstRunId, 'IDENTITY');
+  expect(identityFirst.reserved).toBe(true);
+
+  const identityBlockedRunId = randomUUID();
+  await createRun(identityBlockedRunId);
+  const identityBlocked = await reserve(recurringPolicy, identityBlockedRunId, 'IDENTITY');
+  expect(identityBlocked).toMatchObject({
+    reserved: false,
+    deferredScope: 'LANE:IDENTITY',
+    remainingBeforeReservation: 0,
+  });
+
+  const identityShadowRunId = randomUUID();
+  await createRun(identityShadowRunId);
+  const identityShadowAllowed = await reserve(shadowPolicy, identityShadowRunId, 'IDENTITY');
+  expect(identityShadowAllowed.reserved).toBe(true);
+  expect(identityShadowAllowed.deferredScope).toBeNull();
 });

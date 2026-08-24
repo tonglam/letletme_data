@@ -358,6 +358,13 @@ X 继续使用“高流量单账号、低流量小分区”的原则，但 parti
 manifest compiler 根据未来 24 小时 cadence forecast 加 20% headroom 生成 CI snapshot。X 初始
 并发仍为 2；HTTP 可按 host 设较高并发，但同 host 首版不超过 2；Hermes 首版并发固定为 1。
 
+lane forecast cap 只对 production recurring acquisition 强制执行。`CONTENT_ACQUISITION_SHADOW_MODE=true`
+时，shadow、开发验证和受控 backfill 不创建 phase/lane hard-cap reservation；仍然强制 global
+rolling-day、FINAL90 provider、runner concurrency、timeout 和 provider quota。这样一次 12 小时
+验证不会被此前 recurring scan 消耗的 `NORMAL:CREATOR` 或 `NORMAL:LONGFORM` lane ledger 拦截。
+生产 recurring 模式仍保留 lane cap，并且只有 global/provider/capacity 等真正阻断调用的原因才能
+产生 `BUDGET_DEFERRED`。
+
 X capacity admission：
 
 ```text
