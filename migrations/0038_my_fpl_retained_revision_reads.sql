@@ -80,5 +80,5 @@ COMMENT ON COLUMN competition.my_fpl_snapshot_publications.active IS
   'The sole active product revision for this season/gameweek; recently superseded revisions remain readable for pinned requests.';
 
 CREATE INDEX my_fpl_snapshot_publications_retention_idx
-  ON competition.my_fpl_snapshot_publications(season_id, event_id, updated_at DESC)
+  ON competition.my_fpl_snapshot_publications(season_id, event_id, updated_at DESC NULLS LAST)
   WHERE NOT active;
