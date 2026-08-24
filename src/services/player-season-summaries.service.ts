@@ -686,6 +686,18 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             WHERE summary.season_id = season.season_id
           ), '-infinity'::timestamptz),
           COALESCE((
+            SELECT max(fixture.updated_at)
+            FROM fpl.fixtures fixture
+            WHERE fixture.season_id = season.season_id
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(fixture_stat.updated_at)
+            FROM fpl.player_fixture_stats fixture_stat
+            WHERE fixture_stat.season_id = season.season_id
+          ), '-infinity'::timestamptz)
+        ) AS fpl_source_updated_at,
+        GREATEST(
+          COALESCE((
             SELECT max(metrics.updated_at)
             FROM understat.player_seasons metrics
             WHERE metrics.season_code = season.season_code
@@ -717,17 +729,9 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             INNER JOIN understat.matches understat_match
               ON understat_match.match_id = match_stats.match_id
             WHERE understat_match.season_code = season.season_code
-          ), '-infinity'::timestamptz),
-          COALESCE((
-            SELECT max(fixture.updated_at)
-            FROM fpl.fixtures fixture
-            WHERE fixture.season_id = season.season_id
-          ), '-infinity'::timestamptz),
-          COALESCE((
-            SELECT max(fixture_stat.updated_at)
-            FROM fpl.player_fixture_stats fixture_stat
-            WHERE fixture_stat.season_id = season.season_id
-          ), '-infinity'::timestamptz),
+          ), '-infinity'::timestamptz)
+        ) AS understat_source_updated_at,
+        GREATEST(
           COALESCE((
             SELECT max(team_link.updated_at)
             FROM bridge.entity_links team_link
@@ -757,7 +761,7 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
               AND link.left_provider = 'understat'
               AND link.right_provider = 'fpl'
           ), '-infinity'::timestamptz)
-        ) AS source_updated_at
+        ) AS bridge_source_updated_at
       FROM fpl.seasons season
     )
     SELECT source.season_id, source.season_code
@@ -765,7 +769,9 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
     LEFT JOIN reporting.player_state_season_refreshes refresh
       ON refresh.season_id = source.season_id
     WHERE refresh.season_id IS NULL
-      OR refresh.source_updated_at < source.source_updated_at
+      OR refresh.fpl_source_updated_at < source.fpl_source_updated_at
+      OR refresh.understat_source_updated_at < source.understat_source_updated_at
+      OR refresh.bridge_source_updated_at < source.bridge_source_updated_at
     ORDER BY source.season_id
   `;
   return rows.map((row) => ({ seasonId: row.season_id, seasonCode: row.season_code }));
