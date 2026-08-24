@@ -6,6 +6,7 @@ import {
   isRetryableMyFplCaptureContention,
   isMatchingProvisionalMyFplPublication,
   myFplSnapshotRedisManifestKey,
+  serializeMyFplSnapshotCapture,
   resolveMyFplSnapshotCoverageState,
   type MyFplSnapshotPublication,
 } from '../../src/services/my-fpl-snapshot-publication.service';
@@ -28,6 +29,69 @@ const tournamentWorker = readFileSync('src/workers/tournament-sync.worker.ts', '
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 
 describe('My FPL daily snapshot publication contract', () => {
+  test('serializes in-process captures without hiding a newer data revision', async () => {
+    const publication: MyFplSnapshotPublication = {
+      seasonId: 2026,
+      eventId: 1,
+      revision: 1,
+      snapshotDate: '2026-08-24',
+      sourceCheckedAt: new Date('2026-08-24T00:00:00.000Z'),
+      publishedAt: new Date('2026-08-24T00:00:01.000Z'),
+      kind: 'PROVISIONAL',
+      expectedEntryCount: 1,
+      readyEntryCount: 1,
+      emptyEntryCount: 0,
+      expectedTournamentCount: 1,
+      readyTournamentCount: 1,
+      contentSha256: 'a'.repeat(64),
+    };
+    let calls = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const updatedPublication = { ...publication, revision: 2, contentSha256: 'b'.repeat(64) };
+    const operation = async () => {
+      calls += 1;
+      if (calls === 1) {
+        await barrier;
+        return { status: 'published' as const, publication };
+      }
+      return { status: 'published' as const, publication: updatedPublication };
+    };
+
+    const first = serializeMyFplSnapshotCapture('same-event', operation);
+    const second = serializeMyFplSnapshotCapture('same-event', operation);
+    expect(first).not.toBe(second);
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    release();
+    const [leader, follower] = await Promise.all([first, second]);
+    expect(leader).toEqual({ status: 'published', publication });
+    expect(follower).toEqual({ status: 'published', publication: updatedPublication });
+    expect(calls).toBe(2);
+
+    const failed = serializeMyFplSnapshotCapture('failed-capture', async () => {
+      throw new Error('capture failed');
+    });
+    const retry = serializeMyFplSnapshotCapture('failed-capture', async () => {
+      calls += 1;
+      return { status: 'noop', publication };
+    });
+    await expect(failed).rejects.toThrow('capture failed');
+    await expect(retry).resolves.toEqual({ status: 'noop', publication });
+    await expect(
+      serializeMyFplSnapshotCapture('fresh-failure', async () => {
+        throw new Error('capture failed');
+      }),
+    ).rejects.toThrow('capture failed');
+    await serializeMyFplSnapshotCapture('fresh-failure', async () => {
+      calls += 1;
+      return { status: 'noop', publication };
+    });
+    expect(calls).toBe(4);
+  });
+
   test('keeps one active revision and a durable Redis handoff per gameweek', () => {
     expect(migration).toContain('my_fpl_snapshot_publications_active_key');
     expect(migration).toContain('my_fpl_snapshot_publication_outbox');
