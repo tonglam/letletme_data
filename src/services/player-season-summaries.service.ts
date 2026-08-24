@@ -9,6 +9,7 @@ import {
 } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { logError, logInfo, logWarn } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { reconcileProviderMappings } from './provider-matcher.service';
 
 export type PlayerSeasonSummaryRefresh = Readonly<{
@@ -25,6 +26,10 @@ export type PlayerStateSeasonRefresh = Readonly<{
   understatPlayerCount: number;
   sourceUpdatedAt: string;
   refreshedAt: string;
+}>;
+
+type PlayerStateRefreshOptions = Readonly<{
+  advanceSourceMarker?: boolean;
 }>;
 
 type RefreshRow = {
@@ -99,6 +104,7 @@ export async function refreshPlayerSeasonSummaries(
 /** Publish the cross-provider Player State projection for one FPL season. */
 export async function refreshPlayerStateSeason(
   season: FplSeasonRef,
+  options: PlayerStateRefreshOptions = {},
 ): Promise<PlayerStateSeasonRefresh> {
   const client = await getDbClient();
   const rows = await client<PlayerStateRefreshRow[]>`
@@ -109,12 +115,14 @@ export async function refreshPlayerStateSeason(
   if (!row) {
     throw new Error(`Player State refresh returned no metadata for ${season.seasonCode}`);
   }
-  const sourceMarker = await advancePlayerStateSourceMarker(season);
+  const sourceMarker = options.advanceSourceMarker
+    ? await advancePlayerStateSourceMarker(season)
+    : undefined;
   const result = {
     revision: Number(row.revision),
     playerCount: row.player_count,
     understatPlayerCount: row.understat_player_count,
-    sourceUpdatedAt: iso(sourceMarker.source_updated_at),
+    sourceUpdatedAt: iso(sourceMarker?.source_updated_at ?? row.source_updated_at),
     refreshedAt: iso(row.refreshed_at),
   };
   logInfo('Player State season rows refreshed', {
@@ -191,15 +199,47 @@ async function advancePlayerStateSourceMarker(
           WHERE understat_match.season_code = ${season.seasonCode}
         ), '-infinity'::timestamptz)
       ) AS source_updated_at
+    ),
+    all_source AS (
+      SELECT
+        understat_source.source_updated_at AS understat_source_updated_at,
+        GREATEST(
+          understat_source.source_updated_at,
+          COALESCE((
+            SELECT max(fixture.updated_at)
+            FROM fpl.fixtures fixture
+            WHERE fixture.season_id = ${season.seasonId}::smallint
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(fixture_stat.updated_at)
+            FROM fpl.player_fixture_stats fixture_stat
+            WHERE fixture_stat.season_id = ${season.seasonId}::smallint
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(team_link.updated_at)
+            FROM bridge.entity_links team_link
+            WHERE team_link.entity_type = 'team'
+              AND team_link.left_provider = 'understat'
+              AND team_link.right_provider = 'fpl'
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(match_link.updated_at)
+            FROM bridge.match_links match_link
+            WHERE match_link.season_code = ${season.seasonCode}
+              AND match_link.left_provider = 'understat'
+              AND match_link.right_provider = 'fpl'
+          ), '-infinity'::timestamptz)
+        ) AS source_updated_at
+      FROM understat_source
     )
     UPDATE reporting.player_state_season_refreshes refresh
     SET
       understat_source_updated_at = GREATEST(
         refresh.understat_source_updated_at,
-        understat_source.source_updated_at
+        all_source.understat_source_updated_at
       ),
-      source_updated_at = GREATEST(refresh.source_updated_at, understat_source.source_updated_at)
-    FROM understat_source
+      source_updated_at = GREATEST(refresh.source_updated_at, all_source.source_updated_at)
+    FROM all_source
     WHERE refresh.season_id = ${season.seasonId}::smallint
     RETURNING refresh.source_updated_at, refresh.understat_source_updated_at
   `;
@@ -213,8 +253,9 @@ async function advancePlayerStateSourceMarker(
 /** Refresh Player State without allowing a projection failure to abort its caller's write. */
 export async function refreshPlayerStateSeasonSafely(
   season: FplSeasonRef,
+  options: PlayerStateRefreshOptions = {},
 ): Promise<PlayerStateSeasonRefresh> {
-  return withPlayerStateProjectionSavepoint(() => refreshPlayerStateSeason(season));
+  return withPlayerStateProjectionSavepoint(() => refreshPlayerStateSeason(season, options));
 }
 
 /**
@@ -231,7 +272,9 @@ export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise
   const mappings = await withPlayerStateReconciliationTransaction(() =>
     reconcileProviderMappings(season.seasonCode),
   );
-  const refresh = await withPlayerStateProjectionSavepoint(() => refreshPlayerStateSeason(season));
+  const refresh = await withPlayerStateProjectionSavepoint(() =>
+    refreshPlayerStateSeason(season, { advanceSourceMarker: true }),
+  );
   logInfo('Understat Player State published', {
     season: season.seasonCode,
     mappingMatches: mappings.matches.verified,
@@ -241,6 +284,19 @@ export async function publishUnderstatPlayerState(season: FplSeasonRef): Promise
     understatPlayerCount: refresh.understatPlayerCount,
   });
   return { mappings, refresh };
+}
+
+async function publishUnderstatPlayerStateForRepair(
+  season: FplSeasonRef,
+): Promise<Awaited<ReturnType<typeof publishUnderstatPlayerState>>> {
+  return withMutationScopes(
+    {
+      queueName: 'bridge',
+      jobName: 'player-state-repair',
+      scopes: ['understat:reference:all'],
+    },
+    () => publishUnderstatPlayerState(season),
+  );
 }
 
 async function findStalePlayerSeasonSummaries(): Promise<FplSeasonRef[]> {
@@ -321,6 +377,30 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
             WHERE understat_match.season_code = season.season_code
           ), '-infinity'::timestamptz),
           COALESCE((
+            SELECT max(fixture.updated_at)
+            FROM fpl.fixtures fixture
+            WHERE fixture.season_id = season.season_id
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(fixture_stat.updated_at)
+            FROM fpl.player_fixture_stats fixture_stat
+            WHERE fixture_stat.season_id = season.season_id
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(team_link.updated_at)
+            FROM bridge.entity_links team_link
+            WHERE team_link.entity_type = 'team'
+              AND team_link.left_provider = 'understat'
+              AND team_link.right_provider = 'fpl'
+          ), '-infinity'::timestamptz),
+          COALESCE((
+            SELECT max(match_link.updated_at)
+            FROM bridge.match_links match_link
+            WHERE match_link.season_code = season.season_code
+              AND match_link.left_provider = 'understat'
+              AND match_link.right_provider = 'fpl'
+          ), '-infinity'::timestamptz),
+          COALESCE((
             SELECT max(link.updated_at)
             FROM bridge.entity_links link
             WHERE link.entity_type = 'player'
@@ -352,7 +432,7 @@ export async function repairPlayerStateSeasons(): Promise<{
   let refreshed = 0;
   for (const season of seasons) {
     try {
-      await publishUnderstatPlayerState(season);
+      await publishUnderstatPlayerStateForRepair(season);
       refreshed += 1;
     } catch (reason) {
       failures.push({ season, reason });
