@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createPublicBugReportId, validateBugReportCreateInput } from '../../src/domain/bug-report';
+import {
+  bugReportRequestHash,
+  createPublicBugReportId,
+  validateBugReportCreateInput,
+} from '../../src/domain/bug-report';
 import { createBugReport } from '../../src/services/bug-report.service';
 import { ValidationError } from '../../src/utils/errors';
 import { DatabaseError } from '../../src/utils/errors';
@@ -41,6 +45,69 @@ describe('bug report validation', () => {
       clientMeta: { a: { x: 'one', y: true }, b: 2 },
     });
     expect(first.submissionRequestHash).toBe(second.submissionRequestHash);
+  });
+
+  it('keeps retries idempotent when diagnostic metadata gains fields', () => {
+    const submissionId = '550e8400-e29b-41d4-a716-446655440000';
+    const legacy = validateBugReportCreateInput({
+      source: 'website',
+      body: '诊断字段升级仍应保持幂等',
+      submissionId,
+      clientMeta: {
+        operations: [
+          {
+            operation: 'PlayersForPicker',
+            requestId: 'request-1',
+            code: 'RATE_LIMITED',
+            message: 'Rate limit exceeded',
+          },
+        ],
+      },
+    });
+    const enriched = validateBugReportCreateInput({
+      source: 'website',
+      body: '诊断字段升级仍应保持幂等',
+      submissionId,
+      clientMeta: {
+        operations: [
+          {
+            at: '2026-08-24T00:00:00.000Z',
+            operation: 'PlayersForPicker',
+            requestId: 'request-1',
+            code: 'RATE_LIMITED',
+            status: 429,
+            retryAfterSeconds: 15,
+            rateLimitPolicy: 'graphql-v4',
+            rateLimitScope: 'workload',
+            workload: 'player-stats',
+            message: 'Rate limit exceeded',
+          },
+        ],
+      },
+    });
+
+    expect(enriched.submissionRequestHash).toBe(legacy.submissionRequestHash);
+    expect(enriched.submissionRequestHash).toBe(
+      bugReportRequestHash({
+        source: 'website',
+        userId: null,
+        entryId: null,
+        body: '诊断字段升级仍应保持幂等',
+        submissionId,
+        screenshotObjectKey: null,
+        screenshotUrl: null,
+        clientMeta: {
+          operations: [
+            {
+              operation: 'PlayersForPicker',
+              requestId: 'request-1',
+              code: 'RATE_LIMITED',
+              message: 'Rate limit exceeded',
+            },
+          ],
+        },
+      }),
+    );
   });
 
   it('counts body length in Unicode code points', () => {

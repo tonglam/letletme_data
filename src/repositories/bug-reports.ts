@@ -56,6 +56,49 @@ export type ExpiredBugReportScreenshot = {
 export const hashBugReportScreenshotLocator = (locator: string): string =>
   createHash('sha256').update(locator, 'utf8').digest('hex');
 
+type StoredRequestIdentity = {
+  source: string;
+  userId: string | null;
+  entryId: number | null;
+  body: string;
+  submissionId: string | null;
+  screenshotObjectKey: string | null;
+  screenshotUrl: string | null;
+  clientMeta: unknown;
+  submissionRequestHash?: string | null;
+};
+
+const requestIdentity = (
+  record: StoredRequestIdentity,
+): Omit<Parameters<typeof bugReportRequestHash>[0], 'clientMeta'> => ({
+  source: record.source as BugReportInsert['source'],
+  userId: record.userId,
+  entryId: record.entryId,
+  body: record.body,
+  submissionId: record.submissionId,
+  screenshotObjectKey: record.screenshotObjectKey,
+  screenshotUrl: record.screenshotUrl,
+});
+
+const storedClientMeta = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+
+const storedRequestMatches = (record: StoredRequestIdentity, report: BugReportInsert): boolean => {
+  if (record.submissionRequestHash) {
+    // A persisted hash is the immutable request identity. Never reconstruct it
+    // from a row that retention may already have scrubbed.
+    return record.submissionRequestHash === report.submissionRequestHash;
+  }
+  return (
+    bugReportRequestHash({
+      ...requestIdentity(record),
+      clientMeta: storedClientMeta(record.clientMeta),
+    }) === report.submissionRequestHash
+  );
+};
+
 const SCRUBBED_BUG_REPORT_BODY = 'Screenshot cleanup pending.';
 
 export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
@@ -131,24 +174,12 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             .where(eq(bugReportsInOps.submissionId, report.submissionId))
             .limit(1);
           if (existingSubmission) {
-            const existingHash =
-              existingSubmission.submissionRequestHash ??
-              bugReportRequestHash({
-                source: existingSubmission.source as BugReportInsert['source'],
-                userId: existingSubmission.userId,
-                entryId: existingSubmission.entryId,
-                body: existingSubmission.body,
-                submissionId: existingSubmission.submissionId,
-                screenshotObjectKey: existingSubmission.screenshotObjectKey,
-                screenshotUrl: existingSubmission.screenshotUrl,
-                clientMeta: (existingSubmission.clientMeta ?? {}) as Record<string, unknown>,
-              });
-            if (existingHash !== report.submissionRequestHash)
+            if (!storedRequestMatches(existingSubmission, report))
               throw new ConflictError(
                 'Submission ID was already used for a different bug report',
                 'BUG_REPORT_SUBMISSION_ID_REUSED',
               );
-            if (!existingSubmission.submissionRequestHash) {
+            if (existingSubmission.submissionRequestHash !== report.submissionRequestHash) {
               await connection
                 .update(bugReportsInOps)
                 .set({ submissionRequestHash: report.submissionRequestHash })
@@ -335,24 +366,12 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           .where(eq(bugReportsInOps.submissionId, report.submissionId))
           .limit(1);
         if (!existing) throw new DatabaseError('Bug report insert returned no row');
-        const existingHash =
-          existing.submissionRequestHash ??
-          bugReportRequestHash({
-            source: existing.source as BugReportInsert['source'],
-            userId: existing.userId,
-            entryId: existing.entryId,
-            body: existing.body,
-            submissionId: existing.submissionId,
-            screenshotObjectKey: existing.screenshotObjectKey,
-            screenshotUrl: existing.screenshotUrl,
-            clientMeta: (existing.clientMeta ?? {}) as Record<string, unknown>,
-          });
-        if (existingHash !== report.submissionRequestHash)
+        if (!storedRequestMatches(existing, report))
           throw new ConflictError(
             'Submission ID was already used for a different bug report',
             'BUG_REPORT_SUBMISSION_ID_REUSED',
           );
-        if (!existing.submissionRequestHash) {
+        if (existing.submissionRequestHash !== report.submissionRequestHash) {
           await db
             .update(bugReportsInOps)
             .set({ submissionRequestHash: report.submissionRequestHash })
@@ -973,6 +992,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           userId: bugReportsInOps.userId,
           entryId: bugReportsInOps.entryId,
           submissionId: bugReportsInOps.submissionId,
+          submissionRequestHash: bugReportsInOps.submissionRequestHash,
         })
         .from(bugReportsInOps)
         .where(and(eq(bugReportsInOps.id, report.id), lte(bugReportsInOps.expiresAt, now)))
@@ -1077,6 +1097,12 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
           .where(eq(bugReportRetentionBackupsInOps.id, current.id));
       }
       if (current.screenshotUrl !== null) {
+        const retainedSubmissionRequestHash =
+          current.submissionRequestHash ??
+          bugReportRequestHash({
+            ...requestIdentity(current),
+            clientMeta: storedClientMeta(current.clientMeta),
+          });
         await tx
           .update(bugReportsInOps)
           .set({
@@ -1090,6 +1116,7 @@ export const createBugReportRepository = (dbInstance?: DbOrTransaction) => {
             clientMeta: {},
             screenshotUrl: null,
             scrubbedAt: now,
+            submissionRequestHash: retainedSubmissionRequestHash,
           })
           .where(eq(bugReportsInOps.id, current.id));
       }

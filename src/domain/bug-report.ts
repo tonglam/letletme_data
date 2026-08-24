@@ -24,6 +24,28 @@ const DIAGNOSTIC_KEYS = new Set([
   'viewportBucket',
   'operations',
 ]);
+const GRAPHQL_RATE_LIMIT_POLICIES = new Set(['graphql-v2', 'graphql-v3', 'graphql-v4']);
+const GRAPHQL_RATE_LIMIT_SCOPES = new Set(['global', 'client', 'workload']);
+const GRAPHQL_WORKLOADS = new Set([
+  'interactive',
+  'home',
+  'fixtures',
+  'market',
+  'player-stats',
+  'gameweek',
+  'public-other',
+]);
+const SAFE_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,79}$/;
+const DIAGNOSTIC_FIELD_MAX_LENGTH: Record<string, number> = {
+  at: 40,
+  operation: 80,
+  requestId: 80,
+  code: 80,
+  message: 180,
+  rateLimitPolicy: 32,
+  rateLimitScope: 16,
+  workload: 32,
+};
 const SUBMISSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SCREENSHOT_OBJECT_KEY_PATTERN =
@@ -83,12 +105,24 @@ type BugReportRequestIdentity = Pick<
   | 'submissionId'
   | 'screenshotObjectKey'
   | 'screenshotUrl'
-  | 'clientMeta'
->;
+> & { clientMeta: unknown };
 
+// Keep the v1 identity contract during rollout. The immediately previous
+// binary hashes the legacy diagnostic projection, so storing a v2-only hash
+// would make a request accepted during a failed deployment non-idempotent
+// after rollback. New diagnostic fields are deliberately projected out below.
 export const bugReportRequestHash = (input: BugReportRequestIdentity): string =>
   createHash('sha256')
-    .update(JSON.stringify(canonicalize({ version: 1, ...input })), 'utf8')
+    .update(
+      JSON.stringify(
+        canonicalize({
+          version: 1,
+          ...input,
+          clientMeta: legacyClientMetaForRequestIdentity(input.clientMeta),
+        }),
+      ),
+      'utf8',
+    )
     .digest('hex');
 
 const redactDiagnosticText = (value: unknown): string | null => {
@@ -115,7 +149,7 @@ const redactDiagnosticText = (value: unknown): string | null => {
   return cleaned || null;
 };
 
-export function sanitizeBugReportClientMeta(value: unknown): Record<string, unknown> {
+const legacyClientMetaForRequestIdentity = (value: unknown): Record<string, unknown> => {
   if (!isRecord(value)) return {};
   const cleaned: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
@@ -128,6 +162,84 @@ export function sanitizeBugReportClientMeta(value: unknown): Record<string, unkn
         for (const field of ['operation', 'requestId', 'code', 'message']) {
           const text = redactDiagnosticText(operation[field]);
           if (text) result[field] = text;
+        }
+        return Object.keys(result).length > 0 ? [result] : [];
+      });
+      if (operations.length > 0) cleaned.operations = operations;
+      continue;
+    }
+    if (typeof entry === 'string') {
+      const text = redactDiagnosticText(entry);
+      if (text) cleaned[key] = text;
+      continue;
+    }
+    if (typeof entry === 'number' && Number.isFinite(entry)) {
+      cleaned[key] = entry;
+      continue;
+    }
+    if (typeof entry === 'boolean') cleaned[key] = entry;
+  }
+  if (Buffer.byteLength(JSON.stringify(cleaned), 'utf8') > CLIENT_META_MAX_BYTES)
+    return { truncated: true };
+  return cleaned;
+};
+
+export function sanitizeBugReportClientMeta(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!DIAGNOSTIC_KEYS.has(key)) continue;
+    if (key === 'operations') {
+      if (!Array.isArray(entry)) continue;
+      const operations = entry.slice(-3).flatMap((operation) => {
+        if (!isRecord(operation)) return [];
+        const result: Record<string, unknown> = {};
+        for (const field of [
+          'at',
+          'operation',
+          'requestId',
+          'code',
+          'message',
+          'rateLimitPolicy',
+          'rateLimitScope',
+          'workload',
+        ]) {
+          const text = redactDiagnosticText(operation[field]);
+          if (!text) continue;
+          const maxLength = DIAGNOSTIC_FIELD_MAX_LENGTH[field] ?? 160;
+          const bounded = text.slice(0, maxLength);
+          if (field === 'code' && !SAFE_DIAGNOSTIC_CODE.test(bounded)) continue;
+          result[field] = bounded;
+        }
+        if (
+          typeof result.rateLimitPolicy === 'string' &&
+          !GRAPHQL_RATE_LIMIT_POLICIES.has(result.rateLimitPolicy)
+        )
+          delete result.rateLimitPolicy;
+        if (
+          typeof result.rateLimitScope === 'string' &&
+          !GRAPHQL_RATE_LIMIT_SCOPES.has(result.rateLimitScope)
+        )
+          delete result.rateLimitScope;
+        if (typeof result.workload === 'string' && !GRAPHQL_WORKLOADS.has(result.workload))
+          delete result.workload;
+        const status = operation.status;
+        if (
+          typeof status === 'number' &&
+          Number.isSafeInteger(status) &&
+          status >= 0 &&
+          status <= 599
+        ) {
+          result.status = status;
+        }
+        const retryAfterSeconds = operation.retryAfterSeconds;
+        if (
+          typeof retryAfterSeconds === 'number' &&
+          Number.isSafeInteger(retryAfterSeconds) &&
+          retryAfterSeconds >= 0 &&
+          retryAfterSeconds <= 120
+        ) {
+          result.retryAfterSeconds = retryAfterSeconds;
         }
         return Object.keys(result).length > 0 ? [result] : [];
       });
@@ -239,7 +351,7 @@ export const validateBugReportCreateInput = (
       submissionId,
       screenshotObjectKey,
       screenshotUrl,
-      clientMeta,
+      clientMeta: input.clientMeta,
     }),
     publicId: (options.publicIdGenerator ?? createPublicBugReportId)(),
     closedAt: null,
