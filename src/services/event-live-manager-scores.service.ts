@@ -25,6 +25,7 @@ export type EventLiveManagerScoreBatch = {
 };
 
 export const EVENT_LIVE_PICKS_MAX_AGE_MS = 15 * 60_000;
+export const EVENT_LIVE_HEARTBEAT_MAX_AGE_MS = 15 * 60_000;
 
 export function hasCompleteAggregateCoverage(
   row: { eventCount?: number; firstEventId?: number; lastEventId?: number },
@@ -49,8 +50,18 @@ export function eventLivePicksAreFresh(
   return (
     Number.isFinite(picksTimestamp) &&
     Number.isFinite(liveTimestamp) &&
-    liveTimestamp - picksTimestamp <= maxAgeMs
+    Math.abs(liveTimestamp - picksTimestamp) <= maxAgeMs
   );
+}
+
+export function eventLiveHeartbeatIsFresh(
+  liveCheckedAt: string,
+  nowMs = Date.now(),
+  maxAgeMs = EVENT_LIVE_HEARTBEAT_MAX_AGE_MS,
+): boolean {
+  const liveTimestamp = Date.parse(liveCheckedAt);
+  const ageMs = nowMs - liveTimestamp;
+  return Number.isFinite(liveTimestamp) && ageMs >= 0 && ageMs <= maxAgeMs;
 }
 
 export function buildEventLiveScoreRevision(input: {
@@ -93,6 +104,9 @@ async function loadEventLiveManagerScoreBatch(
     pointsByElement.set(row.elementId, row.totalPoints);
   }
 
+  const checkedAt = snapshot.manifest.lastSuccessfulFetchAt ?? snapshot.manifest.sourceCheckedAt;
+  if (!eventLiveHeartbeatIsFresh(checkedAt)) return null;
+
   const [pickRows, previousTotals] = await Promise.all([
     entryEventPicksRepository.findScoringPicksByEventAndEntryIds(season, eventId, uniqueEntryIds),
     eventId === 1
@@ -112,7 +126,6 @@ async function loadEventLiveManagerScoreBatch(
   );
 
   const authorityRevision = `fpl:live:${snapshot.manifest.publicationId}:${snapshot.manifest.revision}`;
-  const checkedAt = snapshot.manifest.lastSuccessfulFetchAt ?? snapshot.manifest.sourceCheckedAt;
   const scores = new Map<number, RevisionedEventLiveManagerScore>();
   for (const entryId of uniqueEntryIds) {
     const score = deriveEventLiveManagerScore(

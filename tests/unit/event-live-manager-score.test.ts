@@ -6,6 +6,7 @@ import {
 } from '../../src/domain/event-live-manager-score';
 import {
   buildEventLiveScoreRevision,
+  eventLiveHeartbeatIsFresh,
   eventLivePicksAreFresh,
   hasCompleteAggregateCoverage,
 } from '../../src/services/event-live-manager-scores.service';
@@ -88,6 +89,16 @@ describe('event-live manager score authority', () => {
     expect(eventLivePicksAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:15:00.001Z')).toBe(
       false,
     );
+    expect(eventLivePicksAreFresh('2026-08-24T00:15:00.001Z', '2026-08-24T00:00:00.000Z')).toBe(
+      false,
+    );
+  });
+
+  test('rejects an expired or future event-live heartbeat', () => {
+    const now = Date.parse('2026-08-24T00:15:00.000Z');
+    expect(eventLiveHeartbeatIsFresh('2026-08-24T00:00:00.000Z', now)).toBe(true);
+    expect(eventLiveHeartbeatIsFresh('2026-08-23T23:59:59.999Z', now)).toBe(false);
+    expect(eventLiveHeartbeatIsFresh('2026-08-24T00:15:00.001Z', now)).toBe(false);
   });
 
   test('changes the score revision when a prior total is corrected', () => {

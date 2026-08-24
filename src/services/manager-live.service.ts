@@ -701,7 +701,14 @@ export const projectEventLiveManagerRows = (
   return entryIds.flatMap((entryId) => {
     const score = batch.scores.get(entryId);
     if (!score) return [];
-    const metadata = metadataByEntry.get(entryId);
+    const metadataCandidate = metadataByEntry.get(entryId);
+    const batchCheckedAt = Date.parse(batch.checkedAt);
+    const metadata =
+      metadataCandidate &&
+      Number.isFinite(batchCheckedAt) &&
+      isFresh(metadataCandidate, batchCheckedAt)
+        ? metadataCandidate
+        : undefined;
     return [
       {
         ...(metadata && 'revisionAt' in metadata

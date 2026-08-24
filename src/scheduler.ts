@@ -7,7 +7,10 @@ import { runSchedulerPass } from './scheduler/scheduler.service';
 import { dispatchDataPublicationOutbox } from './repositories/data-publication-outbox';
 import { reconcileCoreAndMarketPublications } from './services/data-publication-reconciler';
 import { seasonRepository } from './repositories/seasons';
-import { persistLiveLifecycleStatus } from './services/live-lifecycle-orchestrator';
+import {
+  persistLiveLifecycleStatus,
+  runPicksProbeAndSync,
+} from './services/live-lifecycle-orchestrator';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
 
@@ -20,17 +23,18 @@ const stopHeartbeat = startWorkerHeartbeat({
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('scheduler');
 let inFlight: Promise<unknown> | null = null;
 
-async function runIndependentSchedulerStage(
+async function runIndependentSchedulerStage<T>(
   stage: string,
-  operation: () => Promise<unknown>,
-): Promise<void> {
+  operation: () => Promise<T>,
+): Promise<T | null> {
   try {
-    await operation();
+    return await operation();
   } catch (error) {
     // Each independent recovery path is retried by the next pass and retains
     // its own durable evidence. One unavailable dependency must not suppress
     // the other repair stages for this 30-second cycle.
     logError('Scheduler stage failed; continuing independent recovery paths', error, { stage });
+    return null;
   }
 }
 
@@ -45,7 +49,14 @@ async function runPass(): Promise<void> {
     await runIndependentSchedulerStage('data-publication-outbox', () =>
       dispatchDataPublicationOutbox({ limit: 20 }),
     );
-    await runIndependentSchedulerStage('live-lifecycle', () => persistLiveLifecycleStatus(now));
+    const lifecycle = await runIndependentSchedulerStage('live-lifecycle', () =>
+      persistLiveLifecycleStatus(now),
+    );
+    if (lifecycle?.decision.shouldProbePicks || lifecycle?.decision.shouldSyncPicks) {
+      await runIndependentSchedulerStage('live-picks-refresh', () =>
+        runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now),
+      );
+    }
     await runIndependentSchedulerStage('obligation-registry', () => runSchedulerPass(now));
   })()
     .catch((error) => logError('Scheduler reconciliation pass failed', error))

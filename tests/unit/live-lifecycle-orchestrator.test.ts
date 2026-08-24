@@ -14,9 +14,16 @@ describe('live lifecycle decisions', () => {
     expect(source).toContain('runIndependentSchedulerStage');
     expect(source).toContain('live-lifecycle');
     expect(source).toContain('persistLiveLifecycleStatus(now)');
-    expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
-      source.indexOf('runSchedulerPass(now)'),
+    expect(source).toContain('live-picks-refresh');
+    expect(source).toContain(
+      'runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)',
     );
+    expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
+      source.indexOf('runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)'),
+    );
+    expect(
+      source.indexOf('runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)'),
+    ).toBeLessThan(source.indexOf('runSchedulerPass(now)'));
   });
 
   test('starts the first picks probe 60 minutes after the deadline', () => {
