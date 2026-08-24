@@ -1127,6 +1127,7 @@ export async function failFormalRun(input: {
         windowStart: contentAcquisitionRuns.windowStart,
         windowEnd: contentAcquisitionRuns.windowEnd,
         requestSnapshot: contentAcquisitionRuns.requestSnapshot,
+        requestHash: contentAcquisitionRuns.requestHash,
         status: contentAcquisitionRuns.status,
         jobKind: contentAcquisitionRuns.jobKind,
         provider: contentAcquisitionRuns.provider,
@@ -1441,7 +1442,33 @@ export async function failFormalRun(input: {
       failureStreak = schedule.failureStreak + 1;
       scheduleCheckpoint = asRecord(schedule.checkpoint);
     }
-    const outputContractBlocked = input.outputContractFailure === true && failureStreak >= 2;
+    const currentContractRevision =
+      input.providerEvidence &&
+      typeof input.providerEvidence.runMetrics.outputContractRevision === 'number'
+        ? String(input.providerEvidence.runMetrics.outputContractRevision)
+        : null;
+    const priorContractFailureRows =
+      input.outputContractFailure === true && run.scheduleId && run.requestHash
+        ? await tx
+            .select({ runId: contentAcquisitionRuns.runId })
+            .from(contentAcquisitionRuns)
+            .where(
+              and(
+                eq(contentAcquisitionRuns.scheduleId, run.scheduleId),
+                eq(contentAcquisitionRuns.status, 'FAILED'),
+                eq(contentAcquisitionRuns.requestHash, run.requestHash),
+                sql`${contentAcquisitionRuns.runMetrics} ->> 'outputContractFailure' = 'true'`,
+                ...(currentContractRevision
+                  ? [
+                      sql`${contentAcquisitionRuns.runMetrics} ->> 'outputContractRevision' = ${currentContractRevision}`,
+                    ]
+                  : []),
+              ),
+            )
+            .limit(1)
+        : [];
+    const outputContractBlocked =
+      input.outputContractFailure === true && priorContractFailureRows.length > 0;
     const exhaustedXWindow =
       run.scheduleId !== null &&
       failureStreak >= 3 &&
