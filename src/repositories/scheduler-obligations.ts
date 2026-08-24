@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, gte, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -33,6 +33,8 @@ export type SchedulerObligation = Readonly<{
   leaseExpiresAt: Date | null;
   evidence: Record<string, unknown>;
 }>;
+
+const SUPERSEDED_BY_LATEST_AUTHORITATIVE = 'superseded-by-latest-authoritative';
 
 // A scheduled job may own one obligation while it scans a bounded batch of
 // entries.  The previous 90-second default was shorter than the production
@@ -74,6 +76,33 @@ function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerOb
     leaseExpiresAt: row.leaseExpiresAt,
     evidence: (row.evidence ?? {}) as Record<string, unknown>,
   };
+}
+
+function immutableScheduledDueAtSql() {
+  return sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
+      THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::double precision / 1000)
+    ELSE ${schedulerObligationsInOps.dueAt}
+  END`;
+}
+
+function terminalSchedulerEvidence(evidence?: Record<string, unknown>) {
+  return sql`${JSON.stringify(evidence ?? {})}::jsonb || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'scheduledDueAtMs'
+      THEN jsonb_build_object(
+        'scheduledDueAtMs',
+        ${schedulerObligationsInOps.evidence}->'scheduledDueAtMs'
+      )
+    ELSE '{}'::jsonb
+  END`;
+}
+
+function immutableScheduledDueAt(dueAt: Date, scheduledDueAtMs: string | null): Date {
+  if (!scheduledDueAtMs || !/^[0-9]+$/.test(scheduledDueAtMs)) return dueAt;
+  const timestamp = Number(scheduledDueAtMs);
+  if (!Number.isSafeInteger(timestamp) || timestamp < 0) return dueAt;
+  const scheduled = new Date(timestamp);
+  return Number.isFinite(scheduled.getTime()) ? scheduled : dueAt;
 }
 
 export async function reserveSchedulerObligation(input: {
@@ -151,7 +180,7 @@ export async function supersedeSchedulerObligations(input: {
       evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
         provider: 'understat',
         terminal: true,
-        reason: 'superseded-by-latest-authoritative',
+        reason: SUPERSEDED_BY_LATEST_AUTHORITATIVE,
         ...input.evidence,
       })}::jsonb`,
       completedAt: sql`clock_timestamp()`,
@@ -187,11 +216,7 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
     throw new Error('Scheduler supersede boundary must be a valid timestamp');
   }
   const beforeDueAt = input.beforeDueAt.toISOString();
-  const immutableDueAt = sql`CASE
-    WHEN ${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
-      THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::double precision / 1000)
-    ELSE ${schedulerObligationsInOps.dueAt}
-  END`;
+  const immutableDueAt = immutableScheduledDueAtSql();
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
@@ -199,7 +224,7 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
       evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
         provider: 'fpl',
         terminal: true,
-        reason: 'superseded-by-latest-authoritative',
+        reason: SUPERSEDED_BY_LATEST_AUTHORITATIVE,
         ...input.evidence,
       })}::jsonb`,
       completedAt: sql`clock_timestamp()`,
@@ -454,7 +479,7 @@ export async function completeSchedulerObligation(input: {
     .update(schedulerObligationsInOps)
     .set({
       status: input.status,
-      evidence: input.evidence ?? {},
+      evidence: terminalSchedulerEvidence(input.evidence),
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
@@ -497,7 +522,7 @@ export async function markSchedulerObligationIrrecoverable(input: {
     .update(schedulerObligationsInOps)
     .set({
       status: input.status ?? 'irrecoverable',
-      evidence: input.evidence ?? {},
+      evidence: terminalSchedulerEvidence(input.evidence),
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
@@ -527,7 +552,7 @@ export async function completeSchedulerObligationByBullJobId(input: {
     .update(schedulerObligationsInOps)
     .set({
       status: input.status ?? 'succeeded',
-      evidence: input.evidence ?? {},
+      evidence: terminalSchedulerEvidence(input.evidence),
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
@@ -659,6 +684,7 @@ export async function schedulerObligationStatus(input: {
   consecutiveUnsuccessfulCycles: number;
 }> {
   const db = input.db ?? (await getDb());
+  const immutableDueAt = immutableScheduledDueAtSql();
   const rows = await db
     .select({
       periodKey: schedulerObligationsInOps.periodKey,
@@ -667,30 +693,41 @@ export async function schedulerObligationStatus(input: {
       generation: schedulerObligationsInOps.generation,
       attempts: schedulerObligationsInOps.attempts,
       lastError: schedulerObligationsInOps.lastError,
+      scheduledDueAtMs: sql<
+        string | null
+      >`${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs'`,
+      reason: sql<string | null>`${schedulerObligationsInOps.evidence}->>'reason'`,
     })
     .from(schedulerObligationsInOps)
     .where(
       and(
         eq(schedulerObligationsInOps.jobName, input.jobName),
         eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
-        gte(
-          schedulerObligationsInOps.dueAt,
-          sql`COALESCE((
-            SELECT max(success.due_at)
+        sql`${immutableDueAt} >= COALESCE((
+            SELECT max(CASE
+              WHEN success.evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
+                THEN to_timestamp((success.evidence->>'scheduledDueAtMs')::double precision / 1000)
+              ELSE success.due_at
+            END)
             FROM ops.scheduler_obligations AS success
             WHERE success.job_name = ${input.jobName}
               AND success.scope_key = ${input.scopeKey}
-              AND success.status IN ('succeeded', 'skipped')
+              AND (
+                success.status = 'succeeded'
+                OR (
+                  success.status = 'skipped'
+                  AND success.evidence->>'reason' = 'official_fields_not_open'
+                )
+              )
           ), '-infinity'::timestamptz)`,
-        ),
       ),
     )
-    .orderBy(desc(schedulerObligationsInOps.dueAt), desc(schedulerObligationsInOps.updatedAt));
+    .orderBy(desc(immutableDueAt), desc(schedulerObligationsInOps.updatedAt));
   const latest = rows[0]
     ? {
         periodKey: rows[0].periodKey,
         status: rows[0].status as SchedulerObligationStatus,
-        dueAt: rows[0].dueAt,
+        dueAt: immutableScheduledDueAt(rows[0].dueAt, rows[0].scheduledDueAtMs),
         generation: rows[0].generation,
         attempts: rows[0].attempts,
         lastError: rows[0].lastError,
@@ -698,7 +735,12 @@ export async function schedulerObligationStatus(input: {
     : null;
   let consecutiveUnsuccessfulCycles = 0;
   for (const row of rows) {
-    if (row.status === 'succeeded' || row.status === 'skipped') break;
+    if (
+      row.status === 'succeeded' ||
+      (row.status === 'skipped' && row.reason === 'official_fields_not_open')
+    ) {
+      break;
+    }
     consecutiveUnsuccessfulCycles += 1;
   }
   return {
