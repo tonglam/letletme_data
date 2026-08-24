@@ -91,6 +91,13 @@ function definitionByName(name: string): ScheduledJobDefinition | undefined {
   return schedulerRegistry.find((definition) => definition.name === name);
 }
 
+/** Definitions without a feature flag are always enabled. */
+export function isSchedulerDefinitionEnabled(
+  definition: Pick<ScheduledJobDefinition, 'isEnabled'>,
+): boolean {
+  return definition.isEnabled?.() ?? true;
+}
+
 export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassResult> {
   const season = await seasonRepository.findCurrent();
   const context = await resolveSchedulerContext(season, now);
@@ -127,7 +134,10 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         });
       }
     }
-    if (definition.name === 'price-change-predictions' && definition.isEnabled?.()) {
+    if (
+      definition.name === 'price-change-predictions' &&
+      isSchedulerDefinitionEnabled(definition)
+    ) {
       const latestPlan = resolution.plans
         .filter((plan) => plan.terminalStatus === undefined)
         .sort((left, right) => left.dueAt.getTime() - right.dueAt.getTime())

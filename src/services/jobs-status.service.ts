@@ -1,6 +1,11 @@
 import { Queue } from 'bullmq';
 
-import { readActiveDataPublication } from '../cache/data-publication';
+import {
+  readActiveDataPublication,
+  type DataPublicationDeliveryItem,
+  type DataPublicationManifest,
+  type DataPublicationReadResult,
+} from '../cache/data-publication';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
 import {
   PRICE_CHANGE_DATASET,
@@ -19,6 +24,81 @@ import {
 import { schedulerRegistry } from '../scheduler/job-registry';
 import { eventRepository } from '../repositories/events';
 import { getMyFplSnapshotOperationalStatus } from './my-fpl-snapshot-publication.service';
+
+type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
+type PublicationDelivery = Readonly<{
+  manifest: DataPublicationManifest;
+  items: readonly DataPublicationDeliveryItem[];
+}>;
+
+type PriceChangeContextSelection = Readonly<{
+  context: Record<string, unknown> | null;
+  publicationId: string | null;
+  source: 'redis' | 'database' | 'none';
+}>;
+
+function asContext(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readDeliveryContext(delivery: PublicationDelivery | null): Record<string, unknown> | null {
+  const contextItem = delivery?.items.find((item) => item.manifest.name === 'context');
+  if (!contextItem) return null;
+  try {
+    return asContext(JSON.parse(contextItem.payload));
+  } catch {
+    return null;
+  }
+}
+
+function redisMatchesActivePublication(
+  dbActive: ActivePublication | null,
+  redisActive: Pick<DataPublicationReadResult, 'manifest'> | null,
+): boolean {
+  return Boolean(
+    dbActive &&
+      redisActive &&
+      redisActive.manifest.publicationId === dbActive.publicationId &&
+      redisActive.manifest.revision === dbActive.revision,
+  );
+}
+
+export function selectCanonicalPriceChangeContext(input: {
+  dbActive: ActivePublication | null;
+  redisActive: DataPublicationReadResult | null;
+  dbDelivery: PublicationDelivery | null;
+}): PriceChangeContextSelection {
+  if (redisMatchesActivePublication(input.dbActive, input.redisActive)) {
+    return {
+      context: asContext(input.redisActive?.items.context),
+      publicationId: input.dbActive?.publicationId ?? null,
+      source: 'redis',
+    };
+  }
+
+  const databaseContext =
+    input.dbActive &&
+    input.dbDelivery?.manifest.dataset === PRICE_CHANGE_DATASET &&
+    input.dbDelivery.manifest.publicationId === input.dbActive.publicationId &&
+    input.dbDelivery.manifest.revision === input.dbActive.revision
+      ? readDeliveryContext(input.dbDelivery)
+      : null;
+  if (databaseContext) {
+    return {
+      context: databaseContext,
+      publicationId: input.dbActive?.publicationId ?? null,
+      source: 'database',
+    };
+  }
+
+  return {
+    context: null,
+    publicationId: input.dbActive?.publicationId ?? null,
+    source: 'none',
+  };
+}
 
 export async function getJobsStatus(): Promise<Record<string, unknown>> {
   const season = await seasonRepository.findCurrent();
@@ -79,28 +159,20 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
           dbActive.revision === redisActive.manifest.revision));
   }
 
-  let priceChangeContext: Record<string, unknown> | null = null;
-  if (
-    priceChangeRedisActive?.items.context &&
-    typeof priceChangeRedisActive.items.context === 'object'
-  ) {
-    priceChangeContext = priceChangeRedisActive.items.context as Record<string, unknown>;
-  } else if (priceChangeDbActive) {
-    const delivery = await loadDataPublicationDelivery(priceChangeDbActive.publicationId).catch(
-      () => null,
-    );
-    const contextItem = delivery?.items.find((item) => item.manifest.name === 'context');
-    if (contextItem) {
-      try {
-        const parsed = JSON.parse(contextItem.payload) as unknown;
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          priceChangeContext = parsed as Record<string, unknown>;
-        }
-      } catch {
-        priceChangeContext = null;
-      }
-    }
-  }
+  const priceChangeRedisMatches = redisMatchesActivePublication(
+    priceChangeDbActive,
+    priceChangeRedisActive,
+  );
+  const priceChangeDbDelivery =
+    priceChangeDbActive && !priceChangeRedisMatches
+      ? await loadDataPublicationDelivery(priceChangeDbActive.publicationId).catch(() => null)
+      : null;
+  const priceChangeSelection = selectCanonicalPriceChangeContext({
+    dbActive: priceChangeDbActive,
+    redisActive: priceChangeRedisActive,
+    dbDelivery: priceChangeDbDelivery,
+  });
+  const priceChangeContext = priceChangeSelection.context;
   const fetchedAtValue =
     typeof priceChangeContext?.fetchedAt === 'string' ? priceChangeContext.fetchedAt : null;
   const fetchedAtMs = fetchedAtValue ? Date.parse(fetchedAtValue) : Number.NaN;
@@ -123,8 +195,7 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
   }));
   const priceChanges = {
     dataset: PRICE_CHANGE_DATASET,
-    revision:
-      priceChangeRedisActive?.manifest.publicationId ?? priceChangeDbActive?.publicationId ?? null,
+    revision: priceChangeSelection.publicationId,
     fetchedAt: fetchedAtValue,
     ageSeconds: ageMs === null ? null : Math.floor(ageMs / 1000),
     expectedPlayerCount:

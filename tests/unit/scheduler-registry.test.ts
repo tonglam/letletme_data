@@ -11,6 +11,7 @@ import {
   type ScheduledJobDefinition,
 } from '../../src/scheduler/job-registry';
 import {
+  isSchedulerDefinitionEnabled,
   resolveSchedulerDefinition,
   schedulerPlanKey,
 } from '../../src/scheduler/scheduler.service';
@@ -63,6 +64,15 @@ describe('standalone scheduler registry', () => {
       source: 'catchup',
       evidence: { cadence: 'five-minute', offsetMs: 60_000 },
     });
+  });
+
+  test('treats definitions without an enablement hook as always enabled', () => {
+    const priceChanges = registry.find(
+      (definition) => definition.name === 'price-change-predictions',
+    );
+    expect(priceChanges?.isEnabled).toBeUndefined();
+    expect(isSchedulerDefinitionEnabled(priceChanges!)).toBe(true);
+    expect(isSchedulerDefinitionEnabled({ isEnabled: () => false })).toBe(false);
   });
 
   test('registers maintenance work on the queue-owned scheduler', () => {
