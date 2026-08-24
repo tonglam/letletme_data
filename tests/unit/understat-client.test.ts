@@ -80,7 +80,7 @@ describe('Understat client boundary', () => {
     });
   });
 
-  test('rejects empty team statistics for completed or historical responses', async () => {
+  test('allows empty team statistics for the active season but rejects historical responses', async () => {
     const client = new UnderstatClient({
       enabled: true,
       fetchFn: async () =>
@@ -92,8 +92,8 @@ describe('Understat client boundary', () => {
         ),
     });
 
-    await expect(client.getTeamData('Chelsea', 2026)).rejects.toMatchObject({
-      code: 'VALIDATION_ERROR',
+    await expect(client.getTeamData('Chelsea', 2026)).resolves.toMatchObject({
+      statistics: { situation: {} },
     });
     await expect(client.getTeamData('Chelsea', 2025)).rejects.toMatchObject({
       code: 'VALIDATION_ERROR',
@@ -121,7 +121,7 @@ describe('Understat client boundary', () => {
         ),
     });
 
-    await expect(client.getTeamData('Chelsea', 2026)).rejects.toMatchObject({
+    await expect(client.getTeamData('Chelsea', 2025)).rejects.toMatchObject({
       code: 'VALIDATION_ERROR',
     });
   });
