@@ -3119,9 +3119,7 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       table.publishedAt.desc(),
     ),
     index('my_fpl_snapshot_publications_retention_idx')
-      // Keep the SQL declaration's default NULL ordering: the migration intentionally
-      // omits an explicit NULLS clause, so express the descending key as SQL.
-      .on(table.seasonId, table.eventId, sql`updated_at DESC`)
+      .on(table.seasonId, table.eventId, table.updatedAt.desc())
       .where(sql`NOT active`),
     uniqueIndex('my_fpl_snapshot_publications_active_key')
       .on(table.seasonId, table.eventId)
