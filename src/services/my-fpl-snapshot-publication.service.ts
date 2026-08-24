@@ -33,6 +33,14 @@ export type MyFplSnapshotCaptureResult = Readonly<{
   publication: MyFplSnapshotPublication;
 }>;
 
+export type MyFplSnapshotCaptureOptions = {
+  snapshotDate?: string;
+  now?: Date;
+  actor?: string;
+  reason?: string;
+  idempotencyKey?: string;
+};
+
 export type MyFplSnapshotRedisManifest = Readonly<{
   dataset: 'fpl:my-fpl';
   seasonCode: string;
@@ -120,6 +128,26 @@ class MyFplCaptureLockBusyError extends Error {}
 
 const MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS = 2 * 60_000;
 const MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3;
+const myFplCaptureTails = new Map<string, Promise<void>>();
+
+export function serializeMyFplSnapshotCapture(
+  key: string,
+  operation: () => Promise<MyFplSnapshotCaptureResult>,
+): Promise<MyFplSnapshotCaptureResult> {
+  const prior = myFplCaptureTails.get(key);
+  const result = prior ? prior.then(operation) : Promise.resolve().then(operation);
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  myFplCaptureTails.set(key, settled);
+  void settled.then(() => {
+    if (myFplCaptureTails.get(key) === settled) {
+      myFplCaptureTails.delete(key);
+    }
+  });
+  return result;
+}
 
 async function runMyFplCaptureTransaction(
   client: postgres.Sql,
@@ -1109,17 +1137,11 @@ export async function getMyFplSnapshotOperationalStatus(
   });
 }
 
-export async function captureMyFplSnapshot(
+async function captureMyFplSnapshotOnce(
   season: FplSeasonRef,
   eventId: number,
   kind: MyFplSnapshotKind,
-  options: {
-    snapshotDate?: string;
-    now?: Date;
-    actor?: string;
-    reason?: string;
-    idempotencyKey?: string;
-  } = {},
+  options: MyFplSnapshotCaptureOptions = {},
 ): Promise<MyFplSnapshotCaptureResult> {
   const now = options.now ?? new Date();
   const snapshotDate = options.snapshotDate ?? utc8DateKey(now);
@@ -1860,6 +1882,17 @@ export async function captureMyFplSnapshot(
     });
     return { status: 'published', publication };
   });
+}
+
+export function captureMyFplSnapshot(
+  season: FplSeasonRef,
+  eventId: number,
+  kind: MyFplSnapshotKind,
+  options: MyFplSnapshotCaptureOptions = {},
+): Promise<MyFplSnapshotCaptureResult> {
+  return serializeMyFplSnapshotCapture(`my-fpl:${season.seasonId}:${eventId}`, () =>
+    captureMyFplSnapshotOnce(season, eventId, kind, options),
+  );
 }
 
 function rankForBoard(rows: JsonRecord[], key: 'eventNetPoints' | 'previousEventNetPoints') {

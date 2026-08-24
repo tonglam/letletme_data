@@ -70,7 +70,7 @@ const EnvSchema = z.object({
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
-  TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(false),
+  TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(true),
   FPL_MAX_INFLIGHT: z.coerce.number().int().min(1).max(32).default(5),
   FPL_REQUESTS_PER_SECOND: z.coerce.number().int().min(1).max(20).default(4),
   FPL_BULK_MAX_INFLIGHT_DURING_LIVE: z.coerce.number().int().min(1).max(32).default(3),
