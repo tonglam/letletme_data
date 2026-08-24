@@ -394,10 +394,10 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     sourceCheckedAt,
   );
   await recoverMissingDiscoveryTeams(discovery, activeIncremental);
-  // The 20-team/380-match cardinality guard protects historical replacement
-  // snapshots. The active season is intentionally allowed to be partial so
+  // The 20-team/380-match cardinality guard protects full/reconcile replacement
+  // snapshots. Only active incremental passes may contain partial history so
   // each complete resource can settle independently on every matchday pass.
-  if (!activeSeason) {
+  if (!activeIncremental) {
     assertUnderstatLeagueSnapshotComplete(league, discovery.teams.length, discovery.matches.length);
   }
   discovery.season.state = activeSeason ? 'active' : 'complete';

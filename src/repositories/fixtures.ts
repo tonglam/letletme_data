@@ -1,11 +1,6 @@
 import { and, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 
-import {
-  fixturesInFpl,
-  eventsInFpl,
-  type DbEventFixture,
-  type DbEventFixtureInsert,
-} from '../db/schemas/index.schema';
+import { fixturesInFpl, eventsInFpl, type DbEventFixture } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
@@ -217,7 +212,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
         const db = await getDbInstance();
         const result = await db
           .update(fixturesInFpl)
-          .set({ eventId: null, updatedAt: new Date() })
+          .set({ eventId: null, updatedAt: sql`clock_timestamp()` })
           .where(
             and(
               eq(fixturesInFpl.seasonId, season.seasonId),
@@ -278,7 +273,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
         }
         const result = await db
           .update(fixturesInFpl)
-          .set({ eventId: null, updatedAt: new Date() })
+          .set({ eventId: null, updatedAt: sql`clock_timestamp()` })
           .where(
             and(
               isNotNull(fixturesInFpl.eventId),
@@ -317,7 +312,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
 
         for (let index = 0; index < domainFixtures.length; index += batchSize) {
           const batch = domainFixtures.slice(index, index + batchSize);
-          const newFixtures: DbEventFixtureInsert[] = batch.map((fixture) => ({
+          const newFixtures = batch.map((fixture) => ({
             seasonId: season.seasonId,
             fixtureId: fixture.id,
             code: fixture.code,
@@ -336,7 +331,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
             teamHDifficulty: fixture.teamHDifficulty,
             teamADifficulty: fixture.teamADifficulty,
             pulseId: fixture.pulseId,
-            updatedAt: new Date(),
+            updatedAt: sql`clock_timestamp()`,
           }));
 
           const result = await db
@@ -361,7 +356,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
                 teamHDifficulty: sql`excluded.team_h_difficulty`,
                 teamADifficulty: sql`excluded.team_a_difficulty`,
                 pulseId: sql`excluded.pulse_id`,
-                updatedAt: new Date(),
+                updatedAt: sql`clock_timestamp()`,
               },
             })
             .returning();
