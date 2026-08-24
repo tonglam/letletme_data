@@ -82,6 +82,10 @@ export async function reserveSchedulerObligation(input: {
   db?: DbHandle;
 }): Promise<SchedulerObligation> {
   const db = input.db ?? (await getDb());
+  const scheduledDueAtMs = input.plan.dueAt.getTime();
+  if (!Number.isFinite(scheduledDueAtMs)) {
+    throw new Error('Scheduler obligation plan must have a valid due timestamp');
+  }
   const obligationId = randomUUID();
   const inserted = await db
     .insert(schedulerObligationsInOps)
@@ -98,6 +102,9 @@ export async function reserveSchedulerObligation(input: {
       evidence: {
         ...(input.plan.evidence ?? {}),
         ...(input.plan.eventId === undefined ? {} : { targetEventId: input.plan.eventId }),
+        // due_at is mutable retry state; retain the original schedule boundary
+        // so latest-authoritative coalescing cannot be fooled by a retry delay.
+        scheduledDueAtMs,
       },
     })
     .onConflictDoNothing({
@@ -180,6 +187,11 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
     throw new Error('Scheduler supersede boundary must be a valid timestamp');
   }
   const beforeDueAt = input.beforeDueAt.toISOString();
+  const immutableDueAt = sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
+      THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::double precision / 1000)
+    ELSE ${schedulerObligationsInOps.dueAt}
+  END`;
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
@@ -199,7 +211,7 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
       and(
         eq(schedulerObligationsInOps.jobName, input.jobName),
         eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
-        sql`${schedulerObligationsInOps.dueAt} < ${beforeDueAt}`,
+        sql`${immutableDueAt} < ${beforeDueAt}`,
         inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
       ),
     )

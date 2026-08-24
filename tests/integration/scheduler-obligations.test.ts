@@ -326,6 +326,59 @@ describe('scheduler obligation generation fencing', () => {
     });
   });
 
+  test('coalesces an older failed bucket after its retry due time crosses the boundary', async () => {
+    const sql = await getDbClient();
+    const scheduledDueAtMs = Date.parse('2026-08-23T00:01:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'price-change-predictions',
+        '2627',
+        'price-change-3',
+        'every five minutes at UTC minute 01/06/11...',
+        'UTC',
+        'failed',
+        'catchup',
+        '2026-08-23T00:07:00Z'::timestamptz,
+        1,
+        2,
+        jsonb_build_object('scheduledDueAtMs', ${scheduledDueAtMs})
+      )
+    `;
+
+    expect(
+      await supersedeSchedulerObligationsByDueAt({
+        jobName: 'price-change-predictions',
+        scopeKey: '2627',
+        beforeDueAt: new Date('2026-08-23T00:06:00Z'),
+        evidence: { supersededByPeriodKey: 'price-change-4' },
+      }),
+    ).toBe(1);
+    const rows = await sql<Array<{ status: string; reason: string }>>`
+      SELECT status, evidence->>'reason' AS reason
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      status: 'skipped',
+      reason: 'superseded-by-latest-authoritative',
+    });
+  });
+
   test('terminalizes an expired Understat lease at the generation cap', async () => {
     const sql = await getDbClient();
     await sql`
