@@ -115,6 +115,17 @@ function mapTeamSeason(row: typeof understatTeamSeasons.$inferSelect): Understat
   return { ...rest, season: seasonCode };
 }
 
+function mapTeamMatchStat(
+  row: typeof understatTeamMatchStats.$inferSelect,
+): UnderstatTeamMatchStat {
+  const { createdAt: _createdAt, updatedAt: _updatedAt, side, result, ...rest } = row;
+  return {
+    ...rest,
+    side: side as UnderstatTeamMatchStat['side'],
+    result: result as UnderstatTeamMatchStat['result'],
+  };
+}
+
 function mapTeamSplit(row: typeof understatTeamStatSplits.$inferSelect): UnderstatTeamStatSplit {
   const { seasonCode, createdAt: _createdAt, updatedAt: _updatedAt, ...rest } = row;
   const dimension = UNDERSTAT_SPLIT_DIMENSIONS.find((value) => value === row.dimension);
@@ -254,6 +265,16 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
     return result.length;
   },
 
+  async findTeamsByIds(teamIds: readonly number[]): Promise<UnderstatTeam[]> {
+    if (teamIds.length === 0) return [];
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select()
+      .from(understatTeams)
+      .where(inArray(understatTeams.teamId, [...new Set(teamIds)]));
+    return rows.map(mapTeam);
+  },
+
   async getMatchHashes(season: string): Promise<Map<number, string>> {
     const db = await getDatabase(dbInstance);
     const rows = await db
@@ -341,6 +362,16 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
       .innerJoin(understatMatches, eq(understatTeamMatchStats.matchId, understatMatches.matchId))
       .where(eq(understatMatches.seasonCode, season));
     return new Map(rows.map((row) => [`${row.matchId}:${row.teamId}`, row.sourceHash]));
+  },
+
+  async getMatchStatsBySeason(season: string): Promise<UnderstatTeamMatchStat[]> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({ stat: understatTeamMatchStats })
+      .from(understatTeamMatchStats)
+      .innerJoin(understatMatches, eq(understatTeamMatchStats.matchId, understatMatches.matchId))
+      .where(eq(understatMatches.seasonCode, season));
+    return rows.map(({ stat }) => mapTeamMatchStat(stat));
   },
 
   async upsertMatchStats(rows: UnderstatTeamMatchStat[]): Promise<number> {
@@ -611,7 +642,11 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     return result.length;
   },
 
-  async replacePlayerSeasons(season: string, rows: UnderstatPlayerSeason[]): Promise<boolean> {
+  async replacePlayerSeasons(
+    season: string,
+    rows: UnderstatPlayerSeason[],
+    preserveExisting = false,
+  ): Promise<boolean> {
     const db = await getDatabase(dbInstance);
     const incomingIds = new Set(rows.map((row) => row.playerId));
     if (incomingIds.size !== rows.length) {
@@ -624,13 +659,14 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
       })
       .from(understatPlayerSeasons)
       .where(eq(understatPlayerSeasons.seasonCode, season));
-    if (existing.length > 0 && rows.length === 0) {
+    if (!preserveExisting && existing.length > 0 && rows.length === 0) {
       throw new Error(`Refusing to clear non-empty Understat player season ${season}`);
     }
+    if (preserveExisting && rows.length === 0) return false;
     const oldMap = new Map(existing.map((row) => [row.playerId, row.sourceHash]));
-    const staleIds = existing
-      .map((row) => row.playerId)
-      .filter((playerId) => !incomingIds.has(playerId));
+    const staleIds = preserveExisting
+      ? []
+      : existing.map((row) => row.playerId).filter((playerId) => !incomingIds.has(playerId));
     const changedRows = rows.filter((row) => oldMap.get(row.playerId) !== row.sourceHash);
     if (changedRows.length === 0 && staleIds.length === 0) return false;
     if (staleIds.length > 0) {
@@ -733,6 +769,7 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     season: string,
     teamId: number,
     rows: UnderstatPlayerTeamSeason[],
+    removeStale = true,
   ): Promise<boolean> {
     const db = await getDatabase(dbInstance);
     const incomingIds = new Set(rows.map((row) => row.playerId));
@@ -753,15 +790,16 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
           eq(understatPlayerTeamSeasons.teamId, teamId),
         ),
       );
-    if (existing.length > 0 && rows.length === 0) {
+    if (removeStale && existing.length > 0 && rows.length === 0) {
       throw new Error(
         `Refusing to clear non-empty Understat team participants: season=${season} team=${teamId}`,
       );
     }
+    if (!removeStale && rows.length === 0) return false;
     const oldMap = new Map(existing.map((row) => [row.playerId, row.sourceHash]));
-    const staleIds = existing
-      .map((row) => row.playerId)
-      .filter((playerId) => !incomingIds.has(playerId));
+    const staleIds = removeStale
+      ? existing.map((row) => row.playerId).filter((playerId) => !incomingIds.has(playerId))
+      : [];
     const changedRows = rows.filter((row) => oldMap.get(row.playerId) !== row.sourceHash);
     if (changedRows.length === 0 && staleIds.length === 0) return false;
     if (staleIds.length > 0) {
@@ -856,6 +894,34 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
       .from(understatPlayerMatchStats)
       .where(eq(understatPlayerMatchStats.matchId, matchId));
     return rows.map((row) => row.sourceHash).sort();
+  },
+
+  async getMatchPlayerIdsBySeason(
+    season: string,
+    matchIds: readonly number[],
+  ): Promise<Map<number, Set<number>>> {
+    if (matchIds.length === 0) return new Map();
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({
+        matchId: understatPlayerMatchStats.matchId,
+        playerId: understatPlayerMatchStats.playerId,
+      })
+      .from(understatPlayerMatchStats)
+      .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.matchId))
+      .where(
+        and(
+          eq(understatMatches.seasonCode, season),
+          inArray(understatPlayerMatchStats.matchId, [...new Set(matchIds)]),
+        ),
+      );
+    const result = new Map<number, Set<number>>();
+    for (const row of rows) {
+      const playerIds = result.get(row.matchId) ?? new Set<number>();
+      playerIds.add(row.playerId);
+      result.set(row.matchId, playerIds);
+    }
+    return result;
   },
 
   async replaceMatchStats(matchId: number, rows: UnderstatPlayerMatchStat[]): Promise<boolean> {

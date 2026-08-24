@@ -46,6 +46,29 @@ export function assertUnderstatResourceHashes(
   }
 }
 
+/** Verify that every incoming resource hash survived an additive active write. */
+export function assertUnderstatResourceHashesIncluded(
+  resource: string,
+  expectedHashes: readonly string[],
+  persistedHashes: readonly string[],
+): void {
+  const expectedCounts = new Map<string, number>();
+  for (const hash of expectedHashes) {
+    expectedCounts.set(hash, (expectedCounts.get(hash) ?? 0) + 1);
+  }
+  const persistedCounts = new Map<string, number>();
+  for (const hash of persistedHashes) {
+    persistedCounts.set(hash, (persistedCounts.get(hash) ?? 0) + 1);
+  }
+  for (const [hash, count] of expectedCounts) {
+    if ((persistedCounts.get(hash) ?? 0) < count) {
+      throw new Error(
+        `Understat ${resource} post-commit verification failed: expected hash missing (${hash})`,
+      );
+    }
+  }
+}
+
 function incomplete(reason: string): UnderstatCompletenessResult {
   return { complete: false, reason };
 }
@@ -57,6 +80,7 @@ function complete(): UnderstatCompletenessResult {
 export function evaluateUnderstatPlayerDiscoveryCompleteness(
   incomingPlayerIds: readonly number[],
   previousPlayerIds: Iterable<number>,
+  allowMissing = false,
 ): UnderstatCompletenessResult {
   const incoming = new Set(incomingPlayerIds);
   if (incoming.size !== incomingPlayerIds.length) {
@@ -66,7 +90,7 @@ export function evaluateUnderstatPlayerDiscoveryCompleteness(
 
   const previous = new Set(previousPlayerIds);
   const missing = [...previous].filter((playerId) => !incoming.has(playerId));
-  if (missing.length > 0) {
+  if (!allowMissing && missing.length > 0) {
     return incomplete(
       `player summaries shrank ${incoming.size}/${previous.size}; missing=${missing.join(',')}`,
     );
@@ -86,15 +110,28 @@ export function expectedUnderstatPlayerIdsForTeam(
   return new Set(
     discovery.playerSeasons
       .filter((player) => {
-        const destinationTitle = player.sourceTeamTitle
+        const teamTitles = player.sourceTeamTitle
           .split(',')
           .map((title) => title.trim())
-          .filter((title) => title.length > 0)
-          .at(-1);
-        return destinationTitle === team.title;
+          .filter((title) => title.length > 0);
+        return teamTitles.includes(team.title);
       })
       .map((player) => player.playerId),
   );
+}
+
+export function missingUnderstatDiscoveryTeamIds(
+  teams: readonly Pick<UnderstatTeam, 'id'>[],
+  matches: readonly Pick<UnderstatMatch, 'homeTeamId' | 'awayTeamId'>[],
+): number[] {
+  const knownTeamIds = new Set(teams.map((team) => team.id));
+  return [
+    ...new Set(
+      matches
+        .flatMap((match) => [match.homeTeamId, match.awayTeamId])
+        .filter((id) => !knownTeamIds.has(id)),
+    ),
+  ].sort((left, right) => left - right);
 }
 
 export function evaluateUnderstatTeamResourceCompleteness(
@@ -138,6 +175,45 @@ export function evaluateUnderstatTeamResourceCompleteness(
   }
 
   return complete();
+}
+
+/**
+ * Active league discovery may omit one team's completed-match history. Keep
+ * that team's prior season aggregate until all of its expected team-stat rows
+ * are present, while still persisting complete teams from the same pass.
+ */
+export function selectCompleteUnderstatTeamSeasonRows(
+  matches: readonly Pick<UnderstatMatch, 'id' | 'homeTeamId' | 'awayTeamId' | 'isResult'>[],
+  teamMatchRows: readonly Pick<UnderstatTeamMatchStat, 'matchId' | 'teamId' | 'side'>[],
+  teamSeasons: readonly UnderstatTeamSeason[],
+): UnderstatTeamSeason[] {
+  const expectedByTeam = new Map<number, Map<number, 'h' | 'a'>>();
+  for (const match of matches) {
+    if (!match.isResult) continue;
+    expectedByTeam.set(
+      match.homeTeamId,
+      (expectedByTeam.get(match.homeTeamId) ?? new Map()).set(match.id, 'h'),
+    );
+    expectedByTeam.set(
+      match.awayTeamId,
+      (expectedByTeam.get(match.awayTeamId) ?? new Map()).set(match.id, 'a'),
+    );
+  }
+  const completeTeamIds = new Set<number>();
+  for (const [teamId, expectedMatches] of expectedByTeam) {
+    if (
+      [...expectedMatches].every(([matchId, side]) =>
+        teamMatchRows.some(
+          (row) => row.matchId === matchId && row.teamId === teamId && row.side === side,
+        ),
+      )
+    ) {
+      completeTeamIds.add(teamId);
+    }
+  }
+  return teamSeasons.filter(
+    (row) => !expectedByTeam.has(row.teamId) || completeTeamIds.has(row.teamId),
+  );
 }
 
 export function evaluateUnderstatPlayerTeamResourceCompleteness(
@@ -345,6 +421,28 @@ export function withdrawnUnderstatMatchIds(
     .sort((left, right) => left - right);
 }
 
+/**
+ * Find team match-stat rows that cannot survive an authoritative non-result
+ * match. This is separate from true-to-false transition detection because the
+ * player lane may have already updated the shared match row before the team
+ * lane observes the withdrawal.
+ */
+export function understatTeamStatsOnNonResultMatchIds(
+  incomingMatches: readonly Pick<UnderstatMatch, 'id' | 'isResult'>[],
+  persistedStats: readonly Pick<UnderstatTeamMatchStat, 'matchId'>[],
+): number[] {
+  const nonResultMatchIds = new Set(
+    incomingMatches.filter((match) => !match.isResult).map((match) => match.id),
+  );
+  return [
+    ...new Set(
+      persistedStats
+        .filter((stat) => nonResultMatchIds.has(stat.matchId))
+        .map((stat) => stat.matchId),
+    ),
+  ].sort((left, right) => left - right);
+}
+
 export function assertUnderstatSyncAllowed(season: string): {
   league: string;
   sourceYear: number;
@@ -414,6 +512,7 @@ export function changedUnderstatTeamStatIds(
 export function changedUnderstatPlayerSeasonIds(
   rows: readonly Pick<UnderstatPlayerSeason, 'playerId' | 'sourceHash'>[],
   previousHashes: ReadonlyMap<number, string>,
+  includeMissing = true,
 ): Set<number> {
   const incomingIds = new Set(rows.map((row) => row.playerId));
   const ids = new Set(
@@ -421,8 +520,10 @@ export function changedUnderstatPlayerSeasonIds(
       .filter((row) => previousHashes.get(row.playerId) !== row.sourceHash)
       .map((row) => row.playerId),
   );
-  for (const playerId of previousHashes.keys()) {
-    if (!incomingIds.has(playerId)) ids.add(playerId);
+  if (includeMissing) {
+    for (const playerId of previousHashes.keys()) {
+      if (!incomingIds.has(playerId)) ids.add(playerId);
+    }
   }
   return ids;
 }
@@ -436,13 +537,14 @@ export function changedUnderstatPlayerTeamIds(
   const ids = new Set<number>();
   for (const row of rows) {
     if (!changedPlayerIds.has(row.playerId)) continue;
-    const destinationTitle = row.sourceTeamTitle
+    const teamTitles = row.sourceTeamTitle
       .split(',')
       .map((title) => title.trim())
-      .filter((title) => title.length > 0)
-      .at(-1);
-    const destinationId = destinationTitle ? teamIdsByTitle.get(destinationTitle) : undefined;
-    if (destinationId !== undefined) ids.add(destinationId);
+      .filter((title) => title.length > 0);
+    for (const teamTitle of teamTitles) {
+      const teamId = teamIdsByTitle.get(teamTitle);
+      if (teamId !== undefined) ids.add(teamId);
+    }
   }
   return ids;
 }

@@ -564,13 +564,11 @@ describe('Understat persistence', () => {
       teamIds[0]!,
       completeTeamSplitsFor(season, teamIds[0]!),
     );
-    const incompleteTeamPayload = stageUnderstatTeamDetail(season, teamIds[1]!, []);
-
     await understatSyncRepository.createRun({
       runId,
       lane: 'team',
       season,
-      mode: 'full',
+      mode: 'incremental',
       trigger: 'manual',
     });
     await understatSyncRepository.addItems(runId, [
@@ -594,18 +592,17 @@ describe('Understat persistence', () => {
       understatStagingHash(completeTeamPayload),
       completeTeamPayload,
     );
-    await understatSyncRepository.completeItem(
+    await understatSyncRepository.skipItem(
       runId,
       'team-detail',
       String(teamIds[1]),
-      understatStagingHash(incompleteTeamPayload),
-      incompleteTeamPayload,
+      'team split dimensions missing: result',
     );
 
     await finalizeUnderstatTeamRun({
       runId,
       season,
-      mode: 'full',
+      mode: 'incremental',
       trigger: 'manual',
     });
 
@@ -617,16 +614,12 @@ describe('Understat persistence', () => {
     );
     expect(snapshot.splits.some((row) => row.teamId === teamIds[1])).toBe(false);
     expect(run?.status).toBe('completed');
-    expect(run?.metadata).toEqual({
+    expect(run?.metadata).toMatchObject({
       finalized: true,
       storage: 'postgresql',
       partial: true,
-      incompleteTeams: [
-        {
-          teamId: teamIds[1],
-          reason: `team ${teamIds[1]} split dimensions missing: ${UNDERSTAT_SPLIT_DIMENSIONS.join(',')}`,
-        },
-      ],
+      skippedItems: 1,
+      incompleteTeams: [],
       counts: { teams: 2, matches: 1, teamMatchStats: 2, teamSplits: 7 },
     });
   });
