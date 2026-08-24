@@ -4144,6 +4144,14 @@ export const leagueEventResultsInCompetition = competition.table(
     highestScorePoints: integer('highest_score_points'),
     highestScoreBlank: boolean('highest_score_blank'),
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
+    sourceLiveCheckedAt: timestamp('source_live_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    sourcePicksCheckedAt: timestamp('source_picks_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
@@ -4234,6 +4242,10 @@ export const leagueEventResultsInCompetition = competition.table(
     check(
       'league_event_results_transfer_counts_nonnegative',
       sql`(event_transfers >= 0) AND (event_transfers_cost >= 0)`,
+    ),
+    check(
+      'league_event_results_source_pair_valid',
+      sql`((source_live_checked_at IS NULL) AND (source_picks_checked_at IS NULL)) OR ((source_live_checked_at IS NOT NULL) AND (source_picks_checked_at IS NOT NULL))`,
     ),
   ],
 );

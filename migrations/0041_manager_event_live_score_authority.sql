@@ -16,3 +16,18 @@ ALTER TABLE fpl.manager_event_score_snapshots
       'FPL_FINAL_RESULT'
     )
   );
+
+-- League projections combine two independently refreshed official inputs.
+-- Keep both observations separate from source_checked_at, which remains the
+-- database-clock convergence token used by finalized checkpoints.
+ALTER TABLE competition.league_event_results
+  ADD COLUMN source_live_checked_at timestamptz,
+  ADD COLUMN source_picks_checked_at timestamptz;
+
+ALTER TABLE competition.league_event_results
+  ADD CONSTRAINT league_event_results_source_pair_valid
+  CHECK (
+    (source_live_checked_at IS NULL AND source_picks_checked_at IS NULL)
+    OR
+    (source_live_checked_at IS NOT NULL AND source_picks_checked_at IS NOT NULL)
+  );

@@ -303,6 +303,13 @@ export function projectOfficialH2HEventLiveScores(
     batch.state === 'scheduled' ||
     entryIds.size === 0 ||
     [...entryIds].some((entryId) => !batch.scores.has(entryId)) ||
+    ![...entryIds].some((entryId) => {
+      const score = batch.scores.get(entryId);
+      return (
+        score !== undefined &&
+        (score.eventPoints !== 0 || score.transferCost !== 0 || score.netEventPoints !== 0)
+      );
+    }) ||
     snapshot.matches.some(
       (match) =>
         match.event === eventId &&

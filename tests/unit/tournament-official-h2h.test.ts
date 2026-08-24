@@ -156,6 +156,55 @@ describe('official H2H source import', () => {
     });
   });
 
+  test('rejects a complete all-zero event-live placeholder batch', () => {
+    const checkedAt = '2026-08-24T00:01:00.000Z';
+    expect(
+      projectOfficialH2HEventLiveScores(
+        {
+          standings: [],
+          matches: [
+            {
+              id: 2071743,
+              event: 1,
+              entry_1_entry: 109967,
+              entry_1_points: 23,
+              entry_2_entry: 34299,
+              entry_2_points: 17,
+              winner: 109967,
+              knockout_name: null,
+              sourceOrder: 0,
+            },
+          ],
+        },
+        1,
+        new Set([109967, 34299]),
+        {
+          season: '2627',
+          eventId: 1,
+          state: 'live',
+          revision: 'fpl:live:publication-placeholder',
+          publicationId: 'publication-placeholder',
+          checkedAt,
+          sourceCheckedAt: checkedAt,
+          scores: new Map(
+            [109967, 34299].map((entryId) => [
+              entryId,
+              {
+                entryId,
+                eventPoints: 0,
+                netEventPoints: 0,
+                transferCost: 0,
+                totalPoints: 0,
+                picksCheckedAt: checkedAt,
+                revision: `score-${entryId}`,
+              },
+            ]),
+          ),
+        },
+      ),
+    ).toBeNull();
+  });
+
   test('preserves a validated knockout tiebreak winner when event-live scores are level', () => {
     const snapshot = {
       standings: [],

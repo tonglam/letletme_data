@@ -374,26 +374,43 @@ export function leagueEventLiveInputsAreFresh(
 }
 
 export function findMissingLeagueResultSourceCheckpoints(
-  expected: ReadonlyArray<Pick<LeagueEventResultEvidenceInsert, 'entryId' | 'sourceCheckedAt'>>,
-  persisted: ReadonlyArray<{ entryId: number; sourceCheckedAt: Date | null }>,
+  expected: ReadonlyArray<
+    Pick<
+      LeagueEventResultEvidenceInsert,
+      'entryId' | 'sourceLiveCheckedAt' | 'sourcePicksCheckedAt'
+    >
+  >,
+  persisted: ReadonlyArray<{
+    entryId: number;
+    sourceLiveCheckedAt: Date | null;
+    sourcePicksCheckedAt: Date | null;
+  }>,
 ): number[] {
-  const persistedByEntry = new Map(persisted.map((row) => [row.entryId, row.sourceCheckedAt]));
+  const persistedByEntry = new Map(persisted.map((row) => [row.entryId, row]));
   return uniqueNumbers(
     expected
       .filter((row) => {
-        const expectedMs =
-          row.sourceCheckedAt instanceof Date
-            ? row.sourceCheckedAt.getTime()
-            : Date.parse(row.sourceCheckedAt);
-        if (!Number.isFinite(expectedMs)) {
+        const expectedLiveMs = sourceCheckpointMs(row.sourceLiveCheckedAt);
+        const expectedPicksMs = sourceCheckpointMs(row.sourcePicksCheckedAt);
+        if (!Number.isFinite(expectedLiveMs) || !Number.isFinite(expectedPicksMs)) {
           throw new Error('A valid league result source timestamp is required');
         }
         const checkpoint = persistedByEntry.get(row.entryId);
-        const checkpointMs = checkpoint?.getTime() ?? Number.NaN;
-        return !Number.isFinite(checkpointMs) || checkpointMs < expectedMs;
+        const checkpointLiveMs = checkpoint?.sourceLiveCheckedAt?.getTime() ?? Number.NaN;
+        const checkpointPicksMs = checkpoint?.sourcePicksCheckedAt?.getTime() ?? Number.NaN;
+        return (
+          !Number.isFinite(checkpointLiveMs) ||
+          !Number.isFinite(checkpointPicksMs) ||
+          checkpointLiveMs < expectedLiveMs ||
+          checkpointPicksMs < expectedPicksMs
+        );
       })
       .map((row) => row.entryId),
   );
+}
+
+function sourceCheckpointMs(value: Date | string): number {
+  return value instanceof Date ? value.getTime() : Date.parse(value);
 }
 
 export async function syncLeagueEventResultsByTournament(
@@ -616,12 +633,12 @@ export async function syncLeagueEventResultsByTournament(
       continue;
     }
 
-    const combinedSourceCheckedAt =
-      !finalizationCutoff && activeEventLiveCheckedAt && picksCheckedAt
-        ? new Date(
-            Math.min(Date.parse(activeEventLiveCheckedAt), picksCheckedAt.getTime()),
-          ).toISOString()
-        : requiredRichFreshAfter;
+    const sourceLiveCheckedAt = finalizationCutoff
+      ? requiredRichFreshAfter
+      : activeEventLiveCheckedAt!;
+    const sourcePicksCheckedAt = finalizationCutoff
+      ? requiredRichFreshAfter
+      : picksCheckedAt!.toISOString();
     inserts.push({
       leagueId: tournament.leagueId,
       leagueType: tournament.leagueType,
@@ -651,7 +668,9 @@ export async function syncLeagueEventResultsByTournament(
       highestScoreElementId: data.highestScoreElementId,
       highestScorePoints: data.highestScorePoints,
       highestScoreBlank: data.highestScoreBlank,
-      sourceCheckedAt: combinedSourceCheckedAt,
+      sourceCheckedAt: requiredRichFreshAfter,
+      sourceLiveCheckedAt,
+      sourcePicksCheckedAt,
     });
   }
 

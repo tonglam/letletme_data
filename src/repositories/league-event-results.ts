@@ -11,9 +11,11 @@ type LeagueEventResultInsert = typeof leagueEventResultsInCompetition.$inferInse
 
 export type LeagueEventResultEvidenceInsert = Omit<
   LeagueEventResultInsert,
-  'seasonId' | 'sourceResultId' | 'sourceCheckedAt'
+  'seasonId' | 'sourceResultId' | 'sourceCheckedAt' | 'sourceLiveCheckedAt' | 'sourcePicksCheckedAt'
 > & {
   readonly sourceCheckedAt: Date | string;
+  readonly sourceLiveCheckedAt: Date | string;
+  readonly sourcePicksCheckedAt: Date | string;
 };
 
 function sourceTimestamp(value: Date | string): Date {
@@ -40,6 +42,8 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
           ...value,
           seasonId: season.seasonId,
           sourceCheckedAt: sourceTimestamp(value.sourceCheckedAt),
+          sourceLiveCheckedAt: sourceTimestamp(value.sourceLiveCheckedAt),
+          sourcePicksCheckedAt: sourceTimestamp(value.sourcePicksCheckedAt),
         })),
       )
       .onConflictDoUpdate({
@@ -52,7 +56,17 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
         ],
         where: sql`
           ${leagueEventResultsInCompetition.sourceCheckedAt} IS NULL
-          OR ${leagueEventResultsInCompetition.sourceCheckedAt} < excluded.source_checked_at
+          OR ${leagueEventResultsInCompetition.sourceLiveCheckedAt} IS NULL
+          OR ${leagueEventResultsInCompetition.sourcePicksCheckedAt} IS NULL
+          OR (
+            excluded.source_live_checked_at >= ${leagueEventResultsInCompetition.sourceLiveCheckedAt}
+            AND excluded.source_picks_checked_at >= ${leagueEventResultsInCompetition.sourcePicksCheckedAt}
+            AND (
+              excluded.source_live_checked_at > ${leagueEventResultsInCompetition.sourceLiveCheckedAt}
+              OR excluded.source_picks_checked_at > ${leagueEventResultsInCompetition.sourcePicksCheckedAt}
+              OR excluded.source_checked_at > ${leagueEventResultsInCompetition.sourceCheckedAt}
+            )
+          )
         `,
         set: {
           entryName: sql`excluded.entry_name`,
@@ -80,6 +94,8 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
           highestScorePoints: sql`excluded.highest_score_points`,
           highestScoreBlank: sql`excluded.highest_score_blank`,
           sourceCheckedAt: sql`excluded.source_checked_at`,
+          sourceLiveCheckedAt: sql`excluded.source_live_checked_at`,
+          sourcePicksCheckedAt: sql`excluded.source_picks_checked_at`,
           updatedAt: new Date(),
         },
       });
@@ -143,19 +159,30 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
       leagueType: LeagueEventResultInsert['leagueType'],
       eventId: number,
       entryIds: number[],
-    ): Promise<Array<{ entryId: number; sourceCheckedAt: Date | null }>> => {
+    ): Promise<
+      Array<{
+        entryId: number;
+        sourceLiveCheckedAt: Date | null;
+        sourcePicksCheckedAt: Date | null;
+      }>
+    > => {
       if (entryIds.length === 0) return [];
 
       try {
         const db = await getDbInstance();
         const uniqueIds = Array.from(new Set(entryIds));
-        const results: Array<{ entryId: number; sourceCheckedAt: Date | null }> = [];
+        const results: Array<{
+          entryId: number;
+          sourceLiveCheckedAt: Date | null;
+          sourcePicksCheckedAt: Date | null;
+        }> = [];
         for (let index = 0; index < uniqueIds.length; index += 1000) {
           const chunk = uniqueIds.slice(index, index + 1000);
           const rows = await db
             .select({
               entryId: leagueEventResultsInCompetition.entryId,
-              sourceCheckedAt: leagueEventResultsInCompetition.sourceCheckedAt,
+              sourceLiveCheckedAt: leagueEventResultsInCompetition.sourceLiveCheckedAt,
+              sourcePicksCheckedAt: leagueEventResultsInCompetition.sourcePicksCheckedAt,
             })
             .from(leagueEventResultsInCompetition)
             .where(

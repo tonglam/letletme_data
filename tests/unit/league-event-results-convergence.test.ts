@@ -34,19 +34,45 @@ describe('league event result convergence', () => {
     expect(
       findMissingLeagueResultSourceCheckpoints(
         [
-          { entryId: 1, sourceCheckedAt: '2026-08-24T00:10:00.000Z' },
-          { entryId: 2, sourceCheckedAt: new Date('2026-08-24T00:08:00.000Z') },
-          { entryId: 3, sourceCheckedAt: '2026-08-24T00:09:00.000Z' },
+          {
+            entryId: 1,
+            sourceLiveCheckedAt: '2026-08-24T00:10:00.000Z',
+            sourcePicksCheckedAt: '2026-08-24T00:10:00.000Z',
+          },
+          {
+            entryId: 2,
+            sourceLiveCheckedAt: new Date('2026-08-24T00:08:00.000Z'),
+            sourcePicksCheckedAt: new Date('2026-08-24T00:08:00.000Z'),
+          },
+          {
+            entryId: 3,
+            sourceLiveCheckedAt: '2026-08-24T00:09:00.000Z',
+            sourcePicksCheckedAt: '2026-08-24T00:09:00.000Z',
+          },
         ],
         [
-          { entryId: 1, sourceCheckedAt: new Date('2026-08-24T00:09:59.999Z') },
-          { entryId: 2, sourceCheckedAt: new Date('2026-08-24T00:08:00.000Z') },
+          {
+            entryId: 1,
+            sourceLiveCheckedAt: new Date('2026-08-24T00:10:00.000Z'),
+            sourcePicksCheckedAt: new Date('2026-08-24T00:09:59.999Z'),
+          },
+          {
+            entryId: 2,
+            sourceLiveCheckedAt: new Date('2026-08-24T00:08:01.000Z'),
+            sourcePicksCheckedAt: new Date('2026-08-24T00:08:00.000Z'),
+          },
         ],
       ),
     ).toEqual([1, 3]);
     expect(() =>
       findMissingLeagueResultSourceCheckpoints(
-        [{ entryId: 1, sourceCheckedAt: 'not-a-timestamp' }],
+        [
+          {
+            entryId: 1,
+            sourceLiveCheckedAt: 'not-a-timestamp',
+            sourcePicksCheckedAt: '2026-08-24T00:10:00.000Z',
+          },
+        ],
         [],
       ),
     ).toThrow('valid league result source timestamp');
