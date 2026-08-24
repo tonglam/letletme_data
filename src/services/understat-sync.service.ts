@@ -22,6 +22,13 @@ export interface UnderstatCompletenessResult {
   reason: string;
 }
 
+export class IncompleteUnderstatResourceError extends Error {
+  constructor(resource: string, reason: string) {
+    super(`Understat ${resource} incomplete: ${reason}`);
+    this.name = 'IncompleteUnderstatResourceError';
+  }
+}
+
 export function assertUnderstatResourceHashes(
   resource: string,
   expectedHashes: readonly string[],

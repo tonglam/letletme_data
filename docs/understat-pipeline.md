@@ -248,7 +248,9 @@ and Player runs independently and counts facts directly from the provider tables
 - A terminal detail failure marks that item failed; the run does not finalize.
 - A finalizer infrastructure or constraint error marks the run failed after terminal retry.
 - A resource completeness failure leaves that resource untouched, records it in partial-run metadata,
-  and does not roll back other completed resources.
+  and does not roll back other completed resources. A detail worker leaves an incomplete resource
+  item unsettled; after terminal BullMQ retry, the failed resource ID is carried into the next
+  scheduler generation instead of allowing the generation to succeed.
 - The worker records terminal item/run failure before throwing; the BullMQ `failed` listener is an
   idempotent fallback. If a run is active with no database progress for 30 minutes and both queues
   are empty, the maintenance reconciler fails unfinished items and the run in one transaction.
