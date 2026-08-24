@@ -4,7 +4,7 @@ assertIntegrationEnv();
 
 import { afterAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   fixturesInFpl as eventFixtures,
@@ -467,6 +467,38 @@ describe('Understat persistence', () => {
 
     expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(true);
     expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(false);
+  });
+
+  test('stamps Understat source writes after a transaction waits', async () => {
+    const db = await getDb();
+    await db.transaction(async (tx) => {
+      const references = createUnderstatReferenceRepository(tx);
+      await references.upsertSeason({
+        season,
+        sourceYear: 2098,
+        league,
+        state: 'complete',
+        firstSeenAt: now,
+        lastSeenAt: now,
+      });
+      await references.upsertTeams(teams());
+      await references.upsertMatches([match()]);
+      const [started] = await tx.execute<{ startedMs: number }>(sql`
+        SELECT (EXTRACT(EPOCH FROM transaction_timestamp()) * 1000)::double precision AS "startedMs"
+      `);
+      await tx.execute(sql`SELECT pg_sleep(0.05)`);
+      const refreshed = {
+        ...match(),
+        sourceCheckedAt: new Date(now.getTime() + 1_000),
+        lastSeenAt: new Date(now.getTime() + 1_000),
+      };
+      await references.upsertMatches([refreshed]);
+      const [row] = await tx
+        .select({ updatedAt: understatMatches.updatedAt })
+        .from(understatMatches)
+        .where(eq(understatMatches.matchId, matchId));
+      expect(row?.updatedAt.getTime()).toBeGreaterThan(Number(started?.startedMs ?? 0));
+    });
   });
 
   test('persists shared discovery before team detail resources settle', async () => {
@@ -1192,6 +1224,116 @@ describe('Understat persistence', () => {
     expect(latest.lastSeenSeason).toBe('2829');
   });
 
+  test('does not advance an unchanged provider-link revision on repeated candidate writes', async () => {
+    const identity = `${baseId + 100}`;
+    const initial = await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'pending',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season,
+      evidence: { candidateCount: 1 },
+    });
+    providerLinkIds.push(initial.id);
+    const db = await getDb();
+    const before = new Date('2098-08-08T12:00:00.000Z');
+    await db
+      .update(providerEntityLinks)
+      .set({ updatedAt: before })
+      .where(eq(providerEntityLinks.linkId, initial.id));
+
+    await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'pending',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season,
+      evidence: { candidateCount: 1 },
+    });
+
+    const [row] = await db
+      .select({ updatedAt: providerEntityLinks.updatedAt })
+      .from(providerEntityLinks)
+      .where(eq(providerEntityLinks.linkId, initial.id));
+    expect(row?.updatedAt).toEqual(before);
+  });
+
+  test('does not churn candidate revisions across seasons but tracks review transitions', async () => {
+    const identity = `${baseId + 200}`;
+    const initial = await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'pending',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season: '2728',
+      evidence: { candidateCount: 1 },
+    });
+    providerLinkIds.push(initial.id);
+    const db = await getDb();
+    const before = new Date('2000-08-08T12:00:00.000Z');
+    await db
+      .update(providerEntityLinks)
+      .set({ updatedAt: before })
+      .where(eq(providerEntityLinks.linkId, initial.id));
+
+    await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'pending',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season: '2829',
+      evidence: { candidateCount: 2, observedMatches: 3 },
+    });
+
+    const [candidate] = await db
+      .select({ updatedAt: providerEntityLinks.updatedAt })
+      .from(providerEntityLinks)
+      .where(eq(providerEntityLinks.linkId, initial.id));
+    expect(candidate?.updatedAt).toEqual(before);
+
+    await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: 'understat',
+      leftEntityId: identity,
+      rightProvider: 'fpl',
+      rightEntityId: identity,
+      status: 'ambiguous',
+      method: 'integration-test',
+      ruleId: 'test-rule',
+      season: '2829',
+      evidence: { candidateCount: 2, observedMatches: 3 },
+    });
+    const [statusChanged] = await db
+      .select({ updatedAt: providerEntityLinks.updatedAt })
+      .from(providerEntityLinks)
+      .where(eq(providerEntityLinks.linkId, initial.id));
+    expect(statusChanged?.updatedAt.getTime()).toBeGreaterThan(before.getTime());
+
+    const reviewed = await providerIdentityRepository.updateEntityStatus(initial.id, 'pending');
+    expect(reviewed?.status).toBe('pending');
+    const [reviewedRow] = await db
+      .select({ updatedAt: providerEntityLinks.updatedAt })
+      .from(providerEntityLinks)
+      .where(eq(providerEntityLinks.linkId, initial.id));
+    expect(reviewedRow?.updatedAt.getTime()).toBeGreaterThan(before.getTime());
+  });
+
   test('reconciles only stale evidence from a completed FPL fixture', async () => {
     const db = await getDb();
     await db.insert(fplSeasons).values({
@@ -1251,6 +1393,17 @@ describe('Understat persistence', () => {
     }));
 
     expect(await repository.upsertEvidence(seasonRef, evidence)).toBe(2);
+    const [fixtureBeforeDeletion] = await db
+      .select({ updatedAt: eventFixtures.updatedAt })
+      .from(eventFixtures)
+      .where(
+        and(
+          eq(eventFixtures.seasonId, seasonRef.seasonId),
+          eq(eventFixtures.fixtureId, fplFixtureId),
+        ),
+      );
+    if (!fixtureBeforeDeletion) throw new Error('Fixture row missing before evidence deletion');
+    await Bun.sleep(10);
     expect(await repository.upsertEvidence(seasonRef, [evidence[0]])).toBe(1);
     expect(await repository.upsertEvidence(seasonRef, [])).toBe(0);
     const rows = await db
@@ -1264,5 +1417,18 @@ describe('Understat persistence', () => {
       );
     expect(rows).toHaveLength(1);
     expect(rows[0].elementId).toBe(fplPlayerIds[0]);
+    const [fixtureAfterDeletion] = await db
+      .select({ updatedAt: eventFixtures.updatedAt })
+      .from(eventFixtures)
+      .where(
+        and(
+          eq(eventFixtures.seasonId, seasonRef.seasonId),
+          eq(eventFixtures.fixtureId, fplFixtureId),
+        ),
+      );
+    if (!fixtureAfterDeletion) throw new Error('Fixture row missing after evidence deletion');
+    expect(fixtureAfterDeletion.updatedAt.getTime()).toBeGreaterThan(
+      fixtureBeforeDeletion.updatedAt.getTime(),
+    );
   });
 });

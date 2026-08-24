@@ -162,6 +162,19 @@ function confirmedPlayerSeasons(link: ProviderEntityLink | undefined, season: st
   return [...new Set([...prior, season])].sort();
 }
 
+export function shouldConfirmProviderPlayerSeason(
+  link: Pick<ProviderEntityLink, 'status' | 'evidence'>,
+  season: string,
+  observedMatches: number,
+): boolean {
+  const confirmedSeasons = link.evidence.confirmedSeasons;
+  return (
+    isVerifiedProviderLinkStatus(link.status) &&
+    observedMatches > 0 &&
+    !(Array.isArray(confirmedSeasons) && confirmedSeasons.includes(season))
+  );
+}
+
 function verifiedTeamMap(links: ProviderEntityLink[], season: string): Map<number, number> {
   return new Map(
     links
@@ -356,6 +369,15 @@ function intersect(values: Set<number>, candidates: Set<number>): Set<number> {
   return new Set([...values].filter((value) => candidates.has(value)));
 }
 
+function hasCompleteRosterEvidence(rows: readonly UnderstatRosterEvidence[]): boolean {
+  const startsByTeam = new Map<number, number>();
+  for (const row of rows) {
+    if (!row.started) continue;
+    startsByTeam.set(row.teamId, (startsByTeam.get(row.teamId) ?? 0) + 1);
+  }
+  return startsByTeam.size >= 2 && [...startsByTeam.values()].every((count) => count >= 11);
+}
+
 export async function reconcileProviderPlayers(season: string) {
   const db = await getDb();
   const [entityLinks, matchLinks, fplRows, understatRows, fplPlayers] = await Promise.all([
@@ -417,14 +439,16 @@ export async function reconcileProviderPlayers(season: string) {
   for (const fpl of normalizedFpl) {
     const matchId = matchMap.get(fpl.fixtureCode);
     if (!matchId) continue;
+    const roster = rosterByMatch.get(matchId);
+    if (!roster || !hasCompleteRosterEvidence(roster)) continue;
     let candidates = new Set(
-      (rosterByMatch.get(matchId) ?? [])
+      roster
         .filter((understat) => rosterEvidenceAligns(fpl, understat, teamMap.get(understat.teamId)))
         .map((understat) => understat.playerId),
     );
     if (candidates.size > 1) {
       const assistCandidates = new Set(
-        (rosterByMatch.get(matchId) ?? [])
+        roster
           .filter(
             (understat) => candidates.has(understat.playerId) && understat.assists === fpl.assists,
           )
@@ -444,6 +468,7 @@ export async function reconcileProviderPlayers(season: string) {
   }
 
   let quarantined = 0;
+  let confirmed = 0;
   const verifiedPlayerLinks = entityLinks.filter(
     (link) =>
       link.entityType === 'player' &&
@@ -459,7 +484,41 @@ export async function reconcileProviderPlayers(season: string) {
     if (observedCandidates && !observedCandidates.has(understatPlayerId)) {
       await providerIdentityRepository.updateEntityStatus(link.id, 'quarantined');
       quarantined += 1;
+      continue;
     }
+    const observedMatches = observationsByPair.get(`${playerCode}:${understatPlayerId}`)?.size ?? 0;
+    if (
+      !observedCandidates?.has(understatPlayerId) ||
+      !shouldConfirmProviderPlayerSeason(link, season, observedMatches)
+    ) {
+      continue;
+    }
+    const fpl = normalizedFpl.find((row) => row.playerCode === playerCode);
+    const understat = understatRows.find((row) => row.playerId === understatPlayerId);
+    if (!fpl || !understat) continue;
+    // The entity link is shared across seasons. Keep the durable evidence
+    // season-neutral and only append the newly confirmed season; otherwise a
+    // repair pass for one season rewrites shared evidence and makes every
+    // other season stale again.
+    const confirmedSeasons = confirmedPlayerSeasons(link, season);
+    await providerIdentityRepository.upsertEntityLink({
+      entityType: 'player',
+      leftProvider: link.leftProvider,
+      leftEntityId: String(understatPlayerId),
+      rightProvider: link.rightProvider,
+      rightEntityId: String(playerCode),
+      status: link.status,
+      method: link.method,
+      ruleId: link.ruleId,
+      season,
+      ...(link.reviewedBy ? { reviewedBy: link.reviewedBy } : {}),
+      reviewedAt: link.reviewedAt,
+      evidence: {
+        ...link.evidence,
+        confirmedSeasons,
+      },
+    });
+    confirmed += 1;
   }
 
   const protectedPlayerLinks = entityLinks.filter(
@@ -589,7 +648,7 @@ export async function reconcileProviderPlayers(season: string) {
     if (observedFplCodes.has(player.playerCode) || linkedFplCodes.has(player.playerCode)) continue;
     notObserved += 1;
   }
-  return { verified, ambiguous, pending, quarantined, notObserved };
+  return { verified, confirmed, ambiguous, pending, quarantined, notObserved };
 }
 
 export async function reconcileProviderMappings(season: string) {

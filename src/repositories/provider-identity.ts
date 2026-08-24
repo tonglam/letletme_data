@@ -67,6 +67,7 @@ export interface UpsertEntityLinkInput {
   evidence?: Record<string, unknown>;
   season?: string;
   reviewedBy?: string;
+  reviewedAt?: Date | null;
 }
 
 export interface UpsertMatchLinkInput {
@@ -86,17 +87,23 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
   async upsertEntityLink(input: UpsertEntityLinkInput): Promise<ProviderEntityLink> {
     const db = await getDatabase(dbInstance);
     const reviewed = input.status === 'manual_verified';
-    const { season, evidence, reviewedBy, ...identity } = input;
+    const { season, evidence, reviewedBy, reviewedAt, ...identity } = input;
+    const resolvedReviewedAt = reviewed
+      ? reviewedAt === undefined
+        ? new Date()
+        : reviewedAt
+      : null;
     const [row] = await db
       .insert(providerEntityLinks)
       .values({
         linkId: randomUUID(),
         ...identity,
         evidence: evidence ?? {},
+        updatedAt: sql`clock_timestamp()`,
         firstSeenSeason: season,
         lastSeenSeason: season,
         reviewedBy: reviewed ? reviewedBy : null,
-        reviewedAt: reviewed ? new Date() : null,
+        reviewedAt: resolvedReviewedAt,
       })
       .onConflictDoUpdate({
         target: [
@@ -122,8 +129,41 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
             ELSE GREATEST(${providerEntityLinks.lastSeenSeason}, excluded.last_seen_season)
           END`,
           reviewedBy: reviewed ? input.reviewedBy : null,
-          reviewedAt: reviewed ? new Date() : null,
-          updatedAt: new Date(),
+          reviewedAt: resolvedReviewedAt,
+          // Candidate links are re-observed on every season repair pass. Keep
+          // the source revision stable while a pending/ambiguous candidate is
+          // re-observed; otherwise a later season's candidate evidence can
+          // make every earlier season look stale again. Explicit review
+          // transitions still use the generic branch below and advance the
+          // revision, including a verified link moved back to pending.
+          updatedAt: sql`CASE
+            WHEN ${providerEntityLinks.status} IS NOT DISTINCT FROM excluded.status
+              AND ${providerEntityLinks.status} IN ('pending', 'ambiguous')
+              AND excluded.status IN ('pending', 'ambiguous')
+            THEN ${providerEntityLinks.updatedAt}
+            WHEN ${providerEntityLinks.status} IS DISTINCT FROM excluded.status
+              OR ${providerEntityLinks.method} IS DISTINCT FROM excluded.method
+              OR ${providerEntityLinks.ruleId} IS DISTINCT FROM excluded.rule_id
+              OR ${providerEntityLinks.evidence} IS DISTINCT FROM excluded.evidence
+              OR ${providerEntityLinks.firstSeenSeason} IS DISTINCT FROM (
+                CASE
+                  WHEN ${providerEntityLinks.firstSeenSeason} IS NULL THEN excluded.first_seen_season
+                  WHEN excluded.first_seen_season IS NULL THEN ${providerEntityLinks.firstSeenSeason}
+                  ELSE LEAST(${providerEntityLinks.firstSeenSeason}, excluded.first_seen_season)
+                END
+              )
+              OR ${providerEntityLinks.lastSeenSeason} IS DISTINCT FROM (
+                CASE
+                  WHEN ${providerEntityLinks.lastSeenSeason} IS NULL THEN excluded.last_seen_season
+                  WHEN excluded.last_seen_season IS NULL THEN ${providerEntityLinks.lastSeenSeason}
+                  ELSE GREATEST(${providerEntityLinks.lastSeenSeason}, excluded.last_seen_season)
+                END
+              )
+              OR ${providerEntityLinks.reviewedBy} IS DISTINCT FROM excluded.reviewed_by
+              OR ${providerEntityLinks.reviewedAt} IS DISTINCT FROM excluded.reviewed_at
+            THEN clock_timestamp()
+            ELSE ${providerEntityLinks.updatedAt}
+          END`,
         },
       })
       .returning();
@@ -143,6 +183,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         evidence: evidence ?? {},
         reviewedBy: reviewed ? reviewedBy : null,
         reviewedAt: reviewed ? new Date() : null,
+        updatedAt: sql`clock_timestamp()`,
       })
       .onConflictDoUpdate({
         target: [
@@ -159,7 +200,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
           evidence: input.evidence ?? {},
           reviewedBy: reviewed ? input.reviewedBy : null,
           reviewedAt: reviewed ? new Date() : null,
-          updatedAt: new Date(),
+          updatedAt: sql`clock_timestamp()`,
         },
       })
       .returning();
@@ -178,7 +219,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         status,
         reviewedBy: reviewedBy ?? null,
         reviewedAt: reviewedBy ? new Date() : null,
-        updatedAt: new Date(),
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(eq(providerEntityLinks.linkId, id))
       .returning();
@@ -197,7 +238,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         status,
         reviewedBy: reviewedBy ?? null,
         reviewedAt: reviewedBy ? new Date() : null,
-        updatedAt: new Date(),
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(eq(providerMatchLinks.linkId, id))
       .returning();

@@ -57,7 +57,10 @@ import {
   understatStagingHash,
 } from './understat-staging';
 import { enqueueUnderstatFanout, selectUnsettledUnderstatFanoutIds } from './understat-fanout';
-import { refreshPlayerStateSeason } from './player-season-summaries.service';
+import {
+  publishUnderstatPlayerState,
+  refreshPlayerStateSeasonSafely,
+} from './player-season-summaries.service';
 
 const LEAGUE_RESOURCE_TYPE = 'league';
 const TEAM_RESOURCE_TYPE = 'team-participants';
@@ -100,6 +103,28 @@ async function recoverMissingDiscoveryTeams(
     );
   }
   discovery.teams = [...discovery.teams, ...recovered].sort((left, right) => left.id - right.id);
+}
+
+async function refreshPlayerStateAfterTeamResource(season: string): Promise<void> {
+  try {
+    await refreshPlayerStateSeasonSafely(explicitSeasonRef(season));
+  } catch (error) {
+    logWarn('Player State refresh after Understat team resource failed; repair will retry', {
+      season,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function publishPlayerStateAfterMatchResource(season: string): Promise<void> {
+  try {
+    await publishUnderstatPlayerState(explicitSeasonRef(season));
+  } catch (error) {
+    logWarn('Player State publish after Understat resource failed; repair will retry', {
+      season,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function persistUnderstatPlayerDiscoverySnapshot(
@@ -369,6 +394,9 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     sourceCheckedAt,
   );
   await recoverMissingDiscoveryTeams(discovery, activeIncremental);
+  // The 20-team/380-match cardinality guard protects full/reconcile replacement
+  // snapshots. Only active incremental passes may contain partial history so
+  // each complete resource can settle independently on every matchday pass.
   if (!activeIncremental) {
     assertUnderstatLeagueSnapshotComplete(league, discovery.teams.length, discovery.matches.length);
   }
@@ -505,6 +533,7 @@ export async function syncUnderstatPlayerTeamDetail(job: UnderstatPlayerJobData)
   const teamTitle = requireJobValue(job.teamTitle, 'teamTitle');
   const resourceId = String(teamId);
   if (await alreadySettled(job.runId, TEAM_RESOURCE_TYPE, resourceId)) {
+    await refreshPlayerStateAfterTeamResource(job.season);
     await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }
@@ -580,6 +609,7 @@ export async function syncUnderstatPlayerTeamDetail(job: UnderstatPlayerJobData)
     understatStagingHash(staged),
     staged,
   );
+  await refreshPlayerStateAfterTeamResource(job.season);
   await finalizeWhenReady(job, ready);
 }
 
@@ -589,6 +619,7 @@ export async function syncUnderstatPlayerMatch(job: UnderstatPlayerJobData): Pro
   const matchId = requireJobValue(job.resourceId, 'resourceId');
   const resourceId = String(matchId);
   if (await alreadySettled(job.runId, MATCH_RESOURCE_TYPE, resourceId)) {
+    await publishPlayerStateAfterMatchResource(job.season);
     await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }
@@ -655,6 +686,7 @@ export async function syncUnderstatPlayerMatch(job: UnderstatPlayerJobData): Pro
     understatStagingHash(staged),
     staged,
   );
+  await publishPlayerStateAfterMatchResource(job.season);
   await finalizeWhenReady(job, ready);
 }
 
@@ -761,9 +793,9 @@ export async function finalizeUnderstatPlayerRun(job: UnderstatPlayerJobData): P
     changed,
   );
   try {
-    await refreshPlayerStateSeason(explicitSeasonRef(job.season));
+    await publishUnderstatPlayerState(explicitSeasonRef(job.season));
   } catch (error) {
-    logWarn('Player State refresh after Understat finalize failed; repair will retry', {
+    logWarn('Player State publish after Understat finalize failed; repair will retry', {
       season: job.season,
       error: error instanceof Error ? error.message : String(error),
     });

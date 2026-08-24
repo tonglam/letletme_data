@@ -6,6 +6,7 @@ import {
   providerTeamConfirmedForSeason,
   resolveUniqueProviderAssignments,
   rosterEvidenceAligns,
+  shouldConfirmProviderPlayerSeason,
 } from '../../src/services/provider-matcher.service';
 
 const fpl = {
@@ -69,6 +70,29 @@ describe('provider roster matcher', () => {
     expect(isAutoMappingProtectedStatus('rejected')).toBe(true);
     expect(isAutoMappingProtectedStatus('ambiguous')).toBe(false);
     expect(isAutoMappingProtectedStatus('pending')).toBe(false);
+  });
+
+  test('confirms a previously verified player link for a newly observed season', () => {
+    const link = {
+      status: 'auto_verified' as const,
+      evidence: { confirmedSeasons: ['2526'] },
+    };
+    expect(shouldConfirmProviderPlayerSeason(link, '2627', 1)).toBe(true);
+    expect(shouldConfirmProviderPlayerSeason(link, '2627', 0)).toBe(false);
+    expect(
+      shouldConfirmProviderPlayerSeason(
+        { status: 'auto_verified', evidence: { confirmedSeasons: ['2627'] } },
+        '2627',
+        1,
+      ),
+    ).toBe(false);
+    expect(
+      shouldConfirmProviderPlayerSeason(
+        { status: 'pending', evidence: { confirmedSeasons: ['2526'] } },
+        '2627',
+        1,
+      ),
+    ).toBe(false);
   });
 
   test('uses provider evidence rather than names, with assists only auxiliary', () => {

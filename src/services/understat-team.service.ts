@@ -317,6 +317,9 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
     activeIncremental,
   );
   await recoverMissingDiscoveryTeams(discovery, activeIncremental);
+  // The 20-team/380-match cardinality guard protects full/reconcile replacement
+  // snapshots. Only active incremental passes may contain partial history so
+  // each complete team can settle independently on every matchday pass.
   if (!activeIncremental) {
     assertUnderstatLeagueSnapshotComplete(league, discovery.teams.length, discovery.matches.length);
   }
