@@ -31,18 +31,28 @@ export async function enqueueFormalXRun(
   claimed: Pick<ClaimedFormalRun | ClaimedAcquisitionJobOutbox, 'job' | 'jobId' | 'priority'>,
 ): Promise<Job<AcquisitionJobV1>> {
   const job = acquisitionJobV1Schema.parse(claimed.job);
-  const queued = await getContentXScanQueue().add('content-x-scan', job, {
+  const queue = getContentXScanQueue();
+  const existing = await queue.getJob(claimed.jobId);
+  if (existing) {
+    if (existing.data.runId !== job.runId) {
+      throw new Error(`Content X queue job ID collision for ${claimed.jobId}`);
+    }
+    return existing;
+  }
+
+  await queue.add('content-x-scan', job, {
     jobId: claimed.jobId,
     priority: claimed.priority,
   });
-  // BullMQ returns an existing job when a caller reuses a jobId.  Treat a
-  // different runId as an enqueue failure instead of confirming a durable
-  // hand-off for the wrong run.  The formal job ID includes requestHash, but
-  // this guard remains the fail-closed backstop for legacy/corrupt collisions.
-  if (queued.data.runId !== job.runId) {
+
+  // Queue.add returns a Job object built from the supplied payload even when
+  // Redis retained a different payload for a reused jobId.  Read the
+  // persisted record back before confirming the durable hand-off.
+  const persisted = await queue.getJob(claimed.jobId);
+  if (!persisted || persisted.data.runId !== job.runId) {
     throw new Error(`Content X queue job ID collision for ${claimed.jobId}`);
   }
-  return queued;
+  return persisted;
 }
 
 export function createConfiguredHostGrokRunner(): HostGrokRunnerClient {
