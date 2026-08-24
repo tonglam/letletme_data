@@ -7,6 +7,7 @@ import {
   fetchOfficialH2HSourceSnapshot,
   hasCompleteOfficialH2HScoreBatch,
   hasCompleteEntryEventTotalsCoverage,
+  isOfficialH2HGroupEvent,
   minimumOfficialPlayedCoverageForSuppressedEvent,
   projectOfficialH2HStandings,
   projectOfficialH2HStandingsFromMatches,
@@ -87,6 +88,12 @@ describe('official H2H source import', () => {
     ).toBe(false);
     expect(hasCompleteEntryEventTotalsCoverage(undefined, 1, 2)).toBe(false);
     expect(hasCompleteEntryEventTotalsCoverage(undefined, 1, 0)).toBe(true);
+  });
+
+  test('adds provisional cumulative totals only inside the configured group window', () => {
+    expect(isOfficialH2HGroupEvent(tournament, 1)).toBe(true);
+    expect(isOfficialH2HGroupEvent(tournament, 35)).toBe(true);
+    expect(isOfficialH2HGroupEvent(tournament, 36)).toBe(false);
   });
 
   test('uses event-live manager scores instead of a lagging official H2H score', () => {

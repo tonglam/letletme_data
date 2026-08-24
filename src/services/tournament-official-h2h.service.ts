@@ -65,6 +65,15 @@ export function hasCompleteEntryEventTotalsCoverage(
   );
 }
 
+export function isOfficialH2HGroupEvent(
+  tournament: Pick<TournamentSyncContext, 'groupStartedEventId' | 'groupEndedEventId'>,
+  eventId: number,
+): boolean {
+  const groupStartEventId = tournament.groupStartedEventId ?? 1;
+  const groupEndEventId = tournament.groupEndedEventId;
+  return groupEndEventId !== null && eventId >= groupStartEventId && eventId <= groupEndEventId;
+}
+
 export function resolveFinalizedThroughEventId(
   latestFinalizedEventId: number | null | undefined,
   requestedEventId: number,
@@ -1040,8 +1049,11 @@ export async function syncOfficialH2HTournament(
     effectiveOptions,
   );
   const groupStartEventId = tournament.groupStartedEventId ?? 1;
+  const groupEndEventId = tournament.groupEndedEventId ?? reconcileEventId ?? 38;
+  const provisionalEventBelongsToGroup =
+    provisionalEventId !== null && isOfficialH2HGroupEvent(tournament, provisionalEventId);
   const aggregateTotals =
-    eventLiveSnapshot && eventLiveBatch && provisionalEventId !== null
+    eventLiveSnapshot && eventLiveBatch && provisionalEventBelongsToGroup
       ? await (async () => {
           const previousTotals =
             provisionalEventId <= groupStartEventId
@@ -1083,7 +1095,7 @@ export async function syncOfficialH2HTournament(
           season,
           entryIds,
           groupStartEventId,
-          tournament.groupEndedEventId ?? reconcileEventId ?? 38,
+          groupEndEventId,
         );
   const totalsByEntry = new Map(aggregateTotals.map((row) => [row.entryId, row] as const));
   const matchDerivedStandings = projectOfficialH2HStandingsFromMatches(
