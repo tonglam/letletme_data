@@ -26,6 +26,8 @@ const NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000002';
 const IN_FLIGHT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000003';
 const SECOND_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000004';
 const SECOND_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000005';
+const LATE_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000006';
+const LATEST_OBLIGATION_ID = '30000000-0000-4000-8000-000000000007';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -36,7 +38,9 @@ async function cleanup(): Promise<void> {
       ${NEWER_OBLIGATION_ID}::uuid,
       ${IN_FLIGHT_OBLIGATION_ID}::uuid,
       ${SECOND_OLDER_OBLIGATION_ID}::uuid,
-      ${SECOND_CURRENT_OBLIGATION_ID}::uuid
+      ${SECOND_CURRENT_OBLIGATION_ID}::uuid,
+      ${LATE_OLDER_OBLIGATION_ID}::uuid,
+      ${LATEST_OBLIGATION_ID}::uuid
     )
   `;
 }
@@ -610,12 +614,12 @@ describe('scheduler obligation generation fencing', () => {
           'UTC',
           'pending',
           'reconcile',
-          '2026-08-23T12:00:00Z'::timestamptz,
+          '2026-08-23T12:11:00Z'::timestamptz,
           0,
           0,
           NULL,
           NULL,
-          '{}'::jsonb
+          jsonb_build_object('resultSlot', 'provisional-15')
         ),
         (
           ${NEWER_OBLIGATION_ID}::uuid,
@@ -631,7 +635,10 @@ describe('scheduler obligation generation fencing', () => {
           0,
           NULL,
           NULL,
-          jsonb_build_object('scheduledDueAtMs', ${currentMovedDueAtMs}::bigint)
+          jsonb_build_object(
+            'scheduledDueAtMs', ${currentMovedDueAtMs}::bigint,
+            'resultSlot', 'final-15'
+          )
         ),
         (
           ${IN_FLIGHT_OBLIGATION_ID}::uuid,
@@ -647,7 +654,7 @@ describe('scheduler obligation generation fencing', () => {
           1,
           'integration-worker',
           clock_timestamp() + interval '15 minutes',
-          '{}'::jsonb
+          jsonb_build_object('resultSlot', 'provisional-14')
         ),
         (
           ${SECOND_OLDER_OBLIGATION_ID}::uuid,
@@ -663,7 +670,7 @@ describe('scheduler obligation generation fencing', () => {
           1,
           NULL,
           NULL,
-          '{}'::jsonb
+          jsonb_build_object('resultSlot', 'provisional-14')
         ),
         (
           ${SECOND_CURRENT_OBLIGATION_ID}::uuid,
@@ -679,7 +686,7 @@ describe('scheduler obligation generation fencing', () => {
           0,
           NULL,
           NULL,
-          '{}'::jsonb
+          jsonb_build_object('resultSlot', 'final-15')
         )
     `;
 
@@ -690,12 +697,14 @@ describe('scheduler obligation generation fencing', () => {
             jobName: 'entry-results',
             scopeKey: '2627:event:1',
             periodKey: 'event-1-final-15',
+            resultSlot: 'final-15',
             beforeDueAt: new Date('2026-08-23T12:00:00Z'),
           },
           {
             jobName: 'league-event-results',
             scopeKey: '2627:event:1',
             periodKey: 'event-1-final-15',
+            resultSlot: 'final-15',
             beforeDueAt: new Date('2026-08-23T12:00:00Z'),
           },
         ],
@@ -746,6 +755,83 @@ describe('scheduler obligation generation fencing', () => {
         supersededByPeriodKey: null,
       },
     ]);
+  });
+
+  test('never claims a late older post-match identity after a newer one exists', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES
+        (
+          ${LATE_OLDER_OBLIGATION_ID}::uuid,
+          'entry-results',
+          'integration:event:late-parent',
+          'event-1-final-15',
+          'hourly post-match',
+          'UTC',
+          'pending',
+          'reconcile',
+          clock_timestamp() - interval '1 minute',
+          0,
+          0,
+          jsonb_build_object('resultSlot', 'final-15')
+        ),
+        (
+          ${LATEST_OBLIGATION_ID}::uuid,
+          'entry-results',
+          'integration:event:late-parent',
+          'event-1-final-16',
+          'hourly post-match',
+          'UTC',
+          'pending',
+          'reconcile',
+          clock_timestamp() - interval '2 minutes',
+          0,
+          0,
+          jsonb_build_object('resultSlot', 'final-16')
+        )
+    `;
+
+    const [latest] = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['entry-results'],
+      enforceLatestAuthoritativeScope: true,
+    });
+    expect(latest?.obligation.obligationId).toBe(LATEST_OBLIGATION_ID);
+    expect(
+      await completeSchedulerObligation({
+        obligationId: LATEST_OBLIGATION_ID,
+        generation: 0,
+        status: 'succeeded',
+      }),
+    ).toBe(true);
+
+    expect(
+      await claimSchedulerObligations({
+        limit: 1,
+        includedJobNames: ['entry-results'],
+        enforceLatestAuthoritativeScope: true,
+      }),
+    ).toHaveLength(0);
+    const [older] = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${LATE_OLDER_OBLIGATION_ID}::uuid
+    `;
+    expect(older?.status).toBe('pending');
   });
 
   test('orders status by the immutable period and retains superseded failed cycles', async () => {

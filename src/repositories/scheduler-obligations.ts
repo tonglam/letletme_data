@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -84,12 +84,38 @@ function immutableScheduledDueAtSql() {
   END`;
 }
 
+function postMatchResultSlotIsNewerSql(newerSlot: SQL, olderSlot: SQL) {
+  return sql`CASE
+    WHEN ${newerSlot} = 'final-checkpoint'
+      THEN ${olderSlot} IS DISTINCT FROM 'final-checkpoint'
+    WHEN ${olderSlot} = 'final-checkpoint'
+      THEN false
+    WHEN ${newerSlot} ~ '^(provisional|final)-[0-9]+$'
+      AND ${olderSlot} ~ '^(provisional|final)-[0-9]+$'
+      THEN ROW(
+        substring(${newerSlot} from '([0-9]+)$')::integer,
+        CASE WHEN ${newerSlot} LIKE 'final-%' THEN 1 ELSE 0 END
+      ) > ROW(
+        substring(${olderSlot} from '([0-9]+)$')::integer,
+        CASE WHEN ${olderSlot} LIKE 'final-%' THEN 1 ELSE 0 END
+      )
+    ELSE false
+  END`;
+}
+
 function terminalSchedulerEvidence(evidence?: Record<string, unknown>) {
   return sql`${JSON.stringify(evidence ?? {})}::jsonb || CASE
     WHEN ${schedulerObligationsInOps.evidence} ? 'scheduledDueAtMs'
       THEN jsonb_build_object(
         'scheduledDueAtMs',
         ${schedulerObligationsInOps.evidence}->'scheduledDueAtMs'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'resultSlot'
+      THEN jsonb_build_object(
+        'resultSlot',
+        ${schedulerObligationsInOps.evidence}->'resultSlot'
       )
     ELSE '{}'::jsonb
   END`;
@@ -246,6 +272,7 @@ export type SchedulerDueAtSupersessionBoundary = Readonly<{
   jobName: string;
   scopeKey: string;
   periodKey: string;
+  resultSlot: string;
   beforeDueAt: Date;
 }>;
 
@@ -270,6 +297,8 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
       boundary.jobName.length === 0 ||
       boundary.scopeKey.length === 0 ||
       boundary.periodKey.length === 0 ||
+      typeof boundary.resultSlot !== 'string' ||
+      boundary.resultSlot.length === 0 ||
       !Number.isFinite(boundary.beforeDueAt.getTime())
     ) {
       throw new Error('Scheduler supersession boundary is invalid');
@@ -283,17 +312,21 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
       job_name: boundary.jobName,
       scope_key: boundary.scopeKey,
       period_key: boundary.periodKey,
+      result_slot: boundary.resultSlot,
       before_due_at: boundary.beforeDueAt.toISOString(),
     };
   });
   const db = input.db ?? (await getDb());
+  const boundarySlot = sql`boundaries.result_slot`;
+  const obligationSlot = sql`obligation.evidence->>'resultSlot'`;
   const [result] = await db.execute<{ updatedCount: number | string }>(sql`
     WITH boundaries AS (
-      SELECT job_name, scope_key, period_key, before_due_at
+      SELECT job_name, scope_key, period_key, result_slot, before_due_at
       FROM jsonb_to_recordset(${JSON.stringify(boundaries)}::jsonb) AS boundary(
         job_name text,
         scope_key text,
         period_key text,
+        result_slot text,
         before_due_at timestamptz
       )
     ), updated AS (
@@ -313,13 +346,16 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
       WHERE obligation.job_name = boundaries.job_name
         AND obligation.scope_key = boundaries.scope_key
         AND obligation.period_key <> boundaries.period_key
-        AND CASE
-          WHEN obligation.evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
-            THEN to_timestamp(
-              (obligation.evidence->>'scheduledDueAtMs')::double precision / 1000
-            )
-          ELSE obligation.due_at
-        END <= boundaries.before_due_at
+        AND (
+          CASE
+            WHEN obligation.evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
+              THEN to_timestamp(
+                (obligation.evidence->>'scheduledDueAtMs')::double precision / 1000
+              )
+            ELSE obligation.due_at
+          END <= boundaries.before_due_at
+          OR ${postMatchResultSlotIsNewerSql(boundarySlot, obligationSlot)}
+        )
         AND obligation.status IN ('pending', 'failed')
       RETURNING obligation.obligation_id
     )
@@ -393,6 +429,8 @@ export async function claimSchedulerObligations(
     laneKeys?: readonly string[];
     /** Terminal generation caps for provider-specific lease recovery. */
     generationCaps?: Readonly<Record<string, number>>;
+    /** Revalidate one latest-authoritative identity per durable job/scope. */
+    enforceLatestAuthoritativeScope?: boolean;
     db?: DbHandle;
   } = {},
 ): Promise<readonly { obligation: SchedulerObligation; owner: string }[]> {
@@ -414,6 +452,38 @@ export async function claimSchedulerObligations(
     ...new Set(input.inFlightConflictJobNames ?? includedJobNames),
   ].filter((name) => name.length > 0);
   const laneKeys = [...new Set(input.laneKeys ?? [])].filter((lane) => lane.length > 0).sort();
+  const currentResultSlot = sql`${schedulerObligationsInOps.evidence}->>'resultSlot'`;
+  const newerResultSlot = sql`newer.evidence->>'resultSlot'`;
+  const resultSlotsAreComparable = sql`COALESCE((
+    ${newerResultSlot} = 'final-checkpoint'
+    OR ${currentResultSlot} = 'final-checkpoint'
+    OR (
+      ${newerResultSlot} ~ '^(provisional|final)-[0-9]+$'
+      AND ${currentResultSlot} ~ '^(provisional|final)-[0-9]+$'
+    )
+  ), false)`;
+  const latestAuthoritativeScope = input.enforceLatestAuthoritativeScope
+    ? sql`NOT EXISTS (
+        SELECT 1
+        FROM ops.scheduler_obligations AS newer
+        WHERE newer.job_name = ${schedulerObligationsInOps.jobName}
+          AND newer.scope_key = ${schedulerObligationsInOps.scopeKey}
+          AND newer.period_key <> ${schedulerObligationsInOps.periodKey}
+          AND (
+            ${postMatchResultSlotIsNewerSql(newerResultSlot, currentResultSlot)}
+            OR (
+              NOT ${resultSlotsAreComparable}
+              AND CASE
+                WHEN newer.evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
+                  THEN to_timestamp(
+                    (newer.evidence->>'scheduledDueAtMs')::double precision / 1000
+                  )
+                ELSE newer.due_at
+              END > ${immutableScheduledDueAtSql()}
+            )
+          )
+      )`
+    : undefined;
   const owner = randomUUID();
   return db.transaction(async (tx) => {
     // All schedulers acquire intersecting lane locks in lexical order. The
@@ -456,6 +526,7 @@ export async function claimSchedulerObligations(
           excludedJobNames.length > 0
             ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
             : undefined,
+          latestAuthoritativeScope,
         ),
       )
       .orderBy(asc(schedulerObligationsInOps.dueAt), asc(schedulerObligationsInOps.obligationId))

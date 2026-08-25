@@ -167,6 +167,9 @@ async function claimSchedulerWork(input: {
       laneKeys: lanes,
       excludedJobNames: input.disabledJobNames,
       generationCaps: input.generationCaps,
+      enforceLatestAuthoritativeScope: POST_MATCH_LATEST_AUTHORITATIVE_JOBS.includes(
+        definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
+      ),
     });
     if (result[0]) claimed.push(result[0]);
   }
@@ -194,6 +197,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     jobName: (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number];
     periodKey: string;
     scopeKey: string;
+    resultSlot: string;
     dueAt: Date;
   }> = [];
   for (const definition of schedulerRegistry) {
@@ -243,11 +247,30 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
       )
     ) {
-      for (const plan of latestActiveSchedulerPlansByScope(resolution.plans)) {
+      const latestPlans = latestActiveSchedulerPlansByScope(resolution.plans);
+      const invalidPlan = latestPlans.find(
+        (plan) =>
+          typeof plan.evidence?.resultSlot !== 'string' || plan.evidence.resultSlot.length === 0,
+      );
+      if (invalidPlan) {
+        failed += 1;
+        logError(
+          'Post-match scheduler plan is missing its result-slot authority',
+          new Error('Post-match resultSlot evidence is required'),
+          {
+            jobName: definition.name,
+            scopeKey: invalidPlan.scopeKey,
+            periodKey: invalidPlan.periodKey,
+          },
+        );
+        continue;
+      }
+      for (const plan of latestPlans) {
         latestPostMatchPeriods.push({
           jobName: definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
           periodKey: plan.periodKey,
           scopeKey: plan.scopeKey,
+          resultSlot: plan.evidence?.resultSlot as string,
           dueAt: plan.dueAt,
         });
       }
@@ -340,6 +363,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         jobName: latest.jobName,
         scopeKey: latest.scopeKey,
         periodKey: latest.periodKey,
+        resultSlot: latest.resultSlot,
         beforeDueAt: latest.dueAt,
       })),
       evidence: { checkpoint: 'post-match-results' },
