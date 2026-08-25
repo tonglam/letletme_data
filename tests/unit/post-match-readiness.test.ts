@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test';
 
 import {
+  getPostMatchResultsCheckpoint,
   getPostMatchResultsSlot,
   POST_MATCH_RESULTS_WINDOW_MS,
 } from '../../src/domain/post-match-results';
@@ -70,6 +71,29 @@ describe('bounded post-match result slots', () => {
         new Date('2026-08-22T21:00:00.000Z'),
       ),
     ).toBe('provisional-1');
+  });
+
+  test('anchors every checkpoint to the immutable start of its hourly slot', () => {
+    expect(
+      getPostMatchResultsCheckpoint(
+        { dataChecked: false },
+        fixtures,
+        new Date('2026-08-22T20:50:00.000Z'),
+      ),
+    ).toEqual({
+      slot: 'provisional-0',
+      dueAt: new Date('2026-08-22T20:00:00.000Z'),
+    });
+    expect(
+      getPostMatchResultsCheckpoint(
+        { dataChecked: false },
+        fixtures,
+        new Date('2026-08-22T21:35:00.000Z'),
+      ),
+    ).toEqual({
+      slot: 'provisional-1',
+      dueAt: new Date('2026-08-22T21:00:00.000Z'),
+    });
   });
 
   test('keeps final slots hourly after FPL checks the event data', () => {

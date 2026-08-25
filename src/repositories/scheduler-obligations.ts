@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
-import { getDb, type DbHandle } from '../db/singleton';
+import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
 
 export type SchedulerObligationStatus =
@@ -76,11 +76,80 @@ function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerOb
   };
 }
 
-function immutableScheduledDueAtSql() {
+function immutableScheduledDueAtForSql(evidence: SQL, dueAt: SQL) {
   return sql`CASE
-    WHEN ${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
-      THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::double precision / 1000)
-    ELSE ${schedulerObligationsInOps.dueAt}
+    WHEN ${evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
+      THEN to_timestamp((${evidence}->>'scheduledDueAtMs')::double precision / 1000)
+    ELSE ${dueAt}
+  END`;
+}
+
+function immutableScheduledDueAtSql() {
+  return immutableScheduledDueAtForSql(
+    sql`${schedulerObligationsInOps.evidence}`,
+    sql`${schedulerObligationsInOps.dueAt}`,
+  );
+}
+
+function postMatchAuthorityAtForSql(evidence: SQL) {
+  return sql`CASE
+    WHEN ${evidence}->>'resultAuthorityAtMs' ~ '^[0-9]+$'
+      THEN (${evidence}->>'resultAuthorityAtMs')::numeric
+    ELSE NULL
+  END`;
+}
+
+function postMatchScheduleAnchorForSql(evidence: SQL) {
+  return sql`CASE
+    WHEN ${evidence}->>'resultScheduleAnchorMs' ~ '^[0-9]+$'
+      THEN (${evidence}->>'resultScheduleAnchorMs')::numeric
+    ELSE NULL
+  END`;
+}
+
+// Slot indexes are relative to the last fixture's expected end and can move
+// when that fixture is rescheduled. Rank schedule versions by their persisted
+// fixture update timestamp, then slots within one version by their immutable
+// boundary. Same-slot finality remains monotonic, so a late provisional
+// resolver cannot demote final authority.
+function postMatchIdentityIsNewerSql(input: {
+  newerSlot: SQL;
+  newerDueAt: SQL;
+  newerAuthorityAt: SQL;
+  newerScheduleAnchor: SQL;
+  olderSlot: SQL;
+  olderDueAt: SQL;
+  olderAuthorityAt: SQL;
+  olderScheduleAnchor: SQL;
+}) {
+  const newerNumbered = sql`${input.newerSlot} ~ '^(provisional|final)-[0-9]+$'`;
+  const olderNumbered = sql`${input.olderSlot} ~ '^(provisional|final)-[0-9]+$'`;
+  const newerIndex = sql`substring(${input.newerSlot} from '([0-9]+)$')::integer`;
+  const olderIndex = sql`substring(${input.olderSlot} from '([0-9]+)$')::integer`;
+  return sql`CASE
+    WHEN ${input.newerSlot} = 'final-checkpoint'
+      THEN ${input.olderSlot} IS DISTINCT FROM 'final-checkpoint'
+    WHEN ${input.olderSlot} = 'final-checkpoint'
+      THEN false
+    WHEN ${newerNumbered}
+      AND ${olderNumbered}
+      AND ${newerIndex} = ${olderIndex}
+      AND (${input.newerSlot} LIKE 'final-%') IS DISTINCT FROM
+          (${input.olderSlot} LIKE 'final-%')
+      THEN ${input.newerSlot} LIKE 'final-%'
+    WHEN ${input.newerScheduleAnchor} IS DISTINCT FROM ${input.olderScheduleAnchor}
+      THEN CASE
+        WHEN ${input.newerAuthorityAt} IS NOT NULL
+          AND ${input.olderAuthorityAt} IS NULL
+          THEN true
+        WHEN ${input.newerAuthorityAt} IS NULL
+          AND ${input.olderAuthorityAt} IS NOT NULL
+          THEN false
+        WHEN ${input.newerAuthorityAt} IS DISTINCT FROM ${input.olderAuthorityAt}
+          THEN ${input.newerAuthorityAt} > ${input.olderAuthorityAt}
+        ELSE false
+      END
+    ELSE ${input.newerDueAt} > ${input.olderDueAt}
   END`;
 }
 
@@ -90,6 +159,27 @@ function terminalSchedulerEvidence(evidence?: Record<string, unknown>) {
       THEN jsonb_build_object(
         'scheduledDueAtMs',
         ${schedulerObligationsInOps.evidence}->'scheduledDueAtMs'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'resultSlot'
+      THEN jsonb_build_object(
+        'resultSlot',
+        ${schedulerObligationsInOps.evidence}->'resultSlot'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'resultAuthorityAtMs'
+      THEN jsonb_build_object(
+        'resultAuthorityAtMs',
+        ${schedulerObligationsInOps.evidence}->'resultAuthorityAtMs'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'resultScheduleAnchorMs'
+      THEN jsonb_build_object(
+        'resultScheduleAnchorMs',
+        ${schedulerObligationsInOps.evidence}->'resultScheduleAnchorMs'
       )
     ELSE '{}'::jsonb
   END`;
@@ -106,7 +196,7 @@ function immutableScheduledDueAt(dueAt: Date, scheduledDueAtMs: string | null): 
 export async function reserveSchedulerObligation(input: {
   definition: { name: string; cadence: string; timezone: string };
   plan: SchedulerObligationPlan;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 }): Promise<SchedulerObligation> {
   const db = input.db ?? (await getDb());
   const scheduledDueAtMs = input.plan.dueAt.getTime();
@@ -157,6 +247,127 @@ export async function reserveSchedulerObligation(input: {
   const row = existing[0];
   if (!row) throw new Error('Scheduler obligation disappeared after conflict');
   return mapRow(row);
+}
+
+async function refreshPostMatchObligationAuthority(input: {
+  obligation: SchedulerObligation;
+  plan: SchedulerObligationPlan;
+  db: DbOrTransaction;
+}): Promise<SchedulerObligation> {
+  const resultSlot = input.plan.evidence?.resultSlot;
+  const resultAuthorityAtMs = input.plan.evidence?.resultAuthorityAtMs;
+  const resultScheduleAnchorMs = input.plan.evidence?.resultScheduleAnchorMs;
+  if (
+    typeof resultSlot !== 'string' ||
+    !Number.isSafeInteger(resultAuthorityAtMs) ||
+    Number(resultAuthorityAtMs) <= 0 ||
+    !Number.isSafeInteger(resultScheduleAnchorMs) ||
+    Number(resultScheduleAnchorMs) <= 0
+  ) {
+    return input.obligation;
+  }
+  const scheduledDueAtMs = input.plan.dueAt.getTime();
+  const scheduledDueAtIso = input.plan.dueAt.toISOString();
+  const currentAuthorityAt = postMatchAuthorityAtForSql(sql`${schedulerObligationsInOps.evidence}`);
+  const currentScheduleAnchor = postMatchScheduleAnchorForSql(
+    sql`${schedulerObligationsInOps.evidence}`,
+  );
+  const newerAuthority = sql`(
+    ${currentAuthorityAt} IS NULL OR ${currentAuthorityAt} < ${Number(resultAuthorityAtMs)}
+  )`;
+  const scheduleChanged = sql`(
+    ${currentScheduleAnchor} IS NULL OR
+    ${currentScheduleAnchor} <> ${Number(resultScheduleAnchorMs)}
+  )`;
+  const planEvidence = {
+    ...(input.plan.evidence ?? {}),
+    ...(input.plan.eventId === undefined ? {} : { targetEventId: input.plan.eventId }),
+    scheduledDueAtMs,
+  };
+  const reactivationEvidence = {
+    ...planEvidence,
+    reactivatedForScheduleAuthority: true,
+  };
+  const refreshed = await input.db
+    .update(schedulerObligationsInOps)
+    .set({
+      source: input.plan.source,
+      dueAt: sql`CASE
+        WHEN ${scheduleChanged} THEN ${scheduledDueAtIso}::timestamptz
+        ELSE ${schedulerObligationsInOps.dueAt}
+      END`,
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(planEvidence)}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligation.obligationId),
+        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+        newerAuthority,
+      ),
+    )
+    .returning();
+  if (refreshed[0]) return mapRow(refreshed[0]);
+
+  // Persist a newer authority version without rerunning work when the durable
+  // schedule itself is unchanged. Besides avoiding false retries, this keeps a
+  // late resolver for an older schedule version from outranking a completed or
+  // in-flight row whose ordinary fixture refresh was already observed.
+  const authorityAdvancedWithoutScheduleChange = await input.db
+    .update(schedulerObligationsInOps)
+    .set({
+      source: input.plan.source,
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(planEvidence)}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligation.obligationId),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'succeeded']),
+        newerAuthority,
+        sql`NOT ${scheduleChanged}`,
+      ),
+    )
+    .returning();
+  if (authorityAdvancedWithoutScheduleChange[0]) {
+    return mapRow(authorityAdvancedWithoutScheduleChange[0]);
+  }
+
+  const reactivated = await input.db
+    .update(schedulerObligationsInOps)
+    .set({
+      status: 'pending',
+      source: input.plan.source,
+      dueAt: input.plan.dueAt,
+      generation: sql`${schedulerObligationsInOps.generation} + 1`,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      bullJobId: null,
+      runId: null,
+      lastError: null,
+      evidence: reactivationEvidence,
+      completedAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligation.obligationId),
+        sql`(
+          (
+            ${schedulerObligationsInOps.status} = 'succeeded'
+            AND ${/^(provisional|final)-\d+$/.test(resultSlot)}
+            AND ${scheduleChanged}
+          ) OR (
+            ${schedulerObligationsInOps.status} = 'skipped'
+            AND ${schedulerObligationsInOps.evidence}->>'reason' =
+                ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}
+          )
+        )`,
+        newerAuthority,
+      ),
+    )
+    .returning();
+  return reactivated[0] ? mapRow(reactivated[0]) : input.obligation;
 }
 
 /**
@@ -242,6 +453,182 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
   return updated.length;
 }
 
+export type SchedulerDueAtSupersessionBoundary = Readonly<{
+  jobName: string;
+  scopeKey: string;
+  periodKey: string;
+  resultSlot: string;
+  resultAuthorityAtMs?: number;
+  resultScheduleAnchorMs?: number;
+  beforeDueAt: Date;
+}>;
+
+/**
+ * Post-match latest-authoritative checkpoints can cover every finalized event.
+ * Coalesce all job/scope boundaries in one statement so a season-end scheduler
+ * pass does not issue one permanent no-op update per job and event.
+ *
+ * The authoritative period identity is excluded explicitly. Absolute slot
+ * time ranks rescheduled fixtures; for the same numbered slot, final authority
+ * outranks provisional authority even for pre-rollout observation timestamps.
+ * A persisted fixture update timestamp orders different schedule versions, so
+ * a stale resolver cannot reverse a fresh exact-hour reschedule after waiting
+ * for the lane lock. Immutable due time orders slots within one version.
+ */
+export async function supersedeSchedulerObligationsByDueAtBatch(input: {
+  boundaries: readonly SchedulerDueAtSupersessionBoundary[];
+  evidence?: Record<string, unknown>;
+  db?: DbOrTransaction;
+}): Promise<number> {
+  if (input.boundaries.length === 0) return 0;
+  const seen = new Set<string>();
+  const boundaries = input.boundaries.map((boundary) => {
+    if (
+      boundary.jobName.length === 0 ||
+      boundary.scopeKey.length === 0 ||
+      boundary.periodKey.length === 0 ||
+      typeof boundary.resultSlot !== 'string' ||
+      boundary.resultSlot.length === 0 ||
+      (boundary.resultAuthorityAtMs !== undefined &&
+        (!Number.isSafeInteger(boundary.resultAuthorityAtMs) ||
+          boundary.resultAuthorityAtMs <= 0)) ||
+      (boundary.resultScheduleAnchorMs !== undefined &&
+        (!Number.isSafeInteger(boundary.resultScheduleAnchorMs) ||
+          boundary.resultScheduleAnchorMs <= 0)) ||
+      !Number.isFinite(boundary.beforeDueAt.getTime())
+    ) {
+      throw new Error('Scheduler supersession boundary is invalid');
+    }
+    const identity = JSON.stringify([boundary.jobName, boundary.scopeKey]);
+    if (seen.has(identity)) {
+      throw new Error('Scheduler supersession boundaries must be unique by job and scope');
+    }
+    seen.add(identity);
+    return {
+      job_name: boundary.jobName,
+      scope_key: boundary.scopeKey,
+      period_key: boundary.periodKey,
+      result_slot: boundary.resultSlot,
+      result_authority_at_ms: boundary.resultAuthorityAtMs ?? null,
+      result_schedule_anchor_ms: boundary.resultScheduleAnchorMs ?? null,
+      before_due_at: boundary.beforeDueAt.toISOString(),
+    };
+  });
+  const db = input.db ?? (await getDb());
+  const boundarySlot = sql`boundaries.result_slot`;
+  const obligationSlot = sql`obligation.evidence->>'resultSlot'`;
+  const boundaryAuthorityAt = sql`boundaries.result_authority_at_ms`;
+  const obligationAuthorityAt = postMatchAuthorityAtForSql(sql`obligation.evidence`);
+  const boundaryScheduleAnchor = sql`boundaries.result_schedule_anchor_ms`;
+  const obligationScheduleAnchor = postMatchScheduleAnchorForSql(sql`obligation.evidence`);
+  const boundaryDueAt = sql`boundaries.before_due_at`;
+  const obligationDueAt = immutableScheduledDueAtForSql(
+    sql`obligation.evidence`,
+    sql`obligation.due_at`,
+  );
+  const [result] = await db.execute<{ updatedCount: number | string }>(sql`
+    WITH boundaries AS (
+      SELECT job_name, scope_key, period_key, result_slot,
+             result_authority_at_ms, result_schedule_anchor_ms, before_due_at
+      FROM jsonb_to_recordset(${JSON.stringify(boundaries)}::jsonb) AS boundary(
+        job_name text,
+        scope_key text,
+        period_key text,
+        result_slot text,
+        result_authority_at_ms bigint,
+        result_schedule_anchor_ms bigint,
+        before_due_at timestamptz
+      )
+    ), updated AS (
+      UPDATE ops.scheduler_obligations AS obligation
+      SET status = 'skipped',
+          evidence = obligation.evidence || jsonb_build_object(
+            'provider', 'fpl',
+            'terminal', true,
+            'reason', ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}::text,
+            'supersededByPeriodKey', boundaries.period_key
+          ) || ${JSON.stringify(input.evidence ?? {})}::jsonb,
+          completed_at = clock_timestamp(),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          updated_at = clock_timestamp()
+      FROM boundaries
+      WHERE obligation.job_name = boundaries.job_name
+        AND obligation.scope_key = boundaries.scope_key
+        AND obligation.period_key <> boundaries.period_key
+        AND ${postMatchIdentityIsNewerSql({
+          newerSlot: boundarySlot,
+          newerDueAt: boundaryDueAt,
+          newerAuthorityAt: boundaryAuthorityAt,
+          newerScheduleAnchor: boundaryScheduleAnchor,
+          olderSlot: obligationSlot,
+          olderDueAt: obligationDueAt,
+          olderAuthorityAt: obligationAuthorityAt,
+          olderScheduleAnchor: obligationScheduleAnchor,
+        })}
+        AND obligation.status IN ('pending', 'failed')
+      RETURNING obligation.obligation_id
+    )
+    SELECT count(*)::integer AS "updatedCount"
+    FROM updated
+  `);
+  return Number(result?.updatedCount ?? 0);
+}
+
+export type SchedulerObligationReservation = Readonly<{
+  definition: Readonly<{ name: string; cadence: string; timezone: string }>;
+  plan: SchedulerObligationPlan;
+}>;
+
+/**
+ * Reserve the current post-match identities, refresh their durable fixture
+ * authority, and retire stale peers in one transaction under the same lane
+ * advisory lock used by claim. A previously superseded identity is revived
+ * only when it reappears with a strictly newer authority version; a succeeded
+ * identity gets a new generation only when that version also changes the
+ * schedule anchor. A claimant that waits for this transaction takes its
+ * statement snapshot only after the current identities are committed, so an
+ * uncommitted reservation cannot be missed by the latest-authoritative fence.
+ */
+export async function reconcilePostMatchSchedulerObligations(input: {
+  reservations: readonly SchedulerObligationReservation[];
+  boundaries: readonly SchedulerDueAtSupersessionBoundary[];
+  evidence?: Record<string, unknown>;
+  db?: DbHandle;
+}): Promise<Readonly<{ reservations: readonly SchedulerObligation[]; superseded: number }>> {
+  if (input.reservations.some(({ plan }) => plan.terminalStatus !== undefined)) {
+    throw new Error('Post-match atomic reconciliation only accepts active plans');
+  }
+  if (input.reservations.length === 0 && input.boundaries.length === 0) {
+    return { reservations: [], superseded: 0 };
+  }
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(
+        hashtextextended(${'scheduler-lane:post-match-results'}, 0)
+      )`,
+    );
+    const reservations: SchedulerObligation[] = [];
+    for (const reservation of input.reservations) {
+      const obligation = await reserveSchedulerObligation({ ...reservation, db: tx });
+      reservations.push(
+        await refreshPostMatchObligationAuthority({
+          obligation,
+          plan: reservation.plan,
+          db: tx,
+        }),
+      );
+    }
+    const superseded = await supersedeSchedulerObligationsByDueAtBatch({
+      boundaries: input.boundaries,
+      evidence: input.evidence,
+      db: tx,
+    });
+    return { reservations, superseded };
+  });
+}
+
 export async function hasEarlierInFlightSchedulerObligation(input: {
   jobName: string;
   beforePeriodKey: string;
@@ -306,6 +693,8 @@ export async function claimSchedulerObligations(
     laneKeys?: readonly string[];
     /** Terminal generation caps for provider-specific lease recovery. */
     generationCaps?: Readonly<Record<string, number>>;
+    /** Revalidate one latest-authoritative identity per durable job/scope. */
+    enforceLatestAuthoritativeScope?: boolean;
     db?: DbHandle;
   } = {},
 ): Promise<readonly { obligation: SchedulerObligation; owner: string }[]> {
@@ -327,6 +716,35 @@ export async function claimSchedulerObligations(
     ...new Set(input.inFlightConflictJobNames ?? includedJobNames),
   ].filter((name) => name.length > 0);
   const laneKeys = [...new Set(input.laneKeys ?? [])].filter((lane) => lane.length > 0).sort();
+  const currentResultSlot = sql`${schedulerObligationsInOps.evidence}->>'resultSlot'`;
+  const newerResultSlot = sql`newer.evidence->>'resultSlot'`;
+  const currentDueAt = immutableScheduledDueAtSql();
+  const newerDueAt = immutableScheduledDueAtForSql(sql`newer.evidence`, sql`newer.due_at`);
+  const currentAuthorityAt = postMatchAuthorityAtForSql(sql`${schedulerObligationsInOps.evidence}`);
+  const newerAuthorityAt = postMatchAuthorityAtForSql(sql`newer.evidence`);
+  const currentScheduleAnchor = postMatchScheduleAnchorForSql(
+    sql`${schedulerObligationsInOps.evidence}`,
+  );
+  const newerScheduleAnchor = postMatchScheduleAnchorForSql(sql`newer.evidence`);
+  const latestAuthoritativeScope = input.enforceLatestAuthoritativeScope
+    ? sql`NOT EXISTS (
+        SELECT 1
+        FROM ops.scheduler_obligations AS newer
+        WHERE newer.job_name = ${schedulerObligationsInOps.jobName}
+          AND newer.scope_key = ${schedulerObligationsInOps.scopeKey}
+          AND newer.period_key <> ${schedulerObligationsInOps.periodKey}
+          AND ${postMatchIdentityIsNewerSql({
+            newerSlot: newerResultSlot,
+            newerDueAt,
+            newerAuthorityAt,
+            newerScheduleAnchor,
+            olderSlot: currentResultSlot,
+            olderDueAt: currentDueAt,
+            olderAuthorityAt: currentAuthorityAt,
+            olderScheduleAnchor: currentScheduleAnchor,
+          })}
+      )`
+    : undefined;
   const owner = randomUUID();
   return db.transaction(async (tx) => {
     // All schedulers acquire intersecting lane locks in lexical order. The
@@ -369,6 +787,7 @@ export async function claimSchedulerObligations(
           excludedJobNames.length > 0
             ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
             : undefined,
+          latestAuthoritativeScope,
         ),
       )
       .orderBy(asc(schedulerObligationsInOps.dueAt), asc(schedulerObligationsInOps.obligationId))

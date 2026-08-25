@@ -1,4 +1,5 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
+import type { Fixture } from '../types';
 import { formatCronDateKey } from '../utils/timezone';
 import {
   enqueueCoreSnapshotJob,
@@ -43,7 +44,10 @@ import {
   coreSnapshotRefreshReason,
 } from '../domain/core-snapshot-refresh';
 import { resolvePlayerStatsActiveCadence } from '../domain/job-schedules';
-import { getPostMatchResultsSlot } from '../domain/post-match-results';
+import {
+  getPostMatchResultsCheckpoint,
+  getPostMatchResultsSlot,
+} from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
@@ -88,6 +92,7 @@ export type SchedulerContext = Readonly<{
     finished?: boolean;
     dataChecked?: boolean;
     dataCheckedAt?: Date | null;
+    updatedAt?: Date | null;
   }[];
 }>;
 
@@ -371,6 +376,42 @@ type PostMatchFixturesLoader = (
   eventId: number,
 ) => ReturnType<typeof fixtureRepository.findByEvent>;
 
+function postMatchFixtureAuthority(fixtures: readonly Fixture[]): Readonly<{
+  resultAuthorityAtMs: number;
+  resultScheduleAnchorMs: number;
+}> {
+  const kickoffTimes = fixtures
+    .map((fixture) => fixture.kickoffTime?.getTime())
+    .filter(
+      (kickoffTime): kickoffTime is number =>
+        kickoffTime !== undefined && Number.isSafeInteger(kickoffTime) && kickoffTime > 0,
+    );
+  if (kickoffTimes.length === 0) {
+    throw new Error('Post-match fixtures have no durable schedule anchor');
+  }
+  const resultScheduleAnchorMs = Math.max(...kickoffTimes);
+  const persistedUpdates = fixtures
+    .map((fixture) => fixture.updatedAt?.getTime())
+    .filter(
+      (updatedAt): updatedAt is number =>
+        updatedAt !== undefined && Number.isSafeInteger(updatedAt) && updatedAt > 0,
+    );
+  if (persistedUpdates.length > 0) {
+    return {
+      resultAuthorityAtMs: Math.max(...persistedUpdates),
+      resultScheduleAnchorMs,
+    };
+  }
+
+  // Production fixture rows have a non-null updated_at. Keep a deterministic
+  // compatibility value for injected/unit fixtures while never using wall time
+  // as authority.
+  return {
+    resultAuthorityAtMs: resultScheduleAnchorMs,
+    resultScheduleAnchorMs,
+  };
+}
+
 /**
  * Results are meaningful only after the final fixture's expected end. During
  * the first 24 hours each event gets one idempotent hourly checkpoint. Once
@@ -397,6 +438,13 @@ export async function resolvePostMatchResultPlans(
         source: 'catchup',
         evidence: {
           resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: (
+            event.updatedAt ??
+            event.dataCheckedAt ??
+            event.deadlineTime ??
+            dueAt
+          ).getTime(),
+          resultScheduleAnchorMs: dueAt.getTime(),
           dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
         },
       });
@@ -408,19 +456,19 @@ export async function resolvePostMatchResultPlans(
   const provisional = await Promise.all(
     unsettledEvents.map(async (event): Promise<SchedulerObligationPlan | null> => {
       const fixtures = await loadFixtures(context.season, event.id);
-      const resultSlot = getPostMatchResultsSlot(
+      const checkpoint = getPostMatchResultsCheckpoint(
         { dataChecked: event.dataChecked === true },
         fixtures,
         context.now,
       );
-      if (!resultSlot) return null;
+      if (!checkpoint) return null;
       return {
         scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-        periodKey: `event-${event.id}-${resultSlot}`,
-        dueAt: context.now,
+        periodKey: `event-${event.id}-${checkpoint.slot}`,
+        dueAt: checkpoint.dueAt,
         eventId: event.id,
         source: 'reconcile',
-        evidence: { resultSlot },
+        evidence: { resultSlot: checkpoint.slot, ...postMatchFixtureAuthority(fixtures) },
       };
     }),
   );
@@ -901,16 +949,21 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
       const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
-      const resultSlot = getPostMatchResultsSlot(event, fixtures, context.now);
-      if (!resultSlot?.startsWith('final-')) return [];
+      const checkpoint = getPostMatchResultsCheckpoint(event, fixtures, context.now);
+      if (!checkpoint?.slot.startsWith('final-')) return [];
       return [
         {
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-final-${event.id}-${resultSlot}`,
-          dueAt: context.now,
+          periodKey: `live-final-${event.id}-${checkpoint.slot}`,
+          dueAt: checkpoint.dueAt,
           eventId: event.id,
           source: 'reconcile' as const,
-          evidence: { resultSlot, finalizeEvent: true, persistEventLives: true },
+          evidence: {
+            resultSlot: checkpoint.slot,
+            ...postMatchFixtureAuthority(fixtures),
+            finalizeEvent: true,
+            persistEventLives: true,
+          },
         },
       ];
     },
@@ -1444,6 +1497,7 @@ export async function resolveSchedulerContext(
       finished: event.finished,
       dataChecked: event.dataChecked,
       dataCheckedAt: event.dataCheckedAt,
+      updatedAt: event.updatedAt,
     }));
   const currentEvent = events
     .filter((event) => event.deadlineTime && event.deadlineTime.getTime() <= now.getTime())

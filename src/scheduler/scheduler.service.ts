@@ -7,9 +7,11 @@ import {
   findDueSchedulerJobNames,
   hasEarlierInFlightSchedulerObligation,
   markSchedulerObligationIrrecoverable,
+  reconcilePostMatchSchedulerObligations,
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
+  type SchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import {
   resolveSchedulerContext,
@@ -18,6 +20,7 @@ import {
   type SchedulerContext,
   type SchedulerObligationPlan,
 } from './job-registry';
+import { latestActiveSchedulerPlansByScope } from './plan-coalescing';
 import { logError, logInfo } from '../utils/logger';
 import {
   reconcileExpiredSchedulerEnqueueClaims,
@@ -44,18 +47,54 @@ const UNDERSTAT_SCHEDULER_JOB_NAMES = [
   ...UNDERSTAT_LATEST_AUTHORITATIVE_JOBS,
   'understat-orphan-reconciler',
 ] as const;
+const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
+  'live-finalization',
+  'entry-results',
+  'league-event-results',
+  'tournament-event-results',
+] as const;
 const observedPlanKeys = new Map<string, true>();
 
 export function schedulerPlanKey(
   definition: Pick<ScheduledJobDefinition, 'name'>,
-  plan: Pick<SchedulerObligationPlan, 'scopeKey' | 'periodKey' | 'terminalStatus'>,
+  plan: Pick<SchedulerObligationPlan, 'scopeKey' | 'periodKey' | 'terminalStatus' | 'evidence'>,
 ): string {
-  return JSON.stringify([
+  const identity: Array<string | number> = [
     definition.name,
     plan.scopeKey,
     plan.periodKey,
     plan.terminalStatus ?? 'active',
-  ]);
+  ];
+  const resultSlot = plan.evidence?.resultSlot;
+  const resultAuthorityAtMs = plan.evidence?.resultAuthorityAtMs;
+  const resultScheduleAnchorMs = plan.evidence?.resultScheduleAnchorMs;
+  if (
+    typeof resultSlot === 'string' &&
+    /^(provisional|final)-\d+$/.test(resultSlot) &&
+    Number.isSafeInteger(resultAuthorityAtMs) &&
+    Number(resultAuthorityAtMs) > 0 &&
+    Number.isSafeInteger(resultScheduleAnchorMs) &&
+    Number(resultScheduleAnchorMs) > 0
+  ) {
+    identity.push(Number(resultScheduleAnchorMs));
+    identity.push(Number(resultAuthorityAtMs));
+  }
+  return JSON.stringify(identity);
+}
+
+export function postMatchReservationWasPersisted(
+  plan: Pick<SchedulerObligationPlan, 'evidence'>,
+  obligation: Pick<SchedulerObligation, 'evidence'> | undefined,
+): boolean {
+  if (!obligation) return false;
+  const expectedSlot = plan.evidence?.resultSlot;
+  if (typeof expectedSlot !== 'string') return false;
+  if (!/^(provisional|final)-\d+$/.test(expectedSlot)) return true;
+  return (
+    obligation.evidence.resultSlot === expectedSlot &&
+    obligation.evidence.resultAuthorityAtMs === plan.evidence?.resultAuthorityAtMs &&
+    obligation.evidence.resultScheduleAnchorMs === plan.evidence?.resultScheduleAnchorMs
+  );
 }
 
 function wasPlanObserved(key: string): boolean {
@@ -159,6 +198,9 @@ async function claimSchedulerWork(input: {
       laneKeys: lanes,
       excludedJobNames: input.disabledJobNames,
       generationCaps: input.generationCaps,
+      enforceLatestAuthoritativeScope: POST_MATCH_LATEST_AUTHORITATIVE_JOBS.includes(
+        definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
+      ),
     });
     if (result[0]) claimed.push(result[0]);
   }
@@ -182,6 +224,20 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     string,
     { periodKey: string; scopeKey: string; dueAt: Date }
   >();
+  const latestPostMatchPeriods: Array<{
+    jobName: (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number];
+    periodKey: string;
+    scopeKey: string;
+    resultSlot: string;
+    resultAuthorityAtMs: number;
+    resultScheduleAnchorMs: number;
+    dueAt: Date;
+  }> = [];
+  const postMatchReservations: Array<{
+    definition: ScheduledJobDefinition;
+    plan: SchedulerObligationPlan;
+    planKey: string;
+  }> = [];
   for (const definition of schedulerRegistry) {
     const resolution = await resolveSchedulerDefinition(definition, context);
     if (!resolution.ok) {
@@ -224,6 +280,55 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         });
       }
     }
+    const isPostMatchDefinition = POST_MATCH_LATEST_AUTHORITATIVE_JOBS.includes(
+      definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
+    );
+    if (isPostMatchDefinition) {
+      const latestPlans = latestActiveSchedulerPlansByScope(resolution.plans);
+      const invalidPlan = resolution.plans.find(
+        (plan) =>
+          plan.terminalStatus !== undefined ||
+          typeof plan.evidence?.resultSlot !== 'string' ||
+          plan.evidence.resultSlot.length === 0 ||
+          !Number.isSafeInteger(plan.evidence?.resultAuthorityAtMs) ||
+          Number(plan.evidence?.resultAuthorityAtMs) <= 0 ||
+          !Number.isSafeInteger(plan.evidence?.resultScheduleAnchorMs) ||
+          Number(plan.evidence?.resultScheduleAnchorMs) <= 0,
+      );
+      if (invalidPlan) {
+        failed += 1;
+        logError(
+          'Post-match scheduler plan is missing durable result authority',
+          new Error(
+            'Post-match resultSlot, resultAuthorityAtMs and resultScheduleAnchorMs evidence are required',
+          ),
+          {
+            jobName: definition.name,
+            scopeKey: invalidPlan.scopeKey,
+            periodKey: invalidPlan.periodKey,
+          },
+        );
+        continue;
+      }
+      for (const plan of latestPlans) {
+        latestPostMatchPeriods.push({
+          jobName: definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
+          periodKey: plan.periodKey,
+          scopeKey: plan.scopeKey,
+          resultSlot: plan.evidence?.resultSlot as string,
+          resultAuthorityAtMs: plan.evidence?.resultAuthorityAtMs as number,
+          resultScheduleAnchorMs: plan.evidence?.resultScheduleAnchorMs as number,
+          dueAt: plan.dueAt,
+        });
+      }
+      for (const plan of resolution.plans) {
+        const planKey = schedulerPlanKey(definition, plan);
+        if (!wasPlanObserved(planKey)) {
+          postMatchReservations.push({ definition, plan, planKey });
+        }
+      }
+      continue;
+    }
     for (const plan of resolution.plans) {
       const planKey = schedulerPlanKey(definition, plan);
       if (wasPlanObserved(planKey)) continue;
@@ -253,6 +358,34 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         });
       }
     }
+  }
+
+  try {
+    const result = await reconcilePostMatchSchedulerObligations({
+      reservations: postMatchReservations.map(({ definition, plan }) => ({ definition, plan })),
+      boundaries: latestPostMatchPeriods.map((latest) => ({
+        jobName: latest.jobName,
+        scopeKey: latest.scopeKey,
+        periodKey: latest.periodKey,
+        resultSlot: latest.resultSlot,
+        resultAuthorityAtMs: latest.resultAuthorityAtMs,
+        resultScheduleAnchorMs: latest.resultScheduleAnchorMs,
+        beforeDueAt: latest.dueAt,
+      })),
+      evidence: { checkpoint: 'post-match-results' },
+    });
+    for (const [index, { plan, planKey }] of postMatchReservations.entries()) {
+      if (postMatchReservationWasPersisted(plan, result.reservations[index])) {
+        rememberObservedPlan(planKey);
+      }
+    }
+    reserved += result.reservations.length;
+  } catch (error) {
+    failed += 1;
+    logError('Post-match atomic reservation and coalescing failed', error, {
+      reservationCount: postMatchReservations.length,
+      boundaryCount: latestPostMatchPeriods.length,
+    });
   }
 
   for (const [jobName, latest] of latestUnderstatPeriods) {
