@@ -8,7 +8,7 @@ import {
   type LiveSnapshotCacheContents,
   type LiveSnapshotCachePayload,
 } from '../cache/live-snapshot-cache';
-import { prepareDataPublication } from '../cache/data-publication';
+import { prepareDataPublication, type DataPublicationManifest } from '../cache/data-publication';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { fplClient } from '../clients/fpl';
 import { eventsInFpl } from '../db/schemas/index.schema';
@@ -143,6 +143,25 @@ function bonusTeamCount(): number {
 
 function observedFinalizedFence(disposition: LiveSnapshotDurablePersistenceResult['disposition']) {
   return disposition === 'finalized-noop' || disposition === 'finalized-superseded';
+}
+
+export function livePublicationMatchesFinalizedCheckpoint(
+  manifest: Pick<DataPublicationManifest, 'sourceCheckedAt'> | null,
+  finalizedAt: Date | null,
+): boolean {
+  if (!finalizedAt) return true;
+  if (!manifest) return false;
+  const sourceCheckedAtMs = Date.parse(manifest.sourceCheckedAt);
+  return Number.isFinite(sourceCheckedAtMs) && sourceCheckedAtMs === finalizedAt.getTime();
+}
+
+export function shouldAdvanceLivePublication(
+  contentChanged: boolean,
+  finalizeEvent: boolean | undefined,
+): boolean {
+  // Finalization creates the durable publication proof for the immutable
+  // checkpoint even when the provider payload is byte-for-byte unchanged.
+  return contentChanged || finalizeEvent === true;
 }
 
 export function buildCurrentSeasonPlayerTeamMap(
@@ -527,11 +546,18 @@ export async function recoverPendingLiveSnapshotPublication(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<'none' | 'activated'> {
-  const [cached, active, finalizedAt] = await Promise.all([
+  const [cached, active, activeManifest, finalizedAt] = await Promise.all([
     readLiveSnapshotCache(season.seasonCode, eventId),
     syncOperationsRepository.findActivePublication('fpl:live', season, eventId),
+    syncOperationsRepository.findActivePublicationManifest('fpl:live', season, eventId),
     eventRepository.findLiveSnapshotFinalizedAt(season, eventId),
   ]);
+  if (!livePublicationMatchesFinalizedCheckpoint(activeManifest, finalizedAt)) {
+    throw new DatabaseError(
+      `Finalized event ${eventId} has no publication bound to its immutable checkpoint`,
+      'LIVE_FINAL_PUBLICATION_CHECKPOINT_MISMATCH',
+    );
+  }
   if (
     cached &&
     active?.publicationId === cached.manifest.publicationId &&
@@ -549,6 +575,19 @@ export async function recoverPendingLiveSnapshotPublication(
       `Finalized event ${eventId} has no recoverable canonical live publication`,
       'LIVE_FINAL_PUBLICATION_MISSING',
     );
+  }
+  if (finalizedAt) {
+    const reconciledManifest = await syncOperationsRepository.findActivePublicationManifest(
+      'fpl:live',
+      season,
+      eventId,
+    );
+    if (!livePublicationMatchesFinalizedCheckpoint(reconciledManifest, finalizedAt)) {
+      throw new DatabaseError(
+        `Finalized event ${eventId} publication changed away from its immutable checkpoint`,
+        'LIVE_FINAL_PUBLICATION_CHECKPOINT_MISMATCH',
+      );
+    }
   }
   return result.status === 'repaired' ? 'activated' : 'none';
 }
@@ -640,7 +679,7 @@ export async function syncLiveSnapshot(
     const payload = toCachePayload(prepared);
     const changed = !snapshotContentMatches(active, payload);
 
-    if (!changed) {
+    if (!shouldAdvanceLivePublication(changed, options.finalizeEvent)) {
       let persistedFixtures = false;
       let persistedEventLives = false;
       // Fixture flags are the lifecycle source of truth even for cache-only

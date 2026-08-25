@@ -9,6 +9,7 @@ import { getDbClient } from '../../src/db/singleton';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import {
   persistLiveSnapshotDurably,
+  recoverPendingLiveSnapshotPublication,
   syncLiveSnapshot,
   type LiveSnapshotReferenceData,
   type PreparedLiveSnapshot,
@@ -128,6 +129,12 @@ describe('live snapshot finalization fence', () => {
     state: 'settled',
     liveIdentityBaseline: 'published-event',
   };
+
+  test('rejects a finalized event without an exact checkpoint-bound publication', async () => {
+    await expect(recoverPendingLiveSnapshotPublication(SEASON, EVENT_ID)).rejects.toMatchObject({
+      code: 'LIVE_FINAL_PUBLICATION_CHECKPOINT_MISMATCH',
+    });
+  });
 
   test('treats a later finalization replay as an immutable no-op', async () => {
     const result = await persistLiveSnapshotDurably({
