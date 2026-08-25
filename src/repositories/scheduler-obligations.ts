@@ -267,6 +267,7 @@ async function refreshPostMatchObligationAuthority(input: {
     return input.obligation;
   }
   const scheduledDueAtMs = input.plan.dueAt.getTime();
+  const scheduledDueAtIso = input.plan.dueAt.toISOString();
   const currentAuthorityAt = postMatchAuthorityAtForSql(sql`${schedulerObligationsInOps.evidence}`);
   const currentScheduleAnchor = postMatchScheduleAnchorForSql(
     sql`${schedulerObligationsInOps.evidence}`,
@@ -291,7 +292,10 @@ async function refreshPostMatchObligationAuthority(input: {
     .update(schedulerObligationsInOps)
     .set({
       source: input.plan.source,
-      dueAt: input.plan.dueAt,
+      dueAt: sql`CASE
+        WHEN ${scheduleChanged} THEN ${scheduledDueAtIso}::timestamptz
+        ELSE ${schedulerObligationsInOps.dueAt}
+      END`,
       evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(planEvidence)}::jsonb`,
       updatedAt: sql`clock_timestamp()`,
     })

@@ -47,6 +47,7 @@ async function cleanup(): Promise<void> {
          'integration:event:atomic-reschedule',
          'integration:event:equal-boundary-reschedule',
          'integration:event:in-flight-correction',
+         'integration:event:retry-delay',
          'integration:event:same-slot-correction',
          'integration:event:lane-race'
        )
@@ -1303,6 +1304,114 @@ describe('scheduler obligation generation fencing', () => {
         resultAuthorityAtMs: correctedAuthorityAtMs,
         resultScheduleAnchorMs: correctedScheduleAnchorMs,
         reactivatedForScheduleAuthority: true,
+      }),
+    });
+  });
+
+  test('preserves failed backoff for authority-only refresh and resets it for a schedule change', async () => {
+    const sql = await getDbClient();
+    const originalAuthorityAtMs = Date.parse('2026-08-23T10:00:00Z');
+    const ordinaryRefreshAuthorityAtMs = Date.parse('2026-08-23T10:30:00Z');
+    const correctedAuthorityAtMs = Date.parse('2026-08-23T11:00:00Z');
+    const originalScheduleAnchorMs = Date.parse('2026-08-22T18:00:00Z');
+    const correctedScheduleAnchorMs = Date.parse('2026-08-22T18:15:00Z');
+    const retryDueAt = new Date('2026-08-23T14:00:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, last_error, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'entry-results',
+        'integration:event:retry-delay',
+        'event-1-final-14',
+        'hourly post-match',
+        'UTC',
+        'failed',
+        'reconcile',
+        ${retryDueAt.toISOString()}::timestamptz,
+        0,
+        1,
+        'retry later',
+        jsonb_build_object(
+          'scheduledDueAtMs', ${Date.parse('2026-08-23T12:00:00Z')}::bigint,
+          'resultSlot', 'final-14',
+          'resultAuthorityAtMs', ${originalAuthorityAtMs}::bigint,
+          'resultScheduleAnchorMs', ${originalScheduleAnchorMs}::bigint
+        )
+      )
+    `;
+    const definition = {
+      name: 'entry-results',
+      cadence: 'hourly post-match',
+      timezone: 'UTC',
+    };
+    const basePlan = {
+      scopeKey: 'integration:event:retry-delay',
+      periodKey: 'event-1-final-14',
+      dueAt: new Date('2026-08-23T12:00:00Z'),
+      source: 'reconcile' as const,
+      eventId: 1,
+      evidence: {
+        resultSlot: 'final-14',
+        resultAuthorityAtMs: ordinaryRefreshAuthorityAtMs,
+        resultScheduleAnchorMs: originalScheduleAnchorMs,
+      },
+    };
+    const authorityOnly = await reconcilePostMatchSchedulerObligations({
+      reservations: [{ definition, plan: basePlan }],
+      boundaries: [
+        {
+          jobName: 'entry-results',
+          scopeKey: basePlan.scopeKey,
+          periodKey: basePlan.periodKey,
+          resultSlot: 'final-14',
+          resultAuthorityAtMs: ordinaryRefreshAuthorityAtMs,
+          resultScheduleAnchorMs: originalScheduleAnchorMs,
+          beforeDueAt: basePlan.dueAt,
+        },
+      ],
+    });
+    expect(authorityOnly.reservations[0]).toMatchObject({
+      status: 'failed',
+      dueAt: retryDueAt,
+      evidence: expect.objectContaining({
+        resultAuthorityAtMs: ordinaryRefreshAuthorityAtMs,
+        resultScheduleAnchorMs: originalScheduleAnchorMs,
+      }),
+    });
+
+    const correctedDueAt = new Date('2026-08-23T12:15:00Z');
+    const correctedPlan = {
+      ...basePlan,
+      dueAt: correctedDueAt,
+      evidence: {
+        ...basePlan.evidence,
+        resultAuthorityAtMs: correctedAuthorityAtMs,
+        resultScheduleAnchorMs: correctedScheduleAnchorMs,
+      },
+    };
+    const corrected = await reconcilePostMatchSchedulerObligations({
+      reservations: [{ definition, plan: correctedPlan }],
+      boundaries: [
+        {
+          jobName: 'entry-results',
+          scopeKey: correctedPlan.scopeKey,
+          periodKey: correctedPlan.periodKey,
+          resultSlot: 'final-14',
+          resultAuthorityAtMs: correctedAuthorityAtMs,
+          resultScheduleAnchorMs: correctedScheduleAnchorMs,
+          beforeDueAt: correctedDueAt,
+        },
+      ],
+    });
+    expect(corrected.reservations[0]).toMatchObject({
+      status: 'failed',
+      dueAt: correctedDueAt,
+      evidence: expect.objectContaining({
+        resultAuthorityAtMs: correctedAuthorityAtMs,
+        resultScheduleAnchorMs: correctedScheduleAnchorMs,
       }),
     });
   });
