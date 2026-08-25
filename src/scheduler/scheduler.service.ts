@@ -11,6 +11,7 @@ import {
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
+  type SchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import {
   resolveSchedulerContext,
@@ -79,6 +80,21 @@ export function schedulerPlanKey(
     identity.push(Number(resultAuthorityAtMs));
   }
   return JSON.stringify(identity);
+}
+
+export function postMatchReservationWasPersisted(
+  plan: Pick<SchedulerObligationPlan, 'evidence'>,
+  obligation: Pick<SchedulerObligation, 'evidence'> | undefined,
+): boolean {
+  if (!obligation) return false;
+  const expectedSlot = plan.evidence?.resultSlot;
+  if (typeof expectedSlot !== 'string') return false;
+  if (!/^(provisional|final)-\d+$/.test(expectedSlot)) return true;
+  return (
+    obligation.evidence.resultSlot === expectedSlot &&
+    obligation.evidence.resultAuthorityAtMs === plan.evidence?.resultAuthorityAtMs &&
+    obligation.evidence.resultScheduleAnchorMs === plan.evidence?.resultScheduleAnchorMs
+  );
 }
 
 function wasPlanObserved(key: string): boolean {
@@ -358,7 +374,11 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       })),
       evidence: { checkpoint: 'post-match-results' },
     });
-    for (const { planKey } of postMatchReservations) rememberObservedPlan(planKey);
+    for (const [index, { plan, planKey }] of postMatchReservations.entries()) {
+      if (postMatchReservationWasPersisted(plan, result.reservations[index])) {
+        rememberObservedPlan(planKey);
+      }
+    }
     reserved += result.reservations.length;
   } catch (error) {
     failed += 1;

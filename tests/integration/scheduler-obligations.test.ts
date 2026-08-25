@@ -46,6 +46,7 @@ async function cleanup(): Promise<void> {
        OR scope_key IN (
          'integration:event:atomic-reschedule',
          'integration:event:equal-boundary-reschedule',
+         'integration:event:in-flight-correction',
          'integration:event:same-slot-correction',
          'integration:event:lane-race'
        )
@@ -1137,7 +1138,14 @@ describe('scheduler obligation generation fencing', () => {
         },
       ],
     });
-    expect(unchanged.reservations[0]).toMatchObject({ status: 'succeeded', generation: 0 });
+    expect(unchanged.reservations[0]).toMatchObject({
+      status: 'succeeded',
+      generation: 0,
+      evidence: expect.objectContaining({
+        resultAuthorityAtMs: ordinaryRefreshAuthorityAtMs,
+        resultScheduleAnchorMs: originalScheduleAnchorMs,
+      }),
+    });
 
     const reopened = await reconcilePostMatchSchedulerObligations({
       reservations: [
@@ -1193,6 +1201,109 @@ describe('scheduler obligation generation fencing', () => {
     expect(claimed?.obligation).toMatchObject({
       periodKey: 'event-1-final-14',
       generation: 1,
+    });
+  });
+
+  test('retries a corrected same-slot authority after the in-flight generation drains', async () => {
+    const sql = await getDbClient();
+    const originalAuthorityAtMs = Date.parse('2026-08-23T10:00:00Z');
+    const correctedAuthorityAtMs = Date.parse('2026-08-23T11:00:00Z');
+    const originalScheduleAnchorMs = Date.parse('2026-08-22T18:00:00Z');
+    const correctedScheduleAnchorMs = Date.parse('2026-08-22T18:15:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, run_id,
+        lease_owner, lease_expires_at, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'entry-results',
+        'integration:event:in-flight-correction',
+        'event-1-final-14',
+        'hourly post-match',
+        'UTC',
+        'running',
+        'reconcile',
+        '2026-08-23T12:00:00Z'::timestamptz,
+        0,
+        1,
+        '30000000-0000-4000-8000-000000000099'::uuid,
+        'integration-worker',
+        '2026-08-23T12:30:00Z'::timestamptz,
+        jsonb_build_object(
+          'scheduledDueAtMs', ${Date.parse('2026-08-23T12:00:00Z')}::bigint,
+          'resultSlot', 'final-14',
+          'resultAuthorityAtMs', ${originalAuthorityAtMs}::bigint,
+          'resultScheduleAnchorMs', ${originalScheduleAnchorMs}::bigint
+        )
+      )
+    `;
+    const reservation = {
+      definition: {
+        name: 'entry-results',
+        cadence: 'hourly post-match',
+        timezone: 'UTC',
+      },
+      plan: {
+        scopeKey: 'integration:event:in-flight-correction',
+        periodKey: 'event-1-final-14',
+        dueAt: new Date('2026-08-23T12:15:00Z'),
+        source: 'reconcile' as const,
+        eventId: 1,
+        evidence: {
+          resultSlot: 'final-14',
+          resultAuthorityAtMs: correctedAuthorityAtMs,
+          resultScheduleAnchorMs: correctedScheduleAnchorMs,
+        },
+      },
+    };
+    const boundary = {
+      jobName: 'entry-results',
+      scopeKey: 'integration:event:in-flight-correction',
+      periodKey: 'event-1-final-14',
+      resultSlot: 'final-14',
+      resultAuthorityAtMs: correctedAuthorityAtMs,
+      resultScheduleAnchorMs: correctedScheduleAnchorMs,
+      beforeDueAt: new Date('2026-08-23T12:15:00Z'),
+    };
+
+    const inFlight = await reconcilePostMatchSchedulerObligations({
+      reservations: [reservation],
+      boundaries: [boundary],
+    });
+    expect(inFlight.reservations[0]).toMatchObject({
+      status: 'running',
+      generation: 0,
+      evidence: expect.objectContaining({
+        resultAuthorityAtMs: originalAuthorityAtMs,
+        resultScheduleAnchorMs: originalScheduleAnchorMs,
+      }),
+    });
+
+    await sql`
+      UPDATE ops.scheduler_obligations
+      SET status = 'succeeded',
+          completed_at = clock_timestamp(),
+          lease_owner = NULL,
+          lease_expires_at = NULL
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+
+    const retried = await reconcilePostMatchSchedulerObligations({
+      reservations: [reservation],
+      boundaries: [boundary],
+    });
+    expect(retried.reservations[0]).toMatchObject({
+      status: 'pending',
+      generation: 1,
+      dueAt: new Date('2026-08-23T12:15:00Z'),
+      runId: null,
+      evidence: expect.objectContaining({
+        resultAuthorityAtMs: correctedAuthorityAtMs,
+        resultScheduleAnchorMs: correctedScheduleAnchorMs,
+        reactivatedForScheduleAuthority: true,
+      }),
     });
   });
 

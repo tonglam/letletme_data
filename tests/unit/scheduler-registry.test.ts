@@ -13,6 +13,7 @@ import {
 import {
   isSchedulerDefinitionEnabled,
   orderSchedulerDefinitionsForClaim,
+  postMatchReservationWasPersisted,
   resolveSchedulerDefinition,
   schedulerExecutionLanes,
   schedulerPlanKey,
@@ -523,6 +524,38 @@ describe('standalone scheduler registry', () => {
         },
       }),
     );
+  });
+
+  test('keeps a corrected post-match plan retryable until its authority is persisted', () => {
+    const plan = {
+      evidence: {
+        resultSlot: 'final-14',
+        resultAuthorityAtMs: 1_787_649_200_000,
+        resultScheduleAnchorMs: 1_787_642_000_000,
+      },
+    };
+    expect(
+      postMatchReservationWasPersisted(plan, {
+        evidence: {
+          resultSlot: 'final-14',
+          resultAuthorityAtMs: 1_787_645_600_000,
+          resultScheduleAnchorMs: 1_787_638_400_000,
+        },
+      }),
+    ).toBe(false);
+    expect(postMatchReservationWasPersisted(plan, { evidence: plan.evidence })).toBe(true);
+    expect(
+      postMatchReservationWasPersisted(
+        {
+          evidence: {
+            resultSlot: 'final-checkpoint',
+            resultAuthorityAtMs: 1_787_649_200_000,
+            resultScheduleAnchorMs: 1_787_642_000_000,
+          },
+        },
+        { evidence: {} },
+      ),
+    ).toBe(true);
   });
 
   test('targets entry snapshots at the latest finalized event', () => {

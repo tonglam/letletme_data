@@ -254,9 +254,11 @@ async function refreshPostMatchObligationAuthority(input: {
   plan: SchedulerObligationPlan;
   db: DbOrTransaction;
 }): Promise<SchedulerObligation> {
+  const resultSlot = input.plan.evidence?.resultSlot;
   const resultAuthorityAtMs = input.plan.evidence?.resultAuthorityAtMs;
   const resultScheduleAnchorMs = input.plan.evidence?.resultScheduleAnchorMs;
   if (
+    typeof resultSlot !== 'string' ||
     !Number.isSafeInteger(resultAuthorityAtMs) ||
     Number(resultAuthorityAtMs) <= 0 ||
     !Number.isSafeInteger(resultScheduleAnchorMs) ||
@@ -276,10 +278,13 @@ async function refreshPostMatchObligationAuthority(input: {
     ${currentScheduleAnchor} IS NULL OR
     ${currentScheduleAnchor} <> ${Number(resultScheduleAnchorMs)}
   )`;
-  const evidence = {
+  const planEvidence = {
     ...(input.plan.evidence ?? {}),
     ...(input.plan.eventId === undefined ? {} : { targetEventId: input.plan.eventId }),
     scheduledDueAtMs,
+  };
+  const reactivationEvidence = {
+    ...planEvidence,
     reactivatedForScheduleAuthority: true,
   };
   const refreshed = await input.db
@@ -287,11 +292,7 @@ async function refreshPostMatchObligationAuthority(input: {
     .set({
       source: input.plan.source,
       dueAt: input.plan.dueAt,
-      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
-        ...(input.plan.evidence ?? {}),
-        ...(input.plan.eventId === undefined ? {} : { targetEventId: input.plan.eventId }),
-        scheduledDueAtMs,
-      })}::jsonb`,
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(planEvidence)}::jsonb`,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -299,11 +300,34 @@ async function refreshPostMatchObligationAuthority(input: {
         eq(schedulerObligationsInOps.obligationId, input.obligation.obligationId),
         inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
         newerAuthority,
-        scheduleChanged,
       ),
     )
     .returning();
   if (refreshed[0]) return mapRow(refreshed[0]);
+
+  // Persist a newer authority version without rerunning work when the durable
+  // schedule itself is unchanged. Besides avoiding false retries, this keeps a
+  // late resolver for an older schedule version from outranking a completed or
+  // in-flight row whose ordinary fixture refresh was already observed.
+  const authorityAdvancedWithoutScheduleChange = await input.db
+    .update(schedulerObligationsInOps)
+    .set({
+      source: input.plan.source,
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(planEvidence)}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligation.obligationId),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'succeeded']),
+        newerAuthority,
+        sql`NOT ${scheduleChanged}`,
+      ),
+    )
+    .returning();
+  if (authorityAdvancedWithoutScheduleChange[0]) {
+    return mapRow(authorityAdvancedWithoutScheduleChange[0]);
+  }
 
   const reactivated = await input.db
     .update(schedulerObligationsInOps)
@@ -317,7 +341,7 @@ async function refreshPostMatchObligationAuthority(input: {
       bullJobId: null,
       runId: null,
       lastError: null,
-      evidence,
+      evidence: reactivationEvidence,
       completedAt: null,
       updatedAt: sql`clock_timestamp()`,
     })
@@ -327,6 +351,7 @@ async function refreshPostMatchObligationAuthority(input: {
         sql`(
           (
             ${schedulerObligationsInOps.status} = 'succeeded'
+            AND ${/^(provisional|final)-\d+$/.test(resultSlot)}
             AND ${scheduleChanged}
           ) OR (
             ${schedulerObligationsInOps.status} = 'skipped'
