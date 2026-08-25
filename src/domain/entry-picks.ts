@@ -50,24 +50,22 @@ export function isCompleteEntryPicks(raw: unknown): boolean {
   if (
     picks.some((pick) => {
       const multiplier = asInteger(pick.multiplier);
-      const position = asInteger(pick.position);
       if (
         !isBoolean(pick.is_captain) ||
         !isBoolean(pick.is_vice_captain) ||
         multiplier === null ||
         multiplier < 0 ||
-        multiplier > 3 ||
-        position === null
+        multiplier > 3
       ) {
         return true;
       }
 
       // Finalized FPL picks apply automatic substitutions to multipliers: an
       // outgoing starter/captain can become 0, an incoming bench player 1,
-      // and the vice-captain 2 (or 3 for Triple Captain). Only the two marked
-      // captain roles may ever receive a scoring bonus.
-      if ((pick.is_captain || pick.is_vice_captain) && position > 11) return true;
-      if (pick.is_captain && multiplier === 1) return true;
+      // and the vice-captain 2 (or 3 for Triple Captain). FPL retains the
+      // selected captain flags and original squad positions, so a marked role
+      // may be on the bench and a displaced captain may retain multiplier 1.
+      // Only the two marked captain roles may ever receive a scoring bonus.
       return multiplier > 1 && !pick.is_captain && !pick.is_vice_captain;
     })
   ) {

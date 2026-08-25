@@ -20,6 +20,26 @@ export interface FplSeasonFixtureRow extends Record<string, unknown> {
   awayGoals: number | null;
 }
 
+interface RawFplSeasonFixtureRow extends Record<string, unknown> {
+  fixtureId: number;
+  fixtureCode: number;
+  kickoffAt: unknown;
+  finished: boolean;
+  homeTeamCode: number;
+  awayTeamCode: number;
+  homeGoals: number | null;
+  awayGoals: number | null;
+}
+
+export function normalizeFplFixtureKickoffAt(value: unknown): Date | null {
+  if (value === null || value === undefined) return null;
+  const parsed = value instanceof Date ? new Date(value.getTime()) : new Date(String(value));
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new Error('FPL fixture kickoffAt is not a valid timestamp');
+  }
+  return parsed;
+}
+
 export interface FplSeasonPlayerEvidenceRow extends Record<string, unknown> {
   fixtureCode: number;
   playerCode: number;
@@ -68,7 +88,7 @@ export const createFplSeasonDataRepository = (dbInstance?: DbOrTransaction) => (
   async findFixtures(season: string): Promise<FplSeasonFixtureRow[]> {
     const db = await getDatabase(dbInstance);
     const seasonId = await requireSeasonId(season, db);
-    return db.execute<FplSeasonFixtureRow>(sql`
+    const rows = await db.execute<RawFplSeasonFixtureRow>(sql`
       SELECT
         fixture.fixture_id AS "fixtureId",
         fixture.code AS "fixtureCode",
@@ -85,6 +105,10 @@ export const createFplSeasonDataRepository = (dbInstance?: DbOrTransaction) => (
         ON away.season_id = fixture.season_id AND away.team_id = fixture.team_a_id
       WHERE fixture.season_id = ${seasonId}
     `);
+    return rows.map((row) => ({
+      ...row,
+      kickoffAt: normalizeFplFixtureKickoffAt(row.kickoffAt),
+    }));
   },
 
   async findPlayerEvidence(season: string): Promise<FplSeasonPlayerEvidenceRow[]> {
