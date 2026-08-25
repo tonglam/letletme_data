@@ -11,6 +11,9 @@ const pendingJobs: Array<{
   data: Record<string, unknown>;
 }> = [];
 let returnedJobData: Record<string, unknown> | undefined;
+let persistedJobData: Record<string, unknown> | undefined;
+let persistedJobMissing = false;
+const getJobCalls: string[] = [];
 let currentEventId = 12;
 
 mock.module('../../src/queues/entry-sync.queue', () => ({
@@ -28,12 +31,27 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
         data: returnedJobData ?? data,
       };
     },
+    getJob: async (id: string) => {
+      getJobCalls.push(id);
+      if (persistedJobMissing) return null;
+      const lastCall = addCalls.at(-1);
+      if (!lastCall) return null;
+      return {
+        id,
+        name: lastCall.name,
+        data: persistedJobData ?? lastCall.data,
+      };
+    },
   },
 }));
 
 mock.module('../../src/services/events.service', () => ({
   getCurrentEvent: async () => ({ id: currentEventId }),
   getNextEvent: async () => ({ id: currentEventId + 1 }),
+}));
+
+mock.module('../../src/services/queue-run-tracker', () => ({
+  trackQueueRunJob: async () => undefined,
 }));
 
 const { logger } = await import('../../src/utils/logger');
@@ -46,6 +64,9 @@ describe('entry-sync enqueue runId propagation', () => {
     addCalls.length = 0;
     pendingJobs.length = 0;
     returnedJobData = undefined;
+    persistedJobData = undefined;
+    persistedJobMissing = false;
+    getJobCalls.length = 0;
     currentEventId = 12;
   });
 
@@ -184,15 +205,38 @@ describe('entry-sync enqueue runId propagation', () => {
 
   test('logs the stored run id when BullMQ deduplicates an add', async () => {
     const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined);
-    returnedJobData = { runId: 'stored-run' };
+    persistedJobData = { runId: 'stored-run' };
 
-    await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', { afterEntryId: 0, runId: 'new-run' });
+    const job = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
+      entryIds: [10, 20],
+      eventId: 20,
+      jobId: 'entry-picks-2627-live-refresh-20-123',
+      runId: 'new-run',
+      deduplicationId: 'live-picks-refresh:2627:event-20:cohort',
+      deduplicationTtlMs: 600_000,
+    });
 
+    expect(job.data.runId).toBe('stored-run');
+    expect(getJobCalls).toEqual(['entry-picks-2627-live-refresh-20-123']);
     expect(infoSpy).toHaveBeenCalledWith(
       expect.objectContaining({ runId: 'stored-run' }),
       'Entry sync job enqueued',
     );
     infoSpy.mockRestore();
+  });
+
+  test('fails closed when a Redis-deduplicated job cannot be hydrated', async () => {
+    persistedJobMissing = true;
+
+    await expect(
+      enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
+        entryIds: [10, 20],
+        eventId: 20,
+        jobId: 'entry-picks-2627-live-refresh-20-123',
+        deduplicationId: 'live-picks-refresh:2627:event-20:cohort',
+        deduplicationTtlMs: 600_000,
+      }),
+    ).rejects.toThrow('Entry sync deduplicated job could not be loaded from Redis');
   });
 
   test('uses a stable keyset cursor and preserves retry continuation', async () => {
@@ -265,6 +309,21 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(addCalls[0].opts.jobId).toBe('entry-onboarding-attempt-entry-picks-10');
     expect(addCalls[0].opts.deduplication).toBeUndefined();
     expect(addCalls[1].opts.deduplication).toBeUndefined();
+  });
+
+  test('applies an explicit TTL deduplication key to restart-sensitive cron fan-out', async () => {
+    await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
+      entryIds: [10, 20],
+      eventId: 20,
+      jobId: 'entry-picks-2627-live-refresh-20-123',
+      deduplicationId: 'live-picks-refresh:2627:event-20',
+      deduplicationTtlMs: 600_000,
+    });
+
+    expect(addCalls[0].opts.deduplication).toEqual({
+      id: 'live-picks-refresh:2627:event-20',
+      ttl: 600_000,
+    });
   });
 
   test('retains failure evidence through a deterministic cron continuation', async () => {

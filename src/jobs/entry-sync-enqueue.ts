@@ -32,6 +32,10 @@ export interface EntrySyncJobOptions {
   freshAfter?: string;
   /** Stable deduplication key for every table-scan chunk in one trigger lane. */
   queueKey?: string;
+  /** Optional Redis-backed deduplication identity that survives process restarts. */
+  deduplicationId?: string;
+  /** Keep the deduplication identity for this many milliseconds after enqueue. */
+  deduplicationTtlMs?: number;
   removeOnSettle?: boolean;
 }
 
@@ -167,6 +171,16 @@ async function enqueueEntrySyncJob(
       isEntryList &&
       (options.retryCount ?? 0) === 0 &&
       options.jobId === undefined;
+    const explicitDeduplicationId = options.deduplicationId?.trim();
+    const explicitDeduplicationTtlMs = options.deduplicationTtlMs;
+    if (
+      (explicitDeduplicationId === undefined) !== (explicitDeduplicationTtlMs === undefined) ||
+      explicitDeduplicationId === '' ||
+      (explicitDeduplicationTtlMs !== undefined &&
+        (!Number.isFinite(explicitDeduplicationTtlMs) || explicitDeduplicationTtlMs < 1))
+    ) {
+      throw new Error('Entry sync deduplication requires a non-empty id and positive TTL');
+    }
     // Keep queue evidence for every non-manual trigger, including explicit
     // entry-list/API scans. Manual one-shots may still clean up on settle.
     const removeOnSettle = source === 'manual' && options.removeOnSettle !== false;
@@ -207,7 +221,7 @@ async function enqueueEntrySyncJob(
         : `${jobName}-${season.seasonCode}-${tableScanQueueKey}-chunk-${chunkKey}`;
     const jobId = options.jobId ?? defaultJobId;
     // Deterministic IDs must not block re-triggers after settle.
-    const job = await queue.add(jobName, jobData, {
+    const addedJob = await queue.add(jobName, jobData, {
       attempts: 3,
       backoff: {
         type: 'exponential',
@@ -215,15 +229,35 @@ async function enqueueEntrySyncJob(
       },
       jobId,
       delay: options.delayMs,
-      ...(lifecycleDedupeEntryList
+      ...(explicitDeduplicationId && explicitDeduplicationTtlMs
         ? {
             deduplication: {
-              id: `${jobName}-${season.seasonCode}-entry-list-${entryListContentKey}`,
+              id: explicitDeduplicationId,
+              ttl: Math.floor(explicitDeduplicationTtlMs),
             },
           }
-        : {}),
+        : lifecycleDedupeEntryList
+          ? {
+              deduplication: {
+                id: `${jobName}-${season.seasonCode}-entry-list-${entryListContentKey}`,
+              },
+            }
+          : {}),
       ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
+
+    // BullMQ may return a Job carrying the newly submitted data when an add is
+    // deduplicated, even though its ID points at an older persisted job. Any
+    // caller deriving claims from deduplication must see the Redis payload.
+    const usesRedisDeduplication = Boolean(explicitDeduplicationId) || lifecycleDedupeEntryList;
+    const job = usesRedisDeduplication
+      ? addedJob.id
+        ? await queue.getJob(addedJob.id)
+        : null
+      : addedJob;
+    if (!job) {
+      throw new Error('Entry sync deduplicated job could not be loaded from Redis');
+    }
 
     logInfo('Entry sync job enqueued', {
       jobId: job.id,

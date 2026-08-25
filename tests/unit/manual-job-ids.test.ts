@@ -31,6 +31,10 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   entrySyncQueue: {
     name: 'entry-sync',
     getJobs: async () => [],
+    getJob: async (id: string) => {
+      const lastCall = entrySyncAddCalls.at(-1);
+      return lastCall ? { id, name: lastCall.name, data: lastCall.data } : null;
+    },
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       entrySyncAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };

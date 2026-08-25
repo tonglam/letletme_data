@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { Elysia } from 'elysia';
 
 import { fplClient } from '../clients/fpl';
@@ -110,6 +112,40 @@ type PicksProbeState = {
 const picksProbeStates = new Map<string, PicksProbeState>();
 const daySettlingStates = new Map<string, { revision: number | null; unchangedSince: number }>();
 const picksFanoutClaims = new Map<string, Map<number, number>>();
+
+export function resolveLivePicksRefreshDeduplicationId(
+  seasonCode: string,
+  eventId: number,
+  entryIds: readonly number[],
+): string {
+  const normalizedEntryIds = uniqueNumbers(entryIds).sort((a, b) => a - b);
+  const fanoutHash = createHash('sha256').update(normalizedEntryIds.join(',')).digest('hex');
+  return `live-picks-refresh:${seasonCode}:event-${eventId}:entries-${normalizedEntryIds.length}:${fanoutHash}`;
+}
+
+export function resolveLivePicksRefreshFanout(
+  seasonCode: string,
+  eventId: number,
+  pendingEntryIds: readonly number[],
+  canaryEntryIds: readonly number[],
+): { entryIds: number[]; deduplicationId: string } {
+  const canarySet = new Set(canaryEntryIds);
+  return {
+    entryIds: pendingEntryIds.filter((entryId) => !canarySet.has(entryId)),
+    // A restart resets canary state, so the queued payload may change from N
+    // entries to N-2. The pre-canary cohort is the stable refresh identity.
+    deduplicationId: resolveLivePicksRefreshDeduplicationId(seasonCode, eventId, pendingEntryIds),
+  };
+}
+
+export function resolveLivePicksRefreshClaimedAt(
+  triggeredAt: string | undefined,
+  nowMs: number,
+): number {
+  const parsed = triggeredAt ? Date.parse(triggeredAt) : Number.NaN;
+  if (!Number.isFinite(parsed)) return nowMs;
+  return Math.min(nowMs, Math.max(nowMs - PICKS_REFRESH_INTERVAL_MS, parsed));
+}
 
 const firstKickoff = (fixtures: readonly Fixture[]): number | null => {
   const values = fixtures
@@ -304,7 +340,9 @@ export async function resolveUniqueActiveTournamentEntryIds(
     ...knownEntries
       .filter((entry) => entry.startedEvent === null || entry.startedEvent <= eventId)
       .map((entry) => entry.id),
-  ]).filter((entryId) => entryId > 0);
+  ])
+    .filter((entryId) => entryId > 0)
+    .sort((a, b) => a - b);
 }
 
 function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: number): boolean {
@@ -386,9 +424,10 @@ export async function runPicksProbeAndSync(
   }
 
   state.canarySucceeded = true;
-  const remaining = pending.filter((entryId) => !canaries.includes(entryId));
+  const fanout = resolveLivePicksRefreshFanout(season.seasonCode, eventId, pending, canaries);
+  const remaining = fanout.entryIds;
   if (remaining.length > 0) {
-    await enqueueEntryPicksSyncJob(season, 'cron', {
+    const queuedJob = await enqueueEntryPicksSyncJob(season, 'cron', {
       eventId,
       entryIds: remaining,
       concurrency: Math.max(1, Math.min(FPL_BULK_MAX_INFLIGHT_DURING_LIVE, 3)),
@@ -397,8 +436,22 @@ export async function runPicksProbeAndSync(
       // Entry-list cron IDs are otherwise content-stable and BullMQ would
       // return the first completed job forever, defeating periodic refresh.
       jobId: `entry-picks-${season.seasonCode}-live-refresh-${eventId}-${nowMs}`,
+      // In-memory fan-out claims are lost on scheduler restart. Keep the
+      // refresh interval in Redis as well so a restart/rollback cannot enqueue
+      // another 1,700+ entry sweep for the same event window.
+      // Scope the key to the stable pre-canary cohort so a newly discovered
+      // entry cannot be swallowed and a restart cannot create an N/N-2 pair.
+      deduplicationId: fanout.deduplicationId,
+      deduplicationTtlMs: PICKS_REFRESH_INTERVAL_MS,
     });
-    for (const entryId of remaining) fanoutClaims.set(entryId, nowMs);
+    // BullMQ returns the existing job when a deduplication key is active. Only
+    // claim IDs that are actually present in the returned job payload; this
+    // preserves retry eligibility even if an unexpected key collision occurs.
+    const acceptedEntryIds = new Set(uniqueNumbers(queuedJob.data.entryIds ?? []));
+    const claimedAt = resolveLivePicksRefreshClaimedAt(queuedJob.data.triggeredAt, nowMs);
+    for (const entryId of remaining) {
+      if (acceptedEntryIds.has(entryId)) fanoutClaims.set(entryId, claimedAt);
+    }
   }
   picksFanoutClaims.set(key, fanoutClaims);
   state.attempts += 1;

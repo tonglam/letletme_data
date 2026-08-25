@@ -20,6 +20,7 @@ const enqueuePlayerPricesSyncJob = mock(async () => ({ id: 'player-prices-job-1'
 const enqueuePlayersSyncJob = mock(async () => ({ id: 'players-job-1' }));
 const enqueuePlayerValuesSyncJob = mock(async () => ({ id: 'player-values-job-1' }));
 const enqueuePlayerStatsSyncJob = mock(async () => ({ id: 'player-stats-job-1' }));
+const enqueuePriceChangePredictionsJob = mock(async () => ({ id: 'price-change-job-1' }));
 const enqueueTeamsSyncJob = mock(async () => ({ id: 'teams-job-1' }));
 const enqueuePhasesSyncJob = mock(async () => ({ id: 'phases-job-1' }));
 mock.module('../../src/jobs/data-sync-enqueue', () => ({
@@ -29,6 +30,7 @@ mock.module('../../src/jobs/data-sync-enqueue', () => ({
   enqueuePlayersSyncJob,
   enqueuePlayerValuesSyncJob,
   enqueuePlayerStatsSyncJob,
+  enqueuePriceChangePredictionsJob,
   enqueueTeamsSyncJob,
   enqueuePhasesSyncJob,
 }));
@@ -49,6 +51,10 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   entrySyncQueue: {
     name: 'entry-sync',
     getJobs: async () => [],
+    getJob: async (id: string) => {
+      const lastCall = entrySyncAddCalls.at(-1);
+      return lastCall ? { id, name: lastCall.name, data: lastCall.data } : null;
+    },
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       entrySyncAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
