@@ -30,7 +30,7 @@ CREATE TABLE fpl.manager_live_tournament_coverage (
 );
 
 CREATE INDEX manager_live_tournament_coverage_state_idx
-  ON fpl.manager_live_tournament_coverage (season_id, event_id, state, updated_at DESC);
+  ON fpl.manager_live_tournament_coverage (season_id, event_id, state, updated_at DESC NULLS LAST);
 
 GRANT SELECT, INSERT, UPDATE, DELETE
   ON TABLE fpl.manager_live_tournament_coverage TO letletme_data_writer;
