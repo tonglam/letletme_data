@@ -221,7 +221,7 @@ async function enqueueEntrySyncJob(
         : `${jobName}-${season.seasonCode}-${tableScanQueueKey}-chunk-${chunkKey}`;
     const jobId = options.jobId ?? defaultJobId;
     // Deterministic IDs must not block re-triggers after settle.
-    const job = await queue.add(jobName, jobData, {
+    const addedJob = await queue.add(jobName, jobData, {
       attempts: 3,
       backoff: {
         type: 'exponential',
@@ -245,6 +245,19 @@ async function enqueueEntrySyncJob(
           : {}),
       ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
+
+    // BullMQ may return a Job carrying the newly submitted data when an add is
+    // deduplicated, even though its ID points at an older persisted job. Any
+    // caller deriving claims from deduplication must see the Redis payload.
+    const usesRedisDeduplication = Boolean(explicitDeduplicationId) || lifecycleDedupeEntryList;
+    const job = usesRedisDeduplication
+      ? addedJob.id
+        ? await queue.getJob(addedJob.id)
+        : null
+      : addedJob;
+    if (!job) {
+      throw new Error('Entry sync deduplicated job could not be loaded from Redis');
+    }
 
     logInfo('Entry sync job enqueued', {
       jobId: job.id,
