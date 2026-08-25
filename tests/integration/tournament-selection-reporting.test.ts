@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import { getDbClient } from '../../src/db/singleton';
 import { seasonRepository } from '../../src/repositories/seasons';
+import { refreshTournamentEntryEventSummariesMaterializedView } from '../../src/services/tournament-materialized-views.service';
 import {
   refreshTournamentSelectionStatsMaterializedView,
   syncTournamentSelectionStats,
@@ -24,6 +25,11 @@ async function cleanup(): Promise<void> {
   const sql = await getDbClient();
   await sql`
     DELETE FROM competition.entry_event_picks
+    WHERE season_id = ${SEASON_ID}
+      AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+  `;
+  await sql`
+    DELETE FROM competition.entry_event_results
     WHERE season_id = ${SEASON_ID}
       AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
   `;
@@ -61,6 +67,7 @@ async function cleanup(): Promise<void> {
       AND season_code = '1112'
   `;
   await refreshTournamentSelectionStatsMaterializedView();
+  await refreshTournamentEntryEventSummariesMaterializedView();
 }
 
 async function seed(): Promise<void> {
@@ -110,8 +117,22 @@ async function seed(): Promise<void> {
     FROM unnest(${PLAYER_IDS}::integer[]) WITH ORDINALITY AS player(element_id, ordinality)
   `;
   await sql`
-    INSERT INTO fpl.events (season_id, event_id, name)
-    VALUES (${SEASON_ID}, ${EVENT_ID}, 'Integration GW 1')
+    INSERT INTO fpl.events (
+      season_id,
+      event_id,
+      name,
+      finished,
+      data_checked,
+      live_snapshot_finalized_at
+    )
+    VALUES (
+      ${SEASON_ID},
+      ${EVENT_ID},
+      'Integration GW 1',
+      true,
+      true,
+      timestamptz '2026-08-09 01:00:00+00'
+    )
   `;
   await sql`
     INSERT INTO competition.entries (
@@ -217,6 +238,28 @@ async function seed(): Promise<void> {
     CROSS JOIN unnest(${PLAYER_IDS}::integer[])
       WITH ORDINALITY AS player(element_id, ordinality)
   `;
+  await sql`
+    INSERT INTO competition.entry_event_results (
+      season_id,
+      entry_id,
+      event_id,
+      event_points,
+      event_net_points,
+      overall_points,
+      overall_rank,
+      rich_synced_at
+    )
+    SELECT
+      ${SEASON_ID},
+      entry.entry_id,
+      ${EVENT_ID},
+      60 - entry.ordinality::integer,
+      60 - entry.ordinality::integer,
+      60 - entry.ordinality::integer,
+      entry.ordinality::integer,
+      timestamptz '2026-08-09 01:00:00+00'
+    FROM unnest(${[...ENTRY_IDS]}::integer[]) WITH ORDINALITY AS entry(entry_id, ordinality)
+  `;
 }
 
 beforeAll(seed);
@@ -300,6 +343,20 @@ describe('tournament selection reporting materialized view', () => {
     expect(Number(bothEntries?.vice_captain_percentage)).toBe(50);
     expect(Number(bothEntries?.effective_ownership_percentage)).toBe(150);
 
+    await refreshTournamentEntryEventSummariesMaterializedView();
+    const bothEntrySummaries = await sql<Array<{ entry_id: number; total_entries: number }>>`
+      SELECT entry_id, total_entries
+      FROM reporting.tournament_entry_event_summaries
+      WHERE tournament_id = ${TOURNAMENT_ID}
+        AND season_id = ${SEASON_ID}
+        AND event_id = ${EVENT_ID}
+      ORDER BY entry_id
+    `;
+    expect([...bothEntrySummaries]).toEqual([
+      { entry_id: ENTRY_IDS[0], total_entries: 2 },
+      { entry_id: ENTRY_IDS[1], total_entries: 2 },
+    ]);
+
     await sql`
       UPDATE competition.entries
       SET started_event = 2
@@ -307,6 +364,7 @@ describe('tournament selection reporting materialized view', () => {
         AND entry_id = ${ENTRY_IDS[1]}
     `;
     await refreshTournamentSelectionStatsMaterializedView();
+    await refreshTournamentEntryEventSummariesMaterializedView();
     const eligibleEntryOnly = await readPlayer();
     expect(eligibleEntryOnly).toMatchObject({
       total_entries: 1,
@@ -317,6 +375,16 @@ describe('tournament selection reporting materialized view', () => {
     });
     expect(Number(eligibleEntryOnly?.selection_percentage)).toBe(100);
     expect(Number(eligibleEntryOnly?.effective_ownership_percentage)).toBe(200);
+
+    const eligibleEntrySummaries = await sql<Array<{ entry_id: number; total_entries: number }>>`
+      SELECT entry_id, total_entries
+      FROM reporting.tournament_entry_event_summaries
+      WHERE tournament_id = ${TOURNAMENT_ID}
+        AND season_id = ${SEASON_ID}
+        AND event_id = ${EVENT_ID}
+      ORDER BY entry_id
+    `;
+    expect([...eligibleEntrySummaries]).toEqual([{ entry_id: ENTRY_IDS[0], total_entries: 1 }]);
 
     await sql`
       UPDATE competition.entries

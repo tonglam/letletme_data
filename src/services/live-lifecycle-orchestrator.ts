@@ -2,6 +2,7 @@ import type { Elysia } from 'elysia';
 
 import { fplClient } from '../clients/fpl';
 import type { Event } from '../domain/events';
+import { findEventEligibleEntryIds } from '../domain/entry-infos';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { isCompleteEntryPicks } from '../domain/entry-picks';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
@@ -334,12 +335,13 @@ export async function resolveUniqueActiveTournamentEntryIds(
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
     tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
-  return uniqueNumbers([
+  const candidateEntryIds = uniqueNumbers([
     ...entryLists.flat(),
     ...knownEntries
       .filter((entry) => entry.startedEvent === null || entry.startedEvent <= eventId)
       .map((entry) => entry.id),
-  ])
+  ]).filter((entryId) => entryId > 0);
+  return findEventEligibleEntryIds(candidateEntryIds, knownEntries, eventId)
     .filter((entryId) => entryId > 0)
     .sort((a, b) => a - b);
 }

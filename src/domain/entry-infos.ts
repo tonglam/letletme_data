@@ -53,6 +53,23 @@ export function safeValidateEntryInfo(data: unknown): EntryInfo | null {
 }
 
 /**
+ * A manager has no picks or scored result before the event in which their FPL
+ * entry started. Unknown start metadata stays eligible so a missing entry row
+ * fails at its normal persistence boundary instead of being silently omitted.
+ */
+export function findEventEligibleEntryIds(
+  entryIds: readonly number[],
+  entryInfos: ReadonlyArray<Pick<EntryInfo, 'id' | 'startedEvent'>>,
+  eventId: number,
+): number[] {
+  const startsByEntryId = new Map(entryInfos.map((entry) => [entry.id, entry.startedEvent]));
+  return entryIds.filter((entryId) => {
+    const startedEvent = startsByEntryId.get(entryId);
+    return startedEvent === undefined || startedEvent === null || eventId >= startedEvent;
+  });
+}
+
+/**
  * Map a DB row (or any object with EntryInfo fields + optional timestamps) to domain EntryInfo.
  */
 export function toEntryInfo(

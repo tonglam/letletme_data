@@ -1,5 +1,7 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { findEventEligibleEntryIds, type EntryInfo } from '../domain/entry-infos';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
+import { entryInfoRepository } from '../repositories/entry-infos';
 import {
   tournamentInfoRepository,
   type TournamentInfoSummary,
@@ -23,6 +25,10 @@ export interface LeagueEventPicksDependencies {
     tournamentId: number,
   ) => Promise<TournamentInfoSummary | null>;
   resolveEntryIds: (season: FplSeasonRef, tournament: TournamentInfoSummary) => Promise<number[]>;
+  findEntryInfos: (
+    season: FplSeasonRef,
+    entryIds: number[],
+  ) => Promise<Array<Pick<EntryInfo, 'id' | 'startedEvent'>>>;
   findPersistedEntryIds: (
     season: FplSeasonRef,
     eventId: number,
@@ -34,6 +40,7 @@ export interface LeagueEventPicksDependencies {
 const defaultDependencies: LeagueEventPicksDependencies = {
   findTournament: (season, tournamentId) => tournamentInfoRepository.findById(season, tournamentId),
   resolveEntryIds: resolveTournamentEntryIds,
+  findEntryInfos: (season, entryIds) => entryInfoRepository.findByIds(season, entryIds),
   findPersistedEntryIds: (season, eventId, entryIds) =>
     entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds),
   syncEntry: (season, entryId, eventId) => syncEntryEventPicks(season, entryId, eventId),
@@ -66,14 +73,32 @@ export async function syncLeagueEventPicksByTournament(
     throw new Error(`Tournament ${tournamentId} not found`);
   }
 
-  const entryIds = await dependencies.resolveEntryIds(season, tournament);
+  const candidateEntryIds = await dependencies.resolveEntryIds(season, tournament);
+  const entryInfos = await dependencies.findEntryInfos(season, candidateEntryIds);
+  const entryIds = findEventEligibleEntryIds(candidateEntryIds, entryInfos, eventId);
   logInfo('Resolved tournament entries for league picks', {
     eventId,
     tournamentId,
     leagueId: tournament.leagueId,
     leagueType: tournament.leagueType,
-    entries: entryIds.length,
+    candidateEntries: candidateEntryIds.length,
+    eligibleEntries: entryIds.length,
   });
+
+  if (entryIds.length === 0) {
+    return {
+      tournamentId,
+      eventId,
+      totalEntries: 0,
+      synced: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
+  }
 
   const existingEntryIds = await dependencies.findPersistedEntryIds(season, eventId, entryIds);
   const existingSet = new Set(existingEntryIds);

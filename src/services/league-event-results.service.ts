@@ -34,6 +34,7 @@ import { logError, logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { resolveTournamentEntryIds } from './tournament-entry-resolver.service';
 import { resolveRichResultFreshnessCutoff } from '../domain/entry-sync';
+import { findEventEligibleEntryIds } from '../domain/entry-infos';
 import { latestFreshnessTimestamp } from '../domain/freshness';
 import {
   eventLiveAuthorityCheckedAt,
@@ -43,6 +44,7 @@ import {
 } from './event-live-manager-scores.service';
 
 export { latestFreshnessTimestamp } from '../domain/freshness';
+export { findEventEligibleEntryIds } from '../domain/entry-infos';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -316,18 +318,6 @@ export function findMissingLeagueResultEntryIds(
   persistedEntryIds: ReadonlySet<number>,
 ): number[] {
   return expectedEntryIds.filter((entryId) => !persistedEntryIds.has(entryId));
-}
-
-export function findEventEligibleEntryIds(
-  entryIds: readonly number[],
-  entryInfos: ReadonlyArray<{ id: number; startedEvent: number | null }>,
-  eventId: number,
-): number[] {
-  const startsByEntryId = new Map(entryInfos.map((entry) => [entry.id, entry.startedEvent]));
-  return entryIds.filter((entryId) => {
-    const startedEvent = startsByEntryId.get(entryId);
-    return startedEvent === undefined || startedEvent === null || eventId >= startedEvent;
-  });
 }
 
 export type LeagueEventResultsSyncSummary = {

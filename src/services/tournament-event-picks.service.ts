@@ -7,6 +7,8 @@ import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { publishTournamentTrendScopes } from './tournament-trends-publication.service';
+import { findEventEligibleEntryIds } from '../domain/entry-infos';
+import { entryInfoRepository } from '../repositories/entry-infos';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -59,7 +61,9 @@ export async function syncTournamentEventPicks(
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
     tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
-  const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
+  const candidateEntryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
+  const entryInfos = await entryInfoRepository.findByIds(season, candidateEntryIds);
+  const entryIds = findEventEligibleEntryIds(candidateEntryIds, entryInfos, eventId);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event picks', { eventId });
     return {
