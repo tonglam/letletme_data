@@ -100,6 +100,7 @@ function postMatchIdentityIsNewerSql(input: {
   newerDueAt: SQL;
   olderSlot: SQL;
   olderDueAt: SQL;
+  currentBoundaryWinsEqualReschedule?: boolean;
 }) {
   const newerNumbered = sql`${input.newerSlot} ~ '^(provisional|final)-[0-9]+$'`;
   const olderNumbered = sql`${input.olderSlot} ~ '^(provisional|final)-[0-9]+$'`;
@@ -117,6 +118,13 @@ function postMatchIdentityIsNewerSql(input: {
           (${input.olderSlot} LIKE 'final-%')
       THEN ${input.newerSlot} LIKE 'final-%'
     ELSE ${input.newerDueAt} > ${input.olderDueAt}
+      OR (
+        ${input.currentBoundaryWinsEqualReschedule === true}
+        AND ${input.newerDueAt} = ${input.olderDueAt}
+        AND ${newerNumbered}
+        AND ${olderNumbered}
+        AND ${newerIndex} <> ${olderIndex}
+      )
   END`;
 }
 
@@ -301,6 +309,10 @@ export type SchedulerDueAtSupersessionBoundary = Readonly<{
  * The authoritative period identity is excluded explicitly. Absolute slot
  * time ranks rescheduled fixtures; for the same numbered slot, final authority
  * outranks provisional authority even for pre-rollout observation timestamps.
+ * When an exact-hour fixture reschedule gives two different numbered slots the
+ * same boundary, this fresh resolver boundary wins. That tie-break is
+ * deliberately not used by the symmetric claim fence, where it would make
+ * each row appear newer than the other.
  */
 export async function supersedeSchedulerObligationsByDueAtBatch(input: {
   boundaries: readonly SchedulerDueAtSupersessionBoundary[];
@@ -373,6 +385,7 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
           newerDueAt: boundaryDueAt,
           olderSlot: obligationSlot,
           olderDueAt: obligationDueAt,
+          currentBoundaryWinsEqualReschedule: true,
         })}
         AND obligation.status IN ('pending', 'failed')
       RETURNING obligation.obligation_id

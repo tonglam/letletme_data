@@ -45,6 +45,7 @@ async function cleanup(): Promise<void> {
     )
        OR scope_key IN (
          'integration:event:atomic-reschedule',
+         'integration:event:equal-boundary-reschedule',
          'integration:event:lane-race'
        )
   `;
@@ -865,6 +866,81 @@ describe('scheduler obligation generation fencing', () => {
       SELECT period_key AS "periodKey", status
       FROM ops.scheduler_obligations
       WHERE scope_key = 'integration:event:atomic-reschedule'
+      ORDER BY period_key
+    `;
+    expect([...rows]).toEqual([
+      { periodKey: 'event-1-final-14', status: 'pending' },
+      { periodKey: 'event-1-final-16', status: 'skipped' },
+    ]);
+
+    const [claimed] = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['entry-results'],
+      laneKeys: ['post-match-results'],
+      enforceLatestAuthoritativeScope: true,
+    });
+    expect(claimed?.obligation.periodKey).toBe('event-1-final-14');
+  });
+
+  test('uses the current boundary when an exact-hour reschedule keeps the same due time', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'entry-results',
+        'integration:event:equal-boundary-reschedule',
+        'event-1-final-16',
+        'hourly post-match',
+        'UTC',
+        'pending',
+        'reconcile',
+        '2026-08-23T12:00:00Z'::timestamptz,
+        0,
+        0,
+        jsonb_build_object('resultSlot', 'final-16')
+      )
+    `;
+
+    const result = await reconcilePostMatchSchedulerObligations({
+      reservations: [
+        {
+          definition: {
+            name: 'entry-results',
+            cadence: 'hourly post-match',
+            timezone: 'UTC',
+          },
+          plan: {
+            scopeKey: 'integration:event:equal-boundary-reschedule',
+            periodKey: 'event-1-final-14',
+            dueAt: new Date('2026-08-23T12:00:00Z'),
+            source: 'reconcile',
+            eventId: 1,
+            evidence: { resultSlot: 'final-14' },
+          },
+        },
+      ],
+      boundaries: [
+        {
+          jobName: 'entry-results',
+          scopeKey: 'integration:event:equal-boundary-reschedule',
+          periodKey: 'event-1-final-14',
+          resultSlot: 'final-14',
+          beforeDueAt: new Date('2026-08-23T12:00:00Z'),
+        },
+      ],
+      evidence: { checkpoint: 'post-match-results' },
+    });
+    expect(result.reservations).toHaveLength(1);
+    expect(result.superseded).toBe(1);
+
+    const rows = await sql<Array<{ periodKey: string; status: string }>>`
+      SELECT period_key AS "periodKey", status
+      FROM ops.scheduler_obligations
+      WHERE scope_key = 'integration:event:equal-boundary-reschedule'
       ORDER BY period_key
     `;
     expect([...rows]).toEqual([
