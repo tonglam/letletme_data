@@ -6,7 +6,9 @@ import {
   findPicksRefreshEntryIds,
   PICKS_FIRST_PROBE_OFFSET_MS,
   PICKS_REFRESH_INTERVAL_MS,
+  resolveLivePicksRefreshClaimedAt,
   resolveLivePicksRefreshDeduplicationId,
+  resolveLivePicksRefreshFanout,
   resolveLiveLifecycleDelay,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
@@ -238,5 +240,26 @@ describe('live lifecycle decisions', () => {
     expect(first).toMatch(/^live-picks-refresh:2627:event-1:entries-3:[0-9a-f]{64}$/);
     expect(reordered).toBe(first);
     expect(expanded).not.toBe(first);
+  });
+
+  test('keeps the pre-canary cohort identity stable across a scheduler restart', () => {
+    const established = resolveLivePicksRefreshFanout('2627', 1, [10, 20, 30, 40], []);
+    const restarted = resolveLivePicksRefreshFanout('2627', 1, [10, 20, 30, 40], [10, 20]);
+
+    expect(restarted.deduplicationId).toBe(established.deduplicationId);
+    expect(established.entryIds).toEqual([10, 20, 30, 40]);
+    expect(restarted.entryIds).toEqual([30, 40]);
+  });
+
+  test('preserves a returned job claim time without extending the refresh interval', () => {
+    const now = Date.parse('2026-08-25T10:00:00.000Z');
+    const nineMinutesAgo = new Date(now - 9 * 60_000).toISOString();
+
+    expect(resolveLivePicksRefreshClaimedAt(nineMinutesAgo, now)).toBe(now - 9 * 60_000);
+    expect(resolveLivePicksRefreshClaimedAt('invalid', now)).toBe(now);
+    expect(resolveLivePicksRefreshClaimedAt(new Date(now + 60_000).toISOString(), now)).toBe(now);
+    expect(resolveLivePicksRefreshClaimedAt(new Date(now - 20 * 60_000).toISOString(), now)).toBe(
+      now - PICKS_REFRESH_INTERVAL_MS,
+    );
   });
 });
