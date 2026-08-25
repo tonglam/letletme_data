@@ -1,4 +1,5 @@
 import type { EntrySyncJobName } from '../queues/entry-sync.queue';
+import { findEventEligibleEntryIds, type EntryInfo } from './entry-infos';
 
 type EventFinalizationState = {
   finished: boolean;
@@ -22,6 +23,18 @@ export function shouldRefreshEntryPicks(
   jobData: { source?: string; entryIds?: readonly number[] } | undefined,
 ): boolean {
   return jobData?.source === 'cron' || isExplicitEntryRepairRequest(jobData);
+}
+
+export function planEventEligibleEntrySyncWork(
+  entryIds: readonly number[],
+  entryInfos: ReadonlyArray<Pick<EntryInfo, 'id' | 'startedEvent'>>,
+  eventId: number,
+): { eligibleEntryIds: number[]; skippedUnits: number } {
+  const eligibleEntryIds = findEventEligibleEntryIds(entryIds, entryInfos, eventId);
+  return {
+    eligibleEntryIds,
+    skippedUnits: entryIds.length - eligibleEntryIds.length,
+  };
 }
 
 export function resolveRichResultFreshnessCutoff(

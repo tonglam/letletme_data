@@ -3,12 +3,30 @@ import { describe, expect, test } from 'bun:test';
 import {
   isCronEntryInfoTableScan,
   isExplicitEntryRepairRequest,
+  planEventEligibleEntrySyncWork,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
   shouldRefreshEntryPicks,
 } from '../../src/domain/entry-sync';
 
 describe('explicit entry repair selection', () => {
+  test('skips entries that started after the target event without hiding unknown metadata', () => {
+    expect(
+      planEventEligibleEntrySyncWork(
+        [101, 102, 103, 104],
+        [
+          { id: 101, startedEvent: 1 },
+          { id: 102, startedEvent: 2 },
+          { id: 103, startedEvent: null },
+        ],
+        1,
+      ),
+    ).toEqual({
+      eligibleEntryIds: [101, 103, 104],
+      skippedUnits: 1,
+    });
+  });
+
   test('distinguishes targeted repair lists from scheduled scans', () => {
     expect(isExplicitEntryRepairRequest({ entryIds: [1, 2] })).toBe(true);
     expect(isExplicitEntryRepairRequest({ entryIds: [] })).toBe(true);
