@@ -4,9 +4,11 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
+import { prepareDataPublication } from '../../src/cache/data-publication';
 import type { LiveSnapshotCacheContents } from '../../src/cache/live-snapshot-cache';
 import { getDbClient } from '../../src/db/singleton';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
+import { syncOperationsRepository } from '../../src/repositories/sync-operations';
 import {
   persistLiveSnapshotDurably,
   recoverPendingLiveSnapshotPublication,
@@ -21,6 +23,8 @@ import { mockRawFPLFixture1 } from '../fixtures/fixtures.fixtures';
 const SEASON: FplSeasonRef = { seasonId: 2097, seasonCode: '9798' };
 const EVENT_ID = 1;
 const FINALIZED_AT = new Date('2026-08-25T16:08:07.277Z');
+const CHECKPOINT_RUN_ID = '30000000-0000-4000-8000-000000000001';
+const CHECKPOINT_PUBLICATION_ID = '40000000-0000-4000-8000-000000000001';
 let preservedCurrentSeasonId: number | null = null;
 
 async function removeFixtureSeason(): Promise<void> {
@@ -438,5 +442,69 @@ describe('live snapshot finalization fence', () => {
     `;
     expect(publicationCount?.count).toBe(0);
     expect(latestRun?.status).toBe('skipped');
+  });
+
+  test('reads the finalization marker and active publication from one statement snapshot', async () => {
+    const sql = await getDbClient();
+    try {
+      await syncOperationsRepository.startRun({
+        runId: CHECKPOINT_RUN_ID,
+        provider: 'fpl',
+        lane: 'live',
+        scope: 'live-checkpoint-integration',
+        season: SEASON,
+        eventId: EVENT_ID,
+        mode: 'durable',
+        trigger: 'test',
+      });
+      const staging = await syncOperationsRepository.preparePublication({
+        publicationId: CHECKPOINT_PUBLICATION_ID,
+        dataset: 'fpl:live',
+        season: SEASON,
+        eventId: EVENT_ID,
+        sourceRunId: CHECKPOINT_RUN_ID,
+      });
+      const canonical = prepareDataPublication({
+        dataset: 'fpl:live',
+        seasonCode: SEASON.seasonCode,
+        eventId: EVENT_ID,
+        revision: staging.revision,
+        publicationId: staging.publicationId,
+        sourceCheckedAt: FINALIZED_AT,
+        state: 'settled',
+        items: [
+          { name: 'eventLive', value: [] },
+          { name: 'fixtures', value: [] },
+        ],
+      });
+      await syncOperationsRepository.activatePublication({
+        publicationId: staging.publicationId,
+        dataset: 'fpl:live',
+        season: SEASON,
+        eventId: EVENT_ID,
+        sourceRunId: CHECKPOINT_RUN_ID,
+        manifest: canonical.manifest,
+      });
+
+      const checkpoint = await syncOperationsRepository.findActiveLivePublicationCheckpoint(
+        SEASON,
+        EVENT_ID,
+      );
+      expect(checkpoint?.publicationId).toBe(CHECKPOINT_PUBLICATION_ID);
+      expect(checkpoint?.revision).toBe(staging.revision);
+      expect(checkpoint?.manifest).toEqual(canonical.manifest);
+      expect(checkpoint?.finalizedAt?.toISOString()).toBe(FINALIZED_AT.toISOString());
+    } finally {
+      await sql`
+        UPDATE ops.sync_runs
+        SET publication_id = NULL
+        WHERE run_id = ${CHECKPOINT_RUN_ID}::uuid
+      `;
+      await sql`
+        DELETE FROM ops.dataset_publications
+        WHERE publication_id = ${CHECKPOINT_PUBLICATION_ID}::uuid
+      `;
+      await sql`DELETE FROM ops.sync_runs WHERE run_id = ${CHECKPOINT_RUN_ID}::uuid`;
+    }
   });
 });

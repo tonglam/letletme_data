@@ -17,7 +17,6 @@ import type { DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
-import { eventRepository } from '../repositories/events';
 import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
 import { createPlayerRepository } from '../repositories/players';
 import { createTeamRepository } from '../repositories/teams';
@@ -546,13 +545,16 @@ export async function recoverPendingLiveSnapshotPublication(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<'none' | 'activated'> {
-  const [cached, active, activeManifest, finalizedAt] = await Promise.all([
+  const [cached, checkpoint] = await Promise.all([
     readLiveSnapshotCache(season.seasonCode, eventId),
-    syncOperationsRepository.findActivePublication('fpl:live', season, eventId),
-    syncOperationsRepository.findActivePublicationManifest('fpl:live', season, eventId),
-    eventRepository.findLiveSnapshotFinalizedAt(season, eventId),
+    syncOperationsRepository.findActiveLivePublicationCheckpoint(season, eventId),
   ]);
-  if (!livePublicationMatchesFinalizedCheckpoint(activeManifest, finalizedAt)) {
+  if (
+    !livePublicationMatchesFinalizedCheckpoint(
+      checkpoint?.manifest ?? null,
+      checkpoint?.finalizedAt ?? null,
+    )
+  ) {
     throw new DatabaseError(
       `Finalized event ${eventId} has no publication bound to its immutable checkpoint`,
       'LIVE_FINAL_PUBLICATION_CHECKPOINT_MISMATCH',
@@ -560,8 +562,8 @@ export async function recoverPendingLiveSnapshotPublication(
   }
   if (
     cached &&
-    active?.publicationId === cached.manifest.publicationId &&
-    active.revision === cached.manifest.revision
+    checkpoint?.publicationId === cached.manifest.publicationId &&
+    checkpoint.revision === cached.manifest.revision
   ) {
     return 'none';
   }
@@ -570,24 +572,26 @@ export async function recoverPendingLiveSnapshotPublication(
     { dataset: 'fpl:live', seasonCode: season.seasonCode, eventId },
     season,
   );
-  if (finalizedAt && result.status !== 'matched' && result.status !== 'repaired') {
+  if (checkpoint?.finalizedAt && result.status !== 'matched' && result.status !== 'repaired') {
     throw new DatabaseError(
       `Finalized event ${eventId} has no recoverable canonical live publication`,
       'LIVE_FINAL_PUBLICATION_MISSING',
     );
   }
-  if (finalizedAt) {
-    const reconciledManifest = await syncOperationsRepository.findActivePublicationManifest(
-      'fpl:live',
-      season,
-      eventId,
+  const reconciledCheckpoint = await syncOperationsRepository.findActiveLivePublicationCheckpoint(
+    season,
+    eventId,
+  );
+  if (
+    !livePublicationMatchesFinalizedCheckpoint(
+      reconciledCheckpoint?.manifest ?? null,
+      reconciledCheckpoint?.finalizedAt ?? null,
+    )
+  ) {
+    throw new DatabaseError(
+      `Finalized event ${eventId} publication changed away from its immutable checkpoint`,
+      'LIVE_FINAL_PUBLICATION_CHECKPOINT_MISMATCH',
     );
-    if (!livePublicationMatchesFinalizedCheckpoint(reconciledManifest, finalizedAt)) {
-      throw new DatabaseError(
-        `Finalized event ${eventId} publication changed away from its immutable checkpoint`,
-        'LIVE_FINAL_PUBLICATION_CHECKPOINT_MISMATCH',
-      );
-    }
   }
   return result.status === 'repaired' ? 'activated' : 'none';
 }
