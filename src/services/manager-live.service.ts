@@ -26,6 +26,7 @@ import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   MANAGER_LIVE_CLASSIC_MAX_PAGE,
+  MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
   MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
@@ -904,6 +905,24 @@ export const deriveManagerLiveTournamentCoverageState = (input: {
   return 'WARMING';
 };
 
+export const invalidateManagerLiveTournamentCoverage = (
+  coverage: ManagerLiveTournamentCoverage | null,
+  rosterRevision: string,
+  expectedEntries: number,
+): ManagerLiveTournamentCoverage | null => {
+  if (!coverage || coverage.rosterRevision === rosterRevision) return coverage;
+  return {
+    ...coverage,
+    rosterRevision,
+    expectedEntries,
+    resolvedEntries: 0,
+    fullyFetchedAt: null,
+    managerRevision: null,
+    error: null,
+    state: 'WARMING',
+  };
+};
+
 const mapTournamentCoverage = (row: {
   rosterRevision: string;
   expectedEntries: number;
@@ -975,7 +994,10 @@ const persistTournamentCoverage = async (input: {
       });
       return null;
     });
-  const resolvedEntries = Math.min(input.expectedEntries, input.rows.length);
+  const resolvedEntryIds = new Set(
+    input.rows.filter((row) => typeof row.eventPoints === 'number').map((row) => row.entryId),
+  );
+  const resolvedEntries = Math.min(input.expectedEntries, resolvedEntryIds.size);
   const state = deriveManagerLiveTournamentCoverageState({
     expectedEntries: input.expectedEntries,
     resolvedEntries,
@@ -1856,6 +1878,14 @@ export const refreshClassicStandings = async (
   let nextPage = startPage;
   let exhausted = false;
   let refreshErrorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null = null;
+  if (startPage > MAX_STANDINGS_PAGES) {
+    return {
+      complete: false,
+      nextPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+      refreshedEntryIds: [],
+    };
+  }
   try {
     for (
       let page = startPage;
@@ -1879,6 +1909,11 @@ export const refreshClassicStandings = async (
         exhausted = true;
         break;
       }
+    }
+    if (!exhausted && nextPage > MAX_STANDINGS_PAGES && fetchedRows.size < targetIds.size) {
+      refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
+    } else if (exhausted && fetchedRows.size < targetIds.size) {
+      refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
     }
   } catch (error) {
     refreshErrorCode =
@@ -2027,7 +2062,7 @@ export const refreshClassicStandings = async (
     partial: refreshErrorCode !== null,
   });
   const result = {
-    complete: refreshErrorCode === null && (exhausted || fetchedRows.size >= targetIds.size),
+    complete: refreshErrorCode === null && fetchedRows.size >= targetIds.size,
     nextPage,
     errorCode: refreshErrorCode,
   };
@@ -2201,6 +2236,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
 
   let scope: ManagerScoreScope = entryScope;
   let tournament: Awaited<ReturnType<typeof tournamentInfoRepository.findById>> = null;
+  let authoritativeTournamentRosterEntryIds: number[] | null = null;
   if (input.tournamentId !== undefined) {
     tournament = await tournamentInfoRepository.findById(season, input.tournamentId);
     if (!tournament) {
@@ -2213,6 +2249,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       season,
       input.tournamentId,
     );
+    authoritativeTournamentRosterEntryIds = rosterEntryIds;
     const roster = new Set(rosterEntryIds);
     if (!workerTournamentRefresh && requestedEntryIds.some((entryId) => !roster.has(entryId))) {
       throw new ValidationError(
@@ -2289,6 +2326,16 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     input.tournamentId === undefined
       ? null
       : await readTournamentCoverage(season, input.eventId, input.tournamentId);
+  const coverageRosterEntryIds = authoritativeTournamentRosterEntryIds ?? uniqueEntryIds;
+  const currentTournamentRosterRevision =
+    input.tournamentId === undefined ? null : tournamentRosterRevision(coverageRosterEntryIds);
+  const tournamentCoverage = currentTournamentRosterRevision
+    ? invalidateManagerLiveTournamentCoverage(
+        existingTournamentCoverage,
+        currentTournamentRosterRevision,
+        coverageRosterEntryIds.length,
+      )
+    : existingTournamentCoverage;
   if ((input.readMode ?? 'READ_THROUGH') === 'CACHE_ONLY') {
     const now = Date.now();
     const metadataRows = uniqueEntryIds
@@ -2322,7 +2369,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       nextRefreshAt: nextRefresh(event.finished),
       sourceByEntry,
       refreshQueued,
-      tournamentCoverage: existingTournamentCoverage,
+      tournamentCoverage,
     });
   }
 
@@ -2355,7 +2402,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       const startPage =
         Number.isSafeInteger(input.classicStandingsStartPage) &&
         (input.classicStandingsStartPage ?? 0) >= 1 &&
-        (input.classicStandingsStartPage ?? 0) <= MANAGER_LIVE_CLASSIC_MAX_PAGE
+        (input.classicStandingsStartPage ?? 0) <= MANAGER_LIVE_CLASSIC_CAPPED_CURSOR
           ? input.classicStandingsStartPage!
           : 1;
       const standings = await refreshClassicStandings(
@@ -2452,6 +2499,26 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         sourceByEntry.set(row.entryId, 'UPSTREAM');
       }
     }
+    let durableCoverageRows: CachedRow[] = [];
+    if (input.tournamentId !== undefined) {
+      try {
+        const checkpoints = await managerScoreCheckpointRepository.findByScopeAndEntryIds(
+          season,
+          input.eventId,
+          scope,
+          uniqueEntryIds,
+        );
+        durableCoverageRows = checkpoints.map((checkpoint) =>
+          fromManagerScoreCheckpoint(checkpoint, season.seasonCode),
+        );
+      } catch (error) {
+        logWarn('Manager live coverage checkpoint read failed', {
+          eventId: input.eventId,
+          tournamentId: input.tournamentId,
+          error: error instanceof Error ? error.message : 'unknown',
+        });
+      }
+    }
     const nextRefreshAt = new Date(
       Date.now() +
         (classicStandingsNextPage === null || classicStandingsNextPage === undefined
@@ -2476,7 +2543,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         tournamentId: input.tournamentId,
         rosterRevision: tournamentRosterRevision(uniqueEntryIds),
         expectedEntries: uniqueEntryIds.length,
-        rows: metadataRows,
+        rows: durableCoverageRows,
         errorCode: refreshErrorCode,
         managerRevision: result.managerRevision,
         crawlComplete:

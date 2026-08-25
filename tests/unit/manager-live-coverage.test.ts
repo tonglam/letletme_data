@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   deriveManagerLiveTournamentCoverageState,
+  invalidateManagerLiveTournamentCoverage,
   tournamentRosterRevision,
 } from '../../src/services/manager-live.service';
 
@@ -60,5 +61,27 @@ describe('manager live tournament coverage state', () => {
   test('uses one deterministic revision and changes it when the roster changes', () => {
     expect(tournamentRosterRevision([3, 1, 2])).toBe(tournamentRosterRevision([1, 2, 3]));
     expect(tournamentRosterRevision([1, 2, 3])).not.toBe(tournamentRosterRevision([1, 2, 4]));
+  });
+
+  test('invalidates a published coverage row when the roster revision changes', () => {
+    const previous = {
+      rosterRevision: 'old-roster',
+      expectedEntries: 2,
+      resolvedEntries: 2,
+      fullyFetchedAt: '2026-08-25T00:00:00.000Z',
+      managerRevision: 'old-manager',
+      error: null,
+      state: 'COMPLETE' as const,
+    };
+    expect(invalidateManagerLiveTournamentCoverage(previous, 'new-roster', 3)).toEqual({
+      ...previous,
+      rosterRevision: 'new-roster',
+      expectedEntries: 3,
+      resolvedEntries: 0,
+      fullyFetchedAt: null,
+      managerRevision: null,
+      state: 'WARMING',
+    });
+    expect(invalidateManagerLiveTournamentCoverage(previous, 'old-roster', 2)).toBe(previous);
   });
 });

@@ -4,6 +4,7 @@ import {
   loadManagerLiveClassicCursor,
   loadManagerLiveHotScope,
   MANAGER_LIVE_ATTEMPTS,
+  MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
   MANAGER_LIVE_HOT_SCOPE_SECONDS,
   MANAGER_LIVE_RETRY_BASE_DELAY_MS,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
@@ -175,9 +176,11 @@ describe('manager live refresh policy', () => {
     ).toEqual([30, 60, 120]);
   });
 
-  test('does not mark an unfinished 100-page crawl complete or emit page 101', () => {
+  test('persists a terminal cursor when a crawl reaches the 100-page safety cap', () => {
     const standings = { complete: false, nextPage: 101 };
-    expect(classicStandingsCursorAfterRefresh(true, standings)).toBe(100);
+    expect(classicStandingsCursorAfterRefresh(true, standings)).toBe(
+      MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+    );
   });
 
   test('stops only after the gameweek is both finished and data-checked', () => {

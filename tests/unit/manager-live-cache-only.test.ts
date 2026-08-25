@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 import { redisSingleton } from '../../src/cache/singleton';
 import { fplClient } from '../../src/clients/fpl';
+import { MANAGER_LIVE_CLASSIC_CAPPED_CURSOR } from '../../src/domain/manager-live-refresh';
 import { eventRepository } from '../../src/repositories/events';
 import { managerScoreCheckpointRepository } from '../../src/repositories/live-window';
 import { seasonRepository } from '../../src/repositories/seasons';
@@ -602,6 +603,47 @@ describe('manager live classic standings convergence', () => {
       nextPage: 5,
       errorCode: 'UPSTREAM_UNAVAILABLE',
     });
+  });
+
+  test('stops at the classic page cap without refetching page 100', async () => {
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: true,
+            page: 100,
+            results: [{ entry: 999, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+
+    const first = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101]),
+      new Map(),
+      null,
+      { startPage: 100, maxPages: 2 },
+    );
+    expect(first).toMatchObject({
+      complete: false,
+      nextPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
+
+    const second = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101]),
+      new Map(),
+      null,
+      { startPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR, maxPages: 2 },
+    );
+    expect(second).toMatchObject(first);
+    expect(getClassicStandings).toHaveBeenCalledTimes(1);
   });
 
   test('persists completed pages before retrying a later failed page', async () => {

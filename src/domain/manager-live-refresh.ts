@@ -18,6 +18,10 @@ export const MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT = 4;
 // fetches only two pages per logical run; this is the cursor safety bound, not
 // a request-size increase.
 export const MANAGER_LIVE_CLASSIC_MAX_PAGE = 100;
+// A cursor one past the supported page range is a terminal safety marker. It
+// is persisted so a capped crawl cannot refetch page 100 forever; workers do
+// not send this sentinel to FPL.
+export const MANAGER_LIVE_CLASSIC_CAPPED_CURSOR = MANAGER_LIVE_CLASSIC_MAX_PAGE + 1;
 
 export type ManagerLiveRefreshScope = {
   seasonId: number;
@@ -117,7 +121,7 @@ export const classicStandingsCursorAfterRefresh = (
   completeRefresh
     ? standings.complete
       ? null
-      : Math.min(MANAGER_LIVE_CLASSIC_MAX_PAGE, standings.nextPage)
+      : Math.min(MANAGER_LIVE_CLASSIC_CAPPED_CURSOR, standings.nextPage)
     : undefined;
 
 export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefreshScope | null => {
@@ -170,7 +174,7 @@ const parseManagerLiveHotScopeState = (value: string | null): ManagerLiveHotScop
       (parsed.classicStandingsPage !== null &&
         (!Number.isSafeInteger(parsed.classicStandingsPage) ||
           (parsed.classicStandingsPage ?? 0) < 1 ||
-          (parsed.classicStandingsPage ?? 0) > MANAGER_LIVE_CLASSIC_MAX_PAGE))
+          (parsed.classicStandingsPage ?? 0) > MANAGER_LIVE_CLASSIC_CAPPED_CURSOR))
     ) {
       return null;
     }
@@ -318,7 +322,7 @@ export async function advanceManagerLiveHotState(
     classicStandingsNextPage !== null &&
     (!Number.isSafeInteger(classicStandingsNextPage) ||
       classicStandingsNextPage < 1 ||
-      classicStandingsNextPage > MANAGER_LIVE_CLASSIC_MAX_PAGE)
+      classicStandingsNextPage > MANAGER_LIVE_CLASSIC_CAPPED_CURSOR)
   ) {
     throw new Error(
       `Invalid manager live classic standings page: ${String(classicStandingsNextPage)}`,
@@ -338,7 +342,7 @@ export async function advanceManagerLiveHotState(
     expectedClassicStandingsPage !== null &&
     (!Number.isSafeInteger(expectedClassicStandingsPage) ||
       expectedClassicStandingsPage < 1 ||
-      expectedClassicStandingsPage > MANAGER_LIVE_CLASSIC_MAX_PAGE)
+      expectedClassicStandingsPage > MANAGER_LIVE_CLASSIC_CAPPED_CURSOR)
   ) {
     throw new Error(
       `Invalid expected manager live classic standings page: ${String(expectedClassicStandingsPage)}`,
