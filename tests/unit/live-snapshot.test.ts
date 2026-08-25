@@ -182,6 +182,40 @@ describe('live snapshot preparation', () => {
     ).toThrow('missing=567; unexpected=none');
   });
 
+  test('retains a previously published event roster after the mutable core roster grows', () => {
+    const references = referenceData();
+    references.playerTeamById.set(611, 12);
+    references.playerTeamById.set(612, 4);
+
+    const prepared = prepareLiveSnapshot(
+      1,
+      mockEventLiveResponseFixture,
+      [liveRawFixture()],
+      references,
+      [1],
+      mockEventLiveResponseFixture.elements.map((element) => element.id),
+    );
+
+    expect(prepared.eventLives.eventLives).toHaveLength(3);
+    expect(prepared.liveIdentityBaseline).toBe('published-event');
+  });
+
+  test('rejects live identity that matches neither current nor previously published roster', () => {
+    const references = referenceData();
+    references.playerTeamById.set(611, 12);
+
+    expect(() =>
+      prepareLiveSnapshot(
+        1,
+        { elements: mockEventLiveResponseFixture.elements.slice(0, -1) },
+        [liveRawFixture()],
+        references,
+        [1],
+        mockEventLiveResponseFixture.elements.map((element) => element.id),
+      ),
+    ).toThrow('missing=567,611; unexpected=none');
+  });
+
   test('rejects mixed events and incomplete fixture identity', () => {
     expect(() =>
       prepareLiveSnapshot(
