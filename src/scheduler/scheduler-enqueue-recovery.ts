@@ -1,10 +1,10 @@
-import { Queue, type JobType } from 'bullmq';
+import { Queue, type Job, type JobType } from 'bullmq';
 
 import {
   completeSchedulerObligation,
   confirmSchedulerObligationEnqueued,
   failSchedulerObligation,
-  listExpiredUnconfirmedSchedulerObligations,
+  listExpiredSchedulerObligations,
   renewSchedulerObligation,
   startSchedulerObligation,
   type SchedulerObligation,
@@ -23,6 +23,7 @@ const RECOVERY_JOB_TYPES: JobType[] = [
   'completed',
   'failed',
 ];
+const RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE = 200;
 const NONTERMINAL_JOB_STATES = new Set([
   'waiting',
   'waiting-children',
@@ -37,6 +38,11 @@ export type SchedulerQueueJobSnapshot = Readonly<{
   state: string;
   data: Readonly<Record<string, unknown>>;
   failedReason?: string;
+}>;
+
+export type SchedulerQueueInspection = Readonly<{
+  jobs: readonly SchedulerQueueJobSnapshot[];
+  missingEvidenceVerified: boolean;
 }>;
 
 export type SchedulerEnqueueRecoveryDecision =
@@ -57,8 +63,11 @@ export type SchedulerEnqueueRecoveryResult = Readonly<{
 }>;
 
 type RecoveryDependencies = Readonly<{
-  listCandidates: typeof listExpiredUnconfirmedSchedulerObligations;
-  loadJobs: (queueName: string) => Promise<readonly SchedulerQueueJobSnapshot[]>;
+  listCandidates: typeof listExpiredSchedulerObligations;
+  inspectJobs: (
+    queueName: string,
+    candidates: readonly SchedulerObligation[],
+  ) => Promise<SchedulerQueueInspection>;
   confirm: typeof confirmSchedulerObligationEnqueued;
   start: typeof startSchedulerObligation;
   renew: typeof renewSchedulerObligation;
@@ -67,8 +76,8 @@ type RecoveryDependencies = Readonly<{
 }>;
 
 const defaultRecoveryDependencies: RecoveryDependencies = {
-  listCandidates: listExpiredUnconfirmedSchedulerObligations,
-  loadJobs: loadSchedulerQueueJobs,
+  listCandidates: listExpiredSchedulerObligations,
+  inspectJobs: inspectSchedulerQueueJobs,
   confirm: confirmSchedulerObligationEnqueued,
   start: startSchedulerObligation,
   renew: renewSchedulerObligation,
@@ -82,23 +91,73 @@ function recordData(value: unknown): Readonly<Record<string, unknown>> {
     : {};
 }
 
-async function loadSchedulerQueueJobs(
-  queueName: string,
+export function schedulerRecoveryBullJobIds(
+  obligation: Pick<SchedulerObligation, 'obligationId' | 'generation' | 'bullJobId' | 'scopeKey'>,
+): readonly string[] {
+  if (obligation.bullJobId !== null) return [obligation.bullJobId];
+  const baseId = `scheduler-${obligation.obligationId}-g${obligation.generation}`;
+  const seasonCode = /^(\d{4})(?::|$)/.exec(obligation.scopeKey)?.[1];
+  return seasonCode ? [baseId, `${seasonCode}-${baseId}`] : [baseId];
+}
+
+function jobDataMatchesSchedulerObligation(
+  value: unknown,
+  obligation: Pick<SchedulerObligation, 'obligationId' | 'generation'>,
+): boolean {
+  const data = recordData(value);
+  return (
+    data.obligationId === obligation.obligationId &&
+    data.obligationGeneration === obligation.generation
+  );
+}
+
+async function snapshotSchedulerQueueJobs(
+  jobs: readonly Job<Record<string, unknown>>[],
 ): Promise<readonly SchedulerQueueJobSnapshot[]> {
+  return Promise.all(
+    jobs.map(async (job) => ({
+      id: String(job.id),
+      name: job.name,
+      state: await job.getState(),
+      data: recordData(job.data),
+      ...(job.failedReason ? { failedReason: job.failedReason } : {}),
+    })),
+  );
+}
+
+async function inspectSchedulerQueueJobs(
+  queueName: string,
+  candidates: readonly SchedulerObligation[],
+): Promise<SchedulerQueueInspection> {
   const queue = new Queue<Record<string, unknown>>(queueName, {
     connection: getQueueConnection(),
   });
   try {
-    const jobs = await queue.getJobs(RECOVERY_JOB_TYPES, 0, -1, false);
-    return Promise.all(
-      jobs.map(async (job) => ({
-        id: String(job.id),
-        name: job.name,
-        state: await job.getState(),
-        data: recordData(job.data),
-        ...(job.failedReason ? { failedReason: job.failedReason } : {}),
-      })),
+    const lookupIds = [...new Set(candidates.flatMap(schedulerRecoveryBullJobIds))];
+    const directJobs = (await Promise.all(lookupIds.map((jobId) => queue.getJob(jobId)))).filter(
+      (job): job is Job<Record<string, unknown>> => job !== undefined,
     );
+    const needsFallback = candidates.some(
+      (candidate) =>
+        !directJobs.some((job) => jobDataMatchesSchedulerObligation(job.data, candidate)),
+    );
+    const [fallbackJobs, fallbackJobCount] = needsFallback
+      ? await Promise.all([
+          queue.getJobs(RECOVERY_JOB_TYPES, 0, RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE - 1, false),
+          queue.getJobCountByTypes(...RECOVERY_JOB_TYPES),
+        ])
+      : [[], 0];
+    const uniqueJobs = new Map<string, Job<Record<string, unknown>>>();
+    for (const job of [...directJobs, ...fallbackJobs]) {
+      if (job.id !== undefined) uniqueJobs.set(String(job.id), job);
+    }
+    return {
+      jobs: await snapshotSchedulerQueueJobs([...uniqueJobs.values()]),
+      // BullMQ applies the range per state. Prove the whole multi-state queue
+      // fits inside one page before treating a random-id job as absent.
+      missingEvidenceVerified:
+        !needsFallback || fallbackJobCount < RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE,
+    };
   } finally {
     await queue.close();
   }
@@ -108,10 +167,7 @@ export function matchesSchedulerObligationGeneration(
   job: SchedulerQueueJobSnapshot,
   obligation: Pick<SchedulerObligation, 'obligationId' | 'generation'>,
 ): boolean {
-  return (
-    job.data.obligationId === obligation.obligationId &&
-    job.data.obligationGeneration === obligation.generation
-  );
+  return jobDataMatchesSchedulerObligation(job.data, obligation);
 }
 
 export function decideSchedulerEnqueueRecovery(
@@ -150,9 +206,9 @@ function groupRecoveryCandidates(
 }
 
 /**
- * Recover only the narrow DB-claim/Bull-enqueue crash window. An expired
- * lease alone never authorizes a duplicate generation: Redis state is checked
- * first and every database mutation retains the exact generation fence.
+ * Reconcile expired in-flight obligations against their exact Bull generation.
+ * An expired lease alone never authorizes a duplicate generation: Redis state
+ * is checked first and every database mutation retains the generation fence.
  */
 export async function reconcileExpiredSchedulerEnqueueClaims(input: {
   definitions: readonly Pick<ScheduledJobDefinition, 'name' | 'queueName'>[];
@@ -186,7 +242,9 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
     let jobs: readonly SchedulerQueueJobSnapshot[];
     let missingEvidenceUnverified = false;
     try {
-      jobs = await dependencies.loadJobs(queueName);
+      const inspection = await dependencies.inspectJobs(queueName, queueCandidates);
+      jobs = inspection.jobs;
+      missingEvidenceUnverified = !inspection.missingEvidenceVerified;
     } catch (error) {
       counters.errors += queueCandidates.length;
       logError('Scheduler enqueue recovery could not inspect BullMQ', error, {
@@ -205,9 +263,12 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
       )
     ) {
       try {
-        const secondJobs = await dependencies.loadJobs(queueName);
-        const merged = new Map([...jobs, ...secondJobs].map((job) => [job.id, job] as const));
+        const secondInspection = await dependencies.inspectJobs(queueName, queueCandidates);
+        const merged = new Map(
+          [...jobs, ...secondInspection.jobs].map((job) => [job.id, job] as const),
+        );
         jobs = [...merged.values()];
+        missingEvidenceUnverified ||= !secondInspection.missingEvidenceVerified;
       } catch (error) {
         missingEvidenceUnverified = true;
         logError('Scheduler enqueue recovery could not verify missing BullMQ jobs', error, {
@@ -229,25 +290,38 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
         if (decision === 'mark-running' || decision === 'retain-enqueued') {
           const representative =
             matchingJobs.find((job) => job.state === 'active') ?? matchingJobs[0];
-          if (!representative || !obligation.leaseOwner) {
+          if (!representative) {
             const updated = await dependencies.fail({
               obligationId: obligation.obligationId,
               generation: obligation.generation,
               retryDelayMs: 0,
-              error: new Error('Expired scheduler claim has no recoverable lease owner'),
+              error: new Error('Expired scheduler claim has no matching nonterminal Bull job'),
             });
             if (updated) counters.retried += 1;
             else counters.unchanged += 1;
             continue;
           }
-          const confirmed = await dependencies.confirm({
-            obligationId: obligation.obligationId,
-            owner: obligation.leaseOwner,
-            bullJobId: representative.id,
-          });
-          if (!confirmed) {
-            counters.unchanged += 1;
-            continue;
+          if (obligation.bullJobId === null) {
+            if (!obligation.leaseOwner) {
+              const updated = await dependencies.fail({
+                obligationId: obligation.obligationId,
+                generation: obligation.generation,
+                retryDelayMs: 0,
+                error: new Error('Expired unconfirmed scheduler claim has no lease owner'),
+              });
+              if (updated) counters.retried += 1;
+              else counters.unchanged += 1;
+              continue;
+            }
+            const confirmed = await dependencies.confirm({
+              obligationId: obligation.obligationId,
+              owner: obligation.leaseOwner,
+              bullJobId: representative.id,
+            });
+            if (!confirmed) {
+              counters.unchanged += 1;
+              continue;
+            }
           }
           const updated =
             decision === 'mark-running'
@@ -272,7 +346,7 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
             status: 'succeeded',
             evidence: {
               queue: queueName,
-              reason: 'recovered-unconfirmed-enqueue',
+              reason: 'recovered-expired-bull-generation',
               bullJobIds: matchingJobs.slice(0, 20).map((job) => job.id),
             },
           });
@@ -310,7 +384,7 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
   }
 
   if (counters.candidates > 0) {
-    logInfo('Scheduler expired enqueue claims reconciled', counters);
+    logInfo('Scheduler expired Bull generations reconciled', counters);
   }
   return counters;
 }

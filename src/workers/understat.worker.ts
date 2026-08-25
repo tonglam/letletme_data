@@ -48,6 +48,7 @@ import {
   inspectSchedulerObligationFence,
   startCurrentSchedulerJob,
 } from '../utils/scheduler-obligation-fence';
+import { understatFailureBookkeepingPlan } from '../utils/understat-failure-bookkeeping';
 
 function lockScopes(
   lane: 'team' | 'player',
@@ -467,20 +468,20 @@ export function createUnderstatWorker(): WorkerRuntime {
       attemptsMade: job?.attemptsMade,
     });
     if (job) {
-      const fence = inspectSchedulerObligationFence(job.data);
-      if (fence.kind !== 'malformed') {
+      const bookkeeping = understatFailureBookkeepingPlan(job.data);
+      if (bookkeeping.recordDomainFailure) {
         void recordTeamFailure(job, error).catch((bookkeepingError) =>
           logError('Understat team failure bookkeeping failed', bookkeepingError, {
             runId: job.data.runId,
           }),
         );
-        if (isTerminalJobFailure(job, error)) {
-          void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
-            logError('Understat team obligation failure bookkeeping failed', bookkeepingError, {
-              runId: job.data.runId,
-            }),
-          );
-        }
+      }
+      if (bookkeeping.settleScheduler && isTerminalJobFailure(job, error)) {
+        void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
+          logError('Understat team obligation failure bookkeeping failed', bookkeepingError, {
+            runId: job.data.runId,
+          }),
+        );
       }
       void alertOnFinalFailure(job, error);
     }
@@ -492,20 +493,20 @@ export function createUnderstatWorker(): WorkerRuntime {
       attemptsMade: job?.attemptsMade,
     });
     if (job) {
-      const fence = inspectSchedulerObligationFence(job.data);
-      if (fence.kind !== 'malformed') {
+      const bookkeeping = understatFailureBookkeepingPlan(job.data);
+      if (bookkeeping.recordDomainFailure) {
         void recordPlayerFailure(job, error).catch((bookkeepingError) =>
           logError('Understat player failure bookkeeping failed', bookkeepingError, {
             runId: job.data.runId,
           }),
         );
-        if (isTerminalJobFailure(job, error)) {
-          void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
-            logError('Understat player obligation failure bookkeeping failed', bookkeepingError, {
-              runId: job.data.runId,
-            }),
-          );
-        }
+      }
+      if (bookkeeping.settleScheduler && isTerminalJobFailure(job, error)) {
+        void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
+          logError('Understat player obligation failure bookkeeping failed', bookkeepingError, {
+            runId: job.data.runId,
+          }),
+        );
       }
       void alertOnFinalFailure(job, error);
     }

@@ -10,7 +10,7 @@ import {
   completeSchedulerObligation,
   confirmSchedulerObligationEnqueued,
   failSchedulerObligation,
-  listExpiredUnconfirmedSchedulerObligations,
+  listExpiredSchedulerObligations,
   markSchedulerObligationIrrecoverable,
   schedulerObligationStatus,
   startSchedulerObligation,
@@ -772,7 +772,7 @@ describe('scheduler obligation generation fencing', () => {
     });
   });
 
-  test('selects only expired enqueue claims without Bull acknowledgement for recovery', async () => {
+  test('selects every expired in-flight generation for Bull reconciliation', async () => {
     const sql = await getDbClient();
     await sql`
       INSERT INTO ops.scheduler_obligations (
@@ -846,7 +846,11 @@ describe('scheduler obligation generation fencing', () => {
         )
     `;
 
-    const candidates = await listExpiredUnconfirmedSchedulerObligations();
-    expect(candidates.map((candidate) => candidate.obligationId)).toEqual([OBLIGATION_ID]);
+    const candidates = await listExpiredSchedulerObligations();
+    expect(candidates.map((candidate) => candidate.obligationId)).toEqual([
+      OBLIGATION_ID,
+      NEWER_OBLIGATION_ID,
+      IN_FLIGHT_OBLIGATION_ID,
+    ]);
   });
 });

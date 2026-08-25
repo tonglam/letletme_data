@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, notInArray, sql } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -385,11 +385,11 @@ export async function claimSchedulerObligations(
 }
 
 /**
- * Find claims that may have crashed between the durable DB claim and BullMQ
- * enqueue acknowledgement. Confirmed jobs have a Bull id and running jobs
- * have crossed the worker fence, so neither is eligible for this recovery.
+ * Find expired in-flight obligations for BullMQ reconciliation. Lease expiry
+ * is observation evidence only: the reconciler must inspect the exact Bull
+ * generation before it may settle or retry one of these rows.
  */
-export async function listExpiredUnconfirmedSchedulerObligations(
+export async function listExpiredSchedulerObligations(
   input: { limit?: number; db?: DbHandle } = {},
 ): Promise<readonly SchedulerObligation[]> {
   const limit = input.limit ?? 50;
@@ -402,8 +402,7 @@ export async function listExpiredUnconfirmedSchedulerObligations(
     .from(schedulerObligationsInOps)
     .where(
       and(
-        eq(schedulerObligationsInOps.status, 'enqueued'),
-        isNull(schedulerObligationsInOps.bullJobId),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
         lte(schedulerObligationsInOps.leaseExpiresAt, sql`clock_timestamp()`),
       ),
     )

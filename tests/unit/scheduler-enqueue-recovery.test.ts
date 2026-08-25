@@ -4,6 +4,7 @@ import type { SchedulerObligation } from '../../src/repositories/scheduler-oblig
 import {
   decideSchedulerEnqueueRecovery,
   reconcileExpiredSchedulerEnqueueClaims,
+  schedulerRecoveryBullJobIds,
   type SchedulerQueueJobSnapshot,
 } from '../../src/scheduler/scheduler-enqueue-recovery';
 
@@ -48,6 +49,21 @@ function queueJob(
 }
 
 describe('scheduler enqueue recovery', () => {
+  test('uses confirmed Bull ids and deterministic ids for unconfirmed generations', () => {
+    expect(
+      schedulerRecoveryBullJobIds({ ...obligation('unconfirmed', 2), scopeKey: 'global' }),
+    ).toEqual(['scheduler-unconfirmed-g2']);
+    expect(
+      schedulerRecoveryBullJobIds({ ...obligation('prefixed', 2), scopeKey: '2627:event:1' }),
+    ).toEqual(['scheduler-prefixed-g2', '2627-scheduler-prefixed-g2']);
+    expect(
+      schedulerRecoveryBullJobIds({
+        ...obligation('confirmed', 3),
+        bullJobId: 'actual-confirmed-job',
+      }),
+    ).toEqual(['actual-confirmed-job']);
+  });
+
   test('prioritizes active and queued evidence before terminal history', () => {
     expect(decideSchedulerEnqueueRecovery([])).toBe('retry-missing');
     expect(decideSchedulerEnqueueRecovery([queueJob('a', 1, 'completed')])).toBe('mark-succeeded');
@@ -88,9 +104,9 @@ describe('scheduler enqueue recovery', () => {
       definitions: [{ name: 'recoverable-job', queueName: 'recoverable-queue' }],
       dependencies: {
         listCandidates: async () => candidates,
-        loadJobs: async (queueName) => {
+        inspectJobs: async (queueName) => {
           expect(queueName).toBe('recoverable-queue');
-          return jobs;
+          return { jobs, missingEvidenceVerified: true };
         },
         confirm: async (input) => {
           confirmed.push(input.obligationId);
@@ -129,5 +145,83 @@ describe('scheduler enqueue recovery', () => {
     expect(renewed).toEqual(['waiting']);
     expect(completed).toEqual(['completed']);
     expect(failed.sort()).toEqual(['failed', 'missing']);
+  });
+
+  test('settles an expired confirmed running obligation from terminal Bull evidence', async () => {
+    const candidate: SchedulerObligation = {
+      ...obligation('confirmed-complete', 6),
+      status: 'running',
+      bullJobId: 'actual-confirmed-job',
+    };
+    const completed: string[] = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [{ name: 'recoverable-job', queueName: 'recoverable-queue' }],
+      dependencies: {
+        listCandidates: async () => [candidate],
+        inspectJobs: async (_queueName, candidates) => {
+          expect(candidates).toEqual([candidate]);
+          return {
+            jobs: [
+              {
+                ...queueJob('confirmed-complete', 6, 'completed'),
+                id: 'actual-confirmed-job',
+              },
+            ],
+            missingEvidenceVerified: true,
+          };
+        },
+        confirm: async () => {
+          throw new Error('confirmed obligations must not be confirmed again');
+        },
+        start: async () => false,
+        renew: async () => false,
+        complete: async (input) => {
+          completed.push(input.obligationId);
+          return true;
+        },
+        fail: async () => false,
+      },
+    });
+
+    expect(result).toEqual({
+      candidates: 1,
+      running: 0,
+      retained: 0,
+      succeeded: 1,
+      retried: 0,
+      unchanged: 0,
+      errors: 0,
+    });
+    expect(completed).toEqual(['confirmed-complete']);
+  });
+
+  test('does not retry a missing job when the bounded Redis view was incomplete', async () => {
+    let failCalls = 0;
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [{ name: 'recoverable-job', queueName: 'recoverable-queue' }],
+      dependencies: {
+        listCandidates: async () => [obligation('outside-bounded-view', 7)],
+        inspectJobs: async () => ({ jobs: [], missingEvidenceVerified: false }),
+        confirm: async () => false,
+        start: async () => false,
+        renew: async () => false,
+        complete: async () => false,
+        fail: async () => {
+          failCalls += 1;
+          return true;
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      candidates: 1,
+      running: 0,
+      retained: 0,
+      succeeded: 0,
+      retried: 0,
+      unchanged: 0,
+      errors: 1,
+    });
+    expect(failCalls).toBe(0);
   });
 });
