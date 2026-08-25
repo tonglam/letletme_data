@@ -81,7 +81,12 @@ export interface LiveSnapshotDurablePersistenceRequest {
 }
 
 export interface LiveSnapshotDurablePersistenceResult {
-  readonly accepted: boolean;
+  /**
+   * `advanced` owns both the durable-write and cache-publication fence.
+   * `finalized-cache-replay` may repair cache publication but must not rewrite
+   * the immutable finalized database checkpoint. `superseded` may do neither.
+   */
+  readonly disposition: 'advanced' | 'finalized-cache-replay' | 'superseded';
   readonly winnerCheckedAt: Date;
   readonly persistedFixtures: boolean;
   readonly persistedEventLives: boolean;
@@ -331,7 +336,8 @@ async function claimLiveSnapshotFence(
   season: FplSeasonRef,
   eventId: number,
   checkedAt: Date,
-): Promise<{ accepted: boolean; winnerCheckedAt: Date }> {
+  allowFinalizedCacheReplay: boolean,
+): Promise<Pick<LiveSnapshotDurablePersistenceResult, 'disposition' | 'winnerCheckedAt'>> {
   const claimed = await transaction
     .update(eventsInFpl)
     .set({ liveSnapshotCheckedAt: checkedAt })
@@ -348,7 +354,7 @@ async function claimLiveSnapshotFence(
     )
     .returning({ checkedAt: eventsInFpl.liveSnapshotCheckedAt });
   if (claimed[0]) {
-    return { accepted: true, winnerCheckedAt: claimed[0].checkedAt ?? checkedAt };
+    return { disposition: 'advanced', winnerCheckedAt: claimed[0].checkedAt ?? checkedAt };
   }
 
   const current = await transaction
@@ -363,18 +369,24 @@ async function claimLiveSnapshotFence(
     throw new DatabaseError(`Cannot persist live data for missing event ${eventId}`);
   }
   if (current[0].finalizedAt) {
+    const cacheReplayAccepted =
+      allowFinalizedCacheReplay && checkedAt.getTime() >= current[0].finalizedAt.getTime();
     logInfo('Live snapshot retained the immutable finalized checkpoint', {
       season: season.seasonCode,
       eventId,
       finalizedAt: current[0].finalizedAt.toISOString(),
+      cacheReplayAccepted,
     });
-    return { accepted: false, winnerCheckedAt: current[0].finalizedAt };
+    return {
+      disposition: cacheReplayAccepted ? 'finalized-cache-replay' : 'superseded',
+      winnerCheckedAt: current[0].finalizedAt,
+    };
   }
   const winnerCheckedAt = current[0].checkedAt;
   if (!winnerCheckedAt || winnerCheckedAt.getTime() <= checkedAt.getTime()) {
     throw new DatabaseError('Live snapshot ordering fence did not advance');
   }
-  return { accepted: false, winnerCheckedAt };
+  return { disposition: 'superseded', winnerCheckedAt };
 }
 
 export async function persistLiveSnapshotDurably(
@@ -389,8 +401,14 @@ export async function persistLiveSnapshotDurably(
   }
 
   const result = await withCoreSnapshotReadLock(season, async (transaction) => {
-    const fence = await claimLiveSnapshotFence(transaction, season, eventId, checkedAt);
-    if (!fence.accepted) {
+    const fence = await claimLiveSnapshotFence(
+      transaction,
+      season,
+      eventId,
+      checkedAt,
+      request.finalizeEvent === true,
+    );
+    if (fence.disposition !== 'advanced') {
       return {
         ...fence,
         persistedFixtures: false,
@@ -443,7 +461,7 @@ export async function persistLiveSnapshotDurably(
       }
     }
     return {
-      accepted: true,
+      disposition: 'advanced' as const,
       winnerCheckedAt: fence.winnerCheckedAt,
       persistedFixtures: request.persistFixtures,
       persistedEventLives: persistEventLives,
@@ -742,7 +760,7 @@ export async function syncLiveSnapshot(
           persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
           finalizeEvent: options.finalizeEvent,
         });
-        if (!durable.accepted) {
+        if (durable.disposition === 'superseded') {
           // Do not commit a proof-bearing staging row for a snapshot that lost
           // the ordering fence. Leaving it as `staging` would allow the
           // scheduler reconciler to promote stale payloads in the small window
@@ -762,7 +780,7 @@ export async function syncLiveSnapshot(
     );
     persistedFixtures = durable.persistedFixtures;
     persistedEventLives = durable.persistedEventLives;
-    if (!durable.accepted) {
+    if (durable.disposition === 'superseded') {
       return {
         eventId,
         changed: false,
@@ -790,7 +808,7 @@ export async function syncLiveSnapshot(
         }
       },
       // Canonical persistence and DB item proof already committed above.
-      beforeActivate: async () => durable.accepted,
+      beforeActivate: async () => durable.disposition !== 'superseded',
     });
     if (!published.published) {
       await syncOperationsRepository.skipPublication(

@@ -29,7 +29,7 @@ async function seed(): Promise<void> {
       season_id, season_code, display_name, start_year, end_year, lifecycle_state, is_current
     ) VALUES (
       ${SEASON.seasonId}, ${SEASON.seasonCode}, '2097/98 finalization fence',
-      ${SEASON.seasonId}, ${SEASON.seasonId + 1}, 'completed', false
+      ${SEASON.seasonId}, ${SEASON.seasonId + 1}, 'active', true
     )
   `;
   await sql`
@@ -78,7 +78,7 @@ describe('live snapshot finalization fence', () => {
     });
 
     expect(result).toEqual({
-      accepted: false,
+      disposition: 'finalized-cache-replay',
       winnerCheckedAt: FINALIZED_AT,
       persistedFixtures: false,
       persistedEventLives: false,
