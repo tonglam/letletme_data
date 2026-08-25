@@ -553,14 +553,9 @@ export const schedulerLanesInOps = ops.table(
     scopeKey: text('scope_key').notNull(),
     queueName: text('queue_name').notNull(),
     state: text().default('idle').notNull(),
-    desiredObligationId: uuid('desired_obligation_id')
-      .references(() => schedulerObligationsInOps.obligationId, { onDelete: 'restrict' })
-      .notNull(),
+    desiredObligationId: uuid('desired_obligation_id').notNull(),
     desiredDueAt: timestamp('desired_due_at', { withTimezone: true, mode: 'date' }).notNull(),
-    activeObligationId: uuid('active_obligation_id').references(
-      () => schedulerObligationsInOps.obligationId,
-      { onDelete: 'restrict' },
-    ),
+    activeObligationId: uuid('active_obligation_id'),
     dispatchGeneration: integer('dispatch_generation').default(0).notNull(),
     dispatchOwner: text('dispatch_owner'),
     dispatchLeaseExpiresAt: timestamp('dispatch_lease_expires_at', {
@@ -593,6 +588,16 @@ export const schedulerLanesInOps = ops.table(
     ),
     check('scheduler_lanes_generation_check', sql`dispatch_generation >= 0`),
     check('scheduler_lanes_superseded_check', sql`superseded_count >= 0`),
+    foreignKey({
+      columns: [table.desiredObligationId],
+      foreignColumns: [schedulerObligationsInOps.obligationId],
+      name: 'scheduler_lanes_desired_obligation_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.activeObligationId],
+      foreignColumns: [schedulerObligationsInOps.obligationId],
+      name: 'scheduler_lanes_active_obligation_fk',
+    }).onDelete('restrict'),
     check(
       'scheduler_lanes_identity_check',
       sql`btrim(lane_key) <> '' AND btrim(job_name) <> '' AND btrim(scope_key) <> ''`,

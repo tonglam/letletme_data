@@ -875,7 +875,7 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         runId: null,
         dispatchOwner: null,
         dispatchLeaseExpiresAt: null,
-        retryNotBefore: new Date(dbNow.getTime() + RETRY_DELAY_MS),
+        retryNotBefore: null,
         lastError: `Bull job ${input.bullState} before durable completion`,
         lastProgressAt: dbNow,
         updatedAt: dbNow,

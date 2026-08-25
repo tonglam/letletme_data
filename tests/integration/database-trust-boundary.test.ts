@@ -337,6 +337,7 @@ describe('database trust boundary', () => {
       'fpl_source_artifacts',
       'live_lifecycle_status',
       'mutation_scopes',
+      'scheduler_lanes',
       'scheduler_obligations',
       'schema_migrations',
       'season_imports',
