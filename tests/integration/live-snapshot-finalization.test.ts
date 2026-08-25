@@ -85,13 +85,14 @@ describe('live snapshot finalization fence', () => {
     });
 
     const sql = await getDbClient();
-    const [event] = await sql<{ checkedAt: Date | null; finalizedAt: Date | null }[]>`
-      SELECT live_snapshot_checked_at AS "checkedAt",
-             live_snapshot_finalized_at AS "finalizedAt"
+    const [event] = await sql<{ checkedAtPreserved: boolean; finalizedAtPreserved: boolean }[]>`
+      SELECT live_snapshot_checked_at = ${FINALIZED_AT.toISOString()}::timestamptz
+               AS "checkedAtPreserved",
+             live_snapshot_finalized_at = ${FINALIZED_AT.toISOString()}::timestamptz
+               AS "finalizedAtPreserved"
       FROM fpl.events
       WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}
     `;
-    expect(event?.checkedAt).toEqual(FINALIZED_AT);
-    expect(event?.finalizedAt).toEqual(FINALIZED_AT);
+    expect(event).toEqual({ checkedAtPreserved: true, finalizedAtPreserved: true });
   });
 });
