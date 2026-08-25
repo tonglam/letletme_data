@@ -4,6 +4,7 @@ import { and, asc, eq, gt } from 'drizzle-orm';
 import {
   isExplicitEntryRepairRequest,
   isCronEntryInfoTableScan,
+  planEventEligibleEntrySyncWork,
   shouldRefreshEntryPicks,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
@@ -267,6 +268,7 @@ interface EntrySyncSummary {
   scanComplete: boolean;
   requiredUnits: number;
   reusedUnits: number;
+  skippedUnits: number;
   succeededUnits: number;
   failedUnits: number;
 }
@@ -301,6 +303,7 @@ async function handleEntryJob(
         scanComplete: loaded.fetchedFromDb,
         requiredUnits: 0,
         reusedUnits: 0,
+        skippedUnits: 0,
         succeededUnits: 0,
         failedUnits: 0,
       },
@@ -310,9 +313,25 @@ async function handleEntryJob(
   const concurrency = jobData?.concurrency ?? ENTRY_SYNC_DEFAULT_CONCURRENCY;
   const throttleMs = jobData?.throttleMs ?? ENTRY_SYNC_DEFAULT_THROTTLE_MS;
 
+  const eligibility =
+    jobName === 'entry-info' || jobData?.eventId === undefined
+      ? { eligibleEntryIds: loaded.entryIds, skippedUnits: 0 }
+      : planEventEligibleEntrySyncWork(
+          loaded.entryIds,
+          await entryInfoRepository.findByIds(season, loaded.entryIds),
+          jobData.eventId,
+        );
+  if (eligibility.skippedUnits > 0) {
+    logInfo('Skipped entries that did not exist for the target event', {
+      jobName,
+      eventId: jobData?.eventId,
+      skippedUnits: eligibility.skippedUnits,
+    });
+  }
+
   const selection = options.selectRequired
-    ? await options.selectRequired(loaded.entryIds)
-    : { requiredEntryIds: loaded.entryIds, reusedUnits: 0 };
+    ? await options.selectRequired(eligibility.eligibleEntryIds)
+    : { requiredEntryIds: eligibility.eligibleEntryIds, reusedUnits: 0 };
   let result = await syncEntries(label, selection.requiredEntryIds, handler, {
     concurrency,
     throttleMs,
@@ -351,6 +370,7 @@ async function handleEntryJob(
         scanComplete: false,
         requiredUnits: selection.requiredEntryIds.length,
         reusedUnits: selection.reusedUnits,
+        skippedUnits: eligibility.skippedUnits,
         succeededUnits: result.success,
         failedUnits: result.failed,
       },
@@ -413,6 +433,7 @@ async function handleEntryJob(
       scanComplete: false,
       requiredUnits: selection.requiredEntryIds.length,
       reusedUnits: selection.reusedUnits,
+      skippedUnits: eligibility.skippedUnits,
       succeededUnits: result.success,
       failedUnits: result.failed,
     };
@@ -455,6 +476,7 @@ async function handleEntryJob(
       scanComplete,
       requiredUnits: selection.requiredEntryIds.length,
       reusedUnits: selection.reusedUnits,
+      skippedUnits: eligibility.skippedUnits,
       succeededUnits: result.success,
       failedUnits: result.failed,
     },
@@ -729,6 +751,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
               requiredUnits: scoped.value.requiredUnits,
               succeededUnits: scoped.value.succeededUnits,
               reusedUnits: scoped.value.reusedUnits,
+              skippedUnits: scoped.value.skippedUnits,
             },
           });
         }
