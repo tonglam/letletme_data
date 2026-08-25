@@ -6,6 +6,7 @@ import {
   datasetPublicationItemsInOps,
   datasetPublicationsInOps,
   dataPublicationOutboxInOps,
+  eventsInFpl,
   syncItemsInOps,
   syncRunsInOps,
 } from '../db/schemas/index.schema';
@@ -1106,6 +1107,61 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         return null;
       }
       return manifest;
+    },
+
+    findActiveLivePublicationCheckpoint: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<{
+      publicationId: string | null;
+      revision: number | null;
+      manifest: DataPublicationManifest | null;
+      finalizedAt: Date | null;
+    } | null> => {
+      const db = await getDbInstance();
+      // Keep the immutable event checkpoint and its active publication in one
+      // PostgreSQL statement snapshot. Separate reads can straddle a
+      // concurrent finalization commit and manufacture a false mismatch.
+      const rows = await db
+        .select({
+          publicationId: datasetPublicationsInOps.publicationId,
+          revision: datasetPublicationsInOps.revision,
+          manifest: datasetPublicationsInOps.manifest,
+          finalizedAt: eventsInFpl.liveSnapshotFinalizedAt,
+        })
+        .from(eventsInFpl)
+        .leftJoin(
+          datasetPublicationsInOps,
+          and(
+            publicationScope('fpl:live', season, eventId),
+            eq(datasetPublicationsInOps.status, 'active'),
+          ),
+        )
+        .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)))
+        .limit(1);
+      const row = rows[0];
+      if (!row) return null;
+
+      const parsed = row.manifest
+        ? parseDataPublicationManifest(
+            typeof row.manifest === 'string' ? row.manifest : JSON.stringify(row.manifest),
+          )
+        : null;
+      const manifest =
+        parsed &&
+        parsed.dataset === 'fpl:live' &&
+        parsed.seasonCode === season.seasonCode &&
+        parsed.eventId === eventId &&
+        parsed.publicationId === row.publicationId &&
+        parsed.revision === row.revision
+          ? parsed
+          : null;
+      return {
+        publicationId: row.publicationId,
+        revision: row.revision,
+        manifest,
+        finalizedAt: row.finalizedAt,
+      };
     },
 
     findActiveLivePublicationEvidence,

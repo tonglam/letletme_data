@@ -6,7 +6,9 @@ import {
 } from '../../src/domain/live-snapshot';
 import {
   buildCurrentSeasonPlayerTeamMap,
+  livePublicationMatchesFinalizedCheckpoint,
   prepareLiveSnapshot,
+  shouldAdvanceLivePublication,
   type LiveSnapshotReferenceData,
 } from '../../src/services/live-snapshot.service';
 import type { RawFPLFixture } from '../../src/types';
@@ -62,6 +64,35 @@ function referenceData(): LiveSnapshotReferenceData {
 }
 
 describe('live snapshot preparation', () => {
+  test('requires a finalized publication to bind the exact immutable checkpoint', () => {
+    const finalizedAt = new Date('2026-08-25T16:08:07.277Z');
+
+    expect(livePublicationMatchesFinalizedCheckpoint(null, null)).toBe(true);
+    expect(
+      livePublicationMatchesFinalizedCheckpoint(
+        { sourceCheckedAt: finalizedAt.toISOString() },
+        finalizedAt,
+      ),
+    ).toBe(true);
+    expect(
+      livePublicationMatchesFinalizedCheckpoint(
+        { sourceCheckedAt: '2026-08-25T08:09:03.469Z' },
+        finalizedAt,
+      ),
+    ).toBe(false);
+    expect(
+      livePublicationMatchesFinalizedCheckpoint({ sourceCheckedAt: 'invalid' }, finalizedAt),
+    ).toBe(false);
+    expect(livePublicationMatchesFinalizedCheckpoint(null, finalizedAt)).toBe(false);
+  });
+
+  test('advances the publication for finalization even when content is unchanged', () => {
+    expect(shouldAdvanceLivePublication(false, undefined)).toBe(false);
+    expect(shouldAdvanceLivePublication(false, false)).toBe(false);
+    expect(shouldAdvanceLivePublication(true, false)).toBe(true);
+    expect(shouldAdvanceLivePublication(false, true)).toBe(true);
+  });
+
   test('builds identity only from one complete explicit-season roster', () => {
     expect(
       buildCurrentSeasonPlayerTeamMap(
