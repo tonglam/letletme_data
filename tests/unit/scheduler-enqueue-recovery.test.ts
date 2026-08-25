@@ -4,6 +4,7 @@ import type { SchedulerObligation } from '../../src/repositories/scheduler-oblig
 import {
   decideSchedulerEnqueueRecovery,
   reconcileExpiredSchedulerEnqueueClaims,
+  schedulerRecoveryFallbackViewComplete,
   schedulerRecoveryBullJobIds,
   type SchedulerQueueJobSnapshot,
 } from '../../src/scheduler/scheduler-enqueue-recovery';
@@ -49,6 +50,12 @@ function queueJob(
 }
 
 describe('scheduler enqueue recovery', () => {
+  test('accepts an exactly full bounded recovery page', () => {
+    expect(schedulerRecoveryFallbackViewComplete(199)).toBe(true);
+    expect(schedulerRecoveryFallbackViewComplete(200)).toBe(true);
+    expect(schedulerRecoveryFallbackViewComplete(201)).toBe(false);
+  });
+
   test('uses confirmed Bull ids and deterministic ids for unconfirmed generations', () => {
     expect(
       schedulerRecoveryBullJobIds({ ...obligation('unconfirmed', 2), scopeKey: 'global' }),
@@ -136,6 +143,7 @@ describe('scheduler enqueue recovery', () => {
       running: 1,
       retained: 1,
       succeeded: 1,
+      skipped: 0,
       retried: 2,
       unchanged: 0,
       errors: 0,
@@ -188,11 +196,116 @@ describe('scheduler enqueue recovery', () => {
       running: 0,
       retained: 0,
       succeeded: 1,
+      skipped: 0,
       retried: 0,
       unchanged: 0,
       errors: 0,
     });
     expect(completed).toEqual(['confirmed-complete']);
+  });
+
+  test('trusts two missing exact-id observations for a root job in a busy queue', async () => {
+    let inspections = 0;
+    const failed: string[] = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [{ name: 'recoverable-job', queueName: 'recoverable-queue' }],
+      dependencies: {
+        listCandidates: async () => [obligation('busy-root', 8)],
+        inspectJobs: async () => {
+          inspections += 1;
+          return {
+            jobs: [],
+            missingEvidenceVerified: false,
+            directLookupMissingObligationIds: ['busy-root'],
+          };
+        },
+        confirm: async () => false,
+        start: async () => false,
+        renew: async () => false,
+        complete: async () => false,
+        fail: async (input) => {
+          failed.push(input.obligationId);
+          return true;
+        },
+      },
+    });
+
+    expect(inspections).toBe(2);
+    expect(result.retried).toBe(1);
+    expect(result.errors).toBe(0);
+    expect(failed).toEqual(['busy-root']);
+  });
+
+  test('does not use root-id absence to prove a durable chain is drained', async () => {
+    let failCalls = 0;
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [
+        {
+          name: 'entry-results',
+          queueName: 'entry-sync',
+          recoveryCompletionMode: 'entry-scan-finalizer',
+        },
+      ],
+      dependencies: {
+        listCandidates: async () => [obligation('busy-chain', 9, 'entry-results')],
+        inspectJobs: async () => ({
+          jobs: [],
+          missingEvidenceVerified: false,
+          directLookupMissingObligationIds: ['busy-chain'],
+        }),
+        confirm: async () => false,
+        start: async () => false,
+        renew: async () => false,
+        complete: async () => false,
+        fail: async () => {
+          failCalls += 1;
+          return true;
+        },
+      },
+    });
+
+    expect(result.retried).toBe(0);
+    expect(result.errors).toBe(1);
+    expect(failCalls).toBe(0);
+  });
+
+  test('preserves the price-change no-op terminal status during recovery', async () => {
+    const completions: Array<{ status: string; evidence?: Record<string, unknown> }> = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [{ name: 'price-change-predictions', queueName: 'data-sync' }],
+      dependencies: {
+        listCandidates: async () => [
+          obligation('price-change-noop', 3, 'price-change-predictions'),
+        ],
+        inspectJobs: async () => ({
+          jobs: [
+            {
+              ...queueJob('price-change-noop', 3, 'completed'),
+              name: 'price-change-predictions',
+              returnValue: { outcome: 'noop' },
+            },
+          ],
+          missingEvidenceVerified: true,
+        }),
+        confirm: async () => true,
+        start: async () => false,
+        renew: async () => false,
+        complete: async (input) => {
+          completions.push({ status: input.status, evidence: input.evidence });
+          return true;
+        },
+        fail: async () => false,
+      },
+    });
+
+    expect(result.succeeded).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(completions).toEqual([
+      {
+        status: 'skipped',
+        evidence: expect.objectContaining({ reason: 'official_fields_not_open' }),
+      },
+    ]);
   });
 
   test('retains a completed entry root while its continuation is still pending', async () => {
@@ -414,6 +527,7 @@ describe('scheduler enqueue recovery', () => {
       running: 0,
       retained: 0,
       succeeded: 0,
+      skipped: 0,
       retried: 0,
       unchanged: 0,
       errors: 1,

@@ -44,6 +44,8 @@ export type SchedulerQueueJobSnapshot = Readonly<{
 export type SchedulerQueueInspection = Readonly<{
   jobs: readonly SchedulerQueueJobSnapshot[];
   missingEvidenceVerified: boolean;
+  /** Obligations whose exact candidate Bull ids were all absent in this observation. */
+  directLookupMissingObligationIds?: readonly string[];
 }>;
 
 export type SchedulerEnqueueRecoveryDecision =
@@ -58,6 +60,7 @@ export type SchedulerEnqueueRecoveryResult = Readonly<{
   running: number;
   retained: number;
   succeeded: number;
+  skipped: number;
   retried: number;
   unchanged: number;
   errors: number;
@@ -136,9 +139,11 @@ async function inspectSchedulerQueueJobs(
   });
   try {
     const lookupIds = [...new Set(candidates.flatMap(schedulerRecoveryBullJobIds))];
-    const directJobs = (await Promise.all(lookupIds.map((jobId) => queue.getJob(jobId)))).filter(
+    const directLookups = await Promise.all(lookupIds.map((jobId) => queue.getJob(jobId)));
+    const directJobs = directLookups.filter(
       (job): job is Job<Record<string, unknown>> => job !== undefined,
     );
+    const foundDirectIds = new Set(directJobs.map((job) => String(job.id)));
     // A confirmed Bull id identifies only the scheduler root. Durable chains
     // carry the same generation into continuation/finalizer jobs, so always
     // take one bounded queue view as well as the direct root lookup.
@@ -154,11 +159,20 @@ async function inspectSchedulerQueueJobs(
       jobs: await snapshotSchedulerQueueJobs([...uniqueJobs.values()]),
       // BullMQ applies the range per state. Prove the whole multi-state queue
       // fits inside one page before treating a random-id job as absent.
-      missingEvidenceVerified: fallbackJobCount < RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE,
+      missingEvidenceVerified: schedulerRecoveryFallbackViewComplete(fallbackJobCount),
+      directLookupMissingObligationIds: candidates
+        .filter((candidate) =>
+          schedulerRecoveryBullJobIds(candidate).every((jobId) => !foundDirectIds.has(jobId)),
+        )
+        .map((candidate) => candidate.obligationId),
     };
   } finally {
     await queue.close();
   }
+}
+
+export function schedulerRecoveryFallbackViewComplete(jobCount: number): boolean {
+  return jobCount <= RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE;
 }
 
 export function matchesSchedulerObligationGeneration(
@@ -200,6 +214,22 @@ function schedulerRecoveryCompletionJob(
     );
   }
   return completed.find((job) => job.name.endsWith('-finalize')) ?? null;
+}
+
+function schedulerRecoveryTerminalOutcome(
+  definition: Pick<ScheduledJobDefinition, 'name'>,
+  completionJob: SchedulerQueueJobSnapshot,
+): Readonly<{
+  status: 'succeeded' | 'skipped';
+  evidence: Readonly<Record<string, unknown>>;
+}> {
+  const skippedPriceChange =
+    definition.name === 'price-change-predictions' &&
+    recordData(completionJob.returnValue).outcome === 'noop';
+  return {
+    status: skippedPriceChange ? 'skipped' : 'succeeded',
+    evidence: skippedPriceChange ? { reason: 'official_fields_not_open' } : {},
+  };
 }
 
 function recoveryCompletionMode(
@@ -259,6 +289,7 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
     running: 0,
     retained: 0,
     succeeded: 0,
+    skipped: 0,
     retried: 0,
     unchanged: 0,
     errors: 0,
@@ -278,10 +309,12 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
   for (const [queueName, queueCandidates] of grouped.byQueue) {
     let jobs: readonly SchedulerQueueJobSnapshot[];
     let missingEvidenceUnverified = false;
+    let directLookupMissingObligationIds = new Set<string>();
     try {
       const inspection = await dependencies.inspectJobs(queueName, queueCandidates);
       jobs = inspection.jobs;
       missingEvidenceUnverified = !inspection.missingEvidenceVerified;
+      directLookupMissingObligationIds = new Set(inspection.directLookupMissingObligationIds ?? []);
     } catch (error) {
       counters.errors += queueCandidates.length;
       logError('Scheduler enqueue recovery could not inspect BullMQ', error, {
@@ -319,8 +352,17 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
         );
         jobs = [...merged.values()];
         missingEvidenceUnverified ||= !secondInspection.missingEvidenceVerified;
+        const secondDirectMissing = new Set(
+          secondInspection.directLookupMissingObligationIds ?? [],
+        );
+        directLookupMissingObligationIds = new Set(
+          [...directLookupMissingObligationIds].filter((obligationId) =>
+            secondDirectMissing.has(obligationId),
+          ),
+        );
       } catch (error) {
         missingEvidenceUnverified = true;
+        directLookupMissingObligationIds.clear();
         logError('Scheduler enqueue recovery could not verify missing BullMQ jobs', error, {
           queueName,
         });
@@ -337,7 +379,10 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
       const matchingJobs = jobs.filter((job) =>
         matchesSchedulerObligationGeneration(job, obligation),
       );
-      if (matchingJobs.length === 0 && missingEvidenceUnverified) {
+      const rootAbsenceVerified =
+        completionMode === 'root-job' &&
+        directLookupMissingObligationIds.has(obligation.obligationId);
+      if (matchingJobs.length === 0 && missingEvidenceUnverified && !rootAbsenceVerified) {
         counters.errors += 1;
         continue;
       }
@@ -412,10 +457,14 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
             else counters.unchanged += 1;
             continue;
           }
+          const terminalOutcome = schedulerRecoveryTerminalOutcome(
+            definition,
+            semanticCompletionJob,
+          );
           const updated = await dependencies.complete({
             obligationId: obligation.obligationId,
             generation: obligation.generation,
-            status: 'succeeded',
+            status: terminalOutcome.status,
             evidence: {
               queue: queueName,
               reason: 'recovered-expired-bull-generation',
@@ -423,9 +472,11 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
               semanticBullJobId: semanticCompletionJob.id,
               semanticBullJobName: semanticCompletionJob.name,
               bullJobIds: matchingJobs.slice(0, 20).map((job) => job.id),
+              ...terminalOutcome.evidence,
             },
           });
-          if (updated) counters.succeeded += 1;
+          if (updated && terminalOutcome.status === 'skipped') counters.skipped += 1;
+          else if (updated) counters.succeeded += 1;
           else counters.unchanged += 1;
           continue;
         }
