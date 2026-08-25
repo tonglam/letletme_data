@@ -339,6 +339,7 @@ async function claimLiveSnapshotFence(
       and(
         eq(eventsInFpl.seasonId, season.seasonId),
         eq(eventsInFpl.eventId, eventId),
+        isNull(eventsInFpl.liveSnapshotFinalizedAt),
         or(
           isNull(eventsInFpl.liveSnapshotCheckedAt),
           lte(eventsInFpl.liveSnapshotCheckedAt, checkedAt),
@@ -351,12 +352,23 @@ async function claimLiveSnapshotFence(
   }
 
   const current = await transaction
-    .select({ checkedAt: eventsInFpl.liveSnapshotCheckedAt })
+    .select({
+      checkedAt: eventsInFpl.liveSnapshotCheckedAt,
+      finalizedAt: eventsInFpl.liveSnapshotFinalizedAt,
+    })
     .from(eventsInFpl)
     .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)))
     .limit(1);
   if (!current[0]) {
     throw new DatabaseError(`Cannot persist live data for missing event ${eventId}`);
+  }
+  if (current[0].finalizedAt) {
+    logInfo('Live snapshot retained the immutable finalized checkpoint', {
+      season: season.seasonCode,
+      eventId,
+      finalizedAt: current[0].finalizedAt.toISOString(),
+    });
+    return { accepted: false, winnerCheckedAt: current[0].finalizedAt };
   }
   const winnerCheckedAt = current[0].checkedAt;
   if (!winnerCheckedAt || winnerCheckedAt.getTime() <= checkedAt.getTime()) {
