@@ -97,6 +97,43 @@ describe('FPL raw source artifact Storage client', () => {
     expect(object.declaredByteSize).toBe(object.bytes.byteLength);
   });
 
+  test('treats an absent Content-Length as unknown', async () => {
+    const fetchImpl = mock(
+      async () =>
+        new Response(new TextEncoder().encode('{"ok":true}'), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    ) as FplSourceArtifactStorageFetch;
+
+    const object = await createFplSourceArtifactStorage(config, fetchImpl).download(objectKey);
+
+    expect(object.bytes.byteLength).toBeGreaterThan(0);
+    expect(object.declaredByteSize).toBeNull();
+  });
+
+  test('keeps abort handling active while a response body is streaming', async () => {
+    const fetchImpl = mock(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start() {
+              // Deliberately never close the body.
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    ) as FplSourceArtifactStorageFetch;
+    const controller = new AbortController();
+    const download = createFplSourceArtifactStorage(config, fetchImpl).download(
+      objectKey,
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(download).rejects.toMatchObject({ failureClass: 'STORAGE_BODY_ABORTED' });
+  });
+
   test('rejects a public or incorrectly configured bucket', async () => {
     let lookup = 0;
     const fetchImpl = mock(async (_input: string | URL | Request, init?: RequestInit) => {

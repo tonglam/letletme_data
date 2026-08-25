@@ -413,6 +413,9 @@ export async function triggerJob(name: string, input?: unknown): Promise<JobTrig
   if (name === 'player-prices') {
     requirePlayerPricesChangeDate(input);
   }
+  if (name === 'player-values-sync' || name === 'market-daily') {
+    readMarketSourceDay(input);
+  }
   const jobMap = buildJobMap(input);
   const job = jobMap[name];
   if (!job) {

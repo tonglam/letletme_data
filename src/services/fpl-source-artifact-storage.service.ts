@@ -98,28 +98,78 @@ async function fetchWithTimeout(
   }
 }
 
-async function readBoundedBody(response: Response, limit = MAX_OBJECT_BYTES): Promise<Uint8Array> {
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > limit) {
+async function readBoundedBody(
+  response: Response,
+  limit = MAX_OBJECT_BYTES,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const declaredHeader = response.headers.get('content-length');
+  const declared = declaredHeader === null ? null : Number(declaredHeader);
+  if (declared !== null && Number.isFinite(declared) && declared > limit) {
     throw new FplSourceArtifactStorageError(
       'STORAGE_OBJECT_TOO_LARGE',
       'FPL raw snapshot Storage object exceeds the byte limit',
       response.status,
     );
   }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > limit) {
-    throw new FplSourceArtifactStorageError(
-      'STORAGE_OBJECT_TOO_LARGE',
-      'FPL raw snapshot Storage object exceeds the byte limit',
-      response.status,
-    );
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
+
+  let rejectStopped: (error: FplSourceArtifactStorageError) => void = () => undefined;
+  const stopped = new Promise<never>((_resolve, reject) => {
+    rejectStopped = reject;
+  });
+  let stopping = false;
+  const stop = (failureClass: string, message: string) => {
+    if (stopping) return;
+    stopping = true;
+    void reader.cancel().catch(() => undefined);
+    rejectStopped(new FplSourceArtifactStorageError(failureClass, message, response.status));
+  };
+  const timeout = setTimeout(
+    () => stop('STORAGE_BODY_TIMEOUT', 'FPL raw snapshot Storage response body timed out'),
+    STORAGE_TIMEOUT_MS,
+  );
+  const onAbort = () =>
+    stop('STORAGE_BODY_ABORTED', 'FPL raw snapshot Storage response body aborted');
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  try {
+    while (true) {
+      const { done, value } = await Promise.race([stopped, reader.read()]);
+      if (done) break;
+      if (!value) continue;
+      byteLength += value.byteLength;
+      if (byteLength > limit) {
+        void reader.cancel().catch(() => undefined);
+        throw new FplSourceArtifactStorageError(
+          'STORAGE_OBJECT_TOO_LARGE',
+          'FPL raw snapshot Storage object exceeds the byte limit',
+          response.status,
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', onAbort);
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   return bytes;
 }
 
-async function readErrorText(response: Response): Promise<string> {
-  const bytes = await readBoundedBody(response, 4_096).catch(() => new Uint8Array());
+async function readErrorText(response: Response, signal?: AbortSignal): Promise<string> {
+  const bytes = await readBoundedBody(response, 4_096, signal).catch(() => new Uint8Array());
   return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
 }
 
@@ -297,18 +347,20 @@ export function createFplSourceArtifactStorage(
       );
       if (!response.ok) {
         throw new FplSourceArtifactStorageError(
-          isMissingResponse(response.status, await readErrorText(response))
+          isMissingResponse(response.status, await readErrorText(response, signal))
             ? 'STORAGE_OBJECT_MISSING'
             : 'STORAGE_DOWNLOAD',
           'FPL raw snapshot authenticated download failed',
           response.status,
         );
       }
-      const declared = Number(response.headers.get('content-length'));
+      const declaredHeader = response.headers.get('content-length');
+      const declared = declaredHeader === null ? null : Number(declaredHeader);
       return {
-        bytes: await readBoundedBody(response),
+        bytes: await readBoundedBody(response, MAX_OBJECT_BYTES, signal),
         contentType: response.headers.get('content-type') ?? '',
-        declaredByteSize: Number.isSafeInteger(declared) && declared >= 0 ? declared : null,
+        declaredByteSize:
+          declared !== null && Number.isSafeInteger(declared) && declared >= 0 ? declared : null,
       };
     },
 
@@ -320,7 +372,7 @@ export function createFplSourceArtifactStorage(
         { method: 'DELETE', headers, signal },
       );
       if (response.ok) return 'deleted';
-      const body = await readErrorText(response);
+      const body = await readErrorText(response, signal);
       if (isMissingResponse(response.status, body)) return 'missing';
       throw new FplSourceArtifactStorageError(
         'STORAGE_DELETE',

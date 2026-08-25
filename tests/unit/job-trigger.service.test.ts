@@ -60,4 +60,13 @@ describe('job-trigger service', () => {
       'requires a changeDate in YYYYMMDD format',
     );
   });
+
+  test('validates market source-day input before reading platform state', async () => {
+    for (const name of ['market-daily', 'player-values-sync']) {
+      await expect(triggerJob(name, { sourceDay: '2026-08-25' })).rejects.toMatchObject({
+        name: 'ValidationError',
+        code: 'MARKET_SOURCE_DAY_INVALID',
+      });
+    }
+  });
 });
