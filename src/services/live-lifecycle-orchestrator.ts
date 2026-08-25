@@ -111,6 +111,13 @@ const picksProbeStates = new Map<string, PicksProbeState>();
 const daySettlingStates = new Map<string, { revision: number | null; unchangedSince: number }>();
 const picksFanoutClaims = new Map<string, Map<number, number>>();
 
+export function resolveLivePicksRefreshDeduplicationId(
+  seasonCode: string,
+  eventId: number,
+): string {
+  return `live-picks-refresh:${seasonCode}:event-${eventId}`;
+}
+
 const firstKickoff = (fixtures: readonly Fixture[]): number | null => {
   const values = fixtures
     .map((fixture) => fixture.kickoffTime?.getTime() ?? Number.NaN)
@@ -397,6 +404,11 @@ export async function runPicksProbeAndSync(
       // Entry-list cron IDs are otherwise content-stable and BullMQ would
       // return the first completed job forever, defeating periodic refresh.
       jobId: `entry-picks-${season.seasonCode}-live-refresh-${eventId}-${nowMs}`,
+      // In-memory fan-out claims are lost on scheduler restart. Keep the
+      // refresh interval in Redis as well so a restart/rollback cannot enqueue
+      // another 1,700+ entry sweep for the same event window.
+      deduplicationId: resolveLivePicksRefreshDeduplicationId(season.seasonCode, eventId),
+      deduplicationTtlMs: PICKS_REFRESH_INTERVAL_MS,
     });
     for (const entryId of remaining) fanoutClaims.set(entryId, nowMs);
   }

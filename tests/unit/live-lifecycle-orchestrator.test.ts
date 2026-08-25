@@ -6,6 +6,7 @@ import {
   findPicksRefreshEntryIds,
   PICKS_FIRST_PROBE_OFFSET_MS,
   PICKS_REFRESH_INTERVAL_MS,
+  resolveLivePicksRefreshDeduplicationId,
   resolveLiveLifecycleDelay,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
@@ -227,5 +228,11 @@ describe('live lifecycle decisions', () => {
     ]);
 
     expect(findPicksRefreshEntryIds([1, 2, 3], claims, now)).toEqual([2, 3]);
+  });
+
+  test('uses one restart-durable picks fan-out identity per season and event', () => {
+    expect(resolveLivePicksRefreshDeduplicationId('2627', 1)).toBe(
+      'live-picks-refresh:2627:event-1',
+    );
   });
 });

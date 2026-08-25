@@ -36,6 +36,10 @@ mock.module('../../src/services/events.service', () => ({
   getNextEvent: async () => ({ id: currentEventId + 1 }),
 }));
 
+mock.module('../../src/services/queue-run-tracker', () => ({
+  trackQueueRunJob: async () => undefined,
+}));
+
 const { logger } = await import('../../src/utils/logger');
 const { enqueueEntryPicksSyncJob, retainEntrySyncChainOptions } = await import(
   '../../src/jobs/entry-sync-enqueue'
@@ -265,6 +269,21 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(addCalls[0].opts.jobId).toBe('entry-onboarding-attempt-entry-picks-10');
     expect(addCalls[0].opts.deduplication).toBeUndefined();
     expect(addCalls[1].opts.deduplication).toBeUndefined();
+  });
+
+  test('applies an explicit TTL deduplication key to restart-sensitive cron fan-out', async () => {
+    await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
+      entryIds: [10, 20],
+      eventId: 20,
+      jobId: 'entry-picks-2627-live-refresh-20-123',
+      deduplicationId: 'live-picks-refresh:2627:event-20',
+      deduplicationTtlMs: 600_000,
+    });
+
+    expect(addCalls[0].opts.deduplication).toEqual({
+      id: 'live-picks-refresh:2627:event-20',
+      ttl: 600_000,
+    });
   });
 
   test('retains failure evidence through a deterministic cron continuation', async () => {
