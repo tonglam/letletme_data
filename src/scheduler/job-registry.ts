@@ -43,7 +43,10 @@ import {
   coreSnapshotRefreshReason,
 } from '../domain/core-snapshot-refresh';
 import { resolvePlayerStatsActiveCadence } from '../domain/job-schedules';
-import { getPostMatchResultsSlot } from '../domain/post-match-results';
+import {
+  getPostMatchResultsCheckpoint,
+  getPostMatchResultsSlot,
+} from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
@@ -408,19 +411,19 @@ export async function resolvePostMatchResultPlans(
   const provisional = await Promise.all(
     unsettledEvents.map(async (event): Promise<SchedulerObligationPlan | null> => {
       const fixtures = await loadFixtures(context.season, event.id);
-      const resultSlot = getPostMatchResultsSlot(
+      const checkpoint = getPostMatchResultsCheckpoint(
         { dataChecked: event.dataChecked === true },
         fixtures,
         context.now,
       );
-      if (!resultSlot) return null;
+      if (!checkpoint) return null;
       return {
         scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-        periodKey: `event-${event.id}-${resultSlot}`,
-        dueAt: context.now,
+        periodKey: `event-${event.id}-${checkpoint.slot}`,
+        dueAt: checkpoint.dueAt,
         eventId: event.id,
         source: 'reconcile',
-        evidence: { resultSlot },
+        evidence: { resultSlot: checkpoint.slot },
       };
     }),
   );

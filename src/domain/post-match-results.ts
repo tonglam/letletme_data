@@ -5,6 +5,11 @@ const RESULT_SLOT_MS = 60 * 60 * 1000;
 
 export const POST_MATCH_RESULTS_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+export type PostMatchResultsCheckpoint = Readonly<{
+  slot: string;
+  dueAt: Date;
+}>;
+
 /**
  * Resolve the bounded, idempotent post-match result slot for an event.
  *
@@ -13,11 +18,11 @@ export const POST_MATCH_RESULTS_WINDOW_MS = 24 * 60 * 60 * 1000;
  * hourly so later live-data consolidation can publish a corrected snapshot.
  * Callers use the slot in the BullMQ job ID.
  */
-export function getPostMatchResultsSlot(
+export function getPostMatchResultsCheckpoint(
   event: Pick<Event, 'dataChecked'>,
   fixtures: readonly Fixture[],
   date = new Date(),
-): string | null {
+): PostMatchResultsCheckpoint | null {
   const kickoffTimes = fixtures
     .map((fixture) => fixture.kickoffTime?.getTime())
     .filter(
@@ -40,9 +45,17 @@ export function getPostMatchResultsSlot(
     return null;
   }
 
-  if (event.dataChecked) {
-    return `final-${Math.floor(elapsedMs / RESULT_SLOT_MS)}`;
-  }
+  const slotIndex = Math.floor(elapsedMs / RESULT_SLOT_MS);
+  return {
+    slot: `${event.dataChecked ? 'final' : 'provisional'}-${slotIndex}`,
+    dueAt: new Date(matchEndMs + slotIndex * RESULT_SLOT_MS),
+  };
+}
 
-  return `provisional-${Math.floor(elapsedMs / RESULT_SLOT_MS)}`;
+export function getPostMatchResultsSlot(
+  event: Pick<Event, 'dataChecked'>,
+  fixtures: readonly Fixture[],
+  date = new Date(),
+): string | null {
+  return getPostMatchResultsCheckpoint(event, fixtures, date)?.slot ?? null;
 }

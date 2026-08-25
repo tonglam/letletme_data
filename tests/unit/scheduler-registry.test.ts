@@ -511,6 +511,7 @@ describe('standalone scheduler registry', () => {
     ).toEqual([
       expect.objectContaining({
         periodKey: 'event-1-provisional-0',
+        dueAt: new Date('2026-08-22T20:00:00.000Z'),
         eventId: 1,
         source: 'reconcile',
       }),

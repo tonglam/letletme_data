@@ -18,6 +18,7 @@ import {
   type SchedulerContext,
   type SchedulerObligationPlan,
 } from './job-registry';
+import { latestActiveSchedulerPlansByScope } from './plan-coalescing';
 import { logError, logInfo } from '../utils/logger';
 import {
   reconcileExpiredSchedulerEnqueueClaims,
@@ -43,6 +44,11 @@ const UNDERSTAT_LATEST_AUTHORITATIVE_JOBS = [
 const UNDERSTAT_SCHEDULER_JOB_NAMES = [
   ...UNDERSTAT_LATEST_AUTHORITATIVE_JOBS,
   'understat-orphan-reconciler',
+] as const;
+const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
+  'entry-results',
+  'league-event-results',
+  'tournament-event-results',
 ] as const;
 const observedPlanKeys = new Map<string, true>();
 
@@ -182,6 +188,12 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     string,
     { periodKey: string; scopeKey: string; dueAt: Date }
   >();
+  const latestPostMatchPeriods: Array<{
+    jobName: (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number];
+    periodKey: string;
+    scopeKey: string;
+    dueAt: Date;
+  }> = [];
   for (const definition of schedulerRegistry) {
     const resolution = await resolveSchedulerDefinition(definition, context);
     if (!resolution.ok) {
@@ -221,6 +233,20 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
           periodKey: latestPlan.periodKey,
           scopeKey: latestPlan.scopeKey,
           dueAt: latestPlan.dueAt,
+        });
+      }
+    }
+    if (
+      POST_MATCH_LATEST_AUTHORITATIVE_JOBS.includes(
+        definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
+      )
+    ) {
+      for (const plan of latestActiveSchedulerPlansByScope(resolution.plans)) {
+        latestPostMatchPeriods.push({
+          jobName: definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
+          periodKey: plan.periodKey,
+          scopeKey: plan.scopeKey,
+          dueAt: plan.dueAt,
         });
       }
     }
@@ -300,6 +326,27 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       failed += 1;
       logError('Price-change stale obligation coalescing failed', error, {
         jobName,
+        scopeKey: latest.scopeKey,
+        periodKey: latest.periodKey,
+      });
+    }
+  }
+
+  for (const latest of latestPostMatchPeriods) {
+    try {
+      await supersedeSchedulerObligationsByDueAt({
+        jobName: latest.jobName,
+        scopeKey: latest.scopeKey,
+        beforeDueAt: latest.dueAt,
+        evidence: {
+          checkpoint: 'post-match-results',
+          supersededByPeriodKey: latest.periodKey,
+        },
+      });
+    } catch (error) {
+      failed += 1;
+      logError('Post-match stale obligation coalescing failed', error, {
+        jobName: latest.jobName,
         scopeKey: latest.scopeKey,
         periodKey: latest.periodKey,
       });
