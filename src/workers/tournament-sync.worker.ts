@@ -485,6 +485,19 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             return result;
           }
 
+          // This stage fetches one mutable FPL transfer history per tournament
+          // entry. Keep those requests outside the event-wide mutation
+          // transaction; the service acquires the same event scopes only for
+          // each short canonical write and the final trend publication.
+          if (job.name === TOURNAMENT_JOBS.TRANSFERS_PRE) {
+            const freshAfter = await resolveJobFreshAfter(job);
+            return syncTournamentEventTransfersPre(season, eventId, {
+              freshAfter,
+              perEntryMutationScopes: true,
+              mutationJobId: String(job.id),
+            });
+          }
+
           const runMutation = async (): Promise<ScopedTournamentJobResult> => {
             switch (job.name) {
               case TOURNAMENT_JOBS.POINTS_RACE: {
@@ -604,9 +617,6 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
 
               case TOURNAMENT_JOBS.EVENT_PICKS:
                 return { value: await syncTournamentEventPicks(season, eventId) };
-
-              case TOURNAMENT_JOBS.TRANSFERS_PRE:
-                return { value: await syncTournamentEventTransfersPre(season, eventId) };
 
               case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
                 return {

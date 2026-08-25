@@ -54,6 +54,7 @@ import {
   type DataSyncAttemptContext,
 } from '../utils/data-sync-attempt';
 import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
+import { latestFreshnessTimestamp } from '../domain/freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
@@ -618,12 +619,22 @@ export function createEntrySyncWorker(): WorkerRuntime {
                   if (isExplicitEntryRepairRequest(effectiveJobData)) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
-                  const requiredEntryIds =
-                    await entryEventTransfersRepository.findEntryIdsNeedingSync(
+                  const [checkpointGaps, staleSources] = await Promise.all([
+                    entryEventTransfersRepository.findEntryIdsNeedingSync(
                       season,
                       entryIds,
                       targetEventId,
-                    );
+                    ),
+                    effectiveJobData.freshAfter
+                      ? entryEventTransfersRepository.findEntryIdsNeedingSourceRefresh(
+                          season,
+                          entryIds,
+                          effectiveJobData.freshAfter,
+                        )
+                      : Promise.resolve([]),
+                  ]);
+                  const required = new Set([...checkpointGaps, ...staleSources]);
+                  const requiredEntryIds = entryIds.filter((entryId) => required.has(entryId));
                   return {
                     requiredEntryIds,
                     reusedUnits: entryIds.length - requiredEntryIds.length,
@@ -655,16 +666,24 @@ export function createEntrySyncWorker(): WorkerRuntime {
                   if (isExplicitEntryRepairRequest(effectiveJobData)) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
-                  // Active-GW values can still change. Reuse the dedicated
-                  // rich-result checkpoint only after FPL has finalized the GW.
+                  // A coordinated post-match lane supplies one shared source
+                  // boundary. The canonical entry scan refreshes rows older
+                  // than that boundary; downstream tournament/league/My FPL
+                  // stages reuse those exact rows instead of starting a new
+                  // full provider fan-out from their own wall clock.
                   const event = await eventRepository.findById(season, targetEventId);
                   const finalizationDate = resolveRichResultFreshnessCutoff(event);
-                  if (!finalizationDate) {
+                  const sharedFreshAfter = effectiveJobData.freshAfter;
+                  if (!finalizationDate && !sharedFreshAfter) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
-                  const freshAfter =
-                    (await eventRepository.findDataCheckedAtExact(season, targetEventId)) ??
-                    finalizationDate;
+                  const finalizationCutoff = finalizationDate
+                    ? ((await eventRepository.findDataCheckedAtExact(season, targetEventId)) ??
+                      finalizationDate)
+                    : null;
+                  const freshAfter = sharedFreshAfter
+                    ? latestFreshnessTimestamp(sharedFreshAfter, finalizationCutoff)
+                    : finalizationCutoff!;
                   const requiredEntryIds =
                     await entryEventResultsRepository.findEntryIdsNeedingRichSync(
                       season,

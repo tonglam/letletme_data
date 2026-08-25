@@ -19,6 +19,7 @@ export type LeagueSyncEnqueueOptions = {
   runId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  freshAfter?: string;
 };
 
 async function enqueueLeagueSyncJob(
@@ -43,6 +44,7 @@ async function enqueueLeagueSyncJob(
       ...(options.obligationGeneration === undefined
         ? {}
         : { obligationGeneration: options.obligationGeneration }),
+      ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.

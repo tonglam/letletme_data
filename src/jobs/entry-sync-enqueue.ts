@@ -28,6 +28,8 @@ export interface EntrySyncJobOptions {
   runId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  /** Stable source checkpoint shared by a post-match pipeline. */
+  freshAfter?: string;
   /** Stable deduplication key for every table-scan chunk in one trigger lane. */
   queueKey?: string;
   removeOnSettle?: boolean;
@@ -37,12 +39,17 @@ export function retainEntrySyncChainOptions(
   options:
     | Pick<
         EntrySyncJobOptions,
-        'runId' | 'queueKey' | 'removeOnSettle' | 'obligationId' | 'obligationGeneration'
+        | 'runId'
+        | 'queueKey'
+        | 'removeOnSettle'
+        | 'obligationId'
+        | 'obligationGeneration'
+        | 'freshAfter'
       >
     | undefined,
 ): Pick<
   EntrySyncJobOptions,
-  'runId' | 'queueKey' | 'removeOnSettle' | 'obligationId' | 'obligationGeneration'
+  'runId' | 'queueKey' | 'removeOnSettle' | 'obligationId' | 'obligationGeneration' | 'freshAfter'
 > {
   return {
     runId: options?.runId,
@@ -50,6 +57,7 @@ export function retainEntrySyncChainOptions(
     obligationGeneration: options?.obligationGeneration,
     queueKey: options?.queueKey,
     removeOnSettle: options?.removeOnSettle,
+    freshAfter: options?.freshAfter,
   };
 }
 
@@ -179,6 +187,7 @@ async function enqueueEntrySyncJob(
       runId,
       obligationId: options.obligationId,
       obligationGeneration: options.obligationGeneration,
+      freshAfter: options.freshAfter,
       queueKey: tableScanQueueKey,
       removeOnSettle,
     };

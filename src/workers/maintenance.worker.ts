@@ -45,6 +45,7 @@ import {
 } from '../repositories/scheduler-obligations';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
+import { resolveJobFreshAfter } from '../utils/job-freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
@@ -155,6 +156,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           // publication service remains fail-closed, so an upstream 503, a
           // missing row, or a partial sync leaves the previous active revision
           // serving while this job retries in 30 minutes.
+          const freshAfter = await resolveJobFreshAfter(job);
           const attemptKey = `${job.data.runId}-a${job.attemptsMade + 1}`;
           const source = job.data.snapshotKind === 'FINAL' ? 'reconcile' : 'catchup';
           const entryInfoTargetEventId =
@@ -190,6 +192,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             }),
             enqueueEntryResultsSyncJob(season, source, {
               eventId: job.data.eventId,
+              freshAfter,
               jobId: `my-fpl-${attemptKey}-entry-results`,
               runId: attemptKey,
               queueKey: `my-fpl-${attemptKey}-entry-results`,
@@ -197,6 +200,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             }),
             enqueueEntryTransfersSyncJob(season, source, {
               eventId: job.data.eventId,
+              freshAfter,
               jobId: `my-fpl-${attemptKey}-entry-transfers`,
               runId: attemptKey,
               queueKey: `my-fpl-${attemptKey}-entry-transfers`,
@@ -214,6 +218,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
 
           await runQueueRunPhase(attemptKey, [
             enqueueTournamentEventResults(season, job.data.eventId, source, {
+              freshAfter,
               jobId: `my-fpl-${attemptKey}-tournament-results`,
               runId: attemptKey,
             }),
@@ -228,6 +233,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
 
           await runQueueRunPhase(attemptKey, [
             enqueueTournamentTransfersPre(season, job.data.eventId, source, {
+              freshAfter,
               jobId: `my-fpl-${attemptKey}-tournament-transfers`,
               runId: attemptKey,
             }),

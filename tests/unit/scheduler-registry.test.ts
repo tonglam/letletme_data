@@ -12,7 +12,9 @@ import {
 } from '../../src/scheduler/job-registry';
 import {
   isSchedulerDefinitionEnabled,
+  orderSchedulerDefinitionsForClaim,
   resolveSchedulerDefinition,
+  schedulerExecutionLanes,
   schedulerPlanKey,
 } from '../../src/scheduler/scheduler.service';
 import { resolvePlayerStatsActiveCadence } from '../../src/domain/job-schedules';
@@ -51,6 +53,34 @@ describe('standalone scheduler registry', () => {
     expect(modes.get('understat-team-incremental')).toBe('understat-finalizer');
     expect(modes.get('understat-player-incremental')).toBe('understat-finalizer');
     expect(modes.get('core-snapshot')).toBeUndefined();
+  });
+
+  test('serializes post-match stages and lets My FPL reserve every child queue lane', () => {
+    const byName = new Map(registry.map((definition) => [definition.name, definition]));
+    expect(schedulerExecutionLanes(byName.get('entry-results')!)).toEqual([
+      'post-match-results',
+      'queue:entry-sync',
+    ]);
+    expect(schedulerExecutionLanes(byName.get('my-fpl-snapshot')!)).toEqual([
+      'post-match-results',
+      'queue:data-sync',
+      'queue:entry-sync',
+      'queue:league-sync',
+      'queue:tournament-sync',
+    ]);
+    expect(schedulerExecutionLanes(byName.get('entry-picks')!)).toEqual(['queue:entry-sync']);
+
+    const postMatchOrder = orderSchedulerDefinitionsForClaim(registry)
+      .filter((definition) => definition.executionLanes?.includes('post-match-results'))
+      .map((definition) => definition.name);
+    expect(postMatchOrder).toEqual([
+      'live-finalization',
+      'entry-results',
+      'tournament-event-results',
+      'league-event-results',
+      'my-fpl-finalization',
+      'my-fpl-snapshot',
+    ]);
   });
 
   test('schedules price changes as a critical five-minute latest-authoritative job', async () => {

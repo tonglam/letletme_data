@@ -31,6 +31,7 @@ import type { RawFPLEntryEventPickItem, RawFPLEntryEventPicksResponse } from '..
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { resolveTournamentEntryIds } from './tournament-entry-resolver.service';
 import { resolveRichResultFreshnessCutoff } from '../domain/entry-sync';
 import { latestFreshnessTimestamp } from '../domain/freshness';
@@ -421,6 +422,7 @@ export async function syncLeagueEventResultsByTournament(
     concurrency?: number;
     freshAfter?: Date | string;
     entryIds?: number[];
+    mutationJobId?: string;
   },
 ): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
@@ -698,7 +700,18 @@ export async function syncLeagueEventResultsByTournament(
 
   for (let index = 0; index < inserts.length; index += batchSize) {
     const batch = inserts.slice(index, index + batchSize);
-    updated += await leagueEventResultsRepository.upsertBatch(season, batch);
+    updated += await withMutationScopes(
+      {
+        queueName: 'league-sync',
+        jobName: 'league-event-results',
+        jobId:
+          options?.mutationJobId ??
+          `league-event-results:${season.seasonCode}:e${eventId}:t${tournamentId}`,
+        eventId,
+        tournamentId,
+      },
+      () => leagueEventResultsRepository.upsertBatch(season, batch),
+    );
   }
 
   const builtEntryIds = new Set(inserts.map((insert) => insert.entryId));

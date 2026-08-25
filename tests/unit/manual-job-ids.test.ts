@@ -271,17 +271,22 @@ describe('deterministic result job retention', () => {
   });
 
   test('retains successful and failed jobs for bounded incident evidence', async () => {
+    const freshAfter = '2026-08-25T08:00:00.000Z';
     await enqueueTournamentEventResults(TEST_SEASON, 12, 'cron', {
       jobId: 'tournament-event-results-e12-final-10',
+      freshAfter,
     });
     await enqueueLeagueEventResults(TEST_SEASON, 12, 'cron', {
       jobId: 'league-event-results-e12-coordinator-final-10',
+      freshAfter,
     });
 
     for (const call of [tournamentSyncAddCalls[0], leagueSyncAddCalls[0]]) {
       expect(call.opts.removeOnComplete).toEqual({ age: 86_400, count: 500 });
       expect(call.opts.removeOnFail).toEqual({ age: 7 * 86_400, count: 500 });
     }
+    expect(tournamentSyncAddCalls[0].data.freshAfter).toBe(freshAfter);
+    expect(leagueSyncAddCalls[0].data.freshAfter).toBe(freshAfter);
   });
 
   test('preserves a coordinator correlation ID in league child job data', async () => {
