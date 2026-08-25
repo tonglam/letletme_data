@@ -1,7 +1,9 @@
 import { randomUUID } from 'crypto';
+import type { Job } from 'bullmq';
 
 import {
   entrySyncQueue,
+  type EntrySyncJobData,
   type EntrySyncJobName,
   type EntrySyncJobSource,
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE,
@@ -34,8 +36,8 @@ export interface EntrySyncJobOptions {
   queueKey?: string;
   /** Optional Redis-backed deduplication identity that survives process restarts. */
   deduplicationId?: string;
-  /** Keep the deduplication identity for this many milliseconds after enqueue. */
-  deduplicationTtlMs?: number;
+  /** Minimum interval between accepted jobs after the active single-flight settles. */
+  deduplicationCadenceMs?: number;
   removeOnSettle?: boolean;
 }
 
@@ -94,6 +96,60 @@ function sanitizePositiveInt(value: number | undefined, fallback: number) {
 function sanitizeCursor(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 0;
   return Math.floor(value);
+}
+
+const RECENT_COMPLETED_DEDUPLICATION_SCAN_LIMIT = 500;
+
+function matchesExplicitDeduplicationScope(
+  job: Job<EntrySyncJobData>,
+  input: {
+    jobName: EntrySyncJobName;
+    season: FplSeasonRef;
+    source: EntrySyncJobSource;
+    eventId: number | undefined;
+    queueKey: string;
+    deduplicationId: string;
+  },
+): boolean {
+  if (
+    job.name !== input.jobName ||
+    job.data.seasonId !== input.season.seasonId ||
+    job.data.source !== input.source ||
+    job.data.eventId !== input.eventId
+  ) {
+    return false;
+  }
+  if (job.data.deduplicationId === input.deduplicationId) return true;
+  // Jobs created before the single-flight migration do not carry the durable
+  // identity in their payload. Their event-scoped queue key is the safe bridge.
+  return job.data.deduplicationId === undefined && job.data.queueKey === input.queueKey;
+}
+
+async function findReusableExplicitDeduplicationJob(
+  input: Parameters<typeof matchesExplicitDeduplicationScope>[1] & { cadenceMs: number },
+): Promise<{ job: Job<EntrySyncJobData>; reason: 'non-terminal' | 'cadence' } | null> {
+  const nonTerminalJobs = await entrySyncQueue.getJobs(['waiting', 'delayed', 'active', 'paused']);
+  const nonTerminal = nonTerminalJobs.find((job) => matchesExplicitDeduplicationScope(job, input));
+  if (nonTerminal) return { job: nonTerminal, reason: 'non-terminal' };
+
+  const completedJobs = await entrySyncQueue.getJobs(
+    ['completed'],
+    0,
+    RECENT_COMPLETED_DEDUPLICATION_SCAN_LIMIT - 1,
+    false,
+  );
+  const nowMs = Date.now();
+  const recentCompleted = completedJobs
+    .filter((job) => matchesExplicitDeduplicationScope(job, input))
+    .map((job) => ({ job, triggeredAt: Date.parse(job.data.triggeredAt) }))
+    .filter(
+      ({ triggeredAt }) =>
+        Number.isFinite(triggeredAt) &&
+        triggeredAt <= nowMs &&
+        nowMs - triggeredAt < input.cadenceMs,
+    )
+    .sort((a, b) => b.triggeredAt - a.triggeredAt)[0]?.job;
+  return recentCompleted ? { job: recentCompleted, reason: 'cadence' } : null;
 }
 
 async function enqueueEntrySyncJob(
@@ -172,14 +228,37 @@ async function enqueueEntrySyncJob(
       (options.retryCount ?? 0) === 0 &&
       options.jobId === undefined;
     const explicitDeduplicationId = options.deduplicationId?.trim();
-    const explicitDeduplicationTtlMs = options.deduplicationTtlMs;
+    const explicitDeduplicationCadenceMs = options.deduplicationCadenceMs;
     if (
-      (explicitDeduplicationId === undefined) !== (explicitDeduplicationTtlMs === undefined) ||
+      (explicitDeduplicationId === undefined) !== (explicitDeduplicationCadenceMs === undefined) ||
       explicitDeduplicationId === '' ||
-      (explicitDeduplicationTtlMs !== undefined &&
-        (!Number.isFinite(explicitDeduplicationTtlMs) || explicitDeduplicationTtlMs < 1))
+      (explicitDeduplicationCadenceMs !== undefined &&
+        (!Number.isFinite(explicitDeduplicationCadenceMs) || explicitDeduplicationCadenceMs < 1))
     ) {
-      throw new Error('Entry sync deduplication requires a non-empty id and positive TTL');
+      throw new Error('Entry sync deduplication requires a non-empty id and positive cadence');
+    }
+    if (explicitDeduplicationId && explicitDeduplicationCadenceMs) {
+      const reusable = await findReusableExplicitDeduplicationJob({
+        jobName,
+        season,
+        source,
+        eventId: options.eventId,
+        queueKey: tableScanQueueKey,
+        deduplicationId: explicitDeduplicationId,
+        cadenceMs: explicitDeduplicationCadenceMs,
+      });
+      if (reusable) {
+        logInfo('Entry sync explicit deduplication reused existing job', {
+          jobId: reusable.job.id,
+          jobName,
+          source,
+          queue: queue.name,
+          runId: reusable.job.data.runId,
+          reason: reusable.reason,
+        });
+        await trackQueueRunJob(reusable.job.data.runId ?? runId, queue.name, reusable.job.id);
+        return reusable.job;
+      }
     }
     // Keep queue evidence for every non-manual trigger, including explicit
     // entry-list/API scans. Manual one-shots may still clean up on settle.
@@ -203,6 +282,7 @@ async function enqueueEntrySyncJob(
       obligationGeneration: options.obligationGeneration,
       freshAfter: options.freshAfter,
       queueKey: tableScanQueueKey,
+      deduplicationId: explicitDeduplicationId,
       removeOnSettle,
     };
 
@@ -229,11 +309,10 @@ async function enqueueEntrySyncJob(
       },
       jobId,
       delay: options.delayMs,
-      ...(explicitDeduplicationId && explicitDeduplicationTtlMs
+      ...(explicitDeduplicationId
         ? {
             deduplication: {
               id: explicitDeduplicationId,
-              ttl: Math.floor(explicitDeduplicationTtlMs),
             },
           }
         : lifecycleDedupeEntryList

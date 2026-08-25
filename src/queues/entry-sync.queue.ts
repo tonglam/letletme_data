@@ -54,6 +54,8 @@ export interface EntrySyncJobData {
   /** Stable source checkpoint retained across scan chunks and retries. */
   freshAfter?: string;
   queueKey?: string;
+  /** Stable BullMQ single-flight identity for restart-sensitive fan-out jobs. */
+  deduplicationId?: string;
   /** Propagated through continuation/retry chunks for deterministic daily jobs. */
   removeOnSettle?: boolean;
 }
