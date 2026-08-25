@@ -143,9 +143,11 @@ describe('production environment preflight', () => {
       identityContract,
     );
     const databaseQuiescence = workflow.indexOf(
-      'bun scripts/assert-queue-quiescence.ts --database-only',
+      'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
     );
-    const redisQuiescence = workflow.indexOf('bun scripts/assert-queue-quiescence.ts --redis-only');
+    const redisQuiescence = workflow.indexOf(
+      'bun scripts/assert-queue-quiescence.ts --redis-only --scoped',
+    );
     const migrate = workflow.indexOf('bun run db:migrate');
     const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
     const roleVerify = workflow.indexOf('bun run db:verify-runtime-logins', migrate);
@@ -209,7 +211,7 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 media-worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
@@ -221,7 +223,7 @@ describe('production environment preflight', () => {
     expect(deployScript).not.toContain('db:provision-runtime-logins');
     expect(deployScript).not.toContain('sleep 60');
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toContain(
       '"$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"',

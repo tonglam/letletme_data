@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   assertQuiescenceCatalogPair,
   assertQueueQuiescence,
+  assertScopedQueueQuiescence,
   cascadeId,
   findUnsettledCascades,
 } from '../../scripts/queue-quiescence-gate';
@@ -35,6 +36,7 @@ describe('queue quiescence gate', () => {
   test('covers every canonical BullMQ queue exactly once', () => {
     expect(allQueueNames).toEqual([
       'data-sync',
+      'fpl-critical-sync',
       'entry-sync',
       'league-sync',
       'live-data',
@@ -49,7 +51,7 @@ describe('queue quiescence gate', () => {
       'content-media-transcript',
       'content-x-scan',
     ]);
-    expect(new Set(allQueueNames).size).toBe(14);
+    expect(new Set(allQueueNames).size).toBe(15);
   });
 
   test('accepts a fully settled hard-cut boundary', () => {
@@ -113,6 +115,37 @@ describe('queue quiescence gate', () => {
         runnableQueues: { 'data-sync': { delayed: 7, active: 1 } },
       }),
     ).toThrow('runnable jobs');
+  });
+
+  test('scoped deployment gate allows durable backlog but rejects active or structural work', () => {
+    expect(() =>
+      assertScopedQueueQuiescence({
+        ...accepted(),
+        runnableQueues: {
+          'data-sync': { waiting: 1869, delayed: 3, prioritized: 4 },
+          'fpl-critical-sync': { waiting: 1, delayed: 1 },
+        },
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      assertScopedQueueQuiescence({
+        ...accepted(),
+        runnableQueues: { 'data-sync': { waiting: 1869, active: 1 } },
+      }),
+    ).toThrow('active or structural jobs');
+    expect(() =>
+      assertScopedQueueQuiescence({
+        ...accepted(),
+        runnableQueues: { 'fpl-critical-sync': { paused: 1 } },
+      }),
+    ).toThrow('active or structural jobs');
+    expect(() => assertScopedQueueQuiescence({ ...accepted(), nonTerminalSyncRuns: 1 })).toThrow(
+      'non-terminal sync run',
+    );
+    expect(() => assertScopedQueueQuiescence({ ...accepted(), stagingPublications: 1 })).toThrow(
+      'staging publication',
+    );
   });
 
   test('recognizes only a cascade with a terminal enqueue marker as settled', () => {

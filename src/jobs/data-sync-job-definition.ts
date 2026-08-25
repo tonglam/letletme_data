@@ -20,6 +20,9 @@ export interface DataSyncEnqueueOptions {
   changeDate?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  laneId?: string;
+  laneGeneration?: number;
+  blockerLaneId?: string;
   /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
   removeOnSettle?: boolean;
 }
@@ -58,6 +61,9 @@ export function createDataSyncJobData(
     ...(options.obligationGeneration === undefined
       ? {}
       : { obligationGeneration: options.obligationGeneration }),
+    ...(options.laneId ? { laneId: options.laneId } : {}),
+    ...(options.laneGeneration === undefined ? {} : { laneGeneration: options.laneGeneration }),
+    ...(options.blockerLaneId ? { blockerLaneId: options.blockerLaneId } : {}),
     ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
     ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
   };

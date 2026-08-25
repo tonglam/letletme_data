@@ -3,10 +3,11 @@ import type { Fixture } from '../types';
 import { formatCronDateKey } from '../utils/timezone';
 import {
   enqueueCoreSnapshotJob,
+  enqueuePriceChangePredictionsJob,
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
-  enqueuePriceChangePredictionsJob,
 } from '../jobs/data-sync-enqueue';
+import { enqueueFplCriticalPriceChangeJob } from '../jobs/fpl-critical-sync-enqueue';
 import {
   enqueueEntryInfoSyncJob,
   enqueueEntryPicksSyncJob,
@@ -60,6 +61,7 @@ import {
 } from '../services/live-lifecycle-orchestrator';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig } from '../utils/config';
+import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -109,6 +111,11 @@ export type ScheduledJobDefinition = Readonly<{
   catchUpPolicy: CatchUpPolicy;
   criticality: 'critical' | 'normal' | 'maintenance';
   queueName: string;
+  executionPolicy?: Readonly<{
+    kind: 'single-flight-latest';
+    laneKey: (input: { context: SchedulerContext; plan: SchedulerObligationPlan }) => string;
+    maxTargetsPerDispatch?: number;
+  }>;
   successPredicate: string;
   /**
    * Bull completion evidence used only when recovering an expired scheduler
@@ -139,6 +146,8 @@ export type ScheduledJobDefinition = Readonly<{
     generation: number;
     /** Provider-specific season selected by a scheduler definition. */
     seasonCode?: string;
+    laneId?: string;
+    dispatchGeneration?: number;
   }) => Promise<{ bullJobId?: string | number; runId?: string } | void>;
 }>;
 
@@ -665,13 +674,33 @@ function periodicMaintenanceDefinition(input: {
 function priceChangePredictionsDefinition(): ScheduledJobDefinition {
   const periodMs = 5 * 60_000;
   const offsetMs = 60_000;
+  // This is intentionally evaluated at process startup. A deployment can
+  // install the migration/worker first, then restart with the flag enabled;
+  // changing it mid-process would make the registry's queue contract
+  // ambiguous for obligations already reserved by that process.
+  const singleFlightEnabled =
+    process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED === undefined
+      ? process.env.NODE_ENV !== 'production'
+      : ['1', 'true', 'yes', 'on'].includes(
+          process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED.trim().toLowerCase(),
+        );
   return {
     name: 'price-change-predictions',
     cadence: 'every five minutes at UTC minute 01/06/11...',
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
-    queueName: 'data-sync',
+    queueName: singleFlightEnabled ? fplCriticalSyncQueueName : 'data-sync',
+    ...(singleFlightEnabled
+      ? {
+          executionPolicy: {
+            kind: 'single-flight-latest' as const,
+            laneKey: ({ plan }: { plan: SchedulerObligationPlan }) =>
+              `fpl-price-changes-${plan.scopeKey}`,
+            maxTargetsPerDispatch: 2,
+          },
+        }
+      : {}),
     successPredicate: 'complete fpl:price-changes publication and deliver Redis pointer',
     manualTrigger: true,
     resolve: async (context) => {
@@ -688,12 +717,27 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, obligationId, generation }) => {
-      const job = await enqueuePriceChangePredictionsJob(context.season, 'catchup', {
-        jobId: `scheduler-${obligationId}-g${generation}`,
+    enqueue: async ({ context, plan, obligationId, generation, laneId, dispatchGeneration }) => {
+      if (!singleFlightEnabled) {
+        const job = await enqueuePriceChangePredictionsJob(context.season, 'catchup', {
+          jobId: `scheduler-${obligationId}-g${generation}`,
+          removeOnSettle: false,
+          obligationId,
+          obligationGeneration: generation,
+        });
+        return { bullJobId: job.id, runId: job.data.runId };
+      }
+      if (!laneId || dispatchGeneration === undefined) {
+        throw new Error('Price-change single-flight enqueue requires a scheduler lane');
+      }
+      const source = plan.source === 'schedule' ? 'catchup' : plan.source;
+      const job = await enqueueFplCriticalPriceChangeJob(context.season, source, {
+        jobId: `scheduler-lane-${laneId}-g${dispatchGeneration}`,
         removeOnSettle: false,
         obligationId,
         obligationGeneration: generation,
+        laneId,
+        laneGeneration: dispatchGeneration,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },

@@ -703,9 +703,12 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       outbox?: {
         outboxId: string;
       };
+      /** Optional same-transaction fence for a higher-level scheduler lane. */
+      beforeActivate?: (tx: DbOrTransaction) => Promise<void>;
     }): Promise<void> => {
       const db = await getDbInstance();
       await db.transaction(async (tx) => {
+        await input.beforeActivate?.(tx);
         await tx.execute(sql`
           SELECT pg_advisory_xact_lock(
             hashtext(${input.dataset}),

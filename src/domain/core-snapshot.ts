@@ -53,6 +53,7 @@ export const CORE_SNAPSHOT_EXPECTED_FIXTURES = 380;
 export const CORE_SNAPSHOT_MIN_PLAYERS_PER_TEAM = 11;
 
 export const CORE_SNAPSHOT_MUTATION_SCOPES = [
+  'data-core:publication',
   'data-core:events',
   'data-core:teams',
   'data-core:players',

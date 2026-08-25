@@ -282,12 +282,12 @@ deploy() {
   fi
   remove_exact_stopped_container api
   wait_for_port_3000_free 30 2
-  if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only; then
+  if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
     log_error "Database work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1
   fi
-  if ! compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only; then
+  if ! compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
     log_error "Queue work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1

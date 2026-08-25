@@ -21,6 +21,7 @@ import {
   schedulerObligationStatus,
   schedulerObligationSummary,
 } from '../repositories/scheduler-obligations';
+import { getSchedulerLaneTargets, listSchedulerLanes } from '../repositories/scheduler-lanes';
 import { schedulerRegistry } from '../scheduler/job-registry';
 import { eventRepository } from '../repositories/events';
 import { getMyFplSnapshotOperationalStatus } from './my-fpl-snapshot-publication.service';
@@ -245,6 +246,48 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
       }
     }),
   );
+  const schedulerLanes = await Promise.all(
+    (await listSchedulerLanes()).map(async (lane) => {
+      const targets = await getSchedulerLaneTargets({ laneId: lane.laneId });
+      const queue = new Queue(lane.queueName, { connection });
+      let bullState: string | null = null;
+      let bullTimestamp: number | null = null;
+      try {
+        if (lane.bullJobId) {
+          const job = await queue.getJob(lane.bullJobId);
+          bullState = job ? await job.getState() : 'missing';
+          bullTimestamp = job?.timestamp ?? null;
+        }
+      } finally {
+        await queue.close();
+      }
+      // The lane stores the immutable scheduled waterline. Obligation.dueAt
+      // may be moved by retry/backoff and must not redefine the period.
+      const desiredDueAt = lane.desiredDueAt;
+      return {
+        laneId: lane.laneId,
+        laneKey: lane.laneKey,
+        jobName: lane.jobName,
+        scopeKey: lane.scopeKey,
+        queueName: lane.queueName,
+        state: lane.state,
+        desiredPeriod: targets?.desired?.periodKey ?? null,
+        desiredDueAt: desiredDueAt.toISOString(),
+        activePeriod: targets?.active?.periodKey ?? null,
+        bullJobId: lane.bullJobId,
+        bullState,
+        waitingMs: bullTimestamp === null ? null : Math.max(0, Date.now() - bullTimestamp),
+        lastProgressAt: lane.lastProgressAt.toISOString(),
+        progressAgeMs: Math.max(0, Date.now() - lane.lastProgressAt.getTime()),
+        publicationLagMs: ageMs,
+        generation: lane.dispatchGeneration,
+        supersededCount: lane.supersededCount,
+        blockerJobId: lane.blockerJobId,
+        retryNotBefore: lane.retryNotBefore?.toISOString() ?? null,
+        lastError: lane.lastError,
+      };
+    }),
+  );
   return {
     generatedAt: new Date().toISOString(),
     season: season.seasonCode,
@@ -255,6 +298,7 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
       catchUpPolicy: definition.catchUpPolicy,
       criticality: definition.criticality,
       queueName: definition.queueName,
+      executionPolicy: definition.executionPolicy?.kind ?? null,
       successPredicate: definition.successPredicate,
     })),
     runtime: {
@@ -267,6 +311,7 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
     myFplSnapshots,
     publicationConsistency,
     priceChanges,
+    schedulerLanes,
     queues,
   };
 }

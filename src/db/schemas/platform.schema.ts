@@ -544,6 +544,62 @@ export const schedulerObligationsInOps = ops.table(
   ],
 );
 
+export const schedulerLanesInOps = ops.table(
+  'scheduler_lanes',
+  {
+    laneId: uuid('lane_id').primaryKey().notNull(),
+    laneKey: text('lane_key').notNull(),
+    jobName: text('job_name').notNull(),
+    scopeKey: text('scope_key').notNull(),
+    queueName: text('queue_name').notNull(),
+    state: text().default('idle').notNull(),
+    desiredObligationId: uuid('desired_obligation_id')
+      .references(() => schedulerObligationsInOps.obligationId, { onDelete: 'restrict' })
+      .notNull(),
+    desiredDueAt: timestamp('desired_due_at', { withTimezone: true, mode: 'date' }).notNull(),
+    activeObligationId: uuid('active_obligation_id').references(
+      () => schedulerObligationsInOps.obligationId,
+      { onDelete: 'restrict' },
+    ),
+    dispatchGeneration: integer('dispatch_generation').default(0).notNull(),
+    dispatchOwner: text('dispatch_owner'),
+    dispatchLeaseExpiresAt: timestamp('dispatch_lease_expires_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    bullJobId: text('bull_job_id'),
+    runId: uuid('run_id'),
+    blockerJobId: text('blocker_job_id'),
+    retryNotBefore: timestamp('retry_not_before', { withTimezone: true, mode: 'date' }),
+    lastError: text('last_error'),
+    lastProgressAt: timestamp('last_progress_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    supersededCount: integer('superseded_count').default(0).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex('scheduler_lanes_lane_key').on(table.laneKey),
+    index('scheduler_lanes_state_idx').on(table.state, table.retryNotBefore, table.updatedAt),
+    index('scheduler_lanes_progress_idx').on(table.lastProgressAt, table.laneId),
+    check(
+      'scheduler_lanes_state_check',
+      sql`state = ANY (ARRAY['idle'::text, 'dispatching'::text, 'enqueued'::text, 'running'::text, 'blocked'::text])`,
+    ),
+    check('scheduler_lanes_generation_check', sql`dispatch_generation >= 0`),
+    check('scheduler_lanes_superseded_check', sql`superseded_count >= 0`),
+    check(
+      'scheduler_lanes_identity_check',
+      sql`btrim(lane_key) <> '' AND btrim(job_name) <> '' AND btrim(scope_key) <> ''`,
+    ),
+  ],
+);
+
 export const bugReportsInOps = ops.table(
   'bug_reports',
   {

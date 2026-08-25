@@ -380,9 +380,9 @@ jobs:
             remove_exact_stopped_container api
             wait_for_port_3000_free 30 2
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
-              bun scripts/assert-queue-quiescence.ts --database-only
+              bun scripts/assert-queue-quiescence.ts --database-only --scoped
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun scripts/assert-queue-quiescence.ts --redis-only
+              bun scripts/assert-queue-quiescence.ts --redis-only --scoped
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration run --rm -T backup
             finish_stage
 

@@ -6,6 +6,7 @@ import postgres from 'postgres';
 import {
   assertQuiescenceCatalogPair,
   assertQueueQuiescence,
+  assertScopedQueueQuiescence,
   findUnsettledCascades,
   type RunnableQueueCounts,
 } from './queue-quiescence-gate';
@@ -87,9 +88,11 @@ async function readDatabaseQuiescenceState(database: postgres.Sql): Promise<{
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const databaseOnly = args.length === 1 && args[0] === '--database-only';
-  const redisOnly = args.length === 1 && args[0] === '--redis-only';
-  if (args.length > 0 && !databaseOnly && !redisOnly) {
+  const scoped = args.includes('--scoped');
+  const modeArgs = args.filter((arg) => arg !== '--scoped');
+  const databaseOnly = modeArgs.length === 1 && modeArgs[0] === '--database-only';
+  const redisOnly = modeArgs.length === 1 && modeArgs[0] === '--redis-only';
+  if (modeArgs.length > 0 && !databaseOnly && !redisOnly) {
     throw new Error(`Queue quiescence check does not accept arguments: ${args.join(' ')}`);
   }
 
@@ -134,8 +137,15 @@ async function main(): Promise<void> {
       runnableQueues: Object.fromEntries(queueCountRows) as Record<string, RunnableQueueCounts>,
       unsettledCascadeIds: findUnsettledCascades(cascadeKeys),
     };
-    assertQueueQuiescence(snapshot);
-    console.log(JSON.stringify({ status: 'queue_quiescence_passed', ...snapshot }, null, 2));
+    if (scoped) assertScopedQueueQuiescence(snapshot);
+    else assertQueueQuiescence(snapshot);
+    console.log(
+      JSON.stringify(
+        { status: 'queue_quiescence_passed', mode: scoped ? 'scoped' : 'global', ...snapshot },
+        null,
+        2,
+      ),
+    );
   } finally {
     await Promise.allSettled(queues.map((queue) => queue.close()));
     redis?.disconnect();

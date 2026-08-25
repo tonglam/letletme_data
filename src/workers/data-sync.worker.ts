@@ -52,6 +52,11 @@ function priceChangeCoreRepairJobId(job: Job<DataSyncJobData>): string {
   return `core-snapshot-price-change-repair-${runId}-attempt-${job.attemptsMade + 1}`;
 }
 
+function priceSingleFlightEnabled(): boolean {
+  const value = process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED;
+  return value !== undefined && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
 async function alertPriceChangePublicationOverdue(
   job: Job<DataSyncJobData>,
   error: unknown,
@@ -183,6 +188,17 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
 
     if (job.name === 'price-change-predictions') {
       return runTrackedJob(context, async () => {
+        // Once the latest-wins producer is enabled, a legacy data-sync job
+        // must not publish outside the lane fence during cutover. Its
+        // durable obligation is completed as skipped by the worker event
+        // handler, while the critical queue owns the replacement target.
+        if (priceSingleFlightEnabled() && !job.data.laneId) {
+          logInfo('Skipping legacy price-change job after latest-wins cutover', {
+            jobId: job.id,
+            obligationId: job.data.obligationId,
+          });
+          return { count: 0, outcome: 'noop' as const };
+        }
         // Bootstrap acquisition and all validation happen before the mutation
         // scopes are acquired.  The short locked section only activates the
         // immutable DB publication and its outbox receipt.

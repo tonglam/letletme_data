@@ -12,6 +12,7 @@ import { seasonRepository } from '../repositories/seasons';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import {
   persistCoreSnapshot,
   readCoreSnapshotOrderingTimestamp,
@@ -145,14 +146,22 @@ export async function publishCoreSnapshotPublication(
       });
       return { status: 'stale', persistence: persisted.persistence, publication };
     }
-    await syncOperationsRepository.activatePublication({
-      publicationId: context.publicationId,
-      dataset: 'fpl:core',
-      season,
-      sourceRunId: context.sourceRunId,
-      manifest: publication.manifest,
-      outbox: { outboxId: randomUUID() },
-    });
+    await withMutationScopes(
+      {
+        queueName: 'fpl-critical-sync',
+        jobName: 'core-snapshot',
+        scopes: ['data-core:publication'],
+      },
+      () =>
+        syncOperationsRepository.activatePublication({
+          publicationId: context.publicationId,
+          dataset: 'fpl:core',
+          season,
+          sourceRunId: context.sourceRunId,
+          manifest: publication.manifest,
+          outbox: { outboxId: randomUUID() },
+        }),
+    );
     const delivered = await dispatchDataPublicationOutbox({
       limit: 1,
       publicationId: context.publicationId,
@@ -213,15 +222,24 @@ export async function recoverPendingCoreSnapshotPublication(
     );
     return 'none';
   }
+  const sourceRunId = pending.sourceRunId;
 
-  await syncOperationsRepository.activatePublication({
-    publicationId: pending.publicationId,
-    dataset: 'fpl:core',
-    season,
-    sourceRunId: pending.sourceRunId,
-    manifest: cached.manifest,
-    outbox: { outboxId: randomUUID() },
-  });
+  await withMutationScopes(
+    {
+      queueName: 'fpl-critical-sync',
+      jobName: 'core-snapshot-publication-reconcile',
+      scopes: ['data-core:publication'],
+    },
+    () =>
+      syncOperationsRepository.activatePublication({
+        publicationId: pending.publicationId,
+        dataset: 'fpl:core',
+        season,
+        sourceRunId,
+        manifest: cached.manifest,
+        outbox: { outboxId: randomUUID() },
+      }),
+  );
   await dispatchDataPublicationOutbox({ limit: 1, publicationId: pending.publicationId });
   logInfo('Recovered ops authority from a complete active core cache manifest', {
     season: season.seasonCode,

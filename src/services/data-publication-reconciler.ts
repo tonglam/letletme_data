@@ -15,6 +15,7 @@ import { eventRepository } from '../repositories/events';
 import { randomUUID } from 'node:crypto';
 import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
 import { logInfo, logWarn } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 export type DataPublicationReconciliationResult = Readonly<{
   status: 'matched' | 'repaired' | 'ghost' | 'missing' | 'failed';
@@ -47,31 +48,58 @@ export async function reconcileDataPublication(
     try {
       const prepared = await loadDataPublicationDelivery(staging.publicationId);
       await stageDataPublication(prepared);
-      await syncOperationsRepository.activatePublication({
-        publicationId: staging.publicationId,
-        dataset: scope.dataset,
-        season,
-        ...(scope.eventId === undefined ? {} : { eventId: scope.eventId }),
-        sourceRunId: staging.sourceRunId,
-        manifest: prepared.manifest,
-        outbox: { outboxId: randomUUID() },
-      });
-      stagingWasActivated = true;
-      await dispatchDataPublicationOutbox({
-        limit: 1,
-        publicationId: staging.publicationId,
-      });
-      logInfo('Completed staged Data publication reconciliation', {
-        dataset: scope.dataset,
-        season: scope.seasonCode,
-        eventId: scope.eventId,
-        publicationId: staging.publicationId,
-      });
-      return {
-        status: 'repaired',
-        dataset: scope.dataset,
-        publicationId: staging.publicationId,
-      };
+      // Price-change staging is owned by the single-flight lane. A generic
+      // reconciler must not promote a prepared result after its Bull job was
+      // superseded; the lane worker rechecks its generation and publication
+      // fence before activation. Core/market/live recovery remains safe here.
+      if (scope.dataset === 'fpl:price-changes') {
+        logWarn('Leaving price-change staging to its scheduler lane', {
+          dataset: scope.dataset,
+          season: scope.seasonCode,
+          publicationId: staging.publicationId,
+        });
+      } else {
+        const activate = () =>
+          syncOperationsRepository.activatePublication({
+            publicationId: staging.publicationId,
+            dataset: scope.dataset,
+            season,
+            ...(scope.eventId === undefined ? {} : { eventId: scope.eventId }),
+            sourceRunId: staging.sourceRunId,
+            manifest: prepared.manifest,
+            outbox: { outboxId: randomUUID() },
+          });
+        if (scope.dataset === 'fpl:core') {
+          await withMutationScopes(
+            {
+              queueName: 'fpl-critical-sync',
+              jobName: 'core-snapshot-publication-reconcile',
+              scopes: ['data-core:publication'],
+            },
+            activate,
+          );
+        } else {
+          await activate();
+        }
+        stagingWasActivated = true;
+      }
+      if (stagingWasActivated) {
+        await dispatchDataPublicationOutbox({
+          limit: 1,
+          publicationId: staging.publicationId,
+        });
+        logInfo('Completed staged Data publication reconciliation', {
+          dataset: scope.dataset,
+          season: scope.seasonCode,
+          eventId: scope.eventId,
+          publicationId: staging.publicationId,
+        });
+        return {
+          status: 'repaired',
+          dataset: scope.dataset,
+          publicationId: staging.publicationId,
+        };
+      }
     } catch (error) {
       logWarn('Data publication staging exists but is not yet recoverable', {
         dataset: scope.dataset,
