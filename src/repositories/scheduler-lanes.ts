@@ -478,7 +478,14 @@ export async function fenceSchedulerLaneTarget(input: {
       .for('update')
       .limit(1);
     if (!row) return null;
-    const targetChanged = row.activeObligationId !== input.activeObligationId;
+    // A worker may call the fence with the target it started while the lane's
+    // desired waterline has already advanced.  Compare both columns: in that
+    // case `activeObligationId` still equals the caller's value, but the
+    // caller is nevertheless stale and must retire its obligation before the
+    // latest target is allowed to run.
+    const targetChanged =
+      row.activeObligationId !== input.activeObligationId ||
+      row.desiredObligationId !== input.activeObligationId;
     const nowRows = await tx.execute<{ dbNow: Date | string }>(
       sql`SELECT clock_timestamp() AS "dbNow"`,
     );
@@ -665,6 +672,29 @@ export async function failSchedulerLane(input: {
     );
     const dbNow = asDate(nowRows[0]?.dbNow);
     if (!dbNow) throw new Error('Database clock is unavailable');
+    // Lock and validate the lane first.  A terminal Bull callback from an old
+    // generation must not mark an obligation failed after a newer generation
+    // has already adopted the lane.
+    const [laneRow] = await tx
+      .select({
+        laneId: schedulerLanesInOps.laneId,
+        dispatchGeneration: schedulerLanesInOps.dispatchGeneration,
+        activeObligationId: schedulerLanesInOps.activeObligationId,
+        state: schedulerLanesInOps.state,
+      })
+      .from(schedulerLanesInOps)
+      .where(eq(schedulerLanesInOps.laneId, input.laneId))
+      .for('update')
+      .limit(1);
+    if (
+      !laneRow ||
+      laneRow.dispatchGeneration !== input.dispatchGeneration ||
+      laneRow.activeObligationId !== input.activeObligationId ||
+      laneRow.state !== 'running'
+    ) {
+      return false;
+    }
+
     const obligation = await tx
       .update(schedulerObligationsInOps)
       .set({
@@ -832,6 +862,8 @@ export async function renewSchedulerLane(input: {
  */
 export async function recoverSchedulerLaneAfterBullLoss(input: {
   laneId: string;
+  dispatchGeneration: number;
+  bullJobId: string;
   bullState: 'missing' | 'failed';
   db?: DbHandle;
 }): Promise<boolean> {
@@ -845,7 +877,13 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
     const [lane] = await tx
       .select()
       .from(schedulerLanesInOps)
-      .where(eq(schedulerLanesInOps.laneId, input.laneId))
+      .where(
+        and(
+          eq(schedulerLanesInOps.laneId, input.laneId),
+          eq(schedulerLanesInOps.dispatchGeneration, input.dispatchGeneration),
+          eq(schedulerLanesInOps.bullJobId, input.bullJobId),
+        ),
+      )
       .for('update')
       .limit(1);
     if (!lane || !['enqueued', 'running'].includes(lane.state)) return false;

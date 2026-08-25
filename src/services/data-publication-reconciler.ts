@@ -11,6 +11,7 @@ import {
   markDataPublicationOutboxReconciled,
 } from '../repositories/data-publication-outbox';
 import { syncOperationsRepository } from '../repositories/sync-operations';
+import { getSchedulerLane } from '../repositories/scheduler-lanes';
 import { eventRepository } from '../repositories/events';
 import { randomUUID } from 'node:crypto';
 import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
@@ -22,6 +23,14 @@ export type DataPublicationReconciliationResult = Readonly<{
   dataset: DataPublicationScope['dataset'];
   publicationId?: string;
 }>;
+
+const PRICE_CHANGE_STAGING_ORPHAN_AFTER_MS = 2 * 60_000;
+
+function priceChangeSingleFlightEnabled(): boolean {
+  const value = process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED;
+  if (value === undefined) return process.env.NODE_ENV !== 'production';
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
 
 /**
  * Reconcile the rebuildable Redis pointer against the canonical DB active
@@ -38,51 +47,80 @@ export async function reconcileDataPublication(
     scope.eventId,
   );
   const redisActive = await readActiveDataPublication(scope);
-  const staging = await syncOperationsRepository.findStagingPublication(
+  let staging = await syncOperationsRepository.findStagingPublication(
     scope.dataset,
     season,
     scope.eventId,
   );
+  if (staging && scope.dataset === 'fpl:price-changes' && priceChangeSingleFlightEnabled()) {
+    const lane = await getSchedulerLane({
+      laneKey: `fpl-price-changes-${season.seasonCode}`,
+    });
+    const stagingAgeMs = Date.now() - staging.createdAt.getTime();
+    const expired = staging.expiresAt !== null && staging.expiresAt.getTime() <= Date.now();
+    if (
+      lane?.state === 'running' &&
+      !expired &&
+      stagingAgeMs < PRICE_CHANGE_STAGING_ORPHAN_AFTER_MS
+    ) {
+      // A live lane owns this short-lived staging row. Leave it for the
+      // worker's publication fence; the generic reconciler must not promote
+      // a result outside the latest-wins CAS.
+      logWarn('Price-change staging is owned by the active scheduler lane', {
+        dataset: scope.dataset,
+        season: scope.seasonCode,
+        publicationId: staging.publicationId,
+        laneId: lane.laneId,
+        ageMs: Math.max(0, stagingAgeMs),
+      });
+      staging = null;
+    } else {
+      // A waiting, blocked, idle, or expired lane cannot safely adopt this
+      // payload. Retire the immutable staging row and its source run so one
+      // crashed preparation cannot block every later deployment. The lane
+      // will refetch the latest desired obligation on its next dispatch.
+      await syncOperationsRepository.skipPublication(
+        staging.publicationId,
+        'orphaned-price-change-staging-after-latest-wins-cutover',
+      );
+      logInfo('Retired orphaned price-change staging publication', {
+        dataset: scope.dataset,
+        season: scope.seasonCode,
+        publicationId: staging.publicationId,
+        laneState: lane?.state ?? 'missing',
+        ageMs: Math.max(0, stagingAgeMs),
+      });
+      staging = null;
+    }
+  }
   if (staging) {
     let stagingWasActivated = false;
     try {
       const prepared = await loadDataPublicationDelivery(staging.publicationId);
       await stageDataPublication(prepared);
-      // Price-change staging is owned by the single-flight lane. A generic
-      // reconciler must not promote a prepared result after its Bull job was
-      // superseded; the lane worker rechecks its generation and publication
-      // fence before activation. Core/market/live recovery remains safe here.
-      if (scope.dataset === 'fpl:price-changes') {
-        logWarn('Leaving price-change staging to its scheduler lane', {
-          dataset: scope.dataset,
-          season: scope.seasonCode,
+      const activate = () =>
+        syncOperationsRepository.activatePublication({
           publicationId: staging.publicationId,
+          dataset: scope.dataset,
+          season,
+          ...(scope.eventId === undefined ? {} : { eventId: scope.eventId }),
+          sourceRunId: staging.sourceRunId,
+          manifest: prepared.manifest,
+          outbox: { outboxId: randomUUID() },
         });
+      if (scope.dataset === 'fpl:core') {
+        await withMutationScopes(
+          {
+            queueName: 'fpl-critical-sync',
+            jobName: 'core-snapshot-publication-reconcile',
+            scopes: ['data-core:publication'],
+          },
+          activate,
+        );
       } else {
-        const activate = () =>
-          syncOperationsRepository.activatePublication({
-            publicationId: staging.publicationId,
-            dataset: scope.dataset,
-            season,
-            ...(scope.eventId === undefined ? {} : { eventId: scope.eventId }),
-            sourceRunId: staging.sourceRunId,
-            manifest: prepared.manifest,
-            outbox: { outboxId: randomUUID() },
-          });
-        if (scope.dataset === 'fpl:core') {
-          await withMutationScopes(
-            {
-              queueName: 'fpl-critical-sync',
-              jobName: 'core-snapshot-publication-reconcile',
-              scopes: ['data-core:publication'],
-            },
-            activate,
-          );
-        } else {
-          await activate();
-        }
-        stagingWasActivated = true;
+        await activate();
       }
+      stagingWasActivated = true;
       if (stagingWasActivated) {
         await dispatchDataPublicationOutbox({
           limit: 1,
