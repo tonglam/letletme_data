@@ -91,16 +91,26 @@ function immutableScheduledDueAtSql() {
   );
 }
 
+function postMatchAuthorityAtForSql(evidence: SQL) {
+  return sql`CASE
+    WHEN ${evidence}->>'resultAuthorityAtMs' ~ '^[0-9]+$'
+      THEN (${evidence}->>'resultAuthorityAtMs')::numeric
+    ELSE NULL
+  END`;
+}
+
 // Slot indexes are relative to the last fixture's expected end and can move
-// backwards when that fixture is postponed. Rank different slots by their
-// absolute immutable boundary; only the same numbered slot uses finality as
-// the tie-breaker so a late provisional resolver cannot demote final authority.
+// when that fixture is rescheduled. Rank schedule versions by their persisted
+// fixture update timestamp, then slots within one version by their immutable
+// boundary. Same-slot finality remains monotonic, so a late provisional
+// resolver cannot demote final authority.
 function postMatchIdentityIsNewerSql(input: {
   newerSlot: SQL;
   newerDueAt: SQL;
+  newerAuthorityAt: SQL;
   olderSlot: SQL;
   olderDueAt: SQL;
-  currentBoundaryWinsEqualReschedule?: boolean;
+  olderAuthorityAt: SQL;
 }) {
   const newerNumbered = sql`${input.newerSlot} ~ '^(provisional|final)-[0-9]+$'`;
   const olderNumbered = sql`${input.olderSlot} ~ '^(provisional|final)-[0-9]+$'`;
@@ -117,14 +127,15 @@ function postMatchIdentityIsNewerSql(input: {
       AND (${input.newerSlot} LIKE 'final-%') IS DISTINCT FROM
           (${input.olderSlot} LIKE 'final-%')
       THEN ${input.newerSlot} LIKE 'final-%'
+    WHEN ${input.newerAuthorityAt} IS NOT NULL
+      AND ${input.olderAuthorityAt} IS NULL
+      THEN true
+    WHEN ${input.newerAuthorityAt} IS NULL
+      AND ${input.olderAuthorityAt} IS NOT NULL
+      THEN false
+    WHEN ${input.newerAuthorityAt} IS DISTINCT FROM ${input.olderAuthorityAt}
+      THEN ${input.newerAuthorityAt} > ${input.olderAuthorityAt}
     ELSE ${input.newerDueAt} > ${input.olderDueAt}
-      OR (
-        ${input.currentBoundaryWinsEqualReschedule === true}
-        AND ${input.newerDueAt} = ${input.olderDueAt}
-        AND ${newerNumbered}
-        AND ${olderNumbered}
-        AND ${newerIndex} <> ${olderIndex}
-      )
   END`;
 }
 
@@ -141,6 +152,13 @@ function terminalSchedulerEvidence(evidence?: Record<string, unknown>) {
       THEN jsonb_build_object(
         'resultSlot',
         ${schedulerObligationsInOps.evidence}->'resultSlot'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'resultAuthorityAtMs'
+      THEN jsonb_build_object(
+        'resultAuthorityAtMs',
+        ${schedulerObligationsInOps.evidence}->'resultAuthorityAtMs'
       )
     ELSE '{}'::jsonb
   END`;
@@ -208,6 +226,76 @@ export async function reserveSchedulerObligation(input: {
   const row = existing[0];
   if (!row) throw new Error('Scheduler obligation disappeared after conflict');
   return mapRow(row);
+}
+
+async function refreshPostMatchObligationAuthority(input: {
+  obligation: SchedulerObligation;
+  plan: SchedulerObligationPlan;
+  db: DbOrTransaction;
+}): Promise<SchedulerObligation> {
+  const resultAuthorityAtMs = input.plan.evidence?.resultAuthorityAtMs;
+  if (!Number.isSafeInteger(resultAuthorityAtMs) || Number(resultAuthorityAtMs) <= 0) {
+    return input.obligation;
+  }
+  const scheduledDueAtMs = input.plan.dueAt.getTime();
+  const currentAuthorityAt = postMatchAuthorityAtForSql(sql`${schedulerObligationsInOps.evidence}`);
+  const evidence = {
+    ...(input.plan.evidence ?? {}),
+    ...(input.plan.eventId === undefined ? {} : { targetEventId: input.plan.eventId }),
+    scheduledDueAtMs,
+    reactivatedFromSupersession: true,
+  };
+  const refreshed = await input.db
+    .update(schedulerObligationsInOps)
+    .set({
+      source: input.plan.source,
+      dueAt: input.plan.dueAt,
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+        ...(input.plan.evidence ?? {}),
+        ...(input.plan.eventId === undefined ? {} : { targetEventId: input.plan.eventId }),
+        scheduledDueAtMs,
+      })}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligation.obligationId),
+        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+        sql`(${currentAuthorityAt} IS NULL OR
+             ${currentAuthorityAt} < ${Number(resultAuthorityAtMs)})`,
+      ),
+    )
+    .returning();
+  if (refreshed[0]) return mapRow(refreshed[0]);
+
+  const reactivated = await input.db
+    .update(schedulerObligationsInOps)
+    .set({
+      status: 'pending',
+      source: input.plan.source,
+      dueAt: input.plan.dueAt,
+      generation: sql`${schedulerObligationsInOps.generation} + 1`,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      bullJobId: null,
+      runId: null,
+      lastError: null,
+      evidence,
+      completedAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligation.obligationId),
+        eq(schedulerObligationsInOps.status, 'skipped'),
+        sql`${schedulerObligationsInOps.evidence}->>'reason' =
+            ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}`,
+        sql`(${currentAuthorityAt} IS NULL OR
+             ${currentAuthorityAt} < ${Number(resultAuthorityAtMs)})`,
+      ),
+    )
+    .returning();
+  return reactivated[0] ? mapRow(reactivated[0]) : input.obligation;
 }
 
 /**
@@ -298,6 +386,7 @@ export type SchedulerDueAtSupersessionBoundary = Readonly<{
   scopeKey: string;
   periodKey: string;
   resultSlot: string;
+  resultAuthorityAtMs?: number;
   beforeDueAt: Date;
 }>;
 
@@ -309,10 +398,9 @@ export type SchedulerDueAtSupersessionBoundary = Readonly<{
  * The authoritative period identity is excluded explicitly. Absolute slot
  * time ranks rescheduled fixtures; for the same numbered slot, final authority
  * outranks provisional authority even for pre-rollout observation timestamps.
- * When an exact-hour fixture reschedule gives two different numbered slots the
- * same boundary, this fresh resolver boundary wins. That tie-break is
- * deliberately not used by the symmetric claim fence, where it would make
- * each row appear newer than the other.
+ * A persisted fixture update timestamp orders different schedule versions, so
+ * a stale resolver cannot reverse a fresh exact-hour reschedule after waiting
+ * for the lane lock. Immutable due time orders slots within one version.
  */
 export async function supersedeSchedulerObligationsByDueAtBatch(input: {
   boundaries: readonly SchedulerDueAtSupersessionBoundary[];
@@ -328,6 +416,9 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
       boundary.periodKey.length === 0 ||
       typeof boundary.resultSlot !== 'string' ||
       boundary.resultSlot.length === 0 ||
+      (boundary.resultAuthorityAtMs !== undefined &&
+        (!Number.isSafeInteger(boundary.resultAuthorityAtMs) ||
+          boundary.resultAuthorityAtMs <= 0)) ||
       !Number.isFinite(boundary.beforeDueAt.getTime())
     ) {
       throw new Error('Scheduler supersession boundary is invalid');
@@ -342,12 +433,15 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
       scope_key: boundary.scopeKey,
       period_key: boundary.periodKey,
       result_slot: boundary.resultSlot,
+      result_authority_at_ms: boundary.resultAuthorityAtMs ?? null,
       before_due_at: boundary.beforeDueAt.toISOString(),
     };
   });
   const db = input.db ?? (await getDb());
   const boundarySlot = sql`boundaries.result_slot`;
   const obligationSlot = sql`obligation.evidence->>'resultSlot'`;
+  const boundaryAuthorityAt = sql`boundaries.result_authority_at_ms`;
+  const obligationAuthorityAt = postMatchAuthorityAtForSql(sql`obligation.evidence`);
   const boundaryDueAt = sql`boundaries.before_due_at`;
   const obligationDueAt = immutableScheduledDueAtForSql(
     sql`obligation.evidence`,
@@ -355,12 +449,14 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
   );
   const [result] = await db.execute<{ updatedCount: number | string }>(sql`
     WITH boundaries AS (
-      SELECT job_name, scope_key, period_key, result_slot, before_due_at
+      SELECT job_name, scope_key, period_key, result_slot,
+             result_authority_at_ms, before_due_at
       FROM jsonb_to_recordset(${JSON.stringify(boundaries)}::jsonb) AS boundary(
         job_name text,
         scope_key text,
         period_key text,
         result_slot text,
+        result_authority_at_ms bigint,
         before_due_at timestamptz
       )
     ), updated AS (
@@ -383,9 +479,10 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
         AND ${postMatchIdentityIsNewerSql({
           newerSlot: boundarySlot,
           newerDueAt: boundaryDueAt,
+          newerAuthorityAt: boundaryAuthorityAt,
           olderSlot: obligationSlot,
           olderDueAt: obligationDueAt,
-          currentBoundaryWinsEqualReschedule: true,
+          olderAuthorityAt: obligationAuthorityAt,
         })}
         AND obligation.status IN ('pending', 'failed')
       RETURNING obligation.obligation_id
@@ -402,8 +499,10 @@ export type SchedulerObligationReservation = Readonly<{
 }>;
 
 /**
- * Reserve the current post-match identities and retire stale peers in one
- * transaction under the same lane advisory lock used by claim. A claimant
+ * Reserve the current post-match identities, refresh their durable fixture
+ * authority, and retire stale peers in one transaction under the same lane
+ * advisory lock used by claim. A previously superseded identity is revived
+ * only when it reappears with a strictly newer authority version. A claimant
  * that waits for this transaction takes its statement snapshot only after the
  * current identities are committed, so an uncommitted reservation cannot be
  * missed by the latest-authoritative fence.
@@ -429,7 +528,14 @@ export async function reconcilePostMatchSchedulerObligations(input: {
     );
     const reservations: SchedulerObligation[] = [];
     for (const reservation of input.reservations) {
-      reservations.push(await reserveSchedulerObligation({ ...reservation, db: tx }));
+      const obligation = await reserveSchedulerObligation({ ...reservation, db: tx });
+      reservations.push(
+        await refreshPostMatchObligationAuthority({
+          obligation,
+          plan: reservation.plan,
+          db: tx,
+        }),
+      );
     }
     const superseded = await supersedeSchedulerObligationsByDueAtBatch({
       boundaries: input.boundaries,
@@ -531,6 +637,8 @@ export async function claimSchedulerObligations(
   const newerResultSlot = sql`newer.evidence->>'resultSlot'`;
   const currentDueAt = immutableScheduledDueAtSql();
   const newerDueAt = immutableScheduledDueAtForSql(sql`newer.evidence`, sql`newer.due_at`);
+  const currentAuthorityAt = postMatchAuthorityAtForSql(sql`${schedulerObligationsInOps.evidence}`);
+  const newerAuthorityAt = postMatchAuthorityAtForSql(sql`newer.evidence`);
   const latestAuthoritativeScope = input.enforceLatestAuthoritativeScope
     ? sql`NOT EXISTS (
         SELECT 1
@@ -541,8 +649,10 @@ export async function claimSchedulerObligations(
           AND ${postMatchIdentityIsNewerSql({
             newerSlot: newerResultSlot,
             newerDueAt,
+            newerAuthorityAt,
             olderSlot: currentResultSlot,
             olderDueAt: currentDueAt,
+            olderAuthorityAt: currentAuthorityAt,
           })}
       )`
     : undefined;

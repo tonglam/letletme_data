@@ -1,4 +1,5 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
+import type { Fixture } from '../types';
 import { formatCronDateKey } from '../utils/timezone';
 import {
   enqueueCoreSnapshotJob,
@@ -91,6 +92,7 @@ export type SchedulerContext = Readonly<{
     finished?: boolean;
     dataChecked?: boolean;
     dataCheckedAt?: Date | null;
+    updatedAt?: Date | null;
   }[];
 }>;
 
@@ -374,6 +376,30 @@ type PostMatchFixturesLoader = (
   eventId: number,
 ) => ReturnType<typeof fixtureRepository.findByEvent>;
 
+function postMatchFixtureAuthorityAtMs(fixtures: readonly Fixture[]): number {
+  const persistedUpdates = fixtures
+    .map((fixture) => fixture.updatedAt?.getTime())
+    .filter(
+      (updatedAt): updatedAt is number =>
+        updatedAt !== undefined && Number.isSafeInteger(updatedAt) && updatedAt > 0,
+    );
+  if (persistedUpdates.length > 0) return Math.max(...persistedUpdates);
+
+  // Production fixture rows have a non-null updated_at. Keep a deterministic
+  // compatibility value for injected/unit fixtures while never using wall time
+  // as authority.
+  const kickoffTimes = fixtures
+    .map((fixture) => fixture.kickoffTime?.getTime())
+    .filter(
+      (kickoffTime): kickoffTime is number =>
+        kickoffTime !== undefined && Number.isSafeInteger(kickoffTime) && kickoffTime > 0,
+    );
+  if (kickoffTimes.length === 0) {
+    throw new Error('Post-match fixtures have no durable authority timestamp');
+  }
+  return Math.max(...kickoffTimes);
+}
+
 /**
  * Results are meaningful only after the final fixture's expected end. During
  * the first 24 hours each event gets one idempotent hourly checkpoint. Once
@@ -400,6 +426,12 @@ export async function resolvePostMatchResultPlans(
         source: 'catchup',
         evidence: {
           resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: (
+            event.updatedAt ??
+            event.dataCheckedAt ??
+            event.deadlineTime ??
+            dueAt
+          ).getTime(),
           dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
         },
       });
@@ -423,7 +455,10 @@ export async function resolvePostMatchResultPlans(
         dueAt: checkpoint.dueAt,
         eventId: event.id,
         source: 'reconcile',
-        evidence: { resultSlot: checkpoint.slot },
+        evidence: {
+          resultSlot: checkpoint.slot,
+          resultAuthorityAtMs: postMatchFixtureAuthorityAtMs(fixtures),
+        },
       };
     }),
   );
@@ -915,6 +950,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
           source: 'reconcile' as const,
           evidence: {
             resultSlot: checkpoint.slot,
+            resultAuthorityAtMs: postMatchFixtureAuthorityAtMs(fixtures),
             finalizeEvent: true,
             persistEventLives: true,
           },
@@ -1451,6 +1487,7 @@ export async function resolveSchedulerContext(
       finished: event.finished,
       dataChecked: event.dataChecked,
       dataCheckedAt: event.dataCheckedAt,
+      updatedAt: event.updatedAt,
     }));
   const currentEvent = events
     .filter((event) => event.deadlineTime && event.deadlineTime.getTime() <= now.getTime())

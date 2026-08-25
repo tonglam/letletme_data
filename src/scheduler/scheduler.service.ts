@@ -56,14 +56,25 @@ const observedPlanKeys = new Map<string, true>();
 
 export function schedulerPlanKey(
   definition: Pick<ScheduledJobDefinition, 'name'>,
-  plan: Pick<SchedulerObligationPlan, 'scopeKey' | 'periodKey' | 'terminalStatus'>,
+  plan: Pick<SchedulerObligationPlan, 'scopeKey' | 'periodKey' | 'terminalStatus' | 'evidence'>,
 ): string {
-  return JSON.stringify([
+  const identity: Array<string | number> = [
     definition.name,
     plan.scopeKey,
     plan.periodKey,
     plan.terminalStatus ?? 'active',
-  ]);
+  ];
+  const resultSlot = plan.evidence?.resultSlot;
+  const resultAuthorityAtMs = plan.evidence?.resultAuthorityAtMs;
+  if (
+    typeof resultSlot === 'string' &&
+    /^(provisional|final)-\d+$/.test(resultSlot) &&
+    Number.isSafeInteger(resultAuthorityAtMs) &&
+    Number(resultAuthorityAtMs) > 0
+  ) {
+    identity.push(Number(resultAuthorityAtMs));
+  }
+  return JSON.stringify(identity);
 }
 
 function wasPlanObserved(key: string): boolean {
@@ -198,6 +209,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     periodKey: string;
     scopeKey: string;
     resultSlot: string;
+    resultAuthorityAtMs: number;
     dueAt: Date;
   }> = [];
   const postMatchReservations: Array<{
@@ -256,13 +268,15 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         (plan) =>
           plan.terminalStatus !== undefined ||
           typeof plan.evidence?.resultSlot !== 'string' ||
-          plan.evidence.resultSlot.length === 0,
+          plan.evidence.resultSlot.length === 0 ||
+          !Number.isSafeInteger(plan.evidence?.resultAuthorityAtMs) ||
+          Number(plan.evidence?.resultAuthorityAtMs) <= 0,
       );
       if (invalidPlan) {
         failed += 1;
         logError(
-          'Post-match scheduler plan is missing its result-slot authority',
-          new Error('Post-match resultSlot evidence is required'),
+          'Post-match scheduler plan is missing durable result authority',
+          new Error('Post-match resultSlot and resultAuthorityAtMs evidence are required'),
           {
             jobName: definition.name,
             scopeKey: invalidPlan.scopeKey,
@@ -277,6 +291,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
           periodKey: plan.periodKey,
           scopeKey: plan.scopeKey,
           resultSlot: plan.evidence?.resultSlot as string,
+          resultAuthorityAtMs: plan.evidence?.resultAuthorityAtMs as number,
           dueAt: plan.dueAt,
         });
       }
@@ -327,6 +342,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         scopeKey: latest.scopeKey,
         periodKey: latest.periodKey,
         resultSlot: latest.resultSlot,
+        resultAuthorityAtMs: latest.resultAuthorityAtMs,
         beforeDueAt: latest.dueAt,
       })),
       evidence: { checkpoint: 'post-match-results' },

@@ -480,6 +480,35 @@ describe('standalone scheduler registry', () => {
     expect(active).not.toBe(expired);
   });
 
+  test('uses durable result authority in the observed-plan LRU key', () => {
+    const definition = { name: 'entry-results' };
+    const stale = schedulerPlanKey(definition, {
+      scopeKey: '2627:event:1',
+      periodKey: 'event-1-final-14',
+      evidence: { resultSlot: 'final-14', resultAuthorityAtMs: 1_787_645_600_000 },
+    });
+    const fresh = schedulerPlanKey(definition, {
+      scopeKey: '2627:event:1',
+      periodKey: 'event-1-final-14',
+      evidence: { resultSlot: 'final-14', resultAuthorityAtMs: 1_787_649_200_000 },
+    });
+
+    expect(stale).not.toBe(fresh);
+    expect(
+      schedulerPlanKey(definition, {
+        scopeKey: '2627:event:1',
+        periodKey: 'event-1-final',
+        evidence: { resultSlot: 'final-checkpoint', resultAuthorityAtMs: 1_787_645_600_000 },
+      }),
+    ).toBe(
+      schedulerPlanKey(definition, {
+        scopeKey: '2627:event:1',
+        periodKey: 'event-1-final',
+        evidence: { resultSlot: 'final-checkpoint', resultAuthorityAtMs: 1_787_649_200_000 },
+      }),
+    );
+  });
+
   test('targets entry snapshots at the latest finalized event', () => {
     expect(resolveEntryInfoSnapshotTargetEventId({ latestFinalizedEventId: 8 })).toBe(8);
     expect(resolveEntryInfoSnapshotTargetEventId({})).toBe(0);
@@ -499,7 +528,14 @@ describe('standalone scheduler registry', () => {
         },
       ],
     };
-    const fixtures = [{ ...mockFixture1, kickoffTime: new Date('2026-08-22T18:00:00.000Z') }];
+    const authorityAt = new Date('2026-08-22T19:59:30.000Z');
+    const fixtures = [
+      {
+        ...mockFixture1,
+        kickoffTime: new Date('2026-08-22T18:00:00.000Z'),
+        updatedAt: authorityAt,
+      },
+    ];
     const loadFixtures = async () => fixtures;
 
     expect(await resolvePostMatchResultPlans(baseContext, loadFixtures)).toEqual([]);
@@ -514,6 +550,7 @@ describe('standalone scheduler registry', () => {
         dueAt: new Date('2026-08-22T20:00:00.000Z'),
         eventId: 1,
         source: 'reconcile',
+        evidence: expect.objectContaining({ resultAuthorityAtMs: authorityAt.getTime() }),
       }),
     ]);
   });
