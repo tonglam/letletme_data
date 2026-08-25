@@ -238,6 +238,14 @@ function recoveryCompletionMode(
   return definition.recoveryCompletionMode ?? 'root-job';
 }
 
+function recoveryExpectedStatus(
+  obligation: Pick<SchedulerObligation, 'status'>,
+): 'enqueued' | 'running' | undefined {
+  return obligation.status === 'enqueued' || obligation.status === 'running'
+    ? obligation.status
+    : undefined;
+}
+
 function groupRecoveryCandidates(
   candidates: readonly SchedulerObligation[],
   definitions: readonly Pick<
@@ -294,11 +302,37 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
     unchanged: 0,
     errors: 0,
   };
+  const deferUncertainCandidate = async (
+    obligation: SchedulerObligation,
+    queueName: string,
+    reason: string,
+  ): Promise<void> => {
+    // Move an unresolved row behind the current expired window. Otherwise the
+    // oldest limited result set can permanently starve later obligations.
+    counters.errors += 1;
+    try {
+      const updated = await dependencies.renew({
+        obligationId: obligation.obligationId,
+        generation: obligation.generation,
+      });
+      if (updated) counters.retained += 1;
+      else counters.unchanged += 1;
+    } catch (error) {
+      logError('Scheduler enqueue recovery could not defer an uncertain generation', error, {
+        queueName,
+        jobName: obligation.jobName,
+        obligationId: obligation.obligationId,
+        generation: obligation.generation,
+        reason,
+      });
+    }
+  };
 
   for (const obligation of grouped.unknown) {
     const updated = await dependencies.fail({
       obligationId: obligation.obligationId,
       generation: obligation.generation,
+      expectedStatus: recoveryExpectedStatus(obligation),
       retryDelayMs: 0,
       error: new Error(`No concrete queue definition for ${obligation.jobName}`),
     });
@@ -316,11 +350,13 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
       missingEvidenceUnverified = !inspection.missingEvidenceVerified;
       directLookupMissingObligationIds = new Set(inspection.directLookupMissingObligationIds ?? []);
     } catch (error) {
-      counters.errors += queueCandidates.length;
       logError('Scheduler enqueue recovery could not inspect BullMQ', error, {
         queueName,
         obligationIds: queueCandidates.map((candidate) => candidate.obligationId),
       });
+      for (const obligation of queueCandidates) {
+        await deferUncertainCandidate(obligation, queueName, 'queue-inspection-failed');
+      }
       continue;
     }
 
@@ -379,11 +415,19 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
       const matchingJobs = jobs.filter((job) =>
         matchesSchedulerObligationGeneration(job, obligation),
       );
-      const rootAbsenceVerified =
-        completionMode === 'root-job' &&
-        directLookupMissingObligationIds.has(obligation.obligationId);
-      if (matchingJobs.length === 0 && missingEvidenceUnverified && !rootAbsenceVerified) {
-        counters.errors += 1;
+      // A durable chain cannot publish descendants while its obligation is
+      // still enqueued: every root worker crosses the generation fence and
+      // moves the row to running first. Two absent deterministic-root reads
+      // therefore prove a never-started chain is safe to retry.
+      const deterministicRootAbsenceVerified =
+        directLookupMissingObligationIds.has(obligation.obligationId) &&
+        (completionMode === 'root-job' || obligation.status === 'enqueued');
+      if (
+        matchingJobs.length === 0 &&
+        missingEvidenceUnverified &&
+        !deterministicRootAbsenceVerified
+      ) {
+        await deferUncertainCandidate(obligation, queueName, 'bounded-view-incomplete');
         continue;
       }
       const decision = decideSchedulerEnqueueRecovery(matchingJobs);
@@ -396,6 +440,7 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
             const updated = await dependencies.fail({
               obligationId: obligation.obligationId,
               generation: obligation.generation,
+              expectedStatus: recoveryExpectedStatus(obligation),
               retryDelayMs: 0,
               error: new Error('Expired scheduler claim has no matching nonterminal Bull job'),
             });
@@ -408,6 +453,7 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
               const updated = await dependencies.fail({
                 obligationId: obligation.obligationId,
                 generation: obligation.generation,
+                expectedStatus: recoveryExpectedStatus(obligation),
                 retryDelayMs: 0,
                 error: new Error('Expired unconfirmed scheduler claim has no lease owner'),
               });
@@ -444,12 +490,17 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
         if (decision === 'mark-succeeded') {
           if (!semanticCompletionJob) {
             if (missingEvidenceUnverified) {
-              counters.errors += 1;
+              await deferUncertainCandidate(
+                obligation,
+                queueName,
+                'semantic-finalizer-not-visible',
+              );
               continue;
             }
             const updated = await dependencies.fail({
               obligationId: obligation.obligationId,
               generation: obligation.generation,
+              expectedStatus: recoveryExpectedStatus(obligation),
               retryDelayMs: 0,
               error: new Error(`Bull root completed without ${completionMode} completion evidence`),
             });
@@ -492,12 +543,13 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
           // A failed chain root can coexist with descendants that were
           // published before the handoff failed. Never open a new generation
           // until the bounded queue view proves no descendant is still live.
-          counters.errors += 1;
+          await deferUncertainCandidate(obligation, queueName, 'chain-descendants-not-visible');
           continue;
         }
         const updated = await dependencies.fail({
           obligationId: obligation.obligationId,
           generation: obligation.generation,
+          expectedStatus: recoveryExpectedStatus(obligation),
           retryDelayMs: 0,
           error: new Error(
             decision === 'mark-failed'

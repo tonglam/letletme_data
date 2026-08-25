@@ -236,8 +236,9 @@ describe('scheduler enqueue recovery', () => {
     expect(failed).toEqual(['busy-root']);
   });
 
-  test('does not use root-id absence to prove a durable chain is drained', async () => {
-    let failCalls = 0;
+  test('trusts two missing root-id observations for a never-started durable chain', async () => {
+    let inspections = 0;
+    const failed: string[] = [];
     const result = await reconcileExpiredSchedulerEnqueueClaims({
       definitions: [
         {
@@ -247,7 +248,47 @@ describe('scheduler enqueue recovery', () => {
         },
       ],
       dependencies: {
-        listCandidates: async () => [obligation('busy-chain', 9, 'entry-results')],
+        listCandidates: async () => [obligation('never-started-chain', 9, 'entry-results')],
+        inspectJobs: async () => {
+          inspections += 1;
+          return {
+            jobs: [],
+            missingEvidenceVerified: false,
+            directLookupMissingObligationIds: ['never-started-chain'],
+          };
+        },
+        confirm: async () => false,
+        start: async () => false,
+        renew: async () => false,
+        complete: async () => false,
+        fail: async (input) => {
+          failed.push(input.obligationId);
+          return true;
+        },
+      },
+    });
+
+    expect(inspections).toBe(2);
+    expect(result.retried).toBe(1);
+    expect(result.errors).toBe(0);
+    expect(failed).toEqual(['never-started-chain']);
+  });
+
+  test('does not use root-id absence to prove a running durable chain is drained', async () => {
+    let failCalls = 0;
+    const renewed: string[] = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [
+        {
+          name: 'entry-results',
+          queueName: 'entry-sync',
+          recoveryCompletionMode: 'entry-scan-finalizer',
+        },
+      ],
+      dependencies: {
+        listCandidates: async () => [
+          { ...obligation('busy-chain', 9, 'entry-results'), status: 'running' },
+        ],
         inspectJobs: async () => ({
           jobs: [],
           missingEvidenceVerified: false,
@@ -255,7 +296,10 @@ describe('scheduler enqueue recovery', () => {
         }),
         confirm: async () => false,
         start: async () => false,
-        renew: async () => false,
+        renew: async (input) => {
+          renewed.push(input.obligationId);
+          return true;
+        },
         complete: async () => false,
         fail: async () => {
           failCalls += 1;
@@ -265,8 +309,10 @@ describe('scheduler enqueue recovery', () => {
     });
 
     expect(result.retried).toBe(0);
+    expect(result.retained).toBe(1);
     expect(result.errors).toBe(1);
     expect(failCalls).toBe(0);
+    expect(renewed).toEqual(['busy-chain']);
   });
 
   test('preserves the price-change no-op terminal status during recovery', async () => {
@@ -504,8 +550,9 @@ describe('scheduler enqueue recovery', () => {
     expect(completed.sort()).toEqual(['tournament-chain', 'understat-chain']);
   });
 
-  test('does not retry a missing job when the bounded Redis view was incomplete', async () => {
+  test('defers a missing job when the bounded Redis view was incomplete', async () => {
     let failCalls = 0;
+    const renewed: string[] = [];
     const result = await reconcileExpiredSchedulerEnqueueClaims({
       definitions: [{ name: 'recoverable-job', queueName: 'recoverable-queue' }],
       dependencies: {
@@ -513,7 +560,10 @@ describe('scheduler enqueue recovery', () => {
         inspectJobs: async () => ({ jobs: [], missingEvidenceVerified: false }),
         confirm: async () => false,
         start: async () => false,
-        renew: async () => false,
+        renew: async (input) => {
+          renewed.push(input.obligationId);
+          return true;
+        },
         complete: async () => false,
         fail: async () => {
           failCalls += 1;
@@ -525,7 +575,7 @@ describe('scheduler enqueue recovery', () => {
     expect(result).toEqual({
       candidates: 1,
       running: 0,
-      retained: 0,
+      retained: 1,
       succeeded: 0,
       skipped: 0,
       retried: 0,
@@ -533,5 +583,6 @@ describe('scheduler enqueue recovery', () => {
       errors: 1,
     });
     expect(failCalls).toBe(0);
+    expect(renewed).toEqual(['outside-bounded-view']);
   });
 });

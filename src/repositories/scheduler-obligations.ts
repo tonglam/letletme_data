@@ -655,6 +655,7 @@ export async function failSchedulerObligation(input: {
   obligationId: string;
   owner?: string;
   generation?: number;
+  expectedStatus?: Extract<SchedulerObligationStatus, 'enqueued' | 'running'>;
   error: unknown;
   retryDelayMs?: number;
   db?: DbHandle;
@@ -682,6 +683,9 @@ export async function failSchedulerObligation(input: {
         input.generation === undefined
           ? undefined
           : eq(schedulerObligationsInOps.generation, input.generation),
+        input.expectedStatus === undefined
+          ? undefined
+          : eq(schedulerObligationsInOps.status, input.expectedStatus),
         inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
       ),
     )

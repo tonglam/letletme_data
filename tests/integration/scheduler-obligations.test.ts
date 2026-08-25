@@ -12,6 +12,7 @@ import {
   failSchedulerObligation,
   listExpiredSchedulerObligations,
   markSchedulerObligationIrrecoverable,
+  renewSchedulerObligation,
   schedulerObligationStatus,
   startSchedulerObligation,
   supersedeSchedulerObligations,
@@ -201,6 +202,14 @@ describe('scheduler obligation generation fencing', () => {
         obligationId: OBLIGATION_ID,
         generation: 1,
         error: new Error('late generation failure'),
+      }),
+    ).toBe(false);
+    expect(
+      await failSchedulerObligation({
+        obligationId: OBLIGATION_ID,
+        generation: 2,
+        expectedStatus: 'enqueued',
+        error: new Error('stale status observation'),
       }),
     ).toBe(false);
     expect(
@@ -850,6 +859,97 @@ describe('scheduler obligation generation fencing', () => {
     expect(candidates.map((candidate) => candidate.obligationId)).toEqual([
       OBLIGATION_ID,
       NEWER_OBLIGATION_ID,
+      IN_FLIGHT_OBLIGATION_ID,
+    ]);
+  });
+
+  test('renewing an unresolved recovery window advances to later expired rows', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        lease_owner,
+        lease_expires_at,
+        evidence
+      )
+      VALUES
+        (
+          ${OBLIGATION_ID}::uuid,
+          'entry-results',
+          'integration:recovery-window',
+          'oldest',
+          'integration',
+          'UTC',
+          'running',
+          'reconcile',
+          clock_timestamp() - interval '20 minutes',
+          2,
+          3,
+          'oldest-owner',
+          clock_timestamp() - interval '3 minutes',
+          '{}'::jsonb
+        ),
+        (
+          ${NEWER_OBLIGATION_ID}::uuid,
+          'entry-results',
+          'integration:recovery-window',
+          'middle',
+          'integration',
+          'UTC',
+          'running',
+          'reconcile',
+          clock_timestamp() - interval '20 minutes',
+          2,
+          3,
+          'middle-owner',
+          clock_timestamp() - interval '2 minutes',
+          '{}'::jsonb
+        ),
+        (
+          ${IN_FLIGHT_OBLIGATION_ID}::uuid,
+          'entry-results',
+          'integration:recovery-window',
+          'latest',
+          'integration',
+          'UTC',
+          'running',
+          'reconcile',
+          clock_timestamp() - interval '20 minutes',
+          2,
+          3,
+          'latest-owner',
+          clock_timestamp() - interval '1 minute',
+          '{}'::jsonb
+        )
+    `;
+
+    const firstWindow = await listExpiredSchedulerObligations({ limit: 2 });
+    expect(firstWindow.map((candidate) => candidate.obligationId)).toEqual([
+      OBLIGATION_ID,
+      NEWER_OBLIGATION_ID,
+    ]);
+    for (const candidate of firstWindow) {
+      expect(
+        await renewSchedulerObligation({
+          obligationId: candidate.obligationId,
+          generation: candidate.generation,
+          additionalLeaseMs: 60_000,
+        }),
+      ).toBe(true);
+    }
+
+    const nextWindow = await listExpiredSchedulerObligations({ limit: 2 });
+    expect(nextWindow.map((candidate) => candidate.obligationId)).toEqual([
       IN_FLIGHT_OBLIGATION_ID,
     ]);
   });
