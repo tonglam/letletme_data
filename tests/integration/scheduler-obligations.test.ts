@@ -10,6 +10,7 @@ import {
   completeSchedulerObligation,
   confirmSchedulerObligationEnqueued,
   failSchedulerObligation,
+  findDueSchedulerJobNames,
   listExpiredSchedulerObligations,
   markSchedulerObligationIrrecoverable,
   renewSchedulerObligation,
@@ -39,6 +40,61 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler obligation generation fencing', () => {
+  test('claims one atomic capacity lane and leaves a conflicting job pending', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES
+        (
+          ${OBLIGATION_ID}::uuid, 'entry-results', 'integration:event:1',
+          'integration-result-source', 'integration', 'UTC', 'pending', 'reconcile',
+          clock_timestamp() - interval '2 minutes', 0, 0, '{}'::jsonb
+        ),
+        (
+          ${NEWER_OBLIGATION_ID}::uuid, 'league-event-results', 'integration:event:1',
+          'integration-result-derived', 'integration', 'UTC', 'pending', 'reconcile',
+          clock_timestamp() - interval '1 minute', 0, 0, '{}'::jsonb
+        )
+    `;
+
+    expect(await findDueSchedulerJobNames({})).toEqual(
+      expect.arrayContaining(['entry-results', 'league-event-results']),
+    );
+    const first = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['entry-results'],
+      inFlightConflictJobNames: ['entry-results', 'league-event-results'],
+      laneKeys: ['post-match-results'],
+    });
+    expect(first[0]?.obligation.obligationId).toBe(OBLIGATION_ID);
+
+    const blocked = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['league-event-results'],
+      inFlightConflictJobNames: ['entry-results', 'league-event-results'],
+      laneKeys: ['post-match-results'],
+    });
+    expect(blocked).toHaveLength(0);
+
+    expect(
+      await completeSchedulerObligation({
+        obligationId: OBLIGATION_ID,
+        generation: 0,
+        status: 'succeeded',
+      }),
+    ).toBe(true);
+    const second = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['league-event-results'],
+      inFlightConflictJobNames: ['entry-results', 'league-event-results'],
+      laneKeys: ['post-match-results'],
+    });
+    expect(second[0]?.obligation.obligationId).toBe(NEWER_OBLIGATION_ID);
+  });
+
   test('keeps enqueue acknowledgement distinct from fenced worker start', async () => {
     const sql = await getDbClient();
     await sql`

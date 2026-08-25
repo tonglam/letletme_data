@@ -298,6 +298,12 @@ export async function claimSchedulerObligations(
     leaseMs?: number;
     /** Keep scheduler-only obligations pending while their provider is disabled. */
     excludedJobNames?: readonly string[];
+    /** Restrict this atomic claim to one ordered scheduler definition. */
+    includedJobNames?: readonly string[];
+    /** Existing in-flight jobs that consume any lane required by this claim. */
+    inFlightConflictJobNames?: readonly string[];
+    /** Advisory-lock identities shared by every definition using the same lane. */
+    laneKeys?: readonly string[];
     /** Terminal generation caps for provider-specific lease recovery. */
     generationCaps?: Readonly<Record<string, number>>;
     db?: DbHandle;
@@ -314,8 +320,36 @@ export async function claimSchedulerObligations(
   const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
     (name) => name.length > 0,
   );
+  const includedJobNames = [...new Set(input.includedJobNames ?? [])].filter(
+    (name) => name.length > 0,
+  );
+  const inFlightConflictJobNames = [
+    ...new Set(input.inFlightConflictJobNames ?? includedJobNames),
+  ].filter((name) => name.length > 0);
+  const laneKeys = [...new Set(input.laneKeys ?? [])].filter((lane) => lane.length > 0).sort();
   const owner = randomUUID();
   return db.transaction(async (tx) => {
+    // All schedulers acquire intersecting lane locks in lexical order. The
+    // in-flight check and claim therefore form one database-atomic capacity
+    // decision even during a rolling deployment with two scheduler processes.
+    for (const lane of laneKeys) {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${`scheduler-lane:${lane}`}, 0))`,
+      );
+    }
+    if (inFlightConflictJobNames.length > 0) {
+      const active = await tx
+        .select({ obligationId: schedulerObligationsInOps.obligationId })
+        .from(schedulerObligationsInOps)
+        .where(
+          and(
+            inArray(schedulerObligationsInOps.jobName, inFlightConflictJobNames),
+            inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+          ),
+        )
+        .limit(1);
+      if (active.length > 0) return [];
+    }
     const clockRows = await tx.execute<{ dbNow: Date | string }>(
       sql`SELECT clock_timestamp() AS "dbNow"`,
     );
@@ -329,6 +363,9 @@ export async function claimSchedulerObligations(
         and(
           lte(schedulerObligationsInOps.dueAt, dbNow),
           inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+          includedJobNames.length > 0
+            ? inArray(schedulerObligationsInOps.jobName, includedJobNames)
+            : undefined,
           excludedJobNames.length > 0
             ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
             : undefined,
@@ -382,6 +419,35 @@ export async function claimSchedulerObligations(
     }
     return claimed;
   });
+}
+
+/**
+ * Cheap prefilter for the lane-aware claimant. The later claim transaction is
+ * still authoritative; this only avoids opening one transaction per registry
+ * definition on every 30-second scheduler pass.
+ */
+export async function findDueSchedulerJobNames(input: {
+  excludedJobNames?: readonly string[];
+  db?: DbHandle;
+}): Promise<readonly string[]> {
+  const db = input.db ?? (await getDb());
+  const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
+    (name) => name.length > 0,
+  );
+  const rows = await db
+    .select({ jobName: schedulerObligationsInOps.jobName })
+    .from(schedulerObligationsInOps)
+    .where(
+      and(
+        sql`${schedulerObligationsInOps.dueAt} <= clock_timestamp()`,
+        inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+        excludedJobNames.length > 0
+          ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
+          : undefined,
+      ),
+    )
+    .groupBy(schedulerObligationsInOps.jobName);
+  return rows.map((row) => row.jobName);
 }
 
 /**

@@ -12,6 +12,7 @@ import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { publishTournamentTrendScopes } from './tournament-trends-publication.service';
 
 const DEFAULT_CONCURRENCY = 5;
@@ -20,6 +21,11 @@ export type EntryTransfersClient = Pick<typeof fplClient, 'getEntryTransfers'>;
 export type TournamentTransferSyncOptions = {
   concurrency?: number;
   client?: EntryTransfersClient;
+  /** Shared source boundary used to reuse canonical entry transfer histories. */
+  freshAfter?: string | Date;
+  /** Fetch outside a transaction, then persist each entry under a short event scope. */
+  perEntryMutationScopes?: boolean;
+  mutationJobId?: string;
 };
 
 type TransferWorkSummary = {
@@ -395,11 +401,19 @@ export async function syncTournamentEventTransfersPre(
     };
   }
 
-  const sourceCheckedAt = (await readDatabaseOrderingTimestamp()).exact;
   // The current event remains mutable until its deadline. Poll every active
-  // entry and leave the durable completeness checkpoint at the prior event so
-  // the post-deadline path still performs one authoritative full-history read.
-  const pendingEntryIds = entryIds;
+  // entry once per shared refresh boundary and leave the durable completeness
+  // checkpoint at the prior event so the post-deadline path still performs one
+  // authoritative full-history read.
+  const pendingEntryIds = options?.freshAfter
+    ? await entryEventTransfersRepository.findEntryIdsNeedingSourceRefresh(
+        season,
+        entryIds,
+        options.freshAfter,
+      )
+    : entryIds;
+  const reusedUnits = entryIds.length - pendingEntryIds.length;
+  const sourceCheckedAt = (await readDatabaseOrderingTimestamp()).exact;
   let skipped = 0;
   const failedEntryIds: number[] = [];
 
@@ -411,19 +425,33 @@ export async function syncTournamentEventTransfersPre(
     try {
       const transfers = await client.getEntryTransfers(entryId);
       const hasEventTransfers = transfers.some((transfer) => transfer.event === eventId);
-      await entryEventTransfersRepository.replaceForEvent(
-        season,
-        entryId,
-        eventId,
-        transfers,
-        undefined,
-        {
-          elementInPlayed: false,
-          defaultPoints: 0,
-          checkpointThroughEventId: Math.max(0, eventId - 1),
-          sourceCheckedAt,
-        },
-      );
+      const persistTransfers = () =>
+        entryEventTransfersRepository.replaceForEvent(
+          season,
+          entryId,
+          eventId,
+          transfers,
+          undefined,
+          {
+            elementInPlayed: false,
+            defaultPoints: 0,
+            checkpointThroughEventId: Math.max(0, eventId - 1),
+            sourceCheckedAt,
+          },
+        );
+      if (options?.perEntryMutationScopes) {
+        await withMutationScopes(
+          {
+            queueName: 'tournament-sync',
+            jobName: 'tournament-transfers-pre',
+            jobId: `${options.mutationJobId ?? 'tournament-transfers-pre'}:entry:${entryId}`,
+            eventId,
+          },
+          persistTransfers,
+        );
+      } else {
+        await persistTransfers();
+      }
       if (hasEventTransfers) {
         inserted += 1;
       } else {
@@ -450,13 +478,14 @@ export async function syncTournamentEventTransfersPre(
     inserted,
     skipped,
     errors,
+    reusedUnits,
   });
 
   if (failedUnits > 0) {
     throw new IncompleteDataSyncError(
       'Tournament transfer history did not converge for every active entry',
-      pendingEntryIds.length,
-      0,
+      entryIds.length,
+      reusedUnits,
       succeededUnits,
       failedUnits,
     );
@@ -465,11 +494,25 @@ export async function syncTournamentEventTransfersPre(
   // Transfer history is now durably checkpointed for every active entry. The
   // publisher will atomically promote transfers when picks are complete, or
   // leave the capability explicitly unavailable while collecting picks.
-  await publishTournamentTrendScopes(
-    season,
-    eventId,
-    tournaments.map((tournament) => tournament.id),
-  );
+  const publishTrends = () =>
+    publishTournamentTrendScopes(
+      season,
+      eventId,
+      tournaments.map((tournament) => tournament.id),
+    );
+  if (options?.perEntryMutationScopes) {
+    await withMutationScopes(
+      {
+        queueName: 'tournament-sync',
+        jobName: 'tournament-transfers-pre',
+        jobId: `${options.mutationJobId ?? 'tournament-transfers-pre'}:publication`,
+        eventId,
+      },
+      publishTrends,
+    );
+  } else {
+    await publishTrends();
+  }
 
   return {
     eventId,
@@ -477,8 +520,8 @@ export async function syncTournamentEventTransfersPre(
     inserted,
     skipped,
     errors,
-    requiredUnits: pendingEntryIds.length,
-    reusedUnits: 0,
+    requiredUnits: entryIds.length,
+    reusedUnits,
     succeededUnits,
     failedUnits,
   };

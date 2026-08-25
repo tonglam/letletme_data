@@ -22,6 +22,8 @@ export type MaintenanceEnqueueOptions = Readonly<{
   snapshotActor?: string;
   snapshotReason?: string;
   snapshotIdempotencyKey?: string;
+  /** Shared source checkpoint for a coordinated post-match refresh. */
+  freshAfter?: string;
   attempts?: number;
   backoffDelayMs?: number;
   deduplicationId?: string;
@@ -53,6 +55,7 @@ export async function enqueueMaintenanceJob(
     ...(options.snapshotIdempotencyKey === undefined
       ? {}
       : { snapshotIdempotencyKey: options.snapshotIdempotencyKey }),
+    ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
   };
   try {
     const job = await maintenanceQueue.add(jobName, data, {

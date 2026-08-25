@@ -205,6 +205,56 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
       }
     },
 
+    findEntryIdsNeedingSourceRefresh: async (
+      season: FplSeasonRef,
+      entryIds: number[],
+      freshAfter: string | Date,
+    ): Promise<number[]> => {
+      if (entryIds.length === 0) return [];
+
+      const exactFreshAfter = freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter;
+      const freshnessCutoff = freshAfter instanceof Date ? freshAfter : new Date(freshAfter);
+      if (!Number.isFinite(freshnessCutoff.getTime())) {
+        throw new Error('A valid entry transfer freshness cutoff is required');
+      }
+
+      try {
+        const db = await getDbInstance();
+        const uniqueEntryIds = Array.from(new Set(entryIds));
+        const results: number[] = [];
+        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+          const chunk = uniqueEntryIds.slice(index, index + 1000);
+          const rows = await db
+            .select({
+              entryId: entriesInCompetition.entryId,
+              sourceIsFresh: sql<boolean>`${entriesInCompetition.transfersSourceCheckedAt} >=
+                ${exactFreshAfter}::timestamptz`,
+            })
+            .from(entriesInCompetition)
+            .where(
+              and(
+                eq(entriesInCompetition.seasonId, season.seasonId),
+                inArray(entriesInCompetition.entryId, chunk),
+              ),
+            );
+          const sourceCheckpoints = new Map(rows.map((row) => [row.entryId, row.sourceIsFresh]));
+          results.push(...chunk.filter((entryId) => sourceCheckpoints.get(entryId) !== true));
+        }
+        return results;
+      } catch (error) {
+        logError('Failed to find stale entry transfer sources', error, {
+          season: season.seasonCode,
+          count: entryIds.length,
+          freshAfter: freshnessCutoff.toISOString(),
+        });
+        throw new DatabaseError(
+          'Failed to find stale entry transfer sources',
+          'ENTRY_EVENT_TRANSFERS_SOURCE_FRESHNESS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     replaceForEvent: async (
       season: FplSeasonRef,
       entryId: number,

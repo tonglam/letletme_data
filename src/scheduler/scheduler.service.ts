@@ -4,6 +4,7 @@ import {
   confirmSchedulerObligationEnqueued,
   deferSchedulerObligationByIdentity,
   failSchedulerObligation,
+  findDueSchedulerJobNames,
   hasEarlierInFlightSchedulerObligation,
   markSchedulerObligationIrrecoverable,
   reserveSchedulerObligation,
@@ -29,6 +30,10 @@ import {
 // database-driven. The terminal status is part of the key: a current-day plan
 // observed as active must still be revisited as irrecoverable after its window.
 const MAX_OBSERVED_PLAN_KEYS = 20_000;
+// A cold restart may expose dozens of durable checkpoints at once. Keep the
+// admission burst near the three-connection runtime DB pool while lane locks
+// prevent later passes from stacking more work behind an active lane.
+const MAX_SCHEDULER_CLAIMS_PER_PASS = 4;
 const UNDERSTAT_SCHEDULER_GENERATION_CAP = 3;
 const UNDERSTAT_IN_FLIGHT_DEFER_MS = 60_000;
 const UNDERSTAT_LATEST_AUTHORITATIVE_JOBS = [
@@ -93,6 +98,71 @@ let compatibilityPassInFlight: Promise<void> | null = null;
 
 function definitionByName(name: string): ScheduledJobDefinition | undefined {
   return schedulerRegistry.find((definition) => definition.name === name);
+}
+
+export function schedulerExecutionLanes(
+  definition: Pick<ScheduledJobDefinition, 'executionLanes' | 'queueName'>,
+): readonly string[] {
+  const configured = [...new Set(definition.executionLanes ?? [])].filter(
+    (lane) => lane.trim().length > 0,
+  );
+  return configured.length > 0 ? configured.sort() : [`queue:${definition.queueName}`];
+}
+
+export function orderSchedulerDefinitionsForClaim(
+  definitions: readonly ScheduledJobDefinition[],
+): readonly ScheduledJobDefinition[] {
+  return definitions
+    .map((definition, index) => ({ definition, index }))
+    .sort(
+      (left, right) =>
+        (left.definition.claimPriority ?? 100) - (right.definition.claimPriority ?? 100) ||
+        left.index - right.index,
+    )
+    .map(({ definition }) => definition);
+}
+
+async function claimSchedulerWork(input: {
+  definitions: readonly ScheduledJobDefinition[];
+  disabledJobNames: readonly string[];
+  generationCaps: Readonly<Record<string, number>>;
+}): Promise<Awaited<ReturnType<typeof claimSchedulerObligations>>> {
+  const disabled = new Set(input.disabledJobNames);
+  const dueJobNames = new Set(
+    await findDueSchedulerJobNames({ excludedJobNames: input.disabledJobNames }),
+  );
+  const lanesByJob = new Map(
+    input.definitions.map((definition) => [definition.name, schedulerExecutionLanes(definition)]),
+  );
+  const jobsByLane = new Map<string, Set<string>>();
+  for (const [jobName, lanes] of lanesByJob) {
+    for (const lane of lanes) {
+      const consumers = jobsByLane.get(lane) ?? new Set<string>();
+      consumers.add(jobName);
+      jobsByLane.set(lane, consumers);
+    }
+  }
+
+  const claimed: Awaited<ReturnType<typeof claimSchedulerObligations>>[number][] = [];
+  for (const definition of orderSchedulerDefinitionsForClaim(input.definitions)) {
+    if (claimed.length >= MAX_SCHEDULER_CLAIMS_PER_PASS) break;
+    if (disabled.has(definition.name)) continue;
+    if (!dueJobNames.has(definition.name)) continue;
+    const lanes = lanesByJob.get(definition.name) ?? [];
+    const conflicts = new Set(
+      lanes.flatMap((lane) => [...(jobsByLane.get(lane) ?? new Set<string>())]),
+    );
+    const result = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: [definition.name],
+      inFlightConflictJobNames: [...conflicts],
+      laneKeys: lanes,
+      excludedJobNames: input.disabledJobNames,
+      generationCaps: input.generationCaps,
+    });
+    if (result[0]) claimed.push(result[0]);
+  }
+  return claimed;
 }
 
 /** Definitions without a feature flag are always enabled. */
@@ -253,8 +323,9 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
   const generationCaps = Object.fromEntries(
     UNDERSTAT_SCHEDULER_JOB_NAMES.map((jobName) => [jobName, UNDERSTAT_SCHEDULER_GENERATION_CAP]),
   );
-  const claimed = await claimSchedulerObligations({
-    excludedJobNames: disabledJobNames,
+  const claimed = await claimSchedulerWork({
+    definitions: schedulerRegistry,
+    disabledJobNames,
     generationCaps,
   });
   let enqueued = 0;

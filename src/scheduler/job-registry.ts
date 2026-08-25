@@ -118,6 +118,14 @@ export type ScheduledJobDefinition = Readonly<{
   manualTrigger?: boolean;
   /** Scheduler-only definitions can be excluded from claims while disabled. */
   isEnabled?: () => boolean;
+  /**
+   * Capacity lanes acquired atomically before a scheduler obligation is
+   * claimed. Definitions that share any lane cannot be in flight together.
+   * The default lane is the Bull queue name.
+   */
+  executionLanes?: readonly string[];
+  /** Lower values claim first when several definitions share a lane. */
+  claimPriority?: number;
   resolve: (context: SchedulerContext) => Promise<readonly SchedulerObligationPlan[]>;
   enqueue: (input: {
     context: SchedulerContext;
@@ -452,6 +460,14 @@ function myFplSnapshotDefinition(): ScheduledJobDefinition {
     criticality: 'critical',
     queueName: 'maintenance',
     successPredicate: 'complete My FPL projection published as one active revision',
+    executionLanes: [
+      'queue:data-sync',
+      'queue:entry-sync',
+      'queue:tournament-sync',
+      'queue:league-sync',
+      'post-match-results',
+    ],
+    claimPriority: 50,
     resolve: async (context) => {
       const dueAt = utc8DueAt(context.now, 10, 45);
       if (context.now < dueAt) return [];
@@ -478,6 +494,7 @@ function myFplSnapshotDefinition(): ScheduledJobDefinition {
       const job = await enqueueMyFplSnapshot(context.season, 'catchup', {
         eventId,
         snapshotKind: 'PROVISIONAL',
+        freshAfter: plan.dueAt.toISOString(),
         jobId: `scheduler-${obligationId}-g${generation}`,
         obligationId,
         obligationGeneration: generation,
@@ -496,6 +513,17 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
     criticality: 'critical',
     queueName: 'maintenance',
     successPredicate: 'final My FPL revision replaces the provisional revision',
+    executionLanes: [
+      'queue:data-sync',
+      'queue:entry-sync',
+      'queue:tournament-sync',
+      'queue:league-sync',
+      'post-match-results',
+    ],
+    // A final checkpoint supersedes an older pending provisional snapshot.
+    // The eventual provisional worker then observes the active FINAL revision
+    // and exits without publishing stale authority.
+    claimPriority: 45,
     resolve: async (context) => {
       const plans: SchedulerObligationPlan[] = [];
       for (const event of context.events) {
@@ -518,6 +546,7 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
       const job = await enqueueMyFplSnapshot(context.season, 'reconcile', {
         eventId,
         snapshotKind: 'FINAL',
+        freshAfter: plan.dueAt.toISOString(),
         jobId: `scheduler-${obligationId}-g${generation}`,
         obligationId,
         obligationGeneration: generation,
@@ -865,6 +894,8 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
     criticality: 'critical',
     queueName: 'live-data',
     successPredicate: 'final live snapshot and event checkpoint persisted',
+    executionLanes: ['queue:live-data', 'post-match-results'],
+    claimPriority: 10,
     resolve: async (context) => {
       if (!context.currentEventId) return [];
       const event = await loadSchedulerEvent(context, context.currentEventId);
@@ -1266,11 +1297,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       queueName: 'entry-sync',
       successPredicate: 'entry results checkpoint covers known entries for event',
       recoveryCompletionMode: 'entry-scan-finalizer',
+      executionLanes: ['queue:entry-sync', 'post-match-results'],
+      claimPriority: 20,
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Entry results obligation has no event checkpoint');
         const job = await enqueueEntryResultsSyncJob(context.season, 'catchup', {
           eventId,
+          freshAfter: plan.dueAt.toISOString(),
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
@@ -1305,10 +1339,13 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'critical',
       queueName: 'league-sync',
       successPredicate: 'league results converge for every active tournament',
+      executionLanes: ['queue:league-sync', 'post-match-results'],
+      claimPriority: 40,
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('League results obligation has no event checkpoint');
         const job = await enqueueLeagueEventResults(context.season, eventId, 'catchup', {
+          freshAfter: plan.dueAt.toISOString(),
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
@@ -1325,10 +1362,13 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       successPredicate:
         'tournament result and cascade jobs enqueue; persistent barrier owns downstream completion',
       recoveryCompletionMode: 'tournament-cascade-finalizer',
+      executionLanes: ['queue:tournament-sync', 'post-match-results'],
+      claimPriority: 30,
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Tournament results obligation has no event checkpoint');
         const job = await enqueueTournamentEventResults(context.season, eventId, 'reconcile', {
+          freshAfter: plan.dueAt.toISOString(),
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,

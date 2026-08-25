@@ -268,9 +268,11 @@ describe('entry-sync enqueue runId propagation', () => {
   });
 
   test('retains failure evidence through a deterministic cron continuation', async () => {
+    const freshAfter = '2026-08-25T08:00:00.000Z';
     const root = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
       runId: 'daily-scan',
       removeOnSettle: true,
+      freshAfter,
     });
     const rootData = addCalls[0].data;
     const continuation = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
@@ -281,9 +283,11 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(root.id).toBe('entry-picks-2627-daily-scan-chunk-0');
     expect(continuation.id).toBe('entry-picks-2627-daily-scan-chunk-500');
     expect(rootData.removeOnSettle).toBe(false);
+    expect(rootData.freshAfter).toBe(freshAfter);
     expect(addCalls[0].opts.removeOnComplete).toBeUndefined();
     expect(addCalls[0].opts.removeOnFail).toBeUndefined();
     expect(addCalls[1].data.removeOnSettle).toBe(false);
+    expect(addCalls[1].data.freshAfter).toBe(freshAfter);
     expect(addCalls[1].opts.removeOnComplete).toBeUndefined();
     expect(addCalls[1].opts.removeOnFail).toBeUndefined();
   });

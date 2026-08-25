@@ -36,6 +36,8 @@ export type MaintenanceJobData = {
   snapshotActor?: string;
   snapshotReason?: string;
   snapshotIdempotencyKey?: string;
+  /** Stable source checkpoint shared by all My FPL child refreshes. */
+  freshAfter?: string;
 };
 
 export { maintenanceQueueName } from './names';

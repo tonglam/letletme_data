@@ -51,6 +51,8 @@ export interface EntrySyncJobData {
   /** Durable scheduler obligation carried through every scan chunk/retry. */
   obligationId?: string;
   obligationGeneration?: number;
+  /** Stable source checkpoint retained across scan chunks and retries. */
+  freshAfter?: string;
   queueKey?: string;
   /** Propagated through continuation/retry chunks for deterministic daily jobs. */
   removeOnSettle?: boolean;

@@ -22,10 +22,15 @@ const publicationService = readFileSync(
 );
 const scheduler = readFileSync('src/scheduler/job-registry.ts', 'utf8');
 const worker = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
+const entryWorker = readFileSync('src/workers/entry-sync.worker.ts', 'utf8');
 const queueRunBarrier = readFileSync('src/services/queue-run-barrier.ts', 'utf8');
 const transaction = readFileSync('src/db/singleton.ts', 'utf8');
 const trends = readFileSync('src/services/tournament-trends-publication.service.ts', 'utf8');
 const tournamentWorker = readFileSync('src/workers/tournament-sync.worker.ts', 'utf8');
+const tournamentTransfers = readFileSync(
+  'src/services/tournament-event-transfers.service.ts',
+  'utf8',
+);
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 
 describe('My FPL daily snapshot publication contract', () => {
@@ -170,6 +175,19 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).not.toContain('await Promise.all([\n          enqueueCoreSnapshotJob');
     expect(worker).toContain('eventRepository.findLatestFinalized(season)');
     expect(worker).toContain('eventId: entryInfoTargetEventId');
+    expect(worker).toContain('const freshAfter = await resolveJobFreshAfter(job)');
+    expect(worker).toMatch(
+      /enqueueEntryTransfersSyncJob\(season, source, \{[\s\S]{0,120}freshAfter,/,
+    );
+    expect(worker).toMatch(
+      /enqueueTournamentTransfersPre\(season, job\.data\.eventId, source, \{[\s\S]{0,120}freshAfter,/,
+    );
+    expect(entryWorker).toContain('findEntryIdsNeedingSourceRefresh');
+    expect(tournamentWorker).toContain('job.name === TOURNAMENT_JOBS.TRANSFERS_PRE');
+    expect(tournamentWorker).toContain('const freshAfter = await resolveJobFreshAfter(job)');
+    expect(tournamentWorker).toContain('perEntryMutationScopes: true');
+    expect(tournamentTransfers).toContain('findEntryIdsNeedingSourceRefresh');
+    expect(tournamentTransfers).toContain('requiredUnits: entryIds.length');
   });
 
   test('decides same-day provisional noops only after normalized content hashing', () => {

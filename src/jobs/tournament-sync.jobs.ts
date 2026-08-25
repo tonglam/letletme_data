@@ -38,6 +38,7 @@ export type TournamentSyncEnqueueOptions = {
   obligationId?: string;
   obligationGeneration?: number;
   finalizedEventId?: number;
+  freshAfter?: string;
 };
 
 export async function hasPendingOfficialH2HJob(
@@ -299,6 +300,7 @@ async function enqueueTournamentSyncJob(
       ...(options.obligationGeneration === undefined
         ? {}
         : { obligationGeneration: options.obligationGeneration }),
+      ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
       ...(options.cascadeId ? { cascadeId: options.cascadeId } : {}),
       ...(options.finalizationTargets
         ? {

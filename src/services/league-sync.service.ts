@@ -153,20 +153,15 @@ async function syncResultsAcrossTournaments(
     season,
     eventId,
     label: 'results',
+    // Source reads and any fallback FPL fan-out happen before the service's
+    // short, batch-scoped mutation transaction. Holding the tournament lock
+    // around those network requests previously left PostgreSQL idle in
+    // transaction for several minutes on large leagues.
     syncTournament: (tournamentId) =>
-      withMutationScopes(
-        {
-          queueName: 'league-sync',
-          jobName: 'league-event-results',
-          jobId: `${context?.runId ?? 'coordinator'}:t${tournamentId}`,
-          eventId,
-          tournamentId,
-        },
-        () =>
-          syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
-            freshAfter: context?.freshAfter,
-          }),
-      ),
+      syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
+        freshAfter: context?.freshAfter,
+        mutationJobId: `${context?.runId ?? 'coordinator'}:t${tournamentId}`,
+      }),
   });
 }
 
@@ -191,6 +186,7 @@ export async function processLeagueEventResultsJob(
   if (tournamentId) {
     return syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
       freshAfter: context?.freshAfter,
+      mutationJobId: `${context?.runId ?? 'direct'}:t${tournamentId}`,
     });
   }
   return syncResultsAcrossTournaments(season, eventId, context);

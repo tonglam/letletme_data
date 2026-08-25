@@ -128,7 +128,9 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
         // Coordinators acquire a short transaction per tournament in the
         // service. An outer transaction would retain event locks across the
         // complete network-heavy fan-out.
-        if (tournamentId === undefined) return operation();
+        if (tournamentId === undefined || job.name === LEAGUE_JOBS.LEAGUE_EVENT_RESULTS) {
+          return operation();
+        }
         return withMutationScopes(
           {
             queueName: job.queueName,
