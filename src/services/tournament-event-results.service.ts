@@ -27,6 +27,8 @@ import { withMutationScopes } from '../utils/mutation-scopes';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { isFreshnessBoundaryNewer, latestFreshnessTimestamp } from '../domain/freshness';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { findEventEligibleEntryIds } from '../domain/entry-infos';
+import { entryInfoRepository } from '../repositories/entry-infos';
 
 const DEFAULT_CONCURRENCY = 5;
 const EVENT_LIVE_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS ?? 45_000);
@@ -76,6 +78,16 @@ function validateOrderingTimestamp(value: Date | string): Date | string {
 function freshEntryIds(entryIds: number[], staleEntryIds: number[]): Set<number> {
   const staleEntryIdSet = new Set(staleEntryIds);
   return new Set(entryIds.filter((entryId) => !staleEntryIdSet.has(entryId)));
+}
+
+async function loadEventEligibleEntryIds(
+  season: FplSeasonRef,
+  entryIds: readonly number[],
+  eventId: number,
+): Promise<number[]> {
+  const uniqueEntryIds = uniqueNumbers(entryIds);
+  const entryInfos = await entryInfoRepository.findByIds(season, uniqueEntryIds);
+  return findEventEligibleEntryIds(uniqueEntryIds, entryInfos, eventId);
 }
 
 export function findFreshTournamentResultEntryIds(
@@ -188,7 +200,7 @@ export async function syncTournamentEventResultsForEntryIds(
     errors: number;
   } & TournamentResultWorkSummary
 > {
-  const uniqueEntryIds = uniqueNumbers(entryIds);
+  const uniqueEntryIds = await loadEventEligibleEntryIds(season, entryIds, eventId);
   if (uniqueEntryIds.length === 0) {
     return {
       eventId,
@@ -500,7 +512,7 @@ export async function syncTournamentEventResults(
     tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
 
-  const entryIds = uniqueNumbers(entryLists.flat());
+  const entryIds = await loadEventEligibleEntryIds(season, entryLists.flat(), eventId);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event results', { eventId });
     return {

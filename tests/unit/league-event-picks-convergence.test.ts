@@ -22,6 +22,11 @@ describe('league event picks convergence', () => {
     const dependencies: LeagueEventPicksDependencies = {
       findTournament: async () => tournament,
       resolveEntryIds: async () => [101, 102, 103],
+      findEntryInfos: async () => [
+        { id: 101, startedEvent: 1 },
+        { id: 102, startedEvent: 1 },
+        { id: 103, startedEvent: 1 },
+      ],
       findPersistedEntryIds: async (_season, _eventId, entryIds) =>
         entryIds.filter((entryId) => persisted.has(entryId)),
       syncEntry: async (_season, entryId) => {
@@ -56,6 +61,32 @@ describe('league event picks convergence', () => {
       requiredUnits: 1,
       reusedUnits: 2,
       succeededUnits: 1,
+      failedUnits: 0,
+    });
+  });
+
+  test('does not request picks before an entry started playing', async () => {
+    const dependencies: LeagueEventPicksDependencies = {
+      findTournament: async () => tournament,
+      resolveEntryIds: async () => [201, 202],
+      findEntryInfos: async () => [
+        { id: 201, startedEvent: 2 },
+        { id: 202, startedEvent: 3 },
+      ],
+      findPersistedEntryIds: async () => {
+        throw new Error('should not query persisted picks for an empty eligible set');
+      },
+      syncEntry: async () => {
+        throw new Error('should not fetch picks before an entry started');
+      },
+    };
+
+    await expect(
+      syncLeagueEventPicksByTournament(TEST_SEASON, 77, 1, { dependencies }),
+    ).resolves.toMatchObject({
+      totalEntries: 0,
+      requiredUnits: 0,
+      succeededUnits: 0,
       failedUnits: 0,
     });
   });

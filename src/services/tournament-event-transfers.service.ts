@@ -1,11 +1,13 @@
 import type { DbEntryEventTransfer, DbEventLive } from '../db/schemas/index.schema';
 import { isCompleteEntryPicks } from '../domain/entry-picks';
+import { findEventEligibleEntryIds } from '../domain/entry-infos';
 import type { RawFPLEntryEventPickItem } from '../types';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
+import { entryInfoRepository } from '../repositories/entry-infos';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -34,6 +36,16 @@ type TransferWorkSummary = {
   succeededUnits: number;
   failedUnits: number;
 };
+
+async function loadEventEligibleEntryIds(
+  season: FplSeasonRef,
+  entryIds: readonly number[],
+  eventId: number,
+): Promise<number[]> {
+  const candidateEntryIds = uniqueNumbers(entryIds).filter((entryId) => entryId > 0);
+  const entryInfos = await entryInfoRepository.findByIds(season, candidateEntryIds);
+  return findEventEligibleEntryIds(candidateEntryIds, entryInfos, eventId);
+}
 
 export function isTournamentTransferCheckpointEvent(eventId: number): boolean {
   return Number.isInteger(eventId) && eventId >= 1 && eventId <= 38;
@@ -146,7 +158,7 @@ export async function syncTournamentEventTransfersPost(
     tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
 
-  const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
+  const entryIds = await loadEventEligibleEntryIds(season, entryLists.flat(), eventId);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event transfers', { eventId });
     return {
@@ -385,7 +397,7 @@ export async function syncTournamentEventTransfersPre(
     tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
 
-  const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
+  const entryIds = await loadEventEligibleEntryIds(season, entryLists.flat(), eventId);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event transfers', { eventId });
     return {
