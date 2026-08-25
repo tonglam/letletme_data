@@ -1,14 +1,14 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import { and, eq, isNull, lte, or } from 'drizzle-orm';
 
 import {
-  publishLiveSnapshotCache,
   readLiveSnapshotCache,
   refreshLiveSnapshotHeartbeat,
   type LiveSnapshotCacheContents,
   type LiveSnapshotCachePayload,
 } from '../cache/live-snapshot-cache';
+import { prepareDataPublication } from '../cache/data-publication';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { fplClient } from '../clients/fpl';
 import { eventsInFpl } from '../db/schemas/index.schema';
@@ -17,6 +17,7 @@ import type { DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
+import { eventRepository } from '../repositories/events';
 import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
 import { createPlayerRepository } from '../repositories/players';
 import { createTeamRepository } from '../repositories/teams';
@@ -34,6 +35,7 @@ import {
 } from './event-lives.service';
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
+import { reconcileDataPublication } from './data-publication-reconciler';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import { withMutationScopes } from '../utils/mutation-scopes';
 
@@ -83,27 +85,13 @@ export interface LiveSnapshotDurablePersistenceRequest {
 export interface LiveSnapshotDurablePersistenceResult {
   /**
    * `advanced` owns both the durable-write and cache-publication fence.
-   * `finalized-cache-replay` may repair cache publication but must not rewrite
-   * the immutable finalized database checkpoint. `superseded` may do neither.
+   * `finalized-noop` confirms an immutable final checkpoint and may not publish
+   * the newly fetched candidate. `superseded` may neither write nor publish.
    */
-  readonly disposition: 'advanced' | 'finalized-cache-replay' | 'superseded';
+  readonly disposition: 'advanced' | 'finalized-noop' | 'superseded';
   readonly winnerCheckedAt: Date;
   readonly persistedFixtures: boolean;
   readonly persistedEventLives: boolean;
-}
-
-function publicationItemProof(name: 'eventLive' | 'fixtures', payload: unknown) {
-  const serialized = postgresJsonbCanonicalJson(payload);
-  return {
-    name,
-    payload,
-    count: Array.isArray(payload)
-      ? payload.length
-      : payload && typeof payload === 'object'
-        ? Object.keys(payload).length
-        : 1,
-    checksum: createHash('sha256').update(serialized, 'utf8').digest('hex'),
-  } as const;
 }
 
 export interface LiveSnapshotDependencies {
@@ -127,7 +115,6 @@ export interface LiveSnapshotDependencies {
     eventId: number,
     lastSuccessfulFetchAt: Date,
   ) => Promise<LiveSnapshotCacheContents | null>;
-  readonly publish: typeof publishLiveSnapshotCache;
 }
 
 export interface LiveSnapshotSyncOptions {
@@ -336,7 +323,7 @@ async function claimLiveSnapshotFence(
   season: FplSeasonRef,
   eventId: number,
   checkedAt: Date,
-  allowFinalizedCacheReplay: boolean,
+  allowFinalizedNoop: boolean,
 ): Promise<Pick<LiveSnapshotDurablePersistenceResult, 'disposition' | 'winnerCheckedAt'>> {
   const claimed = await transaction
     .update(eventsInFpl)
@@ -369,16 +356,15 @@ async function claimLiveSnapshotFence(
     throw new DatabaseError(`Cannot persist live data for missing event ${eventId}`);
   }
   if (current[0].finalizedAt) {
-    const cacheReplayAccepted =
-      allowFinalizedCacheReplay && checkedAt.getTime() >= current[0].finalizedAt.getTime();
+    const finalizationReplayNoop = allowFinalizedNoop;
     logInfo('Live snapshot retained the immutable finalized checkpoint', {
       season: season.seasonCode,
       eventId,
       finalizedAt: current[0].finalizedAt.toISOString(),
-      cacheReplayAccepted,
+      finalizationReplayNoop,
     });
     return {
-      disposition: cacheReplayAccepted ? 'finalized-cache-replay' : 'superseded',
+      disposition: finalizationReplayNoop ? 'finalized-noop' : 'superseded',
       winnerCheckedAt: current[0].finalizedAt,
     };
   }
@@ -524,53 +510,36 @@ const defaultDependencies: LiveSnapshotDependencies = {
   readOrderingTimestamp: async () => (await readDatabaseOrderingTimestamp()).date,
   persistDurably: persistLiveSnapshotDurably,
   readPublished: readLiveSnapshotCache,
-  publish: publishLiveSnapshotCache,
 };
 
 export async function recoverPendingLiveSnapshotPublication(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<'none' | 'activated'> {
-  const cached = await readLiveSnapshotCache(season.seasonCode, eventId);
-  if (!cached) return 'none';
-  const active = await syncOperationsRepository.findActivePublication('fpl:live', season, eventId);
-  if (active?.publicationId === cached.manifest.publicationId) return 'none';
-
-  const pending = await syncOperationsRepository.findPublicationById(cached.manifest.publicationId);
+  const [cached, active, finalizedAt] = await Promise.all([
+    readLiveSnapshotCache(season.seasonCode, eventId),
+    syncOperationsRepository.findActivePublication('fpl:live', season, eventId),
+    eventRepository.findLiveSnapshotFinalizedAt(season, eventId),
+  ]);
   if (
-    !pending ||
-    pending.status !== 'staging' ||
-    pending.dataset !== 'fpl:live' ||
-    pending.seasonId !== season.seasonId ||
-    pending.eventId !== eventId ||
-    pending.revision !== cached.manifest.revision ||
-    !pending.sourceRunId
+    cached &&
+    active?.publicationId === cached.manifest.publicationId &&
+    active.revision === cached.manifest.revision
   ) {
-    logError(
-      'Active live cache manifest has no recoverable DB publication; refusing promotion',
-      new DatabaseError(
-        'Active live cache manifest has no recoverable ops publication',
-        'LIVE_PUBLICATION_RECOVERY_CONTRACT_MISMATCH',
-      ),
-      {
-        season: season.seasonCode,
-        eventId,
-        publicationId: cached.manifest.publicationId,
-      },
-    );
     return 'none';
   }
-  await syncOperationsRepository.activatePublication({
-    publicationId: pending.publicationId,
-    dataset: 'fpl:live',
+
+  const result = await reconcileDataPublication(
+    { dataset: 'fpl:live', seasonCode: season.seasonCode, eventId },
     season,
-    eventId,
-    sourceRunId: pending.sourceRunId,
-    manifest: cached.manifest,
-    outbox: { outboxId: randomUUID() },
-  });
-  await dispatchDataPublicationOutbox({ limit: 1, publicationId: pending.publicationId });
-  return 'activated';
+  );
+  if (finalizedAt && result.status !== 'matched' && result.status !== 'repaired') {
+    throw new DatabaseError(
+      `Finalized event ${eventId} has no recoverable canonical live publication`,
+      'LIVE_FINAL_PUBLICATION_MISSING',
+    );
+  }
+  return result.status === 'repaired' ? 'activated' : 'none';
 }
 
 export async function syncLiveSnapshot(
@@ -612,8 +581,7 @@ export async function syncLiveSnapshot(
     trigger: options.trigger ?? 'queue',
   });
 
-  let publicationId: string | null = null;
-  let cachePublished = false;
+  let dbActivated = false;
   let fetchedAt: number | null = null;
   try {
     const checkedAt = await dependencies.readOrderingTimestamp();
@@ -673,7 +641,7 @@ export async function syncLiveSnapshot(
       });
       persistedFixtures = durable.persistedFixtures;
       persistedEventLives = durable.persistedEventLives;
-      if (active) {
+      if (active && durable.disposition === 'advanced') {
         await (
           dependencies.refreshHeartbeat ??
           ((seasonCode: string, currentEventId: number, checkedAt: Date) =>
@@ -718,15 +686,13 @@ export async function syncLiveSnapshot(
     }
 
     const livePublicationId = randomUUID();
-    publicationId = livePublicationId;
     let persistedFixtures = false;
     let persistedEventLives = false;
     const publishStartedAt = Date.now();
-    // Keep the DB staging publication, immutable item proof, and canonical
-    // fixture/event-live facts in one mutation transaction. A crash can now
-    // leave either a complete recoverable DB staging row or nothing at all;
-    // Redis is still touched only after this transaction commits.
-    const { staging, durable } = await withMutationScopes(
+    // Keep the immutable final/live facts, full publication manifest, item
+    // proof, DB activation, and delivery receipt in one transaction. Redis is
+    // rebuilt only from that committed proof after the transaction returns.
+    const { staging, canonical, durable } = await withMutationScopes(
       {
         queueName: 'live-data',
         jobName: 'live-snapshot',
@@ -736,18 +702,6 @@ export async function syncLiveSnapshot(
         ],
       },
       async () => {
-        const staging = await syncOperationsRepository.preparePublication({
-          publicationId: livePublicationId,
-          dataset: 'fpl:live',
-          season,
-          eventId,
-          sourceRunId,
-          manifest: {
-            state: 'staging',
-            sourceCheckedAt: checkedAt.toISOString(),
-            lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
-          },
-        });
         // The surrounding scope already pins the transaction for this whole
         // canonical phase; call the dependency directly to avoid nesting a
         // second scope transaction around the same write set.
@@ -760,87 +714,96 @@ export async function syncLiveSnapshot(
           persistEventLives: options.persistEventLives === true || options.finalizeEvent === true,
           finalizeEvent: options.finalizeEvent,
         });
-        if (durable.disposition === 'superseded') {
-          // Do not commit a proof-bearing staging row for a snapshot that lost
-          // the ordering fence. Leaving it as `staging` would allow the
-          // scheduler reconciler to promote stale payloads in the small window
-          // before this worker could mark it skipped.
-          await syncOperationsRepository.skipPublication(
-            staging.publicationId,
-            'A newer live snapshot already owns the ordering fence',
-          );
-          return { staging, durable };
+        if (durable.disposition !== 'advanced') {
+          // A finalized retry is an immutable no-op. It may reconcile the
+          // already committed final publication before this fetch, but the
+          // newly fetched payload can never allocate or activate a revision.
+          return { staging: null, canonical: null, durable };
         }
-        await syncOperationsRepository.stagePublicationItems(staging.publicationId, [
-          publicationItemProof('eventLive', prepared.eventLives.eventLives),
-          publicationItemProof('fixtures', prepared.fixtures),
-        ]);
-        return { staging, durable };
+
+        const staging = await syncOperationsRepository.preparePublication({
+          publicationId: livePublicationId,
+          dataset: 'fpl:live',
+          season,
+          eventId,
+          sourceRunId,
+          manifest: {
+            state: 'staging',
+            sourceCheckedAt: checkedAt.toISOString(),
+            lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
+          },
+        });
+        const canonical = prepareDataPublication({
+          dataset: 'fpl:live',
+          seasonCode: season.seasonCode,
+          eventId,
+          revision: staging.revision,
+          publicationId: staging.publicationId,
+          sourceCheckedAt: checkedAt,
+          lastSuccessfulFetchAt,
+          state: payload.state,
+          items: [
+            { name: 'eventLive', value: payload.eventLives },
+            { name: 'fixtures', value: payload.fixtures },
+          ],
+        });
+        await syncOperationsRepository.stagePublicationItems(
+          staging.publicationId,
+          canonical.manifest.items.map((item) => ({
+            name: item.name as 'eventLive' | 'fixtures',
+            payload: item.name === 'eventLive' ? payload.eventLives : payload.fixtures,
+            count: item.count,
+            checksum: item.sha256,
+          })),
+        );
+        await syncOperationsRepository.activatePublication({
+          publicationId: staging.publicationId,
+          dataset: 'fpl:live',
+          season,
+          eventId,
+          sourceRunId,
+          manifest: canonical.manifest,
+          outbox: { outboxId: randomUUID() },
+        });
+        return { staging, canonical, durable };
       },
     );
     persistedFixtures = durable.persistedFixtures;
     persistedEventLives = durable.persistedEventLives;
-    if (durable.disposition === 'superseded') {
-      return {
-        eventId,
-        changed: false,
-        stale: true,
-        revision: null,
-        publicationId: null,
-        state: prepared.state,
-        eventLiveCount: prepared.eventLives.eventLives.length,
-        fixtureCount: prepared.fixtures.length,
-        fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
-        bonusTeamCount: bonusTeamCount(),
-        persistedFixtures,
-        persistedEventLives,
-      };
-    }
-    const published = await dependencies.publish(payload, {
-      revision: staging.revision,
-      publicationId: staging.publicationId,
-      sourceCheckedAt: checkedAt,
-      lastSuccessfulFetchAt,
-      activate: false,
-      afterStage: async (manifest) => {
-        if (manifest.items.some((item) => item.name !== 'eventLive' && item.name !== 'fixtures')) {
-          throw new DatabaseError('Live publication contains unsupported items');
-        }
-      },
-      // Canonical persistence and DB item proof already committed above.
-      beforeActivate: async () => durable.disposition !== 'superseded',
-    });
-    if (!published.published) {
-      await syncOperationsRepository.skipPublication(
-        staging.publicationId,
-        'A newer live publication already owns the cache scope',
-      );
+    if (durable.disposition !== 'advanced') {
+      if (durable.disposition === 'finalized-noop' && !active) {
+        throw new DatabaseError(
+          `Finalized event ${eventId} has no active canonical live cache`,
+          'LIVE_FINAL_PUBLICATION_MISSING',
+        );
+      }
       await syncOperationsRepository.finishRun(sourceRunId, {
         status: 'skipped',
-        completedItems:
-          (persistedEventLives ? prepared.eventLives.eventLives.length : 0) +
-          (persistedFixtures ? prepared.fixtures.length : 0),
-        skippedItems:
-          (persistedEventLives ? 0 : prepared.eventLives.eventLives.length) +
-          (persistedFixtures ? 0 : prepared.fixtures.length),
+        completedItems: 0,
+        skippedItems: prepared.eventLives.eventLives.length + prepared.fixtures.length,
         dataChanged: false,
       });
+      const retainedEventLives = active?.eventLives ?? prepared.eventLives.eventLives;
+      const retainedFixtures = active?.fixtures ?? prepared.fixtures;
       return {
         eventId,
         changed: false,
-        stale: true,
-        revision: published.previousManifest?.revision ?? null,
-        publicationId: published.previousManifest?.publicationId ?? null,
-        state: prepared.state,
-        eventLiveCount: prepared.eventLives.eventLives.length,
-        fixtureCount: prepared.fixtures.length,
-        fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
+        stale: durable.disposition === 'superseded',
+        revision: active?.manifest.revision ?? null,
+        publicationId: active?.manifest.publicationId ?? null,
+        state: active?.state ?? prepared.state,
+        eventLiveCount: retainedEventLives.length,
+        fixtureCount: retainedFixtures.length,
+        fixtureTeamCount: fixtureTeamCount(retainedFixtures),
         bonusTeamCount: bonusTeamCount(),
         persistedFixtures,
         persistedEventLives,
       };
     }
-    cachePublished = true;
+    if (!staging || !canonical) {
+      throw new DatabaseError('Advanced live snapshot has no canonical publication proof');
+    }
+    dbActivated = true;
     const sourceAgeMs = Math.max(0, Date.now() - lastSuccessfulFetchAt.getTime());
     if (sourceAgeMs > LIVE_SOURCE_STALE_AFTER_MS) {
       logError(
@@ -855,23 +818,20 @@ export async function syncLiveSnapshot(
         },
       );
     }
-    await syncOperationsRepository.activatePublication({
-      publicationId: staging.publicationId,
-      dataset: 'fpl:live',
-      season,
-      eventId,
-      sourceRunId,
-      manifest: published.manifest,
-      outbox: { outboxId: randomUUID() },
-    });
     const delivered = await dispatchDataPublicationOutbox({
       limit: 1,
       publicationId: staging.publicationId,
     });
     if (delivered.delivered !== 1) {
-      throw new Error(
-        `Live publication ${staging.publicationId} is canonical but Redis delivery is pending`,
-      );
+      const deliveredActive = await dependencies.readPublished(season.seasonCode, eventId);
+      if (
+        deliveredActive?.manifest.publicationId !== staging.publicationId ||
+        deliveredActive.manifest.revision !== staging.revision
+      ) {
+        throw new Error(
+          `Live publication ${staging.publicationId} is canonical but Redis delivery is pending`,
+        );
+      }
     }
 
     const result: LiveSnapshotSyncResult = {
@@ -900,9 +860,7 @@ export async function syncLiveSnapshot(
     });
     return result;
   } catch (error) {
-    if (publicationId && !cachePublished) {
-      await syncOperationsRepository.failPublication(publicationId, error).catch(() => undefined);
-    } else if (!publicationId) {
+    if (!dbActivated) {
       await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
     }
     throw error;
