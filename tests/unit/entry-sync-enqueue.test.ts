@@ -10,6 +10,7 @@ const pendingJobs: Array<{
   name: string;
   data: Record<string, unknown>;
 }> = [];
+const completedJobs: typeof pendingJobs = [];
 let returnedJobData: Record<string, unknown> | undefined;
 let persistedJobData: Record<string, unknown> | undefined;
 let persistedJobMissing = false;
@@ -22,7 +23,8 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   ENTRY_SYNC_DEFAULT_THROTTLE_MS: 150,
   entrySyncQueue: {
     name: 'entry-sync',
-    getJobs: async () => pendingJobs,
+    getJobs: async (states: string[]) =>
+      states.includes('completed') ? completedJobs : pendingJobs,
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       addCalls.push({ name, data, opts });
       return {
@@ -63,6 +65,7 @@ describe('entry-sync enqueue runId propagation', () => {
   beforeEach(() => {
     addCalls.length = 0;
     pendingJobs.length = 0;
+    completedJobs.length = 0;
     returnedJobData = undefined;
     persistedJobData = undefined;
     persistedJobMissing = false;
@@ -212,8 +215,9 @@ describe('entry-sync enqueue runId propagation', () => {
       eventId: 20,
       jobId: 'entry-picks-2627-live-refresh-20-123',
       runId: 'new-run',
+      queueKey: 'live-picks-20',
       deduplicationId: 'live-picks-refresh:2627:event-20:cohort',
-      deduplicationTtlMs: 600_000,
+      deduplicationCadenceMs: 600_000,
     });
 
     expect(job.data.runId).toBe('stored-run');
@@ -233,8 +237,9 @@ describe('entry-sync enqueue runId propagation', () => {
         entryIds: [10, 20],
         eventId: 20,
         jobId: 'entry-picks-2627-live-refresh-20-123',
+        queueKey: 'live-picks-20',
         deduplicationId: 'live-picks-refresh:2627:event-20:cohort',
-        deduplicationTtlMs: 600_000,
+        deduplicationCadenceMs: 600_000,
       }),
     ).rejects.toThrow('Entry sync deduplicated job could not be loaded from Redis');
   });
@@ -311,19 +316,109 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(addCalls[1].opts.deduplication).toBeUndefined();
   });
 
-  test('applies an explicit TTL deduplication key to restart-sensitive cron fan-out', async () => {
+  test('keeps explicit cron fan-out single-flight until the job settles', async () => {
     await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
       entryIds: [10, 20],
       eventId: 20,
       jobId: 'entry-picks-2627-live-refresh-20-123',
+      queueKey: 'live-picks-20',
       deduplicationId: 'live-picks-refresh:2627:event-20',
-      deduplicationTtlMs: 600_000,
+      deduplicationCadenceMs: 600_000,
     });
 
     expect(addCalls[0].opts.deduplication).toEqual({
       id: 'live-picks-refresh:2627:event-20',
-      ttl: 600_000,
     });
+    expect(addCalls[0].data.deduplicationId).toBe('live-picks-refresh:2627:event-20');
+  });
+
+  test('reuses a non-terminal legacy event fan-out after its old TTL elapsed', async () => {
+    pendingJobs.push({
+      id: 'entry-picks-2627-live-refresh-20-old',
+      name: 'entry-picks',
+      data: {
+        seasonId: TEST_SEASON.seasonId,
+        seasonCode: TEST_SEASON.seasonCode,
+        source: 'cron',
+        eventId: 20,
+        queueKey: 'live-picks-20',
+        triggeredAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+        entryIds: [10, 20],
+        runId: 'old-run',
+      },
+    });
+
+    const job = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
+      entryIds: [10, 20],
+      eventId: 20,
+      jobId: 'entry-picks-2627-live-refresh-20-new',
+      queueKey: 'live-picks-20',
+      deduplicationId: 'live-picks-refresh:2627:event-20',
+      deduplicationCadenceMs: 600_000,
+    });
+
+    expect(job.id).toBe('entry-picks-2627-live-refresh-20-old');
+    expect(addCalls).toHaveLength(0);
+  });
+
+  test('reuses the latest completed event fan-out during the restart cadence window', async () => {
+    completedJobs.push({
+      id: 'entry-picks-2627-live-refresh-20-complete',
+      name: 'entry-picks',
+      data: {
+        seasonId: TEST_SEASON.seasonId,
+        seasonCode: TEST_SEASON.seasonCode,
+        source: 'cron',
+        eventId: 20,
+        queueKey: 'live-picks-20',
+        deduplicationId: 'live-picks-refresh:2627:event-20',
+        triggeredAt: new Date(Date.now() - 60_000).toISOString(),
+        entryIds: [10, 20],
+        runId: 'completed-run',
+      },
+    });
+
+    const job = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
+      entryIds: [10, 20],
+      eventId: 20,
+      jobId: 'entry-picks-2627-live-refresh-20-new',
+      queueKey: 'live-picks-20',
+      deduplicationId: 'live-picks-refresh:2627:event-20',
+      deduplicationCadenceMs: 600_000,
+    });
+
+    expect(job.id).toBe('entry-picks-2627-live-refresh-20-complete');
+    expect(addCalls).toHaveLength(0);
+  });
+
+  test('allows a new event fan-out after the completed cadence window expires', async () => {
+    completedJobs.push({
+      id: 'entry-picks-2627-live-refresh-20-expired',
+      name: 'entry-picks',
+      data: {
+        seasonId: TEST_SEASON.seasonId,
+        seasonCode: TEST_SEASON.seasonCode,
+        source: 'cron',
+        eventId: 20,
+        queueKey: 'live-picks-20',
+        deduplicationId: 'live-picks-refresh:2627:event-20',
+        triggeredAt: new Date(Date.now() - 600_001).toISOString(),
+        entryIds: [10, 20],
+        runId: 'expired-run',
+      },
+    });
+
+    const job = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
+      entryIds: [10, 20],
+      eventId: 20,
+      jobId: 'entry-picks-2627-live-refresh-20-new',
+      queueKey: 'live-picks-20',
+      deduplicationId: 'live-picks-refresh:2627:event-20',
+      deduplicationCadenceMs: 600_000,
+    });
+
+    expect(job.id).toBe('entry-picks-2627-live-refresh-20-new');
+    expect(addCalls).toHaveLength(1);
   });
 
   test('retains failure evidence through a deterministic cron continuation', async () => {

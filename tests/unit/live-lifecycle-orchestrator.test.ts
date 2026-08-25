@@ -232,14 +232,16 @@ describe('live lifecycle decisions', () => {
     expect(findPicksRefreshEntryIds([1, 2, 3], claims, now)).toEqual([2, 3]);
   });
 
-  test('uses an order-independent restart-durable identity for the exact picks fan-out', () => {
+  test('uses one restart-durable single-flight identity for the event lane', () => {
     const first = resolveLivePicksRefreshDeduplicationId('2627', 1, [30, 10, 20]);
     const reordered = resolveLivePicksRefreshDeduplicationId('2627', 1, [20, 10, 30, 20]);
     const expanded = resolveLivePicksRefreshDeduplicationId('2627', 1, [10, 20, 30, 40]);
+    const nextEvent = resolveLivePicksRefreshDeduplicationId('2627', 2, [10, 20, 30]);
 
-    expect(first).toMatch(/^live-picks-refresh:2627:event-1:entries-3:[0-9a-f]{64}$/);
+    expect(first).toBe('live-picks-refresh:2627:event-1');
     expect(reordered).toBe(first);
-    expect(expanded).not.toBe(first);
+    expect(expanded).toBe(first);
+    expect(nextEvent).not.toBe(first);
   });
 
   test('keeps the pre-canary cohort identity stable across a scheduler restart', () => {

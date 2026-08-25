@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 import type { Elysia } from 'elysia';
 
 import { fplClient } from '../clients/fpl';
@@ -116,11 +114,12 @@ const picksFanoutClaims = new Map<string, Map<number, number>>();
 export function resolveLivePicksRefreshDeduplicationId(
   seasonCode: string,
   eventId: number,
-  entryIds: readonly number[],
+  _entryIds: readonly number[],
 ): string {
-  const normalizedEntryIds = uniqueNumbers(entryIds).sort((a, b) => a - b);
-  const fanoutHash = createHash('sha256').update(normalizedEntryIds.join(',')).digest('hex');
-  return `live-picks-refresh:${seasonCode}:event-${eventId}:entries-${normalizedEntryIds.length}:${fanoutHash}`;
+  // Keep exactly one live-picks fan-out active per season/event. A cohort hash
+  // lets a newly discovered entry create a second broad sweep while the first
+  // is still running; onboarding already handles that new entry independently.
+  return `live-picks-refresh:${seasonCode}:event-${eventId}`;
 }
 
 export function resolveLivePicksRefreshFanout(
@@ -133,7 +132,7 @@ export function resolveLivePicksRefreshFanout(
   return {
     entryIds: pendingEntryIds.filter((entryId) => !canarySet.has(entryId)),
     // A restart resets canary state, so the queued payload may change from N
-    // entries to N-2. The pre-canary cohort is the stable refresh identity.
+    // entries to N-2. The event lane remains the stable single-flight identity.
     deduplicationId: resolveLivePicksRefreshDeduplicationId(seasonCode, eventId, pendingEntryIds),
   };
 }
@@ -436,13 +435,11 @@ export async function runPicksProbeAndSync(
       // Entry-list cron IDs are otherwise content-stable and BullMQ would
       // return the first completed job forever, defeating periodic refresh.
       jobId: `entry-picks-${season.seasonCode}-live-refresh-${eventId}-${nowMs}`,
-      // In-memory fan-out claims are lost on scheduler restart. Keep the
-      // refresh interval in Redis as well so a restart/rollback cannot enqueue
-      // another 1,700+ entry sweep for the same event window.
-      // Scope the key to the stable pre-canary cohort so a newly discovered
-      // entry cannot be swallowed and a restart cannot create an N/N-2 pair.
+      // In-memory fan-out claims are lost on scheduler restart. BullMQ keeps
+      // this event lane single-flight until the accepted job settles, while
+      // the completed-job cadence window prevents an immediate restart sweep.
       deduplicationId: fanout.deduplicationId,
-      deduplicationTtlMs: PICKS_REFRESH_INTERVAL_MS,
+      deduplicationCadenceMs: PICKS_REFRESH_INTERVAL_MS,
     });
     // BullMQ returns the existing job when a deduplication key is active. Only
     // claim IDs that are actually present in the returned job payload; this
