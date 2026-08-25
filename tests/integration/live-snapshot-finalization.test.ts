@@ -37,8 +37,11 @@ async function seed(): Promise<void> {
       season_id, event_id, name, finished, data_checked, data_checked_at,
       live_snapshot_checked_at, live_snapshot_finalized_at, live_facts_persisted_at
     ) VALUES (
-      ${SEASON.seasonId}, ${EVENT_ID}, 'GW1', true, true, ${FINALIZED_AT},
-      ${FINALIZED_AT}, ${FINALIZED_AT}, ${FINALIZED_AT}
+      ${SEASON.seasonId}, ${EVENT_ID}, 'GW1', true, true,
+      ${FINALIZED_AT.toISOString()}::timestamptz,
+      ${FINALIZED_AT.toISOString()}::timestamptz,
+      ${FINALIZED_AT.toISOString()}::timestamptz,
+      ${FINALIZED_AT.toISOString()}::timestamptz
     )
   `;
 }
