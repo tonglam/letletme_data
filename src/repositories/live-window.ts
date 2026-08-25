@@ -3,6 +3,7 @@ import { and, desc, eq, getTableColumns, inArray, sql } from 'drizzle-orm';
 import {
   liveLifecycleStatusInOps,
   managerEventScoreSnapshotsInFpl,
+  managerLiveTournamentCoverageInFpl,
 } from '../db/schemas/live-window.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -91,6 +92,25 @@ export const liveLifecycleStatusRepository = createLiveLifecycleStatusRepository
 export type ManagerScoreScope =
   | { scopeType: 'ENTRY'; scopeId: 0 }
   | { scopeType: 'CLASSIC_LEAGUE'; scopeId: number };
+
+export type ManagerLiveTournamentCoverageState = 'WARMING' | 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE';
+
+export type ManagerLiveTournamentCoverageInput = {
+  seasonId: number;
+  eventId: number;
+  tournamentId: number;
+  rosterRevision: string;
+  expectedEntries: number;
+  resolvedEntries: number;
+  fullyFetchedAt: Date | null;
+  managerRevision: string | null;
+  error: string | null;
+  state: ManagerLiveTournamentCoverageState;
+  updatedAt?: Date;
+};
+
+export type ManagerLiveTournamentCoverageRow =
+  typeof managerLiveTournamentCoverageInFpl.$inferSelect;
 
 export type ManagerScoreCheckpoint = {
   entryId: number;
@@ -278,5 +298,71 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
     },
   };
 };
+
+export const createManagerLiveTournamentCoverageRepository = (dbInstance?: DbOrTransaction) => {
+  const getDbInstance = async () => dbInstance ?? (await getDb());
+
+  return {
+    findByTournamentAndEvent: async (
+      season: FplSeasonRef,
+      eventId: number,
+      tournamentId: number,
+    ): Promise<ManagerLiveTournamentCoverageRow | null> => {
+      const db = await getDbInstance();
+      const [row] = await db
+        .select()
+        .from(managerLiveTournamentCoverageInFpl)
+        .where(
+          and(
+            eq(managerLiveTournamentCoverageInFpl.seasonId, season.seasonId),
+            eq(managerLiveTournamentCoverageInFpl.eventId, eventId),
+            eq(managerLiveTournamentCoverageInFpl.tournamentId, tournamentId),
+          ),
+        )
+        .limit(1);
+      return row ?? null;
+    },
+
+    upsert: async (input: ManagerLiveTournamentCoverageInput): Promise<void> => {
+      const db = await getDbInstance();
+      const updatedAt = input.updatedAt ?? new Date();
+      await db
+        .insert(managerLiveTournamentCoverageInFpl)
+        .values({
+          seasonId: input.seasonId,
+          eventId: input.eventId,
+          tournamentId: input.tournamentId,
+          rosterRevision: input.rosterRevision,
+          expectedEntries: input.expectedEntries,
+          resolvedEntries: input.resolvedEntries,
+          fullyFetchedAt: input.fullyFetchedAt,
+          managerRevision: input.managerRevision,
+          error: input.error,
+          state: input.state,
+          updatedAt,
+        })
+        .onConflictDoUpdate({
+          target: [
+            managerLiveTournamentCoverageInFpl.seasonId,
+            managerLiveTournamentCoverageInFpl.eventId,
+            managerLiveTournamentCoverageInFpl.tournamentId,
+          ],
+          set: {
+            rosterRevision: sql`excluded.roster_revision`,
+            expectedEntries: sql`excluded.expected_entries`,
+            resolvedEntries: sql`excluded.resolved_entries`,
+            fullyFetchedAt: sql`excluded.fully_fetched_at`,
+            managerRevision: sql`excluded.manager_revision`,
+            error: sql`excluded.error`,
+            state: sql`excluded.state`,
+            updatedAt: sql`excluded.updated_at`,
+          },
+        });
+    },
+  };
+};
+
+export const managerLiveTournamentCoverageRepository =
+  createManagerLiveTournamentCoverageRepository();
 
 export const managerScoreCheckpointRepository = createManagerScoreCheckpointRepository();

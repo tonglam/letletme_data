@@ -120,3 +120,56 @@ export const managerEventScoreSnapshotsInFpl = fpl.table(
     ),
   ],
 );
+
+/**
+ * Durable progress for a tournament-scoped manager-live crawl.  The score
+ * checkpoints remain the row-level source of truth; this table records the
+ * bounded crawl obligation that lets GraphQL distinguish a complete field
+ * from a healthy but still warming partial field.
+ */
+export const managerLiveTournamentCoverageInFpl = fpl.table(
+  'manager_live_tournament_coverage',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    rosterRevision: text('roster_revision').notNull(),
+    expectedEntries: integer('expected_entries').notNull(),
+    resolvedEntries: integer('resolved_entries').notNull(),
+    fullyFetchedAt: timestamp('fully_fetched_at', { withTimezone: true, mode: 'date' }),
+    managerRevision: text('manager_revision'),
+    error: text(),
+    state: text().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.eventId, table.tournamentId],
+      name: 'manager_live_tournament_coverage_pkey',
+    }),
+    index('manager_live_tournament_coverage_state_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.state,
+      table.updatedAt.desc(),
+    ),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'manager_live_tournament_coverage_event_fk',
+    }),
+    check(
+      'manager_live_tournament_coverage_state_valid',
+      sql`state IN ('WARMING', 'COMPLETE', 'PARTIAL', 'UNAVAILABLE')`,
+    ),
+    check(
+      'manager_live_tournament_coverage_counts_valid',
+      sql`expected_entries >= 0 AND resolved_entries >= 0 AND resolved_entries <= expected_entries`,
+    ),
+    check('manager_live_tournament_coverage_ids_positive', sql`event_id > 0 AND tournament_id > 0`),
+    check(
+      'manager_live_tournament_coverage_revision_nonempty',
+      sql`btrim(roster_revision) <> ''::text`,
+    ),
+  ],
+);

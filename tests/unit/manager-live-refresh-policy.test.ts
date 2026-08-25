@@ -9,6 +9,7 @@ import {
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
   MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT,
+  classicStandingsCursorAfterRefresh,
   managerLiveClassicCursorKey,
   managerLiveDispatchEntryChunks,
   managerLiveHotScopeKey,
@@ -44,14 +45,12 @@ describe('manager live refresh policy', () => {
     expect(first).toContain('2627-e1-t7');
   });
 
-  test('does not collapse different entry subsets from the same tournament', () => {
+  test('coalesces different entry subsets into one tournament scope', () => {
     const date = new Date('2026-08-23T08:34:01.000Z');
     const otherSubset = { ...scope, entryIds: [11, 22, 44] };
 
-    expect(managerLiveRefreshJobId(otherSubset, date)).not.toBe(
-      managerLiveRefreshJobId(scope, date),
-    );
-    expect(managerLiveHotScopeKey(otherSubset)).not.toBe(managerLiveHotScopeKey(scope));
+    expect(managerLiveRefreshJobId(otherSubset, date)).toBe(managerLiveRefreshJobId(scope, date));
+    expect(managerLiveHotScopeKey(otherSubset)).toBe(managerLiveHotScopeKey(scope));
   });
 
   test('deduplicates classic standings continuations with request jobs in the same bucket', () => {
@@ -130,7 +129,7 @@ describe('manager live refresh policy', () => {
       [managerLiveClassicCursorKey(scope), '7', 'EX', MANAGER_LIVE_HOT_SCOPE_SECONDS],
       [managerLiveClassicCursorKey(scope), '0', 'EX', MANAGER_LIVE_HOT_SCOPE_SECONDS],
     ]);
-    expect(parseManagerLiveClassicCursor('21')).toBeUndefined();
+    expect(parseManagerLiveClassicCursor('101')).toBeUndefined();
   });
 
   test('stops follow-up eligibility when the hot scope expires or is malformed', async () => {
@@ -174,6 +173,11 @@ describe('manager live refresh policy', () => {
         Math.round((MANAGER_LIVE_RETRY_BASE_DELAY_MS * 2 ** index) / 1000),
       ),
     ).toEqual([30, 60, 120]);
+  });
+
+  test('does not mark an unfinished 100-page crawl complete or emit page 101', () => {
+    const standings = { complete: false, nextPage: 101 };
+    expect(classicStandingsCursorAfterRefresh(true, standings)).toBe(100);
   });
 
   test('stops only after the gameweek is both finished and data-checked', () => {

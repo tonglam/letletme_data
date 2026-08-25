@@ -14,7 +14,10 @@ export const MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE = 12;
 export const MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT = MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE;
 export const MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT = 2;
 export const MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT = 4;
-export const MANAGER_LIVE_CLASSIC_MAX_PAGE = 20;
+// Tournament imports allow up to 100 Classic standings pages. A worker still
+// fetches only two pages per logical run; this is the cursor safety bound, not
+// a request-size increase.
+export const MANAGER_LIVE_CLASSIC_MAX_PAGE = 100;
 
 export type ManagerLiveRefreshScope = {
   seasonId: number;
@@ -65,7 +68,7 @@ const entrySetDigest = (entryIds: readonly number[]): string =>
 const scopeSegment = (scope: Pick<ManagerLiveRefreshScope, 'entryIds' | 'tournamentId'>): string =>
   scope.tournamentId === undefined
     ? `entries-${entrySetDigest(scope.entryIds)}`
-    : `t${scope.tournamentId}-entries-${entrySetDigest(scope.entryIds)}`;
+    : `t${scope.tournamentId}`;
 
 export const managerLiveHotScopeKey = (scope: ManagerLiveRefreshScope): string =>
   `llm:queue:manager-live:hot:v1:${scope.seasonCode}:e${scope.eventId}:${scopeSegment(scope)}`;
@@ -106,6 +109,16 @@ export const parseManagerLiveClassicCursor = (value: string | null): number | nu
     ? page
     : undefined;
 };
+
+export const classicStandingsCursorAfterRefresh = (
+  completeRefresh: boolean,
+  standings: { complete: boolean; nextPage: number },
+): number | null | undefined =>
+  completeRefresh
+    ? standings.complete
+      ? null
+      : Math.min(MANAGER_LIVE_CLASSIC_MAX_PAGE, standings.nextPage)
+    : undefined;
 
 export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefreshScope | null => {
   if (!value) return null;
