@@ -271,7 +271,7 @@ describe('scheduler latest-wins lanes', () => {
       }),
     ).toBe(false);
     const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
-    expect(targets?.desired?.status).toBe('pending');
+    expect(targets?.desired?.status).toBe('running');
     expect(targets?.active?.obligationId).toBe(second.obligationId);
   });
 
