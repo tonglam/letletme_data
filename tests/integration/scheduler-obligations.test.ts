@@ -46,6 +46,7 @@ async function cleanup(): Promise<void> {
        OR scope_key IN (
          'integration:event:atomic-reschedule',
          'integration:event:equal-boundary-reschedule',
+         'integration:event:same-slot-correction',
          'integration:event:lane-race'
        )
   `;
@@ -886,6 +887,8 @@ describe('scheduler obligation generation fencing', () => {
     const sql = await getDbClient();
     const staleAuthorityAtMs = Date.parse('2026-08-23T10:00:00Z');
     const freshAuthorityAtMs = Date.parse('2026-08-23T11:00:00Z');
+    const staleScheduleAnchorMs = Date.parse('2026-08-22T18:00:00Z');
+    const freshScheduleAnchorMs = Date.parse('2026-08-22T20:00:00Z');
     await sql`
       INSERT INTO ops.scheduler_obligations (
         obligation_id, job_name, scope_key, period_key, cadence, timezone,
@@ -905,7 +908,8 @@ describe('scheduler obligation generation fencing', () => {
         0,
         jsonb_build_object(
           'resultSlot', 'final-16',
-          'resultAuthorityAtMs', ${staleAuthorityAtMs}::bigint
+          'resultAuthorityAtMs', ${staleAuthorityAtMs}::bigint,
+          'resultScheduleAnchorMs', ${staleScheduleAnchorMs}::bigint
         )
       )
     `;
@@ -927,6 +931,7 @@ describe('scheduler obligation generation fencing', () => {
             evidence: {
               resultSlot: 'final-14',
               resultAuthorityAtMs: freshAuthorityAtMs,
+              resultScheduleAnchorMs: freshScheduleAnchorMs,
             },
           },
         },
@@ -938,6 +943,7 @@ describe('scheduler obligation generation fencing', () => {
           periodKey: 'event-1-final-14',
           resultSlot: 'final-14',
           resultAuthorityAtMs: freshAuthorityAtMs,
+          resultScheduleAnchorMs: freshScheduleAnchorMs,
           beforeDueAt: new Date('2026-08-23T12:00:00Z'),
         },
       ],
@@ -963,6 +969,7 @@ describe('scheduler obligation generation fencing', () => {
             evidence: {
               resultSlot: 'final-16',
               resultAuthorityAtMs: staleAuthorityAtMs,
+              resultScheduleAnchorMs: staleScheduleAnchorMs,
             },
           },
         },
@@ -974,6 +981,7 @@ describe('scheduler obligation generation fencing', () => {
           periodKey: 'event-1-final-16',
           resultSlot: 'final-16',
           resultAuthorityAtMs: staleAuthorityAtMs,
+          resultScheduleAnchorMs: staleScheduleAnchorMs,
           beforeDueAt: new Date('2026-08-23T12:00:00Z'),
         },
       ],
@@ -1026,6 +1034,7 @@ describe('scheduler obligation generation fencing', () => {
             evidence: {
               resultSlot: 'final-16',
               resultAuthorityAtMs: newestAuthorityAtMs,
+              resultScheduleAnchorMs: staleScheduleAnchorMs,
             },
           },
         },
@@ -1037,6 +1046,7 @@ describe('scheduler obligation generation fencing', () => {
           periodKey: 'event-1-final-16',
           resultSlot: 'final-16',
           resultAuthorityAtMs: newestAuthorityAtMs,
+          resultScheduleAnchorMs: staleScheduleAnchorMs,
           beforeDueAt: new Date('2026-08-23T12:00:00Z'),
         },
       ],
@@ -1055,6 +1065,133 @@ describe('scheduler obligation generation fencing', () => {
     });
     expect(reclaimed?.obligation).toMatchObject({
       periodKey: 'event-1-final-16',
+      generation: 1,
+    });
+  });
+
+  test('reopens a succeeded slot only when its durable schedule anchor changes', async () => {
+    const sql = await getDbClient();
+    const originalAuthorityAtMs = Date.parse('2026-08-23T10:00:00Z');
+    const ordinaryRefreshAuthorityAtMs = Date.parse('2026-08-23T10:30:00Z');
+    const correctedAuthorityAtMs = Date.parse('2026-08-23T11:00:00Z');
+    const originalScheduleAnchorMs = Date.parse('2026-08-22T18:00:00Z');
+    const correctedScheduleAnchorMs = Date.parse('2026-08-22T18:15:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, completed_at, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'entry-results',
+        'integration:event:same-slot-correction',
+        'event-1-final-14',
+        'hourly post-match',
+        'UTC',
+        'succeeded',
+        'reconcile',
+        '2026-08-23T12:00:00Z'::timestamptz,
+        0,
+        1,
+        '2026-08-23T12:05:00Z'::timestamptz,
+        jsonb_build_object(
+          'scheduledDueAtMs', ${Date.parse('2026-08-23T12:00:00Z')}::bigint,
+          'resultSlot', 'final-14',
+          'resultAuthorityAtMs', ${originalAuthorityAtMs}::bigint,
+          'resultScheduleAnchorMs', ${originalScheduleAnchorMs}::bigint
+        )
+      )
+    `;
+
+    const unchanged = await reconcilePostMatchSchedulerObligations({
+      reservations: [
+        {
+          definition: {
+            name: 'entry-results',
+            cadence: 'hourly post-match',
+            timezone: 'UTC',
+          },
+          plan: {
+            scopeKey: 'integration:event:same-slot-correction',
+            periodKey: 'event-1-final-14',
+            dueAt: new Date('2026-08-23T12:00:00Z'),
+            source: 'reconcile',
+            eventId: 1,
+            evidence: {
+              resultSlot: 'final-14',
+              resultAuthorityAtMs: ordinaryRefreshAuthorityAtMs,
+              resultScheduleAnchorMs: originalScheduleAnchorMs,
+            },
+          },
+        },
+      ],
+      boundaries: [
+        {
+          jobName: 'entry-results',
+          scopeKey: 'integration:event:same-slot-correction',
+          periodKey: 'event-1-final-14',
+          resultSlot: 'final-14',
+          resultAuthorityAtMs: ordinaryRefreshAuthorityAtMs,
+          resultScheduleAnchorMs: originalScheduleAnchorMs,
+          beforeDueAt: new Date('2026-08-23T12:00:00Z'),
+        },
+      ],
+    });
+    expect(unchanged.reservations[0]).toMatchObject({ status: 'succeeded', generation: 0 });
+
+    const reopened = await reconcilePostMatchSchedulerObligations({
+      reservations: [
+        {
+          definition: {
+            name: 'entry-results',
+            cadence: 'hourly post-match',
+            timezone: 'UTC',
+          },
+          plan: {
+            scopeKey: 'integration:event:same-slot-correction',
+            periodKey: 'event-1-final-14',
+            dueAt: new Date('2026-08-23T12:15:00Z'),
+            source: 'reconcile',
+            eventId: 1,
+            evidence: {
+              resultSlot: 'final-14',
+              resultAuthorityAtMs: correctedAuthorityAtMs,
+              resultScheduleAnchorMs: correctedScheduleAnchorMs,
+            },
+          },
+        },
+      ],
+      boundaries: [
+        {
+          jobName: 'entry-results',
+          scopeKey: 'integration:event:same-slot-correction',
+          periodKey: 'event-1-final-14',
+          resultSlot: 'final-14',
+          resultAuthorityAtMs: correctedAuthorityAtMs,
+          resultScheduleAnchorMs: correctedScheduleAnchorMs,
+          beforeDueAt: new Date('2026-08-23T12:15:00Z'),
+        },
+      ],
+    });
+    expect(reopened.reservations[0]).toMatchObject({
+      status: 'pending',
+      generation: 1,
+      dueAt: new Date('2026-08-23T12:15:00Z'),
+      evidence: expect.objectContaining({
+        resultAuthorityAtMs: correctedAuthorityAtMs,
+        resultScheduleAnchorMs: correctedScheduleAnchorMs,
+        reactivatedForScheduleAuthority: true,
+      }),
+    });
+
+    const [claimed] = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['entry-results'],
+      laneKeys: ['post-match-results'],
+      enforceLatestAuthoritativeScope: true,
+    });
+    expect(claimed?.obligation).toMatchObject({
+      periodKey: 'event-1-final-14',
       generation: 1,
     });
   });

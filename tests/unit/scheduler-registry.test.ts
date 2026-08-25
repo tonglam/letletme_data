@@ -485,12 +485,20 @@ describe('standalone scheduler registry', () => {
     const stale = schedulerPlanKey(definition, {
       scopeKey: '2627:event:1',
       periodKey: 'event-1-final-14',
-      evidence: { resultSlot: 'final-14', resultAuthorityAtMs: 1_787_645_600_000 },
+      evidence: {
+        resultSlot: 'final-14',
+        resultAuthorityAtMs: 1_787_645_600_000,
+        resultScheduleAnchorMs: 1_787_638_400_000,
+      },
     });
     const fresh = schedulerPlanKey(definition, {
       scopeKey: '2627:event:1',
       periodKey: 'event-1-final-14',
-      evidence: { resultSlot: 'final-14', resultAuthorityAtMs: 1_787_649_200_000 },
+      evidence: {
+        resultSlot: 'final-14',
+        resultAuthorityAtMs: 1_787_649_200_000,
+        resultScheduleAnchorMs: 1_787_638_400_000,
+      },
     });
 
     expect(stale).not.toBe(fresh);
@@ -498,13 +506,21 @@ describe('standalone scheduler registry', () => {
       schedulerPlanKey(definition, {
         scopeKey: '2627:event:1',
         periodKey: 'event-1-final',
-        evidence: { resultSlot: 'final-checkpoint', resultAuthorityAtMs: 1_787_645_600_000 },
+        evidence: {
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: 1_787_645_600_000,
+          resultScheduleAnchorMs: 1_787_638_400_000,
+        },
       }),
     ).toBe(
       schedulerPlanKey(definition, {
         scopeKey: '2627:event:1',
         periodKey: 'event-1-final',
-        evidence: { resultSlot: 'final-checkpoint', resultAuthorityAtMs: 1_787_649_200_000 },
+        evidence: {
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: 1_787_649_200_000,
+          resultScheduleAnchorMs: 1_787_642_000_000,
+        },
       }),
     );
   });
@@ -550,7 +566,10 @@ describe('standalone scheduler registry', () => {
         dueAt: new Date('2026-08-22T20:00:00.000Z'),
         eventId: 1,
         source: 'reconcile',
-        evidence: expect.objectContaining({ resultAuthorityAtMs: authorityAt.getTime() }),
+        evidence: expect.objectContaining({
+          resultAuthorityAtMs: authorityAt.getTime(),
+          resultScheduleAnchorMs: Date.parse('2026-08-22T18:00:00.000Z'),
+        }),
       }),
     ]);
   });

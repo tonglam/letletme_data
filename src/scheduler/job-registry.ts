@@ -376,18 +376,10 @@ type PostMatchFixturesLoader = (
   eventId: number,
 ) => ReturnType<typeof fixtureRepository.findByEvent>;
 
-function postMatchFixtureAuthorityAtMs(fixtures: readonly Fixture[]): number {
-  const persistedUpdates = fixtures
-    .map((fixture) => fixture.updatedAt?.getTime())
-    .filter(
-      (updatedAt): updatedAt is number =>
-        updatedAt !== undefined && Number.isSafeInteger(updatedAt) && updatedAt > 0,
-    );
-  if (persistedUpdates.length > 0) return Math.max(...persistedUpdates);
-
-  // Production fixture rows have a non-null updated_at. Keep a deterministic
-  // compatibility value for injected/unit fixtures while never using wall time
-  // as authority.
+function postMatchFixtureAuthority(fixtures: readonly Fixture[]): Readonly<{
+  resultAuthorityAtMs: number;
+  resultScheduleAnchorMs: number;
+}> {
   const kickoffTimes = fixtures
     .map((fixture) => fixture.kickoffTime?.getTime())
     .filter(
@@ -395,9 +387,29 @@ function postMatchFixtureAuthorityAtMs(fixtures: readonly Fixture[]): number {
         kickoffTime !== undefined && Number.isSafeInteger(kickoffTime) && kickoffTime > 0,
     );
   if (kickoffTimes.length === 0) {
-    throw new Error('Post-match fixtures have no durable authority timestamp');
+    throw new Error('Post-match fixtures have no durable schedule anchor');
   }
-  return Math.max(...kickoffTimes);
+  const resultScheduleAnchorMs = Math.max(...kickoffTimes);
+  const persistedUpdates = fixtures
+    .map((fixture) => fixture.updatedAt?.getTime())
+    .filter(
+      (updatedAt): updatedAt is number =>
+        updatedAt !== undefined && Number.isSafeInteger(updatedAt) && updatedAt > 0,
+    );
+  if (persistedUpdates.length > 0) {
+    return {
+      resultAuthorityAtMs: Math.max(...persistedUpdates),
+      resultScheduleAnchorMs,
+    };
+  }
+
+  // Production fixture rows have a non-null updated_at. Keep a deterministic
+  // compatibility value for injected/unit fixtures while never using wall time
+  // as authority.
+  return {
+    resultAuthorityAtMs: resultScheduleAnchorMs,
+    resultScheduleAnchorMs,
+  };
 }
 
 /**
@@ -432,6 +444,7 @@ export async function resolvePostMatchResultPlans(
             event.deadlineTime ??
             dueAt
           ).getTime(),
+          resultScheduleAnchorMs: dueAt.getTime(),
           dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
         },
       });
@@ -455,10 +468,7 @@ export async function resolvePostMatchResultPlans(
         dueAt: checkpoint.dueAt,
         eventId: event.id,
         source: 'reconcile',
-        evidence: {
-          resultSlot: checkpoint.slot,
-          resultAuthorityAtMs: postMatchFixtureAuthorityAtMs(fixtures),
-        },
+        evidence: { resultSlot: checkpoint.slot, ...postMatchFixtureAuthority(fixtures) },
       };
     }),
   );
@@ -950,7 +960,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
           source: 'reconcile' as const,
           evidence: {
             resultSlot: checkpoint.slot,
-            resultAuthorityAtMs: postMatchFixtureAuthorityAtMs(fixtures),
+            ...postMatchFixtureAuthority(fixtures),
             finalizeEvent: true,
             persistEventLives: true,
           },

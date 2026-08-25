@@ -66,12 +66,16 @@ export function schedulerPlanKey(
   ];
   const resultSlot = plan.evidence?.resultSlot;
   const resultAuthorityAtMs = plan.evidence?.resultAuthorityAtMs;
+  const resultScheduleAnchorMs = plan.evidence?.resultScheduleAnchorMs;
   if (
     typeof resultSlot === 'string' &&
     /^(provisional|final)-\d+$/.test(resultSlot) &&
     Number.isSafeInteger(resultAuthorityAtMs) &&
-    Number(resultAuthorityAtMs) > 0
+    Number(resultAuthorityAtMs) > 0 &&
+    Number.isSafeInteger(resultScheduleAnchorMs) &&
+    Number(resultScheduleAnchorMs) > 0
   ) {
+    identity.push(Number(resultScheduleAnchorMs));
     identity.push(Number(resultAuthorityAtMs));
   }
   return JSON.stringify(identity);
@@ -210,6 +214,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     scopeKey: string;
     resultSlot: string;
     resultAuthorityAtMs: number;
+    resultScheduleAnchorMs: number;
     dueAt: Date;
   }> = [];
   const postMatchReservations: Array<{
@@ -270,13 +275,17 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
           typeof plan.evidence?.resultSlot !== 'string' ||
           plan.evidence.resultSlot.length === 0 ||
           !Number.isSafeInteger(plan.evidence?.resultAuthorityAtMs) ||
-          Number(plan.evidence?.resultAuthorityAtMs) <= 0,
+          Number(plan.evidence?.resultAuthorityAtMs) <= 0 ||
+          !Number.isSafeInteger(plan.evidence?.resultScheduleAnchorMs) ||
+          Number(plan.evidence?.resultScheduleAnchorMs) <= 0,
       );
       if (invalidPlan) {
         failed += 1;
         logError(
           'Post-match scheduler plan is missing durable result authority',
-          new Error('Post-match resultSlot and resultAuthorityAtMs evidence are required'),
+          new Error(
+            'Post-match resultSlot, resultAuthorityAtMs and resultScheduleAnchorMs evidence are required',
+          ),
           {
             jobName: definition.name,
             scopeKey: invalidPlan.scopeKey,
@@ -292,6 +301,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
           scopeKey: plan.scopeKey,
           resultSlot: plan.evidence?.resultSlot as string,
           resultAuthorityAtMs: plan.evidence?.resultAuthorityAtMs as number,
+          resultScheduleAnchorMs: plan.evidence?.resultScheduleAnchorMs as number,
           dueAt: plan.dueAt,
         });
       }
@@ -343,6 +353,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         periodKey: latest.periodKey,
         resultSlot: latest.resultSlot,
         resultAuthorityAtMs: latest.resultAuthorityAtMs,
+        resultScheduleAnchorMs: latest.resultScheduleAnchorMs,
         beforeDueAt: latest.dueAt,
       })),
       evidence: { checkpoint: 'post-match-results' },
