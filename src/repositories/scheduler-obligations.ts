@@ -242,6 +242,93 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
   return updated.length;
 }
 
+export type SchedulerDueAtSupersessionBoundary = Readonly<{
+  jobName: string;
+  scopeKey: string;
+  periodKey: string;
+  beforeDueAt: Date;
+}>;
+
+/**
+ * Post-match latest-authoritative checkpoints can cover every finalized event.
+ * Coalesce all job/scope boundaries in one statement so a season-end scheduler
+ * pass does not issue one permanent no-op update per job and event.
+ *
+ * The authoritative period identity is excluded explicitly. Peers at the same
+ * immutable due time are superseded because a final-N checkpoint replaces its
+ * provisional-N peer without advancing the hourly boundary.
+ */
+export async function supersedeSchedulerObligationsByDueAtBatch(input: {
+  boundaries: readonly SchedulerDueAtSupersessionBoundary[];
+  evidence?: Record<string, unknown>;
+  db?: DbHandle;
+}): Promise<number> {
+  if (input.boundaries.length === 0) return 0;
+  const seen = new Set<string>();
+  const boundaries = input.boundaries.map((boundary) => {
+    if (
+      boundary.jobName.length === 0 ||
+      boundary.scopeKey.length === 0 ||
+      boundary.periodKey.length === 0 ||
+      !Number.isFinite(boundary.beforeDueAt.getTime())
+    ) {
+      throw new Error('Scheduler supersession boundary is invalid');
+    }
+    const identity = JSON.stringify([boundary.jobName, boundary.scopeKey]);
+    if (seen.has(identity)) {
+      throw new Error('Scheduler supersession boundaries must be unique by job and scope');
+    }
+    seen.add(identity);
+    return {
+      job_name: boundary.jobName,
+      scope_key: boundary.scopeKey,
+      period_key: boundary.periodKey,
+      before_due_at: boundary.beforeDueAt.toISOString(),
+    };
+  });
+  const db = input.db ?? (await getDb());
+  const [result] = await db.execute<{ updatedCount: number | string }>(sql`
+    WITH boundaries AS (
+      SELECT job_name, scope_key, period_key, before_due_at
+      FROM jsonb_to_recordset(${JSON.stringify(boundaries)}::jsonb) AS boundary(
+        job_name text,
+        scope_key text,
+        period_key text,
+        before_due_at timestamptz
+      )
+    ), updated AS (
+      UPDATE ops.scheduler_obligations AS obligation
+      SET status = 'skipped',
+          evidence = obligation.evidence || jsonb_build_object(
+            'provider', 'fpl',
+            'terminal', true,
+            'reason', ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}::text,
+            'supersededByPeriodKey', boundaries.period_key
+          ) || ${JSON.stringify(input.evidence ?? {})}::jsonb,
+          completed_at = clock_timestamp(),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          updated_at = clock_timestamp()
+      FROM boundaries
+      WHERE obligation.job_name = boundaries.job_name
+        AND obligation.scope_key = boundaries.scope_key
+        AND obligation.period_key <> boundaries.period_key
+        AND CASE
+          WHEN obligation.evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
+            THEN to_timestamp(
+              (obligation.evidence->>'scheduledDueAtMs')::double precision / 1000
+            )
+          ELSE obligation.due_at
+        END <= boundaries.before_due_at
+        AND obligation.status IN ('pending', 'failed')
+      RETURNING obligation.obligation_id
+    )
+    SELECT count(*)::integer AS "updatedCount"
+    FROM updated
+  `);
+  return Number(result?.updatedCount ?? 0);
+}
+
 export async function hasEarlierInFlightSchedulerObligation(input: {
   jobName: string;
   beforePeriodKey: string;

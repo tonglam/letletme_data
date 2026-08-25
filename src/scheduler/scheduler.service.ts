@@ -10,6 +10,7 @@ import {
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
+  supersedeSchedulerObligationsByDueAtBatch,
 } from '../repositories/scheduler-obligations';
 import {
   resolveSchedulerContext,
@@ -46,6 +47,7 @@ const UNDERSTAT_SCHEDULER_JOB_NAMES = [
   'understat-orphan-reconciler',
 ] as const;
 const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
+  'live-finalization',
   'entry-results',
   'league-event-results',
   'tournament-event-results',
@@ -332,25 +334,21 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     }
   }
 
-  for (const latest of latestPostMatchPeriods) {
-    try {
-      await supersedeSchedulerObligationsByDueAt({
-        jobName: latest.jobName,
-        scopeKey: latest.scopeKey,
-        beforeDueAt: latest.dueAt,
-        evidence: {
-          checkpoint: 'post-match-results',
-          supersededByPeriodKey: latest.periodKey,
-        },
-      });
-    } catch (error) {
-      failed += 1;
-      logError('Post-match stale obligation coalescing failed', error, {
+  try {
+    await supersedeSchedulerObligationsByDueAtBatch({
+      boundaries: latestPostMatchPeriods.map((latest) => ({
         jobName: latest.jobName,
         scopeKey: latest.scopeKey,
         periodKey: latest.periodKey,
-      });
-    }
+        beforeDueAt: latest.dueAt,
+      })),
+      evidence: { checkpoint: 'post-match-results' },
+    });
+  } catch (error) {
+    failed += 1;
+    logError('Post-match stale obligation coalescing failed', error, {
+      boundaryCount: latestPostMatchPeriods.length,
+    });
   }
 
   let enqueueRecovery: SchedulerEnqueueRecoveryResult | null = null;

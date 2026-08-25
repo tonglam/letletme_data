@@ -18,11 +18,14 @@ import {
   startSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
+  supersedeSchedulerObligationsByDueAtBatch,
 } from '../../src/repositories/scheduler-obligations';
 
 const OBLIGATION_ID = '30000000-0000-4000-8000-000000000001';
 const NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000002';
 const IN_FLIGHT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000003';
+const SECOND_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000004';
+const SECOND_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000005';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -31,7 +34,9 @@ async function cleanup(): Promise<void> {
     WHERE obligation_id IN (
       ${OBLIGATION_ID}::uuid,
       ${NEWER_OBLIGATION_ID}::uuid,
-      ${IN_FLIGHT_OBLIGATION_ID}::uuid
+      ${IN_FLIGHT_OBLIGATION_ID}::uuid,
+      ${SECOND_OLDER_OBLIGATION_ID}::uuid,
+      ${SECOND_CURRENT_OBLIGATION_ID}::uuid
     )
   `;
 }
@@ -573,6 +578,174 @@ describe('scheduler obligation generation fencing', () => {
       status: 'skipped',
       reason: 'superseded-by-latest-authoritative',
     });
+  });
+
+  test('batches post-match peers without superseding the current identity or in-flight work', async () => {
+    const sql = await getDbClient();
+    const currentMovedDueAtMs = Date.parse('2026-08-23T11:00:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        lease_owner,
+        lease_expires_at,
+        evidence
+      )
+      VALUES
+        (
+          ${OBLIGATION_ID}::uuid,
+          'entry-results',
+          '2627:event:1',
+          'event-1-provisional-15',
+          'hourly post-match',
+          'UTC',
+          'pending',
+          'reconcile',
+          '2026-08-23T12:00:00Z'::timestamptz,
+          0,
+          0,
+          NULL,
+          NULL,
+          '{}'::jsonb
+        ),
+        (
+          ${NEWER_OBLIGATION_ID}::uuid,
+          'entry-results',
+          '2627:event:1',
+          'event-1-final-15',
+          'hourly post-match',
+          'UTC',
+          'pending',
+          'reconcile',
+          '2026-08-23T11:00:00Z'::timestamptz,
+          0,
+          0,
+          NULL,
+          NULL,
+          jsonb_build_object('scheduledDueAtMs', ${currentMovedDueAtMs}::bigint)
+        ),
+        (
+          ${IN_FLIGHT_OBLIGATION_ID}::uuid,
+          'entry-results',
+          '2627:event:1',
+          'event-1-provisional-14',
+          'hourly post-match',
+          'UTC',
+          'running',
+          'reconcile',
+          '2026-08-23T11:00:00Z'::timestamptz,
+          0,
+          1,
+          'integration-worker',
+          clock_timestamp() + interval '15 minutes',
+          '{}'::jsonb
+        ),
+        (
+          ${SECOND_OLDER_OBLIGATION_ID}::uuid,
+          'league-event-results',
+          '2627:event:1',
+          'event-1-provisional-14',
+          'hourly post-match',
+          'UTC',
+          'failed',
+          'reconcile',
+          '2026-08-23T11:00:00Z'::timestamptz,
+          1,
+          1,
+          NULL,
+          NULL,
+          '{}'::jsonb
+        ),
+        (
+          ${SECOND_CURRENT_OBLIGATION_ID}::uuid,
+          'league-event-results',
+          '2627:event:1',
+          'event-1-final-15',
+          'hourly post-match',
+          'UTC',
+          'pending',
+          'reconcile',
+          '2026-08-23T12:00:00Z'::timestamptz,
+          0,
+          0,
+          NULL,
+          NULL,
+          '{}'::jsonb
+        )
+    `;
+
+    expect(
+      await supersedeSchedulerObligationsByDueAtBatch({
+        boundaries: [
+          {
+            jobName: 'entry-results',
+            scopeKey: '2627:event:1',
+            periodKey: 'event-1-final-15',
+            beforeDueAt: new Date('2026-08-23T12:00:00Z'),
+          },
+          {
+            jobName: 'league-event-results',
+            scopeKey: '2627:event:1',
+            periodKey: 'event-1-final-15',
+            beforeDueAt: new Date('2026-08-23T12:00:00Z'),
+          },
+        ],
+        evidence: { checkpoint: 'post-match-results' },
+      }),
+    ).toBe(2);
+
+    const rows = await sql<
+      Array<{ obligationId: string; status: string; supersededByPeriodKey: string | null }>
+    >`
+      SELECT obligation_id AS "obligationId",
+             status,
+             evidence->>'supersededByPeriodKey' AS "supersededByPeriodKey"
+      FROM ops.scheduler_obligations
+      WHERE obligation_id IN (
+        ${OBLIGATION_ID}::uuid,
+        ${NEWER_OBLIGATION_ID}::uuid,
+        ${IN_FLIGHT_OBLIGATION_ID}::uuid,
+        ${SECOND_OLDER_OBLIGATION_ID}::uuid,
+        ${SECOND_CURRENT_OBLIGATION_ID}::uuid
+      )
+      ORDER BY obligation_id
+    `;
+    expect([...rows]).toEqual([
+      {
+        obligationId: OBLIGATION_ID,
+        status: 'skipped',
+        supersededByPeriodKey: 'event-1-final-15',
+      },
+      {
+        obligationId: NEWER_OBLIGATION_ID,
+        status: 'pending',
+        supersededByPeriodKey: null,
+      },
+      {
+        obligationId: IN_FLIGHT_OBLIGATION_ID,
+        status: 'running',
+        supersededByPeriodKey: null,
+      },
+      {
+        obligationId: SECOND_OLDER_OBLIGATION_ID,
+        status: 'skipped',
+        supersededByPeriodKey: 'event-1-final-15',
+      },
+      {
+        obligationId: SECOND_CURRENT_OBLIGATION_ID,
+        status: 'pending',
+        supersededByPeriodKey: null,
+      },
+    ]);
   });
 
   test('orders status by the immutable period and retains superseded failed cycles', async () => {

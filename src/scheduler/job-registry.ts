@@ -904,16 +904,20 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
       const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
-      const resultSlot = getPostMatchResultsSlot(event, fixtures, context.now);
-      if (!resultSlot?.startsWith('final-')) return [];
+      const checkpoint = getPostMatchResultsCheckpoint(event, fixtures, context.now);
+      if (!checkpoint?.slot.startsWith('final-')) return [];
       return [
         {
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-final-${event.id}-${resultSlot}`,
-          dueAt: context.now,
+          periodKey: `live-final-${event.id}-${checkpoint.slot}`,
+          dueAt: checkpoint.dueAt,
           eventId: event.id,
           source: 'reconcile' as const,
-          evidence: { resultSlot, finalizeEvent: true, persistEventLives: true },
+          evidence: {
+            resultSlot: checkpoint.slot,
+            finalizeEvent: true,
+            persistEventLives: true,
+          },
         },
       ];
     },
