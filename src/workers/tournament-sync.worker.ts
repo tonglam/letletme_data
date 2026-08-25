@@ -62,6 +62,10 @@ import {
   type CascadeCompletionBarrierJob,
 } from '../jobs/tournament-sync.jobs';
 import type { WorkerRuntime } from './worker-runtime';
+import {
+  inspectSchedulerObligationFence,
+  startCurrentSchedulerJob,
+} from '../utils/scheduler-obligation-fence';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import {
@@ -121,19 +125,19 @@ const cascadeRefreshDependencies: CascadeRefreshDependencies = {
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
 
 function startSchedulerLeaseHeartbeat(job: Job<TournamentSyncJobData>): () => void {
-  const obligationId = job.data.obligationId;
-  if (!obligationId) return () => undefined;
+  const fence = inspectSchedulerObligationFence(job.data);
+  if (fence.kind !== 'complete') return () => undefined;
 
   const timer = setInterval(() => {
     void renewSchedulerObligation({
-      obligationId,
-      generation: job.data.obligationGeneration,
+      obligationId: fence.obligationId,
+      generation: fence.generation,
     }).catch((error) => {
       logError('Failed to renew tournament scheduler obligation lease', error, {
         jobId: job.id,
         jobName: job.name,
-        obligationId,
-        generation: job.data.obligationGeneration,
+        obligationId: fence.obligationId,
+        generation: fence.generation,
       });
     });
   }, SCHEDULER_LEASE_HEARTBEAT_MS);
@@ -145,10 +149,11 @@ async function completeTournamentCascadeObligation(
   job: Job<TournamentSyncJobData>,
   completionStage: 'no-active-tournaments' | 'materialized-view-finalizer',
 ): Promise<void> {
-  if (!job.data.obligationId) return;
+  const fence = inspectSchedulerObligationFence(job.data);
+  if (fence.kind !== 'complete') return;
   const completed = await completeSchedulerObligation({
-    obligationId: job.data.obligationId,
-    generation: job.data.obligationGeneration,
+    obligationId: fence.obligationId,
+    generation: fence.generation,
     status: 'succeeded',
     evidence: {
       queue: tournamentSyncQueueName,
@@ -160,8 +165,8 @@ async function completeTournamentCascadeObligation(
   });
   if (!completed) {
     logInfo('Ignored stale tournament obligation completion', {
-      obligationId: job.data.obligationId,
-      generation: job.data.obligationGeneration,
+      obligationId: fence.obligationId,
+      generation: fence.generation,
       jobName: job.name,
       completionStage,
     });
@@ -173,12 +178,13 @@ export async function persistTournamentTerminalFailureBeforeSettlement(
   error: unknown,
   persist: typeof failSchedulerObligation = failSchedulerObligation,
 ): Promise<boolean> {
-  if (!job.data.obligationId || !isTerminalJobAttemptFailure(job, error, job.attemptsMade + 1)) {
+  const fence = inspectSchedulerObligationFence(job.data);
+  if (fence.kind !== 'complete' || !isTerminalJobAttemptFailure(job, error, job.attemptsMade + 1)) {
     return false;
   }
   return persist({
-    obligationId: job.data.obligationId,
-    generation: job.data.obligationGeneration,
+    obligationId: fence.obligationId,
+    generation: fence.generation,
     error,
   });
 }
@@ -389,6 +395,15 @@ async function enqueueOfficialRosterSyncAfterFinalization(
  * event-results (base) → [points-race, battle-race, knockout, transfers-post, cup-results] (parallel)
  */
 async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return { skipped: true, staleSchedulerGeneration: true };
+  }
   const season = await requireCurrentSeasonForJob(job.data);
   const { eventId, source, cascadeId } = job.data;
   const finalizationTargets = job.data.finalizationTargets ?? [];
@@ -721,7 +736,8 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
         }),
     );
   } catch (error) {
-    if (job.data.obligationId) {
+    const fence = inspectSchedulerObligationFence(job.data);
+    if (fence.kind === 'complete') {
       try {
         await persistTournamentTerminalFailureBeforeSettlement(job, error);
       } catch (bookkeepingError) {
@@ -734,8 +750,8 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           {
             jobId: job.id,
             jobName: job.name,
-            obligationId: job.data.obligationId,
-            generation: job.data.obligationGeneration,
+            obligationId: fence.obligationId,
+            generation: fence.generation,
           },
         );
       }
@@ -779,26 +795,24 @@ export function createTournamentSyncWorker(): WorkerRuntime {
       eventId: job.data.eventId,
     });
     if (job.id !== undefined && shouldCompleteTournamentJobOnSettlement(job)) {
-      const completion = job.data.obligationId
-        ? completeSchedulerObligation({
-            obligationId: job.data.obligationId,
-            generation: job.data.obligationGeneration,
-            status: 'succeeded',
-            evidence: {
-              queue: tournamentSyncQueueName,
-              jobName: job.name,
-              eventId: job.data.eventId,
-            },
-          })
-        : completeSchedulerObligationByBullJobId({
-            bullJobId: job.id,
-            evidence: {
-              queue: tournamentSyncQueueName,
-              jobName: job.name,
-              eventId: job.data.eventId,
-            },
-          });
-      void completion.catch(() => undefined);
+      const fence = inspectSchedulerObligationFence(job.data);
+      const evidence = {
+        queue: tournamentSyncQueueName,
+        jobName: job.name,
+        eventId: job.data.eventId,
+      };
+      const completion =
+        fence.kind === 'complete'
+          ? completeSchedulerObligation({
+              obligationId: fence.obligationId,
+              generation: fence.generation,
+              status: 'succeeded',
+              evidence,
+            })
+          : fence.kind === 'none'
+            ? completeSchedulerObligationByBullJobId({ bullJobId: job.id, evidence })
+            : null;
+      if (completion) void completion.catch(() => undefined);
     }
   });
   worker.on('failed', (job, err) => {
@@ -808,13 +822,14 @@ export function createTournamentSyncWorker(): WorkerRuntime {
       eventId: job?.data.eventId,
     });
     if (job) void alertOnFinalFailure(job, err);
-    if (job && isTerminalJobFailure(job, err) && job.data.obligationId) {
+    const fence = job ? inspectSchedulerObligationFence(job.data) : null;
+    if (job && isTerminalJobFailure(job, err) && fence?.kind === 'complete') {
       void failSchedulerObligation({
-        obligationId: job.data.obligationId,
-        generation: job.data.obligationGeneration,
+        obligationId: fence.obligationId,
+        generation: fence.generation,
         error: err,
       }).catch(() => undefined);
-    } else if (job?.id !== undefined && isTerminalJobFailure(job, err)) {
+    } else if (job?.id !== undefined && isTerminalJobFailure(job, err) && fence?.kind === 'none') {
       void failSchedulerObligationByBullJobId({ bullJobId: job.id, error: err }).catch(
         () => undefined,
       );

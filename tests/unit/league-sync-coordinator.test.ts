@@ -5,6 +5,31 @@ import { IncompleteDataSyncError } from '../../src/utils/errors';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('league sync coordinator', () => {
+  test('serializes tournaments that share event-level mutation scopes', async () => {
+    let active = 0;
+    let maximumActive = 0;
+    await syncActiveLeagueTournaments({
+      season: TEST_SEASON,
+      eventId: 12,
+      label: 'results',
+      findActiveTournaments: async () => [{ id: 11 }, { id: 22 }, { id: 33 }],
+      syncTournament: async () => {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise<void>((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+        return {
+          requiredUnits: 1,
+          reusedUnits: 0,
+          succeededUnits: 1,
+          failedUnits: 0,
+        };
+      },
+    });
+
+    expect(maximumActive).toBe(1);
+  });
+
   test('does not finish until every active tournament converges', async () => {
     const completed: number[] = [];
     const result = await syncActiveLeagueTournaments({

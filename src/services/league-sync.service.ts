@@ -12,7 +12,13 @@ import { syncLeagueEventResultsByTournament } from './league-event-results.servi
  * The root scheduler obligation therefore represents canonical convergence,
  * not merely successful child enqueue acknowledgements.
  */
-export const LEAGUE_FANOUT_CONCURRENCY = 10;
+// Every tournament in one event acquires the same entry/league event mutation
+// scopes. Parallel fan-out therefore cannot perform canonical writes in
+// parallel; it only creates 120-second lock waiters while the largest league
+// is still fetching and persisting its entries. Keep one tournament in flight
+// per coordinator and leave the remaining database pool capacity available to
+// live/core publication work.
+export const LEAGUE_FANOUT_CONCURRENCY = 1;
 
 type LeagueTournamentSyncResult = Readonly<{
   requiredUnits: number;

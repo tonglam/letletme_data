@@ -69,6 +69,10 @@ import {
   renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import type { WorkerRuntime } from './worker-runtime';
+import {
+  inspectSchedulerObligationFence,
+  startCurrentSchedulerJob,
+} from '../utils/scheduler-obligation-fence';
 
 const maxRetryCycles = 2;
 const retryBaseDelayMs = 5 * 60_000;
@@ -99,10 +103,13 @@ async function renewEntrySyncObligationLease(
   jobData: Pick<EntrySyncJobData, 'obligationId' | 'obligationGeneration'> | undefined,
   additionalLeaseMs = 0,
 ): Promise<boolean> {
-  if (!jobData?.obligationId) return true;
+  if (!jobData) return true;
+  const fence = inspectSchedulerObligationFence(jobData);
+  if (fence.kind === 'none') return true;
+  if (fence.kind === 'malformed') return false;
   return renewSchedulerObligation({
-    obligationId: jobData.obligationId,
-    generation: jobData.obligationGeneration,
+    obligationId: fence.obligationId,
+    generation: fence.generation,
     additionalLeaseMs,
   });
 }
@@ -457,8 +464,17 @@ export function createEntrySyncWorker(): WorkerRuntime {
   const connection = getQueueConnection();
 
   const processor = async (job: Job<EntrySyncJobData>) => {
-    const season = await requireCurrentSeasonForJob(job.data);
     const jobId = job.id ?? `${job.name}-${job.timestamp}`;
+    if (
+      !(await startCurrentSchedulerJob(job.data, {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId,
+      }))
+    ) {
+      return { skipped: true, staleSchedulerGeneration: true };
+    }
+    const season = await requireCurrentSeasonForJob(job.data);
     const attempt = resolveDataSyncAttempt(
       job.data?.source,
       job.attemptsMade,
@@ -476,22 +492,6 @@ export function createEntrySyncWorker(): WorkerRuntime {
     };
 
     logJobTriggered(context);
-
-    // A delayed retry or continuation may be the first job to run after a
-    // long scheduler interval.  Reject stale generations before they can
-    // touch entry data; the current generation remains authoritative.
-    if (job.data?.obligationId) {
-      const leaseRenewed = await renewEntrySyncObligationLease(job.data);
-      if (!leaseRenewed) {
-        logInfo('Entry sync job skipped for stale scheduler generation', {
-          jobId,
-          jobName: job.name,
-          obligationId: job.data.obligationId,
-          obligationGeneration: job.data.obligationGeneration,
-        });
-        return { skipped: true, staleSchedulerGeneration: true };
-      }
-    }
 
     const attemptContext: DataSyncAttemptContext = {
       queue: job.queueName,
@@ -695,10 +695,13 @@ export function createEntrySyncWorker(): WorkerRuntime {
           runMutation,
         );
         if (scoped.afterCommit) await scoped.afterCommit();
-        if (effectiveJobData?.obligationId && scoped.value.scanComplete) {
+        const fence = effectiveJobData
+          ? inspectSchedulerObligationFence(effectiveJobData)
+          : { kind: 'none' as const };
+        if (fence.kind === 'complete' && scoped.value.scanComplete) {
           await completeSchedulerObligation({
-            obligationId: effectiveJobData.obligationId,
-            generation: effectiveJobData.obligationGeneration,
+            obligationId: fence.obligationId,
+            generation: fence.generation,
             status: 'succeeded',
             evidence: {
               queue: entrySyncQueueName,
@@ -725,7 +728,8 @@ export function createEntrySyncWorker(): WorkerRuntime {
 
   worker.on('completed', (job) => {
     logInfo('Entry sync job completed', { jobId: job.id, name: job.name });
-    if (job.id !== undefined && !job.data.obligationId) {
+    const fence = inspectSchedulerObligationFence(job.data);
+    if (job.id !== undefined && fence.kind === 'none') {
       void completeSchedulerObligationByBullJobId({
         bullJobId: job.id,
         evidence: { queue: entrySyncQueueName, jobName: job.name },
@@ -740,13 +744,18 @@ export function createEntrySyncWorker(): WorkerRuntime {
     });
     if (job) {
       void alertOnFinalFailure(job, error);
-      if (isTerminalJobFailure(job, error) && job.data.obligationId) {
+      const fence = inspectSchedulerObligationFence(job.data);
+      if (isTerminalJobFailure(job, error) && fence.kind === 'complete') {
         void failSchedulerObligation({
-          obligationId: job.data.obligationId,
-          generation: job.data.obligationGeneration,
+          obligationId: fence.obligationId,
+          generation: fence.generation,
           error,
         }).catch(() => undefined);
-      } else if (job.id !== undefined && isTerminalJobFailure(job, error)) {
+      } else if (
+        job.id !== undefined &&
+        isTerminalJobFailure(job, error) &&
+        fence.kind === 'none'
+      ) {
         void failSchedulerObligationByBullJobId({ bullJobId: job.id, error }).catch(
           () => undefined,
         );

@@ -31,6 +31,10 @@ import { alertOnFinalFailure, notifyTwoBots } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { formatCronDateKey } from '../utils/timezone';
+import {
+  inspectSchedulerObligationFence,
+  startCurrentSchedulerJob,
+} from '../utils/scheduler-obligation-fence';
 import type { WorkerRuntime } from './worker-runtime';
 import {
   completeSchedulerObligation,
@@ -73,6 +77,15 @@ async function alertPriceChangePublicationOverdue(
 }
 
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return { skipped: true, staleSchedulerGeneration: true };
+  }
   const season = await requireCurrentSeasonForJob(job.data);
   const context = {
     jobType: 'queue' as const,
@@ -289,19 +302,23 @@ export function createDataSyncWorker(): WorkerRuntime {
         jobName: job.name,
         ...(skippedPriceChange ? { reason: 'official_fields_not_open' } : {}),
       };
-      const completion = job.data.obligationId
-        ? completeSchedulerObligation({
-            obligationId: job.data.obligationId,
-            generation: job.data.obligationGeneration,
-            status,
-            evidence,
-          })
-        : completeSchedulerObligationByBullJobId({
-            bullJobId: job.id,
-            status,
-            evidence,
-          });
-      void completion.catch(() => undefined);
+      const fence = inspectSchedulerObligationFence(job.data);
+      const completion =
+        fence.kind === 'complete'
+          ? completeSchedulerObligation({
+              obligationId: fence.obligationId,
+              generation: fence.generation,
+              status,
+              evidence,
+            })
+          : fence.kind === 'none'
+            ? completeSchedulerObligationByBullJobId({
+                bullJobId: job.id,
+                status,
+                evidence,
+              })
+            : null;
+      if (completion) void completion.catch(() => undefined);
     }
   });
 
@@ -318,13 +335,14 @@ export function createDataSyncWorker(): WorkerRuntime {
         // the alert observes the previous database state and under-counts the
         // current failed cycle.
         void (async () => {
-          if (job.data.obligationId) {
+          const fence = inspectSchedulerObligationFence(job.data);
+          if (fence.kind === 'complete') {
             await failSchedulerObligation({
-              obligationId: job.data.obligationId,
-              generation: job.data.obligationGeneration,
+              obligationId: fence.obligationId,
+              generation: fence.generation,
               error,
             });
-          } else if (job.id !== undefined) {
+          } else if (fence.kind === 'none' && job.id !== undefined) {
             await failSchedulerObligationByBullJobId({ bullJobId: job.id, error });
           }
           await alertPriceChangePublicationOverdue(job, error);

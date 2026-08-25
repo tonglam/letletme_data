@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, notInArray, sql } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -37,11 +37,9 @@ export type SchedulerObligation = Readonly<{
 const SUPERSEDED_BY_LATEST_AUTHORITATIVE = 'superseded-by-latest-authoritative';
 
 // A scheduled job may own one obligation while it scans a bounded batch of
-// entries.  The previous 90-second default was shorter than the production
-// 500-entry catch-up batches, so the scheduler reclaimed healthy work and
-// started a second generation against the same mutation scopes.  Keep the
-// lease comfortably above the longest normal batch; a dead worker is still
-// reclaimed deterministically once this safety window expires.
+// entries. The lease is progress evidence for monitoring and explicit
+// reconciliation; it is not authority to create another Bull generation.
+// BullMQ owns stalled-job recovery for an already-enqueued job.
 const DEFAULT_SCHEDULER_LEASE_MS = 15 * 60_000;
 
 function resolveSchedulerLeaseMs(): number {
@@ -330,16 +328,7 @@ export async function claimSchedulerObligations(
       .where(
         and(
           lte(schedulerObligationsInOps.dueAt, dbNow),
-          or(
-            inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
-            and(
-              inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
-              or(
-                isNull(schedulerObligationsInOps.leaseExpiresAt),
-                lte(schedulerObligationsInOps.leaseExpiresAt, dbNow),
-              ),
-            ),
-          ),
+          inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
           excludedJobNames.length > 0
             ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
             : undefined,
@@ -350,14 +339,10 @@ export async function claimSchedulerObligations(
       .for('update', { skipLocked: true });
     const claimed: { obligation: SchedulerObligation; owner: string }[] = [];
     for (const row of rows) {
-      // A failed attempt and a lease-reclaimed attempt both need a fresh
-      // deterministic Bull ID.  Reusing the old generation can be swallowed
-      // by a queue record whose enqueue response was lost or whose worker
-      // died after claiming the job.
-      const nextGeneration =
-        row.status === 'failed' || row.status === 'enqueued' || row.status === 'running'
-          ? row.generation + 1
-          : row.generation;
+      // Only an explicitly failed attempt gets a fresh deterministic Bull ID.
+      // Enqueued/running work is never reclaimed from lease age alone: the
+      // original Bull job may still be waiting, active, stalled, or retrying.
+      const nextGeneration = row.status === 'failed' ? row.generation + 1 : row.generation;
       const generationCap = input.generationCaps?.[row.jobName];
       if (generationCap !== undefined && nextGeneration >= generationCap) {
         await tx
@@ -385,6 +370,10 @@ export async function claimSchedulerObligations(
           attempts: sql`${schedulerObligationsInOps.attempts} + 1`,
           leaseOwner: owner,
           leaseExpiresAt,
+          // Correlation belongs to one generation. A failed generation must
+          // not make a new claim look Bull-confirmed before its own enqueue.
+          bullJobId: null,
+          runId: null,
           updatedAt: dbNow,
         })
         .where(eq(schedulerObligationsInOps.obligationId, row.obligationId))
@@ -393,6 +382,36 @@ export async function claimSchedulerObligations(
     }
     return claimed;
   });
+}
+
+/**
+ * Find expired in-flight obligations for BullMQ reconciliation. Lease expiry
+ * is observation evidence only: the reconciler must inspect the exact Bull
+ * generation before it may settle or retry one of these rows.
+ */
+export async function listExpiredSchedulerObligations(
+  input: { limit?: number; db?: DbHandle } = {},
+): Promise<readonly SchedulerObligation[]> {
+  const limit = input.limit ?? 50;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+    throw new Error('Scheduler recovery limit must be between 1 and 200');
+  }
+  const db = input.db ?? (await getDb());
+  const rows = await db
+    .select()
+    .from(schedulerObligationsInOps)
+    .where(
+      and(
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        lte(schedulerObligationsInOps.leaseExpiresAt, sql`clock_timestamp()`),
+      ),
+    )
+    .orderBy(
+      asc(schedulerObligationsInOps.leaseExpiresAt),
+      asc(schedulerObligationsInOps.obligationId),
+    )
+    .limit(limit);
+  return rows.map(mapRow);
 }
 
 export async function confirmSchedulerObligationEnqueued(input: {
@@ -406,20 +425,60 @@ export async function confirmSchedulerObligationEnqueued(input: {
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
-      status: 'running',
       bullJobId: input.bullJobId === undefined ? undefined : String(input.bullJobId),
       runId: input.runId,
-      // Keep the claim lease while the Bull job is running. Clearing it here
-      // would make every 30-second scheduler pass reclaim a healthy job and
-      // enqueue a new generation. Completion/failure clears the lease; an
-      // actually lost worker is reclaimed only after this lease expires.
+      // Enqueue acknowledgement is not execution. The worker moves this row
+      // to running only after atomically validating its generation fence.
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
       and(
         eq(schedulerObligationsInOps.obligationId, input.obligationId),
         eq(schedulerObligationsInOps.leaseOwner, input.owner),
-        eq(schedulerObligationsInOps.status, 'enqueued'),
+        // A fast worker may cross its generation fence before the scheduler
+        // persists Bull acknowledgement. The same lease owner can confirm
+        // either state without demoting running work back to enqueued.
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length === 1;
+}
+
+/**
+ * Fence a scheduled Bull job immediately before it performs upstream reads or
+ * database writes. A superseded or terminal generation cannot start work.
+ */
+export async function startSchedulerObligation(input: {
+  obligationId: string;
+  generation: number;
+  additionalLeaseMs?: number;
+  db?: DbHandle;
+}): Promise<boolean> {
+  if (!Number.isSafeInteger(input.generation) || input.generation < 0) {
+    throw new Error('Scheduler obligation generation must be a non-negative safe integer');
+  }
+  const additionalLeaseMs = Math.max(0, Math.floor(input.additionalLeaseMs ?? 0));
+  if (!Number.isSafeInteger(additionalLeaseMs)) {
+    throw new Error('Additional scheduler lease must be a safe integer');
+  }
+  const leaseMs = resolveSchedulerLeaseMs() + additionalLeaseMs;
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) {
+    throw new Error('Scheduler lease must be a positive safe integer');
+  }
+  const db = input.db ?? (await getDb());
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      status: 'running',
+      leaseExpiresAt: sql`clock_timestamp() + ${leaseMs} * interval '1 millisecond'`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligationId),
+        eq(schedulerObligationsInOps.generation, input.generation),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
       ),
     )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });
@@ -596,6 +655,7 @@ export async function failSchedulerObligation(input: {
   obligationId: string;
   owner?: string;
   generation?: number;
+  expectedStatus?: Extract<SchedulerObligationStatus, 'enqueued' | 'running'>;
   error: unknown;
   retryDelayMs?: number;
   db?: DbHandle;
@@ -623,6 +683,9 @@ export async function failSchedulerObligation(input: {
         input.generation === undefined
           ? undefined
           : eq(schedulerObligationsInOps.generation, input.generation),
+        input.expectedStatus === undefined
+          ? undefined
+          : eq(schedulerObligationsInOps.status, input.expectedStatus),
         inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
       ),
     )
