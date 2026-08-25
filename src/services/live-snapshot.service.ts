@@ -86,9 +86,11 @@ export interface LiveSnapshotDurablePersistenceResult {
   /**
    * `advanced` owns both the durable-write and cache-publication fence.
    * `finalized-noop` confirms an immutable final checkpoint and may not publish
-   * the newly fetched candidate. `superseded` may neither write nor publish.
+   * the newly fetched candidate. `finalized-superseded` is the equivalent
+   * fence for a non-final poll and must reconcile the canonical final
+   * publication before returning. `superseded` may neither write nor publish.
    */
-  readonly disposition: 'advanced' | 'finalized-noop' | 'superseded';
+  readonly disposition: 'advanced' | 'finalized-noop' | 'finalized-superseded' | 'superseded';
   readonly winnerCheckedAt: Date;
   readonly persistedFixtures: boolean;
   readonly persistedEventLives: boolean;
@@ -115,6 +117,10 @@ export interface LiveSnapshotDependencies {
     eventId: number,
     lastSuccessfulFetchAt: Date,
   ) => Promise<LiveSnapshotCacheContents | null>;
+  readonly recoverFinalizedPublication?: (
+    season: FplSeasonRef,
+    eventId: number,
+  ) => Promise<'none' | 'activated'>;
 }
 
 export interface LiveSnapshotSyncOptions {
@@ -133,6 +139,10 @@ function bonusTeamCount(): number {
   // Official event-live totals already include projected/final bonus.  There is
   // intentionally no locally calculated bonus publication anymore.
   return 0;
+}
+
+function observedFinalizedFence(disposition: LiveSnapshotDurablePersistenceResult['disposition']) {
+  return disposition === 'finalized-noop' || disposition === 'finalized-superseded';
 }
 
 export function buildCurrentSeasonPlayerTeamMap(
@@ -364,7 +374,7 @@ async function claimLiveSnapshotFence(
       finalizationReplayNoop,
     });
     return {
-      disposition: finalizationReplayNoop ? 'finalized-noop' : 'superseded',
+      disposition: finalizationReplayNoop ? 'finalized-noop' : 'finalized-superseded',
       winnerCheckedAt: current[0].finalizedAt,
     };
   }
@@ -510,6 +520,7 @@ const defaultDependencies: LiveSnapshotDependencies = {
   readOrderingTimestamp: async () => (await readDatabaseOrderingTimestamp()).date,
   persistDurably: persistLiveSnapshotDurably,
   readPublished: readLiveSnapshotCache,
+  recoverFinalizedPublication: recoverPendingLiveSnapshotPublication,
 };
 
 export async function recoverPendingLiveSnapshotPublication(
@@ -568,13 +579,11 @@ export async function syncLiveSnapshot(
     durable: LiveSnapshotDurablePersistenceResult,
     observed: LiveSnapshotCacheContents | null,
   ): Promise<LiveSnapshotCacheContents | null> => {
-    if (durable.disposition !== 'finalized-noop') return observed;
+    if (!observedFinalizedFence(durable.disposition)) return observed;
     // A concurrent finalization may commit while this worker waits for the
     // mutation/core lock. Reconcile only after observing the immutable fence,
     // then re-read; the pre-fetch cache may belong to the prior live revision.
-    if (!options.dependencies) {
-      await recoverPendingLiveSnapshotPublication(season, eventId);
-    }
+    await dependencies.recoverFinalizedPublication?.(season, eventId);
     return dependencies.readPublished(season.seasonCode, eventId);
   };
   const startedAt = Date.now();
@@ -655,7 +664,7 @@ export async function syncLiveSnapshot(
       persistedFixtures = durable.persistedFixtures;
       persistedEventLives = durable.persistedEventLives;
       const retainedActive = await readAfterFinalizedFence(durable, active);
-      if (durable.disposition === 'finalized-noop' && !retainedActive) {
+      if (observedFinalizedFence(durable.disposition) && !retainedActive) {
         throw new DatabaseError(
           `Finalized event ${eventId} has no active canonical live cache`,
           'LIVE_FINAL_PUBLICATION_MISSING',
@@ -792,7 +801,7 @@ export async function syncLiveSnapshot(
     persistedEventLives = durable.persistedEventLives;
     if (durable.disposition !== 'advanced') {
       const retainedActive = await readAfterFinalizedFence(durable, active);
-      if (durable.disposition === 'finalized-noop' && !retainedActive) {
+      if (observedFinalizedFence(durable.disposition) && !retainedActive) {
         throw new DatabaseError(
           `Finalized event ${eventId} has no active canonical live cache`,
           'LIVE_FINAL_PUBLICATION_MISSING',

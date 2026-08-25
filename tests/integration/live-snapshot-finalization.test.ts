@@ -191,6 +191,25 @@ describe('live snapshot finalization fence', () => {
     expect(event).toEqual({ checkedAtPreserved: true, finalizedAtPreserved: true });
   });
 
+  test('marks a non-final poll behind the immutable checkpoint for final reconciliation', async () => {
+    const result = await persistLiveSnapshotDurably({
+      season: SEASON,
+      eventId: EVENT_ID,
+      checkedAt: new Date('2026-08-25T17:07:31.000Z'),
+      prepared,
+      persistFixtures: true,
+      persistEventLives: false,
+      finalizeEvent: false,
+    });
+
+    expect(result).toEqual({
+      disposition: 'finalized-superseded',
+      winnerCheckedAt: FINALIZED_AT,
+      persistedFixtures: false,
+      persistedEventLives: false,
+    });
+  });
+
   test('never allocates or activates a publication from changed retry payloads', async () => {
     const rawFixture: RawFPLFixture = {
       ...mockRawFPLFixture1,
@@ -300,5 +319,117 @@ describe('live snapshot finalization fence', () => {
     expect(publicationCount?.count).toBe(0);
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === 'skipped')).toBe(true);
+  });
+
+  test('reconciles a non-final poll after it observes the finalization fence', async () => {
+    const rawFixture: RawFPLFixture = {
+      ...mockRawFPLFixture1,
+      event: EVENT_ID,
+      started: true,
+      finished: true,
+      finished_provisional: true,
+      minutes: 90,
+    };
+    const references: LiveSnapshotReferenceData = {
+      season: SEASON.seasonCode,
+      nameById: new Map([
+        [rawFixture.team_h, 'Home'],
+        [rawFixture.team_a, 'Away'],
+      ]),
+      shortNameById: new Map([
+        [rawFixture.team_h, 'HOM'],
+        [rawFixture.team_a, 'AWY'],
+      ]),
+      positionById: new Map([
+        [rawFixture.team_h, 1],
+        [rawFixture.team_a, 2],
+      ]),
+      playerTeamById: new Map(
+        mockEventLiveResponseFixture.elements.map((element) => [element.id, rawFixture.team_h]),
+      ),
+    };
+    const retained: LiveSnapshotCacheContents = {
+      season: SEASON.seasonCode,
+      eventId: EVENT_ID,
+      state: 'settled',
+      eventLives: [],
+      fixtures: [],
+      manifest: {
+        dataset: 'fpl:live',
+        seasonCode: SEASON.seasonCode,
+        eventId: EVENT_ID,
+        revision: 42,
+        publicationId: '20000000-0000-4000-8000-000000000042',
+        sourceCheckedAt: FINALIZED_AT.toISOString(),
+        lastSuccessfulFetchAt: FINALIZED_AT.toISOString(),
+        publishedAt: FINALIZED_AT.toISOString(),
+        state: 'settled',
+        items: [],
+      },
+    };
+    const staleObservedBeforeFence: LiveSnapshotCacheContents = {
+      ...retained,
+      manifest: {
+        ...retained.manifest,
+        revision: 41,
+        publicationId: '20000000-0000-4000-8000-000000000041',
+      },
+    };
+    let recovered = false;
+    let recoveryCalls = 0;
+    let publishedReads = 0;
+    const dependencies = {
+      getEventLive: async () => mockEventLiveResponseFixture,
+      getFixtures: async () => [rawFixture],
+      getExpectedFixtureIds: async () => [rawFixture.id],
+      getReferenceData: async () => references,
+      readOrderingTimestamp: async () => new Date('2026-08-25T17:07:31.000Z'),
+      persistDurably: persistLiveSnapshotDurably,
+      readPublished: async () => {
+        publishedReads += 1;
+        return recovered ? retained : staleObservedBeforeFence;
+      },
+      recoverFinalizedPublication: async () => {
+        recoveryCalls += 1;
+        recovered = true;
+        return 'activated' as const;
+      },
+      refreshHeartbeat: async () => {
+        throw new Error('superseded poll must not refresh the canonical manifest');
+      },
+    };
+
+    const result = await syncLiveSnapshot(SEASON, EVENT_ID, {
+      persistEventLives: false,
+      finalizeEvent: false,
+      dependencies,
+    });
+
+    expect(result.changed).toBe(false);
+    expect(result.stale).toBe(false);
+    expect(result.revision).toBe(retained.manifest.revision);
+    expect(result.publicationId).toBe(retained.manifest.publicationId);
+    expect(recoveryCalls).toBe(1);
+    expect(publishedReads).toBe(2);
+
+    const sql = await getDbClient();
+    const [publicationCount] = await sql<{ count: number }[]>`
+      SELECT count(*)::integer AS count
+      FROM ops.dataset_publications
+      WHERE dataset = 'fpl:live'
+        AND season_id = ${SEASON.seasonId}
+        AND event_id = ${EVENT_ID}
+    `;
+    const [latestRun] = await sql<{ status: string }[]>`
+      SELECT status
+      FROM ops.sync_runs
+      WHERE season_id = ${SEASON.seasonId}
+        AND event_id = ${EVENT_ID}
+        AND scope = 'live-snapshot'
+      ORDER BY started_at DESC
+      LIMIT 1
+    `;
+    expect(publicationCount?.count).toBe(0);
+    expect(latestRun?.status).toBe('skipped');
   });
 });
