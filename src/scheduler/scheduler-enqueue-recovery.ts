@@ -37,6 +37,7 @@ export type SchedulerQueueJobSnapshot = Readonly<{
   name: string;
   state: string;
   data: Readonly<Record<string, unknown>>;
+  returnValue?: unknown;
   failedReason?: string;
 }>;
 
@@ -120,6 +121,7 @@ async function snapshotSchedulerQueueJobs(
       name: job.name,
       state: await job.getState(),
       data: recordData(job.data),
+      ...(job.returnvalue === undefined ? {} : { returnValue: job.returnvalue }),
       ...(job.failedReason ? { failedReason: job.failedReason } : {}),
     })),
   );
@@ -137,16 +139,13 @@ async function inspectSchedulerQueueJobs(
     const directJobs = (await Promise.all(lookupIds.map((jobId) => queue.getJob(jobId)))).filter(
       (job): job is Job<Record<string, unknown>> => job !== undefined,
     );
-    const needsFallback = candidates.some(
-      (candidate) =>
-        !directJobs.some((job) => jobDataMatchesSchedulerObligation(job.data, candidate)),
-    );
-    const [fallbackJobs, fallbackJobCount] = needsFallback
-      ? await Promise.all([
-          queue.getJobs(RECOVERY_JOB_TYPES, 0, RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE - 1, false),
-          queue.getJobCountByTypes(...RECOVERY_JOB_TYPES),
-        ])
-      : [[], 0];
+    // A confirmed Bull id identifies only the scheduler root. Durable chains
+    // carry the same generation into continuation/finalizer jobs, so always
+    // take one bounded queue view as well as the direct root lookup.
+    const [fallbackJobs, fallbackJobCount] = await Promise.all([
+      queue.getJobs(RECOVERY_JOB_TYPES, 0, RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE - 1, false),
+      queue.getJobCountByTypes(...RECOVERY_JOB_TYPES),
+    ]);
     const uniqueJobs = new Map<string, Job<Record<string, unknown>>>();
     for (const job of [...directJobs, ...fallbackJobs]) {
       if (job.id !== undefined) uniqueJobs.set(String(job.id), job);
@@ -155,8 +154,7 @@ async function inspectSchedulerQueueJobs(
       jobs: await snapshotSchedulerQueueJobs([...uniqueJobs.values()]),
       // BullMQ applies the range per state. Prove the whole multi-state queue
       // fits inside one page before treating a random-id job as absent.
-      missingEvidenceVerified:
-        !needsFallback || fallbackJobCount < RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE,
+      missingEvidenceVerified: fallbackJobCount < RECOVERY_FALLBACK_SCAN_LIMIT_PER_STATE,
     };
   } finally {
     await queue.close();
@@ -180,9 +178,42 @@ export function decideSchedulerEnqueueRecovery(
   return 'retry-missing';
 }
 
+type RecoveryCompletionMode = NonNullable<ScheduledJobDefinition['recoveryCompletionMode']>;
+
+function schedulerRecoveryCompletionJob(
+  jobs: readonly SchedulerQueueJobSnapshot[],
+  mode: RecoveryCompletionMode,
+): SchedulerQueueJobSnapshot | null {
+  const completed = jobs.filter((job) => job.state === 'completed');
+  if (mode === 'root-job') return completed[0] ?? null;
+  if (mode === 'entry-scan-finalizer') {
+    return completed.find((job) => recordData(job.returnValue).scanComplete === true) ?? null;
+  }
+  if (mode === 'tournament-cascade-finalizer') {
+    return (
+      completed.find(
+        (job) =>
+          job.name === 'tournament-materialized-views-refresh' ||
+          (job.name === 'tournament-event-results' &&
+            recordData(job.returnValue).totalEntries === 0),
+      ) ?? null
+    );
+  }
+  return completed.find((job) => job.name.endsWith('-finalize')) ?? null;
+}
+
+function recoveryCompletionMode(
+  definition: Pick<ScheduledJobDefinition, 'recoveryCompletionMode'>,
+): RecoveryCompletionMode {
+  return definition.recoveryCompletionMode ?? 'root-job';
+}
+
 function groupRecoveryCandidates(
   candidates: readonly SchedulerObligation[],
-  definitions: readonly Pick<ScheduledJobDefinition, 'name' | 'queueName'>[],
+  definitions: readonly Pick<
+    ScheduledJobDefinition,
+    'name' | 'queueName' | 'recoveryCompletionMode'
+  >[],
 ): Readonly<{
   byQueue: ReadonlyMap<string, readonly SchedulerObligation[]>;
   unknown: readonly SchedulerObligation[];
@@ -211,12 +242,18 @@ function groupRecoveryCandidates(
  * is checked first and every database mutation retains the generation fence.
  */
 export async function reconcileExpiredSchedulerEnqueueClaims(input: {
-  definitions: readonly Pick<ScheduledJobDefinition, 'name' | 'queueName'>[];
+  definitions: readonly Pick<
+    ScheduledJobDefinition,
+    'name' | 'queueName' | 'recoveryCompletionMode'
+  >[];
   dependencies?: Partial<RecoveryDependencies>;
 }): Promise<SchedulerEnqueueRecoveryResult> {
   const dependencies = { ...defaultRecoveryDependencies, ...input.dependencies };
   const candidates = await dependencies.listCandidates();
   const grouped = groupRecoveryCandidates(candidates, input.definitions);
+  const definitionsByName = new Map(
+    input.definitions.map((definition) => [definition.name, definition]),
+  );
   const counters = {
     candidates: candidates.length,
     running: 0,
@@ -258,9 +295,22 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
     // Require two observations before declaring an enqueue missing, and keep
     // both snapshots so a transition visible in either one wins.
     if (
-      queueCandidates.some(
-        (candidate) => !jobs.some((job) => matchesSchedulerObligationGeneration(job, candidate)),
-      )
+      queueCandidates.some((candidate) => {
+        const matchingJobs = jobs.filter((job) =>
+          matchesSchedulerObligationGeneration(job, candidate),
+        );
+        if (matchingJobs.length === 0) return true;
+        const definition = definitionsByName.get(candidate.jobName);
+        if (!definition) return true;
+        const mode = recoveryCompletionMode(definition);
+        const decision = decideSchedulerEnqueueRecovery(matchingJobs);
+        return (
+          mode !== 'root-job' &&
+          decision !== 'mark-running' &&
+          decision !== 'retain-enqueued' &&
+          schedulerRecoveryCompletionJob(matchingJobs, mode) === null
+        );
+      })
     ) {
       try {
         const secondInspection = await dependencies.inspectJobs(queueName, queueCandidates);
@@ -278,6 +328,12 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
     }
 
     for (const obligation of queueCandidates) {
+      const definition = definitionsByName.get(obligation.jobName);
+      if (!definition) {
+        counters.errors += 1;
+        continue;
+      }
+      const completionMode = recoveryCompletionMode(definition);
       const matchingJobs = jobs.filter((job) =>
         matchesSchedulerObligationGeneration(job, obligation),
       );
@@ -286,6 +342,7 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
         continue;
       }
       const decision = decideSchedulerEnqueueRecovery(matchingJobs);
+      const semanticCompletionJob = schedulerRecoveryCompletionJob(matchingJobs, completionMode);
       try {
         if (decision === 'mark-running' || decision === 'retain-enqueued') {
           const representative =
@@ -340,6 +397,21 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
         }
 
         if (decision === 'mark-succeeded') {
+          if (!semanticCompletionJob) {
+            if (missingEvidenceUnverified) {
+              counters.errors += 1;
+              continue;
+            }
+            const updated = await dependencies.fail({
+              obligationId: obligation.obligationId,
+              generation: obligation.generation,
+              retryDelayMs: 0,
+              error: new Error(`Bull root completed without ${completionMode} completion evidence`),
+            });
+            if (updated) counters.retried += 1;
+            else counters.unchanged += 1;
+            continue;
+          }
           const updated = await dependencies.complete({
             obligationId: obligation.obligationId,
             generation: obligation.generation,
@@ -347,6 +419,9 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
             evidence: {
               queue: queueName,
               reason: 'recovered-expired-bull-generation',
+              completionMode,
+              semanticBullJobId: semanticCompletionJob.id,
+              semanticBullJobName: semanticCompletionJob.name,
               bullJobIds: matchingJobs.slice(0, 20).map((job) => job.id),
             },
           });
@@ -358,6 +433,17 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
         const failedReasons = matchingJobs
           .map((job) => job.failedReason)
           .filter((reason): reason is string => Boolean(reason));
+        if (
+          decision === 'mark-failed' &&
+          completionMode !== 'root-job' &&
+          missingEvidenceUnverified
+        ) {
+          // A failed chain root can coexist with descendants that were
+          // published before the handoff failed. Never open a new generation
+          // until the bounded queue view proves no descendant is still live.
+          counters.errors += 1;
+          continue;
+        }
         const updated = await dependencies.fail({
           obligationId: obligation.obligationId,
           generation: obligation.generation,

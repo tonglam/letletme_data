@@ -105,6 +105,16 @@ export type ScheduledJobDefinition = Readonly<{
   criticality: 'critical' | 'normal' | 'maintenance';
   queueName: string;
   successPredicate: string;
+  /**
+   * Bull completion evidence used only when recovering an expired scheduler
+   * lease. Most workers settle the obligation from their root job, but
+   * durable chains must reach their semantic finalizer first.
+   */
+  recoveryCompletionMode?:
+    | 'root-job'
+    | 'entry-scan-finalizer'
+    | 'tournament-cascade-finalizer'
+    | 'understat-finalizer';
   manualTrigger?: boolean;
   /** Scheduler-only definitions can be excluded from claims while disabled. */
   isEnabled?: () => boolean;
@@ -171,6 +181,7 @@ function dailyDefinition(input: {
   criticality: ScheduledJobDefinition['criticality'];
   queueName: string;
   successPredicate: string;
+  recoveryCompletionMode?: ScheduledJobDefinition['recoveryCompletionMode'];
   enqueue: ScheduledJobDefinition['enqueue'];
 }): ScheduledJobDefinition {
   return {
@@ -229,6 +240,7 @@ export function understatDailyDefinition(
     minute: number;
     queueName: string;
     successPredicate: string;
+    recoveryCompletionMode?: ScheduledJobDefinition['recoveryCompletionMode'];
     enqueue: ScheduledJobDefinition['enqueue'];
   },
   isEnabled: () => boolean = () => getConfig().UNDERSTAT_ENABLED,
@@ -314,6 +326,7 @@ function eventDefinition(input: {
   criticality: ScheduledJobDefinition['criticality'];
   queueName: string;
   successPredicate: string;
+  recoveryCompletionMode?: ScheduledJobDefinition['recoveryCompletionMode'];
   /** Checkpoint jobs must reconcile every due event, not just the current one. */
   allDueEvents?: boolean;
   enqueue: ScheduledJobDefinition['enqueue'];
@@ -998,6 +1011,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       minute: 15,
       queueName: 'understat-team-sync',
       successPredicate: 'Understat team incremental finalizer completes the daily lane',
+      recoveryCompletionMode: 'understat-finalizer',
       enqueue: async ({ seasonCode, obligationId, generation }) => {
         if (!seasonCode) throw new Error('Understat team obligation has no season code');
         const result = await enqueueUnderstatTeamSync({
@@ -1016,6 +1030,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       minute: 15,
       queueName: 'understat-player-sync',
       successPredicate: 'Understat player incremental finalizer completes the daily lane',
+      recoveryCompletionMode: 'understat-finalizer',
       enqueue: async ({ seasonCode, obligationId, generation }) => {
         if (!seasonCode) throw new Error('Understat player obligation has no season code');
         const result = await enqueueUnderstatPlayerSync({
@@ -1145,6 +1160,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'normal',
       queueName: 'entry-sync',
       successPredicate: 'entry info daily checkpoint advances',
+      recoveryCompletionMode: 'entry-scan-finalizer',
       enqueue: async ({ context, obligationId, generation }) => {
         const job = await enqueueEntryInfoSyncJob(context.season, 'catchup', {
           eventId: resolveEntryInfoSnapshotTargetEventId(context),
@@ -1205,6 +1221,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'critical',
       queueName: 'entry-sync',
       successPredicate: 'entry picks checkpoint covers known entries for event',
+      recoveryCompletionMode: 'entry-scan-finalizer',
       allDueEvents: true,
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
@@ -1226,6 +1243,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'critical',
       queueName: 'entry-sync',
       successPredicate: 'entry transfers checkpoint covers known entries for event',
+      recoveryCompletionMode: 'entry-scan-finalizer',
       allDueEvents: true,
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
@@ -1247,6 +1265,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'normal',
       queueName: 'entry-sync',
       successPredicate: 'entry results checkpoint covers known entries for event',
+      recoveryCompletionMode: 'entry-scan-finalizer',
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Entry results obligation has no event checkpoint');
@@ -1305,6 +1324,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       queueName: 'tournament-sync',
       successPredicate:
         'tournament result and cascade jobs enqueue; persistent barrier owns downstream completion',
+      recoveryCompletionMode: 'tournament-cascade-finalizer',
       enqueue: async ({ context, plan, obligationId, generation }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Tournament results obligation has no event checkpoint');

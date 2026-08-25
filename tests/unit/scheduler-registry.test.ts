@@ -40,6 +40,19 @@ describe('standalone scheduler registry', () => {
     expect(transfers?.successPredicate).toContain('entry transfers checkpoint');
   });
 
+  test('declares semantic recovery finalizers for durable scheduler chains', () => {
+    const modes = new Map(
+      registry.map((definition) => [definition.name, definition.recoveryCompletionMode]),
+    );
+    for (const jobName of ['entry-info', 'entry-picks', 'entry-transfers', 'entry-results']) {
+      expect(modes.get(jobName)).toBe('entry-scan-finalizer');
+    }
+    expect(modes.get('tournament-event-results')).toBe('tournament-cascade-finalizer');
+    expect(modes.get('understat-team-incremental')).toBe('understat-finalizer');
+    expect(modes.get('understat-player-incremental')).toBe('understat-finalizer');
+    expect(modes.get('core-snapshot')).toBeUndefined();
+  });
+
   test('schedules price changes as a critical five-minute latest-authoritative job', async () => {
     const priceChanges = registry.find(
       (definition) => definition.name === 'price-change-predictions',

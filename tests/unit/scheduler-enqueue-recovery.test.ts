@@ -195,6 +195,202 @@ describe('scheduler enqueue recovery', () => {
     expect(completed).toEqual(['confirmed-complete']);
   });
 
+  test('retains a completed entry root while its continuation is still pending', async () => {
+    const renewed: string[] = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [
+        {
+          name: 'entry-results',
+          queueName: 'entry-sync',
+          recoveryCompletionMode: 'entry-scan-finalizer',
+        },
+      ],
+      dependencies: {
+        listCandidates: async () => [obligation('entry-chain', 2, 'entry-results')],
+        inspectJobs: async () => ({
+          jobs: [
+            {
+              ...queueJob('entry-chain', 2, 'completed'),
+              name: 'entry-results',
+              returnValue: { scanComplete: false },
+            },
+            {
+              ...queueJob('entry-chain', 2, 'waiting'),
+              id: 'entry-continuation',
+              name: 'entry-results',
+            },
+          ],
+          missingEvidenceVerified: true,
+        }),
+        confirm: async () => true,
+        start: async () => false,
+        renew: async (input) => {
+          renewed.push(input.obligationId);
+          return true;
+        },
+        complete: async () => {
+          throw new Error('root completion is not semantic entry completion');
+        },
+        fail: async () => false,
+      },
+    });
+
+    expect(result.retained).toBe(1);
+    expect(result.succeeded).toBe(0);
+    expect(renewed).toEqual(['entry-chain']);
+  });
+
+  test('requires scanComplete before recovering an entry chain as succeeded', async () => {
+    const completed: string[] = [];
+    const failed: string[] = [];
+    const candidate = obligation('entry-chain', 3, 'entry-results');
+    let inspections = 0;
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [
+        {
+          name: 'entry-results',
+          queueName: 'entry-sync',
+          recoveryCompletionMode: 'entry-scan-finalizer',
+        },
+      ],
+      dependencies: {
+        listCandidates: async () => [candidate],
+        inspectJobs: async () => {
+          inspections += 1;
+          return {
+            jobs: [
+              {
+                ...queueJob('entry-chain', 3, 'completed'),
+                name: 'entry-results',
+                returnValue: { scanComplete: inspections === 2 },
+              },
+            ],
+            missingEvidenceVerified: true,
+          };
+        },
+        confirm: async () => true,
+        start: async () => false,
+        renew: async () => false,
+        complete: async (input) => {
+          completed.push(input.obligationId);
+          return true;
+        },
+        fail: async (input) => {
+          failed.push(input.obligationId);
+          return true;
+        },
+      },
+    });
+
+    expect(inspections).toBe(2);
+    expect(result.succeeded).toBe(1);
+    expect(result.retried).toBe(0);
+    expect(completed).toEqual(['entry-chain']);
+    expect(failed).toEqual([]);
+  });
+
+  test('retries a drained chain whose root completed without finalizer evidence', async () => {
+    const failed: string[] = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [
+        {
+          name: 'entry-results',
+          queueName: 'entry-sync',
+          recoveryCompletionMode: 'entry-scan-finalizer',
+        },
+      ],
+      dependencies: {
+        listCandidates: async () => [obligation('lost-finalizer', 4, 'entry-results')],
+        inspectJobs: async () => ({
+          jobs: [
+            {
+              ...queueJob('lost-finalizer', 4, 'completed'),
+              name: 'entry-results',
+              returnValue: { scanComplete: false },
+            },
+          ],
+          missingEvidenceVerified: true,
+        }),
+        confirm: async () => true,
+        start: async () => false,
+        renew: async () => false,
+        complete: async () => false,
+        fail: async (input) => {
+          failed.push(input.obligationId);
+          return true;
+        },
+      },
+    });
+
+    expect(result.succeeded).toBe(0);
+    expect(result.retried).toBe(1);
+    expect(failed).toEqual(['lost-finalizer']);
+  });
+
+  test('recognizes tournament and Understat semantic finalizers', async () => {
+    const candidates = [
+      obligation('tournament-chain', 5, 'tournament-event-results'),
+      obligation('understat-chain', 6, 'understat-team-incremental'),
+    ];
+    const completed: string[] = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [
+        {
+          name: 'tournament-event-results',
+          queueName: 'tournament-sync',
+          recoveryCompletionMode: 'tournament-cascade-finalizer',
+        },
+        {
+          name: 'understat-team-incremental',
+          queueName: 'understat-team-sync',
+          recoveryCompletionMode: 'understat-finalizer',
+        },
+      ],
+      dependencies: {
+        listCandidates: async () => candidates,
+        inspectJobs: async (queueName) => ({
+          jobs:
+            queueName === 'tournament-sync'
+              ? [
+                  {
+                    ...queueJob('tournament-chain', 5, 'completed'),
+                    name: 'tournament-event-results',
+                    returnValue: { totalEntries: 100 },
+                  },
+                  {
+                    ...queueJob('tournament-chain', 5, 'completed'),
+                    id: 'tournament-finalizer',
+                    name: 'tournament-materialized-views-refresh',
+                  },
+                ]
+              : [
+                  {
+                    ...queueJob('understat-chain', 6, 'completed'),
+                    name: 'understat-team-discover',
+                  },
+                  {
+                    ...queueJob('understat-chain', 6, 'completed'),
+                    id: 'understat-finalizer',
+                    name: 'understat-team-finalize',
+                  },
+                ],
+          missingEvidenceVerified: true,
+        }),
+        confirm: async () => true,
+        start: async () => false,
+        renew: async () => false,
+        complete: async (input) => {
+          completed.push(input.obligationId);
+          return true;
+        },
+        fail: async () => false,
+      },
+    });
+
+    expect(result.succeeded).toBe(2);
+    expect(completed.sort()).toEqual(['tournament-chain', 'understat-chain']);
+  });
+
   test('does not retry a missing job when the bounded Redis view was incomplete', async () => {
     let failCalls = 0;
     const result = await reconcileExpiredSchedulerEnqueueClaims({
