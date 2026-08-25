@@ -31,6 +31,10 @@ const ENV_KEYS = [
   'BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY',
   'BUG_REPORT_SCREENSHOT_BUCKET',
   'BUG_REPORT_SCREENSHOT_RETENTION_DAYS',
+  'FPL_RAW_SNAPSHOT_STORAGE_ENABLED',
+  'FPL_RAW_SNAPSHOT_SUPABASE_URL',
+  'FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY',
+  'FPL_RAW_SNAPSHOT_BUCKET',
 ] as const;
 const savedEnv = new Map<string, string | undefined>();
 
@@ -45,6 +49,10 @@ beforeEach(() => {
   process.env.BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY = 'test-secret';
   process.env.BUG_REPORT_SCREENSHOT_BUCKET = 'bug-report-screenshots';
   process.env.BUG_REPORT_SCREENSHOT_RETENTION_DAYS = '90';
+  process.env.FPL_RAW_SNAPSHOT_STORAGE_ENABLED = 'true';
+  process.env.FPL_RAW_SNAPSHOT_SUPABASE_URL = 'https://example.supabase.co';
+  process.env.FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY = 'test-secret';
+  process.env.FPL_RAW_SNAPSHOT_BUCKET = 'fpl-raw-snapshots';
   resetConfigForTests();
 });
 

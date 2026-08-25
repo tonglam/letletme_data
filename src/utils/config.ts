@@ -67,6 +67,12 @@ const EnvSchema = z.object({
   BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY: optionalEnv(z.string().min(1).optional()),
   BUG_REPORT_SCREENSHOT_BUCKET: z.string().min(1).default('bug-report-screenshots'),
   BUG_REPORT_SCREENSHOT_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
+  // Exact-byte bootstrap-static archive. Production market capture and every
+  // historical replay fail closed unless this private object store is ready.
+  FPL_RAW_SNAPSHOT_STORAGE_ENABLED: booleanEnv(false),
+  FPL_RAW_SNAPSHOT_SUPABASE_URL: optionalEnv(z.string().url().optional()),
+  FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY: optionalEnv(z.string().min(1).optional()),
+  FPL_RAW_SNAPSHOT_BUCKET: z.string().min(1).default('fpl-raw-snapshots'),
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
@@ -134,8 +140,16 @@ type BugReportScreenshotConfigKeys =
   | 'BUG_REPORT_SCREENSHOT_BUCKET'
   | 'BUG_REPORT_SCREENSHOT_RETENTION_DAYS';
 
-export type AppConfig = Omit<z.infer<typeof EnvSchema>, BugReportScreenshotConfigKeys> &
-  Partial<Pick<z.infer<typeof EnvSchema>, BugReportScreenshotConfigKeys>>;
+type FplRawSnapshotConfigKeys =
+  | 'FPL_RAW_SNAPSHOT_STORAGE_ENABLED'
+  | 'FPL_RAW_SNAPSHOT_SUPABASE_URL'
+  | 'FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY'
+  | 'FPL_RAW_SNAPSHOT_BUCKET';
+
+type OptionalStorageConfigKeys = BugReportScreenshotConfigKeys | FplRawSnapshotConfigKeys;
+
+export type AppConfig = Omit<z.infer<typeof EnvSchema>, OptionalStorageConfigKeys> &
+  Partial<Pick<z.infer<typeof EnvSchema>, OptionalStorageConfigKeys>>;
 
 export type RedisEndpointConfig = {
   readonly host: string;
@@ -176,6 +190,23 @@ export function assertBugReportScreenshotStorageConfigured(config: AppConfig): v
   if (!isBugReportScreenshotStorageConfigured(config)) {
     throw new Error(
       'Production bug-report screenshot storage must be enabled with the private bucket and 90-day retention',
+    );
+  }
+}
+
+export function isFplRawSnapshotStorageConfigured(config: AppConfig): boolean {
+  return (
+    config.FPL_RAW_SNAPSHOT_STORAGE_ENABLED === true &&
+    Boolean(config.FPL_RAW_SNAPSHOT_SUPABASE_URL) &&
+    Boolean(config.FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY) &&
+    config.FPL_RAW_SNAPSHOT_BUCKET === 'fpl-raw-snapshots'
+  );
+}
+
+export function assertFplRawSnapshotStorageConfigured(config: AppConfig): void {
+  if (!isFplRawSnapshotStorageConfigured(config)) {
+    throw new Error(
+      'Production FPL raw snapshot storage must be enabled with the private fpl-raw-snapshots bucket',
     );
   }
 }
@@ -240,6 +271,7 @@ export function getConfig(): AppConfig {
 
     if (parsed.NODE_ENV === 'production') {
       assertBugReportScreenshotStorageConfigured(parsed);
+      assertFplRawSnapshotStorageConfigured(parsed);
     }
 
     if (
@@ -311,6 +343,7 @@ export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
     resolveAuthConfig(conf);
     if (conf.NODE_ENV === 'production') {
       assertBugReportScreenshotStorageConfigured(conf);
+      assertFplRawSnapshotStorageConfigured(conf);
     }
     logInfo('[env] OK', {
       PORT: conf.PORT,

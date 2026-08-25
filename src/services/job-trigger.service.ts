@@ -105,6 +105,26 @@ function requirePlayerPricesChangeDate(input: unknown): string {
   return changeDate;
 }
 
+function readMarketSourceDay(input: unknown): string | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    throw new ValidationError(
+      'Market daily input must be an object with sourceDay in YYYYMMDD format',
+      'MARKET_SOURCE_DAY_INVALID',
+    );
+  }
+  const value = input as Record<string, unknown>;
+  const sourceDay = value.sourceDay ?? value.changeDate;
+  if (sourceDay === undefined) return undefined;
+  if (typeof sourceDay !== 'string' || !/^\d{8}$/.test(sourceDay)) {
+    throw new ValidationError(
+      'Market daily sourceDay must use YYYYMMDD format',
+      'MARKET_SOURCE_DAY_INVALID',
+    );
+  }
+  return sourceDay;
+}
+
 type MyFplManualSnapshotInput = {
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
@@ -234,11 +254,15 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     },
     'player-values-sync': async () => {
       const season = await seasonRepository.findCurrent();
-      return enqueuePlayerValuesSyncJob(season, 'manual');
+      return enqueuePlayerValuesSyncJob(season, 'manual', {
+        changeDate: readMarketSourceDay(input),
+      });
     },
     'market-daily': async () => {
       const season = await seasonRepository.findCurrent();
-      return enqueuePlayerValuesSyncJob(season, 'manual');
+      return enqueuePlayerValuesSyncJob(season, 'manual', {
+        changeDate: readMarketSourceDay(input),
+      });
     },
     'player-stats': async () => {
       const season = await seasonRepository.findCurrent();

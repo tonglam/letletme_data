@@ -3,6 +3,7 @@ import {
   assertPrivateBugReportScreenshotBucket,
   createBugReportScreenshotStorage,
 } from './src/services/bug-report-screenshot-retention.service';
+import { createFplSourceArtifactStorage } from './src/services/fpl-source-artifact-storage.service';
 import { assertContentRuntimeFlags, getContentRuntimeFlags } from './src/content/config';
 import { getConfig, validateEnvForCli } from './src/utils/config';
 import { logInfo } from './src/utils/logger';
@@ -36,6 +37,33 @@ if (process.argv.includes('--probe-bug-report-storage')) {
     });
   } catch (error) {
     console.error('[env] bug-report screenshot storage probe FAILED', {
+      error: error instanceof Error ? error.name : 'UnknownError',
+    });
+    process.exit(1);
+  }
+}
+
+if (process.argv.includes('--probe-fpl-raw-snapshot-storage')) {
+  try {
+    const config = getConfig();
+    if (
+      !config.FPL_RAW_SNAPSHOT_SUPABASE_URL ||
+      !config.FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY ||
+      !config.FPL_RAW_SNAPSHOT_BUCKET
+    ) {
+      throw new Error('FPL raw snapshot Storage credentials are missing');
+    }
+    const storage = createFplSourceArtifactStorage({
+      supabaseUrl: config.FPL_RAW_SNAPSHOT_SUPABASE_URL,
+      secretKey: config.FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY,
+      bucket: config.FPL_RAW_SNAPSHOT_BUCKET,
+    });
+    await storage.provisionAndProbe();
+    logInfo('[env] FPL raw snapshot storage probe OK', {
+      bucket: config.FPL_RAW_SNAPSHOT_BUCKET,
+    });
+  } catch (error) {
+    console.error('[env] FPL raw snapshot storage probe FAILED', {
       error: error instanceof Error ? error.name : 'UnknownError',
     });
     process.exit(1);

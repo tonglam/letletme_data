@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 
-import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
+import type { FPLBootstrapResponse } from '../clients/fpl';
 import type { PlayerValue } from '../domain/player-values';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { PlayerMarketSnapshot } from '../domain/player-market-snapshots';
@@ -16,6 +16,10 @@ import { logError, logInfo } from '../utils/logger';
 import { notifyTwoBots } from '../utils/notify';
 import { formatCronDateKey } from '../utils/timezone';
 import { resolvePlayerSyncEvent } from './player-sync-event.service';
+import {
+  resolveFplBootstrapSourceArtifact,
+  type ResolvedFplBootstrapArtifact,
+} from './fpl-bootstrap-source-artifact.service';
 
 export type PlayerValuesPhaseTimings = {
   bootstrap: number;
@@ -25,25 +29,27 @@ export type PlayerValuesPhaseTimings = {
 };
 
 export type PlayerValuesSyncDependencies = {
-  getBootstrap: typeof fplClient.getBootstrap;
+  resolveBootstrapSourceArtifact: typeof resolveFplBootstrapSourceArtifact;
   resolvePlayerSyncEvent: typeof resolvePlayerSyncEvent;
   persistMarketSnapshot: (
     season: FplSeasonRef,
     eventId: number,
     snapshots: readonly PlayerMarketSnapshot[],
     expectedCount: number,
+    sourceArtifactId: string,
   ) => Promise<{ snapshotDate: string; persistedCount: number }>;
   findByChangeDate: (season: FplSeasonRef, changeDate: string) => Promise<StoredPlayerValue[]>;
   enqueuePlayerPrices: typeof enqueuePlayerPricesSyncJob;
   notify: typeof notifyTwoBots;
   publishMarketPublication?: typeof ensureMarketPublication;
   getCurrentChangeDate: () => string;
-  now: () => Date;
 };
 
 export type PlayerValuesSyncResult = {
   count: number;
   eventId?: number;
+  sourceArtifactId?: string;
+  sourceProvenance?: ResolvedFplBootstrapArtifact['provenance'];
   marketSnapshotCount?: number;
   outcome?: 'noop';
   requiredUnits?: number;
@@ -64,6 +70,8 @@ export type PreparedPlayerValuesSync = Readonly<{
   changeDate: string;
   eventId: number;
   bootstrap: FPLBootstrapResponse;
+  sourceArtifactId: string;
+  sourceProvenance: ResolvedFplBootstrapArtifact['provenance'];
   snapshots: readonly PlayerMarketSnapshot[];
   capturedAt: Date;
   requiredUnits: number;
@@ -71,17 +79,22 @@ export type PreparedPlayerValuesSync = Readonly<{
 }>;
 
 const defaultDependencies: PlayerValuesSyncDependencies = {
-  getBootstrap: () => fplClient.getBootstrap(),
+  resolveBootstrapSourceArtifact: resolveFplBootstrapSourceArtifact,
   resolvePlayerSyncEvent,
-  persistMarketSnapshot: (season, eventId, snapshots, expectedCount) =>
-    playerMarketSnapshotsRepository.upsertCompleteDay(season, eventId, snapshots, expectedCount),
+  persistMarketSnapshot: (season, eventId, snapshots, expectedCount, sourceArtifactId) =>
+    playerMarketSnapshotsRepository.upsertCompleteDay(
+      season,
+      eventId,
+      snapshots,
+      expectedCount,
+      sourceArtifactId,
+    ),
   findByChangeDate: (season, changeDate) =>
     playerValuesRepository.findByChangeDate(season, changeDate),
   enqueuePlayerPrices: enqueuePlayerPricesSyncJob,
   notify: notifyTwoBots,
   publishMarketPublication: ensureMarketPublication,
   getCurrentChangeDate: () => formatCronDateKey(),
-  now: () => new Date(),
 };
 
 function formatPlayerValuesNotification(
@@ -161,13 +174,24 @@ function attachAttemptEvidence(
   }
 }
 
-function assertChangeDate(changeDate: string, currentChangeDate: string): void {
+function assertChangeDate(changeDate: string): void {
   if (!/^\d{8}$/.test(changeDate)) {
     throw new Error(`Invalid player value change date: ${changeDate}`);
   }
-  if (changeDate !== currentChangeDate) {
-    throw new Error(`Player market date ${changeDate} is outside the current UTC+8 window`);
+}
+
+function resolveArchivedMarketEventId(bootstrap: FPLBootstrapResponse): number {
+  for (const events of [
+    bootstrap.events.filter((event) => event.is_current),
+    bootstrap.events.filter((event) => event.is_next),
+    bootstrap.events.filter((event) => event.is_previous),
+  ]) {
+    if (events.length === 1 && events[0]!.id > 0) return events[0]!.id;
+    if (events.length > 1) {
+      throw new Error('Archived FPL bootstrap has ambiguous market event flags');
+    }
   }
+  throw new Error('Archived FPL bootstrap has no current, next, or previous market event');
 }
 
 export async function preparePlayerValuesSync(
@@ -176,33 +200,43 @@ export async function preparePlayerValuesSync(
   dependencies: PlayerValuesSyncDependencies = defaultDependencies,
   options?: { onTargetEventResolved?: (eventId: number) => void },
 ): Promise<PreparedPlayerValuesSync | null> {
-  if (!/^\d{8}$/.test(changeDate)) {
-    throw new Error(`Invalid player value change date: ${changeDate}`);
-  }
-  if (changeDate !== dependencies.getCurrentChangeDate()) {
-    logInfo('Skipping market snapshot outside its scheduled date', { changeDate });
-    return null;
-  }
+  assertChangeDate(changeDate);
 
   const timings: Partial<PlayerValuesPhaseTimings> = {};
   let requiredUnits = 0;
   try {
-    const syncEvent = await dependencies.resolvePlayerSyncEvent(season);
-    if (!syncEvent) throw new Error('No current or next event found for player values');
-    options?.onTargetEventResolved?.(syncEvent.event.id);
+    const currentChangeDate = dependencies.getCurrentChangeDate();
+    const currentSyncEvent =
+      changeDate === currentChangeDate ? await dependencies.resolvePlayerSyncEvent(season) : null;
+    if (changeDate === currentChangeDate && !currentSyncEvent) {
+      throw new Error('No current or next event found for player values');
+    }
+    if (currentSyncEvent) options?.onTargetEventResolved?.(currentSyncEvent.event.id);
 
-    const bootstrap = await measurePhase(timings, 'bootstrap', dependencies.getBootstrap);
+    const resolvedArtifact = await measurePhase(timings, 'bootstrap', () =>
+      dependencies.resolveBootstrapSourceArtifact(season, changeDate),
+    );
+    const bootstrap = resolvedArtifact.bootstrap;
     if (!Array.isArray(bootstrap.elements) || bootstrap.elements.length === 0) {
       throw new Error('No player market data returned from FPL API');
     }
     requiredUnits = bootstrap.elements.length;
-    const capturedAt = dependencies.now();
+    const capturedAt = resolvedArtifact.artifact.retrievedAt;
+    if (formatCronDateKey(capturedAt) !== changeDate) {
+      throw new Error(
+        `Bootstrap artifact ${resolvedArtifact.artifact.artifactId} is outside source day ${changeDate}`,
+      );
+    }
+    const eventId = currentSyncEvent?.event.id ?? resolveArchivedMarketEventId(bootstrap);
+    if (!currentSyncEvent) options?.onTargetEventResolved?.(eventId);
     const snapshots = transformPlayerMarketSnapshots(bootstrap, capturedAt);
     return {
       season,
       changeDate,
-      eventId: syncEvent.event.id,
+      eventId,
       bootstrap,
+      sourceArtifactId: resolvedArtifact.artifact.artifactId,
+      sourceProvenance: resolvedArtifact.provenance,
       snapshots,
       capturedAt,
       requiredUnits,
@@ -231,13 +265,19 @@ export async function persistPreparedPlayerValuesSync(
   const timings: Partial<PlayerValuesPhaseTimings> = { ...prepared.timings };
   let succeededUnits = 0;
   try {
-    assertChangeDate(prepared.changeDate, dependencies.getCurrentChangeDate());
+    assertChangeDate(prepared.changeDate);
+    if (formatCronDateKey(prepared.capturedAt) !== prepared.changeDate) {
+      throw new Error(
+        `Bootstrap artifact ${prepared.sourceArtifactId} is outside source day ${prepared.changeDate}`,
+      );
+    }
     const persisted = await measurePhase(timings, 'snapshotWrite', () =>
       dependencies.persistMarketSnapshot(
         prepared.season,
         prepared.eventId,
         prepared.snapshots,
         prepared.requiredUnits,
+        prepared.sourceArtifactId,
       ),
     );
     succeededUnits = persisted.persistedCount;
@@ -263,7 +303,7 @@ export async function persistPreparedPlayerValuesSync(
       publicationId = publication.publicationId;
     }
     const notificationMessage =
-      changedRows.length > 0
+      changedRows.length > 0 && prepared.sourceProvenance !== 'archive'
         ? formatPlayerValuesNotification(prepared.changeDate, changedRows)
         : undefined;
     if (changedRows.length > 0) {
@@ -274,9 +314,9 @@ export async function persistPreparedPlayerValuesSync(
           removeOnSettle: false,
         });
       }
-      if (!options?.deferNotification) {
+      if (notificationMessage && !options?.deferNotification) {
         try {
-          await dependencies.notify(notificationMessage!, {
+          await dependencies.notify(notificationMessage, {
             // The publication/snapshot identity, rather than the wall-clock
             // minute, is the notification's idempotency boundary. A worker
             // retry may happen in a later minute but must not duplicate the
@@ -296,6 +336,8 @@ export async function persistPreparedPlayerValuesSync(
       season: prepared.season.seasonCode,
       eventId: prepared.eventId,
       changeDate: prepared.changeDate,
+      sourceArtifactId: prepared.sourceArtifactId,
+      sourceProvenance: prepared.sourceProvenance,
       marketSnapshotCount: persisted.persistedCount,
       derivedChanges: changedRows.length,
       requiredUnits: prepared.requiredUnits,
@@ -305,6 +347,8 @@ export async function persistPreparedPlayerValuesSync(
     return {
       count: changedRows.length,
       eventId: prepared.eventId,
+      sourceArtifactId: prepared.sourceArtifactId,
+      sourceProvenance: prepared.sourceProvenance,
       marketSnapshotCount: persisted.persistedCount,
       requiredUnits: prepared.requiredUnits,
       succeededUnits,

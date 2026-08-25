@@ -115,6 +115,7 @@ describe('player market snapshot transformation', () => {
 });
 
 describe('complete daily market snapshot repository', () => {
+  const sourceArtifactId = '11111111-1111-4111-8111-111111111111';
   function createSnapshot(overrides: Partial<PlayerMarketSnapshot> = {}): PlayerMarketSnapshot {
     return {
       ...transformPlayerMarketSnapshots(
@@ -170,14 +171,15 @@ describe('complete daily market snapshot repository', () => {
       selectedByPercent: 18.4,
     });
 
-    await repository.upsertCompleteDay(TEST_SEASON, 1, [first], 1);
-    const result = await repository.upsertCompleteDay(TEST_SEASON, 1, [retry], 1);
+    await repository.upsertCompleteDay(TEST_SEASON, 1, [first], 1, sourceArtifactId);
+    const result = await repository.upsertCompleteDay(TEST_SEASON, 1, [retry], 1, sourceArtifactId);
 
     expect(result).toEqual({ snapshotDate: '2026-08-03', persistedCount: 1 });
     expect(memory.rows.size).toBe(1);
     expect(memory.rows.get('2026-08-03:1')).toMatchObject({
       seasonId: TEST_SEASON.seasonId,
       sourceEventId: 1,
+      sourceArtifactId,
       capturedAt: retry.capturedAt,
       selectedByPercent: '18.4',
     });

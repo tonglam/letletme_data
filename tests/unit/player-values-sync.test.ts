@@ -16,6 +16,23 @@ const rawTeam = {
   short_name: 'MCI',
 };
 
+const sourceArtifact = {
+  artifactId: '11111111-1111-4111-8111-111111111111',
+  seasonId: TEST_SEASON.seasonId,
+  sourceDay: changeDate,
+  sourceTimezone: 'Asia/Shanghai' as const,
+  sourceUrl: 'https://fantasy.premierleague.com/api/bootstrap-static/',
+  bucket: 'fpl-raw-snapshots',
+  objectKey: `fpl/bootstrap-static/${TEST_SEASON.seasonCode}/${changeDate}/${'a'.repeat(64)}.json`,
+  sha256: 'a'.repeat(64),
+  byteSize: 1,
+  contentType: 'application/json' as const,
+  retrievedAt: captureTime,
+  schemaVersion: 1 as const,
+  itemCounts: { events: 1, teams: 1, elements: 1, phases: 0 },
+  createdAt: captureTime,
+};
+
 function storedValue(
   changeType: StoredPlayerValue['changeType'],
   value = singleRawFPLElementFixture.now_cost,
@@ -36,8 +53,12 @@ function buildDependencies(
   overrides: Partial<PlayerValuesSyncDependencies> = {},
 ): PlayerValuesSyncDependencies {
   return {
-    getBootstrap: async () =>
-      ({ elements: [singleRawFPLElementFixture], teams: [rawTeam] }) as never,
+    resolveBootstrapSourceArtifact: async () =>
+      ({
+        artifact: sourceArtifact,
+        bootstrap: { elements: [singleRawFPLElementFixture], teams: [rawTeam] },
+        provenance: 'captured',
+      }) as never,
     resolvePlayerSyncEvent: async () => ({ event: { id: 1 }, phase: 'current' }) as never,
     persistMarketSnapshot: async (_season, _eventId, snapshots) => ({
       snapshotDate: '2026-08-03',
@@ -47,33 +68,47 @@ function buildDependencies(
     enqueuePlayerPrices: async () => ({ id: 'player-prices-immediate' }) as never,
     notify: async () => undefined,
     getCurrentChangeDate: () => changeDate,
-    now: () => captureTime,
     ...overrides,
   };
 }
 
 describe('daily player market snapshot synchronization', () => {
-  test('discards a delayed capture without any upstream or database read', async () => {
-    const getBootstrap = mock(async () => ({ elements: [] }) as never);
+  test('loads a historical source day through the archive path without current event lookup', async () => {
+    const resolveBootstrapSourceArtifact = mock(
+      async () =>
+        ({
+          artifact: sourceArtifact,
+          bootstrap: {
+            elements: [singleRawFPLElementFixture],
+            teams: [rawTeam],
+            events: [{ id: 1, is_current: true, is_next: false, is_previous: false }],
+          },
+          provenance: 'archive',
+        }) as never,
+    );
     const resolvePlayerSyncEvent = mock(async () => null);
     const sync = createPlayerValuesSync(
       buildDependencies({
-        getBootstrap,
+        resolveBootstrapSourceArtifact,
         resolvePlayerSyncEvent,
         getCurrentChangeDate: () => '20260804',
       }),
     );
 
-    await expect(sync(TEST_SEASON, changeDate)).resolves.toEqual({ count: 0, outcome: 'noop' });
+    await expect(sync(TEST_SEASON, changeDate)).resolves.toMatchObject({
+      count: 0,
+      sourceArtifactId: sourceArtifact.artifactId,
+      sourceProvenance: 'archive',
+    });
     expect(resolvePlayerSyncEvent).not.toHaveBeenCalled();
-    expect(getBootstrap).not.toHaveBeenCalled();
+    expect(resolveBootstrapSourceArtifact).toHaveBeenCalledWith(TEST_SEASON, changeDate);
   });
 
   test('reports the explicit target before a later upstream failure', async () => {
     const resolvedEvents: number[] = [];
     const sync = createPlayerValuesSync(
       buildDependencies({
-        getBootstrap: async () => {
+        resolveBootstrapSourceArtifact: async () => {
           throw new Error('bootstrap unavailable');
         },
       }),
@@ -89,7 +124,13 @@ describe('daily player market snapshot synchronization', () => {
 
   test('persists one complete canonical snapshot without writing a second values store', async () => {
     const persistMarketSnapshot = mock(
-      async (_season, _eventId, snapshots: readonly unknown[], expectedCount: number) => ({
+      async (
+        _season,
+        _eventId,
+        snapshots: readonly unknown[],
+        expectedCount: number,
+        _sourceArtifactId: string,
+      ) => ({
         snapshotDate: '2026-08-03',
         persistedCount: snapshots.length,
         expectedCount,
@@ -120,6 +161,7 @@ describe('daily player market snapshot synchronization', () => {
     expect(persistMarketSnapshot.mock.calls[0]?.[1]).toBe(1);
     expect(persistMarketSnapshot.mock.calls[0]?.[2]).toHaveLength(1);
     expect(persistMarketSnapshot.mock.calls[0]?.[3]).toBe(1);
+    expect(persistMarketSnapshot.mock.calls[0]?.[4]).toBe(sourceArtifact.artifactId);
     expect(enqueuePlayerPrices).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
   });
@@ -177,6 +219,36 @@ describe('daily player market snapshot synchronization', () => {
 
     expect(notify).not.toHaveBeenCalled();
     expect(result.notificationMessage).toContain('Haaland (MCI)');
+  });
+
+  test('historical replay reconciles prices without sending stale change notifications', async () => {
+    const notify = mock(async (_message: string) => undefined);
+    const enqueuePlayerPrices = mock(async () => ({ id: 'prices' }) as never);
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        getCurrentChangeDate: () => '20260804',
+        resolveBootstrapSourceArtifact: async () =>
+          ({
+            artifact: sourceArtifact,
+            bootstrap: {
+              elements: [singleRawFPLElementFixture],
+              teams: [rawTeam],
+              events: [{ id: 1, is_current: true, is_next: false, is_previous: false }],
+            },
+            provenance: 'archive',
+          }) as never,
+        findByChangeDate: async () => [storedValue('Rise')],
+        enqueuePlayerPrices,
+        notify,
+      }),
+    );
+
+    await expect(sync(TEST_SEASON, changeDate)).resolves.toMatchObject({
+      count: 1,
+      sourceProvenance: 'archive',
+    });
+    expect(enqueuePlayerPrices).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
   });
 
   test('does not treat Start rows as a price change', async () => {

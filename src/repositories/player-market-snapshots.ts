@@ -129,6 +129,7 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
       sourceEventId: number,
       snapshots: readonly PlayerMarketSnapshot[],
       expectedCount: number,
+      sourceArtifactId?: string,
     ): Promise<{ snapshotDate: string; persistedCount: number }> => {
       try {
         validateCompleteMarketSnapshotBatch(snapshots, expectedCount);
@@ -141,6 +142,7 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
         const rows: DbPlayerMarketSnapshotInsert[] = snapshots.map((snapshot) => ({
           seasonId: season.seasonId,
           sourceEventId,
+          sourceArtifactId,
           snapshotDate: snapshot.snapshotDate,
           capturedAt,
           elementId: snapshot.elementId,
@@ -178,6 +180,7 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
               ],
               set: {
                 sourceEventId: sql`excluded.source_event_id`,
+                sourceArtifactId: sql`excluded.source_artifact_id`,
                 capturedAt: sql`excluded.captured_at`,
                 playerCode: sql`excluded.player_code`,
                 webName: sql`excluded.web_name`,
@@ -250,6 +253,7 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
 
         logInfo('Complete player market snapshot persisted', {
           snapshotDate,
+          sourceArtifactId,
           expectedCount,
           persistedCount,
         });

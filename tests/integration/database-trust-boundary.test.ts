@@ -267,6 +267,59 @@ describe('database trust boundary', () => {
     `;
     expect(publicationBoundary).toEqual({ readable: true, writable: false });
 
+    const [rawSourceBoundary] = await sql<
+      Array<{
+        reader_readable: boolean;
+        writer_selectable: boolean;
+        writer_insertable: boolean;
+        writer_mutable: boolean;
+        immutable_trigger: boolean;
+        anon_trigger_execute: boolean;
+      }>
+    >`
+      SELECT
+        has_table_privilege(
+          'letletme_graphql_reader',
+          'ops.fpl_source_artifacts',
+          'SELECT'
+        ) AS reader_readable,
+        has_table_privilege(
+          'letletme_data_writer',
+          'ops.fpl_source_artifacts',
+          'SELECT'
+        ) AS writer_selectable,
+        has_table_privilege(
+          'letletme_data_writer',
+          'ops.fpl_source_artifacts',
+          'INSERT'
+        ) AS writer_insertable,
+        has_table_privilege(
+          'letletme_data_writer',
+          'ops.fpl_source_artifacts',
+          'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+        ) AS writer_mutable,
+        EXISTS (
+          SELECT 1
+          FROM pg_trigger trigger_row
+          WHERE trigger_row.tgrelid = 'ops.fpl_source_artifacts'::regclass
+            AND trigger_row.tgname = 'fpl_source_artifacts_immutable'
+            AND NOT trigger_row.tgisinternal
+        ) AS immutable_trigger,
+        has_function_privilege(
+          'anon',
+          'ops.prevent_fpl_source_artifact_mutation()',
+          'EXECUTE'
+        ) AS anon_trigger_execute
+    `;
+    expect(rawSourceBoundary).toEqual({
+      reader_readable: false,
+      writer_selectable: true,
+      writer_insertable: true,
+      writer_mutable: false,
+      immutable_trigger: true,
+      anon_trigger_execute: false,
+    });
+
     const opsTables = await sql<NamedFinding[]>`
       SELECT relation.relname AS name
       FROM pg_class relation
@@ -281,6 +334,7 @@ describe('database trust boundary', () => {
       'data_publication_outbox',
       'dataset_publication_items',
       'dataset_publications',
+      'fpl_source_artifacts',
       'live_lifecycle_status',
       'mutation_scopes',
       'scheduler_obligations',

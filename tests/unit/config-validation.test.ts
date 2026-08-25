@@ -17,6 +17,10 @@ const baseEnv = {
   BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY: 'test-secret',
   BUG_REPORT_SCREENSHOT_BUCKET: 'bug-report-screenshots',
   BUG_REPORT_SCREENSHOT_RETENTION_DAYS: '90',
+  FPL_RAW_SNAPSHOT_STORAGE_ENABLED: 'true',
+  FPL_RAW_SNAPSHOT_SUPABASE_URL: 'https://example.supabase.co',
+  FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY: 'test-secret',
+  FPL_RAW_SNAPSHOT_BUCKET: 'fpl-raw-snapshots',
   BUG_REPORT_STORAGE_INTERNAL_URL: 'https://web.example.test/api/internal/bug-report-storage',
   BUG_REPORT_CLEANUP_SECRET: 'c'.repeat(64),
   CONTENT_PIPELINE_ENABLED: 'false',
@@ -61,6 +65,19 @@ describe('production environment preflight', () => {
 
   test('accepts a valid SHA-256 API key digest', async () => {
     expect(await runEnvCheck('a'.repeat(64))).toBe(0);
+  });
+
+  test('rejects production when immutable FPL raw snapshot storage is not configured', async () => {
+    expect(
+      await runEnvCheck('a'.repeat(64), {
+        FPL_RAW_SNAPSHOT_STORAGE_ENABLED: 'false',
+      }),
+    ).not.toBe(0);
+    expect(
+      await runEnvCheck('a'.repeat(64), {
+        FPL_RAW_SNAPSHOT_BUCKET: 'mutable-market-cache',
+      }),
+    ).not.toBe(0);
   });
 
   test('rejects malformed content role hashes and incomplete publication settings', async () => {
@@ -118,6 +135,7 @@ describe('production environment preflight', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
     const preflight = workflow.indexOf('bun run env:check');
     const screenshotProbe = workflow.indexOf('--probe-bug-report-storage');
+    const fplSourceProbe = workflow.indexOf('--probe-fpl-raw-snapshot-storage');
     const identityContract = workflow.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = workflow.indexOf('data_runtime_database_url=$(sed -n');
     const stopServices = workflow.indexOf(
@@ -136,7 +154,8 @@ describe('production environment preflight', () => {
 
     expect(preflight).toBeGreaterThan(0);
     expect(screenshotProbe).toBeGreaterThan(preflight);
-    expect(screenshotProbe).toBeLessThan(identityContract);
+    expect(fplSourceProbe).toBeGreaterThan(screenshotProbe);
+    expect(fplSourceProbe).toBeLessThan(identityContract);
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(configuredRuntimeUrl).toBeLessThan(preflight);
     expect(identityContract).toBeGreaterThan(preflight);
@@ -196,6 +215,7 @@ describe('production environment preflight', () => {
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(deployScript).toContain('bun scripts/wait-for-migration-login.ts');
     expect(deployScript).toContain('bun validate-env.ts --probe-bug-report-storage');
+    expect(deployScript).toContain('bun validate-env.ts --probe-fpl-raw-snapshot-storage');
     expect(deployScript).toContain('bun run db:verify-runtime-logins');
     expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(deployScript).not.toContain('db:provision-runtime-logins');

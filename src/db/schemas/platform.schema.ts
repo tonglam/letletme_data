@@ -715,6 +715,82 @@ export const seasonsInFpl = fpl.table(
   ],
 );
 
+export const fplSourceArtifactsInOps = ops.table(
+  'fpl_source_artifacts',
+  {
+    artifactId: uuid('artifact_id').primaryKey().notNull(),
+    provider: text().default('fpl').notNull(),
+    dataset: text().default('bootstrap-static').notNull(),
+    seasonId: smallint('season_id').notNull(),
+    sourceDay: date('source_day').notNull(),
+    sourceTimezone: text('source_timezone').default('Asia/Shanghai').notNull(),
+    sourceUrl: text('source_url').notNull(),
+    bucket: text().notNull(),
+    objectKey: text('object_key').notNull(),
+    sha256: text().notNull(),
+    byteSize: bigint('byte_size', { mode: 'number' }).notNull(),
+    contentType: text('content_type').notNull(),
+    retrievedAt: timestamp('retrieved_at', { withTimezone: true, mode: 'date' }).notNull(),
+    schemaVersion: integer('schema_version').default(1).notNull(),
+    itemCounts: jsonb('item_counts').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    unique('fpl_source_artifacts_capture_key').on(
+      table.provider,
+      table.dataset,
+      table.seasonId,
+      table.sourceDay,
+      table.sha256,
+    ),
+    unique('fpl_source_artifacts_season_artifact_key').on(table.seasonId, table.artifactId),
+    unique('fpl_source_artifacts_object_key').on(table.bucket, table.objectKey),
+    index('fpl_source_artifacts_day_idx').on(
+      table.seasonId,
+      table.sourceDay,
+      table.retrievedAt.desc(),
+      table.artifactId.desc(),
+    ),
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'fpl_source_artifacts_season_id_fkey',
+    }).onDelete('restrict'),
+    check('fpl_source_artifacts_provider_check', sql`${table.provider} = 'fpl'`),
+    check('fpl_source_artifacts_dataset_check', sql`${table.dataset} = 'bootstrap-static'`),
+    check('fpl_source_artifacts_timezone_check', sql`${table.sourceTimezone} = 'Asia/Shanghai'`),
+    check(
+      'fpl_source_artifacts_url_check',
+      sql`${table.sourceUrl} ~ '^https://fantasy\\.premierleague\\.com/api/bootstrap-static/([?].*)?$'`,
+    ),
+    check('fpl_source_artifacts_bucket_check', sql`${table.bucket} = 'fpl-raw-snapshots'`),
+    check(
+      'fpl_source_artifacts_object_key_check',
+      sql`${table.objectKey} ~ '^fpl/bootstrap-static/[0-9]{4}/[0-9]{8}/[0-9a-f]{64}\\.json$'`,
+    ),
+    check('fpl_source_artifacts_sha_check', sql`${table.sha256} ~ '^[0-9a-f]{64}$'::text`),
+    check(
+      'fpl_source_artifacts_size_check',
+      sql`${table.byteSize} > 0 AND ${table.byteSize} <= 8388608`,
+    ),
+    check(
+      'fpl_source_artifacts_content_type_check',
+      sql`${table.contentType} = 'application/json'`,
+    ),
+    check('fpl_source_artifacts_schema_version_check', sql`${table.schemaVersion} = 1`),
+    check(
+      'fpl_source_artifacts_counts_check',
+      sql`jsonb_typeof(${table.itemCounts}) = 'object'::text AND (${table.itemCounts}->>'events') ~ '^[0-9]+$' AND (${table.itemCounts}->>'teams') ~ '^[0-9]+$' AND (${table.itemCounts}->>'elements') ~ '^[0-9]+$' AND (${table.itemCounts}->>'phases') ~ '^[0-9]+$'`,
+    ),
+    check(
+      'fpl_source_artifacts_source_day_check',
+      sql`(${table.retrievedAt} AT TIME ZONE ${table.sourceTimezone})::date = ${table.sourceDay}`,
+    ),
+  ],
+);
+
 export const tournamentsInCompetition = competition.table(
   'tournaments',
   {
@@ -4030,6 +4106,9 @@ export const playerMarketSnapshotsInFpl = fpl.table(
     chanceOfPlayingNextRound: integer('chance_of_playing_next_round'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    // Added after the baseline table; keep declaration order aligned with the
+    // migrated catalog so schema parity also catches accidental rewrites.
+    sourceArtifactId: uuid('source_artifact_id'),
   },
   (table) => [
     index('player_market_snapshots_event_fk_idx').using(
@@ -4055,6 +4134,9 @@ export const playerMarketSnapshotsInFpl = fpl.table(
       table.teamId.asc().nullsLast(),
       table.snapshotDate.asc().nullsLast(),
     ),
+    index('player_market_snapshots_source_artifact_idx')
+      .using('btree', table.seasonId.asc().nullsLast(), table.sourceArtifactId.asc().nullsLast())
+      .where(sql`(source_artifact_id IS NOT NULL)`),
     foreignKey({
       columns: [table.seasonId],
       foreignColumns: [seasonsInFpl.seasonId],
@@ -4065,6 +4147,11 @@ export const playerMarketSnapshotsInFpl = fpl.table(
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
       name: 'player_market_snapshots_event_fk',
     }),
+    foreignKey({
+      columns: [table.seasonId, table.sourceArtifactId],
+      foreignColumns: [fplSourceArtifactsInOps.seasonId, fplSourceArtifactsInOps.artifactId],
+      name: 'player_market_snapshots_source_artifact_fk',
+    }).onDelete('restrict'),
     foreignKey({
       columns: [table.seasonId, table.elementId],
       foreignColumns: [playersInFpl.seasonId, playersInFpl.elementId],

@@ -28,6 +28,35 @@ describe('FPL bootstrap edge-cache control', () => {
     expect(parsed.pathname).toBe('/api/bootstrap-static/');
     expect(parsed.searchParams.get('letletme_cache_bucket')).toBe('price-changes-123');
   });
+
+  test('returns the exact validated provider bytes for immutable archiving', async () => {
+    const payload = buildCoreSnapshotFixture({ playerCount: 1 }).bootstrap;
+    const raw = ` ${JSON.stringify(payload)}\n`;
+    globalThis.fetch = mock(
+      async () =>
+        new Response(raw, {
+          status: 200,
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        }),
+    ) as unknown as typeof fetch;
+
+    const artifact = await fplClient.getBootstrapArtifact();
+
+    expect(new TextDecoder().decode(artifact.bytes)).toBe(raw);
+    expect(artifact.contentType).toBe('application/json');
+    expect(artifact.payload.elements).toHaveLength(1);
+    expect(artifact.sourceUrl).toBe('https://fantasy.premierleague.com/api/bootstrap-static/');
+    expect(artifact.retrievedAt).toBeInstanceOf(Date);
+  });
+
+  test('refuses to archive a bootstrap response without the JSON media type', async () => {
+    const payload = buildCoreSnapshotFixture({ playerCount: 1 }).bootstrap;
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify(payload), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    await expect(fplClient.getBootstrapArtifact()).rejects.toThrow(/content type/i);
+  });
 });
 
 const eventLiveStats = {
