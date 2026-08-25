@@ -8,9 +8,11 @@ import { getDbClient } from '../../src/db/singleton';
 import {
   claimSchedulerObligations,
   completeSchedulerObligation,
+  confirmSchedulerObligationEnqueued,
   failSchedulerObligation,
   markSchedulerObligationIrrecoverable,
   schedulerObligationStatus,
+  startSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
 } from '../../src/repositories/scheduler-obligations';
@@ -35,6 +37,70 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler obligation generation fencing', () => {
+  test('keeps enqueue acknowledgement distinct from fenced worker start', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'core-snapshot',
+        'integration:core',
+        'integration-fenced-start',
+        'integration',
+        'UTC',
+        'pending',
+        'schedule',
+        clock_timestamp() - interval '1 minute',
+        0,
+        0,
+        '{}'::jsonb
+      )
+    `;
+
+    const [claim] = await claimSchedulerObligations();
+    expect(claim?.obligation.obligationId).toBe(OBLIGATION_ID);
+    expect(
+      await confirmSchedulerObligationEnqueued({
+        obligationId: OBLIGATION_ID,
+        owner: claim!.owner,
+        bullJobId: 'integration-fenced-start-job',
+      }),
+    ).toBe(true);
+
+    const enqueued = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(enqueued[0]?.status).toBe('enqueued');
+    expect(await startSchedulerObligation({ obligationId: OBLIGATION_ID, generation: 1 })).toBe(
+      false,
+    );
+    expect(await startSchedulerObligation({ obligationId: OBLIGATION_ID, generation: 0 })).toBe(
+      true,
+    );
+
+    const running = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(running[0]?.status).toBe('running');
+  });
+
   test('rejects late failure/completion and duplicate completion from an older generation', async () => {
     const sql = await getDbClient();
     await sql`
@@ -550,7 +616,7 @@ describe('scheduler obligation generation fencing', () => {
     expect(failed.overdue).toBe(true);
   });
 
-  test('terminalizes an expired Understat lease at the generation cap', async () => {
+  test('does not reclaim an expired in-flight lease into a duplicate generation', async () => {
     const sql = await getDbClient();
     await sql`
       INSERT INTO ops.scheduler_obligations (
@@ -587,20 +653,18 @@ describe('scheduler obligation generation fencing', () => {
       )
     `;
 
-    expect(
-      await claimSchedulerObligations({
-        generationCaps: { 'understat-player-incremental': 3 },
-      }),
-    ).toHaveLength(0);
-    const rows = await sql<Array<{ status: string; reason: string; lease_owner: string | null }>>`
-      SELECT status, evidence->>'reason' AS reason, lease_owner
+    expect(await claimSchedulerObligations()).toHaveLength(0);
+    const rows = await sql<
+      Array<{ status: string; generation: number; lease_owner: string | null }>
+    >`
+      SELECT status, generation, lease_owner
       FROM ops.scheduler_obligations
       WHERE obligation_id = ${OBLIGATION_ID}::uuid
     `;
     expect(rows[0]).toEqual({
-      status: 'skipped',
-      reason: 'generation-limit',
-      lease_owner: null,
+      status: 'running',
+      generation: 2,
+      lease_owner: 'expired-understat-owner',
     });
   });
 });

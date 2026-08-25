@@ -69,6 +69,7 @@ import {
   renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import type { WorkerRuntime } from './worker-runtime';
+import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
 
 const maxRetryCycles = 2;
 const retryBaseDelayMs = 5 * 60_000;
@@ -457,8 +458,17 @@ export function createEntrySyncWorker(): WorkerRuntime {
   const connection = getQueueConnection();
 
   const processor = async (job: Job<EntrySyncJobData>) => {
-    const season = await requireCurrentSeasonForJob(job.data);
     const jobId = job.id ?? `${job.name}-${job.timestamp}`;
+    if (
+      !(await startCurrentSchedulerJob(job.data, {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId,
+      }))
+    ) {
+      return { skipped: true, staleSchedulerGeneration: true };
+    }
+    const season = await requireCurrentSeasonForJob(job.data);
     const attempt = resolveDataSyncAttempt(
       job.data?.source,
       job.attemptsMade,
@@ -476,22 +486,6 @@ export function createEntrySyncWorker(): WorkerRuntime {
     };
 
     logJobTriggered(context);
-
-    // A delayed retry or continuation may be the first job to run after a
-    // long scheduler interval.  Reject stale generations before they can
-    // touch entry data; the current generation remains authoritative.
-    if (job.data?.obligationId) {
-      const leaseRenewed = await renewEntrySyncObligationLease(job.data);
-      if (!leaseRenewed) {
-        logInfo('Entry sync job skipped for stale scheduler generation', {
-          jobId,
-          jobName: job.name,
-          obligationId: job.data.obligationId,
-          obligationGeneration: job.data.obligationGeneration,
-        });
-        return { skipped: true, staleSchedulerGeneration: true };
-      }
-    }
 
     const attemptContext: DataSyncAttemptContext = {
       queue: job.queueName,

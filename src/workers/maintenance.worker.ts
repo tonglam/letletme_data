@@ -48,6 +48,7 @@ import { logError, logInfo } from '../utils/logger';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
+import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
 
 function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void {
@@ -72,6 +73,15 @@ function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void 
 }
 
 async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unknown> {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return { skipped: true, staleSchedulerGeneration: true };
+  }
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,

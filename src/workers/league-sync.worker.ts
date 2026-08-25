@@ -28,6 +28,7 @@ import {
   failSchedulerObligationByBullJobId,
   renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
+import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
 
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
 
@@ -60,6 +61,15 @@ function startSchedulerLeaseHeartbeat(job: Job<LeagueSyncJobData>): () => void {
  * - Tournament job (with tournamentId): Processes that specific tournament
  */
 async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return { skipped: true, staleSchedulerGeneration: true };
+  }
   const season = await requireCurrentSeasonForJob(job.data);
   const { eventId, tournamentId, source } = job.data;
   const runId = job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`);

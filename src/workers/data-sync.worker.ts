@@ -31,6 +31,7 @@ import { alertOnFinalFailure, notifyTwoBots } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { formatCronDateKey } from '../utils/timezone';
+import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
 import type { WorkerRuntime } from './worker-runtime';
 import {
   completeSchedulerObligation,
@@ -73,6 +74,15 @@ async function alertPriceChangePublicationOverdue(
 }
 
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return { skipped: true, staleSchedulerGeneration: true };
+  }
   const season = await requireCurrentSeasonForJob(job.data);
   const context = {
     jobType: 'queue' as const,

@@ -62,6 +62,7 @@ import {
   type CascadeCompletionBarrierJob,
 } from '../jobs/tournament-sync.jobs';
 import type { WorkerRuntime } from './worker-runtime';
+import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import {
@@ -389,6 +390,15 @@ async function enqueueOfficialRosterSyncAfterFinalization(
  * event-results (base) → [points-race, battle-race, knockout, transfers-post, cup-results] (parallel)
  */
 async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return { skipped: true, staleSchedulerGeneration: true };
+  }
   const season = await requireCurrentSeasonForJob(job.data);
   const { eventId, source, cascadeId } = job.data;
   const finalizationTargets = job.data.finalizationTargets ?? [];

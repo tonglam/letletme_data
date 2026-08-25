@@ -44,6 +44,7 @@ import {
   settleUnderstatObligationFailure,
 } from '../services/understat-recovery.service';
 import type { WorkerRuntime } from './worker-runtime';
+import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
 
 function lockScopes(
   lane: 'team' | 'player',
@@ -102,6 +103,15 @@ function startSchedulerLeaseHeartbeat(
 }
 
 async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return;
+  }
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
@@ -150,6 +160,15 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
 }
 
 async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void> {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return;
+  }
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,

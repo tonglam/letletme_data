@@ -29,6 +29,7 @@ import {
 } from '../repositories/scheduler-obligations';
 import type { WorkerRuntime } from './worker-runtime';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
+import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
 
 /**
  * Live Data Worker
@@ -38,6 +39,15 @@ import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/reten
  * - optional durable event-live persistence and the final-results cascade
  */
 async function processLiveDataJob(job: Job<LiveDataJobData>) {
+  if (
+    !(await startCurrentSchedulerJob(job.data, {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: job.id,
+    }))
+  ) {
+    return { skipped: true, staleSchedulerGeneration: true };
+  }
   const season = await requireCurrentSeasonForJob(job.data);
   const { eventId, source } = job.data;
   const context = {
