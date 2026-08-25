@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
-import { getDb, type DbHandle } from '../db/singleton';
+import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
 
 export type SchedulerObligationStatus =
@@ -76,30 +76,47 @@ function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerOb
   };
 }
 
-function immutableScheduledDueAtSql() {
+function immutableScheduledDueAtForSql(evidence: SQL, dueAt: SQL) {
   return sql`CASE
-    WHEN ${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
-      THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::double precision / 1000)
-    ELSE ${schedulerObligationsInOps.dueAt}
+    WHEN ${evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
+      THEN to_timestamp((${evidence}->>'scheduledDueAtMs')::double precision / 1000)
+    ELSE ${dueAt}
   END`;
 }
 
-function postMatchResultSlotIsNewerSql(newerSlot: SQL, olderSlot: SQL) {
+function immutableScheduledDueAtSql() {
+  return immutableScheduledDueAtForSql(
+    sql`${schedulerObligationsInOps.evidence}`,
+    sql`${schedulerObligationsInOps.dueAt}`,
+  );
+}
+
+// Slot indexes are relative to the last fixture's expected end and can move
+// backwards when that fixture is postponed. Rank different slots by their
+// absolute immutable boundary; only the same numbered slot uses finality as
+// the tie-breaker so a late provisional resolver cannot demote final authority.
+function postMatchIdentityIsNewerSql(input: {
+  newerSlot: SQL;
+  newerDueAt: SQL;
+  olderSlot: SQL;
+  olderDueAt: SQL;
+}) {
+  const newerNumbered = sql`${input.newerSlot} ~ '^(provisional|final)-[0-9]+$'`;
+  const olderNumbered = sql`${input.olderSlot} ~ '^(provisional|final)-[0-9]+$'`;
+  const newerIndex = sql`substring(${input.newerSlot} from '([0-9]+)$')::integer`;
+  const olderIndex = sql`substring(${input.olderSlot} from '([0-9]+)$')::integer`;
   return sql`CASE
-    WHEN ${newerSlot} = 'final-checkpoint'
-      THEN ${olderSlot} IS DISTINCT FROM 'final-checkpoint'
-    WHEN ${olderSlot} = 'final-checkpoint'
+    WHEN ${input.newerSlot} = 'final-checkpoint'
+      THEN ${input.olderSlot} IS DISTINCT FROM 'final-checkpoint'
+    WHEN ${input.olderSlot} = 'final-checkpoint'
       THEN false
-    WHEN ${newerSlot} ~ '^(provisional|final)-[0-9]+$'
-      AND ${olderSlot} ~ '^(provisional|final)-[0-9]+$'
-      THEN ROW(
-        substring(${newerSlot} from '([0-9]+)$')::integer,
-        CASE WHEN ${newerSlot} LIKE 'final-%' THEN 1 ELSE 0 END
-      ) > ROW(
-        substring(${olderSlot} from '([0-9]+)$')::integer,
-        CASE WHEN ${olderSlot} LIKE 'final-%' THEN 1 ELSE 0 END
-      )
-    ELSE false
+    WHEN ${newerNumbered}
+      AND ${olderNumbered}
+      AND ${newerIndex} = ${olderIndex}
+      AND (${input.newerSlot} LIKE 'final-%') IS DISTINCT FROM
+          (${input.olderSlot} LIKE 'final-%')
+      THEN ${input.newerSlot} LIKE 'final-%'
+    ELSE ${input.newerDueAt} > ${input.olderDueAt}
   END`;
 }
 
@@ -132,7 +149,7 @@ function immutableScheduledDueAt(dueAt: Date, scheduledDueAtMs: string | null): 
 export async function reserveSchedulerObligation(input: {
   definition: { name: string; cadence: string; timezone: string };
   plan: SchedulerObligationPlan;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 }): Promise<SchedulerObligation> {
   const db = input.db ?? (await getDb());
   const scheduledDueAtMs = input.plan.dueAt.getTime();
@@ -281,14 +298,14 @@ export type SchedulerDueAtSupersessionBoundary = Readonly<{
  * Coalesce all job/scope boundaries in one statement so a season-end scheduler
  * pass does not issue one permanent no-op update per job and event.
  *
- * The authoritative period identity is excluded explicitly. Peers at the same
- * immutable due time are superseded because a final-N checkpoint replaces its
- * provisional-N peer without advancing the hourly boundary.
+ * The authoritative period identity is excluded explicitly. Absolute slot
+ * time ranks rescheduled fixtures; for the same numbered slot, final authority
+ * outranks provisional authority even for pre-rollout observation timestamps.
  */
 export async function supersedeSchedulerObligationsByDueAtBatch(input: {
   boundaries: readonly SchedulerDueAtSupersessionBoundary[];
   evidence?: Record<string, unknown>;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 }): Promise<number> {
   if (input.boundaries.length === 0) return 0;
   const seen = new Set<string>();
@@ -319,6 +336,11 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
   const db = input.db ?? (await getDb());
   const boundarySlot = sql`boundaries.result_slot`;
   const obligationSlot = sql`obligation.evidence->>'resultSlot'`;
+  const boundaryDueAt = sql`boundaries.before_due_at`;
+  const obligationDueAt = immutableScheduledDueAtForSql(
+    sql`obligation.evidence`,
+    sql`obligation.due_at`,
+  );
   const [result] = await db.execute<{ updatedCount: number | string }>(sql`
     WITH boundaries AS (
       SELECT job_name, scope_key, period_key, result_slot, before_due_at
@@ -346,16 +368,12 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
       WHERE obligation.job_name = boundaries.job_name
         AND obligation.scope_key = boundaries.scope_key
         AND obligation.period_key <> boundaries.period_key
-        AND (
-          CASE
-            WHEN obligation.evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
-              THEN to_timestamp(
-                (obligation.evidence->>'scheduledDueAtMs')::double precision / 1000
-              )
-            ELSE obligation.due_at
-          END <= boundaries.before_due_at
-          OR ${postMatchResultSlotIsNewerSql(boundarySlot, obligationSlot)}
-        )
+        AND ${postMatchIdentityIsNewerSql({
+          newerSlot: boundarySlot,
+          newerDueAt: boundaryDueAt,
+          olderSlot: obligationSlot,
+          olderDueAt: obligationDueAt,
+        })}
         AND obligation.status IN ('pending', 'failed')
       RETURNING obligation.obligation_id
     )
@@ -363,6 +381,50 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
     FROM updated
   `);
   return Number(result?.updatedCount ?? 0);
+}
+
+export type SchedulerObligationReservation = Readonly<{
+  definition: Readonly<{ name: string; cadence: string; timezone: string }>;
+  plan: SchedulerObligationPlan;
+}>;
+
+/**
+ * Reserve the current post-match identities and retire stale peers in one
+ * transaction under the same lane advisory lock used by claim. A claimant
+ * that waits for this transaction takes its statement snapshot only after the
+ * current identities are committed, so an uncommitted reservation cannot be
+ * missed by the latest-authoritative fence.
+ */
+export async function reconcilePostMatchSchedulerObligations(input: {
+  reservations: readonly SchedulerObligationReservation[];
+  boundaries: readonly SchedulerDueAtSupersessionBoundary[];
+  evidence?: Record<string, unknown>;
+  db?: DbHandle;
+}): Promise<Readonly<{ reservations: readonly SchedulerObligation[]; superseded: number }>> {
+  if (input.reservations.some(({ plan }) => plan.terminalStatus !== undefined)) {
+    throw new Error('Post-match atomic reconciliation only accepts active plans');
+  }
+  if (input.reservations.length === 0 && input.boundaries.length === 0) {
+    return { reservations: [], superseded: 0 };
+  }
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(
+        hashtextextended(${'scheduler-lane:post-match-results'}, 0)
+      )`,
+    );
+    const reservations: SchedulerObligation[] = [];
+    for (const reservation of input.reservations) {
+      reservations.push(await reserveSchedulerObligation({ ...reservation, db: tx }));
+    }
+    const superseded = await supersedeSchedulerObligationsByDueAtBatch({
+      boundaries: input.boundaries,
+      evidence: input.evidence,
+      db: tx,
+    });
+    return { reservations, superseded };
+  });
 }
 
 export async function hasEarlierInFlightSchedulerObligation(input: {
@@ -454,14 +516,8 @@ export async function claimSchedulerObligations(
   const laneKeys = [...new Set(input.laneKeys ?? [])].filter((lane) => lane.length > 0).sort();
   const currentResultSlot = sql`${schedulerObligationsInOps.evidence}->>'resultSlot'`;
   const newerResultSlot = sql`newer.evidence->>'resultSlot'`;
-  const resultSlotsAreComparable = sql`COALESCE((
-    ${newerResultSlot} = 'final-checkpoint'
-    OR ${currentResultSlot} = 'final-checkpoint'
-    OR (
-      ${newerResultSlot} ~ '^(provisional|final)-[0-9]+$'
-      AND ${currentResultSlot} ~ '^(provisional|final)-[0-9]+$'
-    )
-  ), false)`;
+  const currentDueAt = immutableScheduledDueAtSql();
+  const newerDueAt = immutableScheduledDueAtForSql(sql`newer.evidence`, sql`newer.due_at`);
   const latestAuthoritativeScope = input.enforceLatestAuthoritativeScope
     ? sql`NOT EXISTS (
         SELECT 1
@@ -469,19 +525,12 @@ export async function claimSchedulerObligations(
         WHERE newer.job_name = ${schedulerObligationsInOps.jobName}
           AND newer.scope_key = ${schedulerObligationsInOps.scopeKey}
           AND newer.period_key <> ${schedulerObligationsInOps.periodKey}
-          AND (
-            ${postMatchResultSlotIsNewerSql(newerResultSlot, currentResultSlot)}
-            OR (
-              NOT ${resultSlotsAreComparable}
-              AND CASE
-                WHEN newer.evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
-                  THEN to_timestamp(
-                    (newer.evidence->>'scheduledDueAtMs')::double precision / 1000
-                  )
-                ELSE newer.due_at
-              END > ${immutableScheduledDueAtSql()}
-            )
-          )
+          AND ${postMatchIdentityIsNewerSql({
+            newerSlot: newerResultSlot,
+            newerDueAt,
+            olderSlot: currentResultSlot,
+            olderDueAt: currentDueAt,
+          })}
       )`
     : undefined;
   const owner = randomUUID();

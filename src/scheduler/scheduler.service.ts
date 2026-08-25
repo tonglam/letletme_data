@@ -7,10 +7,10 @@ import {
   findDueSchedulerJobNames,
   hasEarlierInFlightSchedulerObligation,
   markSchedulerObligationIrrecoverable,
+  reconcilePostMatchSchedulerObligations,
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
-  supersedeSchedulerObligationsByDueAtBatch,
 } from '../repositories/scheduler-obligations';
 import {
   resolveSchedulerContext,
@@ -200,6 +200,11 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     resultSlot: string;
     dueAt: Date;
   }> = [];
+  const postMatchReservations: Array<{
+    definition: ScheduledJobDefinition;
+    plan: SchedulerObligationPlan;
+    planKey: string;
+  }> = [];
   for (const definition of schedulerRegistry) {
     const resolution = await resolveSchedulerDefinition(definition, context);
     if (!resolution.ok) {
@@ -242,15 +247,16 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         });
       }
     }
-    if (
-      POST_MATCH_LATEST_AUTHORITATIVE_JOBS.includes(
-        definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
-      )
-    ) {
+    const isPostMatchDefinition = POST_MATCH_LATEST_AUTHORITATIVE_JOBS.includes(
+      definition.name as (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number],
+    );
+    if (isPostMatchDefinition) {
       const latestPlans = latestActiveSchedulerPlansByScope(resolution.plans);
-      const invalidPlan = latestPlans.find(
+      const invalidPlan = resolution.plans.find(
         (plan) =>
-          typeof plan.evidence?.resultSlot !== 'string' || plan.evidence.resultSlot.length === 0,
+          plan.terminalStatus !== undefined ||
+          typeof plan.evidence?.resultSlot !== 'string' ||
+          plan.evidence.resultSlot.length === 0,
       );
       if (invalidPlan) {
         failed += 1;
@@ -274,6 +280,13 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
           dueAt: plan.dueAt,
         });
       }
+      for (const plan of resolution.plans) {
+        const planKey = schedulerPlanKey(definition, plan);
+        if (!wasPlanObserved(planKey)) {
+          postMatchReservations.push({ definition, plan, planKey });
+        }
+      }
+      continue;
     }
     for (const plan of resolution.plans) {
       const planKey = schedulerPlanKey(definition, plan);
@@ -304,6 +317,28 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         });
       }
     }
+  }
+
+  try {
+    const result = await reconcilePostMatchSchedulerObligations({
+      reservations: postMatchReservations.map(({ definition, plan }) => ({ definition, plan })),
+      boundaries: latestPostMatchPeriods.map((latest) => ({
+        jobName: latest.jobName,
+        scopeKey: latest.scopeKey,
+        periodKey: latest.periodKey,
+        resultSlot: latest.resultSlot,
+        beforeDueAt: latest.dueAt,
+      })),
+      evidence: { checkpoint: 'post-match-results' },
+    });
+    for (const { planKey } of postMatchReservations) rememberObservedPlan(planKey);
+    reserved += result.reservations.length;
+  } catch (error) {
+    failed += 1;
+    logError('Post-match atomic reservation and coalescing failed', error, {
+      reservationCount: postMatchReservations.length,
+      boundaryCount: latestPostMatchPeriods.length,
+    });
   }
 
   for (const [jobName, latest] of latestUnderstatPeriods) {
@@ -355,24 +390,6 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         periodKey: latest.periodKey,
       });
     }
-  }
-
-  try {
-    await supersedeSchedulerObligationsByDueAtBatch({
-      boundaries: latestPostMatchPeriods.map((latest) => ({
-        jobName: latest.jobName,
-        scopeKey: latest.scopeKey,
-        periodKey: latest.periodKey,
-        resultSlot: latest.resultSlot,
-        beforeDueAt: latest.dueAt,
-      })),
-      evidence: { checkpoint: 'post-match-results' },
-    });
-  } catch (error) {
-    failed += 1;
-    logError('Post-match stale obligation coalescing failed', error, {
-      boundaryCount: latestPostMatchPeriods.length,
-    });
   }
 
   let enqueueRecovery: SchedulerEnqueueRecoveryResult | null = null;

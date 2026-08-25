@@ -13,6 +13,7 @@ import {
   findDueSchedulerJobNames,
   listExpiredSchedulerObligations,
   markSchedulerObligationIrrecoverable,
+  reconcilePostMatchSchedulerObligations,
   renewSchedulerObligation,
   schedulerObligationStatus,
   startSchedulerObligation,
@@ -42,6 +43,10 @@ async function cleanup(): Promise<void> {
       ${LATE_OLDER_OBLIGATION_ID}::uuid,
       ${LATEST_OBLIGATION_ID}::uuid
     )
+       OR scope_key IN (
+         'integration:event:atomic-reschedule',
+         'integration:event:lane-race'
+       )
   `;
 }
 
@@ -757,6 +762,125 @@ describe('scheduler obligation generation fencing', () => {
     ]);
   });
 
+  test('does not let a stale provisional boundary supersede same-slot final authority', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'entry-results',
+        'integration:event:reverse-finality',
+        'event-1-final-15',
+        'hourly post-match',
+        'UTC',
+        'pending',
+        'reconcile',
+        '2026-08-23T12:00:00Z'::timestamptz,
+        0,
+        0,
+        jsonb_build_object('resultSlot', 'final-15')
+      )
+    `;
+
+    expect(
+      await supersedeSchedulerObligationsByDueAtBatch({
+        boundaries: [
+          {
+            jobName: 'entry-results',
+            scopeKey: 'integration:event:reverse-finality',
+            periodKey: 'event-1-provisional-15',
+            resultSlot: 'provisional-15',
+            beforeDueAt: new Date('2026-08-23T12:00:00Z'),
+          },
+        ],
+      }),
+    ).toBe(0);
+    const [final] = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(final?.status).toBe('pending');
+  });
+
+  test('ranks a rescheduled checkpoint by immutable time instead of its slot suffix', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'entry-results',
+        'integration:event:atomic-reschedule',
+        'event-1-final-16',
+        'hourly post-match',
+        'UTC',
+        'pending',
+        'reconcile',
+        '2026-08-23T12:00:00Z'::timestamptz,
+        0,
+        0,
+        jsonb_build_object('resultSlot', 'final-16')
+      )
+    `;
+
+    const result = await reconcilePostMatchSchedulerObligations({
+      reservations: [
+        {
+          definition: {
+            name: 'entry-results',
+            cadence: 'hourly post-match',
+            timezone: 'UTC',
+          },
+          plan: {
+            scopeKey: 'integration:event:atomic-reschedule',
+            periodKey: 'event-1-final-14',
+            dueAt: new Date('2026-08-23T13:00:00Z'),
+            source: 'reconcile',
+            eventId: 1,
+            evidence: { resultSlot: 'final-14' },
+          },
+        },
+      ],
+      boundaries: [
+        {
+          jobName: 'entry-results',
+          scopeKey: 'integration:event:atomic-reschedule',
+          periodKey: 'event-1-final-14',
+          resultSlot: 'final-14',
+          beforeDueAt: new Date('2026-08-23T13:00:00Z'),
+        },
+      ],
+      evidence: { checkpoint: 'post-match-results' },
+    });
+    expect(result.reservations).toHaveLength(1);
+    expect(result.superseded).toBe(1);
+
+    const rows = await sql<Array<{ periodKey: string; status: string }>>`
+      SELECT period_key AS "periodKey", status
+      FROM ops.scheduler_obligations
+      WHERE scope_key = 'integration:event:atomic-reschedule'
+      ORDER BY period_key
+    `;
+    expect([...rows]).toEqual([
+      { periodKey: 'event-1-final-14', status: 'pending' },
+      { periodKey: 'event-1-final-16', status: 'skipped' },
+    ]);
+
+    const [claimed] = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['entry-results'],
+      laneKeys: ['post-match-results'],
+      enforceLatestAuthoritativeScope: true,
+    });
+    expect(claimed?.obligation.periodKey).toBe('event-1-final-14');
+  });
+
   test('never claims a late older post-match identity after a newer one exists', async () => {
     const sql = await getDbClient();
     await sql`
@@ -784,7 +908,7 @@ describe('scheduler obligation generation fencing', () => {
           'UTC',
           'pending',
           'reconcile',
-          clock_timestamp() - interval '1 minute',
+          clock_timestamp() - interval '2 minutes',
           0,
           0,
           jsonb_build_object('resultSlot', 'final-15')
@@ -798,7 +922,7 @@ describe('scheduler obligation generation fencing', () => {
           'UTC',
           'pending',
           'reconcile',
-          clock_timestamp() - interval '2 minutes',
+          clock_timestamp() - interval '1 minute',
           0,
           0,
           jsonb_build_object('resultSlot', 'final-16')
@@ -832,6 +956,86 @@ describe('scheduler obligation generation fencing', () => {
       WHERE obligation_id = ${LATE_OLDER_OBLIGATION_ID}::uuid
     `;
     expect(older?.status).toBe('pending');
+  });
+
+  test('waits for an uncommitted post-match reservation before taking the claim snapshot', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${LATE_OLDER_OBLIGATION_ID}::uuid,
+        'entry-results',
+        'integration:event:lane-race',
+        'event-1-final-15',
+        'hourly post-match',
+        'UTC',
+        'pending',
+        'reconcile',
+        clock_timestamp() - interval '2 minutes',
+        0,
+        0,
+        jsonb_build_object('resultSlot', 'final-15')
+      )
+    `;
+
+    let signalReservationReady = (): void => {};
+    const reservationReady = new Promise<void>((resolve) => {
+      signalReservationReady = resolve;
+    });
+    let releaseReservation = (): void => {};
+    const reservationRelease = new Promise<void>((resolve) => {
+      releaseReservation = resolve;
+    });
+    const reservation = sql.begin(async (tx) => {
+      await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended('scheduler-lane:post-match-results', 0)
+        )
+      `;
+      await tx`
+        INSERT INTO ops.scheduler_obligations (
+          obligation_id, job_name, scope_key, period_key, cadence, timezone,
+          status, source, due_at, generation, attempts, evidence
+        )
+        VALUES (
+          ${LATEST_OBLIGATION_ID}::uuid,
+          'entry-results',
+          'integration:event:lane-race',
+          'event-1-final-16',
+          'hourly post-match',
+          'UTC',
+          'pending',
+          'reconcile',
+          clock_timestamp() - interval '1 minute',
+          0,
+          0,
+          jsonb_build_object('resultSlot', 'final-16')
+        )
+      `;
+      signalReservationReady();
+      await reservationRelease;
+    });
+    await reservationReady;
+
+    const claim = claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['entry-results'],
+      laneKeys: ['post-match-results'],
+      enforceLatestAuthoritativeScope: true,
+    });
+    const settledBeforeCommit = await Promise.race([
+      claim.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+    ]);
+    releaseReservation();
+    await reservation;
+
+    expect(settledBeforeCommit).toBe(false);
+    const [claimed] = await claim;
+    expect(claimed?.obligation.obligationId).toBe(LATEST_OBLIGATION_ID);
   });
 
   test('orders status by the immutable period and retains superseded failed cycles', async () => {
