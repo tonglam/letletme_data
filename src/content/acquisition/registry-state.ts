@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { getAcquisitionProfile, type AdapterKind, type SourceType } from './acquisition-profiles';
 import type { BriefingManifestBundle } from './acquisition-manifest';
+import { resolveXIdentityRequirement, type XIdentityRequirement } from './x-identity-policy';
 
 export type DesiredSourceEntity = Readonly<{
   sourceKey: string;
@@ -22,6 +23,7 @@ export type DesiredSourceEndpoint = Readonly<{
   locator: Readonly<Record<string, string>>;
   status: 'active' | 'paused';
   origin: 'MANIFEST';
+  identityRequirement: XIdentityRequirement;
   rightsPolicy: Readonly<Record<string, unknown>>;
   manifestRevision: string;
 }>;
@@ -185,6 +187,11 @@ export function compileBriefingRegistryState(
         locator: locatorRecord(endpoint.locator),
         status: entity.enabled && endpoint.enabled ? ('active' as const) : ('paused' as const),
         origin: 'MANIFEST' as const,
+        identityRequirement: resolveXIdentityRequirement({
+          adapterKind: endpoint.adapterKind,
+          sourceType: entity.sourceType,
+          origin: 'MANIFEST',
+        }),
         rightsPolicy: {
           mode: endpoint.rightsPolicy,
           allowPublic: true,

@@ -179,4 +179,24 @@ describe('Briefing content migration contract', () => {
     expect(sql).toContain(String.raw`schedule.schedule_role = 'PRIMARY'`);
     expect(sql).toContain('acquisition_schedule_health');
   });
+
+  test('separates required X identity checks from handle-only and discovered endpoints', async () => {
+    const sql = await Bun.file(
+      new URL('../../../migrations/0044_content_x_identity_policy.sql', import.meta.url),
+    ).text();
+    expect(sql).toContain('ADD COLUMN identity_requirement');
+    expect(sql).toContain(
+      ['OFFICIAL_FPL', 'LEAGUE_OFFICIAL', 'CLUB_OFFICIAL']
+        .map((value) => String.fromCharCode(39) + value + String.fromCharCode(39))
+        .join(', '),
+    );
+    expect(sql).toContain(String.fromCharCode(39) + 'DISCOVERED_ONLY' + String.fromCharCode(39));
+    expect(sql).toContain(
+      'identity_requirement = ' + String.fromCharCode(39) + 'REQUIRED' + String.fromCharCode(39),
+    );
+    expect(sql).toContain('stable_external_id = NULL');
+    expect(sql).toContain('platform = NULL');
+    expect(sql).toContain('external_id = NULL');
+    expect(sql).toContain('DROP INDEX IF EXISTS content.content_source_endpoints_identity_due_idx');
+  });
 });

@@ -6,7 +6,7 @@
 > [Briefing 多来源采集案例验证 Checklist](./briefing-source-acquisition-checklist.md)
 > 的 2026-08-22 live probes 修订。当前实施分支已经加入 manifest、schema、queue、adapter、
 > ReceiptRevision、pipeline outbox、预算与 health view，但默认开关仍关闭；这些能力不能被描述为
-> 已部署或 production ready。真实 Supadata key、目标镜像验证和 VPS rollout 仍是明确 gate；全量
+> 已部署或 production ready。真实 Supadata key、目标镜像验证和 VPS rollout 仍是明确 gate；官方
 > X identity 与 partition sweep 已在隔离测试数据库完成。
 
 ## 1. 目标与边界
@@ -156,10 +156,11 @@ fail closed，不能退回 `--sandbox none`。
 - PostgreSQL 15.18 fresh database 上，正式 scheduler/worker 跑完 21 个非 X recurring Endpoint：
   19 个 `COMPLETED`、2 个 `CHECKED_NO_CHANGE`、0 个 `FAILED/EMPTY`，生成 155 个 Receipt、
   155 个 immutable ReceiptRevision、155 个 pipeline outbox event 和 29 个有界 triggered job。
-- OfficialFPL 两次有界扫描取得 20 条 Receipt，并在第二次饱和后写 `GAP` 停止；Aston Villa
-  双记者 partition 用两次 identity call 加一次合并 keyword call 取得 6 条帖子，验证多账号只扫一次。
-- 83/83 X account Endpoint 已通过真实 `x_user_search` 绑定数字 user ID；Aston Villa、Brighton、
-  Coventry 的变更 handle 已按 stable Endpoint key 修正，没有静默换绑。
+- OfficialFPL 两次有界扫描取得 20 条 Receipt，并在第二次饱和后写 `GAP` 停止；旧 all-X policy
+  下的双记者 identity 记录保留为历史证据，0044 之后 reporters 只按 handle 扫描。
+- 0044 policy 的验收目标是 22/22 个官方 X account Endpoint 通过真实 `x_user_search`；其余
+  manifest X Endpoint 不绑定 numeric user ID，Aston Villa、Brighton、Coventry 的变更 handle
+  仍按 stable Endpoint key 修正，不静默换绑。
 - 全新 PostgreSQL 15 数据库的完整 X sweep 执行 44 个唯一 recurring partition 和 5 个 keyword
   bounded follow-up：49/49 provider trace、0 failure、0 rejected，接收 177 条；状态为 26
   `COMPLETED`、15 `EMPTY`、7 `SATURATED`、1 `GAP`，p50 19,226 ms、p95 47,903 ms，已知成本
@@ -288,12 +289,29 @@ identity 状态：
 
 `PENDING / VERIFIED / CONFLICT / FAILED`
 
+X 账号另有独立的 `identity_requirement` 策略，不把“可按 handle 扫描”误判成“必须先查
+numeric user ID”：
+
+- `REQUIRED`：仅 `OFFICIAL_FPL`、`LEAGUE_OFFICIAL` 和 `CLUB_OFFICIAL`（首版共 22 个账号），
+  必须通过 exact case-insensitive `x_user_search` 后才允许扫描。
+- `HANDLE_ONLY`：`REPORTER`、`CREATOR`、`PUBLICATION`、`SHOW`、`AGGREGATOR` 以及其他非核心
+  X 账号，直接使用 manifest 中的 handle 扫描，不发起 identity job；Receipt 不写未经验证的
+  numeric author ID。
+- `DISCOVERED_ONLY`：语义搜索发现的 `DISCOVERED_UNKNOWN + OBSERVED` 账号，只做作者观测和
+  归因，不进入 identity scheduler、recurring partition 或 backstop。
+- `NOT_APPLICABLE`：X semantic、RSS/Atom、Podcast 和 YouTube 等不使用 X user identity 的
+  Endpoint。
+
+迁移会清掉旧版本对 `HANDLE_ONLY`/`DISCOVERED_ONLY` Endpoint 误采集的 stable ID，但保留所有
+历史 Receipt、Revision、Run 和 trace；状态报表只统计 `REQUIRED` 的 unresolved identity。
+
 - X 通过 `x_user_search` 得到 exact case-insensitive handle 和数字 user ID。
 - YouTube 以 channel ID 为稳定身份；handle/vanity URL 只作 locator。
 - feed 以最终 canonical feed URL 加 manifest Entity 为身份；redirect 必须同 origin 或有稳定
   external ID 证据。
 - 已绑定 stable ID 与新结果冲突时禁止静默重绑。
-- core identity 每 30 天重验一次；未验证 Endpoint 不执行 recurring scan。
+- `REQUIRED` core identity 每 30 天重验一次；`REQUIRED` 未验证 Endpoint 不执行 recurring
+  scan，`HANDLE_ONLY` 不受该 gate 阻塞。
 
 semantic 或内容链接发现的新来源先写成 `DISCOVERED_UNKNOWN + OBSERVED`。自动进入 `TRIAL`
 必须满足：公开可访问、stable identity、至少三次独立采集成功、无重复 Entity，并获得第二层
@@ -459,6 +477,7 @@ reconcile 不再写占位值，新代码也不把它们当作 Entity identity。
   - `endpoint_id / endpoint_key / source_id`
   - `adapter_kind / profile_key / locator`
   - `stable_external_id`
+  - `identity_requirement=REQUIRED / HANDLE_ONLY / DISCOVERED_ONLY / NOT_APPLICABLE`
   - identity status/error/check/next-check
   - `status / origin / rights_policy / manifest_revision`
 - `content.source_partitions`
@@ -995,7 +1014,7 @@ SUPADATA_API_KEY=<runtime-secret>
 
 CONTENT_X_DAILY_CALL_LIMIT=2400
 CONTENT_X_FINAL90_CALL_LIMIT=300
-# Rolling 24h cap reserved for x_user_search identity resolution.
+# Rolling 24h cap reserved for official x_user_search identity resolution.
 CONTENT_X_IDENTITY_CALL_LIMIT=100
 # Temporary integer multiplier for recurring phase/lane caps; default is 1.
 CONTENT_X_LANE_CAP_MULTIPLIER=1
@@ -1162,8 +1181,8 @@ bun run db:migrate:status
   USD 0.01271324，final `media=[]`；同一帖 X 公共页面确认两张 `pbs.twimg.com/media` 图片，
   VPS deploy 用户可直接读取两张 URL。媒体 enrichment 的 resolver fixture 已覆盖 carousel、视频
   poster/HLS、无媒体和网络失败；它不增加 Grok 调用。
-- 83 个 X account Endpoint 完成真实 exact identity resolution；三项变更 handle 已修正后达到
-  83/83 verified。
+- 22 个官方 X account Endpoint 完成真实 exact identity resolution；其余 manifest X account 按
+  `HANDLE_ONLY` 扫描，语义发现账号保持 `DISCOVERED_ONLY`，不再把 83/83 verified 当作验收目标。
 - 全新 PostgreSQL 15 上 44 个唯一 X partition + 5 个 keyword follow-up 全部完成：49/49 trace、
   0 `FAILED`、0 rejected、177 ReceiptRevision/outbox；semantic 2 `COMPLETED` + 2 `SATURATED`，
   两个 cap gap 均未触发无效 pagination。p50 19,226 ms、p95 47,903 ms，已知成本 USD

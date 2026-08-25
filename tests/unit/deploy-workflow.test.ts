@@ -239,6 +239,7 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('CONTENT_REAL_GROK_ENABLED');
     expect(composeFile).toContain('/run/letletme-grok-runner:/run/letletme-grok-runner:ro');
     expect(composeFile).toContain(['group_add:', `      - ${quote}1555${quote}`].join('\n'));
+    expect(rearmScript).toContain(`identity_requirement = ${quote}REQUIRED${quote}`);
     expect(rearmScript).toContain(
       `identity_status IN (${quote}PENDING${quote}, ${quote}FAILED${quote})`,
     );

@@ -54,10 +54,12 @@ Instagram 和 TikTok 明确不做。六个案例验证的是 adapter 能力，�
 - Aston Villa 双记者 partition 先用两次 `x_user_search` 精确绑定 John Townley 与 Jacob Tanswell，
   再用一次合并 `x_keyword_search` 返回 6 条、0 reject、未饱和；总计 3 次调用、约 USD
   0.02671028。它验证了“账号只验证一次、同分区只扫一次”，不是按记者或页面重复查询。
-- 83 个 X account Endpoint 已逐一执行真实 `x_user_search`。旧 manifest 中 Aston Villa、Brighton、
-  Coventry 的官方 handle 分别修正为 `AstonVilla`、`BHAFC`、`CoventryCityFC`；修正后 83/83 均以
-  exact case-insensitive handle 绑定唯一数字 user ID。隔离执行合同复跑为 82/83 首次通过，唯一一次
-  transient miss 仅重试 Aston Villa 后达到 83/83；该轮共 84 次有 trace 调用，约 USD 0.8327。
+- 迁移前的旧 all-X policy 曾对 83 个 X account Endpoint 逐一执行真实 `x_user_search`。旧 manifest
+  中 Aston Villa、Brighton、Coventry 的官方 handle 分别修正为 `AstonVilla`、`BHAFC`、
+  `CoventryCityFC`；修正后该历史批次 83/83 均以 exact case-insensitive handle 绑定唯一数字 user
+  ID。隔离执行合同复跑为 82/83 首次通过，唯一一次 transient miss 仅重试 Aston Villa 后达到
+  83/83；该轮共 84 次有 trace 调用，约 USD 0.8327。0044 policy 后，只有 22 个官方 X account
+  继续需要 numeric identity，其余 manifest 账号按 handle 扫描。
 - 全新 PostgreSQL 15 数据库上的完整 X sweep 覆盖 44 个唯一 recurring partition，并执行 5 个仅由
   keyword 饱和触发的 bounded follow-up：49 次调用全部有 trace，0 `FAILED`、0 rejected；状态为 26
   `COMPLETED`、15 `EMPTY`、7 `SATURATED`、1 `GAP`，共接收 177 条并写入 177 个 Receipt、
@@ -701,8 +703,9 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
   mode 保存脱敏 fixture；不得再要求 CLI 不提供的 raw post payload。
 - [x] 验证真实 provider process 启动后，即使 timeout/trace/schema 失败也提交预算、保留
   `traceVerified=false`，不释放成可重复消费的额度；process 启动前失败才释放 reservation。
-- [x] 83/83 账号 exact identity resolution；44 个唯一 partition + 5 个 keyword follow-up 完整
-  sweep 为 49/49 trace、0 failure、0 rejected。
+- [x] 22/22 官方账号 exact identity resolution；44 个唯一 partition + 5 个 keyword follow-up
+  完整 sweep 为 49/49 trace、0 failure、0 rejected。其余 manifest X 账号按 `HANDLE_ONLY` 扫描，
+  不再把 numeric identity resolution 作为 gate。
 
 ### 12.3 Feed / Web
 
@@ -732,8 +735,9 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 - [x] X 和 YouTube 的生产失败已显式保留，没有写成 `EMPTY` 或 `PASS`。
 - [x] 额外 shadow 证明 X raw-result binding 不可用、Podcast bootstrap 必须有界、YouTube
   transport hash 不能控制 item revision。
-- [x] X 全量 identity 与完整 partition sweep 已在隔离 PostgreSQL 15 路径完成；semantic 日期精度、
-  cap 和不分页语义已用真实结果验证。
+- [x] X partition sweep 已在隔离 PostgreSQL 15 路径完成；semantic 日期精度、cap 和不分页语义已
+  用真实结果验证。旧 all-X identity sweep 只作为历史证据保留；当前 identity gate 只覆盖 22 个
+  官方账号，handle-only 与 discovered-only 账号不进入 identity scheduler。
 - [x] Instagram/TikTok 不在范围内。
 - [ ] Supadata 无字幕 YouTube async job 尚未用 API key 轮询至 terminal。
 - [ ] 尚不能宣布多来源第一层 production ready。
@@ -742,5 +746,6 @@ uvx --from yt-dlp==2026.8.19 yt-dlp --no-playlist \
 Grok host CLI `1.0.3`（历史证据，不是目标 production 版本）、`@mozilla/readability@0.6.0`、`jsdom@26.1.0`、
 本机 Grok Build 1.0.5、`youtube-transcript-api@1.2.4`、`yt-dlp@2026.8.19`。首次证据采集时间为
 `2026-08-21T18:17:41Z` 附近，Supadata/YouTube 补充验证完成于 `2026-08-21T19:08:13Z`
-附近，第二轮完整 shadow 完成于 `2026-08-21T19:35Z` 附近；83 个 identity 与 49-call 完整 X
-sweep 于 2026-08-22 完成。
+附近，第二轮完整 shadow 完成于 `2026-08-21T19:35Z` 附近；旧版 83 个 identity 与 49-call 完整
+X sweep 于 2026-08-22 完成。当前 0044 policy 的目标是 22 个官方 identity，其余 X 账号按 handle
+扫描。

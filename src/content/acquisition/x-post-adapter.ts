@@ -185,9 +185,13 @@ function adaptMappedPosts(input: {
   checkedAt: Date;
   limit: number;
   fallbackEndpointKey: string;
-  resolveAuthor: (
-    post: GrokBuildXPostV1,
-  ) => Readonly<{ endpointKey: string; stableExternalId: string | null }> | undefined;
+  resolveAuthor: (post: GrokBuildXPostV1) =>
+    | Readonly<{
+        endpointKey: string;
+        stableExternalId: string | null;
+        identityRequirement?: string;
+      }>
+    | undefined;
 }): XPostAdapterResult {
   const uniquePosts = uniqueExecutionPosts(input.execution.posts);
 
@@ -336,13 +340,27 @@ export function adaptGrokBuildPosts(input: {
         );
       }
       const endpoint = endpointByHandle.get(post.authorHandle.toLowerCase());
-      if (!endpoint?.stableExternalId || !/^\d{1,20}$/.test(endpoint.stableExternalId)) {
+      if (!endpoint) {
         throw new XPostQualityError(
           'X_IDENTITY_INVALID',
-          'X partition member is not bound to a numeric user ID',
+          'X partition member is missing from the persisted snapshot',
         );
       }
-      return { endpointKey: endpoint.endpointKey, stableExternalId: endpoint.stableExternalId };
+      if (
+        endpoint.identityRequirement !== 'HANDLE_ONLY' &&
+        (!endpoint.stableExternalId || !/^\d{1,20}$/.test(endpoint.stableExternalId))
+      ) {
+        throw new XPostQualityError(
+          'X_IDENTITY_INVALID',
+          'X partition member requires a numeric user ID before scanning',
+        );
+      }
+      return {
+        endpointKey: endpoint.endpointKey,
+        stableExternalId:
+          endpoint.identityRequirement === 'HANDLE_ONLY' ? null : endpoint.stableExternalId,
+        identityRequirement: endpoint.identityRequirement,
+      };
     },
   });
 }

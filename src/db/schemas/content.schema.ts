@@ -68,6 +68,7 @@ export const contentSourceEndpoints = content.table(
     profileKey: text('profile_key').notNull(),
     locator: jsonb().notNull(),
     stableExternalId: text('stable_external_id'),
+    identityRequirement: text('identity_requirement').default('NOT_APPLICABLE').notNull(),
     identityStatus: text('identity_status').default('PENDING').notNull(),
     identityErrorSummary: text('identity_error_summary'),
     identityCheckedAt: timestamp('identity_checked_at', { withTimezone: true, mode: 'date' }),
@@ -94,7 +95,9 @@ export const contentSourceEndpoints = content.table(
     ),
     index('content_source_endpoints_identity_due_idx')
       .on(table.identityNextCheckAt, table.endpointId)
-      .where(sql`status = 'active' AND identity_status IN ('PENDING', 'FAILED', 'VERIFIED')`),
+      .where(
+        sql`status = 'active' AND adapter_kind = 'X_ACCOUNT' AND identity_requirement = 'REQUIRED' AND identity_status IN ('PENDING', 'FAILED', 'VERIFIED')`,
+      ),
     check(
       'content_source_endpoints_key_format_check',
       sql`endpoint_key ~ '^[a-z0-9]+(-[a-z0-9]+)*$'`,
@@ -102,6 +105,10 @@ export const contentSourceEndpoints = content.table(
     check(
       'content_source_endpoints_adapter_check',
       sql`adapter_kind IN ('X_ACCOUNT', 'X_SEMANTIC', 'RSS_ATOM', 'PODCAST_FEED', 'YOUTUBE_CHANNEL')`,
+    ),
+    check(
+      'content_source_endpoints_identity_requirement_check',
+      sql`identity_requirement IN ('REQUIRED', 'HANDLE_ONLY', 'DISCOVERED_ONLY', 'NOT_APPLICABLE')`,
     ),
     check(
       'content_source_endpoints_identity_status_check',

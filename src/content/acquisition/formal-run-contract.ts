@@ -36,6 +36,11 @@ const endpointSnapshotSchema = z
     profileKey: z.string().min(1).max(100),
     locator: z.record(z.string(), z.string()),
     stableExternalId: z.string().min(1).max(4_096).nullable(),
+    // Optional for backward-compatible replay of pre-policy snapshots. New
+    // scheduler requests include the persisted control-plane policy.
+    identityRequirement: z
+      .enum(['REQUIRED', 'HANDLE_ONLY', 'DISCOVERED_ONLY', 'NOT_APPLICABLE'])
+      .optional(),
     rightsPolicy: jsonObject,
   })
   .strict();
