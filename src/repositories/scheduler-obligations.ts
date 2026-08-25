@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lte, notInArray, sql } from 'drizzle-orm';
 
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
@@ -370,6 +370,10 @@ export async function claimSchedulerObligations(
           attempts: sql`${schedulerObligationsInOps.attempts} + 1`,
           leaseOwner: owner,
           leaseExpiresAt,
+          // Correlation belongs to one generation. A failed generation must
+          // not make a new claim look Bull-confirmed before its own enqueue.
+          bullJobId: null,
+          runId: null,
           updatedAt: dbNow,
         })
         .where(eq(schedulerObligationsInOps.obligationId, row.obligationId))
@@ -378,6 +382,37 @@ export async function claimSchedulerObligations(
     }
     return claimed;
   });
+}
+
+/**
+ * Find claims that may have crashed between the durable DB claim and BullMQ
+ * enqueue acknowledgement. Confirmed jobs have a Bull id and running jobs
+ * have crossed the worker fence, so neither is eligible for this recovery.
+ */
+export async function listExpiredUnconfirmedSchedulerObligations(
+  input: { limit?: number; db?: DbHandle } = {},
+): Promise<readonly SchedulerObligation[]> {
+  const limit = input.limit ?? 50;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+    throw new Error('Scheduler recovery limit must be between 1 and 200');
+  }
+  const db = input.db ?? (await getDb());
+  const rows = await db
+    .select()
+    .from(schedulerObligationsInOps)
+    .where(
+      and(
+        eq(schedulerObligationsInOps.status, 'enqueued'),
+        isNull(schedulerObligationsInOps.bullJobId),
+        lte(schedulerObligationsInOps.leaseExpiresAt, sql`clock_timestamp()`),
+      ),
+    )
+    .orderBy(
+      asc(schedulerObligationsInOps.leaseExpiresAt),
+      asc(schedulerObligationsInOps.obligationId),
+    )
+    .limit(limit);
+  return rows.map(mapRow);
 }
 
 export async function confirmSchedulerObligationEnqueued(input: {
@@ -401,7 +436,10 @@ export async function confirmSchedulerObligationEnqueued(input: {
       and(
         eq(schedulerObligationsInOps.obligationId, input.obligationId),
         eq(schedulerObligationsInOps.leaseOwner, input.owner),
-        eq(schedulerObligationsInOps.status, 'enqueued'),
+        // A fast worker may cross its generation fence before the scheduler
+        // persists Bull acknowledgement. The same lease owner can confirm
+        // either state without demoting running work back to enqueued.
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
       ),
     )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });

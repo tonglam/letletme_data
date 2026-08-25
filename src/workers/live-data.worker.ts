@@ -29,7 +29,10 @@ import {
 } from '../repositories/scheduler-obligations';
 import type { WorkerRuntime } from './worker-runtime';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
-import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
+import {
+  inspectSchedulerObligationFence,
+  startCurrentSchedulerJob,
+} from '../utils/scheduler-obligation-fence';
 
 /**
  * Live Data Worker
@@ -119,18 +122,24 @@ export function createLiveDataWorker(): WorkerRuntime {
       eventId: job.data.eventId,
     });
     if (job.id !== undefined) {
-      const completion = job.data.obligationId
-        ? completeSchedulerObligation({
-            obligationId: job.data.obligationId,
-            generation: job.data.obligationGeneration,
-            status: 'succeeded',
-            evidence: { queue: liveDataQueueName, jobName: job.name, eventId: job.data.eventId },
-          })
-        : completeSchedulerObligationByBullJobId({
-            bullJobId: job.id,
-            evidence: { queue: liveDataQueueName, jobName: job.name, eventId: job.data.eventId },
-          });
-      void completion.catch(() => undefined);
+      const fence = inspectSchedulerObligationFence(job.data);
+      const evidence = {
+        queue: liveDataQueueName,
+        jobName: job.name,
+        eventId: job.data.eventId,
+      };
+      const completion =
+        fence.kind === 'complete'
+          ? completeSchedulerObligation({
+              obligationId: fence.obligationId,
+              generation: fence.generation,
+              status: 'succeeded',
+              evidence,
+            })
+          : fence.kind === 'none'
+            ? completeSchedulerObligationByBullJobId({ bullJobId: job.id, evidence })
+            : null;
+      if (completion) void completion.catch(() => undefined);
     }
   });
   worker.on('failed', (job, err) => {
@@ -141,13 +150,14 @@ export function createLiveDataWorker(): WorkerRuntime {
     });
     if (job) {
       void alertOnFinalFailure(job, err);
-      if (isTerminalJobFailure(job, err) && job.data.obligationId) {
+      const fence = inspectSchedulerObligationFence(job.data);
+      if (isTerminalJobFailure(job, err) && fence.kind === 'complete') {
         void failSchedulerObligation({
-          obligationId: job.data.obligationId,
-          generation: job.data.obligationGeneration,
+          obligationId: fence.obligationId,
+          generation: fence.generation,
           error: err,
         }).catch(() => undefined);
-      } else if (job.id !== undefined && isTerminalJobFailure(job, err)) {
+      } else if (job.id !== undefined && isTerminalJobFailure(job, err) && fence.kind === 'none') {
         void failSchedulerObligationByBullJobId({ bullJobId: job.id, error: err }).catch(
           () => undefined,
         );

@@ -48,23 +48,26 @@ import { logError, logInfo } from '../utils/logger';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
-import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
+import {
+  inspectSchedulerObligationFence,
+  startCurrentSchedulerJob,
+} from '../utils/scheduler-obligation-fence';
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
 
 function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void {
-  const obligationId = job.data.obligationId;
-  if (!obligationId) return () => undefined;
+  const fence = inspectSchedulerObligationFence(job.data);
+  if (fence.kind !== 'complete') return () => undefined;
 
   const timer = setInterval(() => {
     void renewSchedulerObligation({
-      obligationId,
-      generation: job.data.obligationGeneration,
+      obligationId: fence.obligationId,
+      generation: fence.generation,
     }).catch((error) => {
       logError('Failed to renew maintenance scheduler obligation lease', error, {
         jobId: job.id,
         jobName: job.name,
-        obligationId,
-        generation: job.data.obligationGeneration,
+        obligationId: fence.obligationId,
+        generation: fence.generation,
       });
     });
   }, SCHEDULER_LEASE_HEARTBEAT_MS);
@@ -276,18 +279,20 @@ export function createMaintenanceWorker(): WorkerRuntime {
   worker.on('completed', (job) => {
     logInfo('Maintenance job completed', { jobId: job.id, name: job.name });
     if (job.id !== undefined) {
-      const completion = job.data.obligationId
-        ? completeSchedulerObligation({
-            obligationId: job.data.obligationId,
-            generation: job.data.obligationGeneration,
-            status: 'succeeded',
-            evidence: { queue: maintenanceQueueName, jobName: job.name },
-          })
-        : completeSchedulerObligationByBullJobId({
-            bullJobId: job.id,
-            evidence: { queue: maintenanceQueueName, jobName: job.name },
-          });
-      void completion.catch(() => undefined);
+      const fence = inspectSchedulerObligationFence(job.data);
+      const evidence = { queue: maintenanceQueueName, jobName: job.name };
+      const completion =
+        fence.kind === 'complete'
+          ? completeSchedulerObligation({
+              obligationId: fence.obligationId,
+              generation: fence.generation,
+              status: 'succeeded',
+              evidence,
+            })
+          : fence.kind === 'none'
+            ? completeSchedulerObligationByBullJobId({ bullJobId: job.id, evidence })
+            : null;
+      if (completion) void completion.catch(() => undefined);
     }
   });
   worker.on('failed', (job, error) => {
@@ -296,13 +301,18 @@ export function createMaintenanceWorker(): WorkerRuntime {
       name: job?.name,
       attemptsMade: job?.attemptsMade,
     });
-    if (job && isTerminalJobFailure(job, error) && job.data.obligationId) {
+    const fence = job ? inspectSchedulerObligationFence(job.data) : null;
+    if (job && isTerminalJobFailure(job, error) && fence?.kind === 'complete') {
       void failSchedulerObligation({
-        obligationId: job.data.obligationId,
-        generation: job.data.obligationGeneration,
+        obligationId: fence.obligationId,
+        generation: fence.generation,
         error,
       }).catch(() => undefined);
-    } else if (job?.id !== undefined && isTerminalJobFailure(job, error)) {
+    } else if (
+      job?.id !== undefined &&
+      isTerminalJobFailure(job, error) &&
+      fence?.kind === 'none'
+    ) {
       void failSchedulerObligationByBullJobId({ bullJobId: job.id, error }).catch(() => undefined);
     }
   });

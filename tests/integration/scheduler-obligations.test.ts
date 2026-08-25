@@ -10,6 +10,7 @@ import {
   completeSchedulerObligation,
   confirmSchedulerObligationEnqueued,
   failSchedulerObligation,
+  listExpiredUnconfirmedSchedulerObligations,
   markSchedulerObligationIrrecoverable,
   schedulerObligationStatus,
   startSchedulerObligation,
@@ -99,6 +100,63 @@ describe('scheduler obligation generation fencing', () => {
       WHERE obligation_id = ${OBLIGATION_ID}::uuid
     `;
     expect(running[0]?.status).toBe('running');
+  });
+
+  test('accepts enqueue acknowledgement after a fast worker crosses its fence', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'core-snapshot',
+        'integration:core',
+        'integration-fast-worker',
+        'integration',
+        'UTC',
+        'pending',
+        'schedule',
+        clock_timestamp() - interval '1 minute',
+        0,
+        0,
+        '{}'::jsonb
+      )
+    `;
+
+    const [claim] = await claimSchedulerObligations();
+    expect(claim?.obligation.obligationId).toBe(OBLIGATION_ID);
+    expect(await startSchedulerObligation({ obligationId: OBLIGATION_ID, generation: 0 })).toBe(
+      true,
+    );
+    expect(
+      await confirmSchedulerObligationEnqueued({
+        obligationId: OBLIGATION_ID,
+        owner: claim!.owner,
+        bullJobId: 'integration-fast-worker-job',
+      }),
+    ).toBe(true);
+
+    const rows = await sql<Array<{ status: string; bull_job_id: string | null }>>`
+      SELECT status, bull_job_id
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      status: 'running',
+      bull_job_id: 'integration-fast-worker-job',
+    });
   });
 
   test('rejects late failure/completion and duplicate completion from an older generation', async () => {
@@ -666,5 +724,129 @@ describe('scheduler obligation generation fencing', () => {
       generation: 2,
       lease_owner: 'expired-understat-owner',
     });
+  });
+
+  test('clears prior Bull correlation when claiming a failed generation', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        bull_job_id,
+        run_id,
+        evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'core-snapshot',
+        'integration:core',
+        'failed-generation-correlation',
+        'integration',
+        'UTC',
+        'failed',
+        'reconcile',
+        clock_timestamp() - interval '1 minute',
+        2,
+        2,
+        'old-generation-job',
+        '30000000-0000-4000-8000-000000000099'::uuid,
+        '{}'::jsonb
+      )
+    `;
+
+    const [claim] = await claimSchedulerObligations();
+    expect(claim?.obligation).toMatchObject({
+      obligationId: OBLIGATION_ID,
+      generation: 3,
+      bullJobId: null,
+      runId: null,
+    });
+  });
+
+  test('selects only expired enqueue claims without Bull acknowledgement for recovery', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id,
+        job_name,
+        scope_key,
+        period_key,
+        cadence,
+        timezone,
+        status,
+        source,
+        due_at,
+        generation,
+        attempts,
+        lease_owner,
+        lease_expires_at,
+        bull_job_id,
+        evidence
+      )
+      VALUES
+        (
+          ${OBLIGATION_ID}::uuid,
+          'core-snapshot',
+          'integration:core',
+          'expired-unconfirmed',
+          'integration',
+          'UTC',
+          'enqueued',
+          'reconcile',
+          clock_timestamp() - interval '20 minutes',
+          2,
+          3,
+          'expired-owner',
+          clock_timestamp() - interval '1 minute',
+          NULL,
+          '{}'::jsonb
+        ),
+        (
+          ${NEWER_OBLIGATION_ID}::uuid,
+          'core-snapshot',
+          'integration:core',
+          'expired-confirmed',
+          'integration',
+          'UTC',
+          'enqueued',
+          'reconcile',
+          clock_timestamp() - interval '20 minutes',
+          2,
+          3,
+          'confirmed-owner',
+          clock_timestamp() - interval '1 minute',
+          'confirmed-bull-job',
+          '{}'::jsonb
+        ),
+        (
+          ${IN_FLIGHT_OBLIGATION_ID}::uuid,
+          'core-snapshot',
+          'integration:core',
+          'expired-running',
+          'integration',
+          'UTC',
+          'running',
+          'reconcile',
+          clock_timestamp() - interval '20 minutes',
+          2,
+          3,
+          'running-owner',
+          clock_timestamp() - interval '1 minute',
+          NULL,
+          '{}'::jsonb
+        )
+    `;
+
+    const candidates = await listExpiredUnconfirmedSchedulerObligations();
+    expect(candidates.map((candidate) => candidate.obligationId)).toEqual([OBLIGATION_ID]);
   });
 });

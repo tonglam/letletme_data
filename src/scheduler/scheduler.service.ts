@@ -18,6 +18,10 @@ import {
   type SchedulerObligationPlan,
 } from './job-registry';
 import { logError, logInfo } from '../utils/logger';
+import {
+  reconcileExpiredSchedulerEnqueueClaims,
+  type SchedulerEnqueueRecoveryResult,
+} from './scheduler-enqueue-recovery';
 
 // Definitions intentionally resolve the same durable checkpoint on every
 // 30-second pass. Once this process has successfully reserved a plan, repeated
@@ -232,6 +236,17 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     }
   }
 
+  let enqueueRecovery: SchedulerEnqueueRecoveryResult | null = null;
+  try {
+    enqueueRecovery = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: schedulerRegistry,
+    });
+    failed += enqueueRecovery.errors;
+  } catch (error) {
+    failed += 1;
+    logError('Scheduler expired enqueue claim reconciliation failed', error);
+  }
+
   const disabledJobNames = schedulerRegistry
     .filter((definition) => definition.isEnabled && !definition.isEnabled())
     .map((definition) => definition.name);
@@ -300,6 +315,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     claimed: claimed.length,
     enqueued,
     failed,
+    enqueueRecovery,
   });
   return {
     definitions: schedulerRegistry.length,
