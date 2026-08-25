@@ -42,6 +42,30 @@ describe('entry picks multiplier completeness', () => {
     expect(resolveScoringCaptainPick(picks)?.element).toBe(1);
   });
 
+  test('accepts official bench captain roles and a displaced captain multiplier', () => {
+    const benchVice = picks.map((pick) => ({
+      ...pick,
+      is_vice_captain: pick.position === 13,
+    }));
+    const promotedVice = picks.map((pick) => {
+      if (pick.is_captain) return { ...pick, multiplier: 1 };
+      if (pick.is_vice_captain) return { ...pick, multiplier: 2 };
+      return pick;
+    });
+    const benchCaptain = picks.map((pick) => ({
+      ...pick,
+      multiplier: pick.position === 1 ? 2 : pick.position < 11 ? 1 : 0,
+      is_captain: pick.position === 14,
+      is_vice_captain: pick.position === 1,
+    }));
+
+    expect(isCompleteEntryPicks(benchVice)).toBe(true);
+    expect(isCompleteEntryPicks(promotedVice)).toBe(true);
+    expect(isCompleteEntryPicks(benchCaptain)).toBe(true);
+    expect(resolveScoringCaptainPick(promotedVice)?.element).toBe(2);
+    expect(resolveScoringCaptainPick(benchCaptain)?.element).toBe(1);
+  });
+
   test('rejects scoring bonuses outside the captain roles or on both roles', () => {
     expect(
       isCompleteEntryPicks(
@@ -51,11 +75,6 @@ describe('entry picks multiplier completeness', () => {
     expect(
       isCompleteEntryPicks(
         picks.map((pick) => (pick.is_vice_captain ? { ...pick, multiplier: 2 } : pick)),
-      ),
-    ).toBe(false);
-    expect(
-      isCompleteEntryPicks(
-        picks.map((pick) => (pick.is_captain ? { ...pick, multiplier: 1 } : pick)),
       ),
     ).toBe(false);
   });
