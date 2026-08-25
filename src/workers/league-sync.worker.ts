@@ -147,7 +147,10 @@ export function createLeagueSyncWorker(): WorkerRuntime {
   const connection = getQueueConnection();
   const worker = new Worker<LeagueSyncJobData>(leagueSyncQueueName, processLeagueSyncJob, {
     connection,
-    concurrency: 10,
+    // A coordinator already owns the full active-tournament scan and every
+    // tournament shares event-level mutation scopes. Multiple coordinators
+    // only contend on PostgreSQL locks and duplicate FPL reads.
+    concurrency: 1,
     removeOnComplete: BULL_COMPLETED_RETENTION,
     removeOnFail: BULL_FAILED_RETENTION,
     lockDuration: 120_000,
