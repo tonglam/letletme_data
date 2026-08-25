@@ -50,6 +50,7 @@ export interface PreparedLiveSnapshot {
   readonly eventLives: PreparedEventLives;
   readonly fixtures: Fixture[];
   readonly state: LiveSnapshotState;
+  readonly liveIdentityBaseline: 'current-roster' | 'published-event';
 }
 
 export interface LiveSnapshotSyncResult {
@@ -228,6 +229,7 @@ export function prepareLiveSnapshot(
   rawFixtures: RawFPLFixture[],
   referenceData: LiveSnapshotReferenceData,
   expectedFixtureIds: readonly number[],
+  publishedLiveElementIds: readonly number[] = [],
 ): PreparedLiveSnapshot {
   if (!Number.isInteger(eventId) || eventId <= 0) {
     throw new Error(`Invalid live snapshot event ID: ${eventId}`);
@@ -240,15 +242,22 @@ export function prepareLiveSnapshot(
   const expectedLiveElementIds = [...referenceData.playerTeamById.keys()];
   if (
     new Set(liveElementIds).size !== liveElementIds.length ||
-    new Set(expectedLiveElementIds).size !== expectedLiveElementIds.length
+    new Set(expectedLiveElementIds).size !== expectedLiveElementIds.length ||
+    new Set(publishedLiveElementIds).size !== publishedLiveElementIds.length
   ) {
     throw new Error(`Duplicate player identity in live snapshot event ${eventId}`);
   }
   const actualPlayerIds = new Set(liveElementIds);
   const expectedPlayerIds = new Set(expectedLiveElementIds);
+  const publishedPlayerIds = new Set(publishedLiveElementIds);
   const missingPlayers = expectedLiveElementIds.filter((id) => !actualPlayerIds.has(id));
   const unexpectedPlayers = liveElementIds.filter((id) => !expectedPlayerIds.has(id));
-  if (missingPlayers.length > 0 || unexpectedPlayers.length > 0) {
+  const matchesCurrentRoster = missingPlayers.length === 0 && unexpectedPlayers.length === 0;
+  const matchesPublishedEvent =
+    publishedLiveElementIds.length > 0 &&
+    liveElementIds.length === publishedLiveElementIds.length &&
+    liveElementIds.every((id) => publishedPlayerIds.has(id));
+  if (!matchesCurrentRoster && !matchesPublishedEvent) {
     throw new Error(
       `Player identity mismatch for live snapshot event ${eventId}; ` +
         `missing=${missingPlayers.sort((a, b) => a - b).join(',') || 'none'}; ` +
@@ -313,6 +322,7 @@ export function prepareLiveSnapshot(
     eventLives,
     fixtures,
     state: resolveSnapshotState(fixtures),
+    liveIdentityBaseline: matchesCurrentRoster ? 'current-roster' : 'published-event',
   };
 }
 
@@ -596,7 +606,17 @@ export async function syncLiveSnapshot(
       rawFixtures,
       referenceData,
       expectedFixtureIds,
+      active?.eventLives.map((row) => row.elementId),
     );
+    if (prepared.liveIdentityBaseline === 'published-event') {
+      logInfo('Live snapshot retained the published event roster after core roster drift', {
+        season: season.seasonCode,
+        eventId,
+        currentRosterCount: referenceData.playerTeamById.size,
+        eventRosterCount: prepared.eventLives.eventLives.length,
+        priorPublicationId: active?.manifest.publicationId ?? null,
+      });
+    }
     const payload = toCachePayload(prepared);
     const changed = !snapshotContentMatches(active, payload);
 
