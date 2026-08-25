@@ -8,7 +8,6 @@ import { eq, inArray } from 'drizzle-orm';
 import { loadBriefingManifest } from '../../src/content/acquisition/acquisition-manifest';
 import {
   claimDueFormalRuns,
-  claimDueXIdentityRuns,
   confirmFormalRunEnqueued,
 } from '../../src/content/acquisition/formal-run-repository';
 import { reconcileBriefingSourceRegistry } from '../../src/content/acquisition/manifest-reconciler';
@@ -32,7 +31,7 @@ afterAll(async () => {
 });
 
 liveTest(
-  'resolves and scans one real two-reporter partition with three total X tool calls',
+  'scans one real two-reporter partition with one combined X tool call',
   async () => {
     const bundle = await loadBriefingManifest();
     const budgetPolicy = compileXBudgetPolicy({
@@ -43,25 +42,6 @@ liveTest(
     await reconcileBriefingSourceRegistry({ bundle, gitRevision: 'dual-reporter-live-test' });
     const db = await getDb();
     const endpointKeys = ['john-townley-x', 'jacob-tanswell-x'] as const;
-    const futureIdentityCheck = new Date(Date.now() + 30 * 24 * 60 * 60_000);
-
-    await db
-      .update(contentSourceEndpoints)
-      .set({ identityNextCheckAt: futureIdentityCheck })
-      .where(eq(contentSourceEndpoints.adapterKind, 'X_ACCOUNT'));
-    await db
-      .update(contentSourceEndpoints)
-      .set({
-        stableExternalId: null,
-        identityStatus: 'PENDING',
-        identityCheckedAt: null,
-        identityNextCheckAt: new Date(Date.now() - 60_000),
-      })
-      .where(inArray(contentSourceEndpoints.endpointKey, endpointKeys));
-
-    const identityRuns = await claimDueXIdentityRuns({ claimLimit: 2, budgetPolicy });
-    expect(identityRuns).toHaveLength(2);
-    await Promise.all(identityRuns.map((run) => confirmFormalRunEnqueued({ runId: run.runId })));
     const flags = {
       ...getContentRuntimeFlags(),
       pipelineEnabled: true,
@@ -69,16 +49,13 @@ liveTest(
       xScanEnabled: true,
       realGrokEnabled: true,
     };
-    const identityResults = await Promise.all(
-      identityRuns.map((run) => runFormalXWorker(run.job, { flags, xBudgetPolicy: budgetPolicy })),
-    );
-    expect(identityResults.every((result) => result.status === 'COMPLETED')).toBe(true);
 
     const verified = await db
       .select({
         endpointId: contentSourceEndpoints.endpointId,
         endpointKey: contentSourceEndpoints.endpointKey,
         stableExternalId: contentSourceEndpoints.stableExternalId,
+        identityRequirement: contentSourceEndpoints.identityRequirement,
         identityStatus: contentSourceEndpoints.identityStatus,
       })
       .from(contentSourceEndpoints)
@@ -87,7 +64,7 @@ liveTest(
     expect(
       verified.every(
         (endpoint) =>
-          endpoint.identityStatus === 'VERIFIED' && /^\d+$/.test(endpoint.stableExternalId ?? ''),
+          endpoint.identityRequirement === 'HANDLE_ONLY' && endpoint.stableExternalId === null,
       ),
     ).toBe(true);
 

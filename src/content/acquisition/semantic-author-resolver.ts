@@ -136,6 +136,7 @@ async function resolveOne(tx: TransactionHandle, handle: string, dbNow: Date) {
       profileKey: 'x-observed-v1',
       locator: { handle },
       stableExternalId: null,
+      identityRequirement: 'DISCOVERED_ONLY',
       identityStatus: 'PENDING',
       identityErrorSummary: null,
       identityCheckedAt: null,

@@ -34,6 +34,7 @@ WITH due AS (
   FROM content.source_endpoints
   WHERE adapter_kind = 'X_ACCOUNT'
     AND status = 'active'
+    AND identity_requirement = 'REQUIRED'
     AND identity_status IN ('PENDING', 'FAILED')
 )
 UPDATE content.source_endpoints AS endpoint

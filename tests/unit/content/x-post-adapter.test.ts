@@ -120,6 +120,39 @@ describe('Grok Build X post adapter gates', () => {
     });
   });
 
+  test('accepts handle-only manifest accounts without a numeric user ID', () => {
+    const handleOnlyRequest: XScanRunRequestV1 = {
+      ...request,
+      partition: {
+        ...request.partition,
+        members: [
+          {
+            ...request.partition.members[0]!,
+            endpointKey: 'ben-dinnery-x',
+            sourceKey: 'ben-dinnery',
+            locator: { handle: 'BenDinnery' },
+            stableExternalId: null,
+            identityRequirement: 'HANDLE_ONLY',
+          },
+        ],
+      },
+    };
+    const handleOnlyPosts = [
+      {
+        ...posts[0],
+        authorHandle: 'BenDinnery',
+        url: `https://x.com/BenDinnery/status/${posts[0].postId}`,
+      },
+    ];
+    const result = adaptGrokBuildPosts({
+      request: handleOnlyRequest,
+      execution: execution(handleOnlyPosts),
+      checkedAt: new Date('2026-08-21T21:16:00.000Z'),
+    });
+    expect(result.acceptedCount).toBe(1);
+    expect(result.batches[0]?.items[0]?.authorExternalId).toBeNull();
+  });
+
   test('rejects whitespace-only text instead of treating it as media-only', () => {
     try {
       adaptGrokBuildPosts({

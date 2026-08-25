@@ -124,11 +124,27 @@ jobs:
               'event', 'briefing_acquisition_control_health',
               'verifiedXAccounts', (
                 SELECT count(*) FROM content.source_endpoints
-                WHERE adapter_kind = 'X_ACCOUNT' AND identity_status = 'VERIFIED'
+                WHERE adapter_kind = 'X_ACCOUNT'
+                  AND identity_requirement = 'REQUIRED'
+                  AND identity_status = 'VERIFIED'
               ),
-              'unresolvedXAccounts', (
+              'requiredXAccounts', (
                 SELECT count(*) FROM content.source_endpoints
-                WHERE adapter_kind = 'X_ACCOUNT' AND identity_status <> 'VERIFIED'
+                WHERE adapter_kind = 'X_ACCOUNT' AND identity_requirement = 'REQUIRED'
+              ),
+              'unresolvedRequiredXAccounts', (
+                SELECT count(*) FROM content.source_endpoints
+                WHERE adapter_kind = 'X_ACCOUNT'
+                  AND identity_requirement = 'REQUIRED'
+                  AND identity_status <> 'VERIFIED'
+              ),
+              'handleOnlyXAccounts', (
+                SELECT count(*) FROM content.source_endpoints
+                WHERE adapter_kind = 'X_ACCOUNT' AND identity_requirement = 'HANDLE_ONLY'
+              ),
+              'discoveredOnlyXAccounts', (
+                SELECT count(*) FROM content.source_endpoints
+                WHERE adapter_kind = 'X_ACCOUNT' AND identity_requirement = 'DISCOVERED_ONLY'
               ),
               'activeSchedules', (
                 SELECT count(*) FROM content.source_schedules WHERE status = 'active'

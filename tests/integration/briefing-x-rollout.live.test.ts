@@ -74,6 +74,7 @@ liveTest(
       .select({
         endpointKey: contentSourceEndpoints.endpointKey,
         stableExternalId: contentSourceEndpoints.stableExternalId,
+        identityRequirement: contentSourceEndpoints.identityRequirement,
         identityStatus: contentSourceEndpoints.identityStatus,
       })
       .from(contentSourceEndpoints)
@@ -82,7 +83,8 @@ liveTest(
     expect(
       identities.every(
         (endpoint) =>
-          endpoint.identityStatus === 'VERIFIED' && /^\d+$/.test(endpoint.stableExternalId ?? ''),
+          endpoint.identityRequirement !== 'REQUIRED' ||
+          (endpoint.identityStatus === 'VERIFIED' && /^\d+$/.test(endpoint.stableExternalId ?? '')),
       ),
     ).toBe(true);
 

@@ -47,6 +47,9 @@ liveTest(
   async () => {
     const bundle = await loadBriefingManifest();
     const expectedEndpointKeys = bundle.sources.entities
+      .filter((entity) =>
+        ['OFFICIAL_FPL', 'LEAGUE_OFFICIAL', 'CLUB_OFFICIAL'].includes(entity.sourceType),
+      )
       .flatMap((entity) => entity.endpoints)
       .filter((endpoint) => endpoint.adapterKind === 'X_ACCOUNT' && endpoint.enabled)
       .map((endpoint) => endpoint.endpointKey)
@@ -67,16 +70,25 @@ liveTest(
         endpointId: contentSourceEndpoints.endpointId,
         endpointKey: contentSourceEndpoints.endpointKey,
         sourceId: contentSourceEndpoints.sourceId,
+        identityRequirement: contentSourceEndpoints.identityRequirement,
         identityStatus: contentSourceEndpoints.identityStatus,
       })
       .from(contentSourceEndpoints)
       .where(eq(contentSourceEndpoints.adapterKind, 'X_ACCOUNT'));
-    expect(endpoints.map((endpoint) => endpoint.endpointKey).sort()).toEqual(expectedEndpointKeys);
+    expect(
+      endpoints
+        .filter((endpoint) => endpoint.identityRequirement === 'REQUIRED')
+        .map((endpoint) => endpoint.endpointKey)
+        .sort(),
+    ).toEqual(expectedEndpointKeys);
     expect(endpoints.every((endpoint) => endpoint.identityStatus !== 'CONFLICT')).toBe(true);
 
     const sourceIds = endpoints.map((endpoint) => endpoint.sourceId);
     const dueEndpointIds = endpoints
-      .filter((endpoint) => endpoint.identityStatus !== 'VERIFIED')
+      .filter(
+        (endpoint) =>
+          endpoint.identityRequirement === 'REQUIRED' && endpoint.identityStatus !== 'VERIFIED',
+      )
       .map((endpoint) => endpoint.endpointId);
     await db
       .update(contentSources)
@@ -138,6 +150,7 @@ liveTest(
         endpointId: contentSourceEndpoints.endpointId,
         endpointKey: contentSourceEndpoints.endpointKey,
         stableExternalId: contentSourceEndpoints.stableExternalId,
+        identityRequirement: contentSourceEndpoints.identityRequirement,
         identityStatus: contentSourceEndpoints.identityStatus,
         identityErrorSummary: contentSourceEndpoints.identityErrorSummary,
       })
@@ -170,7 +183,10 @@ liveTest(
       .map((run) => (run.runMetrics as RunMetrics).totalCostUsd)
       .filter((cost): cost is number => typeof cost === 'number');
     const unresolved = resolved
-      .filter((endpoint) => endpoint.identityStatus !== 'VERIFIED')
+      .filter(
+        (endpoint) =>
+          endpoint.identityRequirement === 'REQUIRED' && endpoint.identityStatus !== 'VERIFIED',
+      )
       .map((endpoint) => ({
         endpointKey: endpoint.endpointKey,
         identityStatus: endpoint.identityStatus,
@@ -184,7 +200,10 @@ liveTest(
         registered: expectedEndpointKeys.length,
         dueAtStart: dueEndpointIds.length,
         attempted: runIds.length,
-        verified: resolved.filter((endpoint) => endpoint.identityStatus === 'VERIFIED').length,
+        verified: resolved.filter(
+          (endpoint) =>
+            endpoint.identityRequirement === 'REQUIRED' && endpoint.identityStatus === 'VERIFIED',
+        ).length,
         unresolved,
         traceCount: traces.length,
         thrownExecutions,
@@ -202,7 +221,8 @@ liveTest(
     expect(
       resolved.every(
         (endpoint) =>
-          endpoint.identityStatus === 'VERIFIED' && /^\d+$/.test(endpoint.stableExternalId ?? ''),
+          endpoint.identityRequirement !== 'REQUIRED' ||
+          (endpoint.identityStatus === 'VERIFIED' && /^\d+$/.test(endpoint.stableExternalId ?? '')),
       ),
     ).toBe(true);
   },

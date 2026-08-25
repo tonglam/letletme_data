@@ -45,6 +45,7 @@ import {
   type XBudgetPolicy,
 } from './x-budget';
 import { backstopSlotEndForDueAt, latestBackstopSlotEndAt } from './registry-state';
+import { xEndpointMayScan } from './x-identity-policy';
 
 export type RecurringAdapterKind =
   | 'X_ACCOUNT'
@@ -177,6 +178,7 @@ async function endpointSnapshot(tx: TransactionHandle, endpointId: string) {
       profileKey: contentSourceEndpoints.profileKey,
       locator: contentSourceEndpoints.locator,
       stableExternalId: contentSourceEndpoints.stableExternalId,
+      identityRequirement: contentSourceEndpoints.identityRequirement,
       identityStatus: contentSourceEndpoints.identityStatus,
       endpointStatus: contentSourceEndpoints.status,
       endpointRightsPolicy: contentSourceEndpoints.rightsPolicy,
@@ -198,6 +200,7 @@ async function endpointSnapshot(tx: TransactionHandle, endpointId: string) {
     profileKey: row.profileKey,
     locator: asRecord(row.locator) as Record<string, string>,
     stableExternalId: row.stableExternalId,
+    identityRequirement: row.identityRequirement,
     identityStatus: row.identityStatus,
     endpointStatus: row.endpointStatus,
     rightsPolicy: {
@@ -233,6 +236,7 @@ async function partitionSnapshot(tx: TransactionHandle, partitionId: string) {
       profileKey: contentSourceEndpoints.profileKey,
       locator: contentSourceEndpoints.locator,
       stableExternalId: contentSourceEndpoints.stableExternalId,
+      identityRequirement: contentSourceEndpoints.identityRequirement,
       identityStatus: contentSourceEndpoints.identityStatus,
       endpointStatus: contentSourceEndpoints.status,
       endpointRightsPolicy: contentSourceEndpoints.rightsPolicy,
@@ -258,6 +262,7 @@ async function partitionSnapshot(tx: TransactionHandle, partitionId: string) {
       profileKey: row.profileKey,
       locator: asRecord(row.locator) as Record<string, string>,
       stableExternalId: row.stableExternalId,
+      identityRequirement: row.identityRequirement,
       identityStatus: row.identityStatus,
       endpointStatus: row.endpointStatus,
       rightsPolicy: {
@@ -427,6 +432,7 @@ export async function claimDueXIdentityRuns(input: {
       .where(
         and(
           eq(contentSourceEndpoints.adapterKind, 'X_ACCOUNT'),
+          eq(contentSourceEndpoints.identityRequirement, 'REQUIRED'),
           eq(contentSourceEndpoints.status, 'active'),
           eq(contentSources.status, 'active'),
           or(
@@ -481,6 +487,7 @@ export async function claimDueXIdentityRuns(input: {
         profileKey: endpoint.profileKey,
         locator: endpoint.locator,
         stableExternalId: endpoint.stableExternalId,
+        identityRequirement: endpoint.identityRequirement,
         rightsPolicy: endpoint.rightsPolicy,
       };
       const request = parseFormalRunRequestV1({
@@ -792,9 +799,13 @@ export async function claimDueFormalRuns(input: {
           endpoint.sourceStatus !== 'active' ||
           endpoint.adapterKind !== schedule.adapterKind ||
           endpoint.profileKey !== schedule.profileKey ||
-          (endpoint.identityStatus !== 'VERIFIED' &&
-            endpoint.adapterKind !== 'RSS_ATOM' &&
-            endpoint.adapterKind !== 'PODCAST_FEED')
+          (endpoint.adapterKind !== 'RSS_ATOM' &&
+            endpoint.adapterKind !== 'PODCAST_FEED' &&
+            !xEndpointMayScan({
+              adapterKind: endpoint.adapterKind,
+              identityRequirement: endpoint.identityRequirement,
+              identityStatus: endpoint.identityStatus,
+            }))
         ) {
           await deferIneligibleSchedule(schedule.scheduleId);
           continue;
@@ -809,6 +820,7 @@ export async function claimDueFormalRuns(input: {
           profileKey: endpoint.profileKey,
           locator: endpoint.locator,
           stableExternalId: endpoint.stableExternalId,
+          identityRequirement: endpoint.identityRequirement,
           rightsPolicy: endpoint.rightsPolicy,
         };
         request = parseFormalRunRequestV1({
@@ -849,7 +861,11 @@ export async function claimDueFormalRuns(input: {
           partition.members.length === 0 ||
           partition.members.some(
             (member) =>
-              member.identityStatus !== 'VERIFIED' ||
+              !xEndpointMayScan({
+                adapterKind: member.adapterKind,
+                identityRequirement: member.identityRequirement,
+                identityStatus: member.identityStatus,
+              }) ||
               member.endpointStatus !== 'active' ||
               member.sourceStatus !== 'active' ||
               member.adapterKind !== partition.adapterKind ||
@@ -868,6 +884,7 @@ export async function claimDueFormalRuns(input: {
           profileKey: member.profileKey,
           locator: member.locator,
           stableExternalId: member.stableExternalId,
+          identityRequirement: member.identityRequirement,
           rightsPolicy: member.rightsPolicy,
         }));
         const firstMember = members[0]!;

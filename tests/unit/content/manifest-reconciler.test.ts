@@ -27,6 +27,61 @@ describe('Briefing source manifest reconciler', () => {
     });
   });
 
+  test('requires identities only for official FPL and club endpoints', async () => {
+    const state = compileBriefingRegistryState(await loadBriefingManifest());
+    const accounts = state.endpoints.filter((endpoint) => endpoint.adapterKind === 'X_ACCOUNT');
+    const required = accounts.filter((endpoint) => endpoint.identityRequirement === 'REQUIRED');
+    const handleOnly = accounts.filter(
+      (endpoint) => endpoint.identityRequirement === 'HANDLE_ONLY',
+    );
+    const requiredSourceKeys = new Set(
+      state.entities
+        .filter((entity) =>
+          ['OFFICIAL_FPL', 'LEAGUE_OFFICIAL', 'CLUB_OFFICIAL'].includes(entity.sourceType),
+        )
+        .map((entity) => entity.sourceKey),
+    );
+
+    expect(required).toHaveLength(22);
+    expect(handleOnly.length).toBeGreaterThan(0);
+    expect(required.every((endpoint) => requiredSourceKeys.has(endpoint.sourceKey))).toBe(true);
+    expect(
+      handleOnly.every(
+        (endpoint) => initialEndpointIdentity(endpoint, new Date()).identityNextCheckAt === null,
+      ),
+    ).toBe(true);
+  });
+
+  test('does not retain a legacy numeric identity for handle-only endpoints', async () => {
+    const state = compileBriefingRegistryState(await loadBriefingManifest());
+    const endpoint = state.endpoints.find((item) => item.endpointKey === 'ben-dinnery-x');
+    expect(endpoint?.identityRequirement).toBe('HANDLE_ONLY');
+    if (!endpoint) return;
+
+    expect(
+      reconcileEndpointIdentity({
+        endpoint,
+        existing: {
+          adapterKind: 'X_ACCOUNT',
+          profileKey: endpoint.profileKey,
+          locator: { handle: 'BenDinnery' },
+          stableExternalId: '123456789',
+          identityStatus: 'VERIFIED',
+          identityErrorSummary: null,
+          identityCheckedAt: new Date('2026-08-01T00:00:00.000Z'),
+          identityNextCheckAt: new Date('2026-08-31T00:00:00.000Z'),
+        },
+        now: new Date('2026-08-22T00:00:00.000Z'),
+      }),
+    ).toEqual({
+      stableExternalId: null,
+      identityStatus: 'PENDING',
+      identityErrorSummary: null,
+      identityCheckedAt: null,
+      identityNextCheckAt: null,
+    });
+  });
+
   test('never silently rebinds a changed configured stable identity', async () => {
     const state = compileBriefingRegistryState(await loadBriefingManifest());
     const youtube = state.endpoints.find((endpoint) => endpoint.adapterKind === 'YOUTUBE_CHANNEL');

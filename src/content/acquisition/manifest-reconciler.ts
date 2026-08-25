@@ -85,6 +85,15 @@ export function initialEndpointIdentity(
           : null,
     };
   }
+  if (endpoint.identityRequirement !== 'REQUIRED') {
+    return {
+      stableExternalId: null,
+      identityStatus: 'PENDING',
+      identityErrorSummary: null,
+      identityCheckedAt: null,
+      identityNextCheckAt: null,
+    };
+  }
   return {
     stableExternalId: null,
     identityStatus: 'PENDING',
@@ -106,6 +115,24 @@ export function reconcileEndpointIdentity(input: {
   const locatorChanged =
     canonicalLocator(input.existing.locator) !== canonicalLocator(input.endpoint.locator);
   const configuredIdentity = configuredStableIdentity(input.endpoint);
+
+  // Handle-only and discovered X endpoints deliberately have no authoritative
+  // numeric identity.  Clear any legacy identity that was collected before
+  // this policy existed so downstream receipts cannot accidentally treat it
+  // as verified.  This branch also makes handle edits safe without an X API
+  // lookup and prevents a stale identity refresh from being scheduled.
+  if (
+    input.endpoint.adapterKind === 'X_ACCOUNT' &&
+    input.endpoint.identityRequirement !== 'REQUIRED'
+  ) {
+    return {
+      stableExternalId: null,
+      identityStatus: 'PENDING',
+      identityErrorSummary: null,
+      identityCheckedAt: null,
+      identityNextCheckAt: null,
+    };
+  }
 
   if (
     input.existing.stableExternalId &&
@@ -470,6 +497,7 @@ export async function reconcileBriefingSourceRegistry(input: {
           adapterKind: endpoint.adapterKind,
           profileKey: endpoint.profileKey,
           locator: endpoint.locator,
+          identityRequirement: endpoint.identityRequirement,
           ...identity,
           status: endpoint.status,
           origin: endpoint.origin,
@@ -488,6 +516,7 @@ export async function reconcileBriefingSourceRegistry(input: {
             adapterKind: sql`excluded.adapter_kind`,
             profileKey: sql`excluded.profile_key`,
             locator: sql`excluded.locator`,
+            identityRequirement: sql`excluded.identity_requirement`,
             stableExternalId: sql`excluded.stable_external_id`,
             identityStatus: sql`excluded.identity_status`,
             identityErrorSummary: sql`excluded.identity_error_summary`,
