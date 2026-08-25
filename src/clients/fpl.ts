@@ -590,6 +590,13 @@ export type FPLBootstrapRequestOptions = Readonly<{
    */
   edgeCacheKey?: string;
 }>;
+export type FPLBootstrapArtifactResponse = Readonly<{
+  bytes: Uint8Array;
+  payload: FPLBootstrapResponse;
+  sourceUrl: string;
+  contentType: 'application/json';
+  retrievedAt: Date;
+}>;
 export type RawFPLEventLiveStats = z.infer<typeof EventLiveStatsSchema>;
 export type RawFPLEventLiveElement = z.infer<typeof EventLiveElementSchema>;
 export type RawFPLEventLiveResponse = z.infer<typeof EventLiveResponseSchema>;
@@ -870,6 +877,83 @@ class FPLClient {
 
       throw new FPLClientError(
         'Failed to fetch bootstrap data',
+        undefined,
+        'UNKNOWN_ERROR',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  /**
+   * Fetch the exact bootstrap response bytes for durable source evidence.
+   * Unlike getBootstrap(), this boundary also requires the provider's actual
+   * HTTP media type so an HTML/CDN error page can never be archived as JSON.
+   */
+  async getBootstrapArtifact(
+    options: FPLBootstrapRequestOptions = {},
+  ): Promise<FPLBootstrapArtifactResponse> {
+    const requestUrl = new URL(`${this.baseUrl}/bootstrap-static/`);
+    const edgeCacheKey = options.edgeCacheKey?.trim();
+    if (edgeCacheKey) requestUrl.searchParams.set('letletme_cache_bucket', edgeCacheKey);
+    const url = requestUrl.toString();
+
+    try {
+      logDebug('Fetching exact FPL bootstrap artifact', { url });
+      const response = await this.request(url);
+      if (!response.ok) {
+        throw new FPLClientError(
+          `HTTP ${response.status}: ${response.statusText}`,
+          response.status,
+          'HTTP_ERROR',
+        );
+      }
+
+      const contentType = response.headers
+        .get('content-type')
+        ?.split(';', 1)[0]
+        ?.trim()
+        .toLowerCase();
+      if (contentType !== 'application/json') {
+        throw new FPLClientError(
+          'FPL bootstrap response content type is not application/json',
+          undefined,
+          'VALIDATION_ERROR',
+        );
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength === 0 || bytes.byteLength > 8 * 1_024 * 1_024) {
+        throw new FPLClientError(
+          'FPL bootstrap response byte size is invalid',
+          undefined,
+          'VALIDATION_ERROR',
+        );
+      }
+      const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      const data: unknown = JSON.parse(decoded);
+      const payload = BootstrapResponseSchema.parse(data);
+      const retrievedAt = new Date();
+
+      logDebug('Successfully fetched exact FPL bootstrap artifact', {
+        url,
+        byteSize: bytes.byteLength,
+        eventCount: payload.events.length,
+        teamCount: payload.teams.length,
+        playerCount: payload.elements.length,
+        phaseCount: payload.phases.length,
+      });
+      return { bytes, payload, sourceUrl: url, contentType, retrievedAt };
+    } catch (error) {
+      if (error instanceof z.ZodError || error instanceof SyntaxError) {
+        throw new FPLClientError(
+          'Invalid response format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+      if (error instanceof FPLClientError) throw error;
+      throw new FPLClientError(
+        'Failed to fetch bootstrap artifact',
         undefined,
         'UNKNOWN_ERROR',
         error instanceof Error ? error : new Error(String(error)),

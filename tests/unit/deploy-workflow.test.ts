@@ -62,6 +62,8 @@ describe('release workflow gates', () => {
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
     expect(deployScript).toContain('--provision-and-probe');
+    expect(deployScript).toContain('--probe-fpl-raw-snapshot-storage');
+    expect(workflow).toContain('--probe-fpl-raw-snapshot-storage');
     expect(deployScript).toContain('bootstrap-briefing-source-media-env.sh');
     expect(workflow).toContain('bootstrap-briefing-source-media-env.sh');
     expect(workflow.indexOf('scripts/bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(

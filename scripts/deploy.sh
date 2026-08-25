@@ -221,6 +221,11 @@ deploy() {
     log_error "Bug-report screenshot storage contract failed; services were not stopped."
     exit 1
   fi
+  log_info "Provisioning and probing the immutable FPL raw snapshot bucket"
+  if ! compose run --rm -T api bun validate-env.ts --probe-fpl-raw-snapshot-storage; then
+    log_error "FPL raw snapshot storage contract failed; services were not stopped."
+    exit 1
+  fi
   if ! "${PROJECT_DIR}/scripts/bootstrap-briefing-source-media-env.sh" \
     "${ENV_FILE}" "${CONTENT_MEDIA_ENV_FILE}"; then
     log_error "Could not establish the private source-media environment file."

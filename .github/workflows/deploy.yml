@@ -338,6 +338,8 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
               bun validate-env.ts --probe-bug-report-storage
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun validate-env.ts --probe-fpl-raw-snapshot-storage
             test -x scripts/bootstrap-briefing-source-media-env.sh
             scripts/bootstrap-briefing-source-media-env.sh "$env_file" "$media_env_file"
             media_worker_setting=false

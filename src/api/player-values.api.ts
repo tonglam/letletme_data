@@ -1,4 +1,4 @@
-import { Elysia } from 'elysia';
+import { Elysia, t } from 'elysia';
 
 import { enqueuePlayerValuesSyncJob } from '../jobs/data-sync-enqueue';
 import { seasonRepository } from '../repositories/seasons';
@@ -13,16 +13,35 @@ import { seasonRepository } from '../repositories/seasons';
  * Each record is uniquely identified by (elementId, changeDate).
  */
 
-export const playerValuesAPI = new Elysia({ prefix: '/player-values' }).post(
-  '/sync',
-  async ({ set }) => {
+export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
+  .post('/sync', async ({ set }) => {
     const season = await seasonRepository.findCurrent();
     const job = await enqueuePlayerValuesSyncJob(season, 'api');
     set.status = 202;
     return {
       success: true,
-      message: 'Player values sync job enqueued',
+      message: 'Current source-day player values sync job enqueued',
       jobId: job.id,
     };
-  },
-);
+  })
+  .post(
+    '/replay',
+    async ({ body, set }) => {
+      const season = await seasonRepository.findCurrent();
+      const job = await enqueuePlayerValuesSyncJob(season, 'api', {
+        changeDate: body.sourceDay,
+      });
+      set.status = 202;
+      return {
+        success: true,
+        message: 'Archive-only source-day player values replay job enqueued',
+        sourceDay: body.sourceDay,
+        jobId: job.id,
+      };
+    },
+    {
+      body: t.Object({
+        sourceDay: t.String({ pattern: '^[0-9]{8}$' }),
+      }),
+    },
+  );
