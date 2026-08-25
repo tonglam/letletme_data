@@ -237,6 +237,15 @@ describe('live snapshot finalization fence', () => {
         items: [],
       },
     };
+    const staleObservedBeforeFence: LiveSnapshotCacheContents = {
+      ...retained,
+      manifest: {
+        ...retained.manifest,
+        revision: 41,
+        publicationId: '10000000-0000-4000-8000-000000000041',
+      },
+    };
+    let publishedReads = 0;
     const dependencies = {
       getEventLive: async () => mockEventLiveResponseFixture,
       getFixtures: async () => [rawFixture],
@@ -244,7 +253,10 @@ describe('live snapshot finalization fence', () => {
       getReferenceData: async () => references,
       readOrderingTimestamp: async () => new Date('2026-08-25T17:06:31.000Z'),
       persistDurably: persistLiveSnapshotDurably,
-      readPublished: async () => retained,
+      readPublished: async () => {
+        publishedReads += 1;
+        return publishedReads <= 2 ? staleObservedBeforeFence : retained;
+      },
       refreshHeartbeat: async () => {
         throw new Error('finalized replay must not refresh the canonical manifest');
       },
@@ -268,6 +280,7 @@ describe('live snapshot finalization fence', () => {
     expect(
       results.every((result) => result.publicationId === retained.manifest.publicationId),
     ).toBe(true);
+    expect(publishedReads).toBe(4);
 
     const sql = await getDbClient();
     const [publicationCount] = await sql<{ count: number }[]>`

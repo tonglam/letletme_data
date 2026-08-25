@@ -564,6 +564,19 @@ export async function syncLiveSnapshot(
       () => dependencies.persistDurably(request),
     );
   };
+  const readAfterFinalizedFence = async (
+    durable: LiveSnapshotDurablePersistenceResult,
+    observed: LiveSnapshotCacheContents | null,
+  ): Promise<LiveSnapshotCacheContents | null> => {
+    if (durable.disposition !== 'finalized-noop') return observed;
+    // A concurrent finalization may commit while this worker waits for the
+    // mutation/core lock. Reconcile only after observing the immutable fence,
+    // then re-read; the pre-fetch cache may belong to the prior live revision.
+    if (!options.dependencies) {
+      await recoverPendingLiveSnapshotPublication(season, eventId);
+    }
+    return dependencies.readPublished(season.seasonCode, eventId);
+  };
   const startedAt = Date.now();
   if (!options.dependencies) {
     await recoverPendingLiveSnapshotPublication(season, eventId);
@@ -641,6 +654,13 @@ export async function syncLiveSnapshot(
       });
       persistedFixtures = durable.persistedFixtures;
       persistedEventLives = durable.persistedEventLives;
+      const retainedActive = await readAfterFinalizedFence(durable, active);
+      if (durable.disposition === 'finalized-noop' && !retainedActive) {
+        throw new DatabaseError(
+          `Finalized event ${eventId} has no active canonical live cache`,
+          'LIVE_FINAL_PUBLICATION_MISSING',
+        );
+      }
       if (active && durable.disposition === 'advanced') {
         await (
           dependencies.refreshHeartbeat ??
@@ -662,12 +682,12 @@ export async function syncLiveSnapshot(
         eventId,
         changed: false,
         stale: false,
-        revision: active?.manifest.revision ?? null,
-        publicationId: active?.manifest.publicationId ?? null,
-        state: prepared.state,
-        eventLiveCount: prepared.eventLives.eventLives.length,
-        fixtureCount: prepared.fixtures.length,
-        fixtureTeamCount: fixtureTeamCount(prepared.fixtures),
+        revision: retainedActive?.manifest.revision ?? null,
+        publicationId: retainedActive?.manifest.publicationId ?? null,
+        state: retainedActive?.state ?? prepared.state,
+        eventLiveCount: retainedActive?.eventLives.length ?? prepared.eventLives.eventLives.length,
+        fixtureCount: retainedActive?.fixtures.length ?? prepared.fixtures.length,
+        fixtureTeamCount: fixtureTeamCount(retainedActive?.fixtures ?? prepared.fixtures),
         bonusTeamCount: bonusTeamCount(),
         persistedFixtures,
         persistedEventLives,
@@ -677,7 +697,7 @@ export async function syncLiveSnapshot(
         durationMs: Date.now() - startedAt,
         fetchDurationMs: (fetchedAt ?? Date.now()) - startedAt,
         publishDurationMs: 0,
-        sourceCheckedAt: active?.manifest.sourceCheckedAt ?? null,
+        sourceCheckedAt: retainedActive?.manifest.sourceCheckedAt ?? null,
         lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
         sourceAgeMs: Math.max(0, Date.now() - lastSuccessfulFetchAt.getTime()),
         stale: false,
@@ -771,7 +791,8 @@ export async function syncLiveSnapshot(
     persistedFixtures = durable.persistedFixtures;
     persistedEventLives = durable.persistedEventLives;
     if (durable.disposition !== 'advanced') {
-      if (durable.disposition === 'finalized-noop' && !active) {
+      const retainedActive = await readAfterFinalizedFence(durable, active);
+      if (durable.disposition === 'finalized-noop' && !retainedActive) {
         throw new DatabaseError(
           `Finalized event ${eventId} has no active canonical live cache`,
           'LIVE_FINAL_PUBLICATION_MISSING',
@@ -783,15 +804,15 @@ export async function syncLiveSnapshot(
         skippedItems: prepared.eventLives.eventLives.length + prepared.fixtures.length,
         dataChanged: false,
       });
-      const retainedEventLives = active?.eventLives ?? prepared.eventLives.eventLives;
-      const retainedFixtures = active?.fixtures ?? prepared.fixtures;
+      const retainedEventLives = retainedActive?.eventLives ?? prepared.eventLives.eventLives;
+      const retainedFixtures = retainedActive?.fixtures ?? prepared.fixtures;
       return {
         eventId,
         changed: false,
         stale: durable.disposition === 'superseded',
-        revision: active?.manifest.revision ?? null,
-        publicationId: active?.manifest.publicationId ?? null,
-        state: active?.state ?? prepared.state,
+        revision: retainedActive?.manifest.revision ?? null,
+        publicationId: retainedActive?.manifest.publicationId ?? null,
+        state: retainedActive?.state ?? prepared.state,
         eventLiveCount: retainedEventLives.length,
         fixtureCount: retainedFixtures.length,
         fixtureTeamCount: fixtureTeamCount(retainedFixtures),
