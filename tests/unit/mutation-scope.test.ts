@@ -6,6 +6,7 @@ import {
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../../src/domain/mutation-scope';
+import { summarizeMutationScopes } from '../../src/utils/mutation-scopes';
 
 describe('resolveMutationScopes', () => {
   it('maps the canonical live queue name', () => {
@@ -239,5 +240,22 @@ describe('resolveMutationScopes', () => {
     expect(resolveMutationScopes({ queueName: 'bridge', jobName: 'entity-link' })).toEqual([
       'bridge:all',
     ]);
+  });
+
+  it('summarizes scope kinds without exposing identifier-bearing scopes', () => {
+    const summary = summarizeMutationScopes([
+      'entry-core:2026:123456',
+      'entry-core:2026:123457',
+      'tournament-structure:event:33',
+      'data-core:publication',
+      'malformed scope with secret',
+    ]);
+
+    expect(summary).toEqual({
+      scopeCount: 5,
+      scopeKinds: ['data-core', 'entry-core', 'tournament-structure', 'unknown'],
+    });
+    expect(JSON.stringify(summary)).not.toContain('123456');
+    expect(JSON.stringify(summary)).not.toContain('123457');
   });
 });
