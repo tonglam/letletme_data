@@ -478,13 +478,13 @@ export async function attachFreshnessWindowToSchedulerObligation(input: {
     .update(schedulerObligationsInOps)
     .set({
       evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
-        'freshnessWindowId', ${input.freshnessWindowId},
+        'freshnessWindowId', ${input.freshnessWindowId}::bigint,
         'freshnessWindowIds',
         CASE
           WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
             THEN ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
           ELSE '[]'::jsonb
-        END || jsonb_build_array(${input.freshnessWindowId})
+        END || jsonb_build_array(${input.freshnessWindowId}::bigint)
       )`,
       updatedAt: sql`clock_timestamp()`,
     })
