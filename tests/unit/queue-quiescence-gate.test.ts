@@ -60,7 +60,7 @@ describe('queue quiescence gate', () => {
       'content-media-transcript',
       'content-x-scan',
     ]);
-    expect(new Set(allQueueNames).size).toBe(23);
+    expect(new Set(allQueueNames).size).toBe(24);
   });
 
   test('accepts a fully settled hard-cut boundary', () => {

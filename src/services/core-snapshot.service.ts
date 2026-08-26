@@ -60,6 +60,7 @@ export interface CoreSnapshotSyncOptions {
   readonly sourceRunId?: string;
   /** Exact freshness window being repaired, carried into the publication manifest. */
   readonly freshnessWindowId?: number;
+  /**
    * Optional exact bootstrap captured by a deadline-sensitive price watcher.
    * Core still fetches fixtures through its normal dependency, but the player,
    * team, event and phase rows come from the same provider response that

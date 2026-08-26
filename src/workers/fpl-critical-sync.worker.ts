@@ -468,7 +468,7 @@ async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
       jobName: job.name,
       jobId: blockerId,
     },
-      () =>
+    () =>
       syncCoreSnapshot(season, {
         trigger: 'queue',
         sourceRunId: job.data.runId,
