@@ -13,6 +13,7 @@ import {
   calculateDrainEtaMs,
   percentile,
 } from '../../src/services/queue-governance.service';
+import { resolveQueueDispatchBudgetMs } from '../../src/utils/queue-monitor';
 import { queueHealthRetentionCutoff } from '../../src/services/queue-governance.service';
 import { summarizeDataError } from '../../src/domain/error-classification';
 import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-official-h2h.service';
@@ -63,6 +64,14 @@ describe('GW queue and data governance primitives', () => {
     expect(classifyBacklog({ waiting: 1, active: 0, failed: 0, providerWaitP95Ms: 5_001 })).toBe(
       'PROVIDER_THROTTLED',
     );
+  });
+
+  test('derives queue deadline budgets from the contract registry', () => {
+    expect(resolveQueueDispatchBudgetMs('data-sync')).toBe(60_000);
+    expect(resolveQueueDispatchBudgetMs('entry-sync')).toBe(15 * 60_000);
+    expect(resolveQueueDispatchBudgetMs('my-fpl-orchestration')).toBe(15 * 60_000);
+    expect(resolveQueueDispatchBudgetMs('maintenance')).toBe(60 * 60_000);
+    expect(resolveQueueDispatchBudgetMs('unknown-queue')).toBeUndefined();
   });
 
   test('calculates bounded drain ETA and percentiles', () => {
