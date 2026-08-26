@@ -54,7 +54,7 @@ export type PriceChangeHotCursor = Readonly<{
   detectedAt: string;
   fetchedAt: string;
   expiresAt: string;
-  state: 'PROVISIONAL' | 'STALE' | 'FAILED';
+  state: 'PROVISIONAL' | 'STALE' | 'RECONCILED' | 'FAILED';
   reconciliationError: string | null;
 }>;
 
@@ -77,7 +77,7 @@ export function isPriceChangeHotSnapshotNewer(
     return Boolean(snapshot);
   }
   const hotAt = Date.parse(snapshot.detectedAt);
-  const durableAt = Date.parse(durable.fetchedAt);
+  const durableAt = Date.parse(durable.sourceCheckedAt ?? durable.fetchedAt);
   return Number.isFinite(hotAt) && (!Number.isFinite(durableAt) || hotAt > durableAt);
 }
 
@@ -87,6 +87,34 @@ export function priceChangeHotPointerKey(seasonCode: string): string {
 
 export function priceChangeHotPayloadKey(seasonCode: string, revision: string): string {
   return `${HOT_KEY_PREFIX}:${seasonCode}:${revision}`;
+}
+
+/** Small metadata envelope used by cursor polling without loading the board. */
+export function priceChangeHotMetadataKey(seasonCode: string, revision: string): string {
+  return `${HOT_KEY_PREFIX}:${seasonCode}:${revision}:metadata`;
+}
+
+type PriceChangeHotSnapshotMetadata = Omit<PriceChangeHotSnapshot, 'board'>;
+
+function priceChangeHotSnapshotMetadata(snapshot: PriceChangeHotSnapshot): string {
+  const metadata: PriceChangeHotSnapshotMetadata = {
+    schemaVersion: snapshot.schemaVersion,
+    seasonCode: snapshot.seasonCode,
+    revision: snapshot.revision,
+    triggerFingerprint: snapshot.triggerFingerprint,
+    sourceHash: snapshot.sourceHash,
+    artifactId: snapshot.artifactId,
+    deadline: snapshot.deadline,
+    detectedAt: snapshot.detectedAt,
+    fetchedAt: snapshot.fetchedAt,
+    expiresAt: snapshot.expiresAt,
+    expectedPlayerCount: snapshot.expectedPlayerCount,
+    observedPlayerCount: snapshot.observedPlayerCount,
+    corePlayerCount: snapshot.corePlayerCount,
+    corePlayerDelta: snapshot.corePlayerDelta,
+    reconciliation: snapshot.reconciliation,
+  };
+  return JSON.stringify(metadata);
 }
 
 export function sha256Bytes(bytes: Uint8Array): string {
@@ -391,6 +419,7 @@ if current then
   end
 end
 redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[4])
+redis.call('SET', KEYS[3], ARGV[5], 'PX', ARGV[4])
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[4])
 return 1
 `;
@@ -400,6 +429,7 @@ export async function publishPriceChangeHotSnapshot(
 ): Promise<{ readonly published: boolean; readonly payloadKey: string }> {
   const redis = await redisSingleton.getClient();
   const payloadKey = priceChangeHotPayloadKey(snapshot.seasonCode, snapshot.revision);
+  const metadataKey = priceChangeHotMetadataKey(snapshot.seasonCode, snapshot.revision);
   const pointerKey = priceChangeHotPointerKey(snapshot.seasonCode);
   const payload = JSON.stringify(snapshot);
   const pointer = JSON.stringify({
@@ -409,13 +439,15 @@ export async function publishPriceChangeHotSnapshot(
   });
   const result = await redis.eval(
     POINTER_CAS_SCRIPT,
-    2,
+    3,
     pointerKey,
     payloadKey,
+    metadataKey,
     payload,
     pointer,
     Date.parse(snapshot.detectedAt),
     PRICE_CHANGE_HOT_TTL_MS,
+    priceChangeHotSnapshotMetadata(snapshot),
   );
   return { published: Number(result) === 1, payloadKey };
 }
@@ -500,9 +532,11 @@ export async function readPriceChangeHotCursor(
     state:
       snapshot.reconciliation.state === 'failed'
         ? 'FAILED'
-        : Date.now() - Date.parse(snapshot.fetchedAt) >= PRICE_CHANGE_READY_MS
-          ? 'STALE'
-          : 'PROVISIONAL',
+        : snapshot.reconciliation.state === 'reconciled'
+          ? 'RECONCILED'
+          : Date.now() - Date.parse(snapshot.fetchedAt) >= PRICE_CHANGE_READY_MS
+            ? 'STALE'
+            : 'PROVISIONAL',
     reconciliationError: snapshot.reconciliation.error,
   };
 }
@@ -558,15 +592,18 @@ if ARGV[4] == 'failed' and existing.reconciliation and existing.reconciliation.s
   return 1
 end
 redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[5])
+redis.call('SET', KEYS[2], ARGV[6], 'PX', ARGV[5])
 return 1
 `,
-    1,
+    2,
     priceChangeHotPayloadKey(updated.seasonCode, updated.revision),
+    priceChangeHotMetadataKey(updated.seasonCode, updated.revision),
     updated.revision,
     updated.sourceHash,
     JSON.stringify(updated),
     input.state,
     Math.max(Date.parse(updated.expiresAt) - Date.now(), 1),
+    priceChangeHotSnapshotMetadata(updated),
   );
   return Number(result) === 1;
 }

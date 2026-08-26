@@ -74,6 +74,8 @@ export type PriceChangeBoard = {
   deadline: string | null;
   nextDeadlines: string[];
   fetchedAt: string | null;
+  /** Provider request-start ordering evidence; kept internal to Data. */
+  sourceCheckedAt?: string | null;
   staleAt: string | null;
   revision: string;
   expectedPlayerCount: number;
@@ -726,12 +728,15 @@ export function parsePublishedPriceChangeBoard(
   const expectedPlayerCount = context.expectedPlayerCount as number;
   const observedPlayerCount = context.observedPlayerCount as number;
   const fetchedAt = Date.parse(context.fetchedAt);
+  const sourceCheckedAt = Date.parse(manifest.sourceCheckedAt);
   const staleAt = Date.parse(context.staleAt);
   const hardExpiresAt = Date.parse(context.hardExpiresAt);
   if (
+    !Number.isFinite(sourceCheckedAt) ||
     !Number.isFinite(fetchedAt) ||
     !Number.isFinite(staleAt) ||
     !Number.isFinite(hardExpiresAt) ||
+    sourceCheckedAt > fetchedAt ||
     staleAt !== fetchedAt + PRICE_CHANGE_READY_MS ||
     hardExpiresAt !== fetchedAt + PRICE_CHANGE_MAX_AGE_MS
   ) {
@@ -776,6 +781,7 @@ export function parsePublishedPriceChangeBoard(
     deadline: context.deadline,
     nextDeadlines: [...nextDeadlines],
     fetchedAt: new Date(fetchedAt).toISOString(),
+    sourceCheckedAt: new Date(sourceCheckedAt).toISOString(),
     staleAt: new Date(staleAt).toISOString(),
     revision: manifest.publicationId,
     expectedPlayerCount,
@@ -942,6 +948,11 @@ async function readLegacyPriceChangeBoard(season: FplSeasonRef): Promise<PriceCh
     return {
       ...(candidate as unknown as PriceChangeBoard),
       status: 'STALE',
+      sourceCheckedAt:
+        typeof candidate.sourceCheckedAt === 'string' &&
+        Number.isFinite(Date.parse(candidate.sourceCheckedAt))
+          ? new Date(Date.parse(candidate.sourceCheckedAt)).toISOString()
+          : undefined,
       revision: typeof candidate.revision === 'string' ? candidate.revision : 'legacy',
       expectedPlayerCount: ids.size,
       observedPlayerCount: players.length,
@@ -1011,7 +1022,10 @@ export async function preparePriceChangePublication(
     }
 
     const core = await readCorePublicationEvidence(season);
-    const board = normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds);
+    const board = {
+      ...normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds),
+      sourceCheckedAt: requestStartedAt.toISOString(),
+    };
     const context = contextFromBoard(board, fetchedAt);
     return {
       outcome: 'ready',

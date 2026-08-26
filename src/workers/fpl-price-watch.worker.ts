@@ -363,11 +363,31 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
     postDeadlineSuccessfulProbe,
     watchDurationMs: Date.now() - startedAt,
   });
-  if (successfulProbes === 0) {
-    throw new Error('Price-watch received no valid bootstrap response during its watch window');
-  }
   if (hotPublications === 0 && !postDeadlineSuccessfulProbe) {
-    throw new Error('Price-watch received no valid post-deadline bootstrap observation');
+    const evidence = {
+      reason: 'price-watch-window-expired-without-post-deadline-evidence',
+      deadlineAt: deadlineAt.toISOString(),
+      stopAt: new Date(stopAt).toISOString(),
+      pollCount,
+      successfulProbes,
+      hotPublications,
+      noChangeObserved,
+      postDeadlineSuccessfulProbe,
+    };
+    logWarn('Price-watch window expired without conclusive evidence', {
+      season: season.seasonCode,
+      ...evidence,
+    });
+    if (job.data.obligationId && job.data.obligationGeneration !== undefined) {
+      const completed = await completeSchedulerObligation({
+        obligationId: job.data.obligationId,
+        generation: job.data.obligationGeneration,
+        status: 'skipped',
+        evidence,
+      });
+      if (!completed) throw new Error('Price-watch expiry completion CAS failed');
+    }
+    return { outcome: 'window-expired' as const, hotPublications, pollCount };
   }
   if (job.data.obligationId && job.data.obligationGeneration !== undefined) {
     const completed = await completeSchedulerObligation({

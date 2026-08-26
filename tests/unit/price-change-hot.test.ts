@@ -43,6 +43,7 @@ describe('price-change hot snapshot', () => {
       deadline: null,
       nextDeadlines: [],
       fetchedAt,
+      sourceCheckedAt: fetchedAt,
       staleAt: fetchedAt,
       revision: 'durable-revision',
       expectedPlayerCount: 0,
@@ -93,5 +94,21 @@ describe('price-change hot snapshot', () => {
     expect(isPriceChangeHotSnapshotNewer(snapshot, durableBoard('2026-08-26T07:00:05.000Z'))).toBe(
       false,
     );
+  });
+
+  test('uses durable request-start evidence for overlapping fetches', () => {
+    const snapshot = buildPriceChangeHotSnapshot({
+      season: TEST_SEASON,
+      bootstrap: priceBootstrap(2),
+      sourceHash: 'c'.repeat(64),
+      detectedAt: new Date('2026-08-26T07:00:03.000Z'),
+      fetchedAt: new Date('2026-08-26T07:00:08.000Z'),
+    });
+    const durable = {
+      ...durableBoard('2026-08-26T07:00:08.000Z'),
+      sourceCheckedAt: '2026-08-26T07:00:01.000Z',
+    };
+
+    expect(isPriceChangeHotSnapshotNewer(snapshot, durable)).toBe(true);
   });
 });
