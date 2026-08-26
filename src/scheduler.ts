@@ -15,6 +15,11 @@ import { MAINTENANCE_JOBS } from './queues/maintenance.queue';
 import { QueueDrainOnlyError } from './services/queue-governance.service';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
+// Compatibility mode can run while the registry-owned live-picks definition
+// is disabled.  Keep one durable root identity per provider probe interval;
+// the queue's deduplication key still prevents overlap while the job is live,
+// and a completed/failed Bull job cannot suppress the next refresh forever.
+const LIVE_PICKS_COMPATIBILITY_BUCKET_MS = 2 * 60_000;
 
 getConfig();
 if (getConfig().NODE_ENV === 'production') await databaseSingleton.connect();
@@ -113,6 +118,9 @@ async function runPass(): Promise<void> {
         );
       }
     } else {
+      const livePicksCompatibilityBucket = Math.floor(
+        now.getTime() / LIVE_PICKS_COMPATIBILITY_BUCKET_MS,
+      );
       await runIndependentSchedulerStage(
         'core-market-publication-reconcile',
         () => reconcileCoreAndMarketPublications(season),
@@ -138,6 +146,7 @@ async function runPass(): Promise<void> {
           // live-picks worker owns provider I/O in both rollout modes.
           () =>
             enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id, {
+              jobId: `live-picks-compatibility-${lifecycle.season.seasonCode}-e${lifecycle.currentEvent.id}-b${livePicksCompatibilityBucket}`,
               now,
             }),
           stageState,

@@ -21,6 +21,8 @@ describe('live lifecycle decisions', () => {
     expect(source).toContain('persistLiveLifecycleStatus(now)');
     expect(source).toContain('live-picks-refresh');
     expect(source).toContain('enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id');
+    expect(source).toContain('jobId: `live-picks-compatibility-');
+    expect(source).toContain('LIVE_PICKS_COMPATIBILITY_BUCKET_MS');
     expect(source).not.toContain('runPicksProbeAndSync(');
     expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
       source.indexOf('enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id'),
