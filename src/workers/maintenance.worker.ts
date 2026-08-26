@@ -51,6 +51,7 @@ import { logError, logInfo } from '../utils/logger';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
+import { createQueueRunAttemptId } from '../utils/queue-run-id';
 import type { WorkerRuntime } from './worker-runtime';
 import {
   inspectSchedulerObligationFence,
@@ -137,7 +138,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             entryId: job.data.entryId!,
             ...(job.data.eventId === undefined ? {} : { eventId: job.data.eventId }),
             entryInfoTargetEventId,
-            attemptKey: `${job.data.runId}-a${job.attemptsMade + 1}`,
+            attemptKey: createQueueRunAttemptId(),
           });
         }
         case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT: {
@@ -163,7 +164,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           // missing row, or a partial sync leaves the previous active revision
           // serving while this job retries in 30 minutes.
           const freshAfter = await resolveJobFreshAfter(job);
-          const attemptKey = `${job.data.runId}-a${job.attemptsMade + 1}`;
+          const attemptKey = createQueueRunAttemptId();
           const source = job.data.snapshotKind === 'FINAL' ? 'reconcile' : 'catchup';
           const entryInfoTargetEventId =
             (await eventRepository.findLatestFinalized(season))?.id ?? 0;

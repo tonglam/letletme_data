@@ -19,6 +19,28 @@ type MutationScopeInput = {
 
 const MUTATION_SCOPE_WAIT_TIMEOUT_MS = 120_000;
 
+export type MutationScopeSummary = Readonly<{
+  scopeCount: number;
+  scopeKinds: readonly string[];
+}>;
+
+/**
+ * Return safe aggregate scope evidence for logs and operational responses.
+ * Concrete scopes may contain entry, tournament, event, or other identifiers;
+ * those values are intentionally never copied into the summary.
+ */
+export function summarizeMutationScopes(scopes: readonly string[]): MutationScopeSummary {
+  const scopeKinds = [
+    ...new Set(
+      scopes.map((scope) => {
+        const kind = scope.split(':', 1)[0]?.trim() ?? '';
+        return /^[A-Za-z0-9._-]{1,64}$/.test(kind) ? kind : 'unknown';
+      }),
+    ),
+  ].sort();
+  return { scopeCount: scopes.length, scopeKinds };
+}
+
 /** Acquire all scopes in lexical order on the caller's PostgreSQL transaction.
  * Every canonical write using these scopes must run before the transaction
  * callback returns, so commit/rollback/process death releases the locks. */
@@ -109,7 +131,7 @@ export async function withMutationScopes<T>(
     queueName: input.queueName,
     jobName: input.jobName,
     jobId: input.jobId,
-    scopes,
+    ...summarizeMutationScopes(scopes),
   });
   return withDatabaseMutationScopes(scopes, operation);
 }
