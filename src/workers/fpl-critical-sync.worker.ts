@@ -13,6 +13,7 @@ import {
   fenceSchedulerLaneTarget,
   getSchedulerLane,
   recoverSchedulerLaneAfterBullLoss,
+  replaceBlockedSchedulerLaneAfterCoreSourceStale,
   startSchedulerLane,
   unblockSchedulerLane,
   type SchedulerLaneTarget,
@@ -170,14 +171,18 @@ async function hotPriceSourceDependencies(
     };
   } catch (error) {
     logWarn(
-      'Archived provisional source unavailable; critical price reconciliation will re-fetch',
+      'Archived provisional source unavailable; critical price reconciliation will retry source-bound',
       {
         season: job.data.seasonCode,
         artifactId: metadata.sourceArtifactId,
         error: error instanceof Error ? error.message : String(error),
       },
     );
-    return undefined;
+    throw new Error(
+      `Archived price-change source unavailable for reconciliation: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
 
@@ -206,6 +211,7 @@ async function markHotPriceReconciled(
 async function markHotPriceReconciliationFailed(
   job: Job<FplCriticalJobData>,
   error: unknown,
+  metadataOverride?: HotPriceSourceMetadata,
 ): Promise<void> {
   // A latest-wins worker can fail after its Bull payload was superseded. Read
   // the lane's active target first so the terminal callback marks the current
@@ -213,10 +219,9 @@ async function markHotPriceReconciliationFailed(
   const targets = job.data.laneId
     ? await getSchedulerLaneTargets({ laneId: job.data.laneId }).catch(() => null)
     : null;
-  const metadata = hotPriceSourceMetadata(
-    job,
-    targets?.active?.evidence ?? targets?.desired?.evidence,
-  );
+  const metadata =
+    metadataOverride ??
+    hotPriceSourceMetadata(job, targets?.active?.evidence ?? targets?.desired?.evidence);
   if (!metadata.priceChangeBoardRevision) return;
   const snapshot = await readPriceChangeHotSnapshotAtRevision(
     job.data.seasonCode,
@@ -560,7 +565,12 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
 async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
   const season = await requireCurrentSeasonForJob(job.data);
   const { laneId, dispatchGeneration } = laneInputs(job);
-  const hotSource = await hotPriceSourceDependencies(job);
+  const targetsBeforeRepair = await getSchedulerLaneTargets({ laneId });
+  const sourceMetadata = hotPriceSourceMetadata(
+    job,
+    targetsBeforeRepair?.active?.evidence ?? targetsBeforeRepair?.desired?.evidence,
+  );
+  const hotSource = await hotPriceSourceDependencies(job, sourceMetadata);
   const blockerId = String(job.id);
   const result = await withMutationScopes(
     {
@@ -579,16 +589,31 @@ async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
       }),
   );
   if (result.outcome === 'noop') {
-    // An archived watcher repair can legitimately lose a source-time race to
-    // a newer Core publication.  syncCoreSnapshot records that publication
-    // as skipped; the blocker is therefore resolved successfully and the
-    // price lane may continue with its latest desired target.
-    const unblocked = await unblockSchedulerLane({ blockerJobId: blockerId, success: true });
-    if (!unblocked) throw new Error('Core repair stale-source unblock CAS failed');
-    logInfo('Core repair skipped stale archived source and unblocked price lane', {
+    // A stale archived source must not be replayed after a newer Core
+    // publication wins. Mark the provisional revision terminal and retire the
+    // incompatible price obligation; the replacement has no source evidence,
+    // so the next price attempt fetches a bootstrap compatible with Core.
+    await markHotPriceReconciliationFailed(
+      job,
+      new Error('Core repair source superseded by a newer Core publication'),
+      sourceMetadata,
+    );
+    const activeObligationId = targetsBeforeRepair?.lane.activeObligationId;
+    if (!activeObligationId) {
+      throw new Error('Core repair stale-source lane has no active price obligation');
+    }
+    const replaced = await replaceBlockedSchedulerLaneAfterCoreSourceStale({
+      laneId,
+      dispatchGeneration,
+      activeObligationId,
+      blockerJobId: blockerId,
+    });
+    if (!replaced.ok) throw new Error('Core repair stale-source lane replacement CAS failed');
+    logInfo('Core repair skipped stale archived source and replaced price target', {
       laneId,
       dispatchGeneration,
       blockerJobId: blockerId,
+      replacementObligationId: replaced.obligation?.obligationId,
     });
     return result;
   }

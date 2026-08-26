@@ -7,6 +7,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 import { getDbClient } from '../../src/db/singleton';
 import {
   advanceSchedulerLane,
+  blockSchedulerLane,
   claimSchedulerLaneDispatch,
   completeSchedulerLane,
   confirmSchedulerLaneEnqueued,
@@ -14,6 +15,7 @@ import {
   fenceSchedulerLaneTarget,
   getSchedulerLaneTargets,
   recoverSchedulerLaneAfterBullLoss,
+  replaceBlockedSchedulerLaneAfterCoreSourceStale,
   startSchedulerLane,
 } from '../../src/repositories/scheduler-lanes';
 import { reserveSchedulerObligation } from '../../src/repositories/scheduler-obligations';
@@ -180,6 +182,83 @@ describe('scheduler latest-wins lanes', () => {
     expect(targets?.desired?.obligationId).toBe(second.obligationId);
     expect(targets?.desired?.status).toBe('pending');
     expect(targets?.active).toBeNull();
+  });
+
+  test('replaces a stale Core-source target instead of replaying it forever', async () => {
+    const first = await reserve('2026-08-25T04:07:00.000Z', 'price-core-source-stale');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-price-job-core-source-stale',
+      obligationId: first.obligationId,
+    });
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId: 'integration-price-job-core-source-stale',
+    });
+    expect(started).not.toBeNull();
+    expect(
+      await blockSchedulerLane({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        activeObligationId: first.obligationId,
+        blockerJobId: 'integration-core-repair-stale',
+        error: new Error('Core source is older than active publication'),
+        blockerEvidence: {
+          sourceHash: 'a'.repeat(64),
+          sourceArtifactId: '00000000-0000-4000-8000-000000000001',
+          priceChangeBoardRevision: '0123456789abcdef',
+          sourceDetectedAt: '2026-08-25T04:07:01.000Z',
+          sourceFetchedAt: '2026-08-25T04:07:02.000Z',
+        },
+      }),
+    ).toBe(true);
+
+    const replaced = await replaceBlockedSchedulerLaneAfterCoreSourceStale({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      activeObligationId: first.obligationId,
+      blockerJobId: 'integration-core-repair-stale',
+    });
+    expect(replaced.ok).toBe(true);
+    expect(replaced.replaced).toBe(true);
+    expect(replaced.obligation?.obligationId).not.toBe(first.obligationId);
+    expect(replaced.obligation?.status).toBe('pending');
+    expect(replaced.obligation?.evidence.sourceHash).toBeUndefined();
+    expect(replaced.obligation?.evidence.sourceArtifactId).toBeUndefined();
+    expect(replaced.obligation?.evidence.priceChangeBoardRevision).toBeUndefined();
+    expect(replaced.lane).toMatchObject({
+      state: 'idle',
+      activeObligationId: null,
+      blockerJobId: null,
+      desiredObligationId: replaced.obligation?.obligationId,
+    });
+
+    const sql = await getDbClient();
+    const old = await sql<Array<{ status: string; reason: string | null }>>`
+      SELECT status, evidence->>'reason' AS reason
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${first.obligationId}::uuid
+    `;
+    expect(old[0]).toEqual({ status: 'skipped', reason: 'core-source-superseded' });
+
+    const replay = await replaceBlockedSchedulerLaneAfterCoreSourceStale({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      activeObligationId: first.obligationId,
+      blockerJobId: 'integration-core-repair-stale',
+    });
+    expect(replay).toMatchObject({ ok: true, replaced: false });
   });
 
   test('accepts a late enqueue confirmation after the Bull job already succeeded', async () => {

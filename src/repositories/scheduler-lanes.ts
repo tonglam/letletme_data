@@ -55,6 +55,32 @@ const RETRY_DELAY_MS = 60_000;
 const BLOCKED_RETRY_DELAY_MS = 5 * 60_000;
 const LANE_SUPERSEDED_REASON = 'superseded-by-latest-authoritative';
 const CUTOVER_SUPERSEDED_REASON = 'cutover-superseded';
+const CORE_SOURCE_SUPERSEDED_REASON = 'core-source-superseded';
+
+/**
+ * Evidence copied from a provisional price watcher is only valid for the
+ * exact bootstrap that was captured.  Once a Core repair loses its source
+ * ordering race, a replacement price obligation must fetch a fresh source
+ * instead of replaying the incompatible artifact forever.
+ */
+const PRICE_SOURCE_EVIDENCE_KEYS = [
+  'sourceHash',
+  'sourceArtifactId',
+  'priceChangeBoardRevision',
+  'sourceDetectedAt',
+  'sourceFetchedAt',
+  'blockerJobId',
+  'corePlayerCount',
+  'corePlayerDelta',
+] as const;
+
+export function withoutPriceChangeSourceEvidence(
+  evidence: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...evidence };
+  for (const key of PRICE_SOURCE_EVIDENCE_KEYS) delete result[key];
+  return result;
+}
 
 function asDate(value: Date | string | null | undefined): Date | null {
   if (value === null || value === undefined) return null;
@@ -1093,6 +1119,205 @@ export async function unblockSchedulerLane(input: {
     )
     .returning({ laneId: schedulerLanesInOps.laneId });
   return updated.length === 1;
+}
+
+export type SchedulerLaneCoreSourceReplacement = Readonly<{
+  ok: boolean;
+  replaced: boolean;
+  lane: SchedulerLane | null;
+  obligation: SchedulerObligation | null;
+}>;
+
+/**
+ * Retire a price target whose archived watcher source lost the Core source
+ * ordering race.  A successful Core repair must not simply unblock the same
+ * target: that target carries an incompatible player set and would enter the
+ * Core-admission blocker again on every retry.  Reuse a newer source-free
+ * desired target when one already exists; otherwise create one successor for
+ * the same immutable schedule bucket and let the next price worker fetch the
+ * current bootstrap.
+ *
+ * The callback can be delivered more than once (Bull completion plus a late
+ * scheduler reconciliation).  Recognise the terminal audit marker and return
+ * success without mutating a newer generation.
+ */
+export async function replaceBlockedSchedulerLaneAfterCoreSourceStale(input: {
+  laneId: string;
+  dispatchGeneration: number;
+  activeObligationId: string;
+  blockerJobId: string;
+  db?: DbHandle;
+}): Promise<SchedulerLaneCoreSourceReplacement> {
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    const nowRows = await tx.execute<{ dbNow: Date | string }>(
+      sql`SELECT clock_timestamp() AS "dbNow"`,
+    );
+    const dbNow = asDate(nowRows[0]?.dbNow);
+    if (!dbNow) throw new Error('Database clock is unavailable');
+
+    const [laneRow] = await tx
+      .select()
+      .from(schedulerLanesInOps)
+      .where(eq(schedulerLanesInOps.laneId, input.laneId))
+      .for('update')
+      .limit(1);
+    if (!laneRow) return { ok: false, replaced: false, lane: null, obligation: null };
+
+    const [oldRow] = await tx
+      .select()
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, input.activeObligationId))
+      .for('update')
+      .limit(1);
+    const oldObligation = oldRow ? mapObligation(oldRow) : null;
+
+    // Idempotent acknowledgement for a callback replay after this
+    // transaction committed and a scheduler pass already claimed the
+    // successor.  Do not accept a terminal row from an unrelated lane.
+    if (
+      oldObligation?.jobName === laneRow.jobName &&
+      oldObligation.scopeKey === laneRow.scopeKey &&
+      oldObligation.status === 'skipped' &&
+      oldObligation.evidence.reason === CORE_SOURCE_SUPERSEDED_REASON &&
+      laneRow.desiredObligationId !== input.activeObligationId &&
+      laneRow.blockerJobId !== input.blockerJobId
+    ) {
+      const [desiredRow] = await tx
+        .select()
+        .from(schedulerObligationsInOps)
+        .where(eq(schedulerObligationsInOps.obligationId, laneRow.desiredObligationId))
+        .limit(1);
+      return {
+        ok: true,
+        replaced: false,
+        lane: mapLane(laneRow),
+        obligation: desiredRow ? mapObligation(desiredRow) : null,
+      };
+    }
+
+    if (
+      laneRow.state !== 'blocked' ||
+      laneRow.dispatchGeneration !== input.dispatchGeneration ||
+      laneRow.activeObligationId !== input.activeObligationId ||
+      laneRow.blockerJobId !== input.blockerJobId ||
+      !oldObligation ||
+      oldObligation.jobName !== laneRow.jobName ||
+      oldObligation.scopeKey !== laneRow.scopeKey ||
+      oldObligation.jobName !== 'price-change-predictions'
+    ) {
+      return { ok: false, replaced: false, lane: mapLane(laneRow), obligation: null };
+    }
+
+    const [desiredRow] = await tx
+      .select()
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, laneRow.desiredObligationId))
+      .for('update')
+      .limit(1);
+    const desired = desiredRow ? mapObligation(desiredRow) : null;
+    const desiredIsRunnable = desired && ['pending', 'failed'].includes(desired.status);
+    const desiredIsDifferent = desired?.obligationId !== oldObligation.obligationId;
+    let successor = desiredIsRunnable && desiredIsDifferent ? desired : null;
+
+    if (!successor) {
+      successor = await reserveSchedulerObligation({
+        definition: {
+          name: oldObligation.jobName,
+          cadence: oldObligation.cadence,
+          timezone: oldObligation.timezone,
+          queueName: laneRow.queueName,
+        },
+        plan: {
+          scopeKey: oldObligation.scopeKey,
+          periodKey: `${oldObligation.periodKey}-core-source-refresh-${randomUUID()}`,
+          dueAt: scheduledDueAt(oldObligation),
+          source: oldObligation.source,
+          evidence: {
+            ...withoutPriceChangeSourceEvidence(oldObligation.evidence),
+            coreSourceSupersededFromObligationId: oldObligation.obligationId,
+            coreSourceSupersededReason: 'newer-core-publication',
+          },
+        },
+        db: tx,
+      });
+    }
+
+    const supersededSourceEvidence = {
+      ...(typeof oldObligation.evidence.sourceHash === 'string'
+        ? { supersededSourceHash: oldObligation.evidence.sourceHash }
+        : {}),
+      ...(typeof oldObligation.evidence.sourceArtifactId === 'string'
+        ? { supersededSourceArtifactId: oldObligation.evidence.sourceArtifactId }
+        : {}),
+      ...(typeof oldObligation.evidence.priceChangeBoardRevision === 'string'
+        ? { supersededPriceChangeBoardRevision: oldObligation.evidence.priceChangeBoardRevision }
+        : {}),
+    };
+    const retired = await tx
+      .update(schedulerObligationsInOps)
+      .set({
+        status: 'skipped',
+        evidence: terminalEvidence({
+          terminal: true,
+          reason: CORE_SOURCE_SUPERSEDED_REASON,
+          supersededByObligationId: successor.obligationId,
+          supersededByPeriodKey: successor.periodKey,
+          ...supersededSourceEvidence,
+        }),
+        completedAt: dbNow,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        updatedAt: dbNow,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.obligationId, oldObligation.obligationId),
+          inArray(schedulerObligationsInOps.status, ['pending', 'enqueued', 'running', 'failed']),
+        ),
+      )
+      .returning({ obligationId: schedulerObligationsInOps.obligationId });
+    if (retired.length !== 1) {
+      throw new Error('Stale Core repair price obligation retirement CAS failed');
+    }
+
+    const updated = await tx
+      .update(schedulerLanesInOps)
+      .set({
+        state: 'idle',
+        desiredObligationId: successor.obligationId,
+        desiredDueAt: scheduledDueAt(successor),
+        activeObligationId: null,
+        dispatchOwner: null,
+        dispatchLeaseExpiresAt: null,
+        bullJobId: null,
+        runId: null,
+        blockerJobId: null,
+        retryNotBefore: null,
+        lastError: null,
+        lastProgressAt: dbNow,
+        supersededCount: sql`${schedulerLanesInOps.supersededCount} + 1`,
+        updatedAt: dbNow,
+      })
+      .where(
+        and(
+          eq(schedulerLanesInOps.laneId, input.laneId),
+          eq(schedulerLanesInOps.dispatchGeneration, input.dispatchGeneration),
+          eq(schedulerLanesInOps.activeObligationId, input.activeObligationId),
+          eq(schedulerLanesInOps.blockerJobId, input.blockerJobId),
+          eq(schedulerLanesInOps.state, 'blocked'),
+        ),
+      )
+      .returning();
+    if (!updated[0]) throw new Error('Stale Core repair lane replacement CAS failed');
+
+    return {
+      ok: true,
+      replaced: true,
+      lane: mapLane(updated[0]),
+      obligation: successor,
+    };
+  });
 }
 
 export async function renewSchedulerLane(input: {
