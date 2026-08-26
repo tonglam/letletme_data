@@ -14,6 +14,7 @@ import {
 import { enqueueDataGovernanceJob, DATA_GOVERNANCE_JOBS } from './jobs/data-governance.jobs';
 import { enqueueMaintenanceJob } from './jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from './queues/maintenance.queue';
+import { QueueDrainOnlyError } from './services/queue-governance.service';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
 
@@ -36,6 +37,18 @@ async function runIndependentSchedulerStage<T>(
     // Each independent recovery path is retried by the next pass and retains
     // its own durable evidence. One unavailable dependency must not suppress
     // the other repair stages for this 30-second cycle.
+    if (error instanceof QueueDrainOnlyError) {
+      // Admission is an intentional deferral. Keep the obligation pending so
+      // the next pass can dispatch it after the operator/automatic gate opens;
+      // do not turn a controlled drain-only response into a false scheduler
+      // failure and restart loop.
+      logInfo('Scheduler stage deferred by queue admission gate', {
+        stage,
+        queue: error.message,
+        retryAfterSeconds: error.retryAfterSeconds,
+      });
+      return null;
+    }
     logError('Scheduler stage failed; continuing independent recovery paths', error, { stage });
     if (state) state.failed = true;
     return null;

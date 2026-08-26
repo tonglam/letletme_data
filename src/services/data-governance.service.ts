@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
 
 import {
   dataGovernanceCasesInOps,
@@ -30,6 +30,11 @@ import {
   leagueSyncQueueName,
 } from '../queues/names';
 import { mapWithConcurrency } from '../utils/async';
+import {
+  QUEUE_HEALTH_RETENTION_BATCH_SIZE,
+  QUEUE_HEALTH_RETENTION_MAX_BATCHES,
+  queueHealthRetentionCutoff,
+} from './queue-governance.service';
 
 export type GovernanceCaseStatus =
   | 'OPEN'
@@ -349,11 +354,25 @@ export async function observeFreshnessConsumerEvidence(
     // reloads so an absent writer remains a visible failure.
     throw new Error('FRESHNESS_CONSUMER_PROBE_CONFIG_MISSING');
   }
-  const windows = await listFreshnessWindows({
-    status: ['PENDING', 'BREACHED'],
-    limit: Math.min(100, Math.max(1, input.limit ?? 100)),
+  // Always give never-observed PENDING windows the first slice. Recovered
+  // breaches remain BREACHED for historical SLO accounting; including them
+  // in this cursor would let an old incident starve new consumer probes.
+  const limit = Math.min(100, Math.max(1, input.limit ?? 100));
+  const pending = await listFreshnessWindows({
+    status: 'PENDING',
+    limit,
     db: input.db,
   });
+  const breached =
+    pending.length >= limit
+      ? []
+      : await listFreshnessWindows({
+          status: 'BREACHED',
+          recovered: 'unrecovered',
+          limit: limit - pending.length,
+          db: input.db,
+        });
+  const windows = [...pending, ...breached];
   const candidates = windows.filter((window) => {
     const contract = dataContractRegistry.find((item) => item.contractKey === window.contractKey);
     const evidence = contract?.consumerEvidence;
@@ -594,6 +613,7 @@ export async function recordFreshnessObservation(input: {
 export async function listFreshnessWindows(
   input: {
     status?: FreshnessSloStatus | FreshnessSloStatus[];
+    recovered?: 'any' | 'unrecovered' | 'recovered';
     dueAfter?: Date;
     dueBefore?: Date;
     limit?: number;
@@ -609,6 +629,11 @@ export async function listFreshnessWindows(
         : [input.status];
   const filters = [
     statuses ? inArray(freshnessSloWindowsInOps.status, statuses) : undefined,
+    input.recovered === 'unrecovered'
+      ? isNull(freshnessSloWindowsInOps.recoveredAt)
+      : input.recovered === 'recovered'
+        ? sql`${freshnessSloWindowsInOps.recoveredAt} IS NOT NULL`
+        : undefined,
     input.dueAfter ? gte(freshnessSloWindowsInOps.dueAt, input.dueAfter) : undefined,
     input.dueBefore ? sql`${freshnessSloWindowsInOps.dueAt} <= ${input.dueBefore}` : undefined,
   ].filter(Boolean);
@@ -622,6 +647,53 @@ export async function listFreshnessWindows(
     )
     .orderBy(asc(freshnessSloWindowsInOps.dueAt), desc(freshnessSloWindowsInOps.windowId))
     .limit(Math.min(1_000_000, Math.max(1, input.limit ?? 100)));
+}
+
+/**
+ * Keep high-frequency queue telemetry bounded without issuing an unbounded
+ * DELETE during an incident. The monitor calls this at most hourly under a
+ * Redis lease; each invocation removes a finite number of old rows and the
+ * next invocation continues until the retention boundary is caught up.
+ */
+export async function pruneQueueHealthWindows(
+  input: {
+    now?: Date;
+    retentionDays?: number;
+    batchSize?: number;
+    maxBatches?: number;
+    db?: DbHandle;
+  } = {},
+): Promise<number> {
+  const batchSize = input.batchSize ?? QUEUE_HEALTH_RETENTION_BATCH_SIZE;
+  const maxBatches = input.maxBatches ?? QUEUE_HEALTH_RETENTION_MAX_BATCHES;
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1) {
+    throw new Error('Queue health retention batch size must be a positive integer');
+  }
+  if (!Number.isSafeInteger(maxBatches) || maxBatches < 1) {
+    throw new Error('Queue health retention max batches must be a positive integer');
+  }
+  const cutoff = queueHealthRetentionCutoff(input.now, input.retentionDays);
+  const db = input.db ?? (await getDb());
+  let deleted = 0;
+  for (let batch = 0; batch < maxBatches; batch += 1) {
+    const rows = (await db.execute(sql`
+      WITH doomed AS (
+        SELECT window_start, queue_name
+        FROM ops.queue_health_windows
+        WHERE window_start < ${cutoff}
+        ORDER BY window_start ASC, queue_name ASC
+        LIMIT ${batchSize}
+      )
+      DELETE FROM ops.queue_health_windows AS health
+      USING doomed
+      WHERE health.window_start = doomed.window_start
+        AND health.queue_name = doomed.queue_name
+      RETURNING health.queue_name
+    `)) as unknown as readonly unknown[];
+    deleted += rows.length;
+    if (rows.length < batchSize) break;
+  }
+  return deleted;
 }
 
 export async function getFreshnessWindow(windowId: number, db?: DbHandle) {

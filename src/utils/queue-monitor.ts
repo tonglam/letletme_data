@@ -12,8 +12,12 @@ import {
   percentile,
   releaseQueueMonitorLease,
   writeQueueHealthSnapshot,
+  QUEUE_HEALTH_RETENTION_LEASE_QUEUE,
+  QUEUE_HEALTH_RETENTION_MAX_BATCHES,
+  QUEUE_HEALTH_RETENTION_BATCH_SIZE,
   type QueueHealthSnapshot,
 } from '../services/queue-governance.service';
+import { pruneQueueHealthWindows } from '../services/data-governance.service';
 import {
   readRuntimeHeartbeat,
   runtimeReleaseRevision,
@@ -214,6 +218,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   let addedEvents = 0;
   let started = false;
   const leaseOwner = randomUUID();
+  let lastRetentionAttemptAt = 0;
 
   const logCounts = async (context: string) => {
     try {
@@ -349,6 +354,28 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           logError('Automatic queue admission evaluation failed', error, { queue: queueName }),
         );
         await persistWindow(withEvents, windowIntervalMs);
+        // Queue health is sampled frequently, so retain only a bounded
+        // 35-day operational history. A global Redis lease ensures one
+        // monitor performs the bounded cleanup per hour during rollouts.
+        if (Date.now() - lastRetentionAttemptAt >= 60 * 60_000) {
+          lastRetentionAttemptAt = Date.now();
+          const retentionLeader = await acquireQueueMonitorLease(
+            QUEUE_HEALTH_RETENTION_LEASE_QUEUE,
+            leaseOwner,
+            3_700,
+          ).catch((error) => {
+            logError('Queue health retention lease failed', error, { queue: queueName });
+            return false;
+          });
+          if (retentionLeader) {
+            await pruneQueueHealthWindows({
+              batchSize: QUEUE_HEALTH_RETENTION_BATCH_SIZE,
+              maxBatches: QUEUE_HEALTH_RETENTION_MAX_BATCHES,
+            }).catch((error) =>
+              logError('Queue health retention failed', error, { queue: queueName }),
+            );
+          }
+        }
       }
       lastCounts = counts;
       lastSnapshot = withEvents;

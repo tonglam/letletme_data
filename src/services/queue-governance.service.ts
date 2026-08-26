@@ -72,6 +72,10 @@ const ADMISSION_PREFIX = 'ops:queue-admission:';
 const RED_SAMPLE_PREFIX = 'ops:queue-admission-red:';
 const GREEN_SAMPLE_PREFIX = 'ops:queue-admission-green-since:';
 const MONITOR_LEASE_PREFIX = 'ops:queue-monitor-leader:';
+export const QUEUE_HEALTH_RETENTION_LEASE_QUEUE = '__queue-health-retention__';
+export const QUEUE_HEALTH_RETENTION_DAYS = 35;
+export const QUEUE_HEALTH_RETENTION_BATCH_SIZE = 5_000;
+export const QUEUE_HEALTH_RETENTION_MAX_BATCHES = 20;
 export const QUEUE_MONITOR_LEASE_TTL_SECONDS = 75;
 const AUTO_GATED_QUEUES = new Set(['data-repair', 'housekeeping', 'entry-onboarding']);
 const AUTO_GATE_RED_CLASSES = new Set<BacklogClass>([
@@ -88,6 +92,16 @@ const CRITICAL_QUEUES = new Set([
   'publication-outbox',
   'my-fpl-orchestration',
 ]);
+
+export function queueHealthRetentionCutoff(
+  now = new Date(),
+  retentionDays = QUEUE_HEALTH_RETENTION_DAYS,
+): Date {
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < 1) {
+    throw new Error('Queue health retention days must be a positive integer');
+  }
+  return new Date(now.getTime() - retentionDays * 86_400_000);
+}
 
 export function classifyBacklog(
   input: Readonly<{
@@ -308,8 +322,17 @@ async function updateAdmissionSample(
   }
   await redis.del(redKey);
   const currentGreenSince = await redis.get(greenKey);
+  const greenRetentionSeconds = Math.max(
+    getConfig().QUEUE_ADMISSION_GATE_TTL_SECONDS,
+    Math.ceil(getConfig().QUEUE_ADMISSION_GREEN_CLEAR_MS / 1_000),
+  );
   if (!currentGreenSince) {
-    await redis.set(greenKey, String(Date.now()), 'EX', 900);
+    await redis.set(greenKey, String(Date.now()), 'EX', greenRetentionSeconds);
+  } else {
+    // Preserve the original green-since timestamp while extending the key's
+    // TTL. A fixed 15-minute expiry would make a configured 24-hour clear
+    // interval restart forever before the gate can automatically open.
+    await redis.expire(greenKey, greenRetentionSeconds);
   }
   return 0;
 }

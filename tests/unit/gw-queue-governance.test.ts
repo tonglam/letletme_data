@@ -13,6 +13,7 @@ import {
   calculateDrainEtaMs,
   percentile,
 } from '../../src/services/queue-governance.service';
+import { queueHealthRetentionCutoff } from '../../src/services/queue-governance.service';
 import { summarizeDataError } from '../../src/domain/error-classification';
 import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-official-h2h.service';
 import { missingLockedPageNumbers } from '../../src/domain/official-h2h-manifest';
@@ -70,6 +71,15 @@ describe('GW queue and data governance primitives', () => {
     expect(calculateDrainEtaMs(20, 10, 10)).toBeNull();
     expect(percentile([30, 10, 20], 0.5)).toBe(20);
     expect(percentile([], 0.95)).toBeNull();
+  });
+
+  test('keeps queue-health retention bounded at a deterministic cutoff', () => {
+    expect(queueHealthRetentionCutoff(new Date('2026-08-27T00:00:00.000Z'), 35)).toEqual(
+      new Date('2026-07-23T00:00:00.000Z'),
+    );
+    expect(() => queueHealthRetentionCutoff(new Date(), 0)).toThrow(
+      'Queue health retention days must be a positive integer',
+    );
   });
 
   test('requires all producer and consumer revisions for MET', () => {
