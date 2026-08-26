@@ -309,7 +309,10 @@ async function reconcileSingleFlightBullState(lane: SchedulerLane): Promise<void
       // Price lane enqueue IDs are deterministic. Recover a successful Redis
       // add even when the scheduler lost the response before its CAS write;
       // otherwise the two-minute dispatch lease would create a duplicate.
-      const expectedJobId = `scheduler-lane-${lane.laneId}-g${lane.dispatchGeneration}`;
+      // enqueueFplCriticalPriceChangeJob applies the season prefix through
+      // getExplicitDataSyncQueueJobId; mirror that exact Bull identity when
+      // recovering an enqueue whose response was lost.
+      const expectedJobId = `${lane.scopeKey}-scheduler-lane-${lane.laneId}-g${lane.dispatchGeneration}`;
       const job = await queue.getJob(expectedJobId);
       const state = job ? await job.getState() : 'missing';
       if (['waiting', 'delayed', 'active', 'paused', 'prioritized'].includes(state)) {
