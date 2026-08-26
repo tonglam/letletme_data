@@ -151,7 +151,7 @@ export const managerLiveTournamentCoverageInFpl = fpl.table(
       table.seasonId,
       table.eventId,
       table.state,
-      table.updatedAt.desc(),
+      table.updatedAt.desc().nullsLast(),
     ),
     foreignKey({
       columns: [table.seasonId, table.eventId],
