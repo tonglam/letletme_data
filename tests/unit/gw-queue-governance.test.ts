@@ -16,6 +16,7 @@ import {
 import {
   resolveJobDispatchBudgetMs,
   resolveQueueDispatchBudgetMs,
+  resolveQueueTimingMetrics,
 } from '../../src/utils/queue-monitor';
 import { queueHealthRetentionCutoff } from '../../src/services/queue-governance.service';
 import { summarizeDataError } from '../../src/domain/error-classification';
@@ -90,6 +91,36 @@ describe('GW queue and data governance primitives', () => {
     expect(calculateDrainEtaMs(20, 10, 10)).toBeNull();
     expect(percentile([30, 10, 20], 0.5)).toBe(20);
     expect(percentile([], 0.95)).toBeNull();
+  });
+
+  test('excludes retained completed jobs outside the rolling timing window', () => {
+    const nowMs = 1_000_000;
+    const metrics = resolveQueueTimingMetrics(
+      [
+        {
+          timestamp: nowMs - 60_000,
+          processedOn: nowMs - 59_000,
+          finishedOn: nowMs - 58_000,
+          data: { providerAdmissionWaitMs: 999, providerStatus: 429 },
+        },
+        {
+          timestamp: nowMs - 4_000,
+          processedOn: nowMs - 3_000,
+          finishedOn: nowMs - 1_000,
+          data: { providerAdmissionWaitMs: 12 },
+        },
+      ],
+      { nowMs, lookbackMs: 10_000 },
+    );
+
+    expect(metrics).toEqual({
+      waitP50Ms: 1_000,
+      waitP95Ms: 1_000,
+      executionP50Ms: 2_000,
+      executionP95Ms: 2_000,
+      providerWaitP95Ms: 12,
+      provider429Rate: 0,
+    });
   });
 
   test('keeps queue-health retention bounded at a deterministic cutoff', () => {
