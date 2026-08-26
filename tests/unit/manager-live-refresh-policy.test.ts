@@ -6,6 +6,7 @@ import {
   MANAGER_LIVE_ATTEMPTS,
   MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
   MANAGER_LIVE_HOT_SCOPE_SECONDS,
+  MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT,
   MANAGER_LIVE_RETRY_BASE_DELAY_MS,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
@@ -91,6 +92,26 @@ describe('manager live refresh policy', () => {
     const chunks = managerLiveDispatchEntryChunks([...input, input[0]!]);
 
     expect(chunks).toEqual([[...input].sort((left, right) => left - right)]);
+  });
+
+  test('accepts complete authoritative tournament rosters while keeping entry scopes bounded', () => {
+    const tournamentEntryIds = Array.from(
+      { length: MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT },
+      (_, index) => index + 1,
+    );
+    expect(
+      parseManagerLiveHotScope(JSON.stringify({ ...scope, entryIds: tournamentEntryIds }))
+        ?.entryIds,
+    ).toHaveLength(MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT);
+    expect(
+      parseManagerLiveHotScope(
+        JSON.stringify({
+          ...scope,
+          tournamentId: undefined,
+          entryIds: tournamentEntryIds.slice(0, 501),
+        }),
+      ),
+    ).toBeNull();
   });
 
   test('persists a normalized hot scope for exactly six hours', async () => {

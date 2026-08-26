@@ -18,6 +18,9 @@ export const MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT = 4;
 // fetches only two pages per logical run; this is the cursor safety bound, not
 // a request-size increase.
 export const MANAGER_LIVE_CLASSIC_MAX_PAGE = 100;
+// Internal tournament hot state may carry the complete authoritative roster;
+// public manager-live reads remain bounded to 500 entry IDs per request.
+export const MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT = 5_000;
 // A cursor one past the supported page range is a terminal safety marker. It
 // is persisted so a capped crawl cannot refetch page 100 forever; workers do
 // not send this sentinel to FPL.
@@ -140,6 +143,8 @@ export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefre
     const entryIds = Array.isArray(parsed.entryIds)
       ? normalizeManagerLiveEntryIds(parsed.entryIds)
       : [];
+    const maxEntryIds =
+      parsed.tournamentId === undefined ? 500 : MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT;
     if (
       !Number.isSafeInteger(parsed.seasonId) ||
       typeof parsed.seasonCode !== 'string' ||
@@ -147,7 +152,7 @@ export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefre
       !Number.isSafeInteger(parsed.eventId) ||
       (parsed.eventId ?? 0) <= 0 ||
       entryIds.length === 0 ||
-      entryIds.length > 500 ||
+      entryIds.length > maxEntryIds ||
       entryIds.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0) ||
       (parsed.tournamentId !== undefined &&
         (!Number.isSafeInteger(parsed.tournamentId) || parsed.tournamentId <= 0))
@@ -240,7 +245,6 @@ if sameRoster then
   end
 end
 if sameRoster then
-  redis.call('EXPIRE', KEYS[1], ARGV[1])
   return current
 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])

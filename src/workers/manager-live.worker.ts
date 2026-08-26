@@ -1,7 +1,10 @@
 import { Job, QueueEvents, Worker } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
-import { shouldStopManagerLiveRefresh } from '../domain/manager-live-refresh';
+import {
+  normalizeManagerLiveEntryIds,
+  shouldStopManagerLiveRefresh,
+} from '../domain/manager-live-refresh';
 import {
   readHotManagerLiveScope,
   reconcileManagerLiveHotScopeRoster,
@@ -80,10 +83,12 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       return { stopped: 'event-finalized' as const };
     }
 
-    const authoritativeEntryIds =
+    const authoritativeEntryIds = normalizeManagerLiveEntryIds(
       job.data.tournamentId === undefined
         ? job.data.entryIds
-        : await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId);
+        : await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId),
+    );
+    const jobEntryIds = normalizeManagerLiveEntryIds(job.data.entryIds);
     const currentHotState = await readHotManagerLiveScope({
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
@@ -91,10 +96,14 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       entryIds: authoritativeEntryIds,
       ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
     });
+    const jobOwnsCurrentRoster =
+      currentHotState !== null &&
+      currentHotState.entryIds.length === jobEntryIds.length &&
+      currentHotState.entryIds.every((entryId, index) => entryId === jobEntryIds[index]);
     if (
       !job.data.generation ||
       !currentHotState ||
-      currentHotState.generation !== job.data.generation
+      (currentHotState.generation !== job.data.generation && jobOwnsCurrentRoster)
     ) {
       logInfo('Manager live refresh stopped for stale or missing hot generation', {
         eventId: job.data.eventId,
@@ -118,6 +127,21 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       classicStandingsPage: hotState.classicStandingsPage ?? undefined,
       classicStandingsCursorEpoch: hotState.classicStandingsCursorEpoch,
     };
+    const needsJobDataUpdate =
+      effectiveJobData.generation !== job.data.generation ||
+      !effectiveJobData.entryIds.every((entryId, index) => entryId === jobEntryIds[index]) ||
+      effectiveJobData.entryIds.length !== jobEntryIds.length ||
+      effectiveJobData.summaryRotationCursor !== job.data.summaryRotationCursor ||
+      effectiveJobData.classicStandingsPage !== job.data.classicStandingsPage ||
+      effectiveJobData.classicStandingsCursorEpoch !== job.data.classicStandingsCursorEpoch;
+    if (needsJobDataUpdate) {
+      // A roster reconciliation rotates the Redis generation. Persist the
+      // adopted generation/cursors on the active Bull job before doing any
+      // upstream work so a transient failure retries the new lane rather than
+      // being discarded as stale.
+      await job.updateData(effectiveJobData);
+      job.data = effectiveJobData;
+    }
     const persistedClassicCursor = hotState.classicStandingsPage;
     const classicStandingsStartPage =
       persistedClassicCursor === null
