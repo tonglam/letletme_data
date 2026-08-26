@@ -287,7 +287,6 @@ if sameRoster then
   end
 end
 if sameRoster then
-  redis.call('EXPIRE', KEYS[1], ARGV[1])
   return current
 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
