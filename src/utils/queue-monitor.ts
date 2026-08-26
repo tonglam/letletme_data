@@ -26,6 +26,7 @@ import {
 import { logDebug, logError, logInfo, logWarn } from './logger';
 import { readFplAdmissionTelemetry } from './fpl-admission';
 import { getConfig } from './config';
+import { contractForSchedulerJob, dataContractRegistry } from '../domain/data-contracts';
 
 type QueueCounts = Record<string, number>;
 
@@ -38,13 +39,68 @@ export interface QueueMonitorOptions {
   consumerHeartbeatRole?: RuntimeRole;
 }
 
-const DEFAULT_DISPATCH_BUDGETS: Record<string, number> = {
+const FALLBACK_DISPATCH_BUDGETS: Record<string, number> = {
   'official-h2h-live': 15_000,
   'live-data': 30_000,
   'live-picks': 30_000,
   'publication-outbox': 30_000,
   'data-sync': 60_000,
+  // These queues are either legacy drain-only or delegated/internal lanes and
+  // therefore do not have a public contract entry. Keep a bounded monitor
+  // budget instead of silently disabling deadline classification for them.
+  maintenance: 60 * 60_000,
+  'content-media-transcript': 15 * 60_000,
+  'content-x-scan': 15 * 60_000,
 };
+
+const REGISTRY_DISPATCH_BUDGETS = (() => {
+  const budgets = new Map<string, number>();
+  for (const contract of dataContractRegistry) {
+    const previous = budgets.get(contract.queueLane);
+    if (previous === undefined || contract.dispatchWithinMs < previous) {
+      budgets.set(contract.queueLane, contract.dispatchWithinMs);
+    }
+  }
+  return budgets;
+})();
+
+/**
+ * Queue deadline classification uses the contract of the oldest runnable job
+ * when that job is represented in the registry. This matters for mixed lanes:
+ * a `data-repair` trends job has a one-hour budget while a player summary job
+ * has a fifteen-minute budget. Fallbacks are limited to legacy or delegated
+ * queues that intentionally have no public contract.
+ */
+export function resolveQueueDispatchBudgetMs(queueName: string): number | undefined {
+  return REGISTRY_DISPATCH_BUDGETS.get(queueName) ?? FALLBACK_DISPATCH_BUDGETS[queueName];
+}
+
+export function resolveJobDispatchBudgetMs(
+  queueName: string,
+  job: Readonly<{ name: string; data?: unknown }>,
+): number | null | undefined {
+  const contractKey =
+    job.data && typeof job.data === 'object' && 'contractKey' in job.data
+      ? (job.data as { contractKey?: unknown }).contractKey
+      : undefined;
+  if (typeof contractKey === 'string') {
+    const contract = dataContractRegistry.find((item) => item.contractKey === contractKey);
+    if (contract) return contract.dispatchWithinMs;
+  }
+  const jobContract = contractForSchedulerJob(job.name);
+  if (jobContract) return jobContract.dispatchWithinMs;
+  const laneBudgets = new Set(
+    dataContractRegistry
+      .filter((contract) => contract.queueLane === queueName)
+      .map((contract) => contract.dispatchWithinMs),
+  );
+  // A mixed lane without an identifiable contract is intentionally excluded
+  // from deadline classification. Falling back to its minimum budget would
+  // turn a valid long-budget job into a false red sample and could gate the
+  // whole lane.
+  if (laneBudgets.size > 1) return null;
+  return resolveQueueDispatchBudgetMs(queueName);
+}
 
 type TimingJob = Pick<Job, 'timestamp' | 'processedOn' | 'finishedOn' | 'data'>;
 
@@ -203,7 +259,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   const queueName = options.queueName ?? queue.name;
   const pollIntervalMs = options.pollIntervalMs ?? getConfig().QUEUE_HEALTH_SNAPSHOT_INTERVAL_MS;
   const windowIntervalMs = getConfig().QUEUE_HEALTH_WINDOW_INTERVAL_MS;
-  const dispatchBudgetMs = options.dispatchBudgetMs ?? DEFAULT_DISPATCH_BUDGETS[queueName];
+  const dispatchBudgetMs = options.dispatchBudgetMs ?? resolveQueueDispatchBudgetMs(queueName);
   let pollInterval: NodeJS.Timeout | null = null;
   let lastCounts: QueueCounts | null = null;
   let lastSnapshot: QueueHealthSnapshot | undefined;
@@ -244,6 +300,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       }));
       const snapshot = await inspectQueue(queue, {
         dispatchBudgetMs,
+        dispatchBudgetForJob: (job) => resolveJobDispatchBudgetMs(queueName, job),
         releaseSha: heartbeat?.releaseSha ?? runtimeReleaseRevision(),
         ...timing,
         providerWaitP95Ms: providerTelemetry.waitP95Ms,
@@ -311,7 +368,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           failed: snapshot.failed,
           stalled: windowStalled,
           oldestRunnableAgeMs: snapshot.oldestRunnableAgeMs,
-          dispatchBudgetMs,
+          dispatchBudgetMs: snapshot.dispatchBudgetMs ?? dispatchBudgetMs,
           providerWaitP95Ms: snapshot.providerWaitP95Ms,
           provider429Rate: snapshot.provider429Rate,
           arrivalsPerMinute: windowArrivals,

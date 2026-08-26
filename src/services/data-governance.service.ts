@@ -672,7 +672,11 @@ export async function pruneQueueHealthWindows(
   if (!Number.isSafeInteger(maxBatches) || maxBatches < 1) {
     throw new Error('Queue health retention max batches must be a positive integer');
   }
-  const cutoff = queueHealthRetentionCutoff(input.now, input.retentionDays);
+  // Pass timestamps as explicitly typed ISO strings. The postgres driver used
+  // by the runtime does not serialize Date instances in generic `sql` chunks;
+  // leaving the Date object here makes the hourly retention side-channel fail
+  // with ERR_INVALID_ARG_TYPE and silently accumulates queue windows.
+  const cutoff = queueHealthRetentionCutoff(input.now, input.retentionDays).toISOString();
   const db = input.db ?? (await getDb());
   let deleted = 0;
   for (let batch = 0; batch < maxBatches; batch += 1) {
@@ -680,7 +684,7 @@ export async function pruneQueueHealthWindows(
       WITH doomed AS (
         SELECT window_start, queue_name
         FROM ops.queue_health_windows
-        WHERE window_start < ${cutoff}
+        WHERE window_start < ${cutoff}::timestamptz
         ORDER BY window_start ASC, queue_name ASC
         LIMIT ${batchSize}
       )
