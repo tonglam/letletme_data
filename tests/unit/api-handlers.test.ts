@@ -80,6 +80,8 @@ mock.module('../../src/queues/maintenance.queue', () => ({
     ENTRY_ONBOARDING: 'entry-onboarding',
     MY_FPL_SNAPSHOT: 'my-fpl-snapshot',
     MY_FPL_SNAPSHOT_OUTBOX: 'my-fpl-snapshot-outbox',
+    DATA_PUBLICATION_OUTBOX: 'data-publication-outbox',
+    UNDERSTAT_ORPHAN_RECONCILER: 'understat-orphan-reconciler',
   },
   maintenanceQueueName: 'maintenance',
   maintenanceQueue: {
@@ -89,6 +91,13 @@ mock.module('../../src/queues/maintenance.queue', () => ({
       return { id: opts.jobId as string, name, data };
     },
   },
+  queueForMaintenanceLane: () => ({
+    name: 'maintenance',
+    add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
+      maintenanceAddCalls.push({ name, data, opts });
+      return { id: opts.jobId as string, name, data };
+    },
+  }),
 }));
 
 // Mock the live-data queue (not live-data.jobs) so real enqueue helpers run and

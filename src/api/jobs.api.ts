@@ -82,6 +82,15 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       logError(`Manual job failed: ${name}`, error, { requestId });
       const status = getHttpStatusFromError(error);
       set.status = status;
+      if (
+        status === 503 &&
+        error &&
+        typeof error === 'object' &&
+        'retryAfterSeconds' in error &&
+        typeof error.retryAfterSeconds === 'number'
+      ) {
+        set.headers['retry-after'] = String(Math.max(1, Math.ceil(error.retryAfterSeconds)));
+      }
       set.headers['x-request-id'] = requestId;
       const code = getPublicErrorCode(error, status);
       return {

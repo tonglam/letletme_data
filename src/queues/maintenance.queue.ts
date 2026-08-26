@@ -2,7 +2,31 @@ import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
-import { maintenanceQueueName } from './names';
+import {
+  dataRepairQueueName,
+  entryOnboardingQueueName,
+  housekeepingQueueName,
+  myFplOrchestrationQueueName,
+  publicationOutboxQueueName,
+  maintenanceQueueName,
+} from './names';
+
+export type MaintenanceLane =
+  | 'maintenance'
+  | 'my-fpl-orchestration'
+  | 'publication-outbox'
+  | 'entry-onboarding'
+  | 'data-repair'
+  | 'housekeeping';
+
+export const MAINTENANCE_LANE_QUEUE_NAMES = {
+  maintenance: maintenanceQueueName,
+  'my-fpl-orchestration': myFplOrchestrationQueueName,
+  'publication-outbox': publicationOutboxQueueName,
+  'entry-onboarding': entryOnboardingQueueName,
+  'data-repair': dataRepairQueueName,
+  housekeeping: housekeepingQueueName,
+} as const satisfies Record<MaintenanceLane, string>;
 
 export const MAINTENANCE_JOBS = {
   PLAYER_MARKET_FRESHNESS: 'player-market-freshness-watchdog',
@@ -15,6 +39,7 @@ export const MAINTENANCE_JOBS = {
   ENTRY_ONBOARDING: 'entry-onboarding',
   MY_FPL_SNAPSHOT: 'my-fpl-snapshot',
   MY_FPL_SNAPSHOT_OUTBOX: 'my-fpl-snapshot-outbox',
+  DATA_PUBLICATION_OUTBOX: 'data-publication-outbox',
   UNDERSTAT_ORPHAN_RECONCILER: 'understat-orphan-reconciler',
 } as const;
 
@@ -23,6 +48,8 @@ export type MaintenanceJobSource = 'schedule' | 'catchup' | 'reconcile' | 'manua
 
 export type MaintenanceJobData = {
   jobName: MaintenanceJobName;
+  /** New lane routing; missing on old jobs and therefore defaults to legacy maintenance. */
+  lane?: MaintenanceLane;
   source: MaintenanceJobSource;
   seasonId: number;
   seasonCode: string;
@@ -30,6 +57,8 @@ export type MaintenanceJobData = {
   runId: string;
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired, carried into a downstream publication. */
+  freshnessWindowId?: number;
   entryId?: number;
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
@@ -52,6 +81,35 @@ export const maintenanceQueue = new Queue<MaintenanceJobData>(maintenanceQueueNa
   },
 });
 
+/** One Bull queue per maintenance lane; the legacy queue remains drain-only. */
+export const maintenanceLaneQueues = Object.fromEntries(
+  (Object.entries(MAINTENANCE_LANE_QUEUE_NAMES) as [MaintenanceLane, string][]).map(
+    ([lane, queueName]) => [
+      lane,
+      lane === 'maintenance'
+        ? maintenanceQueue
+        : new Queue<MaintenanceJobData>(queueName, {
+            connection: getQueueConnection(),
+            defaultJobOptions: {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 60_000 },
+              removeOnComplete: BULL_COMPLETED_RETENTION,
+              removeOnFail: BULL_FAILED_RETENTION,
+            },
+          }),
+    ],
+  ),
+) as Record<MaintenanceLane, Queue<MaintenanceJobData>>;
+
+export function queueForMaintenanceLane(lane: MaintenanceLane): Queue<MaintenanceJobData> {
+  return maintenanceLaneQueues[lane] ?? maintenanceQueue;
+}
+
 export async function closeMaintenanceQueue(): Promise<void> {
+  await Promise.all(
+    Object.values(maintenanceLaneQueues).map((queue) =>
+      queue === maintenanceQueue ? Promise.resolve() : queue.close(),
+    ),
+  );
   await maintenanceQueue.close();
 }

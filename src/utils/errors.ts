@@ -51,6 +51,8 @@ export class IncompleteDataSyncError extends Error implements APIError {
     public readonly reusedUnits: number,
     public readonly succeededUnits: number,
     public readonly failedUnits: number,
+    /** Optional stable cause code for aggregate failures (for governance). */
+    public readonly detailCode?: string,
   ) {
     super(message);
     this.name = 'IncompleteDataSyncError';
@@ -152,7 +154,8 @@ export function getPublicErrorMessage(error: unknown, status: number): string {
 /** Return only stable, client-actionable business codes. Database, Redis and
  * provider internals never become public error codes in production. */
 export function getPublicErrorCode(error: unknown, status: number): string | undefined {
-  if (status >= 500 || !isAPIError(error) || typeof error.code !== 'string') return undefined;
+  if (!isAPIError(error) || typeof error.code !== 'string') return undefined;
+  if (status >= 500 && !(status === 503 && error.code === 'QUEUE_DRAIN_ONLY')) return undefined;
   return /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : undefined;
 }
 

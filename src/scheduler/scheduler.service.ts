@@ -8,8 +8,9 @@ import {
   claimSchedulerObligations,
   confirmSchedulerObligationEnqueued,
   deferSchedulerObligationByIdentity,
+  deferSchedulerObligationForAdmission,
   failSchedulerObligation,
-  findDueSchedulerJobNames,
+  findDueSchedulerObligationCandidates,
   hasEarlierInFlightSchedulerObligation,
   markSchedulerObligationIrrecoverable,
   reconcilePostMatchSchedulerObligations,
@@ -37,7 +38,25 @@ import {
   type SchedulerObligationPlan,
 } from './job-registry';
 import { latestActiveSchedulerPlansByScope } from './plan-coalescing';
+import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
+import { QueueDrainOnlyError, readQueueAdmission } from '../services/queue-governance.service';
+import {
+  attachFreshnessWindowToSchedulerObligation,
+  upsertFreshnessWindow,
+} from '../services/data-governance.service';
+import { getConfig } from '../utils/config';
+import { mapWithConcurrency, TimeoutError, withTimeout } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
+import { safeDataErrorCode } from '../domain/error-classification';
+import { contractForSchedulerJob } from '../domain/data-contracts';
+import {
+  advanceSchedulerProgress,
+  completeSchedulerProgress,
+  createSchedulerProgress,
+  readSchedulerProgress,
+  writeSchedulerProgress,
+  tryWriteSchedulerProgress,
+} from './scheduler-progress';
 import {
   reconcileExpiredSchedulerEnqueueClaims,
   type SchedulerEnqueueRecoveryResult,
@@ -72,6 +91,101 @@ const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
   'tournament-event-results',
 ] as const;
 const observedPlanKeys = new Map<string, true>();
+
+// A definition resolver may still be unwinding after its bounded caller
+// timeout (for example, a driver socket that has not observed cancellation
+// yet). Coalesce that underlying operation per definition so the next 30s
+// pass cannot create another identical provider/DB request while the first is
+// still in flight. The entry is removed only after the actual resolver
+// settles; each pass still gets its own bounded timeout around that promise.
+const definitionResolutionInFlight = new WeakMap<
+  ScheduledJobDefinition,
+  Promise<readonly SchedulerObligationPlan[]>
+>();
+
+function evidenceNumber(evidence: Readonly<Record<string, unknown>> | undefined, key: string) {
+  const value = evidence?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function evidenceString(evidence: Readonly<Record<string, unknown>> | undefined, key: string) {
+  const value = evidence?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * Create the durable SLO window at the same point that the scheduler records
+ * the obligation.  The window is an evidence ledger, not a success marker:
+ * downstream publication and consumer probes fill the milestone columns and
+ * the observer settles the status later.  A missing/temporarily unavailable
+ * governance table must not prevent the business obligation from being
+ * reserved, so the write is deliberately best-effort during rolling rollout.
+ */
+async function recordFreshnessWindowForPlan(
+  definition: ScheduledJobDefinition,
+  plan: SchedulerObligationPlan,
+  seasonId: number,
+): Promise<number | null> {
+  const contract = contractForSchedulerJob(definition.name);
+  if (
+    !contract ||
+    contract.visibility === 'excluded' ||
+    contract.freshnessEvidence !== 'publication'
+  )
+    return null;
+  const eligibleAtMs = evidenceNumber(plan.evidence, 'eligibleAtMs') ?? plan.dueAt.getTime();
+  const eligibleAt = new Date(eligibleAtMs);
+  // The freshness deadline is end-to-end: the scheduler must dispatch within
+  // the dispatch budget and the producer must finish within its execution
+  // budget. A dispatch-only deadline would breach every long-running but
+  // healthy producer before it had a chance to publish evidence.
+  const dueAt = new Date(
+    plan.dueAt.getTime() + contract.dispatchWithinMs + contract.executionBudgetMs,
+  );
+  if (!Number.isFinite(eligibleAt.getTime()) || !Number.isFinite(dueAt.getTime())) return null;
+  const explicitSourceDay = evidenceString(plan.evidence, 'sourceDay');
+  const sourceDay =
+    explicitSourceDay ??
+    (definition.name === 'market-daily' && /^\d{8}$/.test(plan.periodKey)
+      ? `${plan.periodKey.slice(0, 4)}-${plan.periodKey.slice(4, 6)}-${plan.periodKey.slice(6, 8)}`
+      : undefined);
+  return upsertFreshnessWindow({
+    sloKey: contract.contractKey,
+    contractKey: contract.contractKey,
+    seasonId,
+    scopeKey: plan.scopeKey,
+    periodKey: plan.periodKey,
+    ...(plan.eventId === undefined ? {} : { eventId: plan.eventId }),
+    ...(sourceDay ? { sourceDay } : {}),
+    eligibleAt,
+    dueAt,
+    obligationDueAt: plan.dueAt,
+  }).catch((error) => {
+    logError('Freshness window reservation evidence failed', error, {
+      contractKey: contract.contractKey,
+      jobName: definition.name,
+      scopeKey: plan.scopeKey,
+      periodKey: plan.periodKey,
+    });
+    return null;
+  });
+}
+
+export function freshnessWindowIdsFromEvidence(
+  evidence: Readonly<Record<string, unknown>> | undefined,
+): readonly number[] {
+  const values: unknown[] = [];
+  if (Array.isArray(evidence?.freshnessWindowIds)) values.push(...evidence.freshnessWindowIds);
+  values.push(evidence?.freshnessWindowId);
+  return [...new Set(values)].filter(
+    (value): value is number =>
+      typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
+  );
+}
+
+function freshnessWindowIdFromEvidence(evidence: Readonly<Record<string, unknown>> | undefined) {
+  return freshnessWindowIdsFromEvidence(evidence)[0];
+}
 
 export function schedulerPlanKey(
   definition: Pick<ScheduledJobDefinition, 'name'>,
@@ -145,8 +259,37 @@ export async function resolveSchedulerDefinition(
   | Readonly<{ ok: false; error: unknown }>
 > {
   try {
-    return { ok: true, plans: await definition.resolve(context) };
+    const timeoutMs = getConfig().SCHEDULER_RESOLVE_TIMEOUT_MS;
+    let underlying = definitionResolutionInFlight.get(definition);
+    if (!underlying) {
+      const resolution = Promise.resolve().then(() => definition.resolve(context));
+      const tracked = resolution.finally(() => {
+        if (definitionResolutionInFlight.get(definition) === tracked) {
+          definitionResolutionInFlight.delete(definition);
+        }
+      });
+      underlying = tracked;
+      definitionResolutionInFlight.set(definition, tracked);
+    }
+    const plans = await withTimeout(
+      underlying,
+      timeoutMs,
+      `Scheduler definition ${definition.name} resolution exceeded ${timeoutMs}ms`,
+    );
+    return { ok: true, plans };
   } catch (error) {
+    if (error instanceof TimeoutError) {
+      const underlying = definitionResolutionInFlight.get(definition);
+      if (underlying) {
+        // A resolver may be backed by a driver operation that cannot be
+        // cancelled by Promise.race. Keep this scheduler pass in-flight until
+        // the exact operation settles; the process heartbeat/progress stale
+        // guard will then expose a genuinely hung resolver and the VPS
+        // supervisor can restart it, rather than allowing every 30s pass to
+        // accumulate another live query on the same pool.
+        await underlying.catch(() => undefined);
+      }
+    }
     return { ok: false, error };
   }
 }
@@ -156,7 +299,9 @@ export async function resolveSchedulerDefinition(
  * scheduler. A caller receives the existing Bull ID when work is already
  * waiting/running/blocked; it never creates a parallel direct data-sync job.
  */
-export async function triggerPriceChangeLane(): Promise<{
+export async function triggerPriceChangeLane(
+  options: { freshnessWindowId?: number } = {},
+): Promise<{
   bullJobId?: string | number;
   runId?: string;
   /** Whether the request enqueued a new job or joined work already pending. */
@@ -227,6 +372,23 @@ export async function triggerPriceChangeLane(): Promise<{
     queueName: definition.queueName,
     desiredObligation: obligation,
   });
+  if (options.freshnessWindowId !== undefined) {
+    await attachFreshnessWindowToSchedulerObligation({
+      obligationId: advanced.lane.desiredObligationId,
+      freshnessWindowId: options.freshnessWindowId,
+    });
+    if (!advanced.shouldDispatch && advanced.lane.activeObligationId) {
+      // A latest-wins lane may already have a Bull job in flight. Updating the
+      // desired row alone is not enough: the running worker loaded its Bull
+      // payload before this repair joined the lane. Bind the exact window to
+      // the active obligation too; the provider worker re-reads this fenced
+      // evidence before preparing its publication.
+      await attachFreshnessWindowToSchedulerObligation({
+        obligationId: advanced.lane.activeObligationId,
+        freshnessWindowId: options.freshnessWindowId,
+      });
+    }
+  }
   if (!advanced.shouldDispatch) {
     return {
       ...(advanced.lane.bullJobId
@@ -267,6 +429,8 @@ export async function triggerPriceChangeLane(): Promise<{
       generation: target.obligation.generation,
       laneId: dispatch.lane.laneId,
       dispatchGeneration: dispatch.lane.dispatchGeneration,
+      freshnessWindowId: options.freshnessWindowId,
+      freshnessWindowIds: freshnessWindowIdsFromEvidence(target.obligation.evidence),
     });
     if (result?.bullJobId === undefined)
       throw new Error('Manual price enqueue returned no Bull ID');
@@ -276,6 +440,7 @@ export async function triggerPriceChangeLane(): Promise<{
       bullJobId: result.bullJobId,
       runId: result.runId,
       obligationId: target.obligation.obligationId,
+      queueName: dispatch.lane.queueName,
     });
     if (!confirmed) throw new Error('Manual price lane enqueue confirmation CAS failed');
     return { ...result, state: 'enqueued' };
@@ -427,6 +592,7 @@ async function reconcileSingleFlightBullState(
           bullJobId: job.id,
           runId: job.data?.runId,
           obligationId: job.data?.obligationId,
+          queueName: lane.queueName,
         });
         if (!confirmed) {
           logError('Latest-wins dispatch recovery CAS failed', undefined, {
@@ -595,13 +761,40 @@ async function alertPriceLaneFreshness(
   }
 }
 
+async function admissionDisabledSchedulerJobs(
+  definitions: readonly ScheduledJobDefinition[],
+): Promise<readonly string[]> {
+  const checked = await Promise.all(
+    definitions.map(async (definition) => {
+      const lane = schedulerLaneName(definition);
+      if (!lane) return null;
+      const admission = await readQueueAdmission(lane);
+      return admission?.mode === 'DRAIN_ONLY' ? definition.name : null;
+    }),
+  );
+  return checked.filter((name): name is string => name !== null);
+}
+
 export function schedulerExecutionLanes(
-  definition: Pick<ScheduledJobDefinition, 'executionLanes' | 'queueName'>,
+  definition: Pick<ScheduledJobDefinition, 'name' | 'executionLanes' | 'queueName'>,
 ): readonly string[] {
   const configured = [...new Set(definition.executionLanes ?? [])].filter(
     (lane) => lane.trim().length > 0,
   );
-  return configured.length > 0 ? configured.sort() : [`queue:${definition.queueName}`];
+  if (configured.length > 0) return configured.sort();
+  return [`queue:${schedulerLaneName(definition)}`];
+}
+
+function schedulerLaneName(definition: Pick<ScheduledJobDefinition, 'name' | 'queueName'>): string {
+  if (definition.name === 'tournament-official-h2h-live' && getConfig().QUEUE_LANES_V2_ENABLED) {
+    return 'official-h2h-live';
+  }
+  if (definition.queueName === 'maintenance' && getConfig().QUEUE_LANES_V2_ENABLED) {
+    return (
+      MAINTENANCE_JOB_LANES[definition.name as keyof typeof MAINTENANCE_JOB_LANES] ?? 'maintenance'
+    );
+  }
+  return definition.queueName;
 }
 
 export function orderSchedulerDefinitionsForClaim(
@@ -617,15 +810,44 @@ export function orderSchedulerDefinitionsForClaim(
     .map(({ definition }) => definition);
 }
 
+export function orderSchedulerDefinitionsByEarliestDue(
+  definitions: readonly ScheduledJobDefinition[],
+  candidates: readonly { jobName: string; earliestDueAt: Date }[],
+): readonly ScheduledJobDefinition[] {
+  const dueByName = new Map(
+    candidates.map((candidate) => [candidate.jobName, candidate.earliestDueAt.getTime()]),
+  );
+  return definitions
+    .map((definition, index) => ({
+      definition,
+      index,
+      dueAt: dueByName.get(definition.name) ?? Number.POSITIVE_INFINITY,
+    }))
+    .sort(
+      (left, right) =>
+        left.dueAt - right.dueAt ||
+        (left.definition.claimPriority ?? 100) - (right.definition.claimPriority ?? 100) ||
+        left.index - right.index,
+    )
+    .map(({ definition }) => definition);
+}
+
 async function claimSchedulerWork(input: {
   definitions: readonly ScheduledJobDefinition[];
   disabledJobNames: readonly string[];
   generationCaps: Readonly<Record<string, number>>;
-}): Promise<Awaited<ReturnType<typeof claimSchedulerObligations>>> {
+  now?: Date;
+}): Promise<{
+  claimed: Awaited<ReturnType<typeof claimSchedulerObligations>>;
+  dueCount: number;
+  lateCount: number;
+  oldestDueAt: Date | null;
+}> {
   const disabled = new Set(input.disabledJobNames);
-  const dueJobNames = new Set(
-    await findDueSchedulerJobNames({ excludedJobNames: input.disabledJobNames }),
-  );
+  const candidates = await findDueSchedulerObligationCandidates({
+    excludedJobNames: input.disabledJobNames,
+  });
+  const dueJobNames = new Set(candidates.map((candidate) => candidate.jobName));
   const lanesByJob = new Map(
     input.definitions.map((definition) => [definition.name, schedulerExecutionLanes(definition)]),
   );
@@ -639,7 +861,7 @@ async function claimSchedulerWork(input: {
   }
 
   const claimed: Awaited<ReturnType<typeof claimSchedulerObligations>>[number][] = [];
-  for (const definition of orderSchedulerDefinitionsForClaim(input.definitions)) {
+  for (const definition of orderSchedulerDefinitionsByEarliestDue(input.definitions, candidates)) {
     if (claimed.length >= MAX_SCHEDULER_CLAIMS_PER_PASS) break;
     if (disabled.has(definition.name)) continue;
     if (!dueJobNames.has(definition.name)) continue;
@@ -660,7 +882,19 @@ async function claimSchedulerWork(input: {
     });
     if (result[0]) claimed.push(result[0]);
   }
-  return claimed;
+  return {
+    claimed,
+    dueCount: candidates.length,
+    lateCount: candidates.filter((candidate) => {
+      const definition = input.definitions.find((item) => item.name === candidate.jobName);
+      const dispatchWithinMs = contractForSchedulerJob(candidate.jobName)?.dispatchWithinMs ?? 0;
+      return (
+        definition !== undefined &&
+        candidate.earliestDueAt.getTime() + dispatchWithinMs < (input.now ?? new Date()).getTime()
+      );
+    }).length,
+    oldestDueAt: candidates[0]?.earliestDueAt ?? null,
+  };
 }
 
 /** Definitions without a feature flag are always enabled. */
@@ -670,13 +904,36 @@ export function isSchedulerDefinitionEnabled(
   return definition.isEnabled?.() ?? true;
 }
 
-export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassResult> {
+async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassResult> {
+  // Keep the previous completed-pass milestone while the new pass is running.
+  // Replacing it with `null` at pass start makes every ordinary in-flight pass
+  // look unhealthy to /jobs/status, even though the scheduler is still making
+  // bounded progress.  A genuinely stuck pass is detected when this preserved
+  // milestone becomes older than SCHEDULER_PROGRESS_STALE_AFTER_MS.
+  const previousProgress = await readSchedulerProgress();
+  let progress = {
+    ...createSchedulerProgress(now),
+    lastCompletedPassAt: previousProgress?.lastCompletedPassAt ?? null,
+    lastCompletedDurationMs: previousProgress?.lastCompletedDurationMs ?? null,
+    dueCount: previousProgress?.dueCount ?? 0,
+    lateCount: previousProgress?.lateCount ?? 0,
+    oldestUnfinishedDueAt: previousProgress?.oldestUnfinishedDueAt ?? null,
+    generationRecoveryCount: previousProgress?.generationRecoveryCount ?? 0,
+    leaseRecoveryCount: previousProgress?.leaseRecoveryCount ?? 0,
+  };
+  await tryWriteSchedulerProgress(progress);
+  progress = advanceSchedulerProgress(progress, 'resolve-context');
+  await tryWriteSchedulerProgress(progress);
   const season = await seasonRepository.findCurrent();
   const context = await resolveSchedulerContext(season, now);
   let reserved = 0;
   let failed = 0;
   const latestUnderstatPeriods = new Map<string, { periodKey: string; scopeKey: string }>();
   const latestLegacyPriceChangePeriods = new Map<
+    string,
+    { periodKey: string; scopeKey: string; dueAt: Date }
+  >();
+  const latestLivePicksPeriods = new Map<
     string,
     { periodKey: string; scopeKey: string; dueAt: Date }
   >();
@@ -708,14 +965,53 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
   // reloads the row, while this map records whether Redis gave us a positive
   // answer for the generation we observed.
   const singleFlightReconciled = new Map<string, boolean>();
-  for (const definition of schedulerRegistry) {
-    const resolution = await resolveSchedulerDefinition(definition, context);
+  // Definition planning is pure control-plane work. Resolve independently in
+  // a bounded batch so one slow repository/provider-adjacent stage cannot hold
+  // the entire 30-second pass hostage, while retaining deterministic result
+  // order for coalescing and evidence.
+  progress = advanceSchedulerProgress(progress, 'resolve-definitions', undefined, new Date());
+  await tryWriteSchedulerProgress(progress);
+  const resolutions = await mapWithConcurrency(schedulerRegistry, 4, (definition) =>
+    resolveSchedulerDefinition(definition, context),
+  );
+  for (const [definitionIndex, definition] of schedulerRegistry.entries()) {
+    const resolution = resolutions[definitionIndex];
+    if (!resolution) {
+      failed += 1;
+      logError(
+        'Scheduler definition resolution returned no result',
+        new Error('missing resolution'),
+        {
+          jobName: definition.name,
+        },
+      );
+      continue;
+    }
     if (!resolution.ok) {
       failed += 1;
       logError('Scheduler definition resolution failed', resolution.error, {
         jobName: definition.name,
       });
       continue;
+    }
+    if (definition.name === 'live-picks-refresh' && !isSchedulerDefinitionEnabled(definition)) {
+      // Do not reserve buckets while the dedicated lane is disabled. Existing
+      // pending buckets are coalesced to the newest target when the flag is
+      // enabled, so a rollout pause cannot create a historical burst.
+      continue;
+    }
+    if (definition.name === 'live-picks-refresh') {
+      const latestPlan = resolution.plans
+        .filter((plan) => plan.terminalStatus === undefined)
+        .sort((left, right) => left.dueAt.getTime() - right.dueAt.getTime())
+        .at(-1);
+      if (latestPlan) {
+        latestLivePicksPeriods.set(latestPlan.scopeKey, {
+          periodKey: latestPlan.periodKey,
+          scopeKey: latestPlan.scopeKey,
+          dueAt: latestPlan.dueAt,
+        });
+      }
     }
     if (
       UNDERSTAT_LATEST_AUTHORITATIVE_JOBS.includes(
@@ -795,7 +1091,11 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       for (const plan of resolution.plans) {
         const planKey = schedulerPlanKey(definition, plan);
         if (!wasPlanObserved(planKey)) {
-          postMatchReservations.push({ definition, plan, planKey });
+          postMatchReservations.push({
+            definition: { ...definition, queueName: schedulerLaneName(definition) },
+            plan,
+            planKey,
+          });
         }
       }
       continue;
@@ -808,7 +1108,23 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       // guard to avoid redundant reservation reads.
       if (wasPlanObserved(planKey) && !definition.executionPolicy) continue;
       try {
-        const obligation = await reserveSchedulerObligation({ definition, plan });
+        const obligation = await reserveSchedulerObligation({
+          definition: { ...definition, queueName: schedulerLaneName(definition) },
+          plan,
+        });
+        if (!plan.terminalStatus) {
+          const freshnessWindowId = await recordFreshnessWindowForPlan(
+            definition,
+            plan,
+            context.season.seasonId,
+          );
+          if (freshnessWindowId !== null) {
+            await attachFreshnessWindowToSchedulerObligation({
+              obligationId: obligation.obligationId,
+              freshnessWindowId,
+            });
+          }
+        }
         if (plan.terminalStatus) {
           await markSchedulerObligationIrrecoverable({
             obligationId: obligation.obligationId,
@@ -850,6 +1166,9 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     }
   }
 
+  progress = advanceSchedulerProgress(progress, 'reserve-obligations', undefined, new Date());
+  await tryWriteSchedulerProgress(progress);
+
   try {
     const result = await reconcilePostMatchSchedulerObligations({
       reservations: postMatchReservations.map(({ definition, plan }) => ({ definition, plan })),
@@ -867,6 +1186,11 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     for (const [index, { plan, planKey }] of postMatchReservations.entries()) {
       if (postMatchReservationWasPersisted(plan, result.reservations[index])) {
         rememberObservedPlan(planKey);
+        await recordFreshnessWindowForPlan(
+          postMatchReservations[index].definition,
+          plan,
+          context.season.seasonId,
+        );
       }
     }
     reserved += result.reservations.length;
@@ -877,6 +1201,9 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       boundaryCount: latestPostMatchPeriods.length,
     });
   }
+
+  progress = advanceSchedulerProgress(progress, 'coalesce-latest-authority', undefined, new Date());
+  await tryWriteSchedulerProgress(progress);
 
   for (const [jobName, latest] of latestUnderstatPeriods) {
     try {
@@ -929,6 +1256,29 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     }
   }
 
+  for (const latest of latestLivePicksPeriods.values()) {
+    try {
+      await supersedeSchedulerObligationsByDueAt({
+        jobName: 'live-picks-refresh',
+        scopeKey: latest.scopeKey,
+        beforeDueAt: latest.dueAt,
+        evidence: {
+          dataset: 'competition:live-entry-picks',
+          supersededByPeriodKey: latest.periodKey,
+        },
+      });
+    } catch (error) {
+      failed += 1;
+      logError('Live-picks stale obligation coalescing failed', error, {
+        scopeKey: latest.scopeKey,
+        periodKey: latest.periodKey,
+      });
+    }
+  }
+
+  const featureDisabledJobNames = schedulerRegistry
+    .filter((definition) => definition.isEnabled && !definition.isEnabled())
+    .map((definition) => definition.name);
   let enqueueRecovery: SchedulerEnqueueRecoveryResult | null = null;
   try {
     const latestWinsJobNames = schedulerRegistry
@@ -936,7 +1286,10 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       .map((definition) => definition.name);
     enqueueRecovery = await reconcileExpiredSchedulerEnqueueClaims({
       definitions: schedulerRegistry,
-      excludedJobNames: latestWinsJobNames,
+      // A disabled provider must not be resurrected by lease recovery while
+      // its rollout flag is off. Existing in-flight jobs can still drain, but
+      // an expired claim waits for an explicit re-enable/reconcile pass.
+      excludedJobNames: [...latestWinsJobNames, ...featureDisabledJobNames],
     });
     failed += enqueueRecovery.errors;
   } catch (error) {
@@ -944,9 +1297,10 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     logError('Scheduler expired enqueue claim reconciliation failed', error);
   }
 
-  const disabledJobNames = schedulerRegistry
-    .filter((definition) => definition.isEnabled && !definition.isEnabled())
-    .map((definition) => definition.name);
+  const disabledJobNames = [
+    ...featureDisabledJobNames,
+    ...(await admissionDisabledSchedulerJobs(schedulerRegistry)),
+  ];
   // The lane is the only authority for latest-wins jobs. Keeping these
   // obligations out of the generic claim query prevents an elapsed
   // scheduler lease from creating a second generation while Bull still owns
@@ -959,11 +1313,20 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
   const generationCaps = Object.fromEntries(
     UNDERSTAT_SCHEDULER_JOB_NAMES.map((jobName) => [jobName, UNDERSTAT_SCHEDULER_GENERATION_CAP]),
   );
-  const claimed = await claimSchedulerWork({
+  const claimResult = await claimSchedulerWork({
     definitions: schedulerRegistry,
     disabledJobNames,
     generationCaps,
+    now,
   });
+  const claimed = claimResult.claimed;
+  progress = advanceSchedulerProgress(
+    progress,
+    'enqueue-claimed-obligations',
+    { claimedCount: claimed.length },
+    new Date(),
+  );
+  await tryWriteSchedulerProgress(progress);
   let enqueued = 0;
   let laneClaimed = 0;
   await Promise.all(
@@ -1016,6 +1379,8 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         },
         obligationId: target.obligation.obligationId,
         generation: target.obligation.generation,
+        freshnessWindowId: freshnessWindowIdFromEvidence(target.obligation.evidence),
+        freshnessWindowIds: freshnessWindowIdsFromEvidence(target.obligation.evidence),
         laneId: dispatch.lane.laneId,
         dispatchGeneration: dispatch.lane.dispatchGeneration,
       });
@@ -1027,10 +1392,23 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         bullJobId,
         runId: result?.runId,
         obligationId: target.obligation.obligationId,
+        queueName: dispatch.lane.queueName,
       });
       if (!confirmed) throw new Error('Scheduler lane enqueue confirmation CAS failed');
       enqueued += 1;
     } catch (error) {
+      if (error instanceof QueueDrainOnlyError) {
+        await failSchedulerLaneDispatch({
+          laneId: dispatch.lane.laneId,
+          owner: dispatch.owner,
+          error: 'QUEUE_DRAIN_ONLY',
+        });
+        logInfo('Latest-wins scheduler lane deferred by admission gate', {
+          laneKey,
+          laneId: dispatch.lane.laneId,
+        });
+        continue;
+      }
       let reconciliationConfirmed = true;
       try {
         await reconcileSingleFlightBullState(dispatch.lane);
@@ -1102,12 +1480,15 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
           },
           obligationId: obligation.obligationId,
           generation: obligation.generation,
+          freshnessWindowId: freshnessWindowIdFromEvidence(obligation.evidence),
+          freshnessWindowIds: freshnessWindowIdsFromEvidence(obligation.evidence),
         });
         const confirmed = await confirmSchedulerObligationEnqueued({
           obligationId: obligation.obligationId,
           owner,
           bullJobId: result?.bullJobId,
           runId: result?.runId,
+          queueName: schedulerLaneName(definition),
         });
         if (!confirmed) {
           throw new Error('Scheduler enqueue confirmation lost its obligation lease');
@@ -1116,6 +1497,19 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         // checkpoint reconciler must transition this row to succeeded.
         enqueued += 1;
       } catch (error) {
+        if (error instanceof QueueDrainOnlyError) {
+          await deferSchedulerObligationForAdmission({
+            obligationId: obligation.obligationId,
+            owner,
+            generation: obligation.generation,
+            delayMs: error.retryAfterSeconds * 1_000,
+          });
+          logInfo('Scheduler obligation deferred by admission gate', {
+            jobName: obligation.jobName,
+            obligationId: obligation.obligationId,
+          });
+          return;
+        }
         failed += 1;
         await failSchedulerObligation({ obligationId: obligation.obligationId, owner, error });
         logError('Scheduler obligation enqueue failed', error, {
@@ -1134,6 +1528,16 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     failed,
     enqueueRecovery,
   });
+  progress = completeSchedulerProgress(progress, new Date());
+  progress = {
+    ...progress,
+    dueCount: claimResult.dueCount,
+    lateCount: claimResult.lateCount,
+    oldestUnfinishedDueAt: claimResult.oldestDueAt?.toISOString() ?? null,
+    leaseRecoveryCount: (enqueueRecovery?.running ?? 0) + (enqueueRecovery?.retained ?? 0),
+    generationRecoveryCount: enqueueRecovery?.retried ?? 0,
+  };
+  await tryWriteSchedulerProgress(progress);
   return {
     definitions: schedulerRegistry.length,
     reserved,
@@ -1141,6 +1545,32 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
     enqueued,
     failed,
   };
+}
+
+/**
+ * Persist a bounded error marker when a pass fails before it can complete its
+ * normal progress write. Heartbeat remains independent process liveness; this
+ * marker is what lets jobs/status distinguish a stuck pass from a healthy one.
+ */
+export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassResult> {
+  try {
+    return await runSchedulerPassUnsafe(now);
+  } catch (error) {
+    try {
+      const progress = await readSchedulerProgress();
+      if (progress) {
+        await writeSchedulerProgress({
+          ...progress,
+          currentStage: 'failed',
+          stageStartedAt: new Date().toISOString(),
+          lastPassErrorCode: safeDataErrorCode(error),
+        });
+      }
+    } catch (progressError) {
+      logError('Scheduler failure progress persistence failed', progressError);
+    }
+    throw error;
+  }
 }
 
 /**

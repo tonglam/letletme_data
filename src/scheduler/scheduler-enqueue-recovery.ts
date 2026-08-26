@@ -12,6 +12,8 @@ import {
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import type { ScheduledJobDefinition } from './job-registry';
+import { queueLaneForSchedulerJob } from '../domain/data-contracts';
+import { getConfig } from '../utils/config';
 
 const RECOVERY_JOB_TYPES: JobType[] = [
   'waiting',
@@ -203,6 +205,17 @@ function schedulerRecoveryCompletionJob(
   if (mode === 'entry-scan-finalizer') {
     return completed.find((job) => recordData(job.returnValue).scanComplete === true) ?? null;
   }
+  if (mode === 'live-picks-finalizer') {
+    return (
+      completed.find(
+        (job) =>
+          recordData(job.returnValue).scanComplete === true ||
+          (job.data.lane === 'live-picks' &&
+            recordData(job.returnValue).hasMore === false &&
+            recordData(job.returnValue).failedUnits === 0),
+      ) ?? null
+    );
+  }
   if (mode === 'tournament-cascade-finalizer') {
     return (
       completed.find(
@@ -258,11 +271,23 @@ function groupRecoveryCandidates(
 }> {
   const queues = new Map<string, SchedulerObligation[]>();
   const unknown: SchedulerObligation[] = [];
+  const lanesV2Enabled = getConfig().QUEUE_LANES_V2_ENABLED;
   const definitionQueues = new Map(
-    definitions.map((definition) => [definition.name, definition.queueName]),
+    definitions.map((definition) => [
+      definition.name,
+      lanesV2Enabled
+        ? (queueLaneForSchedulerJob(definition.name) ?? definition.queueName)
+        : definition.queueName,
+    ]),
   );
   for (const obligation of candidates) {
-    const queueName = definitionQueues.get(obligation.jobName);
+    const evidence = recordData(obligation.evidence);
+    const submittedQueueName =
+      typeof evidence.submittedQueueName === 'string' ? evidence.submittedQueueName : undefined;
+    const scheduledQueueName =
+      typeof evidence.scheduledQueueName === 'string' ? evidence.scheduledQueueName : undefined;
+    const queueName =
+      submittedQueueName ?? scheduledQueueName ?? definitionQueues.get(obligation.jobName);
     if (!queueName || queueName.includes('*')) {
       unknown.push(obligation);
       continue;
@@ -469,6 +494,7 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
               obligationId: obligation.obligationId,
               owner: obligation.leaseOwner,
               bullJobId: representative.id,
+              queueName,
             });
             if (!confirmed) {
               counters.unchanged += 1;

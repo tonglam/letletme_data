@@ -178,6 +178,12 @@ deploy() {
   trap deploy_on_exit EXIT
   require_compose
   require_files
+  if ! DATABASE_CONNECTION_BUDGET="${DATABASE_CONNECTION_BUDGET:-15}" \
+    COMPOSE_BIN="$COMPOSE_BIN" COMPOSE_FILE="$COMPOSE_FILE" PROJECT_DIR="$PROJECT_DIR" \
+    "${PROJECT_DIR}/scripts/check-database-pool-budget.sh"; then
+    log_error "Compose runtime pool budget or worker inventory check failed; services were not stopped."
+    exit 1
+  fi
   DEPLOY_OLD_REVISION=$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf '')
   DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat \
     /home/workspace/letletme-grok-runner/current.release 2>/dev/null || printf unknown)
@@ -193,7 +199,7 @@ deploy() {
   if [[ -n "${APP_IMAGE:-}" ]]; then
     export APP_IMAGE
     log_info "Pulling the configured application image"
-    compose --profile migration pull api scheduler worker content-worker media-worker migration backup
+    compose --profile migration pull api scheduler worker content-worker live-picks-worker official-h2h-worker media-worker migration backup
   else
     log_info "Building containers"
     compose build --pull
@@ -277,6 +283,11 @@ deploy() {
   fi
   if ! compose stop -t 45 media-worker; then
     log_error "Media worker did not stop cleanly; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  if ! compose stop -t 45 live-picks-worker official-h2h-worker; then
+    log_error "Provider-heavy workers did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi

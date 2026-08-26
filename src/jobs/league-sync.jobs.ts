@@ -9,6 +9,7 @@ import {
 } from '../queues/league-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type LeagueSyncJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
@@ -31,6 +32,9 @@ async function enqueueLeagueSyncJob(
 ) {
   try {
     const queue = leagueSyncQueue;
+    if (await isQueueDrainOnly(queue.name)) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
     const runId = options.runId ?? randomUUID();
     const jobData: LeagueSyncJobData = {
       seasonId: season.seasonId,

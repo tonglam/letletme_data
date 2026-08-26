@@ -85,6 +85,8 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       finalizeEvent: job.data.finalizeEvent === true,
       trigger: source,
       mutationScopes: ['data-core:fixtures', `live-snapshot:event:${eventId}`],
+      sourceRunId: job.data.runId,
+      freshnessWindowId: job.data.freshnessWindowId,
     });
     // A failed downstream enqueue causes BullMQ to retry this parent after the
     // canonical live write has already committed. On that retry the unchanged

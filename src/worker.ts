@@ -9,6 +9,7 @@ import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
 import { createTournamentRepairWorker } from './workers/tournament-repair.worker';
 import { createUnderstatWorker } from './workers/understat.worker';
 import { createMaintenanceWorker } from './workers/maintenance.worker';
+import { createDataGovernanceWorker } from './workers/data-governance.worker';
 import { databaseSingleton } from './db/singleton';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
@@ -36,6 +37,7 @@ const runtimes: WorkerRuntime[] = [
   createTournamentRepairWorker(),
   createUnderstatWorker(),
   createMaintenanceWorker(),
+  createDataGovernanceWorker(),
 ];
 
 const queueMonitors = runtimes.flatMap((runtime) =>
@@ -44,6 +46,7 @@ const queueMonitors = runtimes.flatMap((runtime) =>
       queue: target.queue,
       queueEvents: target.queueEvents,
       queueName: target.queueName,
+      consumerHeartbeatRole: 'queueWorker',
     }),
   ),
 );

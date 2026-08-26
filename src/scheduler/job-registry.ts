@@ -25,6 +25,7 @@ import {
   hasPendingOfficialH2HJob,
 } from '../jobs/tournament-sync.jobs';
 import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
+import { enqueueLivePicksRefresh } from '../jobs/live-picks.jobs';
 import {
   enqueueBugReportCleanup,
   enqueueBugReportScreenshotRetention,
@@ -62,6 +63,7 @@ import {
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
+import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -106,6 +108,8 @@ export function resolveEntryInfoSnapshotTargetEventId(
 
 export type ScheduledJobDefinition = Readonly<{
   name: string;
+  /** Contract key is attached when the immutable registry is constructed. */
+  contractKey?: string;
   cadence: string;
   timezone: string;
   catchUpPolicy: CatchUpPolicy;
@@ -125,6 +129,7 @@ export type ScheduledJobDefinition = Readonly<{
   recoveryCompletionMode?:
     | 'root-job'
     | 'entry-scan-finalizer'
+    | 'live-picks-finalizer'
     | 'tournament-cascade-finalizer'
     | 'understat-finalizer';
   manualTrigger?: boolean;
@@ -146,6 +151,10 @@ export type ScheduledJobDefinition = Readonly<{
     generation: number;
     /** Provider-specific season selected by a scheduler definition. */
     seasonCode?: string;
+    /** Exact freshness window being repaired, when dispatched by governance. */
+    freshnessWindowId?: number;
+    /** All freshness windows joined to one latest-wins publication. */
+    freshnessWindowIds?: readonly number[];
     laneId?: string;
     dispatchGeneration?: number;
   }) => Promise<{ bullJobId?: string | number; runId?: string } | void>;
@@ -717,13 +726,24 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, plan, obligationId, generation, laneId, dispatchGeneration }) => {
+    enqueue: async ({
+      context,
+      plan,
+      obligationId,
+      generation,
+      freshnessWindowId,
+      freshnessWindowIds,
+      laneId,
+      dispatchGeneration,
+    }) => {
       if (!singleFlightEnabled) {
         const job = await enqueuePriceChangePredictionsJob(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
+          freshnessWindowIds,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       }
@@ -738,6 +758,8 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
         obligationGeneration: generation,
         laneId,
         laneGeneration: dispatchGeneration,
+        freshnessWindowId,
+        freshnessWindowIds,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -843,7 +865,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, plan, obligationId, generation }) => {
+    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;
       if (!eventId) throw new Error('Live snapshot obligation has no event checkpoint');
       const job = await enqueueLiveSnapshot(context.season, eventId, 'reconcile', {
@@ -852,8 +874,61 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         reuseExisting: true,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
+    },
+  };
+}
+
+function livePicksDefinition(): ScheduledJobDefinition {
+  const refreshIntervalMs = 10 * 60_000;
+  return {
+    name: 'live-picks-refresh',
+    cadence: 'lifecycle-aware eligible-entry sweep after source canary',
+    timezone: 'UTC',
+    catchUpPolicy: 'latest-authoritative',
+    criticality: 'critical',
+    queueName: 'live-picks',
+    executionLanes: ['queue:live-picks'],
+    claimPriority: 5,
+    successPredicate: 'canary accepted and eligible entry picks finalizer completes',
+    recoveryCompletionMode: 'live-picks-finalizer',
+    manualTrigger: false,
+    isEnabled: () => getConfig().QUEUE_LANES_V2_ENABLED,
+    resolve: async (context) => {
+      // Disabled rollout must not reserve historical obligations that will all
+      // become runnable when the lane is enabled later.
+      if (!getConfig().QUEUE_LANES_V2_ENABLED) return [];
+      if (!context.currentEventId) return [];
+      const event = await loadSchedulerEvent(context, context.currentEventId);
+      if (!event) return [];
+      const fixtures = await loadSchedulerFixtures(context, event.id);
+      const decision = decideLiveLifecycle(event, fixtures, context.now);
+      if (!decision.shouldProbePicks && !decision.shouldSyncPicks) return [];
+      const bucket = Math.floor(context.now.getTime() / refreshIntervalMs);
+      const dueAt = new Date(bucket * refreshIntervalMs);
+      return [
+        {
+          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+          periodKey: `live-picks-${event.id}-${bucket}`,
+          dueAt,
+          eventId: event.id,
+          source: 'reconcile' as const,
+          evidence: { lifecycleState: decision.state, refreshIntervalMs },
+        },
+      ];
+    },
+    enqueue: async ({ context, plan, obligationId, generation }) => {
+      const eventId = plan.eventId ?? context.currentEventId;
+      if (!eventId) throw new Error('Live picks obligation has no event checkpoint');
+      const job = await enqueueLivePicksRefresh(context.season, eventId, {
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        obligationId,
+        obligationGeneration: generation,
+        now: plan.dueAt,
+      });
+      return { bullJobId: job.id };
     },
   };
 }
@@ -873,8 +948,10 @@ export function officialH2HDefinition(
     cadence: 'one-minute official H2H match-window sync',
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
-    criticality: 'normal',
+    criticality: 'critical',
     queueName: 'tournament-sync',
+    executionLanes: ['queue:official-h2h-live'],
+    claimPriority: 15,
     successPredicate: 'official H2H match snapshot and standings publish atomically',
     manualTrigger: false,
     resolve: async (context) => {
@@ -965,12 +1042,13 @@ function coreLifecycleReconcileDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, obligationId, generation }) => {
+    enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
       const job = await enqueueCoreSnapshotJob(context.season, 'reconcile', {
         jobId: `scheduler-${obligationId}-g${generation}`,
         removeOnSettle: false,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -1011,7 +1089,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, plan, obligationId, generation }) => {
+    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;
       if (!eventId) throw new Error('Live finalization obligation has no event checkpoint');
       const job = await enqueueLiveSnapshot(context.season, eventId, 'reconcile', {
@@ -1021,6 +1099,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
         reuseExisting: true,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },
@@ -1072,7 +1151,7 @@ function activePlayerStatsDefinition(): ScheduledJobDefinition {
 }
 
 export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
-  return [
+  const definitions: ScheduledJobDefinition[] = [
     coreLifecycleReconcileDefinition(),
     priceChangePredictionsDefinition(),
     dailyDefinition({
@@ -1084,12 +1163,13 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'critical',
       queueName: 'data-sync',
       successPredicate: 'core publication active for current authoritative event',
-      enqueue: async ({ context, obligationId, generation }) => {
+      enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
         const job = await enqueueCoreSnapshotJob(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },
@@ -1103,13 +1183,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'critical',
       queueName: 'data-sync',
       successPredicate: 'complete market snapshot and delivered publication',
-      enqueue: async ({ context, plan, obligationId, generation }) => {
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const job = await enqueuePlayerValuesSyncJob(context.season, 'catchup', {
           changeDate: plan.periodKey,
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },
@@ -1184,11 +1265,12 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'normal',
       queueName: 'maintenance',
       successPredicate: 'market freshness watchdog verifies a complete current snapshot',
-      enqueue: async ({ context, obligationId, generation }) => {
+      enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
         const job = await enqueuePlayerMarketFreshness(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },
@@ -1518,11 +1600,17 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       },
     }),
     liveSnapshotDefinition(),
+    livePicksDefinition(),
     officialH2HDefinition(),
     liveFinalizationDefinition(),
     activePlayerStatsDefinition(),
     contentDefinition(),
   ];
+  assertDataContractRegistry(definitions.map((definition) => definition.name));
+  return definitions.map((definition) => ({
+    ...definition,
+    contractKey: contractForSchedulerJob(definition.name)?.contractKey,
+  }));
 }
 
 export async function resolveSchedulerContext(

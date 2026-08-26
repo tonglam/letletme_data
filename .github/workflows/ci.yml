@@ -85,6 +85,11 @@ jobs:
       - name: Build production runtime image
         run: docker build --target runner --tag letletme-data:ci .
 
+      - name: Validate Compose worker inventory and database pool budget
+        run: |
+          docker compose config --quiet
+          DATABASE_CONNECTION_BUDGET=15 scripts/check-database-pool-budget.sh
+
       - name: Verify production runtime identity and host runner artifact
         run: |
           test "$(docker image inspect --format '{{.Config.User}}' letletme-data:ci)" = "appuser"

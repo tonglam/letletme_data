@@ -16,22 +16,26 @@ import {
   closeContentHttpAcquisitionQueue,
   createFormalHttpWorkerRuntime,
   enqueueFormalHttpRun,
+  getContentHttpAcquisitionQueue,
 } from './content/workers/content-http-acquisition.queue';
 import {
   closeContentXQueue,
   createConfiguredHostGrokRunner,
   createFormalXWorkerRuntime,
   enqueueFormalXRun,
+  getContentXScanQueue,
 } from './content/workers/content-x.queue';
 import {
   closeContentMediaTranscriptQueue,
   createFormalMediaWorkerRuntime,
   enqueueFormalMediaRun,
+  getContentMediaTranscriptQueue,
 } from './content/workers/content-media-transcript.queue';
 import { databaseSingleton } from './db/singleton';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
+import { startQueueMonitor } from './utils/queue-monitor';
 
 const FORMAL_SCHEDULER_INTERVAL_MS = 30_000;
 const ACQUISITION_JOB_OUTBOX_INTERVAL_MS = 5_000;
@@ -53,6 +57,7 @@ let publicationOutboxDispatcher: ReturnType<typeof setInterval> | null = null;
 let formalHttpRuntime: ReturnType<typeof createFormalHttpWorkerRuntime> | null = null;
 let formalXRuntime: ReturnType<typeof createFormalXWorkerRuntime> | null = null;
 let formalMediaRuntime: ReturnType<typeof createFormalMediaWorkerRuntime> | null = null;
+const queueMonitors: Array<{ stop: () => void }> = [];
 let formalScheduleInFlight: Promise<void> | null = null;
 let formalXInitializationInFlight: Promise<void> | null = null;
 let acquisitionJobOutboxDispatchInFlight: Promise<void> | null = null;
@@ -145,6 +150,14 @@ async function ensureFormalXRuntime(): Promise<void> {
     try {
       const executor = createConfiguredHostGrokRunner();
       formalXRuntime = createFormalXWorkerRuntime(executor, xBudgetPolicy ?? undefined);
+      queueMonitors.push(
+        startQueueMonitor({
+          queue: getContentXScanQueue(),
+          queueEvents: formalXRuntime.queueEvents,
+          queueName: 'content-x-scan',
+          consumerHeartbeatRole: 'contentWorker',
+        }),
+      );
       logInfo(
         'Host Grok runner client initialized; X acquisition will validate the host runner per run',
       );
@@ -230,8 +243,28 @@ async function startFormalAcquisition(): Promise<void> {
     return;
   }
 
-  if (flags.httpAcquisitionEnabled) formalHttpRuntime = createFormalHttpWorkerRuntime();
-  if (flags.podcastTranscriptEnabled) formalMediaRuntime = createFormalMediaWorkerRuntime();
+  if (flags.httpAcquisitionEnabled) {
+    formalHttpRuntime = createFormalHttpWorkerRuntime();
+    queueMonitors.push(
+      startQueueMonitor({
+        queue: getContentHttpAcquisitionQueue(),
+        queueEvents: formalHttpRuntime.queueEvents,
+        queueName: 'content-http-acquisition',
+        consumerHeartbeatRole: 'contentWorker',
+      }),
+    );
+  }
+  if (flags.podcastTranscriptEnabled) {
+    formalMediaRuntime = createFormalMediaWorkerRuntime();
+    queueMonitors.push(
+      startQueueMonitor({
+        queue: getContentMediaTranscriptQueue(),
+        queueEvents: formalMediaRuntime.queueEvents,
+        queueName: 'content-media-transcript',
+        consumerHeartbeatRole: 'contentWorker',
+      }),
+    );
+  }
   await dispatchPendingAcquisitionJobOutbox();
   await schedulePendingFormalAcquisition();
   acquisitionJobOutboxDispatcher = setInterval(() => {
@@ -255,6 +288,7 @@ void startFormalAcquisition().catch((error) => {
 
 async function shutdown(signal: string): Promise<void> {
   logInfo('Content worker shutting down', { signal });
+  queueMonitors.forEach((monitor) => monitor.stop());
   if (formalScheduler) clearInterval(formalScheduler);
   if (acquisitionJobOutboxDispatcher) clearInterval(acquisitionJobOutboxDispatcher);
   if (publicationOutboxDispatcher) clearInterval(publicationOutboxDispatcher);

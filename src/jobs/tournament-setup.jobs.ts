@@ -7,6 +7,7 @@ import { tournamentSetupEnqueueScope } from '../domain/mutation-scope';
 import { ConflictError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
 export interface EnqueueTournamentSetupOptions {
@@ -149,6 +150,9 @@ async function enqueueTournamentSetupUnlocked(
 ) {
   try {
     const queue = tournamentSetupQueue;
+    if (await isQueueDrainOnly(queue.name)) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
     const jobData: TournamentSetupJobData = {
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,

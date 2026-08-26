@@ -10,6 +10,7 @@ import { logError, logInfo } from '../../utils/logger';
 import { getQueueConnection } from '../../utils/queue';
 import { runFormalXWorker, type GrokBuildExecutorLike } from './formal-x.worker';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../../queues/retention';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../../services/queue-governance.service';
 
 export const contentXScanQueueName = 'content-x-scan';
 
@@ -30,6 +31,9 @@ export function getContentXScanQueue(): Queue<AcquisitionJobV1> {
 export async function enqueueFormalXRun(
   claimed: Pick<ClaimedFormalRun | ClaimedAcquisitionJobOutbox, 'job' | 'jobId' | 'priority'>,
 ): Promise<Job<AcquisitionJobV1>> {
+  if (await isQueueDrainOnly(contentXScanQueueName)) {
+    throw new QueueDrainOnlyError(contentXScanQueueName);
+  }
   const job = acquisitionJobV1Schema.parse(claimed.job);
   const queue = getContentXScanQueue();
   const existing = await queue.getJob(claimed.jobId);

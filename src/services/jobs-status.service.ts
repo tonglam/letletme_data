@@ -25,6 +25,18 @@ import { getSchedulerLaneTargets, listSchedulerLanes } from '../repositories/sch
 import { schedulerRegistry } from '../scheduler/job-registry';
 import { eventRepository } from '../repositories/events';
 import { getMyFplSnapshotOperationalStatus } from './my-fpl-snapshot-publication.service';
+import { readSchedulerProgress, isSchedulerProgressHealthy } from '../scheduler/scheduler-progress';
+import { readQueueAdmission, readQueueHealthSnapshot } from './queue-governance.service';
+import {
+  listFreshnessWindows,
+  listGovernanceCases,
+  listQueueHealthWindows,
+  countGovernanceCases,
+} from './data-governance.service';
+import { dataContractRegistry } from '../domain/data-contracts';
+import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
+import { getConfig } from '../utils/config';
+import { calculateBurnRate } from '../domain/freshness-slo';
 
 type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
 type PublicationDelivery = Readonly<{
@@ -101,22 +113,72 @@ export function selectCanonicalPriceChangeContext(input: {
   };
 }
 
-export async function getJobsStatus(): Promise<Record<string, unknown>> {
+export type JobsStatusWindow = '1h' | '6h' | '3d' | '28d';
+
+export async function getJobsStatus(
+  window: JobsStatusWindow = '1h',
+): Promise<Record<string, unknown>> {
   const season = await seasonRepository.findCurrent();
+  const windowMs: Record<JobsStatusWindow, number> = {
+    '1h': 60 * 60_000,
+    '6h': 6 * 60 * 60_000,
+    '3d': 3 * 24 * 60 * 60_000,
+    '28d': 28 * 24 * 60 * 60_000,
+  };
+  const since = new Date(Date.now() - windowMs[window]);
   const [
     obligations,
     schedulerHeartbeat,
     queueWorkerHeartbeat,
     contentWorkerHeartbeat,
     mediaWorkerHeartbeat,
+    livePicksWorkerHeartbeat,
+    officialH2HWorkerHeartbeat,
     myFplSnapshots,
+    schedulerProgress,
+    freshnessWindows,
+    governanceCases,
+    queueHealthWindows,
+    governanceCaseCount,
   ] = await Promise.all([
     schedulerObligationSummary(),
     readRuntimeHeartbeat('scheduler'),
     readRuntimeHeartbeat('queueWorker'),
     readRuntimeHeartbeat('contentWorker'),
     readRuntimeHeartbeat('mediaWorker'),
+    readRuntimeHeartbeat('livePicksWorker'),
+    readRuntimeHeartbeat('officialH2HWorker'),
     getMyFplSnapshotOperationalStatus(season),
+    readSchedulerProgress(),
+    // Query the requested SLO window at the database boundary. The table is
+    // ordered by due time; fetching the first 500 rows without a lower bound
+    // would silently drop the newest evidence after a high-volume live day.
+    listFreshnessWindows({
+      dueAfter: since,
+      dueBefore: new Date(),
+      // One row per queue/minute is expected. Keep the requested window
+      // intact instead of returning an arbitrary first page on 28-day views.
+      limit: Math.min(
+        1_000_000,
+        Math.max(5_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
+      ),
+    }).catch(() => []),
+    listGovernanceCases({ limit: 100 }).catch(() => []),
+    listQueueHealthWindows({
+      since,
+      // Raw one-minute samples are useful for short incident windows.  A
+      // 28-day view is deliberately reduced to one SQL row per queue/hour so
+      // the status endpoint cannot build a million-row JSON response.
+      ...(window === '28d' ? { bucket: 'hour' as const } : {}),
+      limit:
+        window === '28d'
+          ? Math.min(100_000, allQueueNames.length * Math.ceil(windowMs[window] / 3_600_000) + 100)
+          : Math.min(
+              100_000,
+              Math.max(1_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
+            ),
+    }).catch(() => []),
+    countGovernanceCases().catch(() => 0),
   ]);
   const scheduler = Boolean(schedulerHeartbeat && (await checkRuntimeHeartbeat('scheduler')));
   const queueWorker = Boolean(queueWorkerHeartbeat && (await checkRuntimeHeartbeat('queueWorker')));
@@ -124,6 +186,12 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
     contentWorkerHeartbeat && (await checkRuntimeHeartbeat('contentWorker')),
   );
   const mediaWorker = Boolean(mediaWorkerHeartbeat && (await checkRuntimeHeartbeat('mediaWorker')));
+  const livePicksWorker = Boolean(
+    livePicksWorkerHeartbeat && (await checkRuntimeHeartbeat('livePicksWorker')),
+  );
+  const officialH2HWorker = Boolean(
+    officialH2HWorkerHeartbeat && (await checkRuntimeHeartbeat('officialH2HWorker')),
+  );
   const publicationConsistency: Record<string, boolean> = {};
   const currentEvent = await eventRepository.findCurrent(season);
   const publicationScopes = [
@@ -224,11 +292,68 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
     },
   };
 
+  const eligibleWindows = freshnessWindows.filter((item) => item.status !== 'NOT_APPLICABLE');
+  const burnByContract = Object.fromEntries(
+    dataContractRegistry.map((contract) => {
+      const windowsForContract = eligibleWindows.filter(
+        (item) => item.contractKey === contract.contractKey,
+      );
+      const breached = windowsForContract.filter(
+        (item) => item.status === 'BREACHED' || item.status === 'INVALID',
+      ).length;
+      return [
+        contract.contractKey,
+        {
+          eligible: windowsForContract.length,
+          breached,
+          burnRate: calculateBurnRate(breached, windowsForContract.length),
+        },
+      ];
+    }),
+  );
+
+  // `/jobs/status` is consumed by lightweight health tooling and must remain
+  // safe to expose behind the service API key.  Keep the detailed governance
+  // case feed on `/ops/data-governance/cases`; only return bounded aggregate
+  // buckets here so a scope key (which may contain an entry identifier) or a
+  // raw provider/error message can never leak through the status endpoint.
+  const governanceCaseBuckets = new Map<
+    string,
+    {
+      contractKey: string;
+      lane: string;
+      status: string;
+      errorClass: string;
+      errorCode: string;
+      count: number;
+    }
+  >();
+  for (const item of governanceCases) {
+    const key = [item.contractKey, item.lane, item.status, item.errorClass, item.errorCode].join(
+      '|',
+    );
+    const current = governanceCaseBuckets.get(key);
+    if (current) {
+      current.count += 1;
+      continue;
+    }
+    governanceCaseBuckets.set(key, {
+      contractKey: item.contractKey,
+      lane: item.lane,
+      status: item.status,
+      errorClass: item.errorClass,
+      errorCode: item.errorCode,
+      count: 1,
+    });
+  }
+
   const connection = getQueueConnection();
   const queues = await Promise.all(
     allQueueNames.map(async (name) => {
       const queue = new Queue(name, { connection });
       try {
+        const healthSnapshot = await readQueueHealthSnapshot(name);
+        const admission = await readQueueAdmission(name);
         return {
           name,
           counts: await queue.getJobCounts(
@@ -240,6 +365,8 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
             'completed',
             'failed',
           ),
+          health: healthSnapshot,
+          admission,
         };
       } finally {
         await queue.close();
@@ -297,13 +424,24 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
       timezone: definition.timezone,
       catchUpPolicy: definition.catchUpPolicy,
       criticality: definition.criticality,
-      queueName: definition.queueName,
+      queueName:
+        getConfig().QUEUE_LANES_V2_ENABLED && definition.name === 'tournament-official-h2h-live'
+          ? 'official-h2h-live'
+          : getConfig().QUEUE_LANES_V2_ENABLED && definition.queueName === 'maintenance'
+            ? (MAINTENANCE_JOB_LANES[definition.name as keyof typeof MAINTENANCE_JOB_LANES] ??
+              'maintenance')
+            : definition.queueName,
       executionPolicy: definition.executionPolicy?.kind ?? null,
       successPredicate: definition.successPredicate,
+      contractKey: dataContractRegistry.find((contract) =>
+        (contract.schedulerJobs as readonly string[]).includes(definition.name),
+      )?.contractKey,
     })),
     runtime: {
       scheduler: { healthy: scheduler, heartbeat: schedulerHeartbeat },
       queueWorker: { healthy: queueWorker, heartbeat: queueWorkerHeartbeat },
+      livePicksWorker: { healthy: livePicksWorker, heartbeat: livePicksWorkerHeartbeat },
+      officialH2HWorker: { healthy: officialH2HWorker, heartbeat: officialH2HWorkerHeartbeat },
       contentWorker: { healthy: contentWorker, heartbeat: contentWorkerHeartbeat },
       mediaWorker: { healthy: mediaWorker, heartbeat: mediaWorkerHeartbeat },
     },
@@ -313,5 +451,41 @@ export async function getJobsStatus(): Promise<Record<string, unknown>> {
     priceChanges,
     schedulerLanes,
     queues,
+    schedulerProgress: {
+      healthy: schedulerProgress ? isSchedulerProgressHealthy(schedulerProgress) : false,
+      value: schedulerProgress,
+    },
+    window,
+    queueHealthWindows,
+    queueHealthWindowGranularity: window === '28d' ? 'hour' : 'raw',
+    errorBudgetBurn: {
+      target: 0.99,
+      eligible: eligibleWindows.length,
+      breached: eligibleWindows.filter(
+        (item) => item.status === 'BREACHED' || item.status === 'INVALID',
+      ).length,
+      burnRate: calculateBurnRate(
+        eligibleWindows.filter((item) => item.status === 'BREACHED' || item.status === 'INVALID')
+          .length,
+        eligibleWindows.length,
+      ),
+      byContract: burnByContract,
+    },
+    freshness: {
+      mode: getConfig().FRESHNESS_SLO_MODE,
+      pending: freshnessWindows.filter((window) => window.status === 'PENDING').length,
+      breached: freshnessWindows.filter((window) => window.status === 'BREACHED').length,
+      invalid: freshnessWindows.filter((window) => window.status === 'INVALID').length,
+      notApplicable: freshnessWindows.filter((window) => window.status === 'NOT_APPLICABLE').length,
+      oldestPendingDueAt:
+        freshnessWindows
+          .filter((window) => window.status === 'PENDING')
+          .sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime())[0]?.dueAt ?? null,
+    },
+    governanceCases: [...governanceCaseBuckets.values()],
+    governanceCaseCount,
+    admissions: queues
+      .filter((queue) => queue.admission)
+      .map((queue) => ({ name: queue.name, admission: queue.admission })),
   };
 }

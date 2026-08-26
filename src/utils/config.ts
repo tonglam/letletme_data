@@ -17,6 +17,10 @@ function integerEnv(defaultValue: number) {
   return z.coerce.number().int().default(defaultValue);
 }
 
+function boundedIntegerEnv(defaultValue: number, minimum: number, maximum: number) {
+  return z.coerce.number().int().min(minimum).max(maximum).default(defaultValue);
+}
+
 /** dotenv turns `KEY=` into `""`; treat that as unset for optional secrets/URLs. */
 function optionalEnv(schema: z.ZodType<string | undefined>) {
   return z.preprocess((value) => {
@@ -88,6 +92,24 @@ const EnvSchema = z.object({
   FPL_REQUEST_DEADLINE_MS: integerEnv(40_000),
   FPL_RETRY_BASE_DELAY_MS: integerEnv(500),
   FPL_RETRY_MAX_DELAY_MS: integerEnv(5_000),
+  // A scheduler definition is a planning stage, not an unbounded provider
+  // request.  Keep one slow definition from holding the 30-second pass (and
+  // its progress heartbeat) forever.
+  SCHEDULER_RESOLVE_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  // Queue governance rollout switches.  They are deliberately opt-in so a
+  // rolling deploy can start the new consumers before routing new work.
+  QUEUE_LANES_V2_ENABLED: booleanEnv(false),
+  QUEUE_ADMISSION_AUTOMATION_ENABLED: booleanEnv(false),
+  OFFICIAL_H2H_INCREMENTAL_ENABLED: booleanEnv(false),
+  FRESHNESS_CONSUMER_PROBES_ENABLED: booleanEnv(false),
+  FRESHNESS_SLO_MODE: z.enum(['shadow', 'enforced']).default('shadow'),
+  QUEUE_HEALTH_SNAPSHOT_INTERVAL_MS: boundedIntegerEnv(15_000, 1_000, 15 * 60_000),
+  QUEUE_HEALTH_WINDOW_INTERVAL_MS: boundedIntegerEnv(60_000, 1_000, 60 * 60_000),
+  QUEUE_HEALTH_SNAPSHOT_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
+  QUEUE_ADMISSION_GREEN_CLEAR_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
+  QUEUE_ADMISSION_GATE_TTL_SECONDS: z.coerce.number().int().min(1).max(900).default(900),
+  DATA_GOVERNANCE_WEB_URL: optionalEnv(z.string().url().optional()),
+  DATA_GOVERNANCE_PROBE_TOKEN: optionalEnv(z.string().min(16).optional()),
   ENTRY_SYNC_CHUNK_SIZE: integerEnv(500),
   ENTRY_SYNC_CONCURRENCY: integerEnv(5),
   ENTRY_SYNC_THROTTLE_MS: integerEnv(200),
@@ -276,6 +298,15 @@ export function getConfig(): AppConfig {
     if (parsed.NODE_ENV === 'production') {
       assertBugReportScreenshotStorageConfigured(parsed);
       assertFplRawSnapshotStorageConfigured(parsed);
+    }
+
+    if (
+      parsed.FRESHNESS_CONSUMER_PROBES_ENABLED &&
+      (!parsed.DATA_GOVERNANCE_WEB_URL || !parsed.DATA_GOVERNANCE_PROBE_TOKEN)
+    ) {
+      throw new Error(
+        'DATA_GOVERNANCE_WEB_URL and DATA_GOVERNANCE_PROBE_TOKEN are required when freshness consumer probes are enabled',
+      );
     }
 
     if (

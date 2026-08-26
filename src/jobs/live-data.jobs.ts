@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { liveDataQueue, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
 import { logError, logInfo } from '../utils/logger';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
@@ -71,8 +72,10 @@ export async function enqueueLiveSnapshot(
     finalizeEvent?: boolean;
     now?: Date;
     jobId?: string;
+    runId?: string;
     obligationId?: string;
     obligationGeneration?: number;
+    freshnessWindowId?: number;
     /** Scheduler reconciliation may join an already-enqueued deterministic job. */
     reuseExisting?: boolean;
   } = {},
@@ -81,6 +84,9 @@ export async function enqueueLiveSnapshot(
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
   try {
     const queue = liveDataQueue;
+    if (await isQueueDrainOnly(queue.name)) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
     const explicitJobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : null;
     let replacementJobId: string | null = null;
     const existingExplicitJob = explicitJobId ? await queue.getJob(explicitJobId) : null;
@@ -138,11 +144,23 @@ export async function enqueueLiveSnapshot(
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
-      runId: randomUUID(),
+      // The first scheduler generation uses the obligation as its evidence
+      // join key. A failed generation must receive a fresh sync-run identity;
+      // otherwise a retry would reuse the terminal failed run and be unable to
+      // activate its publication. Bull retries within one generation keep the
+      // same runId, while a new generation is fenced by a new UUID.
+      runId:
+        options.runId ??
+        (options.obligationId && (options.obligationGeneration ?? 0) === 0
+          ? options.obligationId
+          : randomUUID()),
       ...(options.obligationId ? { obligationId: options.obligationId } : {}),
       ...(options.obligationGeneration === undefined
         ? {}
         : { obligationGeneration: options.obligationGeneration }),
+      ...(options.freshnessWindowId === undefined
+        ? {}
+        : { freshnessWindowId: options.freshnessWindowId }),
       persistEventLives,
       ...(options.finalizeEvent !== undefined ? { finalizeEvent: options.finalizeEvent } : {}),
     };

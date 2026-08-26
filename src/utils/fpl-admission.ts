@@ -18,6 +18,112 @@ const LEASES_KEY = 'llm:fpl:admission:leases';
 const LEASE_KEY_PREFIX = 'llm:fpl:admission:lease:';
 const LEASE_META_KEY = 'llm:fpl:admission:lease-meta';
 const ADMISSION_SCRIPT_VERSION = 'v3';
+const TELEMETRY_PREFIX = 'ops:fpl-admission:telemetry:';
+const TELEMETRY_TTL_SECONDS = 300;
+const TELEMETRY_WINDOW_MS = 60_000;
+const WAIT_HISTOGRAM_BUCKETS = [0, 100, 500, 1_000, 5_000, 10_000, 60_000] as const;
+
+export type FplAdmissionTelemetry = Readonly<{
+  waitP95Ms: number | null;
+  response429Rate: number | null;
+  waitSamples: number;
+  responseSamples: number;
+}>;
+
+function telemetryKey(now = Date.now()): string {
+  return `${TELEMETRY_PREFIX}${Math.floor(now / TELEMETRY_WINDOW_MS)}`;
+}
+
+function waitBucket(waitMs: number): number {
+  const bounded = Math.max(0, Math.floor(waitMs));
+  return (
+    WAIT_HISTOGRAM_BUCKETS.find((bucket) => bounded <= bucket) ??
+    WAIT_HISTOGRAM_BUCKETS[WAIT_HISTOGRAM_BUCKETS.length - 1]
+  );
+}
+
+function incrementTelemetry(fields: readonly (readonly [string, number])[]): void {
+  // Test mode intentionally stays in-process and should not open a Redis
+  // connection just because a unit test exercised an FPL client helper.
+  if (useLocalTestScheduler()) return;
+  const key = telemetryKey();
+  void queueRedisSingleton
+    .getClient()
+    .then((redis) => {
+      const pipeline = redis.multi();
+      for (const [field, value] of fields) pipeline.hincrby(key, field, value);
+      pipeline.expire(key, TELEMETRY_TTL_SECONDS);
+      return pipeline.exec();
+    })
+    .catch(() => undefined);
+}
+
+/** Record one request's wait in a short-lived histogram for queue governance. */
+export function recordFplAdmissionWait(waitMs: number): void {
+  const bucket = waitBucket(waitMs);
+  incrementTelemetry([
+    ['waitSamples', 1],
+    [`waitLe${bucket}`, 1],
+  ]);
+}
+
+/** Record provider status independently of the adaptive bulk limiter. */
+export function recordFplResponseTelemetry(status: number | null): void {
+  incrementTelemetry([
+    ['responseSamples', 1],
+    ...(status === 429 ? ([['response429', 1]] as const) : []),
+  ]);
+}
+
+/** Read the last five minute buckets; failures are treated as unavailable. */
+export async function readFplAdmissionTelemetry(now = Date.now()): Promise<FplAdmissionTelemetry> {
+  if (useLocalTestScheduler()) {
+    return { waitP95Ms: null, response429Rate: null, waitSamples: 0, responseSamples: 0 };
+  }
+  try {
+    const redis = await queueRedisSingleton.getClient();
+    const keys = Array.from({ length: 5 }, (_, index) =>
+      telemetryKey(now - index * TELEMETRY_WINDOW_MS),
+    );
+    const buckets = await Promise.all(keys.map((key) => redis.hgetall(key)));
+    let waitSamples = 0;
+    let responseSamples = 0;
+    let response429 = 0;
+    const histogram = new Map<number, number>();
+    for (const bucket of buckets) {
+      waitSamples += Number(bucket.waitSamples ?? 0);
+      responseSamples += Number(bucket.responseSamples ?? 0);
+      response429 += Number(bucket.response429 ?? 0);
+      for (const threshold of WAIT_HISTOGRAM_BUCKETS) {
+        histogram.set(
+          threshold,
+          (histogram.get(threshold) ?? 0) + Number(bucket[`waitLe${threshold}`] ?? 0),
+        );
+      }
+    }
+    if (waitSamples <= 0 && responseSamples <= 0) {
+      return { waitP95Ms: null, response429Rate: null, waitSamples: 0, responseSamples: 0 };
+    }
+    const target = Math.max(1, Math.ceil(waitSamples * 0.95));
+    let cumulative = 0;
+    let waitP95Ms: number | null = null;
+    for (const threshold of WAIT_HISTOGRAM_BUCKETS) {
+      cumulative += histogram.get(threshold) ?? 0;
+      if (cumulative >= target) {
+        waitP95Ms = threshold;
+        break;
+      }
+    }
+    return {
+      waitP95Ms,
+      response429Rate: responseSamples > 0 ? response429 / responseSamples : null,
+      waitSamples,
+      responseSamples,
+    };
+  } catch {
+    return { waitP95Ms: null, response429Rate: null, waitSamples: 0, responseSamples: 0 };
+  }
+}
 
 export class FplAdmissionUnavailableError extends FPLClientError {
   constructor(cause?: unknown) {
@@ -117,6 +223,7 @@ export type FplAdmissionOptions = {
 
 type LocalWaiter = {
   priority: FplRequestPriority;
+  waitStartedAt: number;
   deadlineAt?: number;
   timeout: ReturnType<typeof setTimeout> | null;
   resolve: (release: () => void) => void;
@@ -170,6 +277,7 @@ function localDrain(): void {
     localInflight += 1;
     if (selected.priority === 'live') localLive += 1;
     else localBulk += 1;
+    recordFplAdmissionWait(Date.now() - selected.waitStartedAt);
     selected.resolve(createLocalRelease(selected.priority));
   }
 }
@@ -178,6 +286,7 @@ function localAcquire(
   priority: FplRequestPriority,
   options: FplAdmissionOptions,
 ): Promise<() => void> {
+  const waitStartedAt = Date.now();
   if (options.deadlineAt !== undefined && options.deadlineAt <= Date.now()) {
     return Promise.reject(
       new FplAdmissionUnavailableError(new Error('Admission deadline exceeded')),
@@ -187,6 +296,7 @@ function localAcquire(
     return new Promise<() => void>((resolve, reject) => {
       const waiter: LocalWaiter = {
         priority,
+        waitStartedAt,
         deadlineAt: options.deadlineAt,
         timeout: null,
         resolve,
@@ -210,6 +320,7 @@ function localAcquire(
   localInflight += 1;
   if (priority === 'live') localLive += 1;
   else localBulk += 1;
+  recordFplAdmissionWait(Date.now() - waitStartedAt);
   return Promise.resolve(createLocalRelease(priority));
 }
 
@@ -228,6 +339,7 @@ async function distributedAcquire(
   options: FplAdmissionOptions,
 ): Promise<() => void> {
   const token = randomUUID();
+  const waitStartedAt = Date.now();
   let redis: Awaited<ReturnType<typeof queueRedisSingleton.getClient>>;
   try {
     assertAdmissionDeadline(options.deadlineAt);
@@ -278,6 +390,7 @@ async function distributedAcquire(
         priority,
         admissionVersion: ADMISSION_SCRIPT_VERSION,
       });
+      recordFplAdmissionWait(Date.now() - waitStartedAt);
       let released = false;
       return async () => {
         if (released) return;
@@ -316,6 +429,7 @@ export function reportFplResponse(
   status: number | null,
   now = Date.now(),
 ): void {
+  recordFplResponseTelemetry(status);
   if (priority !== 'bulk') return;
   if (useLocalTestScheduler()) {
     if (status === 429 || (status !== null && status >= 500)) {

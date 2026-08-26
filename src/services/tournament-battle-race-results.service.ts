@@ -4,6 +4,7 @@ import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
+import { tournamentOfficialH2HManifestRepository } from '../repositories/tournament-official-h2h-manifest';
 import { enqueueTournamentRosterReconcile } from '../jobs/tournament-sync.jobs';
 import { mapWithConcurrency } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
@@ -20,6 +21,14 @@ import {
 } from './tournament-official-h2h.service';
 
 const officialH2HRecoveryTargets = new WeakMap<IncompleteDataSyncError, number[]>();
+export type OfficialH2HFullReconcileTarget = Readonly<{
+  tournamentId: number;
+  lockedScheduleHash: string | null;
+}>;
+const officialH2HFullReconcileTargets = new WeakMap<
+  IncompleteDataSyncError,
+  OfficialH2HFullReconcileTarget[]
+>();
 
 async function getOfficialH2HSyncOptions(
   season: FplSeasonRef,
@@ -41,6 +50,14 @@ async function getOfficialH2HSyncOptions(
 export function getOfficialH2HRecoveryTargets(error: unknown): readonly number[] {
   return error instanceof IncompleteDataSyncError
     ? (officialH2HRecoveryTargets.get(error) ?? [])
+    : [];
+}
+
+export function getOfficialH2HFullReconcileTargets(
+  error: unknown,
+): readonly OfficialH2HFullReconcileTarget[] {
+  return error instanceof IncompleteDataSyncError
+    ? (officialH2HFullReconcileTargets.get(error) ?? [])
     : [];
 }
 
@@ -398,18 +415,27 @@ export const LocalBattleStrategy = {
 export async function syncOfficialH2HTournaments(
   season: FplSeasonRef,
   eventId: number,
+  syncOptions: Readonly<{ forceFull?: boolean; tournamentId?: number }> = {},
 ): Promise<{ eventId: number; updatedGroups: number; updatedResults: number; skipped: number }> {
-  const tournaments = (
-    await tournamentInfoRepository.findBattleRaceByEvent(season, eventId)
-  ).filter(isOfficialH2HTournament);
-  const options = tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
+  const tournaments = (await tournamentInfoRepository.findBattleRaceByEvent(season, eventId))
+    .filter(isOfficialH2HTournament)
+    .filter(
+      (tournament) =>
+        syncOptions.tournamentId === undefined || tournament.id === syncOptions.tournamentId,
+    );
+  const scoreOptions =
+    tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
   const recoveryTournamentIds: number[] = [];
+  const fullReconcileTargets: OfficialH2HFullReconcileTarget[] = [];
   const results = await mapWithConcurrency(tournaments, 5, async (tournament) => {
     try {
-      return await OfficialH2HStrategy.sync(season, tournament, eventId, options);
+      return await OfficialH2HStrategy.sync(season, tournament, eventId, {
+        ...scoreOptions,
+        forceFull: syncOptions.forceFull === true,
+      });
     } catch (error) {
       if (
         error !== null &&
@@ -418,6 +444,35 @@ export async function syncOfficialH2HTournaments(
         error.code === 'TOURNAMENT_OFFICIAL_H2H_STANDINGS_INCOMPLETE'
       ) {
         recoveryTournamentIds.push(tournament.id);
+      }
+      if (
+        error !== null &&
+        typeof error === 'object' &&
+        'code' in error &&
+        typeof error.code === 'string' &&
+        (error.code === 'TOURNAMENT_OFFICIAL_H2H_PAGE_CHANGED' ||
+          error.code === 'TOURNAMENT_OFFICIAL_H2H_SCHEDULE_CHANGED' ||
+          error.code === 'TOURNAMENT_OFFICIAL_H2H_KNOCKOUT_CHANGED')
+      ) {
+        // The selector already read the locked manifest before fetching. Keep
+        // only the hash as a bounded, non-sensitive dedupe key for the guarded
+        // full reconciliation that follows this failed atomic attempt.
+        let lockedScheduleHash: string | null = null;
+        try {
+          const manifests = await tournamentOfficialH2HManifestRepository.findByTournament(
+            season,
+            tournament.id,
+          );
+          const hashes = [...new Set(manifests.map((manifest) => manifest.scheduleHash))];
+          lockedScheduleHash = hashes.length === 1 ? (hashes[0] ?? null) : null;
+        } catch (manifestError) {
+          logWarn('Could not read locked H2H schedule hash for reconciliation key', {
+            tournamentId: tournament.id,
+            eventId,
+            error: manifestError instanceof Error ? manifestError.message : 'unknown',
+          });
+        }
+        fullReconcileTargets.push({ tournamentId: tournament.id, lockedScheduleHash });
       }
       failures.push(tournament.id);
       logError('Official H2H strategy failed', error, { tournamentId: tournament.id, eventId });
@@ -435,8 +490,16 @@ export async function syncOfficialH2HTournaments(
       0,
       tournaments.length - failures.length,
       failures.length,
+      fullReconcileTargets.length > 0 ? 'TOURNAMENT_OFFICIAL_H2H_SCHEDULE_CHANGED' : undefined,
     );
     officialH2HRecoveryTargets.set(error, recoveryTournamentIds);
+    officialH2HFullReconcileTargets.set(
+      error,
+      fullReconcileTargets.filter(
+        (target, index, all) =>
+          all.findIndex((candidate) => candidate.tournamentId === target.tournamentId) === index,
+      ),
+    );
     throw error;
   }
   return { eventId, updatedGroups, updatedResults, skipped: 0 };

@@ -98,6 +98,34 @@ describe('data publication contract', () => {
     ).toBeNull();
   });
 
+  test('preserves all joined freshness windows in a price publication manifest', () => {
+    const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
+    const manifest: DataPublicationManifest = {
+      dataset: 'fpl:price-changes',
+      seasonCode: '2627',
+      eventId: null,
+      revision: 9,
+      publicationId: '00000000-0000-4000-8000-000000000009',
+      sourceCheckedAt: '2026-08-09T01:00:00.000Z',
+      freshnessWindowId: 17,
+      freshnessWindowIds: [17, 18],
+      publishedAt: '2026-08-09T01:00:01.000Z',
+      state: 'active',
+      items: ['context', 'players'].map((name) => ({
+        name,
+        key: dataPublicationItemKey(priceScope, 9, name),
+        type: 'string',
+        count: 1,
+        bytes: Buffer.byteLength(payload, 'utf8'),
+        sha256: createHash('sha256').update(payload).digest('hex'),
+      })),
+    };
+    expect(parseDataPublicationManifest(JSON.stringify(manifest))).toEqual(manifest);
+    expect(
+      parseDataPublicationManifest(JSON.stringify({ ...manifest, freshnessWindowIds: [0] })),
+    ).toBeNull();
+  });
+
   test('rejects malformed IDs, duplicate names, and noncanonical item keys', () => {
     const manifest = validManifest();
     expect(
