@@ -281,7 +281,13 @@ function groupRecoveryCandidates(
     ]),
   );
   for (const obligation of candidates) {
-    const queueName = definitionQueues.get(obligation.jobName);
+    const evidence = recordData(obligation.evidence);
+    const submittedQueueName =
+      typeof evidence.submittedQueueName === 'string' ? evidence.submittedQueueName : undefined;
+    const scheduledQueueName =
+      typeof evidence.scheduledQueueName === 'string' ? evidence.scheduledQueueName : undefined;
+    const queueName =
+      submittedQueueName ?? scheduledQueueName ?? definitionQueues.get(obligation.jobName);
     if (!queueName || queueName.includes('*')) {
       unknown.push(obligation);
       continue;
@@ -488,6 +494,7 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
               obligationId: obligation.obligationId,
               owner: obligation.leaseOwner,
               bullJobId: representative.id,
+              queueName,
             });
             if (!confirmed) {
               counters.unchanged += 1;

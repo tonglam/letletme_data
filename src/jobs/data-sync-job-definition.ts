@@ -25,6 +25,8 @@ export interface DataSyncEnqueueOptions {
   blockerLaneId?: string;
   /** Exact freshness window being repaired, when this is a governance retry. */
   freshnessWindowId?: number;
+  /** All joined freshness windows for a shared latest-wins publication. */
+  freshnessWindowIds?: readonly number[];
   /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
   removeOnSettle?: boolean;
 }
@@ -80,5 +82,8 @@ export function createDataSyncJobData(
     ...(options.freshnessWindowId === undefined
       ? {}
       : { freshnessWindowId: options.freshnessWindowId }),
+    ...(options.freshnessWindowIds === undefined
+      ? {}
+      : { freshnessWindowIds: [...new Set(options.freshnessWindowIds)] }),
   };
 }

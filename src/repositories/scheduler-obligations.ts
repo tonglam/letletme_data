@@ -198,7 +198,7 @@ function immutableScheduledDueAt(dueAt: Date, scheduledDueAtMs: string | null): 
 }
 
 export async function reserveSchedulerObligation(input: {
-  definition: { name: string; cadence: string; timezone: string };
+  definition: { name: string; cadence: string; timezone: string; queueName?: string };
   plan: SchedulerObligationPlan;
   db?: DbOrTransaction;
 }): Promise<SchedulerObligation> {
@@ -226,6 +226,7 @@ export async function reserveSchedulerObligation(input: {
         // due_at is mutable retry state; retain the original schedule boundary
         // so latest-authoritative coalescing cannot be fooled by a retry delay.
         scheduledDueAtMs,
+        ...(input.definition.queueName ? { scheduledQueueName: input.definition.queueName } : {}),
       },
     })
     .onConflictDoNothing({
@@ -608,7 +609,7 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
 }
 
 export type SchedulerObligationReservation = Readonly<{
-  definition: Readonly<{ name: string; cadence: string; timezone: string }>;
+  definition: Readonly<{ name: string; cadence: string; timezone: string; queueName?: string }>;
   plan: SchedulerObligationPlan;
 }>;
 
@@ -1036,6 +1037,8 @@ export async function confirmSchedulerObligationEnqueued(input: {
   owner: string;
   bullJobId?: string | number;
   runId?: string;
+  /** Actual Bull queue used for this generation. */
+  queueName?: string;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -1044,6 +1047,11 @@ export async function confirmSchedulerObligationEnqueued(input: {
     .set({
       bullJobId: input.bullJobId === undefined ? undefined : String(input.bullJobId),
       runId: input.runId,
+      ...(input.queueName
+        ? {
+            evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('submittedQueueName', ${input.queueName})`,
+          }
+        : {}),
       // Enqueue acknowledgement is not execution. The worker moves this row
       // to running only after atomically validating its generation fence.
       updatedAt: sql`clock_timestamp()`,

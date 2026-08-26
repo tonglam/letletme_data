@@ -171,9 +171,20 @@ async function recordFreshnessWindowForPlan(
   });
 }
 
+export function freshnessWindowIdsFromEvidence(
+  evidence: Readonly<Record<string, unknown>> | undefined,
+): readonly number[] {
+  const values: unknown[] = [];
+  if (Array.isArray(evidence?.freshnessWindowIds)) values.push(...evidence.freshnessWindowIds);
+  values.push(evidence?.freshnessWindowId);
+  return [...new Set(values)].filter(
+    (value): value is number =>
+      typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
+  );
+}
+
 function freshnessWindowIdFromEvidence(evidence: Readonly<Record<string, unknown>> | undefined) {
-  const value = evidence?.freshnessWindowId;
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  return freshnessWindowIdsFromEvidence(evidence)[0];
 }
 
 export function schedulerPlanKey(
@@ -419,6 +430,7 @@ export async function triggerPriceChangeLane(
       laneId: dispatch.lane.laneId,
       dispatchGeneration: dispatch.lane.dispatchGeneration,
       freshnessWindowId: options.freshnessWindowId,
+      freshnessWindowIds: freshnessWindowIdsFromEvidence(target.obligation.evidence),
     });
     if (result?.bullJobId === undefined)
       throw new Error('Manual price enqueue returned no Bull ID');
@@ -428,6 +440,7 @@ export async function triggerPriceChangeLane(
       bullJobId: result.bullJobId,
       runId: result.runId,
       obligationId: target.obligation.obligationId,
+      queueName: dispatch.lane.queueName,
     });
     if (!confirmed) throw new Error('Manual price lane enqueue confirmation CAS failed');
     return { ...result, state: 'enqueued' };
@@ -579,6 +592,7 @@ async function reconcileSingleFlightBullState(
           bullJobId: job.id,
           runId: job.data?.runId,
           obligationId: job.data?.obligationId,
+          queueName: lane.queueName,
         });
         if (!confirmed) {
           logError('Latest-wins dispatch recovery CAS failed', undefined, {
@@ -919,6 +933,10 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     string,
     { periodKey: string; scopeKey: string; dueAt: Date }
   >();
+  const latestLivePicksPeriods = new Map<
+    string,
+    { periodKey: string; scopeKey: string; dueAt: Date }
+  >();
   const latestPostMatchPeriods: Array<{
     jobName: (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number];
     periodKey: string;
@@ -975,6 +993,25 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         jobName: definition.name,
       });
       continue;
+    }
+    if (definition.name === 'live-picks-refresh' && !isSchedulerDefinitionEnabled(definition)) {
+      // Do not reserve buckets while the dedicated lane is disabled. Existing
+      // pending buckets are coalesced to the newest target when the flag is
+      // enabled, so a rollout pause cannot create a historical burst.
+      continue;
+    }
+    if (definition.name === 'live-picks-refresh') {
+      const latestPlan = resolution.plans
+        .filter((plan) => plan.terminalStatus === undefined)
+        .sort((left, right) => left.dueAt.getTime() - right.dueAt.getTime())
+        .at(-1);
+      if (latestPlan) {
+        latestLivePicksPeriods.set(latestPlan.scopeKey, {
+          periodKey: latestPlan.periodKey,
+          scopeKey: latestPlan.scopeKey,
+          dueAt: latestPlan.dueAt,
+        });
+      }
     }
     if (
       UNDERSTAT_LATEST_AUTHORITATIVE_JOBS.includes(
@@ -1054,7 +1091,11 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       for (const plan of resolution.plans) {
         const planKey = schedulerPlanKey(definition, plan);
         if (!wasPlanObserved(planKey)) {
-          postMatchReservations.push({ definition, plan, planKey });
+          postMatchReservations.push({
+            definition: { ...definition, queueName: schedulerLaneName(definition) },
+            plan,
+            planKey,
+          });
         }
       }
       continue;
@@ -1067,7 +1108,10 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       // guard to avoid redundant reservation reads.
       if (wasPlanObserved(planKey) && !definition.executionPolicy) continue;
       try {
-        const obligation = await reserveSchedulerObligation({ definition, plan });
+        const obligation = await reserveSchedulerObligation({
+          definition: { ...definition, queueName: schedulerLaneName(definition) },
+          plan,
+        });
         if (!plan.terminalStatus) {
           const freshnessWindowId = await recordFreshnessWindowForPlan(
             definition,
@@ -1212,6 +1256,29 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     }
   }
 
+  for (const latest of latestLivePicksPeriods.values()) {
+    try {
+      await supersedeSchedulerObligationsByDueAt({
+        jobName: 'live-picks-refresh',
+        scopeKey: latest.scopeKey,
+        beforeDueAt: latest.dueAt,
+        evidence: {
+          dataset: 'competition:live-entry-picks',
+          supersededByPeriodKey: latest.periodKey,
+        },
+      });
+    } catch (error) {
+      failed += 1;
+      logError('Live-picks stale obligation coalescing failed', error, {
+        scopeKey: latest.scopeKey,
+        periodKey: latest.periodKey,
+      });
+    }
+  }
+
+  const featureDisabledJobNames = schedulerRegistry
+    .filter((definition) => definition.isEnabled && !definition.isEnabled())
+    .map((definition) => definition.name);
   let enqueueRecovery: SchedulerEnqueueRecoveryResult | null = null;
   try {
     const latestWinsJobNames = schedulerRegistry
@@ -1219,7 +1286,10 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       .map((definition) => definition.name);
     enqueueRecovery = await reconcileExpiredSchedulerEnqueueClaims({
       definitions: schedulerRegistry,
-      excludedJobNames: latestWinsJobNames,
+      // A disabled provider must not be resurrected by lease recovery while
+      // its rollout flag is off. Existing in-flight jobs can still drain, but
+      // an expired claim waits for an explicit re-enable/reconcile pass.
+      excludedJobNames: [...latestWinsJobNames, ...featureDisabledJobNames],
     });
     failed += enqueueRecovery.errors;
   } catch (error) {
@@ -1227,9 +1297,6 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     logError('Scheduler expired enqueue claim reconciliation failed', error);
   }
 
-  const featureDisabledJobNames = schedulerRegistry
-    .filter((definition) => definition.isEnabled && !definition.isEnabled())
-    .map((definition) => definition.name);
   const disabledJobNames = [
     ...featureDisabledJobNames,
     ...(await admissionDisabledSchedulerJobs(schedulerRegistry)),
@@ -1313,6 +1380,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         obligationId: target.obligation.obligationId,
         generation: target.obligation.generation,
         freshnessWindowId: freshnessWindowIdFromEvidence(target.obligation.evidence),
+        freshnessWindowIds: freshnessWindowIdsFromEvidence(target.obligation.evidence),
         laneId: dispatch.lane.laneId,
         dispatchGeneration: dispatch.lane.dispatchGeneration,
       });
@@ -1324,6 +1392,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         bullJobId,
         runId: result?.runId,
         obligationId: target.obligation.obligationId,
+        queueName: dispatch.lane.queueName,
       });
       if (!confirmed) throw new Error('Scheduler lane enqueue confirmation CAS failed');
       enqueued += 1;
@@ -1412,12 +1481,14 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
           obligationId: obligation.obligationId,
           generation: obligation.generation,
           freshnessWindowId: freshnessWindowIdFromEvidence(obligation.evidence),
+          freshnessWindowIds: freshnessWindowIdsFromEvidence(obligation.evidence),
         });
         const confirmed = await confirmSchedulerObligationEnqueued({
           obligationId: obligation.obligationId,
           owner,
           bullJobId: result?.bullJobId,
           runId: result?.runId,
+          queueName: schedulerLaneName(definition),
         });
         if (!confirmed) {
           throw new Error('Scheduler enqueue confirmation lost its obligation lease');

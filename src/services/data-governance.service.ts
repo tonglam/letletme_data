@@ -147,12 +147,21 @@ export async function recordDataPublicationEvidence(input: {
   db?: DbHandle;
 }): Promise<number> {
   const contractKey = PUBLICATION_CONTRACT_BY_DATASET[input.manifest.dataset];
-  const freshnessWindowId = input.manifest.freshnessWindowId;
+  const freshnessWindowIds = [
+    ...(Array.isArray(input.manifest.freshnessWindowIds) ? input.manifest.freshnessWindowIds : []),
+    input.manifest.freshnessWindowId,
+  ].filter(
+    (value, index, values): value is number =>
+      typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value > 0 &&
+      values.indexOf(value) === index,
+  );
   const sourceRunId = input.sourceRunId;
-  if (!contractKey || (!input.sourceRunId && freshnessWindowId === undefined)) return 0;
+  if (!contractKey || (!input.sourceRunId && freshnessWindowIds.length === 0)) return 0;
   const db = input.db ?? (await getDb());
   const windows =
-    freshnessWindowId !== undefined
+    freshnessWindowIds.length > 0
       ? await db
           .select({
             windowId: freshnessSloWindowsInOps.windowId,
@@ -164,13 +173,13 @@ export async function recordDataPublicationEvidence(input: {
           .innerJoin(seasonsInFpl, eq(seasonsInFpl.seasonId, freshnessSloWindowsInOps.seasonId))
           .where(
             and(
-              eq(freshnessSloWindowsInOps.windowId, freshnessWindowId),
+              inArray(freshnessSloWindowsInOps.windowId, freshnessWindowIds),
               eq(freshnessSloWindowsInOps.contractKey, contractKey),
               eq(seasonsInFpl.seasonCode, input.manifest.seasonCode),
               inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED', 'INVALID']),
             ),
           )
-          .limit(1)
+          .limit(Math.max(1, freshnessWindowIds.length))
       : await db
           .select({
             windowId: freshnessSloWindowsInOps.windowId,
@@ -254,7 +263,15 @@ export async function attachFreshnessWindowToSchedulerObligation(input: {
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
-      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({ freshnessWindowId: input.freshnessWindowId })}::jsonb`,
+      evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
+        'freshnessWindowId', ${input.freshnessWindowId},
+        'freshnessWindowIds',
+        CASE
+          WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
+            THEN ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
+          ELSE '[]'::jsonb
+        END || jsonb_build_array(${input.freshnessWindowId})
+      )`,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
@@ -627,6 +644,9 @@ export async function transitionGovernanceCase(input: {
         eq(dataGovernanceCasesInOps.caseId, input.caseId),
         eq(dataGovernanceCasesInOps.updatedAt, input.expectedUpdatedAt),
         inArray(dataGovernanceCasesInOps.status, ['OPEN', 'REQUIRES_REVIEW']),
+        input.action === 'execute'
+          ? eq(dataGovernanceCasesInOps.caseKind, 'freshness-breach')
+          : undefined,
       ),
     )
     .returning({ caseId: dataGovernanceCasesInOps.caseId });

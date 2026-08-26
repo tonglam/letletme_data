@@ -51,6 +51,7 @@ import { formatCronDateKey } from '../utils/timezone';
 import { persistLiveLifecycleStatus } from '../services/live-lifecycle-orchestrator';
 import { reconcileCoreAndMarketPublications } from '../services/data-publication-reconciler';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
+import { seasonRepository } from '../repositories/seasons';
 import type { WorkerRuntime } from './worker-runtime';
 
 type GovernanceFreshnessCase = Awaited<ReturnType<typeof listGovernanceCases>>[number];
@@ -322,10 +323,18 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
                 ? null
                 : await getFreshnessWindow(governanceCase.sloWindowId);
             if (!window) throw new Error('Freshness governance case has no linked SLO window');
+            const linkedSeason =
+              window.seasonId === null ? null : await seasonRepository.findById(window.seasonId);
+            if (!linkedSeason) {
+              throw new Error('FRESHNESS_SEASON_MISSING: linked SLO window season is unavailable');
+            }
             await enqueueFreshnessCaseRepair({
               governanceCase: claimed,
               window,
-              season: { seasonId: job.data.seasonId, seasonCode: job.data.seasonCode },
+              // A governance case may outlive a current-season rollover. The
+              // linked window is the authority for repair scope; never use the
+              // worker's current season as a substitute.
+              season: linkedSeason,
             });
             dispatched += 1;
           } catch (repairError) {

@@ -520,6 +520,8 @@ export async function confirmSchedulerLaneEnqueued(input: {
   runId?: string;
   /** Obligation carried by the Bull payload being confirmed. */
   obligationId?: string;
+  /** Actual Bull queue used for this lane generation. */
+  queueName?: string;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -583,6 +585,11 @@ export async function confirmSchedulerLaneEnqueued(input: {
       .set({
         bullJobId,
         ...(input.runId === undefined ? {} : { runId: input.runId }),
+        ...(input.queueName
+          ? {
+              evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('submittedQueueName', ${input.queueName})`,
+            }
+          : {}),
         updatedAt: sql`clock_timestamp()`,
       })
       .where(

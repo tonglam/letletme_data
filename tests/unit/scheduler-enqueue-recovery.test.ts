@@ -67,6 +67,33 @@ describe('scheduler enqueue recovery', () => {
     expect(result.candidates).toBe(0);
   });
 
+  test('uses the queue recorded on the obligation generation after a lane flag switch', async () => {
+    const candidate = {
+      ...obligation('recorded-queue', 2),
+      evidence: { submittedQueueName: 'maintenance' },
+    };
+    let inspectedQueue: string | undefined;
+    await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [{ name: 'recoverable-job', queueName: 'data-repair' }],
+      dependencies: {
+        listCandidates: async () => [candidate],
+        inspectJobs: async (queueName) => {
+          inspectedQueue = queueName;
+          return {
+            jobs: [queueJob('recorded-queue', 2, 'waiting')],
+            missingEvidenceVerified: true,
+          };
+        },
+        confirm: async () => true,
+        start: async () => false,
+        renew: async () => true,
+        complete: async () => false,
+        fail: async () => false,
+      },
+    });
+    expect(inspectedQueue).toBe('maintenance');
+  });
+
   test('accepts an exactly full bounded recovery page', () => {
     expect(schedulerRecoveryFallbackViewComplete(199)).toBe(true);
     expect(schedulerRecoveryFallbackViewComplete(200)).toBe(true);

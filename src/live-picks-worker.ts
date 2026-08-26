@@ -52,9 +52,20 @@ async function shutdown(signal: string) {
 
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
-process.on('uncaughtException', (error) => logError('Live picks worker uncaught exception', error));
+const failFast = (message: string, error: unknown) => {
+  // A fatal asynchronous error can leave Bull workers and the heartbeat loop
+  // alive. Stop advertising this process as healthy and let Compose restart it
+  // with a non-zero exit instead of accepting more work in an unknown state.
+  stopHeartbeat();
+  stopRuntimeHeartbeat();
+  queueMonitors.forEach((monitor) => monitor.stop());
+  logError(message, error);
+  process.exitCode = 1;
+  process.exit(1);
+};
+process.on('uncaughtException', (error) => failFast('Live picks worker uncaught exception', error));
 process.on('unhandledRejection', (error) =>
-  logError('Live picks worker unhandled rejection', error),
+  failFast('Live picks worker unhandled rejection', error),
 );
 
 logInfo('Live picks worker started', {

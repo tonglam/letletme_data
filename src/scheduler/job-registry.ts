@@ -153,6 +153,8 @@ export type ScheduledJobDefinition = Readonly<{
     seasonCode?: string;
     /** Exact freshness window being repaired, when dispatched by governance. */
     freshnessWindowId?: number;
+    /** All freshness windows joined to one latest-wins publication. */
+    freshnessWindowIds?: readonly number[];
     laneId?: string;
     dispatchGeneration?: number;
   }) => Promise<{ bullJobId?: string | number; runId?: string } | void>;
@@ -730,6 +732,7 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
       obligationId,
       generation,
       freshnessWindowId,
+      freshnessWindowIds,
       laneId,
       dispatchGeneration,
     }) => {
@@ -740,6 +743,7 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
           obligationId,
           obligationGeneration: generation,
           freshnessWindowId,
+          freshnessWindowIds,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       }
@@ -755,6 +759,7 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
         laneId,
         laneGeneration: dispatchGeneration,
         freshnessWindowId,
+        freshnessWindowIds,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -892,6 +897,9 @@ function livePicksDefinition(): ScheduledJobDefinition {
     manualTrigger: false,
     isEnabled: () => getConfig().QUEUE_LANES_V2_ENABLED,
     resolve: async (context) => {
+      // Disabled rollout must not reserve historical obligations that will all
+      // become runnable when the lane is enabled later.
+      if (!getConfig().QUEUE_LANES_V2_ENABLED) return [];
       if (!context.currentEventId) return [];
       const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];

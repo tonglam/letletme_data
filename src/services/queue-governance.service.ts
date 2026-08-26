@@ -377,9 +377,13 @@ export async function evaluateAutomaticAdmission(
       Date.now() - allGreenSince >= getConfig().QUEUE_ADMISSION_GREEN_CLEAR_MS
     ) {
       await redis.del(queueAdmissionKey(snapshot.queueName));
-    } else if (existing?.changedBy === 'queue-governance' && criticalState.red) {
-      // A critical incident still exists even if this low lane is locally
-      // healthy; do not let its short Redis TTL silently reopen admission.
+    } else if (
+      existing?.changedBy === 'queue-governance' &&
+      (criticalState.red || criticalState.greenSince === null || ownGreenSince <= 0)
+    ) {
+      // A critical incident, or an incomplete critical/own evidence sample,
+      // still exists even if this low lane is locally healthy; do not let its
+      // short Redis TTL silently reopen admission while the monitor is blind.
       await redis.expire(
         queueAdmissionKey(snapshot.queueName),
         getConfig().QUEUE_ADMISSION_GATE_TTL_SECONDS,

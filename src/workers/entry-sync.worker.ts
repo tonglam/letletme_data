@@ -509,6 +509,10 @@ export function createEntrySyncWorker(
     ) {
       return { skipped: true, staleSchedulerGeneration: true };
     }
+    // Validate the season before any live-picks canary or other provider work.
+    // A stale root must not write an older season merely because it takes the
+    // dedicated branch before the ordinary entry path's guard.
+    const season = await requireCurrentSeasonForJob(job.data);
     // The dedicated live-picks lane carries one root canary job followed by
     // entry-picks child jobs. Both must share the same consumer so the root
     // cannot be accidentally treated as a normal entry payload (or marked
@@ -534,7 +538,6 @@ export function createEntrySyncWorker(
       }
       return result;
     }
-    const season = await requireCurrentSeasonForJob(job.data);
     const attempt = resolveDataSyncAttempt(
       job.data?.source,
       job.attemptsMade,

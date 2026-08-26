@@ -197,18 +197,28 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
 
     let prepared;
     try {
-      const evidenceWindowId = activeTarget.obligation.evidence.freshnessWindowId;
-      const freshnessWindowId =
-        job.data.freshnessWindowId ??
-        (typeof evidenceWindowId === 'number' && Number.isSafeInteger(evidenceWindowId)
-          ? evidenceWindowId
-          : undefined);
+      const freshnessWindowIds = [
+        ...(Array.isArray(job.data.freshnessWindowIds) ? job.data.freshnessWindowIds : []),
+        ...(Array.isArray(activeTarget.obligation.evidence.freshnessWindowIds)
+          ? activeTarget.obligation.evidence.freshnessWindowIds
+          : []),
+        job.data.freshnessWindowId,
+        activeTarget.obligation.evidence.freshnessWindowId,
+      ].filter(
+        (value, index, values): value is number =>
+          typeof value === 'number' &&
+          Number.isSafeInteger(value) &&
+          value > 0 &&
+          values.indexOf(value) === index,
+      );
+      const freshnessWindowId = freshnessWindowIds[0];
       prepared = await preparePriceChangePublication(
         season,
         undefined,
         job.data.source === 'manual' ? 'manual' : 'queue',
         job.data.runId,
         freshnessWindowId,
+        freshnessWindowIds,
       );
     } catch (error) {
       if (error instanceof PriceChangeCorePublicationRequiredError) {

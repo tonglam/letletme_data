@@ -219,6 +219,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             job.data.source === 'manual' ? 'manual' : 'queue',
             job.data.runId,
             job.data.freshnessWindowId,
+            job.data.freshnessWindowIds,
           );
         } catch (error) {
           if (error instanceof PriceChangeCorePublicationRequiredError) {

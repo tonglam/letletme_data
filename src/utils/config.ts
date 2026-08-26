@@ -17,6 +17,10 @@ function integerEnv(defaultValue: number) {
   return z.coerce.number().int().default(defaultValue);
 }
 
+function boundedIntegerEnv(defaultValue: number, minimum: number, maximum: number) {
+  return z.coerce.number().int().min(minimum).max(maximum).default(defaultValue);
+}
+
 /** dotenv turns `KEY=` into `""`; treat that as unset for optional secrets/URLs. */
 function optionalEnv(schema: z.ZodType<string | undefined>) {
   return z.preprocess((value) => {
@@ -99,10 +103,10 @@ const EnvSchema = z.object({
   OFFICIAL_H2H_INCREMENTAL_ENABLED: booleanEnv(false),
   FRESHNESS_CONSUMER_PROBES_ENABLED: booleanEnv(false),
   FRESHNESS_SLO_MODE: z.enum(['shadow', 'enforced']).default('shadow'),
-  QUEUE_HEALTH_SNAPSHOT_INTERVAL_MS: integerEnv(15_000),
-  QUEUE_HEALTH_WINDOW_INTERVAL_MS: integerEnv(60_000),
+  QUEUE_HEALTH_SNAPSHOT_INTERVAL_MS: boundedIntegerEnv(15_000, 1_000, 15 * 60_000),
+  QUEUE_HEALTH_WINDOW_INTERVAL_MS: boundedIntegerEnv(60_000, 1_000, 60 * 60_000),
   QUEUE_HEALTH_SNAPSHOT_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
-  QUEUE_ADMISSION_GREEN_CLEAR_MS: integerEnv(5 * 60_000),
+  QUEUE_ADMISSION_GREEN_CLEAR_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
   QUEUE_ADMISSION_GATE_TTL_SECONDS: z.coerce.number().int().min(1).max(900).default(900),
   DATA_GOVERNANCE_WEB_URL: optionalEnv(z.string().url().optional()),
   DATA_GOVERNANCE_PROBE_TOKEN: optionalEnv(z.string().min(16).optional()),
