@@ -248,6 +248,38 @@ describe('revision-pinned projected manager score', () => {
     });
   });
 
+  test('reconstructs applied substitutions against the selected XI formation', () => {
+    const managerPicks = picks();
+    // Start with exactly three defenders and four midfielders so a midfielder
+    // cannot replace the absent defender, while a later defender can.
+    managerPicks[4] = { ...managerPicks[4], elementType: 3, multiplier: 0 };
+    managerPicks[1] = { ...managerPicks[1], multiplier: 0 };
+    managerPicks[11] = { ...managerPicks[11], elementType: 3, multiplier: 1 };
+    managerPicks[12] = { ...managerPicks[12], elementType: 2, multiplier: 1 };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+    liveByElement.set(2, live(2, 0, 0));
+    liveByElement.set(5, live(5, 0, 0));
+
+    const result = projectEventLiveManagerScore({
+      entryId: 101,
+      picks: managerPicks,
+      liveByElement,
+      fixtures: [fixture(2, 97, true), fixture(4, 98, true)],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 12)).toMatchObject({
+      autoSub: true,
+      autoSubForElementId: 5,
+    });
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 13)).toMatchObject({
+      autoSub: true,
+      autoSubForElementId: 2,
+    });
+  });
+
   test('fails closed when the manager chip has no manager scoring input', () => {
     const managerPicks = picks();
     managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };

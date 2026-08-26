@@ -12,7 +12,7 @@ import {
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
-const resultPicksMigration = readFileSync('migrations/0052_entry_event_result_picks.sql', 'utf8');
+const resultPicksMigration = readFileSync('migrations/0055_entry_event_result_picks.sql', 'utf8');
 const retainedRevisionMigration = readFileSync(
   'migrations/0038_my_fpl_retained_revision_reads.sql',
   'utf8',

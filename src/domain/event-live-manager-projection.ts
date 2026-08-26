@@ -290,7 +290,9 @@ export function projectEventLiveManagerScore(input: {
   if (chipIs(chip, 'manager', 'MANAGER')) return null;
   const benchBoost = chipIs(chip, 'bboost', 'BENCH_BOOST');
   const captainMultiplier = chipIs(chip, '3xc', 'TRIPLE_CAPTAIN') ? 3 : 2;
-  const starters = picks.filter((pick) => pick.position <= 11);
+  const starters = picks
+    .filter((pick) => pick.position <= 11)
+    .sort((left, right) => left.position - right.position);
   const benchPicks = picks
     .filter((pick) => pick.position > 11)
     .sort((left, right) => left.position - right.position);
@@ -299,7 +301,7 @@ export function projectEventLiveManagerScore(input: {
   const nonPlayingStarters = starters.filter((pick) => {
     const live = input.liveByElement.get(pick.elementId);
     const teamFixtures = fixturesByTeam.get(pick.teamId) ?? [];
-    return (live?.minutes ?? 0) === 0 && pick.multiplier > 0 && hasCompletedFixtures(teamFixtures);
+    return (live?.minutes ?? 0) === 0 && hasCompletedFixtures(teamFixtures);
   });
 
   if (!benchBoost) {
@@ -316,20 +318,53 @@ export function projectEventLiveManagerScore(input: {
         pick.multiplier === 0 && (live?.minutes ?? 0) === 0 && hasCompletedFixtures(teamFixtures)
       );
     });
+    // Reconstruct the selected XI before applying the substitutions already
+    // reflected in the FPL multipliers. Checking the current final XI alone
+    // cannot distinguish crossed pairs when both final formations are legal.
+    const nonPlayingStarterIds = new Set(nonPlayingStarters.map((pick) => pick.elementId));
+    for (const pick of picks) {
+      const selectedStarter =
+        pick.position <= 11 && (pick.multiplier > 0 || nonPlayingStarterIds.has(pick.elementId));
+      pick.effectiveMultiplier = selectedStarter ? 1 : 0;
+      pick.pickActive = selectedStarter;
+      pick.autoSub = false;
+      pick.autoSubForElementId = null;
+    }
+    const remainingNonPlayingStarters = [...nonPlayingStarters];
     const usedOutgoingStarters = new Set<number>();
     for (const benchPlayer of alreadyAppliedBench) {
       let matched = false;
       for (const starter of alreadyAppliedOutgoingStarters) {
         if (usedOutgoingStarters.has(starter.elementId)) continue;
+        const previousStarterMultiplier = starter.effectiveMultiplier;
+        const previousStarterActive = starter.pickActive;
+        const previousStarterAutoSub = starter.autoSub;
+        const previousStarterAutoSubForElementId = starter.autoSubForElementId;
+        const previousBenchMultiplier = benchPlayer.effectiveMultiplier;
+        const previousBenchActive = benchPlayer.pickActive;
         const previousAutoSub = benchPlayer.autoSub;
         const previousAutoSubForElementId = benchPlayer.autoSubForElementId;
+        starter.effectiveMultiplier = 0;
+        starter.pickActive = false;
+        benchPlayer.effectiveMultiplier = 1;
+        benchPlayer.pickActive = true;
         benchPlayer.autoSub = true;
         benchPlayer.autoSubForElementId = starter.elementId;
         if (validFormation(picks)) {
           usedOutgoingStarters.add(starter.elementId);
+          const remainingIndex = remainingNonPlayingStarters.findIndex(
+            (candidate) => candidate.elementId === starter.elementId,
+          );
+          if (remainingIndex >= 0) remainingNonPlayingStarters.splice(remainingIndex, 1);
           matched = true;
           break;
         }
+        starter.effectiveMultiplier = previousStarterMultiplier;
+        starter.pickActive = previousStarterActive;
+        starter.autoSub = previousStarterAutoSub;
+        starter.autoSubForElementId = previousStarterAutoSubForElementId;
+        benchPlayer.effectiveMultiplier = previousBenchMultiplier;
+        benchPlayer.pickActive = previousBenchActive;
         benchPlayer.autoSub = previousAutoSub;
         benchPlayer.autoSubForElementId = previousAutoSubForElementId;
       }
@@ -343,10 +378,10 @@ export function projectEventLiveManagerScore(input: {
       // still pending. Once it is confirmed as a no-show, try the next bench
       // player instead.
       if ((benchLive?.minutes ?? 0) === 0 && hasCompletedFixtures(benchFixtures)) continue;
-      if (nonPlayingStarters.length === 0) break;
+      if (remainingNonPlayingStarters.length === 0) break;
 
-      for (let index = 0; index < nonPlayingStarters.length; index += 1) {
-        const starter = nonPlayingStarters[index];
+      for (let index = 0; index < remainingNonPlayingStarters.length; index += 1) {
+        const starter = remainingNonPlayingStarters[index];
         const previousStarterMultiplier = starter.effectiveMultiplier;
         const previousBenchMultiplier = benchPlayer.effectiveMultiplier;
         const previousStarterActive = starter.pickActive;
@@ -361,7 +396,7 @@ export function projectEventLiveManagerScore(input: {
         benchPlayer.autoSub = true;
         benchPlayer.autoSubForElementId = starter.elementId;
         if (validFormation(picks)) {
-          nonPlayingStarters.splice(index, 1);
+          remainingNonPlayingStarters.splice(index, 1);
           break;
         }
 
