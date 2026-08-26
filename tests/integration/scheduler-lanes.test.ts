@@ -253,6 +253,34 @@ describe('scheduler latest-wins lanes', () => {
     expect(recovered?.lane.dispatchGeneration).toBe(2);
   });
 
+  test('recovers a dispatching lane when Bull is missing before confirmation', async () => {
+    const first = await reserve('2026-08-25T05:07:00.000Z', 'price-dispatch-missing');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    expect(
+      await recoverSchedulerLaneAfterBullLoss({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId: 'integration-price-job-missing-before-confirmation',
+        bullState: 'missing',
+        obligationId: first.obligationId,
+      }),
+    ).toBe(true);
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.desired?.status).toBe('failed');
+    expect(targets?.desired?.bullJobId).toBe('integration-price-job-missing-before-confirmation');
+    const recovered = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(recovered?.lane.dispatchGeneration).toBe(2);
+  });
+
   test('recovers an enqueued obligation when Bull fails before lane start', async () => {
     const first = await reserve('2026-08-25T05:15:00.000Z', 'price-pre-start-failure');
     const initial = await advanceSchedulerLane({

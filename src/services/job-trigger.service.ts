@@ -64,6 +64,11 @@ export type JobTriggerResult =
       message: string;
     }
   | {
+      kind: 'pending';
+      jobId?: string | number;
+      message: string;
+    }
+  | {
       kind: 'executed';
       message: string;
     };
@@ -445,6 +450,26 @@ export async function triggerJob(name: string, input?: unknown): Promise<JobTrig
       message: typed.refreshed
         ? 'current-event mismatch found; core-snapshot job enqueued'
         : 'active core publication already matches the database current event',
+    };
+  }
+
+  // Latest-wins manual refreshes may join a dispatch that is still being
+  // reconciled (including a short dispatch lease with no Bull ID yet). Keep
+  // that state explicit instead of reporting a synchronous execution.
+  if (
+    result &&
+    typeof result === 'object' &&
+    'state' in result &&
+    (result as { state?: unknown }).state === 'pending'
+  ) {
+    const jobId =
+      'bullJobId' in result ? (result as { bullJobId?: string | number }).bullJobId : undefined;
+    return {
+      kind: 'pending',
+      ...(jobId === undefined ? {} : { jobId }),
+      message: jobId
+        ? `Job '${name}' is already pending (${jobId})`
+        : `Job '${name}' is pending reconciliation`,
     };
   }
 

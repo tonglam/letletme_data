@@ -62,6 +62,15 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         };
       }
 
+      if (result.kind === 'pending') {
+        return {
+          success: true,
+          pending: true,
+          message: result.message,
+          ...(result.jobId === undefined ? {} : { jobId: result.jobId }),
+        };
+      }
+
       return { success: true, message: result.message };
     } catch (error) {
       if (error instanceof JobNotFoundError) {

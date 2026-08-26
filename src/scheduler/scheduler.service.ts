@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { seasonRepository } from '../repositories/seasons';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { Queue } from 'bullmq';
+import { enqueueFplCriticalCoreRepairJob } from '../jobs/fpl-critical-sync-enqueue';
 
 import {
   claimSchedulerObligations,
@@ -25,6 +26,7 @@ import {
   getSchedulerLane,
   getSchedulerLaneTarget,
   recoverSchedulerLaneAfterBullLoss,
+  unblockSchedulerLane,
   type SchedulerLane,
 } from '../repositories/scheduler-lanes';
 import {
@@ -157,6 +159,8 @@ export async function resolveSchedulerDefinition(
 export async function triggerPriceChangeLane(): Promise<{
   bullJobId?: string | number;
   runId?: string;
+  /** Whether the request enqueued a new job or joined work already pending. */
+  state: 'enqueued' | 'pending';
 }> {
   const definition = definitionByName('price-change-predictions');
   if (!definition?.executionPolicy) {
@@ -231,6 +235,7 @@ export async function triggerPriceChangeLane(): Promise<{
           ? { bullJobId: advanced.lane.blockerJobId }
           : {}),
       ...(advanced.lane.runId ? { runId: advanced.lane.runId } : {}),
+      state: 'pending',
     };
   }
   const dispatch = await claimSchedulerLaneDispatch({ laneId: advanced.lane.laneId });
@@ -243,6 +248,7 @@ export async function triggerPriceChangeLane(): Promise<{
           ? { bullJobId: current.blockerJobId }
           : {}),
       ...(current?.runId ? { runId: current.runId } : {}),
+      state: 'pending',
     };
   }
   const target = await getSchedulerLaneTarget({ laneId: dispatch.lane.laneId });
@@ -272,7 +278,7 @@ export async function triggerPriceChangeLane(): Promise<{
       obligationId: target.obligation.obligationId,
     });
     if (!confirmed) throw new Error('Manual price lane enqueue confirmation CAS failed');
-    return result;
+    return { ...result, state: 'enqueued' };
   } catch (error) {
     // An enqueue timeout can be ambiguous: Bull may have accepted the
     // deterministic job before the network response failed. Reconcile that
@@ -289,6 +295,25 @@ export async function triggerPriceChangeLane(): Promise<{
       return {
         ...(current.bullJobId ? { bullJobId: current.bullJobId } : {}),
         ...(current.runId ? { runId: current.runId } : {}),
+        state: 'pending',
+      };
+    }
+    // A failed reconciliation means Redis did not give us a trustworthy
+    // answer about the deterministic Bull identity. Releasing the dispatch
+    // lease here could create a second runnable job, so report the request as
+    // pending and let the scheduler reconcile it on the next pass.
+    if (current?.state === 'dispatching') {
+      return { state: 'pending' };
+    }
+    if (current?.state === 'idle' || current?.state === 'blocked') {
+      return {
+        ...(current.bullJobId
+          ? { bullJobId: current.bullJobId }
+          : current.blockerJobId
+            ? { bullJobId: current.blockerJobId }
+            : {}),
+        ...(current.runId ? { runId: current.runId } : {}),
+        state: 'pending',
       };
     }
     await failSchedulerLaneDispatch({ laneId: dispatch.lane.laneId, owner: dispatch.owner, error });
@@ -302,7 +327,83 @@ function definitionByName(name: string): ScheduledJobDefinition | undefined {
   return schedulerRegistry.find((definition) => definition.name === name);
 }
 
-async function reconcileSingleFlightBullState(lane: SchedulerLane): Promise<void> {
+async function reconcileSingleFlightBullState(
+  lane: SchedulerLane,
+  currentSeason?: Awaited<ReturnType<typeof seasonRepository.findCurrent>>,
+): Promise<void> {
+  // A Core mismatch moves the price lane to `blocked` before the repair job is
+  // delivered. Reconcile that hand-off just like a price dispatch: a missing
+  // deterministic repair is safe to re-add, while a transient Redis error is
+  // deliberately surfaced so the caller cannot reclaim the lane lease.
+  if (lane.state === 'blocked') {
+    if (!lane.blockerJobId) {
+      throw new Error(`Blocked scheduler lane ${lane.laneId} has no blocker Bull job ID`);
+    }
+    const queue = new Queue(lane.queueName, { connection: getQueueConnection() });
+    try {
+      const blocker = await queue.getJob(lane.blockerJobId);
+      const state = blocker ? await blocker.getState() : 'missing';
+      if (['waiting', 'delayed', 'active', 'paused', 'prioritized'].includes(state)) return;
+      if (state === 'completed') {
+        const unblocked = await unblockSchedulerLane({
+          blockerJobId: lane.blockerJobId,
+          success: true,
+        });
+        if (!unblocked) {
+          throw new Error(`Scheduler lane blocker completion CAS failed for ${lane.laneId}`);
+        }
+        return;
+      }
+      if (state === 'failed') {
+        const unblocked = await unblockSchedulerLane({
+          blockerJobId: lane.blockerJobId,
+          success: false,
+          error: new Error('Core repair Bull job failed before lane unblock'),
+        });
+        if (!unblocked) {
+          throw new Error(`Scheduler lane blocker failure CAS failed for ${lane.laneId}`);
+        }
+        return;
+      }
+      if (state !== 'missing') {
+        throw new Error(`Unexpected Core repair Bull state ${state} for ${lane.laneId}`);
+      }
+
+      const season = currentSeason ?? (await seasonRepository.findCurrent());
+      if (season.seasonCode !== lane.scopeKey) {
+        throw new Error(
+          `Cannot recover Core repair for ${lane.laneId}: lane scope ${lane.scopeKey} is not current season ${season.seasonCode}`,
+        );
+      }
+      const expectedBlockerId = `${season.seasonCode}-core-snapshot-price-change-repair-${lane.laneId}-g${lane.dispatchGeneration}`;
+      if (lane.blockerJobId !== expectedBlockerId) {
+        throw new Error(
+          `Core repair Bull ID mismatch for ${lane.laneId}: expected ${expectedBlockerId}, got ${lane.blockerJobId}`,
+        );
+      }
+      const repair = await enqueueFplCriticalCoreRepairJob(season, 'reconcile', {
+        jobId: `core-snapshot-price-change-repair-${lane.laneId}-g${lane.dispatchGeneration}`,
+        removeOnSettle: false,
+        laneId: lane.laneId,
+        laneGeneration: lane.dispatchGeneration,
+        blockerLaneId: lane.laneId,
+      });
+      if (String(repair.id) !== lane.blockerJobId) {
+        throw new Error(
+          `Core repair Bull ID mismatch after recovery: expected ${lane.blockerJobId}, got ${repair.id}`,
+        );
+      }
+      logInfo('Recovered blocked price lane Core repair delivery', {
+        laneId: lane.laneId,
+        dispatchGeneration: lane.dispatchGeneration,
+        blockerJobId: lane.blockerJobId,
+        season: season.seasonCode,
+      });
+    } finally {
+      await queue.close();
+    }
+    return;
+  }
   if (lane.state === 'dispatching' && lane.dispatchOwner) {
     const queue = new Queue(lane.queueName, { connection: getQueueConnection() });
     try {
@@ -331,6 +432,24 @@ async function reconcileSingleFlightBullState(lane: SchedulerLane): Promise<void
             bullJobId: job.id,
           });
         }
+      }
+      if (state === 'missing' || state === 'failed') {
+        const recovered = await recoverSchedulerLaneAfterBullLoss({
+          laneId: lane.laneId,
+          dispatchGeneration: lane.dispatchGeneration,
+          bullJobId: expectedJobId,
+          bullState: state,
+          obligationId: lane.desiredObligationId,
+        });
+        if (!recovered) {
+          logError('Latest-wins dispatch loss recovery CAS failed', undefined, {
+            laneId: lane.laneId,
+            dispatchGeneration: lane.dispatchGeneration,
+            bullJobId: expectedJobId,
+            bullState: state,
+          });
+        }
+        return;
       }
       if (state === 'completed') {
         await notifyTwoBots(
@@ -580,6 +699,12 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       lane: SchedulerLane;
     }>
   >();
+  // A lane whose Bull reconciliation was inconclusive must not be reclaimed
+  // merely because its short dispatch lease elapsed. Keep this decision
+  // separate from the lane snapshot: the database claim below deliberately
+  // reloads the row, while this map records whether Redis gave us a positive
+  // answer for the generation we observed.
+  const singleFlightReconciled = new Map<string, boolean>();
   for (const definition of schedulerRegistry) {
     const resolution = await resolveSchedulerDefinition(definition, context);
     if (!resolution.ok) {
@@ -839,20 +964,35 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
   let enqueued = 0;
   let laneClaimed = 0;
   await Promise.all(
-    [...singleFlightLanes.values()].map((entry) =>
-      Promise.all([
-        reconcileSingleFlightBullState(entry.lane),
-        alertPriceLaneFreshness(entry.lane, season),
-      ]).catch((error) => {
+    [...singleFlightLanes.values()].map(async (entry) => {
+      try {
+        await reconcileSingleFlightBullState(entry.lane, season);
+        singleFlightReconciled.set(entry.lane.laneId, true);
+      } catch (error) {
+        // Do not let an inconclusive Redis read fall through to
+        // claimSchedulerLaneDispatch: an expired dispatching lease may still
+        // represent a job accepted by Bull whose response was lost.
+        singleFlightReconciled.set(entry.lane.laneId, false);
         failed += 1;
         logError('Latest-wins Bull state reconciliation failed', error, {
           laneId: entry.lane.laneId,
           laneKey: entry.lane.laneKey,
         });
-      }),
-    ),
+        return;
+      }
+      try {
+        await alertPriceLaneFreshness(entry.lane, season);
+      } catch (error) {
+        failed += 1;
+        logError('Latest-wins price freshness alert failed', error, {
+          laneId: entry.lane.laneId,
+          laneKey: entry.lane.laneKey,
+        });
+      }
+    }),
   );
   for (const [laneKey, entry] of singleFlightLanes) {
+    if (singleFlightReconciled.get(entry.lane.laneId) !== true) continue;
     const dispatch = await claimSchedulerLaneDispatch({ laneId: entry.lane.laneId });
     if (!dispatch) continue;
     laneClaimed += 1;

@@ -118,11 +118,13 @@ async function blockPriceLaneForCoreRepair(
       season: season.seasonCode,
     });
   } catch (repairError) {
-    await unblockSchedulerLane({
-      blockerJobId: repairId,
-      success: false,
-      error: repairError,
-    }).catch(() => undefined);
+    // Keep the lane blocked until the deterministic repair delivery is
+    // reconciled. The process may exit after blockSchedulerLane commits but
+    // before Queue.add returns (or after Bull accepts the job and the response
+    // is lost); unblocking here would allow a second price generation to run
+    // while Core is still stale. The scheduler reconciles blockerJobId against
+    // Bull and either re-adds the missing repair or releases the lane with the
+    // five-minute retry delay after a confirmed failure.
     await notifyTwoBots(
       [
         'Price-change Core repair enqueue failed',
