@@ -1,8 +1,8 @@
-import { and, asc, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 
 import {
-  entryEventPicksInCompetition,
   entryEventResultsInCompetition,
+  eventsInFpl,
   type DbEntryEventResult,
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
@@ -26,7 +26,6 @@ import {
 
 type AutoSubItem = RawFPLEntryEventPicksResponse['automatic_subs'][number];
 type ResultStorage = typeof entryEventResultsInCompetition.$inferSelect;
-type PickStorage = typeof entryEventPicksInCompetition.$inferSelect;
 
 type EntryEventTotalsRow = {
   entryId: number;
@@ -37,6 +36,20 @@ type EntryEventTotalsRow = {
   eventCount?: number;
   firstEventId?: number;
   lastEventId?: number;
+};
+
+type EntryEventResultReadOptions = Readonly<{
+  /** Restrict the range to events FPL has explicitly finalized and checked. */
+  finalizedOnly?: boolean;
+}>;
+
+export type EntryEventResultRevisionEvidence = {
+  entryId: number;
+  eventId: number;
+  sourceResultId: number | null;
+  eventNetPoints: number | null;
+  richSyncedAt: Date | null;
+  updatedAt: Date;
 };
 
 export type EventPointsPayload = {
@@ -66,19 +79,13 @@ export function deriveBenchPointsFromEffectiveMultipliers(
     .reduce((total, pick) => total + (elementsPoints.get(pick.element) ?? 0), 0);
 }
 
-function hydrateResult(row: ResultStorage, picks: readonly PickStorage[]): DbEntryEventResult {
+function hydrateResult(row: ResultStorage): DbEntryEventResult {
   return {
     ...row,
     id: row.sourceResultId,
     eventPlayedCaptain: row.playedCaptainElementId,
     eventCaptainPoints: row.captainPoints,
-    eventPicks: picks.map((pick) => ({
-      element: pick.elementId,
-      position: pick.position,
-      multiplier: pick.multiplier,
-      is_captain: pick.isCaptain,
-      is_vice_captain: pick.isViceCaptain,
-    })),
+    eventPicks: row.eventPicks,
     eventAutoSub: row.automaticSubstitutions,
   };
 }
@@ -233,6 +240,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       entryIds: number[],
       startEventId: number,
       endEventId: number,
+      options: EntryEventResultReadOptions = {},
     ): Promise<EntryEventTotalsRow[]> => {
       if (entryIds.length === 0) return [];
 
@@ -242,26 +250,50 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const rows: EntryEventTotalsRow[] = [];
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
           const chunk = uniqueEntryIds.slice(index, index + 1000);
-          const chunkRows = await db
-            .select({
-              entryId: entryEventResultsInCompetition.entryId,
-              totalPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventPoints}), 0)::int`,
-              totalTransfersCost: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventTransfersCost}), 0)::int`,
-              totalNetPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventNetPoints}), 0)::int`,
-              eventCount: sql<number>`COUNT(*)::int`,
-              firstEventId: sql<number>`MIN(${entryEventResultsInCompetition.eventId})::int`,
-              lastEventId: sql<number>`MAX(${entryEventResultsInCompetition.eventId})::int`,
-            })
-            .from(entryEventResultsInCompetition)
-            .where(
-              and(
-                eq(entryEventResultsInCompetition.seasonId, season.seasonId),
-                inArray(entryEventResultsInCompetition.entryId, chunk),
-                gte(entryEventResultsInCompetition.eventId, startEventId),
-                lte(entryEventResultsInCompetition.eventId, endEventId),
-              ),
-            )
-            .groupBy(entryEventResultsInCompetition.entryId);
+          const baseWhere = and(
+            eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+            inArray(entryEventResultsInCompetition.entryId, chunk),
+            gte(entryEventResultsInCompetition.eventId, startEventId),
+            lte(entryEventResultsInCompetition.eventId, endEventId),
+          );
+          const selectShape = {
+            entryId: entryEventResultsInCompetition.entryId,
+            totalPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventPoints}), 0)::int`,
+            totalTransfersCost: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventTransfersCost}), 0)::int`,
+            totalNetPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventNetPoints}), 0)::int`,
+            eventCount: sql<number>`COUNT(*)::int`,
+            firstEventId: sql<number>`MIN(${entryEventResultsInCompetition.eventId})::int`,
+            lastEventId: sql<number>`MAX(${entryEventResultsInCompetition.eventId})::int`,
+          };
+          const chunkRows = options.finalizedOnly
+            ? await db
+                .select(selectShape)
+                .from(entryEventResultsInCompetition)
+                .innerJoin(
+                  eventsInFpl,
+                  and(
+                    eq(eventsInFpl.seasonId, entryEventResultsInCompetition.seasonId),
+                    eq(eventsInFpl.eventId, entryEventResultsInCompetition.eventId),
+                  ),
+                )
+                .where(
+                  and(
+                    baseWhere,
+                    eq(eventsInFpl.finished, true),
+                    eq(eventsInFpl.dataChecked, true),
+                    isNotNull(entryEventResultsInCompetition.richSyncedAt),
+                    or(
+                      isNull(eventsInFpl.dataCheckedAt),
+                      gte(entryEventResultsInCompetition.richSyncedAt, eventsInFpl.dataCheckedAt),
+                    ),
+                  ),
+                )
+                .groupBy(entryEventResultsInCompetition.entryId)
+            : await db
+                .select(selectShape)
+                .from(entryEventResultsInCompetition)
+                .where(baseWhere)
+                .groupBy(entryEventResultsInCompetition.entryId);
           rows.push(...chunkRows);
         }
         return rows;
@@ -277,6 +309,62 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       }
     },
 
+    findRevisionEvidenceByEntry: async (
+      season: FplSeasonRef,
+      entryIds: number[],
+      startEventId: number,
+      endEventId: number,
+      options: EntryEventResultReadOptions = {},
+    ): Promise<EntryEventResultRevisionEvidence[]> => {
+      if (entryIds.length === 0 || endEventId < startEventId) return [];
+      const db = await getDbInstance();
+      const rows: EntryEventResultRevisionEvidence[] = [];
+      const uniqueEntryIds = Array.from(new Set(entryIds));
+      for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+        const chunk = uniqueEntryIds.slice(index, index + 1000);
+        const baseWhere = and(
+          eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+          inArray(entryEventResultsInCompetition.entryId, chunk),
+          gte(entryEventResultsInCompetition.eventId, startEventId),
+          lte(entryEventResultsInCompetition.eventId, endEventId),
+        );
+        const selectShape = {
+          entryId: entryEventResultsInCompetition.entryId,
+          eventId: entryEventResultsInCompetition.eventId,
+          sourceResultId: entryEventResultsInCompetition.sourceResultId,
+          eventNetPoints: entryEventResultsInCompetition.eventNetPoints,
+          richSyncedAt: entryEventResultsInCompetition.richSyncedAt,
+          updatedAt: entryEventResultsInCompetition.updatedAt,
+        };
+        const chunkRows = options.finalizedOnly
+          ? await db
+              .select(selectShape)
+              .from(entryEventResultsInCompetition)
+              .innerJoin(
+                eventsInFpl,
+                and(
+                  eq(eventsInFpl.seasonId, entryEventResultsInCompetition.seasonId),
+                  eq(eventsInFpl.eventId, entryEventResultsInCompetition.eventId),
+                ),
+              )
+              .where(
+                and(
+                  baseWhere,
+                  eq(eventsInFpl.finished, true),
+                  eq(eventsInFpl.dataChecked, true),
+                  isNotNull(entryEventResultsInCompetition.richSyncedAt),
+                  or(
+                    isNull(eventsInFpl.dataCheckedAt),
+                    gte(entryEventResultsInCompetition.richSyncedAt, eventsInFpl.dataCheckedAt),
+                  ),
+                ),
+              )
+          : await db.select(selectShape).from(entryEventResultsInCompetition).where(baseWhere);
+        rows.push(...chunkRows);
+      }
+      return rows;
+    },
+
     findByEventAndEntryIds: async (
       season: FplSeasonRef,
       eventId: number,
@@ -290,41 +378,17 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const results: DbEntryEventResult[] = [];
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
           const chunk = uniqueEntryIds.slice(index, index + 1000);
-          const [resultRows, pickRows] = await Promise.all([
-            db
-              .select()
-              .from(entryEventResultsInCompetition)
-              .where(
-                and(
-                  eq(entryEventResultsInCompetition.seasonId, season.seasonId),
-                  eq(entryEventResultsInCompetition.eventId, eventId),
-                  inArray(entryEventResultsInCompetition.entryId, chunk),
-                ),
+          const resultRows = await db
+            .select()
+            .from(entryEventResultsInCompetition)
+            .where(
+              and(
+                eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+                eq(entryEventResultsInCompetition.eventId, eventId),
+                inArray(entryEventResultsInCompetition.entryId, chunk),
               ),
-            db
-              .select()
-              .from(entryEventPicksInCompetition)
-              .where(
-                and(
-                  eq(entryEventPicksInCompetition.seasonId, season.seasonId),
-                  eq(entryEventPicksInCompetition.eventId, eventId),
-                  inArray(entryEventPicksInCompetition.entryId, chunk),
-                ),
-              )
-              .orderBy(
-                asc(entryEventPicksInCompetition.entryId),
-                asc(entryEventPicksInCompetition.position),
-              ),
-          ]);
-          const picksByEntry = new Map<number, PickStorage[]>();
-          for (const pick of pickRows) {
-            const entryPicks = picksByEntry.get(pick.entryId) ?? [];
-            entryPicks.push(pick);
-            picksByEntry.set(pick.entryId, entryPicks);
-          }
-          results.push(
-            ...resultRows.map((row) => hydrateResult(row, picksByEntry.get(row.entryId) ?? [])),
-          );
+            );
+          results.push(...resultRows.map((row) => hydrateResult(row)));
         }
         return results;
       } catch (error) {
@@ -360,7 +424,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
           const chunk = uniqueEntryIds.slice(index, index + 1000);
           const rows = await db
-            .select({ entryId: entryEventResultsInCompetition.entryId })
+            .select({
+              entryId: entryEventResultsInCompetition.entryId,
+              eventPicks: entryEventResultsInCompetition.eventPicks,
+            })
             .from(entryEventResultsInCompetition)
             .where(
               and(
@@ -372,7 +439,13 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
                   : isNotNull(entryEventResultsInCompetition.richSyncedAt),
               ),
             );
-          for (const row of rows) syncedEntryIds.add(row.entryId);
+          for (const row of rows) {
+            // A rich timestamp without the normalized 15-pick payload is not
+            // a reusable finalized score. This includes rows written before
+            // event_picks was introduced; leave them eligible for a fresh
+            // provider read instead of treating [] as complete evidence.
+            if (isCompleteEntryPicks(row.eventPicks)) syncedEntryIds.add(row.entryId);
+          }
         }
         return uniqueEntryIds.filter((entryId) => !syncedEntryIds.has(entryId));
       } catch (error) {
@@ -470,6 +543,13 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           eventChip: toNullableDbChip(picks.active_chip),
           playedCaptainElementId: captainPick ? captainPick.element : null,
           captainPoints: captainPick ? captainPointsBase * captainPick.multiplier : null,
+          eventPicks: picks.picks.map((pick) => ({
+            element: pick.element,
+            position: pick.position,
+            multiplier: pick.multiplier,
+            is_captain: pick.is_captain,
+            is_vice_captain: pick.is_vice_captain,
+          })),
           automaticSubstitutions: autoSubs,
           overallPoints: previousOverallPoints + eventLiveScore.netEventPoints,
           overallRank: entryHistory.overall_rank ?? 0,
@@ -502,6 +582,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               eventChip: insert.eventChip,
               playedCaptainElementId: insert.playedCaptainElementId,
               captainPoints: insert.captainPoints,
+              eventPicks: insert.eventPicks,
               automaticSubstitutions: insert.automaticSubstitutions,
               overallPoints: insert.overallPoints,
               overallRank: insert.overallRank,

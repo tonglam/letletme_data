@@ -2390,6 +2390,8 @@ export const entryEventPicksInCompetition = competition.table(
       .notNull(),
     sourceCreatedAt: timestamp('source_created_at', { withTimezone: true, mode: 'date' }).notNull(),
     sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true, mode: 'date' }).notNull(),
+    /** Team captured with the event pick; never derive scoring identity from mutable players.team_id. */
+    eventTeamId: integer('event_team_id'),
   },
   (table) => [
     index('entry_event_picks_element_idx').using(
@@ -2409,6 +2411,7 @@ export const entryEventPicksInCompetition = competition.table(
       table.seasonId.asc().nullsLast(),
       table.elementId.asc().nullsLast(),
     ),
+    index('entry_event_picks_event_team_idx').on(table.seasonId, table.eventId, table.eventTeamId),
     index('entry_event_picks_source_row_idx').using(
       'btree',
       table.sourcePickRowId.asc().nullsLast(),
@@ -2432,6 +2435,11 @@ export const entryEventPicksInCompetition = competition.table(
       columns: [table.seasonId, table.elementId],
       foreignColumns: [playersInFpl.seasonId, playersInFpl.elementId],
       name: 'entry_event_picks_player_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventTeamId],
+      foreignColumns: [teamsInFpl.seasonId, teamsInFpl.teamId],
+      name: 'entry_event_picks_event_team_fk',
     }),
     primaryKey({
       columns: [table.seasonId, table.entryId, table.eventId, table.position],
@@ -3400,6 +3408,8 @@ export const entryEventResultsInCompetition = competition.table(
     richSyncedAt: timestamp('rich_synced_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    /** Immutable picks payload captured with the finalized result. */
+    eventPicks: jsonb('event_picks').default([]).notNull(),
   },
   (table) => [
     index('entry_event_results_captain_fk_idx').using(
@@ -3461,6 +3471,7 @@ export const entryEventResultsInCompetition = competition.table(
       'entry_event_results_auto_sub_array',
       sql`(automatic_substitutions IS NULL) OR (jsonb_typeof(automatic_substitutions) = 'array'::text)`,
     ),
+    check('entry_event_results_event_picks_array', sql`jsonb_typeof(event_picks) = 'array'::text`),
   ],
 );
 
@@ -3490,6 +3501,18 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
     idempotencyKey: text('idempotency_key'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    scoreSource: text('score_source'),
+    livePublicationId: uuid('live_publication_id'),
+    liveRevision: text('live_revision'),
+    algorithmVersion: text('algorithm_version'),
+    sourceMinCheckedAt: timestamp('source_min_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    sourceMaxCheckedAt: timestamp('source_max_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
   },
   (table) => [
     index('my_fpl_snapshot_publications_gc_idx').on(
@@ -3529,6 +3552,14 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       sql`expected_entry_count >= 0 AND ready_entry_count >= 0 AND empty_entry_count >= 0 AND ready_entry_count + empty_entry_count = expected_entry_count AND expected_tournament_count >= 0 AND ready_tournament_count >= 0 AND ready_tournament_count <= expected_tournament_count`,
     ),
     check('my_fpl_snapshot_publications_hash_check', sql`content_sha256 ~ '^[0-9a-f]{64}$'::text`),
+    check(
+      'my_fpl_snapshot_publications_score_source_check',
+      sql`score_source IS NULL OR score_source IN ('FPL_EVENT_LIVE', 'FPL_FINAL_RESULT')`,
+    ),
+    check(
+      'my_fpl_snapshot_publications_source_span_check',
+      sql`source_min_checked_at IS NULL OR source_max_checked_at IS NULL OR source_min_checked_at <= source_max_checked_at`,
+    ),
     check(
       'my_fpl_snapshot_publications_override_check',
       sql`((override_actor IS NULL AND override_reason IS NULL AND idempotency_key IS NULL) OR (kind = 'FINAL'::text AND override_actor IS NOT NULL AND override_reason IS NOT NULL AND idempotency_key IS NOT NULL AND btrim(override_actor) <> '' AND btrim(override_reason) <> '' AND btrim(idempotency_key) <> ''))`,

@@ -119,8 +119,11 @@ describe('official H2H source import', () => {
       state: 'live',
       revision: 'fpl:live:publication-8:8',
       publicationId: 'publication-8',
+      liveRevision: '8',
       checkedAt: '2026-08-24T00:01:00.000Z',
       sourceCheckedAt: '2026-08-24T00:00:59.000Z',
+      calculationMode: 'PROJECTED_AUTOSUBS',
+      algorithmVersion: 'fpl-projected-autosubs-v1',
       scores: new Map([
         [
           109967,
@@ -184,8 +187,11 @@ describe('official H2H source import', () => {
           state: 'live',
           revision: 'fpl:live:publication-placeholder',
           publicationId: 'publication-placeholder',
+          liveRevision: 'placeholder',
           checkedAt,
           sourceCheckedAt: checkedAt,
+          calculationMode: 'PROJECTED_AUTOSUBS',
+          algorithmVersion: 'fpl-projected-autosubs-v1',
           scores: new Map(
             [109967, 34299].map((entryId) => [
               entryId,
@@ -231,8 +237,11 @@ describe('official H2H source import', () => {
       state: 'live',
       revision: 'fpl:live:publication-8:8',
       publicationId: 'publication-8',
+      liveRevision: '8',
       checkedAt,
       sourceCheckedAt: checkedAt,
+      calculationMode: 'PROJECTED_AUTOSUBS',
+      algorithmVersion: 'fpl-projected-autosubs-v1',
       scores: new Map(
         [109967, 34299].map((entryId) => [
           entryId,
@@ -285,8 +294,11 @@ describe('official H2H source import', () => {
           state: 'live',
           revision: 'fpl:live:publication-8:8',
           publicationId: 'publication-8',
+          liveRevision: '8',
           checkedAt,
           sourceCheckedAt: checkedAt,
+          calculationMode: 'PROJECTED_AUTOSUBS',
+          algorithmVersion: 'fpl-projected-autosubs-v1',
           scores: new Map([
             [
               109967,

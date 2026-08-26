@@ -113,8 +113,11 @@ describe('Classic manager headline projection', () => {
         state: 'live',
         revision: 'fpl:live:publication-8:8',
         publicationId: 'publication-8',
+        liveRevision: '8',
         checkedAt: '2026-08-24T00:01:00.000Z',
         sourceCheckedAt: '2026-08-24T00:00:59.000Z',
+        calculationMode: 'PROJECTED_AUTOSUBS' as const,
+        algorithmVersion: 'fpl-projected-autosubs-v1',
         scores: new Map([
           [
             109967,
@@ -143,8 +146,13 @@ describe('Classic manager headline projection', () => {
         checkedAt: '2026-08-24T00:01:00.000Z',
       }),
     ]);
-    expect(projected[0]?.revision).toStartWith(
-      'fpl:live:publication-8:8:entry:109967:score:metadata:',
+    const projectedRow = projected[0];
+    expect(projectedRow?.provenance?.scoreRevision).toBe(
+      'fpl:live:publication-8:8:entry:109967:score',
+    );
+    expect(projectedRow?.provenance?.rankRevision).toBeString();
+    expect(projectedRow?.revision).toBe(
+      `${projectedRow?.provenance?.scoreRevision}:${projectedRow?.provenance?.rankRevision}`,
     );
   });
 
@@ -155,8 +163,11 @@ describe('Classic manager headline projection', () => {
       state: 'live',
       revision: 'fpl:live:publication-8:8',
       publicationId: 'publication-8',
+      liveRevision: '8',
       checkedAt: '2026-08-24T00:01:00.000Z',
       sourceCheckedAt: '2026-08-24T00:00:59.000Z',
+      calculationMode: 'PROJECTED_AUTOSUBS' as const,
+      algorithmVersion: 'fpl-projected-autosubs-v1',
       scores: new Map([
         [
           109967,
@@ -189,8 +200,11 @@ describe('Classic manager headline projection', () => {
       state: 'live' as const,
       revision: 'fpl:live:publication-8:8',
       publicationId: 'publication-8',
+      liveRevision: '8',
       checkedAt: '2026-08-24T00:01:00.000Z',
       sourceCheckedAt: '2026-08-24T00:00:59.000Z',
+      calculationMode: 'PROJECTED_AUTOSUBS' as const,
+      algorithmVersion: 'fpl-projected-autosubs-v1',
       scores: new Map([
         [
           109967,

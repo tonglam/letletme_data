@@ -160,6 +160,7 @@ export async function enqueueManagerLiveRefresh(input: {
       input.source ?? 'request',
       input.runAt ?? new Date(),
       hotState,
+      undefined,
     );
   } catch (error) {
     logError('Failed to enqueue manager live refresh', error, {

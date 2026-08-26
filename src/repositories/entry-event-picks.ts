@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
-import { entryEventPicksInCompetition } from '../db/schemas/index.schema';
+import { entryEventPicksInCompetition, playersInFpl } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
@@ -18,6 +18,10 @@ export type EventLiveManagerPickRow = {
   isViceCaptain: boolean;
   transfersCost: number | null;
   sourceUpdatedAt: Date;
+  elementType: number;
+  /** Event-scoped team identity; null means the scorer must fail closed. */
+  teamId: number | null;
+  activeChip: string | null;
 };
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -68,6 +72,8 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
   ): Promise<boolean> => {
     const existing = await db
       .select({
+        elementId: entryEventPicksInCompetition.elementId,
+        eventTeamId: entryEventPicksInCompetition.eventTeamId,
         sourceCreatedAt: entryEventPicksInCompetition.sourceCreatedAt,
         sourceUpdatedAt: entryEventPicksInCompetition.sourceUpdatedAt,
       })
@@ -94,6 +100,12 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       (earliest, row) => (row.sourceCreatedAt < earliest ? row.sourceCreatedAt : earliest),
       syncedAt,
     );
+    // Preserve a null event-scoped team as an explicit unknown. Falling back
+    // to the mutable current players.team_id on a retry could silently move a
+    // historical pick to a post-deadline club after a transfer.
+    const previouslyCapturedTeamByElement = new Map(
+      existing.map((row) => [row.elementId, row.eventTeamId] as const),
+    );
     await db
       .delete(entryEventPicksInCompetition)
       .where(
@@ -105,6 +117,22 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       );
 
     const activeChip = toNullableDbChip(picks.active_chip);
+    const playerTeams = await db
+      .select({
+        elementId: playersInFpl.elementId,
+        teamId: playersInFpl.teamId,
+      })
+      .from(playersInFpl)
+      .where(
+        and(
+          eq(playersInFpl.seasonId, season.seasonId),
+          inArray(
+            playersInFpl.elementId,
+            picks.picks.map((pick) => pick.element),
+          ),
+        ),
+      );
+    const teamByElement = new Map(playerTeams.map((row) => [row.elementId, row.teamId]));
     await db.insert(entryEventPicksInCompetition).values(
       picks.picks.map((pick) => ({
         seasonId: season.seasonId,
@@ -112,6 +140,11 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         eventId,
         position: pick.position,
         elementId: pick.element,
+        // Capture the deadline-time observation. A missing player row stays
+        // NULL and is never replaced with a later mutable players.team_id.
+        eventTeamId: previouslyCapturedTeamByElement.has(pick.element)
+          ? (previouslyCapturedTeamByElement.get(pick.element) ?? null)
+          : (teamByElement.get(pick.element) ?? null),
         multiplier: pick.multiplier,
         isCaptain: pick.is_captain,
         isViceCaptain: pick.is_vice_captain,
@@ -147,8 +180,28 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
                 isViceCaptain: entryEventPicksInCompetition.isViceCaptain,
                 transfersCost: entryEventPicksInCompetition.transfersCost,
                 sourceUpdatedAt: entryEventPicksInCompetition.sourceUpdatedAt,
+                elementType: playersInFpl.elementType,
+                teamId: sql<number | null>`COALESCE(
+                  (
+                    SELECT min(fixture_stat.team_id)
+                    FROM fpl.player_fixture_stats fixture_stat
+                    WHERE fixture_stat.season_id = ${entryEventPicksInCompetition.seasonId}
+                      AND fixture_stat.event_id = ${entryEventPicksInCompetition.eventId}
+                      AND fixture_stat.element_id = ${entryEventPicksInCompetition.elementId}
+                    HAVING count(DISTINCT fixture_stat.team_id) = 1
+                  ),
+                  ${entryEventPicksInCompetition.eventTeamId}
+                )`,
+                activeChip: entryEventPicksInCompetition.activeChip,
               })
               .from(entryEventPicksInCompetition)
+              .innerJoin(
+                playersInFpl,
+                and(
+                  eq(playersInFpl.seasonId, entryEventPicksInCompetition.seasonId),
+                  eq(playersInFpl.elementId, entryEventPicksInCompetition.elementId),
+                ),
+              )
               .where(
                 and(
                   eq(entryEventPicksInCompetition.seasonId, season.seasonId),

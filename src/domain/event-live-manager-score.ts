@@ -7,6 +7,11 @@ export type EventLiveManagerPick = {
   isViceCaptain: boolean;
   transfersCost: number | null;
   sourceUpdatedAt: Date;
+  /** Canonical player metadata used by the revision-pinned projection. */
+  elementType?: number;
+  /** Event-scoped identity captured with the pick or fixture evidence. */
+  teamId?: number | null;
+  activeChip?: string | null;
 };
 
 export type EventLiveManagerScore = {

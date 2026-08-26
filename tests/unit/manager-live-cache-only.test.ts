@@ -7,11 +7,14 @@ import { eventRepository } from '../../src/repositories/events';
 import { managerScoreCheckpointRepository } from '../../src/repositories/live-window';
 import { seasonRepository } from '../../src/repositories/seasons';
 import { eventLiveManagerScoreService } from '../../src/services/event-live-manager-scores.service';
+import { contentHash } from '../../src/utils/content-hash';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 const dispatchModule = await import('../../src/services/manager-live-refresh-dispatch');
 
 const redisRows = new Map<number, string>();
+const materializationPointers = new Map<number, string>();
+const materializationPayloads = new Map<string, string>();
 let redisReadFails = false;
 let redisWriteSucceeds = false;
 let postgresRows: Array<Record<string, unknown>> = [];
@@ -44,6 +47,8 @@ const loadEventLiveManagerScores = mock(
       publicationId: 'test-publication',
       checkedAt,
       sourceCheckedAt: checkedAt,
+      calculationMode: 'PROJECTED_AUTOSUBS',
+      algorithmVersion: 'fpl-projected-autosubs-v1',
       scores: new Map(
         availableEntryIds.map((entryId) => {
           const metadata = metadataByEntry.get(entryId);
@@ -72,6 +77,22 @@ const loadEventLiveManagerScores = mock(
 );
 eventLiveManagerScoreService.load = loadEventLiveManagerScores as never;
 
+const effectiveLineup = (entryId: number) =>
+  Array.from({ length: 15 }, (_, index) => {
+    const position = index + 1;
+    return {
+      elementId: entryId * 100 + position,
+      position,
+      sourceMultiplier: position === 1 ? 2 : position <= 11 ? 1 : 0,
+      effectiveMultiplier: position === 1 ? 2 : position <= 11 ? 1 : 0,
+      pickActive: position <= 11,
+      autoSub: false,
+      isCaptain: position === 1,
+      isViceCaptain: position === 2,
+      captainForScoring: position === 1,
+    };
+  });
+
 const findCurrent = mock(async () => TEST_SEASON as never);
 seasonRepository.findCurrent = findCurrent;
 const findEventById = mock(
@@ -94,10 +115,14 @@ const getRedisClient = mock(async () => {
         : ([[new Error('cache write unavailable'), null]] as const),
   };
   return {
-    hmget: async (_key: string, ...fields: string[]) =>
-      redisReadFails
-        ? Promise.reject(new Error('cache unavailable'))
-        : fields.map((field) => redisRows.get(Number(field)) ?? null),
+    hmget: async (key: string, ...fields: string[]) => {
+      if (redisReadFails) return Promise.reject(new Error('cache unavailable'));
+      if (key === 'ManagerScoreHead:2627:1:PROJECTED_AUTOSUBS') {
+        return fields.map((field) => materializationPointers.get(Number(field)) ?? null);
+      }
+      return fields.map((field) => redisRows.get(Number(field)) ?? null);
+    },
+    mget: async (...keys: string[]) => keys.map((key) => materializationPayloads.get(key) ?? null),
     multi: () => transaction,
   } as never;
 });
@@ -171,32 +196,64 @@ const cachedRow = (entryId: number, checkedAt: string) => ({
   staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
 });
 
-const checkpointRow = (entryId: number, checkedAt: string) => ({
-  seasonId: TEST_SEASON.seasonId,
-  eventId: 1,
-  scopeType: 'ENTRY',
-  scopeId: 0,
-  entryId,
-  eventPoints: entryId % 100,
-  netEventPoints: entryId % 100,
-  totalPoints: 1000 + entryId,
-  totalScope: 'OVERALL',
-  eventRank: 10 + entryId,
-  overallRank: 100 + entryId,
-  leagueRank: null,
-  source: 'FPL_ENTRY_SUMMARY',
-  transferCost: 0,
-  eventPointSemantics: 'GROSS',
-  contentRevision: `revision-${entryId}`,
-  checkedAt: new Date(checkedAt),
-  updatedAt: new Date(checkedAt),
-  upstreamUpdatedAt: null,
-});
+const putProjectedMaterialization = (
+  entryId: number,
+  checkedAt: string,
+  generation = 1,
+  verifiedLiveCheckedAt = checkedAt,
+): void => {
+  const inputRevision = `input-${entryId}`;
+  const key = `ManagerScoreMaterialization:2627:1:${entryId}:${inputRevision}`;
+  materializationPointers.set(
+    entryId,
+    JSON.stringify({ inputRevision, generation, verifiedLiveCheckedAt }),
+  );
+  const lineup = effectiveLineup(entryId);
+  const eventPoints = entryId % 100;
+  const totalPoints = 1000 + entryId;
+  const scoreRevision = contentHash({
+    inputRevision,
+    eventPoints,
+    netEventPoints: eventPoints,
+    totalPoints,
+    effectiveLineup: lineup,
+  });
+  materializationPayloads.set(
+    key,
+    JSON.stringify({
+      entryId,
+      inputRevision,
+      scoreRevision,
+      generation,
+      calculationMode: 'PROJECTED_AUTOSUBS',
+      algorithmVersion: 'fpl-projected-autosubs-v1',
+      scoreSource: 'FPL_EVENT_LIVE',
+      livePublicationId: '00000000-0000-4000-8000-000000000001',
+      liveRevision: '8',
+      liveCheckedAt: checkedAt,
+      verifiedLiveCheckedAt,
+      picksRevision: `picks-${entryId}`,
+      picksCheckedAt: checkedAt,
+      previousTotalsRevision: `previous-${entryId}`,
+      previousTotalsThroughEventId: null,
+      eventPoints,
+      netEventPoints: eventPoints,
+      totalPoints,
+      transferCost: 0,
+      effectiveLineup: lineup,
+      rankRevision: null,
+      rankSource: null,
+      rankCheckedAt: null,
+    }),
+  );
+};
 
 describe('manager live CACHE_ONLY reads', () => {
   beforeEach(() => {
     reattachManagerLiveSpies();
     redisRows.clear();
+    materializationPointers.clear();
+    materializationPayloads.clear();
     redisReadFails = false;
     redisWriteSucceeds = false;
     postgresRows = [];
@@ -206,10 +263,10 @@ describe('manager live CACHE_ONLY reads', () => {
     getClassicStandings.mockClear();
   });
 
-  test('never calls FPL and keeps stale Redis rows as last-good', async () => {
+  test('never calls FPL and keeps a stale projected materialization as last-good', async () => {
     const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
-    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
-    redisRows.set(102, JSON.stringify(cachedRow(102, checkedAt)));
+    putProjectedMaterialization(101, checkedAt);
+    putProjectedMaterialization(102, checkedAt);
 
     const result = await resolveManagerLiveScores({
       eventId: 1,
@@ -232,37 +289,22 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(getClassicStandings).not.toHaveBeenCalled();
   });
 
-  test('reports PostgreSQL, mixed, and unavailable source coverage precisely', async () => {
+  test('reports projected materialization and unavailable coverage precisely', async () => {
     const checkedAt = new Date().toISOString();
-    redisReadFails = true;
-    postgresRows = [checkpointRow(101, checkedAt), checkpointRow(102, checkedAt)];
-    const postgres = await resolveManagerLiveScores({
+    putProjectedMaterialization(101, checkedAt);
+    putProjectedMaterialization(102, checkedAt);
+    const projected = await resolveManagerLiveScores({
       eventId: 1,
       entryIds: [101, 102],
       readMode: 'CACHE_ONLY',
     });
-    expect(postgres).toMatchObject({
+    expect(projected).toMatchObject({
       dataAvailability: 'FRESH',
-      servedFrom: 'POSTGRES',
+      servedFrom: 'REDIS',
       partial: false,
     });
 
-    redisReadFails = false;
-    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
-    postgresRows = [checkpointRow(102, checkedAt)];
-    const mixed = await resolveManagerLiveScores({
-      eventId: 1,
-      entryIds: [101, 102],
-      readMode: 'CACHE_ONLY',
-    });
-    expect(mixed).toMatchObject({
-      dataAvailability: 'FRESH',
-      servedFrom: 'MIXED',
-      partial: false,
-    });
-
-    postgresRows = [];
-    availableEventLiveEntryIds = new Set([101]);
+    materializationPointers.delete(102);
     const partial = await resolveManagerLiveScores({
       eventId: 1,
       entryIds: [101, 102],
@@ -275,8 +317,8 @@ describe('manager live CACHE_ONLY reads', () => {
       missingEntryIds: [102],
     });
 
-    redisRows.clear();
-    availableEventLiveEntryIds = new Set();
+    materializationPointers.clear();
+    materializationPayloads.clear();
     const unavailable = await resolveManagerLiveScores({
       eventId: 1,
       entryIds: [101, 102],
@@ -287,7 +329,7 @@ describe('manager live CACHE_ONLY reads', () => {
       servedFrom: 'NONE',
       partial: true,
       missingEntryIds: [101, 102],
-      errorCode: 'UPSTREAM_UNAVAILABLE',
+      errorCode: 'INPUT_INCOMPLETE',
     });
     expect(getEntrySummary).not.toHaveBeenCalled();
     expect(getClassicStandings).not.toHaveBeenCalled();
@@ -297,7 +339,7 @@ describe('manager live CACHE_ONLY reads', () => {
     const checkedAt = new Date().toISOString();
     const entryIds = Array.from({ length: 500 }, (_, index) => 10_000 + index);
     for (const entryId of entryIds) {
-      redisRows.set(entryId, JSON.stringify(cachedRow(entryId, checkedAt)));
+      putProjectedMaterialization(entryId, checkedAt);
     }
 
     const startedAt = performance.now();
@@ -317,7 +359,7 @@ describe('manager live CACHE_ONLY reads', () => {
 
   test('does not let a stuck queue dispatch block a cache hit', async () => {
     const checkedAt = new Date().toISOString();
-    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    putProjectedMaterialization(101, checkedAt);
     dispatchRefresh.mockImplementationOnce(() => new Promise<void>(() => undefined));
 
     const startedAt = performance.now();
@@ -335,7 +377,7 @@ describe('manager live CACHE_ONLY reads', () => {
 
   test('does not confirm a dispatch that rejects after the response deadline', async () => {
     const checkedAt = new Date().toISOString();
-    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    putProjectedMaterialization(101, checkedAt);
     let rejectDispatch!: (reason: Error) => void;
     const lateDispatch = new Promise<void>((_, reject) => {
       rejectDispatch = reject;
@@ -355,7 +397,7 @@ describe('manager live CACHE_ONLY reads', () => {
 
   test('reports a confirmed enqueue failure without discarding cached content', async () => {
     const checkedAt = new Date().toISOString();
-    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    putProjectedMaterialization(101, checkedAt);
     dispatchRefresh.mockImplementationOnce(async () => {
       throw new Error('queue unavailable');
     });
@@ -370,16 +412,9 @@ describe('manager live CACHE_ONLY reads', () => {
     expect(result.refreshQueued).toBe(false);
   });
 
-  test('prefers a differing durable checkpoint at the same checkedAt', async () => {
+  test('accepts the generation-pinned immutable materialization', async () => {
     const checkedAt = new Date().toISOString();
-    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
-    postgresRows = [
-      {
-        ...checkpointRow(101, checkedAt),
-        overallRank: 765_432,
-        contentRevision: 'postgres-durable-revision',
-      },
-    ];
+    putProjectedMaterialization(101, checkedAt, 7);
 
     const result = await resolveManagerLiveScores({
       eventId: 1,
@@ -387,72 +422,29 @@ describe('manager live CACHE_ONLY reads', () => {
       readMode: 'CACHE_ONLY',
     });
 
-    expect(result).toMatchObject({ servedFrom: 'POSTGRES' });
+    expect(result).toMatchObject({ servedFrom: 'REDIS', dataAvailability: 'FRESH' });
     expect(result.rows[0]).toMatchObject({
-      overallRank: 765_432,
-      revision: expect.stringMatching(
-        /^fpl:live:test-publication:8:entry:101:metadata:[0-9a-f]{16}$/,
-      ),
-    });
-    expect(result.rows[0]).toHaveProperty('revisionAt', checkedAt);
-  });
-
-  test('keeps a newer Redis enrichment when the matching checkpoint write failed', async () => {
-    const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
-    const revisionAt = new Date(Date.parse(checkedAt) + 60_000).toISOString();
-    redisRows.set(
-      101,
-      JSON.stringify({
-        ...cachedRow(101, checkedAt),
-        overallRank: 123_456,
-        revision: 'redis-newer-revision',
-        revisionAt,
-      }),
-    );
-    postgresRows = [
-      {
-        ...checkpointRow(101, checkedAt),
-        overallRank: 765_432,
-        contentRevision: 'postgres-older-revision',
+      source: 'FPL_EVENT_LIVE',
+      calculationMode: 'PROJECTED_AUTOSUBS',
+      eventPoints: 1,
+      totalPoints: 1101,
+      provenance: {
+        scoreSource: 'FPL_EVENT_LIVE',
+        scoreRevision: contentHash({
+          inputRevision: 'input-101',
+          eventPoints: 1,
+          netEventPoints: 1,
+          totalPoints: 1101,
+          effectiveLineup: effectiveLineup(101),
+        }),
       },
-    ];
-
-    const result = await resolveManagerLiveScores({
-      eventId: 1,
-      entryIds: [101],
-      readMode: 'CACHE_ONLY',
-    });
-
-    expect(result).toMatchObject({ servedFrom: 'REDIS' });
-    expect(result.rows[0]).toMatchObject({
-      overallRank: 123_456,
-      revision: expect.stringMatching(
-        /^fpl:live:test-publication:8:entry:101:metadata:[0-9a-f]{16}$/,
-      ),
     });
   });
 
-  test('uses a newer checkpoint enrichment when the matching Redis write failed', async () => {
-    const checkedAt = new Date(Date.now() - 10 * 60_000).toISOString();
-    const redisRevisionAt = new Date(Date.parse(checkedAt) + 30_000).toISOString();
-    const checkpointRevisionAt = new Date(Date.parse(checkedAt) + 60_000);
-    redisRows.set(
-      101,
-      JSON.stringify({
-        ...cachedRow(101, checkedAt),
-        overallRank: 123_456,
-        revision: 'redis-older-enrichment',
-        revisionAt: redisRevisionAt,
-      }),
-    );
-    postgresRows = [
-      {
-        ...checkpointRow(101, checkedAt),
-        overallRank: 765_432,
-        contentRevision: 'postgres-newer-revision',
-        updatedAt: checkpointRevisionAt,
-      },
-    ];
+  test('serves the durable head heartbeat instead of the immutable materialization timestamp', async () => {
+    const materializedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const verifiedAt = new Date().toISOString();
+    putProjectedMaterialization(101, materializedAt, 1, verifiedAt);
 
     const result = await resolveManagerLiveScores({
       eventId: 1,
@@ -460,13 +452,33 @@ describe('manager live CACHE_ONLY reads', () => {
       readMode: 'CACHE_ONLY',
     });
 
-    expect(result).toMatchObject({ servedFrom: 'POSTGRES' });
-    expect(result.rows[0]).toMatchObject({
-      overallRank: 765_432,
-      revision: expect.stringMatching(
-        /^fpl:live:test-publication:8:entry:101:metadata:[0-9a-f]{16}$/,
-      ),
-      revisionAt: checkpointRevisionAt.toISOString(),
+    expect(result).toMatchObject({
+      dataAvailability: 'FRESH',
+      checkedAt: verifiedAt,
+      servedFrom: 'REDIS',
+    });
+    expect(result.rows[0]?.provenance?.liveCheckedAt).toBe(verifiedAt);
+  });
+
+  test('does not serve a different live revision for a pinned CACHE_ONLY request', async () => {
+    const checkedAt = new Date().toISOString();
+    putProjectedMaterialization(101, checkedAt);
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'CACHE_ONLY',
+      liveRef: {
+        publicationId: '00000000-0000-4000-8000-000000000001',
+        revision: '9',
+      },
+    });
+
+    expect(result).toMatchObject({
+      rows: [],
+      missingEntryIds: [101],
+      partial: true,
+      errorCode: 'REVISION_UNAVAILABLE',
     });
   });
 });
@@ -475,6 +487,8 @@ describe('manager live READ_THROUGH source reporting', () => {
   beforeEach(() => {
     reattachManagerLiveSpies();
     redisRows.clear();
+    materializationPointers.clear();
+    materializationPayloads.clear();
     redisReadFails = false;
     redisWriteSucceeds = false;
     postgresRows = [];
@@ -524,7 +538,7 @@ describe('manager live READ_THROUGH source reporting', () => {
           summary_overall_rank: 34_567,
         }) as never,
     );
-    upsertCheckpoint.mockImplementationOnce(async () => {
+    upsertCheckpoint.mockImplementation(async () => {
       throw new Error('checkpoint unavailable');
     });
 
@@ -553,9 +567,9 @@ describe('manager live READ_THROUGH source reporting', () => {
           summary_overall_rank: 34_567,
         }) as never,
     );
-    upsertCheckpoint.mockImplementationOnce(async () => {
+    managerScoreCheckpointRepository.upsertBatch = (async () => {
       throw new Error('checkpoint unavailable');
-    });
+    }) as never;
 
     const result = await resolveManagerLiveScores({
       eventId: 1,
@@ -574,6 +588,7 @@ describe('manager live READ_THROUGH source reporting', () => {
 
 describe('manager live classic standings convergence', () => {
   beforeEach(() => {
+    managerScoreCheckpointRepository.upsertBatch = upsertCheckpoint;
     upsertCheckpoint.mockReset();
     upsertCheckpoint.mockImplementation(successfulCheckpointWrite);
     getClassicStandings.mockReset();
@@ -809,6 +824,7 @@ describe('manager live classic standings convergence', () => {
       complete: false,
       nextPage: 5,
       errorCode: 'UPSTREAM_UNAVAILABLE',
+      refreshedEntryIds: [],
     });
     expect(rows.has(101)).toBe(false);
   });
@@ -824,7 +840,12 @@ describe('manager live classic standings convergence', () => {
       { startPage: 7, maxPages: 2 },
     );
 
-    expect(standings).toEqual({ complete: true, nextPage: 7, errorCode: null });
+    expect(standings).toEqual({
+      complete: true,
+      nextPage: 7,
+      errorCode: null,
+      refreshedEntryIds: [],
+    });
     expect(classicStandingsCursorAfterRefresh(true, standings)).toBeNull();
     expect(getClassicStandings).not.toHaveBeenCalled();
   });
@@ -960,7 +981,7 @@ describe('manager live API read mode contract', () => {
 
   test('accepts CACHE_ONLY and returns the additive metadata', async () => {
     const checkedAt = new Date().toISOString();
-    redisRows.set(101, JSON.stringify(cachedRow(101, checkedAt)));
+    putProjectedMaterialization(101, checkedAt);
     const response = await managerLiveAPI.handle(
       new Request('http://localhost/internal/manager-live/resolve', {
         method: 'POST',
