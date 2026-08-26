@@ -23,6 +23,7 @@ import {
   loadPriceChangeHotSource,
   markPriceChangeHotReconciliation,
   readPriceChangeHotSnapshot,
+  readPriceChangeHotSnapshotAtRevision,
 } from '../services/price-change-hot.service';
 import {
   resolveBullMqAttemptQueueWaitMs,
@@ -93,6 +94,11 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
       : undefined);
   if (!sourceArtifactId || !sourceHash) return undefined;
   try {
+    const hotSnapshot = boardRevision
+      ? await readPriceChangeHotSnapshotAtRevision(job.data.seasonCode, boardRevision).catch(
+          () => null,
+        )
+      : await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
     const source = await loadPriceChangeHotSource({
       artifactId: sourceArtifactId,
       sourceHash,
@@ -103,7 +109,26 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
       sourceHash,
       priceChangeBoardRevision: boardRevision,
     });
-    return { getBootstrap: async () => source.payload };
+    const capturedAt =
+      hotSnapshot !== null &&
+      hotSnapshot.sourceHash === sourceHash &&
+      (!boardRevision || hotSnapshot.revision === boardRevision)
+        ? {
+            requestStartedAt: new Date(hotSnapshot.detectedAt),
+            fetchedAt: new Date(hotSnapshot.fetchedAt),
+          }
+        : null;
+    return {
+      getBootstrap: async () => source.payload,
+      ...(capturedAt
+        ? {
+            captureTimestamps: {
+              requestStartedAt: capturedAt.requestStartedAt,
+              fetchedAt: capturedAt.fetchedAt,
+            },
+          }
+        : {}),
+    };
   } catch (error) {
     logWarn('Archived provisional source unavailable; durable reconciliation will re-fetch', {
       season: job.data.seasonCode,
@@ -131,7 +156,10 @@ async function markHotPriceReconciled(
       ? obligation.evidence.priceChangeBoardRevision
       : undefined);
   if (!boardRevision) return;
-  const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+  const snapshot = await readPriceChangeHotSnapshotAtRevision(
+    job.data.seasonCode,
+    boardRevision,
+  ).catch(() => null);
   if (!snapshot || snapshot.revision !== boardRevision) return;
   if (preparedBoardRevision !== boardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {
@@ -157,7 +185,10 @@ async function markHotPriceReconciliationFailed(
       ? obligation.evidence.priceChangeBoardRevision
       : undefined);
   if (!boardRevision) return;
-  const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+  const snapshot = await readPriceChangeHotSnapshotAtRevision(
+    job.data.seasonCode,
+    boardRevision,
+  ).catch(() => null);
   if (!snapshot || snapshot.revision !== boardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {
     state: 'failed',

@@ -203,6 +203,21 @@ describe('price-change prediction normalization', () => {
     expect(older.fetchedAt.getTime()).toBeGreaterThan(newer.fetchedAt.getTime());
   });
 
+  it('preserves the provider capture timestamps for archived reconciliation', async () => {
+    const capturedRequest = new Date('2026-08-24T06:05:00.100Z');
+    const capturedFetch = new Date('2026-08-24T06:05:01.000Z');
+    const result = await requestPriceChangeBootstrap({
+      getBootstrap: async () => bootstrapFixture(),
+      captureTimestamps: {
+        requestStartedAt: capturedRequest,
+        fetchedAt: capturedFetch,
+      },
+    });
+
+    expect(result.requestStartedAt.toISOString()).toBe(capturedRequest.toISOString());
+    expect(result.fetchedAt.toISOString()).toBe(capturedFetch.toISOString());
+  });
+
   it('keeps official preseason zero values as a usable board row', () => {
     const board = normalizePriceChangeBoard(
       bootstrapFixture({

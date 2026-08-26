@@ -128,6 +128,12 @@ async function recordFreshnessWindowForPlan(
   plan: SchedulerObligationPlan,
   seasonId: number,
 ): Promise<number | null> {
+  // The price watcher is an observation obligation. It may publish a hot
+  // board, or legitimately observe that the official provider did not change
+  // prices, without producing a durable PostgreSQL publication for this
+  // particular watch. Keep it out of the publication-SLO denominator; the
+  // durable price-change lane owns the publication window.
+  if (definition.name === 'price-change-watch') return null;
   const contract = contractForSchedulerJob(definition.name);
   if (
     !contract ||

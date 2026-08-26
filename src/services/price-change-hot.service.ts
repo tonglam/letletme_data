@@ -7,6 +7,7 @@ import {
 } from '../clients/fpl';
 import {
   normalizePriceChangeBoard,
+  PRICE_CHANGE_READY_MS,
   priceChangeTriggerFingerprint,
   type PriceChangeBoard,
 } from './price-change-predictions.service';
@@ -53,8 +54,12 @@ export type PriceChangeHotCursor = Readonly<{
   detectedAt: string;
   fetchedAt: string;
   expiresAt: string;
-  state: 'PROVISIONAL';
+  state: 'PROVISIONAL' | 'STALE' | 'FAILED';
+  reconciliationError: string | null;
 }>;
+
+const DURABLE_PUBLICATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Return whether a valid hot board is newer than the durable board. */
 export function isPriceChangeHotSnapshotNewer(
@@ -288,8 +293,20 @@ function isValidSnapshot(
     !Array.isArray(value.board.players) ||
     value.board.players.length !== observedPlayerCount ||
     value.board.revision !== value.revision ||
-    value.board.status !== 'READY' ||
+    !['READY', 'STALE'].includes(String(value.board.status)) ||
+    typeof value.board.fetchedAt !== 'string' ||
+    typeof value.board.staleAt !== 'string' ||
     value.board.source !== 'FPL_BOOTSTRAP'
+  ) {
+    return false;
+  }
+  const boardFetchedAt = Date.parse(value.board.fetchedAt);
+  const boardStaleAt = Date.parse(value.board.staleAt);
+  if (
+    !Number.isFinite(boardFetchedAt) ||
+    !Number.isFinite(boardStaleAt) ||
+    boardFetchedAt !== fetchedAt ||
+    boardStaleAt !== fetchedAt + PRICE_CHANGE_READY_MS
   ) {
     return false;
   }
@@ -314,6 +331,9 @@ function isValidSnapshot(
     reconciliation.state === 'reconciled' &&
     (reconciliation.durablePublicationId === null ||
       reconciliation.durableRevision === null ||
+      !DURABLE_PUBLICATION_ID_PATTERN.test(reconciliation.durablePublicationId) ||
+      typeof reconciliation.durableRevision !== 'number' ||
+      reconciliation.durableRevision <= 0 ||
       reconciliation.error !== null)
   ) {
     return false;
@@ -359,11 +379,12 @@ const POINTER_CAS_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
 if current then
   local ok, parsed = pcall(cjson.decode, current)
-  if ok and parsed and parsed.detectedAtMs and tonumber(parsed.detectedAtMs) >= tonumber(ARGV[2]) then
+  if ok and parsed and parsed.detectedAtMs and tonumber(parsed.detectedAtMs) >= tonumber(ARGV[3]) then
     return 0
   end
 end
-redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[4])
+redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[4])
 return 1
 `;
 
@@ -379,11 +400,12 @@ export async function publishPriceChangeHotSnapshot(
     payloadKey,
     detectedAtMs: Date.parse(snapshot.detectedAt),
   });
-  await redis.set(payloadKey, payload, 'PX', PRICE_CHANGE_HOT_TTL_MS);
   const result = await redis.eval(
     POINTER_CAS_SCRIPT,
-    1,
+    2,
     pointerKey,
+    payloadKey,
+    payload,
     pointer,
     Date.parse(snapshot.detectedAt),
     PRICE_CHANGE_HOT_TTL_MS,
@@ -398,7 +420,45 @@ export async function readPriceChangeHotSnapshot(
   const redis = await redisSingleton.getClient();
   const pointer = parsePointer(await redis.get(priceChangeHotPointerKey(seasonCode)));
   if (!pointer) return null;
-  const raw = await redis.get(pointer.payloadKey);
+  if (pointer.payloadKey !== priceChangeHotPayloadKey(seasonCode, pointer.revision)) return null;
+  return readPriceChangeHotSnapshotPayload(
+    redis,
+    seasonCode,
+    pointer.payloadKey,
+    pointer.revision,
+    now,
+  );
+}
+
+/**
+ * Read one immutable hot payload by revision, without consulting the active
+ * pointer. Reconciliation jobs use this when a newer hot board has already
+ * become active so the archived source keeps its original capture time.
+ */
+export async function readPriceChangeHotSnapshotAtRevision(
+  seasonCode: string,
+  revision: string,
+  now = new Date(),
+): Promise<PriceChangeHotSnapshot | null> {
+  if (!/^[0-9a-f]{16}$/.test(revision)) return null;
+  const redis = await redisSingleton.getClient();
+  return readPriceChangeHotSnapshotPayload(
+    redis,
+    seasonCode,
+    priceChangeHotPayloadKey(seasonCode, revision),
+    revision,
+    now,
+  );
+}
+
+async function readPriceChangeHotSnapshotPayload(
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  seasonCode: string,
+  payloadKey: string,
+  expectedRevision: string,
+  now: Date,
+): Promise<PriceChangeHotSnapshot | null> {
+  const raw = await redis.get(payloadKey);
   if (!raw) return null;
   let parsed: unknown;
   try {
@@ -406,9 +466,16 @@ export async function readPriceChangeHotSnapshot(
   } catch {
     return null;
   }
-  if (!isValidSnapshot(parsed, seasonCode, now) || parsed.revision !== pointer.revision)
+  if (!isValidSnapshot(parsed, seasonCode, now) || parsed.revision !== expectedRevision)
     return null;
-  return parsed;
+  const ageMs = now.getTime() - Date.parse(parsed.fetchedAt);
+  return {
+    ...parsed,
+    board: {
+      ...parsed.board,
+      status: ageMs < PRICE_CHANGE_READY_MS ? 'READY' : 'STALE',
+    },
+  };
 }
 
 export async function readPriceChangeHotCursor(
@@ -423,7 +490,13 @@ export async function readPriceChangeHotCursor(
     detectedAt: snapshot.detectedAt,
     fetchedAt: snapshot.fetchedAt,
     expiresAt: snapshot.expiresAt,
-    state: 'PROVISIONAL',
+    state:
+      snapshot.reconciliation.state === 'failed'
+        ? 'FAILED'
+        : Date.now() - Date.parse(snapshot.fetchedAt) >= PRICE_CHANGE_READY_MS
+          ? 'STALE'
+          : 'PROVISIONAL',
+    reconciliationError: snapshot.reconciliation.error,
   };
 }
 
@@ -437,8 +510,11 @@ export async function markPriceChangeHotReconciliation(
       }
     | { readonly state: 'failed'; readonly error: string },
 ): Promise<boolean> {
-  const current = await readPriceChangeHotSnapshot(snapshot.seasonCode);
-  if (!current || current.revision !== snapshot.revision) return false;
+  const current = await readPriceChangeHotSnapshotAtRevision(
+    snapshot.seasonCode,
+    snapshot.revision,
+  );
+  if (!current || current.sourceHash !== snapshot.sourceHash) return false;
   const updated: PriceChangeHotSnapshot = {
     ...current,
     reconciliation:

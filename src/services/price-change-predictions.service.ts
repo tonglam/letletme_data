@@ -99,6 +99,15 @@ export type PriceChangePublicationDependencies = {
    * client and the publication fence use the same cache bucket/order value.
    */
   readonly getBootstrap: (requestStartedAtMs: number) => Promise<FPLBootstrapResponse>;
+  /**
+   * An archived watcher response carries the provider capture time that must
+   * survive queue delay. Live requests leave this unset and use the local
+   * request/fetch clocks below.
+   */
+  readonly captureTimestamps?: Readonly<{
+    requestStartedAt: Date;
+    fetchedAt: Date;
+  }>;
 };
 
 export type PreparedPriceChangePublication = {
@@ -189,6 +198,22 @@ export async function requestPriceChangeBootstrap(
 }> {
   const requestStartedAtMs = now();
   const bootstrap = await dependencies.getBootstrap(requestStartedAtMs);
+  const captured = dependencies.captureTimestamps;
+  if (captured) {
+    if (
+      !Number.isFinite(captured.requestStartedAt.getTime()) ||
+      !Number.isFinite(captured.fetchedAt.getTime())
+    ) {
+      throw new PriceChangePredictionValidationError(
+        'Archived price-change capture timestamps are invalid',
+      );
+    }
+    return {
+      bootstrap,
+      requestStartedAt: new Date(captured.requestStartedAt),
+      fetchedAt: new Date(captured.fetchedAt),
+    };
+  }
   return {
     bootstrap,
     requestStartedAt: new Date(requestStartedAtMs),

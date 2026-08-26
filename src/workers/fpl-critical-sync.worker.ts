@@ -16,6 +16,7 @@ import {
   startSchedulerLane,
   unblockSchedulerLane,
   type SchedulerLaneTarget,
+  getSchedulerLaneTargets,
 } from '../repositories/scheduler-lanes';
 import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
 import { syncOperationsRepository } from '../repositories/sync-operations';
@@ -28,6 +29,7 @@ import {
   loadPriceChangeHotSource,
   markPriceChangeHotReconciliation,
   readPriceChangeHotSnapshot,
+  readPriceChangeHotSnapshotAtRevision,
 } from '../services/price-change-hot.service';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
 import { readActiveDataPublication } from '../cache/data-publication';
@@ -89,6 +91,12 @@ async function hotPriceSourceDependencies(
 ) {
   if (!metadata.sourceArtifactId || !metadata.sourceHash) return undefined;
   try {
+    const hotSnapshot = metadata.priceChangeBoardRevision
+      ? await readPriceChangeHotSnapshotAtRevision(
+          job.data.seasonCode,
+          metadata.priceChangeBoardRevision,
+        ).catch(() => null)
+      : await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
     const source = await loadPriceChangeHotSource({
       artifactId: metadata.sourceArtifactId,
       sourceHash: metadata.sourceHash,
@@ -99,7 +107,28 @@ async function hotPriceSourceDependencies(
       sourceHash: metadata.sourceHash,
       priceChangeBoardRevision: metadata.priceChangeBoardRevision,
     });
-    return { bootstrap: source.payload, getBootstrap: async () => source.payload };
+    const capturedAt =
+      hotSnapshot !== null &&
+      hotSnapshot.sourceHash === metadata.sourceHash &&
+      (!metadata.priceChangeBoardRevision ||
+        hotSnapshot.revision === metadata.priceChangeBoardRevision)
+        ? {
+            requestStartedAt: new Date(hotSnapshot.detectedAt),
+            fetchedAt: new Date(hotSnapshot.fetchedAt),
+          }
+        : null;
+    return {
+      bootstrap: source.payload,
+      getBootstrap: async () => source.payload,
+      ...(capturedAt
+        ? {
+            captureTimestamps: {
+              requestStartedAt: capturedAt.requestStartedAt,
+              fetchedAt: capturedAt.fetchedAt,
+            },
+          }
+        : {}),
+    };
   } catch (error) {
     logWarn(
       'Archived provisional source unavailable; critical price reconciliation will re-fetch',
@@ -121,7 +150,10 @@ async function markHotPriceReconciled(
   metadata: HotPriceSourceMetadata = hotPriceSourceMetadata(job),
 ): Promise<void> {
   if (!metadata.priceChangeBoardRevision || !publicationId || revision === undefined) return;
-  const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+  const snapshot = await readPriceChangeHotSnapshotAtRevision(
+    job.data.seasonCode,
+    metadata.priceChangeBoardRevision,
+  ).catch(() => null);
   if (!snapshot || snapshot.revision !== metadata.priceChangeBoardRevision) return;
   if (preparedBoardRevision !== metadata.priceChangeBoardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {
@@ -136,9 +168,21 @@ async function markHotPriceReconciliationFailed(
   job: Job<FplCriticalJobData>,
   error: unknown,
 ): Promise<void> {
-  const metadata = hotPriceSourceMetadata(job);
+  // A latest-wins worker can fail after its Bull payload was superseded. Read
+  // the lane's active target first so the terminal callback marks the current
+  // hot revision failed rather than leaving that newer snapshot pending.
+  const targets = job.data.laneId
+    ? await getSchedulerLaneTargets({ laneId: job.data.laneId }).catch(() => null)
+    : null;
+  const metadata = hotPriceSourceMetadata(
+    job,
+    targets?.active?.evidence ?? targets?.desired?.evidence,
+  );
   if (!metadata.priceChangeBoardRevision) return;
-  const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+  const snapshot = await readPriceChangeHotSnapshotAtRevision(
+    job.data.seasonCode,
+    metadata.priceChangeBoardRevision,
+  ).catch(() => null);
   if (!snapshot || snapshot.revision !== metadata.priceChangeBoardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {
     state: 'failed',
@@ -473,6 +517,9 @@ async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
         trigger: 'queue',
         sourceRunId: job.data.runId,
         ...(hotSource?.bootstrap ? { bootstrap: hotSource.bootstrap } : {}),
+        ...(hotSource?.captureTimestamps?.fetchedAt
+          ? { sourceCheckedAt: hotSource.captureTimestamps.fetchedAt }
+          : {}),
       }),
   );
   if (result.outcome !== 'ready' || !result.publicationId || result.revision === undefined) {

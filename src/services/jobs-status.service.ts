@@ -320,6 +320,7 @@ export async function getJobsStatus(
       detectedAt: priceChangeHotCursor?.detectedAt ?? null,
       fetchedAt: priceChangeHotCursor?.fetchedAt ?? null,
       expiresAt: priceChangeHotCursor?.expiresAt ?? null,
+      reconciliationError: priceChangeHotCursor?.reconciliationError ?? null,
       ageMs: priceChangeHotCursor
         ? Math.max(0, Date.now() - Date.parse(priceChangeHotCursor.detectedAt))
         : null,

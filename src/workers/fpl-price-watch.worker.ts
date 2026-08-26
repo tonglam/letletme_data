@@ -29,6 +29,7 @@ import {
   priceChangeTriggerFingerprint,
   priceChangeValueFingerprint,
   shouldPublishPriceChangeHotSnapshot,
+  type PriceChangeBoard,
 } from '../services/price-change-predictions.service';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
@@ -54,8 +55,28 @@ function enabled(): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+function singleFlightEnabled(): boolean {
+  const raw = process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED;
+  if (raw === undefined) return process.env.NODE_ENV !== 'production';
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
+function usablePriceChangeBaseline(board: PriceChangeBoard | null): PriceChangeBoard | null {
+  if (
+    !board ||
+    !['READY', 'STALE'].includes(board.status) ||
+    board.players.length === 0 ||
+    board.expectedPlayerCount <= 0 ||
+    board.observedPlayerCount !== board.players.length ||
+    board.expectedPlayerCount !== board.observedPlayerCount
+  ) {
+    return null;
+  }
+  return board;
+}
 
 async function enqueueDurableReconciliation(
   season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>,
@@ -71,11 +92,19 @@ async function enqueueDurableReconciliation(
   } catch (error) {
     // During flag-off rollout the latest-wins lane is intentionally absent.
     // Keep the hot board visible and use the existing durable producer as the
-    // safe fallback; the next scheduler pass will reconcile it when enabled.
-    logWarn('Latest-wins price reconciliation unavailable; using legacy queue', {
-      season: season.seasonCode,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    // safe fallback. Once latest-wins is enabled, a legacy job without a lane
+    // identity is deliberately skipped by data-sync, so enqueueing it would
+    // create false completion and leave reconciliation pending.
+    logWarn(
+      singleFlightEnabled()
+        ? 'Latest-wins price reconciliation unavailable; leaving hot reconciliation for scheduler retry'
+        : 'Latest-wins price reconciliation unavailable; using legacy queue',
+      {
+        season: season.seasonCode,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    if (singleFlightEnabled()) throw error;
   }
   await enqueuePriceChangePredictionsJob(season, 'reconcile', {
     jobId: `price-change-hot-reconcile-${randomUUID()}`,
@@ -149,13 +178,12 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
   // already visible in the first post-restart probe. Conversely, when the
   // value fingerprint is unchanged, a deadline rollover remains a no-change
   // day and must not create a provisional board.
-  let previousValueFingerprint: string | null = priorHot
-    ? priceChangeBoardValueFingerprint(priorHot.board)
-    : durableBoard
-      ? priceChangeBoardValueFingerprint(durableBoard)
-      : null;
+  const baselineBoard = priorHot?.board ?? usablePriceChangeBaseline(durableBoard);
+  let previousValueFingerprint: string | null = baselineBoard
+    ? priceChangeBoardValueFingerprint(baselineBoard)
+    : null;
   let initialized = previousValueFingerprint !== null;
-  let previousDeadline: string | null = priorHot?.deadline ?? durableBoard?.deadline ?? null;
+  let previousDeadline: string | null = baselineBoard?.deadline ?? null;
   let pollCount = 0;
   let successfulProbes = 0;
   let hotPublications = 0;
@@ -180,15 +208,28 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       const isPostDeadline = Date.now() >= deadlineAt.getTime();
       retryableFailureStreak = 0;
       if (!initialized) {
-        initialized = true;
-        previousValueFingerprint = valueFingerprint;
-        previousDeadline = observedDeadline;
-        logInfo('Price-watch baseline established without an event', {
-          season: season.seasonCode,
-          deadlineAt: deadlineAt.toISOString(),
-          fingerprint,
-          pollCount,
-        });
+        if (isPostDeadline) {
+          // A first valid response after the official deadline may already
+          // contain the changed prices. It is not evidence of "no change";
+          // keep the watcher inconclusive rather than silently baselining the
+          // post-change response and completing the obligation.
+          logWarn('Price-watch cannot establish a post-deadline baseline', {
+            season: season.seasonCode,
+            deadlineAt: deadlineAt.toISOString(),
+            fingerprint,
+            pollCount,
+          });
+        } else {
+          initialized = true;
+          previousValueFingerprint = valueFingerprint;
+          previousDeadline = observedDeadline;
+          logInfo('Price-watch baseline established without an event', {
+            season: season.seasonCode,
+            deadlineAt: deadlineAt.toISOString(),
+            fingerprint,
+            pollCount,
+          });
+        }
       } else if (shouldPublishPriceChangeHotSnapshot(previousValueFingerprint, valueFingerprint)) {
         const sourceHash = sha256Bytes(artifact.bytes);
         const artifactId = createPriceChangeHotArtifactId();

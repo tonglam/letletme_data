@@ -67,6 +67,12 @@ export interface CoreSnapshotSyncOptions {
    * triggered the provisional price board.
    */
   readonly bootstrap?: FPLBootstrapResponse;
+  /**
+   * Preserve the provider capture time when a watcher replays an archived
+   * bootstrap. A delayed repair must not look newer than an intervening Core
+   * publication merely because the worker started later.
+   */
+  readonly sourceCheckedAt?: Date;
 }
 
 const defaultDependencies: CoreSnapshotDependencies = {
@@ -136,7 +142,12 @@ export async function syncCoreSnapshot(
   let preparedPublicationId: string | null = null;
   let persistenceCommitted = false;
   try {
-    const sourceCheckedAt = await dependencies.readOrderingTimestamp();
+    const sourceCheckedAt = options.sourceCheckedAt
+      ? new Date(options.sourceCheckedAt)
+      : await dependencies.readOrderingTimestamp();
+    if (!Number.isFinite(sourceCheckedAt.getTime())) {
+      throw new Error('Core snapshot source capture timestamp is invalid');
+    }
     const [bootstrap, fixtures] = await Promise.all([
       options.bootstrap ? Promise.resolve(options.bootstrap) : dependencies.getBootstrap(),
       dependencies.getFixtures(),
