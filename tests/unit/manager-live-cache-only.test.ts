@@ -753,6 +753,36 @@ describe('manager live classic standings convergence', () => {
     });
   });
 
+  test('restarts from page one when normal exhaustion misses a target', async () => {
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: false,
+            page: 6,
+            results: [{ entry: 999, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101]),
+      new Map(),
+      null,
+      { startPage: 6, maxPages: 1 },
+    );
+
+    expect(result).toMatchObject({
+      complete: false,
+      nextPage: 1,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
   test('does not advance a page when both durable publications fail', async () => {
     getClassicStandings.mockImplementationOnce(
       async () =>

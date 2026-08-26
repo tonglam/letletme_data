@@ -2097,6 +2097,11 @@ export const refreshClassicStandings = async (
     fetchedRows.size < targetIds.size &&
     durableTargetEntryIds.length < targetIds.size
   ) {
+    // A normal end-of-list can still miss a target when the manager crossed a
+    // page boundary while this multi-job crawl was in progress. Do not persist
+    // the terminal cursor in that case: the next bounded invocation must restart
+    // from page one and give the moved entry a chance to be observed again.
+    nextPage = 1;
     refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
   }
 
