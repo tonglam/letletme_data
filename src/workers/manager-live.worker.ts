@@ -136,11 +136,20 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       return { stopped: 'event-finalized' as const };
     }
 
-    const authoritativeEntryIds = normalizeManagerLiveEntryIds(
+    let authoritativeEntryIds = normalizeManagerLiveEntryIds(
       job.data.tournamentId === undefined
         ? job.data.entryIds
         : await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId),
     );
+    if (job.data.tournamentId !== undefined && authoritativeEntryIds.length === 0) {
+      // The first roster read can race the GW-boundary roster-sync write. Read
+      // the relation again immediately before clearing the hot marker; if the
+      // roster has already returned, continue this generation into the normal
+      // roster reconciliation path instead of deleting its live refresh lane.
+      authoritativeEntryIds = normalizeManagerLiveEntryIds(
+        await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId),
+      );
+    }
     if (job.data.tournamentId !== undefined && authoritativeEntryIds.length === 0) {
       const cleared = await clearManagerLiveHotScope(
         {

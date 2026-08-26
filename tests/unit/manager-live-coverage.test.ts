@@ -134,5 +134,21 @@ describe('manager live tournament coverage state', () => {
         2,
       ),
     ).toBe(true);
+    expect(
+      shouldQueueFinalizedManagerLiveCoverage(
+        { ...complete, managerRevision: 'final:old-manager' },
+        rosterRevision,
+        2,
+        'final:new-manager',
+      ),
+    ).toBe(true);
+    expect(
+      shouldQueueFinalizedManagerLiveCoverage(
+        { ...complete, managerRevision: 'final:current-manager' },
+        rosterRevision,
+        2,
+        'final:current-manager',
+      ),
+    ).toBe(false);
   });
 });

@@ -945,13 +945,15 @@ export const shouldQueueFinalizedManagerLiveCoverage = (
   > | null,
   rosterRevision: string,
   expectedEntries: number,
+  currentManagerRevision?: string | null,
 ): boolean =>
   !(
     coverage?.state === 'COMPLETE' &&
     coverage.rosterRevision === rosterRevision &&
     coverage.expectedEntries === expectedEntries &&
     coverage.resolvedEntries === expectedEntries &&
-    isFinalManagerLiveRevision(coverage.managerRevision)
+    isFinalManagerLiveRevision(coverage.managerRevision) &&
+    (currentManagerRevision === undefined || coverage.managerRevision === currentManagerRevision)
   );
 
 const mapTournamentCoverage = (row: {
@@ -2402,6 +2404,30 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     const projectionEntryIdSet = new Set(projectionEntryIds);
     const projectedFinalRows = finalRows.filter((row) => projectionEntryIdSet.has(row.entryId));
     const projectedResolvedIds = new Set(projectedFinalRows.map((row) => row.entryId));
+    let currentFinalManagerRevision: string | undefined;
+    if (
+      input.tournamentId !== undefined &&
+      currentTournamentRosterRevision !== null &&
+      tournamentCoverage?.state === 'COMPLETE' &&
+      isFinalManagerLiveRevision(tournamentCoverage.managerRevision)
+    ) {
+      const requestedEntryIdSet = new Set(uniqueEntryIds);
+      const requestedTheFullRoster =
+        coverageRosterEntryIds.length === uniqueEntryIds.length &&
+        coverageRosterEntryIds.every((entryId) => requestedEntryIdSet.has(entryId));
+      const coverageFinalRows = requestedTheFullRoster
+        ? finalRows
+        : await finalResultRows(season, input.eventId, coverageRosterEntryIds, event.dataCheckedAt);
+      const coverageResolvedIds = new Set(coverageFinalRows.map((row) => row.entryId));
+      currentFinalManagerRevision = finalManagerRevision(
+        managerRevision(
+          season.seasonCode,
+          input.eventId,
+          coverageFinalRows,
+          coverageRosterEntryIds.filter((entryId) => !coverageResolvedIds.has(entryId)),
+        ),
+      );
+    }
     let refreshQueued = false;
     if (
       input.tournamentId !== undefined &&
@@ -2411,6 +2437,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         tournamentCoverage,
         currentTournamentRosterRevision,
         coverageRosterEntryIds.length,
+        currentFinalManagerRevision,
       )
     ) {
       try {
@@ -2790,6 +2817,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     ManagerLiveResolveResult['errorCode'],
     'UNSUPPORTED_H2H_LIVE' | null
   > | null = null;
+  let refreshQueued = false;
 
   if (input.tournamentId !== undefined && tournament?.leagueType === 'h2h') {
     // FPL does not expose a live H2H table, but its official entry summary is
@@ -3420,6 +3448,38 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     }
   }
 
+  // READ_THROUGH may serve a bounded page from cache/checkpoints while its
+  // local background crawl is still running. Queue the durable tournament
+  // worker as the coverage owner so a page request cannot leave the full-field
+  // coverage row null or stale forever. Dispatch is bounded and deduplicated
+  // by the tournament hot scope; it does not add an upstream wait to this
+  // response.
+  if (
+    input.tournamentId !== undefined &&
+    currentTournamentRosterRevision !== null &&
+    !shouldPreserveManagerLiveTournamentCoverage(
+      tournamentCoverage,
+      currentTournamentRosterRevision,
+      coverageRosterEntryIds.length,
+    )
+  ) {
+    try {
+      refreshQueued =
+        (await dispatchManagerLiveRefreshBounded({
+          season,
+          eventId: input.eventId,
+          entryIds: coverageRosterEntryIds,
+          tournamentId: input.tournamentId,
+        })) === 'QUEUED';
+    } catch (error) {
+      logWarn('Manager live read-through coverage dispatch failed', {
+        eventId: input.eventId,
+        tournamentId: input.tournamentId,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+    }
+  }
+
   const now = Date.now();
   const metadataRows = uniqueEntryIds
     .map((entryId) => rows.get(entryId))
@@ -3440,6 +3500,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     checkedAt: nowIso(),
     nextRefreshAt: nextRefresh(event.finished),
     sourceByEntry,
+    refreshQueued,
     ...(input.tournamentId === undefined ? {} : { tournamentCoverage }),
   });
 };
