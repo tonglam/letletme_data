@@ -25,6 +25,11 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  finalManagerRevision,
+  isFinalManagerLiveRevision,
+  tournamentRosterRevision,
+} from '../domain/manager-live-coverage';
+import {
   MANAGER_LIVE_CLASSIC_MAX_PAGE,
   MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
   MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
@@ -34,6 +39,7 @@ import {
   classicStandingsCursorAfterRefresh,
 } from '../domain/manager-live-refresh';
 export { classicStandingsCursorAfterRefresh } from '../domain/manager-live-refresh';
+export { tournamentRosterRevision } from '../domain/manager-live-coverage';
 import {
   acquireDistributedLease,
   classicManagerBackgroundStandingsStartPage,
@@ -879,16 +885,6 @@ const managerDataAvailability = (
   return rows.every((row) => isFresh(row, now)) ? 'FRESH' : 'LAST_GOOD';
 };
 
-export const tournamentRosterRevision = (entryIds: readonly number[]): string =>
-  createHash('sha256')
-    .update(
-      Array.from(new Set(entryIds))
-        .sort((left, right) => left - right)
-        .join(','),
-    )
-    .digest('hex')
-    .slice(0, 20);
-
 export const deriveManagerLiveTournamentCoverageState = (input: {
   expectedEntries: number;
   resolvedEntries: number;
@@ -937,6 +933,22 @@ export const shouldPreserveManagerLiveTournamentCoverage = (
   coverage.rosterRevision === rosterRevision &&
   coverage.expectedEntries === expectedEntries &&
   coverage.resolvedEntries === expectedEntries;
+
+export const shouldQueueFinalizedManagerLiveCoverage = (
+  coverage: Pick<
+    ManagerLiveTournamentCoverage,
+    'state' | 'rosterRevision' | 'expectedEntries' | 'resolvedEntries' | 'managerRevision'
+  > | null,
+  rosterRevision: string,
+  expectedEntries: number,
+): boolean =>
+  !(
+    coverage?.state === 'COMPLETE' &&
+    coverage.rosterRevision === rosterRevision &&
+    coverage.expectedEntries === expectedEntries &&
+    coverage.resolvedEntries === expectedEntries &&
+    isFinalManagerLiveRevision(coverage.managerRevision)
+  );
 
 const mapTournamentCoverage = (row: {
   rosterRevision: string;
@@ -998,25 +1010,36 @@ const persistTournamentCoverage = async (input: {
   errorCode: ManagerLiveResolveResult['errorCode'];
   managerRevision: string;
   crawlComplete: boolean;
-}): Promise<ManagerLiveTournamentCoverage> => {
-  const existing = await managerLiveTournamentCoverageRepository
-    .findByTournamentAndEvent(input.season, input.eventId, input.tournamentId)
-    .catch((error) => {
-      logWarn('Manager live tournament coverage baseline read failed', {
-        eventId: input.eventId,
-        tournamentId: input.tournamentId,
-        error: error instanceof Error ? error.message : 'unknown',
-      });
-      return null;
+}): Promise<ManagerLiveTournamentCoverage | null> => {
+  let existing: Awaited<
+    ReturnType<typeof managerLiveTournamentCoverageRepository.findByTournamentAndEvent>
+  >;
+  try {
+    existing = await managerLiveTournamentCoverageRepository.findByTournamentAndEvent(
+      input.season,
+      input.eventId,
+      input.tournamentId,
+    );
+  } catch (error) {
+    logWarn('Manager live tournament coverage baseline read failed', {
+      eventId: input.eventId,
+      tournamentId: input.tournamentId,
+      error: error instanceof Error ? error.message : 'unknown',
     });
+    // A failed baseline read must never be interpreted as an empty crawl. The
+    // repository write is fenced as well, but skipping here keeps a transient
+    // read failure from publishing 0 resolved rows over durable progress.
+    return null;
+  }
   const resolvedEntryIds = new Set(
     input.rows.filter((row) => typeof row.eventPoints === 'number').map((row) => row.entryId),
   );
-  const preserveExistingComplete = shouldPreserveManagerLiveTournamentCoverage(
-    existing,
-    input.rosterRevision,
-    input.expectedEntries,
-  );
+  const preserveExistingComplete =
+    shouldPreserveManagerLiveTournamentCoverage(
+      existing,
+      input.rosterRevision,
+      input.expectedEntries,
+    ) && !isFinalManagerLiveRevision(input.managerRevision);
   const resolvedEntries = preserveExistingComplete
     ? (existing?.resolvedEntries ?? 0)
     : Math.min(input.expectedEntries, resolvedEntryIds.size);
@@ -2371,7 +2394,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       input.tournamentId !== undefined &&
       !workerTournamentRefresh &&
       currentTournamentRosterRevision !== null &&
-      !shouldPreserveManagerLiveTournamentCoverage(
+      shouldQueueFinalizedManagerLiveCoverage(
         tournamentCoverage,
         currentTournamentRosterRevision,
         coverageRosterEntryIds.length,
@@ -2417,7 +2440,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         fullMissingEntryIds,
       );
       result.managerRevision = fullManagerRevision;
-      result.tournamentCoverage = await persistTournamentCoverage({
+      const persistedCoverage = await persistTournamentCoverage({
         season,
         eventId: input.eventId,
         tournamentId: input.tournamentId,
@@ -2425,9 +2448,10 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         expectedEntries: coverageRosterEntryIds.length,
         rows: finalRows,
         errorCode: finalErrorCode,
-        managerRevision: fullManagerRevision,
+        managerRevision: finalManagerRevision(fullManagerRevision),
         crawlComplete: resolvedIds.size === coverageRosterEntryIds.length,
       });
+      result.tournamentCoverage = persistedCoverage ?? tournamentCoverage;
     }
     return result;
   }
@@ -2622,6 +2646,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       }
     }
     let durableCoverageRows: CachedRow[] = [];
+    let durableCoverageReadFailed = false;
     if (input.tournamentId !== undefined) {
       try {
         const checkpoints = await managerScoreCheckpointRepository.findByScopeAndEntryIds(
@@ -2634,6 +2659,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           fromManagerScoreCheckpoint(checkpoint, season.seasonCode),
         );
       } catch (error) {
+        durableCoverageReadFailed = true;
         logWarn('Manager live coverage checkpoint read failed', {
           eventId: input.eventId,
           tournamentId: input.tournamentId,
@@ -2660,7 +2686,11 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       sourceByEntry,
       classicStandingsNextPage,
     });
-    if (input.tournamentId !== undefined) {
+    if (input.tournamentId !== undefined && durableCoverageReadFailed) {
+      // Keep the last authoritative coverage object in the response and do
+      // not turn an unavailable checkpoint read into a zero-row publication.
+      result.tournamentCoverage = tournamentCoverage;
+    } else if (input.tournamentId !== undefined) {
       const durableCoverageEntryIds = new Set(
         durableCoverageRows
           .filter((row) => typeof row.eventPoints === 'number')
@@ -2676,7 +2706,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         durableMissingEntryIds,
       );
       result.managerRevision = fullManagerRevision;
-      result.tournamentCoverage = await persistTournamentCoverage({
+      const persistedCoverage = await persistTournamentCoverage({
         season,
         eventId: input.eventId,
         tournamentId: input.tournamentId,
@@ -2690,6 +2720,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
             ? classicStandingsNextPage === null
             : refreshErrorCode === null,
       });
+      result.tournamentCoverage = persistedCoverage ?? tournamentCoverage;
     }
     return result;
   }

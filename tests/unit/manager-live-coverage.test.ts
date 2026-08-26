@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   deriveManagerLiveTournamentCoverageState,
   invalidateManagerLiveTournamentCoverage,
+  shouldQueueFinalizedManagerLiveCoverage,
   shouldPreserveManagerLiveTournamentCoverage,
   tournamentRosterRevision,
 } from '../../src/services/manager-live.service';
@@ -106,5 +107,32 @@ describe('manager live tournament coverage state', () => {
       ),
     ).toBe(false);
     expect(shouldPreserveManagerLiveTournamentCoverage(complete, 'new-roster', 2)).toBe(false);
+  });
+
+  test('requires a finalized manager revision before skipping final reconciliation', () => {
+    const rosterRevision = tournamentRosterRevision([1, 2]);
+    const complete = {
+      rosterRevision,
+      expectedEntries: 2,
+      resolvedEntries: 2,
+      managerRevision: 'live-manager',
+      state: 'COMPLETE' as const,
+    };
+
+    expect(shouldQueueFinalizedManagerLiveCoverage(complete, rosterRevision, 2)).toBe(true);
+    expect(
+      shouldQueueFinalizedManagerLiveCoverage(
+        { ...complete, managerRevision: 'final:final-manager' },
+        rosterRevision,
+        2,
+      ),
+    ).toBe(false);
+    expect(
+      shouldQueueFinalizedManagerLiveCoverage(
+        { ...complete, state: 'PARTIAL', managerRevision: 'final:final-manager' },
+        rosterRevision,
+        2,
+      ),
+    ).toBe(true);
   });
 });

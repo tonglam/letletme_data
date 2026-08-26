@@ -11,8 +11,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
-import { fpl, ops } from './platform.schema';
-import { eventsInFpl } from './platform.schema';
+import { eventsInFpl, fpl, ops, tournamentsInCompetition } from './platform.schema';
 
 export const liveLifecycleStatusInOps = ops.table(
   'live_lifecycle_status',
@@ -158,6 +157,11 @@ export const managerLiveTournamentCoverageInFpl = fpl.table(
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
       name: 'manager_live_tournament_coverage_event_fk',
     }),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'manager_live_tournament_coverage_tournament_fk',
+    }).onDelete('cascade'),
     check(
       'manager_live_tournament_coverage_state_valid',
       sql`state IN ('WARMING', 'COMPLETE', 'PARTIAL', 'UNAVAILABLE')`,

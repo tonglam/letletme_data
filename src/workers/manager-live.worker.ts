@@ -55,6 +55,10 @@ export async function scheduleManagerLiveContinuation(
   }
 }
 
+export const shouldRetryFinalizedTournamentManagerLive = (
+  result: Pick<ManagerLiveResolveResult, 'partial' | 'errorCode'>,
+): boolean => result.partial && result.errorCode === 'UPSTREAM_UNAVAILABLE';
+
 /**
  * A failed BullMQ attempt must retry the bounded chunk it actually owned.
  * Follow-up jobs advance the shared hot cursor before the failed attempt is
@@ -206,7 +210,19 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
         : { classicStandingsStartPage }),
       summaryRotationCursor,
     });
-    if (eventFinalized) return result;
+    if (eventFinalized) {
+      // Final rows can become visible one entry at a time after the event is
+      // data-checked. Keep a database-only continuation alive until the
+      // authoritative result scan is complete; the finalized service branch
+      // never calls the current FPL manager endpoints.
+      if (
+        job.data.tournamentId !== undefined &&
+        shouldRetryFinalizedTournamentManagerLive(result)
+      ) {
+        await scheduleManagerLiveContinuation(effectiveJobData, result, classicStandingsStartPage);
+      }
+      return result;
+    }
     await scheduleManagerLiveContinuation(effectiveJobData, result, classicStandingsStartPage);
     return result;
   });
