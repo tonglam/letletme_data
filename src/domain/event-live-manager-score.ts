@@ -9,7 +9,8 @@ export type EventLiveManagerPick = {
   sourceUpdatedAt: Date;
   /** Canonical player metadata used by the revision-pinned projection. */
   elementType?: number;
-  teamId?: number;
+  /** Event-scoped identity captured with the pick or fixture evidence. */
+  teamId?: number | null;
   activeChip?: string | null;
 };
 

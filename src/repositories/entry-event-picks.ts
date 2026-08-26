@@ -19,7 +19,8 @@ export type EventLiveManagerPickRow = {
   transfersCost: number | null;
   sourceUpdatedAt: Date;
   elementType: number;
-  teamId: number;
+  /** Event-scoped team identity; null means the scorer must fail closed. */
+  teamId: number | null;
   activeChip: string | null;
 };
 
@@ -108,6 +109,22 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       );
 
     const activeChip = toNullableDbChip(picks.active_chip);
+    const playerTeams = await db
+      .select({
+        elementId: playersInFpl.elementId,
+        teamId: playersInFpl.teamId,
+      })
+      .from(playersInFpl)
+      .where(
+        and(
+          eq(playersInFpl.seasonId, season.seasonId),
+          inArray(
+            playersInFpl.elementId,
+            picks.picks.map((pick) => pick.element),
+          ),
+        ),
+      );
+    const teamByElement = new Map(playerTeams.map((row) => [row.elementId, row.teamId]));
     await db.insert(entryEventPicksInCompetition).values(
       picks.picks.map((pick) => ({
         seasonId: season.seasonId,
@@ -115,6 +132,9 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         eventId,
         position: pick.position,
         elementId: pick.element,
+        // Capture the deadline-time observation. A missing player row stays
+        // NULL and is never replaced with a later mutable players.team_id.
+        eventTeamId: teamByElement.get(pick.element) ?? null,
         multiplier: pick.multiplier,
         isCaptain: pick.is_captain,
         isViceCaptain: pick.is_vice_captain,
@@ -151,7 +171,17 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
                 transfersCost: entryEventPicksInCompetition.transfersCost,
                 sourceUpdatedAt: entryEventPicksInCompetition.sourceUpdatedAt,
                 elementType: playersInFpl.elementType,
-                teamId: playersInFpl.teamId,
+                teamId: sql<number | null>`COALESCE(
+                  (
+                    SELECT min(fixture_stat.team_id)
+                    FROM fpl.player_fixture_stats fixture_stat
+                    WHERE fixture_stat.season_id = ${entryEventPicksInCompetition.seasonId}
+                      AND fixture_stat.event_id = ${entryEventPicksInCompetition.eventId}
+                      AND fixture_stat.element_id = ${entryEventPicksInCompetition.elementId}
+                    HAVING count(DISTINCT fixture_stat.team_id) = 1
+                  ),
+                  ${entryEventPicksInCompetition.eventTeamId}
+                )`,
                 activeChip: entryEventPicksInCompetition.activeChip,
               })
               .from(entryEventPicksInCompetition)

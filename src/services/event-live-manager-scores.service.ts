@@ -140,7 +140,7 @@ export function buildScoreInputRevision(input: {
     position: number;
     elementId: number;
     elementType?: number;
-    teamId?: number;
+    teamId?: number | null;
     multiplier: number;
     isCaptain: boolean;
     isViceCaptain: boolean;
@@ -517,7 +517,19 @@ async function loadEventLiveManagerScoreBatch(
           }))
       : [];
   if (materializationRows.length > 0) {
-    await persistManagerScoreMaterializations(season, eventId, materializationRows);
+    const materializationResult = await persistManagerScoreMaterializations(
+      season,
+      eventId,
+      materializationRows,
+    );
+    // A CAS rejection means the durable live pointer, picks, or prior-result
+    // input changed while this batch was calculating. Do not return those
+    // rows as if they were authoritative; the caller will represent the
+    // missing entry as unavailable and a later request will recalculate it.
+    for (const entryId of materializationResult.rejectedEntryIds) {
+      scores.delete(entryId);
+      projectedLineupByEntry.delete(entryId);
+    }
   }
 
   return {

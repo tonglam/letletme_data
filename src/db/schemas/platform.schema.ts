@@ -2135,6 +2135,8 @@ export const entryEventPicksInCompetition = competition.table(
     eventId: integer('event_id').notNull(),
     position: smallint().notNull(),
     elementId: integer('element_id').notNull(),
+    /** Team captured with the event pick; never derive scoring identity from mutable players.team_id. */
+    eventTeamId: integer('event_team_id'),
     multiplier: smallint().notNull(),
     isCaptain: boolean('is_captain').notNull(),
     isViceCaptain: boolean('is_vice_captain').notNull(),
@@ -2190,6 +2192,11 @@ export const entryEventPicksInCompetition = competition.table(
       columns: [table.seasonId, table.elementId],
       foreignColumns: [playersInFpl.seasonId, playersInFpl.elementId],
       name: 'entry_event_picks_player_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventTeamId],
+      foreignColumns: [teamsInFpl.seasonId, teamsInFpl.teamId],
+      name: 'entry_event_picks_event_team_fk',
     }),
     primaryKey({
       columns: [table.seasonId, table.entryId, table.eventId, table.position],

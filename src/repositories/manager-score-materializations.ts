@@ -42,6 +42,7 @@ export type ManagerScoreMaterializationResult = Readonly<{
   materializationsWritten: number;
   headsUpdated: number;
   headsRejected: number;
+  rejectedEntryIds: readonly number[];
 }>;
 
 export type ManagerScoreHeadReadResult = Readonly<{
@@ -598,7 +599,7 @@ export async function persistManagerScoreMaterializations(
   rows: readonly ManagerScoreMaterializationInput[],
 ): Promise<ManagerScoreMaterializationResult> {
   if (rows.length === 0) {
-    return { materializationsWritten: 0, headsUpdated: 0, headsRejected: 0 };
+    return { materializationsWritten: 0, headsUpdated: 0, headsRejected: 0, rejectedEntryIds: [] };
   }
   for (const row of rows) validateInput(row);
   const first = rows[0]!;
@@ -609,6 +610,7 @@ export async function persistManagerScoreMaterializations(
   const db = await getDbClient();
   const rowsForRedis: Array<ManagerScoreMaterializationInput & { generation: number }> = [];
   const result = await db.begin(async (tx) => {
+    const rejectedEntryIds = new Set<number>();
     // Lock each entry identity before assigning generations. Different input
     // revisions for one entry must serialize even though their revision locks
     // are distinct; otherwise both can publish generation 1 and Redis may
@@ -679,6 +681,7 @@ export async function persistManagerScoreMaterializations(
         materializationsWritten,
         headsUpdated: 0,
         headsRejected: rows.length,
+        rejectedEntryIds: rows.map((row) => row.entryId),
       };
     }
 
@@ -694,6 +697,7 @@ export async function persistManagerScoreMaterializations(
         String(currentPointer.revision) !== row.liveRevision
       ) {
         headsRejected += 1;
+        rejectedEntryIds.add(row.entryId);
         continue;
       }
       const currentInputs = await readCurrentInputRevisions(
@@ -707,6 +711,7 @@ export async function persistManagerScoreMaterializations(
         currentInputs.previousTotalsRevision !== row.previousTotalsRevision
       ) {
         headsRejected += 1;
+        rejectedEntryIds.add(row.entryId);
         continue;
       }
       const existing = await tx<
@@ -765,13 +770,19 @@ export async function persistManagerScoreMaterializations(
       `;
       if (headWrite.length === 0) {
         headsRejected += 1;
+        rejectedEntryIds.add(row.entryId);
         continue;
       }
       const publishedGeneration = Number(headWrite[0]!.generation);
       rowsForRedis.push({ ...row, generation: publishedGeneration });
       headsUpdated += 1;
     }
-    return { materializationsWritten, headsUpdated, headsRejected };
+    return {
+      materializationsWritten,
+      headsUpdated,
+      headsRejected,
+      rejectedEntryIds: Array.from(rejectedEntryIds).sort((left, right) => left - right),
+    };
   });
   try {
     await publishMaterializationHeadsToRedis(season, eventId, rowsForRedis);
@@ -807,7 +818,18 @@ async function readCurrentInputRevisions(
       active_chip: string | null;
     }>
   >`
-    SELECT pick.position, pick.element_id, player.element_type, player.team_id,
+    SELECT pick.position, pick.element_id, player.element_type,
+           COALESCE(
+             (
+               SELECT min(fixture_stat.team_id)
+               FROM fpl.player_fixture_stats fixture_stat
+               WHERE fixture_stat.season_id = pick.season_id
+                 AND fixture_stat.event_id = pick.event_id
+                 AND fixture_stat.element_id = pick.element_id
+               HAVING count(DISTINCT fixture_stat.team_id) = 1
+             ),
+             pick.event_team_id
+           ) AS team_id,
            pick.multiplier, pick.is_captain, pick.is_vice_captain,
            pick.transfers_cost, pick.active_chip::text
     FROM competition.entry_event_picks pick
