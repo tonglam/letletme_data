@@ -416,7 +416,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
           const chunk = uniqueEntryIds.slice(index, index + 1000);
           const rows = await db
-            .select({ entryId: entryEventResultsInCompetition.entryId })
+            .select({
+              entryId: entryEventResultsInCompetition.entryId,
+              eventPicks: entryEventResultsInCompetition.eventPicks,
+            })
             .from(entryEventResultsInCompetition)
             .where(
               and(
@@ -428,7 +431,13 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
                   : isNotNull(entryEventResultsInCompetition.richSyncedAt),
               ),
             );
-          for (const row of rows) syncedEntryIds.add(row.entryId);
+          for (const row of rows) {
+            // A rich timestamp without the normalized 15-pick payload is not
+            // a reusable finalized score. This includes rows written before
+            // event_picks was introduced; leave them eligible for a fresh
+            // provider read instead of treating [] as complete evidence.
+            if (isCompleteEntryPicks(row.eventPicks)) syncedEntryIds.add(row.entryId);
+          }
         }
         return uniqueEntryIds.filter((entryId) => !syncedEntryIds.has(entryId));
       } catch (error) {

@@ -72,6 +72,8 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
   ): Promise<boolean> => {
     const existing = await db
       .select({
+        elementId: entryEventPicksInCompetition.elementId,
+        eventTeamId: entryEventPicksInCompetition.eventTeamId,
         sourceCreatedAt: entryEventPicksInCompetition.sourceCreatedAt,
         sourceUpdatedAt: entryEventPicksInCompetition.sourceUpdatedAt,
       })
@@ -97,6 +99,11 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
     const sourceCreatedAt = existing.reduce<Date>(
       (earliest, row) => (row.sourceCreatedAt < earliest ? row.sourceCreatedAt : earliest),
       syncedAt,
+    );
+    const previouslyCapturedTeamByElement = new Map(
+      existing.flatMap((row) =>
+        row.eventTeamId === null ? [] : [[row.elementId, row.eventTeamId] as const],
+      ),
     );
     await db
       .delete(entryEventPicksInCompetition)
@@ -134,7 +141,10 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         elementId: pick.element,
         // Capture the deadline-time observation. A missing player row stays
         // NULL and is never replaced with a later mutable players.team_id.
-        eventTeamId: teamByElement.get(pick.element) ?? null,
+        eventTeamId:
+          previouslyCapturedTeamByElement.get(pick.element) ??
+          teamByElement.get(pick.element) ??
+          null,
         multiplier: pick.multiplier,
         isCaptain: pick.is_captain,
         isViceCaptain: pick.is_vice_captain,

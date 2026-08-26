@@ -154,6 +154,33 @@ if updated > 0 then redis.call('EXPIRE', head_key, ttl) end
 return updated
 `;
 
+const INVALIDATE_MATERIALIZATION_HEADS_SCRIPT = `
+local head_key = KEYS[1]
+local count = tonumber(ARGV[1])
+local index = 2
+local removed = 0
+for _ = 1, count do
+  local entry_id = ARGV[index]
+  local expected_generation = tonumber(ARGV[index + 1])
+  local expected_input_revision = ARGV[index + 2]
+  local materialization_key = ARGV[index + 3]
+  local current_raw = redis.call('HGET', head_key, entry_id)
+  if current_raw then
+    local decoded, current = pcall(cjson.decode, current_raw)
+    if decoded and type(current) == 'table'
+      and tonumber(current.generation) == expected_generation
+      and current.inputRevision == expected_input_revision then
+      redis.call('HDEL', head_key, entry_id)
+      redis.call('DEL', materialization_key)
+      removed = removed + 1
+    end
+  end
+  index = index + 4
+end
+if redis.call('HLEN', head_key) == 0 then redis.call('DEL', head_key) end
+return removed
+`;
+
 const isValidTimestamp = (value: string): boolean => Number.isFinite(Date.parse(value));
 
 const validateInput = (input: ManagerScoreMaterializationInput): void => {
@@ -401,6 +428,37 @@ const publishMaterializationHeadsToRedis = async (
   );
   if (!Number.isSafeInteger(Number(result))) {
     throw new Error('Redis materialization head publication returned an invalid result');
+  }
+};
+
+const invalidateMaterializationHeadsInRedis = async (
+  season: FplSeasonRef,
+  eventId: number,
+  rows: readonly (ManagerScoreMaterializationInput & { generation: number })[],
+): Promise<void> => {
+  if (rows.length === 0) return;
+  const redis = await redisSingleton.getClient();
+  const mode = rows[0]!.calculationMode;
+  if (rows.some((row) => row.calculationMode !== mode)) {
+    throw new Error('Redis materialization invalidation requires one calculation mode');
+  }
+  const args = [String(rows.length)];
+  for (const row of rows) {
+    args.push(
+      String(row.entryId),
+      String(row.generation),
+      row.inputRevision,
+      managerScoreMaterializationRedisKey(season, eventId, row.entryId, row.inputRevision),
+    );
+  }
+  const result = await redis.eval(
+    INVALIDATE_MATERIALIZATION_HEADS_SCRIPT,
+    1,
+    managerScoreHeadRedisKey(season, eventId, mode),
+    ...args,
+  );
+  if (!Number.isSafeInteger(Number(result))) {
+    throw new Error('Redis materialization head invalidation returned an invalid result');
   }
 };
 
@@ -879,14 +937,24 @@ export async function persistManagerScoreMaterializations(
   try {
     await publishMaterializationHeadsToRedis(season, eventId, rowsForRedis);
   } catch (error) {
-    // PostgreSQL heads remain authoritative. A Redis outage only turns the
-    // next CACHE_ONLY read into a PostgreSQL miss; it must not roll back a
-    // committed immutable materialization.
+    // PostgreSQL heads remain authoritative. Remove any matching stale Redis
+    // pointers so a successful Redis read cannot serve the previous
+    // generation after the durable write. If Redis itself is unavailable,
+    // CACHE_ONLY falls back to PostgreSQL on the next read.
     logWarn('Manager score materialization Redis publication failed', {
       eventId,
       entries: rowsForRedis.length,
       error: error instanceof Error ? error.message : 'unknown',
     });
+    try {
+      await invalidateMaterializationHeadsInRedis(season, eventId, rowsForRedis);
+    } catch (invalidationError) {
+      logWarn('Manager score materialization Redis invalidation failed', {
+        eventId,
+        entries: rowsForRedis.length,
+        error: invalidationError instanceof Error ? invalidationError.message : 'unknown',
+      });
+    }
   }
   return result;
 }
