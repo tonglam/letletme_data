@@ -365,6 +365,10 @@ export const createManagerLiveTournamentCoverageRepository = (dbInstance?: DbOrT
               ${managerLiveTournamentCoverageInFpl.state} = 'COMPLETE'
               AND ${managerLiveTournamentCoverageInFpl.rosterRevision} = excluded.roster_revision
               AND ${managerLiveTournamentCoverageInFpl.expectedEntries} = excluded.expected_entries
+              AND (
+                excluded.state <> 'COMPLETE'
+                OR excluded.updated_at < ${managerLiveTournamentCoverageInFpl.updatedAt}
+              )
             )
           `,
         });

@@ -2252,6 +2252,14 @@ const finalResultRows = async (
     );
 };
 
+const workerProjectionEntryIds = (
+  entryIds: readonly number[],
+  workerTournamentRefresh: boolean,
+): number[] =>
+  workerTournamentRefresh
+    ? entryIds.slice(0, MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT)
+    : [...entryIds];
+
 const managerLiveInFlight = new Map<string, Promise<ManagerLiveResolveResult>>();
 
 const resolveManagerLiveScoresUncoalesced = async (input: {
@@ -2349,21 +2357,61 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     const resolvedIds = new Set(finalRows.map((row) => row.entryId));
     const finalErrorCode =
       resolvedIds.size === uniqueEntryIds.length ? null : ('UPSTREAM_UNAVAILABLE' as const);
+    const projectionEntryIds = workerProjectionEntryIds(uniqueEntryIds, workerTournamentRefresh);
+    const projectionEntryIdSet = new Set(projectionEntryIds);
+    const projectedFinalRows = finalRows.filter((row) => projectionEntryIdSet.has(row.entryId));
+    const projectedResolvedIds = new Set(projectedFinalRows.map((row) => row.entryId));
+    let refreshQueued = false;
+    if (
+      input.tournamentId !== undefined &&
+      !workerTournamentRefresh &&
+      currentTournamentRosterRevision !== null &&
+      !shouldPreserveManagerLiveTournamentCoverage(
+        tournamentCoverage,
+        currentTournamentRosterRevision,
+        coverageRosterEntryIds.length,
+      )
+    ) {
+      try {
+        refreshQueued =
+          (await dispatchManagerLiveRefreshBounded({
+            season,
+            eventId: input.eventId,
+            entryIds: coverageRosterEntryIds,
+            tournamentId: input.tournamentId,
+          })) === 'QUEUED';
+      } catch (error) {
+        logWarn('Finalized manager live coverage dispatch failed', {
+          eventId: input.eventId,
+          tournamentId: input.tournamentId,
+          error: error instanceof Error ? error.message : 'unknown',
+        });
+      }
+    }
     const result = buildManagerLiveResult({
       season: season.seasonCode,
       eventId: input.eventId,
-      rows: finalRows,
+      rows: projectedFinalRows,
       // Once FPL marks the event data_checked, an older active/summary/league
       // checkpoint is no longer a valid score fallback. Missing finalized rows
       // stay unavailable until the persisted official result arrives.
-      missingEntryIds: uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId)),
+      missingEntryIds: projectionEntryIds.filter((entryId) => !projectedResolvedIds.has(entryId)),
       errorCode: finalErrorCode,
       checkedAt: nowIso(),
       nextRefreshAt: nextRefresh(true),
       sourceByEntry: new Map(finalRows.map((row) => [row.entryId, 'POSTGRES' as const])),
+      refreshQueued,
       ...(input.tournamentId === undefined ? {} : { tournamentCoverage }),
     });
     if (workerTournamentRefresh && input.tournamentId !== undefined) {
+      const fullMissingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
+      const fullManagerRevision = managerRevision(
+        season.seasonCode,
+        input.eventId,
+        finalRows,
+        fullMissingEntryIds,
+      );
+      result.managerRevision = fullManagerRevision;
       result.tournamentCoverage = await persistTournamentCoverage({
         season,
         eventId: input.eventId,
@@ -2372,7 +2420,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         expectedEntries: coverageRosterEntryIds.length,
         rows: finalRows,
         errorCode: finalErrorCode,
-        managerRevision: result.managerRevision,
+        managerRevision: fullManagerRevision,
         crawlComplete: resolvedIds.size === coverageRosterEntryIds.length,
       });
     }
@@ -2595,17 +2643,34 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           : INCOMPLETE_CLASSIC_REFRESH_SECONDS) *
           1000,
     ).toISOString();
+    const projectionEntryIds = workerProjectionEntryIds(uniqueEntryIds, workerTournamentRefresh);
+    const projectionEntryIdSet = new Set(projectionEntryIds);
     const result = await buildActiveManagerLiveResult({
       season,
       eventId: input.eventId,
-      entryIds: uniqueEntryIds,
-      metadataRows,
+      entryIds: projectionEntryIds,
+      metadataRows: metadataRows.filter((row) => projectionEntryIdSet.has(row.entryId)),
       errorCode: refreshErrorCode,
       nextRefreshAt,
       sourceByEntry,
       classicStandingsNextPage,
     });
     if (input.tournamentId !== undefined) {
+      const durableCoverageEntryIds = new Set(
+        durableCoverageRows
+          .filter((row) => typeof row.eventPoints === 'number')
+          .map((row) => row.entryId),
+      );
+      const durableMissingEntryIds = uniqueEntryIds.filter(
+        (entryId) => !durableCoverageEntryIds.has(entryId),
+      );
+      const fullManagerRevision = managerRevision(
+        season.seasonCode,
+        input.eventId,
+        durableCoverageRows,
+        durableMissingEntryIds,
+      );
+      result.managerRevision = fullManagerRevision;
       result.tournamentCoverage = await persistTournamentCoverage({
         season,
         eventId: input.eventId,
@@ -2614,7 +2679,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         expectedEntries: uniqueEntryIds.length,
         rows: durableCoverageRows,
         errorCode: refreshErrorCode,
-        managerRevision: result.managerRevision,
+        managerRevision: fullManagerRevision,
         crawlComplete:
           tournament?.leagueType === 'classic'
             ? classicStandingsNextPage === null
