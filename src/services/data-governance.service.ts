@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
 
 import {
   dataGovernanceCasesInOps,
@@ -635,7 +635,7 @@ export async function listFreshnessWindows(
         ? sql`${freshnessSloWindowsInOps.recoveredAt} IS NOT NULL`
         : undefined,
     input.dueAfter ? gte(freshnessSloWindowsInOps.dueAt, input.dueAfter) : undefined,
-    input.dueBefore ? sql`${freshnessSloWindowsInOps.dueAt} <= ${input.dueBefore}` : undefined,
+    input.dueBefore ? lte(freshnessSloWindowsInOps.dueAt, input.dueBefore) : undefined,
   ].filter(Boolean);
   return db
     .select()
