@@ -20,14 +20,15 @@ describe('live lifecycle decisions', () => {
     expect(source).toContain('live-lifecycle');
     expect(source).toContain('persistLiveLifecycleStatus(now)');
     expect(source).toContain('live-picks-refresh');
-    expect(source).toContain(
-      'runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)',
-    );
+    expect(source).toContain('enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id');
+    expect(source).toContain('jobId: `live-picks-compatibility-');
+    expect(source).toContain('LIVE_PICKS_COMPATIBILITY_BUCKET_MS');
+    expect(source).not.toContain('runPicksProbeAndSync(');
     expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
-      source.indexOf('runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)'),
+      source.indexOf('enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id'),
     );
     expect(
-      source.indexOf('runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now)'),
+      source.indexOf('enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id'),
     ).toBeLessThan(source.indexOf('runSchedulerPass(now)'));
     const registrySource = readFileSync('src/scheduler/job-registry.ts', 'utf8');
     expect(registrySource).toContain('const decision = decideLiveLifecycle(event, fixtures');
