@@ -406,6 +406,13 @@ export const createTournamentManagementRepository = () => ({
           DELETE FROM competition.tournament_entries
           WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
         `;
+        // Manager-live coverage is keyed by event and tournament but does not
+        // reference competition.tournaments, so remove it explicitly before
+        // deleting the tournament to avoid leaving orphaned crawl state.
+        await tx`
+          DELETE FROM fpl.manager_live_tournament_coverage
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        `;
         // Serialize against capture/Redis activation for every event that has
         // ever contained this tournament. The second query below is after the
         // advisory locks, so it also sees a revision that raced the first
