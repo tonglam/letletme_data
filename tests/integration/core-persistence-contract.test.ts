@@ -550,9 +550,9 @@ persistenceTest(
         1,
         1,
       );
-      expect(repairedLegacy.lastEntryName).toBe('Runtime Entry 70_003');
+      expect(repairedLegacy.lastEntryName).toBe('Runtime Entry 70003');
       expect(repairedLegacy.usedEntryNames).toEqual([
-        'Runtime Entry 70_003',
+        'Runtime Entry 70003',
         'Repaired Legacy Entry',
       ]);
       const renamed = await entryRepository.upsertFromSummary(
