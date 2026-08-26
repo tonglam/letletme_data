@@ -75,6 +75,7 @@ mock.module('../../src/queues/maintenance.queue', () => ({
     TOURNAMENT_TRENDS: 'tournament-trends-repair',
     BUG_REPORT_CLEANUP: 'bug-report-cleanup',
     BUG_REPORT_SCREENSHOT_RETENTION: 'bug-report-screenshot-retention',
+    CLIENT_SIGNAL_RETENTION: 'client-signal-retention',
     LAUNCH_MONITOR: 'launch-monitor',
     POST_MATCH_CONSOLIDATION: 'post-match-consolidation',
     ENTRY_ONBOARDING: 'entry-onboarding',

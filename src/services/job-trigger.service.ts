@@ -28,6 +28,7 @@ import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
   enqueueBugReportCleanup,
   enqueueBugReportScreenshotRetention,
+  enqueueClientSignalRetention,
   enqueueLaunchMonitor,
   enqueuePlayerMarketFreshness,
   enqueuePlayerSeasonSummaryRepair,
@@ -249,6 +250,10 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     [MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION]: async () => {
       const season = await seasonRepository.findCurrent();
       return enqueueBugReportScreenshotRetention(season, 'manual');
+    },
+    [MAINTENANCE_JOBS.CLIENT_SIGNAL_RETENTION]: async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueueClientSignalRetention(season, 'manual');
     },
     [MAINTENANCE_JOBS.LAUNCH_MONITOR]: async () => {
       const season = await seasonRepository.findCurrent();

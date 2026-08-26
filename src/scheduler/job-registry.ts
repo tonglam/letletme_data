@@ -29,6 +29,7 @@ import { enqueueLivePicksRefresh } from '../jobs/live-picks.jobs';
 import {
   enqueueBugReportCleanup,
   enqueueBugReportScreenshotRetention,
+  enqueueClientSignalRetention,
   enqueueLaunchMonitor,
   enqueuePlayerMarketFreshness,
   enqueuePlayerSeasonSummaryRepair,
@@ -1314,6 +1315,25 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       successPredicate: 'expired and orphaned private screenshot objects are reconciled',
       enqueue: async ({ context, obligationId, generation }) => {
         const job = await enqueueBugReportScreenshotRetention(context.season, 'catchup', {
+          jobId: `scheduler-${obligationId}-g${generation}`,
+          obligationId,
+          obligationGeneration: generation,
+        });
+        return { bullJobId: job.id, runId: job.data.runId };
+      },
+    }),
+    dailyDefinition({
+      name: MAINTENANCE_JOBS.CLIENT_SIGNAL_RETENTION,
+      hour: 3,
+      minute: 30,
+      cadence: 'daily',
+      catchUpPolicy: 'latest-authoritative',
+      criticality: 'maintenance',
+      queueName: 'maintenance',
+      successPredicate:
+        'anonymous client signal windows and idempotency batches stay within retention',
+      enqueue: async ({ context, obligationId, generation }) => {
+        const job = await enqueueClientSignalRetention(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,

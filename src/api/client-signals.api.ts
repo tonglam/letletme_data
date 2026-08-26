@@ -7,31 +7,106 @@ import {
 } from '../services/client-signals.service';
 import { logError } from '../utils/logger';
 
-export const clientSignalsAPI = new Elysia({ prefix: '/internal/ops' }).post(
-  '/client-signals',
-  async ({ body, request, set }) => {
-    const verification = await verifyRequestApiKey(request);
-    if (verification.status !== 'ok') {
-      const failure = apiKeyFailureHttpResponse(verification.status);
-      set.status = failure.httpStatus;
-      return { accepted: false, error: failure.error };
-    }
+type ClientSignalBodyProblem = {
+  status: 413 | 422;
+  message: 'payload exceeds 16 KiB' | 'invalid JSON body';
+};
 
-    try {
-      const result = await ingestClientSignalBatch(body);
-      set.status = 202;
-      return { accepted: true, duplicate: result.duplicate };
-    } catch (error) {
-      if (error instanceof ClientSignalValidationError) {
-        set.status = 422;
-        return { accepted: false, error: error.message };
+const bodyProblems = new WeakMap<Request, ClientSignalBodyProblem>();
+
+function declaredBodyBytes(request: Request): number | null {
+  const value = request.headers.get('content-length');
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : Number.POSITIVE_INFINITY;
+}
+
+async function parseJsonBodyWithLimit(request: Request): Promise<unknown | undefined> {
+  const declared = declaredBodyBytes(request);
+  if (declared !== null && declared > 16 * 1024) {
+    bodyProblems.set(request, { status: 413, message: 'payload exceeds 16 KiB' });
+    return null;
+  }
+
+  const stream = request.body;
+  if (!stream) {
+    bodyProblems.set(request, { status: 422, message: 'invalid JSON body' });
+    return null;
+  }
+
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      if (!part.value) continue;
+      byteLength += part.value.byteLength;
+      if (byteLength > 16 * 1024) {
+        await reader.cancel();
+        bodyProblems.set(request, { status: 413, message: 'payload exceeds 16 KiB' });
+        return null;
       }
-      logError('Client signal ingestion failed', error);
-      set.status = 503;
-      return { accepted: false, error: 'Client signal ingestion unavailable' };
+      chunks.push(part.value);
     }
-  },
-  {
-    body: t.Any(),
-  },
-);
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  try {
+    const raw = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return JSON.parse(raw) as unknown;
+  } catch {
+    bodyProblems.set(request, { status: 422, message: 'invalid JSON body' });
+    return null;
+  }
+}
+
+export const clientSignalsAPI = new Elysia({ prefix: '/internal/ops' })
+  .onParse(async ({ request, contentType }) => {
+    if (contentType !== 'application/json') return undefined;
+    return parseJsonBodyWithLimit(request);
+  })
+  .post(
+    '/client-signals',
+    async ({ body, request, set }) => {
+      const bodyProblem = bodyProblems.get(request);
+      bodyProblems.delete(request);
+      if (bodyProblem) {
+        set.status = bodyProblem.status;
+        return { accepted: false, error: bodyProblem.message };
+      }
+
+      const verification = await verifyRequestApiKey(request);
+      if (verification.status !== 'ok') {
+        const failure = apiKeyFailureHttpResponse(verification.status);
+        set.status = failure.httpStatus;
+        return { accepted: false, error: failure.error };
+      }
+
+      try {
+        const result = await ingestClientSignalBatch(body);
+        set.status = 202;
+        return { accepted: true, duplicate: result.duplicate };
+      } catch (error) {
+        if (error instanceof ClientSignalValidationError) {
+          set.status = 422;
+          return { accepted: false, error: error.message };
+        }
+        logError('Client signal ingestion failed', error);
+        set.status = 503;
+        return { accepted: false, error: 'Client signal ingestion unavailable' };
+      }
+    },
+    {
+      body: t.Any(),
+    },
+  );

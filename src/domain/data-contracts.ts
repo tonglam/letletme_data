@@ -250,7 +250,12 @@ export const dataContractRegistry = [
     lifecycleStages: ['active', 'review', 'finished', 'idle'],
     eligibility: 'internal schedule',
     queueLane: housekeepingQueueName,
-    schedulerJobs: ['bug-report-cleanup', 'bug-report-screenshot-retention', 'launch-monitor'],
+    schedulerJobs: [
+      'bug-report-cleanup',
+      'bug-report-screenshot-retention',
+      'client-signal-retention',
+      'launch-monitor',
+    ],
     dispatchWithinMs: 60 * 60_000,
     executionBudgetMs: 60 * 60_000,
     integrity: 'internal checkpoint',
@@ -403,6 +408,7 @@ export function queueLaneForSchedulerJob(jobName: string): string | undefined {
     'player-market-freshness-watchdog': dataRepairQueueName,
     'bug-report-cleanup': housekeepingQueueName,
     'bug-report-screenshot-retention': housekeepingQueueName,
+    'client-signal-retention': housekeepingQueueName,
     'launch-monitor': housekeepingQueueName,
   };
   return explicit[jobName] ?? contractForSchedulerJob(jobName)?.queueLane;

@@ -398,18 +398,15 @@ function approximateQuantile(accumulator: SummaryAccumulator, quantile: number):
   return null;
 }
 
-export async function getClientSignalSummary(
-  since: Date,
-  limit = 5_000,
-): Promise<Record<string, unknown>> {
+export async function getClientSignalSummary(since: Date): Promise<Record<string, unknown>> {
   const client = await getDbClient();
   const rows = await client<SummaryRow[]>`
     SELECT client, release, surface, metric, device_group, sample_source, result, bucket,
-           sample_count, value_sum
+           SUM(sample_count)::bigint AS sample_count,
+           SUM(value_sum)::double precision AS value_sum
     FROM ops.client_signal_windows
     WHERE window_start >= ${since}
-    ORDER BY window_start DESC
-    LIMIT ${Math.max(1, Math.min(limit, 20_000))}
+    GROUP BY client, release, surface, metric, device_group, sample_source, result, bucket
   `;
   const grouped = new Map<string, SummaryAccumulator>();
   for (const row of rows) {
