@@ -40,6 +40,16 @@ export function blockingRunnableJobCount(queueName: string, counts: RunnableQueu
   return (counts.active ?? 0) + (counts.paused ?? 0) + (counts['waiting-children'] ?? 0);
 }
 
+/**
+ * Deployment stops every writer before the migration boundary. Waiting,
+ * delayed, and prioritized jobs are durable records that the new image can
+ * resume, but an executing or structurally-owned job could be orphaned by the
+ * schema change and must still block the cut.
+ */
+export function scopedBlockingRunnableJobCount(counts: RunnableQueueCounts): number {
+  return (counts.active ?? 0) + (counts.paused ?? 0) + (counts['waiting-children'] ?? 0);
+}
+
 export function cascadeId(key: string): { id: string; settled: boolean } | null {
   const marker = ':tournament-cascade:';
   const markerIndex = key.indexOf(marker);
@@ -70,7 +80,7 @@ export function findUnsettledCascades(keys: readonly string[]): string[] {
     .sort();
 }
 
-export function assertQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
+function assertDatabaseQuiescence(snapshot: QueueQuiescenceSnapshot): void {
   if (snapshot.nonTerminalSyncRuns !== 0) {
     throw new Error(`Database has ${snapshot.nonTerminalSyncRuns} non-terminal sync run(s)`);
   }
@@ -80,6 +90,15 @@ export function assertQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
   if (snapshot.runningMediaLeases !== 0) {
     throw new Error(`Database has ${snapshot.runningMediaLeases} RUNNING source-media lease(s)`);
   }
+  if (snapshot.unsettledCascadeIds.length > 0) {
+    throw new Error(
+      `Tournament cascades are incomplete: ${snapshot.unsettledCascadeIds.join(', ')}`,
+    );
+  }
+}
+
+export function assertQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
+  assertDatabaseQuiescence(snapshot);
 
   const runnable = Object.entries(snapshot.runnableQueues)
     .filter(([queueName, counts]) => blockingRunnableJobCount(queueName, counts) !== 0)
@@ -87,10 +106,21 @@ export function assertQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
   if (runnable.length > 0) {
     throw new Error(`Queues still have runnable jobs: ${runnable.join(', ')}`);
   }
+}
 
-  if (snapshot.unsettledCascadeIds.length > 0) {
-    throw new Error(
-      `Tournament cascades are incomplete: ${snapshot.unsettledCascadeIds.join(', ')}`,
-    );
+/**
+ * Scoped deployment quiescence keeps the migration boundary safe without
+ * requiring an unrelated waiting backlog to drain. It is intentionally
+ * stricter than simply ignoring queue counts: active, paused, and
+ * waiting-children jobs remain blockers, as do all durable database units.
+ */
+export function assertScopedQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
+  assertDatabaseQuiescence(snapshot);
+
+  const blockers = Object.entries(snapshot.runnableQueues)
+    .filter(([, counts]) => scopedBlockingRunnableJobCount(counts) !== 0)
+    .map(([queueName, counts]) => `${queueName}=${JSON.stringify(counts)}`);
+  if (blockers.length > 0) {
+    throw new Error(`Queues still have active or structural jobs: ${blockers.join(', ')}`);
   }
 }

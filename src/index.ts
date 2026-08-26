@@ -24,6 +24,7 @@ import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
 import { understatAPI } from './api/understat.api';
 import { trendsAPI } from './api/trends.api';
+import { dataGovernanceAPI } from './api/data-governance.api';
 import { databaseSingleton } from './db/singleton';
 
 // Import job registration functions
@@ -197,6 +198,7 @@ const app = new Elysia()
   .use(understatAPI)
   .use(trendsAPI)
   .use(contentAPI)
+  .use(dataGovernanceAPI)
 
   // ================================
   // Cron Job Registration

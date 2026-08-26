@@ -1,10 +1,14 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 
 import {
   mergeClassicStandingWithEntrySummary,
+  MANAGER_LIVE_READ_THROUGH_BACKGROUND_STANDINGS_PAGE_LIMIT,
+  persistTournamentCoverage,
   projectEventLiveManagerRows,
   type ManagerLiveScoreRow,
 } from '../../src/services/manager-live.service';
+import { managerLiveTournamentCoverageRepository } from '../../src/repositories/live-window';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 const row = (overrides: Partial<ManagerLiveScoreRow> = {}): ManagerLiveScoreRow => ({
   season: '2627',
@@ -28,6 +32,70 @@ const row = (overrides: Partial<ManagerLiveScoreRow> = {}): ManagerLiveScoreRow 
 });
 
 describe('Classic manager headline projection', () => {
+  test('keeps read-through background standings bounded to the worker page budget', () => {
+    expect(MANAGER_LIVE_READ_THROUGH_BACKGROUND_STANDINGS_PAGE_LIMIT).toBe(2);
+  });
+
+  test('does not report finalized coverage as published when the upsert fails', async () => {
+    const findCoverage = spyOn(
+      managerLiveTournamentCoverageRepository,
+      'findByTournamentAndEvent',
+    ).mockResolvedValue(null);
+    const upsertCoverage = spyOn(
+      managerLiveTournamentCoverageRepository,
+      'upsert',
+    ).mockRejectedValue(new Error('coverage database unavailable'));
+
+    try {
+      await expect(
+        persistTournamentCoverage({
+          season: TEST_SEASON,
+          eventId: 1,
+          tournamentId: 7,
+          rosterRevision: 'roster-1',
+          expectedEntries: 1,
+          rows: [row({ source: 'FPL_FINAL_RESULT' })],
+          errorCode: null,
+          managerRevision: 'final:manager-1',
+          crawlComplete: true,
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      findCoverage.mockRestore();
+      upsertCoverage.mockRestore();
+    }
+  });
+
+  test('does not report finalized coverage as published when the roster fence rejects it', async () => {
+    const findCoverage = spyOn(
+      managerLiveTournamentCoverageRepository,
+      'findByTournamentAndEvent',
+    ).mockResolvedValue(null);
+    const upsertCoverage = spyOn(
+      managerLiveTournamentCoverageRepository,
+      'upsert',
+    ).mockResolvedValue(false);
+
+    try {
+      await expect(
+        persistTournamentCoverage({
+          season: TEST_SEASON,
+          eventId: 1,
+          tournamentId: 7,
+          rosterRevision: 'roster-1',
+          expectedEntries: 1,
+          rows: [row({ source: 'FPL_FINAL_RESULT' })],
+          errorCode: null,
+          managerRevision: 'final:manager-1',
+          crawlComplete: true,
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      findCoverage.mockRestore();
+      upsertCoverage.mockRestore();
+    }
+  });
+
   test('replaces a lagging 23-point summary with the traced 37-point event-live score', () => {
     const projected = projectEventLiveManagerRows(
       '2627',

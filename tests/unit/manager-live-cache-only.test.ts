@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 import { redisSingleton } from '../../src/cache/singleton';
 import { fplClient } from '../../src/clients/fpl';
+import { MANAGER_LIVE_CLASSIC_CAPPED_CURSOR } from '../../src/domain/manager-live-refresh';
 import { eventRepository } from '../../src/repositories/events';
 import { managerScoreCheckpointRepository } from '../../src/repositories/live-window';
 import { seasonRepository } from '../../src/repositories/seasons';
@@ -156,13 +157,13 @@ const cachedRow = (entryId: number, checkedAt: string) => ({
   eventPoints: entryId % 100,
   netEventPoints: entryId % 100,
   totalPoints: 1000 + entryId,
-  totalScope: 'OVERALL',
+  totalScope: 'OVERALL' as const,
   eventRank: 10 + entryId,
   overallRank: 100 + entryId,
   leagueRank: null,
-  source: 'FPL_ENTRY_SUMMARY',
+  source: 'FPL_ENTRY_SUMMARY' as const,
   transferCost: 0,
-  eventPointSemantics: 'GROSS',
+  eventPointSemantics: 'GROSS' as const,
   revision: `revision-${entryId}`,
   checkedAt,
   revisionAt: checkedAt,
@@ -604,6 +605,82 @@ describe('manager live classic standings convergence', () => {
     });
   });
 
+  test('stops at the classic page cap without refetching page 100', async () => {
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: true,
+            page: 100,
+            results: [{ entry: 999, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+
+    const first = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101]),
+      new Map(),
+      null,
+      { startPage: 100, maxPages: 2 },
+    );
+    expect(first).toMatchObject({
+      complete: false,
+      nextPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
+
+    const second = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101]),
+      new Map(),
+      null,
+      { startPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR, maxPages: 2 },
+    );
+    expect(second).toMatchObject(first);
+    expect(getClassicStandings).toHaveBeenCalledTimes(1);
+  });
+
+  test('accepts durable target coverage when the bounded crawl reaches the page cap', async () => {
+    const checkedAt = new Date().toISOString();
+    const rows = new Map([
+      [101, cachedRow(101, checkedAt)],
+      [102, cachedRow(102, checkedAt)],
+    ]);
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: true,
+            page: 100,
+            results: [{ entry: 999, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101, 102]),
+      rows,
+      null,
+      { startPage: 100, maxPages: 1 },
+    );
+
+    expect(result).toMatchObject({
+      complete: true,
+      nextPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+      errorCode: null,
+    });
+  });
+
   test('persists completed pages before retrying a later failed page', async () => {
     getClassicStandings.mockImplementationOnce(
       async () =>
@@ -639,6 +716,71 @@ describe('manager live classic standings convergence', () => {
     expect(rows.get(101)).toMatchObject({ eventPoints: 51, leagueRank: 7 });
     expect(upsertCheckpoint).toHaveBeenCalledTimes(1);
     expect(upsertCheckpoint.mock.calls[0]?.[3]).toHaveLength(1);
+  });
+
+  test('treats normal standings exhaustion as complete when earlier pages are durable', async () => {
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: false,
+            page: 6,
+            results: [{ entry: 999, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+    const checkedAt = new Date().toISOString();
+    const rows = new Map([
+      [101, cachedRow(101, checkedAt)],
+      [102, cachedRow(102, checkedAt)],
+    ]);
+
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101, 102]),
+      rows,
+      null,
+      { startPage: 6, maxPages: 1 },
+    );
+
+    expect(result).toMatchObject({
+      complete: true,
+      nextPage: 7,
+      errorCode: null,
+    });
+  });
+
+  test('restarts from page one when normal exhaustion misses a target', async () => {
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: false,
+            page: 6,
+            results: [{ entry: 999, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101]),
+      new Map(),
+      null,
+      { startPage: 6, maxPages: 1 },
+    );
+
+    expect(result).toMatchObject({
+      complete: false,
+      nextPage: 1,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
   });
 
   test('does not advance a page when both durable publications fail', async () => {
@@ -798,6 +940,8 @@ describe('manager live classic standings convergence', () => {
     expect(selectWorkerSummaryRefreshTargets(entryIds, 12, 3)).toEqual(
       Array.from({ length: 12 }, (_, index) => index + 1),
     );
+    expect(selectWorkerSummaryRefreshTargets([25, 1, 13], 1, 0)).toEqual([1]);
+    expect(selectWorkerSummaryRefreshTargets([25, 1, 13], 1, 1)).toEqual([13]);
   });
 });
 

@@ -703,9 +703,12 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       outbox?: {
         outboxId: string;
       };
+      /** Optional same-transaction fence for a higher-level scheduler lane. */
+      beforeActivate?: (tx: DbOrTransaction) => Promise<void>;
     }): Promise<void> => {
       const db = await getDbInstance();
       await db.transaction(async (tx) => {
+        await input.beforeActivate?.(tx);
         await tx.execute(sql`
           SELECT pg_advisory_xact_lock(
             hashtext(${input.dataset}),
@@ -1049,6 +1052,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       revision: number;
       sourceRunId: string;
       manifest: DataPublicationManifest;
+      createdAt: Date;
+      expiresAt: Date | null;
     } | null> => {
       const db = await getDbInstance();
       const rows = await db
@@ -1057,6 +1062,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           revision: datasetPublicationsInOps.revision,
           sourceRunId: datasetPublicationsInOps.sourceRunId,
           manifest: datasetPublicationsInOps.manifest,
+          createdAt: datasetPublicationsInOps.createdAt,
+          expiresAt: datasetPublicationsInOps.expiresAt,
         })
         .from(datasetPublicationsInOps)
         .where(
@@ -1074,6 +1081,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         revision: row.revision,
         sourceRunId: row.sourceRunId,
         manifest: row.manifest as unknown as DataPublicationManifest,
+        createdAt: row.createdAt,
+        expiresAt: row.expiresAt,
       };
     },
 

@@ -1,4 +1,4 @@
-import { Worker, Job, QueueEvents } from 'bullmq';
+import { Worker, Job, QueueEvents, type Queue } from 'bullmq';
 
 import { finalizeTournamentEventLifecycle } from '../domain/tournament-event-finalization';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -14,6 +14,7 @@ import { syncTournamentEventResults } from '../services/tournament-event-results
 import { syncTournamentPointsRaceResults } from '../services/tournament-points-race-results.service';
 import {
   enqueueOfficialH2HRosterRecoveries,
+  getOfficialH2HFullReconcileTargets,
   getOfficialH2HRecoveryTargets,
   syncOfficialH2HTournaments,
   syncTournamentBattleRaceResults,
@@ -54,6 +55,7 @@ import {
   enqueueTournamentPointsRace,
   enqueueTournamentBattleRace,
   enqueueTournamentKnockout,
+  enqueueTournamentOfficialH2H,
   enqueueTournamentTransfersPost,
   enqueueTournamentCupResults,
   enqueueTournamentMaterializedViewsRefresh,
@@ -75,6 +77,7 @@ import {
   failSchedulerObligationByBullJobId,
   renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
+import { openGovernanceCase } from '../services/data-governance.service';
 
 type PostCommitIntent = () => Promise<void>;
 
@@ -156,7 +159,7 @@ async function completeTournamentCascadeObligation(
     generation: fence.generation,
     status: 'succeeded',
     evidence: {
-      queue: tournamentSyncQueueName,
+      queue: job.queueName,
       jobName: job.name,
       eventId: job.data.eventId,
       cascadeId: job.data.cascadeId,
@@ -537,7 +540,14 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
               }
 
               case TOURNAMENT_JOBS.OFFICIAL_H2H:
-                return { value: await syncOfficialH2HTournaments(season, eventId) };
+                return {
+                  value: await syncOfficialH2HTournaments(season, eventId, {
+                    forceFull: job.data.officialH2HMode === 'full-reconcile',
+                    ...(job.data.tournamentId === undefined
+                      ? {}
+                      : { tournamentId: job.data.tournamentId }),
+                  }),
+                };
 
               case TOURNAMENT_JOBS.KNOCKOUT: {
                 const result = await syncTournamentKnockoutResults(season, eventId);
@@ -741,6 +751,87 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
               // publishing the Redis job so the worker can claim it reliably.
               await enqueueOfficialH2HRosterRecoveries(season, eventId, recoveryTargets);
             }
+            const fullReconcileTargets =
+              job.name === TOURNAMENT_JOBS.OFFICIAL_H2H
+                ? getOfficialH2HFullReconcileTargets(error)
+                : [];
+            if (fullReconcileTargets.length > 0) {
+              await Promise.all(
+                fullReconcileTargets.map(async (target) => {
+                  const hash = target.lockedScheduleHash ?? 'unknown';
+                  try {
+                    await openGovernanceCase({
+                      caseKind: 'h2h-schedule-drift',
+                      contractKey: 'official-h2h',
+                      lane: 'official-h2h-live',
+                      scopeKey: `${season.seasonCode}:tournament:${target.tournamentId}`,
+                      errorClass: 'CONTRACT_DRIFT',
+                      errorCode: 'TOURNAMENT_OFFICIAL_H2H_SCHEDULE_CHANGED',
+                      fingerprint: `official-h2h:${season.seasonCode}:${target.tournamentId}:${hash}`,
+                      evidence: {
+                        eventId,
+                        lockedScheduleHash: target.lockedScheduleHash,
+                        reconciliation: 'full',
+                      },
+                      repairTarget: {
+                        tournamentId: target.tournamentId,
+                        eventId,
+                        lockedScheduleHash: target.lockedScheduleHash,
+                      },
+                      compensator: 'protected official H2H full reconciliation',
+                    });
+                  } catch (caseError) {
+                    // The original transaction has already rolled back. A
+                    // missing case must not turn a deterministic drift signal
+                    // into a different worker failure; the next audit can
+                    // recreate the same fingerprint.
+                    logError('Failed to persist official H2H drift governance case', caseError, {
+                      eventId,
+                      tournamentId: target.tournamentId,
+                    });
+                  }
+                }),
+              );
+              if (job.data.officialH2HMode === 'full-reconcile') {
+                // A guarded full reconciliation that still sees drift is now
+                // a review case. Do not enqueue another self-referential job.
+                throw error;
+              }
+              // A locked-page drift aborts the current transaction. Requeue
+              // exactly one guarded full root per tournament/hash; the full
+              // root may refresh an unchanged manifest, but a changed locked
+              // hash remains a review case and cannot publish partial rows.
+              await Promise.all(
+                fullReconcileTargets.map(async (target) => {
+                  const hash = target.lockedScheduleHash ?? 'unknown';
+                  const reconcileKey = `full-reconcile:${target.tournamentId}:${hash}`;
+                  try {
+                    const fullJob = await enqueueTournamentOfficialH2H(
+                      season,
+                      eventId,
+                      'reconcile',
+                      {
+                        tournamentId: target.tournamentId,
+                        officialH2HMode: 'full-reconcile',
+                        officialH2HReconcileKey: reconcileKey,
+                        jobId: `official-h2h-${reconcileKey}`,
+                      },
+                    );
+                    logInfo('Enqueued guarded official H2H full reconciliation', {
+                      eventId,
+                      tournamentId: target.tournamentId,
+                      reconcileKey,
+                      jobId: fullJob?.id,
+                    });
+                  } catch (reconcileError) {
+                    logError('Failed to enqueue official H2H full reconciliation', reconcileError, {
+                      eventId,
+                      tournamentId: target.tournamentId,
+                    });
+                  }
+                }),
+              );
+            }
             throw error;
           }
         }),
@@ -781,22 +872,26 @@ export function shouldCompleteTournamentJobOnSettlement(
   return job.name !== TOURNAMENT_JOBS.EVENT_RESULTS && job.data.source !== 'cascade';
 }
 
-export function createTournamentSyncWorker(): WorkerRuntime {
+export function createTournamentSyncWorker(
+  input: {
+    queue?: Queue<TournamentSyncJobData>;
+    queueName?: string;
+    concurrency?: number;
+  } = {},
+): WorkerRuntime {
   const connection = getQueueConnection();
-  const worker = new Worker<TournamentSyncJobData>(
-    tournamentSyncQueueName,
-    processTournamentSyncJob,
-    {
-      connection,
-      concurrency: 10,
-      removeOnComplete: BULL_COMPLETED_RETENTION,
-      removeOnFail: BULL_FAILED_RETENTION,
-      lockDuration: 120_000,
-      maxStalledCount: 2,
-      stalledInterval: 15_000,
-    },
-  );
-  const queueEvents = new QueueEvents(tournamentSyncQueueName, { connection });
+  const workerQueue = input.queue ?? tournamentSyncQueue;
+  const workerQueueName = input.queueName ?? tournamentSyncQueueName;
+  const worker = new Worker<TournamentSyncJobData>(workerQueueName, processTournamentSyncJob, {
+    connection,
+    concurrency: input.concurrency ?? 10,
+    removeOnComplete: BULL_COMPLETED_RETENTION,
+    removeOnFail: BULL_FAILED_RETENTION,
+    lockDuration: 120_000,
+    maxStalledCount: 2,
+    stalledInterval: 15_000,
+  });
+  const queueEvents = new QueueEvents(workerQueueName, { connection });
 
   worker.on('completed', (job) => {
     logInfo('Tournament sync worker completed job', {
@@ -807,7 +902,7 @@ export function createTournamentSyncWorker(): WorkerRuntime {
     if (job.id !== undefined && shouldCompleteTournamentJobOnSettlement(job)) {
       const fence = inspectSchedulerObligationFence(job.data);
       const evidence = {
-        queue: tournamentSyncQueueName,
+        queue: workerQueueName,
         jobName: job.name,
         eventId: job.data.eventId,
       };
@@ -850,8 +945,6 @@ export function createTournamentSyncWorker(): WorkerRuntime {
   return {
     workers: [worker],
     queueEvents: [queueEvents],
-    monitorTargets: [
-      { queue: tournamentSyncQueue, queueEvents, queueName: tournamentSyncQueueName },
-    ],
+    monitorTargets: [{ queue: workerQueue, queueEvents, queueName: workerQueueName }],
   };
 }

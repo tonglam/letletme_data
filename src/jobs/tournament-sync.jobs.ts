@@ -5,12 +5,15 @@ import {
   type TournamentSyncJobName,
   type TournamentSyncJobData,
 } from '../queues/tournament-sync.queue';
+import { officialH2hLiveQueue } from '../queues/official-h2h-live.queue';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { queueRedisSingleton } from '../queues/redis';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 import { trackQueueRunJob } from '../services/queue-run-tracker';
+import { getConfig } from '../utils/config';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type TournamentSyncJobSource =
   | 'cron'
@@ -39,19 +42,26 @@ export type TournamentSyncEnqueueOptions = {
   obligationGeneration?: number;
   finalizedEventId?: number;
   freshAfter?: string;
+  /** Force a page-manifest guarded full reconciliation after incremental drift. */
+  officialH2HMode?: 'incremental' | 'full-reconcile';
+  /** Stable dedupe key for the full reconciliation root. */
+  officialH2HReconcileKey?: string;
 };
 
 export async function hasPendingOfficialH2HJob(
   season: FplSeasonRef,
   eventId: number,
+  tournamentId?: number,
 ): Promise<boolean> {
   try {
-    const jobs = await tournamentSyncQueue.getJobs(['waiting', 'delayed', 'active']);
+    const queue = getConfig().QUEUE_LANES_V2_ENABLED ? officialH2hLiveQueue : tournamentSyncQueue;
+    const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
     return jobs.some(
       (job) =>
         job.name === TOURNAMENT_JOBS.OFFICIAL_H2H &&
         job.data.seasonId === season.seasonId &&
-        job.data.eventId === eventId,
+        job.data.eventId === eventId &&
+        (tournamentId === undefined || job.data.tournamentId === tournamentId),
     );
   } catch (error) {
     logError('Failed to check pending official H2H jobs', error, {
@@ -288,7 +298,12 @@ async function enqueueTournamentSyncJob(
   options: TournamentSyncEnqueueOptions = {},
 ) {
   try {
-    const queue = tournamentSyncQueue;
+    const useOfficialLane =
+      jobName === TOURNAMENT_JOBS.OFFICIAL_H2H && getConfig().QUEUE_LANES_V2_ENABLED;
+    const queue = useOfficialLane ? officialH2hLiveQueue : tournamentSyncQueue;
+    if (source === 'manual' && (await isQueueDrainOnly(queue.name))) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
     const jobData: TournamentSyncJobData = {
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
@@ -329,6 +344,13 @@ async function enqueueTournamentSyncJob(
         : {}),
       ...(options.expectedProgressMarker !== undefined
         ? { expectedProgressMarker: options.expectedProgressMarker }
+        : {}),
+      ...(useOfficialLane
+        ? { lane: 'official-h2h-live' as const }
+        : { lane: 'tournament-sync' as const }),
+      ...(options.officialH2HMode ? { officialH2HMode: options.officialH2HMode } : {}),
+      ...(options.officialH2HReconcileKey
+        ? { officialH2HReconcileKey: options.officialH2HReconcileKey }
         : {}),
     };
 
@@ -404,7 +426,7 @@ export const enqueueTournamentOfficialH2H = async (
   const effectiveSource = source ?? 'cron';
   if (
     (effectiveSource === 'cron' || effectiveSource === 'reconcile') &&
-    (await hasPendingOfficialH2HJob(season, eventId))
+    (await hasPendingOfficialH2HJob(season, eventId, options?.tournamentId))
   ) {
     logInfo('Official H2H job already pending; skipping enqueue', {
       season: season.seasonCode,

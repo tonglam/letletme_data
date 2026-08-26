@@ -83,10 +83,11 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   const queue = input.queueName;
   const { jobName, eventId, tournamentId } = input;
 
-  if (queue === 'data-sync') {
+  if (queue === 'data-sync' || queue === 'fpl-critical-sync') {
     switch (jobName) {
       case 'core-snapshot':
         return [
+          'data-core:publication',
           'data-core:events',
           'data-core:teams',
           'data-core:players',
@@ -99,7 +100,7 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'player-values':
         return jobName === 'player-stats' ? ['data-core:players'] : [`data-core:${jobName}`];
       case 'price-change-predictions':
-        return ['data-core:players', 'data-price-change:publication'];
+        return ['data-core:publication', 'data-price-change:publication'];
       default:
         return [];
     }

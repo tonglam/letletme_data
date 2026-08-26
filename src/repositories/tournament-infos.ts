@@ -90,6 +90,9 @@ export interface TournamentInfoSummary {
   knockoutPlayAgainstNum: number | null;
   state: 'active' | 'inactive' | 'finished';
   standingsReadyAt: string | null;
+  /** Lifecycle markers used to fence roster-scoped background work. */
+  rosterLastSyncedAt?: string | null;
+  setupProgressUpdatedAt?: string | null;
   officialScheduleHash: string | null;
   officialScheduleSyncedAt: string | null;
   officialScheduleLockedAt: string | null;
@@ -186,6 +189,8 @@ function mapTournamentInfo(
     knockoutPlayAgainstNum: row.knockoutPlayAgainstNum,
     state: row.state,
     standingsReadyAt: exactTimestamp(row.standingsReadyAt),
+    rosterLastSyncedAt: exactTimestamp(row.rosterLastSyncedAt),
+    setupProgressUpdatedAt: exactTimestamp(row.setupProgressUpdatedAt),
     officialScheduleHash: row.officialScheduleHash,
     officialScheduleSyncedAt: exactTimestamp(row.officialScheduleSyncedAt),
     officialScheduleLockedAt: exactTimestamp(row.officialScheduleLockedAt),

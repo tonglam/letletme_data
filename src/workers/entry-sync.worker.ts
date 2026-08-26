@@ -22,8 +22,10 @@ import {
   ENTRY_SYNC_DEFAULT_CONCURRENCY,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
   entrySyncQueue,
+  type EntrySyncLane,
   entrySyncQueueName,
 } from '../queues/entry-sync.queue';
+import type { Queue } from 'bullmq';
 import {
   enqueueEntryInfoSyncJob,
   enqueueEntryPicksSyncJob,
@@ -32,6 +34,7 @@ import {
   retainEntrySyncChainOptions,
   type EntrySyncJobOptions,
 } from '../jobs/entry-sync-enqueue';
+import { runLivePicksRefreshJob, type LivePicksRefreshJobData } from '../jobs/live-picks.jobs';
 import { syncEntryInfo } from '../services/entry-info.service';
 import { getCurrentEvent } from '../services/events.service';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
@@ -483,8 +486,17 @@ async function handleEntryJob(
   };
 }
 
-export function createEntrySyncWorker(): WorkerRuntime {
+export function createEntrySyncWorker(
+  input: {
+    queue?: Queue<EntrySyncJobData>;
+    queueName?: string;
+    concurrency?: number;
+    lane?: EntrySyncLane;
+  } = {},
+): WorkerRuntime {
   const connection = getQueueConnection();
+  const workerQueue = input.queue ?? entrySyncQueue;
+  const workerQueueName = input.queueName ?? entrySyncQueueName;
 
   const processor = async (job: Job<EntrySyncJobData>) => {
     const jobId = job.id ?? `${job.name}-${job.timestamp}`;
@@ -496,6 +508,31 @@ export function createEntrySyncWorker(): WorkerRuntime {
       }))
     ) {
       return { skipped: true, staleSchedulerGeneration: true };
+    }
+    // The dedicated live-picks lane carries one root canary job followed by
+    // entry-picks child jobs. Both must share the same consumer so the root
+    // cannot be accidentally treated as a normal entry payload (or marked
+    // complete before its fan-out drains).
+    if (job.name === 'live-picks-refresh') {
+      const result = await runLivePicksRefreshJob(job.data as unknown as LivePicksRefreshJobData);
+      if (result.scanComplete) {
+        const fence = inspectSchedulerObligationFence(job.data);
+        if (fence.kind === 'complete') {
+          await completeSchedulerObligation({
+            obligationId: fence.obligationId,
+            generation: fence.generation,
+            status: 'succeeded',
+            evidence: {
+              queue: workerQueueName,
+              jobName: job.name,
+              eventId: job.data.eventId,
+              canaryCount: result.canaryCount,
+              finalizer: 'root-no-fanout',
+            },
+          });
+        }
+      }
+      return result;
     }
     const season = await requireCurrentSeasonForJob(job.data);
     const attempt = resolveDataSyncAttempt(
@@ -739,13 +776,17 @@ export function createEntrySyncWorker(): WorkerRuntime {
         const fence = effectiveJobData
           ? inspectSchedulerObligationFence(effectiveJobData)
           : { kind: 'none' as const };
-        if (fence.kind === 'complete' && scoped.value.scanComplete) {
+        const livePicksChildComplete =
+          effectiveJobData?.lane === 'live-picks' &&
+          scoped.value.failedUnits === 0 &&
+          scoped.value.hasMore === false;
+        if (fence.kind === 'complete' && (scoped.value.scanComplete || livePicksChildComplete)) {
           await completeSchedulerObligation({
             obligationId: fence.obligationId,
             generation: fence.generation,
             status: 'succeeded',
             evidence: {
-              queue: entrySyncQueueName,
+              queue: workerQueueName,
               jobName: job.name,
               eventId: targetEventId,
               requiredUnits: scoped.value.requiredUnits,
@@ -760,21 +801,25 @@ export function createEntrySyncWorker(): WorkerRuntime {
     });
   };
 
-  const worker = new Worker<EntrySyncJobData>(entrySyncQueueName, processor, {
+  const worker = new Worker<EntrySyncJobData>(workerQueueName, processor, {
     connection,
+    ...(input.concurrency === undefined ? {} : { concurrency: input.concurrency }),
     lockDuration: 120_000,
     maxStalledCount: 2,
     stalledInterval: 15_000,
   });
-  const queueEvents = new QueueEvents(entrySyncQueueName, { connection });
+  const queueEvents = new QueueEvents(workerQueueName, { connection });
 
   worker.on('completed', (job) => {
     logInfo('Entry sync job completed', { jobId: job.id, name: job.name });
     const fence = inspectSchedulerObligationFence(job.data);
+    // A live-picks root only gates the canary and schedules the child scan;
+    // its obligation is settled by the child finalizer (or its exact retry).
+    if (job.name === 'live-picks-refresh') return;
     if (job.id !== undefined && fence.kind === 'none') {
       void completeSchedulerObligationByBullJobId({
         bullJobId: job.id,
-        evidence: { queue: entrySyncQueueName, jobName: job.name },
+        evidence: { queue: workerQueueName, jobName: job.name, lane: input.lane ?? 'entry-sync' },
       }).catch(() => undefined);
     }
   });
@@ -808,6 +853,6 @@ export function createEntrySyncWorker(): WorkerRuntime {
   return {
     workers: [worker],
     queueEvents: [queueEvents],
-    monitorTargets: [{ queue: entrySyncQueue, queueEvents, queueName: entrySyncQueueName }],
+    monitorTargets: [{ queue: workerQueue, queueEvents, queueName: workerQueueName }],
   };
 }

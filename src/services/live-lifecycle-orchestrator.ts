@@ -365,7 +365,19 @@ export async function runPicksProbeAndSync(
   season: FplSeasonRef,
   eventId: number,
   now = new Date(),
-): Promise<{ canaryCount: number; synced: number; pending: number }> {
+  obligation: Readonly<{
+    obligationId?: string;
+    obligationGeneration?: number;
+  }> = {},
+): Promise<{
+  canaryCount: number;
+  synced: number;
+  pending: number;
+  /** The source canary was accepted for this event window. */
+  sourceReady: boolean;
+  /** The complete eligible-entry sweep reached its semantic finalizer. */
+  scanComplete: boolean;
+}> {
   const key = `${season.seasonCode}:${eventId}`;
   const state = picksProbeStates.get(key) ?? {
     attempts: 0,
@@ -373,16 +385,40 @@ export async function runPicksProbeAndSync(
     canarySucceeded: false,
     failedCanaryEntryIds: new Set<number>(),
   };
-  if (now.getTime() < state.nextProbeAt) return { canaryCount: 0, synced: 0, pending: 0 };
+  if (now.getTime() < state.nextProbeAt) {
+    return {
+      canaryCount: 0,
+      synced: 0,
+      pending: 0,
+      sourceReady: false,
+      scanComplete: false,
+    };
+  }
   const entryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
-  if (entryIds.length === 0) return { canaryCount: 0, synced: 0, pending: 0 };
+  if (entryIds.length === 0) {
+    return {
+      canaryCount: 0,
+      synced: 0,
+      pending: 0,
+      sourceReady: true,
+      scanComplete: true,
+    };
+  }
   const fanoutClaims = picksFanoutClaims.get(key) ?? new Map<number, number>();
   const nowMs = now.getTime();
   // Complete picks are not immutable: FPL can update multipliers for automatic
   // substitutions and vice-captain promotion. Refresh every active entry on a
   // bounded cadence instead of treating one persisted 15-player rowset as final.
   const pending = findPicksRefreshEntryIds(entryIds, fanoutClaims, nowMs);
-  if (pending.length === 0) return { canaryCount: 0, synced: 0, pending: 0 };
+  if (pending.length === 0) {
+    return {
+      canaryCount: 0,
+      synced: 0,
+      pending: 0,
+      sourceReady: true,
+      scanComplete: true,
+    };
+  }
 
   let canaries = state.canarySucceeded
     ? []
@@ -421,7 +457,13 @@ export async function runPicksProbeAndSync(
       eventId,
       canaries: canaries.length,
     });
-    return { canaryCount, synced: 0, pending: pending.length };
+    return {
+      canaryCount,
+      synced: 0,
+      pending: pending.length,
+      sourceReady: false,
+      scanComplete: false,
+    };
   }
 
   state.canarySucceeded = true;
@@ -433,10 +475,13 @@ export async function runPicksProbeAndSync(
       entryIds: remaining,
       concurrency: Math.max(1, Math.min(FPL_BULK_MAX_INFLIGHT_DURING_LIVE, 3)),
       throttleMs: 0,
+      lane: 'live-picks',
       queueKey: `live-picks-${eventId}`,
       // Entry-list cron IDs are otherwise content-stable and BullMQ would
       // return the first completed job forever, defeating periodic refresh.
       jobId: `entry-picks-${season.seasonCode}-live-refresh-${eventId}-${nowMs}`,
+      obligationId: obligation.obligationId,
+      obligationGeneration: obligation.obligationGeneration,
       // In-memory fan-out claims are lost on scheduler restart. BullMQ keeps
       // this event lane single-flight until the accepted job settles, while
       // the completed-job cadence window prevents an immediate restart sweep.
@@ -462,7 +507,13 @@ export async function runPicksProbeAndSync(
     totalUniqueEntries: entryIds.length,
     queued: remaining.length,
   });
-  return { canaryCount, synced: canaryCount, pending: remaining.length };
+  return {
+    canaryCount,
+    synced: canaryCount,
+    pending: remaining.length,
+    sourceReady: true,
+    scanComplete: remaining.length === 0,
+  };
 }
 
 /**

@@ -142,7 +142,11 @@ restore_last_known_healthy_if_ledger_unchanged() {
 }
 
 runtime_worker_services() {
-  local services=(scheduler worker content-worker)
+  # Every long-lived consumer is part of the runtime inventory. Keeping the
+  # provider-heavy lanes in this list makes start/restore/health paths
+  # symmetric; otherwise a successful deploy could silently leave a queue
+  # without a consumer.
+  local services=(scheduler worker content-worker live-picks-worker official-h2h-worker)
   if [[ "${RUNTIME_INCLUDE_MEDIA_WORKER:-auto}" != false ]] \
     && compose config --services | grep -qx 'media-worker'; then
     services+=(media-worker)
@@ -172,7 +176,7 @@ start_runtime_services() {
   done < <(runtime_worker_services)
   compose up -d --remove-orphans --no-build "${services[@]}"
   compose up -d --remove-orphans --no-build api || {
-    echo 'API start failed; preserving scheduler/worker/content-worker/media-worker for recovery' >&2
+    echo 'API start failed; preserving scheduler/worker/content-worker/live-picks-worker/official-h2h-worker/media-worker for recovery' >&2
     port_3000_owner >&2
     # A failed Docker bind can leave the exact Compose API container in
     # `created` state while its network namespace/port proxy is being torn

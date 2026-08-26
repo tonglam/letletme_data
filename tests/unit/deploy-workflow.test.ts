@@ -96,6 +96,8 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('command_timeout: 20m');
     expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
     expect(workflow).toContain('"$old_media_present" || true');
+    expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
+    expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployStateMachine).toContain(
       'export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"',
     );
@@ -119,7 +121,7 @@ describe('release workflow gates', () => {
     expect(ciWorkflow).toContain(`bun-version: [${quote}1.3.14${quote}]`);
     expect(dockerfile).not.toContain('apk upgrade');
     expect(
-      dockerfile.match(/apk add --no-cache libcrypto3=3\.5\.7-r0 libssl3=3\.5\.7-r0/g),
+      dockerfile.match(/apk add --no-cache libcrypto3=3\.5\.8-r0 libssl3=3\.5\.8-r0/g),
     ).toHaveLength(2);
     expect(ciWorkflow).toContain('test -x /app/letletme-grok-runner');
     expect(ciWorkflow).toContain('getent group letletme-grok-bridge');

@@ -5,6 +5,10 @@ import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'dri
 import { schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
+import { contractForSchedulerJob, queueLaneForSchedulerJob } from '../domain/data-contracts';
+import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
+import { openGovernanceCase } from '../services/data-governance.service';
+import { logError } from '../utils/logger';
 
 export type SchedulerObligationStatus =
   | 'pending'
@@ -395,6 +399,7 @@ export async function supersedeSchedulerObligations(input: {
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
+      lastError: null,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -439,6 +444,7 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
+      lastError: null,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -551,6 +557,7 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
           completed_at = clock_timestamp(),
           lease_owner = NULL,
           lease_expires_at = NULL,
+          last_error = NULL,
           updated_at = clock_timestamp()
       FROM boundaries
       WHERE obligation.job_name = boundaries.job_name
@@ -660,11 +667,14 @@ export async function deferSchedulerObligationByIdentity(input: {
   const db = input.db ?? (await getDb());
   const delayMs = Math.max(1_000, Math.floor(input.delayMs));
   if (!Number.isSafeInteger(delayMs)) throw new Error('Scheduler defer delay must be an integer');
+  const deferredError = input.error
+    ? summarizeDataError(new Error(input.error)).summary
+    : undefined;
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
       dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
-      ...(input.error ? { lastError: input.error } : {}),
+      ...(deferredError ? { lastError: `TRANSIENT_INFRA:${deferredError}` } : {}),
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -747,6 +757,11 @@ export async function claimSchedulerObligations(
     : undefined;
   const owner = randomUUID();
   return db.transaction(async (tx) => {
+    // Scheduler coordination is a bounded control-plane operation. A stuck
+    // connection or advisory lock must fail this claim and let the next
+    // 30-second pass recover, rather than pinning the scheduler in-flight.
+    await tx.execute(sql`SET LOCAL statement_timeout = '10s'`);
+    await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
     // All schedulers acquire intersecting lane locks in lexical order. The
     // in-flight check and claim therefore form one database-atomic capacity
     // decision even during a rolling deployment with two scheduler processes.
@@ -813,6 +828,7 @@ export async function claimSchedulerObligations(
             completedAt: dbNow,
             leaseOwner: null,
             leaseExpiresAt: null,
+            lastError: null,
             updatedAt: dbNow,
           })
           .where(eq(schedulerObligationsInOps.obligationId, row.obligationId));
@@ -870,18 +886,64 @@ export async function findDueSchedulerJobNames(input: {
 }
 
 /**
+ * Earliest-due candidates used by the scheduler's EDF admission pass.  The
+ * claimant still rechecks this ordering and all lane/generation predicates in
+ * its transaction; this read only avoids claiming a newer low-priority bucket
+ * ahead of an older deadline.
+ */
+export async function findDueSchedulerObligationCandidates(
+  input: {
+    excludedJobNames?: readonly string[];
+    db?: DbHandle;
+  } = {},
+): Promise<readonly { jobName: string; earliestDueAt: Date }[]> {
+  const db = input.db ?? (await getDb());
+  const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
+    (name) => name.length > 0,
+  );
+  const rows = await db.execute<{ jobName: string; earliestDueAt: Date | string }>(sql`
+    SELECT job_name AS "jobName", min(due_at) AS "earliestDueAt"
+    FROM ops.scheduler_obligations
+    WHERE due_at <= clock_timestamp()
+      AND status IN ('pending', 'failed')
+      ${
+        excludedJobNames.length > 0
+          ? sql`AND job_name NOT IN (${sql.join(
+              excludedJobNames.map((name) => sql`${name}`),
+              sql`, `,
+            )})`
+          : sql``
+      }
+    GROUP BY job_name
+    ORDER BY min(due_at) ASC, min(obligation_id::text) ASC
+  `);
+  return rows
+    .map((row) => {
+      const dueAt =
+        row.earliestDueAt instanceof Date ? row.earliestDueAt : new Date(row.earliestDueAt);
+      return Number.isFinite(dueAt.getTime())
+        ? { jobName: row.jobName, earliestDueAt: dueAt }
+        : null;
+    })
+    .filter((row): row is { jobName: string; earliestDueAt: Date } => row !== null);
+}
+
+/**
  * Find expired in-flight obligations for BullMQ reconciliation. Lease expiry
  * is observation evidence only: the reconciler must inspect the exact Bull
  * generation before it may settle or retry one of these rows.
  */
 export async function listExpiredSchedulerObligations(
-  input: { limit?: number; db?: DbHandle } = {},
+  input: { limit?: number; excludedJobNames?: readonly string[]; db?: DbHandle } = {},
 ): Promise<readonly SchedulerObligation[]> {
   const limit = input.limit ?? 50;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
     throw new Error('Scheduler recovery limit must be between 1 and 200');
   }
   const db = input.db ?? (await getDb());
+  const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
+    (name) => name.length > 0,
+  );
   const rows = await db
     .select()
     .from(schedulerObligationsInOps)
@@ -889,6 +951,9 @@ export async function listExpiredSchedulerObligations(
       and(
         inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
         lte(schedulerObligationsInOps.leaseExpiresAt, sql`clock_timestamp()`),
+        excludedJobNames.length > 0
+          ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
+          : undefined,
       ),
     )
     .orderBy(
@@ -1016,6 +1081,8 @@ export async function completeSchedulerObligation(input: {
   status: Extract<SchedulerObligationStatus, 'succeeded' | 'skipped' | 'irrecoverable'>;
   generation?: number;
   evidence?: Record<string, unknown>;
+  /** Only an irrecoverable terminal error keeps a durable error marker. */
+  lastError?: string | null;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -1027,6 +1094,7 @@ export async function completeSchedulerObligation(input: {
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
+      lastError: input.status === 'irrecoverable' ? (input.lastError ?? null) : null,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -1055,6 +1123,8 @@ export async function markSchedulerObligationIrrecoverable(input: {
   status?: Extract<SchedulerObligationStatus, 'skipped' | 'irrecoverable'>;
   generation?: number;
   evidence?: Record<string, unknown>;
+  /** Historical/current-day skips clear errors; failed terminal work keeps one. */
+  lastError?: string | null;
   includeInFlight?: boolean;
   db?: DbHandle;
 }): Promise<boolean> {
@@ -1070,6 +1140,7 @@ export async function markSchedulerObligationIrrecoverable(input: {
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
+      lastError: input.lastError ?? null,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -1100,6 +1171,7 @@ export async function completeSchedulerObligationByBullJobId(input: {
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
+      lastError: null,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -1146,16 +1218,27 @@ export async function failSchedulerObligation(input: {
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
-  const summary = (input.error instanceof Error ? input.error.message : String(input.error)).slice(
+  const classified = summarizeDataError(input.error);
+  const retryPolicy = retryPolicyForError(classified.errorClass);
+  const summary = `${classified.errorClass}:${classified.errorCode} ${classified.summary}`.slice(
     0,
-    4_000,
+    1_000,
   );
   const retryDelayMs = Math.max(0, Math.floor(input.retryDelayMs ?? 60_000));
+  // `attempts` is incremented when a failed obligation is claimed for a new
+  // generation.  Keep transient/provider retries bounded at the scheduler
+  // layer as well as at Bull's per-job attempt layer; otherwise a source that
+  // stays unavailable would create an unbounded stream of new generations.
+  const terminalAfterThisAttempt = sql`${schedulerObligationsInOps.attempts} >= ${retryPolicy.maxAttempts}`;
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
-      status: 'failed',
-      dueAt: sql`clock_timestamp() + ${retryDelayMs} * interval '1 millisecond'`,
+      status: sql`CASE WHEN ${terminalAfterThisAttempt} THEN 'irrecoverable' ELSE 'failed' END`,
+      dueAt: sql`CASE
+        WHEN ${terminalAfterThisAttempt} THEN clock_timestamp()
+        ELSE clock_timestamp() + ${retryDelayMs} * interval '1 millisecond'
+      END`,
+      completedAt: sql`CASE WHEN ${terminalAfterThisAttempt} THEN clock_timestamp() ELSE NULL END`,
       lastError: summary,
       leaseOwner: null,
       leaseExpiresAt: null,
@@ -1174,7 +1257,57 @@ export async function failSchedulerObligation(input: {
         inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
       ),
     )
-    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+    .returning({
+      obligationId: schedulerObligationsInOps.obligationId,
+      status: schedulerObligationsInOps.status,
+    });
+  if (updated.length === 1) {
+    // A terminal worker failure is durable evidence that needs an actionable
+    // repair case. Persisting the case is best-effort and must never mask the
+    // already-recorded obligation failure.
+    // Retryable provider/source-not-ready errors should not open a governance
+    // case on every bounded attempt.  Once the scheduler exhausts the policy
+    // and marks the obligation irrecoverable, keep an actionable case even if
+    // the individual error class normally relies on the SLO observer.
+    if (retryPolicy.createGovernanceCase || updated[0]?.status === 'irrecoverable') {
+      try {
+        const [obligation] = await db
+          .select({
+            jobName: schedulerObligationsInOps.jobName,
+            scopeKey: schedulerObligationsInOps.scopeKey,
+            generation: schedulerObligationsInOps.generation,
+          })
+          .from(schedulerObligationsInOps)
+          .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+          .limit(1);
+        const contract = obligation ? contractForSchedulerJob(obligation.jobName) : undefined;
+        if (obligation && contract) {
+          await openGovernanceCase({
+            caseKind: 'scheduler-failure',
+            contractKey: contract.contractKey,
+            lane: queueLaneForSchedulerJob(obligation.jobName) ?? contract.queueLane,
+            obligationId: input.obligationId,
+            scopeKey: obligation.scopeKey,
+            errorClass: classified.errorClass,
+            errorCode: classified.errorCode,
+            fingerprint: `${obligation.jobName}:${obligation.scopeKey}:${classified.errorCode}`,
+            evidence: {
+              generation: obligation.generation,
+              retryable: retryPolicy.retryable,
+              maxAttempts: retryPolicy.maxAttempts,
+            },
+            repairTarget: { jobName: obligation.jobName, scopeKey: obligation.scopeKey },
+            compensator: contract.compensator,
+            db,
+          });
+        }
+      } catch (caseError) {
+        logError('Scheduler failure governance case persistence failed', caseError, {
+          obligationId: input.obligationId,
+        });
+      }
+    }
+  }
   return updated.length === 1;
 }
 

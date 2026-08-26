@@ -4,7 +4,11 @@ import type { ManagerLiveJobData } from '../../src/queues/manager-live.queue';
 
 process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
 
-const { scheduleManagerLiveContinuation } = await import('../../src/workers/manager-live.worker');
+const {
+  scheduleManagerLiveContinuation,
+  selectManagerLiveJobCursors,
+  shouldRetryFinalizedTournamentManagerLive,
+} = await import('../../src/workers/manager-live.worker');
 
 const jobData: ManagerLiveJobData = {
   version: 1,
@@ -18,6 +22,89 @@ const jobData: ManagerLiveJobData = {
 };
 
 describe('manager live worker continuation', () => {
+  test('keeps finalized tournament coverage retryable while final rows are incomplete', () => {
+    expect(
+      shouldRetryFinalizedTournamentManagerLive({
+        partial: true,
+        errorCode: 'UPSTREAM_UNAVAILABLE',
+        tournamentCoverage: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRetryFinalizedTournamentManagerLive({
+        partial: false,
+        errorCode: 'UPSTREAM_UNAVAILABLE',
+        tournamentCoverage: {
+          rosterRevision: 'roster',
+          expectedEntries: 20,
+          resolvedEntries: 12,
+          fullyFetchedAt: null,
+          managerRevision: 'final:manager',
+          error: 'UPSTREAM_UNAVAILABLE',
+          state: 'PARTIAL',
+        },
+      }),
+    ).toBe(true);
+    expect(
+      shouldRetryFinalizedTournamentManagerLive({
+        partial: false,
+        errorCode: null,
+        tournamentCoverage: {
+          rosterRevision: 'roster',
+          expectedEntries: 2,
+          resolvedEntries: 2,
+          fullyFetchedAt: '2026-08-26T00:00:00.000Z',
+          managerRevision: 'final:manager',
+          error: null,
+          state: 'COMPLETE',
+        },
+      }),
+    ).toBe(false);
+  });
+
+  test('pins a retry to its failed cursors while allowing a roster rotation to adopt new cursors', () => {
+    const hotState = {
+      generation: 'generation-a',
+      summaryRotationCursor: 5,
+      classicStandingsPage: 7,
+      classicStandingsCursorEpoch: 2,
+    };
+    expect(
+      selectManagerLiveJobCursors({
+        attemptsMade: 1,
+        jobData: {
+          generation: 'generation-a',
+          summaryRotationCursor: 4,
+          classicStandingsPage: 6,
+          classicStandingsCursorEpoch: 1,
+        },
+        hotState,
+      }),
+    ).toMatchObject({
+      retryCursorsPinned: true,
+      summaryRotationCursor: 4,
+      classicStandingsPage: 6,
+      classicStandingsCursorEpoch: 1,
+    });
+    expect(
+      selectManagerLiveJobCursors({
+        attemptsMade: 1,
+        jobData: {
+          generation: 'generation-old',
+          summaryRotationCursor: 4,
+          classicStandingsPage: 6,
+          classicStandingsCursorEpoch: 1,
+        },
+        hotState: { ...hotState, generation: 'generation-new' },
+      }),
+    ).toMatchObject({
+      retryCursorsPinned: false,
+      summaryRotationCursor: 5,
+      classicStandingsPage: 7,
+      classicStandingsCursorEpoch: 2,
+    });
+  });
+
   test('passes the persisted logical cursor through retries unchanged', async () => {
     const calls: number[] = [];
     await scheduleManagerLiveContinuation(

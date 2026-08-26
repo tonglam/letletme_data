@@ -14,6 +14,8 @@ import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import {
   managerScoreCheckpointRepository,
+  managerLiveTournamentCoverageRepository,
+  type ManagerLiveTournamentCoverageState,
   type ManagerScoreCheckpoint,
   type ManagerScoreScope,
 } from '../repositories/live-window';
@@ -23,12 +25,22 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { logDebug, logWarn } from '../utils/logger';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  finalManagerRevision,
+  isFinalManagerLiveRevision,
+  tournamentRosterRevision,
+} from '../domain/manager-live-coverage';
+import {
   MANAGER_LIVE_CLASSIC_MAX_PAGE,
+  MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
   MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
   MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT,
+  classicStandingsCursorAfterRefresh,
+  managerLiveRosterRevision,
 } from '../domain/manager-live-refresh';
+export { classicStandingsCursorAfterRefresh } from '../domain/manager-live-refresh';
+export { tournamentRosterRevision } from '../domain/manager-live-coverage';
 import {
   acquireDistributedLease,
   classicManagerBackgroundStandingsStartPage,
@@ -44,6 +56,7 @@ import {
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
   mergeUniqueTargetManagerRows,
+  nextManagerLiveStandingsContinuation,
   pendingManagerRefreshEntryIds,
   planClassicManagerFallback,
   planManagerLiveRefreshTargets,
@@ -76,9 +89,13 @@ const CACHE_TTL_SECONDS = 48 * 60 * 60;
 // official row fresh for at least three refresh cycles. This prevents a
 // transient refresh miss from being presented as stale immediately.
 const REFRESH_SECONDS = 30;
+const INCOMPLETE_CLASSIC_REFRESH_SECONDS = 15;
 const STALE_SECONDS = Math.max(90, 3 * REFRESH_SECONDS);
-const MAX_STANDINGS_PAGES = 20;
+const MAX_STANDINGS_PAGES = MANAGER_LIVE_CLASSIC_MAX_PAGE;
 const MAX_FOREGROUND_STANDINGS_PAGES = 4;
+export const MANAGER_LIVE_READ_THROUGH_BACKGROUND_STANDINGS_PAGE_LIMIT =
+  MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT;
+const MAX_BACKGROUND_STANDINGS_PAGES = MANAGER_LIVE_READ_THROUGH_BACKGROUND_STANDINGS_PAGE_LIMIT;
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 // A small classic roster should receive a complete OR column in the initial
 // response. Larger leagues remain bounded and finish through the background
@@ -116,6 +133,15 @@ export type ManagerLiveTotalScope = 'OVERALL' | 'CLASSIC_PHASE';
 export type ManagerLiveReadMode = 'CACHE_ONLY' | 'READ_THROUGH';
 export type ManagerLiveDataAvailability = 'FRESH' | 'LAST_GOOD' | 'PARTIAL' | 'UNAVAILABLE';
 export type ManagerLiveServedFrom = 'REDIS' | 'POSTGRES' | 'MIXED' | 'NONE';
+export type ManagerLiveTournamentCoverage = {
+  rosterRevision: string;
+  expectedEntries: number;
+  resolvedEntries: number;
+  fullyFetchedAt: string | null;
+  managerRevision: string | null;
+  error: string | null;
+  state: ManagerLiveTournamentCoverageState;
+};
 
 export type ManagerLiveScoreRow = {
   season: string;
@@ -150,6 +176,7 @@ export type ManagerLiveResolveResult = {
   errorCode: 'UNSUPPORTED_H2H_LIVE' | 'UPSTREAM_UNAVAILABLE' | 'UPSTREAM_RATE_LIMITED' | null;
   checkedAt: string;
   nextRefreshAt: string;
+  tournamentCoverage?: ManagerLiveTournamentCoverage | null;
   /** Internal worker continuation; absent on public cache-only reads. */
   classicStandingsNextPage?: number | null;
 };
@@ -863,6 +890,223 @@ const managerDataAvailability = (
   return rows.every((row) => isFresh(row, now)) ? 'FRESH' : 'LAST_GOOD';
 };
 
+export const deriveManagerLiveTournamentCoverageState = (input: {
+  expectedEntries: number;
+  resolvedEntries: number;
+  errorCode: ManagerLiveResolveResult['errorCode'];
+  crawlComplete: boolean;
+}): ManagerLiveTournamentCoverageState => {
+  const complete =
+    input.crawlComplete &&
+    input.errorCode === null &&
+    input.resolvedEntries === input.expectedEntries;
+  if (complete) return 'COMPLETE';
+  if (input.resolvedEntries > 0) return 'PARTIAL';
+  if (input.errorCode) return 'UNAVAILABLE';
+  return 'WARMING';
+};
+
+export const invalidateManagerLiveTournamentCoverage = (
+  coverage: ManagerLiveTournamentCoverage | null,
+  rosterRevision: string,
+  expectedEntries: number,
+): ManagerLiveTournamentCoverage | null => {
+  if (!coverage || coverage.rosterRevision === rosterRevision) return coverage;
+  return {
+    ...coverage,
+    rosterRevision,
+    expectedEntries,
+    resolvedEntries: 0,
+    fullyFetchedAt: null,
+    managerRevision: null,
+    error: null,
+    state: 'WARMING',
+  };
+};
+
+export const shouldPreserveManagerLiveTournamentCoverage = (
+  coverage: {
+    state: string;
+    rosterRevision: string;
+    expectedEntries: number;
+    resolvedEntries: number;
+  } | null,
+  rosterRevision: string,
+  expectedEntries: number,
+): boolean =>
+  coverage?.state === 'COMPLETE' &&
+  coverage.rosterRevision === rosterRevision &&
+  coverage.expectedEntries === expectedEntries &&
+  coverage.resolvedEntries === expectedEntries;
+
+export const shouldQueueFinalizedManagerLiveCoverage = (
+  coverage: Pick<
+    ManagerLiveTournamentCoverage,
+    'state' | 'rosterRevision' | 'expectedEntries' | 'resolvedEntries' | 'managerRevision'
+  > | null,
+  rosterRevision: string,
+  expectedEntries: number,
+  currentManagerRevision?: string | null,
+): boolean =>
+  !(
+    coverage?.state === 'COMPLETE' &&
+    coverage.rosterRevision === rosterRevision &&
+    coverage.expectedEntries === expectedEntries &&
+    coverage.resolvedEntries === expectedEntries &&
+    isFinalManagerLiveRevision(coverage.managerRevision) &&
+    (currentManagerRevision === undefined || coverage.managerRevision === currentManagerRevision)
+  );
+
+const mapTournamentCoverage = (row: {
+  rosterRevision: string;
+  expectedEntries: number;
+  resolvedEntries: number;
+  fullyFetchedAt: Date | null;
+  managerRevision: string | null;
+  error: string | null;
+  state: string;
+}): ManagerLiveTournamentCoverage | null => {
+  if (
+    row.state !== 'WARMING' &&
+    row.state !== 'COMPLETE' &&
+    row.state !== 'PARTIAL' &&
+    row.state !== 'UNAVAILABLE'
+  ) {
+    return null;
+  }
+  return {
+    rosterRevision: row.rosterRevision,
+    expectedEntries: row.expectedEntries,
+    resolvedEntries: row.resolvedEntries,
+    fullyFetchedAt: row.fullyFetchedAt?.toISOString() ?? null,
+    managerRevision: row.managerRevision,
+    error: row.error,
+    state: row.state,
+  };
+};
+
+const readTournamentCoverage = async (
+  season: FplSeasonRef,
+  eventId: number,
+  tournamentId: number,
+): Promise<ManagerLiveTournamentCoverage | null> => {
+  try {
+    const row = await managerLiveTournamentCoverageRepository.findByTournamentAndEvent(
+      season,
+      eventId,
+      tournamentId,
+    );
+    return row ? mapTournamentCoverage(row) : null;
+  } catch (error) {
+    logWarn('Manager live tournament coverage read failed', {
+      eventId,
+      tournamentId,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return null;
+  }
+};
+
+export const persistTournamentCoverage = async (input: {
+  season: FplSeasonRef;
+  eventId: number;
+  tournamentId: number;
+  rosterRevision: string;
+  expectedEntries: number;
+  rows: readonly ManagerLiveScoreRow[];
+  errorCode: ManagerLiveResolveResult['errorCode'];
+  managerRevision: string;
+  crawlComplete: boolean;
+}): Promise<ManagerLiveTournamentCoverage | null> => {
+  let existing: Awaited<
+    ReturnType<typeof managerLiveTournamentCoverageRepository.findByTournamentAndEvent>
+  >;
+  try {
+    existing = await managerLiveTournamentCoverageRepository.findByTournamentAndEvent(
+      input.season,
+      input.eventId,
+      input.tournamentId,
+    );
+  } catch (error) {
+    logWarn('Manager live tournament coverage baseline read failed', {
+      eventId: input.eventId,
+      tournamentId: input.tournamentId,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    // A failed baseline read must never be interpreted as an empty crawl. The
+    // repository write is fenced as well, but skipping here keeps a transient
+    // read failure from publishing 0 resolved rows over durable progress.
+    return null;
+  }
+  const resolvedEntryIds = new Set(
+    input.rows.filter((row) => typeof row.eventPoints === 'number').map((row) => row.entryId),
+  );
+  const preserveExistingComplete =
+    shouldPreserveManagerLiveTournamentCoverage(
+      existing,
+      input.rosterRevision,
+      input.expectedEntries,
+    ) && !isFinalManagerLiveRevision(input.managerRevision);
+  const resolvedEntries = preserveExistingComplete
+    ? (existing?.resolvedEntries ?? 0)
+    : Math.min(input.expectedEntries, resolvedEntryIds.size);
+  const state = preserveExistingComplete
+    ? 'COMPLETE'
+    : deriveManagerLiveTournamentCoverageState({
+        expectedEntries: input.expectedEntries,
+        resolvedEntries,
+        errorCode: input.errorCode,
+        crawlComplete: input.crawlComplete,
+      });
+  const complete = state === 'COMPLETE';
+  const fullyFetchedAt = complete
+    ? preserveExistingComplete
+      ? (existing?.fullyFetchedAt ?? null)
+      : new Date()
+    : existing?.rosterRevision === input.rosterRevision
+      ? existing.fullyFetchedAt
+      : null;
+  const coverage: ManagerLiveTournamentCoverage = {
+    rosterRevision: input.rosterRevision,
+    expectedEntries: input.expectedEntries,
+    resolvedEntries,
+    fullyFetchedAt: fullyFetchedAt?.toISOString() ?? null,
+    managerRevision: input.managerRevision,
+    error: input.errorCode,
+    state,
+  };
+  try {
+    const accepted = await managerLiveTournamentCoverageRepository.upsert({
+      seasonId: input.season.seasonId,
+      eventId: input.eventId,
+      tournamentId: input.tournamentId,
+      rosterRevision: coverage.rosterRevision,
+      expectedEntries: coverage.expectedEntries,
+      resolvedEntries: coverage.resolvedEntries,
+      fullyFetchedAt,
+      managerRevision: coverage.managerRevision,
+      error: coverage.error,
+      state: coverage.state,
+    });
+    if (!accepted) {
+      logWarn('Manager live tournament coverage publication rejected by roster fence', {
+        eventId: input.eventId,
+        tournamentId: input.tournamentId,
+        rosterRevision: input.rosterRevision,
+      });
+      return null;
+    }
+  } catch (error) {
+    logWarn('Manager live tournament coverage publication failed', {
+      eventId: input.eventId,
+      tournamentId: input.tournamentId,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return null;
+  }
+  return coverage;
+};
+
 const managerServedFrom = (
   rows: readonly ManagerLiveScoreRow[],
   sourceByEntry: ReadonlyMap<number, ManagerLiveRowBacking>,
@@ -888,6 +1132,7 @@ const buildManagerLiveResult = (input: {
   sourceByEntry: ReadonlyMap<number, ManagerLiveRowBacking>;
   refreshQueued?: boolean;
   checkedAt?: string;
+  tournamentCoverage?: ManagerLiveTournamentCoverage | null;
   classicStandingsNextPage?: number | null;
 }): ManagerLiveResolveResult => {
   const fallbackCheckedAt = input.checkedAt ?? nowIso();
@@ -909,6 +1154,9 @@ const buildManagerLiveResult = (input: {
     errorCode: input.errorCode,
     checkedAt: managerCheckedAt(input.rows, fallbackCheckedAt),
     nextRefreshAt: input.nextRefreshAt,
+    ...(input.tournamentCoverage === undefined
+      ? {}
+      : { tournamentCoverage: input.tournamentCoverage }),
     ...(input.classicStandingsNextPage === undefined
       ? {}
       : { classicStandingsNextPage: input.classicStandingsNextPage }),
@@ -925,6 +1173,7 @@ const buildActiveManagerLiveResult = async (input: {
   sourceByEntry: ReadonlyMap<number, ManagerLiveRowBacking>;
   refreshQueued?: boolean;
   checkedAt?: string;
+  tournamentCoverage?: ManagerLiveTournamentCoverage | null;
   classicStandingsNextPage?: number | null;
 }): Promise<ManagerLiveResolveResult> => {
   const batch = await eventLiveManagerScoreService
@@ -958,6 +1207,9 @@ const buildActiveManagerLiveResult = async (input: {
     // authority is carried independently by row.source/revision/checkedAt.
     sourceByEntry: input.sourceByEntry,
     checkedAt: batch?.checkedAt ?? input.checkedAt,
+    ...(input.tournamentCoverage === undefined
+      ? {}
+      : { tournamentCoverage: input.tournamentCoverage }),
     ...(input.refreshQueued === undefined ? {} : { refreshQueued: input.refreshQueued }),
     ...(input.classicStandingsNextPage === undefined
       ? {}
@@ -993,6 +1245,19 @@ const dispatchManagerLiveRefreshBounded = async (
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+};
+
+const tournamentRosterLifecycleMarker = (
+  tournament: {
+    rosterLastSyncedAt?: string | null;
+    setupProgressUpdatedAt?: string | null;
+  } | null,
+): string | null => {
+  if (!tournament) return null;
+  const markers = [tournament.rosterLastSyncedAt, tournament.setupProgressUpdatedAt].filter(
+    (marker): marker is string => typeof marker === 'string' && marker.length > 0,
+  );
+  return markers.length > 0 ? markers.join('|') : null;
 };
 
 const runManagerLiveBackgroundRefresh = createKeyedSerialTaskScheduler();
@@ -1691,6 +1956,14 @@ export const refreshClassicStandings = async (
   let nextPage = startPage;
   let exhausted = false;
   let refreshErrorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null = null;
+  if (startPage > MAX_STANDINGS_PAGES) {
+    return {
+      complete: false,
+      nextPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+      errorCode: 'UPSTREAM_UNAVAILABLE',
+      refreshedEntryIds: [],
+    };
+  }
   try {
     for (
       let page = startPage;
@@ -1715,6 +1988,11 @@ export const refreshClassicStandings = async (
         break;
       }
     }
+    // `fetchedRows` is intentionally scoped to this bounded invocation. A
+    // worker continuation can reach normal standings exhaustion with only the
+    // final page(s) in memory even though earlier pages are already durable in
+    // `rows`. Do not turn that normal end-of-list into an upstream failure; the
+    // durable roster is the coverage authority.
   } catch (error) {
     refreshErrorCode =
       error instanceof FPLClientError && error.status === 429
@@ -1727,6 +2005,7 @@ export const refreshClassicStandings = async (
     });
   }
   let publishedRows: ManagerLiveScoreRow[] = [];
+  let durableTargetEntryIds: number[] = [];
   if (fetchedRows.size > 0) {
     const uniqueFetchedRows = Array.from(fetchedRows.values());
     try {
@@ -1852,6 +2131,31 @@ export const refreshClassicStandings = async (
       });
     }
   }
+  durableTargetEntryIds = Array.from(targetIds).filter((entryId) => {
+    const row = rows.get(entryId);
+    return row !== undefined && typeof row.eventPoints === 'number';
+  });
+  if (
+    !refreshErrorCode &&
+    !exhausted &&
+    nextPage > MAX_STANDINGS_PAGES &&
+    fetchedRows.size < targetIds.size &&
+    durableTargetEntryIds.length < targetIds.size
+  ) {
+    refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
+  } else if (
+    !refreshErrorCode &&
+    exhausted &&
+    fetchedRows.size < targetIds.size &&
+    durableTargetEntryIds.length < targetIds.size
+  ) {
+    // A normal end-of-list can still miss a target when the manager crossed a
+    // page boundary while this multi-job crawl was in progress. Do not persist
+    // the terminal cursor in that case: the next bounded invocation must restart
+    // from page one and give the moved entry a chance to be observed again.
+    nextPage = 1;
+    refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
+  }
 
   logDebug('Official classic manager live refresh completed', {
     eventId,
@@ -1864,7 +2168,9 @@ export const refreshClassicStandings = async (
   const result = {
     complete:
       refreshErrorCode === null &&
-      (exhausted || fetchedRows.size >= targetIds.size || nextPage > MAX_STANDINGS_PAGES),
+      (fetchedRows.size >= targetIds.size ||
+        ((exhausted || nextPage > MAX_STANDINGS_PAGES) &&
+          durableTargetEntryIds.length >= targetIds.size)),
     nextPage,
     errorCode: refreshErrorCode,
   };
@@ -1877,12 +2183,6 @@ export const refreshClassicStandings = async (
   });
   return result;
 };
-
-export const classicStandingsCursorAfterRefresh = (
-  completeRefresh: boolean,
-  standings: Pick<Awaited<ReturnType<typeof refreshClassicStandings>>, 'complete' | 'nextPage'>,
-): number | null | undefined =>
-  completeRefresh ? (standings.complete ? null : standings.nextPage) : undefined;
 
 export const preserveClassicOverallRank = (
   incoming: CachedRow,
@@ -1929,7 +2229,7 @@ export const selectWorkerSummaryRefreshTargets = (
   rotationCursor: number,
 ): number[] => {
   if (!Number.isSafeInteger(limit) || limit <= 0) return [];
-  const normalized = Array.from(new Set(entryIds));
+  const normalized = Array.from(new Set(entryIds)).sort((left, right) => left - right);
   if (normalized.length <= limit) return normalized;
   const chunkCount = Math.ceil(normalized.length / limit);
   const cursor = Number.isSafeInteger(rotationCursor) ? Math.max(0, rotationCursor) : 0;
@@ -2009,6 +2309,14 @@ const finalResultRows = async (
     );
 };
 
+const workerProjectionEntryIds = (
+  entryIds: readonly number[],
+  workerTournamentRefresh: boolean,
+): number[] =>
+  workerTournamentRefresh
+    ? entryIds.slice(0, MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT)
+    : [...entryIds];
+
 const managerLiveInFlight = new Map<string, Promise<ManagerLiveResolveResult>>();
 
 const resolveManagerLiveScoresUncoalesced = async (input: {
@@ -2021,13 +2329,15 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   summaryRotationCursor?: number;
 }): Promise<ManagerLiveResolveResult> => {
   const season = await seasonRepository.findCurrent();
-  const uniqueEntryIds = Array.from(new Set(input.entryIds));
+  const requestedEntryIds = Array.from(new Set(input.entryIds));
+  const workerTournamentRefresh =
+    input.completeRefresh === true && input.tournamentId !== undefined;
   if (
     !Number.isSafeInteger(input.eventId) ||
     input.eventId <= 0 ||
-    uniqueEntryIds.length === 0 ||
-    uniqueEntryIds.length > 500 ||
-    uniqueEntryIds.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0)
+    requestedEntryIds.length === 0 ||
+    (!workerTournamentRefresh && requestedEntryIds.length > 500) ||
+    requestedEntryIds.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0)
   ) {
     throw new ValidationError('Invalid manager live request.', 'MANAGER_LIVE_REQUEST_INVALID');
   }
@@ -2042,6 +2352,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
 
   let scope: ManagerScoreScope = entryScope;
   let tournament: Awaited<ReturnType<typeof tournamentInfoRepository.findById>> = null;
+  let authoritativeTournamentRosterEntryIds: number[] | null = null;
   if (input.tournamentId !== undefined) {
     tournament = await tournamentInfoRepository.findById(season, input.tournamentId);
     if (!tournament) {
@@ -2050,19 +2361,53 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         'MANAGER_LIVE_TOURNAMENT_INVALID',
       );
     }
-    const roster = new Set(
-      await tournamentEntryRepository.findEntryIdsByTournamentId(season, input.tournamentId),
+    const rosterEntryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
+      season,
+      input.tournamentId,
     );
-    if (uniqueEntryIds.some((entryId) => !roster.has(entryId))) {
+    authoritativeTournamentRosterEntryIds = rosterEntryIds;
+    const roster = new Set(rosterEntryIds);
+    if (!workerTournamentRefresh && requestedEntryIds.some((entryId) => !roster.has(entryId))) {
       throw new ValidationError(
         'Entry is not a member of the tournament.',
         'MANAGER_LIVE_ENTRY_NOT_IN_TOURNAMENT',
       );
     }
+    // Public resolve remains capped at 500. The background worker is the only
+    // caller allowed to expand a tournament scope, and it re-reads the
+    // authoritative roster on every run so a roster revision cannot leave the
+    // crawl pinned to the first request's window.
+    if (workerTournamentRefresh) {
+      requestedEntryIds.splice(0, requestedEntryIds.length, ...rosterEntryIds);
+    }
     if (tournament.leagueType === 'classic') {
       scope = { scopeType: 'CLASSIC_LEAGUE', scopeId: tournament.leagueId };
     }
   }
+
+  const uniqueEntryIds = requestedEntryIds;
+
+  const existingTournamentCoverage =
+    input.tournamentId === undefined
+      ? null
+      : await readTournamentCoverage(season, input.eventId, input.tournamentId);
+  const coverageRosterEntryIds = authoritativeTournamentRosterEntryIds ?? uniqueEntryIds;
+  const currentTournamentRosterRevision =
+    input.tournamentId === undefined ? null : tournamentRosterRevision(coverageRosterEntryIds);
+  const currentTournamentHotRosterRevision =
+    input.tournamentId === undefined
+      ? undefined
+      : managerLiveRosterRevision(
+          coverageRosterEntryIds,
+          tournamentRosterLifecycleMarker(tournament),
+        );
+  const tournamentCoverage = currentTournamentRosterRevision
+    ? invalidateManagerLiveTournamentCoverage(
+        existingTournamentCoverage,
+        currentTournamentRosterRevision,
+        coverageRosterEntryIds.length,
+      )
+    : existingTournamentCoverage;
 
   // A finished/data-checked event is historical data. Do not call the current
   // FPL manager endpoint for it; the final result table is the authority.
@@ -2074,19 +2419,110 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       event.dataCheckedAt,
     );
     const resolvedIds = new Set(finalRows.map((row) => row.entryId));
-    return buildManagerLiveResult({
+    const finalErrorCode =
+      resolvedIds.size === uniqueEntryIds.length ? null : ('UPSTREAM_UNAVAILABLE' as const);
+    const projectionEntryIds = workerProjectionEntryIds(uniqueEntryIds, workerTournamentRefresh);
+    const projectionEntryIdSet = new Set(projectionEntryIds);
+    const projectedFinalRows = finalRows.filter((row) => projectionEntryIdSet.has(row.entryId));
+    const projectedResolvedIds = new Set(projectedFinalRows.map((row) => row.entryId));
+    let currentFinalManagerRevision: string | undefined;
+    if (
+      input.tournamentId !== undefined &&
+      currentTournamentRosterRevision !== null &&
+      tournamentCoverage?.state === 'COMPLETE' &&
+      isFinalManagerLiveRevision(tournamentCoverage.managerRevision)
+    ) {
+      const requestedEntryIdSet = new Set(uniqueEntryIds);
+      const requestedTheFullRoster =
+        coverageRosterEntryIds.length === uniqueEntryIds.length &&
+        coverageRosterEntryIds.every((entryId) => requestedEntryIdSet.has(entryId));
+      const coverageFinalRows = requestedTheFullRoster
+        ? finalRows
+        : await finalResultRows(season, input.eventId, coverageRosterEntryIds, event.dataCheckedAt);
+      const coverageResolvedIds = new Set(coverageFinalRows.map((row) => row.entryId));
+      currentFinalManagerRevision = finalManagerRevision(
+        managerRevision(
+          season.seasonCode,
+          input.eventId,
+          coverageFinalRows,
+          coverageRosterEntryIds.filter((entryId) => !coverageResolvedIds.has(entryId)),
+        ),
+      );
+    }
+    let refreshQueued = false;
+    if (
+      input.tournamentId !== undefined &&
+      !workerTournamentRefresh &&
+      currentTournamentRosterRevision !== null &&
+      shouldQueueFinalizedManagerLiveCoverage(
+        tournamentCoverage,
+        currentTournamentRosterRevision,
+        coverageRosterEntryIds.length,
+        currentFinalManagerRevision,
+      )
+    ) {
+      try {
+        refreshQueued =
+          (await dispatchManagerLiveRefreshBounded({
+            season,
+            eventId: input.eventId,
+            entryIds: coverageRosterEntryIds,
+            tournamentId: input.tournamentId,
+            rosterRevision: currentTournamentHotRosterRevision,
+          })) === 'QUEUED';
+      } catch (error) {
+        logWarn('Finalized manager live coverage dispatch failed', {
+          eventId: input.eventId,
+          tournamentId: input.tournamentId,
+          error: error instanceof Error ? error.message : 'unknown',
+        });
+      }
+    }
+    const result = buildManagerLiveResult({
       season: season.seasonCode,
       eventId: input.eventId,
-      rows: finalRows,
+      rows: projectedFinalRows,
       // Once FPL marks the event data_checked, an older active/summary/league
       // checkpoint is no longer a valid score fallback. Missing finalized rows
       // stay unavailable until the persisted official result arrives.
-      missingEntryIds: uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId)),
-      errorCode: resolvedIds.size === uniqueEntryIds.length ? null : 'UPSTREAM_UNAVAILABLE',
+      missingEntryIds: projectionEntryIds.filter((entryId) => !projectedResolvedIds.has(entryId)),
+      errorCode: finalErrorCode,
       checkedAt: nowIso(),
       nextRefreshAt: nextRefresh(true),
       sourceByEntry: new Map(finalRows.map((row) => [row.entryId, 'POSTGRES' as const])),
+      refreshQueued,
+      ...(input.tournamentId === undefined ? {} : { tournamentCoverage }),
     });
+    if (workerTournamentRefresh && input.tournamentId !== undefined) {
+      const fullMissingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
+      const fullManagerRevision = managerRevision(
+        season.seasonCode,
+        input.eventId,
+        finalRows,
+        fullMissingEntryIds,
+      );
+      result.managerRevision = fullManagerRevision;
+      const finalCoverageRosterRevision = tournamentRosterRevision(coverageRosterEntryIds);
+      const persistedCoverage = await persistTournamentCoverage({
+        season,
+        eventId: input.eventId,
+        tournamentId: input.tournamentId,
+        rosterRevision: finalCoverageRosterRevision,
+        expectedEntries: coverageRosterEntryIds.length,
+        rows: finalRows,
+        errorCode: finalErrorCode,
+        managerRevision: finalManagerRevision(fullManagerRevision),
+        crawlComplete: resolvedIds.size === coverageRosterEntryIds.length,
+      });
+      result.tournamentCoverage = persistedCoverage;
+      if (!persistedCoverage) {
+        // A finalized result is not successful until its tournament coverage
+        // is durable. Keep the worker continuation and Bull retry eligible
+        // instead of treating an in-memory COMPLETE candidate as published.
+        result.errorCode = result.errorCode ?? 'UPSTREAM_UNAVAILABLE';
+      }
+    }
+    return result;
   }
 
   let redis: Redis | null = null;
@@ -2125,8 +2561,11 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       const dispatchState = await dispatchManagerLiveRefreshBounded({
         season,
         eventId: input.eventId,
-        entryIds: uniqueEntryIds,
+        entryIds: coverageRosterEntryIds,
         ...(input.tournamentId === undefined ? {} : { tournamentId: input.tournamentId }),
+        ...(currentTournamentHotRosterRevision === undefined
+          ? {}
+          : { rosterRevision: currentTournamentHotRosterRevision }),
       });
       // A dispatch that misses the response deadline is deliberately reported as
       // PENDING. Do not advertise it as queued until enqueue has been confirmed;
@@ -2148,6 +2587,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       nextRefreshAt: nextRefresh(event.finished),
       sourceByEntry,
       refreshQueued,
+      tournamentCoverage,
     });
   }
 
@@ -2176,17 +2616,18 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
 
     if (input.tournamentId !== undefined && tournament?.leagueType === 'classic') {
       if (!tournament) throw new Error('Tournament validation unexpectedly missing');
+      const standingsTargetIds = workerTournamentRefresh ? uniqueEntryIds : staleOrMissingForWorker;
       const startPage =
         Number.isSafeInteger(input.classicStandingsStartPage) &&
         (input.classicStandingsStartPage ?? 0) >= 1 &&
-        (input.classicStandingsStartPage ?? 0) <= MANAGER_LIVE_CLASSIC_MAX_PAGE
+        (input.classicStandingsStartPage ?? 0) <= MANAGER_LIVE_CLASSIC_CAPPED_CURSOR
           ? input.classicStandingsStartPage!
           : 1;
       const standings = await refreshClassicStandings(
         season,
         input.eventId,
         tournament.leagueId,
-        new Set(staleOrMissingForWorker),
+        new Set(standingsTargetIds),
         rows,
         redis,
         {
@@ -2276,16 +2717,84 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         sourceByEntry.set(row.entryId, 'UPSTREAM');
       }
     }
-    return buildActiveManagerLiveResult({
+    let durableCoverageRows: CachedRow[] = [];
+    let durableCoverageReadFailed = false;
+    if (input.tournamentId !== undefined) {
+      try {
+        const checkpoints = await managerScoreCheckpointRepository.findByScopeAndEntryIds(
+          season,
+          input.eventId,
+          scope,
+          uniqueEntryIds,
+        );
+        durableCoverageRows = checkpoints.map((checkpoint) =>
+          fromManagerScoreCheckpoint(checkpoint, season.seasonCode),
+        );
+      } catch (error) {
+        durableCoverageReadFailed = true;
+        logWarn('Manager live coverage checkpoint read failed', {
+          eventId: input.eventId,
+          tournamentId: input.tournamentId,
+          error: error instanceof Error ? error.message : 'unknown',
+        });
+      }
+    }
+    const nextRefreshAt = new Date(
+      Date.now() +
+        (classicStandingsNextPage === null || classicStandingsNextPage === undefined
+          ? REFRESH_SECONDS
+          : INCOMPLETE_CLASSIC_REFRESH_SECONDS) *
+          1000,
+    ).toISOString();
+    const projectionEntryIds = workerProjectionEntryIds(uniqueEntryIds, workerTournamentRefresh);
+    const projectionEntryIdSet = new Set(projectionEntryIds);
+    const result = await buildActiveManagerLiveResult({
       season,
       eventId: input.eventId,
-      entryIds: uniqueEntryIds,
-      metadataRows,
+      entryIds: projectionEntryIds,
+      metadataRows: metadataRows.filter((row) => projectionEntryIdSet.has(row.entryId)),
       errorCode: refreshErrorCode,
-      nextRefreshAt: nextRefresh(event.finished),
+      nextRefreshAt,
       sourceByEntry,
       classicStandingsNextPage,
     });
+    if (input.tournamentId !== undefined && durableCoverageReadFailed) {
+      // Keep the last authoritative coverage object in the response and do
+      // not turn an unavailable checkpoint read into a zero-row publication.
+      result.tournamentCoverage = tournamentCoverage;
+    } else if (input.tournamentId !== undefined) {
+      const durableCoverageEntryIds = new Set(
+        durableCoverageRows
+          .filter((row) => typeof row.eventPoints === 'number')
+          .map((row) => row.entryId),
+      );
+      const durableMissingEntryIds = uniqueEntryIds.filter(
+        (entryId) => !durableCoverageEntryIds.has(entryId),
+      );
+      const fullManagerRevision = managerRevision(
+        season.seasonCode,
+        input.eventId,
+        durableCoverageRows,
+        durableMissingEntryIds,
+      );
+      result.managerRevision = fullManagerRevision;
+      const persistedCoverage = await persistTournamentCoverage({
+        season,
+        eventId: input.eventId,
+        tournamentId: input.tournamentId,
+        rosterRevision: tournamentRosterRevision(uniqueEntryIds),
+        expectedEntries: uniqueEntryIds.length,
+        rows: durableCoverageRows,
+        errorCode: refreshErrorCode,
+        managerRevision: fullManagerRevision,
+        crawlComplete:
+          tournament?.leagueType === 'classic'
+            ? classicStandingsNextPage === null
+            : refreshErrorCode === null,
+      });
+      result.tournamentCoverage = persistedCoverage ?? tournamentCoverage;
+    }
+    return result;
   }
 
   const classicTournament =
@@ -2333,6 +2842,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     ManagerLiveResolveResult['errorCode'],
     'UNSUPPORTED_H2H_LIVE' | null
   > | null = null;
+  let refreshQueued = false;
 
   if (input.tournamentId !== undefined && tournament?.leagueType === 'h2h') {
     // FPL does not expose a live H2H table, but its official entry summary is
@@ -2631,192 +3141,213 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         .sort((left, right) => left - right)
         .join(',')}`;
       const capturedBackgroundRows = new Map(rows);
-      scheduleBackgroundRefresh(backgroundKey, backgroundWorkKey, async () => {
-        let backgroundRows = new Map(capturedBackgroundRows);
-        let backgroundResult: Awaited<ReturnType<typeof refreshClassicStandings>> = {
-          complete: standings.complete,
-          nextPage: standings.nextPage,
-          errorCode: null,
-          refreshedEntryIds: [],
-        };
-        if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
-          backgroundResult = await runManagerStandingsPageSequence(
-            backgroundStandingsStartPage,
-            MAX_STANDINGS_PAGES,
-            async (page) => {
-              const pageResult = await runClassicStandingsRefresh(
+      const scheduleClassicBackgroundRefresh = (startPage: number): void => {
+        scheduleBackgroundRefresh(
+          backgroundKey,
+          `${backgroundWorkKey}:standings-page:${startPage}`,
+          async () => {
+            let backgroundRows = new Map(capturedBackgroundRows);
+            let backgroundResult: Awaited<ReturnType<typeof refreshClassicStandings>> = {
+              complete: standings.complete,
+              nextPage: standings.nextPage,
+              errorCode: null,
+              refreshedEntryIds: [],
+            };
+            if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
+              const backgroundMaxPage = Math.min(
+                MAX_STANDINGS_PAGES,
+                startPage + MAX_BACKGROUND_STANDINGS_PAGES - 1,
+              );
+              backgroundResult = await runManagerStandingsPageSequence(
+                startPage,
+                backgroundMaxPage,
+                async (page) => {
+                  const pageResult = await runClassicStandingsRefresh(
+                    redis,
+                    classicRefreshKey,
+                    async (assertLeaseOwned) => {
+                      // Re-read after entering every page-sized lane. Foreground
+                      // work can jump ahead between pages, and this crawl observes
+                      // any publication that completed while it yielded.
+                      backgroundRows = await readBackgroundRows(
+                        redis,
+                        season,
+                        input.eventId,
+                        scope,
+                        backgroundEntryIds,
+                        capturedBackgroundRows,
+                      );
+                      const standingsTargets = pendingManagerRefreshEntryIds(
+                        backgroundPlan.backgroundStandingsEntryIds,
+                        backgroundRows,
+                        isFresh,
+                      );
+                      return standingsTargets.length > 0
+                        ? refreshClassicStandings(
+                            season,
+                            input.eventId,
+                            classicLeagueId,
+                            new Set(standingsTargets),
+                            backgroundRows,
+                            redis,
+                            { startPage: page, maxPages: 1 },
+                            assertLeaseOwned,
+                          )
+                        : {
+                            complete: true,
+                            nextPage: page,
+                            errorCode: null,
+                            refreshedEntryIds: [],
+                          };
+                    },
+                    'background',
+                  );
+                  return { ...pageResult, refreshedEntryIds: pageResult.refreshedEntryIds ?? [] };
+                },
+              );
+              const continuationPage = nextManagerLiveStandingsContinuation(
+                backgroundResult,
+                MAX_STANDINGS_PAGES,
+              );
+              if (continuationPage !== null) {
+                scheduleClassicBackgroundRefresh(continuationPage);
+              }
+            }
+
+            // Only rows refreshed by a successful page (plus rows that were
+            // already fresh rank-only targets) may receive OR enrichment. A failed
+            // crawl must not stamp an old standings row fresh through summary data.
+            const refreshedStandingsIds = new Set([
+              ...deferredForegroundRankTargets,
+              ...(backgroundResult.refreshedEntryIds ?? []),
+            ]);
+            const rankOnlyEntryIds = new Set(
+              rankOnlyTargets.filter((entryId) => !refreshedStandingsIds.has(entryId)),
+            );
+            const backgroundRankTargets = Array.from(
+              new Set([...rankOnlyTargets, ...(backgroundResult.refreshedEntryIds ?? [])]),
+            ).filter((entryId) => {
+              const row = backgroundRows.get(entryId);
+              return (
+                row?.source === 'FPL_CLASSIC_STANDINGS' &&
+                shouldEnrichClassicOverallRank(
+                  entryId,
+                  row,
+                  refreshedStandingsIds,
+                  rankOnlyEntryIds,
+                  isFresh,
+                  classicStandingNeedsOverallRank,
+                )
+              );
+            });
+
+            // Hold the league lane for one four-entry upstream wave at a time.
+            // Foreground misses can therefore jump ahead between background waves,
+            // while every merge still observes the latest serialized standings row.
+            for (const batch of managerSummaryFetchBatches(backgroundRankTargets)) {
+              await runClassicStandingsRefresh(
                 redis,
                 classicRefreshKey,
                 async (assertLeaseOwned) => {
-                  // Re-read after entering every page-sized lane. Foreground
-                  // work can jump ahead between pages, and this crawl observes
-                  // any publication that completed while it yielded.
-                  backgroundRows = await readBackgroundRows(
+                  const batchRows = await readBackgroundRows(
                     redis,
                     season,
                     input.eventId,
                     scope,
-                    backgroundEntryIds,
-                    capturedBackgroundRows,
-                  );
-                  const standingsTargets = pendingManagerRefreshEntryIds(
-                    backgroundPlan.backgroundStandingsEntryIds,
+                    batch,
                     backgroundRows,
-                    isFresh,
                   );
-                  return standingsTargets.length > 0
-                    ? refreshClassicStandings(
-                        season,
-                        input.eventId,
-                        classicLeagueId,
-                        new Set(standingsTargets),
-                        backgroundRows,
-                        redis,
-                        { startPage: page, maxPages: 1 },
-                        assertLeaseOwned,
+                  const rankTargets = batch.filter((entryId) => {
+                    const row = batchRows.get(entryId);
+                    return (
+                      row?.source === 'FPL_CLASSIC_STANDINGS' &&
+                      shouldEnrichClassicOverallRank(
+                        entryId,
+                        row,
+                        refreshedStandingsIds,
+                        rankOnlyEntryIds,
+                        isFresh,
+                        classicStandingNeedsOverallRank,
                       )
-                    : {
-                        complete: true,
-                        nextPage: page,
-                        errorCode: null,
-                        refreshedEntryIds: [],
-                      };
+                    );
+                  });
+                  if (rankTargets.length > 0) {
+                    await refreshEntrySummaries(
+                      season,
+                      input.eventId,
+                      rankTargets,
+                      batchRows,
+                      redis,
+                      scope,
+                      {
+                        force: true,
+                        priority: 'background',
+                        preserveClassicStanding: true,
+                        assertLeaseOwned,
+                      },
+                    );
+                  }
+                  mergeLatestRows(backgroundRows, batchRows);
                 },
                 'background',
               );
-              return { ...pageResult, refreshedEntryIds: pageResult.refreshedEntryIds ?? [] };
-            },
-          );
-        }
+            }
 
-        // Only rows refreshed by a successful page (plus rows that were
-        // already fresh rank-only targets) may receive OR enrichment. A failed
-        // crawl must not stamp an old standings row fresh through summary data.
-        const refreshedStandingsIds = new Set([
-          ...deferredForegroundRankTargets,
-          ...(backgroundResult.refreshedEntryIds ?? []),
-        ]);
-        const rankOnlyEntryIds = new Set(
-          rankOnlyTargets.filter((entryId) => !refreshedStandingsIds.has(entryId)),
-        );
-        const backgroundRankTargets = Array.from(
-          new Set([...rankOnlyTargets, ...(backgroundResult.refreshedEntryIds ?? [])]),
-        ).filter((entryId) => {
-          const row = backgroundRows.get(entryId);
-          return (
-            row?.source === 'FPL_CLASSIC_STANDINGS' &&
-            shouldEnrichClassicOverallRank(
-              entryId,
-              row,
-              refreshedStandingsIds,
-              rankOnlyEntryIds,
-              isFresh,
-              classicStandingNeedsOverallRank,
-            )
-          );
-        });
-
-        // Hold the league lane for one four-entry upstream wave at a time.
-        // Foreground misses can therefore jump ahead between background waves,
-        // while every merge still observes the latest serialized standings row.
-        for (const batch of managerSummaryFetchBatches(backgroundRankTargets)) {
-          await runClassicStandingsRefresh(
-            redis,
-            classicRefreshKey,
-            async (assertLeaseOwned) => {
-              const batchRows = await readBackgroundRows(
+            const summaryCandidates = classicManagerSummaryFallbackEntryIds(
+              backgroundPlan.backgroundSummaryEntryIds,
+              backgroundPlan.backgroundStandingsEntryIds,
+              coldEntryIds,
+              staleSummaryFallbackIds,
+              backgroundResult.complete,
+            );
+            for (const batch of managerSummaryFetchBatches(summaryCandidates)) {
+              await runClassicStandingsRefresh(
                 redis,
-                season,
-                input.eventId,
-                scope,
-                batch,
-                backgroundRows,
+                classicRefreshKey,
+                async (assertLeaseOwned) => {
+                  const batchRows = await readBackgroundRows(
+                    redis,
+                    season,
+                    input.eventId,
+                    scope,
+                    batch,
+                    backgroundRows,
+                  );
+                  const summaryTargets = batch.filter((entryId) => {
+                    const row = batchRows.get(entryId);
+                    // Summary is a new-entry fallback only. A classic row that
+                    // appeared while this job waited owns phase totals and rank.
+                    return classicManagerSummaryFallbackNeedsRefresh(
+                      row,
+                      row ? isFresh(row) : false,
+                    );
+                  });
+                  if (summaryTargets.length > 0) {
+                    await refreshEntrySummaries(
+                      season,
+                      input.eventId,
+                      summaryTargets,
+                      batchRows,
+                      redis,
+                      scope,
+                      { priority: 'background', assertLeaseOwned },
+                    );
+                  }
+                  mergeLatestRows(backgroundRows, batchRows);
+                },
+                'background',
               );
-              const rankTargets = batch.filter((entryId) => {
-                const row = batchRows.get(entryId);
-                return (
-                  row?.source === 'FPL_CLASSIC_STANDINGS' &&
-                  shouldEnrichClassicOverallRank(
-                    entryId,
-                    row,
-                    refreshedStandingsIds,
-                    rankOnlyEntryIds,
-                    isFresh,
-                    classicStandingNeedsOverallRank,
-                  )
-                );
-              });
-              if (rankTargets.length > 0) {
-                await refreshEntrySummaries(
-                  season,
-                  input.eventId,
-                  rankTargets,
-                  batchRows,
-                  redis,
-                  scope,
-                  {
-                    force: true,
-                    priority: 'background',
-                    preserveClassicStanding: true,
-                    assertLeaseOwned,
-                  },
-                );
-              }
-              mergeLatestRows(backgroundRows, batchRows);
-            },
-            'background',
-          );
-        }
-
-        const summaryCandidates = classicManagerSummaryFallbackEntryIds(
-          backgroundPlan.backgroundSummaryEntryIds,
-          backgroundPlan.backgroundStandingsEntryIds,
-          coldEntryIds,
-          staleSummaryFallbackIds,
-          backgroundResult.complete,
+            }
+            logDebug('Official classic manager background refresh completed', {
+              eventId: input.eventId,
+              leagueId: classicLeagueId,
+              remaining: summaryCandidates.length,
+              complete: backgroundResult.complete,
+            });
+          },
         );
-        for (const batch of managerSummaryFetchBatches(summaryCandidates)) {
-          await runClassicStandingsRefresh(
-            redis,
-            classicRefreshKey,
-            async (assertLeaseOwned) => {
-              const batchRows = await readBackgroundRows(
-                redis,
-                season,
-                input.eventId,
-                scope,
-                batch,
-                backgroundRows,
-              );
-              const summaryTargets = batch.filter((entryId) => {
-                const row = batchRows.get(entryId);
-                // Summary is a new-entry fallback only. A classic row that
-                // appeared while this job waited owns phase totals and rank.
-                return classicManagerSummaryFallbackNeedsRefresh(row, row ? isFresh(row) : false);
-              });
-              if (summaryTargets.length > 0) {
-                await refreshEntrySummaries(
-                  season,
-                  input.eventId,
-                  summaryTargets,
-                  batchRows,
-                  redis,
-                  scope,
-                  { priority: 'background', assertLeaseOwned },
-                );
-              }
-              mergeLatestRows(backgroundRows, batchRows);
-            },
-            'background',
-          );
-        }
-        logDebug('Official classic manager background refresh completed', {
-          eventId: input.eventId,
-          leagueId: classicLeagueId,
-          remaining: summaryCandidates.length,
-          complete: backgroundResult.complete,
-        });
-      });
+      };
+      scheduleClassicBackgroundRefresh(backgroundStandingsStartPage);
     }
   }
 
@@ -2942,6 +3473,31 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     }
   }
 
+  // READ_THROUGH may serve a bounded page from cache/checkpoints while its
+  // local background crawl is still running. Queue the durable tournament
+  // worker as the coverage owner so a page request cannot leave the full-field
+  // coverage row null or stale forever. Dispatch is bounded and deduplicated
+  // by the tournament hot scope; it does not add an upstream wait to this
+  // response.
+  if (input.tournamentId !== undefined && currentTournamentRosterRevision !== null) {
+    try {
+      refreshQueued =
+        (await dispatchManagerLiveRefreshBounded({
+          season,
+          eventId: input.eventId,
+          entryIds: coverageRosterEntryIds,
+          tournamentId: input.tournamentId,
+          rosterRevision: currentTournamentHotRosterRevision,
+        })) === 'QUEUED';
+    } catch (error) {
+      logWarn('Manager live read-through coverage dispatch failed', {
+        eventId: input.eventId,
+        tournamentId: input.tournamentId,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+    }
+  }
+
   const now = Date.now();
   const metadataRows = uniqueEntryIds
     .map((entryId) => rows.get(entryId))
@@ -2962,6 +3518,8 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     checkedAt: nowIso(),
     nextRefreshAt: nextRefresh(event.finished),
     sourceByEntry,
+    refreshQueued,
+    ...(input.tournamentId === undefined ? {} : { tournamentCoverage }),
   });
 };
 

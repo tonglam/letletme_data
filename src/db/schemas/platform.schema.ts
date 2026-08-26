@@ -544,6 +544,252 @@ export const schedulerObligationsInOps = ops.table(
   ],
 );
 
+export const schedulerLanesInOps = ops.table(
+  'scheduler_lanes',
+  {
+    laneId: uuid('lane_id').primaryKey().notNull(),
+    laneKey: text('lane_key').notNull(),
+    jobName: text('job_name').notNull(),
+    scopeKey: text('scope_key').notNull(),
+    queueName: text('queue_name').notNull(),
+    state: text().default('idle').notNull(),
+    desiredObligationId: uuid('desired_obligation_id').notNull(),
+    desiredDueAt: timestamp('desired_due_at', { withTimezone: true, mode: 'date' }).notNull(),
+    activeObligationId: uuid('active_obligation_id'),
+    dispatchGeneration: integer('dispatch_generation').default(0).notNull(),
+    dispatchOwner: text('dispatch_owner'),
+    dispatchLeaseExpiresAt: timestamp('dispatch_lease_expires_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    bullJobId: text('bull_job_id'),
+    runId: uuid('run_id'),
+    blockerJobId: text('blocker_job_id'),
+    retryNotBefore: timestamp('retry_not_before', { withTimezone: true, mode: 'date' }),
+    lastError: text('last_error'),
+    lastProgressAt: timestamp('last_progress_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    supersededCount: integer('superseded_count').default(0).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex('scheduler_lanes_lane_key').on(table.laneKey),
+    index('scheduler_lanes_state_idx').on(table.state, table.retryNotBefore, table.updatedAt),
+    index('scheduler_lanes_progress_idx').on(table.lastProgressAt, table.laneId),
+    check(
+      'scheduler_lanes_state_check',
+      sql`state = ANY (ARRAY['idle'::text, 'dispatching'::text, 'enqueued'::text, 'running'::text, 'blocked'::text])`,
+    ),
+    check('scheduler_lanes_generation_check', sql`dispatch_generation >= 0`),
+    check('scheduler_lanes_superseded_check', sql`superseded_count >= 0`),
+    foreignKey({
+      columns: [table.desiredObligationId],
+      foreignColumns: [schedulerObligationsInOps.obligationId],
+      name: 'scheduler_lanes_desired_obligation_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.activeObligationId],
+      foreignColumns: [schedulerObligationsInOps.obligationId],
+      name: 'scheduler_lanes_active_obligation_fk',
+    }).onDelete('restrict'),
+    check(
+      'scheduler_lanes_identity_check',
+      sql`btrim(lane_key) <> '' AND btrim(job_name) <> '' AND btrim(scope_key) <> ''`,
+    ),
+  ],
+);
+
+export const queueHealthWindowsInOps = ops.table(
+  'queue_health_windows',
+  {
+    windowStart: timestamp('window_start', { withTimezone: true, mode: 'date' }).notNull(),
+    queueName: text('queue_name').notNull(),
+    waiting: integer().default(0).notNull(),
+    active: integer().default(0).notNull(),
+    delayed: integer().default(0).notNull(),
+    prioritized: integer().default(0).notNull(),
+    waitingChildren: integer('waiting_children').default(0).notNull(),
+    failed: integer().default(0).notNull(),
+    completed: integer().default(0).notNull(),
+    runnable: integer().default(0).notNull(),
+    oldestRunnableAgeMs: bigint('oldest_runnable_age_ms', { mode: 'number' }),
+    arrivals: integer().default(0).notNull(),
+    completions: integer().default(0).notNull(),
+    failures: integer().default(0).notNull(),
+    stalled: integer().default(0).notNull(),
+    waitP50Ms: bigint('wait_p50_ms', { mode: 'number' }),
+    waitP95Ms: bigint('wait_p95_ms', { mode: 'number' }),
+    executionP50Ms: bigint('execution_p50_ms', { mode: 'number' }),
+    executionP95Ms: bigint('execution_p95_ms', { mode: 'number' }),
+    providerWaitP95Ms: bigint('provider_wait_p95_ms', { mode: 'number' }),
+    provider429Rate: numeric('provider_429_rate', { precision: 6, scale: 5 }),
+    netGrowth: integer('net_growth').default(0).notNull(),
+    drainEtaMs: bigint('drain_eta_ms', { mode: 'number' }),
+    backlogClass: text('backlog_class').default('HEALTHY').notNull(),
+    admissionMode: text('admission_mode').default('OPEN').notNull(),
+    consumerHeartbeatAt: timestamp('consumer_heartbeat_at', { withTimezone: true, mode: 'date' }),
+    releaseSha: text('release_sha'),
+    evidence: jsonb().default({}).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.windowStart, table.queueName] }),
+    index('queue_health_windows_queue_time_idx').on(table.queueName, table.windowStart.desc()),
+    index('queue_health_windows_class_time_idx')
+      .on(table.backlogClass, table.windowStart.desc())
+      .where(sql`backlog_class <> 'HEALTHY'`),
+    check('queue_health_windows_queue_nonempty', sql`btrim(queue_name) <> ''`),
+    check(
+      'queue_health_windows_counts_nonnegative',
+      sql`waiting >= 0 AND active >= 0 AND delayed >= 0 AND prioritized >= 0 AND waiting_children >= 0 AND failed >= 0 AND completed >= 0 AND runnable >= 0 AND arrivals >= 0 AND completions >= 0 AND failures >= 0 AND stalled >= 0`,
+    ),
+    check(
+      'queue_health_windows_backlog_class_check',
+      sql`backlog_class = ANY (ARRAY['NO_CONSUMER','POISON_STORM','STALLED','DEADLINE_RISK','PROVIDER_THROTTLED','BURST','HEALTHY'])`,
+    ),
+    check(
+      'queue_health_windows_admission_check',
+      sql`admission_mode = ANY (ARRAY['OPEN','DRAIN_ONLY'])`,
+    ),
+    check('queue_health_windows_evidence_object', sql`jsonb_typeof(evidence) = 'object'`),
+  ],
+);
+
+export const dataGovernanceCasesInOps = ops.table(
+  'data_governance_cases',
+  {
+    caseId: bigint('case_id', { mode: 'number' }).generatedByDefaultAsIdentity().primaryKey(),
+    caseKind: text('case_kind').notNull(),
+    contractKey: text('contract_key').notNull(),
+    lane: text().notNull(),
+    obligationId: uuid('obligation_id'),
+    sloWindowId: bigint('slo_window_id', { mode: 'number' }),
+    scopeKey: text('scope_key').notNull(),
+    targetRevision: text('target_revision'),
+    errorClass: text('error_class').notNull(),
+    errorCode: text('error_code').notNull(),
+    fingerprint: text().notNull(),
+    evidence: jsonb().default({}).notNull(),
+    repairTarget: jsonb('repair_target').default({}).notNull(),
+    compensator: text().notNull(),
+    attempts: integer().default(0).notNull(),
+    status: text().default('OPEN').notNull(),
+    lastError: text('last_error'),
+    openedAt: timestamp('opened_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    recoveredAt: timestamp('recovered_at', { withTimezone: true, mode: 'date' }),
+    recoveryRevision: text('recovery_revision'),
+  },
+  (table) => [
+    uniqueIndex('data_governance_cases_open_dedupe_idx')
+      .on(table.caseKind, table.contractKey, table.lane, table.scopeKey, table.fingerprint)
+      .where(sql`status IN ('OPEN','AUTO_REPAIRING','REQUIRES_REVIEW')`),
+    index('data_governance_cases_status_time_idx').on(table.status, table.updatedAt.desc()),
+    index('data_governance_cases_slo_idx')
+      .on(table.sloWindowId)
+      .where(sql`slo_window_id IS NOT NULL`),
+    index('data_governance_cases_obligation_idx')
+      .on(table.obligationId)
+      .where(sql`obligation_id IS NOT NULL`),
+    check(
+      'data_governance_cases_status_check',
+      sql`status = ANY (ARRAY['OPEN','AUTO_REPAIRING','REQUIRES_REVIEW','RECOVERED','DISMISSED'])`,
+    ),
+    check('data_governance_cases_attempts_check', sql`attempts >= 0`),
+    check(
+      'data_governance_cases_key_check',
+      sql`btrim(case_kind) <> '' AND btrim(contract_key) <> '' AND btrim(lane) <> '' AND btrim(scope_key) <> '' AND btrim(error_class) <> '' AND btrim(error_code) <> '' AND btrim(fingerprint) <> '' AND btrim(compensator) <> ''`,
+    ),
+    check('data_governance_cases_evidence_object', sql`jsonb_typeof(evidence) = 'object'`),
+    check('data_governance_cases_repair_object', sql`jsonb_typeof(repair_target) = 'object'`),
+  ],
+);
+
+export const freshnessSloWindowsInOps = ops.table(
+  'freshness_slo_windows',
+  {
+    windowId: bigint('window_id', { mode: 'number' }).generatedByDefaultAsIdentity().primaryKey(),
+    sloKey: text('slo_key').notNull(),
+    contractKey: text('contract_key').notNull(),
+    seasonId: smallint('season_id'),
+    scopeKey: text('scope_key').notNull(),
+    periodKey: text('period_key').notNull(),
+    eventId: integer('event_id'),
+    sourceDay: date('source_day'),
+    eligibleAt: timestamp('eligible_at', { withTimezone: true, mode: 'date' }).notNull(),
+    dueAt: timestamp('due_at', { withTimezone: true, mode: 'date' }).notNull(),
+    obligationDueAt: timestamp('obligation_due_at', { withTimezone: true, mode: 'date' }),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
+    pgPublishedAt: timestamp('pg_published_at', { withTimezone: true, mode: 'date' }),
+    redisSeenAt: timestamp('redis_seen_at', { withTimezone: true, mode: 'date' }),
+    graphqlSeenAt: timestamp('graphql_seen_at', { withTimezone: true, mode: 'date' }),
+    webSeenAt: timestamp('web_seen_at', { withTimezone: true, mode: 'date' }),
+    producerRevision: text('producer_revision'),
+    redisRevision: text('redis_revision'),
+    graphqlRevision: text('graphql_revision'),
+    webRevision: text('web_revision'),
+    expectedCount: integer('expected_count'),
+    observedCount: integer('observed_count'),
+    notApplicableCount: integer('not_applicable_count').default(0).notNull(),
+    completenessStatus: text('completeness_status').default('PENDING').notNull(),
+    status: text().default('PENDING').notNull(),
+    breachCode: text('breach_code'),
+    recoveredAt: timestamp('recovered_at', { withTimezone: true, mode: 'date' }),
+    recoveryRevision: text('recovery_revision'),
+    evidence: jsonb().default({}).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    unique('freshness_slo_windows_identity').on(table.sloKey, table.scopeKey, table.periodKey),
+    index('freshness_slo_windows_pending_due_idx')
+      .on(table.dueAt, table.windowId)
+      .where(sql`status = 'PENDING'`),
+    index('freshness_slo_windows_breach_idx')
+      .on(table.contractKey, table.status, table.dueAt.desc())
+      .where(sql`status IN ('BREACHED','INVALID')`),
+    index('freshness_slo_windows_scope_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.contractKey,
+      table.dueAt.desc(),
+    ),
+    check(
+      'freshness_slo_windows_status_check',
+      sql`status = ANY (ARRAY['PENDING','MET','BREACHED','INVALID','NOT_APPLICABLE'])`,
+    ),
+    check(
+      'freshness_slo_windows_completeness_check',
+      sql`completeness_status = ANY (ARRAY['PENDING','COMPLETE','INCOMPLETE','INVALID','NOT_APPLICABLE'])`,
+    ),
+    check(
+      'freshness_slo_windows_counts_check',
+      sql`(expected_count IS NULL OR expected_count >= 0) AND (observed_count IS NULL OR observed_count >= 0) AND not_applicable_count >= 0`,
+    ),
+    check('freshness_slo_windows_time_check', sql`due_at >= eligible_at`),
+    check('freshness_slo_windows_evidence_object', sql`jsonb_typeof(evidence) = 'object'`),
+  ],
+);
+
 export const bugReportsInOps = ops.table(
   'bug_reports',
   {
@@ -965,6 +1211,49 @@ export const tournamentsInCompetition = competition.table(
     check(
       'tournaments_setup_time_order',
       sql`(setup_finished_at IS NULL) OR (setup_started_at IS NULL) OR (setup_finished_at >= setup_started_at)`,
+    ),
+  ],
+);
+
+export const tournamentOfficialH2HPageManifestsInCompetition = competition.table(
+  'tournament_official_h2h_page_manifests',
+  {
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    pageNumber: integer('page_number').notNull(),
+    scheduleHash: text('schedule_hash').notNull(),
+    matchIds: integer('match_ids').array().notNull(),
+    eventIds: integer('event_ids').array().notNull(),
+    immutablePageHash: text('immutable_page_hash').notNull(),
+    capturedAt: timestamp('captured_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.seasonId, table.tournamentId, table.pageNumber] }),
+    index('tournament_h2h_manifest_event_idx').on(table.seasonId, table.tournamentId),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'tournament_h2h_manifest_tournament_fk',
+    }).onDelete('cascade'),
+    check('tournament_h2h_manifest_page_positive', sql`page_number > 0`),
+    check('tournament_h2h_manifest_schedule_hash', sql`schedule_hash ~ '^[0-9a-f]{64}$'`),
+    check('tournament_h2h_manifest_immutable_hash', sql`immutable_page_hash ~ '^[0-9a-f]{64}$'`),
+    check('tournament_h2h_manifest_match_ids_nonempty', sql`cardinality(match_ids) > 0`),
+    check('tournament_h2h_manifest_event_ids_nonempty', sql`cardinality(event_ids) > 0`),
+    check(
+      'tournament_h2h_manifest_match_ids_positive',
+      sql`array_position(match_ids, NULL) IS NULL AND array_to_string(match_ids, ',') ~ '^[1-9][0-9]*(,[1-9][0-9]*)*$'`,
+    ),
+    check(
+      'tournament_h2h_manifest_event_ids_positive',
+      sql`array_position(event_ids, NULL) IS NULL AND array_to_string(event_ids, ',') ~ '^[1-9][0-9]*(,[1-9][0-9]*)*$'`,
+    ),
+    check(
+      'tournament_h2h_manifest_arrays_1d',
+      sql`array_ndims(match_ids) = 1 AND array_ndims(event_ids) = 1`,
     ),
   ],
 );

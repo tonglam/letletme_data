@@ -63,6 +63,12 @@ export interface TournamentSyncJobData {
   allowUnlockedOfficialH2HRecovery?: boolean;
   /** Progress marker observed when a non-resume retry was queued. */
   expectedProgressMarker?: string | null;
+  /** Official H2H is isolated once the lanes rollout is enabled. */
+  lane?: 'tournament-sync' | 'official-h2h-live';
+  /** A guarded full reconciliation is distinct from the minute incremental root. */
+  officialH2HMode?: 'incremental' | 'full-reconcile';
+  /** Stable, redacted dedupe key for a full reconciliation case. */
+  officialH2HReconcileKey?: string;
 }
 
 export const tournamentSyncQueue = new Queue<TournamentSyncJobData>(tournamentSyncQueueName, {

@@ -16,6 +16,7 @@ import {
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
 } from '../cache/data-publication';
+import { recordDataPublicationEvidence } from '../services/data-governance.service';
 import { canonicalJson, postgresJsonbCanonicalJson } from '../utils/content-hash';
 import { logError } from '../utils/logger';
 
@@ -31,9 +32,49 @@ export type ClaimedDataPublicationOutbox = Readonly<{
   outboxId: string;
   owner: string;
   publicationId: string;
+  sourceRunId: string | null;
+  dbActivatedAt: Date | null;
   manifest: DataPublicationManifest;
   items: readonly DataPublicationDeliveryItem[];
 }>;
+
+function decodePublicationPayloads(
+  items: readonly DataPublicationDeliveryItem[],
+): Readonly<Record<string, unknown>> {
+  const payloads: Record<string, unknown> = {};
+  for (const item of items) {
+    try {
+      payloads[item.manifest.name] = JSON.parse(item.payload) as unknown;
+    } catch {
+      // The checksum/byte proof is still authoritative. Counts fall back to
+      // manifest item counts when a payload cannot be decoded for telemetry.
+    }
+  }
+  return payloads;
+}
+
+async function recordPublicationEvidenceBestEffort(input: {
+  row: ClaimedDataPublicationOutbox;
+  pgPublishedAt?: Date | null;
+  redisSeenAt?: Date | null;
+}): Promise<void> {
+  try {
+    await recordDataPublicationEvidence({
+      manifest: input.row.manifest,
+      sourceRunId: input.row.sourceRunId,
+      payloads: decodePublicationPayloads(input.row.items),
+      pgPublishedAt: input.pgPublishedAt,
+      redisSeenAt: input.redisSeenAt,
+    });
+  } catch (error) {
+    // Governance evidence is additive. A database/telemetry outage must not
+    // turn a successfully staged publication into a failed delivery.
+    logError('Data publication freshness evidence update failed', error, {
+      publicationId: input.row.publicationId,
+      dataset: input.row.manifest.dataset,
+    });
+  }
+}
 
 async function loadPreparedPublication(
   db: DbOrTransaction,
@@ -121,6 +162,8 @@ export async function claimDataPublicationOutbox(input: {
       .select({
         outboxId: dataPublicationOutboxInOps.outboxId,
         publicationId: dataPublicationOutboxInOps.publicationId,
+        sourceRunId: dataPublicationOutboxInOps.sourceRunId,
+        dbActivatedAt: dataPublicationOutboxInOps.dbActivatedAt,
         manifest: dataPublicationOutboxInOps.manifest,
       })
       .from(dataPublicationOutboxInOps)
@@ -166,6 +209,8 @@ export async function claimDataPublicationOutbox(input: {
         outboxId: row.outboxId,
         owner,
         publicationId: row.publicationId,
+        sourceRunId: row.sourceRunId,
+        dbActivatedAt: row.dbActivatedAt,
         ...prepared,
       });
     }
@@ -243,7 +288,7 @@ export async function markDataPublicationOutboxReconciled(input: {
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
-  return db.transaction(async (tx) => {
+  const row = await db.transaction(async (tx) => {
     const updated = await tx
       .update(dataPublicationOutboxInOps)
       .set({
@@ -271,9 +316,10 @@ export async function markDataPublicationOutboxReconciled(input: {
       .returning({
         publicationId: dataPublicationOutboxInOps.publicationId,
         sourceRunId: dataPublicationOutboxInOps.sourceRunId,
+        dbActivatedAt: dataPublicationOutboxInOps.dbActivatedAt,
       });
     const row = updated[0];
-    if (!row) return false;
+    if (!row) return null;
     if (row.sourceRunId) {
       await tx
         .update(syncRunsInOps)
@@ -290,8 +336,30 @@ export async function markDataPublicationOutboxReconciled(input: {
           ),
         );
     }
-    return true;
+    return row;
   });
+  if (!row) return false;
+
+  // The reconciler has already performed the Redis CAS before closing this
+  // receipt. Record the same PG/Redis milestones as the normal dispatcher so
+  // a crash in the delivery path cannot leave a permanently pending SLO
+  // window. This is telemetry only: the canonical pointer and outbox receipt
+  // are already committed and must not be rolled back on an evidence outage.
+  try {
+    const prepared = await loadDataPublicationDelivery(row.publicationId);
+    await recordDataPublicationEvidence({
+      manifest: prepared.manifest,
+      sourceRunId: row.sourceRunId,
+      payloads: decodePublicationPayloads(prepared.items),
+      pgPublishedAt: row.dbActivatedAt,
+      redisSeenAt: new Date(),
+    });
+  } catch (error) {
+    logError('Reconciled publication freshness evidence update failed', error, {
+      publicationId: row.publicationId,
+    });
+  }
+  return true;
 }
 
 async function markDataPublicationOutboxStage(input: {
@@ -401,6 +469,10 @@ export async function dispatchDataPublicationOutbox(
       try {
         // Canonical DB activation happened before this dispatcher was called.
         // Redis is staged and CAS-activated only after the proof is complete.
+        await recordPublicationEvidenceBestEffort({
+          row,
+          pgPublishedAt: row.dbActivatedAt,
+        });
         await stageDataPublication({ manifest: row.manifest, items: row.items });
         if (
           !(await markDataPublicationOutboxStage({
@@ -426,6 +498,8 @@ export async function dispatchDataPublicationOutbox(
         ) {
           throw new Error(`Outbox lease lost while activating ${row.outboxId}`);
         }
+        const redisSeenAt = new Date();
+        await recordPublicationEvidenceBestEffort({ row, redisSeenAt });
         if (await markDataPublicationOutboxDelivered(row)) delivered += 1;
       } catch (error) {
         failed += 1;

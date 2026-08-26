@@ -200,7 +200,7 @@ jobs:
               fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
                 if [ "$services_start_attempted" = true ]; then
-                  echo "Data deployment failed after service start; preserving scheduler/worker/content-worker/media-worker for recovery" >&2
+                  echo "Data deployment failed after service start; preserving scheduler/worker/content-worker/live-picks-worker/official-h2h-worker/media-worker for recovery" >&2
                   APP_IMAGE="$IMAGE_REF" docker compose ps || true
                   ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
@@ -294,6 +294,9 @@ jobs:
               exit 1
             fi
             APP_IMAGE="$IMAGE_REF" docker compose config --quiet
+            DATABASE_CONNECTION_BUDGET="${DATABASE_CONNECTION_BUDGET:-15}" \
+              COMPOSE_BIN='docker compose' COMPOSE_FILE=docker-compose.yml PROJECT_DIR="$VPS_WORKDIR" \
+              scripts/check-database-pool-budget.sh
             APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-size: 20m'
             APP_IMAGE="$IMAGE_REF" docker compose config | grep -Eq 'max-file: "5"$'
             migration_database_url=$(sed -n 's/^DATABASE_URL=//p' "$migration_env_file" \
@@ -322,7 +325,7 @@ jobs:
             old_runner_release_sha=${old_runner_release_sha:-unknown}
             acquire_deploy_lock
             image_pull_attempted=true
-            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker media-worker migration backup
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker live-picks-worker official-h2h-worker media-worker migration backup
             image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_REF")
             test "$image_revision" = "$DEPLOY_SHA"
             finish_stage
@@ -377,12 +380,13 @@ jobs:
             # stop a healthy worker.  (The scheduler is stopped separately.)
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler content-worker media-worker
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 live-picks-worker official-h2h-worker
             remove_exact_stopped_container api
             wait_for_port_3000_free 30 2
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
-              bun scripts/assert-queue-quiescence.ts --database-only
+              bun scripts/assert-queue-quiescence.ts --database-only --scoped
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-              bun scripts/assert-queue-quiescence.ts --redis-only
+              bun scripts/assert-queue-quiescence.ts --redis-only --scoped
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration run --rm -T backup
             finish_stage
 
@@ -436,6 +440,12 @@ jobs:
             finish_stage
             start_stage serviceReady
             services_start_attempted=true
+            # The media worker owns a runtime heartbeat even when source-media
+            # processing is disabled. Keep it in the normal forward start so
+            # /ready can distinguish an intentionally disabled worker from a
+            # missing or crashed worker. RUNTIME_INCLUDE_MEDIA_WORKER=false is
+            # reserved for restoring a release that never had this container.
+            export RUNTIME_INCLUDE_MEDIA_WORKER=true
             # The shared state machine owns the equivalent API/worker startup
             # (`docker compose up -d ...`) and preserves healthy workers on a
             # first API bind failure.

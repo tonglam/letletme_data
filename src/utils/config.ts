@@ -76,6 +76,9 @@ const EnvSchema = z.object({
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
+  // Keep the latest-wins producer opt-in in production during the first
+  // rollout. Development and tests exercise the new lane by default.
+  PRICE_CHANGE_SINGLE_FLIGHT_ENABLED: booleanEnv(process.env.NODE_ENV !== 'production'),
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(true),
   FPL_MAX_INFLIGHT: z.coerce.number().int().min(1).max(32).default(5),
   FPL_REQUESTS_PER_SECOND: z.coerce.number().int().min(1).max(20).default(4),
@@ -85,6 +88,24 @@ const EnvSchema = z.object({
   FPL_REQUEST_DEADLINE_MS: integerEnv(40_000),
   FPL_RETRY_BASE_DELAY_MS: integerEnv(500),
   FPL_RETRY_MAX_DELAY_MS: integerEnv(5_000),
+  // A scheduler definition is a planning stage, not an unbounded provider
+  // request.  Keep one slow definition from holding the 30-second pass (and
+  // its progress heartbeat) forever.
+  SCHEDULER_RESOLVE_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  // Queue governance rollout switches.  They are deliberately opt-in so a
+  // rolling deploy can start the new consumers before routing new work.
+  QUEUE_LANES_V2_ENABLED: booleanEnv(false),
+  QUEUE_ADMISSION_AUTOMATION_ENABLED: booleanEnv(false),
+  OFFICIAL_H2H_INCREMENTAL_ENABLED: booleanEnv(false),
+  FRESHNESS_CONSUMER_PROBES_ENABLED: booleanEnv(false),
+  FRESHNESS_SLO_MODE: z.enum(['shadow', 'enforced']).default('shadow'),
+  QUEUE_HEALTH_SNAPSHOT_INTERVAL_MS: integerEnv(15_000),
+  QUEUE_HEALTH_WINDOW_INTERVAL_MS: integerEnv(60_000),
+  QUEUE_HEALTH_SNAPSHOT_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
+  QUEUE_ADMISSION_GREEN_CLEAR_MS: integerEnv(5 * 60_000),
+  QUEUE_ADMISSION_GATE_TTL_SECONDS: z.coerce.number().int().min(1).max(900).default(900),
+  DATA_GOVERNANCE_WEB_URL: optionalEnv(z.string().url().optional()),
+  DATA_GOVERNANCE_PROBE_TOKEN: optionalEnv(z.string().min(16).optional()),
   ENTRY_SYNC_CHUNK_SIZE: integerEnv(500),
   ENTRY_SYNC_CONCURRENCY: integerEnv(5),
   ENTRY_SYNC_THROTTLE_MS: integerEnv(200),
@@ -147,9 +168,10 @@ type FplRawSnapshotConfigKeys =
   | 'FPL_RAW_SNAPSHOT_BUCKET';
 
 type OptionalStorageConfigKeys = BugReportScreenshotConfigKeys | FplRawSnapshotConfigKeys;
+type OptionalRuntimeConfigKeys = OptionalStorageConfigKeys | 'PRICE_CHANGE_SINGLE_FLIGHT_ENABLED';
 
-export type AppConfig = Omit<z.infer<typeof EnvSchema>, OptionalStorageConfigKeys> &
-  Partial<Pick<z.infer<typeof EnvSchema>, OptionalStorageConfigKeys>>;
+export type AppConfig = Omit<z.infer<typeof EnvSchema>, OptionalRuntimeConfigKeys> &
+  Partial<Pick<z.infer<typeof EnvSchema>, OptionalRuntimeConfigKeys>>;
 
 export type RedisEndpointConfig = {
   readonly host: string;

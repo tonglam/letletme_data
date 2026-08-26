@@ -1,4 +1,5 @@
 import { createDataSyncWorker } from './workers/data-sync.worker';
+import { createFplCriticalSyncWorker } from './workers/fpl-critical-sync.worker';
 import { createEntrySyncWorker } from './workers/entry-sync.worker';
 import { createLiveDataWorker } from './workers/live-data.worker';
 import { createManagerLiveWorker } from './workers/manager-live.worker';
@@ -8,6 +9,7 @@ import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
 import { createTournamentRepairWorker } from './workers/tournament-repair.worker';
 import { createUnderstatWorker } from './workers/understat.worker';
 import { createMaintenanceWorker } from './workers/maintenance.worker';
+import { createDataGovernanceWorker } from './workers/data-governance.worker';
 import { databaseSingleton } from './db/singleton';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
@@ -25,6 +27,7 @@ if (config.NODE_ENV === 'production') {
 }
 const runtimes: WorkerRuntime[] = [
   createDataSyncWorker(),
+  createFplCriticalSyncWorker(),
   createEntrySyncWorker(),
   createLiveDataWorker(),
   createManagerLiveWorker(),
@@ -34,6 +37,7 @@ const runtimes: WorkerRuntime[] = [
   createTournamentRepairWorker(),
   createUnderstatWorker(),
   createMaintenanceWorker(),
+  createDataGovernanceWorker(),
 ];
 
 const queueMonitors = runtimes.flatMap((runtime) =>
@@ -42,6 +46,7 @@ const queueMonitors = runtimes.flatMap((runtime) =>
       queue: target.queue,
       queueEvents: target.queueEvents,
       queueName: target.queueName,
+      consumerHeartbeatRole: 'queueWorker',
     }),
   ),
 );

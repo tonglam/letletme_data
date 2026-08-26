@@ -4,19 +4,26 @@ import {
   loadManagerLiveClassicCursor,
   loadManagerLiveHotScope,
   MANAGER_LIVE_ATTEMPTS,
+  MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
   MANAGER_LIVE_HOT_SCOPE_SECONDS,
+  MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT,
   MANAGER_LIVE_RETRY_BASE_DELAY_MS,
   MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT,
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
   MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT,
+  classicStandingsCursorAfterRefresh,
   managerLiveClassicCursorKey,
   managerLiveDispatchEntryChunks,
+  managerLiveFollowupRunAt,
+  managerLiveHotStateKey,
   managerLiveHotScopeKey,
+  managerLiveRosterRevision,
   managerLiveRefreshJobId,
   managerLiveRefreshJobIdForState,
   parseManagerLiveHotState,
   parseManagerLiveClassicCursor,
   parseManagerLiveHotScope,
+  removeManagerLiveHotState,
   shouldStopManagerLiveRefresh,
   writeManagerLiveClassicCursor,
   writeManagerLiveHotScope,
@@ -44,14 +51,22 @@ describe('manager live refresh policy', () => {
     expect(first).toContain('2627-e1-t7');
   });
 
-  test('does not collapse different entry subsets from the same tournament', () => {
+  test('coalesces different entry subsets into one tournament scope', () => {
     const date = new Date('2026-08-23T08:34:01.000Z');
     const otherSubset = { ...scope, entryIds: [11, 22, 44] };
 
-    expect(managerLiveRefreshJobId(otherSubset, date)).not.toBe(
-      managerLiveRefreshJobId(scope, date),
+    expect(managerLiveRefreshJobId(otherSubset, date)).toBe(managerLiveRefreshJobId(scope, date));
+    expect(managerLiveHotScopeKey(otherSubset)).toBe(managerLiveHotScopeKey(scope));
+  });
+
+  test('derives stable roster revisions and changes them for an authoritative lifecycle marker', () => {
+    expect(managerLiveRosterRevision([33, 11, 33])).toBe(managerLiveRosterRevision([11, 33]));
+    expect(managerLiveRosterRevision([11, 33], 'sync-a')).toBe(
+      managerLiveRosterRevision([11, 33], 'sync-a'),
     );
-    expect(managerLiveHotScopeKey(otherSubset)).not.toBe(managerLiveHotScopeKey(scope));
+    expect(managerLiveRosterRevision([11, 33], 'sync-a')).not.toBe(
+      managerLiveRosterRevision([11, 33], 'sync-b'),
+    );
   });
 
   test('deduplicates classic standings continuations with request jobs in the same bucket', () => {
@@ -61,6 +76,13 @@ describe('manager live refresh policy', () => {
 
     expect(sameScope).toBe(request);
     expect(managerLiveRefreshJobId(scope, new Date('2026-08-23T08:34:29.999Z'))).toBe(sameScope);
+  });
+
+  test('moves a follow-up scheduled inside the current bucket to the next bucket', () => {
+    const now = Date.parse('2026-08-23T08:34:10.000Z');
+    expect(managerLiveFollowupRunAt(new Date('2026-08-23T08:34:20.000Z'), now).toISOString()).toBe(
+      '2026-08-23T08:34:30.000Z',
+    );
   });
 
   test('binds v2 jobs to a hot-scope generation while preserving bucket deduplication', () => {
@@ -83,6 +105,26 @@ describe('manager live refresh policy', () => {
     const chunks = managerLiveDispatchEntryChunks([...input, input[0]!]);
 
     expect(chunks).toEqual([[...input].sort((left, right) => left - right)]);
+  });
+
+  test('accepts complete authoritative tournament rosters while keeping entry scopes bounded', () => {
+    const tournamentEntryIds = Array.from(
+      { length: MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT },
+      (_, index) => index + 1,
+    );
+    expect(
+      parseManagerLiveHotScope(JSON.stringify({ ...scope, entryIds: tournamentEntryIds }))
+        ?.entryIds,
+    ).toHaveLength(MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT);
+    expect(
+      parseManagerLiveHotScope(
+        JSON.stringify({
+          ...scope,
+          tournamentId: undefined,
+          entryIds: tournamentEntryIds.slice(0, 501),
+        }),
+      ),
+    ).toBeNull();
   });
 
   test('persists a normalized hot scope for exactly six hours', async () => {
@@ -130,7 +172,28 @@ describe('manager live refresh policy', () => {
       [managerLiveClassicCursorKey(scope), '7', 'EX', MANAGER_LIVE_HOT_SCOPE_SECONDS],
       [managerLiveClassicCursorKey(scope), '0', 'EX', MANAGER_LIVE_HOT_SCOPE_SECONDS],
     ]);
-    expect(parseManagerLiveClassicCursor('21')).toBeUndefined();
+    expect(parseManagerLiveClassicCursor('101')).toBeUndefined();
+  });
+
+  test('removes the generation-aware hot state only for the owning generation', async () => {
+    const calls: Array<[string, number, string, string]> = [];
+    const redis = {
+      eval: async (script: string, numberOfKeys: number, key: string, generation: string) => {
+        calls.push([script, numberOfKeys, key, generation]);
+        return 1;
+      },
+    };
+
+    await expect(
+      removeManagerLiveHotState(redis as never, { ...scope, entryIds: [] }, 'generation-a'),
+    ).resolves.toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]).toBe(1);
+    expect(calls[0]?.[2]).toBe(managerLiveHotStateKey({ ...scope, entryIds: [] }));
+    expect(calls[0]?.[3]).toBe('generation-a');
+    await expect(
+      removeManagerLiveHotState(redis as never, { ...scope, entryIds: [] }),
+    ).resolves.toBe(false);
   });
 
   test('stops follow-up eligibility when the hot scope expires or is malformed', async () => {
@@ -174,6 +237,13 @@ describe('manager live refresh policy', () => {
         Math.round((MANAGER_LIVE_RETRY_BASE_DELAY_MS * 2 ** index) / 1000),
       ),
     ).toEqual([30, 60, 120]);
+  });
+
+  test('persists a terminal cursor when a crawl reaches the 100-page safety cap', () => {
+    const standings = { complete: false, nextPage: 101 };
+    expect(classicStandingsCursorAfterRefresh(true, standings)).toBe(
+      MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+    );
   });
 
   test('stops only after the gameweek is both finished and data-checked', () => {

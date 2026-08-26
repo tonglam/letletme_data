@@ -23,6 +23,7 @@ export interface ManagerLiveJobData {
   eventId: number;
   entryIds: number[];
   tournamentId?: number;
+  rosterRevision?: string;
   generation?: string;
   summaryRotationCursor?: number;
   classicStandingsPage?: number;

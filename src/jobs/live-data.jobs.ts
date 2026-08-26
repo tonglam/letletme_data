@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { liveDataQueue, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
 import { logError, logInfo } from '../utils/logger';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
@@ -81,6 +82,9 @@ export async function enqueueLiveSnapshot(
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
   try {
     const queue = liveDataQueue;
+    if (source === 'manual' && (await isQueueDrainOnly(queue.name))) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
     const explicitJobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : null;
     let replacementJobId: string | null = null;
     const existingExplicitJob = explicitJobId ? await queue.getJob(explicitJobId) : null;

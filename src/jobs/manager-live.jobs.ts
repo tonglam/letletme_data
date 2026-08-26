@@ -6,9 +6,11 @@ import {
   initializeManagerLiveHotState,
   loadManagerLiveHotState,
   managerLiveDispatchEntryChunks,
-  MANAGER_LIVE_REFRESH_BUCKET_MS,
+  managerLiveFollowupRunAt,
+  reconcileManagerLiveHotStateRoster,
   managerLiveRefreshJobIdForState,
   normalizeManagerLiveEntryIds,
+  removeManagerLiveHotState,
   type ManagerLiveHotScopeState,
   type ManagerLiveRefreshScope,
 } from '../domain/manager-live-refresh';
@@ -41,6 +43,7 @@ const managerLiveScopeFromJobData = (jobData: ManagerLiveJobData): ManagerLiveRe
   eventId: jobData.eventId,
   entryIds: normalizeManagerLiveEntryIds(jobData.entryIds),
   ...(jobData.tournamentId === undefined ? {} : { tournamentId: jobData.tournamentId }),
+  ...(jobData.rosterRevision === undefined ? {} : { rosterRevision: jobData.rosterRevision }),
 });
 
 export async function readManagerLiveClassicCursor(
@@ -59,6 +62,22 @@ export async function readManagerLiveHotState(
   return state;
 }
 
+export async function clearManagerLiveHotScope(
+  scope: ManagerLiveRefreshScope,
+  expectedGeneration?: string,
+  expectedRosterRevision?: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return removeManagerLiveHotState(redis, scope, expectedGeneration, expectedRosterRevision);
+}
+
+export async function reconcileManagerLiveHotScopeRoster(
+  scope: ManagerLiveRefreshScope,
+): Promise<ManagerLiveHotScopeState | null> {
+  const redis = await queueRedisSingleton.getClient();
+  return reconcileManagerLiveHotStateRoster(redis, scope);
+}
+
 async function addManagerLiveRefresh(
   scope: ManagerLiveRefreshScope,
   source: ManagerLiveJobData['source'],
@@ -74,6 +93,7 @@ async function addManagerLiveRefresh(
     eventId: scope.eventId,
     entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
     ...(scope.tournamentId === undefined ? {} : { tournamentId: scope.tournamentId }),
+    ...(scope.rosterRevision === undefined ? {} : { rosterRevision: scope.rosterRevision }),
     ...(hotState?.generation === undefined ? {} : { generation: hotState.generation }),
     ...(hotState?.summaryRotationCursor === undefined
       ? {}
@@ -113,6 +133,7 @@ export async function enqueueManagerLiveRefresh(input: {
   eventId: number;
   entryIds: readonly number[];
   tournamentId?: number;
+  rosterRevision?: string;
   runAt?: Date;
   markHot?: boolean;
   source?: ManagerLiveJobData['source'];
@@ -123,6 +144,7 @@ export async function enqueueManagerLiveRefresh(input: {
     eventId: input.eventId,
     entryIds: normalizeManagerLiveEntryIds(input.entryIds),
     ...(input.tournamentId === undefined ? {} : { tournamentId: input.tournamentId }),
+    ...(input.rosterRevision === undefined ? {} : { rosterRevision: input.rosterRevision }),
   };
   try {
     const hotState =
@@ -149,6 +171,7 @@ export async function enqueueManagerLiveRefreshBatches(input: {
   eventId: number;
   entryIds: readonly number[];
   tournamentId?: number;
+  rosterRevision?: string;
   runAt?: Date;
   markHot?: boolean;
   source?: ManagerLiveJobData['source'];
@@ -194,8 +217,6 @@ export async function scheduleNextManagerLiveRefresh(
   );
   if (!updatedState) return null;
   const requestedRunAt = new Date(nextRefreshAt);
-  const runAt = Number.isFinite(requestedRunAt.getTime())
-    ? new Date(Math.max(Date.now() + 1_000, requestedRunAt.getTime()))
-    : new Date(Date.now() + MANAGER_LIVE_REFRESH_BUCKET_MS);
+  const runAt = managerLiveFollowupRunAt(requestedRunAt);
   return addManagerLiveRefresh(updatedState, 'followup', runAt, updatedState);
 }

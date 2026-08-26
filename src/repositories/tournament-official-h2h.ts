@@ -4,6 +4,7 @@ import {
   tournamentBattleGroupResultsInCompetition,
   tournamentKnockoutResultsInCompetition,
   tournamentsInCompetition,
+  tournamentOfficialH2HPageManifestsInCompetition,
   type DbTournamentBattleGroupResultInsert,
   type DbTournamentGroupInsert,
   type DbTournamentKnockoutInsert,
@@ -13,6 +14,8 @@ import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import type { OfficialH2HPageManifest } from '../domain/official-h2h-manifest';
+import type { RawFPLLeagueH2HMatch } from '../clients/fpl';
 
 import { createTournamentGroupRepository } from './tournament-groups';
 import { createTournamentKnockoutsRepository } from './tournament-knockouts';
@@ -25,9 +28,95 @@ export type OfficialH2HPublication = {
   knockoutRows: DbTournamentKnockoutResultInsert[];
   bracketRows: DbTournamentKnockoutInsert[];
   groupRows: DbTournamentGroupInsert[];
+  pageManifests?: readonly OfficialH2HPageManifest[];
 };
 
+function previousLockedAt(
+  previous: { lockedAt: Date | null } | undefined,
+  publication: Pick<OfficialH2HPublication, 'lockSchedule' | 'checkedAt'>,
+): Date | null {
+  return previous?.lockedAt ?? (publication.lockSchedule ? publication.checkedAt : null);
+}
+
 export const tournamentOfficialH2HRepository = {
+  /** Rehydrate the last complete schedule so a locked minute refresh can
+   * replace only the page containing the current event. Scores are refreshed
+   * from the provider; immutable sides/order remain database evidence. */
+  async findPersistedMatches(
+    season: FplSeasonRef,
+    tournamentId: number,
+  ): Promise<Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>> {
+    const db = await getDb();
+    const [battleRows, knockoutRows] = await Promise.all([
+      db
+        .select()
+        .from(tournamentBattleGroupResultsInCompetition)
+        .where(
+          and(
+            eq(tournamentBattleGroupResultsInCompetition.seasonId, season.seasonId),
+            eq(tournamentBattleGroupResultsInCompetition.tournamentId, tournamentId),
+          ),
+        ),
+      db
+        .select()
+        .from(tournamentKnockoutResultsInCompetition)
+        .where(
+          and(
+            eq(tournamentKnockoutResultsInCompetition.seasonId, season.seasonId),
+            eq(tournamentKnockoutResultsInCompetition.tournamentId, tournamentId),
+          ),
+        ),
+    ]);
+    const regular = battleRows
+      .filter((row) => row.officialMatchId !== null && row.sourceOrder !== null)
+      .map((row) => ({
+        id: row.officialMatchId!,
+        event: row.eventId,
+        entry_1_entry: row.homeEntryId,
+        entry_1_name: null,
+        entry_1_player_name: null,
+        entry_1_points: row.homeNetPoints,
+        entry_1_total: row.homeMatchPoints ?? undefined,
+        entry_2_entry: row.awayEntryId,
+        entry_2_name: null,
+        entry_2_player_name: null,
+        entry_2_points: row.awayNetPoints,
+        entry_2_total: row.awayMatchPoints ?? undefined,
+        winner:
+          row.homeMatchPoints === 3
+            ? row.homeEntryId
+            : row.awayMatchPoints === 3
+              ? row.awayEntryId
+              : null,
+        is_bye: row.isBye,
+        is_knockout: false,
+        knockout_name: null,
+        tiebreak: null,
+        sourceOrder: row.sourceOrder!,
+      })) satisfies Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+    const knockout = knockoutRows
+      .filter((row) => row.officialMatchId !== null && row.sourceOrder !== null)
+      .map((row) => ({
+        id: row.officialMatchId!,
+        event: row.eventId,
+        entry_1_entry: row.homeEntryId,
+        entry_1_name: null,
+        entry_1_player_name: null,
+        entry_1_points: row.homeNetPoints,
+        entry_2_entry: row.awayEntryId,
+        entry_2_name: null,
+        entry_2_player_name: null,
+        entry_2_points: row.awayNetPoints,
+        winner: row.matchWinner,
+        is_bye: row.homeEntryId === null || row.awayEntryId === null,
+        is_knockout: true,
+        knockout_name: row.knockoutName,
+        tiebreak: row.tiebreak,
+        sourceOrder: row.sourceOrder!,
+      })) satisfies Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+    return [...regular, ...knockout].sort((a, b) => a.sourceOrder - b.sourceOrder);
+  },
+
   async publish(
     season: FplSeasonRef,
     tournamentId: number,
@@ -66,6 +155,66 @@ export const tournamentOfficialH2HRepository = {
             'Official H2H schedule changed after it was locked.',
             'TOURNAMENT_OFFICIAL_H2H_SCHEDULE_CHANGED',
           );
+        }
+
+        if (publication.pageManifests && publication.pageManifests.length > 0) {
+          const existingManifests = await tx
+            .select()
+            .from(tournamentOfficialH2HPageManifestsInCompetition)
+            .where(
+              and(
+                eq(tournamentOfficialH2HPageManifestsInCompetition.seasonId, season.seasonId),
+                eq(tournamentOfficialH2HPageManifestsInCompetition.tournamentId, tournamentId),
+              ),
+            );
+          const existingByPage = new Map(
+            existingManifests.map((manifest) => [manifest.pageNumber, manifest]),
+          );
+          for (const manifest of publication.pageManifests) {
+            const previous = existingByPage.get(manifest.pageNumber);
+            if (
+              previous?.lockedAt &&
+              (previous.scheduleHash !== manifest.scheduleHash ||
+                previous.immutablePageHash !== manifest.immutablePageHash ||
+                previous.matchIds.join(',') !== manifest.matchIds.join(',') ||
+                previous.eventIds.join(',') !== manifest.eventIds.join(','))
+            ) {
+              throw new ConflictError(
+                `Official H2H page ${manifest.pageNumber} changed after it was locked.`,
+                'TOURNAMENT_OFFICIAL_H2H_PAGE_CHANGED',
+              );
+            }
+          }
+          await tx
+            .insert(tournamentOfficialH2HPageManifestsInCompetition)
+            .values(
+              publication.pageManifests.map((manifest) => ({
+                seasonId: season.seasonId,
+                tournamentId,
+                pageNumber: manifest.pageNumber,
+                scheduleHash: manifest.scheduleHash,
+                matchIds: [...manifest.matchIds],
+                eventIds: [...manifest.eventIds],
+                immutablePageHash: manifest.immutablePageHash,
+                capturedAt: new Date(manifest.capturedAt),
+                lockedAt: previousLockedAt(existingByPage.get(manifest.pageNumber), publication),
+              })),
+            )
+            .onConflictDoUpdate({
+              target: [
+                tournamentOfficialH2HPageManifestsInCompetition.seasonId,
+                tournamentOfficialH2HPageManifestsInCompetition.tournamentId,
+                tournamentOfficialH2HPageManifestsInCompetition.pageNumber,
+              ],
+              set: {
+                scheduleHash: sql`excluded.schedule_hash`,
+                matchIds: sql`excluded.match_ids`,
+                eventIds: sql`excluded.event_ids`,
+                immutablePageHash: sql`excluded.immutable_page_hash`,
+                capturedAt: sql`excluded.captured_at`,
+                lockedAt: sql`COALESCE(${tournamentOfficialH2HPageManifestsInCompetition.lockedAt}, excluded.locked_at)`,
+              },
+            });
         }
 
         if (publication.battleRows.length > 0) {

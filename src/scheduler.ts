@@ -1,7 +1,7 @@
 import { databaseSingleton } from './db/singleton';
 import { getConfig } from './utils/config';
 import { logError, logInfo } from './utils/logger';
-import { startWorkerHeartbeat } from './utils/worker-heartbeat';
+import { touchWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { runSchedulerPass } from './scheduler/scheduler.service';
 import { dispatchDataPublicationOutbox } from './repositories/data-publication-outbox';
@@ -11,15 +11,17 @@ import {
   persistLiveLifecycleStatus,
   runPicksProbeAndSync,
 } from './services/live-lifecycle-orchestrator';
+import { enqueueDataGovernanceJob, DATA_GOVERNANCE_JOBS } from './jobs/data-governance.jobs';
+import { enqueueMaintenanceJob } from './jobs/maintenance.jobs';
+import { MAINTENANCE_JOBS } from './queues/maintenance.queue';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
 
 getConfig();
 if (getConfig().NODE_ENV === 'production') await databaseSingleton.connect();
 
-const stopHeartbeat = startWorkerHeartbeat({
-  path: process.env.SCHEDULER_HEARTBEAT_PATH ?? '/tmp/scheduler-heartbeat',
-});
+const schedulerHeartbeatPath = process.env.SCHEDULER_HEARTBEAT_PATH ?? '/tmp/scheduler-heartbeat';
+const stopHeartbeat = () => undefined;
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('scheduler');
 let inFlight: Promise<unknown> | null = null;
 
@@ -43,22 +45,64 @@ async function runPass(): Promise<void> {
   const pass = (async () => {
     const now = new Date();
     const season = await seasonRepository.findCurrent();
-    await runIndependentSchedulerStage('core-market-publication-reconcile', () =>
-      reconcileCoreAndMarketPublications(season),
-    );
-    await runIndependentSchedulerStage('data-publication-outbox', () =>
-      dispatchDataPublicationOutbox({ limit: 20 }),
-    );
-    const lifecycle = await runIndependentSchedulerStage('live-lifecycle', () =>
-      persistLiveLifecycleStatus(now),
-    );
-    if (lifecycle?.decision.shouldProbePicks || lifecycle?.decision.shouldSyncPicks) {
-      await runIndependentSchedulerStage('live-picks-refresh', () =>
-        runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now),
+    if (getConfig().QUEUE_LANES_V2_ENABLED) {
+      const halfMinute = Math.floor(now.getTime() / SCHEDULER_INTERVAL_MS);
+      const minute = Math.floor(now.getTime() / 60_000);
+      await runIndependentSchedulerStage('publication-reconcile-enqueue', () =>
+        enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
+          jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
+        }),
       );
+      await runIndependentSchedulerStage('data-publication-outbox-enqueue', () =>
+        enqueueMaintenanceJob(season, MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX, 'reconcile', {
+          jobId: `governance-publication-outbox-${season.seasonCode}-${halfMinute}`,
+        }),
+      );
+      await runIndependentSchedulerStage('lifecycle-status-enqueue', () =>
+        enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS, {
+          jobId: `governance-lifecycle-${season.seasonCode}-${Math.floor(now.getTime() / 30_000)}`,
+        }),
+      );
+      if (now.getTime() % 60_000 < SCHEDULER_INTERVAL_MS) {
+        await runIndependentSchedulerStage('freshness-observer-enqueue', () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER, {
+            jobId: `governance-freshness-${season.seasonCode}-${minute}`,
+          }),
+        );
+        await runIndependentSchedulerStage('governance-audit-enqueue', () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.GW_AUDIT, {
+            jobId: `governance-audit-${season.seasonCode}-${minute}`,
+          }),
+        );
+        await runIndependentSchedulerStage('governance-case-recheck-enqueue', () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.CASE_RECHECK, {
+            jobId: `governance-case-recheck-${season.seasonCode}-${minute}`,
+          }),
+        );
+      }
+    } else {
+      await runIndependentSchedulerStage('core-market-publication-reconcile', () =>
+        reconcileCoreAndMarketPublications(season),
+      );
+      await runIndependentSchedulerStage('data-publication-outbox', () =>
+        dispatchDataPublicationOutbox({ limit: 20 }),
+      );
+      const lifecycle = await runIndependentSchedulerStage('live-lifecycle', () =>
+        persistLiveLifecycleStatus(now),
+      );
+      if (lifecycle?.decision.shouldProbePicks || lifecycle?.decision.shouldSyncPicks) {
+        await runIndependentSchedulerStage('live-picks-refresh-compatibility', () =>
+          runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now),
+        );
+      }
     }
     await runIndependentSchedulerStage('obligation-registry', () => runSchedulerPass(now));
   })()
+    .then(() => {
+      // The scheduler heartbeat is progress evidence, not merely process
+      // liveness.  Touch it only after every independent stage completed.
+      touchWorkerHeartbeat(schedulerHeartbeatPath);
+    })
     .catch((error) => logError('Scheduler reconciliation pass failed', error))
     .finally(() => {
       inFlight = null;

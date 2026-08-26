@@ -3,9 +3,11 @@ import { and, desc, eq, getTableColumns, inArray, sql } from 'drizzle-orm';
 import {
   liveLifecycleStatusInOps,
   managerEventScoreSnapshotsInFpl,
+  managerLiveTournamentCoverageInFpl,
 } from '../db/schemas/live-window.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { tournamentRosterRevision } from '../domain/manager-live-coverage';
 
 export type LiveLifecycleStatusRow = typeof liveLifecycleStatusInOps.$inferSelect;
 
@@ -91,6 +93,25 @@ export const liveLifecycleStatusRepository = createLiveLifecycleStatusRepository
 export type ManagerScoreScope =
   | { scopeType: 'ENTRY'; scopeId: 0 }
   | { scopeType: 'CLASSIC_LEAGUE'; scopeId: number };
+
+export type ManagerLiveTournamentCoverageState = 'WARMING' | 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE';
+
+export type ManagerLiveTournamentCoverageInput = {
+  seasonId: number;
+  eventId: number;
+  tournamentId: number;
+  rosterRevision: string;
+  expectedEntries: number;
+  resolvedEntries: number;
+  fullyFetchedAt: Date | null;
+  managerRevision: string | null;
+  error: string | null;
+  state: ManagerLiveTournamentCoverageState;
+  updatedAt?: Date;
+};
+
+export type ManagerLiveTournamentCoverageRow =
+  typeof managerLiveTournamentCoverageInFpl.$inferSelect;
 
 export type ManagerScoreCheckpoint = {
   entryId: number;
@@ -278,5 +299,125 @@ export const createManagerScoreCheckpointRepository = (dbInstance?: DbOrTransact
     },
   };
 };
+
+export const createManagerLiveTournamentCoverageRepository = (dbInstance?: DbOrTransaction) => {
+  const getDbInstance = async () => dbInstance ?? (await getDb());
+
+  return {
+    findByTournamentAndEvent: async (
+      season: FplSeasonRef,
+      eventId: number,
+      tournamentId: number,
+    ): Promise<ManagerLiveTournamentCoverageRow | null> => {
+      const db = await getDbInstance();
+      const [row] = await db
+        .select()
+        .from(managerLiveTournamentCoverageInFpl)
+        .where(
+          and(
+            eq(managerLiveTournamentCoverageInFpl.seasonId, season.seasonId),
+            eq(managerLiveTournamentCoverageInFpl.eventId, eventId),
+            eq(managerLiveTournamentCoverageInFpl.tournamentId, tournamentId),
+          ),
+        )
+        .limit(1);
+      return row ?? null;
+    },
+
+    upsert: async (input: ManagerLiveTournamentCoverageInput): Promise<boolean> => {
+      const db = await getDbInstance();
+      const updatedAt = input.updatedAt ?? new Date();
+      return db.transaction(async (tx) => {
+        // Roster publication and tournament deletion both take FOR UPDATE on
+        // the parent tournament row. Holding FOR SHARE through the roster
+        // reread and coverage upsert serializes those mutations with this
+        // writer and prevents a deleted tournament from being recreated.
+        const tournamentRows = await tx.execute<{ present: number }>(sql`
+          SELECT 1 AS present
+          FROM competition.tournaments
+          WHERE season_id = ${input.seasonId}
+            AND tournament_id = ${input.tournamentId}
+          FOR SHARE
+        `);
+        if (tournamentRows.length === 0) return false;
+
+        const rosterRows = await tx.execute<{ entryId: number }>(sql`
+          SELECT entry_id AS "entryId"
+          FROM competition.tournament_entries
+          WHERE season_id = ${input.seasonId}
+            AND tournament_id = ${input.tournamentId}
+          ORDER BY entry_id
+          FOR SHARE
+        `);
+        // A worker can spend minutes fetching a roster. Recheck the
+        // authoritative generation immediately before publication so a late
+        // result from roster A cannot overwrite the newer roster B state.
+        if (
+          tournamentRosterRevision(rosterRows.map((row) => row.entryId)) !== input.rosterRevision
+        ) {
+          return false;
+        }
+
+        await tx
+          .insert(managerLiveTournamentCoverageInFpl)
+          .values({
+            seasonId: input.seasonId,
+            eventId: input.eventId,
+            tournamentId: input.tournamentId,
+            rosterRevision: input.rosterRevision,
+            expectedEntries: input.expectedEntries,
+            resolvedEntries: input.resolvedEntries,
+            fullyFetchedAt: input.fullyFetchedAt,
+            managerRevision: input.managerRevision,
+            error: input.error,
+            state: input.state,
+            updatedAt,
+          })
+          .onConflictDoUpdate({
+            target: [
+              managerLiveTournamentCoverageInFpl.seasonId,
+              managerLiveTournamentCoverageInFpl.eventId,
+              managerLiveTournamentCoverageInFpl.tournamentId,
+            ],
+            set: {
+              rosterRevision: sql`excluded.roster_revision`,
+              expectedEntries: sql`excluded.expected_entries`,
+              resolvedEntries: sql`excluded.resolved_entries`,
+              fullyFetchedAt: sql`excluded.fully_fetched_at`,
+              managerRevision: sql`excluded.manager_revision`,
+              error: sql`excluded.error`,
+              state: sql`excluded.state`,
+              updatedAt: sql`excluded.updated_at`,
+            },
+            // Coverage is a monotonic publication. If two workers read the
+            // same baseline concurrently, a slower write must not overwrite
+            // a COMPLETE row or reduce partial progress for the same roster.
+            setWhere: sql`
+              NOT (
+                (
+                  ${managerLiveTournamentCoverageInFpl.rosterRevision} = excluded.roster_revision
+                  AND ${managerLiveTournamentCoverageInFpl.expectedEntries} = excluded.expected_entries
+                  AND excluded.resolved_entries < ${managerLiveTournamentCoverageInFpl.resolvedEntries}
+                )
+                OR (
+                  ${managerLiveTournamentCoverageInFpl.state} = 'COMPLETE'
+                  AND ${managerLiveTournamentCoverageInFpl.rosterRevision} = excluded.roster_revision
+                  AND ${managerLiveTournamentCoverageInFpl.expectedEntries} = excluded.expected_entries
+                  AND (
+                    excluded.state <> 'COMPLETE'
+                    OR excluded.updated_at < ${managerLiveTournamentCoverageInFpl.updatedAt}
+                  )
+                )
+              )
+            `,
+          });
+        return true;
+      });
+    },
+  };
+};
+
+export const managerLiveTournamentCoverageRepository =
+  createManagerLiveTournamentCoverageRepository();
 
 export const managerScoreCheckpointRepository = createManagerScoreCheckpointRepository();

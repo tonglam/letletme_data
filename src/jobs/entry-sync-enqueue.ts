@@ -4,17 +4,21 @@ import type { Job } from 'bullmq';
 import {
   entrySyncQueue,
   type EntrySyncJobData,
+  type EntrySyncLane,
   type EntrySyncJobName,
   type EntrySyncJobSource,
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE,
   ENTRY_SYNC_DEFAULT_CONCURRENCY,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
 } from '../queues/entry-sync.queue';
+import { livePicksQueue } from '../queues/live-picks.queue';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { getCurrentEvent } from '../services/events.service';
 import { logError, logInfo } from '../utils/logger';
 import { stableHash } from '../utils/stable-hash';
 import { trackQueueRunJob } from '../services/queue-run-tracker';
+import { getConfig } from '../utils/config';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export interface EntrySyncJobOptions {
   entryIds?: number[];
@@ -39,6 +43,7 @@ export interface EntrySyncJobOptions {
   /** Minimum interval between accepted jobs after the active single-flight settles. */
   deduplicationCadenceMs?: number;
   removeOnSettle?: boolean;
+  lane?: EntrySyncLane;
 }
 
 export function retainEntrySyncChainOptions(
@@ -51,11 +56,18 @@ export function retainEntrySyncChainOptions(
         | 'obligationId'
         | 'obligationGeneration'
         | 'freshAfter'
+        | 'lane'
       >
     | undefined,
 ): Pick<
   EntrySyncJobOptions,
-  'runId' | 'queueKey' | 'removeOnSettle' | 'obligationId' | 'obligationGeneration' | 'freshAfter'
+  | 'runId'
+  | 'queueKey'
+  | 'removeOnSettle'
+  | 'obligationId'
+  | 'obligationGeneration'
+  | 'freshAfter'
+  | 'lane'
 > {
   return {
     runId: options?.runId,
@@ -64,7 +76,14 @@ export function retainEntrySyncChainOptions(
     queueKey: options?.queueKey,
     removeOnSettle: options?.removeOnSettle,
     freshAfter: options?.freshAfter,
+    lane: options?.lane,
   };
+}
+
+export function entryQueueForLane(lane: EntrySyncLane | undefined) {
+  return lane === 'live-picks' && getConfig().QUEUE_LANES_V2_ENABLED
+    ? livePicksQueue
+    : entrySyncQueue;
 }
 
 function hashEntryListKey(
@@ -126,13 +145,16 @@ function matchesExplicitDeduplicationScope(
 }
 
 async function findReusableExplicitDeduplicationJob(
-  input: Parameters<typeof matchesExplicitDeduplicationScope>[1] & { cadenceMs: number },
+  input: Parameters<typeof matchesExplicitDeduplicationScope>[1] & {
+    cadenceMs: number;
+    queue: typeof entrySyncQueue;
+  },
 ): Promise<{ job: Job<EntrySyncJobData>; reason: 'non-terminal' | 'cadence' } | null> {
-  const nonTerminalJobs = await entrySyncQueue.getJobs(['waiting', 'delayed', 'active', 'paused']);
+  const nonTerminalJobs = await input.queue.getJobs(['waiting', 'delayed', 'active', 'paused']);
   const nonTerminal = nonTerminalJobs.find((job) => matchesExplicitDeduplicationScope(job, input));
   if (nonTerminal) return { job: nonTerminal, reason: 'non-terminal' };
 
-  const completedJobs = await entrySyncQueue.getJobs(
+  const completedJobs = await input.queue.getJobs(
     ['completed'],
     0,
     RECENT_COMPLETED_DEDUPLICATION_SCAN_LIMIT - 1,
@@ -159,7 +181,11 @@ async function enqueueEntrySyncJob(
   options: EntrySyncJobOptions = {},
 ) {
   try {
-    const queue = entrySyncQueue;
+    const lane = options.lane ?? 'entry-sync';
+    const queue = entryQueueForLane(lane);
+    if ((source === 'manual' || source === 'api') && (await isQueueDrainOnly(queue.name))) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
     const chunkSize = sanitizePositiveInt(options.chunkSize, ENTRY_SYNC_DEFAULT_CHUNK_SIZE);
     const afterEntryId = sanitizeCursor(options.afterEntryId);
     const concurrency = sanitizePositiveInt(options.concurrency, ENTRY_SYNC_DEFAULT_CONCURRENCY);
@@ -246,6 +272,7 @@ async function enqueueEntrySyncJob(
         queueKey: tableScanQueueKey,
         deduplicationId: explicitDeduplicationId,
         cadenceMs: explicitDeduplicationCadenceMs,
+        queue,
       });
       if (reusable) {
         logInfo('Entry sync explicit deduplication reused existing job', {
@@ -268,6 +295,7 @@ async function enqueueEntrySyncJob(
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
       source,
+      lane,
       triggeredAt: new Date().toISOString(),
       entryIds: options.entryIds,
       retryCount: options.retryCount,

@@ -1,8 +1,18 @@
 import { Job, QueueEvents, Worker } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
-import { shouldStopManagerLiveRefresh } from '../domain/manager-live-refresh';
-import { readManagerLiveHotState, scheduleNextManagerLiveRefresh } from '../jobs/manager-live.jobs';
+import {
+  managerLiveRosterRevision,
+  normalizeManagerLiveEntryIds,
+  shouldStopManagerLiveRefresh,
+  type ManagerLiveHotScopeState,
+} from '../domain/manager-live-refresh';
+import {
+  clearManagerLiveHotScope,
+  readHotManagerLiveScope,
+  reconcileManagerLiveHotScopeRoster,
+  scheduleNextManagerLiveRefresh,
+} from '../jobs/manager-live.jobs';
 import {
   MANAGER_LIVE_JOBS,
   MANAGER_LIVE_JOB_VERSION,
@@ -11,6 +21,8 @@ import {
   type ManagerLiveJobData,
 } from '../queues/manager-live.queue';
 import { eventRepository } from '../repositories/events';
+import { tournamentEntryRepository } from '../repositories/tournament-entries';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import {
   refreshManagerLiveScores,
   type ManagerLiveResolveResult,
@@ -46,6 +58,56 @@ export async function scheduleManagerLiveContinuation(
   }
 }
 
+export const shouldRetryFinalizedTournamentManagerLive = (
+  result: Pick<ManagerLiveResolveResult, 'partial' | 'errorCode' | 'tournamentCoverage'>,
+): boolean => {
+  if (result.errorCode === 'UPSTREAM_UNAVAILABLE') return true;
+  const coverage = result.tournamentCoverage;
+  return (
+    result.partial ||
+    coverage === undefined ||
+    coverage === null ||
+    coverage.state !== 'COMPLETE' ||
+    coverage.resolvedEntries < coverage.expectedEntries
+  );
+};
+
+/**
+ * A failed BullMQ attempt must retry the bounded chunk it actually owned.
+ * Follow-up jobs advance the shared hot cursor before the failed attempt is
+ * retried, so adopting that cursor on retry would silently skip the failed
+ * chunk. A roster-generation rotation is the one exception: the old job no
+ * longer owns the authoritative roster and must adopt the new lane's cursors.
+ */
+export const selectManagerLiveJobCursors = (input: {
+  attemptsMade: number;
+  jobData: Pick<
+    ManagerLiveJobData,
+    'generation' | 'summaryRotationCursor' | 'classicStandingsPage' | 'classicStandingsCursorEpoch'
+  >;
+  hotState: Pick<
+    ManagerLiveHotScopeState,
+    'generation' | 'summaryRotationCursor' | 'classicStandingsPage' | 'classicStandingsCursorEpoch'
+  >;
+}) => {
+  const rosterGenerationChanged = input.jobData.generation !== input.hotState.generation;
+  const pinRetryCursors = input.attemptsMade > 0 && !rosterGenerationChanged;
+
+  return {
+    rosterGenerationChanged,
+    retryCursorsPinned: pinRetryCursors,
+    summaryRotationCursor: pinRetryCursors
+      ? (input.jobData.summaryRotationCursor ?? input.hotState.summaryRotationCursor)
+      : input.hotState.summaryRotationCursor,
+    classicStandingsPage: pinRetryCursors
+      ? input.jobData.classicStandingsPage
+      : (input.hotState.classicStandingsPage ?? undefined),
+    classicStandingsCursorEpoch: pinRetryCursors
+      ? (input.jobData.classicStandingsCursorEpoch ?? input.hotState.classicStandingsCursorEpoch)
+      : input.hotState.classicStandingsCursorEpoch,
+  };
+};
+
 export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
   if (job.name !== MANAGER_LIVE_JOBS.REFRESH || job.data.version !== MANAGER_LIVE_JOB_VERSION) {
     throw new Error(`Unsupported manager live job: ${job.name}@${job.data.version}`);
@@ -67,7 +129,8 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
   logJobTriggered(context);
 
   return runTrackedJob(context, async () => {
-    if (shouldStopManagerLiveRefresh(event)) {
+    const eventFinalized = shouldStopManagerLiveRefresh(event);
+    if (eventFinalized && job.data.tournamentId === undefined) {
       logInfo('Manager live refresh stopped after final event settlement', {
         eventId: job.data.eventId,
         tournamentId: job.data.tournamentId ?? null,
@@ -75,8 +138,90 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       return { stopped: 'event-finalized' as const };
     }
 
-    const hotState = await readManagerLiveHotState(job.data);
-    if (!hotState) {
+    const jobEntryIds = normalizeManagerLiveEntryIds(job.data.entryIds);
+    const expectedJobRosterRevision =
+      job.data.rosterRevision ?? managerLiveRosterRevision(jobEntryIds);
+    const tournamentInfo =
+      job.data.tournamentId === undefined
+        ? null
+        : await tournamentInfoRepository.findById(season, job.data.tournamentId);
+    const tournamentRosterMarker = tournamentInfo
+      ? [tournamentInfo.rosterLastSyncedAt, tournamentInfo.setupProgressUpdatedAt]
+          .filter((marker): marker is string => typeof marker === 'string' && marker.length > 0)
+          .join('|') || null
+      : null;
+    let authoritativeEntryIds = normalizeManagerLiveEntryIds(
+      job.data.tournamentId === undefined
+        ? jobEntryIds
+        : await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId),
+    );
+    if (job.data.tournamentId !== undefined && authoritativeEntryIds.length === 0) {
+      // The first roster read can race the GW-boundary roster-sync write. Read
+      // the relation again immediately before clearing the hot marker; if the
+      // roster has already returned, continue this generation into the normal
+      // roster reconciliation path instead of deleting its live refresh lane.
+      authoritativeEntryIds = normalizeManagerLiveEntryIds(
+        await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId),
+      );
+    }
+    const authoritativeRosterRevision =
+      job.data.tournamentId === undefined
+        ? undefined
+        : tournamentInfo
+          ? managerLiveRosterRevision(authoritativeEntryIds, tournamentRosterMarker)
+          : expectedJobRosterRevision;
+    if (job.data.tournamentId !== undefined && authoritativeEntryIds.length === 0) {
+      // A roster can be republished between the second relation read and this
+      // branch. Compare the durable lifecycle marker before touching Redis; the
+      // Lua delete below repeats the generation+revision CAS for the remaining
+      // request/worker race.
+      if (authoritativeRosterRevision !== expectedJobRosterRevision) {
+        logInfo('Manager live refresh stopped without clearing a newer roster revision', {
+          eventId: job.data.eventId,
+          tournamentId: job.data.tournamentId,
+          expectedRosterRevision: expectedJobRosterRevision,
+          authoritativeRosterRevision,
+        });
+        return { stopped: 'stale-roster-revision' as const };
+      }
+      const cleared = await clearManagerLiveHotScope(
+        {
+          seasonId: season.seasonId,
+          seasonCode: season.seasonCode,
+          eventId: job.data.eventId,
+          entryIds: [],
+          tournamentId: job.data.tournamentId,
+          rosterRevision: expectedJobRosterRevision,
+        },
+        job.data.generation,
+        expectedJobRosterRevision,
+      );
+      logInfo('Manager live refresh stopped after authoritative roster became empty', {
+        eventId: job.data.eventId,
+        tournamentId: job.data.tournamentId,
+        cleared,
+      });
+      return { stopped: 'empty-authoritative-roster' as const };
+    }
+    const currentHotState = await readHotManagerLiveScope({
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
+      eventId: job.data.eventId,
+      entryIds: authoritativeEntryIds,
+      ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+      ...(authoritativeRosterRevision === undefined
+        ? {}
+        : { rosterRevision: authoritativeRosterRevision }),
+    });
+    const jobOwnsCurrentRoster =
+      currentHotState !== null &&
+      currentHotState.entryIds.length === jobEntryIds.length &&
+      currentHotState.entryIds.every((entryId, index) => entryId === jobEntryIds[index]);
+    if (
+      !job.data.generation ||
+      !currentHotState ||
+      (currentHotState.generation !== job.data.generation && jobOwnsCurrentRoster)
+    ) {
       logInfo('Manager live refresh stopped for stale or missing hot generation', {
         eventId: job.data.eventId,
         tournamentId: job.data.tournamentId ?? null,
@@ -84,30 +229,89 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       });
       return { stopped: 'stale-hot-generation' as const };
     }
-    const persistedClassicCursor = hotState.classicStandingsPage;
-    const classicStandingsStartPage =
-      persistedClassicCursor === null
-        ? 1
-        : (persistedClassicCursor ?? job.data.classicStandingsPage ?? 1);
+    const hotState = await reconcileManagerLiveHotScopeRoster({
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
+      eventId: job.data.eventId,
+      entryIds: authoritativeEntryIds,
+      ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+      ...(authoritativeRosterRevision === undefined
+        ? {}
+        : { rosterRevision: authoritativeRosterRevision }),
+    });
+    if (!hotState) {
+      logInfo('Manager live refresh stopped after hot scope expired during reconciliation', {
+        eventId: job.data.eventId,
+        tournamentId: job.data.tournamentId ?? null,
+        generation: job.data.generation,
+      });
+      return { stopped: 'expired-hot-scope' as const };
+    }
+    const selectedCursors = selectManagerLiveJobCursors({
+      attemptsMade: job.attemptsMade,
+      jobData: job.data,
+      hotState,
+    });
+    const effectiveJobData: ManagerLiveJobData = {
+      ...job.data,
+      entryIds: hotState.entryIds,
+      generation: hotState.generation,
+      rosterRevision: hotState.rosterRevision,
+      summaryRotationCursor: selectedCursors.summaryRotationCursor,
+      classicStandingsPage: selectedCursors.classicStandingsPage,
+      classicStandingsCursorEpoch: selectedCursors.classicStandingsCursorEpoch,
+    };
+    const needsJobDataUpdate =
+      effectiveJobData.generation !== job.data.generation ||
+      effectiveJobData.rosterRevision !== job.data.rosterRevision ||
+      !effectiveJobData.entryIds.every((entryId, index) => entryId === jobEntryIds[index]) ||
+      effectiveJobData.entryIds.length !== jobEntryIds.length ||
+      effectiveJobData.summaryRotationCursor !== job.data.summaryRotationCursor ||
+      effectiveJobData.classicStandingsPage !== job.data.classicStandingsPage ||
+      effectiveJobData.classicStandingsCursorEpoch !== job.data.classicStandingsCursorEpoch;
+    if (needsJobDataUpdate) {
+      // A roster reconciliation rotates the Redis generation. Persist the
+      // adopted generation/cursors on the active Bull job before doing any
+      // upstream work so a transient failure retries the new lane rather than
+      // being discarded as stale.
+      await job.updateData(effectiveJobData);
+      job.data = effectiveJobData;
+    }
+    const classicStandingsStartPage = selectedCursors.classicStandingsPage ?? 1;
     // BullMQ retries reuse the same job data, so they retry the same bounded
     // summary chunk. The atomic hot state advances this logical cursor only
     // when the follow-up is scheduled; wall-clock parity cannot starve a
     // permanently failing manager when the event uses 60-second refreshes.
     const summaryRotationCursor =
-      Number.isSafeInteger(job.data.summaryRotationCursor) &&
-      (job.data.summaryRotationCursor ?? -1) >= 0
-        ? job.data.summaryRotationCursor
+      Number.isSafeInteger(effectiveJobData.summaryRotationCursor) &&
+      (effectiveJobData.summaryRotationCursor ?? -1) >= 0
+        ? effectiveJobData.summaryRotationCursor
         : hotState.summaryRotationCursor;
     const result = await refreshManagerLiveScores({
-      eventId: job.data.eventId,
-      entryIds: job.data.entryIds,
-      ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+      eventId: effectiveJobData.eventId,
+      entryIds: effectiveJobData.entryIds,
+      ...(effectiveJobData.tournamentId === undefined
+        ? {}
+        : { tournamentId: effectiveJobData.tournamentId }),
       ...(classicStandingsStartPage === undefined || classicStandingsStartPage === null
         ? {}
         : { classicStandingsStartPage }),
       summaryRotationCursor,
     });
-    await scheduleManagerLiveContinuation(job.data, result, classicStandingsStartPage);
+    if (eventFinalized) {
+      // Final rows can become visible one entry at a time after the event is
+      // data-checked. Keep a database-only continuation alive until the
+      // authoritative result scan is complete; the finalized service branch
+      // never calls the current FPL manager endpoints.
+      if (
+        job.data.tournamentId !== undefined &&
+        shouldRetryFinalizedTournamentManagerLive(result)
+      ) {
+        await scheduleManagerLiveContinuation(effectiveJobData, result, classicStandingsStartPage);
+      }
+      return result;
+    }
+    await scheduleManagerLiveContinuation(effectiveJobData, result, classicStandingsStartPage);
     return result;
   });
 }
