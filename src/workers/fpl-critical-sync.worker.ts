@@ -197,11 +197,18 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
 
     let prepared;
     try {
+      const evidenceWindowId = activeTarget.obligation.evidence.freshnessWindowId;
+      const freshnessWindowId =
+        job.data.freshnessWindowId ??
+        (typeof evidenceWindowId === 'number' && Number.isSafeInteger(evidenceWindowId)
+          ? evidenceWindowId
+          : undefined);
       prepared = await preparePriceChangePublication(
         season,
         undefined,
         job.data.source === 'manual' ? 'manual' : 'queue',
         job.data.runId,
+        freshnessWindowId,
       );
     } catch (error) {
       if (error instanceof PriceChangeCorePublicationRequiredError) {

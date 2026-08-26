@@ -366,6 +366,17 @@ export async function triggerPriceChangeLane(
       obligationId: advanced.lane.desiredObligationId,
       freshnessWindowId: options.freshnessWindowId,
     });
+    if (!advanced.shouldDispatch && advanced.lane.activeObligationId) {
+      // A latest-wins lane may already have a Bull job in flight. Updating the
+      // desired row alone is not enough: the running worker loaded its Bull
+      // payload before this repair joined the lane. Bind the exact window to
+      // the active obligation too; the provider worker re-reads this fenced
+      // evidence before preparing its publication.
+      await attachFreshnessWindowToSchedulerObligation({
+        obligationId: advanced.lane.activeObligationId,
+        freshnessWindowId: options.freshnessWindowId,
+      });
+    }
   }
   if (!advanced.shouldDispatch) {
     return {
