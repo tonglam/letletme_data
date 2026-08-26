@@ -69,6 +69,22 @@ function priceSingleFlightEnabled(): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
 }
 
+function archivedCaptureTimestamps(
+  sourceDetectedAt: string | undefined,
+  sourceFetchedAt: string | undefined,
+): { readonly requestStartedAt: Date; readonly fetchedAt: Date } | null {
+  if (!sourceDetectedAt && !sourceFetchedAt) return null;
+  if (!sourceDetectedAt || !sourceFetchedAt) {
+    throw new Error('Archived price-change source capture timestamps are incomplete');
+  }
+  const requestStartedAt = new Date(sourceDetectedAt);
+  const fetchedAt = new Date(sourceFetchedAt);
+  if (!Number.isFinite(requestStartedAt.getTime()) || !Number.isFinite(fetchedAt.getTime())) {
+    throw new Error('Archived price-change source capture timestamps are invalid');
+  }
+  return { requestStartedAt, fetchedAt };
+}
+
 async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
   if (job.name !== 'price-change-predictions') {
     return undefined;
@@ -117,7 +133,16 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
             requestStartedAt: new Date(hotSnapshot.detectedAt),
             fetchedAt: new Date(hotSnapshot.fetchedAt),
           }
-        : null;
+        : archivedCaptureTimestamps(
+            job.data.sourceDetectedAt ??
+              (typeof obligation?.evidence.sourceDetectedAt === 'string'
+                ? obligation.evidence.sourceDetectedAt
+                : undefined),
+            job.data.sourceFetchedAt ??
+              (typeof obligation?.evidence.sourceFetchedAt === 'string'
+                ? obligation.evidence.sourceFetchedAt
+                : undefined),
+          );
     return {
       getBootstrap: async () => source.payload,
       ...(capturedAt

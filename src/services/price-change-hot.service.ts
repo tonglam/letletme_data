@@ -515,6 +515,13 @@ export async function markPriceChangeHotReconciliation(
     snapshot.revision,
   );
   if (!current || current.sourceHash !== snapshot.sourceHash) return false;
+  // Keep a verified durable publication terminal. A worker can fail after
+  // writing the reconciled marker (for example while completing its lane),
+  // and a later Bull terminal callback must not turn that success into a
+  // misleading failed state.
+  if (input.state === 'failed' && current.reconciliation.state === 'reconciled') {
+    return true;
+  }
   const updated: PriceChangeHotSnapshot = {
     ...current,
     reconciliation:
@@ -533,11 +540,26 @@ export async function markPriceChangeHotReconciliation(
           },
   };
   const redis = await redisSingleton.getClient();
-  await redis.set(
+  const result = await redis.eval(
+    `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, existing = pcall(cjson.decode, raw)
+if not ok or not existing then return 0 end
+if existing.revision ~= ARGV[1] or existing.sourceHash ~= ARGV[2] then return 0 end
+if ARGV[4] == 'failed' and existing.reconciliation and existing.reconciliation.state == 'reconciled' then
+  return 1
+end
+redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[5])
+return 1
+`,
+    1,
     priceChangeHotPayloadKey(updated.seasonCode, updated.revision),
+    updated.revision,
+    updated.sourceHash,
     JSON.stringify(updated),
-    'PX',
+    input.state,
     Math.max(Date.parse(updated.expiresAt) - Date.now(), 1),
   );
-  return true;
+  return Number(result) === 1;
 }

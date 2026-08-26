@@ -87,6 +87,8 @@ async function enqueueDurableReconciliation(
       sourceHash: snapshot.sourceHash,
       sourceArtifactId: snapshot.artifactId ?? undefined,
       priceChangeBoardRevision: snapshot.revision,
+      sourceDetectedAt: snapshot.detectedAt,
+      sourceFetchedAt: snapshot.fetchedAt,
     });
     return;
   } catch (error) {
@@ -112,6 +114,8 @@ async function enqueueDurableReconciliation(
     sourceHash: snapshot.sourceHash,
     sourceArtifactId: snapshot.artifactId ?? undefined,
     priceChangeBoardRevision: snapshot.revision,
+    sourceDetectedAt: snapshot.detectedAt,
+    sourceFetchedAt: snapshot.fetchedAt,
   });
 }
 
@@ -205,7 +209,10 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       const valueFingerprint = priceChangeValueFingerprint(artifact.payload);
       const observedDeadline = priceChangePrimaryDeadline(artifact.payload);
       successfulProbes += 1;
-      const isPostDeadline = Date.now() >= deadlineAt.getTime();
+      // A request that began before the official cutover can complete after it
+      // and still contain the pre-change response. Only a probe initiated at
+      // or after the deadline is evidence about the post-deadline state.
+      const isPostDeadline = probeStartedAt >= deadlineAt.getTime();
       retryableFailureStreak = 0;
       if (!initialized) {
         if (isPostDeadline) {
@@ -321,6 +328,7 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
         pollCount,
         error: error instanceof Error ? error.message : String(error),
       });
+      if (!retryable) throw error;
     }
     const elapsedFromDeadline = Date.now() - deadlineAt.getTime();
     const interval =

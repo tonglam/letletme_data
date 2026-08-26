@@ -768,6 +768,12 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
         ...(typeof plan.evidence?.priceChangeBoardRevision === 'string'
           ? { priceChangeBoardRevision: plan.evidence.priceChangeBoardRevision }
           : {}),
+        ...(typeof plan.evidence?.sourceDetectedAt === 'string'
+          ? { sourceDetectedAt: plan.evidence.sourceDetectedAt }
+          : {}),
+        ...(typeof plan.evidence?.sourceFetchedAt === 'string'
+          ? { sourceFetchedAt: plan.evidence.sourceFetchedAt }
+          : {}),
       };
       if (!singleFlightEnabled) {
         const job = await enqueuePriceChangePredictionsJob(context.season, 'catchup', {
@@ -822,10 +828,18 @@ function priceChangeWatchDefinition(): ScheduledJobDefinition {
     successPredicate: 'observe an official price-change fingerprint or record no change',
     resolve: async (context) => {
       if (!priceHotWatchEnabled()) return [];
-      const board = await getPriceChangePredictions();
+      // Deadline discovery must remain available during a cold rollout or
+      // after the durable publication has expired. The durable board is an
+      // optimization, not the authority for whether an official watch exists.
+      const board = await getPriceChangePredictions().catch(() => null);
       const nowMs = context.now.getTime();
-      let deadlineCandidates = board.nextDeadlines;
-      if (deadlineCandidates.length === 0) {
+      let deadlineCandidates =
+        board && ['READY', 'STALE'].includes(board.status) ? board.nextDeadlines : [];
+      const hasCandidateInWindow = deadlineCandidates.some((value) => {
+        const timestamp = Date.parse(value);
+        return Number.isFinite(timestamp) && timestamp >= nowMs - watchWindowMs;
+      });
+      if (deadlineCandidates.length === 0 || !hasCandidateInWindow) {
         try {
           const bootstrap = await fplClient.getBootstrap({
             edgeCacheKey: `price-watch-schedule-${Math.floor(nowMs / 30_000)}`,

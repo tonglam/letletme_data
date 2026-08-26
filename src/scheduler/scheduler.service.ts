@@ -320,6 +320,8 @@ export async function triggerPriceChangeLane(
     readonly sourceHash?: string;
     readonly sourceArtifactId?: string;
     readonly priceChangeBoardRevision?: string;
+    readonly sourceDetectedAt?: string;
+    readonly sourceFetchedAt?: string;
   } = {},
 ): Promise<{
   bullJobId?: string | number;
@@ -361,13 +363,19 @@ export async function triggerPriceChangeLane(
     })();
   if (!basePlan) throw new Error('No current price-change scheduler target exists');
   const reconciliationEvidence =
-    options.sourceHash || options.sourceArtifactId || options.priceChangeBoardRevision
+    options.sourceHash ||
+    options.sourceArtifactId ||
+    options.priceChangeBoardRevision ||
+    options.sourceDetectedAt ||
+    options.sourceFetchedAt
       ? {
           ...(options.sourceHash ? { sourceHash: options.sourceHash } : {}),
           ...(options.sourceArtifactId ? { sourceArtifactId: options.sourceArtifactId } : {}),
           ...(options.priceChangeBoardRevision
             ? { priceChangeBoardRevision: options.priceChangeBoardRevision }
             : {}),
+          ...(options.sourceDetectedAt ? { sourceDetectedAt: options.sourceDetectedAt } : {}),
+          ...(options.sourceFetchedAt ? { sourceFetchedAt: options.sourceFetchedAt } : {}),
           reconciliation: 'price-change-hot',
         }
       : {};

@@ -31,6 +31,9 @@ export interface DataSyncEnqueueOptions {
   sourceHash?: string;
   sourceArtifactId?: string;
   priceChangeBoardRevision?: string;
+  /** Provider capture timestamps retained after the hot Redis TTL expires. */
+  sourceDetectedAt?: string;
+  sourceFetchedAt?: string;
   /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
   removeOnSettle?: boolean;
 }
@@ -86,6 +89,8 @@ export function createDataSyncJobData(
     ...(options.priceChangeBoardRevision
       ? { priceChangeBoardRevision: options.priceChangeBoardRevision }
       : {}),
+    ...(options.sourceDetectedAt ? { sourceDetectedAt: options.sourceDetectedAt } : {}),
+    ...(options.sourceFetchedAt ? { sourceFetchedAt: options.sourceFetchedAt } : {}),
     ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
     ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
     ...(options.freshnessWindowId === undefined

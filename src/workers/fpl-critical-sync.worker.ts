@@ -66,6 +66,8 @@ type HotPriceSourceMetadata = Readonly<{
   sourceHash?: string;
   sourceArtifactId?: string;
   priceChangeBoardRevision?: string;
+  sourceDetectedAt?: string;
+  sourceFetchedAt?: string;
 }>;
 
 function hotPriceSourceMetadata(
@@ -82,7 +84,34 @@ function hotPriceSourceMetadata(
     (typeof evidence?.priceChangeBoardRevision === 'string'
       ? evidence.priceChangeBoardRevision
       : undefined) ?? job.data.priceChangeBoardRevision;
-  return { sourceHash, sourceArtifactId, priceChangeBoardRevision };
+  const sourceDetectedAt =
+    (typeof evidence?.sourceDetectedAt === 'string' ? evidence.sourceDetectedAt : undefined) ??
+    job.data.sourceDetectedAt;
+  const sourceFetchedAt =
+    (typeof evidence?.sourceFetchedAt === 'string' ? evidence.sourceFetchedAt : undefined) ??
+    job.data.sourceFetchedAt;
+  return {
+    sourceHash,
+    sourceArtifactId,
+    priceChangeBoardRevision,
+    sourceDetectedAt,
+    sourceFetchedAt,
+  };
+}
+
+function captureTimestampsFromMetadata(
+  metadata: HotPriceSourceMetadata,
+): { readonly requestStartedAt: Date; readonly fetchedAt: Date } | null {
+  if (!metadata.sourceDetectedAt && !metadata.sourceFetchedAt) return null;
+  if (!metadata.sourceDetectedAt || !metadata.sourceFetchedAt) {
+    throw new Error('Archived price-change source capture timestamps are incomplete');
+  }
+  const requestStartedAt = new Date(metadata.sourceDetectedAt);
+  const fetchedAt = new Date(metadata.sourceFetchedAt);
+  if (!Number.isFinite(requestStartedAt.getTime()) || !Number.isFinite(fetchedAt.getTime())) {
+    throw new Error('Archived price-change source capture timestamps are invalid');
+  }
+  return { requestStartedAt, fetchedAt };
 }
 
 async function hotPriceSourceDependencies(
@@ -116,7 +145,7 @@ async function hotPriceSourceDependencies(
             requestStartedAt: new Date(hotSnapshot.detectedAt),
             fetchedAt: new Date(hotSnapshot.fetchedAt),
           }
-        : null;
+        : captureTimestampsFromMetadata(metadata);
     return {
       bootstrap: source.payload,
       getBootstrap: async () => source.payload,
@@ -249,6 +278,8 @@ async function blockPriceLaneForCoreRepair(
       ...(metadata.priceChangeBoardRevision
         ? { priceChangeBoardRevision: metadata.priceChangeBoardRevision }
         : {}),
+      ...(metadata.sourceDetectedAt ? { sourceDetectedAt: metadata.sourceDetectedAt } : {}),
+      ...(metadata.sourceFetchedAt ? { sourceFetchedAt: metadata.sourceFetchedAt } : {}),
     });
     if (String(repair.id) !== repairId) {
       throw new Error(`Core repair Bull ID mismatch: expected ${repairId}, got ${repair.id}`);
