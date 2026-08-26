@@ -321,6 +321,51 @@ describe('scheduler latest-wins lanes', () => {
     expect(recovered?.lane.dispatchGeneration).toBe(2);
   });
 
+  test('does not recover a missing dispatch while its lease is active', async () => {
+    const first = await reserve('2026-08-25T05:05:00.000Z', 'price-dispatch-lease-active');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+
+    expect(
+      await recoverSchedulerLaneAfterBullLoss({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId: 'integration-price-job-missing-while-lease-active',
+        bullState: 'missing',
+        obligationId: first.obligationId,
+      }),
+    ).toBe(false);
+    const stillDispatching = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(stillDispatching?.lane.state).toBe('dispatching');
+    expect(stillDispatching?.lane.dispatchGeneration).toBe(1);
+
+    const sql = await getDbClient();
+    await sql`
+      UPDATE ops.scheduler_lanes
+      SET dispatch_lease_expires_at = clock_timestamp() - interval '1 second'
+      WHERE lane_id = ${initial.lane.laneId}
+    `;
+    expect(
+      await recoverSchedulerLaneAfterBullLoss({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId: 'integration-price-job-missing-after-lease-expiry',
+        bullState: 'missing',
+        obligationId: first.obligationId,
+      }),
+    ).toBe(true);
+    const recovered = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(recovered?.lane.state).toBe('idle');
+    expect(recovered?.desired?.status).toBe('failed');
+  });
+
   test('recovers a dispatching lane when Bull is missing before confirmation', async () => {
     const first = await reserve('2026-08-25T05:07:00.000Z', 'price-dispatch-missing');
     const initial = await advanceSchedulerLane({
@@ -332,6 +377,12 @@ describe('scheduler latest-wins lanes', () => {
     });
     const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
     expect(dispatch).not.toBeNull();
+    const sql = await getDbClient();
+    await sql`
+      UPDATE ops.scheduler_lanes
+      SET dispatch_lease_expires_at = clock_timestamp() - interval '1 second'
+      WHERE lane_id = ${initial.lane.laneId}
+    `;
     expect(
       await recoverSchedulerLaneAfterBullLoss({
         laneId: initial.lane.laneId,

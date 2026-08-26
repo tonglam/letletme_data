@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
 import { schedulerLanesInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
@@ -1101,6 +1101,18 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
             and(
               eq(schedulerLanesInOps.state, 'dispatching'),
               isNull(schedulerLanesInOps.bullJobId),
+              // A missing Bull record is ambiguous while the owner may still
+              // be between claimSchedulerLaneDispatch and Queue.add.  Only
+              // a terminal Bull failure can settle that dispatch immediately;
+              // a missing record must wait for the short lease to expire.
+              or(
+                input.bullState === 'failed'
+                  ? sql`TRUE`
+                  : isNull(schedulerLanesInOps.dispatchLeaseExpiresAt),
+                input.bullState === 'failed'
+                  ? sql`FALSE`
+                  : lte(schedulerLanesInOps.dispatchLeaseExpiresAt, dbNow),
+              ),
             ),
           ),
         ),
