@@ -404,7 +404,10 @@ async function reconcileSingleFlightBullState(
     }
     return;
   }
-  if (lane.state === 'dispatching' && lane.dispatchOwner) {
+  if (lane.state === 'dispatching') {
+    if (!lane.dispatchOwner) {
+      throw new Error(`Dispatching scheduler lane ${lane.laneId} has no dispatch owner`);
+    }
     const queue = new Queue(lane.queueName, { connection: getQueueConnection() });
     try {
       // Price lane enqueue IDs are deterministic. Recover a successful Redis
