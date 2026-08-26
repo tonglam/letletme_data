@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 
 import {
   entryEventResultsInCompetition,
@@ -282,6 +282,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
                     eq(eventsInFpl.finished, true),
                     eq(eventsInFpl.dataChecked, true),
                     isNotNull(entryEventResultsInCompetition.richSyncedAt),
+                    or(
+                      isNull(eventsInFpl.dataCheckedAt),
+                      gte(entryEventResultsInCompetition.richSyncedAt, eventsInFpl.dataCheckedAt),
+                    ),
                   ),
                 )
                 .groupBy(entryEventResultsInCompetition.entryId)
@@ -349,6 +353,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
                   eq(eventsInFpl.finished, true),
                   eq(eventsInFpl.dataChecked, true),
                   isNotNull(entryEventResultsInCompetition.richSyncedAt),
+                  or(
+                    isNull(eventsInFpl.dataCheckedAt),
+                    gte(entryEventResultsInCompetition.richSyncedAt, eventsInFpl.dataCheckedAt),
+                  ),
                 ),
               )
           : await db.select(selectShape).from(entryEventResultsInCompetition).where(baseWhere);

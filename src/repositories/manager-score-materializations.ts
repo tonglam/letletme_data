@@ -8,6 +8,7 @@ import {
   type EffectiveLineupRow,
 } from '../domain/event-live-manager-projection';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { ENTRY_SEASON_SYNC_LOCK_NAMESPACE } from './entry-event-transfers';
 import { contentHash } from '../utils/content-hash';
 import { logWarn } from '../utils/logger';
 
@@ -757,6 +758,29 @@ export async function persistManagerScoreMaterializations(
       `;
     }
 
+    // Entry/pick/result writers use the shared season-entry fence below. Hold
+    // the same fence and the entry row lock until the head CAS completes so a
+    // revision cannot be validated, then become stale before it is promoted.
+    for (const entryId of entryIds) {
+      await tx`
+        SELECT pg_advisory_xact_lock(
+          ${ENTRY_SEASON_SYNC_LOCK_NAMESPACE},
+          hashint8((${season.seasonId}::bigint << 32) + ${entryId}::bigint)
+        )
+      `;
+      const entryRows = await tx`
+        SELECT 1
+        FROM competition.entries
+        WHERE season_id = ${season.seasonId} AND entry_id = ${entryId}
+        FOR UPDATE
+      `;
+      if (entryRows.length !== 1) {
+        throw new Error(
+          `Entry ${entryId} is not persisted for explicit season ${season.seasonCode}`,
+        );
+      }
+    }
+
     let materializationsWritten = 0;
     for (const row of rows) {
       const sourceMin = new Date(
@@ -1044,6 +1068,7 @@ async function readCurrentInputRevisions(
       AND result.rich_synced_at IS NOT NULL
       AND event.finished = true
       AND event.data_checked = true
+      AND (event.data_checked_at IS NULL OR result.rich_synced_at >= event.data_checked_at)
     ORDER BY result.event_id
   `;
   const previousTotal = results.reduce((sum, result) => sum + (result.event_net_points ?? 0), 0);

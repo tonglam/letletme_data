@@ -218,4 +218,50 @@ describe('revision-pinned projected manager score', () => {
     });
     expect(result?.effectiveLineup.filter((pick) => pick.captainForScoring)).toHaveLength(1);
   });
+
+  test('retains automatic substitutions already applied by the picks payload', () => {
+    const managerPicks = picks();
+    managerPicks[2] = { ...managerPicks[2], multiplier: 0 };
+    managerPicks[11] = { ...managerPicks[11], multiplier: 1 };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+    liveByElement.set(3, live(3, 0, 0));
+
+    const result = projectEventLiveManagerScore({
+      entryId: 101,
+      picks: managerPicks,
+      liveByElement,
+      fixtures: [fixture(2, 97, true)],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 12)).toMatchObject({
+      effectiveMultiplier: 1,
+      pickActive: true,
+      autoSub: true,
+      autoSubForElementId: 3,
+    });
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 3)).toMatchObject({
+      effectiveMultiplier: 0,
+      pickActive: false,
+    });
+  });
+
+  test('fails closed when the manager chip has no manager scoring input', () => {
+    const managerPicks = picks();
+    managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+
+    expect(
+      projectEventLiveManagerScore({
+        entryId: 101,
+        picks: managerPicks,
+        liveByElement,
+        fixtures: [],
+      }),
+    ).toBeNull();
+  });
 });

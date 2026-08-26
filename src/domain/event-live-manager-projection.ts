@@ -283,12 +283,19 @@ export function projectEventLiveManagerScore(input: {
   // projector independent of repository ordering so a caller cannot change
   // scoring semantics merely by reordering the 15 picks.
   const chip = picks.find((pick) => pick.position === 1)?.activeChip ?? null;
+  // The manager chip adds a separate manager-scoring fact that is not present
+  // in the player-live input accepted by this projector. Never publish a
+  // partial player-only score for it; the caller must use a source that carries
+  // the manager points explicitly.
+  if (chipIs(chip, 'manager', 'MANAGER')) return null;
   const benchBoost = chipIs(chip, 'bboost', 'BENCH_BOOST');
   const captainMultiplier = chipIs(chip, '3xc', 'TRIPLE_CAPTAIN') ? 3 : 2;
   const starters = picks.filter((pick) => pick.position <= 11);
-  const bench = picks
-    .filter((pick) => pick.position > 11 && pick.multiplier === 0)
+  const benchPicks = picks
+    .filter((pick) => pick.position > 11)
     .sort((left, right) => left.position - right.position);
+  const alreadyAppliedBench = benchPicks.filter((pick) => pick.multiplier > 0);
+  const bench = benchPicks.filter((pick) => pick.multiplier === 0);
   const nonPlayingStarters = starters.filter((pick) => {
     const live = input.liveByElement.get(pick.elementId);
     const teamFixtures = fixturesByTeam.get(pick.teamId) ?? [];
@@ -296,6 +303,39 @@ export function projectEventLiveManagerScore(input: {
   });
 
   if (!benchBoost) {
+    // FPL may already have applied an automatic substitution in the picks
+    // payload. In that case the promoted bench player has a positive source
+    // multiplier and the outgoing starter has a zero multiplier, so looking
+    // only at zero-multiplier bench rows loses the authoritative substitution
+    // evidence. Pair each such promoted player with the first no-show starter
+    // that leaves a legal formation, before projecting any unresolved pairs.
+    const alreadyAppliedOutgoingStarters = starters.filter((pick) => {
+      const live = input.liveByElement.get(pick.elementId);
+      const teamFixtures = fixturesByTeam.get(pick.teamId) ?? [];
+      return (
+        pick.multiplier === 0 && (live?.minutes ?? 0) === 0 && hasCompletedFixtures(teamFixtures)
+      );
+    });
+    const usedOutgoingStarters = new Set<number>();
+    for (const benchPlayer of alreadyAppliedBench) {
+      let matched = false;
+      for (const starter of alreadyAppliedOutgoingStarters) {
+        if (usedOutgoingStarters.has(starter.elementId)) continue;
+        const previousAutoSub = benchPlayer.autoSub;
+        const previousAutoSubForElementId = benchPlayer.autoSubForElementId;
+        benchPlayer.autoSub = true;
+        benchPlayer.autoSubForElementId = starter.elementId;
+        if (validFormation(picks)) {
+          usedOutgoingStarters.add(starter.elementId);
+          matched = true;
+          break;
+        }
+        benchPlayer.autoSub = previousAutoSub;
+        benchPlayer.autoSubForElementId = previousAutoSubForElementId;
+      }
+      if (!matched) return null;
+    }
+
     for (const benchPlayer of bench) {
       const benchLive = input.liveByElement.get(benchPlayer.elementId);
       const benchFixtures = fixturesByTeam.get(benchPlayer.teamId) ?? [];
