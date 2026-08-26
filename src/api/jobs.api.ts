@@ -1,4 +1,4 @@
-import { Elysia } from 'elysia';
+import { Elysia, t } from 'elysia';
 
 import { JobNotFoundError, listTriggerableJobs, triggerJob } from '../services/job-trigger.service';
 import {
@@ -24,18 +24,37 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
     return { success: true, jobs, count: jobs.length };
   })
 
-  .get('/status', async ({ request, set }) => {
-    // This endpoint includes queue, scheduler and publication state. Keep it
-    // service-only even when the broader mutation guard is disabled in a local
-    // environment.
-    const verification = await verifyRequestApiKey(request);
-    if (verification.status !== 'ok') {
-      const failure = apiKeyFailureHttpResponse(verification.status);
-      set.status = failure.httpStatus;
-      return { success: false, error: failure.error };
-    }
-    return { success: true, ...(await getJobsStatus()) };
-  })
+  .get(
+    '/status',
+    async ({ request, query, set }) => {
+      // This endpoint includes queue, scheduler and publication state. Keep it
+      // service-only even when the broader mutation guard is disabled in a local
+      // environment.
+      const verification = await verifyRequestApiKey(request);
+      if (verification.status !== 'ok') {
+        const failure = apiKeyFailureHttpResponse(verification.status);
+        set.status = failure.httpStatus;
+        return { success: false, error: failure.error };
+      }
+      const window = query.window ?? '1h';
+      return { success: true, ...(await getJobsStatus(window)) };
+    },
+    {
+      query: t.Object({
+        window: t.Optional(
+          t.Union([
+            t.Literal('15m'),
+            t.Literal('1h'),
+            t.Literal('6h'),
+            t.Literal('24h'),
+            t.Literal('3d'),
+            t.Literal('7d'),
+            t.Literal('28d'),
+          ]),
+        ),
+      }),
+    },
+  )
 
   .post('/:name/trigger', async ({ params, body, request, set }) => {
     const { name } = params;

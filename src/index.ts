@@ -20,6 +20,7 @@ import { playerValuesAPI } from './api/player-values.api';
 import { playersAPI } from './api/players.api';
 import { registerMutationRateLimit } from './api/rate-limit';
 import { checkReadiness } from './api/health';
+import { clientSignalsAPI } from './api/client-signals.api';
 import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
 import { understatAPI } from './api/understat.api';
@@ -199,6 +200,7 @@ const app = new Elysia()
   .use(trendsAPI)
   .use(contentAPI)
   .use(dataGovernanceAPI)
+  .use(clientSignalsAPI)
 
   // ================================
   // Cron Job Registration

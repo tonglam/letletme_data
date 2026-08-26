@@ -3,8 +3,11 @@ import { describe, expect, it } from 'bun:test';
 import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   normalizePriceChangeBoard,
+  parsePublishedPriceChangeBoard,
   priceChangeBootstrapEdgeCacheKey,
   PriceChangePredictionValidationError,
+  PRICE_CHANGE_MAX_AGE_MS,
+  PRICE_CHANGE_READY_MS,
   PRICE_CHANGE_STALE_MS,
   requestPriceChangeBootstrap,
 } from '../../src/services/price-change-predictions.service';
@@ -201,5 +204,47 @@ describe('price-change prediction normalization', () => {
       new Date(Date.parse('2026-08-22T00:00:00Z') + 10 * 60 * 1_000).toISOString(),
     );
     expect(PRICE_CHANGE_STALE_MS).toBe(60 * 60 * 1_000);
+  });
+
+  it('hard-expires the canonical publication at exactly one hour', () => {
+    const fetchedAt = new Date('2026-08-22T00:00:00.000Z');
+    const board = normalizePriceChangeBoard(bootstrapFixture(), fetchedAt);
+    const publication = {
+      manifest: {
+        dataset: 'fpl:price-changes',
+        eventId: null,
+        state: 'active',
+        publicationId: 'price-publication-test',
+        revision: 1,
+        items: [{ name: 'context' }, { name: 'players' }],
+      },
+      items: {
+        context: {
+          schemaVersion: 1,
+          source: 'FPL_BOOTSTRAP',
+          fetchedAt: fetchedAt.toISOString(),
+          staleAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_READY_MS).toISOString(),
+          hardExpiresAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS).toISOString(),
+          deadline: board.deadline,
+          nextDeadlines: board.nextDeadlines,
+          expectedPlayerCount: board.expectedPlayerCount,
+          observedPlayerCount: board.observedPlayerCount,
+        },
+        players: board.players,
+      },
+    } as never;
+
+    expect(
+      parsePublishedPriceChangeBoard(
+        publication,
+        new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS - 1),
+      )?.status,
+    ).toBe('STALE');
+    expect(
+      parsePublishedPriceChangeBoard(
+        publication,
+        new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS),
+      ),
+    ).toMatchObject({ status: 'UNAVAILABLE', revision: 'unavailable' });
   });
 });
