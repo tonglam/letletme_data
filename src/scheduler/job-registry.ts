@@ -73,6 +73,16 @@ export type CatchUpPolicy =
   | 'event-checkpoint'
   | 'none';
 
+/**
+ * Some definitions retain a legacy queueName for payload/migration
+ * compatibility even though lane-v2 sends them to a dedicated queue. Keep
+ * those overrides in the registry module so scheduler and status/catalog
+ * paths cannot disagree about the effective lane.
+ */
+export function schedulerQueueLaneOverride(jobName: string): string | undefined {
+  return jobName === 'my-fpl-finalization' ? 'my-fpl-orchestration' : undefined;
+}
+
 export type SchedulerObligationPlan = Readonly<{
   scopeKey: string;
   periodKey: string;

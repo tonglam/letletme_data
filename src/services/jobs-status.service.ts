@@ -22,7 +22,7 @@ import {
   schedulerObligationSummary,
 } from '../repositories/scheduler-obligations';
 import { getSchedulerLaneTargets, listSchedulerLanes } from '../repositories/scheduler-lanes';
-import { schedulerRegistry } from '../scheduler/job-registry';
+import { schedulerQueueLaneOverride, schedulerRegistry } from '../scheduler/job-registry';
 import { eventRepository } from '../repositories/events';
 import { getMyFplSnapshotOperationalStatus } from './my-fpl-snapshot-publication.service';
 import { readSchedulerProgress, isSchedulerProgressHealthy } from '../scheduler/scheduler-progress';
@@ -427,10 +427,12 @@ export async function getJobsStatus(
       queueName:
         getConfig().QUEUE_LANES_V2_ENABLED && definition.name === 'tournament-official-h2h-live'
           ? 'official-h2h-live'
-          : getConfig().QUEUE_LANES_V2_ENABLED && definition.queueName === 'maintenance'
-            ? (MAINTENANCE_JOB_LANES[definition.name as keyof typeof MAINTENANCE_JOB_LANES] ??
-              'maintenance')
-            : definition.queueName,
+          : getConfig().QUEUE_LANES_V2_ENABLED && schedulerQueueLaneOverride(definition.name)
+            ? schedulerQueueLaneOverride(definition.name)
+            : getConfig().QUEUE_LANES_V2_ENABLED && definition.queueName === 'maintenance'
+              ? (MAINTENANCE_JOB_LANES[definition.name as keyof typeof MAINTENANCE_JOB_LANES] ??
+                'maintenance')
+              : definition.queueName,
       executionPolicy: definition.executionPolicy?.kind ?? null,
       successPredicate: definition.successPredicate,
       contractKey: dataContractRegistry.find((contract) =>
