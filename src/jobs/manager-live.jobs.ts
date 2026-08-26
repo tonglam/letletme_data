@@ -73,7 +73,7 @@ export async function clearManagerLiveHotScope(
 
 export async function reconcileManagerLiveHotScopeRoster(
   scope: ManagerLiveRefreshScope,
-): Promise<ManagerLiveHotScopeState> {
+): Promise<ManagerLiveHotScopeState | null> {
   const redis = await queueRedisSingleton.getClient();
   return reconcileManagerLiveHotStateRoster(redis, scope);
 }

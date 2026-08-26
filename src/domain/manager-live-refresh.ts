@@ -270,8 +270,7 @@ return ARGV[2]
 const RECONCILE_HOT_SCOPE_ROSTER_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
 if not current then
-  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
-  return ARGV[2]
+  return nil
 end
 local state = cjson.decode(current)
 local candidate = cjson.decode(ARGV[2])
@@ -392,7 +391,7 @@ export async function initializeManagerLiveHotState(
 export async function reconcileManagerLiveHotStateRoster(
   redis: ManagerLiveHotStateRedis,
   scope: ManagerLiveRefreshScope,
-): Promise<ManagerLiveHotScopeState> {
+): Promise<ManagerLiveHotScopeState | null> {
   const normalizedScope = {
     ...scope,
     entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
@@ -412,9 +411,7 @@ export async function reconcileManagerLiveHotStateRoster(
     String(MANAGER_LIVE_HOT_SCOPE_SECONDS),
     JSON.stringify(candidate),
   );
-  const state = parseManagerLiveHotScopeState(typeof raw === 'string' ? raw : null);
-  if (state) return state;
-  throw new Error('Manager live hot scope roster reconciliation failed');
+  return parseManagerLiveHotScopeState(typeof raw === 'string' ? raw : null);
 }
 
 export async function loadManagerLiveHotState(

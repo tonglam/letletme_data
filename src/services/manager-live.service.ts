@@ -2561,7 +2561,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       const dispatchState = await dispatchManagerLiveRefreshBounded({
         season,
         eventId: input.eventId,
-        entryIds: uniqueEntryIds,
+        entryIds: coverageRosterEntryIds,
         ...(input.tournamentId === undefined ? {} : { tournamentId: input.tournamentId }),
         ...(currentTournamentHotRosterRevision === undefined
           ? {}

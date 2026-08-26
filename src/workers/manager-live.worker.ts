@@ -239,6 +239,14 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
         ? {}
         : { rosterRevision: authoritativeRosterRevision }),
     });
+    if (!hotState) {
+      logInfo('Manager live refresh stopped after hot scope expired during reconciliation', {
+        eventId: job.data.eventId,
+        tournamentId: job.data.tournamentId ?? null,
+        generation: job.data.generation,
+      });
+      return { stopped: 'expired-hot-scope' as const };
+    }
     const selectedCursors = selectManagerLiveJobCursors({
       attemptsMade: job.attemptsMade,
       jobData: job.data,

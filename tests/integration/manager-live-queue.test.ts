@@ -9,6 +9,7 @@ import {
   MANAGER_LIVE_HOT_SCOPE_SECONDS,
   loadManagerLiveHotState,
   managerLiveHotStateKey,
+  reconcileManagerLiveHotStateRoster,
   removeManagerLiveHotState,
   type ManagerLiveRefreshScope,
 } from '../../src/domain/manager-live-refresh';
@@ -134,6 +135,14 @@ describe('manager live queue integration', () => {
       generation: second.data.generation,
       rosterRevision: 'authoritative:sync-b',
     });
+  });
+
+  test('does not recreate an expired hot scope from worker reconciliation', async () => {
+    const redis = await queueRedisSingleton.getClient();
+    await redis.unlink(managerLiveHotStateKey(scope));
+
+    await expect(reconcileManagerLiveHotStateRoster(redis, scope)).resolves.toBeNull();
+    expect(await redis.exists(managerLiveHotStateKey(scope))).toBe(0);
   });
 
   test('does not schedule a follow-up after the hot marker expires', async () => {
