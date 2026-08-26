@@ -12,6 +12,10 @@ import {
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
+const resultPicksMigration = readFileSync(
+  'migrations/0052_entry_event_result_picks.sql',
+  'utf8',
+);
 const retainedRevisionMigration = readFileSync(
   'migrations/0038_my_fpl_retained_revision_reads.sql',
   'utf8',
@@ -144,6 +148,16 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('entryPicks.length === 15');
     expect(publicationService).toContain('entryPicks.every((pick) => pick.total_points !== null');
     expect(publicationService).toContain('same transaction as the immutable');
+  });
+
+  test('binds final picks to the immutable result row', () => {
+    expect(resultPicksMigration).toContain('ADD COLUMN IF NOT EXISTS event_picks jsonb');
+    expect(resultPicksMigration).toContain('entry_event_results_event_picks_array');
+    expect(publicationService).toContain('result.event_picks');
+    expect(publicationService).toContain('overlayFinalResultPicks');
+    expect(publicationService).toContain(
+      'final result picks are incomplete or changed for event',
+    );
   });
 
   test('serializes publication timestamps for the production postgres adapter', () => {

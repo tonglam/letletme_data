@@ -403,6 +403,7 @@ type EventResult = {
   event_chip: string | null;
   played_captain_element_id: number | null;
   captain_points: number | null;
+  event_picks: unknown;
   automatic_substitutions: unknown;
   team_value: number | null;
   bank: number | null;
@@ -650,6 +651,91 @@ const mapPick = (
   };
 };
 
+type CanonicalEventPick = Readonly<{
+  element: number;
+  position: number;
+  multiplier: number;
+  is_captain: boolean;
+  is_vice_captain: boolean;
+}>;
+
+const parseCanonicalEventPicks = (value: unknown): CanonicalEventPick[] | null => {
+  if (!Array.isArray(value) || value.length !== 15) return null;
+  const picks = value.flatMap((candidate): CanonicalEventPick[] => {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return [];
+    const row = candidate as JsonRecord;
+    if (
+      typeof row.element !== 'number' ||
+      !Number.isSafeInteger(row.element) ||
+      row.element <= 0 ||
+      typeof row.position !== 'number' ||
+      !Number.isSafeInteger(row.position) ||
+      row.position < 1 ||
+      row.position > 15 ||
+      typeof row.multiplier !== 'number' ||
+      !Number.isSafeInteger(row.multiplier) ||
+      row.multiplier < 0 ||
+      row.multiplier > 3 ||
+      typeof row.is_captain !== 'boolean' ||
+      typeof row.is_vice_captain !== 'boolean'
+    ) {
+      return [];
+    }
+    return [
+      {
+        element: row.element,
+        position: row.position,
+        multiplier: row.multiplier,
+        is_captain: row.is_captain,
+        is_vice_captain: row.is_vice_captain,
+      },
+    ];
+  });
+  if (
+    picks.length !== 15 ||
+    new Set(picks.map((pick) => pick.element)).size !== 15 ||
+    new Set(picks.map((pick) => pick.position)).size !== 15 ||
+    picks.filter((pick) => pick.is_captain).length !== 1 ||
+    picks.filter((pick) => pick.is_vice_captain).length !== 1 ||
+    picks.some((pick) => pick.is_captain && pick.is_vice_captain)
+  ) {
+    return null;
+  }
+  return picks.sort((left, right) => left.position - right.position);
+};
+
+/**
+ * Final score rows carry the immutable pick payload used by FPL to calculate
+ * the result. Display fields (player name, fixture and live stats) still come
+ * from the event pick read model, but score-bearing fields must be overlaid
+ * from the result payload. A mismatch fails closed instead of combining two
+ * different team revisions.
+ */
+const overlayFinalResultPicks = (
+  result: EventResult,
+  displayRows: readonly PickRow[],
+): PickRow[] | null => {
+  const finalPicks = parseCanonicalEventPicks(result.event_picks);
+  if (!finalPicks || displayRows.length !== 15) return null;
+  const displayByElement = new Map(displayRows.map((row) => [row.element, row] as const));
+  if (displayByElement.size !== 15) return null;
+  const merged = finalPicks.map((pick) => {
+    const display = displayByElement.get(pick.element);
+    if (!display || display.position !== pick.position) return null;
+    return {
+      ...display,
+      position: pick.position,
+      multiplier: pick.multiplier,
+      is_captain: pick.is_captain,
+      is_vice_captain: pick.is_vice_captain,
+      active_chip: pick.position === 1 ? display.active_chip : null,
+      transfers: pick.position === 1 ? display.transfers : null,
+      transfers_cost: pick.position === 1 ? display.transfers_cost : null,
+    } satisfies PickRow;
+  });
+  return merged.every((row): row is PickRow => row !== null) ? merged : null;
+};
+
 /**
  * Current-event pick detail must use the same immutable player-live payload as
  * the projected manager headline. The mutable player_gameweek_stats table is
@@ -829,6 +915,7 @@ const projectedResult = (
       ? (captain.total_points ?? 0) *
         (effectiveLineup.get(captain.element)?.effectiveMultiplier ?? 1)
       : 0,
+    event_picks: canonicalEventPicks(picks),
     automatic_substitutions: automaticSubstitutions,
     team_value: entry.team_value,
     bank: entry.bank,
@@ -1585,6 +1672,7 @@ async function captureMyFplSnapshotOnce(
              result.overall_rank, result.event_transfers, result.event_transfers_cost,
              result.event_net_points, result.event_bench_points, result.event_auto_sub_points,
              result.event_chip::text, result.played_captain_element_id, result.captain_points,
+             result.event_picks,
              result.automatic_substitutions, result.team_value, result.bank, result.rich_synced_at,
              NULL::text AS input_revision, NULL::text AS score_revision
       FROM competition.entry_event_results result
@@ -1756,6 +1844,21 @@ async function captureMyFplSnapshotOnce(
       ORDER BY pick.entry_id, pick.position
     `;
     const picksByEntry = groupBy(pickRows, (row) => row.entry_id);
+
+    if (kind === 'FINAL') {
+      for (const current of currentResults.values()) {
+        const finalPicks = overlayFinalResultPicks(
+          current,
+          picksByEntry.get(current.entry_id) ?? [],
+        );
+        if (!finalPicks) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${current.entry_id} final result picks are incomplete or changed for event ${eventId}`,
+          );
+        }
+        picksByEntry.set(current.entry_id, finalPicks);
+      }
+    }
 
     if (kind === 'FINAL' && event.data_checked_at) {
       for (const current of currentResults.values()) {

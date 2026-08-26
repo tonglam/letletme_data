@@ -3150,6 +3150,7 @@ export const entryEventResultsInCompetition = competition.table(
     eventChip: chipInCompetition('event_chip'),
     playedCaptainElementId: integer('played_captain_element_id'),
     captainPoints: integer('captain_points'),
+    eventPicks: jsonb('event_picks').default([]).notNull(),
     automaticSubstitutions: jsonb('automatic_substitutions'),
     overallPoints: integer('overall_points').default(0).notNull(),
     overallRank: integer('overall_rank').default(0).notNull(),

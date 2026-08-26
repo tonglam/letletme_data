@@ -1,7 +1,6 @@
-import { and, asc, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 
 import {
-  entryEventPicksInCompetition,
   entryEventResultsInCompetition,
   eventsInFpl,
   type DbEntryEventResult,
@@ -27,7 +26,6 @@ import {
 
 type AutoSubItem = RawFPLEntryEventPicksResponse['automatic_subs'][number];
 type ResultStorage = typeof entryEventResultsInCompetition.$inferSelect;
-type PickStorage = typeof entryEventPicksInCompetition.$inferSelect;
 
 type EntryEventTotalsRow = {
   entryId: number;
@@ -81,19 +79,13 @@ export function deriveBenchPointsFromEffectiveMultipliers(
     .reduce((total, pick) => total + (elementsPoints.get(pick.element) ?? 0), 0);
 }
 
-function hydrateResult(row: ResultStorage, picks: readonly PickStorage[]): DbEntryEventResult {
+function hydrateResult(row: ResultStorage): DbEntryEventResult {
   return {
     ...row,
     id: row.sourceResultId,
     eventPlayedCaptain: row.playedCaptainElementId,
     eventCaptainPoints: row.captainPoints,
-    eventPicks: picks.map((pick) => ({
-      element: pick.elementId,
-      position: pick.position,
-      multiplier: pick.multiplier,
-      is_captain: pick.isCaptain,
-      is_vice_captain: pick.isViceCaptain,
-    })),
+    eventPicks: row.eventPicks,
     eventAutoSub: row.automaticSubstitutions,
   };
 }
@@ -378,41 +370,17 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const results: DbEntryEventResult[] = [];
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
           const chunk = uniqueEntryIds.slice(index, index + 1000);
-          const [resultRows, pickRows] = await Promise.all([
-            db
-              .select()
-              .from(entryEventResultsInCompetition)
-              .where(
-                and(
-                  eq(entryEventResultsInCompetition.seasonId, season.seasonId),
-                  eq(entryEventResultsInCompetition.eventId, eventId),
-                  inArray(entryEventResultsInCompetition.entryId, chunk),
-                ),
+          const resultRows = await db
+            .select()
+            .from(entryEventResultsInCompetition)
+            .where(
+              and(
+                eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+                eq(entryEventResultsInCompetition.eventId, eventId),
+                inArray(entryEventResultsInCompetition.entryId, chunk),
               ),
-            db
-              .select()
-              .from(entryEventPicksInCompetition)
-              .where(
-                and(
-                  eq(entryEventPicksInCompetition.seasonId, season.seasonId),
-                  eq(entryEventPicksInCompetition.eventId, eventId),
-                  inArray(entryEventPicksInCompetition.entryId, chunk),
-                ),
-              )
-              .orderBy(
-                asc(entryEventPicksInCompetition.entryId),
-                asc(entryEventPicksInCompetition.position),
-              ),
-          ]);
-          const picksByEntry = new Map<number, PickStorage[]>();
-          for (const pick of pickRows) {
-            const entryPicks = picksByEntry.get(pick.entryId) ?? [];
-            entryPicks.push(pick);
-            picksByEntry.set(pick.entryId, entryPicks);
-          }
-          results.push(
-            ...resultRows.map((row) => hydrateResult(row, picksByEntry.get(row.entryId) ?? [])),
-          );
+            );
+          results.push(...resultRows.map((row) => hydrateResult(row)));
         }
         return results;
       } catch (error) {
@@ -558,6 +526,13 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           eventChip: toNullableDbChip(picks.active_chip),
           playedCaptainElementId: captainPick ? captainPick.element : null,
           captainPoints: captainPick ? captainPointsBase * captainPick.multiplier : null,
+          eventPicks: picks.picks.map((pick) => ({
+            element: pick.element,
+            position: pick.position,
+            multiplier: pick.multiplier,
+            is_captain: pick.is_captain,
+            is_vice_captain: pick.is_vice_captain,
+          })),
           automaticSubstitutions: autoSubs,
           overallPoints: previousOverallPoints + eventLiveScore.netEventPoints,
           overallRank: entryHistory.overall_rank ?? 0,
@@ -590,6 +565,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               eventChip: insert.eventChip,
               playedCaptainElementId: insert.playedCaptainElementId,
               captainPoints: insert.captainPoints,
+              eventPicks: insert.eventPicks,
               automaticSubstitutions: insert.automaticSubstitutions,
               overallPoints: insert.overallPoints,
               overallRank: insert.overallRank,
