@@ -17,6 +17,7 @@ import {
   bigint,
   date,
   numeric,
+  doublePrecision,
   primaryKey,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -666,6 +667,77 @@ export const queueHealthWindowsInOps = ops.table(
       sql`admission_mode = ANY (ARRAY['OPEN','DRAIN_ONLY'])`,
     ),
     check('queue_health_windows_evidence_object', sql`jsonb_typeof(evidence) = 'object'`),
+  ],
+);
+
+export const clientSignalBatchesInOps = ops.table(
+  'client_signal_batches',
+  {
+    batchId: uuid('batch_id').notNull(),
+    client: text().notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    batchRowId: bigint('batch_row_id', { mode: 'number' })
+      .generatedByDefaultAsIdentity()
+      .primaryKey(),
+  },
+  (table) => [
+    uniqueIndex('client_signal_batches_batch_id_unique').on(table.batchId),
+    index('client_signal_batches_received_idx').on(table.receivedAt.desc()),
+    check('client_signal_batches_client_check', sql`client IN ('web','wechat_miniprogram')`),
+  ],
+);
+
+export const clientSignalWindowsInOps = ops.table(
+  'client_signal_windows',
+  {
+    windowId: bigint('window_id', { mode: 'number' }).generatedByDefaultAsIdentity().primaryKey(),
+    windowStart: timestamp('window_start', { withTimezone: true, mode: 'date' }).notNull(),
+    client: text().notNull(),
+    release: text().notNull(),
+    surface: text().notNull(),
+    metric: text().notNull(),
+    deviceGroup: text('device_group').notNull(),
+    sampleSource: text('sample_source').notNull(),
+    result: text().notNull(),
+    bucket: text().notNull(),
+    sampleCount: bigint('sample_count', { mode: 'number' }).default(0).notNull(),
+    valueSum: doublePrecision('value_sum').default(0).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex('client_signal_windows_identity').on(
+      table.windowStart,
+      table.client,
+      table.release,
+      table.surface,
+      table.metric,
+      table.deviceGroup,
+      table.sampleSource,
+      table.result,
+      table.bucket,
+    ),
+    index('client_signal_windows_client_metric_time_idx').on(
+      table.client,
+      table.metric,
+      table.windowStart.desc(),
+    ),
+    index('client_signal_windows_retention_idx').on(table.windowStart),
+    check('client_signal_windows_client_check', sql`client IN ('web','wechat_miniprogram')`),
+    check('client_signal_windows_source_check', sql`sample_source IN ('real','synthetic')`),
+    check(
+      'client_signal_windows_result_check',
+      sql`result IN ('ok','error','timeout','auth_error','stale','unavailable')`,
+    ),
+    check('client_signal_windows_count_check', sql`sample_count > 0`),
+    check('client_signal_windows_value_check', sql`value_sum >= 0`),
+    check(
+      'client_signal_windows_dimensions_check',
+      sql`btrim(release) <> '' AND btrim(surface) <> '' AND btrim(metric) <> '' AND btrim(device_group) <> '' AND btrim(bucket) <> ''`,
+    ),
   ],
 );
 

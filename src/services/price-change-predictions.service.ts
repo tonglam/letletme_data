@@ -682,7 +682,9 @@ export function parsePublishedPriceChangeBoard(
   }
   const ageMs = now.getTime() - fetchedAt;
   if (ageMs < 0) return null;
-  if (ageMs > PRICE_CHANGE_MAX_AGE_MS) return unavailableBoard();
+  // The hard boundary is inclusive: at exactly one hour the last-good
+  // publication is no longer contract-valid for any consumer.
+  if (ageMs >= PRICE_CHANGE_MAX_AGE_MS) return unavailableBoard();
   const board: PriceChangeBoard = {
     status: ageMs < PRICE_CHANGE_READY_MS ? 'READY' : 'STALE',
     source: 'FPL_BOOTSTRAP',

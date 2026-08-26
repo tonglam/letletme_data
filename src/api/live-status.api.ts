@@ -78,6 +78,10 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
     const finishedFixtures = fixtures.filter(
       (fixture) => fixture.finished || fixture.finishedProvisional,
     ).length;
+    const publishedFixtureCount =
+      selectedPublication?.manifest.items.find((item) => item.name === 'fixtures')?.count ?? null;
+    const publishedEventLiveCount =
+      selectedPublication?.manifest.items.find((item) => item.name === 'eventLive')?.count ?? null;
 
     return {
       success: true,
@@ -105,9 +109,8 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
               selectedPublication.manifest.lastSuccessfulFetchAt ??
               selectedPublication.manifest.sourceCheckedAt,
             source: selectedSource,
-            fixtureCount: cachedPublication?.fixtures.length ?? null,
-            eventLiveCount:
-              cachedPublication?.eventLives.length ?? selectedPublication.eventLives.length,
+            fixtureCount: publishedFixtureCount,
+            eventLiveCount: cachedPublication?.eventLives.length ?? publishedEventLiveCount,
           }
         : null,
       coverage: {

@@ -138,6 +138,7 @@ describe('standalone scheduler registry', () => {
         'tournament-trends-repair',
         'bug-report-cleanup',
         'bug-report-screenshot-retention',
+        'client-signal-retention',
         'launch-monitor',
         'post-match-consolidation',
       ]),

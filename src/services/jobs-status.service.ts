@@ -37,6 +37,7 @@ import { dataContractRegistry } from '../domain/data-contracts';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
+import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 
 type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
 type PublicationDelivery = Readonly<{
@@ -113,19 +114,31 @@ export function selectCanonicalPriceChangeContext(input: {
   };
 }
 
-export type JobsStatusWindow = '1h' | '6h' | '3d' | '28d';
+export type JobsStatusWindow = '15m' | '1h' | '6h' | '24h' | '3d' | '7d' | '28d';
 
 export async function getJobsStatus(
   window: JobsStatusWindow = '1h',
 ): Promise<Record<string, unknown>> {
   const season = await seasonRepository.findCurrent();
   const windowMs: Record<JobsStatusWindow, number> = {
+    '15m': 15 * 60_000,
     '1h': 60 * 60_000,
     '6h': 6 * 60 * 60_000,
+    '24h': 24 * 60 * 60_000,
     '3d': 3 * 24 * 60 * 60_000,
+    '7d': 7 * 24 * 60 * 60_000,
     '28d': 28 * 24 * 60 * 60_000,
   };
-  const since = new Date(Date.now() - windowMs[window]);
+  const nowMs = Date.now();
+  const since = new Date(nowMs - windowMs[window]);
+  const clientSignalSince = new Date(
+    Math.floor((nowMs - windowMs[window]) / CLIENT_SIGNAL_WINDOW_MS) * CLIENT_SIGNAL_WINDOW_MS,
+  );
+  // Include the current five-minute bucket, whose samples are still arriving,
+  // while keeping both query boundaries aligned to stored window_start values.
+  const clientSignalUntil = new Date(
+    (Math.floor(nowMs / CLIENT_SIGNAL_WINDOW_MS) + 1) * CLIENT_SIGNAL_WINDOW_MS,
+  );
   const [
     obligations,
     schedulerHeartbeat,
@@ -140,6 +153,7 @@ export async function getJobsStatus(
     governanceCases,
     queueHealthWindows,
     governanceCaseCount,
+    clientSignals,
   ] = await Promise.all([
     schedulerObligationSummary(),
     readRuntimeHeartbeat('scheduler'),
@@ -169,16 +183,22 @@ export async function getJobsStatus(
       // Raw one-minute samples are useful for short incident windows.  A
       // 28-day view is deliberately reduced to one SQL row per queue/hour so
       // the status endpoint cannot build a million-row JSON response.
-      ...(window === '28d' ? { bucket: 'hour' as const } : {}),
-      limit:
-        window === '28d'
-          ? Math.min(100_000, allQueueNames.length * Math.ceil(windowMs[window] / 3_600_000) + 100)
-          : Math.min(
-              100_000,
-              Math.max(1_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
-            ),
+      ...(['7d', '28d'].includes(window) ? { bucket: 'hour' as const } : {}),
+      limit: ['7d', '28d'].includes(window)
+        ? Math.min(100_000, allQueueNames.length * Math.ceil(windowMs[window] / 3_600_000) + 100)
+        : Math.min(
+            100_000,
+            Math.max(1_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
+          ),
     }).catch(() => []),
     countGovernanceCases().catch(() => 0),
+    getClientSignalSummary(clientSignalSince, clientSignalUntil).catch(() => ({
+      windowStart: clientSignalSince.toISOString(),
+      windowEnd: clientSignalUntil.toISOString(),
+      sampleCount: 0,
+      groups: [],
+      unavailable: true,
+    })),
   ]);
   const scheduler = Boolean(schedulerHeartbeat && (await checkRuntimeHeartbeat('scheduler')));
   const queueWorker = Boolean(queueWorkerHeartbeat && (await checkRuntimeHeartbeat('queueWorker')));
@@ -251,7 +271,7 @@ export async function getJobsStatus(
       ? 'UNAVAILABLE'
       : ageMs < PRICE_CHANGE_READY_MS
         ? 'READY'
-        : ageMs <= PRICE_CHANGE_MAX_AGE_MS
+        : ageMs < PRICE_CHANGE_MAX_AGE_MS
           ? 'STALE'
           : 'UNAVAILABLE';
   const priceChangeObligation = await schedulerObligationStatus({
@@ -459,7 +479,7 @@ export async function getJobsStatus(
     },
     window,
     queueHealthWindows,
-    queueHealthWindowGranularity: window === '28d' ? 'hour' : 'raw',
+    queueHealthWindowGranularity: ['7d', '28d'].includes(window) ? 'hour' : 'raw',
     errorBudgetBurn: {
       target: 0.99,
       eligible: eligibleWindows.length,
@@ -486,6 +506,7 @@ export async function getJobsStatus(
     },
     governanceCases: [...governanceCaseBuckets.values()],
     governanceCaseCount,
+    clientSignals,
     admissions: queues
       .filter((queue) => queue.admission)
       .map((queue) => ({ name: queue.name, admission: queue.admission })),

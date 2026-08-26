@@ -41,6 +41,7 @@ export const MAINTENANCE_JOB_LANES = {
   [MAINTENANCE_JOBS.TOURNAMENT_TRENDS]: 'data-repair',
   [MAINTENANCE_JOBS.BUG_REPORT_CLEANUP]: 'housekeeping',
   [MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION]: 'housekeeping',
+  [MAINTENANCE_JOBS.CLIENT_SIGNAL_RETENTION]: 'housekeeping',
   [MAINTENANCE_JOBS.LAUNCH_MONITOR]: 'housekeeping',
   [MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION]: 'my-fpl-orchestration',
   [MAINTENANCE_JOBS.ENTRY_ONBOARDING]: 'entry-onboarding',
@@ -165,6 +166,12 @@ export const enqueueBugReportScreenshotRetention = (
   options?: MaintenanceEnqueueOptions,
 ) =>
   enqueueMaintenanceJob(season, MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION, source, options);
+
+export const enqueueClientSignalRetention = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.CLIENT_SIGNAL_RETENTION, source, options);
 
 export const enqueueLaunchMonitor = (
   season: FplSeasonRef,

@@ -2,6 +2,7 @@ import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { runBugReportCleanup } from '../services/bug-report-cleanup.service';
 import { runBugReportScreenshotRetention } from '../services/bug-report-screenshot-retention.service';
+import { purgeClientSignalRetention } from '../services/client-signals.service';
 import { repairPlayerSeasonSummaries } from '../services/player-season-summaries.service';
 import { runPlayerMarketFreshnessWatchdog } from '../jobs/player-market-freshness.jobs';
 import { repairTournamentTrendScopes } from '../jobs/tournament-trends-repair.jobs';
@@ -121,6 +122,8 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
         }
         case MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION:
           return runBugReportScreenshotRetention();
+        case MAINTENANCE_JOBS.CLIENT_SIGNAL_RETENTION:
+          return purgeClientSignalRetention();
         case MAINTENANCE_JOBS.LAUNCH_MONITOR:
           return runLaunchMonitor({ source: 'cron' });
         case MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION:
