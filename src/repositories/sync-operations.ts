@@ -142,6 +142,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function sourceCheckedAtFromManifest(value: unknown): Date | null {
+  if (!isRecord(value) || typeof value.sourceCheckedAt !== 'string') return null;
+  const timestamp = new Date(value.sourceCheckedAt);
+  return Number.isFinite(timestamp.getTime()) ? timestamp : null;
+}
+
 function hasFixtureBreakdownEvidence(value: unknown): value is EventLive {
   if (!isRecord(value) || !Array.isArray(value.fixtureBreakdown)) return false;
   const fixtureIds = new Set<number>();
@@ -823,6 +829,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .select({
             publicationId: datasetPublicationsInOps.publicationId,
             revision: datasetPublicationsInOps.revision,
+            manifest: datasetPublicationsInOps.manifest,
           })
           .from(datasetPublicationsInOps)
           .where(
@@ -840,6 +847,34 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             'A newer dataset publication is already active for this scope',
             'DATASET_PUBLICATION_STALE_ACTIVATION',
           );
+        }
+
+        // Revisions are allocation order, not provider source order.  A
+        // delayed archived Core repair can therefore have a larger revision
+        // than a newer live publication.  Fence Core activation by the source
+        // capture time while the active row is locked, so the old snapshot can
+        // never retire the newer authoritative publication.
+        if (input.dataset === 'fpl:core' && activeRows.length > 0) {
+          const candidateSourceCheckedAt = sourceCheckedAtFromManifest(input.manifest);
+          if (!candidateSourceCheckedAt) {
+            throw new DatabaseError(
+              'Core publication source capture timestamp is invalid',
+              'CORE_PUBLICATION_SOURCE_INVALID',
+            );
+          }
+          const activeSourceCheckedAt = sourceCheckedAtFromManifest(activeRows[0].manifest);
+          if (!activeSourceCheckedAt) {
+            throw new DatabaseError(
+              'Active Core publication source capture timestamp is unavailable',
+              'CORE_PUBLICATION_SOURCE_UNAVAILABLE',
+            );
+          }
+          if (activeSourceCheckedAt.getTime() > candidateSourceCheckedAt.getTime()) {
+            throw new DatabaseError(
+              'A newer Core source publication is already active',
+              'CORE_SNAPSHOT_STALE_SOURCE',
+            );
+          }
         }
 
         const runRows = await tx

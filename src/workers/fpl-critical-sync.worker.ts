@@ -578,6 +578,20 @@ async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
           : {}),
       }),
   );
+  if (result.outcome === 'noop') {
+    // An archived watcher repair can legitimately lose a source-time race to
+    // a newer Core publication.  syncCoreSnapshot records that publication
+    // as skipped; the blocker is therefore resolved successfully and the
+    // price lane may continue with its latest desired target.
+    const unblocked = await unblockSchedulerLane({ blockerJobId: blockerId, success: true });
+    if (!unblocked) throw new Error('Core repair stale-source unblock CAS failed');
+    logInfo('Core repair skipped stale archived source and unblocked price lane', {
+      laneId,
+      dispatchGeneration,
+      blockerJobId: blockerId,
+    });
+    return result;
+  }
   if (result.outcome !== 'ready' || !result.publicationId || result.revision === undefined) {
     throw new Error('Core repair did not produce a durable publication');
   }
