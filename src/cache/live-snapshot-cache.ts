@@ -134,6 +134,25 @@ export async function readLiveSnapshotCache(
   };
 }
 
+/**
+ * Read the active immutable live publication only when it matches a caller's
+ * request-pinned reference. A changed active pointer is an explicit revision
+ * miss; callers must retry with a new reference instead of mixing payloads.
+ */
+export async function readLiveSnapshotCacheByReference(
+  season: string,
+  eventId: number,
+  reference: { publicationId: string; revision: number | string },
+  redis?: Redis,
+): Promise<LiveSnapshotCacheContents | null> {
+  const snapshot = await readLiveSnapshotCache(season, eventId, redis);
+  if (!snapshot) return null;
+  return snapshot.manifest.publicationId === reference.publicationId &&
+    String(snapshot.manifest.revision) === String(reference.revision)
+    ? snapshot
+    : null;
+}
+
 export async function retireLiveSnapshotCache(
   season: string,
   eventId: number,

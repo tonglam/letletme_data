@@ -40,7 +40,7 @@ describe('My FPL daily snapshot publication contract', () => {
       eventId: 1,
       revision: 1,
       snapshotDate: '2026-08-24',
-      sourceCheckedAt: new Date('2026-08-24T00:00:00.000Z'),
+      sourceCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
       publishedAt: new Date('2026-08-24T00:00:01.000Z'),
       kind: 'PROVISIONAL',
       expectedEntryCount: 1,
@@ -49,6 +49,12 @@ describe('My FPL daily snapshot publication contract', () => {
       expectedTournamentCount: 1,
       readyTournamentCount: 1,
       contentSha256: 'a'.repeat(64),
+      scoreSource: 'FPL_EVENT_LIVE',
+      livePublicationId: '00000000-0000-4000-8000-000000000001',
+      liveRevision: '8',
+      algorithmVersion: 'fpl-projected-autosubs-v1',
+      sourceMinCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
+      sourceMaxCheckedAt: new Date('2026-08-23T02:05:00.000Z'),
     };
     let calls = 0;
     let release!: () => void;
@@ -279,6 +285,12 @@ describe('My FPL daily snapshot publication contract', () => {
       expectedTournamentCount: 1,
       readyTournamentCount: 1,
       contentSha256: 'a'.repeat(64),
+      scoreSource: 'FPL_EVENT_LIVE',
+      livePublicationId: '00000000-0000-4000-8000-000000000001',
+      liveRevision: '8',
+      algorithmVersion: 'fpl-projected-autosubs-v1',
+      sourceMinCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
+      sourceMaxCheckedAt: new Date('2026-08-23T02:05:00.000Z'),
     };
     expect(
       isMatchingProvisionalMyFplPublication(active, {

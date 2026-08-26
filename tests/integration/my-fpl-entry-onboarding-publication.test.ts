@@ -5,7 +5,12 @@ assertIntegrationEnv();
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import { redisSingleton } from '../../src/cache/singleton';
+import type { EventLive } from '../../src/domain/event-lives';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
+import {
+  publishLiveSnapshotCache,
+  retireLiveSnapshotCache,
+} from '../../src/cache/live-snapshot-cache';
 import { getDbClient } from '../../src/db/singleton';
 import {
   captureMyFplSnapshot,
@@ -24,7 +29,34 @@ const PLAYER_IDS = Array.from({ length: 15 }, (_, index) => 998_301 + index);
 const SNAPSHOT_DATE = '2026-08-23';
 const CAPTURE_NOW = new Date('2026-08-23T04:00:00.000Z');
 const MANIFEST_KEY = myFplSnapshotRedisManifestKey(SEASON.seasonCode, EVENT_ID);
+const LIVE_PUBLICATION_ID = '00000000-0000-4000-8000-000000000209';
 
+const liveRows: EventLive[] = PLAYER_IDS.map((elementId, index) => ({
+  eventId: EVENT_ID,
+  elementId,
+  minutes: 90,
+  goalsScored: 0,
+  assists: 0,
+  cleanSheets: 0,
+  goalsConceded: 0,
+  ownGoals: 0,
+  penaltiesSaved: 0,
+  penaltiesMissed: 0,
+  yellowCards: 0,
+  redCards: 0,
+  saves: 0,
+  bonus: 0,
+  bps: 0,
+  defensiveContribution: 0,
+  starts: true,
+  expectedGoals: null,
+  expectedAssists: null,
+  expectedGoalInvolvements: null,
+  expectedGoalsConceded: null,
+  inDreamTeam: false,
+  totalPoints: index + 1,
+  createdAt: CAPTURE_NOW,
+}));
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
   await sql`
@@ -73,6 +105,7 @@ async function cleanup(): Promise<void> {
     WHERE season_id = ${SEASON.seasonId} AND season_code = ${SEASON.seasonCode}
   `;
   const cache = await redisSingleton.getClient();
+  await retireLiveSnapshotCache(SEASON.seasonCode, EVENT_ID, cache);
   await cache.unlink(MANIFEST_KEY);
 }
 
@@ -122,6 +155,21 @@ async function seedBase(): Promise<void> {
     FROM unnest(${PLAYER_IDS}::integer[])
       WITH ORDINALITY AS player(element_id, ordinality)
   `;
+  await publishLiveSnapshotCache(
+    {
+      season: SEASON.seasonCode,
+      eventId: EVENT_ID,
+      state: 'live',
+      eventLives: liveRows,
+      fixtures: [],
+    },
+    {
+      revision: 1,
+      publicationId: LIVE_PUBLICATION_ID,
+      sourceCheckedAt: CAPTURE_NOW,
+      lastSuccessfulFetchAt: CAPTURE_NOW,
+    },
+  );
 }
 
 async function seedEntry(entryId: number, complete: boolean): Promise<void> {
@@ -186,8 +234,12 @@ async function seedEntryEventData(entryId: number): Promise<void> {
   `;
 }
 
-beforeAll(seedBase);
-afterAll(cleanup);
+beforeAll(async () => {
+  await seedBase();
+});
+afterAll(async () => {
+  await cleanup();
+});
 
 describe('My FPL onboarding publication correction', () => {
   test('keeps the old active revision until all new-entry data is complete', async () => {

@@ -2,10 +2,20 @@ import { createHash, randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
 
 import { redisSingleton } from '../cache/singleton';
+import { EVENT_LIVE_PROJECTION_ALGORITHM_VERSION } from '../domain/event-live-manager-projection';
+import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { getDbClient } from '../db/singleton';
-import { postgresJsonbCanonicalJson } from '../utils/content-hash';
+import { contentHash, postgresJsonbCanonicalJson } from '../utils/content-hash';
 import { logInfo, logWarn } from '../utils/logger';
+import {
+  buildScoreInputRevision,
+  eventLiveManagerScoreService,
+  loadFreshEventLiveAuthoritySnapshot,
+} from './event-live-manager-scores.service';
+import type { RevisionedEventLiveManagerScore } from './event-live-manager-scores.service';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type MyFplSnapshotKind = 'PROVISIONAL' | 'FINAL';
 
@@ -23,6 +33,12 @@ export type MyFplSnapshotPublication = Readonly<{
   expectedTournamentCount: number;
   readyTournamentCount: number;
   contentSha256: string;
+  scoreSource: 'FPL_EVENT_LIVE' | 'FPL_FINAL_RESULT' | null;
+  livePublicationId: string | null;
+  liveRevision: string | null;
+  algorithmVersion: string | null;
+  sourceMinCheckedAt: Date | null;
+  sourceMaxCheckedAt: Date | null;
   overrideActor?: string | null;
   overrideReason?: string | null;
   idempotencyKey?: string | null;
@@ -51,6 +67,12 @@ export type MyFplSnapshotRedisManifest = Readonly<{
   publishedAt: string;
   kind: MyFplSnapshotKind;
   contentSha256: string;
+  scoreSource: 'FPL_EVENT_LIVE' | 'FPL_FINAL_RESULT' | null;
+  livePublicationId: string | null;
+  liveRevision: string | null;
+  algorithmVersion: string | null;
+  sourceMinCheckedAt: string | null;
+  sourceMaxCheckedAt: string | null;
 }>;
 
 export type MyFplSnapshotOutboxDispatchResult = Readonly<{
@@ -118,7 +140,8 @@ export function isMatchingProvisionalMyFplPublication(
 ): active is MyFplSnapshotPublication {
   return (
     candidate.kind === 'PROVISIONAL' &&
-    active?.kind === candidate.kind &&
+    isCompleteMyFplPublication(active) &&
+    active.kind === candidate.kind &&
     active.snapshotDate === candidate.snapshotDate &&
     active.contentSha256 === candidate.contentSha256
   );
@@ -292,8 +315,13 @@ type PickRow = {
   team_short_name: string | null;
   team_name: string | null;
   element_type: number;
+  team_id: number;
   is_captain: boolean;
   is_vice_captain: boolean;
+  active_chip: string | null;
+  transfers: number | null;
+  transfers_cost: number | null;
+  source_updated_at: Date | string;
   multiplier: number;
   total_points: number | null;
   minutes: number | null;
@@ -354,15 +382,19 @@ type TournamentRow = {
   bank: number | null;
   previous_event_net_points: number | null;
   previous_group_rank: number | null;
+  input_revision: string | null;
+  score_revision: string | null;
 };
 
 type EventResult = {
+  source_result_id: number | null;
+  updated_at: Date | string;
   event_id: number;
   entry_id: number;
   event_points: number;
   event_rank: number | null;
   overall_points: number;
-  overall_rank: number;
+  overall_rank: number | null;
   event_transfers: number;
   event_transfers_cost: number;
   event_net_points: number;
@@ -375,6 +407,8 @@ type EventResult = {
   team_value: number | null;
   bank: number | null;
   rich_synced_at: Date | string | null;
+  input_revision: string | null;
+  score_revision: string | null;
 };
 
 type EntrySource = {
@@ -568,7 +602,14 @@ const mapHistory = (row: HistoryRow): JsonRecord => ({
   bank: row.bank,
 });
 
-const mapPick = (row: PickRow, autoSub: ReadonlySet<number>): JsonRecord => {
+const mapPick = (
+  row: PickRow,
+  autoSub: ReadonlySet<number>,
+  effectiveLineup?: ReadonlyMap<
+    number,
+    { effectiveMultiplier: number; pickActive: boolean; autoSub: boolean }
+  >,
+): JsonRecord => {
   const minutes = integerValue(row.minutes);
   const yellowCards = integerValue(row.yellow_cards);
   const redCards = integerValue(row.red_cards);
@@ -582,7 +623,7 @@ const mapPick = (row: PickRow, autoSub: ReadonlySet<number>): JsonRecord => {
     elementTypeName: positionName(row.element_type),
     isCaptain: row.is_captain,
     isViceCaptain: row.is_vice_captain,
-    multiplier: row.multiplier,
+    multiplier: effectiveLineup?.get(row.element)?.effectiveMultiplier ?? row.multiplier,
     totalPoints: integerValue(row.total_points),
     minutes,
     goalsScored: integerValue(row.goals_scored),
@@ -601,12 +642,48 @@ const mapPick = (row: PickRow, autoSub: ReadonlySet<number>): JsonRecord => {
     bgw: fixtureCount === 0,
     dgw: fixtureCount > 1,
     isPlayed: minutes > 0 || yellowCards > 0 || redCards > 0,
-    autoSub: autoSub.has(row.element),
+    autoSub: effectiveLineup?.get(row.element)?.autoSub ?? autoSub.has(row.element),
     expectedGoals: nullableNumber(row.expected_goals),
     expectedAssists: nullableNumber(row.expected_assists),
     expectedGoalInvolvements: nullableNumber(row.expected_goal_involvements),
     expectedGoalsConceded: nullableNumber(row.expected_goals_conceded),
   };
+};
+
+/**
+ * Current-event pick detail must use the same immutable player-live payload as
+ * the projected manager headline. The mutable player_gameweek_stats table is
+ * still used for historical/final reads, but never for a provisional score.
+ */
+const overlayProjectedEventLiveStats = (
+  eventId: number,
+  rows: PickRow[],
+  eventLives: readonly EventLive[],
+): void => {
+  const liveByElement = new Map(eventLives.map((row) => [row.elementId, row] as const));
+  for (const row of rows) {
+    const live = liveByElement.get(row.element);
+    if (!live) {
+      throw new MyFplSnapshotIncompleteError(
+        `Event-live publication is missing player ${row.element} for event ${eventId}`,
+      );
+    }
+    row.total_points = live.totalPoints;
+    row.minutes = live.minutes;
+    row.goals_scored = live.goalsScored;
+    row.assists = live.assists;
+    row.clean_sheets = live.cleanSheets;
+    row.goals_conceded = live.goalsConceded;
+    row.yellow_cards = live.yellowCards;
+    row.red_cards = live.redCards;
+    row.saves = live.saves;
+    row.bonus = live.bonus;
+    row.bps = live.bps;
+    row.expected_goals = live.expectedGoals;
+    row.expected_assists = live.expectedAssists;
+    row.expected_goal_involvements = live.expectedGoalInvolvements;
+    row.expected_goals_conceded = live.expectedGoalsConceded;
+  }
 };
 
 const mapTransfer = (row: TransferRow): JsonRecord => ({
@@ -624,6 +701,8 @@ const mapTransfer = (row: TransferRow): JsonRecord => ({
 
 const resultPayload = (result: EventResult, picks: JsonRecord[]): JsonRecord => ({
   eventId: result.event_id,
+  inputRevision: result.input_revision,
+  scoreRevision: result.score_revision,
   eventPoints: result.event_points,
   overallPoints: result.overall_points,
   overallRank: result.overall_rank,
@@ -641,6 +720,186 @@ const resultPayload = (result: EventResult, picks: JsonRecord[]): JsonRecord => 
   picks,
   automaticSubstitutions: result.automatic_substitutions ?? [],
 });
+
+const canonicalEventPicks = (picks: readonly PickRow[]) =>
+  [...picks]
+    .sort((left, right) => left.position - right.position || left.element - right.element)
+    .map((pick) => ({
+      element: pick.element,
+      position: pick.position,
+      multiplier: pick.multiplier,
+      is_captain: pick.is_captain,
+      is_vice_captain: pick.is_vice_captain,
+    }));
+
+const finalResultRevisions = (
+  result: EventResult,
+  picks: readonly PickRow[],
+  dataCheckedAt: Date | string,
+): { inputRevision: string; scoreRevision: string } => {
+  const eventPicks = canonicalEventPicks(picks);
+  const picksRevision = contentHash(eventPicks);
+  const resultRevision = contentHash({
+    entryId: result.entry_id,
+    eventId: result.event_id,
+    sourceResultId: result.source_result_id,
+    eventPoints: result.event_points,
+    eventNetPoints: result.event_net_points,
+    overallPoints: result.overall_points,
+    eventTransfers: result.event_transfers,
+    eventTransfersCost: result.event_transfers_cost,
+    eventChip: result.event_chip,
+    playedCaptainElementId: result.played_captain_element_id,
+    captainPoints: result.captain_points,
+    automaticSubstitutions: result.automatic_substitutions,
+    eventPicks,
+  });
+  const inputRevision = contentHash({
+    eventId: result.event_id,
+    entryId: result.entry_id,
+    resultRevision,
+    picksRevision,
+    dataCheckedAt: new Date(dataCheckedAt).toISOString(),
+  });
+  const scoreRevision = contentHash({
+    inputRevision,
+    eventPoints: result.event_points,
+    netEventPoints: result.event_net_points,
+    totalPoints: result.overall_points,
+    transferCost: result.event_transfers_cost,
+  });
+  return { inputRevision, scoreRevision };
+};
+
+type ProjectedManagerScore = RevisionedEventLiveManagerScore;
+
+const projectedResult = (
+  entry: EntrySource,
+  eventId: number,
+  score: ProjectedManagerScore,
+  picks: PickRow[],
+): EventResult => {
+  const positionOnePick = picks.find((pick) => pick.position === 1);
+  const effectiveLineup = new Map(
+    (score.effectiveLineup ?? []).map((row) => [row.elementId, row] as const),
+  );
+  const captain =
+    picks.find((pick) => effectiveLineup.get(pick.element)?.captainForScoring) ??
+    picks.find((pick) => pick.is_captain);
+  const incomingAutoSubs = picks.filter((pick) => {
+    const effective = effectiveLineup.get(pick.element);
+    return effective?.autoSub === true && effective.pickActive === true;
+  });
+  const outgoingAutoSubs = picks.filter((pick) => {
+    const effective = effectiveLineup.get(pick.element);
+    return pick.position <= 11 && effective?.pickActive === false;
+  });
+  const automaticSubstitutions = incomingAutoSubs.map((pick, index) => ({
+    element_in: pick.element,
+    element_out: outgoingAutoSubs[index]?.element ?? null,
+  }));
+  const eventPoints = score.eventPoints;
+  const eventNetPoints = score.netEventPoints;
+  const transferCost = score.transferCost;
+  return {
+    source_result_id: null,
+    updated_at: score.picksCheckedAt,
+    event_id: eventId,
+    entry_id: entry.entry_id,
+    event_points: eventPoints,
+    event_rank: null,
+    overall_points: score.totalPoints ?? entry.overall_points ?? 0,
+    overall_rank: null,
+    event_transfers: positionOnePick?.transfers ?? 0,
+    event_transfers_cost: transferCost,
+    event_net_points: eventNetPoints,
+    event_bench_points: picks.reduce((sum, pick) => {
+      const effective = effectiveLineup.get(pick.element);
+      return sum + (effective?.pickActive === false ? (pick.total_points ?? 0) : 0);
+    }, 0),
+    event_auto_sub_points: picks.reduce((sum, pick) => {
+      const effective = effectiveLineup.get(pick.element);
+      return (
+        sum + (effective?.autoSub ? (pick.total_points ?? 0) * effective.effectiveMultiplier : 0)
+      );
+    }, 0),
+    event_chip: positionOnePick?.active_chip ?? null,
+    played_captain_element_id: captain?.element ?? null,
+    captain_points: captain
+      ? (captain.total_points ?? 0) *
+        (effectiveLineup.get(captain.element)?.effectiveMultiplier ?? 1)
+      : 0,
+    automatic_substitutions: automaticSubstitutions,
+    team_value: entry.team_value,
+    bank: entry.bank,
+    // The projected row is sourced from the pinned fpl:live publication; it
+    // intentionally has no rich result timestamp. Publication provenance is
+    // carried separately by the My FPL header.
+    rich_synced_at: null,
+    input_revision: score.inputRevision ?? null,
+    score_revision: score.revision,
+  };
+};
+
+/**
+ * The capture transaction reads the payload picks/results while the shared
+ * manager-score service reads its own connection. Recompute the canonical
+ * input revisions from the transaction rows and reject the publication if a
+ * pick or finalized baseline changed between those reads. This keeps the
+ * headline, detail picks and tournament row on one score input revision.
+ */
+const projectedScoreUsesCaptureInputs = (
+  eventId: number,
+  entryId: number,
+  entryStartedEvent: number | null,
+  score: ProjectedManagerScore,
+  picks: readonly PickRow[],
+  previousResults: readonly EventResult[],
+  authorityRevision: string,
+): boolean => {
+  const firstScoringEvent = Math.max(1, entryStartedEvent ?? 1);
+  const previousEntryResults = previousResults.filter(
+    (row) =>
+      row.entry_id === entryId && row.event_id >= firstScoringEvent && row.event_id < eventId,
+  );
+  const previousTotal = previousEntryResults.reduce(
+    (sum, row) => sum + (row.event_net_points ?? 0),
+    0,
+  );
+  const inputRevision = buildScoreInputRevision({
+    algorithmVersion: EVENT_LIVE_PROJECTION_ALGORITHM_VERSION,
+    authorityRevision,
+    entryId,
+    entryStartedEvent,
+    picks: picks.map((pick) => ({
+      position: pick.position,
+      elementId: pick.element,
+      elementType: pick.element_type,
+      teamId: pick.team_id,
+      multiplier: pick.multiplier,
+      isCaptain: pick.is_captain,
+      isViceCaptain: pick.is_vice_captain,
+      transfersCost: pick.transfers_cost,
+      sourceUpdatedAt: new Date(pick.source_updated_at),
+      activeChip: pick.active_chip,
+    })),
+    previousTotal: eventId === 1 ? 0 : previousTotal,
+    previousTotalsThroughEventId: eventId > 1 ? eventId - 1 : null,
+    previousResultEvidence: previousEntryResults.map((row) => ({
+      entryId: row.entry_id,
+      eventId: row.event_id,
+      sourceResultId: row.source_result_id,
+      eventNetPoints: row.event_net_points,
+      richSyncedAt: row.rich_synced_at ? new Date(row.rich_synced_at) : null,
+      updatedAt: new Date(row.updated_at),
+    })),
+  });
+  return (
+    score.inputRevision === inputRevision.inputRevision &&
+    score.picksRevision === inputRevision.picksRevision &&
+    score.previousTotalsRevision === inputRevision.previousTotalsRevision
+  );
+};
 
 const average = (values: number[]): number | null =>
   values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -944,6 +1203,12 @@ type MyFplPublicationRow = {
   expected_tournament_count: number;
   ready_tournament_count: number;
   content_sha256: string;
+  score_source: 'FPL_EVENT_LIVE' | 'FPL_FINAL_RESULT' | null;
+  live_publication_id: string | null;
+  live_revision: string | null;
+  algorithm_version: string | null;
+  source_min_checked_at: Date | string | null;
+  source_max_checked_at: Date | string | null;
   override_actor: string | null;
   override_reason: string | null;
   idempotency_key: string | null;
@@ -968,10 +1233,76 @@ function mapMyFplPublication(row: MyFplPublicationRow): MyFplSnapshotPublication
     expectedTournamentCount: row.expected_tournament_count,
     readyTournamentCount: row.ready_tournament_count,
     contentSha256: row.content_sha256,
+    scoreSource: row.score_source,
+    livePublicationId: row.live_publication_id,
+    liveRevision: row.live_revision,
+    algorithmVersion: row.algorithm_version,
+    sourceMinCheckedAt: row.source_min_checked_at ? new Date(row.source_min_checked_at) : null,
+    sourceMaxCheckedAt: row.source_max_checked_at ? new Date(row.source_max_checked_at) : null,
     overrideActor: row.override_actor,
     overrideReason: row.override_reason,
     idempotencyKey: row.idempotency_key,
   };
+}
+
+/**
+ * A publication is readable only when its score authority and source span
+ * describe one complete, internally consistent capture. Incomplete legacy or
+ * partially migrated rows are treated as unavailable; callers must recapture
+ * instead of silently using their payload.
+ */
+export function isCompleteMyFplPublication(
+  publication: MyFplSnapshotPublication | null,
+): publication is MyFplSnapshotPublication {
+  if (!publication) return false;
+  const sourceCheckedAt = publication.sourceCheckedAt.getTime();
+  const sourceMinCheckedAt = publication.sourceMinCheckedAt?.getTime() ?? Number.NaN;
+  const sourceMaxCheckedAt = publication.sourceMaxCheckedAt?.getTime() ?? Number.NaN;
+  if (
+    !Number.isSafeInteger(publication.seasonId) ||
+    publication.seasonId <= 0 ||
+    !Number.isSafeInteger(publication.eventId) ||
+    publication.eventId <= 0 ||
+    !Number.isSafeInteger(publication.revision) ||
+    publication.revision <= 0 ||
+    !Number.isFinite(sourceCheckedAt) ||
+    !Number.isFinite(sourceMinCheckedAt) ||
+    !Number.isFinite(sourceMaxCheckedAt) ||
+    sourceCheckedAt !== sourceMinCheckedAt ||
+    sourceMinCheckedAt > sourceMaxCheckedAt ||
+    !Number.isFinite(publication.publishedAt.getTime()) ||
+    !/^[0-9a-f]{64}$/i.test(publication.contentSha256) ||
+    !Number.isSafeInteger(publication.expectedEntryCount) ||
+    publication.expectedEntryCount < 0 ||
+    !Number.isSafeInteger(publication.readyEntryCount) ||
+    publication.readyEntryCount < 0 ||
+    !Number.isSafeInteger(publication.emptyEntryCount) ||
+    publication.emptyEntryCount < 0 ||
+    publication.readyEntryCount + publication.emptyEntryCount !== publication.expectedEntryCount ||
+    !Number.isSafeInteger(publication.expectedTournamentCount) ||
+    publication.expectedTournamentCount < 0 ||
+    !Number.isSafeInteger(publication.readyTournamentCount) ||
+    publication.readyTournamentCount !== publication.expectedTournamentCount
+  ) {
+    return false;
+  }
+  if (publication.kind === 'PROVISIONAL') {
+    return (
+      publication.scoreSource === 'FPL_EVENT_LIVE' &&
+      publication.livePublicationId !== null &&
+      UUID_RE.test(publication.livePublicationId) &&
+      publication.liveRevision !== null &&
+      publication.liveRevision.trim() !== '' &&
+      publication.algorithmVersion === EVENT_LIVE_PROJECTION_ALGORITHM_VERSION
+    );
+  }
+  return (
+    publication.kind === 'FINAL' &&
+    publication.scoreSource === 'FPL_FINAL_RESULT' &&
+    publication.livePublicationId === null &&
+    publication.liveRevision === null &&
+    publication.algorithmVersion === null
+  );
 }
 
 async function loadActivePublication(
@@ -983,7 +1314,9 @@ async function loadActivePublication(
     SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
            published_at, kind, expected_entry_count, ready_entry_count,
            empty_entry_count, expected_tournament_count, ready_tournament_count,
-           content_sha256, override_actor, override_reason, idempotency_key
+           content_sha256, score_source, live_publication_id, live_revision,
+           algorithm_version, source_min_checked_at, source_max_checked_at,
+           override_actor, override_reason, idempotency_key
     FROM competition.my_fpl_snapshot_publications
     WHERE season_id = ${seasonId} AND event_id = ${eventId} AND active
     ORDER BY revision DESC
@@ -991,7 +1324,8 @@ async function loadActivePublication(
   `;
   const row = rows[0];
   if (!row) return null;
-  return mapMyFplPublication(row);
+  const publication = mapMyFplPublication(row);
+  return isCompleteMyFplPublication(publication) ? publication : null;
 }
 
 async function loadPublicationByIdempotencyKey(
@@ -1004,13 +1338,17 @@ async function loadPublicationByIdempotencyKey(
     SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
            published_at, kind, expected_entry_count, ready_entry_count,
            empty_entry_count, expected_tournament_count, ready_tournament_count,
-           content_sha256, override_actor, override_reason, idempotency_key
+           content_sha256, score_source, live_publication_id, live_revision,
+           algorithm_version, source_min_checked_at, source_max_checked_at,
+           override_actor, override_reason, idempotency_key
     FROM competition.my_fpl_snapshot_publications
     WHERE season_id = ${seasonId} AND event_id = ${eventId}
       AND idempotency_key = ${idempotencyKey}
     LIMIT 1
   `;
-  return rows[0] ? mapMyFplPublication(rows[0]) : null;
+  if (!rows[0]) return null;
+  const publication = mapMyFplPublication(rows[0]);
+  return isCompleteMyFplPublication(publication) ? publication : null;
 }
 
 export async function getActiveMyFplPublication(
@@ -1025,7 +1363,7 @@ export async function hasFinalMyFplPublication(
   eventId: number,
 ): Promise<boolean> {
   const publication = await getActiveMyFplPublication(season, eventId);
-  return publication?.kind === 'FINAL';
+  return publication?.kind === 'FINAL' && isCompleteMyFplPublication(publication);
 }
 
 export async function getMyFplSnapshotOperationalStatus(
@@ -1187,13 +1525,24 @@ async function captureMyFplSnapshotOnce(
     if (kind === 'FINAL' && (!event.finished || !event.data_checked)) {
       throw new MyFplSnapshotIncompleteError(`Event ${eventId} is not finalized by FPL`);
     }
+    if (kind === 'FINAL' && !event.data_checked_at) {
+      throw new MyFplSnapshotIncompleteError(
+        `Event ${eventId} has no data_checked_at freshness fence`,
+      );
+    }
+    if (kind === 'PROVISIONAL' && event.finished && event.data_checked) {
+      throw new MyFplSnapshotIncompleteError(
+        `Event ${eventId} is finalized; a PROVISIONAL capture is not an allowed score source`,
+      );
+    }
     if (event.deadline_time && new Date(event.deadline_time).getTime() > now.getTime()) {
       throw new MyFplSnapshotIncompleteError(`Event ${eventId} deadline has not passed`);
     }
 
     const active = await loadActivePublication(tx, season.seasonId, eventId);
     if (
-      active?.kind === 'FINAL' &&
+      isCompleteMyFplPublication(active) &&
+      active.kind === 'FINAL' &&
       (!overrideActor ||
         !overrideReason ||
         !idempotencyKey ||
@@ -1226,25 +1575,77 @@ async function captureMyFplSnapshotOnce(
       throw new MyFplSnapshotIncompleteError('No current-season entries are available');
     }
 
+    // Provisional scores never read the current event result. Final scores read
+    // the current event only after the final fence has passed.
+    const resultUpperBound = kind === 'FINAL' ? eventId : Math.max(0, eventId - 1);
+
     const resultRows = await tx<EventResult[]>`
-      SELECT event_id, entry_id, event_points, event_rank, overall_points,
-             overall_rank, event_transfers, event_transfers_cost, event_net_points,
-             event_bench_points, event_auto_sub_points, event_chip::text,
-             played_captain_element_id, captain_points, automatic_substitutions,
-             team_value, bank, rich_synced_at
-      FROM competition.entry_event_results
-      WHERE season_id = ${season.seasonId} AND event_id <= ${eventId}
-        AND rich_synced_at IS NOT NULL
-      ORDER BY entry_id, event_id
+      SELECT result.source_result_id, result.updated_at, result.event_id, result.entry_id,
+             result.event_points, result.event_rank, result.overall_points,
+             result.overall_rank, result.event_transfers, result.event_transfers_cost,
+             result.event_net_points, result.event_bench_points, result.event_auto_sub_points,
+             result.event_chip::text, result.played_captain_element_id, result.captain_points,
+             result.automatic_substitutions, result.team_value, result.bank, result.rich_synced_at,
+             NULL::text AS input_revision, NULL::text AS score_revision
+      FROM competition.entry_event_results result
+      JOIN fpl.events result_event
+        ON result_event.season_id = result.season_id
+       AND result_event.event_id = result.event_id
+      WHERE result.season_id = ${season.seasonId}
+        AND result.event_id <= ${resultUpperBound}
+        AND result_event.finished = true
+        AND result_event.data_checked = true
+      ORDER BY result.entry_id, result.event_id
     `;
     const currentResults = new Map(
-      resultRows.filter((row) => row.event_id === eventId).map((row) => [row.entry_id, row]),
+      resultRows
+        .filter((row) => row.event_id === eventId && row.rich_synced_at !== null)
+        .map((row) => [row.entry_id, row]),
     );
+    if (kind === 'FINAL') {
+      const finalFreshAfter = event.data_checked_at
+        ? new Date(event.data_checked_at).getTime()
+        : Number.NaN;
+      for (const entry of entries) {
+        if ((entry.started_event ?? 1) > eventId) continue;
+        const current = currentResults.get(entry.entry_id);
+        if (!current) continue;
+        if (
+          !Number.isFinite(finalFreshAfter) ||
+          current.rich_synced_at === null ||
+          new Date(current.rich_synced_at).getTime() < finalFreshAfter
+        ) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entry.entry_id} final result is older than data_checked_at for event ${eventId}`,
+          );
+        }
+        const firstScoringEvent = Math.max(1, entry.started_event ?? 1);
+        const previous = resultRows
+          .filter(
+            (row) =>
+              row.entry_id === entry.entry_id &&
+              row.event_id >= firstScoringEvent &&
+              row.event_id < eventId,
+          )
+          .at(-1);
+        const previousTotal = previous?.overall_points ?? 0;
+        if (current.overall_points !== previousTotal + current.event_net_points) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entry.entry_id} final total does not reconcile for event ${eventId}`,
+          );
+        }
+        if (current.event_net_points !== current.event_points - current.event_transfers_cost) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entry.entry_id} final net points do not reconcile for event ${eventId}`,
+          );
+        }
+      }
+    }
     const finalizedHistoryEvents = await tx<{ event_id: number }[]>`
       SELECT event_id
       FROM fpl.events
       WHERE season_id = ${season.seasonId}
-        AND event_id <= ${eventId}
+        AND event_id <= ${resultUpperBound}
         AND finished = true
         AND data_checked = true
       ORDER BY event_id
@@ -1268,6 +1669,9 @@ async function captureMyFplSnapshotOnce(
              result.team_value AS "teamValue",
              result.bank
       FROM competition.entry_event_results result
+      JOIN fpl.events result_event
+        ON result_event.season_id = result.season_id
+       AND result_event.event_id = result.event_id
       LEFT JOIN fpl.players player
         ON player.season_id = result.season_id
        AND player.element_id = result.played_captain_element_id
@@ -1284,8 +1688,10 @@ async function captureMyFplSnapshotOnce(
         ON team.season_id = player.season_id
        AND team.team_id = COALESCE(historical_captain_team.team_id, player.team_id)
       WHERE result.season_id = ${season.seasonId}
-        AND result.event_id <= ${eventId}
+        AND result.event_id <= ${resultUpperBound}
         AND result.rich_synced_at IS NOT NULL
+        AND result_event.finished = true
+        AND result_event.data_checked = true
       ORDER BY result.entry_id, result.event_id
     `;
     const mappedHistory = groupBy(historyRows, (row) => row.entry_id);
@@ -1294,7 +1700,9 @@ async function captureMyFplSnapshotOnce(
       SELECT pick.entry_id, pick.element_id AS element, pick.position,
              player.web_name, team.short_name AS team_short_name,
              team.name AS team_name, player.element_type,
-             pick.is_captain, pick.is_vice_captain, pick.multiplier,
+             player.team_id,
+             pick.is_captain, pick.is_vice_captain, pick.active_chip::text,
+             pick.transfers, pick.transfers_cost, pick.multiplier, pick.source_updated_at,
              stats.total_points, stats.minutes, stats.goals_scored,
              stats.assists, stats.clean_sheets, stats.goals_conceded,
              stats.yellow_cards, stats.red_cards, stats.saves, stats.bonus,
@@ -1349,6 +1757,133 @@ async function captureMyFplSnapshotOnce(
     `;
     const picksByEntry = groupBy(pickRows, (row) => row.entry_id);
 
+    if (kind === 'FINAL' && event.data_checked_at) {
+      for (const current of currentResults.values()) {
+        const revisions = finalResultRevisions(
+          current,
+          picksByEntry.get(current.entry_id) ?? [],
+          event.data_checked_at,
+        );
+        current.input_revision = revisions.inputRevision;
+        current.score_revision = revisions.scoreRevision;
+      }
+    }
+
+    if (kind === 'FINAL') {
+      for (const [entryId, current] of currentResults) {
+        const entryPicks = picksByEntry.get(entryId) ?? [];
+        if (entryPicks.length !== 15) continue;
+        const detailPoints = entryPicks.reduce(
+          (sum, pick) => sum + integerValue(pick.total_points) * pick.multiplier,
+          0,
+        );
+        if (detailPoints !== current.event_points) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entryId} final headline/detail mismatch for event ${eventId}`,
+          );
+        }
+      }
+    }
+
+    // The provisional path is one revision-pinned event-live batch. It never
+    // reads the current event's entry_event_results. FINAL uses only the
+    // finalized result path and never invokes the projector.
+    const projectedScoresByEntry = new Map<number, ProjectedManagerScore>();
+    let projectedBatch: Awaited<ReturnType<typeof eventLiveManagerScoreService.load>> = null;
+    if (kind === 'PROVISIONAL') {
+      const activeEntryIds = entries
+        .filter((entry) => (entry.started_event ?? 1) <= eventId)
+        .map((entry) => entry.entry_id);
+      projectedBatch = await eventLiveManagerScoreService.load(season, eventId, activeEntryIds, {
+        includeEffectiveLineup: true,
+      });
+      if (!projectedBatch) {
+        throw new MyFplSnapshotIncompleteError(
+          `Event-live projected score publication is unavailable for event ${eventId}`,
+        );
+      }
+      const pinnedLiveSnapshot = await loadFreshEventLiveAuthoritySnapshot(season, eventId, {
+        publicationId: projectedBatch.publicationId,
+        revision: projectedBatch.liveRevision,
+      });
+      if (!pinnedLiveSnapshot) {
+        throw new MyFplSnapshotIncompleteError(
+          `Event-live publication changed during capture for event ${eventId}`,
+        );
+      }
+      overlayProjectedEventLiveStats(eventId, pickRows, pinnedLiveSnapshot.eventLives);
+      const startedEventByEntry = new Map(
+        entries.map((entry) => [entry.entry_id, entry.started_event] as const),
+      );
+      for (const entryId of activeEntryIds) {
+        const score = projectedBatch.scores.get(entryId);
+        const entryPicks = picksByEntry.get(entryId) ?? [];
+        if (
+          !score ||
+          score.totalPoints === null ||
+          !score.effectiveLineup ||
+          score.effectiveLineup.length !== 15 ||
+          entryPicks.length !== 15
+        ) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entryId} has no complete projected score for event ${eventId}`,
+          );
+        }
+        if (
+          !projectedScoreUsesCaptureInputs(
+            eventId,
+            entryId,
+            startedEventByEntry.get(entryId) ?? null,
+            score,
+            entryPicks,
+            resultRows,
+            projectedBatch.revision,
+          )
+        ) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entryId} projected score input revision changed during capture`,
+          );
+        }
+        if (score.netEventPoints !== score.eventPoints - score.transferCost) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entryId} projected net points do not reconcile for event ${eventId}`,
+          );
+        }
+        const finalizedPreviousTotal =
+          eventId === 1
+            ? 0
+            : resultRows
+                .filter(
+                  (row) =>
+                    row.entry_id === entryId &&
+                    row.event_id >= Math.max(1, startedEventByEntry.get(entryId) ?? 1) &&
+                    row.event_id < eventId,
+                )
+                .reduce((sum, row) => sum + (row.event_net_points ?? 0), 0);
+        if (score.totalPoints !== finalizedPreviousTotal + score.netEventPoints) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entryId} projected total does not reconcile for event ${eventId}`,
+          );
+        }
+        const effectiveByElement = new Map(
+          score.effectiveLineup.map((row) => [row.elementId, row] as const),
+        );
+        const detailPoints = entryPicks.reduce(
+          (sum, pick) =>
+            sum +
+            integerValue(pick.total_points) *
+              (effectiveByElement.get(pick.element)?.effectiveMultiplier ?? 0),
+          0,
+        );
+        if (detailPoints !== score.eventPoints) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entryId} projected headline/detail mismatch for event ${eventId}`,
+          );
+        }
+        projectedScoresByEntry.set(entryId, score);
+      }
+    }
+
     const transferRows = await tx<TransferRow[]>`
       SELECT transfer.entry_id, transfer.event_id,
              COALESCE(result.event_transfers, 0)::integer AS event_transfers,
@@ -1396,10 +1931,29 @@ async function captureMyFplSnapshotOnce(
         ON result.season_id = transfer.season_id
        AND result.entry_id = transfer.entry_id
        AND result.event_id = transfer.event_id
+       AND result.event_id <= ${resultUpperBound}
+       AND EXISTS (
+         SELECT 1
+         FROM fpl.events result_event
+         WHERE result_event.season_id = result.season_id
+           AND result_event.event_id = result.event_id
+           AND result_event.finished = true
+           AND result_event.data_checked = true
+       )
       WHERE transfer.season_id = ${season.seasonId}
         AND transfer.event_id <= ${eventId}
       ORDER BY transfer.entry_id, transfer.event_id, transfer.transfer_time, transfer.transfer_id
     `;
+    if (kind === 'PROVISIONAL') {
+      for (const row of transferRows) {
+        if (row.event_id !== eventId) continue;
+        const score = projectedScoresByEntry.get(row.entry_id);
+        if (!score) continue;
+        row.event_transfers =
+          pickRows.find((pick) => pick.entry_id === row.entry_id)?.transfers ?? row.event_transfers;
+        row.event_transfers_cost = score.transferCost;
+      }
+    }
     const transfersByEntry = groupBy(transferRows, (row) => row.entry_id);
 
     const pastSeasonRows = await tx<
@@ -1427,11 +1981,21 @@ async function captureMyFplSnapshotOnce(
       payload: JsonRecord;
     }> = [];
     const readyEntryIds = new Set<number>();
+    const scoreRevisionsByEntry = new Map<
+      number,
+      { inputRevision: string; scoreRevision: string } | null
+    >();
     let emptyEntryCount = 0;
     for (const entry of entries) {
-      const currentResult = currentResults.get(entry.entry_id);
       const entryPicks = picksByEntry.get(entry.entry_id) ?? [];
       const isEmpty = (entry.started_event ?? 1) > eventId;
+      const projectedScore = projectedScoresByEntry.get(entry.entry_id);
+      const currentResult =
+        kind === 'PROVISIONAL'
+          ? !isEmpty && projectedScore
+            ? projectedResult(entry, eventId, projectedScore, entryPicks)
+            : undefined
+          : currentResults.get(entry.entry_id);
       const uniquePickElements = new Set(entryPicks.map((pick) => pick.element));
       const uniquePickPositions = new Set(entryPicks.map((pick) => pick.position));
       const pastSeasons = pastSeasonsByEntry.get(entry.entry_id) ?? [];
@@ -1457,6 +2021,10 @@ async function captureMyFplSnapshotOnce(
       }
       const complete =
         Boolean(currentResult) &&
+        typeof currentResult?.input_revision === 'string' &&
+        currentResult.input_revision.length > 0 &&
+        typeof currentResult.score_revision === 'string' &&
+        currentResult.score_revision.length > 0 &&
         entryPicks.length === 15 &&
         uniquePickElements.size === 15 &&
         uniquePickPositions.size === 15 &&
@@ -1474,8 +2042,20 @@ async function captureMyFplSnapshotOnce(
       }
       if (isEmpty) emptyEntryCount += 1;
       else readyEntryIds.add(entry.entry_id);
+      scoreRevisionsByEntry.set(
+        entry.entry_id,
+        currentResult?.input_revision && currentResult.score_revision
+          ? {
+              inputRevision: currentResult.input_revision,
+              scoreRevision: currentResult.score_revision,
+            }
+          : null,
+      );
       const autoSubs = automaticSubElements(currentResult?.automatic_substitutions);
-      const picks = entryPicks.map((row) => mapPick(row, autoSubs));
+      const effectiveLineup = projectedScore?.effectiveLineup
+        ? new Map(projectedScore.effectiveLineup.map((row) => [row.elementId, row] as const))
+        : undefined;
+      const picks = entryPicks.map((row) => mapPick(row, autoSubs, effectiveLineup));
       const historyPayload = history.map(mapHistory);
       const gameweek = isEmpty
         ? { state: 'EMPTY', eventId, result: null }
@@ -1544,13 +2124,16 @@ async function captureMyFplSnapshotOnce(
                captain.web_name AS captain_web_name,
                captain_team.short_name AS captain_team_short_name,
                result.captain_points, result.team_value, result.bank,
-               group_result.group_id
+               group_result.group_id,
+               NULL::text AS input_revision,
+               NULL::text AS score_revision
         FROM competition.tournament_entries roster
-        LEFT JOIN competition.entry_event_results result
-          ON result.season_id = roster.season_id
-         AND result.entry_id = roster.entry_id
-         AND result.event_id = ${eventId}
-         AND result.rich_synced_at IS NOT NULL
+		LEFT JOIN competition.entry_event_results result
+		  ON result.season_id = roster.season_id
+		 AND result.entry_id = roster.entry_id
+		 AND result.event_id = ${eventId}
+         AND ${kind === 'FINAL'}
+		 AND result.rich_synced_at IS NOT NULL
         LEFT JOIN fpl.players captain
           ON captain.season_id = roster.season_id
          AND captain.element_id = result.played_captain_element_id
@@ -1575,13 +2158,67 @@ async function captureMyFplSnapshotOnce(
        AND previous.entry_id = current_rows.entry_id
        AND previous.event_id = ${Math.max(1, eventId - 1)}
        AND previous.rich_synced_at IS NOT NULL
+       AND EXISTS (
+         SELECT 1
+         FROM fpl.events previous_event
+         WHERE previous_event.season_id = previous.season_id
+           AND previous_event.event_id = previous.event_id
+           AND previous_event.finished = true
+           AND previous_event.data_checked = true
+       )
       LEFT JOIN competition.tournament_points_group_results previous_group
         ON previous_group.season_id = ${season.seasonId}
        AND previous_group.tournament_id = current_rows.tournament_id
        AND previous_group.event_id = ${Math.max(1, eventId - 1)}
        AND previous_group.entry_id = current_rows.entry_id
+       AND EXISTS (
+         SELECT 1
+         FROM fpl.events previous_group_event
+         WHERE previous_group_event.season_id = ${season.seasonId}
+           AND previous_group_event.event_id = previous_group.event_id
+           AND previous_group_event.finished = true
+           AND previous_group_event.data_checked = true
+       )
       ORDER BY current_rows.tournament_id, current_rows.entry_id
     `;
+    if (kind === 'PROVISIONAL') {
+      const entryById = new Map(entries.map((entry) => [entry.entry_id, entry] as const));
+      for (const row of tournamentRows) {
+        const score = projectedScoresByEntry.get(row.entry_id);
+        const entry = entryById.get(row.entry_id);
+        if (!score || !entry) continue;
+        const projected = projectedResult(
+          entry,
+          eventId,
+          score,
+          picksByEntry.get(row.entry_id) ?? [],
+        );
+        const captain = (picksByEntry.get(row.entry_id) ?? []).find(
+          (pick) => pick.element === projected.played_captain_element_id,
+        );
+        row.event_points = projected.event_points;
+        row.event_cost = projected.event_transfers_cost;
+        row.event_net_points = projected.event_net_points;
+        row.event_rank = null;
+        row.overall_points = projected.overall_points;
+        row.overall_rank = null;
+        row.event_chip = projected.event_chip;
+        row.captain_id = projected.played_captain_element_id;
+        row.captain_web_name = captain?.web_name ?? null;
+        row.captain_team_short_name = captain?.team_short_name ?? null;
+        row.captain_points = projected.captain_points;
+        row.team_value = projected.team_value;
+        row.bank = projected.bank;
+        row.input_revision = projected.input_revision;
+        row.score_revision = projected.score_revision;
+      }
+    } else {
+      for (const row of tournamentRows) {
+        const current = currentResults.get(row.entry_id);
+        row.input_revision = current?.input_revision ?? null;
+        row.score_revision = current?.score_revision ?? null;
+      }
+    }
     const tournamentRowsByTournament = groupBy(tournamentRows, (row) => row.tournament_id);
     const tournamentRowByMembership = new Map(
       tournamentRows.map((row) => [`${row.tournament_id}:${row.entry_id}`, row] as const),
@@ -1598,7 +2235,13 @@ async function captureMyFplSnapshotOnce(
         `${membership.tournament_id}:${membership.entry_id}`,
       );
       const isEmpty = (entry.started_event ?? 1) > eventId;
-      if (!row || (!isEmpty && row.event_net_points === null)) {
+      if (
+        !row ||
+        (!isEmpty &&
+          (row.event_net_points === null ||
+            row.input_revision === null ||
+            row.score_revision === null))
+      ) {
         throw new MyFplSnapshotIncompleteError(
           `Tournament ${membership.tournament_id} is incomplete for entry ${membership.entry_id}`,
         );
@@ -1630,6 +2273,18 @@ async function captureMyFplSnapshotOnce(
             `Tournament ${tournamentId} entry ${sourceRow.entry_id} has no complete event result`,
           );
         }
+        const isEmpty = (entryById.get(sourceRow.entry_id)?.started_event ?? 1) > eventId;
+        const entryRevisions = scoreRevisionsByEntry.get(sourceRow.entry_id) ?? null;
+        if (
+          !isEmpty &&
+          (!entryRevisions ||
+            sourceRow.input_revision !== entryRevisions.inputRevision ||
+            sourceRow.score_revision !== entryRevisions.scoreRevision)
+        ) {
+          throw new MyFplSnapshotIncompleteError(
+            `Tournament ${tournamentId} entry ${sourceRow.entry_id} score revision does not match entry payload`,
+          );
+        }
       }
       const boardRows = sourceRows.map(
         (row) =>
@@ -1656,6 +2311,8 @@ async function captureMyFplSnapshotOnce(
             teamValue: row.team_value,
             bank: row.bank,
             previousEventNetPoints: row.previous_event_net_points,
+            inputRevision: row.input_revision,
+            scoreRevision: row.score_revision,
           }) as JsonRecord,
       );
       const currentRanks = rankForBoard(boardRows, 'eventNetPoints');
@@ -1691,18 +2348,36 @@ async function captureMyFplSnapshotOnce(
       });
     }
 
-    const sourceTimes = resultRows.map((row) => new Date(row.rich_synced_at ?? now).getTime());
+    const sourceTimeInputs: Array<Date | string> = [
+      ...resultRows.flatMap((row) => (row.rich_synced_at ? [row.rich_synced_at] : [])),
+      ...pickRows.map((row) => row.source_updated_at),
+      ...(kind === 'FINAL' && event.data_checked_at ? [event.data_checked_at] : []),
+      ...(kind === 'PROVISIONAL' && projectedBatch ? [projectedBatch.sourceCheckedAt] : []),
+    ];
+    const sourceTimes = sourceTimeInputs.map((value) => new Date(value).getTime());
     if (sourceTimes.some((value) => !Number.isFinite(value))) {
       throw new MyFplSnapshotIncompleteError(
         'My FPL snapshot contains an invalid source timestamp',
       );
     }
-    const latestSourceTimestamp =
+    const sourceMinTimestamp =
+      sourceTimes.length === 0
+        ? now.getTime()
+        : sourceTimes.reduce((earliest, value) => Math.min(earliest, value), Infinity);
+    const sourceMaxTimestamp =
       sourceTimes.length === 0
         ? now.getTime()
         : sourceTimes.reduce((latest, value) => Math.max(latest, value), -Infinity);
-    const sourceCheckedAt = new Date(latestSourceTimestamp);
+    const sourceCheckedAt = new Date(sourceMinTimestamp);
+    const sourceMaxCheckedAt = new Date(sourceMaxTimestamp);
     const sourceCheckedAtIso = sourceCheckedAt.toISOString();
+    const sourceMaxCheckedAtIso = sourceMaxCheckedAt.toISOString();
+    const scoreSource = kind === 'FINAL' ? 'FPL_FINAL_RESULT' : 'FPL_EVENT_LIVE';
+    const livePublicationId =
+      kind === 'PROVISIONAL' ? (projectedBatch?.publicationId ?? null) : null;
+    const liveRevision = kind === 'PROVISIONAL' ? (projectedBatch?.liveRevision ?? null) : null;
+    const algorithmVersion =
+      kind === 'PROVISIONAL' ? (projectedBatch?.algorithmVersion ?? null) : null;
     const content = {
       seasonId: season.seasonId,
       eventId,
@@ -1735,12 +2410,17 @@ async function captureMyFplSnapshotOnce(
 
     const publicationRows = await tx<{ revision: number | string; published_at: Date | string }[]>`
       INSERT INTO competition.my_fpl_snapshot_publications
-        (season_id, event_id, snapshot_date, source_checked_at, published_at, kind,
+        (season_id, event_id, snapshot_date, source_checked_at, source_min_checked_at,
+         source_max_checked_at, score_source, live_publication_id, live_revision,
+         algorithm_version, published_at, kind,
          active, expected_entry_count, ready_entry_count, empty_entry_count,
          expected_tournament_count, ready_tournament_count, content_sha256,
          override_actor, override_reason, idempotency_key)
       VALUES
-        (${season.seasonId}, ${eventId}, ${snapshotDate}::date, ${sourceCheckedAtIso}::timestamptz, ${nowIso}::timestamptz, ${kind},
+        (${season.seasonId}, ${eventId}, ${snapshotDate}::date, ${sourceCheckedAtIso}::timestamptz,
+         ${sourceCheckedAtIso}::timestamptz, ${sourceMaxCheckedAtIso}::timestamptz,
+         ${scoreSource}, ${livePublicationId}, ${liveRevision}, ${algorithmVersion},
+         ${nowIso}::timestamptz, ${kind},
          false, ${entries.length}, ${readyEntryIds.size}, ${emptyEntryCount},
          ${tournamentIds.length}, ${tournamentIds.length}, ${contentSha256},
          ${overrideActor}, ${overrideReason}, ${idempotencyKey})
@@ -1822,6 +2502,12 @@ async function captureMyFplSnapshotOnce(
       publishedAt: now.toISOString(),
       kind,
       contentSha256,
+      scoreSource,
+      livePublicationId,
+      liveRevision,
+      algorithmVersion,
+      sourceMinCheckedAt: sourceCheckedAt.toISOString(),
+      sourceMaxCheckedAt: sourceMaxCheckedAt.toISOString(),
     };
     // This receipt is committed in the same transaction as the immutable
     // children and active-pointer switch. Redis can therefore only receive a
@@ -1857,6 +2543,12 @@ async function captureMyFplSnapshotOnce(
       revision,
       snapshotDate,
       sourceCheckedAt,
+      scoreSource,
+      livePublicationId,
+      liveRevision,
+      algorithmVersion,
+      sourceMinCheckedAt: sourceCheckedAt,
+      sourceMaxCheckedAt,
       publishedAt: new Date(publicationRows[0].published_at),
       kind,
       expectedEntryCount: entries.length,
@@ -1931,7 +2623,25 @@ const isMyFplSnapshotRedisManifest = (value: unknown): value is MyFplSnapshotRed
     Number.isFinite(Date.parse(candidate.publishedAt)) &&
     (candidate.kind === 'PROVISIONAL' || candidate.kind === 'FINAL') &&
     typeof candidate.contentSha256 === 'string' &&
-    /^[0-9a-f]{64}$/.test(candidate.contentSha256)
+    /^[0-9a-f]{64}$/.test(candidate.contentSha256) &&
+    (candidate.kind === 'PROVISIONAL'
+      ? candidate.scoreSource === 'FPL_EVENT_LIVE' &&
+        typeof candidate.livePublicationId === 'string' &&
+        UUID_RE.test(candidate.livePublicationId) &&
+        typeof candidate.liveRevision === 'string' &&
+        candidate.liveRevision.trim() !== '' &&
+        typeof candidate.algorithmVersion === 'string' &&
+        candidate.algorithmVersion === EVENT_LIVE_PROJECTION_ALGORITHM_VERSION
+      : candidate.scoreSource === 'FPL_FINAL_RESULT' &&
+        candidate.livePublicationId === null &&
+        candidate.liveRevision === null &&
+        candidate.algorithmVersion === null) &&
+    typeof candidate.sourceMinCheckedAt === 'string' &&
+    Number.isFinite(Date.parse(candidate.sourceMinCheckedAt)) &&
+    typeof candidate.sourceMaxCheckedAt === 'string' &&
+    Number.isFinite(Date.parse(candidate.sourceMaxCheckedAt)) &&
+    Date.parse(candidate.sourceMinCheckedAt) <= Date.parse(candidate.sourceMaxCheckedAt) &&
+    candidate.sourceCheckedAt === candidate.sourceMinCheckedAt
   );
 };
 

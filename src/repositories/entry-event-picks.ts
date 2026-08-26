@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
-import { entryEventPicksInCompetition } from '../db/schemas/index.schema';
+import { entryEventPicksInCompetition, playersInFpl } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
@@ -18,6 +18,9 @@ export type EventLiveManagerPickRow = {
   isViceCaptain: boolean;
   transfersCost: number | null;
   sourceUpdatedAt: Date;
+  elementType: number;
+  teamId: number;
+  activeChip: string | null;
 };
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -147,8 +150,18 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
                 isViceCaptain: entryEventPicksInCompetition.isViceCaptain,
                 transfersCost: entryEventPicksInCompetition.transfersCost,
                 sourceUpdatedAt: entryEventPicksInCompetition.sourceUpdatedAt,
+                elementType: playersInFpl.elementType,
+                teamId: playersInFpl.teamId,
+                activeChip: entryEventPicksInCompetition.activeChip,
               })
               .from(entryEventPicksInCompetition)
+              .innerJoin(
+                playersInFpl,
+                and(
+                  eq(playersInFpl.seasonId, entryEventPicksInCompetition.seasonId),
+                  eq(playersInFpl.elementId, entryEventPicksInCompetition.elementId),
+                ),
+              )
               .where(
                 and(
                   eq(entryEventPicksInCompetition.seasonId, season.seasonId),

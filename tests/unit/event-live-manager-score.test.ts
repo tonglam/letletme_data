@@ -5,7 +5,7 @@ import {
   type EventLiveManagerPick,
 } from '../../src/domain/event-live-manager-score';
 import {
-  buildEventLiveScoreRevision,
+  buildScoreInputRevision,
   eventLiveHeartbeatIsFresh,
   eventLivePicksAreFresh,
   hasCompleteAggregateCoverage,
@@ -86,6 +86,9 @@ describe('event-live manager score authority', () => {
     expect(eventLivePicksAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:14:59.999Z')).toBe(
       true,
     );
+    expect(eventLivePicksAreFresh('2026-08-24T00:00:00.001Z', '2026-08-24T00:00:00.000Z')).toBe(
+      false,
+    );
     expect(eventLivePicksAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:15:00.001Z')).toBe(
       false,
     );
@@ -95,46 +98,96 @@ describe('event-live manager score authority', () => {
   });
 
   test('rejects an expired or future event-live heartbeat', () => {
-    const now = Date.parse('2026-08-24T00:15:00.000Z');
-    expect(eventLiveHeartbeatIsFresh('2026-08-24T00:00:00.000Z', now)).toBe(true);
-    expect(eventLiveHeartbeatIsFresh('2026-08-23T23:59:59.999Z', now)).toBe(false);
-    expect(eventLiveHeartbeatIsFresh('2026-08-24T00:15:00.001Z', now)).toBe(false);
+    const now = Date.parse('2026-08-24T00:01:30.001Z');
+    expect(eventLiveHeartbeatIsFresh('2026-08-24T00:00:00.001Z', now)).toBe(true);
+    expect(eventLiveHeartbeatIsFresh('2026-08-24T00:00:00.000Z', now)).toBe(false);
+    expect(eventLiveHeartbeatIsFresh('2026-08-24T00:01:30.002Z', now)).toBe(false);
   });
 
   test('changes the score revision when a prior total is corrected', () => {
     const input = {
+      algorithmVersion: 'fpl-projected-autosubs-v1',
       authorityRevision: 'fpl:live:publication-8:8',
       entryId: 109967,
-      eventPoints: 37,
-      transferCost: 0,
+      picks: picks(),
       previousTotal: 100,
-      totalPoints: 137,
+      previousTotalsThroughEventId: 7,
     };
-    expect(buildEventLiveScoreRevision(input)).not.toBe(
-      buildEventLiveScoreRevision({ ...input, previousTotal: 104, totalPoints: 141 }),
+    expect(buildScoreInputRevision(input).inputRevision).not.toBe(
+      buildScoreInputRevision({ ...input, previousTotal: 104 }).inputRevision,
     );
   });
 
   test('keeps a content revision stable across freshness-only picks observations', () => {
     const content = {
+      algorithmVersion: 'fpl-projected-autosubs-v1',
       authorityRevision: 'fpl:live:publication-8:8',
       entryId: 109967,
-      eventPoints: 37,
-      transferCost: 0,
+      picks: picks(),
       previousTotal: 100,
-      totalPoints: 137,
+      previousTotalsThroughEventId: 7,
     };
     const firstObservation = {
       ...content,
-      picksCheckedAt: '2026-08-24T00:00:30.000Z',
-    } as typeof content;
+      picks: content.picks.map((pick) => ({
+        ...pick,
+        sourceUpdatedAt: new Date('2026-08-24T00:00:30.000Z'),
+      })),
+    };
     const laterObservation = {
       ...content,
-      picksCheckedAt: '2026-08-24T00:10:30.000Z',
-    } as typeof content;
+      picks: content.picks.map((pick) => ({
+        ...pick,
+        sourceUpdatedAt: new Date('2026-08-24T00:10:30.000Z'),
+      })),
+    };
 
-    expect(buildEventLiveScoreRevision(firstObservation)).toBe(
-      buildEventLiveScoreRevision(laterObservation),
+    expect(buildScoreInputRevision(firstObservation).inputRevision).toBe(
+      buildScoreInputRevision(laterObservation).inputRevision,
     );
+  });
+
+  test('keeps input revision stable across heartbeat-only source timestamps', () => {
+    const base = {
+      algorithmVersion: 'fpl-projected-autosubs-v1',
+      authorityRevision: 'fpl:live:publication-8:8',
+      entryId: 109967,
+      picks: picks(),
+      previousTotal: 100,
+      previousTotalsThroughEventId: 7,
+      previousResultEvidence: [
+        {
+          entryId: 109967,
+          eventId: 7,
+          sourceResultId: 7001,
+          eventNetPoints: 58,
+          richSyncedAt: new Date('2026-08-24T00:00:00.000Z'),
+          updatedAt: new Date('2026-08-24T00:00:01.000Z'),
+        },
+      ],
+    };
+    const later = {
+      ...base,
+      picks: base.picks.map((pick) => ({
+        ...pick,
+        sourceUpdatedAt: new Date('2026-08-24T00:10:00.000Z'),
+      })),
+      previousResultEvidence: base.previousResultEvidence.map((result) => ({
+        ...result,
+        richSyncedAt: new Date('2026-08-24T00:10:00.000Z'),
+        updatedAt: new Date('2026-08-24T00:10:01.000Z'),
+      })),
+    };
+    expect(buildScoreInputRevision(base).inputRevision).toBe(
+      buildScoreInputRevision(later).inputRevision,
+    );
+    expect(
+      buildScoreInputRevision({
+        ...base,
+        picks: base.picks.map((pick, index) =>
+          index === 1 ? { ...pick, multiplier: pick.multiplier + 1 } : pick,
+        ),
+      }).inputRevision,
+    ).not.toBe(buildScoreInputRevision(base).inputRevision);
   });
 });

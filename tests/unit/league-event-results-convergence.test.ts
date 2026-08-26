@@ -20,10 +20,10 @@ describe('league event result convergence', () => {
   test('requires one fresh, time-paired event-live and picks observation', () => {
     const now = Date.parse('2026-08-24T00:15:00.000Z');
     expect(
-      leagueEventLiveInputsAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:14:59.999Z', now),
+      leagueEventLiveInputsAreFresh('2026-08-24T00:14:00.001Z', '2026-08-24T00:14:00.000Z', now),
     ).toBe(true);
     expect(
-      leagueEventLiveInputsAreFresh('2026-08-23T23:59:59.999Z', '2026-08-24T00:14:59.999Z', now),
+      leagueEventLiveInputsAreFresh('2026-08-24T00:13:29.999Z', '2026-08-24T00:13:00.000Z', now),
     ).toBe(false);
     expect(
       leagueEventLiveInputsAreFresh('2026-08-24T00:00:00.000Z', '2026-08-24T00:15:00.001Z', now),

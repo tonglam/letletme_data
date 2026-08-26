@@ -3,6 +3,7 @@ import { and, asc, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 import {
   entryEventPicksInCompetition,
   entryEventResultsInCompetition,
+  eventsInFpl,
   type DbEntryEventResult,
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
@@ -37,6 +38,20 @@ type EntryEventTotalsRow = {
   eventCount?: number;
   firstEventId?: number;
   lastEventId?: number;
+};
+
+type EntryEventResultReadOptions = Readonly<{
+  /** Restrict the range to events FPL has explicitly finalized and checked. */
+  finalizedOnly?: boolean;
+}>;
+
+export type EntryEventResultRevisionEvidence = {
+  entryId: number;
+  eventId: number;
+  sourceResultId: number | null;
+  eventNetPoints: number | null;
+  richSyncedAt: Date | null;
+  updatedAt: Date;
 };
 
 export type EventPointsPayload = {
@@ -233,6 +248,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       entryIds: number[],
       startEventId: number,
       endEventId: number,
+      options: EntryEventResultReadOptions = {},
     ): Promise<EntryEventTotalsRow[]> => {
       if (entryIds.length === 0) return [];
 
@@ -242,26 +258,46 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const rows: EntryEventTotalsRow[] = [];
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
           const chunk = uniqueEntryIds.slice(index, index + 1000);
-          const chunkRows = await db
-            .select({
-              entryId: entryEventResultsInCompetition.entryId,
-              totalPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventPoints}), 0)::int`,
-              totalTransfersCost: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventTransfersCost}), 0)::int`,
-              totalNetPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventNetPoints}), 0)::int`,
-              eventCount: sql<number>`COUNT(*)::int`,
-              firstEventId: sql<number>`MIN(${entryEventResultsInCompetition.eventId})::int`,
-              lastEventId: sql<number>`MAX(${entryEventResultsInCompetition.eventId})::int`,
-            })
-            .from(entryEventResultsInCompetition)
-            .where(
-              and(
-                eq(entryEventResultsInCompetition.seasonId, season.seasonId),
-                inArray(entryEventResultsInCompetition.entryId, chunk),
-                gte(entryEventResultsInCompetition.eventId, startEventId),
-                lte(entryEventResultsInCompetition.eventId, endEventId),
-              ),
-            )
-            .groupBy(entryEventResultsInCompetition.entryId);
+          const baseWhere = and(
+            eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+            inArray(entryEventResultsInCompetition.entryId, chunk),
+            gte(entryEventResultsInCompetition.eventId, startEventId),
+            lte(entryEventResultsInCompetition.eventId, endEventId),
+          );
+          const selectShape = {
+            entryId: entryEventResultsInCompetition.entryId,
+            totalPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventPoints}), 0)::int`,
+            totalTransfersCost: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventTransfersCost}), 0)::int`,
+            totalNetPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventNetPoints}), 0)::int`,
+            eventCount: sql<number>`COUNT(*)::int`,
+            firstEventId: sql<number>`MIN(${entryEventResultsInCompetition.eventId})::int`,
+            lastEventId: sql<number>`MAX(${entryEventResultsInCompetition.eventId})::int`,
+          };
+          const chunkRows = options.finalizedOnly
+            ? await db
+                .select(selectShape)
+                .from(entryEventResultsInCompetition)
+                .innerJoin(
+                  eventsInFpl,
+                  and(
+                    eq(eventsInFpl.seasonId, entryEventResultsInCompetition.seasonId),
+                    eq(eventsInFpl.eventId, entryEventResultsInCompetition.eventId),
+                  ),
+                )
+                .where(
+                  and(
+                    baseWhere,
+                    eq(eventsInFpl.finished, true),
+                    eq(eventsInFpl.dataChecked, true),
+                    isNotNull(entryEventResultsInCompetition.richSyncedAt),
+                  ),
+                )
+                .groupBy(entryEventResultsInCompetition.entryId)
+            : await db
+                .select(selectShape)
+                .from(entryEventResultsInCompetition)
+                .where(baseWhere)
+                .groupBy(entryEventResultsInCompetition.entryId);
           rows.push(...chunkRows);
         }
         return rows;
@@ -275,6 +311,58 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           error instanceof Error ? error : undefined,
         );
       }
+    },
+
+    findRevisionEvidenceByEntry: async (
+      season: FplSeasonRef,
+      entryIds: number[],
+      startEventId: number,
+      endEventId: number,
+      options: EntryEventResultReadOptions = {},
+    ): Promise<EntryEventResultRevisionEvidence[]> => {
+      if (entryIds.length === 0 || endEventId < startEventId) return [];
+      const db = await getDbInstance();
+      const rows: EntryEventResultRevisionEvidence[] = [];
+      const uniqueEntryIds = Array.from(new Set(entryIds));
+      for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+        const chunk = uniqueEntryIds.slice(index, index + 1000);
+        const baseWhere = and(
+          eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+          inArray(entryEventResultsInCompetition.entryId, chunk),
+          gte(entryEventResultsInCompetition.eventId, startEventId),
+          lte(entryEventResultsInCompetition.eventId, endEventId),
+        );
+        const selectShape = {
+          entryId: entryEventResultsInCompetition.entryId,
+          eventId: entryEventResultsInCompetition.eventId,
+          sourceResultId: entryEventResultsInCompetition.sourceResultId,
+          eventNetPoints: entryEventResultsInCompetition.eventNetPoints,
+          richSyncedAt: entryEventResultsInCompetition.richSyncedAt,
+          updatedAt: entryEventResultsInCompetition.updatedAt,
+        };
+        const chunkRows = options.finalizedOnly
+          ? await db
+              .select(selectShape)
+              .from(entryEventResultsInCompetition)
+              .innerJoin(
+                eventsInFpl,
+                and(
+                  eq(eventsInFpl.seasonId, entryEventResultsInCompetition.seasonId),
+                  eq(eventsInFpl.eventId, entryEventResultsInCompetition.eventId),
+                ),
+              )
+              .where(
+                and(
+                  baseWhere,
+                  eq(eventsInFpl.finished, true),
+                  eq(eventsInFpl.dataChecked, true),
+                  isNotNull(entryEventResultsInCompetition.richSyncedAt),
+                ),
+              )
+          : await db.select(selectShape).from(entryEventResultsInCompetition).where(baseWhere);
+        rows.push(...chunkRows);
+      }
+      return rows;
     },
 
     findByEventAndEntryIds: async (

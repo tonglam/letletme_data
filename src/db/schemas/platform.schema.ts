@@ -3243,6 +3243,18 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
     expectedTournamentCount: integer('expected_tournament_count').notNull(),
     readyTournamentCount: integer('ready_tournament_count').notNull(),
     contentSha256: text('content_sha256').notNull(),
+    scoreSource: text('score_source'),
+    livePublicationId: uuid('live_publication_id'),
+    liveRevision: text('live_revision'),
+    algorithmVersion: text('algorithm_version'),
+    sourceMinCheckedAt: timestamp('source_min_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    sourceMaxCheckedAt: timestamp('source_max_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
     overrideActor: text('override_actor'),
     overrideReason: text('override_reason'),
     idempotencyKey: text('idempotency_key'),
@@ -3287,6 +3299,14 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       sql`expected_entry_count >= 0 AND ready_entry_count >= 0 AND empty_entry_count >= 0 AND ready_entry_count + empty_entry_count = expected_entry_count AND expected_tournament_count >= 0 AND ready_tournament_count >= 0 AND ready_tournament_count <= expected_tournament_count`,
     ),
     check('my_fpl_snapshot_publications_hash_check', sql`content_sha256 ~ '^[0-9a-f]{64}$'::text`),
+    check(
+      'my_fpl_snapshot_publications_score_source_check',
+      sql`score_source IS NULL OR score_source IN ('FPL_EVENT_LIVE', 'FPL_FINAL_RESULT')`,
+    ),
+    check(
+      'my_fpl_snapshot_publications_source_span_check',
+      sql`source_min_checked_at IS NULL OR source_max_checked_at IS NULL OR source_min_checked_at <= source_max_checked_at`,
+    ),
     check(
       'my_fpl_snapshot_publications_override_check',
       sql`((override_actor IS NULL AND override_reason IS NULL AND idempotency_key IS NULL) OR (kind = 'FINAL'::text AND override_actor IS NOT NULL AND override_reason IS NOT NULL AND idempotency_key IS NOT NULL AND btrim(override_actor) <> '' AND btrim(override_reason) <> '' AND btrim(idempotency_key) <> ''))`,

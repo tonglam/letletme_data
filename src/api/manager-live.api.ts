@@ -16,6 +16,16 @@ export const managerLiveAPI = new Elysia({ prefix: '/internal/manager-live' }).p
       entryIds: t.Array(positiveInteger, { minItems: 1, maxItems: 500 }),
       tournamentId: t.Optional(positiveInteger),
       readMode: t.Optional(t.Union([t.Literal('CACHE_ONLY'), t.Literal('READ_THROUGH')])),
+      requestedCalculationMode: t.Optional(
+        t.Union([t.Literal('OFFICIAL_CURRENT_MULTIPLIERS'), t.Literal('PROJECTED_AUTOSUBS')]),
+      ),
+      includeEffectiveLineup: t.Optional(t.Boolean()),
+      liveRef: t.Optional(
+        t.Object({
+          publicationId: t.String({ minLength: 1 }),
+          revision: t.Union([t.String({ minLength: 1 }), positiveInteger]),
+        }),
+      ),
     }),
   },
 );
