@@ -2,7 +2,11 @@ import { Job, QueueEvents, Worker } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { shouldStopManagerLiveRefresh } from '../domain/manager-live-refresh';
-import { readManagerLiveHotState, scheduleNextManagerLiveRefresh } from '../jobs/manager-live.jobs';
+import {
+  readHotManagerLiveScope,
+  reconcileManagerLiveHotScopeRoster,
+  scheduleNextManagerLiveRefresh,
+} from '../jobs/manager-live.jobs';
 import {
   MANAGER_LIVE_JOBS,
   MANAGER_LIVE_JOB_VERSION,
@@ -11,6 +15,7 @@ import {
   type ManagerLiveJobData,
 } from '../queues/manager-live.queue';
 import { eventRepository } from '../repositories/events';
+import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import {
   refreshManagerLiveScores,
   type ManagerLiveResolveResult,
@@ -75,8 +80,22 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       return { stopped: 'event-finalized' as const };
     }
 
-    const hotState = await readManagerLiveHotState(job.data);
-    if (!hotState) {
+    const authoritativeEntryIds =
+      job.data.tournamentId === undefined
+        ? job.data.entryIds
+        : await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId);
+    const currentHotState = await readHotManagerLiveScope({
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
+      eventId: job.data.eventId,
+      entryIds: authoritativeEntryIds,
+      ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+    });
+    if (
+      !job.data.generation ||
+      !currentHotState ||
+      currentHotState.generation !== job.data.generation
+    ) {
       logInfo('Manager live refresh stopped for stale or missing hot generation', {
         eventId: job.data.eventId,
         tournamentId: job.data.tournamentId ?? null,
@@ -84,6 +103,21 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       });
       return { stopped: 'stale-hot-generation' as const };
     }
+    const hotState = await reconcileManagerLiveHotScopeRoster({
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
+      eventId: job.data.eventId,
+      entryIds: authoritativeEntryIds,
+      ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+    });
+    const effectiveJobData: ManagerLiveJobData = {
+      ...job.data,
+      entryIds: hotState.entryIds,
+      generation: hotState.generation,
+      summaryRotationCursor: hotState.summaryRotationCursor,
+      classicStandingsPage: hotState.classicStandingsPage ?? undefined,
+      classicStandingsCursorEpoch: hotState.classicStandingsCursorEpoch,
+    };
     const persistedClassicCursor = hotState.classicStandingsPage;
     const classicStandingsStartPage =
       persistedClassicCursor === null
@@ -94,20 +128,22 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
     // when the follow-up is scheduled; wall-clock parity cannot starve a
     // permanently failing manager when the event uses 60-second refreshes.
     const summaryRotationCursor =
-      Number.isSafeInteger(job.data.summaryRotationCursor) &&
-      (job.data.summaryRotationCursor ?? -1) >= 0
-        ? job.data.summaryRotationCursor
+      Number.isSafeInteger(effectiveJobData.summaryRotationCursor) &&
+      (effectiveJobData.summaryRotationCursor ?? -1) >= 0
+        ? effectiveJobData.summaryRotationCursor
         : hotState.summaryRotationCursor;
     const result = await refreshManagerLiveScores({
-      eventId: job.data.eventId,
-      entryIds: job.data.entryIds,
-      ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+      eventId: effectiveJobData.eventId,
+      entryIds: effectiveJobData.entryIds,
+      ...(effectiveJobData.tournamentId === undefined
+        ? {}
+        : { tournamentId: effectiveJobData.tournamentId }),
       ...(classicStandingsStartPage === undefined || classicStandingsStartPage === null
         ? {}
         : { classicStandingsStartPage }),
       summaryRotationCursor,
     });
-    await scheduleManagerLiveContinuation(job.data, result, classicStandingsStartPage);
+    await scheduleManagerLiveContinuation(effectiveJobData, result, classicStandingsStartPage);
     return result;
   });
 }

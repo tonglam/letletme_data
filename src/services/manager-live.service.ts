@@ -2061,7 +2061,8 @@ export const refreshClassicStandings = async (
     !refreshErrorCode &&
     !exhausted &&
     nextPage > MAX_STANDINGS_PAGES &&
-    fetchedRows.size < targetIds.size
+    fetchedRows.size < targetIds.size &&
+    durableTargetEntryIds.length < targetIds.size
   ) {
     refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
   } else if (
@@ -2085,7 +2086,8 @@ export const refreshClassicStandings = async (
     complete:
       refreshErrorCode === null &&
       (fetchedRows.size >= targetIds.size ||
-        (exhausted && durableTargetEntryIds.length >= targetIds.size)),
+        ((exhausted || nextPage > MAX_STANDINGS_PAGES) &&
+          durableTargetEntryIds.length >= targetIds.size)),
     nextPage,
     errorCode: refreshErrorCode,
   };
@@ -2144,7 +2146,7 @@ export const selectWorkerSummaryRefreshTargets = (
   rotationCursor: number,
 ): number[] => {
   if (!Number.isSafeInteger(limit) || limit <= 0) return [];
-  const normalized = Array.from(new Set(entryIds));
+  const normalized = Array.from(new Set(entryIds)).sort((left, right) => left - right);
   if (normalized.length <= limit) return normalized;
   const chunkCount = Math.ceil(normalized.length / limit);
   const cursor = Number.isSafeInteger(rotationCursor) ? Math.max(0, rotationCursor) : 0;

@@ -93,6 +93,15 @@ export function managerLiveRefreshBucket(date: Date): string {
   return bucket.toISOString().replace(/\D/g, '').slice(0, 14);
 }
 
+export function managerLiveFollowupRunAt(requestedRunAt: Date, nowMs = Date.now()): Date {
+  const nextBucketAt =
+    Math.floor(nowMs / MANAGER_LIVE_REFRESH_BUCKET_MS) * MANAGER_LIVE_REFRESH_BUCKET_MS +
+    MANAGER_LIVE_REFRESH_BUCKET_MS;
+  const minimumRunAt = Math.max(nowMs + 1_000, nextBucketAt);
+  const requestedMs = requestedRunAt.getTime();
+  return new Date(Math.max(minimumRunAt, Number.isFinite(requestedMs) ? requestedMs : 0));
+}
+
 export function managerLiveRefreshJobId(scope: ManagerLiveRefreshScope, date: Date): string {
   return `manager-live-v1-${scope.seasonCode}-e${scope.eventId}-${scopeSegment(scope)}-${managerLiveRefreshBucket(date)}`;
 }
@@ -211,6 +220,33 @@ redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
 return ARGV[2]
 `;
 
+const RECONCILE_HOT_SCOPE_ROSTER_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if not current then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
+  return ARGV[2]
+end
+local state = cjson.decode(current)
+local candidate = cjson.decode(ARGV[2])
+local currentEntries = state['entryIds'] or {}
+local candidateEntries = candidate['entryIds'] or {}
+local sameRoster = #currentEntries == #candidateEntries
+if sameRoster then
+  for index = 1, #candidateEntries do
+    if currentEntries[index] ~= candidateEntries[index] then
+      sameRoster = false
+      break
+    end
+  end
+end
+if sameRoster then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+  return current
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
+return ARGV[2]
+`;
+
 const ADVANCE_HOT_SCOPE_STATE_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
 if not current then return nil end
@@ -296,6 +332,33 @@ export async function initializeManagerLiveHotState(
   );
   if (recoveredState) return recoveredState;
   throw new Error('Manager live hot scope state is malformed');
+}
+
+export async function reconcileManagerLiveHotStateRoster(
+  redis: ManagerLiveHotStateRedis,
+  scope: ManagerLiveRefreshScope,
+): Promise<ManagerLiveHotScopeState> {
+  const normalizedScope = {
+    ...scope,
+    entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
+  };
+  const candidate: ManagerLiveHotScopeState = {
+    ...normalizedScope,
+    generation: randomUUID(),
+    summaryRotationCursor: 0,
+    classicStandingsPage: null,
+    classicStandingsCursorEpoch: 0,
+  };
+  const raw = await redis.eval(
+    RECONCILE_HOT_SCOPE_ROSTER_SCRIPT,
+    1,
+    managerLiveHotStateKey(normalizedScope),
+    String(MANAGER_LIVE_HOT_SCOPE_SECONDS),
+    JSON.stringify(candidate),
+  );
+  const state = parseManagerLiveHotScopeState(typeof raw === 'string' ? raw : null);
+  if (state) return state;
+  throw new Error('Manager live hot scope roster reconciliation failed');
 }
 
 export async function loadManagerLiveHotState(

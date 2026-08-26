@@ -13,6 +13,7 @@ import {
   classicStandingsCursorAfterRefresh,
   managerLiveClassicCursorKey,
   managerLiveDispatchEntryChunks,
+  managerLiveFollowupRunAt,
   managerLiveHotScopeKey,
   managerLiveRefreshJobId,
   managerLiveRefreshJobIdForState,
@@ -61,6 +62,13 @@ describe('manager live refresh policy', () => {
 
     expect(sameScope).toBe(request);
     expect(managerLiveRefreshJobId(scope, new Date('2026-08-23T08:34:29.999Z'))).toBe(sameScope);
+  });
+
+  test('moves a follow-up scheduled inside the current bucket to the next bucket', () => {
+    const now = Date.parse('2026-08-23T08:34:10.000Z');
+    expect(managerLiveFollowupRunAt(new Date('2026-08-23T08:34:20.000Z'), now).toISOString()).toBe(
+      '2026-08-23T08:34:30.000Z',
+    );
   });
 
   test('binds v2 jobs to a hot-scope generation while preserving bucket deduplication', () => {

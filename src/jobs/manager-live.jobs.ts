@@ -6,7 +6,8 @@ import {
   initializeManagerLiveHotState,
   loadManagerLiveHotState,
   managerLiveDispatchEntryChunks,
-  MANAGER_LIVE_REFRESH_BUCKET_MS,
+  managerLiveFollowupRunAt,
+  reconcileManagerLiveHotStateRoster,
   managerLiveRefreshJobIdForState,
   normalizeManagerLiveEntryIds,
   type ManagerLiveHotScopeState,
@@ -57,6 +58,13 @@ export async function readManagerLiveHotState(
   const state = await readHotManagerLiveScope(managerLiveScopeFromJobData(jobData));
   if (!state || !jobData.generation || state.generation !== jobData.generation) return null;
   return state;
+}
+
+export async function reconcileManagerLiveHotScopeRoster(
+  scope: ManagerLiveRefreshScope,
+): Promise<ManagerLiveHotScopeState> {
+  const redis = await queueRedisSingleton.getClient();
+  return reconcileManagerLiveHotStateRoster(redis, scope);
 }
 
 async function addManagerLiveRefresh(
@@ -194,8 +202,6 @@ export async function scheduleNextManagerLiveRefresh(
   );
   if (!updatedState) return null;
   const requestedRunAt = new Date(nextRefreshAt);
-  const runAt = Number.isFinite(requestedRunAt.getTime())
-    ? new Date(Math.max(Date.now() + 1_000, requestedRunAt.getTime()))
-    : new Date(Date.now() + MANAGER_LIVE_REFRESH_BUCKET_MS);
+  const runAt = managerLiveFollowupRunAt(requestedRunAt);
   return addManagerLiveRefresh(updatedState, 'followup', runAt, updatedState);
 }

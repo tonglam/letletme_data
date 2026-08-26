@@ -646,6 +646,41 @@ describe('manager live classic standings convergence', () => {
     expect(getClassicStandings).toHaveBeenCalledTimes(1);
   });
 
+  test('accepts durable target coverage when the bounded crawl reaches the page cap', async () => {
+    const checkedAt = new Date().toISOString();
+    const rows = new Map([
+      [101, cachedRow(101, checkedAt)],
+      [102, cachedRow(102, checkedAt)],
+    ]);
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: true,
+            page: 100,
+            results: [{ entry: 999, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101, 102]),
+      rows,
+      null,
+      { startPage: 100, maxPages: 1 },
+    );
+
+    expect(result).toMatchObject({
+      complete: true,
+      nextPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+      errorCode: null,
+    });
+  });
+
   test('persists completed pages before retrying a later failed page', async () => {
     getClassicStandings.mockImplementationOnce(
       async () =>
@@ -875,6 +910,8 @@ describe('manager live classic standings convergence', () => {
     expect(selectWorkerSummaryRefreshTargets(entryIds, 12, 3)).toEqual(
       Array.from({ length: 12 }, (_, index) => index + 1),
     );
+    expect(selectWorkerSummaryRefreshTargets([25, 1, 13], 1, 0)).toEqual([1]);
+    expect(selectWorkerSummaryRefreshTargets([25, 1, 13], 1, 1)).toEqual([13]);
   });
 });
 
