@@ -180,9 +180,24 @@ export async function advanceSchedulerLane(input: {
           updatedAt: dbNow,
           lastProgressAt: dbNow,
         })
+        // PostgreSQL does not gap-lock a missing unique key under the row
+        // lock above. Two scheduler/API replicas can therefore both observe
+        // no lane and race the first insert. Let the unique index serialize
+        // the creation, then reload the winner below.
+        .onConflictDoNothing({ target: schedulerLanesInOps.laneKey })
         .returning();
-      if (!inserted[0]) throw new Error('Scheduler lane insert returned no row');
-      row = inserted[0];
+      if (inserted[0]) {
+        row = inserted[0];
+      } else {
+        const [reloaded] = await tx
+          .select()
+          .from(schedulerLanesInOps)
+          .where(eq(schedulerLanesInOps.laneKey, input.laneKey))
+          .for('update')
+          .limit(1);
+        if (!reloaded) throw new Error('Scheduler lane disappeared after conflict');
+        row = reloaded;
+      }
     } else {
       const isNewer = desiredScheduledDueAt.getTime() > existingRow.desiredDueAt.getTime();
       const updated = await tx
@@ -321,29 +336,55 @@ export async function confirmSchedulerLaneEnqueued(input: {
   owner: string;
   bullJobId: string | number;
   runId?: string;
+  /** Obligation carried by the Bull payload being confirmed. */
+  obligationId?: string;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
-  const updated = await db
-    .update(schedulerLanesInOps)
-    .set({
-      state: 'enqueued',
-      dispatchOwner: null,
-      dispatchLeaseExpiresAt: null,
-      bullJobId: String(input.bullJobId),
-      runId: input.runId,
-      lastProgressAt: sql`clock_timestamp()`,
-      updatedAt: sql`clock_timestamp()`,
-    })
-    .where(
-      and(
-        eq(schedulerLanesInOps.laneId, input.laneId),
-        eq(schedulerLanesInOps.dispatchOwner, input.owner),
-        eq(schedulerLanesInOps.state, 'dispatching'),
-      ),
-    )
-    .returning({ laneId: schedulerLanesInOps.laneId });
-  return updated.length === 1;
+  return db.transaction(async (tx) => {
+    const [lane] = await tx
+      .select({
+        laneId: schedulerLanesInOps.laneId,
+        desiredObligationId: schedulerLanesInOps.desiredObligationId,
+      })
+      .from(schedulerLanesInOps)
+      .where(
+        and(
+          eq(schedulerLanesInOps.laneId, input.laneId),
+          eq(schedulerLanesInOps.dispatchOwner, input.owner),
+          eq(schedulerLanesInOps.state, 'dispatching'),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (!lane) return false;
+    await tx
+      .update(schedulerLanesInOps)
+      .set({
+        state: 'enqueued',
+        dispatchOwner: null,
+        dispatchLeaseExpiresAt: null,
+        bullJobId: String(input.bullJobId),
+        runId: input.runId,
+        lastProgressAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(eq(schedulerLanesInOps.laneId, lane.laneId));
+    // Keep the accepted Bull identity on the obligation as well as the lane.
+    // This lets recovery identify an older enqueued job after the desired
+    // waterline has advanced to a newer obligation.
+    await tx
+      .update(schedulerObligationsInOps)
+      .set({
+        bullJobId: String(input.bullJobId),
+        ...(input.runId === undefined ? {} : { runId: input.runId }),
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        eq(schedulerObligationsInOps.obligationId, input.obligationId ?? lane.desiredObligationId),
+      );
+    return true;
+  });
 }
 
 export async function failSchedulerLaneDispatch(input: {
@@ -865,6 +906,8 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
   dispatchGeneration: number;
   bullJobId: string;
   bullState: 'missing' | 'failed';
+  /** Payload identity for failures before the worker can start the lane. */
+  obligationId?: string;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -887,7 +930,23 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
       .for('update')
       .limit(1);
     if (!lane || !['enqueued', 'running'].includes(lane.state)) return false;
-    if (lane.activeObligationId) {
+    // A queued job can fail before startSchedulerLane assigns
+    // active_obligation_id (for example after a season rollover). Prefer the
+    // obligation carried by the Bull payload, then the accepted Bull identity
+    // persisted during enqueue confirmation. Never guess from the current
+    // desired waterline: it may already point at a newer obligation.
+    const failedObligationIds = new Set<string>();
+    if (input.obligationId) failedObligationIds.add(input.obligationId);
+    if (lane.activeObligationId) failedObligationIds.add(lane.activeObligationId);
+    if (failedObligationIds.size === 0) {
+      const [bullObligation] = await tx
+        .select({ obligationId: schedulerObligationsInOps.obligationId })
+        .from(schedulerObligationsInOps)
+        .where(eq(schedulerObligationsInOps.bullJobId, input.bullJobId))
+        .limit(1);
+      if (bullObligation?.obligationId) failedObligationIds.add(bullObligation.obligationId);
+    }
+    for (const failedObligationId of failedObligationIds) {
       await tx
         .update(schedulerObligationsInOps)
         .set({
@@ -899,8 +958,8 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         })
         .where(
           and(
-            eq(schedulerObligationsInOps.obligationId, lane.activeObligationId),
-            inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+            eq(schedulerObligationsInOps.obligationId, failedObligationId),
+            inArray(schedulerObligationsInOps.status, ['pending', 'enqueued', 'running']),
           ),
         );
     }

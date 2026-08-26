@@ -52,6 +52,30 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler latest-wins lanes', () => {
+  test('serializes concurrent first observations of a lane', async () => {
+    const first = await reserve('2026-08-25T03:00:00.000Z', 'price-concurrent-1');
+    const second = await reserve('2026-08-25T03:05:00.000Z', 'price-concurrent-2');
+    const [left, right] = await Promise.all([
+      advanceSchedulerLane({
+        laneKey: LANE_KEY,
+        jobName: DEFINITION.name,
+        scopeKey: SCOPE_KEY,
+        queueName: 'fpl-critical-sync',
+        desiredObligation: first,
+      }),
+      advanceSchedulerLane({
+        laneKey: LANE_KEY,
+        jobName: DEFINITION.name,
+        scopeKey: SCOPE_KEY,
+        queueName: 'fpl-critical-sync',
+        desiredObligation: second,
+      }),
+    ]);
+    expect(left.lane.laneId).toBe(right.lane.laneId);
+    const targets = await getSchedulerLaneTargets({ laneId: left.lane.laneId });
+    expect(targets?.lane.desiredObligationId).toBe(second.obligationId);
+  });
+
   test('coalesces newer obligations without creating a second Bull dispatch', async () => {
     const first = await reserve('2026-08-25T04:00:00.000Z', 'price-1');
     const initial = await advanceSchedulerLane({
@@ -147,6 +171,37 @@ describe('scheduler latest-wins lanes', () => {
     ).toBe(true);
     const recovered = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
     expect(recovered?.lane.dispatchGeneration).toBe(2);
+  });
+
+  test('recovers an enqueued obligation when Bull fails before lane start', async () => {
+    const first = await reserve('2026-08-25T05:15:00.000Z', 'price-pre-start-failure');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-price-job-pre-start-failure',
+      obligationId: first.obligationId,
+    });
+    expect(
+      await recoverSchedulerLaneAfterBullLoss({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId: 'integration-price-job-pre-start-failure',
+        bullState: 'failed',
+        obligationId: first.obligationId,
+      }),
+    ).toBe(true);
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.desired?.status).toBe('failed');
   });
 
   test('does not recover when Bull loss was observed for a stale generation', async () => {

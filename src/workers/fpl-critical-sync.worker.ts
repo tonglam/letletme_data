@@ -10,9 +10,9 @@ import {
 import {
   blockSchedulerLane,
   completeSchedulerLane,
-  failSchedulerLane,
   fenceSchedulerLaneTarget,
   getSchedulerLane,
+  recoverSchedulerLaneAfterBullLoss,
   startSchedulerLane,
   unblockSchedulerLane,
   type SchedulerLaneTarget,
@@ -59,8 +59,9 @@ async function markSupersededPriceRunSkipped(
   target: SchedulerLaneTarget,
   job: Job<FplCriticalJobData>,
   skippedItems = 0,
+  runIdOverride?: string,
 ): Promise<void> {
-  const runId = target.obligation.runId ?? job.data.runId;
+  const runId = runIdOverride ?? target.obligation.runId ?? job.data.runId;
   if (!runId) return;
   await syncOperationsRepository
     .finishRun(runId, {
@@ -222,11 +223,12 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
     });
     if (!beforePersist) throw new Error('Scheduler lane pre-publication fence CAS failed');
     if (beforePersist.obligation.obligationId !== activeTarget.obligation.obligationId) {
-      await markSupersededPriceRunSkipped(
-        activeTarget,
-        job,
-        prepared.outcome === 'ready' ? prepared.board.players.length : 0,
-      );
+      const skippedItems = prepared.outcome === 'ready' ? prepared.board.players.length : 0;
+      await markSupersededPriceRunSkipped(activeTarget, job, skippedItems);
+      // preparePriceChangePublication owns a separate source run for the HTTP
+      // fetch. Retire that run too; otherwise a superseded fetch remains
+      // RUNNING forever and blocks the deployment quiescence gate.
+      await markSupersededPriceRunSkipped(activeTarget, job, skippedItems, prepared.sourceRunId);
       activeTarget = beforePersist;
       continue;
     }
@@ -399,15 +401,20 @@ export function createFplCriticalSyncWorker(): WorkerRuntime {
         );
         return;
       }
-      const lane = getSchedulerLane({ laneId: job.data.laneId });
-      const activeObligationId = (await lane)?.activeObligationId;
-      if (activeObligationId) {
-        await failSchedulerLane({
-          laneId: job.data.laneId,
-          dispatchGeneration: job.data.laneGeneration,
-          activeObligationId,
-          error,
-        });
+      const recovered = await recoverSchedulerLaneAfterBullLoss({
+        laneId: job.data.laneId,
+        dispatchGeneration: job.data.laneGeneration,
+        bullJobId: String(job.id),
+        bullState: 'failed',
+        obligationId: job.data.obligationId,
+      });
+      if (!recovered) {
+        // A false CAS means another generation already owns the lane (or the
+        // row was retired). Surface it in logs instead of silently ignoring a
+        // terminal callback; stale callbacks must remain observable.
+        throw new Error(
+          `Price lane failure reconciliation CAS failed for ${job.data.laneId} generation ${job.data.laneGeneration}`,
+        );
       }
     })().catch((failure) => logError('FPL critical failure reconciliation failed', failure));
   });

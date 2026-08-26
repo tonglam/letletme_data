@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { seasonRepository } from '../repositories/seasons';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { Queue } from 'bullmq';
@@ -174,7 +175,7 @@ export async function triggerPriceChangeLane(): Promise<{
   // Manual refreshes are allowed between cadence boundaries. Use the most
   // recently-started five-minute source bucket as the target waterline when
   // the schedule resolver correctly returns no future-due plan.
-  const plan =
+  const basePlan =
     resolvedPlan ??
     (() => {
       const periodMs = 5 * 60_000;
@@ -189,11 +190,30 @@ export async function triggerPriceChangeLane(): Promise<{
         evidence: { cadence: 'five-minute', offsetMs, manual: true },
       };
     })();
-  if (!plan) throw new Error('No current price-change scheduler target exists');
-  const obligation = await reserveSchedulerObligation({
+  if (!basePlan) throw new Error('No current price-change scheduler target exists');
+  let plan: SchedulerObligationPlan = { ...basePlan, source: 'manual' };
+  let obligation = await reserveSchedulerObligation({
     definition,
-    plan: { ...plan, source: 'manual' },
+    plan,
   });
+  // The cadence identity is intentionally immutable once it has succeeded.
+  // A later manual refresh must therefore get a new dispatchable obligation;
+  // reusing the terminal five-minute row would make advanceSchedulerLane
+  // correctly (but undesirably) report no work.
+  if (['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) {
+    const requestedAtMs = context.now.getTime();
+    plan = {
+      ...plan,
+      periodKey: `${plan.periodKey}-manual-${randomUUID()}`,
+      dueAt: context.now,
+      evidence: {
+        ...(plan.evidence ?? {}),
+        manual: true,
+        requestedAtMs,
+      },
+    };
+    obligation = await reserveSchedulerObligation({ definition, plan });
+  }
   const laneKey = definition.executionPolicy.laneKey({ context, plan });
   const advanced = await advanceSchedulerLane({
     laneKey,
@@ -248,6 +268,7 @@ export async function triggerPriceChangeLane(): Promise<{
       owner: dispatch.owner,
       bullJobId: result.bullJobId,
       runId: result.runId,
+      obligationId: target.obligation.obligationId,
     });
     if (!confirmed) throw new Error('Manual price lane enqueue confirmation CAS failed');
     return result;
@@ -297,6 +318,7 @@ async function reconcileSingleFlightBullState(lane: SchedulerLane): Promise<void
           owner: lane.dispatchOwner,
           bullJobId: job.id,
           runId: job.data?.runId,
+          obligationId: job.data?.obligationId,
         });
         if (!confirmed) {
           logError('Latest-wins dispatch recovery CAS failed', undefined, {
@@ -853,6 +875,7 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
         owner: dispatch.owner,
         bullJobId,
         runId: result?.runId,
+        obligationId: target.obligation.obligationId,
       });
       if (!confirmed) throw new Error('Scheduler lane enqueue confirmation CAS failed');
       enqueued += 1;
