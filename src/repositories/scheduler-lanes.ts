@@ -587,7 +587,7 @@ export async function confirmSchedulerLaneEnqueued(input: {
         ...(input.runId === undefined ? {} : { runId: input.runId }),
         ...(input.queueName
           ? {
-              evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('submittedQueueName', ${input.queueName})`,
+              evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('submittedQueueName', ${input.queueName}::text)`,
             }
           : {}),
         updatedAt: sql`clock_timestamp()`,

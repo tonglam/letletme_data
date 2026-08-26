@@ -1049,7 +1049,7 @@ export async function confirmSchedulerObligationEnqueued(input: {
       runId: input.runId,
       ...(input.queueName
         ? {
-            evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('submittedQueueName', ${input.queueName})`,
+            evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('submittedQueueName', ${input.queueName}::text)`,
           }
         : {}),
       // Enqueue acknowledgement is not execution. The worker moves this row
