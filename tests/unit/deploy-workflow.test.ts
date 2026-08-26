@@ -96,6 +96,8 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('command_timeout: 20m');
     expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
     expect(workflow).toContain('"$old_media_present" || true');
+    expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
+    expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployStateMachine).toContain(
       'export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"',
     );

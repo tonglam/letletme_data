@@ -436,6 +436,12 @@ jobs:
             finish_stage
             start_stage serviceReady
             services_start_attempted=true
+            # The media worker owns a runtime heartbeat even when source-media
+            # processing is disabled. Keep it in the normal forward start so
+            # /ready can distinguish an intentionally disabled worker from a
+            # missing or crashed worker. RUNTIME_INCLUDE_MEDIA_WORKER=false is
+            # reserved for restoring a release that never had this container.
+            export RUNTIME_INCLUDE_MEDIA_WORKER=true
             # The shared state machine owns the equivalent API/worker startup
             # (`docker compose up -d ...`) and preserves healthy workers on a
             # first API bind failure.
