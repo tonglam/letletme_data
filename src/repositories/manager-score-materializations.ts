@@ -193,6 +193,14 @@ return removed
 
 const isValidTimestamp = (value: string): boolean => Number.isFinite(Date.parse(value));
 
+const timestampToIso = (value: Date | string): string => {
+  const timestamp = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) {
+    throw new Error('Invalid manager score head timestamp');
+  }
+  return timestamp.toISOString();
+};
+
 const validateInput = (input: ManagerScoreMaterializationInput): void => {
   if (!UUID_RE.test(input.livePublicationId)) throw new Error('Invalid live publication UUID');
   if (
@@ -866,7 +874,7 @@ export async function persistManagerScoreMaterializations(
           input_revision: string;
           score_revision: string;
           verified_live_revision: string | null;
-          verified_live_checked_at: Date | null;
+          verified_live_checked_at: Date | string | null;
           verified_picks_revision: string | null;
           verified_previous_totals_revision: string | null;
         }[]
@@ -892,7 +900,7 @@ export async function persistManagerScoreMaterializations(
         currentHead.verified_previous_totals_revision === row.previousTotalsRevision
       ) {
         const headTouch = await tx<
-          Array<{ generation: number | string; verified_live_checked_at: Date }>
+          Array<{ generation: number | string; verified_live_checked_at: Date | string }>
         >`
           UPDATE fpl.manager_event_score_heads
           SET verified_live_checked_at = GREATEST(
@@ -915,14 +923,14 @@ export async function persistManagerScoreMaterializations(
         rowsForRedis.push({
           ...row,
           generation: Number(touched.generation),
-          verifiedLiveCheckedAt: touched.verified_live_checked_at.toISOString(),
+          verifiedLiveCheckedAt: timestampToIso(touched.verified_live_checked_at),
         });
         headsUpdated += 1;
         continue;
       }
       const generation = Number(existing[0]?.generation ?? 0) + 1;
       const headWrite = await tx<
-        Array<{ generation: number | string; verified_live_checked_at: Date }>
+        Array<{ generation: number | string; verified_live_checked_at: Date | string }>
       >`
         INSERT INTO fpl.manager_event_score_heads (
           season_id, event_id, entry_id, calculation_mode,
@@ -956,7 +964,7 @@ export async function persistManagerScoreMaterializations(
       rowsForRedis.push({
         ...row,
         generation: publishedGeneration,
-        verifiedLiveCheckedAt: headWrite[0]!.verified_live_checked_at.toISOString(),
+        verifiedLiveCheckedAt: timestampToIso(headWrite[0]!.verified_live_checked_at),
       });
       headsUpdated += 1;
     }
