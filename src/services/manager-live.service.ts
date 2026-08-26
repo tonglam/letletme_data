@@ -923,6 +923,21 @@ export const invalidateManagerLiveTournamentCoverage = (
   };
 };
 
+export const shouldPreserveManagerLiveTournamentCoverage = (
+  coverage: {
+    state: string;
+    rosterRevision: string;
+    expectedEntries: number;
+    resolvedEntries: number;
+  } | null,
+  rosterRevision: string,
+  expectedEntries: number,
+): boolean =>
+  coverage?.state === 'COMPLETE' &&
+  coverage.rosterRevision === rosterRevision &&
+  coverage.expectedEntries === expectedEntries &&
+  coverage.resolvedEntries === expectedEntries;
+
 const mapTournamentCoverage = (row: {
   rosterRevision: string;
   expectedEntries: number;
@@ -997,16 +1012,27 @@ const persistTournamentCoverage = async (input: {
   const resolvedEntryIds = new Set(
     input.rows.filter((row) => typeof row.eventPoints === 'number').map((row) => row.entryId),
   );
-  const resolvedEntries = Math.min(input.expectedEntries, resolvedEntryIds.size);
-  const state = deriveManagerLiveTournamentCoverageState({
-    expectedEntries: input.expectedEntries,
-    resolvedEntries,
-    errorCode: input.errorCode,
-    crawlComplete: input.crawlComplete,
-  });
+  const preserveExistingComplete = shouldPreserveManagerLiveTournamentCoverage(
+    existing,
+    input.rosterRevision,
+    input.expectedEntries,
+  );
+  const resolvedEntries = preserveExistingComplete
+    ? (existing?.resolvedEntries ?? 0)
+    : Math.min(input.expectedEntries, resolvedEntryIds.size);
+  const state = preserveExistingComplete
+    ? 'COMPLETE'
+    : deriveManagerLiveTournamentCoverageState({
+        expectedEntries: input.expectedEntries,
+        resolvedEntries,
+        errorCode: input.errorCode,
+        crawlComplete: input.crawlComplete,
+      });
   const complete = state === 'COMPLETE';
   const fullyFetchedAt = complete
-    ? new Date()
+    ? preserveExistingComplete
+      ? (existing?.fullyFetchedAt ?? null)
+      : new Date()
     : existing?.rosterRevision === input.rosterRevision
       ? existing.fullyFetchedAt
       : null;

@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   deriveManagerLiveTournamentCoverageState,
   invalidateManagerLiveTournamentCoverage,
+  shouldPreserveManagerLiveTournamentCoverage,
   tournamentRosterRevision,
 } from '../../src/services/manager-live.service';
 
@@ -83,5 +84,27 @@ describe('manager live tournament coverage state', () => {
       state: 'WARMING',
     });
     expect(invalidateManagerLiveTournamentCoverage(previous, 'old-roster', 2)).toBe(previous);
+  });
+
+  test('preserves COMPLETE coverage while an unchanged roster is recrawled', () => {
+    const complete = {
+      rosterRevision: 'same-roster',
+      expectedEntries: 2,
+      resolvedEntries: 2,
+      fullyFetchedAt: '2026-08-25T00:00:00.000Z',
+      managerRevision: 'old-manager',
+      error: null,
+      state: 'COMPLETE' as const,
+    };
+
+    expect(shouldPreserveManagerLiveTournamentCoverage(complete, 'same-roster', 2)).toBe(true);
+    expect(
+      shouldPreserveManagerLiveTournamentCoverage(
+        { ...complete, resolvedEntries: 1 },
+        'same-roster',
+        2,
+      ),
+    ).toBe(false);
+    expect(shouldPreserveManagerLiveTournamentCoverage(complete, 'new-roster', 2)).toBe(false);
   });
 });
