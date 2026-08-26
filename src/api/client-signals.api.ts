@@ -73,7 +73,13 @@ async function parseJsonBodyWithLimit(request: Request): Promise<unknown | undef
 
 export const clientSignalsAPI = new Elysia({ prefix: '/internal/ops' })
   .onParse(async ({ request, contentType }) => {
-    if (contentType !== 'application/json') return undefined;
+    // Returning undefined delegates to Elysia's default parser, which would
+    // buffer an unsupported body before the handler can enforce the 16 KiB
+    // transport budget. Claim every content type here and fail closed.
+    if (contentType.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+      bodyProblems.set(request, { status: 422, message: 'invalid JSON body' });
+      return null;
+    }
     return parseJsonBodyWithLimit(request);
   })
   .post(
