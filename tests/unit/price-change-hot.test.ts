@@ -70,6 +70,8 @@ describe('price-change hot snapshot', () => {
     expect(snapshot.expectedPlayerCount).toBe(2);
     expect(snapshot.corePlayerCount).toBe(1);
     expect(snapshot.corePlayerDelta).toBe(1);
+    expect(snapshot.payloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(snapshot.metadataHash).toMatch(/^[0-9a-f]{64}$/);
     expect(snapshot.reconciliation.state).toBe('pending');
     expect(snapshot.expiresAt).toBe(
       new Date(detectedAt.getTime() + PRICE_CHANGE_HOT_TTL_MS).toISOString(),

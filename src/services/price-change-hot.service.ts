@@ -18,7 +18,7 @@ import { logInfo } from '../utils/logger';
 import { createFplSourceArtifactStorage } from './fpl-source-artifact-storage.service';
 
 export const PRICE_CHANGE_HOT_TTL_MS = 15 * 60 * 1000;
-export const PRICE_CHANGE_HOT_SCHEMA_VERSION = 1 as const;
+export const PRICE_CHANGE_HOT_SCHEMA_VERSION = 2 as const;
 
 const HOT_KEY_PREFIX = 'fpl:price-changes:hot';
 
@@ -30,6 +30,10 @@ export type PriceChangeHotSnapshot = Readonly<{
   revision: string;
   triggerFingerprint: string;
   sourceHash: string;
+  /** Hash of the immutable payload envelope, excluding reconciliation state. */
+  payloadHash: string;
+  /** Hash of the immutable metadata envelope, excluding reconciliation state. */
+  metadataHash: string;
   artifactId: string | null;
   deadline: string | null;
   detectedAt: string;
@@ -96,6 +100,34 @@ export function priceChangeHotMetadataKey(seasonCode: string, revision: string):
 
 type PriceChangeHotSnapshotMetadata = Omit<PriceChangeHotSnapshot, 'board'>;
 
+type HotSnapshotRecord = Record<string, unknown>;
+
+const immutablePayloadJson = (value: HotSnapshotRecord): string => {
+  const {
+    payloadHash: _payloadHash,
+    metadataHash: _metadataHash,
+    reconciliation: _reconciliation,
+    ...immutable
+  } = value;
+  return JSON.stringify(immutable);
+};
+
+const immutableMetadataJson = (value: HotSnapshotRecord): string => {
+  const {
+    metadataHash: _metadataHash,
+    reconciliation: _reconciliation,
+    board: _board,
+    ...immutable
+  } = value;
+  return JSON.stringify(immutable);
+};
+
+const hotPayloadHash = (value: HotSnapshotRecord): string =>
+  sha256Bytes(new TextEncoder().encode(immutablePayloadJson(value)));
+
+const hotMetadataHash = (value: HotSnapshotRecord): string =>
+  sha256Bytes(new TextEncoder().encode(immutableMetadataJson(value)));
+
 function priceChangeHotSnapshotMetadata(snapshot: PriceChangeHotSnapshot): string {
   const metadata: PriceChangeHotSnapshotMetadata = {
     schemaVersion: snapshot.schemaVersion,
@@ -103,6 +135,8 @@ function priceChangeHotSnapshotMetadata(snapshot: PriceChangeHotSnapshot): strin
     revision: snapshot.revision,
     triggerFingerprint: snapshot.triggerFingerprint,
     sourceHash: snapshot.sourceHash,
+    payloadHash: snapshot.payloadHash,
+    metadataHash: snapshot.metadataHash,
     artifactId: snapshot.artifactId,
     deadline: snapshot.deadline,
     detectedAt: snapshot.detectedAt,
@@ -242,12 +276,14 @@ export function buildPriceChangeHotSnapshot(input: {
   }
   const board = normalizePriceChangeBoard(input.bootstrap, fetchedAt);
   const expiresAt = new Date(detectedAt.getTime() + PRICE_CHANGE_HOT_TTL_MS);
-  return {
+  const base = {
     schemaVersion: PRICE_CHANGE_HOT_SCHEMA_VERSION,
     seasonCode: input.season.seasonCode,
     revision: board.revision,
     triggerFingerprint: priceChangeTriggerFingerprint(input.bootstrap),
     sourceHash: input.sourceHash,
+    payloadHash: '',
+    metadataHash: '',
     artifactId: input.artifactId ?? null,
     deadline: board.deadline,
     detectedAt: detectedAt.toISOString(),
@@ -264,7 +300,11 @@ export function buildPriceChangeHotSnapshot(input: {
       durableRevision: null,
       error: null,
     },
-  };
+  } as const;
+  const payloadHash = hotPayloadHash(base);
+  const withPayloadHash = { ...base, payloadHash };
+  const metadataHash = hotMetadataHash(withPayloadHash);
+  return { ...withPayloadHash, metadataHash };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -290,6 +330,10 @@ function isValidSnapshotMetadata(
     !/^[0-9a-f]{64}$/.test(value.triggerFingerprint) ||
     typeof value.sourceHash !== 'string' ||
     !/^[0-9a-f]{64}$/.test(value.sourceHash) ||
+    typeof value.payloadHash !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(value.payloadHash) ||
+    typeof value.metadataHash !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(value.metadataHash) ||
     (value.artifactId !== null && typeof value.artifactId !== 'string') ||
     (value.deadline !== null &&
       (typeof value.deadline !== 'string' || !Number.isFinite(Date.parse(value.deadline)))) ||
@@ -361,7 +405,7 @@ function isValidSnapshotMetadata(
   ) {
     return false;
   }
-  return true;
+  return hotMetadataHash(value) === value.metadataHash;
 }
 
 function isValidSnapshot(
@@ -371,6 +415,7 @@ function isValidSnapshot(
 ): value is PriceChangeHotSnapshot {
   if (!isValidSnapshotMetadata(value, seasonCode, now)) return false;
   const snapshot = value as PriceChangeHotSnapshot;
+  if (hotPayloadHash(snapshot) !== snapshot.payloadHash) return false;
   if (!isRecord(snapshot.board)) return false;
   const expectedPlayerCount = snapshot.expectedPlayerCount;
   const observedPlayerCount = snapshot.observedPlayerCount;
@@ -410,6 +455,8 @@ function parsePointer(value: string | null): {
   readonly revision: string;
   readonly payloadKey: string;
   readonly detectedAtMs: number;
+  readonly payloadHash: string;
+  readonly metadataHash: string;
 } | null {
   if (!value) return null;
   try {
@@ -418,7 +465,11 @@ function parsePointer(value: string | null): {
     if (
       typeof parsed.revision !== 'string' ||
       typeof parsed.payloadKey !== 'string' ||
-      !Number.isSafeInteger(parsed.detectedAtMs)
+      !Number.isSafeInteger(parsed.detectedAtMs) ||
+      typeof parsed.payloadHash !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(parsed.payloadHash) ||
+      typeof parsed.metadataHash !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(parsed.metadataHash)
     ) {
       return null;
     }
@@ -426,6 +477,8 @@ function parsePointer(value: string | null): {
       revision: parsed.revision,
       payloadKey: parsed.payloadKey,
       detectedAtMs: Number(parsed.detectedAtMs),
+      payloadHash: parsed.payloadHash,
+      metadataHash: parsed.metadataHash,
     };
   } catch {
     return null;
@@ -458,6 +511,8 @@ export async function publishPriceChangeHotSnapshot(
     revision: snapshot.revision,
     payloadKey,
     detectedAtMs: Date.parse(snapshot.detectedAt),
+    payloadHash: snapshot.payloadHash,
+    metadataHash: snapshot.metadataHash,
   });
   const result = await redis.eval(
     POINTER_CAS_SCRIPT,
@@ -488,6 +543,7 @@ export async function readPriceChangeHotSnapshot(
     pointer.payloadKey,
     pointer.revision,
     now,
+    pointer.payloadHash,
   );
 }
 
@@ -534,7 +590,12 @@ export async function readPriceChangeHotSnapshotMetadata(
   } catch {
     return null;
   }
-  if (!isValidSnapshotMetadata(parsed, seasonCode, now) || parsed.revision !== pointer.revision) {
+  if (
+    !isValidSnapshotMetadata(parsed, seasonCode, now) ||
+    parsed.revision !== pointer.revision ||
+    parsed.payloadHash !== pointer.payloadHash ||
+    parsed.metadataHash !== pointer.metadataHash
+  ) {
     return null;
   }
   return parsed;
@@ -546,6 +607,7 @@ async function readPriceChangeHotSnapshotPayload(
   payloadKey: string,
   expectedRevision: string,
   now: Date,
+  expectedPayloadHash?: string,
 ): Promise<PriceChangeHotSnapshot | null> {
   const raw = await redis.get(payloadKey);
   if (!raw) return null;
@@ -555,7 +617,11 @@ async function readPriceChangeHotSnapshotPayload(
   } catch {
     return null;
   }
-  if (!isValidSnapshot(parsed, seasonCode, now) || parsed.revision !== expectedRevision)
+  if (
+    !isValidSnapshot(parsed, seasonCode, now) ||
+    parsed.revision !== expectedRevision ||
+    (expectedPayloadHash !== undefined && parsed.payloadHash !== expectedPayloadHash)
+  )
     return null;
   const ageMs = now.getTime() - Date.parse(parsed.fetchedAt);
   return {
