@@ -284,10 +284,14 @@ export async function reconcileExpiredSchedulerEnqueueClaims(input: {
     ScheduledJobDefinition,
     'name' | 'queueName' | 'recoveryCompletionMode'
   >[];
+  /** Latest-wins lanes are reconciled by their lane state machine instead. */
+  excludedJobNames?: readonly string[];
   dependencies?: Partial<RecoveryDependencies>;
 }): Promise<SchedulerEnqueueRecoveryResult> {
   const dependencies = { ...defaultRecoveryDependencies, ...input.dependencies };
-  const candidates = await dependencies.listCandidates();
+  const candidates = await dependencies.listCandidates({
+    excludedJobNames: input.excludedJobNames,
+  });
   const grouped = groupRecoveryCandidates(candidates, input.definitions);
   const definitionsByName = new Map(
     input.definitions.map((definition) => [definition.name, definition]),

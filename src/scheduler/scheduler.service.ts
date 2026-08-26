@@ -201,11 +201,12 @@ export async function triggerPriceChangeLane(): Promise<{
   // reusing the terminal five-minute row would make advanceSchedulerLane
   // correctly (but undesirably) report no work.
   if (['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) {
-    const requestedAtMs = context.now.getTime();
+    const manualDueAt = new Date(Math.max(context.now.getTime(), plan.dueAt.getTime() + 1));
+    const requestedAtMs = manualDueAt.getTime();
     plan = {
       ...plan,
       periodKey: `${plan.periodKey}-manual-${randomUUID()}`,
-      dueAt: context.now,
+      dueAt: manualDueAt,
       evidence: {
         ...(plan.evidence ?? {}),
         manual: true,
@@ -799,8 +800,12 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
 
   let enqueueRecovery: SchedulerEnqueueRecoveryResult | null = null;
   try {
+    const latestWinsJobNames = schedulerRegistry
+      .filter((definition) => definition.executionPolicy)
+      .map((definition) => definition.name);
     enqueueRecovery = await reconcileExpiredSchedulerEnqueueClaims({
       definitions: schedulerRegistry,
+      excludedJobNames: latestWinsJobNames,
     });
     failed += enqueueRecovery.errors;
   } catch (error) {

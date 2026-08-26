@@ -60,18 +60,25 @@ async function markSupersededPriceRunSkipped(
   job: Job<FplCriticalJobData>,
   skippedItems = 0,
   runIdOverride?: string,
+  strict = false,
 ): Promise<void> {
   const runId = runIdOverride ?? target.obligation.runId ?? job.data.runId;
   if (!runId) return;
-  await syncOperationsRepository
-    .finishRun(runId, {
-      status: 'skipped',
-      completedItems: 0,
-      skippedItems,
-      dataChanged: false,
-      metadata: { reason: 'superseded-by-latest-authoritative' },
-    })
-    .catch(() => undefined);
+  const finish = syncOperationsRepository.finishRun(runId, {
+    status: 'skipped',
+    completedItems: 0,
+    skippedItems,
+    dataChanged: false,
+    metadata: { reason: 'superseded-by-latest-authoritative' },
+  });
+  if (strict) {
+    await finish;
+  } else {
+    // The lane's scheduler job run ID is only a correlation identifier; older
+    // producers did not create a sync_runs row for it. Keep that compatibility
+    // path best-effort while requiring the real preparation run below.
+    await finish.catch(() => undefined);
+  }
 }
 
 async function blockPriceLaneForCoreRepair(
@@ -228,7 +235,13 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
       // preparePriceChangePublication owns a separate source run for the HTTP
       // fetch. Retire that run too; otherwise a superseded fetch remains
       // RUNNING forever and blocks the deployment quiescence gate.
-      await markSupersededPriceRunSkipped(activeTarget, job, skippedItems, prepared.sourceRunId);
+      await markSupersededPriceRunSkipped(
+        activeTarget,
+        job,
+        skippedItems,
+        prepared.sourceRunId,
+        true,
+      );
       activeTarget = beforePersist;
       continue;
     }

@@ -199,19 +199,20 @@ export async function advanceSchedulerLane(input: {
         row = reloaded;
       }
     } else {
-      const isNewer = desiredScheduledDueAt.getTime() > existingRow.desiredDueAt.getTime();
+      row = existingRow;
+    }
+    // A conflict-safe insert can reload a winner whose desired waterline is
+    // older than this caller's obligation. Apply the same latest-wins update
+    // to both the ordinary existing-row and insert-conflict paths.
+    if (desiredScheduledDueAt.getTime() > row.desiredDueAt.getTime()) {
       const updated = await tx
         .update(schedulerLanesInOps)
         .set({
-          ...(isNewer
-            ? {
-                desiredObligationId: input.desiredObligation.obligationId,
-                desiredDueAt: desiredScheduledDueAt,
-              }
-            : {}),
+          desiredObligationId: input.desiredObligation.obligationId,
+          desiredDueAt: desiredScheduledDueAt,
           updatedAt: dbNow,
         })
-        .where(eq(schedulerLanesInOps.laneId, existingRow.laneId))
+        .where(eq(schedulerLanesInOps.laneId, row.laneId))
         .returning();
       if (!updated[0]) throw new Error('Scheduler lane update returned no row');
       row = updated[0];
