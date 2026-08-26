@@ -539,6 +539,22 @@ persistenceTest(
         await entryRepository.upsertFromSummary(season, buildEntrySummary(entryId), 1, 1);
       }
       await entryRepository.upsertFromSummary(season, buildEntrySummary(70_003), 1, 1);
+      await client`
+        UPDATE competition.entries
+        SET used_entry_names = '{}'::text[]
+        WHERE season_id = ${season.seasonId} AND entry_id = ${70_003}
+      `;
+      const repairedLegacy = await entryRepository.upsertFromSummary(
+        season,
+        { ...buildEntrySummary(70_003), name: 'Repaired Legacy Entry' },
+        1,
+        1,
+      );
+      expect(repairedLegacy.lastEntryName).toBe('Runtime Entry 70003');
+      expect(repairedLegacy.usedEntryNames).toEqual([
+        'Runtime Entry 70003',
+        'Repaired Legacy Entry',
+      ]);
       const renamed = await entryRepository.upsertFromSummary(
         season,
         { ...buildEntrySummary(entryIds[0]), name: 'Renamed Runtime Entry' },
@@ -548,6 +564,45 @@ persistenceTest(
       expect(renamed.usedEntryNames).toEqual([
         `Runtime Entry ${entryIds[0]}`,
         'Renamed Runtime Entry',
+      ]);
+
+      const repeated = await entryRepository.upsertFromSummary(
+        season,
+        { ...buildEntrySummary(entryIds[0]), name: 'Renamed Runtime Entry' },
+        1,
+        1,
+      );
+      expect(repeated.entryName).toBe('Renamed Runtime Entry');
+      expect(repeated.lastEntryName).toBe(`Runtime Entry ${entryIds[0]}`);
+      expect(repeated.usedEntryNames).toEqual([
+        `Runtime Entry ${entryIds[0]}`,
+        'Renamed Runtime Entry',
+      ]);
+
+      const renamedBack = await entryRepository.upsertFromSummary(
+        season,
+        { ...buildEntrySummary(entryIds[0]), name: `Runtime Entry ${entryIds[0]}` },
+        1,
+        1,
+      );
+      expect(renamedBack.entryName).toBe(`Runtime Entry ${entryIds[0]}`);
+      expect(renamedBack.lastEntryName).toBe('Renamed Runtime Entry');
+      expect(renamedBack.usedEntryNames).toEqual([
+        `Runtime Entry ${entryIds[0]}`,
+        'Renamed Runtime Entry',
+      ]);
+
+      const caseChanged = await entryRepository.upsertFromSummary(
+        season,
+        { ...buildEntrySummary(entryIds[0]), name: `runtime entry ${entryIds[0]}` },
+        1,
+        1,
+      );
+      expect(caseChanged.lastEntryName).toBe(`Runtime Entry ${entryIds[0]}`);
+      expect(caseChanged.usedEntryNames).toEqual([
+        `Runtime Entry ${entryIds[0]}`,
+        'Renamed Runtime Entry',
+        `runtime entry ${entryIds[0]}`,
       ]);
 
       const picks = buildPicks(1);

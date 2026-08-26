@@ -98,6 +98,8 @@ describe('entry-info atomic upsert contract', () => {
       'COALESCE("competition"."entries"."overall_points", 0)',
     );
     expect(renderSql(conflict.set.lastEntryName)).toContain('"competition"."entries"."entry_name"');
+    expect(renderSql(conflict.set.lastEntryName)).toContain('CASE');
+    expect(renderSql(conflict.set.lastEntryName)).toContain('last_entry_name');
     expect(renderSql(conflict.set.usedEntryNames)).toContain('WITH ORDINALITY');
   });
 });

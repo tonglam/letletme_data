@@ -13,10 +13,28 @@ export function isExplicitEntryRepairRequest(
   return jobData?.entryIds !== undefined;
 }
 
-export function isCronEntryInfoTableScan(
-  jobData: { source?: string; entryIds?: readonly number[] } | undefined,
+export function shouldRefreshEntryInfoFromSource(
+  jobData:
+    | {
+        source?: string;
+        entryIds?: readonly number[];
+        retryCount?: number;
+        obligationId?: string;
+      }
+    | undefined,
 ): boolean {
-  return jobData?.source === 'cron' && jobData.entryIds === undefined;
+  const isRoutineCapture =
+    (jobData?.source === 'catchup' || jobData?.source === 'reconcile') &&
+    jobData.obligationId === undefined;
+  if (isRoutineCapture && (jobData?.retryCount ?? 0) > 0) return false;
+  if (jobData?.entryIds !== undefined) return true;
+  if (jobData?.source === 'cron' || jobData?.source === 'manual') return true;
+
+  // Standalone scheduler jobs use `catchup` as their source, but carry the
+  // durable obligation through every scan chunk and retry. Entry identity is
+  // mutable even when the GW snapshot checkpoint is already complete, so a
+  // scheduled full scan must still read the upstream summary.
+  return jobData?.obligationId !== undefined;
 }
 
 export function shouldRefreshEntryPicks(
