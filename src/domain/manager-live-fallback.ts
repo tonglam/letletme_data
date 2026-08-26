@@ -217,6 +217,18 @@ export const runManagerStandingsPageSequence = async <TError>(
   };
 };
 
+export const nextManagerLiveStandingsContinuation = <TError>(
+  result: Pick<ManagerStandingsPageResult<TError>, 'complete' | 'nextPage' | 'errorCode'>,
+  maxPage: number,
+): number | null =>
+  !result.complete &&
+  result.errorCode === null &&
+  Number.isSafeInteger(result.nextPage) &&
+  result.nextPage > 0 &&
+  result.nextPage <= maxPage
+    ? result.nextPage
+    : null;
+
 export const classicManagerBackgroundStandingsStartPage = (
   standingsEntryIds: readonly number[],
   coldEntryIds: ReadonlySet<number>,

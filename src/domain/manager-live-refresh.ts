@@ -41,6 +41,7 @@ type ManagerLiveHotRedis = {
 
 type ManagerLiveHotStateRedis = ManagerLiveHotRedis & {
   eval(script: string, numberOfKeys: number, ...args: string[]): Promise<unknown>;
+  del(key: string): Promise<unknown>;
 };
 
 export type ManagerLiveHotScopeState = ManagerLiveRefreshScope & {
@@ -370,6 +371,13 @@ export async function loadManagerLiveHotState(
   scope: ManagerLiveRefreshScope,
 ): Promise<ManagerLiveHotScopeState | null> {
   return parseManagerLiveHotScopeState(await redis.get(managerLiveHotStateKey(scope)));
+}
+
+export async function removeManagerLiveHotState(
+  redis: ManagerLiveHotStateRedis,
+  scope: ManagerLiveRefreshScope,
+): Promise<void> {
+  await redis.del(managerLiveHotStateKey(scope));
 }
 
 export async function advanceManagerLiveHotState(

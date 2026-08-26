@@ -7,6 +7,7 @@ import {
   type ManagerLiveHotScopeState,
 } from '../domain/manager-live-refresh';
 import {
+  clearManagerLiveHotScope,
   readHotManagerLiveScope,
   reconcileManagerLiveHotScopeRoster,
   scheduleNextManagerLiveRefresh,
@@ -140,6 +141,20 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
         ? job.data.entryIds
         : await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId),
     );
+    if (job.data.tournamentId !== undefined && authoritativeEntryIds.length === 0) {
+      await clearManagerLiveHotScope({
+        seasonId: season.seasonId,
+        seasonCode: season.seasonCode,
+        eventId: job.data.eventId,
+        entryIds: [],
+        tournamentId: job.data.tournamentId,
+      });
+      logInfo('Manager live refresh stopped after authoritative roster became empty', {
+        eventId: job.data.eventId,
+        tournamentId: job.data.tournamentId,
+      });
+      return { stopped: 'empty-authoritative-roster' as const };
+    }
     const jobEntryIds = normalizeManagerLiveEntryIds(job.data.entryIds);
     const currentHotState = await readHotManagerLiveScope({
       seasonId: season.seasonId,

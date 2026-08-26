@@ -15,12 +15,14 @@ import {
   managerLiveClassicCursorKey,
   managerLiveDispatchEntryChunks,
   managerLiveFollowupRunAt,
+  managerLiveHotStateKey,
   managerLiveHotScopeKey,
   managerLiveRefreshJobId,
   managerLiveRefreshJobIdForState,
   parseManagerLiveHotState,
   parseManagerLiveClassicCursor,
   parseManagerLiveHotScope,
+  removeManagerLiveHotState,
   shouldStopManagerLiveRefresh,
   writeManagerLiveClassicCursor,
   writeManagerLiveHotScope,
@@ -160,6 +162,19 @@ describe('manager live refresh policy', () => {
       [managerLiveClassicCursorKey(scope), '0', 'EX', MANAGER_LIVE_HOT_SCOPE_SECONDS],
     ]);
     expect(parseManagerLiveClassicCursor('101')).toBeUndefined();
+  });
+
+  test('removes the generation-aware hot state for an empty authoritative roster', async () => {
+    const calls: string[] = [];
+    const redis = {
+      del: async (key: string) => {
+        calls.push(key);
+        return 1;
+      },
+    };
+
+    await removeManagerLiveHotState(redis as never, { ...scope, entryIds: [] });
+    expect(calls).toEqual([managerLiveHotStateKey({ ...scope, entryIds: [] })]);
   });
 
   test('stops follow-up eligibility when the hot scope expires or is malformed', async () => {

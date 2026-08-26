@@ -324,10 +324,10 @@ export const createManagerLiveTournamentCoverageRepository = (dbInstance?: DbOrT
       return row ?? null;
     },
 
-    upsert: async (input: ManagerLiveTournamentCoverageInput): Promise<void> => {
+    upsert: async (input: ManagerLiveTournamentCoverageInput): Promise<boolean> => {
       const db = await getDbInstance();
       const updatedAt = input.updatedAt ?? new Date();
-      await db.transaction(async (tx) => {
+      return db.transaction(async (tx) => {
         // Roster publication and tournament deletion both take FOR UPDATE on
         // the parent tournament row. Holding FOR SHARE through the roster
         // reread and coverage upsert serializes those mutations with this
@@ -339,7 +339,7 @@ export const createManagerLiveTournamentCoverageRepository = (dbInstance?: DbOrT
             AND tournament_id = ${input.tournamentId}
           FOR SHARE
         `);
-        if (tournamentRows.length === 0) return;
+        if (tournamentRows.length === 0) return false;
 
         const rosterRows = await tx.execute<{ entryId: number }>(sql`
           SELECT entry_id AS "entryId"
@@ -355,7 +355,7 @@ export const createManagerLiveTournamentCoverageRepository = (dbInstance?: DbOrT
         if (
           tournamentRosterRevision(rosterRows.map((row) => row.entryId)) !== input.rosterRevision
         ) {
-          return;
+          return false;
         }
 
         await tx
@@ -411,6 +411,7 @@ export const createManagerLiveTournamentCoverageRepository = (dbInstance?: DbOrT
               )
             `,
           });
+        return true;
       });
     },
   };

@@ -66,6 +66,36 @@ describe('Classic manager headline projection', () => {
     }
   });
 
+  test('does not report finalized coverage as published when the roster fence rejects it', async () => {
+    const findCoverage = spyOn(
+      managerLiveTournamentCoverageRepository,
+      'findByTournamentAndEvent',
+    ).mockResolvedValue(null);
+    const upsertCoverage = spyOn(
+      managerLiveTournamentCoverageRepository,
+      'upsert',
+    ).mockResolvedValue(false);
+
+    try {
+      await expect(
+        persistTournamentCoverage({
+          season: TEST_SEASON,
+          eventId: 1,
+          tournamentId: 7,
+          rosterRevision: 'roster-1',
+          expectedEntries: 1,
+          rows: [row({ source: 'FPL_FINAL_RESULT' })],
+          errorCode: null,
+          managerRevision: 'final:manager-1',
+          crawlComplete: true,
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      findCoverage.mockRestore();
+      upsertCoverage.mockRestore();
+    }
+  });
+
   test('replaces a lagging 23-point summary with the traced 37-point event-live score', () => {
     const projected = projectEventLiveManagerRows(
       '2627',

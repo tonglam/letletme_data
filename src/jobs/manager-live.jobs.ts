@@ -10,6 +10,7 @@ import {
   reconcileManagerLiveHotStateRoster,
   managerLiveRefreshJobIdForState,
   normalizeManagerLiveEntryIds,
+  removeManagerLiveHotState,
   type ManagerLiveHotScopeState,
   type ManagerLiveRefreshScope,
 } from '../domain/manager-live-refresh';
@@ -58,6 +59,11 @@ export async function readManagerLiveHotState(
   const state = await readHotManagerLiveScope(managerLiveScopeFromJobData(jobData));
   if (!state || !jobData.generation || state.generation !== jobData.generation) return null;
   return state;
+}
+
+export async function clearManagerLiveHotScope(scope: ManagerLiveRefreshScope): Promise<void> {
+  const redis = await queueRedisSingleton.getClient();
+  await removeManagerLiveHotState(redis, scope);
 }
 
 export async function reconcileManagerLiveHotScopeRoster(
