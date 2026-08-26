@@ -17,19 +17,17 @@ describe('live lifecycle decisions', () => {
   test('standalone scheduler persists lifecycle independently of live publications', () => {
     const source = readFileSync('src/scheduler.ts', 'utf8');
     expect(source).toContain('runIndependentSchedulerStage');
-    expect(source).toContain('live-lifecycle');
-    expect(source).toContain('persistLiveLifecycleStatus(now)');
-    expect(source).toContain('live-picks-refresh');
-    expect(source).toContain('enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id');
-    expect(source).toContain('jobId: `live-picks-compatibility-');
-    expect(source).toContain('LIVE_PICKS_COMPATIBILITY_BUCKET_MS');
+    expect(source).toContain('DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS');
+    expect(source).toContain('DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE');
+    expect(source).toContain('MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX');
+    expect(source).not.toContain('persistLiveLifecycleStatus(');
+    expect(source).not.toContain('reconcileCoreAndMarketPublications(');
+    expect(source).not.toContain('dispatchDataPublicationOutbox(');
     expect(source).not.toContain('runPicksProbeAndSync(');
-    expect(source.indexOf('persistLiveLifecycleStatus(now)')).toBeLessThan(
-      source.indexOf('enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id'),
-    );
-    expect(
-      source.indexOf('enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id'),
-    ).toBeLessThan(source.indexOf('runSchedulerPass(now)'));
+    const workerSource = readFileSync('src/workers/data-governance.worker.ts', 'utf8');
+    expect(workerSource).toContain('persistLiveLifecycleStatus(new Date())');
+    expect(workerSource).toContain('enqueueLivePicksRefresh(tick.season, tick.currentEvent.id');
+    expect(workerSource).toContain('LIVE_PICKS_COMPATIBILITY_BUCKET_MS');
     const registrySource = readFileSync('src/scheduler/job-registry.ts', 'utf8');
     expect(registrySource).toContain('const decision = decideLiveLifecycle(event, fixtures');
     expect(registrySource).toContain('decision.state ===');
