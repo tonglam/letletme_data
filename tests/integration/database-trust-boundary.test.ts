@@ -331,6 +331,8 @@ describe('database trust boundary', () => {
       'bug_report_retention_backups',
       'bug_report_storage_migrations',
       'bug_reports',
+      'client_signal_batches',
+      'client_signal_windows',
       'data_governance_cases',
       'data_publication_outbox',
       'dataset_publication_items',
