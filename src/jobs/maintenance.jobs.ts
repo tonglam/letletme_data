@@ -54,8 +54,15 @@ export function maintenanceLaneForJob(
   jobName: MaintenanceJobName,
   options?: Pick<MaintenanceEnqueueOptions, 'lane'>,
 ): MaintenanceLane {
-  if (!getConfig().QUEUE_LANES_V2_ENABLED) return 'maintenance';
   const expectedLane = MAINTENANCE_JOB_LANES[jobName];
+  // Publication receipts are correctness-critical and must not be queued
+  // behind an unrelated legacy maintenance job during a lane-v2 rollback.
+  // Keep the legacy queue available for old payloads, but route all new
+  // outbox work to its independently consumed lane in either rollout mode.
+  const isPublicationOutbox =
+    jobName === MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX ||
+    jobName === MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX;
+  if (!getConfig().QUEUE_LANES_V2_ENABLED && !isPublicationOutbox) return 'maintenance';
   if (options?.lane && options.lane !== expectedLane) {
     throw new Error(
       `Maintenance job ${jobName} must stay on lane ${expectedLane}; received ${options.lane}`,

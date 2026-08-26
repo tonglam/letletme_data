@@ -53,9 +53,15 @@ import { persistLiveLifecycleStatus } from '../services/live-lifecycle-orchestra
 import { reconcileCoreAndMarketPublications } from '../services/data-publication-reconciler';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import { seasonRepository } from '../repositories/seasons';
+import { QueueDrainOnlyError } from '../services/queue-governance.service';
 import type { WorkerRuntime } from './worker-runtime';
 
 type GovernanceFreshnessCase = Awaited<ReturnType<typeof listGovernanceCases>>[number];
+
+// The legacy scheduler compatibility bridge still needs a bounded live-picks
+// root when lane v2 is disabled. Keep that identity cadence-based so a
+// completed/failed Bull job cannot suppress the next lifecycle refresh.
+const LIVE_PICKS_COMPATIBILITY_BUCKET_MS = 2 * 60_000;
 
 /**
  * Dispatch the concrete producer/repair lane for a freshness breach. The
@@ -192,9 +198,35 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
     switch (job.name) {
       case DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS: {
         const tick = await persistLiveLifecycleStatus(new Date());
+        let picksDeferred = false;
+        if (
+          !getConfig().QUEUE_LANES_V2_ENABLED &&
+          tick &&
+          (tick.decision.shouldProbePicks || tick.decision.shouldSyncPicks)
+        ) {
+          const now = new Date();
+          try {
+            await enqueueLivePicksRefresh(tick.season, tick.currentEvent.id, {
+              jobId: `live-picks-compatibility-${tick.season.seasonCode}-e${tick.currentEvent.id}-b${Math.floor(now.getTime() / LIVE_PICKS_COMPATIBILITY_BUCKET_MS)}`,
+              now,
+            });
+          } catch (error) {
+            if (!(error instanceof QueueDrainOnlyError)) throw error;
+            // A manually drained critical lane must not erase the lifecycle
+            // checkpoint. The next governance tick will retry the latest
+            // compatibility bucket after admission reopens.
+            picksDeferred = true;
+            logInfo('Compatibility live-picks refresh deferred by admission gate', {
+              queue: 'live-picks',
+              eventId: tick.currentEvent.id,
+              retryAfterSeconds: error.retryAfterSeconds,
+            });
+          }
+        }
         return {
           state: tick?.decision.state ?? null,
           eventId: tick?.currentEvent.id ?? null,
+          picksDeferred,
         };
       }
       case DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE:

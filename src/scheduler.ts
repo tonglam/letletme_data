@@ -4,22 +4,13 @@ import { logError, logInfo } from './utils/logger';
 import { touchWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { runSchedulerPass } from './scheduler/scheduler.service';
-import { dispatchDataPublicationOutbox } from './repositories/data-publication-outbox';
-import { reconcileCoreAndMarketPublications } from './services/data-publication-reconciler';
 import { seasonRepository } from './repositories/seasons';
-import { persistLiveLifecycleStatus } from './services/live-lifecycle-orchestrator';
 import { enqueueDataGovernanceJob, DATA_GOVERNANCE_JOBS } from './jobs/data-governance.jobs';
-import { enqueueLivePicksRefresh } from './jobs/live-picks.jobs';
 import { enqueueMaintenanceJob } from './jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from './queues/maintenance.queue';
 import { QueueDrainOnlyError } from './services/queue-governance.service';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
-// Compatibility mode can run while the registry-owned live-picks definition
-// is disabled.  Keep one durable root identity per provider probe interval;
-// the queue's deduplication key still prevents overlap while the job is live,
-// and a completed/failed Bull job cannot suppress the next refresh forever.
-const LIVE_PICKS_COMPATIBILITY_BUCKET_MS = 2 * 60_000;
 
 getConfig();
 if (getConfig().NODE_ENV === 'production') await databaseSingleton.connect();
@@ -64,14 +55,15 @@ async function runPass(): Promise<void> {
     const stageState = { failed: false };
     const now = new Date();
     const season = await seasonRepository.findCurrent();
+    const halfMinute = Math.floor(now.getTime() / SCHEDULER_INTERVAL_MS);
+    const minute = Math.floor(now.getTime() / 60_000);
     if (getConfig().QUEUE_LANES_V2_ENABLED) {
-      const halfMinute = Math.floor(now.getTime() / SCHEDULER_INTERVAL_MS);
-      const minute = Math.floor(now.getTime() / 60_000);
       await runIndependentSchedulerStage(
         'publication-reconcile-enqueue',
         () =>
           enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
             jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
+            deduplicationId: `governance-publication-reconcile-${season.seasonCode}`,
           }),
         stageState,
       );
@@ -80,6 +72,7 @@ async function runPass(): Promise<void> {
         () =>
           enqueueMaintenanceJob(season, MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX, 'reconcile', {
             jobId: `governance-publication-outbox-${season.seasonCode}-${halfMinute}`,
+            deduplicationId: `governance-publication-outbox-${season.seasonCode}`,
           }),
         stageState,
       );
@@ -88,6 +81,7 @@ async function runPass(): Promise<void> {
         () =>
           enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS, {
             jobId: `governance-lifecycle-${season.seasonCode}-${Math.floor(now.getTime() / 30_000)}`,
+            deduplicationId: `governance-lifecycle-${season.seasonCode}`,
           }),
         stageState,
       );
@@ -97,6 +91,7 @@ async function runPass(): Promise<void> {
           () =>
             enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER, {
               jobId: `governance-freshness-${season.seasonCode}-${minute}`,
+              deduplicationId: `governance-freshness-${season.seasonCode}`,
             }),
           stageState,
         );
@@ -105,6 +100,7 @@ async function runPass(): Promise<void> {
           () =>
             enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.GW_AUDIT, {
               jobId: `governance-audit-${season.seasonCode}-${minute}`,
+              deduplicationId: `governance-audit-${season.seasonCode}`,
             }),
           stageState,
         );
@@ -113,45 +109,39 @@ async function runPass(): Promise<void> {
           () =>
             enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.CASE_RECHECK, {
               jobId: `governance-case-recheck-${season.seasonCode}-${minute}`,
+              deduplicationId: `governance-case-recheck-${season.seasonCode}`,
             }),
           stageState,
         );
       }
     } else {
-      const livePicksCompatibilityBucket = Math.floor(
-        now.getTime() / LIVE_PICKS_COMPATIBILITY_BUCKET_MS,
+      await runIndependentSchedulerStage(
+        'publication-reconcile-enqueue',
+        () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
+            jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
+            deduplicationId: `governance-publication-reconcile-${season.seasonCode}`,
+          }),
+        stageState,
       );
       await runIndependentSchedulerStage(
-        'core-market-publication-reconcile',
-        () => reconcileCoreAndMarketPublications(season),
+        'data-publication-outbox-enqueue',
+        () =>
+          enqueueMaintenanceJob(season, MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX, 'reconcile', {
+            jobId: `governance-publication-outbox-${season.seasonCode}-${halfMinute}`,
+            deduplicationId: `governance-publication-outbox-${season.seasonCode}`,
+          }),
         stageState,
       );
       await runIndependentSchedulerStage(
-        'data-publication-outbox',
-        () => dispatchDataPublicationOutbox({ limit: 20 }),
+        'lifecycle-status-enqueue',
+        () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS, {
+            jobId: `governance-lifecycle-${season.seasonCode}-${Math.floor(now.getTime() / 30_000)}`,
+            deduplicationId: `governance-lifecycle-${season.seasonCode}`,
+          }),
         stageState,
       );
-      const lifecycle = await runIndependentSchedulerStage(
-        'live-lifecycle',
-        () => persistLiveLifecycleStatus(now),
-        stageState,
-      );
-      if (lifecycle?.decision.shouldProbePicks || lifecycle?.decision.shouldSyncPicks) {
-        await runIndependentSchedulerStage(
-          'live-picks-refresh-compatibility',
-          // Keep the compatibility path scheduler-only as well.  The old
-          // implementation performed the canary/provider fan-out inline,
-          // which could hold the scheduler's in-flight pass indefinitely and
-          // leave its progress heartbeat falsely healthy.  The dedicated
-          // live-picks worker owns provider I/O in both rollout modes.
-          () =>
-            enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id, {
-              jobId: `live-picks-compatibility-${lifecycle.season.seasonCode}-e${lifecycle.currentEvent.id}-b${livePicksCompatibilityBucket}`,
-              now,
-            }),
-          stageState,
-        );
-      }
     }
     const obligationResult = await runIndependentSchedulerStage(
       'obligation-registry',

@@ -18,6 +18,8 @@ export async function enqueueDataGovernanceJob(
     obligationId?: string;
     obligationGeneration?: number;
     jobId?: string;
+    /** Simple Bull deduplication while a control-plane tick is running. */
+    deduplicationId?: string;
   }> = {},
 ) {
   if (await isQueueDrainOnly(dataGovernanceQueue.name)) {
@@ -39,6 +41,7 @@ export async function enqueueDataGovernanceJob(
     },
     {
       jobId: options.jobId ?? `${jobName}-${season.seasonCode}-${Date.now()}-${randomUUID()}`,
+      ...(options.deduplicationId ? { deduplication: { id: options.deduplicationId } } : {}),
     },
   );
   logInfo('Data governance job enqueued', {
