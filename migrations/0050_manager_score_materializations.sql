@@ -62,7 +62,7 @@ CREATE TABLE fpl.manager_event_score_materializations (
 );
 
 CREATE INDEX manager_event_score_materializations_lookup_idx
-  ON fpl.manager_event_score_materializations (season_id, event_id, entry_id, calculation_mode, created_at DESC);
+  ON fpl.manager_event_score_materializations (season_id, event_id, entry_id, calculation_mode, created_at DESC NULLS LAST);
 
 CREATE TABLE fpl.manager_event_score_heads (
   season_id smallint NOT NULL,

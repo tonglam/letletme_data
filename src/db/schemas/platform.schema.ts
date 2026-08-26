@@ -2169,6 +2169,7 @@ export const entryEventPicksInCompetition = competition.table(
       table.seasonId.asc().nullsLast(),
       table.elementId.asc().nullsLast(),
     ),
+    index('entry_event_picks_event_team_idx').on(table.seasonId, table.eventId, table.eventTeamId),
     index('entry_event_picks_source_row_idx').using(
       'btree',
       table.sourcePickRowId.asc().nullsLast(),
