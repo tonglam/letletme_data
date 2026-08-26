@@ -60,6 +60,12 @@ export interface CoreSnapshotSyncOptions {
   readonly sourceRunId?: string;
   /** Exact freshness window being repaired, carried into the publication manifest. */
   readonly freshnessWindowId?: number;
+   * Optional exact bootstrap captured by a deadline-sensitive price watcher.
+   * Core still fetches fixtures through its normal dependency, but the player,
+   * team, event and phase rows come from the same provider response that
+   * triggered the provisional price board.
+   */
+  readonly bootstrap?: FPLBootstrapResponse;
 }
 
 const defaultDependencies: CoreSnapshotDependencies = {
@@ -131,7 +137,7 @@ export async function syncCoreSnapshot(
   try {
     const sourceCheckedAt = await dependencies.readOrderingTimestamp();
     const [bootstrap, fixtures] = await Promise.all([
-      dependencies.getBootstrap(),
+      options.bootstrap ? Promise.resolve(options.bootstrap) : dependencies.getBootstrap(),
       dependencies.getFixtures(),
     ]);
     dependencies.onMilestone?.('fetched');

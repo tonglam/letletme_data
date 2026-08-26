@@ -269,6 +269,61 @@ function getDeadlines(bootstrap: FPLBootstrapResponse): string[] {
   return normalized;
 }
 
+/**
+ * Stable identity for an actual official price-change event. Deliberately
+ * excludes transfer counts and prediction fields, which can move between
+ * polls without a price change. The deadline is included so a new deadline
+ * never reuses the previous event's baseline.
+ */
+export function priceChangeTriggerFingerprint(bootstrap: FPLBootstrapResponse): string {
+  const deadlines = getDeadlines(bootstrap);
+  const values = priceChangeValueFingerprint(bootstrap);
+  return createHash('sha256')
+    .update(JSON.stringify({ deadline: deadlines[0], values }), 'utf8')
+    .digest('hex');
+}
+
+/** Stable identity for the provider's current player prices and ID set. */
+export function priceChangeValueFingerprint(bootstrap: FPLBootstrapResponse): string {
+  const players = bootstrap.elements
+    .map((element) => ({ id: element.id, nowCost: element.now_cost }))
+    .sort((left, right) => left.id - right.id);
+  return createHash('sha256').update(JSON.stringify(players), 'utf8').digest('hex');
+}
+
+/**
+ * A deadline is only a polling window. Publish a provisional board after a
+ * baseline exists and the provider's player-price identity actually changes;
+ * a day with no official price movement therefore produces no hot update.
+ */
+export function shouldPublishPriceChangeHotSnapshot(
+  previousValueFingerprint: string | null,
+  nextValueFingerprint: string,
+): boolean {
+  return previousValueFingerprint !== null && previousValueFingerprint !== nextValueFingerprint;
+}
+
+/** The first official deadline is the event identity used by the hot watcher. */
+export function priceChangePrimaryDeadline(bootstrap: FPLBootstrapResponse): string {
+  return getDeadlines(bootstrap)[0]!;
+}
+
+/** Build the same event identity from a previously published board. */
+export function priceChangeBoardTriggerFingerprint(board: PriceChangeBoard): string {
+  const values = priceChangeBoardValueFingerprint(board);
+  return createHash('sha256')
+    .update(JSON.stringify({ deadline: board.deadline, values }), 'utf8')
+    .digest('hex');
+}
+
+/** Stable identity for the player prices and ID set in a published board. */
+export function priceChangeBoardValueFingerprint(board: PriceChangeBoard): string {
+  const players = board.players
+    .map((player) => ({ id: player.playerId, nowCost: player.currentPrice }))
+    .sort((left, right) => left.id - right.id);
+  return createHash('sha256').update(JSON.stringify(players), 'utf8').digest('hex');
+}
+
 function hasPredictionFields(bootstrap: FPLBootstrapResponse): boolean {
   return bootstrap.elements.some(
     (element) =>

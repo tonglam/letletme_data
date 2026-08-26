@@ -37,6 +37,7 @@ describe('queue quiescence gate', () => {
     expect(allQueueNames).toEqual([
       'data-sync',
       'fpl-critical-sync',
+      'fpl-price-watch',
       'entry-sync',
       'league-sync',
       'live-data',

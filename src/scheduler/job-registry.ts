@@ -8,6 +8,7 @@ import {
   enqueuePlayerValuesSyncJob,
 } from '../jobs/data-sync-enqueue';
 import { enqueueFplCriticalPriceChangeJob } from '../jobs/fpl-critical-sync-enqueue';
+import { enqueueFplPriceWatchJob } from '../jobs/fpl-price-watch-enqueue';
 import {
   enqueueEntryInfoSyncJob,
   enqueueEntryPicksSyncJob,
@@ -65,6 +66,8 @@ import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publicatio
 import { getConfig } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
+import { fplPriceWatchQueueName } from '../queues/fpl-price-watch.queue';
+import { getPriceChangePredictions } from '../services/price-change-predictions.service';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -750,6 +753,17 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
       laneId,
       dispatchGeneration,
     }) => {
+      const hotSourceOptions = {
+        ...(typeof plan.evidence?.sourceHash === 'string'
+          ? { sourceHash: plan.evidence.sourceHash }
+          : {}),
+        ...(typeof plan.evidence?.sourceArtifactId === 'string'
+          ? { sourceArtifactId: plan.evidence.sourceArtifactId }
+          : {}),
+        ...(typeof plan.evidence?.priceChangeBoardRevision === 'string'
+          ? { priceChangeBoardRevision: plan.evidence.priceChangeBoardRevision }
+          : {}),
+      };
       if (!singleFlightEnabled) {
         const job = await enqueuePriceChangePredictionsJob(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
@@ -758,6 +772,7 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
           obligationGeneration: generation,
           freshnessWindowId,
           freshnessWindowIds,
+          ...hotSourceOptions,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       }
@@ -774,6 +789,68 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
         laneGeneration: dispatchGeneration,
         freshnessWindowId,
         freshnessWindowIds,
+        ...hotSourceOptions,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  };
+}
+
+function priceHotWatchEnabled(): boolean {
+  const raw = process.env.PRICE_CHANGE_HOT_WATCH_ENABLED;
+  if (raw === undefined) return process.env.NODE_ENV !== 'production';
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
+function priceChangeWatchDefinition(): ScheduledJobDefinition {
+  const leadMs = 30_000;
+  const watchWindowMs = 5 * 60_000;
+  return {
+    name: 'price-change-watch',
+    cadence: 'deadline window (30 seconds before each official price-change deadline)',
+    timezone: 'UTC',
+    catchUpPolicy: 'latest-authoritative',
+    criticality: 'critical',
+    queueName: fplPriceWatchQueueName,
+    executionLanes: [fplPriceWatchQueueName],
+    isEnabled: priceHotWatchEnabled,
+    successPredicate: 'observe an official price-change fingerprint or record no change',
+    resolve: async (context) => {
+      if (!priceHotWatchEnabled()) return [];
+      const board = await getPriceChangePredictions();
+      const nowMs = context.now.getTime();
+      const deadline = board.nextDeadlines
+        .map((value) => Date.parse(value))
+        .filter((value) => Number.isFinite(value) && value >= nowMs - watchWindowMs)
+        .sort((left, right) => left - right)[0];
+      if (deadline === undefined) return [];
+      const deadlineAt = new Date(deadline);
+      return [
+        {
+          scopeKey: context.season.seasonCode,
+          periodKey: `price-change-watch-${deadline}`,
+          dueAt: new Date(deadline - leadMs),
+          source: 'catchup' as const,
+          evidence: {
+            deadlineAt: deadlineAt.toISOString(),
+            leadMs,
+            watchWindowMs,
+          },
+        },
+      ];
+    },
+    enqueue: async ({ context, plan, obligationId, generation }) => {
+      const rawDeadline = plan.evidence?.deadlineAt;
+      if (typeof rawDeadline !== 'string') {
+        throw new Error('Price-watch scheduler plan is missing deadlineAt evidence');
+      }
+      const deadlineAt = new Date(rawDeadline);
+      const job = await enqueueFplPriceWatchJob(context.season, {
+        deadlineAt,
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        obligationId,
+        obligationGeneration: generation,
+        source: plan.source === 'manual' ? 'manual' : 'catchup',
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -1172,6 +1249,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
   const definitions: ScheduledJobDefinition[] = [
     coreLifecycleReconcileDefinition(),
     priceChangePredictionsDefinition(),
+    priceChangeWatchDefinition(),
     dailyDefinition({
       name: 'core-snapshot',
       hour: 6,

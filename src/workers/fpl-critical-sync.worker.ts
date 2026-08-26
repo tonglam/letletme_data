@@ -24,6 +24,11 @@ import {
   persistPriceChangePublication,
   PriceChangeCorePublicationRequiredError,
 } from '../services/price-change-predictions.service';
+import {
+  loadPriceChangeHotSource,
+  markPriceChangeHotReconciliation,
+  readPriceChangeHotSnapshot,
+} from '../services/price-change-hot.service';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
 import { readActiveDataPublication } from '../cache/data-publication';
 import {
@@ -33,7 +38,7 @@ import {
 } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 import { alertOnFinalFailure, notifyTwoBots } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -53,6 +58,77 @@ function laneInputs(job: Job<FplCriticalJobData>): {
 
 function blockerJobId(seasonCode: string, laneId: string, generation: number): string {
   return `${seasonCode}-core-snapshot-price-change-repair-${laneId}-g${generation}`;
+}
+
+type HotPriceSourceMetadata = Readonly<{
+  sourceHash?: string;
+  sourceArtifactId?: string;
+  priceChangeBoardRevision?: string;
+}>;
+
+function hotPriceSourceMetadata(
+  job: Job<FplCriticalJobData>,
+  evidence?: Record<string, unknown>,
+): HotPriceSourceMetadata {
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof evidence?.sourceHash === 'string' ? evidence.sourceHash : undefined);
+  const sourceArtifactId =
+    job.data.sourceArtifactId ??
+    (typeof evidence?.sourceArtifactId === 'string' ? evidence.sourceArtifactId : undefined);
+  const priceChangeBoardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof evidence?.priceChangeBoardRevision === 'string'
+      ? evidence.priceChangeBoardRevision
+      : undefined);
+  return { sourceHash, sourceArtifactId, priceChangeBoardRevision };
+}
+
+async function hotPriceSourceDependencies(
+  job: Job<FplCriticalJobData>,
+  metadata: HotPriceSourceMetadata = hotPriceSourceMetadata(job),
+) {
+  if (!metadata.sourceArtifactId || !metadata.sourceHash) return undefined;
+  try {
+    const source = await loadPriceChangeHotSource({
+      artifactId: metadata.sourceArtifactId,
+      sourceHash: metadata.sourceHash,
+    });
+    logInfo('Using archived provisional source for critical price reconciliation', {
+      season: job.data.seasonCode,
+      artifactId: metadata.sourceArtifactId,
+      sourceHash: metadata.sourceHash,
+      priceChangeBoardRevision: metadata.priceChangeBoardRevision,
+    });
+    return { bootstrap: source.payload, getBootstrap: async () => source.payload };
+  } catch (error) {
+    logWarn(
+      'Archived provisional source unavailable; critical price reconciliation will re-fetch',
+      {
+        season: job.data.seasonCode,
+        artifactId: metadata.sourceArtifactId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    return undefined;
+  }
+}
+
+async function markHotPriceReconciled(
+  job: Job<FplCriticalJobData>,
+  publicationId: string | undefined,
+  revision: number | undefined,
+  metadata: HotPriceSourceMetadata = hotPriceSourceMetadata(job),
+): Promise<void> {
+  if (!metadata.priceChangeBoardRevision || !publicationId || revision === undefined) return;
+  const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+  if (!snapshot || snapshot.revision !== metadata.priceChangeBoardRevision) return;
+  const updated = await markPriceChangeHotReconciliation(snapshot, {
+    state: 'reconciled',
+    durablePublicationId: publicationId,
+    durableRevision: revision,
+  });
+  if (!updated) throw new Error('Price-change hot reconciliation CAS failed');
 }
 
 async function markSupersededPriceRunSkipped(
@@ -85,6 +161,7 @@ async function blockPriceLaneForCoreRepair(
   job: Job<FplCriticalJobData>,
   error: unknown,
   season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>,
+  metadata: HotPriceSourceMetadata = hotPriceSourceMetadata(job),
 ): Promise<{ outcome: 'blocked'; blockerJobId: string }> {
   const { laneId, dispatchGeneration } = laneInputs(job);
   const lane = await getSchedulerLane({ laneId });
@@ -107,6 +184,11 @@ async function blockPriceLaneForCoreRepair(
       laneId,
       laneGeneration: dispatchGeneration,
       blockerLaneId: laneId,
+      ...(metadata.sourceHash ? { sourceHash: metadata.sourceHash } : {}),
+      ...(metadata.sourceArtifactId ? { sourceArtifactId: metadata.sourceArtifactId } : {}),
+      ...(metadata.priceChangeBoardRevision
+        ? { priceChangeBoardRevision: metadata.priceChangeBoardRevision }
+        : {}),
     });
     if (String(repair.id) !== repairId) {
       throw new Error(`Core repair Bull ID mismatch: expected ${repairId}, got ${repair.id}`);
@@ -212,9 +294,11 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
           values.indexOf(value) === index,
       );
       const freshnessWindowId = freshnessWindowIds[0];
+      const sourceMetadata = hotPriceSourceMetadata(job, activeTarget.obligation.evidence);
+      const hotSource = await hotPriceSourceDependencies(job, sourceMetadata);
       prepared = await preparePriceChangePublication(
         season,
-        undefined,
+        hotSource,
         job.data.source === 'manual' ? 'manual' : 'queue',
         job.data.runId,
         freshnessWindowId,
@@ -222,7 +306,12 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
       );
     } catch (error) {
       if (error instanceof PriceChangeCorePublicationRequiredError) {
-        return blockPriceLaneForCoreRepair(job, error, season);
+        return blockPriceLaneForCoreRepair(
+          job,
+          error,
+          season,
+          hotPriceSourceMetadata(job, activeTarget.obligation.evidence),
+        );
       }
       throw error;
     }
@@ -298,7 +387,12 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
     } catch (error) {
       await syncOperationsRepository.failRun(prepared.sourceRunId, error).catch(() => undefined);
       if (error instanceof PriceChangeCorePublicationRequiredError) {
-        return blockPriceLaneForCoreRepair(job, error, season);
+        return blockPriceLaneForCoreRepair(
+          job,
+          error,
+          season,
+          hotPriceSourceMetadata(job, activeTarget.obligation.evidence),
+        );
       }
       if (
         error instanceof Error &&
@@ -323,6 +417,12 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
       throw new Error('Price-change publication did not return durable identity');
     }
     await verifyPricePublication(season, persisted.publicationId, persisted.revision);
+    await markHotPriceReconciled(
+      job,
+      persisted.publicationId,
+      persisted.revision,
+      hotPriceSourceMetadata(job, activeTarget.obligation.evidence),
+    );
     const completed = await completeSchedulerLane({
       laneId,
       dispatchGeneration,
@@ -343,6 +443,7 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
 async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
   const season = await requireCurrentSeasonForJob(job.data);
   const { laneId, dispatchGeneration } = laneInputs(job);
+  const hotSource = await hotPriceSourceDependencies(job);
   const blockerId = String(job.id);
   const result = await withMutationScopes(
     {
@@ -350,10 +451,11 @@ async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
       jobName: job.name,
       jobId: blockerId,
     },
-    () =>
+      () =>
       syncCoreSnapshot(season, {
         trigger: 'queue',
         sourceRunId: job.data.runId,
+        ...(hotSource?.bootstrap ? { bootstrap: hotSource.bootstrap } : {}),
       }),
   );
   if (result.outcome !== 'ready' || !result.publicationId || result.revision === undefined) {

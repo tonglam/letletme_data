@@ -13,6 +13,7 @@ import {
   findDueSchedulerObligationCandidates,
   hasEarlierInFlightSchedulerObligation,
   markSchedulerObligationIrrecoverable,
+  mergeSchedulerObligationEvidence,
   reconcilePostMatchSchedulerObligations,
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
@@ -308,7 +309,12 @@ export async function resolveSchedulerDefinition(
  * waiting/running/blocked; it never creates a parallel direct data-sync job.
  */
 export async function triggerPriceChangeLane(
-  options: { freshnessWindowId?: number } = {},
+  options: {
+    freshnessWindowId?: number;
+    readonly sourceHash?: string;
+    readonly sourceArtifactId?: string;
+    readonly priceChangeBoardRevision?: string;
+  } = {},
 ): Promise<{
   bullJobId?: string | number;
   runId?: string;
@@ -348,7 +354,22 @@ export async function triggerPriceChangeLane(
       };
     })();
   if (!basePlan) throw new Error('No current price-change scheduler target exists');
-  let plan: SchedulerObligationPlan = { ...basePlan, source: 'manual' };
+  const reconciliationEvidence =
+    options.sourceHash || options.sourceArtifactId || options.priceChangeBoardRevision
+      ? {
+          ...(options.sourceHash ? { sourceHash: options.sourceHash } : {}),
+          ...(options.sourceArtifactId ? { sourceArtifactId: options.sourceArtifactId } : {}),
+          ...(options.priceChangeBoardRevision
+            ? { priceChangeBoardRevision: options.priceChangeBoardRevision }
+            : {}),
+          reconciliation: 'price-change-hot',
+        }
+      : {};
+  let plan: SchedulerObligationPlan = {
+    ...basePlan,
+    source: 'manual',
+    evidence: { ...(basePlan.evidence ?? {}), ...reconciliationEvidence },
+  };
   let obligation = await reserveSchedulerObligation({
     definition,
     plan,
@@ -371,6 +392,12 @@ export async function triggerPriceChangeLane(
       },
     };
     obligation = await reserveSchedulerObligation({ definition, plan });
+  }
+  if (Object.keys(reconciliationEvidence).length > 0) {
+    obligation = await mergeSchedulerObligationEvidence({
+      obligationId: obligation.obligationId,
+      evidence: reconciliationEvidence,
+    });
   }
   const laneKey = definition.executionPolicy.laneKey({ context, plan });
   const advanced = await advanceSchedulerLane({

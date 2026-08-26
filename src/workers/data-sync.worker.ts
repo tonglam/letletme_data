@@ -20,13 +20,18 @@ import {
   PriceChangeCorePublicationRequiredError,
 } from '../services/price-change-predictions.service';
 import {
+  loadPriceChangeHotSource,
+  markPriceChangeHotReconciliation,
+  readPriceChangeHotSnapshot,
+} from '../services/price-change-hot.service';
+import {
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
   type DataSyncAttemptContext,
 } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 import { alertOnFinalFailure, notifyTwoBots } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -41,6 +46,7 @@ import {
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
+  getSchedulerObligation,
   schedulerObligationStatus,
 } from '../repositories/scheduler-obligations';
 
@@ -60,6 +66,78 @@ function priceSingleFlightEnabled(): boolean {
   // staged rollout.
   if (value === undefined) return process.env.NODE_ENV !== 'production';
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
+  if (job.name !== 'price-change-predictions') {
+    return undefined;
+  }
+  const obligation =
+    (!job.data.sourceArtifactId || !job.data.sourceHash) && job.data.obligationId
+      ? await getSchedulerObligation({ obligationId: job.data.obligationId }).catch(() => null)
+      : null;
+  const sourceArtifactId =
+    job.data.sourceArtifactId ??
+    (typeof obligation?.evidence.sourceArtifactId === 'string'
+      ? obligation.evidence.sourceArtifactId
+      : undefined);
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof obligation?.evidence.sourceHash === 'string'
+      ? obligation.evidence.sourceHash
+      : undefined);
+  const boardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
+      ? obligation.evidence.priceChangeBoardRevision
+      : undefined);
+  if (!sourceArtifactId || !sourceHash) return undefined;
+  try {
+    const source = await loadPriceChangeHotSource({
+      artifactId: sourceArtifactId,
+      sourceHash,
+    });
+    logInfo('Using archived provisional source for durable price reconciliation', {
+      season: job.data.seasonCode,
+      artifactId: sourceArtifactId,
+      sourceHash,
+      priceChangeBoardRevision: boardRevision,
+    });
+    return { getBootstrap: async () => source.payload };
+  } catch (error) {
+    logWarn('Archived provisional source unavailable; durable reconciliation will re-fetch', {
+      season: job.data.seasonCode,
+      artifactId: sourceArtifactId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
+async function markHotPriceReconciled(
+  job: Job<DataSyncJobData>,
+  publicationId: string | undefined,
+  revision: number | undefined,
+): Promise<void> {
+  if (!publicationId || revision === undefined) return;
+  const obligation =
+    !job.data.priceChangeBoardRevision && job.data.obligationId
+      ? await getSchedulerObligation({ obligationId: job.data.obligationId }).catch(() => null)
+      : null;
+  const boardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
+      ? obligation.evidence.priceChangeBoardRevision
+      : undefined);
+  if (!boardRevision) return;
+  const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+  if (!snapshot || snapshot.revision !== boardRevision) return;
+  const updated = await markPriceChangeHotReconciliation(snapshot, {
+    state: 'reconciled',
+    durablePublicationId: publicationId,
+    durableRevision: revision,
+  });
+  if (!updated) throw new Error('Price-change hot reconciliation CAS failed');
 }
 
 async function alertPriceChangePublicationOverdue(
@@ -213,9 +291,10 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
         // immutable DB publication and its outbox receipt.
         let prepared;
         try {
+          const hotSource = await hotPriceSourceDependencies(job);
           prepared = await preparePriceChangePublication(
             season,
-            undefined,
+            hotSource,
             job.data.source === 'manual' ? 'manual' : 'queue',
             job.data.runId,
             job.data.freshnessWindowId,
@@ -275,6 +354,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             );
           }
         }
+        await markHotPriceReconciled(job, persisted.publicationId, persisted.revision);
         return persisted;
       });
     }

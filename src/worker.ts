@@ -1,5 +1,6 @@
 import { createDataSyncWorker } from './workers/data-sync.worker';
 import { createFplCriticalSyncWorker } from './workers/fpl-critical-sync.worker';
+import { createFplPriceWatchWorker } from './workers/fpl-price-watch.worker';
 import { createEntrySyncWorker } from './workers/entry-sync.worker';
 import { createLiveDataWorker } from './workers/live-data.worker';
 import { createManagerLiveWorker } from './workers/manager-live.worker';
@@ -28,6 +29,7 @@ if (config.NODE_ENV === 'production') {
 const runtimes: WorkerRuntime[] = [
   createDataSyncWorker(),
   createFplCriticalSyncWorker(),
+  createFplPriceWatchWorker(),
   createEntrySyncWorker(),
   createLiveDataWorker(),
   createManagerLiveWorker(),

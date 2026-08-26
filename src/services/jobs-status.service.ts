@@ -39,6 +39,7 @@ import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
+import { readPriceChangeHotCursor } from './price-change-hot.service';
 
 type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
 type PublicationDelivery = Readonly<{
@@ -155,6 +156,7 @@ export async function getJobsStatus(
     queueHealthWindows,
     governanceCaseCount,
     clientSignals,
+    priceChangeHotCursor,
   ] = await Promise.all([
     schedulerObligationSummary(),
     readRuntimeHeartbeat('scheduler'),
@@ -200,6 +202,7 @@ export async function getJobsStatus(
       groups: [],
       unavailable: true,
     })),
+    readPriceChangeHotCursor(season.seasonCode).catch(() => null),
   ]);
   const scheduler = Boolean(schedulerHeartbeat && (await checkRuntimeHeartbeat('scheduler')));
   const queueWorker = Boolean(queueWorkerHeartbeat && (await checkRuntimeHeartbeat('queueWorker')));
@@ -310,6 +313,16 @@ export async function getJobsStatus(
       )?.criticality,
       latest: priceChangeObligation.latest,
       summary: obligations,
+    },
+    hotWatch: {
+      revision: priceChangeHotCursor?.revision ?? null,
+      state: priceChangeHotCursor?.state ?? 'NONE',
+      detectedAt: priceChangeHotCursor?.detectedAt ?? null,
+      fetchedAt: priceChangeHotCursor?.fetchedAt ?? null,
+      expiresAt: priceChangeHotCursor?.expiresAt ?? null,
+      ageMs: priceChangeHotCursor
+        ? Math.max(0, Date.now() - Date.parse(priceChangeHotCursor.detectedAt))
+        : null,
     },
   };
 

@@ -1,5 +1,6 @@
 export const dataSyncQueueName = 'data-sync';
 export const fplCriticalSyncQueueName = 'fpl-critical-sync';
+export const fplPriceWatchQueueName = 'fpl-price-watch';
 export const entrySyncQueueName = 'entry-sync';
 export const leagueSyncQueueName = 'league-sync';
 export const liveDataQueueName = 'live-data';
@@ -26,6 +27,7 @@ export const contentXScanQueueName = 'content-x-scan';
 export const queueNames = [
   dataSyncQueueName,
   fplCriticalSyncQueueName,
+  fplPriceWatchQueueName,
   entrySyncQueueName,
   leagueSyncQueueName,
   liveDataQueueName,
