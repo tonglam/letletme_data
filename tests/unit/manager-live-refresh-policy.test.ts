@@ -17,6 +17,7 @@ import {
   managerLiveFollowupRunAt,
   managerLiveHotStateKey,
   managerLiveHotScopeKey,
+  managerLiveRosterRevision,
   managerLiveRefreshJobId,
   managerLiveRefreshJobIdForState,
   parseManagerLiveHotState,
@@ -56,6 +57,16 @@ describe('manager live refresh policy', () => {
 
     expect(managerLiveRefreshJobId(otherSubset, date)).toBe(managerLiveRefreshJobId(scope, date));
     expect(managerLiveHotScopeKey(otherSubset)).toBe(managerLiveHotScopeKey(scope));
+  });
+
+  test('derives stable roster revisions and changes them for an authoritative lifecycle marker', () => {
+    expect(managerLiveRosterRevision([33, 11, 33])).toBe(managerLiveRosterRevision([11, 33]));
+    expect(managerLiveRosterRevision([11, 33], 'sync-a')).toBe(
+      managerLiveRosterRevision([11, 33], 'sync-a'),
+    );
+    expect(managerLiveRosterRevision([11, 33], 'sync-a')).not.toBe(
+      managerLiveRosterRevision([11, 33], 'sync-b'),
+    );
   });
 
   test('deduplicates classic standings continuations with request jobs in the same bucket', () => {

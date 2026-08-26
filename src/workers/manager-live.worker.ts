@@ -2,6 +2,7 @@ import { Job, QueueEvents, Worker } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
+  managerLiveRosterRevision,
   normalizeManagerLiveEntryIds,
   shouldStopManagerLiveRefresh,
   type ManagerLiveHotScopeState,
@@ -21,6 +22,7 @@ import {
 } from '../queues/manager-live.queue';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import {
   refreshManagerLiveScores,
   type ManagerLiveResolveResult,
@@ -136,9 +138,21 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       return { stopped: 'event-finalized' as const };
     }
 
+    const jobEntryIds = normalizeManagerLiveEntryIds(job.data.entryIds);
+    const expectedJobRosterRevision =
+      job.data.rosterRevision ?? managerLiveRosterRevision(jobEntryIds);
+    const tournamentInfo =
+      job.data.tournamentId === undefined
+        ? null
+        : await tournamentInfoRepository.findById(season, job.data.tournamentId);
+    const tournamentRosterMarker = tournamentInfo
+      ? [tournamentInfo.rosterLastSyncedAt, tournamentInfo.setupProgressUpdatedAt]
+          .filter((marker): marker is string => typeof marker === 'string' && marker.length > 0)
+          .join('|') || null
+      : null;
     let authoritativeEntryIds = normalizeManagerLiveEntryIds(
       job.data.tournamentId === undefined
-        ? job.data.entryIds
+        ? jobEntryIds
         : await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId),
     );
     if (job.data.tournamentId !== undefined && authoritativeEntryIds.length === 0) {
@@ -150,7 +164,26 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
         await tournamentEntryRepository.findEntryIdsByTournamentId(season, job.data.tournamentId),
       );
     }
+    const authoritativeRosterRevision =
+      job.data.tournamentId === undefined
+        ? undefined
+        : tournamentInfo
+          ? managerLiveRosterRevision(authoritativeEntryIds, tournamentRosterMarker)
+          : expectedJobRosterRevision;
     if (job.data.tournamentId !== undefined && authoritativeEntryIds.length === 0) {
+      // A roster can be republished between the second relation read and this
+      // branch. Compare the durable lifecycle marker before touching Redis; the
+      // Lua delete below repeats the generation+revision CAS for the remaining
+      // request/worker race.
+      if (authoritativeRosterRevision !== expectedJobRosterRevision) {
+        logInfo('Manager live refresh stopped without clearing a newer roster revision', {
+          eventId: job.data.eventId,
+          tournamentId: job.data.tournamentId,
+          expectedRosterRevision: expectedJobRosterRevision,
+          authoritativeRosterRevision,
+        });
+        return { stopped: 'stale-roster-revision' as const };
+      }
       const cleared = await clearManagerLiveHotScope(
         {
           seasonId: season.seasonId,
@@ -158,8 +191,10 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
           eventId: job.data.eventId,
           entryIds: [],
           tournamentId: job.data.tournamentId,
+          rosterRevision: expectedJobRosterRevision,
         },
         job.data.generation,
+        expectedJobRosterRevision,
       );
       logInfo('Manager live refresh stopped after authoritative roster became empty', {
         eventId: job.data.eventId,
@@ -168,13 +203,15 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       });
       return { stopped: 'empty-authoritative-roster' as const };
     }
-    const jobEntryIds = normalizeManagerLiveEntryIds(job.data.entryIds);
     const currentHotState = await readHotManagerLiveScope({
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
       eventId: job.data.eventId,
       entryIds: authoritativeEntryIds,
       ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+      ...(authoritativeRosterRevision === undefined
+        ? {}
+        : { rosterRevision: authoritativeRosterRevision }),
     });
     const jobOwnsCurrentRoster =
       currentHotState !== null &&
@@ -198,6 +235,9 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       eventId: job.data.eventId,
       entryIds: authoritativeEntryIds,
       ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
+      ...(authoritativeRosterRevision === undefined
+        ? {}
+        : { rosterRevision: authoritativeRosterRevision }),
     });
     const selectedCursors = selectManagerLiveJobCursors({
       attemptsMade: job.attemptsMade,
@@ -208,12 +248,14 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       ...job.data,
       entryIds: hotState.entryIds,
       generation: hotState.generation,
+      rosterRevision: hotState.rosterRevision,
       summaryRotationCursor: selectedCursors.summaryRotationCursor,
       classicStandingsPage: selectedCursors.classicStandingsPage,
       classicStandingsCursorEpoch: selectedCursors.classicStandingsCursorEpoch,
     };
     const needsJobDataUpdate =
       effectiveJobData.generation !== job.data.generation ||
+      effectiveJobData.rosterRevision !== job.data.rosterRevision ||
       !effectiveJobData.entryIds.every((entryId, index) => entryId === jobEntryIds[index]) ||
       effectiveJobData.entryIds.length !== jobEntryIds.length ||
       effectiveJobData.summaryRotationCursor !== job.data.summaryRotationCursor ||

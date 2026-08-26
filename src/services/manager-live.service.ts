@@ -37,6 +37,7 @@ import {
   MANAGER_LIVE_WORKER_REQUEST_DEADLINE_MS,
   MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT,
   classicStandingsCursorAfterRefresh,
+  managerLiveRosterRevision,
 } from '../domain/manager-live-refresh';
 export { classicStandingsCursorAfterRefresh } from '../domain/manager-live-refresh';
 export { tournamentRosterRevision } from '../domain/manager-live-coverage';
@@ -1246,6 +1247,19 @@ const dispatchManagerLiveRefreshBounded = async (
   }
 };
 
+const tournamentRosterLifecycleMarker = (
+  tournament: {
+    rosterLastSyncedAt?: string | null;
+    setupProgressUpdatedAt?: string | null;
+  } | null,
+): string | null => {
+  if (!tournament) return null;
+  const markers = [tournament.rosterLastSyncedAt, tournament.setupProgressUpdatedAt].filter(
+    (marker): marker is string => typeof marker === 'string' && marker.length > 0,
+  );
+  return markers.length > 0 ? markers.join('|') : null;
+};
+
 const runManagerLiveBackgroundRefresh = createKeyedSerialTaskScheduler();
 // This gate is shared by every live-desk refresh in the process. Per-request
 // batching alone is insufficient because distinct tournaments can refresh at
@@ -2380,6 +2394,13 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   const coverageRosterEntryIds = authoritativeTournamentRosterEntryIds ?? uniqueEntryIds;
   const currentTournamentRosterRevision =
     input.tournamentId === undefined ? null : tournamentRosterRevision(coverageRosterEntryIds);
+  const currentTournamentHotRosterRevision =
+    input.tournamentId === undefined
+      ? undefined
+      : managerLiveRosterRevision(
+          coverageRosterEntryIds,
+          tournamentRosterLifecycleMarker(tournament),
+        );
   const tournamentCoverage = currentTournamentRosterRevision
     ? invalidateManagerLiveTournamentCoverage(
         existingTournamentCoverage,
@@ -2447,6 +2468,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
             eventId: input.eventId,
             entryIds: coverageRosterEntryIds,
             tournamentId: input.tournamentId,
+            rosterRevision: currentTournamentHotRosterRevision,
           })) === 'QUEUED';
       } catch (error) {
         logWarn('Finalized manager live coverage dispatch failed', {
@@ -2541,6 +2563,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         eventId: input.eventId,
         entryIds: uniqueEntryIds,
         ...(input.tournamentId === undefined ? {} : { tournamentId: input.tournamentId }),
+        ...(currentTournamentHotRosterRevision === undefined
+          ? {}
+          : { rosterRevision: currentTournamentHotRosterRevision }),
       });
       // A dispatch that misses the response deadline is deliberately reported as
       // PENDING. Do not advertise it as queued until enqueue has been confirmed;
@@ -3454,15 +3479,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   // coverage row null or stale forever. Dispatch is bounded and deduplicated
   // by the tournament hot scope; it does not add an upstream wait to this
   // response.
-  if (
-    input.tournamentId !== undefined &&
-    currentTournamentRosterRevision !== null &&
-    !shouldPreserveManagerLiveTournamentCoverage(
-      tournamentCoverage,
-      currentTournamentRosterRevision,
-      coverageRosterEntryIds.length,
-    )
-  ) {
+  if (input.tournamentId !== undefined && currentTournamentRosterRevision !== null) {
     try {
       refreshQueued =
         (await dispatchManagerLiveRefreshBounded({
@@ -3470,6 +3487,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           eventId: input.eventId,
           entryIds: coverageRosterEntryIds,
           tournamentId: input.tournamentId,
+          rosterRevision: currentTournamentHotRosterRevision,
         })) === 'QUEUED';
     } catch (error) {
       logWarn('Manager live read-through coverage dispatch failed', {

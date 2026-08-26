@@ -43,6 +43,7 @@ const managerLiveScopeFromJobData = (jobData: ManagerLiveJobData): ManagerLiveRe
   eventId: jobData.eventId,
   entryIds: normalizeManagerLiveEntryIds(jobData.entryIds),
   ...(jobData.tournamentId === undefined ? {} : { tournamentId: jobData.tournamentId }),
+  ...(jobData.rosterRevision === undefined ? {} : { rosterRevision: jobData.rosterRevision }),
 });
 
 export async function readManagerLiveClassicCursor(
@@ -64,9 +65,10 @@ export async function readManagerLiveHotState(
 export async function clearManagerLiveHotScope(
   scope: ManagerLiveRefreshScope,
   expectedGeneration?: string,
+  expectedRosterRevision?: string,
 ): Promise<boolean> {
   const redis = await queueRedisSingleton.getClient();
-  return removeManagerLiveHotState(redis, scope, expectedGeneration);
+  return removeManagerLiveHotState(redis, scope, expectedGeneration, expectedRosterRevision);
 }
 
 export async function reconcileManagerLiveHotScopeRoster(
@@ -91,6 +93,7 @@ async function addManagerLiveRefresh(
     eventId: scope.eventId,
     entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
     ...(scope.tournamentId === undefined ? {} : { tournamentId: scope.tournamentId }),
+    ...(scope.rosterRevision === undefined ? {} : { rosterRevision: scope.rosterRevision }),
     ...(hotState?.generation === undefined ? {} : { generation: hotState.generation }),
     ...(hotState?.summaryRotationCursor === undefined
       ? {}
@@ -130,6 +133,7 @@ export async function enqueueManagerLiveRefresh(input: {
   eventId: number;
   entryIds: readonly number[];
   tournamentId?: number;
+  rosterRevision?: string;
   runAt?: Date;
   markHot?: boolean;
   source?: ManagerLiveJobData['source'];
@@ -140,6 +144,7 @@ export async function enqueueManagerLiveRefresh(input: {
     eventId: input.eventId,
     entryIds: normalizeManagerLiveEntryIds(input.entryIds),
     ...(input.tournamentId === undefined ? {} : { tournamentId: input.tournamentId }),
+    ...(input.rosterRevision === undefined ? {} : { rosterRevision: input.rosterRevision }),
   };
   try {
     const hotState =
@@ -166,6 +171,7 @@ export async function enqueueManagerLiveRefreshBatches(input: {
   eventId: number;
   entryIds: readonly number[];
   tournamentId?: number;
+  rosterRevision?: string;
   runAt?: Date;
   markHot?: boolean;
   source?: ManagerLiveJobData['source'];

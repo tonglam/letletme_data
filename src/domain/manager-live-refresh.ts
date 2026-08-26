@@ -32,6 +32,10 @@ export type ManagerLiveRefreshScope = {
   eventId: number;
   entryIds: number[];
   tournamentId?: number;
+  // A tournament lifecycle marker (or the deterministic entry-set fallback)
+  // fences hot-state cleanup across an empty-roster transition. It is not part
+  // of the Redis key: changing it must rotate the generation in that key.
+  rosterRevision?: string;
 };
 
 type ManagerLiveHotRedis = {
@@ -45,6 +49,7 @@ type ManagerLiveHotStateRedis = ManagerLiveHotRedis & {
 
 export type ManagerLiveHotScopeState = ManagerLiveRefreshScope & {
   generation: string;
+  rosterRevision: string;
   summaryRotationCursor: number;
   classicStandingsPage: number | null;
   // Distinguishes the initial page-1 cursor from a completed crawl whose
@@ -71,6 +76,14 @@ const entrySetDigest = (entryIds: readonly number[]): string =>
     .update(normalizeManagerLiveEntryIds(entryIds).join(','))
     .digest('hex')
     .slice(0, 12);
+
+export const managerLiveRosterRevision = (
+  entryIds: readonly number[],
+  authoritativeMarker?: string | null,
+): string => {
+  const marker = authoritativeMarker?.trim();
+  return marker ? `authoritative:${marker}` : `entries:${entrySetDigest(entryIds)}`;
+};
 
 const scopeSegment = (scope: Pick<ManagerLiveRefreshScope, 'entryIds' | 'tournamentId'>): string =>
   scope.tournamentId === undefined
@@ -155,7 +168,11 @@ export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefre
       entryIds.length > maxEntryIds ||
       entryIds.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0) ||
       (parsed.tournamentId !== undefined &&
-        (!Number.isSafeInteger(parsed.tournamentId) || parsed.tournamentId <= 0))
+        (!Number.isSafeInteger(parsed.tournamentId) || parsed.tournamentId <= 0)) ||
+      (parsed.rosterRevision !== undefined &&
+        (typeof parsed.rosterRevision !== 'string' ||
+          parsed.rosterRevision.length === 0 ||
+          parsed.rosterRevision.length > 256))
     ) {
       return null;
     }
@@ -165,6 +182,7 @@ export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefre
       eventId: parsed.eventId,
       entryIds,
       ...(parsed.tournamentId === undefined ? {} : { tournamentId: parsed.tournamentId }),
+      ...(parsed.rosterRevision === undefined ? {} : { rosterRevision: parsed.rosterRevision }),
     } as ManagerLiveRefreshScope;
   } catch {
     return null;
@@ -194,6 +212,10 @@ const parseManagerLiveHotScopeState = (value: string | null): ManagerLiveHotScop
     }
     return {
       ...scope,
+      rosterRevision:
+        typeof parsed.rosterRevision === 'string'
+          ? parsed.rosterRevision
+          : managerLiveRosterRevision(scope.entryIds),
       generation: parsed.generation,
       summaryRotationCursor: parsed.summaryRotationCursor as number,
       classicStandingsPage: parsed.classicStandingsPage ?? null,
@@ -209,8 +231,28 @@ const parseManagerLiveHotScopeState = (value: string | null): ManagerLiveHotScop
 const INITIALIZE_HOT_SCOPE_STATE_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
 if current then
-  redis.call('EXPIRE', KEYS[1], ARGV[1])
-  return current
+  local ok, state = pcall(cjson.decode, current)
+  local candidate = cjson.decode(ARGV[2])
+  local sameRoster = false
+  if ok and state and state['rosterRevision'] == candidate['rosterRevision'] then
+    local currentEntries = state['entryIds'] or {}
+    local candidateEntries = candidate['entryIds'] or {}
+    sameRoster = #currentEntries == #candidateEntries
+    if sameRoster then
+      for index = 1, #candidateEntries do
+        if currentEntries[index] ~= candidateEntries[index] then
+          sameRoster = false
+          break
+        end
+      end
+    end
+  end
+  if sameRoster then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+    return current
+  end
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
+  return ARGV[2]
 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
 return ARGV[2]
@@ -235,7 +277,7 @@ local state = cjson.decode(current)
 local candidate = cjson.decode(ARGV[2])
 local currentEntries = state['entryIds'] or {}
 local candidateEntries = candidate['entryIds'] or {}
-local sameRoster = #currentEntries == #candidateEntries
+local sameRoster = state['rosterRevision'] == candidate['rosterRevision'] and #currentEntries == #candidateEntries
 if sameRoster then
   for index = 1, #candidateEntries do
     if currentEntries[index] ~= candidateEntries[index] then
@@ -245,6 +287,7 @@ if sameRoster then
   end
 end
 if sameRoster then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
   return current
 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
@@ -293,9 +336,9 @@ return encoded
 
 const REMOVE_HOT_SCOPE_IF_GENERATION_MATCHES_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
-if not current or ARGV[1] == '' then return 0 end
+if not current or ARGV[1] == '' or ARGV[2] == '' then return 0 end
 local ok, state = pcall(cjson.decode, current)
-if not ok or not state or state['generation'] ~= ARGV[1] then return 0 end
+if not ok or not state or state['generation'] ~= ARGV[1] or state['rosterRevision'] ~= ARGV[2] then return 0 end
 return redis.call('DEL', KEYS[1])
 `;
 
@@ -308,6 +351,7 @@ export async function initializeManagerLiveHotState(
   const normalizedScope = {
     ...scope,
     entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
+    rosterRevision: managerLiveRosterRevision(scope.entryIds, scope.rosterRevision),
   };
   const candidate: ManagerLiveHotScopeState = {
     ...normalizedScope,
@@ -353,6 +397,7 @@ export async function reconcileManagerLiveHotStateRoster(
   const normalizedScope = {
     ...scope,
     entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
+    rosterRevision: managerLiveRosterRevision(scope.entryIds, scope.rosterRevision),
   };
   const candidate: ManagerLiveHotScopeState = {
     ...normalizedScope,
@@ -384,13 +429,17 @@ export async function removeManagerLiveHotState(
   redis: ManagerLiveHotStateRedis,
   scope: ManagerLiveRefreshScope,
   expectedGeneration?: string,
+  expectedRosterRevision?: string,
 ): Promise<boolean> {
   if (!expectedGeneration) return false;
+  const rosterRevision =
+    expectedRosterRevision ?? managerLiveRosterRevision(scope.entryIds, scope.rosterRevision);
   const result = await redis.eval(
     REMOVE_HOT_SCOPE_IF_GENERATION_MATCHES_SCRIPT,
     1,
     managerLiveHotStateKey(scope),
     expectedGeneration,
+    rosterRevision,
   );
   return Number(result) === 1;
 }
