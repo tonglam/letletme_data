@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
-import { logError, logger, serializeError } from '../../src/utils/logger';
+import { logError, logInfo, logger, serializeError } from '../../src/utils/logger';
 
 afterEach(() => {
   mock.restore();
@@ -16,7 +16,8 @@ describe('structured logger', () => {
     const serialized = serializeError(error) as Record<string, unknown>;
 
     expect(String(serialized.message).length).toBeLessThanOrEqual(2_020);
-    expect(String(serialized.stack).length).toBeLessThanOrEqual(8_020);
+    expect(String(serialized.stack).length).toBeLessThanOrEqual(520);
+    expect(String(serialized.stack)).not.toContain('\n');
     expect(serialized.code).toBe('UPSTREAM_FAILURE');
     expect(serialized.status).toBe(503);
   });
@@ -27,6 +28,25 @@ describe('structured logger', () => {
     logError('Worker failed', new Error('boom'), { jobId: 'job-1' });
 
     expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('redacts entry identifiers and sensitive payloads from structured logs', () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    logInfo('Entry sync progress', {
+      entryId: 123456,
+      entryIds: [123456, 123457],
+      url: 'https://fantasy.premierleague.com/api/entry/123456/event/1/picks/',
+      jobId: 'entry-results-entry-123456',
+      scopeKey: 'entry-core:2026:123456',
+      safeCount: 2,
+    });
+
+    const [payload] = infoSpy.mock.calls[0] ?? [];
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain('123456');
+    expect(serialized).not.toContain('123457');
+    expect((payload as unknown as Record<string, unknown>).safeCount).toBe(2);
   });
 
   test('keeps bounded scalar metadata from non-Error objects', () => {
