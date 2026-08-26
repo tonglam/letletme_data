@@ -1,4 +1,4 @@
-import type { Queue } from 'bullmq';
+import type { Job, Queue } from 'bullmq';
 
 import { queueRedisSingleton } from '../queues/redis';
 import { canonicalQueueCatalog } from '../domain/data-contracts';
@@ -18,6 +18,8 @@ export type QueueAdmissionMode = 'OPEN' | 'DRAIN_ONLY';
 export type QueueHealthSnapshot = Readonly<{
   queueName: string;
   observedAt: string;
+  /** Budget selected for the oldest runnable job, when one is available. */
+  dispatchBudgetMs?: number;
   waiting: number;
   active: number;
   delayed: number;
@@ -438,6 +440,8 @@ export async function inspectQueue(
   input: {
     releaseSha?: string;
     dispatchBudgetMs?: number;
+    /** Return null when a mixed lane has no safe per-job budget. */
+    dispatchBudgetForJob?: (job: Pick<Job, 'name' | 'data'>) => number | null | undefined;
     consumerHeartbeatAt?: string | null;
     providerWaitP95Ms?: number | null;
     provider429Rate?: number | null;
@@ -468,6 +472,11 @@ export async function inspectQueue(
       ? (await queue.getJobs(['waiting', 'prioritized'], 0, 0, true))[0]
       : undefined;
   const oldestRunnableAgeMs = oldest ? Math.max(0, Date.now() - oldest.timestamp) : null;
+  const selectedDispatchBudget = oldest ? input.dispatchBudgetForJob?.(oldest) : undefined;
+  const dispatchBudgetMs =
+    selectedDispatchBudget === null
+      ? undefined
+      : (selectedDispatchBudget ?? input.dispatchBudgetMs);
   const arrivals = waiting + active;
   const completions = 0;
   const admission = await readQueueAdmission(queue.name);
@@ -483,7 +492,7 @@ export async function inspectQueue(
     active,
     failed,
     oldestRunnableAgeMs,
-    dispatchBudgetMs: input.dispatchBudgetMs,
+    dispatchBudgetMs,
     providerWaitP95Ms: input.providerWaitP95Ms,
     provider429Rate: input.provider429Rate,
     ...heartbeatEvidence,
@@ -491,6 +500,7 @@ export async function inspectQueue(
   return {
     queueName: queue.name,
     observedAt: new Date().toISOString(),
+    dispatchBudgetMs,
     waiting,
     active,
     delayed,
