@@ -3,9 +3,11 @@ import { describe, expect, test } from 'bun:test';
 import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   buildPriceChangeHotSnapshot,
+  isPriceChangeHotSnapshotNewer,
   PRICE_CHANGE_HOT_TTL_MS,
   sha256Bytes,
 } from '../../src/services/price-change-hot.service';
+import type { PriceChangeBoard } from '../../src/services/price-change-predictions.service';
 import { buildCoreSnapshotFixture } from '../fixtures/core-snapshot.fixtures';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
@@ -34,6 +36,21 @@ function priceBootstrap(playerCount = 2): FPLBootstrapResponse {
 }
 
 describe('price-change hot snapshot', () => {
+  function durableBoard(fetchedAt: string): PriceChangeBoard {
+    return {
+      status: 'READY',
+      source: 'FPL_BOOTSTRAP',
+      deadline: null,
+      nextDeadlines: [],
+      fetchedAt,
+      staleAt: fetchedAt,
+      revision: 'durable-revision',
+      expectedPlayerCount: 0,
+      observedPlayerCount: 0,
+      players: [],
+    };
+  }
+
   test('builds a complete provisional board without Core ID admission', () => {
     const detectedAt = new Date('2026-08-26T07:00:03.000Z');
     const fetchedAt = new Date('2026-08-26T07:00:02.500Z');
@@ -62,5 +79,19 @@ describe('price-change hot snapshot', () => {
     const bytes = new TextEncoder().encode('{"bootstrap":true}');
     expect(sha256Bytes(bytes)).toMatch(/^[0-9a-f]{64}$/);
     expect(sha256Bytes(bytes)).toBe(sha256Bytes(bytes.slice()));
+  });
+
+  test('orders a slow hot response by probe start, not fetch completion', () => {
+    const snapshot = buildPriceChangeHotSnapshot({
+      season: TEST_SEASON,
+      bootstrap: priceBootstrap(2),
+      sourceHash: 'b'.repeat(64),
+      detectedAt: new Date('2026-08-26T07:00:03.000Z'),
+      fetchedAt: new Date('2026-08-26T07:00:08.000Z'),
+    });
+
+    expect(isPriceChangeHotSnapshotNewer(snapshot, durableBoard('2026-08-26T07:00:05.000Z'))).toBe(
+      false,
+    );
   });
 });

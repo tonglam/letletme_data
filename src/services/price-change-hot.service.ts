@@ -61,7 +61,14 @@ export type PriceChangeHotCursor = Readonly<{
 const DURABLE_PUBLICATION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-/** Return whether a valid hot board is newer than the durable board. */
+/**
+ * Return whether a valid hot board is newer than the durable board.
+ *
+ * `detectedAt` is captured before the provider request starts and is therefore
+ * the source-order timestamp for a hot response.  Do not use `fetchedAt` here:
+ * a slow response can finish after a newer durable request and otherwise make
+ * an older hot payload win the resolver race until the hot TTL expires.
+ */
 export function isPriceChangeHotSnapshotNewer(
   snapshot: PriceChangeHotSnapshot | null,
   durable: PriceChangeBoard,
@@ -69,7 +76,7 @@ export function isPriceChangeHotSnapshotNewer(
   if (!snapshot || durable.status === 'UNAVAILABLE' || !durable.fetchedAt) {
     return Boolean(snapshot);
   }
-  const hotAt = Date.parse(snapshot.fetchedAt);
+  const hotAt = Date.parse(snapshot.detectedAt);
   const durableAt = Date.parse(durable.fetchedAt);
   return Number.isFinite(hotAt) && (!Number.isFinite(durableAt) || hotAt > durableAt);
 }
