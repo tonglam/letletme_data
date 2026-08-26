@@ -27,12 +27,37 @@ describe('manager live worker continuation', () => {
       shouldRetryFinalizedTournamentManagerLive({
         partial: true,
         errorCode: 'UPSTREAM_UNAVAILABLE',
+        tournamentCoverage: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRetryFinalizedTournamentManagerLive({
+        partial: false,
+        errorCode: 'UPSTREAM_UNAVAILABLE',
+        tournamentCoverage: {
+          rosterRevision: 'roster',
+          expectedEntries: 20,
+          resolvedEntries: 12,
+          fullyFetchedAt: null,
+          managerRevision: 'final:manager',
+          error: 'UPSTREAM_UNAVAILABLE',
+          state: 'PARTIAL',
+        },
       }),
     ).toBe(true);
     expect(
       shouldRetryFinalizedTournamentManagerLive({
         partial: false,
         errorCode: null,
+        tournamentCoverage: {
+          rosterRevision: 'roster',
+          expectedEntries: 2,
+          resolvedEntries: 2,
+          fullyFetchedAt: '2026-08-26T00:00:00.000Z',
+          managerRevision: 'final:manager',
+          error: null,
+          state: 'COMPLETE',
+        },
       }),
     ).toBe(false);
   });

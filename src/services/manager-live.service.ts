@@ -2440,18 +2440,34 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         fullMissingEntryIds,
       );
       result.managerRevision = fullManagerRevision;
+      const finalCoverageRosterRevision = tournamentRosterRevision(coverageRosterEntryIds);
+      const finalCoverageComplete =
+        finalErrorCode === null && resolvedIds.size === coverageRosterEntryIds.length;
+      const finalCoverageCandidate: ManagerLiveTournamentCoverage = {
+        rosterRevision: finalCoverageRosterRevision,
+        expectedEntries: coverageRosterEntryIds.length,
+        resolvedEntries: resolvedIds.size,
+        fullyFetchedAt: finalCoverageComplete ? nowIso() : null,
+        managerRevision: finalManagerRevision(fullManagerRevision),
+        error: finalErrorCode,
+        state: finalCoverageComplete
+          ? 'COMPLETE'
+          : resolvedIds.size > 0
+            ? 'PARTIAL'
+            : 'UNAVAILABLE',
+      };
       const persistedCoverage = await persistTournamentCoverage({
         season,
         eventId: input.eventId,
         tournamentId: input.tournamentId,
-        rosterRevision: tournamentRosterRevision(coverageRosterEntryIds),
+        rosterRevision: finalCoverageRosterRevision,
         expectedEntries: coverageRosterEntryIds.length,
         rows: finalRows,
         errorCode: finalErrorCode,
         managerRevision: finalManagerRevision(fullManagerRevision),
         crawlComplete: resolvedIds.size === coverageRosterEntryIds.length,
       });
-      result.tournamentCoverage = persistedCoverage ?? tournamentCoverage;
+      result.tournamentCoverage = persistedCoverage ?? finalCoverageCandidate;
     }
     return result;
   }

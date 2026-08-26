@@ -56,8 +56,18 @@ export async function scheduleManagerLiveContinuation(
 }
 
 export const shouldRetryFinalizedTournamentManagerLive = (
-  result: Pick<ManagerLiveResolveResult, 'partial' | 'errorCode'>,
-): boolean => result.partial && result.errorCode === 'UPSTREAM_UNAVAILABLE';
+  result: Pick<ManagerLiveResolveResult, 'partial' | 'errorCode' | 'tournamentCoverage'>,
+): boolean => {
+  if (result.errorCode === 'UPSTREAM_UNAVAILABLE') return true;
+  const coverage = result.tournamentCoverage;
+  return (
+    result.partial ||
+    coverage === undefined ||
+    coverage === null ||
+    coverage.state !== 'COMPLETE' ||
+    coverage.resolvedEntries < coverage.expectedEntries
+  );
+};
 
 /**
  * A failed BullMQ attempt must retry the bounded chunk it actually owned.
