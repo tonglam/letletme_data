@@ -362,6 +362,12 @@ deploy() {
   finish_stage
   start_stage serviceReady
   log_info "Starting services"
+  # The media worker owns a runtime heartbeat even when source-media
+  # processing is disabled. Keep it in the normal forward start so /ready can
+  # distinguish an intentionally disabled worker from a missing or crashed
+  # worker. RUNTIME_INCLUDE_MEDIA_WORKER=false is reserved for restoring a
+  # release that never had this container.
+  export RUNTIME_INCLUDE_MEDIA_WORKER=true
   start_runtime_services
   log_info "Current service status"
   compose ps
