@@ -644,7 +644,10 @@ export const queueHealthWindowsInOps = ops.table(
       .notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.windowStart, table.queueName] }),
+    primaryKey({
+      columns: [table.windowStart, table.queueName],
+      name: 'queue_health_windows_pk',
+    }),
     index('queue_health_windows_queue_time_idx').on(table.queueName, table.windowStart.desc()),
     index('queue_health_windows_class_time_idx')
       .on(table.backlogClass, table.windowStart.desc())
@@ -1231,8 +1234,13 @@ export const tournamentOfficialH2HPageManifestsInCompetition = competition.table
     lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
-    primaryKey({ columns: [table.seasonId, table.tournamentId, table.pageNumber] }),
-    index('tournament_h2h_manifest_event_idx').on(table.seasonId, table.tournamentId),
+    primaryKey({
+      columns: [table.seasonId, table.tournamentId, table.pageNumber],
+      name: 'tournament_official_h2h_page_manifests_pkey',
+    }),
+    index('tournament_h2h_manifest_event_idx')
+      .on(table.seasonId, table.tournamentId)
+      .where(sql`locked_at IS NOT NULL`),
     foreignKey({
       columns: [table.seasonId, table.tournamentId],
       foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],

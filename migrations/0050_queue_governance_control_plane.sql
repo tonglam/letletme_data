@@ -60,9 +60,9 @@ CREATE TABLE ops.queue_health_windows (
 );
 
 CREATE INDEX queue_health_windows_queue_time_idx
-  ON ops.queue_health_windows (queue_name, window_start DESC);
+  ON ops.queue_health_windows (queue_name, window_start DESC NULLS LAST);
 CREATE INDEX queue_health_windows_class_time_idx
-  ON ops.queue_health_windows (backlog_class, window_start DESC)
+  ON ops.queue_health_windows (backlog_class, window_start DESC NULLS LAST)
   WHERE backlog_class <> 'HEALTHY';
 
 CREATE TABLE ops.data_governance_cases (
@@ -104,7 +104,7 @@ CREATE UNIQUE INDEX data_governance_cases_open_dedupe_idx
   ON ops.data_governance_cases (case_kind, contract_key, lane, scope_key, fingerprint)
   WHERE status IN ('OPEN','AUTO_REPAIRING','REQUIRES_REVIEW');
 CREATE INDEX data_governance_cases_status_time_idx
-  ON ops.data_governance_cases (status, updated_at DESC);
+  ON ops.data_governance_cases (status, updated_at DESC NULLS LAST);
 CREATE INDEX data_governance_cases_slo_idx
   ON ops.data_governance_cases (slo_window_id)
   WHERE slo_window_id IS NOT NULL;

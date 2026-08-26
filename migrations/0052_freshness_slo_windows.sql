@@ -50,10 +50,10 @@ CREATE INDEX freshness_slo_windows_pending_due_idx
   ON ops.freshness_slo_windows (due_at, window_id)
   WHERE status = 'PENDING';
 CREATE INDEX freshness_slo_windows_breach_idx
-  ON ops.freshness_slo_windows (contract_key, status, due_at DESC)
+  ON ops.freshness_slo_windows (contract_key, status, due_at DESC NULLS LAST)
   WHERE status IN ('BREACHED','INVALID');
 CREATE INDEX freshness_slo_windows_scope_idx
-  ON ops.freshness_slo_windows (season_id, event_id, contract_key, due_at DESC);
+  ON ops.freshness_slo_windows (season_id, event_id, contract_key, due_at DESC NULLS LAST);
 
 REVOKE ALL ON TABLE ops.freshness_slo_windows FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE ON TABLE ops.freshness_slo_windows TO letletme_data_writer;
