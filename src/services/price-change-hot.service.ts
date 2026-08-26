@@ -271,11 +271,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isValidSnapshot(
+function isValidSnapshotMetadata(
   value: unknown,
   seasonCode: string,
   now: Date,
-): value is PriceChangeHotSnapshot {
+): value is PriceChangeHotSnapshotMetadata {
   if (!isRecord(value)) return false;
   const expectedPlayerCount = value.expectedPlayerCount;
   const observedPlayerCount = value.observedPlayerCount;
@@ -291,7 +291,8 @@ function isValidSnapshot(
     typeof value.sourceHash !== 'string' ||
     !/^[0-9a-f]{64}$/.test(value.sourceHash) ||
     (value.artifactId !== null && typeof value.artifactId !== 'string') ||
-    (value.deadline !== null && typeof value.deadline !== 'string') ||
+    (value.deadline !== null &&
+      (typeof value.deadline !== 'string' || !Number.isFinite(Date.parse(value.deadline)))) ||
     typeof value.detectedAt !== 'string' ||
     typeof value.fetchedAt !== 'string' ||
     typeof value.expiresAt !== 'string' ||
@@ -299,11 +300,13 @@ function isValidSnapshot(
     !Number.isSafeInteger(expectedPlayerCount) ||
     typeof observedPlayerCount !== 'number' ||
     !Number.isSafeInteger(observedPlayerCount) ||
+    expectedPlayerCount <= 0 ||
+    observedPlayerCount <= 0 ||
+    expectedPlayerCount !== observedPlayerCount ||
     (corePlayerCount !== null &&
       (typeof corePlayerCount !== 'number' || !Number.isSafeInteger(corePlayerCount))) ||
     (corePlayerDelta !== null &&
       (typeof corePlayerDelta !== 'number' || !Number.isSafeInteger(corePlayerDelta))) ||
-    !isRecord(value.board) ||
     !isRecord(value.reconciliation)
   ) {
     return false;
@@ -311,37 +314,14 @@ function isValidSnapshot(
   const detectedAt = Date.parse(value.detectedAt);
   const fetchedAt = Date.parse(value.fetchedAt);
   const expiresAt = Date.parse(value.expiresAt);
-  if (!Number.isFinite(detectedAt) || !Number.isFinite(fetchedAt) || !Number.isFinite(expiresAt)) {
-    return false;
-  }
-  if (expiresAt <= now.getTime() || expiresAt !== detectedAt + PRICE_CHANGE_HOT_TTL_MS) {
-    return false;
-  }
   if (
-    expectedPlayerCount !== observedPlayerCount ||
-    expectedPlayerCount <= 0 ||
-    observedPlayerCount <= 0 ||
-    expectedPlayerCount !== value.board.expectedPlayerCount ||
-    observedPlayerCount !== value.board.observedPlayerCount ||
-    value.board.deadline !== value.deadline ||
-    !Array.isArray(value.board.nextDeadlines) ||
-    !Array.isArray(value.board.players) ||
-    value.board.players.length !== observedPlayerCount ||
-    value.board.revision !== value.revision ||
-    !['READY', 'STALE'].includes(String(value.board.status)) ||
-    typeof value.board.fetchedAt !== 'string' ||
-    typeof value.board.staleAt !== 'string' ||
-    value.board.source !== 'FPL_BOOTSTRAP'
-  ) {
-    return false;
-  }
-  const boardFetchedAt = Date.parse(value.board.fetchedAt);
-  const boardStaleAt = Date.parse(value.board.staleAt);
-  if (
-    !Number.isFinite(boardFetchedAt) ||
-    !Number.isFinite(boardStaleAt) ||
-    boardFetchedAt !== fetchedAt ||
-    boardStaleAt !== fetchedAt + PRICE_CHANGE_READY_MS
+    !Number.isFinite(detectedAt) ||
+    !Number.isFinite(fetchedAt) ||
+    !Number.isFinite(expiresAt) ||
+    detectedAt > now.getTime() ||
+    fetchedAt > now.getTime() ||
+    expiresAt <= now.getTime() ||
+    expiresAt !== detectedAt + PRICE_CHANGE_HOT_TTL_MS
   ) {
     return false;
   }
@@ -378,6 +358,48 @@ function isValidSnapshot(
     (reconciliation.error === null ||
       reconciliation.durablePublicationId !== null ||
       reconciliation.durableRevision !== null)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isValidSnapshot(
+  value: unknown,
+  seasonCode: string,
+  now: Date,
+): value is PriceChangeHotSnapshot {
+  if (!isValidSnapshotMetadata(value, seasonCode, now)) return false;
+  const snapshot = value as PriceChangeHotSnapshot;
+  if (!isRecord(snapshot.board)) return false;
+  const expectedPlayerCount = snapshot.expectedPlayerCount;
+  const observedPlayerCount = snapshot.observedPlayerCount;
+  const fetchedAt = Date.parse(snapshot.fetchedAt);
+  if (
+    expectedPlayerCount !== observedPlayerCount ||
+    expectedPlayerCount <= 0 ||
+    observedPlayerCount <= 0 ||
+    expectedPlayerCount !== snapshot.board.expectedPlayerCount ||
+    observedPlayerCount !== snapshot.board.observedPlayerCount ||
+    snapshot.board.deadline !== snapshot.deadline ||
+    !Array.isArray(snapshot.board.nextDeadlines) ||
+    !Array.isArray(snapshot.board.players) ||
+    snapshot.board.players.length !== observedPlayerCount ||
+    snapshot.board.revision !== snapshot.revision ||
+    !['READY', 'STALE'].includes(String(snapshot.board.status)) ||
+    typeof snapshot.board.fetchedAt !== 'string' ||
+    typeof snapshot.board.staleAt !== 'string' ||
+    snapshot.board.source !== 'FPL_BOOTSTRAP'
+  ) {
+    return false;
+  }
+  const boardFetchedAt = Date.parse(snapshot.board.fetchedAt);
+  const boardStaleAt = Date.parse(snapshot.board.staleAt);
+  if (
+    !Number.isFinite(boardFetchedAt) ||
+    !Number.isFinite(boardStaleAt) ||
+    boardFetchedAt !== fetchedAt ||
+    boardStaleAt !== fetchedAt + PRICE_CHANGE_READY_MS
   ) {
     return false;
   }
@@ -490,6 +512,34 @@ export async function readPriceChangeHotSnapshotAtRevision(
   );
 }
 
+/**
+ * Read only the active immutable hot metadata envelope. Status and cursor
+ * consumers must not transfer or parse the player-filled board on every
+ * health poll; the full payload is reserved for an explicit reconciliation or
+ * revision-bound board read.
+ */
+export async function readPriceChangeHotSnapshotMetadata(
+  seasonCode: string,
+  now = new Date(),
+): Promise<PriceChangeHotSnapshotMetadata | null> {
+  const redis = await redisSingleton.getClient();
+  const pointer = parsePointer(await redis.get(priceChangeHotPointerKey(seasonCode)));
+  if (!pointer) return null;
+  if (pointer.payloadKey !== priceChangeHotPayloadKey(seasonCode, pointer.revision)) return null;
+  const raw = await redis.get(priceChangeHotMetadataKey(seasonCode, pointer.revision));
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isValidSnapshotMetadata(parsed, seasonCode, now) || parsed.revision !== pointer.revision) {
+    return null;
+  }
+  return parsed;
+}
+
 async function readPriceChangeHotSnapshotPayload(
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
   seasonCode: string,
@@ -521,23 +571,23 @@ export async function readPriceChangeHotCursor(
   seasonCode: string,
   now = new Date(),
 ): Promise<PriceChangeHotCursor | null> {
-  const snapshot = await readPriceChangeHotSnapshot(seasonCode, now);
-  if (!snapshot) return null;
+  const metadata = await readPriceChangeHotSnapshotMetadata(seasonCode, now);
+  if (!metadata) return null;
   return {
     seasonCode,
-    revision: snapshot.revision,
-    detectedAt: snapshot.detectedAt,
-    fetchedAt: snapshot.fetchedAt,
-    expiresAt: snapshot.expiresAt,
+    revision: metadata.revision,
+    detectedAt: metadata.detectedAt,
+    fetchedAt: metadata.fetchedAt,
+    expiresAt: metadata.expiresAt,
     state:
-      snapshot.reconciliation.state === 'failed'
+      metadata.reconciliation.state === 'failed'
         ? 'FAILED'
-        : snapshot.reconciliation.state === 'reconciled'
+        : metadata.reconciliation.state === 'reconciled'
           ? 'RECONCILED'
-          : Date.now() - Date.parse(snapshot.fetchedAt) >= PRICE_CHANGE_READY_MS
+          : now.getTime() - Date.parse(metadata.fetchedAt) >= PRICE_CHANGE_READY_MS
             ? 'STALE'
             : 'PROVISIONAL',
-    reconciliationError: snapshot.reconciliation.error,
+    reconciliationError: metadata.reconciliation.error,
   };
 }
 

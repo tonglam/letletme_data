@@ -39,7 +39,7 @@ import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
-import { readPriceChangeHotCursor } from './price-change-hot.service';
+import { readPriceChangeHotSnapshotMetadata } from './price-change-hot.service';
 
 type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
 type PublicationDelivery = Readonly<{
@@ -202,7 +202,7 @@ export async function getJobsStatus(
       groups: [],
       unavailable: true,
     })),
-    readPriceChangeHotCursor(season.seasonCode).catch(() => null),
+    readPriceChangeHotSnapshotMetadata(season.seasonCode).catch(() => null),
   ]);
   const scheduler = Boolean(schedulerHeartbeat && (await checkRuntimeHeartbeat('scheduler')));
   const queueWorker = Boolean(queueWorkerHeartbeat && (await checkRuntimeHeartbeat('queueWorker')));
@@ -316,11 +316,20 @@ export async function getJobsStatus(
     },
     hotWatch: {
       revision: priceChangeHotCursor?.revision ?? null,
-      state: priceChangeHotCursor?.state ?? 'NONE',
+      state:
+        priceChangeHotCursor?.reconciliation.state === 'failed'
+          ? 'FAILED'
+          : priceChangeHotCursor?.reconciliation.state === 'reconciled'
+            ? 'RECONCILED'
+            : priceChangeHotCursor
+              ? Date.now() - Date.parse(priceChangeHotCursor.fetchedAt) >= PRICE_CHANGE_READY_MS
+                ? 'STALE'
+                : 'PROVISIONAL'
+              : 'NONE',
       detectedAt: priceChangeHotCursor?.detectedAt ?? null,
       fetchedAt: priceChangeHotCursor?.fetchedAt ?? null,
       expiresAt: priceChangeHotCursor?.expiresAt ?? null,
-      reconciliationError: priceChangeHotCursor?.reconciliationError ?? null,
+      reconciliationError: priceChangeHotCursor?.reconciliation.error ?? null,
       ageMs: priceChangeHotCursor
         ? Math.max(0, Date.now() - Date.parse(priceChangeHotCursor.detectedAt))
         : null,

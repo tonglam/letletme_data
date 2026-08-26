@@ -27,6 +27,7 @@ import {
   failSchedulerLaneDispatch,
   getSchedulerLane,
   getSchedulerLaneTarget,
+  getSchedulerLaneTargets,
   recoverSchedulerLaneAfterBullLoss,
   unblockSchedulerLane,
   type SchedulerLane,
@@ -379,9 +380,18 @@ export async function triggerPriceChangeLane(
           reconciliation: 'price-change-hot',
         }
       : {};
+  // A hot watcher may observe a price move after the ordinary five-minute
+  // obligation is already running. Give each exact captured source its own
+  // durable target instead of merging the evidence into the running row: the
+  // source-evidence fence can then distinguish the late hot target from the
+  // payload the worker already prepared. Repeated enqueue attempts for the
+  // same source still coalesce because this identity is deterministic.
+  const hotSourceIdentity =
+    options.sourceHash ?? options.priceChangeBoardRevision ?? options.sourceArtifactId;
   let plan: SchedulerObligationPlan = {
     ...basePlan,
     source: 'manual',
+    ...(hotSourceIdentity ? { periodKey: `${basePlan.periodKey}-hot-${hotSourceIdentity}` } : {}),
     evidence: { ...(basePlan.evidence ?? {}), ...reconciliationEvidence },
   };
   let obligation = await reserveSchedulerObligation({
@@ -392,7 +402,12 @@ export async function triggerPriceChangeLane(
   // A later manual refresh must therefore get a new dispatchable obligation;
   // reusing the terminal five-minute row would make advanceSchedulerLane
   // correctly (but undesirably) report no work.
-  if (['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) {
+  // A hot reconciliation identity is immutable. Reusing the same captured
+  // source must remain idempotent even after it has already settled; creating
+  // a random manual suffix here would turn repeated watcher callbacks into
+  // duplicate price publications. Ordinary manual refreshes retain their
+  // historical re-run behavior and receive a fresh identity below.
+  if (!hotSourceIdentity && ['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) {
     const manualDueAt = new Date(Math.max(context.now.getTime(), plan.dueAt.getTime() + 1));
     const requestedAtMs = manualDueAt.getTime();
     plan = {
@@ -595,12 +610,25 @@ async function reconcileSingleFlightBullState(
           `Core repair Bull ID mismatch for ${lane.laneId}: expected ${expectedBlockerId}, got ${lane.blockerJobId}`,
         );
       }
+      const blockedTargets = await getSchedulerLaneTargets({ laneId: lane.laneId });
+      const blockerEvidence =
+        blockedTargets?.active?.evidence ?? blockedTargets?.desired?.evidence ?? {};
+      const sourceHash = evidenceString(blockerEvidence, 'sourceHash');
+      const sourceArtifactId = evidenceString(blockerEvidence, 'sourceArtifactId');
+      const priceChangeBoardRevision = evidenceString(blockerEvidence, 'priceChangeBoardRevision');
+      const sourceDetectedAt = evidenceString(blockerEvidence, 'sourceDetectedAt');
+      const sourceFetchedAt = evidenceString(blockerEvidence, 'sourceFetchedAt');
       const repair = await enqueueFplCriticalCoreRepairJob(season, 'reconcile', {
         jobId: `core-snapshot-price-change-repair-${lane.laneId}-g${lane.dispatchGeneration}`,
         removeOnSettle: false,
         laneId: lane.laneId,
         laneGeneration: lane.dispatchGeneration,
         blockerLaneId: lane.laneId,
+        ...(sourceHash ? { sourceHash } : {}),
+        ...(sourceArtifactId ? { sourceArtifactId } : {}),
+        ...(priceChangeBoardRevision ? { priceChangeBoardRevision } : {}),
+        ...(sourceDetectedAt ? { sourceDetectedAt } : {}),
+        ...(sourceFetchedAt ? { sourceFetchedAt } : {}),
       });
       if (String(repair.id) !== lane.blockerJobId) {
         throw new Error(

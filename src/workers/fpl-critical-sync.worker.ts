@@ -273,6 +273,14 @@ async function blockPriceLaneForCoreRepair(
     activeObligationId,
     blockerJobId: repairId,
     error,
+    blockerEvidence: {
+      ...metadata,
+      sourceArtifactId: metadata.sourceArtifactId,
+      sourceHash: metadata.sourceHash,
+      priceChangeBoardRevision: metadata.priceChangeBoardRevision,
+      sourceDetectedAt: metadata.sourceDetectedAt,
+      sourceFetchedAt: metadata.sourceFetchedAt,
+    },
   });
   if (!blocked) throw new Error('Price lane blocker CAS failed');
 

@@ -998,6 +998,8 @@ export async function blockSchedulerLane(input: {
   activeObligationId: string;
   blockerJobId: string;
   error: unknown;
+  /** Source identity required to replay a Core repair after Bull loss. */
+  blockerEvidence?: Record<string, unknown>;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -1033,6 +1035,10 @@ export async function blockSchedulerLane(input: {
         lastError: summary,
         leaseOwner: null,
         leaseExpiresAt: null,
+        evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+          blockerJobId: input.blockerJobId,
+          ...(input.blockerEvidence ?? {}),
+        })}::jsonb`,
         updatedAt: dbNow,
       })
       .where(eq(schedulerObligationsInOps.obligationId, input.activeObligationId));
@@ -1040,7 +1046,10 @@ export async function blockSchedulerLane(input: {
       .update(schedulerLanesInOps)
       .set({
         state: 'blocked',
-        activeObligationId: null,
+        // Retain the blocked obligation identity until the repair completes so
+        // recovery can replay its exact hot source instead of silently
+        // fetching a newer, potentially incompatible bootstrap.
+        activeObligationId: input.activeObligationId,
         bullJobId: null,
         runId: null,
         blockerJobId: input.blockerJobId,
@@ -1067,6 +1076,7 @@ export async function unblockSchedulerLane(input: {
     .update(schedulerLanesInOps)
     .set({
       state: 'idle',
+      activeObligationId: null,
       blockerJobId: null,
       retryNotBefore: input.success
         ? null
