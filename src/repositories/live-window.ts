@@ -357,6 +357,16 @@ export const createManagerLiveTournamentCoverageRepository = (dbInstance?: DbOrT
             state: sql`excluded.state`,
             updatedAt: sql`excluded.updated_at`,
           },
+          // Coverage is a monotonic publication. If two workers read the
+          // same baseline concurrently, a slower PARTIAL/UNAVAILABLE write
+          // must not overwrite a COMPLETE row published by the faster one.
+          setWhere: sql`
+            NOT (
+              ${managerLiveTournamentCoverageInFpl.state} = 'COMPLETE'
+              AND ${managerLiveTournamentCoverageInFpl.rosterRevision} = excluded.roster_revision
+              AND ${managerLiveTournamentCoverageInFpl.expectedEntries} = excluded.expected_entries
+            )
+          `,
         });
     },
   };

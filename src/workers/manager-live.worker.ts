@@ -4,6 +4,7 @@ import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
   normalizeManagerLiveEntryIds,
   shouldStopManagerLiveRefresh,
+  type ManagerLiveHotScopeState,
 } from '../domain/manager-live-refresh';
 import {
   readHotManagerLiveScope,
@@ -54,6 +55,42 @@ export async function scheduleManagerLiveContinuation(
   }
 }
 
+/**
+ * A failed BullMQ attempt must retry the bounded chunk it actually owned.
+ * Follow-up jobs advance the shared hot cursor before the failed attempt is
+ * retried, so adopting that cursor on retry would silently skip the failed
+ * chunk. A roster-generation rotation is the one exception: the old job no
+ * longer owns the authoritative roster and must adopt the new lane's cursors.
+ */
+export const selectManagerLiveJobCursors = (input: {
+  attemptsMade: number;
+  jobData: Pick<
+    ManagerLiveJobData,
+    'generation' | 'summaryRotationCursor' | 'classicStandingsPage' | 'classicStandingsCursorEpoch'
+  >;
+  hotState: Pick<
+    ManagerLiveHotScopeState,
+    'generation' | 'summaryRotationCursor' | 'classicStandingsPage' | 'classicStandingsCursorEpoch'
+  >;
+}) => {
+  const rosterGenerationChanged = input.jobData.generation !== input.hotState.generation;
+  const pinRetryCursors = input.attemptsMade > 0 && !rosterGenerationChanged;
+
+  return {
+    rosterGenerationChanged,
+    retryCursorsPinned: pinRetryCursors,
+    summaryRotationCursor: pinRetryCursors
+      ? (input.jobData.summaryRotationCursor ?? input.hotState.summaryRotationCursor)
+      : input.hotState.summaryRotationCursor,
+    classicStandingsPage: pinRetryCursors
+      ? input.jobData.classicStandingsPage
+      : (input.hotState.classicStandingsPage ?? undefined),
+    classicStandingsCursorEpoch: pinRetryCursors
+      ? (input.jobData.classicStandingsCursorEpoch ?? input.hotState.classicStandingsCursorEpoch)
+      : input.hotState.classicStandingsCursorEpoch,
+  };
+};
+
 export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
   if (job.name !== MANAGER_LIVE_JOBS.REFRESH || job.data.version !== MANAGER_LIVE_JOB_VERSION) {
     throw new Error(`Unsupported manager live job: ${job.name}@${job.data.version}`);
@@ -75,7 +112,8 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
   logJobTriggered(context);
 
   return runTrackedJob(context, async () => {
-    if (shouldStopManagerLiveRefresh(event)) {
+    const eventFinalized = shouldStopManagerLiveRefresh(event);
+    if (eventFinalized && job.data.tournamentId === undefined) {
       logInfo('Manager live refresh stopped after final event settlement', {
         eventId: job.data.eventId,
         tournamentId: job.data.tournamentId ?? null,
@@ -119,13 +157,18 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       entryIds: authoritativeEntryIds,
       ...(job.data.tournamentId === undefined ? {} : { tournamentId: job.data.tournamentId }),
     });
+    const selectedCursors = selectManagerLiveJobCursors({
+      attemptsMade: job.attemptsMade,
+      jobData: job.data,
+      hotState,
+    });
     const effectiveJobData: ManagerLiveJobData = {
       ...job.data,
       entryIds: hotState.entryIds,
       generation: hotState.generation,
-      summaryRotationCursor: hotState.summaryRotationCursor,
-      classicStandingsPage: hotState.classicStandingsPage ?? undefined,
-      classicStandingsCursorEpoch: hotState.classicStandingsCursorEpoch,
+      summaryRotationCursor: selectedCursors.summaryRotationCursor,
+      classicStandingsPage: selectedCursors.classicStandingsPage,
+      classicStandingsCursorEpoch: selectedCursors.classicStandingsCursorEpoch,
     };
     const needsJobDataUpdate =
       effectiveJobData.generation !== job.data.generation ||
@@ -142,11 +185,7 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
       await job.updateData(effectiveJobData);
       job.data = effectiveJobData;
     }
-    const persistedClassicCursor = hotState.classicStandingsPage;
-    const classicStandingsStartPage =
-      persistedClassicCursor === null
-        ? 1
-        : (persistedClassicCursor ?? job.data.classicStandingsPage ?? 1);
+    const classicStandingsStartPage = selectedCursors.classicStandingsPage ?? 1;
     // BullMQ retries reuse the same job data, so they retry the same bounded
     // summary chunk. The atomic hot state advances this logical cursor only
     // when the follow-up is scheduled; wall-clock parity cannot starve a
@@ -167,6 +206,7 @@ export async function processManagerLiveJob(job: Job<ManagerLiveJobData>) {
         : { classicStandingsStartPage }),
       summaryRotationCursor,
     });
+    if (eventFinalized) return result;
     await scheduleManagerLiveContinuation(effectiveJobData, result, classicStandingsStartPage);
     return result;
   });

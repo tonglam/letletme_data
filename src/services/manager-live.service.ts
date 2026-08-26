@@ -2322,6 +2322,21 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
 
   const uniqueEntryIds = requestedEntryIds;
 
+  const existingTournamentCoverage =
+    input.tournamentId === undefined
+      ? null
+      : await readTournamentCoverage(season, input.eventId, input.tournamentId);
+  const coverageRosterEntryIds = authoritativeTournamentRosterEntryIds ?? uniqueEntryIds;
+  const currentTournamentRosterRevision =
+    input.tournamentId === undefined ? null : tournamentRosterRevision(coverageRosterEntryIds);
+  const tournamentCoverage = currentTournamentRosterRevision
+    ? invalidateManagerLiveTournamentCoverage(
+        existingTournamentCoverage,
+        currentTournamentRosterRevision,
+        coverageRosterEntryIds.length,
+      )
+    : existingTournamentCoverage;
+
   // A finished/data-checked event is historical data. Do not call the current
   // FPL manager endpoint for it; the final result table is the authority.
   if (event.finished && event.dataChecked) {
@@ -2332,7 +2347,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       event.dataCheckedAt,
     );
     const resolvedIds = new Set(finalRows.map((row) => row.entryId));
-    return buildManagerLiveResult({
+    const finalErrorCode =
+      resolvedIds.size === uniqueEntryIds.length ? null : ('UPSTREAM_UNAVAILABLE' as const);
+    const result = buildManagerLiveResult({
       season: season.seasonCode,
       eventId: input.eventId,
       rows: finalRows,
@@ -2340,11 +2357,26 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       // checkpoint is no longer a valid score fallback. Missing finalized rows
       // stay unavailable until the persisted official result arrives.
       missingEntryIds: uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId)),
-      errorCode: resolvedIds.size === uniqueEntryIds.length ? null : 'UPSTREAM_UNAVAILABLE',
+      errorCode: finalErrorCode,
       checkedAt: nowIso(),
       nextRefreshAt: nextRefresh(true),
       sourceByEntry: new Map(finalRows.map((row) => [row.entryId, 'POSTGRES' as const])),
+      ...(input.tournamentId === undefined ? {} : { tournamentCoverage }),
     });
+    if (workerTournamentRefresh && input.tournamentId !== undefined) {
+      result.tournamentCoverage = await persistTournamentCoverage({
+        season,
+        eventId: input.eventId,
+        tournamentId: input.tournamentId,
+        rosterRevision: tournamentRosterRevision(coverageRosterEntryIds),
+        expectedEntries: coverageRosterEntryIds.length,
+        rows: finalRows,
+        errorCode: finalErrorCode,
+        managerRevision: result.managerRevision,
+        crawlComplete: resolvedIds.size === coverageRosterEntryIds.length,
+      });
+    }
+    return result;
   }
 
   let redis: Redis | null = null;
@@ -2373,20 +2405,6 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
   const staleOrMissingForWorker = uniqueEntryIds.filter(
     (entryId) => !rows.has(entryId) || !isFresh(rows.get(entryId)!),
   );
-  const existingTournamentCoverage =
-    input.tournamentId === undefined
-      ? null
-      : await readTournamentCoverage(season, input.eventId, input.tournamentId);
-  const coverageRosterEntryIds = authoritativeTournamentRosterEntryIds ?? uniqueEntryIds;
-  const currentTournamentRosterRevision =
-    input.tournamentId === undefined ? null : tournamentRosterRevision(coverageRosterEntryIds);
-  const tournamentCoverage = currentTournamentRosterRevision
-    ? invalidateManagerLiveTournamentCoverage(
-        existingTournamentCoverage,
-        currentTournamentRosterRevision,
-        coverageRosterEntryIds.length,
-      )
-    : existingTournamentCoverage;
   if ((input.readMode ?? 'READ_THROUGH') === 'CACHE_ONLY') {
     const now = Date.now();
     const metadataRows = uniqueEntryIds
