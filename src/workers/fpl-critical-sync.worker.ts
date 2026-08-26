@@ -223,14 +223,25 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
     // Re-read the desired target immediately before publication. If a newer
     // five-minute obligation arrived while the HTTP request was in flight,
     // discard this payload and let the same Bull job prepare the latest one.
-    const beforePersist = await fenceSchedulerLaneTarget({
-      laneId,
-      dispatchGeneration,
-      activeObligationId: activeTarget.obligation.obligationId,
-      bullJobId: String(job.id),
-      runId: job.data.runId,
-    });
-    if (!beforePersist) throw new Error('Scheduler lane pre-publication fence CAS failed');
+    let beforePersist: SchedulerLaneTarget | null;
+    try {
+      beforePersist = await fenceSchedulerLaneTarget({
+        laneId,
+        dispatchGeneration,
+        activeObligationId: activeTarget.obligation.obligationId,
+        bullJobId: String(job.id),
+        runId: job.data.runId,
+      });
+      if (!beforePersist) throw new Error('Scheduler lane pre-publication fence CAS failed');
+    } catch (error) {
+      // preparePriceChangePublication creates its own RUNNING source run. A
+      // fence exception (including a null CAS) happens after preparation's
+      // error handler has returned, so close that run here before allowing Bull
+      // to retry. Otherwise every retry leaves a non-terminal sync_runs row and
+      // the deployment quiescence gate can never drain.
+      await syncOperationsRepository.failRun(prepared.sourceRunId, error);
+      throw error;
+    }
     if (beforePersist.obligation.obligationId !== activeTarget.obligation.obligationId) {
       const skippedItems = prepared.outcome === 'ready' ? prepared.board.players.length : 0;
       await markSupersededPriceRunSkipped(activeTarget, job, skippedItems);

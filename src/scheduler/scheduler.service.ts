@@ -1031,15 +1031,35 @@ export async function runSchedulerPass(now = new Date()): Promise<SchedulerPassR
       if (!confirmed) throw new Error('Scheduler lane enqueue confirmation CAS failed');
       enqueued += 1;
     } catch (error) {
-      await reconcileSingleFlightBullState(dispatch.lane).catch((reconcileError) => {
+      let reconciliationConfirmed = true;
+      try {
+        await reconcileSingleFlightBullState(dispatch.lane);
+      } catch (reconcileError) {
+        reconciliationConfirmed = false;
         logError('Latest-wins enqueue ambiguity reconciliation failed', reconcileError, {
           laneId: dispatch.lane.laneId,
           dispatchGeneration: dispatch.lane.dispatchGeneration,
         });
-      });
+      }
       const current = await getSchedulerLane({ laneId: dispatch.lane.laneId });
       if (current?.state === 'enqueued' || current?.state === 'running') {
         enqueued += 1;
+        continue;
+      }
+      // A failed enqueue response is ambiguous until Bull positively reports
+      // the expected deterministic job as missing/failed.  If Redis is
+      // unavailable (or the state is otherwise inconclusive), retain the
+      // dispatch lease and let the next scheduler pass reconcile it. Releasing
+      // the lane here could create a second generation while the first Bull
+      // job is still runnable.
+      if (!reconciliationConfirmed || current?.state === 'dispatching') {
+        failed += 1;
+        logError('Latest-wins enqueue failure deferred pending Bull reconciliation', error, {
+          laneKey,
+          laneId: dispatch.lane.laneId,
+          dispatchGeneration: dispatch.lane.dispatchGeneration,
+          reconciliationConfirmed,
+        });
         continue;
       }
       failed += 1;

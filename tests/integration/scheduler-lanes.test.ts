@@ -76,6 +76,74 @@ describe('scheduler latest-wins lanes', () => {
     expect(targets?.lane.desiredObligationId).toBe(second.obligationId);
   });
 
+  test('rearms a waiting legacy price job during latest-wins cutover', async () => {
+    const legacy = await reserve('2026-08-25T03:10:00.000Z', 'price-legacy-cutover');
+    const sql = await getDbClient();
+    const legacyBullJobId = `2627-scheduler-${legacy.obligationId}-g${legacy.generation}`;
+    await sql`
+      UPDATE ops.scheduler_obligations
+      SET status = 'enqueued', bull_job_id = ${legacyBullJobId}
+      WHERE obligation_id = ${legacy.obligationId}::uuid
+    `;
+
+    const advanced = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: legacy,
+    });
+
+    expect(advanced.shouldDispatch).toBe(true);
+    expect(advanced.lane.desiredObligationId).not.toBe(legacy.obligationId);
+    const targets = await getSchedulerLaneTargets({ laneId: advanced.lane.laneId });
+    expect(targets?.desired?.status).toBe('pending');
+    expect(targets?.desired?.evidence.cutoverRearmedFromObligationId).toBe(legacy.obligationId);
+    const retired = await sql<Array<{ status: string; reason: string }>>`
+      SELECT status, evidence->>'reason' AS reason
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${legacy.obligationId}::uuid
+    `;
+    expect(retired[0]).toEqual({ status: 'skipped', reason: 'cutover-superseded' });
+  });
+
+  test('deterministically supersedes equal-time obligations by period key', async () => {
+    const first = await reserve('2026-08-25T03:20:00.000Z', 'price-equal-a');
+    const second = await reserve('2026-08-25T03:20:00.000Z', 'price-equal-b');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const advanced = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: second,
+    });
+
+    expect(initial.lane.laneId).toBe(advanced.lane.laneId);
+    expect(advanced.lane.desiredObligationId).toBe(second.obligationId);
+    const sql = await getDbClient();
+    const statuses = await sql<Array<{ periodKey: string; status: string; reason: string | null }>>`
+      SELECT period_key AS "periodKey", status, evidence->>'reason' AS reason
+      FROM ops.scheduler_obligations
+      WHERE job_name = ${DEFINITION.name} AND scope_key = ${SCOPE_KEY}
+      ORDER BY period_key
+    `;
+    expect(Array.from(statuses)).toEqual([
+      {
+        periodKey: 'price-equal-a',
+        status: 'skipped',
+        reason: 'superseded-by-latest-authoritative',
+      },
+      { periodKey: 'price-equal-b', status: 'pending', reason: null },
+    ]);
+  });
+
   test('coalesces newer obligations without creating a second Bull dispatch', async () => {
     const first = await reserve('2026-08-25T04:00:00.000Z', 'price-1');
     const initial = await advanceSchedulerLane({

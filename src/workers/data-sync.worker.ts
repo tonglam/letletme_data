@@ -54,7 +54,12 @@ function priceChangeCoreRepairJobId(job: Job<DataSyncJobData>): string {
 
 function priceSingleFlightEnabled(): boolean {
   const value = process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED;
-  return value !== undefined && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+  // Keep the legacy worker's default aligned with the scheduler registry and
+  // publication reconciler: local/test processes opt into the lane unless an
+  // explicit flag says otherwise, while production remains opt-in during the
+  // staged rollout.
+  if (value === undefined) return process.env.NODE_ENV !== 'production';
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
 }
 
 async function alertPriceChangePublicationOverdue(

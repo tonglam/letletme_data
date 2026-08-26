@@ -4,7 +4,11 @@ import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import { schedulerLanesInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
-import { type SchedulerObligation, type SchedulerObligationStatus } from './scheduler-obligations';
+import {
+  reserveSchedulerObligation,
+  type SchedulerObligation,
+  type SchedulerObligationStatus,
+} from './scheduler-obligations';
 
 export type SchedulerLaneState = 'idle' | 'dispatching' | 'enqueued' | 'running' | 'blocked';
 
@@ -45,6 +49,7 @@ const DISPATCH_LEASE_MS = 2 * 60_000;
 const RETRY_DELAY_MS = 60_000;
 const BLOCKED_RETRY_DELAY_MS = 5 * 60_000;
 const LANE_SUPERSEDED_REASON = 'superseded-by-latest-authoritative';
+const CUTOVER_SUPERSEDED_REASON = 'cutover-superseded';
 
 function asDate(value: Date | string | null | undefined): Date | null {
   if (value === null || value === undefined) return null;
@@ -128,6 +133,20 @@ function scheduledDueAt(obligation: SchedulerObligation): Date {
   return obligation.dueAt;
 }
 
+function isLegacyPriceChangeInFlight(obligation: SchedulerObligation): boolean {
+  if (
+    obligation.jobName !== 'price-change-predictions' ||
+    !['enqueued', 'running', 'skipped'].includes(obligation.status) ||
+    !obligation.bullJobId
+  ) {
+    return false;
+  }
+  // Legacy scheduler jobs used scheduler-{obligationId}-g{generation}; the
+  // lane producer uses scheduler-lane-{laneId}-g{dispatchGeneration}. Only
+  // the former can be waiting in data-sync during a latest-wins cutover.
+  return obligation.bullJobId.includes(`scheduler-${obligation.obligationId}-g`);
+}
+
 async function loadTarget(
   db: DbHandle,
   lane: SchedulerLane,
@@ -203,8 +222,110 @@ export async function advanceSchedulerLane(input: {
     }
     // A conflict-safe insert can reload a winner whose desired waterline is
     // older than this caller's obligation. Apply the same latest-wins update
-    // to both the ordinary existing-row and insert-conflict paths.
-    if (desiredScheduledDueAt.getTime() > row.desiredDueAt.getTime()) {
+    // to both the ordinary existing-row and insert-conflict paths. Due times
+    // are normally unique five-minute buckets, but manual refreshes can create
+    // distinct obligations at the same millisecond. Use the immutable
+    // periodKey as a deterministic tie-breaker so one equal-time obligation is
+    // selected and all peers can be explicitly superseded below.
+    const [currentDesiredRow] = await tx
+      .select()
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, row.desiredObligationId))
+      .limit(1);
+    if (!currentDesiredRow) throw new Error('Scheduler lane desired obligation disappeared');
+    let currentDesired = mapObligation(currentDesiredRow);
+
+    // A deployment can enable latest-wins while the old data-sync job is still
+    // waiting, has just crossed its start fence, or has already completed the
+    // flag-on noop before this scheduler pass observes it. Binding that legacy
+    // obligation to the new lane would leave a skipped desired row without a
+    // critical-queue replacement. Rearm exactly once by retiring the old
+    // obligation and inserting a fresh pending identity in this lane
+    // transaction. The legacy worker is guaranteed to take its flag-on noop
+    // path, so retiring a just-started row is safe; its deterministic Bull
+    // completion remains audit evidence and is idempotent against the skipped
+    // row.
+    if (
+      currentDesired.obligationId === input.desiredObligation.obligationId &&
+      isLegacyPriceChangeInFlight(currentDesired) &&
+      row.state === 'idle' &&
+      (!row.activeObligationId || row.activeObligationId === currentDesired.obligationId)
+    ) {
+      const replacement = await reserveSchedulerObligation({
+        definition: {
+          name: currentDesired.jobName,
+          cadence: currentDesired.cadence,
+          timezone: currentDesired.timezone,
+        },
+        plan: {
+          scopeKey: currentDesired.scopeKey,
+          periodKey: `${currentDesired.periodKey}-latest-wins-rearm-${randomUUID()}`,
+          dueAt: currentDesired.dueAt,
+          source: input.desiredObligation.source,
+          evidence: {
+            ...currentDesired.evidence,
+            cutoverRearmedFromObligationId: currentDesired.obligationId,
+            cutoverReason: CUTOVER_SUPERSEDED_REASON,
+          },
+        },
+        db: tx,
+      });
+      const retired = await tx
+        .update(schedulerObligationsInOps)
+        .set({
+          status: 'skipped',
+          evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+            terminal: true,
+            reason: CUTOVER_SUPERSEDED_REASON,
+            supersededByObligationId: replacement.obligationId,
+            supersededByPeriodKey: replacement.periodKey,
+          })}::jsonb`,
+          completedAt: dbNow,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          updatedAt: dbNow,
+        })
+        .where(
+          and(
+            eq(schedulerObligationsInOps.obligationId, currentDesired.obligationId),
+            inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'skipped']),
+          ),
+        )
+        .returning();
+      if (!retired[0]) throw new Error('Legacy price-change obligation cutover CAS failed');
+      const updated = await tx
+        .update(schedulerLanesInOps)
+        .set({
+          state: 'idle',
+          desiredObligationId: replacement.obligationId,
+          desiredDueAt: scheduledDueAt(replacement),
+          activeObligationId: null,
+          dispatchOwner: null,
+          dispatchLeaseExpiresAt: null,
+          bullJobId: null,
+          runId: null,
+          retryNotBefore: null,
+          lastError: null,
+          lastProgressAt: dbNow,
+          supersededCount: sql`${schedulerLanesInOps.supersededCount} + 1`,
+          updatedAt: dbNow,
+        })
+        .where(eq(schedulerLanesInOps.laneId, row.laneId))
+        .returning();
+      if (!updated[0]) throw new Error('Scheduler lane cutover rearm update returned no row');
+      row = updated[0];
+      currentDesired = replacement;
+    }
+
+    // The rearm path above may have changed the selected target before the
+    // ordinary latest-wins comparison. Read the row's waterline from the
+    // selected obligation below rather than relying on the original snapshot.
+    const currentDesiredScheduledDueAt = scheduledDueAt(currentDesired);
+    const desiredIsNewer =
+      desiredScheduledDueAt.getTime() > currentDesiredScheduledDueAt.getTime() ||
+      (desiredScheduledDueAt.getTime() === currentDesiredScheduledDueAt.getTime() &&
+        input.desiredObligation.periodKey > currentDesired.periodKey);
+    if (desiredIsNewer) {
       const updated = await tx
         .update(schedulerLanesInOps)
         .set({
@@ -218,11 +339,25 @@ export async function advanceSchedulerLane(input: {
       row = updated[0];
     }
 
+    // Read the selected waterline back after the update. Supersession must use
+    // the persisted winner rather than this caller's obligation: a concurrent
+    // equal-time manual request may lose the period-key tie-breaker.
+    const [selectedDesiredRow] = await tx
+      .select()
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, row.desiredObligationId))
+      .limit(1);
+    if (!selectedDesiredRow) throw new Error('Scheduler lane selected obligation disappeared');
+    const selectedDesired = mapObligation(selectedDesiredRow);
+    const selectedScheduledDueAt = scheduledDueAt(selectedDesired);
+
     // Waiting generations have no useful work once a newer desired period is
     // known. Keep an active target intact so its publication fence can decide
     // the linearization point; the worker will adopt the newer target before
-    // it writes if the desired row changed first.
+    // it writes if the desired row changed first. Equal-time peers are ordered
+    // by periodKey and the non-selected one is terminalized explicitly.
     const immutableDueAt = scheduledDueAtSql();
+    const selectedDueAtIso = selectedScheduledDueAt.toISOString();
     const supersedable = await tx
       .update(schedulerObligationsInOps)
       .set({
@@ -230,8 +365,8 @@ export async function advanceSchedulerLane(input: {
         evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
           terminal: true,
           reason: LANE_SUPERSEDED_REASON,
-          supersededByObligationId: input.desiredObligation.obligationId,
-          supersededByPeriodKey: input.desiredObligation.periodKey,
+          supersededByObligationId: selectedDesired.obligationId,
+          supersededByPeriodKey: selectedDesired.periodKey,
         })}::jsonb`,
         completedAt: dbNow,
         leaseOwner: null,
@@ -242,11 +377,18 @@ export async function advanceSchedulerLane(input: {
         and(
           eq(schedulerObligationsInOps.jobName, input.jobName),
           eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
-          sql`${immutableDueAt} < ${desiredScheduledDueAt.toISOString()}`,
+          sql`(
+            ${immutableDueAt} < ${selectedDueAtIso}
+            OR (
+              ${immutableDueAt} = ${selectedDueAtIso}
+              AND ${schedulerObligationsInOps.periodKey} < ${selectedDesired.periodKey}
+            )
+          )`,
           inArray(schedulerObligationsInOps.status, ['pending', 'failed', 'enqueued']),
           row.activeObligationId
             ? sql`${schedulerObligationsInOps.obligationId} <> ${row.activeObligationId}`
             : undefined,
+          sql`${schedulerObligationsInOps.obligationId} <> ${selectedDesired.obligationId}`,
         ),
       )
       .returning({ obligationId: schedulerObligationsInOps.obligationId });
