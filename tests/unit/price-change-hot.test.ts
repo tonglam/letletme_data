@@ -84,6 +84,24 @@ describe('price-change hot snapshot', () => {
     expect(sha256Bytes(bytes)).toBe(sha256Bytes(bytes.slice()));
   });
 
+  test('rejects a bootstrap whose event season differs from the requested lane', () => {
+    const bootstrap = priceBootstrap(2);
+    const mismatched = {
+      ...bootstrap,
+      events: bootstrap.events.map((event, index) =>
+        index === 0 ? { ...event, deadline_time: '2027-08-14T17:30:00.000Z' } : event,
+      ),
+    } as FPLBootstrapResponse;
+
+    expect(() =>
+      buildPriceChangeHotSnapshot({
+        season: TEST_SEASON,
+        bootstrap: mismatched,
+        sourceHash: 'd'.repeat(64),
+      }),
+    ).toThrow('does not match current season 2627');
+  });
+
   test('orders a slow hot response by probe start, not fetch completion', () => {
     const snapshot = buildPriceChangeHotSnapshot({
       season: TEST_SEASON,

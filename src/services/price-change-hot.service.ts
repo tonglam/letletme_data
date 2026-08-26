@@ -9,8 +9,10 @@ import {
   normalizePriceChangeBoard,
   PRICE_CHANGE_READY_MS,
   priceChangeTriggerFingerprint,
+  PriceChangePredictionValidationError,
   type PriceChangeBoard,
 } from './price-change-predictions.service';
+import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { redisSingleton } from '../cache/singleton';
 import { getConfig } from '../utils/config';
@@ -273,6 +275,17 @@ export function buildPriceChangeHotSnapshot(input: {
   const fetchedAt = input.fetchedAt ?? detectedAt;
   if (!Number.isFinite(detectedAt.getTime()) || !Number.isFinite(fetchedAt.getTime())) {
     throw new Error('Price-change hot snapshot timestamps are invalid');
+  }
+  const sourceSeason = deriveFplSeasonFromEvents(input.bootstrap.events);
+  if (!sourceSeason) {
+    throw new PriceChangePredictionValidationError(
+      'FPL bootstrap season cannot be derived from events',
+    );
+  }
+  if (sourceSeason !== input.season.seasonCode) {
+    throw new PriceChangePredictionValidationError(
+      `FPL bootstrap season ${sourceSeason} does not match current season ${input.season.seasonCode}`,
+    );
   }
   const board = normalizePriceChangeBoard(input.bootstrap, fetchedAt);
   const expiresAt = new Date(detectedAt.getTime() + PRICE_CHANGE_HOT_TTL_MS);

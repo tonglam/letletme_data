@@ -258,6 +258,16 @@ export async function syncCoreSnapshot(
         .skipPublication(preparedPublicationId, 'superseded-by-newer-core-source')
         .catch(() => undefined);
       if (!validatedSnapshot) throw error;
+      await syncOperationsRepository.finishRun(sourceRunId, {
+        status: 'skipped',
+        completedItems: 0,
+        skippedItems: workUnits(validatedSnapshot),
+        dataChanged: false,
+        metadata: {
+          reason: 'superseded-by-newer-core-source',
+          sourceCheckedAt: options.sourceCheckedAt?.toISOString() ?? null,
+        },
+      });
       return result(validatedSnapshot, false);
     }
     if (preparedPublicationId && !persistenceCommitted) {

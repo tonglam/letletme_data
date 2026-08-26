@@ -166,6 +166,30 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
     getPriceChangePredictions().catch(() => null),
     readPriceChangeHotSnapshot(season.seasonCode).catch(() => null),
   ]);
+  // A hot snapshot can be visible even when the asynchronous durable handoff
+  // failed after the Redis write. Retry that exact source before using it as
+  // the next value baseline; otherwise the unchanged official prices would be
+  // treated as a no-op forever and the durable lane would never be re-enqueued.
+  if (priorHot?.reconciliation.state === 'failed') {
+    try {
+      await enqueueDurableReconciliation(season, priorHot);
+      logInfo('Retried failed price-change hot reconciliation handoff', {
+        season: season.seasonCode,
+        revision: priorHot.revision,
+        sourceHash: priorHot.sourceHash,
+      });
+    } catch (error) {
+      // Keep watching and leave the failure evidence intact. The next
+      // scheduler pass will retry again, while the active hot board remains
+      // the correct value baseline for this deadline.
+      logWarn('Price-change hot reconciliation handoff retry failed', {
+        season: season.seasonCode,
+        revision: priorHot.revision,
+        sourceHash: priorHot.sourceHash,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   // Core is observability metadata only on this path. Start the Redis read in
   // parallel, but never await it before publishing a hot board; if it is
   // ready by detection time, expose the player-count delta for reconciliation
