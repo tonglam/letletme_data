@@ -14,8 +14,15 @@ import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { tournamentOfficialH2HRepository } from '../repositories/tournament-official-h2h';
+import { tournamentOfficialH2HManifestRepository } from '../repositories/tournament-official-h2h-manifest';
 import { contentHash } from '../utils/content-hash';
+import {
+  buildOfficialH2HPageManifest,
+  validateOfficialH2HPageManifest,
+  type OfficialH2HPageManifest,
+} from '../domain/official-h2h-manifest';
 import { ValidationError } from '../utils/errors';
+import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
 import {
   eventLiveManagerScoreService,
@@ -26,11 +33,43 @@ const MAX_H2H_PAGES = 100;
 
 type OfficialH2HClient = Pick<typeof fplClient, 'getLeagueH2HStandings' | 'getLeagueH2HMatches'>;
 
+export type OfficialH2HFetchOptions = Readonly<{
+  /** Locked page manifests let a minute refresh avoid fetching unrelated pages. */
+  matchPages?: readonly number[];
+  existingManifests?: readonly OfficialH2HPageManifest[];
+}>;
+
+export function resolveOfficialH2HPagesToFetch(
+  manifests: readonly Pick<OfficialH2HPageManifest, 'pageNumber' | 'eventIds' | 'lockedAt'>[],
+  eventId: number,
+  incrementalEnabled: boolean,
+): Readonly<{ mode: 'full' | 'incremental'; pageNumbers: readonly number[] }> {
+  const locked = manifests.length > 0 && manifests.every((manifest) => manifest.lockedAt !== null);
+  if (!incrementalEnabled || !locked) return { mode: 'full', pageNumbers: [] };
+  const pageNumbers = manifests
+    .filter((manifest) => manifest.eventIds.includes(eventId))
+    .map((manifest) => manifest.pageNumber)
+    .sort((a, b) => a - b);
+  // A locked manifest is the authority for the incremental boundary. If the
+  // current event is absent, silently publishing standings without refreshing
+  // any match page would hide a pagination/eligibility drift. Force one full
+  // reconciliation so the caller can either prove the locked hash is still
+  // valid or raise an explicit governance case.
+  if (pageNumbers.length === 0) return { mode: 'full', pageNumbers: [] };
+  return { mode: 'incremental', pageNumbers };
+}
+
 export type OfficialH2HStanding = RawFPLLeagueStandingsResult & { entry: number };
 
 export type OfficialH2HSourceSnapshot = {
   standings: OfficialH2HStanding[];
   matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+  /** Exact provider page boundaries, retained for locked-manifest validation. */
+  pageMatches?: readonly {
+    pageNumber: number;
+    matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+  }[];
+  pageManifests?: readonly OfficialH2HPageManifest[];
 };
 
 export type OfficialH2HSyncOptions = {
@@ -43,6 +82,8 @@ export type OfficialH2HSyncOptions = {
   provisionalEventId?: number | null;
   /** Suppress every outcome shape for an incomplete provisional event. */
   suppressedEventId?: number | null;
+  /** Bypass the minute-page selector for a guarded full reconciliation. */
+  forceFull?: boolean;
 };
 
 type EntryEventTotalsCoverage = {
@@ -371,7 +412,9 @@ function isOfficialKnockoutMatch(match: RawFPLLeagueH2HMatch): boolean {
 export async function fetchOfficialH2HSourceSnapshot(
   leagueId: number,
   client: OfficialH2HClient = fplClient,
+  options: OfficialH2HFetchOptions = {},
 ): Promise<OfficialH2HSourceSnapshot> {
+  const startedAt = Date.now();
   const standings: OfficialH2HStanding[] = [];
   let standingsPage = 1;
   let previousStandingsSignature: string | null = null;
@@ -404,10 +447,23 @@ export async function fetchOfficialH2HSourceSnapshot(
   }
 
   const matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }> = [];
+  const pageSlices: Array<{
+    pageNumber: number;
+    matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+  }> = [];
+  const requestedPages = options.matchPages
+    ? [...new Set(options.matchPages)]
+        .filter((page) => Number.isSafeInteger(page) && page > 0)
+        .sort((a, b) => a - b)
+    : null;
   let matchPage = 1;
   let previousMatchSignature: string | null = null;
-  while (true) {
-    const response = await client.getLeagueH2HMatches(leagueId, matchPage);
+  const pageNumbers = requestedPages ?? null;
+  while (pageNumbers ? pageNumbers.length > 0 : true) {
+    if (pageNumbers && matchPage > pageNumbers.length) break;
+    const pageNumber = pageNumbers ? pageNumbers[matchPage - 1] : matchPage;
+    if (pageNumber === undefined) break;
+    const response = await client.getLeagueH2HMatches(leagueId, pageNumber);
     const signature = response.results.map((match) => match.id).join(',');
     if (
       response.has_next &&
@@ -420,8 +476,19 @@ export async function fetchOfficialH2HSourceSnapshot(
       );
     }
     previousMatchSignature = signature;
-    for (const match of response.results) {
-      matches.push({ ...match, sourceOrder: matches.length });
+    const pageOffset =
+      options.existingManifests
+        ?.filter((manifest) => manifest.pageNumber < pageNumber)
+        .reduce((total, manifest) => total + manifest.matchIds.length, 0) ?? matches.length;
+    const pageMatches = response.results.map((match, index) => ({
+      ...match,
+      sourceOrder: pageOffset + index,
+    }));
+    matches.push(...pageMatches);
+    pageSlices.push({ pageNumber, matches: pageMatches });
+    if (pageNumbers) {
+      matchPage += 1;
+      continue;
     }
     if (!response.has_next) break;
     matchPage += 1;
@@ -453,7 +520,38 @@ export async function fetchOfficialH2HSourceSnapshot(
     }
     standingEntryIds.add(standing.entry);
   }
-  return { standings, matches };
+  const scheduleHash = contentHash(
+    matches
+      .filter((match) => !isOfficialKnockoutMatch(match))
+      .map((match) => ({
+        officialMatchId: match.id,
+        eventId: match.event,
+        sourceOrder: match.sourceOrder,
+        homeEntryId: match.entry_1_entry,
+        awayEntryId: match.entry_2_entry,
+        isBye: match.is_bye ?? false,
+      })),
+  );
+  const capturedAt = new Date();
+  // An empty terminal page is a valid pagination response (and is common for
+  // a newly-created tournament). It carries no durable schedule evidence and
+  // must not manufacture an invalid empty manifest. A non-empty page is still
+  // validated by the manifest builder and by the publication transaction.
+  const pageManifests = pageSlices
+    .filter((page) => page.matches.length > 0)
+    .map((page) =>
+      buildOfficialH2HPageManifest(page.pageNumber, page.matches, scheduleHash, capturedAt),
+    );
+  logInfo('Official H2H source pages captured', {
+    leagueId,
+    mode: options.matchPages ? 'incremental' : 'full',
+    standingsPages: standingsPage,
+    matchPages: pageSlices.length,
+    requestCount: standingsPage + pageSlices.length,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    scheduleHash,
+  });
+  return { standings, matches, pageMatches: pageSlices, pageManifests };
 }
 
 export function projectOfficialH2HStandings(
@@ -919,10 +1017,66 @@ export async function syncOfficialH2HTournament(
     );
   }
 
-  const [snapshot, entryIds] = await Promise.all([
-    fetchOfficialH2HSourceSnapshot(tournament.leagueId),
-    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
-  ]);
+  const entryIdsPromise = tournamentEntryRepository.findEntryIdsByTournamentId(
+    season,
+    tournament.id,
+  );
+  const manifests = getConfig().OFFICIAL_H2H_INCREMENTAL_ENABLED
+    ? await tournamentOfficialH2HManifestRepository
+        .findByTournament(season, tournament.id)
+        .catch((error) => {
+          logWarn('Official H2H manifest unavailable; falling back to full fetch', {
+            tournamentId: tournament.id,
+            error: error instanceof Error ? error.message : 'unknown',
+          });
+          return [];
+        })
+    : [];
+  const pagePlan = resolveOfficialH2HPagesToFetch(
+    manifests,
+    reconcileEventId ?? 0,
+    getConfig().OFFICIAL_H2H_INCREMENTAL_ENABLED &&
+      reconcileEventId !== undefined &&
+      options.forceFull !== true,
+  );
+  const fetched = await fetchOfficialH2HSourceSnapshot(tournament.leagueId, fplClient, {
+    ...(pagePlan.mode === 'incremental'
+      ? { matchPages: pagePlan.pageNumbers, existingManifests: manifests }
+      : {}),
+  });
+  let snapshot = fetched;
+  if (pagePlan.mode === 'incremental') {
+    const persisted = await tournamentOfficialH2HRepository.findPersistedMatches(
+      season,
+      tournament.id,
+    );
+    const byId = new Map(persisted.map((match) => [match.id, match]));
+    for (const match of fetched.matches) byId.set(match.id, match);
+    const merged = [...byId.values()].sort((a, b) => a.sourceOrder - b.sourceOrder);
+    // A locked manifest is immutable. Validate every fetched page before the
+    // normal full projection; any drift aborts the transaction with zero rows.
+    for (const manifest of manifests.filter((item) =>
+      pagePlan.pageNumbers.includes(item.pageNumber),
+    )) {
+      // Validate against this run's provider evidence only. Falling back to
+      // persisted rows here would let a missing/empty page appear healthy and
+      // publish stale data after the locked schedule has drifted.
+      const fetchedPage = fetched.pageMatches?.find(
+        (page) => page.pageNumber === manifest.pageNumber,
+      );
+      // Validate the complete provider response, not a filtered projection of
+      // the locked IDs. Filtering would hide a newly inserted match and let a
+      // changed page publish stale persisted rows.
+      if (!fetchedPage || !validateOfficialH2HPageManifest(manifest, fetchedPage.matches)) {
+        throw new ValidationError(
+          `Official H2H page ${manifest.pageNumber} changed after it was locked.`,
+          'TOURNAMENT_OFFICIAL_H2H_PAGE_CHANGED',
+        );
+      }
+    }
+    snapshot = { standings: fetched.standings, matches: merged, pageManifests: manifests };
+  }
+  const entryIds = await entryIdsPromise;
   const entryIdSet = new Set(entryIds);
   if (snapshot.standings.length > 0 && snapshot.standings.length !== entryIdSet.size) {
     throw new ValidationError(
@@ -1141,6 +1295,8 @@ export async function syncOfficialH2HTournament(
     checkedAt,
     lockSchedule: scoringSnapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
     groupRows,
+    pageManifests: snapshot.pageManifests,
+    fullReconcile: options.forceFull === true,
   });
 
   logInfo('Official H2H strategy completed', {

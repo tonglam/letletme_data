@@ -47,11 +47,19 @@ describe('queue quiescence gate', () => {
       'understat-team-sync',
       'tournament-repair',
       'maintenance',
+      'live-picks',
+      'official-h2h-live',
+      'my-fpl-orchestration',
+      'publication-outbox',
+      'entry-onboarding',
+      'data-repair',
+      'housekeeping',
+      'data-governance',
       'content-http-acquisition',
       'content-media-transcript',
       'content-x-scan',
     ]);
-    expect(new Set(allQueueNames).size).toBe(15);
+    expect(new Set(allQueueNames).size).toBe(23);
   });
 
   test('accepts a fully settled hard-cut boundary', () => {

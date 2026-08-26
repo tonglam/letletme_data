@@ -12,6 +12,7 @@ import {
   dispatchDataPublicationOutbox,
   loadDataPublicationDelivery,
 } from '../repositories/data-publication-outbox';
+import { recordDataPublicationEvidence } from './data-governance.service';
 import { contentHash } from '../utils/content-hash';
 import { logInfo } from '../utils/logger';
 import { formatCronDateKey } from '../utils/timezone';
@@ -35,7 +36,34 @@ export type MarketPublicationOptions = Readonly<{
    * commits; Redis is never touched while the canonical transaction is open.
    */
   deferDelivery?: boolean;
+  /** Correlate the publication run with its scheduler/Bull obligation. */
+  sourceRunId?: string;
+  /** Exact freshness window being repaired, carried into the manifest. */
+  freshnessWindowId?: number;
 }>;
+
+async function recordUnchangedMarketEvidence(
+  season: FplSeasonRef,
+  active: NonNullable<Awaited<ReturnType<typeof readActiveDataPublication>>>,
+  source: { capturedAt: Date },
+  options: MarketPublicationOptions,
+): Promise<void> {
+  if (options.freshnessWindowId === undefined && options.sourceRunId === undefined) return;
+  const { freshnessWindowId: _oldWindowId, ...baseManifest } = active.manifest;
+  await recordDataPublicationEvidence({
+    manifest: {
+      ...baseManifest,
+      ...(options.freshnessWindowId === undefined
+        ? {}
+        : { freshnessWindowId: options.freshnessWindowId }),
+      sourceCheckedAt: source.capturedAt.toISOString(),
+    },
+    sourceRunId: options.sourceRunId,
+    payloads: active.items,
+    pgPublishedAt: new Date(active.manifest.publishedAt),
+    redisSeenAt: new Date(),
+  });
+}
 
 async function ensureMarketPublicationDelivered(
   season: FplSeasonRef,
@@ -94,6 +122,22 @@ export async function ensureMarketPublication(
     activeContext?.capturedAt === context.capturedAt &&
     activeContext?.rowCount === context.rowCount
   ) {
+    try {
+      // A watchdog can legitimately observe the same complete market snapshot
+      // for several minutes. There is no new outbox row on this path, so write
+      // the retained PG/Redis revision directly against the exact scheduler
+      // window (or source run) instead of letting an enforceable window age
+      // into a false breach.
+      await recordUnchangedMarketEvidence(season, active, source, options);
+    } catch (error) {
+      // Evidence is additive telemetry; the already-active publication remains
+      // authoritative even if the governance table is temporarily unavailable.
+      logInfo('Unchanged market publication evidence update failed', {
+        season: season.seasonCode,
+        publicationId: active.manifest.publicationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return {
       status: 'unchanged',
       revision: active.manifest.revision,
@@ -134,7 +178,7 @@ export async function ensureMarketPublication(
     }
   }
 
-  const sourceRunId = randomUUID();
+  const sourceRunId = options.sourceRunId ?? randomUUID();
   await syncOperationsRepository.startRun({
     runId: sourceRunId,
     provider: 'fpl',
@@ -162,6 +206,7 @@ export async function ensureMarketPublication(
       revision: prepared.revision,
       publicationId: prepared.publicationId,
       sourceCheckedAt: source.capturedAt,
+      freshnessWindowId: options.freshnessWindowId,
       state: 'active',
       items: [{ name: 'context', value: context }],
     });

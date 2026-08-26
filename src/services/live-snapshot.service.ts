@@ -35,6 +35,7 @@ import {
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 import { reconcileDataPublication } from './data-publication-reconciler';
+import { recordDataPublicationEvidence } from './data-governance.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import { withMutationScopes } from '../utils/mutation-scopes';
 
@@ -128,6 +129,10 @@ export interface LiveSnapshotSyncOptions {
   readonly trigger?: 'cron' | 'manual' | 'cascade' | 'queue' | 'catchup' | 'reconcile';
   readonly mutationScopes?: readonly string[];
   readonly dependencies?: LiveSnapshotDependencies;
+  /** Correlate the publication run with its scheduler/Bull obligation. */
+  readonly sourceRunId?: string;
+  /** Exact freshness window being repaired, carried into the publication manifest. */
+  readonly freshnessWindowId?: number;
 }
 
 function fixtureTeamCount(fixtures: readonly Fixture[]): number {
@@ -634,7 +639,7 @@ export async function syncLiveSnapshot(
     await recoverPendingLiveSnapshotPublication(season, eventId);
   }
 
-  const sourceRunId = randomUUID();
+  const sourceRunId = options.sourceRunId ?? randomUUID();
   await syncOperationsRepository.startRun({
     runId: sourceRunId,
     provider: 'fpl',
@@ -719,6 +724,38 @@ export async function syncLiveSnapshot(
           ((seasonCode: string, currentEventId: number, checkedAt: Date) =>
             refreshLiveSnapshotHeartbeat(seasonCode, currentEventId, checkedAt))
         )(season.seasonCode, eventId, lastSuccessfulFetchAt);
+      }
+      if (retainedActive) {
+        try {
+          // Do not carry an old window id forward when this poll was not
+          // dispatched for a specific freshness repair.  The retained
+          // publication is valid evidence for the current source run, but an
+          // old window would incorrectly settle a different obligation.
+          const { freshnessWindowId: _retainedFreshnessWindowId, ...retainedManifest } =
+            retainedActive.manifest;
+          await recordDataPublicationEvidence({
+            manifest: {
+              ...retainedManifest,
+              sourceCheckedAt: checkedAt.toISOString(),
+              lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
+              ...(options.freshnessWindowId === undefined
+                ? {}
+                : { freshnessWindowId: options.freshnessWindowId }),
+            },
+            sourceRunId,
+            payloads: {
+              eventLive: retainedActive.eventLives,
+              fixtures: retainedActive.fixtures,
+            },
+            pgPublishedAt: new Date(retainedActive.manifest.publishedAt),
+            redisSeenAt: lastSuccessfulFetchAt,
+          });
+        } catch (error) {
+          logError('Unchanged live snapshot freshness evidence update failed', error, {
+            eventId,
+            publicationId: retainedActive.manifest.publicationId,
+          });
+        }
       }
       await syncOperationsRepository.finishRun(sourceRunId, {
         status: 'skipped',
@@ -812,6 +849,7 @@ export async function syncLiveSnapshot(
           revision: staging.revision,
           publicationId: staging.publicationId,
           sourceCheckedAt: checkedAt,
+          freshnessWindowId: options.freshnessWindowId,
           lastSuccessfulFetchAt,
           state: payload.state,
           items: [

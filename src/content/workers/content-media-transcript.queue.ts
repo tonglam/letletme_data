@@ -7,6 +7,7 @@ import { logError, logInfo } from '../../utils/logger';
 import { getQueueConnection } from '../../utils/queue';
 import { runFormalMediaWorker } from './formal-media.worker';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../../queues/retention';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../../services/queue-governance.service';
 
 export const contentMediaTranscriptQueueName = 'content-media-transcript';
 
@@ -27,6 +28,9 @@ export function getContentMediaTranscriptQueue(): Queue<AcquisitionJobV1> {
 export async function enqueueFormalMediaRun(
   claimed: Pick<ClaimedAcquisitionJobOutbox, 'job' | 'jobId' | 'priority'>,
 ): Promise<Job<AcquisitionJobV1>> {
+  if (await isQueueDrainOnly(contentMediaTranscriptQueueName)) {
+    throw new QueueDrainOnlyError(contentMediaTranscriptQueueName);
+  }
   const job = acquisitionJobV1Schema.parse(claimed.job);
   return getContentMediaTranscriptQueue().add('content-media-transcript', job, {
     jobId: claimed.jobId,

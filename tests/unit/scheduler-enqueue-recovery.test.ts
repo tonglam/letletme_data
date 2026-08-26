@@ -67,6 +67,33 @@ describe('scheduler enqueue recovery', () => {
     expect(result.candidates).toBe(0);
   });
 
+  test('uses the queue recorded on the obligation generation after a lane flag switch', async () => {
+    const candidate = {
+      ...obligation('recorded-queue', 2),
+      evidence: { submittedQueueName: 'maintenance' },
+    };
+    let inspectedQueue: string | undefined;
+    await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [{ name: 'recoverable-job', queueName: 'data-repair' }],
+      dependencies: {
+        listCandidates: async () => [candidate],
+        inspectJobs: async (queueName) => {
+          inspectedQueue = queueName;
+          return {
+            jobs: [queueJob('recorded-queue', 2, 'waiting')],
+            missingEvidenceVerified: true,
+          };
+        },
+        confirm: async () => true,
+        start: async () => false,
+        renew: async () => true,
+        complete: async () => false,
+        fail: async () => false,
+      },
+    });
+    expect(inspectedQueue).toBe('maintenance');
+  });
+
   test('accepts an exactly full bounded recovery page', () => {
     expect(schedulerRecoveryFallbackViewComplete(199)).toBe(true);
     expect(schedulerRecoveryFallbackViewComplete(200)).toBe(true);
@@ -501,6 +528,55 @@ describe('scheduler enqueue recovery', () => {
     expect(result.succeeded).toBe(0);
     expect(result.retried).toBe(1);
     expect(failed).toEqual(['lost-finalizer']);
+  });
+
+  test('requires the live-picks scan to be fully drained before recovery', async () => {
+    const completed: string[] = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [
+        {
+          name: 'live-picks-refresh',
+          queueName: 'live-picks',
+          recoveryCompletionMode: 'live-picks-finalizer',
+        },
+      ],
+      dependencies: {
+        listCandidates: async () => [obligation('live-picks-chain', 7, 'live-picks-refresh')],
+        inspectJobs: async () => ({
+          jobs: [
+            {
+              ...queueJob('live-picks-chain', 7, 'completed'),
+              name: 'live-picks-refresh',
+              returnValue: { scanComplete: false },
+            },
+            {
+              ...queueJob('live-picks-chain', 7, 'completed'),
+              id: 'live-picks-child',
+              name: 'entry-picks',
+              data: {
+                obligationId: 'live-picks-chain',
+                obligationGeneration: 7,
+                lane: 'live-picks',
+              },
+              returnValue: { hasMore: false, failedUnits: 0 },
+            },
+          ],
+          missingEvidenceVerified: true,
+        }),
+        confirm: async () => true,
+        start: async () => false,
+        renew: async () => false,
+        complete: async (input) => {
+          completed.push(input.obligationId);
+          return true;
+        },
+        fail: async () => false,
+      },
+    });
+
+    expect(result.succeeded).toBe(1);
+    expect(result.retried).toBe(0);
+    expect(completed).toEqual(['live-picks-chain']);
   });
 
   test('recognizes tournament and Understat semantic finalizers', async () => {

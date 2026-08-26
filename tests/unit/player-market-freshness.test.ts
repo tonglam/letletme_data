@@ -43,6 +43,20 @@ describe('09:36 player market freshness watchdog', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  test('carries the exact governance window and source run into publication', async () => {
+    const ensureMarketPublication = mock(async () => ({ status: 'published' as const }));
+    await expect(
+      checkPlayerMarketFreshness(now, dependencies({ ensureMarketPublication }), {
+        freshnessWindowId: 42,
+        sourceRunId: 'scheduler-run-42',
+      }),
+    ).resolves.toMatchObject({ status: 'ready' });
+    expect(ensureMarketPublication).toHaveBeenCalledWith(TEST_SEASON, {
+      freshnessWindowId: 42,
+      sourceRunId: 'scheduler-run-42',
+    });
+  });
+
   test('uses the current bootstrap roster rather than the accumulated players table', async () => {
     const result = await checkPlayerMarketFreshness(
       now,

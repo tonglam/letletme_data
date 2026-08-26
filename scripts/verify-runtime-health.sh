@@ -62,7 +62,7 @@ if [ "$api_ready" != true ]; then
   exit 1
 fi
 
-for service in scheduler worker content-worker media-worker; do
+for service in scheduler worker content-worker live-picks-worker official-h2h-worker media-worker; do
   container=$(compose ps -q "$service" | head -n 1)
   test -n "$container"
   service_ready=false

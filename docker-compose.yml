@@ -57,6 +57,9 @@ services:
       - TZ=Asia/Shanghai
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
       - SCHEDULER_MODE=standalone
+      # Keep the sum of long-lived process pools below 80% of the usual
+      # 15-session Supavisor budget, leaving room for migrations/probes.
+      - DATABASE_POOL_MAX=2
     logging: *default-logging
     ports:
       - '127.0.0.1:3000:3000'
@@ -87,6 +90,7 @@ services:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
+      - DATABASE_POOL_MAX=2
     logging: *default-logging
     restart: unless-stopped
     healthcheck:
@@ -94,6 +98,56 @@ services:
       # the event loop is hung even though the process still runs. find exits
       # 0 without matches, so assert on non-empty output.
       test: ['CMD-SHELL', 'test -n "$$(find /tmp/worker-heartbeat -mmin -2 2>/dev/null)"']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  live-picks-worker:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    command: bun dist/live-picks-worker.js
+    env_file:
+      - path: ${ENV_FILE:-.env.deploy}
+        required: false
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
+      - DATABASE_POOL_MAX=2
+      - LIVE_PICKS_WORKER_HEARTBEAT_PATH=/tmp/live-picks-worker-heartbeat
+    logging: *default-logging
+    restart: unless-stopped
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'test -n "$$(find /tmp/live-picks-worker-heartbeat -mmin -2 2>/dev/null)"']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  official-h2h-worker:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    command: bun dist/official-h2h-worker.js
+    env_file:
+      - path: ${ENV_FILE:-.env.deploy}
+        required: false
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+      - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
+      - DATABASE_POOL_MAX=1
+      - OFFICIAL_H2H_WORKER_HEARTBEAT_PATH=/tmp/official-h2h-worker-heartbeat
+    logging: *default-logging
+    restart: unless-stopped
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'test -n "$$(find /tmp/official-h2h-worker-heartbeat -mmin -2 2>/dev/null)"']
       interval: 30s
       timeout: 5s
       retries: 3
@@ -114,6 +168,7 @@ services:
       - SCHEDULER_MODE=standalone
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
       - SCHEDULER_HEARTBEAT_PATH=/tmp/scheduler-heartbeat
+      - DATABASE_POOL_MAX=1
     logging: *default-logging
     restart: unless-stopped
     healthcheck:
@@ -136,6 +191,7 @@ services:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
+      - DATABASE_POOL_MAX=1
       - WORKER_HEARTBEAT_PATH=/tmp/content-worker-heartbeat
       - CONTENT_MANIFEST_GIT_REVISION=${CONTENT_MANIFEST_GIT_REVISION:-unknown}
       - CONTENT_GROK_RUNNER_SOCKET=${CONTENT_GROK_RUNNER_SOCKET:-/run/letletme-grok-runner/runner.sock}

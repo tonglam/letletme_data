@@ -3,6 +3,7 @@ import { dataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 import { formatCronDateKey } from '../utils/timezone';
 import { trackQueueRunJob } from '../services/queue-run-tracker';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 import {
   createDataSyncJobData,
   defaultDataSyncJobId,
@@ -33,6 +34,9 @@ async function enqueueDataSyncJob(
 ) {
   try {
     const queue = dataSyncQueue;
+    if (await isQueueDrainOnly(queue.name)) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
     const jobId = options.jobId
       ? getExplicitDataSyncQueueJobId(season, options.jobId)
       : defaultDataSyncJobId(jobName, season, source, options);

@@ -314,6 +314,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           eventId: syncRunsInOps.eventId,
           mode: syncRunsInOps.mode,
           trigger: syncRunsInOps.trigger,
+          status: syncRunsInOps.status,
         })
         .from(syncRunsInOps)
         .where(eq(syncRunsInOps.runId, runId))
@@ -334,6 +335,32 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           'Sync run ID is already bound to another immutable identity',
           'SYNC_RUN_ID_CONFLICT',
         );
+      }
+      // Scheduler retries intentionally reuse the durable obligation/run
+      // correlation so publication evidence can still join the exact window.
+      // A failed run is the one terminal state that may be fenced back to
+      // running: without this transition the later attempt can fetch and
+      // stage data but finishRun is forbidden from activating its publication.
+      if (row.status === 'failed') {
+        const reactivated = await db
+          .update(syncRunsInOps)
+          .set({
+            status: 'running',
+            completedItems: 0,
+            failedItems: 0,
+            skippedItems: 0,
+            dataChanged: false,
+            publicationId: null,
+            errorSummary: null,
+            completedAt: null,
+            startedAt: startedAt ?? sql`clock_timestamp()`,
+            ...(input.expectedItems === undefined ? {} : { expectedItems: input.expectedItems }),
+            ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(and(eq(syncRunsInOps.runId, runId), eq(syncRunsInOps.status, 'failed')))
+          .returning({ runId: syncRunsInOps.runId });
+        if (reactivated.length === 1) return runId;
       }
       return runId;
     },

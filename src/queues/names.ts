@@ -10,6 +10,14 @@ export const tournamentRepairQueueName = 'tournament-repair';
 export const understatPlayerQueueName = 'understat-player-sync';
 export const understatTeamQueueName = 'understat-team-sync';
 export const maintenanceQueueName = 'maintenance';
+export const livePicksQueueName = 'live-picks';
+export const officialH2hLiveQueueName = 'official-h2h-live';
+export const myFplOrchestrationQueueName = 'my-fpl-orchestration';
+export const publicationOutboxQueueName = 'publication-outbox';
+export const entryOnboardingQueueName = 'entry-onboarding';
+export const dataRepairQueueName = 'data-repair';
+export const housekeepingQueueName = 'housekeeping';
+export const dataGovernanceQueueName = 'data-governance';
 
 export const contentHttpAcquisitionQueueName = 'content-http-acquisition';
 export const contentMediaTranscriptQueueName = 'content-media-transcript';
@@ -28,6 +36,14 @@ export const queueNames = [
   understatTeamQueueName,
   tournamentRepairQueueName,
   maintenanceQueueName,
+  livePicksQueueName,
+  officialH2hLiveQueueName,
+  myFplOrchestrationQueueName,
+  publicationOutboxQueueName,
+  entryOnboardingQueueName,
+  dataRepairQueueName,
+  housekeepingQueueName,
+  dataGovernanceQueueName,
 ] as const;
 
 export const contentQueueNames = [

@@ -3,19 +3,23 @@ import { randomUUID } from 'node:crypto';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   MAINTENANCE_JOBS,
-  maintenanceQueue,
+  queueForMaintenanceLane,
+  type MaintenanceLane,
   type MaintenanceJobData,
   type MaintenanceJobName,
   type MaintenanceJobSource,
 } from '../queues/maintenance.queue';
-import { maintenanceQueueName } from '../queues/names';
 import { logError, logInfo } from '../utils/logger';
+import { getConfig } from '../utils/config';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type MaintenanceEnqueueOptions = Readonly<{
   jobId?: string;
   runId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired, carried into a downstream publication. */
+  freshnessWindowId?: number;
   entryId?: number;
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
@@ -27,7 +31,38 @@ export type MaintenanceEnqueueOptions = Readonly<{
   attempts?: number;
   backoffDelayMs?: number;
   deduplicationId?: string;
+  lane?: Exclude<MaintenanceLane, 'maintenance'>;
 }>;
+
+/** Exhaustive routing map: adding a maintenance job requires choosing a lane. */
+export const MAINTENANCE_JOB_LANES = {
+  [MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS]: 'data-repair',
+  [MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY]: 'data-repair',
+  [MAINTENANCE_JOBS.TOURNAMENT_TRENDS]: 'data-repair',
+  [MAINTENANCE_JOBS.BUG_REPORT_CLEANUP]: 'housekeeping',
+  [MAINTENANCE_JOBS.BUG_REPORT_SCREENSHOT_RETENTION]: 'housekeeping',
+  [MAINTENANCE_JOBS.LAUNCH_MONITOR]: 'housekeeping',
+  [MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION]: 'my-fpl-orchestration',
+  [MAINTENANCE_JOBS.ENTRY_ONBOARDING]: 'entry-onboarding',
+  [MAINTENANCE_JOBS.MY_FPL_SNAPSHOT]: 'my-fpl-orchestration',
+  [MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX]: 'publication-outbox',
+  [MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX]: 'publication-outbox',
+  [MAINTENANCE_JOBS.UNDERSTAT_ORPHAN_RECONCILER]: 'data-repair',
+} as const satisfies Record<MaintenanceJobName, Exclude<MaintenanceLane, 'maintenance'>>;
+
+export function maintenanceLaneForJob(
+  jobName: MaintenanceJobName,
+  options?: Pick<MaintenanceEnqueueOptions, 'lane'>,
+): MaintenanceLane {
+  if (!getConfig().QUEUE_LANES_V2_ENABLED) return 'maintenance';
+  const expectedLane = MAINTENANCE_JOB_LANES[jobName];
+  if (options?.lane && options.lane !== expectedLane) {
+    throw new Error(
+      `Maintenance job ${jobName} must stay on lane ${expectedLane}; received ${options.lane}`,
+    );
+  }
+  return options?.lane ?? expectedLane;
+}
 
 export async function enqueueMaintenanceJob(
   season: FplSeasonRef,
@@ -36,8 +71,13 @@ export async function enqueueMaintenanceJob(
   options: MaintenanceEnqueueOptions = {},
 ) {
   const runId = options.runId ?? randomUUID();
+  const lane = maintenanceLaneForJob(jobName, options);
+  if (await isQueueDrainOnly(lane)) {
+    throw new QueueDrainOnlyError(lane);
+  }
   const data: MaintenanceJobData = {
     jobName,
+    ...(lane === 'maintenance' ? {} : { lane }),
     source,
     seasonId: season.seasonId,
     seasonCode: season.seasonCode,
@@ -47,6 +87,9 @@ export async function enqueueMaintenanceJob(
     ...(options.obligationGeneration === undefined
       ? {}
       : { obligationGeneration: options.obligationGeneration }),
+    ...(options.freshnessWindowId === undefined
+      ? {}
+      : { freshnessWindowId: options.freshnessWindowId }),
     ...(options.entryId === undefined ? {} : { entryId: options.entryId }),
     ...(options.eventId === undefined ? {} : { eventId: options.eventId }),
     ...(options.snapshotKind === undefined ? {} : { snapshotKind: options.snapshotKind }),
@@ -58,7 +101,8 @@ export async function enqueueMaintenanceJob(
     ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
   };
   try {
-    const job = await maintenanceQueue.add(jobName, data, {
+    const queue = queueForMaintenanceLane(lane);
+    const job = await queue.add(jobName, data, {
       jobId: options.jobId,
       ...(options.attempts === undefined ? {} : { attempts: options.attempts }),
       ...(options.backoffDelayMs === undefined
@@ -70,7 +114,8 @@ export async function enqueueMaintenanceJob(
       ...(source === 'manual' ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
     logInfo('Maintenance job enqueued', {
-      queue: maintenanceQueueName,
+      queue: queue.name,
+      lane,
       jobId: job.id,
       jobName,
       source,

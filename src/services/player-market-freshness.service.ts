@@ -88,6 +88,7 @@ function isFinalWindowCapture(snapshotDate: string, capturedAt: Date | null): bo
 export async function checkPlayerMarketFreshness(
   now: Date = new Date(),
   dependencies: PlayerMarketFreshnessDependencies = defaultDependencies,
+  options: { freshnessWindowId?: number; sourceRunId?: string } = {},
 ): Promise<PlayerMarketFreshnessResult> {
   const season = await dependencies.findCurrentSeason();
   const syncEvent = await dependencies.resolveSyncEvent(season, now);
@@ -154,7 +155,10 @@ export async function checkPlayerMarketFreshness(
 
   if (status === 'ready') {
     if (dependencies.ensureMarketPublication) {
-      await dependencies.ensureMarketPublication(season);
+      await dependencies.ensureMarketPublication(season, {
+        freshnessWindowId: options.freshnessWindowId,
+        sourceRunId: options.sourceRunId,
+      });
     }
     logInfo('Player market freshness watchdog passed', result);
     return result;

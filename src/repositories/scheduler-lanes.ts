@@ -2,8 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
-import { schedulerLanesInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
+import {
+  freshnessSloWindowsInOps,
+  schedulerLanesInOps,
+  schedulerObligationsInOps,
+} from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
+import { contractForSchedulerJob } from '../domain/data-contracts';
 import {
   reserveSchedulerObligation,
   type SchedulerObligation,
@@ -405,6 +410,40 @@ export async function advanceSchedulerLane(input: {
       if (counted) row = counted;
     }
 
+    // A latest-wins target intentionally retires older pending/enqueued
+    // obligations. Their freshness windows must leave the eligible SLO
+    // denominator as well; otherwise the selected target is the only one that
+    // can publish while every superseded window eventually breaches.
+    const contract = contractForSchedulerJob(input.jobName);
+    if (contract?.freshnessEvidence === 'publication') {
+      await tx
+        .update(freshnessSloWindowsInOps)
+        .set({
+          status: 'NOT_APPLICABLE',
+          completenessStatus: 'NOT_APPLICABLE',
+          breachCode: null,
+          evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify({
+            reason: 'SUPERSEDED_BY_LATEST',
+            supersededByPeriodKey: selectedDesired.periodKey,
+          })}::jsonb`,
+          updatedAt: dbNow,
+        })
+        .where(
+          and(
+            eq(freshnessSloWindowsInOps.contractKey, contract.contractKey),
+            eq(freshnessSloWindowsInOps.scopeKey, input.scopeKey),
+            inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
+            sql`(
+              ${freshnessSloWindowsInOps.obligationDueAt} < ${selectedDueAtIso}::timestamptz
+              OR (
+                ${freshnessSloWindowsInOps.obligationDueAt} = ${selectedDueAtIso}::timestamptz
+                AND ${freshnessSloWindowsInOps.periodKey} < ${selectedDesired.periodKey}
+              )
+            )`,
+          ),
+        );
+    }
+
     const lane = mapLane(row);
     const [desiredRow] = await tx
       .select({ status: schedulerObligationsInOps.status })
@@ -481,6 +520,8 @@ export async function confirmSchedulerLaneEnqueued(input: {
   runId?: string;
   /** Obligation carried by the Bull payload being confirmed. */
   obligationId?: string;
+  /** Actual Bull queue used for this lane generation. */
+  queueName?: string;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -544,6 +585,11 @@ export async function confirmSchedulerLaneEnqueued(input: {
       .set({
         bullJobId,
         ...(input.runId === undefined ? {} : { runId: input.runId }),
+        ...(input.queueName
+          ? {
+              evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('submittedQueueName', ${input.queueName})`,
+            }
+          : {}),
         updatedAt: sql`clock_timestamp()`,
       })
       .where(

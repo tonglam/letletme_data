@@ -27,13 +27,15 @@ import {
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplPublication,
 } from '../services/my-fpl-snapshot-publication.service';
+import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
 import { runEntryOnboarding } from '../services/entry-onboarding.service';
 import { runQueueRunPhase } from '../services/queue-run-barrier';
 import { eventRepository } from '../repositories/events';
 import {
   MAINTENANCE_JOBS,
-  maintenanceQueue,
-  maintenanceQueueName,
+  maintenanceLaneQueues,
+  MAINTENANCE_LANE_QUEUE_NAMES,
+  type MaintenanceLane,
   type MaintenanceJobData,
 } from '../queues/maintenance.queue';
 import {
@@ -44,6 +46,7 @@ import {
   renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import { getQueueConnection } from '../utils/queue';
+import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -100,7 +103,10 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
     return await runTrackedJob(context, async () => {
       switch (job.name) {
         case MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS:
-          return runPlayerMarketFreshnessWatchdog();
+          return runPlayerMarketFreshnessWatchdog(new Date(), {
+            freshnessWindowId: job.data.freshnessWindowId,
+            sourceRunId: job.data.runId,
+          });
         case MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY:
           return repairPlayerSeasonSummaries();
         case MAINTENANCE_JOBS.TOURNAMENT_TRENDS:
@@ -262,6 +268,13 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           }
           return result;
         }
+        case MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX: {
+          const result = await dispatchDataPublicationOutbox({ limit: 20 });
+          if (result.failed > 0) {
+            throw new Error(`Data publication outbox left ${result.failed} receipt(s) for retry`);
+          }
+          return result;
+        }
         default:
           throw new Error(`Unknown maintenance job: ${job.name}`);
       }
@@ -273,60 +286,79 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
 
 export function createMaintenanceWorker(): WorkerRuntime {
   const connection = getQueueConnection();
-  const worker = new Worker<MaintenanceJobData>(maintenanceQueueName, processMaintenanceJob, {
-    connection,
-    concurrency: 2,
-    lockDuration: 120_000,
-    maxStalledCount: 2,
-    stalledInterval: 15_000,
-  });
-  const queueEvents = new QueueEvents(maintenanceQueueName, { connection });
-
-  worker.on('completed', (job) => {
-    logInfo('Maintenance job completed', { jobId: job.id, name: job.name });
-    if (job.id !== undefined) {
-      const fence = inspectSchedulerObligationFence(job.data);
-      const evidence = { queue: maintenanceQueueName, jobName: job.name };
-      const completion =
-        fence.kind === 'complete'
-          ? completeSchedulerObligation({
-              obligationId: fence.obligationId,
-              generation: fence.generation,
-              status: 'succeeded',
-              evidence,
-            })
-          : fence.kind === 'none'
-            ? completeSchedulerObligationByBullJobId({ bullJobId: job.id, evidence })
-            : null;
-      if (completion) void completion.catch(() => undefined);
-    }
-  });
-  worker.on('failed', (job, error) => {
-    logError('Maintenance job failed', error, {
-      jobId: job?.id,
-      name: job?.name,
-      attemptsMade: job?.attemptsMade,
-    });
-    const fence = job ? inspectSchedulerObligationFence(job.data) : null;
-    if (job && isTerminalJobFailure(job, error) && fence?.kind === 'complete') {
-      void failSchedulerObligation({
-        obligationId: fence.obligationId,
-        generation: fence.generation,
-        error,
-      }).catch(() => undefined);
-    } else if (
-      job?.id !== undefined &&
-      isTerminalJobFailure(job, error) &&
-      fence?.kind === 'none'
-    ) {
-      void failSchedulerObligationByBullJobId({ bullJobId: job.id, error }).catch(() => undefined);
-    }
-  });
-  worker.on('error', (error) => logError('Maintenance worker error', error));
-
-  return {
-    workers: [worker],
-    queueEvents: [queueEvents],
-    monitorTargets: [{ queue: maintenanceQueue, queueEvents, queueName: maintenanceQueueName }],
+  const laneConcurrency: Record<MaintenanceLane, number> = {
+    maintenance: 1,
+    'my-fpl-orchestration': 1,
+    'publication-outbox': 2,
+    'entry-onboarding': 2,
+    'data-repair': 1,
+    housekeeping: 1,
   };
+  const lanes: MaintenanceLane[] = getConfig().QUEUE_LANES_V2_ENABLED
+    ? (Object.keys(MAINTENANCE_LANE_QUEUE_NAMES) as MaintenanceLane[])
+    : ['maintenance'];
+  const workers: Worker<MaintenanceJobData>[] = [];
+  const queueEvents: QueueEvents[] = [];
+  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
+  for (const lane of lanes) {
+    const queueName = MAINTENANCE_LANE_QUEUE_NAMES[lane];
+    const queue = maintenanceLaneQueues[lane];
+    const worker = new Worker<MaintenanceJobData>(queueName, processMaintenanceJob, {
+      connection,
+      concurrency: laneConcurrency[lane],
+      lockDuration: 120_000,
+      maxStalledCount: 2,
+      stalledInterval: 15_000,
+    });
+    const events = new QueueEvents(queueName, { connection });
+    worker.on('completed', (job) => {
+      logInfo('Maintenance job completed', { jobId: job.id, name: job.name, lane });
+      if (job.id !== undefined) {
+        const fence = inspectSchedulerObligationFence(job.data);
+        const evidence = { queue: queueName, lane, jobName: job.name };
+        const completion =
+          fence.kind === 'complete'
+            ? completeSchedulerObligation({
+                obligationId: fence.obligationId,
+                generation: fence.generation,
+                status: 'succeeded',
+                evidence,
+              })
+            : fence.kind === 'none'
+              ? completeSchedulerObligationByBullJobId({ bullJobId: job.id, evidence })
+              : null;
+        if (completion) void completion.catch(() => undefined);
+      }
+    });
+    worker.on('failed', (job, error) => {
+      logError('Maintenance job failed', error, {
+        jobId: job?.id,
+        name: job?.name,
+        lane,
+        attemptsMade: job?.attemptsMade,
+      });
+      const fence = job ? inspectSchedulerObligationFence(job.data) : null;
+      if (job && isTerminalJobFailure(job, error) && fence?.kind === 'complete') {
+        void failSchedulerObligation({
+          obligationId: fence.obligationId,
+          generation: fence.generation,
+          error,
+        }).catch(() => undefined);
+      } else if (
+        job?.id !== undefined &&
+        isTerminalJobFailure(job, error) &&
+        fence?.kind === 'none'
+      ) {
+        void failSchedulerObligationByBullJobId({ bullJobId: job.id, error }).catch(
+          () => undefined,
+        );
+      }
+    });
+    worker.on('error', (error) => logError('Maintenance worker error', error, { lane }));
+    workers.push(worker);
+    queueEvents.push(events);
+    monitorTargets.push({ queue, queueEvents: events, queueName });
+  }
+
+  return { workers, queueEvents, monitorTargets };
 }

@@ -52,6 +52,14 @@ export interface CoreSnapshotDependencies {
 export interface CoreSnapshotSyncOptions {
   readonly trigger?: 'cron' | 'manual' | 'queue' | 'event-transition';
   readonly dependencies?: CoreSnapshotDependencies;
+  /**
+   * Correlate the durable publication run with the scheduler/Bull execution
+   * that owns it.  The scheduler stores this value on the obligation so the
+   * freshness ledger can join the publication back to the exact window.
+   */
+  readonly sourceRunId?: string;
+  /** Exact freshness window being repaired, carried into the publication manifest. */
+  readonly freshnessWindowId?: number;
 }
 
 const defaultDependencies: CoreSnapshotDependencies = {
@@ -107,7 +115,7 @@ export async function syncCoreSnapshot(
   ) {
     throw new Error(`FPL season ${currentSeason.seasonCode} is no longer current`);
   }
-  const sourceRunId = randomUUID();
+  const sourceRunId = options.sourceRunId ?? randomUUID();
   await syncOperationsRepository.startRun({
     runId: sourceRunId,
     provider: 'fpl',
@@ -162,6 +170,7 @@ export async function syncCoreSnapshot(
           revision: prepared.revision,
           publicationId: prepared.publicationId,
           sourceCheckedAt,
+          freshnessWindowId: options.freshnessWindowId,
         });
         const payloads: Record<string, unknown> = {
           events: snapshot.events,
@@ -193,6 +202,7 @@ export async function syncCoreSnapshot(
           publicationId: prepared.publicationId,
           sourceRunId,
           sourceCheckedAt,
+          freshnessWindowId: options.freshnessWindowId,
         });
         return { prepared, persisted, preparedCache };
       },
@@ -206,6 +216,7 @@ export async function syncCoreSnapshot(
         publicationId: preparedAndPersisted.prepared.publicationId,
         sourceRunId,
         sourceCheckedAt,
+        freshnessWindowId: options.freshnessWindowId,
       },
       preparedAndPersisted.preparedCache,
     );

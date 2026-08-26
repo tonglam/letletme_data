@@ -59,6 +59,10 @@ export interface DataPublicationManifest {
   readonly sourceCheckedAt: string;
   /** The last successful source fetch, even when the immutable payload is unchanged. */
   readonly lastSuccessfulFetchAt?: string;
+  /** Exact freshness window that requested this publication, when applicable. */
+  readonly freshnessWindowId?: number;
+  /** All freshness windows joined to this publication, when applicable. */
+  readonly freshnessWindowIds?: readonly number[];
   readonly publishedAt: string;
   readonly state: DataPublicationState;
   readonly items: readonly DataPublicationManifestItem[];
@@ -74,6 +78,10 @@ export interface PublishDataRevisionInput extends DataPublicationScope {
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
   readonly lastSuccessfulFetchAt?: Date;
+  /** Exact freshness window that requested this publication, when applicable. */
+  readonly freshnessWindowId?: number;
+  /** All freshness windows joined to this publication, when applicable. */
+  readonly freshnessWindowIds?: readonly number[];
   readonly state: DataPublicationState;
   readonly items: readonly DataPublicationItemInput[];
 }
@@ -110,13 +118,20 @@ const MANIFEST_FIELDS = [
   'state',
   'items',
 ] as const;
-const OPTIONAL_MANIFEST_FIELDS = ['lastSuccessfulFetchAt'] as const;
+const OPTIONAL_MANIFEST_FIELDS = [
+  'lastSuccessfulFetchAt',
+  'freshnessWindowId',
+  'freshnessWindowIds',
+] as const;
 const MANIFEST_ITEM_FIELDS = ['name', 'key', 'type', 'count', 'bytes', 'sha256'] as const;
 
 function hasManifestFields(value: Record<string, unknown>): boolean {
+  const actual = Object.keys(value);
+  const allowed = new Set<string>([...MANIFEST_FIELDS, ...OPTIONAL_MANIFEST_FIELDS]);
   return (
-    hasExactFields(value, MANIFEST_FIELDS) ||
-    hasExactFields(value, [...MANIFEST_FIELDS, ...OPTIONAL_MANIFEST_FIELDS])
+    MANIFEST_FIELDS.every((field) => actual.includes(field)) &&
+    actual.every((field) => allowed.has(field)) &&
+    actual.length <= MANIFEST_FIELDS.length + OPTIONAL_MANIFEST_FIELDS.length
   );
 }
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
@@ -424,6 +439,24 @@ function createManifest(
   }
   const sourceCheckedAt = input.sourceCheckedAt.toISOString();
   const lastSuccessfulFetchAt = input.lastSuccessfulFetchAt?.toISOString();
+  if (
+    input.freshnessWindowId !== undefined &&
+    (!Number.isSafeInteger(input.freshnessWindowId) || input.freshnessWindowId <= 0)
+  ) {
+    throw new CacheError(
+      'Invalid freshness window ID',
+      'DATA_PUBLICATION_FRESHNESS_WINDOW_INVALID',
+    );
+  }
+  const freshnessWindowIds = input.freshnessWindowIds
+    ? [...new Set(input.freshnessWindowIds)]
+    : undefined;
+  if (freshnessWindowIds?.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new CacheError(
+      'Invalid freshness window IDs',
+      'DATA_PUBLICATION_FRESHNESS_WINDOWS_INVALID',
+    );
+  }
   if (!isDataPublicationId(input.publicationId)) {
     throw new CacheError('Invalid publication ID', 'DATA_PUBLICATION_ID_INVALID');
   }
@@ -438,6 +471,12 @@ function createManifest(
     publicationId: input.publicationId,
     sourceCheckedAt,
     ...(lastSuccessfulFetchAt ? { lastSuccessfulFetchAt } : {}),
+    ...(input.freshnessWindowId === undefined
+      ? {}
+      : { freshnessWindowId: input.freshnessWindowId }),
+    ...(freshnessWindowIds === undefined || freshnessWindowIds.length === 0
+      ? {}
+      : { freshnessWindowIds }),
     publishedAt: new Date().toISOString(),
     state: input.state,
     items: items.map((item) => item.manifest),
@@ -612,6 +651,16 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
       (value.lastSuccessfulFetchAt !== undefined &&
         (typeof value.lastSuccessfulFetchAt !== 'string' ||
           !Number.isFinite(new Date(value.lastSuccessfulFetchAt).getTime()))) ||
+      (value.freshnessWindowId !== undefined &&
+        (typeof value.freshnessWindowId !== 'number' ||
+          !Number.isSafeInteger(value.freshnessWindowId) ||
+          value.freshnessWindowId <= 0)) ||
+      (value.freshnessWindowIds !== undefined &&
+        (!Array.isArray(value.freshnessWindowIds) ||
+          value.freshnessWindowIds.some(
+            (windowId) =>
+              typeof windowId !== 'number' || !Number.isSafeInteger(windowId) || windowId <= 0,
+          ))) ||
       typeof value.publishedAt !== 'string' ||
       !Number.isFinite(new Date(value.publishedAt).getTime()) ||
       !isCanonicalState(dataset, value.state) ||

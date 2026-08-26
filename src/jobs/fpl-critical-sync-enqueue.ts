@@ -12,6 +12,7 @@ import {
   type DataSyncEnqueueOptions,
   type DataSyncJobSource,
 } from './data-sync-job-definition';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type FplCriticalEnqueueOptions = DataSyncEnqueueOptions & {
   laneId: string;
@@ -26,6 +27,9 @@ async function enqueueFplCriticalJob(
   options: FplCriticalEnqueueOptions,
 ) {
   try {
+    if (await isQueueDrainOnly(fplCriticalSyncQueue.name)) {
+      throw new QueueDrainOnlyError(fplCriticalSyncQueue.name);
+    }
     const jobData = createDataSyncJobData(season, source, options) as FplCriticalJobData;
     const jobId = getExplicitDataSyncQueueJobId(
       season,

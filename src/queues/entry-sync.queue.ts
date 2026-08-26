@@ -2,6 +2,7 @@ import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
 import { entrySyncQueueName } from './names';
+import { livePicksQueue } from './live-picks.queue';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { entrySyncQueueName } from './names';
@@ -9,6 +10,7 @@ export { entrySyncQueueName } from './names';
 export type EntrySyncJobName = 'entry-info' | 'entry-picks' | 'entry-transfers' | 'entry-results';
 
 export type EntrySyncJobSource = 'cron' | 'manual' | 'api' | 'catchup' | 'reconcile';
+export type EntrySyncLane = 'entry-sync' | 'live-picks';
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -37,6 +39,8 @@ export interface EntrySyncJobData {
   seasonId: number;
   seasonCode: string;
   source?: EntrySyncJobSource;
+  /** The live-picks lane is an isolated Bull queue; old payloads default to entry-sync. */
+  lane?: EntrySyncLane;
   triggeredAt: string;
   entryIds?: number[];
   retryCount?: number;
@@ -73,6 +77,9 @@ export const entrySyncQueue = new Queue<EntrySyncJobData>(entrySyncQueueName, {
   },
 });
 
+export { livePicksQueue } from './live-picks.queue';
+
 export async function closeEntrySyncQueue() {
   await entrySyncQueue.close();
+  await livePicksQueue.close();
 }

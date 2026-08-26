@@ -1,7 +1,7 @@
 import { databaseSingleton } from './db/singleton';
 import { getConfig } from './utils/config';
 import { logError, logInfo } from './utils/logger';
-import { startWorkerHeartbeat } from './utils/worker-heartbeat';
+import { touchWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { runSchedulerPass } from './scheduler/scheduler.service';
 import { dispatchDataPublicationOutbox } from './repositories/data-publication-outbox';
@@ -11,21 +11,25 @@ import {
   persistLiveLifecycleStatus,
   runPicksProbeAndSync,
 } from './services/live-lifecycle-orchestrator';
+import { enqueueDataGovernanceJob, DATA_GOVERNANCE_JOBS } from './jobs/data-governance.jobs';
+import { enqueueMaintenanceJob } from './jobs/maintenance.jobs';
+import { MAINTENANCE_JOBS } from './queues/maintenance.queue';
+import { QueueDrainOnlyError } from './services/queue-governance.service';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
 
 getConfig();
 if (getConfig().NODE_ENV === 'production') await databaseSingleton.connect();
 
-const stopHeartbeat = startWorkerHeartbeat({
-  path: process.env.SCHEDULER_HEARTBEAT_PATH ?? '/tmp/scheduler-heartbeat',
-});
+const schedulerHeartbeatPath = process.env.SCHEDULER_HEARTBEAT_PATH ?? '/tmp/scheduler-heartbeat';
+const stopHeartbeat = () => undefined;
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('scheduler');
 let inFlight: Promise<unknown> | null = null;
 
 async function runIndependentSchedulerStage<T>(
   stage: string,
   operation: () => Promise<T>,
+  state?: { failed: boolean },
 ): Promise<T | null> {
   try {
     return await operation();
@@ -33,7 +37,20 @@ async function runIndependentSchedulerStage<T>(
     // Each independent recovery path is retried by the next pass and retains
     // its own durable evidence. One unavailable dependency must not suppress
     // the other repair stages for this 30-second cycle.
+    if (error instanceof QueueDrainOnlyError) {
+      // Admission is an intentional deferral. Keep the obligation pending so
+      // the next pass can dispatch it after the operator/automatic gate opens;
+      // do not turn a controlled drain-only response into a false scheduler
+      // failure and restart loop.
+      logInfo('Scheduler stage deferred by queue admission gate', {
+        stage,
+        queue: error.message,
+        retryAfterSeconds: error.retryAfterSeconds,
+      });
+      return null;
+    }
     logError('Scheduler stage failed; continuing independent recovery paths', error, { stage });
+    if (state) state.failed = true;
     return null;
   }
 }
@@ -41,24 +58,108 @@ async function runIndependentSchedulerStage<T>(
 async function runPass(): Promise<void> {
   if (inFlight) return inFlight.then(() => undefined);
   const pass = (async () => {
+    const stageState = { failed: false };
     const now = new Date();
     const season = await seasonRepository.findCurrent();
-    await runIndependentSchedulerStage('core-market-publication-reconcile', () =>
-      reconcileCoreAndMarketPublications(season),
-    );
-    await runIndependentSchedulerStage('data-publication-outbox', () =>
-      dispatchDataPublicationOutbox({ limit: 20 }),
-    );
-    const lifecycle = await runIndependentSchedulerStage('live-lifecycle', () =>
-      persistLiveLifecycleStatus(now),
-    );
-    if (lifecycle?.decision.shouldProbePicks || lifecycle?.decision.shouldSyncPicks) {
-      await runIndependentSchedulerStage('live-picks-refresh', () =>
-        runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now),
+    if (getConfig().QUEUE_LANES_V2_ENABLED) {
+      const halfMinute = Math.floor(now.getTime() / SCHEDULER_INTERVAL_MS);
+      const minute = Math.floor(now.getTime() / 60_000);
+      await runIndependentSchedulerStage(
+        'publication-reconcile-enqueue',
+        () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
+            jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
+          }),
+        stageState,
       );
+      await runIndependentSchedulerStage(
+        'data-publication-outbox-enqueue',
+        () =>
+          enqueueMaintenanceJob(season, MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX, 'reconcile', {
+            jobId: `governance-publication-outbox-${season.seasonCode}-${halfMinute}`,
+          }),
+        stageState,
+      );
+      await runIndependentSchedulerStage(
+        'lifecycle-status-enqueue',
+        () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS, {
+            jobId: `governance-lifecycle-${season.seasonCode}-${Math.floor(now.getTime() / 30_000)}`,
+          }),
+        stageState,
+      );
+      if (now.getTime() % 60_000 < SCHEDULER_INTERVAL_MS) {
+        await runIndependentSchedulerStage(
+          'freshness-observer-enqueue',
+          () =>
+            enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER, {
+              jobId: `governance-freshness-${season.seasonCode}-${minute}`,
+            }),
+          stageState,
+        );
+        await runIndependentSchedulerStage(
+          'governance-audit-enqueue',
+          () =>
+            enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.GW_AUDIT, {
+              jobId: `governance-audit-${season.seasonCode}-${minute}`,
+            }),
+          stageState,
+        );
+        await runIndependentSchedulerStage(
+          'governance-case-recheck-enqueue',
+          () =>
+            enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.CASE_RECHECK, {
+              jobId: `governance-case-recheck-${season.seasonCode}-${minute}`,
+            }),
+          stageState,
+        );
+      }
+    } else {
+      await runIndependentSchedulerStage(
+        'core-market-publication-reconcile',
+        () => reconcileCoreAndMarketPublications(season),
+        stageState,
+      );
+      await runIndependentSchedulerStage(
+        'data-publication-outbox',
+        () => dispatchDataPublicationOutbox({ limit: 20 }),
+        stageState,
+      );
+      const lifecycle = await runIndependentSchedulerStage(
+        'live-lifecycle',
+        () => persistLiveLifecycleStatus(now),
+        stageState,
+      );
+      if (lifecycle?.decision.shouldProbePicks || lifecycle?.decision.shouldSyncPicks) {
+        await runIndependentSchedulerStage(
+          'live-picks-refresh-compatibility',
+          () => runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now),
+          stageState,
+        );
+      }
     }
-    await runIndependentSchedulerStage('obligation-registry', () => runSchedulerPass(now));
+    const obligationResult = await runIndependentSchedulerStage(
+      'obligation-registry',
+      () => runSchedulerPass(now),
+      stageState,
+    );
+    // A scheduler pass can return normally after isolating definition/claim/
+    // enqueue failures.  Those failures are already persisted on the
+    // obligation, but they must also suppress the progress heartbeat: a
+    // healthy process with a non-progressing registry is not healthy for
+    // scheduling purposes.
+    if (obligationResult && obligationResult.failed > 0) {
+      stageState.failed = true;
+    }
+    if (stageState.failed) {
+      throw new Error('SCHEDULER_STAGE_FAILED: progress heartbeat withheld');
+    }
   })()
+    .then(() => {
+      // The scheduler heartbeat is progress evidence, not merely process
+      // liveness.  Touch it only after every independent stage completed.
+      touchWorkerHeartbeat(schedulerHeartbeatPath);
+    })
     .catch((error) => logError('Scheduler reconciliation pass failed', error))
     .finally(() => {
       inFlight = null;

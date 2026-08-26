@@ -23,6 +23,10 @@ export interface DataSyncEnqueueOptions {
   laneId?: string;
   laneGeneration?: number;
   blockerLaneId?: string;
+  /** Exact freshness window being repaired, when this is a governance retry. */
+  freshnessWindowId?: number;
+  /** All joined freshness windows for a shared latest-wins publication. */
+  freshnessWindowIds?: readonly number[];
   /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
   removeOnSettle?: boolean;
 }
@@ -51,12 +55,21 @@ export function createDataSyncJobData(
   source: DataSyncJobSource,
   options: DataSyncEnqueueOptions,
 ) {
+  const runId =
+    options.runId ??
+    (options.obligationId && (options.obligationGeneration ?? 0) === 0
+      ? options.obligationId
+      : randomUUID());
   return {
     seasonId: season.seasonId,
     seasonCode: season.seasonCode,
     source,
     triggeredAt: new Date().toISOString(),
-    runId: options.runId ?? randomUUID(),
+    // Scheduler-owned jobs use the durable obligation as their run
+    // correlation. This is the identity written to scheduler_obligations and
+    // later carried into the publication source_run_id, so freshness evidence
+    // can join the exact obligation without guessing from scope/period.
+    runId,
     ...(options.obligationId ? { obligationId: options.obligationId } : {}),
     ...(options.obligationGeneration === undefined
       ? {}
@@ -66,5 +79,11 @@ export function createDataSyncJobData(
     ...(options.blockerLaneId ? { blockerLaneId: options.blockerLaneId } : {}),
     ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
     ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
+    ...(options.freshnessWindowId === undefined
+      ? {}
+      : { freshnessWindowId: options.freshnessWindowId }),
+    ...(options.freshnessWindowIds === undefined
+      ? {}
+      : { freshnessWindowIds: [...new Set(options.freshnessWindowIds)] }),
   };
 }

@@ -31,6 +31,10 @@ export interface DataSyncJobData {
   eventId?: number;
   /** Price-history date in the configured cron timezone (YYYYMMDD). */
   changeDate?: string;
+  /** Exact freshness window being repaired, when this is a governance retry. */
+  freshnessWindowId?: number;
+  /** All joined freshness windows for a shared latest-wins publication. */
+  freshnessWindowIds?: readonly number[];
 }
 
 const defaultJobOptions = {
