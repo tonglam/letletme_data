@@ -82,6 +82,14 @@ async function cleanup(): Promise<void> {
       AND event_id = ${EVENT_ID}
   `;
   await sql`
+    DELETE FROM fpl.manager_event_score_heads
+    WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}
+  `;
+  await sql`
+    DELETE FROM fpl.manager_event_score_materializations
+    WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}
+  `;
+  await sql`
     DELETE FROM competition.entry_event_transfers
     WHERE season_id = ${SEASON.seasonId}
       AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
@@ -240,7 +248,7 @@ async function seedEntry(entryId: number, complete: boolean): Promise<void> {
     VALUES (
       ${SEASON.seasonId}, ${entryId}, ${`Integration Entry ${entryId}`},
       ${`Integration Manager ${entryId}`}, 1,
-      60, 1000, 10, 1000, 0,
+      67, 1000, 10, 1000, 0,
       ${EVENT_ID}, ${EVENT_ID}, ${complete ? EVENT_ID : null},
       ${complete ? CAPTURE_NOW.toISOString() : null}::timestamptz,
       ${CAPTURE_NOW.toISOString()}::timestamptz, 0
@@ -260,9 +268,9 @@ async function seedEntryEventData(entryId: number): Promise<void> {
       team_value, bank, rich_synced_at, event_picks
     )
     VALUES (
-      ${SEASON.seasonId}, ${entryId}, ${EVENT_ID}, 60, 0,
-      0, 60, 5, 0, 60, 1000,
-      ${PLAYER_IDS[0]}, 10, '[]'::jsonb, 1000, 10,
+      ${SEASON.seasonId}, ${entryId}, ${EVENT_ID}, 67, 0,
+      0, 67, 0, 0, 67, 1000,
+      ${PLAYER_IDS[0]}, 2, '[]'::jsonb, 1000, 10,
       ${CAPTURE_NOW.toISOString()}::timestamptz,
       ${JSON.stringify(EVENT_PICKS)}::jsonb
     )
@@ -382,12 +390,12 @@ describe('My FPL onboarding publication correction', () => {
 
     await sql`
       UPDATE competition.entries
-      SET overall_points = 61
+      SET overall_rank = 1001
       WHERE season_id = ${SEASON.seasonId} AND entry_id = ${ENTRY_IDS[0]}
     `;
     await sql`
       UPDATE competition.entry_event_results
-      SET overall_points = 61
+      SET overall_rank = 1001
       WHERE season_id = ${SEASON.seasonId}
         AND event_id = ${EVENT_ID}
         AND entry_id = ${ENTRY_IDS[0]}
