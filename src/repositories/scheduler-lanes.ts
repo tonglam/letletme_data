@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import { schedulerLanesInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
@@ -344,28 +344,51 @@ export async function confirmSchedulerLaneEnqueued(input: {
   const db = input.db ?? (await getDb());
   return db.transaction(async (tx) => {
     const [lane] = await tx
-      .select({
-        laneId: schedulerLanesInOps.laneId,
-        desiredObligationId: schedulerLanesInOps.desiredObligationId,
-      })
+      .select()
       .from(schedulerLanesInOps)
-      .where(
-        and(
-          eq(schedulerLanesInOps.laneId, input.laneId),
-          eq(schedulerLanesInOps.dispatchOwner, input.owner),
-          eq(schedulerLanesInOps.state, 'dispatching'),
-        ),
-      )
+      .where(eq(schedulerLanesInOps.laneId, input.laneId))
       .for('update')
       .limit(1);
     if (!lane) return false;
+
+    const bullJobId = String(input.bullJobId);
+    const obligationId = input.obligationId ?? lane.activeObligationId ?? lane.desiredObligationId;
+    const [obligation] = await tx
+      .select()
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, obligationId))
+      .limit(1);
+
+    // Bull can settle a very short job before this transaction gets the
+    // scheduler lock.  The terminal callback has already persisted the
+    // accepted Bull identity on the obligation and released the lane, so a
+    // late confirmation is an idempotent success rather than a server error.
+    // Also accept a retry after the first confirmation while the same Bull job
+    // is enqueued/running.  Require the obligation to belong to this lane's
+    // job/scope before treating the identity as authoritative.
+    const obligationBelongsToLane =
+      obligation?.jobName === lane.jobName && obligation.scopeKey === lane.scopeKey;
+    const terminalObligation =
+      obligationBelongsToLane &&
+      obligation?.bullJobId === bullJobId &&
+      ['succeeded', 'skipped', 'failed', 'irrecoverable'].includes(obligation.status);
+    if (terminalObligation) return true;
+    if (
+      obligationBelongsToLane &&
+      lane.bullJobId === bullJobId &&
+      ['enqueued', 'running'].includes(lane.state)
+    ) {
+      return true;
+    }
+
+    if (lane.state !== 'dispatching' || lane.dispatchOwner !== input.owner) return false;
     await tx
       .update(schedulerLanesInOps)
       .set({
         state: 'enqueued',
         dispatchOwner: null,
         dispatchLeaseExpiresAt: null,
-        bullJobId: String(input.bullJobId),
+        bullJobId,
         runId: input.runId,
         lastProgressAt: sql`clock_timestamp()`,
         updatedAt: sql`clock_timestamp()`,
@@ -377,7 +400,7 @@ export async function confirmSchedulerLaneEnqueued(input: {
     await tx
       .update(schedulerObligationsInOps)
       .set({
-        bullJobId: String(input.bullJobId),
+        bullJobId,
         ...(input.runId === undefined ? {} : { runId: input.runId }),
         updatedAt: sql`clock_timestamp()`,
       })
@@ -925,7 +948,19 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         and(
           eq(schedulerLanesInOps.laneId, input.laneId),
           eq(schedulerLanesInOps.dispatchGeneration, input.dispatchGeneration),
-          eq(schedulerLanesInOps.bullJobId, input.bullJobId),
+          or(
+            and(
+              inArray(schedulerLanesInOps.state, ['enqueued', 'running']),
+              eq(schedulerLanesInOps.bullJobId, input.bullJobId),
+            ),
+            // A worker can fail before the scheduler's enqueue confirmation
+            // writes Bull's ID.  The lane generation and payload obligation
+            // still fence this callback to the dispatch being settled.
+            and(
+              eq(schedulerLanesInOps.state, 'dispatching'),
+              isNull(schedulerLanesInOps.bullJobId),
+            ),
+          ),
         ),
       )
       .for('update')
@@ -952,6 +987,7 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         .update(schedulerObligationsInOps)
         .set({
           status: 'failed',
+          bullJobId: input.bullJobId,
           lastError: `Bull job ${input.bullState} before durable completion`,
           leaseOwner: null,
           leaseExpiresAt: null,

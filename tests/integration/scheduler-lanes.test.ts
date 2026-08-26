@@ -114,6 +114,86 @@ describe('scheduler latest-wins lanes', () => {
     expect(targets?.active).toBeNull();
   });
 
+  test('accepts a late enqueue confirmation after the Bull job already succeeded', async () => {
+    const first = await reserve('2026-08-25T04:10:00.000Z', 'price-confirm-after-success');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+
+    // A fast Bull job may start and settle before the scheduler receives the
+    // enqueue response. Confirmation must remain an idempotent success.
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId: 'integration-price-job-fast-success',
+    });
+    expect(started).not.toBeNull();
+    const completed = await completeSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      activeObligationId: first.obligationId,
+      status: 'succeeded',
+    });
+    expect(completed.ok).toBe(true);
+    expect(
+      await confirmSchedulerLaneEnqueued({
+        laneId: initial.lane.laneId,
+        owner: dispatch!.owner,
+        bullJobId: 'integration-price-job-fast-success',
+        obligationId: first.obligationId,
+      }),
+    ).toBe(true);
+
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.desired?.status).toBe('succeeded');
+    expect(targets?.desired?.bullJobId).toBe('integration-price-job-fast-success');
+  });
+
+  test('accepts a late enqueue confirmation after a pre-start Bull failure', async () => {
+    const first = await reserve('2026-08-25T04:15:00.000Z', 'price-confirm-after-failure');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+
+    // The worker failure callback can run while the lane is still
+    // dispatching, before the enqueue confirmation transaction commits.
+    expect(
+      await recoverSchedulerLaneAfterBullLoss({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId: 'integration-price-job-fast-failure',
+        bullState: 'failed',
+        obligationId: first.obligationId,
+      }),
+    ).toBe(true);
+    expect(
+      await confirmSchedulerLaneEnqueued({
+        laneId: initial.lane.laneId,
+        owner: dispatch!.owner,
+        bullJobId: 'integration-price-job-fast-failure',
+        obligationId: first.obligationId,
+      }),
+    ).toBe(true);
+
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.desired?.status).toBe('failed');
+    expect(targets?.desired?.bullJobId).toBe('integration-price-job-fast-failure');
+  });
+
   test('does not create a new generation merely because the Bull job waited', async () => {
     const first = await reserve('2026-08-25T04:00:00.000Z', 'price-waiting');
     const initial = await advanceSchedulerLane({
