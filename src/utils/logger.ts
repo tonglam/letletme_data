@@ -17,11 +17,50 @@ function isProductionRuntime(): boolean {
 const logLevel = process.env.LOG_LEVEL || 'info';
 
 const MAX_ERROR_MESSAGE_LENGTH = 2_000;
-const MAX_ERROR_STACK_LENGTH = 8_000;
+const MAX_ERROR_STACK_LENGTH = 500;
 const MAX_ERROR_CAUSE_DEPTH = 2;
+const REDACTED_LOG_VALUE = '[REDACTED]';
+const SENSITIVE_LOG_KEY_PATTERN =
+  /^(?:entry[_-]?ids?|scopes?|scope[_-]?key|token|secret|password|api[_-]?key|authorization|headers?|sql|statement|query|params?|parameters|payload|body)$/i;
+const ENTRY_ID_PATH_PATTERN = /(\/entry\/)(\d+)/gi;
+const ENTRY_ID_LABEL_PATTERN = /(\bentry(?:[_ -]?ids?)?\s*(?:[:=#-]\s*|\s+))\d+/gi;
 
 function truncate(value: string, maxLength: number) {
   return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...[truncated]`;
+}
+
+/** Keep operational logs useful while preventing entry identifiers from being
+ * copied into stdout, which is retained and forwarded to third-party sinks. */
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(ENTRY_ID_PATH_PATTERN, `$1${REDACTED_LOG_VALUE}`)
+    .replace(ENTRY_ID_LABEL_PATTERN, `$1${REDACTED_LOG_VALUE}`);
+}
+
+function sanitizeLogValue(value: unknown, key?: string, depth = 0): unknown {
+  if (key && SENSITIVE_LOG_KEY_PATTERN.test(key)) return REDACTED_LOG_VALUE;
+  if (typeof value === 'string') return redactSensitiveText(value);
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (value instanceof Date) return value.toISOString();
+  if (depth >= 6) return REDACTED_LOG_VALUE;
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeLogValue(item, undefined, depth + 1));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [
+        childKey,
+        sanitizeLogValue(childValue, childKey, depth + 1),
+      ]),
+    );
+  }
+  return value;
+}
+
+function sanitizeLogPayload(data?: object): object | undefined {
+  if (data === undefined) return undefined;
+  const sanitized = sanitizeLogValue(data);
+  return isRecord(sanitized) ? sanitized : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -46,7 +85,10 @@ export function serializeError(error: unknown, depth = 0): unknown {
     };
 
     if (error.stack) {
-      serialized.stack = truncate(error.stack, MAX_ERROR_STACK_LENGTH);
+      // Keep only the first, bounded line. Full stacks can include request
+      // paths, identifiers, SQL fragments, and other internal details.
+      const firstLine = error.stack.split('\n', 1)[0] ?? '';
+      serialized.stack = truncate(redactSensitiveText(firstLine), MAX_ERROR_STACK_LENGTH);
     }
     if (errorWithMetadata.code !== undefined) {
       serialized.code = errorWithMetadata.code;
@@ -77,7 +119,7 @@ export function serializeError(error: unknown, depth = 0): unknown {
           return [];
         }
         if (typeof value === 'string') {
-          return [[key, truncate(value, MAX_ERROR_MESSAGE_LENGTH)]];
+          return [[key, redactSensitiveText(truncate(value, MAX_ERROR_MESSAGE_LENGTH))]];
         }
         if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
           return [[key, value]];
@@ -162,34 +204,34 @@ function mergeJobContext(data?: object): object | undefined {
 
 // Logger helpers
 export const logInfo = (message: string, data?: object) => {
-  const payload = mergeJobContext(data);
+  const payload = sanitizeLogPayload(mergeJobContext(data));
   logger.info(payload, message);
 };
 
 export const logError = (message: string, error?: Error | unknown, data?: object) => {
-  const payloadWithContext = mergeJobContext(data);
+  const payloadWithContext = sanitizeLogPayload(mergeJobContext(data));
   const payload = {
     ...(payloadWithContext ?? {}),
-    ...(error === undefined ? {} : { error: serializeError(error) }),
+    ...(error === undefined ? {} : { error: sanitizeLogValue(serializeError(error), 'error') }),
   };
   logger.error(payload, message);
 };
 
 export const logDebug = (message: string, data?: object) => {
-  const payload = mergeJobContext(data);
+  const payload = sanitizeLogPayload(mergeJobContext(data));
   logger.debug(payload, message);
 };
 
 export const logWarn = (message: string, data?: object) => {
-  const payload = mergeJobContext(data);
+  const payload = sanitizeLogPayload(mergeJobContext(data));
   logger.warn(payload, message);
 };
 
 export const logJobError = (message: string, error?: Error | unknown, data?: object) => {
-  const payloadWithContext = mergeJobContext(data);
+  const payloadWithContext = sanitizeLogPayload(mergeJobContext(data));
   const payload = {
     ...(payloadWithContext ?? {}),
-    ...(error === undefined ? {} : { error: serializeError(error) }),
+    ...(error === undefined ? {} : { error: sanitizeLogValue(serializeError(error), 'error') }),
   };
   logger.error(payload, message);
 };
