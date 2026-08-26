@@ -9,6 +9,8 @@ import {
   MANAGER_LIVE_HOT_SCOPE_SECONDS,
   loadManagerLiveHotState,
   managerLiveHotStateKey,
+  reconcileManagerLiveHotStateRoster,
+  removeManagerLiveHotState,
   type ManagerLiveRefreshScope,
 } from '../../src/domain/manager-live-refresh';
 import {
@@ -101,6 +103,46 @@ describe('manager live queue integration', () => {
       classicStandingsPage: null,
       classicStandingsCursorEpoch: 0,
     });
+  });
+
+  test('rejects cleanup from an older roster revision after the hot lane rotates', async () => {
+    const runAt = new Date(Date.now() + 45_000);
+    const first = await enqueueManagerLiveRefresh({
+      season: TEST_SEASON,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      rosterRevision: 'sync-a',
+      runAt,
+    });
+    const second = await enqueueManagerLiveRefresh({
+      season: TEST_SEASON,
+      eventId: scope.eventId,
+      entryIds: scope.entryIds,
+      tournamentId: scope.tournamentId,
+      rosterRevision: 'sync-b',
+      runAt: new Date(runAt.getTime() + 1_000),
+    });
+    if (first.id) createdJobIds.add(first.id);
+    if (second.id) createdJobIds.add(second.id);
+
+    expect(second.data.generation).not.toBe(first.data.generation);
+    const redis = await queueRedisSingleton.getClient();
+    await expect(
+      removeManagerLiveHotState(redis, scope, first.data.generation, first.data.rosterRevision),
+    ).resolves.toBe(false);
+    await expect(loadManagerLiveHotState(redis, scope)).resolves.toMatchObject({
+      generation: second.data.generation,
+      rosterRevision: 'authoritative:sync-b',
+    });
+  });
+
+  test('does not recreate an expired hot scope from worker reconciliation', async () => {
+    const redis = await queueRedisSingleton.getClient();
+    await redis.unlink(managerLiveHotStateKey(scope));
+
+    await expect(reconcileManagerLiveHotStateRoster(redis, scope)).resolves.toBeNull();
+    expect(await redis.exists(managerLiveHotStateKey(scope))).toBe(0);
   });
 
   test('does not schedule a follow-up after the hot marker expires', async () => {

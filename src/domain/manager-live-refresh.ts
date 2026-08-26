@@ -14,7 +14,17 @@ export const MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE = 12;
 export const MANAGER_LIVE_WORKER_SUMMARY_FETCH_LIMIT = MANAGER_LIVE_WORKER_ENTRY_CHUNK_SIZE;
 export const MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT = 2;
 export const MANAGER_LIVE_WORKER_CLASSIC_OR_FETCH_LIMIT = 4;
-export const MANAGER_LIVE_CLASSIC_MAX_PAGE = 20;
+// Tournament imports allow up to 100 Classic standings pages. A worker still
+// fetches only two pages per logical run; this is the cursor safety bound, not
+// a request-size increase.
+export const MANAGER_LIVE_CLASSIC_MAX_PAGE = 100;
+// Internal tournament hot state may carry the complete authoritative roster;
+// public manager-live reads remain bounded to 500 entry IDs per request.
+export const MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT = 5_000;
+// A cursor one past the supported page range is a terminal safety marker. It
+// is persisted so a capped crawl cannot refetch page 100 forever; workers do
+// not send this sentinel to FPL.
+export const MANAGER_LIVE_CLASSIC_CAPPED_CURSOR = MANAGER_LIVE_CLASSIC_MAX_PAGE + 1;
 
 export type ManagerLiveRefreshScope = {
   seasonId: number;
@@ -22,6 +32,10 @@ export type ManagerLiveRefreshScope = {
   eventId: number;
   entryIds: number[];
   tournamentId?: number;
+  // A tournament lifecycle marker (or the deterministic entry-set fallback)
+  // fences hot-state cleanup across an empty-roster transition. It is not part
+  // of the Redis key: changing it must rotate the generation in that key.
+  rosterRevision?: string;
 };
 
 type ManagerLiveHotRedis = {
@@ -35,6 +49,7 @@ type ManagerLiveHotStateRedis = ManagerLiveHotRedis & {
 
 export type ManagerLiveHotScopeState = ManagerLiveRefreshScope & {
   generation: string;
+  rosterRevision: string;
   summaryRotationCursor: number;
   classicStandingsPage: number | null;
   // Distinguishes the initial page-1 cursor from a completed crawl whose
@@ -62,10 +77,18 @@ const entrySetDigest = (entryIds: readonly number[]): string =>
     .digest('hex')
     .slice(0, 12);
 
+export const managerLiveRosterRevision = (
+  entryIds: readonly number[],
+  authoritativeMarker?: string | null,
+): string => {
+  const marker = authoritativeMarker?.trim();
+  return marker ? `authoritative:${marker}` : `entries:${entrySetDigest(entryIds)}`;
+};
+
 const scopeSegment = (scope: Pick<ManagerLiveRefreshScope, 'entryIds' | 'tournamentId'>): string =>
   scope.tournamentId === undefined
     ? `entries-${entrySetDigest(scope.entryIds)}`
-    : `t${scope.tournamentId}-entries-${entrySetDigest(scope.entryIds)}`;
+    : `t${scope.tournamentId}`;
 
 export const managerLiveHotScopeKey = (scope: ManagerLiveRefreshScope): string =>
   `llm:queue:manager-live:hot:v1:${scope.seasonCode}:e${scope.eventId}:${scopeSegment(scope)}`;
@@ -84,6 +107,15 @@ export function managerLiveRefreshBucket(date: Date): string {
     Math.floor(date.getTime() / MANAGER_LIVE_REFRESH_BUCKET_MS) * MANAGER_LIVE_REFRESH_BUCKET_MS,
   );
   return bucket.toISOString().replace(/\D/g, '').slice(0, 14);
+}
+
+export function managerLiveFollowupRunAt(requestedRunAt: Date, nowMs = Date.now()): Date {
+  const nextBucketAt =
+    Math.floor(nowMs / MANAGER_LIVE_REFRESH_BUCKET_MS) * MANAGER_LIVE_REFRESH_BUCKET_MS +
+    MANAGER_LIVE_REFRESH_BUCKET_MS;
+  const minimumRunAt = Math.max(nowMs + 1_000, nextBucketAt);
+  const requestedMs = requestedRunAt.getTime();
+  return new Date(Math.max(minimumRunAt, Number.isFinite(requestedMs) ? requestedMs : 0));
 }
 
 export function managerLiveRefreshJobId(scope: ManagerLiveRefreshScope, date: Date): string {
@@ -107,6 +139,16 @@ export const parseManagerLiveClassicCursor = (value: string | null): number | nu
     : undefined;
 };
 
+export const classicStandingsCursorAfterRefresh = (
+  completeRefresh: boolean,
+  standings: { complete: boolean; nextPage: number },
+): number | null | undefined =>
+  completeRefresh
+    ? standings.complete
+      ? null
+      : Math.min(MANAGER_LIVE_CLASSIC_CAPPED_CURSOR, standings.nextPage)
+    : undefined;
+
 export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefreshScope | null => {
   if (!value) return null;
   try {
@@ -114,6 +156,8 @@ export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefre
     const entryIds = Array.isArray(parsed.entryIds)
       ? normalizeManagerLiveEntryIds(parsed.entryIds)
       : [];
+    const maxEntryIds =
+      parsed.tournamentId === undefined ? 500 : MANAGER_LIVE_TOURNAMENT_ENTRY_LIMIT;
     if (
       !Number.isSafeInteger(parsed.seasonId) ||
       typeof parsed.seasonCode !== 'string' ||
@@ -121,10 +165,14 @@ export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefre
       !Number.isSafeInteger(parsed.eventId) ||
       (parsed.eventId ?? 0) <= 0 ||
       entryIds.length === 0 ||
-      entryIds.length > 500 ||
+      entryIds.length > maxEntryIds ||
       entryIds.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0) ||
       (parsed.tournamentId !== undefined &&
-        (!Number.isSafeInteger(parsed.tournamentId) || parsed.tournamentId <= 0))
+        (!Number.isSafeInteger(parsed.tournamentId) || parsed.tournamentId <= 0)) ||
+      (parsed.rosterRevision !== undefined &&
+        (typeof parsed.rosterRevision !== 'string' ||
+          parsed.rosterRevision.length === 0 ||
+          parsed.rosterRevision.length > 256))
     ) {
       return null;
     }
@@ -134,6 +182,7 @@ export const parseManagerLiveHotScope = (value: string | null): ManagerLiveRefre
       eventId: parsed.eventId,
       entryIds,
       ...(parsed.tournamentId === undefined ? {} : { tournamentId: parsed.tournamentId }),
+      ...(parsed.rosterRevision === undefined ? {} : { rosterRevision: parsed.rosterRevision }),
     } as ManagerLiveRefreshScope;
   } catch {
     return null;
@@ -157,12 +206,16 @@ const parseManagerLiveHotScopeState = (value: string | null): ManagerLiveHotScop
       (parsed.classicStandingsPage !== null &&
         (!Number.isSafeInteger(parsed.classicStandingsPage) ||
           (parsed.classicStandingsPage ?? 0) < 1 ||
-          (parsed.classicStandingsPage ?? 0) > MANAGER_LIVE_CLASSIC_MAX_PAGE))
+          (parsed.classicStandingsPage ?? 0) > MANAGER_LIVE_CLASSIC_CAPPED_CURSOR))
     ) {
       return null;
     }
     return {
       ...scope,
+      rosterRevision:
+        typeof parsed.rosterRevision === 'string'
+          ? parsed.rosterRevision
+          : managerLiveRosterRevision(scope.entryIds),
       generation: parsed.generation,
       summaryRotationCursor: parsed.summaryRotationCursor as number,
       classicStandingsPage: parsed.classicStandingsPage ?? null,
@@ -178,8 +231,28 @@ const parseManagerLiveHotScopeState = (value: string | null): ManagerLiveHotScop
 const INITIALIZE_HOT_SCOPE_STATE_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
 if current then
-  redis.call('EXPIRE', KEYS[1], ARGV[1])
-  return current
+  local ok, state = pcall(cjson.decode, current)
+  local candidate = cjson.decode(ARGV[2])
+  local sameRoster = false
+  if ok and state and state['rosterRevision'] == candidate['rosterRevision'] then
+    local currentEntries = state['entryIds'] or {}
+    local candidateEntries = candidate['entryIds'] or {}
+    sameRoster = #currentEntries == #candidateEntries
+    if sameRoster then
+      for index = 1, #candidateEntries do
+        if currentEntries[index] ~= candidateEntries[index] then
+          sameRoster = false
+          break
+        end
+      end
+    end
+  end
+  if sameRoster then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+    return current
+  end
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
+  return ARGV[2]
 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
 return ARGV[2]
@@ -191,6 +264,31 @@ if current and current ~= ARGV[1] then
   return current
 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+return ARGV[2]
+`;
+
+const RECONCILE_HOT_SCOPE_ROSTER_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if not current then
+  return nil
+end
+local state = cjson.decode(current)
+local candidate = cjson.decode(ARGV[2])
+local currentEntries = state['entryIds'] or {}
+local candidateEntries = candidate['entryIds'] or {}
+local sameRoster = state['rosterRevision'] == candidate['rosterRevision'] and #currentEntries == #candidateEntries
+if sameRoster then
+  for index = 1, #candidateEntries do
+    if currentEntries[index] ~= candidateEntries[index] then
+      sameRoster = false
+      break
+    end
+  end
+end
+if sameRoster then
+  return current
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[1])
 return ARGV[2]
 `;
 
@@ -234,6 +332,14 @@ redis.call('SET', KEYS[1], encoded, 'PX', ttl)
 return encoded
 `;
 
+const REMOVE_HOT_SCOPE_IF_GENERATION_MATCHES_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if not current or ARGV[1] == '' or ARGV[2] == '' then return 0 end
+local ok, state = pcall(cjson.decode, current)
+if not ok or not state or state['generation'] ~= ARGV[1] or state['rosterRevision'] ~= ARGV[2] then return 0 end
+return redis.call('DEL', KEYS[1])
+`;
+
 export const parseManagerLiveHotState = parseManagerLiveHotScopeState;
 
 export async function initializeManagerLiveHotState(
@@ -243,6 +349,7 @@ export async function initializeManagerLiveHotState(
   const normalizedScope = {
     ...scope,
     entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
+    rosterRevision: managerLiveRosterRevision(scope.entryIds, scope.rosterRevision),
   };
   const candidate: ManagerLiveHotScopeState = {
     ...normalizedScope,
@@ -281,11 +388,56 @@ export async function initializeManagerLiveHotState(
   throw new Error('Manager live hot scope state is malformed');
 }
 
+export async function reconcileManagerLiveHotStateRoster(
+  redis: ManagerLiveHotStateRedis,
+  scope: ManagerLiveRefreshScope,
+): Promise<ManagerLiveHotScopeState | null> {
+  const normalizedScope = {
+    ...scope,
+    entryIds: normalizeManagerLiveEntryIds(scope.entryIds),
+    rosterRevision: managerLiveRosterRevision(scope.entryIds, scope.rosterRevision),
+  };
+  const candidate: ManagerLiveHotScopeState = {
+    ...normalizedScope,
+    generation: randomUUID(),
+    summaryRotationCursor: 0,
+    classicStandingsPage: null,
+    classicStandingsCursorEpoch: 0,
+  };
+  const raw = await redis.eval(
+    RECONCILE_HOT_SCOPE_ROSTER_SCRIPT,
+    1,
+    managerLiveHotStateKey(normalizedScope),
+    String(MANAGER_LIVE_HOT_SCOPE_SECONDS),
+    JSON.stringify(candidate),
+  );
+  return parseManagerLiveHotScopeState(typeof raw === 'string' ? raw : null);
+}
+
 export async function loadManagerLiveHotState(
   redis: ManagerLiveHotRedis,
   scope: ManagerLiveRefreshScope,
 ): Promise<ManagerLiveHotScopeState | null> {
   return parseManagerLiveHotScopeState(await redis.get(managerLiveHotStateKey(scope)));
+}
+
+export async function removeManagerLiveHotState(
+  redis: ManagerLiveHotStateRedis,
+  scope: ManagerLiveRefreshScope,
+  expectedGeneration?: string,
+  expectedRosterRevision?: string,
+): Promise<boolean> {
+  if (!expectedGeneration) return false;
+  const rosterRevision =
+    expectedRosterRevision ?? managerLiveRosterRevision(scope.entryIds, scope.rosterRevision);
+  const result = await redis.eval(
+    REMOVE_HOT_SCOPE_IF_GENERATION_MATCHES_SCRIPT,
+    1,
+    managerLiveHotStateKey(scope),
+    expectedGeneration,
+    rosterRevision,
+  );
+  return Number(result) === 1;
 }
 
 export async function advanceManagerLiveHotState(
@@ -305,7 +457,7 @@ export async function advanceManagerLiveHotState(
     classicStandingsNextPage !== null &&
     (!Number.isSafeInteger(classicStandingsNextPage) ||
       classicStandingsNextPage < 1 ||
-      classicStandingsNextPage > MANAGER_LIVE_CLASSIC_MAX_PAGE)
+      classicStandingsNextPage > MANAGER_LIVE_CLASSIC_CAPPED_CURSOR)
   ) {
     throw new Error(
       `Invalid manager live classic standings page: ${String(classicStandingsNextPage)}`,
@@ -325,7 +477,7 @@ export async function advanceManagerLiveHotState(
     expectedClassicStandingsPage !== null &&
     (!Number.isSafeInteger(expectedClassicStandingsPage) ||
       expectedClassicStandingsPage < 1 ||
-      expectedClassicStandingsPage > MANAGER_LIVE_CLASSIC_MAX_PAGE)
+      expectedClassicStandingsPage > MANAGER_LIVE_CLASSIC_CAPPED_CURSOR)
   ) {
     throw new Error(
       `Invalid expected manager live classic standings page: ${String(expectedClassicStandingsPage)}`,

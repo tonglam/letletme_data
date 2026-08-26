@@ -14,6 +14,7 @@ import {
   managerLiveBackgroundRefreshKey,
   managerSummaryFetchBatches,
   mergeUniqueTargetManagerRows,
+  nextManagerLiveStandingsContinuation,
   pendingManagerRefreshEntryIds,
   pendingOverallRankRefreshEntryIds,
   planClassicManagerFallback,
@@ -42,6 +43,24 @@ import {
 } from '../../src/domain/manager-live-fallback';
 
 describe('manager live refresh targets', () => {
+  test('returns the next bounded standings cursor until the crawl completes', () => {
+    expect(
+      nextManagerLiveStandingsContinuation({ complete: false, nextPage: 7, errorCode: null }, 100),
+    ).toBe(7);
+    expect(
+      nextManagerLiveStandingsContinuation(
+        { complete: false, nextPage: 7, errorCode: 'UPSTREAM_UNAVAILABLE' },
+        100,
+      ),
+    ).toBeNull();
+    expect(
+      nextManagerLiveStandingsContinuation(
+        { complete: false, nextPage: 101, errorCode: null },
+        100,
+      ),
+    ).toBeNull();
+  });
+
   test('serves stale last-good rows without foreground upstream work', () => {
     expect(planManagerLiveRefreshTargets([1, 2], new Set([1, 2]), new Set())).toEqual({
       foregroundEntryIds: [],
