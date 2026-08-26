@@ -1149,9 +1149,15 @@ export async function persistPriceChangePublication(
     };
   } catch (error) {
     if (!dbActivated) {
-      await syncOperationsRepository.failPublication(publicationId, error).catch(() => undefined);
       const skipReason = priceRunSkipReason(error);
       if (skipReason) {
+        // Publication-fence and Core-refresh races are expected latest-wins
+        // supersessions, not failed source fetches. Retire a staging row with
+        // the skip-aware atomic path so its source run is recorded as skipped
+        // instead of being made terminally failed first.
+        await syncOperationsRepository
+          .skipPublication(publicationId, skipReason)
+          .catch(() => undefined);
         await syncOperationsRepository
           .finishRun(sourceRunId, {
             status: 'skipped',
@@ -1162,6 +1168,7 @@ export async function persistPriceChangePublication(
           })
           .catch(() => undefined);
       } else {
+        await syncOperationsRepository.failPublication(publicationId, error).catch(() => undefined);
         await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
       }
     }
