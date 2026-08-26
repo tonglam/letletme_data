@@ -4,7 +4,7 @@
 FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS base
 WORKDIR /app
 
-RUN apk add --no-cache libcrypto3=3.5.7-r0 libssl3=3.5.7-r0
+RUN apk add --no-cache libcrypto3=3.5.8-r0 libssl3=3.5.8-r0
 
 # Install dependencies separately for caching
 FROM base AS deps
@@ -42,7 +42,7 @@ FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b4
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN apk add --no-cache libcrypto3=3.5.7-r0 libssl3=3.5.7-r0
+RUN apk add --no-cache libcrypto3=3.5.8-r0 libssl3=3.5.8-r0
 
 # Copy runtime files
 COPY --from=build /app/package.json ./

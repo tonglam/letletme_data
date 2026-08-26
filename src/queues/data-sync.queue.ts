@@ -23,6 +23,10 @@ export interface DataSyncJobData {
   /** Durable scheduler obligation identity carried through worker completion. */
   obligationId?: string;
   obligationGeneration?: number;
+  /** Single-flight scheduler lane identity, when the job is lane-managed. */
+  laneId?: string;
+  laneGeneration?: number;
+  blockerLaneId?: string;
   /** Optional event filter (fixtures, player-stats); absent = current/all behavior */
   eventId?: number;
   /** Price-history date in the configured cron timezone (YYYYMMDD). */

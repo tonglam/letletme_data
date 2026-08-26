@@ -24,6 +24,7 @@ import { syncTournamentSelectionStats } from './tournament-selection-stats.servi
 import { logInfo } from '../utils/logger';
 import { ValidationError } from '../utils/errors';
 import { schedulerRegistry } from '../scheduler/job-registry';
+import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
   enqueueBugReportCleanup,
   enqueueBugReportScreenshotRetention,
@@ -60,6 +61,11 @@ export type JobTriggerResult =
   | {
       kind: 'enqueued';
       jobId: string | number | undefined;
+      message: string;
+    }
+  | {
+      kind: 'pending';
+      jobId?: string | number;
       message: string;
     }
   | {
@@ -269,6 +275,12 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       return enqueuePlayerStatsSyncJob(season, 'manual');
     },
     'price-change-predictions': async () => {
+      if (
+        schedulerRegistry.find((definition) => definition.name === 'price-change-predictions')
+          ?.executionPolicy
+      ) {
+        return triggerPriceChangeLane();
+      }
       const season = await seasonRepository.findCurrent();
       return enqueuePriceChangePredictionsJob(season, 'manual');
     },
@@ -441,9 +453,32 @@ export async function triggerJob(name: string, input?: unknown): Promise<JobTrig
     };
   }
 
+  // Latest-wins manual refreshes may join a dispatch that is still being
+  // reconciled (including a short dispatch lease with no Bull ID yet). Keep
+  // that state explicit instead of reporting a synchronous execution.
+  if (
+    result &&
+    typeof result === 'object' &&
+    'state' in result &&
+    (result as { state?: unknown }).state === 'pending'
+  ) {
+    const jobId =
+      'bullJobId' in result ? (result as { bullJobId?: string | number }).bullJobId : undefined;
+    return {
+      kind: 'pending',
+      ...(jobId === undefined ? {} : { jobId }),
+      message: jobId
+        ? `Job '${name}' is already pending (${jobId})`
+        : `Job '${name}' is pending reconciliation`,
+    };
+  }
+
   logInfo(`Manual job enqueued: ${name}`);
-  if (result && typeof result === 'object' && 'id' in result) {
-    const jobId = (result as { id: string | number }).id;
+  if (result && typeof result === 'object' && ('id' in result || 'bullJobId' in result)) {
+    const jobId =
+      'id' in result
+        ? (result as { id: string | number }).id
+        : (result as { bullJobId: string | number }).bullJobId;
     return {
       kind: 'enqueued',
       jobId,

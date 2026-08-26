@@ -14,6 +14,7 @@ import {
 } from '../repositories/data-publication-outbox';
 import { seasonRepository } from '../repositories/seasons';
 import { syncOperationsRepository } from '../repositories/sync-operations';
+import { assertSchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 
@@ -106,6 +107,9 @@ export type PreparedPriceChangePublication = {
   readonly sourceRunId: string;
   readonly requestStartedAt: Date;
   readonly fetchedAt: Date;
+  /** Core publication identity captured with the upstream price response. */
+  readonly corePublicationId: string;
+  readonly corePublicationRevision: number;
   readonly board: PriceChangeBoard;
   readonly context: PriceChangePublicationContext;
 };
@@ -147,6 +151,16 @@ export class PriceChangePredictionUnavailableError extends Error {
     super(message);
     this.name = 'PriceChangePredictionUnavailableError';
   }
+}
+
+function priceRunSkipReason(error: unknown): string | null {
+  if (error instanceof PriceChangeCorePublicationRequiredError) {
+    return 'core-publication-mismatch';
+  }
+  if (error instanceof Error && error.message.includes('Scheduler lane target was superseded')) {
+    return 'superseded-by-latest-authoritative';
+  }
+  return null;
 }
 
 export function priceChangeBootstrapEdgeCacheKey(nowMs = Date.now()): string {
@@ -750,7 +764,13 @@ async function readCanonicalPriceChangePublication(
   return { board: parsePublishedPriceChangeBoard(redisPublication), hasActivePublication: false };
 }
 
-async function readCorePlayerIds(season: FplSeasonRef): Promise<ReadonlySet<number>> {
+type CorePublicationEvidence = Readonly<{
+  publicationId: string;
+  revision: number;
+  playerIds: ReadonlySet<number>;
+}>;
+
+async function readCorePublicationEvidence(season: FplSeasonRef): Promise<CorePublicationEvidence> {
   const active = await syncOperationsRepository.findActivePublication('fpl:core', season);
   if (!active) throw new PriceChangeCorePublicationRequiredError();
   const delivery = await loadDataPublicationDelivery(active.publicationId).catch(() => null);
@@ -793,7 +813,11 @@ async function readCorePlayerIds(season: FplSeasonRef): Promise<ReadonlySet<numb
       'The active fpl:core player IDs are not unique',
     );
   }
-  return ids;
+  return { publicationId: active.publicationId, revision: active.revision, playerIds: ids };
+}
+
+async function readCorePlayerIds(season: FplSeasonRef): Promise<ReadonlySet<number>> {
+  return (await readCorePublicationEvidence(season)).playerIds;
 }
 
 async function readLegacyPriceChangeBoard(season: FplSeasonRef): Promise<PriceChangeBoard | null> {
@@ -892,12 +916,35 @@ export async function preparePriceChangePublication(
       };
     }
 
-    const expectedPlayerIds = await readCorePlayerIds(season);
-    const board = normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, expectedPlayerIds);
+    const core = await readCorePublicationEvidence(season);
+    const board = normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds);
     const context = contextFromBoard(board, fetchedAt);
-    return { outcome: 'ready', season, sourceRunId, requestStartedAt, fetchedAt, board, context };
+    return {
+      outcome: 'ready',
+      season,
+      sourceRunId,
+      requestStartedAt,
+      fetchedAt,
+      corePublicationId: core.publicationId,
+      corePublicationRevision: core.revision,
+      board,
+      context,
+    };
   } catch (error) {
-    await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
+    const skipReason = priceRunSkipReason(error);
+    if (skipReason) {
+      await syncOperationsRepository
+        .finishRun(sourceRunId, {
+          status: 'skipped',
+          completedItems: 0,
+          skippedItems: 2,
+          dataChanged: false,
+          metadata: { reason: skipReason },
+        })
+        .catch(() => undefined);
+    } else {
+      await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
+    }
     throw error;
   }
 }
@@ -922,9 +969,25 @@ async function ensurePriceChangePublicationDelivered(
 
 export async function persistPriceChangePublication(
   prepared: PreparedPriceChangePublication,
-  options: { readonly deferDelivery?: boolean } = {},
+  options: {
+    readonly deferDelivery?: boolean;
+    readonly publicationFence?: {
+      readonly laneId: string;
+      readonly dispatchGeneration: number;
+      readonly activeObligationId: string;
+    };
+  } = {},
 ): Promise<PriceChangeSyncResult> {
-  const { season, sourceRunId, requestStartedAt, fetchedAt, board, context } = prepared;
+  const {
+    season,
+    sourceRunId,
+    requestStartedAt,
+    fetchedAt,
+    corePublicationId,
+    corePublicationRevision,
+    board,
+    context,
+  } = prepared;
   const publicationId = randomUUID();
   const outboxId = randomUUID();
   let dbActivated = false;
@@ -962,7 +1025,16 @@ export async function persistPriceChangePublication(
       }
     }
 
-    const currentCorePlayerIds = await readCorePlayerIds(season);
+    const currentCore = await readCorePublicationEvidence(season);
+    if (
+      currentCore.publicationId !== corePublicationId ||
+      currentCore.revision !== corePublicationRevision
+    ) {
+      throw new PriceChangeCorePublicationRequiredError(
+        'The active fpl:core publication changed while price changes were being prepared',
+      );
+    }
+    const currentCorePlayerIds = currentCore.playerIds;
     const publishedPlayerIds = new Set(board.players.map((player) => player.playerId));
     if (
       currentCorePlayerIds.size !== publishedPlayerIds.size ||
@@ -1017,6 +1089,40 @@ export async function persistPriceChangePublication(
       sourceRunId,
       manifest: preparedData.manifest,
       outbox: { outboxId },
+      ...(options.publicationFence
+        ? {
+            beforeActivate: async (tx) => {
+              await assertSchedulerLanePublicationFence(tx, options.publicationFence!);
+              const activeCore = await syncOperationsRepository.findActivePublication(
+                'fpl:core',
+                season,
+              );
+              if (
+                activeCore?.publicationId !== corePublicationId ||
+                activeCore.revision !== corePublicationRevision
+              ) {
+                throw new PriceChangeCorePublicationRequiredError(
+                  'The active fpl:core publication changed before price publication activation',
+                );
+              }
+            },
+          }
+        : {
+            beforeActivate: async () => {
+              const activeCore = await syncOperationsRepository.findActivePublication(
+                'fpl:core',
+                season,
+              );
+              if (
+                activeCore?.publicationId !== corePublicationId ||
+                activeCore.revision !== corePublicationRevision
+              ) {
+                throw new PriceChangeCorePublicationRequiredError(
+                  'The active fpl:core publication changed before price publication activation',
+                );
+              }
+            },
+          }),
     });
     dbActivated = true;
     if (!options.deferDelivery) {
@@ -1043,8 +1149,28 @@ export async function persistPriceChangePublication(
     };
   } catch (error) {
     if (!dbActivated) {
-      await syncOperationsRepository.failPublication(publicationId, error).catch(() => undefined);
-      await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
+      const skipReason = priceRunSkipReason(error);
+      if (skipReason) {
+        // Publication-fence and Core-refresh races are expected latest-wins
+        // supersessions, not failed source fetches. Retire a staging row with
+        // the skip-aware atomic path so its source run is recorded as skipped
+        // instead of being made terminally failed first.
+        await syncOperationsRepository
+          .skipPublication(publicationId, skipReason)
+          .catch(() => undefined);
+        await syncOperationsRepository
+          .finishRun(sourceRunId, {
+            status: 'skipped',
+            completedItems: 0,
+            skippedItems: board.players.length,
+            dataChanged: false,
+            metadata: { reason: skipReason },
+          })
+          .catch(() => undefined);
+      } else {
+        await syncOperationsRepository.failPublication(publicationId, error).catch(() => undefined);
+        await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
+      }
     }
     throw error;
   }

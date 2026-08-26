@@ -93,8 +93,12 @@ describe('standalone scheduler registry', () => {
       timezone: 'UTC',
       catchUpPolicy: 'latest-authoritative',
       criticality: 'critical',
-      queueName: 'data-sync',
+      queueName: 'fpl-critical-sync',
       manualTrigger: true,
+    });
+    expect(priceChanges?.executionPolicy).toMatchObject({
+      kind: 'single-flight-latest',
+      maxTargetsPerDispatch: 2,
     });
     const plans = await priceChanges!.resolve({
       season: TEST_SEASON,

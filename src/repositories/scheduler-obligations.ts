@@ -875,13 +875,16 @@ export async function findDueSchedulerJobNames(input: {
  * generation before it may settle or retry one of these rows.
  */
 export async function listExpiredSchedulerObligations(
-  input: { limit?: number; db?: DbHandle } = {},
+  input: { limit?: number; excludedJobNames?: readonly string[]; db?: DbHandle } = {},
 ): Promise<readonly SchedulerObligation[]> {
   const limit = input.limit ?? 50;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
     throw new Error('Scheduler recovery limit must be between 1 and 200');
   }
   const db = input.db ?? (await getDb());
+  const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
+    (name) => name.length > 0,
+  );
   const rows = await db
     .select()
     .from(schedulerObligationsInOps)
@@ -889,6 +892,9 @@ export async function listExpiredSchedulerObligations(
       and(
         inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
         lte(schedulerObligationsInOps.leaseExpiresAt, sql`clock_timestamp()`),
+        excludedJobNames.length > 0
+          ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
+          : undefined,
       ),
     )
     .orderBy(

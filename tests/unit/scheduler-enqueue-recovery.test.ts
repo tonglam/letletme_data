@@ -50,6 +50,23 @@ function queueJob(
 }
 
 describe('scheduler enqueue recovery', () => {
+  test('passes latest-wins exclusions to the expired-claim query', async () => {
+    let query: { excludedJobNames?: readonly string[] } | undefined;
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [{ name: 'recoverable-job', queueName: 'recoverable-queue' }],
+      excludedJobNames: ['price-change-predictions'],
+      dependencies: {
+        listCandidates: async (input) => {
+          query = input;
+          return [];
+        },
+      },
+    });
+
+    expect(query).toEqual({ excludedJobNames: ['price-change-predictions'] });
+    expect(result.candidates).toBe(0);
+  });
+
   test('accepts an exactly full bounded recovery page', () => {
     expect(schedulerRecoveryFallbackViewComplete(199)).toBe(true);
     expect(schedulerRecoveryFallbackViewComplete(200)).toBe(true);

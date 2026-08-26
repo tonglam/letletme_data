@@ -42,6 +42,7 @@ describe('resolveMutationScopes', () => {
     expect(snapshotScopes).toContain('data-core:fixtures');
     expect(snapshotScopes).toContain('live-snapshot:event:33');
     expect(fixtureScopes).toEqual([
+      'data-core:publication',
       'data-core:events',
       'data-core:teams',
       'data-core:players',
@@ -73,10 +74,10 @@ describe('resolveMutationScopes', () => {
   it('serializes price-change publication with the canonical player roster', () => {
     expect(
       resolveMutationScopes({
-        queueName: 'data-sync',
+        queueName: 'fpl-critical-sync',
         jobName: 'price-change-predictions',
       }),
-    ).toEqual(['data-core:players', 'data-price-change:publication']);
+    ).toEqual(['data-core:publication', 'data-price-change:publication']);
   });
 
   it('adds event-scoped conflict groups for league event results', () => {

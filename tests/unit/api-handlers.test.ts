@@ -195,6 +195,13 @@ const triggerJob = spyOn(jobTriggerServiceModule, 'triggerJob').mockImplementati
     if (name === 'player-prices') {
       return { kind: 'enqueued' as const, jobId: 'job-player-prices-1', message: 'Job triggered' };
     }
+    if (name === 'price-change-predictions') {
+      return {
+        kind: 'pending' as const,
+        jobId: '2627-scheduler-lane-price-g1',
+        message: 'Job is already pending',
+      };
+    }
     throw new jobTriggerServiceModule.JobNotFoundError(name);
   },
 );
@@ -295,6 +302,26 @@ describe('jobsAPI handlers', () => {
 
     expect(response.status).toBe(200);
     expect(triggerJob).toHaveBeenCalledWith('player-prices', { changeDate: '20260803' });
+  });
+
+  test('POST /jobs/price-change-predictions/trigger reports an existing lane as pending', async () => {
+    const response = await jobsAPI.handle(
+      new Request('http://localhost/jobs/price-change-predictions/trigger', { method: 'POST' }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      success: boolean;
+      pending: boolean;
+      jobId: string;
+      message: string;
+    };
+    expect(body).toEqual({
+      success: true,
+      pending: true,
+      jobId: '2627-scheduler-lane-price-g1',
+      message: 'Job is already pending',
+    });
+    expect(triggerJob).toHaveBeenCalledWith('price-change-predictions', undefined);
   });
 
   test('POST /jobs/unknown/trigger returns 404', async () => {

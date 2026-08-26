@@ -76,6 +76,9 @@ const EnvSchema = z.object({
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
+  // Keep the latest-wins producer opt-in in production during the first
+  // rollout. Development and tests exercise the new lane by default.
+  PRICE_CHANGE_SINGLE_FLIGHT_ENABLED: booleanEnv(process.env.NODE_ENV !== 'production'),
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(true),
   FPL_MAX_INFLIGHT: z.coerce.number().int().min(1).max(32).default(5),
   FPL_REQUESTS_PER_SECOND: z.coerce.number().int().min(1).max(20).default(4),
@@ -147,9 +150,10 @@ type FplRawSnapshotConfigKeys =
   | 'FPL_RAW_SNAPSHOT_BUCKET';
 
 type OptionalStorageConfigKeys = BugReportScreenshotConfigKeys | FplRawSnapshotConfigKeys;
+type OptionalRuntimeConfigKeys = OptionalStorageConfigKeys | 'PRICE_CHANGE_SINGLE_FLIGHT_ENABLED';
 
-export type AppConfig = Omit<z.infer<typeof EnvSchema>, OptionalStorageConfigKeys> &
-  Partial<Pick<z.infer<typeof EnvSchema>, OptionalStorageConfigKeys>>;
+export type AppConfig = Omit<z.infer<typeof EnvSchema>, OptionalRuntimeConfigKeys> &
+  Partial<Pick<z.infer<typeof EnvSchema>, OptionalRuntimeConfigKeys>>;
 
 export type RedisEndpointConfig = {
   readonly host: string;
