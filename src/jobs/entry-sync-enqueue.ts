@@ -183,7 +183,7 @@ async function enqueueEntrySyncJob(
   try {
     const lane = options.lane ?? 'entry-sync';
     const queue = entryQueueForLane(lane);
-    if ((source === 'manual' || source === 'api') && (await isQueueDrainOnly(queue.name))) {
+    if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
     const chunkSize = sanitizePositiveInt(options.chunkSize, ENTRY_SYNC_DEFAULT_CHUNK_SIZE);

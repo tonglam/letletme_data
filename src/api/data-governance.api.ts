@@ -88,6 +88,8 @@ function safeGovernanceCase(row: Record<string, unknown>) {
     compensator: row.compensator,
     attempts: row.attempts,
     status: row.status,
+    repairJobId: row.repairJobId,
+    repairDeadlineAt: row.repairDeadlineAt,
     openedAt: row.openedAt,
     updatedAt: row.updatedAt,
     recoveredAt: row.recoveredAt,

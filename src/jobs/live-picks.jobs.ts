@@ -3,6 +3,7 @@ import { runPicksProbeAndSync } from '../services/live-lifecycle-orchestrator';
 import { livePicksQueue } from '../queues/live-picks.queue';
 import { logError, logInfo } from '../utils/logger';
 import { FPLClientError } from '../utils/errors';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type LivePicksRefreshResult = Readonly<{
   canaryCount: number;
@@ -33,6 +34,9 @@ export async function enqueueLivePicksRefresh(
 ) {
   if (!Number.isSafeInteger(eventId) || eventId <= 0) {
     throw new Error('Live picks refresh requires a positive event id');
+  }
+  if (await isQueueDrainOnly(livePicksQueue.name)) {
+    throw new QueueDrainOnlyError(livePicksQueue.name);
   }
   const now = options.now ?? new Date();
   const job = await livePicksQueue.add(

@@ -22,6 +22,7 @@ import {
 } from '../queues/manager-live.queue';
 import { queueRedisSingleton } from '../queues/redis';
 import { logError, logInfo } from '../utils/logger';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export async function markManagerLiveScopeHot(
   scope: ManagerLiveRefreshScope,
@@ -85,6 +86,9 @@ async function addManagerLiveRefresh(
   hotState?: ManagerLiveHotScopeState | null,
   classicStandingsPage?: number | null,
 ): Promise<Job<ManagerLiveJobData>> {
+  if (await isQueueDrainOnly(managerLiveQueue.name)) {
+    throw new QueueDrainOnlyError(managerLiveQueue.name);
+  }
   const now = Date.now();
   const data: ManagerLiveJobData = {
     version: MANAGER_LIVE_JOB_VERSION,

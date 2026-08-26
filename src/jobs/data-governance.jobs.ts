@@ -7,6 +7,7 @@ import {
   type DataGovernanceJobName,
 } from '../queues/data-governance.queue';
 import { logInfo } from '../utils/logger';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export async function enqueueDataGovernanceJob(
   season: FplSeasonRef,
@@ -19,6 +20,9 @@ export async function enqueueDataGovernanceJob(
     jobId?: string;
   }> = {},
 ) {
+  if (await isQueueDrainOnly(dataGovernanceQueue.name)) {
+    throw new QueueDrainOnlyError(dataGovernanceQueue.name);
+  }
   const job = await dataGovernanceQueue.add(
     jobName,
     {

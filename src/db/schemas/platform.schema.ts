@@ -689,6 +689,8 @@ export const dataGovernanceCasesInOps = ops.table(
     attempts: integer().default(0).notNull(),
     status: text().default('OPEN').notNull(),
     lastError: text('last_error'),
+    repairJobId: text('repair_job_id'),
+    repairDeadlineAt: timestamp('repair_deadline_at', { withTimezone: true, mode: 'date' }),
     openedAt: timestamp('opened_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
@@ -714,6 +716,10 @@ export const dataGovernanceCasesInOps = ops.table(
       sql`status = ANY (ARRAY['OPEN','AUTO_REPAIRING','REQUIRES_REVIEW','RECOVERED','DISMISSED'])`,
     ),
     check('data_governance_cases_attempts_check', sql`attempts >= 0`),
+    check(
+      'data_governance_cases_repair_deadline_check',
+      sql`repair_deadline_at IS NULL OR repair_deadline_at >= opened_at`,
+    ),
     check(
       'data_governance_cases_key_check',
       sql`btrim(case_kind) <> '' AND btrim(contract_key) <> '' AND btrim(lane) <> '' AND btrim(scope_key) <> '' AND btrim(error_class) <> '' AND btrim(error_code) <> '' AND btrim(fingerprint) <> '' AND btrim(compensator) <> ''`,

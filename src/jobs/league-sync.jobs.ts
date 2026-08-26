@@ -32,7 +32,7 @@ async function enqueueLeagueSyncJob(
 ) {
   try {
     const queue = leagueSyncQueue;
-    if (source === 'manual' && (await isQueueDrainOnly(queue.name))) {
+    if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
     const runId = options.runId ?? randomUUID();

@@ -5,12 +5,16 @@ import {
 } from '../queues/tournament-repair.queue';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { TournamentSetupIssueRecord } from '../domain/tournament-setup-issue';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export async function enqueueTournamentRepair(
   season: FplSeasonRef,
   issue: TournamentSetupIssueRecord,
   source: TournamentRepairJobData['source'] = 'setup',
 ) {
+  if (await isQueueDrainOnly(tournamentRepairQueue.name)) {
+    throw new QueueDrainOnlyError(tournamentRepairQueue.name);
+  }
   const data: TournamentRepairJobData = {
     seasonId: season.seasonId,
     seasonCode: season.seasonCode,

@@ -24,8 +24,11 @@ import {
   getFreshnessWindow,
   listGovernanceCases,
   observeDueFreshnessWindows,
+  reopenExpiredGovernanceCaseRepair,
   updateGovernanceCaseStatus,
 } from '../services/data-governance.service';
+import { dataContractRegistry } from '../domain/data-contracts';
+import { getConfig } from '../utils/config';
 import {
   enqueueCoreSnapshotJob,
   enqueuePlayerStatsSyncJob,
@@ -207,6 +210,11 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
         return { auditedAt: new Date().toISOString(), openCases: openCases.length };
       }
       case DATA_GOVERNANCE_JOBS.CASE_RECHECK: {
+        if (getConfig().FRESHNESS_SLO_MODE !== 'enforced') {
+          // Shadow mode is deliberately observation-only. Do not claim cases
+          // or enqueue any producer repair until enforcement is enabled.
+          return { checked: 0, recovered: 0, dispatched: 0, requiresReview: 0, shadow: true };
+        }
         const openCases = await listGovernanceCases({
           status: ['OPEN', 'AUTO_REPAIRING'],
           limit: 100,
@@ -250,6 +258,40 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
             continue;
           }
 
+          // A claimed repair owns a bounded settlement window. Rechecks run
+          // every minute, so never dispatch another attempt while the prior
+          // producer/outbox/cache chain can still be settling. Once the
+          // deadline has elapsed, reopen with a CAS; the next pass may claim
+          // the next attempt.
+          if (governanceCase.status === 'AUTO_REPAIRING') {
+            if (!governanceCase.repairDeadlineAt) {
+              const changed = await updateGovernanceCaseStatus({
+                caseId: governanceCase.caseId,
+                expectedUpdatedAt: governanceCase.updatedAt,
+                status: 'REQUIRES_REVIEW',
+                lastError: 'AUTOMATIC_REPAIR_DEADLINE_MISSING',
+              });
+              if (changed) requiresReview += 1;
+              continue;
+            }
+            if (governanceCase.repairDeadlineAt.getTime() > Date.now()) continue;
+            if (governanceCase.attempts >= 2) {
+              const changed = await updateGovernanceCaseStatus({
+                caseId: governanceCase.caseId,
+                expectedUpdatedAt: governanceCase.updatedAt,
+                status: 'REQUIRES_REVIEW',
+                lastError: 'AUTOMATIC_REPAIR_ATTEMPTS_EXHAUSTED',
+              });
+              if (changed) requiresReview += 1;
+              continue;
+            }
+            await reopenExpiredGovernanceCaseRepair({
+              caseId: governanceCase.caseId,
+              expectedUpdatedAt: governanceCase.updatedAt,
+            });
+            continue;
+          }
+
           if (governanceCase.attempts >= 2) {
             const changed = await updateGovernanceCaseStatus({
               caseId: governanceCase.caseId,
@@ -264,6 +306,11 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
           const claimed = await claimGovernanceCaseRepair({
             caseId: governanceCase.caseId,
             expectedUpdatedAt: governanceCase.updatedAt,
+            repairJobId: `governance-case-${governanceCase.caseId}-attempt-${governanceCase.attempts + 1}`,
+            settlementMs:
+              dataContractRegistry.find(
+                (contract) => contract.contractKey === governanceCase.contractKey,
+              )?.executionBudgetMs ?? 15 * 60_000,
           });
           if (!claimed) continue;
           try {

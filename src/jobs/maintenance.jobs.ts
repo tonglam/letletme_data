@@ -70,11 +70,7 @@ export async function enqueueMaintenanceJob(
 ) {
   const runId = options.runId ?? randomUUID();
   const lane = maintenanceLaneForJob(jobName, options);
-  if (
-    (source === 'manual' || source === 'api') &&
-    lane !== 'maintenance' &&
-    (await isQueueDrainOnly(lane))
-  ) {
+  if (await isQueueDrainOnly(lane)) {
     throw new QueueDrainOnlyError(lane);
   }
   const data: MaintenanceJobData = {

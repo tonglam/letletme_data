@@ -34,7 +34,7 @@ async function enqueueDataSyncJob(
 ) {
   try {
     const queue = dataSyncQueue;
-    if ((source === 'manual' || source === 'api') && (await isQueueDrainOnly(queue.name))) {
+    if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
     const jobId = options.jobId

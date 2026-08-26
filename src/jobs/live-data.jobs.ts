@@ -82,7 +82,7 @@ export async function enqueueLiveSnapshot(
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
   try {
     const queue = liveDataQueue;
-    if (source === 'manual' && (await isQueueDrainOnly(queue.name))) {
+    if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
     const explicitJobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : null;

@@ -8,6 +8,7 @@ import {
   claimSchedulerObligations,
   confirmSchedulerObligationEnqueued,
   deferSchedulerObligationByIdentity,
+  deferSchedulerObligationForAdmission,
   failSchedulerObligation,
   findDueSchedulerObligationCandidates,
   hasEarlierInFlightSchedulerObligation,
@@ -38,7 +39,7 @@ import {
 } from './job-registry';
 import { latestActiveSchedulerPlansByScope } from './plan-coalescing';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
-import { readQueueAdmission } from '../services/queue-governance.service';
+import { QueueDrainOnlyError, readQueueAdmission } from '../services/queue-governance.service';
 import { upsertFreshnessWindow } from '../services/data-governance.service';
 import { getConfig } from '../utils/config';
 import { mapWithConcurrency, TimeoutError, withTimeout } from '../utils/async';
@@ -123,10 +124,21 @@ async function recordFreshnessWindowForPlan(
   seasonId: number,
 ): Promise<void> {
   const contract = contractForSchedulerJob(definition.name);
-  if (!contract || contract.visibility === 'excluded') return;
+  if (
+    !contract ||
+    contract.visibility === 'excluded' ||
+    contract.freshnessEvidence !== 'publication'
+  )
+    return;
   const eligibleAtMs = evidenceNumber(plan.evidence, 'eligibleAtMs') ?? plan.dueAt.getTime();
   const eligibleAt = new Date(eligibleAtMs);
-  const dueAt = new Date(plan.dueAt.getTime() + contract.dispatchWithinMs);
+  // The freshness deadline is end-to-end: the scheduler must dispatch within
+  // the dispatch budget and the producer must finish within its execution
+  // budget. A dispatch-only deadline would breach every long-running but
+  // healthy producer before it had a chance to publish evidence.
+  const dueAt = new Date(
+    plan.dueAt.getTime() + contract.dispatchWithinMs + contract.executionBudgetMs,
+  );
   if (!Number.isFinite(eligibleAt.getTime()) || !Number.isFinite(dueAt.getTime())) return;
   const explicitSourceDay = evidenceString(plan.evidence, 'sourceDay');
   const sourceDay =
@@ -1276,6 +1288,18 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       if (!confirmed) throw new Error('Scheduler lane enqueue confirmation CAS failed');
       enqueued += 1;
     } catch (error) {
+      if (error instanceof QueueDrainOnlyError) {
+        await failSchedulerLaneDispatch({
+          laneId: dispatch.lane.laneId,
+          owner: dispatch.owner,
+          error: 'QUEUE_DRAIN_ONLY',
+        });
+        logInfo('Latest-wins scheduler lane deferred by admission gate', {
+          laneKey,
+          laneId: dispatch.lane.laneId,
+        });
+        continue;
+      }
       let reconciliationConfirmed = true;
       try {
         await reconcileSingleFlightBullState(dispatch.lane);
@@ -1361,6 +1385,19 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         // checkpoint reconciler must transition this row to succeeded.
         enqueued += 1;
       } catch (error) {
+        if (error instanceof QueueDrainOnlyError) {
+          await deferSchedulerObligationForAdmission({
+            obligationId: obligation.obligationId,
+            owner,
+            generation: obligation.generation,
+            delayMs: error.retryAfterSeconds * 1_000,
+          });
+          logInfo('Scheduler obligation deferred by admission gate', {
+            jobName: obligation.jobName,
+            obligationId: obligation.obligationId,
+          });
+          return;
+        }
         failed += 1;
         await failSchedulerObligation({ obligationId: obligation.obligationId, owner, error });
         logError('Scheduler obligation enqueue failed', error, {

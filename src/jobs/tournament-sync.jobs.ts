@@ -301,7 +301,7 @@ async function enqueueTournamentSyncJob(
     const useOfficialLane =
       jobName === TOURNAMENT_JOBS.OFFICIAL_H2H && getConfig().QUEUE_LANES_V2_ENABLED;
     const queue = useOfficialLane ? officialH2hLiveQueue : tournamentSyncQueue;
-    if (source === 'manual' && (await isQueueDrainOnly(queue.name))) {
+    if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
     const jobData: TournamentSyncJobData = {

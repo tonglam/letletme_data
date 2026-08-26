@@ -3,6 +3,11 @@ import { randomUUID } from 'node:crypto';
 import type { UnderstatSyncMode, UnderstatSyncTrigger } from '../domain/understat';
 import { getUnderstatPlayerQueue } from '../queues/understat-player.queue';
 import { getUnderstatTeamQueue } from '../queues/understat-team.queue';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
+
+async function assertUnderstatAdmission(queueName: string): Promise<void> {
+  if (await isQueueDrainOnly(queueName)) throw new QueueDrainOnlyError(queueName);
+}
 
 export interface UnderstatSyncRequest {
   season: string;
@@ -16,8 +21,10 @@ export interface UnderstatSyncRequest {
 }
 
 export async function enqueueUnderstatTeamSync(request: UnderstatSyncRequest) {
+  const queue = getUnderstatTeamQueue();
+  await assertUnderstatAdmission(queue.name);
   const runId = request.runId ?? randomUUID();
-  const job = await getUnderstatTeamQueue().add(
+  const job = await queue.add(
     'understat-team-discover',
     {
       runId,
@@ -36,8 +43,10 @@ export async function enqueueUnderstatTeamSync(request: UnderstatSyncRequest) {
 }
 
 export async function enqueueUnderstatPlayerSync(request: UnderstatSyncRequest) {
+  const queue = getUnderstatPlayerQueue();
+  await assertUnderstatAdmission(queue.name);
   const runId = request.runId ?? randomUUID();
-  const job = await getUnderstatPlayerQueue().add(
+  const job = await queue.add(
     'understat-player-discover',
     {
       runId,
@@ -66,7 +75,9 @@ export async function enqueueUnderstatTeamDetail(input: {
   teamId: number;
   teamTitle: string;
 }) {
-  return getUnderstatTeamQueue().add('understat-team-detail', input, {
+  const queue = getUnderstatTeamQueue();
+  await assertUnderstatAdmission(queue.name);
+  return queue.add('understat-team-detail', input, {
     jobId: `understat-team-detail-${input.runId}-${input.teamId}`,
   });
 }
@@ -79,7 +90,9 @@ export async function enqueueUnderstatTeamFinalize(input: {
   obligationId?: string;
   obligationGeneration?: number;
 }) {
-  return getUnderstatTeamQueue().add('understat-team-finalize', input, {
+  const queue = getUnderstatTeamQueue();
+  await assertUnderstatAdmission(queue.name);
+  return queue.add('understat-team-finalize', input, {
     jobId: `understat-team-finalize-${input.runId}`,
   });
 }
@@ -94,7 +107,9 @@ export async function enqueueUnderstatPlayerTeamDetail(input: {
   resourceId: number;
   teamTitle: string;
 }) {
-  return getUnderstatPlayerQueue().add('understat-player-team-detail', input, {
+  const queue = getUnderstatPlayerQueue();
+  await assertUnderstatAdmission(queue.name);
+  return queue.add('understat-player-team-detail', input, {
     jobId: `understat-player-team-${input.runId}-${input.resourceId}`,
   });
 }
@@ -108,7 +123,9 @@ export async function enqueueUnderstatPlayerMatch(input: {
   obligationGeneration?: number;
   resourceId: number;
 }) {
-  return getUnderstatPlayerQueue().add('understat-player-match', input, {
+  const queue = getUnderstatPlayerQueue();
+  await assertUnderstatAdmission(queue.name);
+  return queue.add('understat-player-match', input, {
     jobId: `understat-player-match-${input.runId}-${input.resourceId}`,
   });
 }
@@ -121,7 +138,9 @@ export async function enqueueUnderstatPlayerFinalize(input: {
   obligationId?: string;
   obligationGeneration?: number;
 }) {
-  return getUnderstatPlayerQueue().add('understat-player-finalize', input, {
+  const queue = getUnderstatPlayerQueue();
+  await assertUnderstatAdmission(queue.name);
+  return queue.add('understat-player-finalize', input, {
     jobId: `understat-player-finalize-${input.runId}`,
   });
 }

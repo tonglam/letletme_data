@@ -83,6 +83,8 @@ CREATE TABLE ops.data_governance_cases (
   attempts integer NOT NULL DEFAULT 0,
   status text NOT NULL DEFAULT 'OPEN',
   last_error text,
+  repair_job_id text,
+  repair_deadline_at timestamptz,
   opened_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   recovered_at timestamptz,
@@ -91,6 +93,9 @@ CREATE TABLE ops.data_governance_cases (
     status IN ('OPEN','AUTO_REPAIRING','REQUIRES_REVIEW','RECOVERED','DISMISSED')
   ),
   CONSTRAINT data_governance_cases_attempts_check CHECK (attempts >= 0),
+  CONSTRAINT data_governance_cases_repair_deadline_check CHECK (
+    repair_deadline_at IS NULL OR repair_deadline_at >= opened_at
+  ),
   CONSTRAINT data_governance_cases_key_check CHECK (
     btrim(case_kind) <> '' AND btrim(contract_key) <> '' AND btrim(lane) <> ''
     AND btrim(scope_key) <> '' AND btrim(error_class) <> '' AND btrim(error_code) <> ''

@@ -33,6 +33,8 @@ export type DataContract = Readonly<{
   schedulerJobs: readonly string[];
   dispatchWithinMs: number;
   executionBudgetMs: number;
+  /** Evidence writer currently attached to this contract's producer. */
+  freshnessEvidence?: 'publication' | 'checkpoint' | 'none';
   integrity: string;
   publicationEvidence: readonly string[];
   consumerEvidence: Readonly<{
@@ -62,6 +64,7 @@ export const dataContractRegistry = [
     schedulerJobs: ['core-current-reconcile', 'core-snapshot'],
     dispatchWithinMs: 60_000,
     executionBudgetMs: 5 * 60_000,
+    freshnessEvidence: 'publication',
     integrity: 'teams/events/fixtures complete for the source revision',
     publicationEvidence: ['ops.dataset_publications active', 'checksum', 'Redis pointer'],
     consumerEvidence: publicConsumers('coreEventContext', 'homePublicBootstrap'),
@@ -78,6 +81,7 @@ export const dataContractRegistry = [
     schedulerJobs: ['market-daily', 'price-change-predictions', 'player-market-freshness-watchdog'],
     dispatchWithinMs: 10 * 60_000,
     executionBudgetMs: 10 * 60_000,
+    freshnessEvidence: 'publication',
     integrity: 'expected player count equals observed count and source-day lineage matches',
     publicationEvidence: ['source artifact bytes/SHA', 'market rows', 'active publication'],
     consumerEvidence: publicConsumers('marketSnapshotContext/priceChangeBoard', 'market pages'),
@@ -94,6 +98,7 @@ export const dataContractRegistry = [
     schedulerJobs: ['live-snapshot', 'live-finalization'],
     dispatchWithinMs: 30_000,
     executionBudgetMs: 90_000,
+    freshnessEvidence: 'publication',
     integrity: 'event roster and all fixture groups are complete',
     publicationEvidence: ['active fpl:live publication', 'event checkpoint'],
     consumerEvidence: publicConsumers('liveSnapshot/gameweekDesk', 'live pages'),

@@ -9,6 +9,7 @@ import { logError, logInfo } from '../../utils/logger';
 import { getQueueConnection } from '../../utils/queue';
 import { runFormalHttpWorker } from './formal-http.worker';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../../queues/retention';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../../services/queue-governance.service';
 
 export const contentHttpAcquisitionQueueName = 'content-http-acquisition';
 
@@ -29,6 +30,9 @@ export function getContentHttpAcquisitionQueue(): Queue<AcquisitionJobV1> {
 export async function enqueueFormalHttpRun(
   claimed: Pick<ClaimedFormalRun | ClaimedAcquisitionJobOutbox, 'job' | 'jobId' | 'priority'>,
 ): Promise<Job<AcquisitionJobV1>> {
+  if (await isQueueDrainOnly(contentHttpAcquisitionQueueName)) {
+    throw new QueueDrainOnlyError(contentHttpAcquisitionQueueName);
+  }
   const job = acquisitionJobV1Schema.parse(claimed.job);
   return getContentHttpAcquisitionQueue().add('content-http-acquisition', job, {
     jobId: claimed.jobId,

@@ -64,6 +64,11 @@ export type OfficialH2HStanding = RawFPLLeagueStandingsResult & { entry: number 
 export type OfficialH2HSourceSnapshot = {
   standings: OfficialH2HStanding[];
   matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+  /** Exact provider page boundaries, retained for locked-manifest validation. */
+  pageMatches?: readonly {
+    pageNumber: number;
+    matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+  }[];
   pageManifests?: readonly OfficialH2HPageManifest[];
 };
 
@@ -546,7 +551,7 @@ export async function fetchOfficialH2HSourceSnapshot(
     durationMs: Math.max(0, Date.now() - startedAt),
     scheduleHash,
   });
-  return { standings, matches, pageManifests };
+  return { standings, matches, pageMatches: pageSlices, pageManifests };
 }
 
 export function projectOfficialH2HStandings(
@@ -1056,8 +1061,13 @@ export async function syncOfficialH2HTournament(
       // Validate against this run's provider evidence only. Falling back to
       // persisted rows here would let a missing/empty page appear healthy and
       // publish stale data after the locked schedule has drifted.
-      const pageMatches = fetched.matches.filter((match) => manifest.matchIds.includes(match.id));
-      if (!validateOfficialH2HPageManifest(manifest, pageMatches)) {
+      const fetchedPage = fetched.pageMatches?.find(
+        (page) => page.pageNumber === manifest.pageNumber,
+      );
+      // Validate the complete provider response, not a filtered projection of
+      // the locked IDs. Filtering would hide a newly inserted match and let a
+      // changed page publish stale persisted rows.
+      if (!fetchedPage || !validateOfficialH2HPageManifest(manifest, fetchedPage.matches)) {
         throw new ValidationError(
           `Official H2H page ${manifest.pageNumber} changed after it was locked.`,
           'TOURNAMENT_OFFICIAL_H2H_PAGE_CHANGED',

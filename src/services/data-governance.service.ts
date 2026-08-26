@@ -10,7 +10,6 @@ import { getDb, type DbHandle } from '../db/singleton';
 import type { DataPublicationManifest } from '../cache/data-publication';
 import {
   applyFreshnessObservation,
-  evaluateFreshnessWindow,
   type FreshnessCompletenessStatus,
   type FreshnessSloStatus,
 } from '../domain/freshness-slo';
@@ -214,92 +213,101 @@ export async function recordFreshnessObservation(input: {
   db?: DbHandle;
 }): Promise<FreshnessSloStatus | null> {
   const db = input.db ?? (await getDb());
-  const [current] = await db
-    .select()
-    .from(freshnessSloWindowsInOps)
-    .where(eq(freshnessSloWindowsInOps.windowId, input.windowId))
-    .limit(1);
-  if (!current) return null;
-  const completeness =
-    input.completenessStatus ??
-    (input.invalid ? 'INVALID' : (current.completenessStatus as FreshnessCompletenessStatus));
-  const invalid = input.invalid ?? current.status === 'INVALID';
-  const observation = {
-    eligible: current.status !== 'NOT_APPLICABLE',
-    invalid,
-    consumerEvidenceRequired: getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED,
-    dueAt: current.dueAt,
-    sourceCheckedAt: input.sourceCheckedAt ?? current.sourceCheckedAt,
-    pgPublishedAt: input.pgPublishedAt ?? current.pgPublishedAt,
-    redisSeenAt: input.redisSeenAt ?? current.redisSeenAt,
-    graphqlSeenAt: input.graphqlSeenAt ?? current.graphqlSeenAt,
-    producerRevision: input.producerRevision ?? current.producerRevision,
-    redisRevision: input.redisRevision ?? current.redisRevision,
-    graphqlRevision: input.graphqlRevision ?? current.graphqlRevision,
-    webRevision: input.webRevision ?? current.webRevision,
-    expectedCount: input.expectedCount ?? current.expectedCount,
-    observedCount: input.observedCount ?? current.observedCount,
-    completeness,
-    webSeenAt: input.webSeenAt ?? current.webSeenAt,
-  } as const;
-  const status = evaluateFreshnessWindow(observation);
-  const applied = applyFreshnessObservation(current.status as FreshnessSloStatus, observation);
-  const nextStatus = current.status === 'BREACHED' ? 'BREACHED' : status;
-  const updates: Record<string, unknown> = {
-    completenessStatus: completeness,
-    status: nextStatus,
-    breachCode:
-      input.breachCode ??
-      (nextStatus === 'BREACHED' ? (current.breachCode ?? 'DEADLINE_OR_INCOMPLETE') : null),
-    updatedAt: sql`clock_timestamp()`,
-  };
-  // Observation events are partial by design: a Redis/cache probe may arrive
-  // before the producer checkpoint. Never overwrite an earlier milestone with
-  // undefined (or move an observed timestamp backwards).
-  const milestoneFields = [
-    ['sourceCheckedAt', input.sourceCheckedAt],
-    ['pgPublishedAt', input.pgPublishedAt],
-    ['redisSeenAt', input.redisSeenAt],
-    ['graphqlSeenAt', input.graphqlSeenAt],
-    ['webSeenAt', input.webSeenAt],
-    ['producerRevision', input.producerRevision],
-    ['redisRevision', input.redisRevision],
-    ['graphqlRevision', input.graphqlRevision],
-    ['webRevision', input.webRevision],
-    ['expectedCount', input.expectedCount],
-    ['observedCount', input.observedCount],
-    ['notApplicableCount', input.notApplicableCount],
-  ] as const;
-  for (const [field, value] of milestoneFields) {
-    if (value === undefined) continue;
-    // Milestone timestamps are append-only evidence. A delayed probe can
-    // arrive out of order, but it must never move a previously observed
-    // source/publication/consumer timestamp backwards. Revision and count
-    // fields are snapshots and may legitimately change while a window is
-    // pending, so only the timestamp columns use this guard.
-    if (
-      (field === 'sourceCheckedAt' ||
-        field === 'pgPublishedAt' ||
-        field === 'redisSeenAt' ||
-        field === 'graphqlSeenAt' ||
-        field === 'webSeenAt') &&
-      current[field] instanceof Date &&
-      value instanceof Date &&
-      value.getTime() < current[field].getTime()
-    ) {
-      continue;
+  return db.transaction(async (tx) => {
+    // The status machine is monotonic, but the evidence columns are a
+    // read/compute/write operation. Lock the row so overlapping publication
+    // and consumer probes cannot derive a status from the same stale snapshot
+    // and move a window backwards.
+    const [current] = await tx
+      .select()
+      .from(freshnessSloWindowsInOps)
+      .where(eq(freshnessSloWindowsInOps.windowId, input.windowId))
+      .for('update')
+      .limit(1);
+    if (!current) return null;
+    const completeness =
+      input.completenessStatus ??
+      (input.invalid ? 'INVALID' : (current.completenessStatus as FreshnessCompletenessStatus));
+    const invalid = input.invalid ?? current.status === 'INVALID';
+    const observation = {
+      eligible: current.status !== 'NOT_APPLICABLE',
+      invalid,
+      consumerEvidenceRequired: getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED,
+      dueAt: current.dueAt,
+      sourceCheckedAt: input.sourceCheckedAt ?? current.sourceCheckedAt,
+      pgPublishedAt: input.pgPublishedAt ?? current.pgPublishedAt,
+      redisSeenAt: input.redisSeenAt ?? current.redisSeenAt,
+      graphqlSeenAt: input.graphqlSeenAt ?? current.graphqlSeenAt,
+      producerRevision: input.producerRevision ?? current.producerRevision,
+      redisRevision: input.redisRevision ?? current.redisRevision,
+      graphqlRevision: input.graphqlRevision ?? current.graphqlRevision,
+      webRevision: input.webRevision ?? current.webRevision,
+      expectedCount: input.expectedCount ?? current.expectedCount,
+      observedCount: input.observedCount ?? current.observedCount,
+      completeness,
+      webSeenAt: input.webSeenAt ?? current.webSeenAt,
+    } as const;
+    const applied = applyFreshnessObservation(current.status as FreshnessSloStatus, observation);
+    // `applyFreshnessObservation` preserves historical MET/BREACHED semantics;
+    // do not derive a second status path that could demote a settled window.
+    const nextStatus = applied.status;
+    const updates: Record<string, unknown> = {
+      completenessStatus: completeness,
+      status: nextStatus,
+      breachCode:
+        nextStatus === 'BREACHED'
+          ? (input.breachCode ?? current.breachCode ?? 'DEADLINE_OR_INCOMPLETE')
+          : null,
+      updatedAt: sql`clock_timestamp()`,
+    };
+    // Observation events are partial by design: a Redis/cache probe may arrive
+    // before the producer checkpoint. Never overwrite an earlier milestone with
+    // undefined (or move an observed timestamp backwards).
+    const milestoneFields = [
+      ['sourceCheckedAt', input.sourceCheckedAt],
+      ['pgPublishedAt', input.pgPublishedAt],
+      ['redisSeenAt', input.redisSeenAt],
+      ['graphqlSeenAt', input.graphqlSeenAt],
+      ['webSeenAt', input.webSeenAt],
+      ['producerRevision', input.producerRevision],
+      ['redisRevision', input.redisRevision],
+      ['graphqlRevision', input.graphqlRevision],
+      ['webRevision', input.webRevision],
+      ['expectedCount', input.expectedCount],
+      ['observedCount', input.observedCount],
+      ['notApplicableCount', input.notApplicableCount],
+    ] as const;
+    for (const [field, value] of milestoneFields) {
+      if (value === undefined) continue;
+      // Milestone timestamps are append-only evidence. A delayed probe can
+      // arrive out of order, but it must never move a previously observed
+      // source/publication/consumer timestamp backwards. Revision and count
+      // fields are snapshots and may legitimately change while a window is
+      // pending, so only the timestamp columns use this guard.
+      if (
+        (field === 'sourceCheckedAt' ||
+          field === 'pgPublishedAt' ||
+          field === 'redisSeenAt' ||
+          field === 'graphqlSeenAt' ||
+          field === 'webSeenAt') &&
+        current[field] instanceof Date &&
+        value instanceof Date &&
+        value.getTime() < current[field].getTime()
+      ) {
+        continue;
+      }
+      updates[field] = value;
     }
-    updates[field] = value;
-  }
-  if (applied.recovered) {
-    updates.recoveredAt = sql`COALESCE(${freshnessSloWindowsInOps.recoveredAt}, clock_timestamp())`;
-    updates.recoveryRevision = input.webRevision ?? current.webRevision ?? null;
-  }
-  await db
-    .update(freshnessSloWindowsInOps)
-    .set(updates as never)
-    .where(eq(freshnessSloWindowsInOps.windowId, input.windowId));
-  return nextStatus;
+    if (applied.recovered) {
+      updates.recoveredAt = sql`COALESCE(${freshnessSloWindowsInOps.recoveredAt}, clock_timestamp())`;
+      updates.recoveryRevision = input.webRevision ?? current.webRevision ?? null;
+    }
+    await tx
+      .update(freshnessSloWindowsInOps)
+      .set(updates as never)
+      .where(eq(freshnessSloWindowsInOps.windowId, input.windowId));
+    return nextStatus;
+  });
 }
 
 export async function listFreshnessWindows(
@@ -387,6 +395,10 @@ export async function observeDueFreshnessWindows(
     });
     if (status !== 'BREACHED' && status !== 'INVALID') continue;
     if (status === 'BREACHED') breached += 1;
+    // Shadow mode is observation-only.  Keep the breached window for
+    // baseline/error-budget reporting, but do not create a repair case until
+    // enforcement is explicitly enabled.
+    if (getConfig().FRESHNESS_SLO_MODE !== 'enforced') continue;
     const contract = dataContractRegistry.find((item) => item.contractKey === window.contractKey);
     const existing = await openGovernanceCase({
       caseKind: 'freshness-breach',
@@ -511,12 +523,50 @@ export async function transitionGovernanceCase(input: {
         : 'REQUIRES_REVIEW';
   const result = await db
     .update(dataGovernanceCasesInOps)
-    .set({ status: nextStatus, updatedAt: sql`clock_timestamp()` })
+    .set({
+      status: nextStatus,
+      repairJobId: null,
+      repairDeadlineAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
     .where(
       and(
         eq(dataGovernanceCasesInOps.caseId, input.caseId),
         eq(dataGovernanceCasesInOps.updatedAt, input.expectedUpdatedAt),
         inArray(dataGovernanceCasesInOps.status, ['OPEN', 'REQUIRES_REVIEW']),
+      ),
+    )
+    .returning({ caseId: dataGovernanceCasesInOps.caseId });
+  return result.length === 1;
+}
+
+/**
+ * Release a repair claim only after its bounded settlement window has elapsed.
+ * This prevents the minute-level case recheck from dispatching duplicate work
+ * while the producer job is still running or its publication evidence is
+ * still propagating through the outbox/cache.
+ */
+export async function reopenExpiredGovernanceCaseRepair(input: {
+  caseId: number;
+  expectedUpdatedAt: Date;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  const result = await db
+    .update(dataGovernanceCasesInOps)
+    .set({
+      status: 'OPEN',
+      repairJobId: null,
+      repairDeadlineAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(dataGovernanceCasesInOps.caseId, input.caseId),
+        eq(dataGovernanceCasesInOps.updatedAt, input.expectedUpdatedAt),
+        eq(dataGovernanceCasesInOps.status, 'AUTO_REPAIRING'),
+        sql`${dataGovernanceCasesInOps.repairDeadlineAt} IS NOT NULL`,
+        sql`${dataGovernanceCasesInOps.repairDeadlineAt} <= clock_timestamp()`,
       ),
     )
     .returning({ caseId: dataGovernanceCasesInOps.caseId });
@@ -532,14 +582,22 @@ export async function transitionGovernanceCase(input: {
 export async function claimGovernanceCaseRepair(input: {
   caseId: number;
   expectedUpdatedAt: Date;
+  repairJobId: string;
+  settlementMs: number;
   db?: DbHandle;
 }) {
+  if (input.repairJobId.trim().length === 0) throw new Error('Repair job id is required');
+  if (!Number.isSafeInteger(input.settlementMs) || input.settlementMs < 1_000) {
+    throw new Error('Repair settlement window must be at least one second');
+  }
   const db = input.db ?? (await getDb());
   const [row] = await db
     .update(dataGovernanceCasesInOps)
     .set({
       status: 'AUTO_REPAIRING',
       attempts: sql`${dataGovernanceCasesInOps.attempts} + 1`,
+      repairJobId: input.repairJobId,
+      repairDeadlineAt: sql`clock_timestamp() + ${input.settlementMs} * interval '1 millisecond'`,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -547,6 +605,7 @@ export async function claimGovernanceCaseRepair(input: {
         eq(dataGovernanceCasesInOps.caseId, input.caseId),
         eq(dataGovernanceCasesInOps.updatedAt, input.expectedUpdatedAt),
         inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING']),
+        sql`${dataGovernanceCasesInOps.repairJobId} IS NULL`,
         lt(dataGovernanceCasesInOps.attempts, 2),
       ),
     )
@@ -574,6 +633,8 @@ export async function updateGovernanceCaseStatus(input: {
             recoveryRevision: input.recoveryRevision ?? null,
           }
         : {}),
+      repairJobId: null,
+      repairDeadlineAt: null,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
