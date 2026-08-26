@@ -164,17 +164,25 @@ describe('manager live refresh policy', () => {
     expect(parseManagerLiveClassicCursor('101')).toBeUndefined();
   });
 
-  test('removes the generation-aware hot state for an empty authoritative roster', async () => {
-    const calls: string[] = [];
+  test('removes the generation-aware hot state only for the owning generation', async () => {
+    const calls: Array<[string, number, string, string]> = [];
     const redis = {
-      del: async (key: string) => {
-        calls.push(key);
+      eval: async (script: string, numberOfKeys: number, key: string, generation: string) => {
+        calls.push([script, numberOfKeys, key, generation]);
         return 1;
       },
     };
 
-    await removeManagerLiveHotState(redis as never, { ...scope, entryIds: [] });
-    expect(calls).toEqual([managerLiveHotStateKey({ ...scope, entryIds: [] })]);
+    await expect(
+      removeManagerLiveHotState(redis as never, { ...scope, entryIds: [] }, 'generation-a'),
+    ).resolves.toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]).toBe(1);
+    expect(calls[0]?.[2]).toBe(managerLiveHotStateKey({ ...scope, entryIds: [] }));
+    expect(calls[0]?.[3]).toBe('generation-a');
+    await expect(
+      removeManagerLiveHotState(redis as never, { ...scope, entryIds: [] }),
+    ).resolves.toBe(false);
   });
 
   test('stops follow-up eligibility when the hot scope expires or is malformed', async () => {

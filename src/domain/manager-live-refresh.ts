@@ -41,7 +41,6 @@ type ManagerLiveHotRedis = {
 
 type ManagerLiveHotStateRedis = ManagerLiveHotRedis & {
   eval(script: string, numberOfKeys: number, ...args: string[]): Promise<unknown>;
-  del(key: string): Promise<unknown>;
 };
 
 export type ManagerLiveHotScopeState = ManagerLiveRefreshScope & {
@@ -292,6 +291,14 @@ redis.call('SET', KEYS[1], encoded, 'PX', ttl)
 return encoded
 `;
 
+const REMOVE_HOT_SCOPE_IF_GENERATION_MATCHES_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if not current or ARGV[1] == '' then return 0 end
+local ok, state = pcall(cjson.decode, current)
+if not ok or not state or state['generation'] ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
+`;
+
 export const parseManagerLiveHotState = parseManagerLiveHotScopeState;
 
 export async function initializeManagerLiveHotState(
@@ -376,8 +383,16 @@ export async function loadManagerLiveHotState(
 export async function removeManagerLiveHotState(
   redis: ManagerLiveHotStateRedis,
   scope: ManagerLiveRefreshScope,
-): Promise<void> {
-  await redis.del(managerLiveHotStateKey(scope));
+  expectedGeneration?: string,
+): Promise<boolean> {
+  if (!expectedGeneration) return false;
+  const result = await redis.eval(
+    REMOVE_HOT_SCOPE_IF_GENERATION_MATCHES_SCRIPT,
+    1,
+    managerLiveHotStateKey(scope),
+    expectedGeneration,
+  );
+  return Number(result) === 1;
 }
 
 export async function advanceManagerLiveHotState(

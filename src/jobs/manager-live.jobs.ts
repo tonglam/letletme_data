@@ -61,9 +61,12 @@ export async function readManagerLiveHotState(
   return state;
 }
 
-export async function clearManagerLiveHotScope(scope: ManagerLiveRefreshScope): Promise<void> {
+export async function clearManagerLiveHotScope(
+  scope: ManagerLiveRefreshScope,
+  expectedGeneration?: string,
+): Promise<boolean> {
   const redis = await queueRedisSingleton.getClient();
-  await removeManagerLiveHotState(redis, scope);
+  return removeManagerLiveHotState(redis, scope, expectedGeneration);
 }
 
 export async function reconcileManagerLiveHotScopeRoster(

@@ -3101,9 +3101,13 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
               refreshedEntryIds: [],
             };
             if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
+              const backgroundMaxPage = Math.min(
+                MAX_STANDINGS_PAGES,
+                startPage + MAX_BACKGROUND_STANDINGS_PAGES - 1,
+              );
               backgroundResult = await runManagerStandingsPageSequence(
                 startPage,
-                MAX_BACKGROUND_STANDINGS_PAGES,
+                backgroundMaxPage,
                 async (page) => {
                   const pageResult = await runClassicStandingsRefresh(
                     redis,
