@@ -1350,8 +1350,10 @@ const materializedProjectedRows = (
   materializations: readonly ManagerScoreMaterializedRow[],
   includeEffectiveLineup: boolean,
   expectedLiveRef?: { publicationId: string; revision: number | string },
+  rankMetadataRows: readonly CachedRow[] = [],
 ): CachedRow[] => {
   const byEntry = new Map(materializations.map((row) => [row.entryId, row] as const));
+  const rankMetadataByEntry = new Map(rankMetadataRows.map((row) => [row.entryId, row] as const));
   return entryIds.flatMap((entryId) => {
     const row = byEntry.get(entryId);
     if (
@@ -1385,6 +1387,27 @@ const materializedProjectedRows = (
     ) {
       return [];
     }
+    const rankMetadataCandidate = rankMetadataByEntry.get(entryId);
+    const liveCheckedAt = row.liveCheckedAt.getTime();
+    const rankMetadata =
+      rankMetadataCandidate &&
+      (rankMetadataCandidate.source === 'FPL_ENTRY_SUMMARY' ||
+        rankMetadataCandidate.source === 'FPL_CLASSIC_STANDINGS') &&
+      Number.isFinite(Date.parse(rankMetadataCandidate.checkedAt)) &&
+      Date.parse(rankMetadataCandidate.checkedAt) <= liveCheckedAt &&
+      isWithinStaleWindow(rankMetadataCandidate, liveCheckedAt)
+        ? rankMetadataCandidate
+        : undefined;
+    const rankRevision = rankMetadata
+      ? contentHash({
+          entryId,
+          eventId,
+          source: rankMetadata.source,
+          eventRank: rankMetadata.eventRank,
+          overallRank: rankMetadata.overallRank,
+          leagueRank: rankMetadata.leagueRank,
+        })
+      : null;
     const checkedAt = row.liveCheckedAt.toISOString();
     const effectiveLineup =
       includeEffectiveLineup && isEffectiveLineup(row.effectiveLineup)
@@ -1399,14 +1422,14 @@ const materializedProjectedRows = (
         netEventPoints: row.netEventPoints,
         totalPoints: row.totalPoints,
         totalScope: 'OVERALL' as const,
-        eventRank: null,
-        overallRank: null,
-        leagueRank: null,
+        eventRank: rankMetadata?.eventRank ?? null,
+        overallRank: rankMetadata?.overallRank ?? null,
+        leagueRank: rankMetadata?.leagueRank ?? null,
         source: 'FPL_EVENT_LIVE' as const,
         transferCost: row.transferCost,
         eventPointSemantics:
           row.transferCost === 0 ? ('ZERO_COST_EQUIVALENT' as const) : ('GROSS' as const),
-        revision: row.scoreRevision,
+        revision: `${row.scoreRevision}:${rankRevision ?? 'none'}`,
         checkedAt,
         upstreamUpdatedAt: checkedAt,
         staleAt: plusSeconds(checkedAt, STALE_SECONDS),
@@ -1419,7 +1442,7 @@ const materializedProjectedRows = (
           algorithmVersion: row.algorithmVersion,
           inputRevision: row.inputRevision,
           scoreRevision: row.scoreRevision,
-          rankRevision: row.rankRevision,
+          rankRevision,
           livePublicationId: row.livePublicationId,
           liveRevision: row.liveRevision,
           liveCheckedAt: checkedAt,
@@ -1430,8 +1453,12 @@ const materializedProjectedRows = (
           resultRevision: null,
           resultCheckedAt: null,
           dataCheckedAt: null,
-          rankSource: row.rankSource,
-          rankCheckedAt: row.rankCheckedAt?.toISOString() ?? null,
+          rankSource:
+            rankMetadata?.source === 'FPL_ENTRY_SUMMARY' ||
+            rankMetadata?.source === 'FPL_CLASSIC_STANDINGS'
+              ? rankMetadata.source
+              : null,
+          rankCheckedAt: rankMetadata?.checkedAt ?? null,
         },
       },
     ];
@@ -2951,6 +2978,32 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     }
 
     let projectedRows: CachedRow[] = [];
+    let rankMetadataRows: CachedRow[] = [];
+    let rankMetadataRedis: Redis | null = null;
+    try {
+      rankMetadataRedis = await redisSingleton.getClient();
+    } catch (error) {
+      logWarn('Rank metadata Redis unavailable in cache-only mode', {
+        eventId: input.eventId,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+    }
+    try {
+      const metadata = await readCachedAndCheckpointRows(
+        rankMetadataRedis,
+        season,
+        input.eventId,
+        scope,
+        uniqueEntryIds,
+      );
+      rankMetadataRows = [...metadata.values()];
+    } catch (error) {
+      logWarn('Rank metadata read failed in cache-only mode', {
+        eventId: input.eventId,
+        entries: uniqueEntryIds.length,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+    }
     try {
       const projectedHeadRead = await readManagerScoreHeadRowsWithSource(
         season,
@@ -2965,6 +3018,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         projectedHeadRead.rows,
         input.includeEffectiveLineup === true,
         input.liveRef,
+        rankMetadataRows,
       );
       for (const row of projectedRows) {
         sourceByEntry.set(

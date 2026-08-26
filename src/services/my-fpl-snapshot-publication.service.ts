@@ -136,6 +136,12 @@ export function isMatchingProvisionalMyFplPublication(
     kind: MyFplSnapshotKind;
     snapshotDate: string;
     contentSha256: string;
+    scoreSource: MyFplSnapshotPublication['scoreSource'];
+    livePublicationId: string | null;
+    liveRevision: string | null;
+    algorithmVersion: string | null;
+    sourceMinCheckedAt: string;
+    sourceMaxCheckedAt: string;
   }>,
 ): active is MyFplSnapshotPublication {
   return (
@@ -143,7 +149,13 @@ export function isMatchingProvisionalMyFplPublication(
     isCompleteMyFplPublication(active) &&
     active.kind === candidate.kind &&
     active.snapshotDate === candidate.snapshotDate &&
-    active.contentSha256 === candidate.contentSha256
+    active.contentSha256 === candidate.contentSha256 &&
+    active.scoreSource === candidate.scoreSource &&
+    active.livePublicationId === candidate.livePublicationId &&
+    active.liveRevision === candidate.liveRevision &&
+    active.algorithmVersion === candidate.algorithmVersion &&
+    active.sourceMinCheckedAt?.toISOString() === candidate.sourceMinCheckedAt &&
+    active.sourceMaxCheckedAt?.toISOString() === candidate.sourceMaxCheckedAt
   );
 }
 
@@ -876,14 +888,15 @@ const projectedResult = (
     const effective = effectiveLineup.get(pick.element);
     return effective?.autoSub === true && effective.pickActive === true;
   });
-  const outgoingAutoSubs = picks.filter((pick) => {
-    const effective = effectiveLineup.get(pick.element);
-    return pick.position <= 11 && effective?.pickActive === false;
+  const automaticSubstitutions = incomingAutoSubs.map((pick) => {
+    const outgoingElement = effectiveLineup.get(pick.element)?.autoSubForElementId;
+    if (!outgoingElement) {
+      throw new MyFplSnapshotIncompleteError(
+        `Projected auto-substitution for entry ${entry.entry_id} has no accepted outgoing starter`,
+      );
+    }
+    return { element_in: pick.element, element_out: outgoingElement };
   });
-  const automaticSubstitutions = incomingAutoSubs.map((pick, index) => ({
-    element_in: pick.element,
-    element_out: outgoingAutoSubs[index]?.element ?? null,
-  }));
   const eventPoints = score.eventPoints;
   const eventNetPoints = score.netEventPoints;
   const transferCost = score.transferCost;
@@ -2506,6 +2519,12 @@ async function captureMyFplSnapshotOnce(
         kind,
         snapshotDate,
         contentSha256,
+        scoreSource,
+        livePublicationId,
+        liveRevision,
+        algorithmVersion,
+        sourceMinCheckedAt: sourceCheckedAtIso,
+        sourceMaxCheckedAt: sourceMaxCheckedAtIso,
       })
     ) {
       return { status: 'noop', publication: active };

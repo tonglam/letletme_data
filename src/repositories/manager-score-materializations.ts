@@ -580,6 +580,13 @@ const materializationRevisionLockKey = (
   inputRevision: string,
 ): string => `${materializationLockKey(seasonId, eventId, mode)}:${inputRevision}`;
 
+const materializationEntryLockKey = (
+  seasonId: number,
+  eventId: number,
+  mode: string,
+  entryId: number,
+): string => `${materializationLockKey(seasonId, eventId, mode)}:entry:${entryId}`;
+
 /**
  * Persist a batch after calculation. Materializations are immutable; heads
  * are advanced only while the durable fpl:live pointer still names the exact
@@ -602,10 +609,21 @@ export async function persistManagerScoreMaterializations(
   const db = await getDbClient();
   const rowsForRedis: Array<ManagerScoreMaterializationInput & { generation: number }> = [];
   const result = await db.begin(async (tx) => {
-    // Lock each input revision in deterministic order. This coalesces the
-    // common overlap between entry sets without serializing unrelated
-    // revisions for the same event, while the per-entry head row lock below
-    // still protects generation assignment.
+    // Lock each entry identity before assigning generations. Different input
+    // revisions for one entry must serialize even though their revision locks
+    // are distinct; otherwise both can publish generation 1 and Redis may
+    // retain the losing payload. Entry locks are deterministic to avoid
+    // deadlocks for overlapping batches.
+    const entryIds = Array.from(new Set(rows.map((row) => row.entryId))).sort((a, b) => a - b);
+    for (const entryId of entryIds) {
+      await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${materializationEntryLockKey(season.seasonId, eventId, first.calculationMode, entryId)}, 0)
+        )
+      `;
+    }
+    // Lock each input revision in deterministic order to coalesce overlapping
+    // entry sets that are calculating the same immutable materialization.
     const revisions = Array.from(new Set(rows.map((row) => row.inputRevision))).sort();
     for (const revision of revisions) {
       await tx`
@@ -723,7 +741,7 @@ export async function persistManagerScoreMaterializations(
         continue;
       }
       const generation = Number(existing[0]?.generation ?? 0) + 1;
-      await tx`
+      const headWrite = await tx<Array<{ generation: number | string }>>`
         INSERT INTO fpl.manager_event_score_heads (
           season_id, event_id, entry_id, calculation_mode,
           input_revision, score_revision, generation,
@@ -743,8 +761,14 @@ export async function persistManagerScoreMaterializations(
             verified_previous_totals_revision = EXCLUDED.verified_previous_totals_revision,
             updated_at = now()
         WHERE fpl.manager_event_score_heads.generation < EXCLUDED.generation
+        RETURNING generation
       `;
-      rowsForRedis.push({ ...row, generation });
+      if (headWrite.length === 0) {
+        headsRejected += 1;
+        continue;
+      }
+      const publishedGeneration = Number(headWrite[0]!.generation);
+      rowsForRedis.push({ ...row, generation: publishedGeneration });
       headsUpdated += 1;
     }
     return { materializationsWritten, headsUpdated, headsRejected };

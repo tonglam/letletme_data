@@ -12,10 +12,7 @@ import {
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
-const resultPicksMigration = readFileSync(
-  'migrations/0052_entry_event_result_picks.sql',
-  'utf8',
-);
+const resultPicksMigration = readFileSync('migrations/0052_entry_event_result_picks.sql', 'utf8');
 const retainedRevisionMigration = readFileSync(
   'migrations/0038_my_fpl_retained_revision_reads.sql',
   'utf8',
@@ -155,9 +152,7 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(resultPicksMigration).toContain('entry_event_results_event_picks_array');
     expect(publicationService).toContain('result.event_picks');
     expect(publicationService).toContain('overlayFinalResultPicks');
-    expect(publicationService).toContain(
-      'final result picks are incomplete or changed for event',
-    );
+    expect(publicationService).toContain('final result picks are incomplete or changed for event');
   });
 
   test('serializes publication timestamps for the production postgres adapter', () => {
@@ -311,6 +306,12 @@ describe('My FPL daily snapshot publication contract', () => {
         kind: 'PROVISIONAL',
         snapshotDate: active.snapshotDate,
         contentSha256: active.contentSha256,
+        scoreSource: active.scoreSource,
+        livePublicationId: active.livePublicationId,
+        liveRevision: active.liveRevision,
+        algorithmVersion: active.algorithmVersion,
+        sourceMinCheckedAt: active.sourceMinCheckedAt!.toISOString(),
+        sourceMaxCheckedAt: active.sourceMaxCheckedAt!.toISOString(),
       }),
     ).toBe(true);
     expect(
@@ -318,6 +319,12 @@ describe('My FPL daily snapshot publication contract', () => {
         kind: 'PROVISIONAL',
         snapshotDate: active.snapshotDate,
         contentSha256: 'b'.repeat(64),
+        scoreSource: active.scoreSource,
+        livePublicationId: active.livePublicationId,
+        liveRevision: active.liveRevision,
+        algorithmVersion: active.algorithmVersion,
+        sourceMinCheckedAt: active.sourceMinCheckedAt!.toISOString(),
+        sourceMaxCheckedAt: active.sourceMaxCheckedAt!.toISOString(),
       }),
     ).toBe(false);
     expect(
@@ -325,6 +332,12 @@ describe('My FPL daily snapshot publication contract', () => {
         kind: 'FINAL',
         snapshotDate: active.snapshotDate,
         contentSha256: active.contentSha256,
+        scoreSource: 'FPL_FINAL_RESULT',
+        livePublicationId: null,
+        liveRevision: null,
+        algorithmVersion: null,
+        sourceMinCheckedAt: active.sourceMinCheckedAt!.toISOString(),
+        sourceMaxCheckedAt: active.sourceMaxCheckedAt!.toISOString(),
       }),
     ).toBe(false);
     expect(resolveMyFplSnapshotCoverageState(null, 0)).toBe('NO_PUBLICATION');

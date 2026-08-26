@@ -17,6 +17,8 @@ export type EffectiveLineupRow = Readonly<{
   isCaptain: boolean;
   isViceCaptain: boolean;
   captainForScoring: boolean;
+  /** The starter accepted as the outgoing leg of this projected auto-sub. */
+  autoSubForElementId?: number | null;
 }>;
 
 /** Validate the complete scoring lineup before it crosses a storage/API boundary. */
@@ -55,6 +57,9 @@ export const isEffectiveLineup = (value: unknown): value is readonly EffectiveLi
       typeof row.isCaptain !== 'boolean' ||
       typeof row.isViceCaptain !== 'boolean' ||
       typeof row.captainForScoring !== 'boolean' ||
+      (row.autoSubForElementId !== undefined &&
+        row.autoSubForElementId !== null &&
+        (!Number.isSafeInteger(row.autoSubForElementId) || row.autoSubForElementId <= 0)) ||
       elements.has(elementId) ||
       positions.has(position) ||
       (row.pickActive ? effectiveMultiplier <= 0 : effectiveMultiplier !== 0) ||
@@ -170,6 +175,7 @@ type MutableProjectionPick = ProjectionPick & {
   effectiveMultiplier: number;
   pickActive: boolean;
   autoSub: boolean;
+  autoSubForElementId: number | null;
 };
 
 const isCompletedFixture = (fixture: Fixture): boolean =>
@@ -220,6 +226,7 @@ export function projectEventLiveManagerScore(input: {
     effectiveMultiplier: pick.multiplier > 0 ? 1 : 0,
     pickActive: pick.multiplier > 0,
     autoSub: false,
+    autoSubForElementId: null,
   }));
   const positions = new Set(picks.map((pick) => pick.position));
   const elements = new Set(picks.map((pick) => pick.elementId));
@@ -301,12 +308,14 @@ export function projectEventLiveManagerScore(input: {
         const previousStarterActive = starter.pickActive;
         const previousBenchActive = benchPlayer.pickActive;
         const previousBenchAutoSub = benchPlayer.autoSub;
+        const previousBenchAutoSubForElementId = benchPlayer.autoSubForElementId;
 
         starter.effectiveMultiplier = 0;
         starter.pickActive = false;
         benchPlayer.effectiveMultiplier = 1;
         benchPlayer.pickActive = true;
         benchPlayer.autoSub = true;
+        benchPlayer.autoSubForElementId = starter.elementId;
         if (validFormation(picks)) {
           nonPlayingStarters.splice(index, 1);
           break;
@@ -317,6 +326,7 @@ export function projectEventLiveManagerScore(input: {
         benchPlayer.effectiveMultiplier = previousBenchMultiplier;
         benchPlayer.pickActive = previousBenchActive;
         benchPlayer.autoSub = previousBenchAutoSub;
+        benchPlayer.autoSubForElementId = previousBenchAutoSubForElementId;
       }
     }
   } else {
@@ -372,6 +382,7 @@ export function projectEventLiveManagerScore(input: {
       isCaptain: pick.isCaptain,
       isViceCaptain: pick.isViceCaptain,
       captainForScoring: pick === captainForScoring,
+      autoSubForElementId: pick.autoSubForElementId,
     })),
   };
 }
