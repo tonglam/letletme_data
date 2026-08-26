@@ -43,6 +43,17 @@ async function assertCoreSourceIsNotStale(
   db: DbOrTransaction,
 ): Promise<void> {
   if (!sourceCheckedAt) return;
+  // Use the same scope advisory lock as activatePublication before taking
+  // publication-row locks.  The activation path locks its target staging row
+  // before the active rows; serialising the source fence at the scope level
+  // prevents a concurrent Core persist from acquiring those rows in the
+  // opposite order and deadlocking the publication transaction.
+  await db.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtext('fpl:core'),
+      hashtext(${`${season.seasonId}:0`})
+    )
+  `);
   const publications = await db
     .select({
       publicationId: datasetPublicationsInOps.publicationId,
