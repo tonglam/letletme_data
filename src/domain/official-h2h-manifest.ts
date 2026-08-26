@@ -80,3 +80,18 @@ export function pagesContainingEvent(
     .map((manifest) => manifest.pageNumber)
     .sort((a, b) => a - b);
 }
+
+/** Return locked page boundaries that a complete provider fetch failed to return. */
+export function missingLockedPageNumbers(
+  existing: readonly {
+    pageNumber: number;
+    lockedAt: string | Date | null;
+  }[],
+  incoming: readonly Pick<OfficialH2HPageManifest, 'pageNumber'>[],
+): number[] {
+  const incomingPages = new Set(incoming.map((manifest) => manifest.pageNumber));
+  return existing
+    .filter((manifest) => manifest.lockedAt !== null && !incomingPages.has(manifest.pageNumber))
+    .map((manifest) => manifest.pageNumber)
+    .sort((a, b) => a - b);
+}

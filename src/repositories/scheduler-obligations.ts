@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
 
-import { schedulerObligationsInOps } from '../db/schemas/index.schema';
+import { freshnessSloWindowsInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
 import { contractForSchedulerJob, queueLaneForSchedulerJob } from '../domain/data-contracts';
@@ -456,6 +456,31 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
       ),
     )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  const contract = contractForSchedulerJob(input.jobName);
+  if (contract?.freshnessEvidence === 'publication') {
+    await db
+      .update(freshnessSloWindowsInOps)
+      .set({
+        status: 'NOT_APPLICABLE',
+        completenessStatus: 'NOT_APPLICABLE',
+        breachCode: null,
+        evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify({
+          reason: 'SUPERSEDED_BY_LATEST',
+          ...(input.evidence?.supersededByPeriodKey === undefined
+            ? {}
+            : { supersededByPeriodKey: input.evidence.supersededByPeriodKey }),
+        })}::jsonb`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(freshnessSloWindowsInOps.contractKey, contract.contractKey),
+          eq(freshnessSloWindowsInOps.scopeKey, input.scopeKey),
+          inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
+          sql`${freshnessSloWindowsInOps.obligationDueAt} < ${beforeDueAt}::timestamptz`,
+        ),
+      );
+  }
   return updated.length;
 }
 

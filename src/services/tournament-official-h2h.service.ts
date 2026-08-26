@@ -1296,6 +1296,7 @@ export async function syncOfficialH2HTournament(
     lockSchedule: scoringSnapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
     groupRows,
     pageManifests: snapshot.pageManifests,
+    fullReconcile: options.forceFull === true,
   });
 
   logInfo('Official H2H strategy completed', {

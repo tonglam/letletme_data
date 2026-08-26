@@ -35,6 +35,7 @@ import {
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 import { reconcileDataPublication } from './data-publication-reconciler';
+import { recordDataPublicationEvidence } from './data-governance.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import { withMutationScopes } from '../utils/mutation-scopes';
 
@@ -723,6 +724,38 @@ export async function syncLiveSnapshot(
           ((seasonCode: string, currentEventId: number, checkedAt: Date) =>
             refreshLiveSnapshotHeartbeat(seasonCode, currentEventId, checkedAt))
         )(season.seasonCode, eventId, lastSuccessfulFetchAt);
+      }
+      if (retainedActive) {
+        try {
+          // Do not carry an old window id forward when this poll was not
+          // dispatched for a specific freshness repair.  The retained
+          // publication is valid evidence for the current source run, but an
+          // old window would incorrectly settle a different obligation.
+          const { freshnessWindowId: _retainedFreshnessWindowId, ...retainedManifest } =
+            retainedActive.manifest;
+          await recordDataPublicationEvidence({
+            manifest: {
+              ...retainedManifest,
+              sourceCheckedAt: checkedAt.toISOString(),
+              lastSuccessfulFetchAt: lastSuccessfulFetchAt.toISOString(),
+              ...(options.freshnessWindowId === undefined
+                ? {}
+                : { freshnessWindowId: options.freshnessWindowId }),
+            },
+            sourceRunId,
+            payloads: {
+              eventLive: retainedActive.eventLives,
+              fixtures: retainedActive.fixtures,
+            },
+            pgPublishedAt: new Date(retainedActive.manifest.publishedAt),
+            redisSeenAt: lastSuccessfulFetchAt,
+          });
+        } catch (error) {
+          logError('Unchanged live snapshot freshness evidence update failed', error, {
+            eventId,
+            publicationId: retainedActive.manifest.publicationId,
+          });
+        }
       }
       await syncOperationsRepository.finishRun(sourceRunId, {
         status: 'skipped',

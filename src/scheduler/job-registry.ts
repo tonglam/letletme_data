@@ -860,7 +860,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, plan, obligationId, generation }) => {
+    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;
       if (!eventId) throw new Error('Live snapshot obligation has no event checkpoint');
       const job = await enqueueLiveSnapshot(context.season, eventId, 'reconcile', {
@@ -869,6 +869,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         reuseExisting: true,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },
@@ -1033,12 +1034,13 @@ function coreLifecycleReconcileDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, obligationId, generation }) => {
+    enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
       const job = await enqueueCoreSnapshotJob(context.season, 'reconcile', {
         jobId: `scheduler-${obligationId}-g${generation}`,
         removeOnSettle: false,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -1079,7 +1081,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, plan, obligationId, generation }) => {
+    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;
       if (!eventId) throw new Error('Live finalization obligation has no event checkpoint');
       const job = await enqueueLiveSnapshot(context.season, eventId, 'reconcile', {
@@ -1089,6 +1091,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
         reuseExisting: true,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },
@@ -1152,12 +1155,13 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'critical',
       queueName: 'data-sync',
       successPredicate: 'core publication active for current authoritative event',
-      enqueue: async ({ context, obligationId, generation }) => {
+      enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
         const job = await enqueueCoreSnapshotJob(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },
@@ -1171,13 +1175,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'critical',
       queueName: 'data-sync',
       successPredicate: 'complete market snapshot and delivered publication',
-      enqueue: async ({ context, plan, obligationId, generation }) => {
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const job = await enqueuePlayerValuesSyncJob(context.season, 'catchup', {
           changeDate: plan.periodKey,
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },
@@ -1252,11 +1257,12 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'normal',
       queueName: 'maintenance',
       successPredicate: 'market freshness watchdog verifies a complete current snapshot',
-      enqueue: async ({ context, obligationId, generation }) => {
+      enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
         const job = await enqueuePlayerMarketFreshness(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },

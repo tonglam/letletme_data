@@ -4,9 +4,10 @@ import {
   dataGovernanceCasesInOps,
   freshnessSloWindowsInOps,
   queueHealthWindowsInOps,
+  seasonsInFpl,
   schedulerObligationsInOps,
 } from '../db/schemas/index.schema';
-import { getDb, type DbHandle } from '../db/singleton';
+import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { DataPublicationManifest } from '../cache/data-publication';
 import {
   applyFreshnessObservation,
@@ -153,19 +154,32 @@ export async function recordDataPublicationEvidence(input: {
   const windows =
     freshnessWindowId !== undefined
       ? await db
-          .select({ windowId: freshnessSloWindowsInOps.windowId })
+          .select({
+            windowId: freshnessSloWindowsInOps.windowId,
+            scopeKey: freshnessSloWindowsInOps.scopeKey,
+            eventId: freshnessSloWindowsInOps.eventId,
+            seasonCode: seasonsInFpl.seasonCode,
+          })
           .from(freshnessSloWindowsInOps)
+          .innerJoin(seasonsInFpl, eq(seasonsInFpl.seasonId, freshnessSloWindowsInOps.seasonId))
           .where(
             and(
               eq(freshnessSloWindowsInOps.windowId, freshnessWindowId),
               eq(freshnessSloWindowsInOps.contractKey, contractKey),
+              eq(seasonsInFpl.seasonCode, input.manifest.seasonCode),
               inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED', 'INVALID']),
             ),
           )
           .limit(1)
       : await db
-          .select({ windowId: freshnessSloWindowsInOps.windowId })
+          .select({
+            windowId: freshnessSloWindowsInOps.windowId,
+            scopeKey: freshnessSloWindowsInOps.scopeKey,
+            eventId: freshnessSloWindowsInOps.eventId,
+            seasonCode: seasonsInFpl.seasonCode,
+          })
           .from(freshnessSloWindowsInOps)
+          .innerJoin(seasonsInFpl, eq(seasonsInFpl.seasonId, freshnessSloWindowsInOps.seasonId))
           .innerJoin(
             schedulerObligationsInOps,
             and(
@@ -177,11 +191,20 @@ export async function recordDataPublicationEvidence(input: {
             and(
               eq(schedulerObligationsInOps.runId, sourceRunId as string),
               eq(freshnessSloWindowsInOps.contractKey, contractKey),
+              eq(seasonsInFpl.seasonCode, input.manifest.seasonCode),
               inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED', 'INVALID']),
             ),
           )
           .limit(20);
-  if (windows.length === 0) return 0;
+  const eligibleWindows = windows.filter((window) => {
+    if (window.seasonCode !== input.manifest.seasonCode) return false;
+    if (contractKey === 'live-snapshot' && window.eventId !== input.manifest.eventId) {
+      return false;
+    }
+    const scopeSeason = window.scopeKey.match(/^(\d{4})(?::|$)/)?.[1];
+    return scopeSeason === input.manifest.seasonCode;
+  });
+  if (eligibleWindows.length === 0) return 0;
 
   const sourceCheckedAt = new Date(input.manifest.sourceCheckedAt);
   const publishedAt = new Date(input.manifest.publishedAt);
@@ -198,7 +221,7 @@ export async function recordDataPublicationEvidence(input: {
     completenessStatus: counts.completenessStatus,
   } as const;
   let updated = 0;
-  for (const window of windows) {
+  for (const window of eligibleWindows) {
     const status = await recordFreshnessObservation({
       windowId: window.windowId,
       ...observation,
@@ -207,6 +230,36 @@ export async function recordDataPublicationEvidence(input: {
     if (status !== null) updated += 1;
   }
   return updated;
+}
+
+/**
+ * Bind a publication freshness window to an already-reserved scheduler
+ * obligation.  Window reservation is deliberately best-effort and happens
+ * after the obligation insert, so this small JSON merge lets existing rows
+ * carry the exact window identity into the eventual Bull payload as well.
+ */
+export async function attachFreshnessWindowToSchedulerObligation(input: {
+  obligationId: string;
+  freshnessWindowId: number;
+  db?: DbOrTransaction;
+}): Promise<boolean> {
+  if (
+    !input.obligationId ||
+    !Number.isSafeInteger(input.freshnessWindowId) ||
+    input.freshnessWindowId <= 0
+  ) {
+    return false;
+  }
+  const db = input.db ?? (await getDb());
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({ freshnessWindowId: input.freshnessWindowId })}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length === 1;
 }
 
 export async function recordFreshnessObservation(input: {
@@ -564,6 +617,7 @@ export async function transitionGovernanceCase(input: {
     .update(dataGovernanceCasesInOps)
     .set({
       status: nextStatus,
+      ...(input.action === 'execute' ? { attempts: 0 } : {}),
       repairJobId: null,
       repairDeadlineAt: null,
       updatedAt: sql`clock_timestamp()`,

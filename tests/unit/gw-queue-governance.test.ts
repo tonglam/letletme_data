@@ -15,6 +15,7 @@ import {
 } from '../../src/services/queue-governance.service';
 import { summarizeDataError } from '../../src/domain/error-classification';
 import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-official-h2h.service';
+import { missingLockedPageNumbers } from '../../src/domain/official-h2h-manifest';
 import {
   dataContractRegistry,
   canonicalQueueCatalog,
@@ -172,6 +173,19 @@ describe('GW queue and data governance primitives', () => {
         true,
       ),
     ).toEqual({ mode: 'full', pageNumbers: [] });
+  });
+
+  test('detects locked H2H pages missing from a guarded full fetch', () => {
+    expect(
+      missingLockedPageNumbers(
+        [
+          { pageNumber: 1, lockedAt: '2026-08-25T00:00:00.000Z' },
+          { pageNumber: 2, lockedAt: '2026-08-25T00:00:00.000Z' },
+          { pageNumber: 3, lockedAt: null },
+        ],
+        [{ pageNumber: 1 }, { pageNumber: 3 }, { pageNumber: 4 }],
+      ),
+    ).toEqual([2]);
   });
 
   test('keeps queue, maintenance and contract catalogs explicit', () => {

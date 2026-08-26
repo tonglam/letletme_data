@@ -14,7 +14,10 @@ import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-import type { OfficialH2HPageManifest } from '../domain/official-h2h-manifest';
+import {
+  missingLockedPageNumbers,
+  type OfficialH2HPageManifest,
+} from '../domain/official-h2h-manifest';
 import type { RawFPLLeagueH2HMatch } from '../clients/fpl';
 
 import { createTournamentGroupRepository } from './tournament-groups';
@@ -29,6 +32,8 @@ export type OfficialH2HPublication = {
   bracketRows: DbTournamentKnockoutInsert[];
   groupRows: DbTournamentGroupInsert[];
   pageManifests?: readonly OfficialH2HPageManifest[];
+  /** A guarded full fetch must prove that no previously locked page vanished. */
+  fullReconcile?: boolean;
 };
 
 function previousLockedAt(
@@ -157,6 +162,16 @@ export const tournamentOfficialH2HRepository = {
           );
         }
 
+        if (
+          publication.fullReconcile === true &&
+          current.scheduleLockedAt &&
+          (!publication.pageManifests || publication.pageManifests.length === 0)
+        ) {
+          throw new ConflictError(
+            'Official H2H full reconciliation did not return page manifests.',
+            'TOURNAMENT_OFFICIAL_H2H_PAGE_MISSING',
+          );
+        }
         if (publication.pageManifests && publication.pageManifests.length > 0) {
           const existingManifests = await tx
             .select()
@@ -170,6 +185,18 @@ export const tournamentOfficialH2HRepository = {
           const existingByPage = new Map(
             existingManifests.map((manifest) => [manifest.pageNumber, manifest]),
           );
+          if (publication.fullReconcile === true && current.scheduleLockedAt) {
+            const missingLockedPages = missingLockedPageNumbers(
+              existingManifests,
+              publication.pageManifests,
+            );
+            if (missingLockedPages.length > 0) {
+              throw new ConflictError(
+                `Official H2H locked page(s) missing from full reconciliation: ${missingLockedPages.join(',')}.`,
+                'TOURNAMENT_OFFICIAL_H2H_PAGE_MISSING',
+              );
+            }
+          }
           for (const manifest of publication.pageManifests) {
             const previous = existingByPage.get(manifest.pageNumber);
             if (

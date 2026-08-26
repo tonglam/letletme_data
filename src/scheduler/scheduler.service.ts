@@ -40,7 +40,10 @@ import {
 import { latestActiveSchedulerPlansByScope } from './plan-coalescing';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { QueueDrainOnlyError, readQueueAdmission } from '../services/queue-governance.service';
-import { upsertFreshnessWindow } from '../services/data-governance.service';
+import {
+  attachFreshnessWindowToSchedulerObligation,
+  upsertFreshnessWindow,
+} from '../services/data-governance.service';
 import { getConfig } from '../utils/config';
 import { mapWithConcurrency, TimeoutError, withTimeout } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
@@ -122,14 +125,14 @@ async function recordFreshnessWindowForPlan(
   definition: ScheduledJobDefinition,
   plan: SchedulerObligationPlan,
   seasonId: number,
-): Promise<void> {
+): Promise<number | null> {
   const contract = contractForSchedulerJob(definition.name);
   if (
     !contract ||
     contract.visibility === 'excluded' ||
     contract.freshnessEvidence !== 'publication'
   )
-    return;
+    return null;
   const eligibleAtMs = evidenceNumber(plan.evidence, 'eligibleAtMs') ?? plan.dueAt.getTime();
   const eligibleAt = new Date(eligibleAtMs);
   // The freshness deadline is end-to-end: the scheduler must dispatch within
@@ -139,14 +142,14 @@ async function recordFreshnessWindowForPlan(
   const dueAt = new Date(
     plan.dueAt.getTime() + contract.dispatchWithinMs + contract.executionBudgetMs,
   );
-  if (!Number.isFinite(eligibleAt.getTime()) || !Number.isFinite(dueAt.getTime())) return;
+  if (!Number.isFinite(eligibleAt.getTime()) || !Number.isFinite(dueAt.getTime())) return null;
   const explicitSourceDay = evidenceString(plan.evidence, 'sourceDay');
   const sourceDay =
     explicitSourceDay ??
     (definition.name === 'market-daily' && /^\d{8}$/.test(plan.periodKey)
       ? `${plan.periodKey.slice(0, 4)}-${plan.periodKey.slice(4, 6)}-${plan.periodKey.slice(6, 8)}`
       : undefined);
-  await upsertFreshnessWindow({
+  return upsertFreshnessWindow({
     sloKey: contract.contractKey,
     contractKey: contract.contractKey,
     seasonId,
@@ -164,7 +167,13 @@ async function recordFreshnessWindowForPlan(
       scopeKey: plan.scopeKey,
       periodKey: plan.periodKey,
     });
+    return null;
   });
+}
+
+function freshnessWindowIdFromEvidence(evidence: Readonly<Record<string, unknown>> | undefined) {
+  const value = evidence?.freshnessWindowId;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 export function schedulerPlanKey(
@@ -352,6 +361,12 @@ export async function triggerPriceChangeLane(
     queueName: definition.queueName,
     desiredObligation: obligation,
   });
+  if (options.freshnessWindowId !== undefined) {
+    await attachFreshnessWindowToSchedulerObligation({
+      obligationId: advanced.lane.desiredObligationId,
+      freshnessWindowId: options.freshnessWindowId,
+    });
+  }
   if (!advanced.shouldDispatch) {
     return {
       ...(advanced.lane.bullJobId
@@ -1043,7 +1058,17 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       try {
         const obligation = await reserveSchedulerObligation({ definition, plan });
         if (!plan.terminalStatus) {
-          await recordFreshnessWindowForPlan(definition, plan, context.season.seasonId);
+          const freshnessWindowId = await recordFreshnessWindowForPlan(
+            definition,
+            plan,
+            context.season.seasonId,
+          );
+          if (freshnessWindowId !== null) {
+            await attachFreshnessWindowToSchedulerObligation({
+              obligationId: obligation.obligationId,
+              freshnessWindowId,
+            });
+          }
         }
         if (plan.terminalStatus) {
           await markSchedulerObligationIrrecoverable({
@@ -1276,6 +1301,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         },
         obligationId: target.obligation.obligationId,
         generation: target.obligation.generation,
+        freshnessWindowId: freshnessWindowIdFromEvidence(target.obligation.evidence),
         laneId: dispatch.lane.laneId,
         dispatchGeneration: dispatch.lane.dispatchGeneration,
       });
@@ -1374,6 +1400,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
           },
           obligationId: obligation.obligationId,
           generation: obligation.generation,
+          freshnessWindowId: freshnessWindowIdFromEvidence(obligation.evidence),
         });
         const confirmed = await confirmSchedulerObligationEnqueued({
           obligationId: obligation.obligationId,
