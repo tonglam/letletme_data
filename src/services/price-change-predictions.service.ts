@@ -105,6 +105,8 @@ export type PreparedPriceChangePublication = {
   readonly outcome: 'ready';
   readonly season: FplSeasonRef;
   readonly sourceRunId: string;
+  /** Exact freshness window being repaired, carried into the manifest. */
+  readonly freshnessWindowId?: number;
   readonly requestStartedAt: Date;
   readonly fetchedAt: Date;
   /** Core publication identity captured with the upstream price response. */
@@ -874,6 +876,7 @@ export async function preparePriceChangePublication(
   dependencies: PriceChangePublicationDependencies = defaultDependencies,
   trigger: 'cron' | 'manual' | 'queue' = 'queue',
   sourceRunIdOverride?: string,
+  freshnessWindowId?: number,
 ): Promise<PriceChangePreparationResult> {
   const sourceRunId = sourceRunIdOverride ?? randomUUID();
   await syncOperationsRepository.startRun({
@@ -924,6 +927,7 @@ export async function preparePriceChangePublication(
       outcome: 'ready',
       season,
       sourceRunId,
+      freshnessWindowId,
       requestStartedAt,
       fetchedAt,
       corePublicationId: core.publicationId,
@@ -1063,6 +1067,7 @@ export async function persistPriceChangePublication(
       publicationId: publication.publicationId,
       sourceCheckedAt: requestStartedAt,
       lastSuccessfulFetchAt: fetchedAt,
+      freshnessWindowId: prepared.freshnessWindowId,
       state: 'active',
       items: [
         { name: 'context', value: context },

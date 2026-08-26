@@ -130,6 +130,8 @@ export interface LiveSnapshotSyncOptions {
   readonly dependencies?: LiveSnapshotDependencies;
   /** Correlate the publication run with its scheduler/Bull obligation. */
   readonly sourceRunId?: string;
+  /** Exact freshness window being repaired, carried into the publication manifest. */
+  readonly freshnessWindowId?: number;
 }
 
 function fixtureTeamCount(fixtures: readonly Fixture[]): number {
@@ -814,6 +816,7 @@ export async function syncLiveSnapshot(
           revision: staging.revision,
           publicationId: staging.publicationId,
           sourceCheckedAt: checkedAt,
+          freshnessWindowId: options.freshnessWindowId,
           lastSuccessfulFetchAt,
           state: payload.state,
           items: [

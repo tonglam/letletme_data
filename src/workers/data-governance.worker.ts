@@ -33,7 +33,6 @@ import {
   enqueueCoreSnapshotJob,
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
-  enqueuePriceChangePredictionsJob,
 } from '../jobs/data-sync-enqueue';
 import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueLivePicksRefresh } from '../jobs/live-picks.jobs';
@@ -51,6 +50,7 @@ import {
 import { formatCronDateKey } from '../utils/timezone';
 import { persistLiveLifecycleStatus } from '../services/live-lifecycle-orchestrator';
 import { reconcileCoreAndMarketPublications } from '../services/data-publication-reconciler';
+import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import type { WorkerRuntime } from './worker-runtime';
 
 type GovernanceFreshnessCase = Awaited<ReturnType<typeof listGovernanceCases>>[number];
@@ -75,18 +75,19 @@ async function enqueueFreshnessCaseRepair(input: {
       await enqueueCoreSnapshotJob(season, 'reconcile', {
         jobId,
         removeOnSettle: false,
+        freshnessWindowId: window.windowId,
       });
       return;
     case 'market-price':
       if (window.periodKey.startsWith('price-change-')) {
-        await enqueuePriceChangePredictionsJob(season, 'reconcile', {
-          jobId,
-          removeOnSettle: false,
-        });
+        await triggerPriceChangeLane({ freshnessWindowId: window.windowId });
         return;
       }
       if (window.periodKey.startsWith('maintenance-')) {
-        await enqueuePlayerMarketFreshness(season, 'reconcile', { jobId });
+        await enqueuePlayerMarketFreshness(season, 'reconcile', {
+          jobId,
+          freshnessWindowId: window.windowId,
+        });
         return;
       }
       if (!window.sourceDay) {
@@ -100,6 +101,7 @@ async function enqueueFreshnessCaseRepair(input: {
         changeDate: sourceDay,
         jobId,
         removeOnSettle: false,
+        freshnessWindowId: window.windowId,
       });
       return;
     case 'live-snapshot':
@@ -107,6 +109,7 @@ async function enqueueFreshnessCaseRepair(input: {
       await enqueueLiveSnapshot(season, eventId, 'reconcile', {
         persistEventLives: true,
         jobId,
+        freshnessWindowId: window.windowId,
       });
       return;
     case 'live-picks':

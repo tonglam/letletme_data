@@ -3,6 +3,7 @@ import { Elysia, t } from 'elysia';
 
 import {
   listFreshnessWindows,
+  countGovernanceCases,
   listGovernanceCases,
   transitionGovernanceCase,
 } from '../services/data-governance.service';
@@ -150,7 +151,16 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
       status: status as never,
       limit: boundedLimit(query.limit, 100, 500),
     });
-    return { success: true, cases: cases.map((row) => safeGovernanceCase(row)) };
+    const openCount = await countGovernanceCases({
+      status: ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW'],
+    });
+    const total = await countGovernanceCases();
+    return {
+      success: true,
+      cases: cases.map((row) => safeGovernanceCase(row)),
+      openCount,
+      total,
+    };
   })
   .post(
     '/data-governance/cases/:id/action',

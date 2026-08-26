@@ -469,6 +469,7 @@ export async function runPicksProbeAndSync(
   state.canarySucceeded = true;
   const fanout = resolveLivePicksRefreshFanout(season.seasonCode, eventId, pending, canaries);
   const remaining = fanout.entryIds;
+  let reusedCompletedScan = false;
   if (remaining.length > 0) {
     const queuedJob = await enqueueEntryPicksSyncJob(season, 'cron', {
       eventId,
@@ -492,6 +493,21 @@ export async function runPicksProbeAndSync(
     // claim IDs that are actually present in the returned job payload; this
     // preserves retry eligibility even if an unexpected key collision occurs.
     const acceptedEntryIds = new Set(uniqueNumbers(queuedJob.data.entryIds ?? []));
+    // A cadence deduplication can return a retained completed child from the
+    // previous refresh. Treat it as evidence for this obligation only when
+    // the child explicitly covered the same entry list and its final result
+    // proves that no continuation or failed IDs remained. A partial/active
+    // child still has to settle through its normal finalizer.
+    const childState = await queuedJob.getState();
+    const childResult = queuedJob.returnvalue as
+      | { hasMore?: unknown; failedUnits?: unknown }
+      | undefined;
+    reusedCompletedScan =
+      childState === 'completed' &&
+      childResult?.hasMore === false &&
+      childResult?.failedUnits === 0 &&
+      acceptedEntryIds.size === remaining.length &&
+      remaining.every((entryId) => acceptedEntryIds.has(entryId));
     const claimedAt = resolveLivePicksRefreshClaimedAt(queuedJob.data.triggeredAt, nowMs);
     for (const entryId of remaining) {
       if (acceptedEntryIds.has(entryId)) fanoutClaims.set(entryId, claimedAt);
@@ -512,7 +528,7 @@ export async function runPicksProbeAndSync(
     synced: canaryCount,
     pending: remaining.length,
     sourceReady: true,
-    scanComplete: remaining.length === 0,
+    scanComplete: remaining.length === 0 || reusedCompletedScan,
   };
 }
 

@@ -28,6 +28,7 @@ export interface CoreSnapshotPublicationContext {
   readonly publicationId: string;
   readonly sourceRunId: string;
   readonly sourceCheckedAt: Date;
+  readonly freshnessWindowId?: number;
 }
 
 export interface CoreSnapshotCommitResult {
@@ -92,6 +93,7 @@ export async function publishCoreSnapshotPublication(
           revision: context.revision,
           publicationId: context.publicationId,
           sourceCheckedAt: context.sourceCheckedAt,
+          freshnessWindowId: context.freshnessWindowId,
           activate: false,
           afterStage: async (manifest) => {
             const payloads: Record<string, unknown> = {

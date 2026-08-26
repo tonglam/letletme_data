@@ -131,8 +131,9 @@ function publicationEvidenceCounts(
 
 /**
  * Attach the immutable publication proof to the exact scheduler/SLO window
- * that produced it.  The source run is the join key: matching only season or
- * event would let a late publication accidentally settle an older bucket.
+ * that produced it.  Repairs carry the window identity in the publication
+ * manifest because they intentionally receive a new source run/generation;
+ * ordinary scheduler jobs continue to use the source-run join as a fallback.
  * This function is deliberately best-effort at call sites; losing telemetry
  * must never roll back an already committed data publication.
  */
@@ -145,26 +146,41 @@ export async function recordDataPublicationEvidence(input: {
   db?: DbHandle;
 }): Promise<number> {
   const contractKey = PUBLICATION_CONTRACT_BY_DATASET[input.manifest.dataset];
-  if (!contractKey || !input.sourceRunId) return 0;
+  const freshnessWindowId = input.manifest.freshnessWindowId;
+  const sourceRunId = input.sourceRunId;
+  if (!contractKey || (!input.sourceRunId && freshnessWindowId === undefined)) return 0;
   const db = input.db ?? (await getDb());
-  const windows = await db
-    .select({ windowId: freshnessSloWindowsInOps.windowId })
-    .from(freshnessSloWindowsInOps)
-    .innerJoin(
-      schedulerObligationsInOps,
-      and(
-        eq(schedulerObligationsInOps.scopeKey, freshnessSloWindowsInOps.scopeKey),
-        eq(schedulerObligationsInOps.periodKey, freshnessSloWindowsInOps.periodKey),
-      ),
-    )
-    .where(
-      and(
-        eq(schedulerObligationsInOps.runId, input.sourceRunId),
-        eq(freshnessSloWindowsInOps.contractKey, contractKey),
-        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED', 'INVALID']),
-      ),
-    )
-    .limit(20);
+  const windows =
+    freshnessWindowId !== undefined
+      ? await db
+          .select({ windowId: freshnessSloWindowsInOps.windowId })
+          .from(freshnessSloWindowsInOps)
+          .where(
+            and(
+              eq(freshnessSloWindowsInOps.windowId, freshnessWindowId),
+              eq(freshnessSloWindowsInOps.contractKey, contractKey),
+              inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED', 'INVALID']),
+            ),
+          )
+          .limit(1)
+      : await db
+          .select({ windowId: freshnessSloWindowsInOps.windowId })
+          .from(freshnessSloWindowsInOps)
+          .innerJoin(
+            schedulerObligationsInOps,
+            and(
+              eq(schedulerObligationsInOps.scopeKey, freshnessSloWindowsInOps.scopeKey),
+              eq(schedulerObligationsInOps.periodKey, freshnessSloWindowsInOps.periodKey),
+            ),
+          )
+          .where(
+            and(
+              eq(schedulerObligationsInOps.runId, sourceRunId as string),
+              eq(freshnessSloWindowsInOps.contractKey, contractKey),
+              inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED', 'INVALID']),
+            ),
+          )
+          .limit(20);
   if (windows.length === 0) return 0;
 
   const sourceCheckedAt = new Date(input.manifest.sourceCheckedAt);
@@ -509,9 +525,22 @@ export async function listGovernanceCases(
 }
 
 /** Return the unbounded case total separately from the bounded operator feed. */
-export async function countGovernanceCases(db?: DbHandle): Promise<number> {
-  const handle = db ?? (await getDb());
-  const [row] = await handle.select({ count: count() }).from(dataGovernanceCasesInOps);
+export async function countGovernanceCases(
+  input:
+    | {
+        status?: GovernanceCaseStatus | GovernanceCaseStatus[];
+        db?: DbHandle;
+      }
+    | DbHandle = {},
+): Promise<number> {
+  const handle = 'select' in input ? input : (input.db ?? (await getDb()));
+  const statuses = 'select' in input ? undefined : input.status;
+  const statusValues =
+    statuses === undefined ? undefined : Array.isArray(statuses) ? statuses : [statuses];
+  const [row] = await handle
+    .select({ count: count() })
+    .from(dataGovernanceCasesInOps)
+    .where(statusValues ? inArray(dataGovernanceCasesInOps.status, statusValues) : undefined);
   return Number(row?.count ?? 0);
 }
 
@@ -526,7 +555,10 @@ export async function transitionGovernanceCase(input: {
     input.action === 'dismiss'
       ? 'DISMISSED'
       : input.action === 'execute'
-        ? 'AUTO_REPAIRING'
+        ? // Keep the case claimable. The governance worker owns the repair
+          // identity/deadline CAS; moving here to AUTO_REPAIRING with null
+          // fields would make the next recheck classify it as malformed.
+          'OPEN'
         : 'REQUIRES_REVIEW';
   const result = await db
     .update(dataGovernanceCasesInOps)

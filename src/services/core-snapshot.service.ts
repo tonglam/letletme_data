@@ -58,6 +58,8 @@ export interface CoreSnapshotSyncOptions {
    * freshness ledger can join the publication back to the exact window.
    */
   readonly sourceRunId?: string;
+  /** Exact freshness window being repaired, carried into the publication manifest. */
+  readonly freshnessWindowId?: number;
 }
 
 const defaultDependencies: CoreSnapshotDependencies = {
@@ -168,6 +170,7 @@ export async function syncCoreSnapshot(
           revision: prepared.revision,
           publicationId: prepared.publicationId,
           sourceCheckedAt,
+          freshnessWindowId: options.freshnessWindowId,
         });
         const payloads: Record<string, unknown> = {
           events: snapshot.events,
@@ -199,6 +202,7 @@ export async function syncCoreSnapshot(
           publicationId: prepared.publicationId,
           sourceRunId,
           sourceCheckedAt,
+          freshnessWindowId: options.freshnessWindowId,
         });
         return { prepared, persisted, preparedCache };
       },
@@ -212,6 +216,7 @@ export async function syncCoreSnapshot(
         publicationId: preparedAndPersisted.prepared.publicationId,
         sourceRunId,
         sourceCheckedAt,
+        freshnessWindowId: options.freshnessWindowId,
       },
       preparedAndPersisted.preparedCache,
     );

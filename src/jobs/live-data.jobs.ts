@@ -75,6 +75,7 @@ export async function enqueueLiveSnapshot(
     runId?: string;
     obligationId?: string;
     obligationGeneration?: number;
+    freshnessWindowId?: number;
     /** Scheduler reconciliation may join an already-enqueued deterministic job. */
     reuseExisting?: boolean;
   } = {},
@@ -157,6 +158,9 @@ export async function enqueueLiveSnapshot(
       ...(options.obligationGeneration === undefined
         ? {}
         : { obligationGeneration: options.obligationGeneration }),
+      ...(options.freshnessWindowId === undefined
+        ? {}
+        : { freshnessWindowId: options.freshnessWindowId }),
       persistEventLives,
       ...(options.finalizeEvent !== undefined ? { finalizeEvent: options.finalizeEvent } : {}),
     };

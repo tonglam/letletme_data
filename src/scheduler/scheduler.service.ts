@@ -279,7 +279,9 @@ export async function resolveSchedulerDefinition(
  * scheduler. A caller receives the existing Bull ID when work is already
  * waiting/running/blocked; it never creates a parallel direct data-sync job.
  */
-export async function triggerPriceChangeLane(): Promise<{
+export async function triggerPriceChangeLane(
+  options: { freshnessWindowId?: number } = {},
+): Promise<{
   bullJobId?: string | number;
   runId?: string;
   /** Whether the request enqueued a new job or joined work already pending. */
@@ -390,6 +392,7 @@ export async function triggerPriceChangeLane(): Promise<{
       generation: target.obligation.generation,
       laneId: dispatch.lane.laneId,
       dispatchGeneration: dispatch.lane.dispatchGeneration,
+      freshnessWindowId: options.freshnessWindowId,
     });
     if (result?.bullJobId === undefined)
       throw new Error('Manual price enqueue returned no Bull ID');

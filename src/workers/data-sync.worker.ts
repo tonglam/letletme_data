@@ -152,6 +152,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           marketPublication = await ensureMarketPublication(season, {
             deferDelivery: true,
             sourceRunId: job.data.runId,
+            freshnessWindowId: job.data.freshnessWindowId,
           });
           return persisted;
         });
@@ -217,6 +218,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             undefined,
             job.data.source === 'manual' ? 'manual' : 'queue',
             job.data.runId,
+            job.data.freshnessWindowId,
           );
         } catch (error) {
           if (error instanceof PriceChangeCorePublicationRequiredError) {
@@ -283,6 +285,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             return syncCoreSnapshot(season, {
               trigger: 'queue',
               sourceRunId: job.data.runId,
+              freshnessWindowId: job.data.freshnessWindowId,
             });
           case 'player-prices':
             if (!job.data.changeDate) {

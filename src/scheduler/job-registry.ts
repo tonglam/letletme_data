@@ -151,6 +151,8 @@ export type ScheduledJobDefinition = Readonly<{
     generation: number;
     /** Provider-specific season selected by a scheduler definition. */
     seasonCode?: string;
+    /** Exact freshness window being repaired, when dispatched by governance. */
+    freshnessWindowId?: number;
     laneId?: string;
     dispatchGeneration?: number;
   }) => Promise<{ bullJobId?: string | number; runId?: string } | void>;
@@ -722,13 +724,22 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, plan, obligationId, generation, laneId, dispatchGeneration }) => {
+    enqueue: async ({
+      context,
+      plan,
+      obligationId,
+      generation,
+      freshnessWindowId,
+      laneId,
+      dispatchGeneration,
+    }) => {
       if (!singleFlightEnabled) {
         const job = await enqueuePriceChangePredictionsJob(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       }
@@ -743,6 +754,7 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
         obligationGeneration: generation,
         laneId,
         laneGeneration: dispatchGeneration,
+        freshnessWindowId,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },

@@ -18,6 +18,8 @@ export type MaintenanceEnqueueOptions = Readonly<{
   runId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired, carried into a downstream publication. */
+  freshnessWindowId?: number;
   entryId?: number;
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
@@ -85,6 +87,9 @@ export async function enqueueMaintenanceJob(
     ...(options.obligationGeneration === undefined
       ? {}
       : { obligationGeneration: options.obligationGeneration }),
+    ...(options.freshnessWindowId === undefined
+      ? {}
+      : { freshnessWindowId: options.freshnessWindowId }),
     ...(options.entryId === undefined ? {} : { entryId: options.entryId }),
     ...(options.eventId === undefined ? {} : { eventId: options.eventId }),
     ...(options.snapshotKind === undefined ? {} : { snapshotKind: options.snapshotKind }),

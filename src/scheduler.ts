@@ -28,6 +28,7 @@ let inFlight: Promise<unknown> | null = null;
 async function runIndependentSchedulerStage<T>(
   stage: string,
   operation: () => Promise<T>,
+  state?: { failed: boolean },
 ): Promise<T | null> {
   try {
     return await operation();
@@ -36,6 +37,7 @@ async function runIndependentSchedulerStage<T>(
     // its own durable evidence. One unavailable dependency must not suppress
     // the other repair stages for this 30-second cycle.
     logError('Scheduler stage failed; continuing independent recovery paths', error, { stage });
+    if (state) state.failed = true;
     return null;
   }
 }
@@ -43,60 +45,94 @@ async function runIndependentSchedulerStage<T>(
 async function runPass(): Promise<void> {
   if (inFlight) return inFlight.then(() => undefined);
   const pass = (async () => {
+    const stageState = { failed: false };
     const now = new Date();
     const season = await seasonRepository.findCurrent();
     if (getConfig().QUEUE_LANES_V2_ENABLED) {
       const halfMinute = Math.floor(now.getTime() / SCHEDULER_INTERVAL_MS);
       const minute = Math.floor(now.getTime() / 60_000);
-      await runIndependentSchedulerStage('publication-reconcile-enqueue', () =>
-        enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
-          jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
-        }),
+      await runIndependentSchedulerStage(
+        'publication-reconcile-enqueue',
+        () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
+            jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
+          }),
+        stageState,
       );
-      await runIndependentSchedulerStage('data-publication-outbox-enqueue', () =>
-        enqueueMaintenanceJob(season, MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX, 'reconcile', {
-          jobId: `governance-publication-outbox-${season.seasonCode}-${halfMinute}`,
-        }),
+      await runIndependentSchedulerStage(
+        'data-publication-outbox-enqueue',
+        () =>
+          enqueueMaintenanceJob(season, MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX, 'reconcile', {
+            jobId: `governance-publication-outbox-${season.seasonCode}-${halfMinute}`,
+          }),
+        stageState,
       );
-      await runIndependentSchedulerStage('lifecycle-status-enqueue', () =>
-        enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS, {
-          jobId: `governance-lifecycle-${season.seasonCode}-${Math.floor(now.getTime() / 30_000)}`,
-        }),
+      await runIndependentSchedulerStage(
+        'lifecycle-status-enqueue',
+        () =>
+          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS, {
+            jobId: `governance-lifecycle-${season.seasonCode}-${Math.floor(now.getTime() / 30_000)}`,
+          }),
+        stageState,
       );
       if (now.getTime() % 60_000 < SCHEDULER_INTERVAL_MS) {
-        await runIndependentSchedulerStage('freshness-observer-enqueue', () =>
-          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER, {
-            jobId: `governance-freshness-${season.seasonCode}-${minute}`,
-          }),
+        await runIndependentSchedulerStage(
+          'freshness-observer-enqueue',
+          () =>
+            enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER, {
+              jobId: `governance-freshness-${season.seasonCode}-${minute}`,
+            }),
+          stageState,
         );
-        await runIndependentSchedulerStage('governance-audit-enqueue', () =>
-          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.GW_AUDIT, {
-            jobId: `governance-audit-${season.seasonCode}-${minute}`,
-          }),
+        await runIndependentSchedulerStage(
+          'governance-audit-enqueue',
+          () =>
+            enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.GW_AUDIT, {
+              jobId: `governance-audit-${season.seasonCode}-${minute}`,
+            }),
+          stageState,
         );
-        await runIndependentSchedulerStage('governance-case-recheck-enqueue', () =>
-          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.CASE_RECHECK, {
-            jobId: `governance-case-recheck-${season.seasonCode}-${minute}`,
-          }),
+        await runIndependentSchedulerStage(
+          'governance-case-recheck-enqueue',
+          () =>
+            enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.CASE_RECHECK, {
+              jobId: `governance-case-recheck-${season.seasonCode}-${minute}`,
+            }),
+          stageState,
         );
       }
     } else {
-      await runIndependentSchedulerStage('core-market-publication-reconcile', () =>
-        reconcileCoreAndMarketPublications(season),
+      await runIndependentSchedulerStage(
+        'core-market-publication-reconcile',
+        () => reconcileCoreAndMarketPublications(season),
+        stageState,
       );
-      await runIndependentSchedulerStage('data-publication-outbox', () =>
-        dispatchDataPublicationOutbox({ limit: 20 }),
+      await runIndependentSchedulerStage(
+        'data-publication-outbox',
+        () => dispatchDataPublicationOutbox({ limit: 20 }),
+        stageState,
       );
-      const lifecycle = await runIndependentSchedulerStage('live-lifecycle', () =>
-        persistLiveLifecycleStatus(now),
+      const lifecycle = await runIndependentSchedulerStage(
+        'live-lifecycle',
+        () => persistLiveLifecycleStatus(now),
+        stageState,
       );
       if (lifecycle?.decision.shouldProbePicks || lifecycle?.decision.shouldSyncPicks) {
-        await runIndependentSchedulerStage('live-picks-refresh-compatibility', () =>
-          runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now),
+        await runIndependentSchedulerStage(
+          'live-picks-refresh-compatibility',
+          () => runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now),
+          stageState,
         );
       }
     }
-    await runIndependentSchedulerStage('obligation-registry', () => runSchedulerPass(now));
+    await runIndependentSchedulerStage(
+      'obligation-registry',
+      () => runSchedulerPass(now),
+      stageState,
+    );
+    if (stageState.failed) {
+      throw new Error('SCHEDULER_STAGE_FAILED: progress heartbeat withheld');
+    }
   })()
     .then(() => {
       // The scheduler heartbeat is progress evidence, not merely process

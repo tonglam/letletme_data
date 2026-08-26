@@ -37,6 +37,8 @@ export type MarketPublicationOptions = Readonly<{
   deferDelivery?: boolean;
   /** Correlate the publication run with its scheduler/Bull obligation. */
   sourceRunId?: string;
+  /** Exact freshness window being repaired, carried into the manifest. */
+  freshnessWindowId?: number;
 }>;
 
 async function ensureMarketPublicationDelivered(
@@ -164,6 +166,7 @@ export async function ensureMarketPublication(
       revision: prepared.revision,
       publicationId: prepared.publicationId,
       sourceCheckedAt: source.capturedAt,
+      freshnessWindowId: options.freshnessWindowId,
       state: 'active',
       items: [{ name: 'context', value: context }],
     });

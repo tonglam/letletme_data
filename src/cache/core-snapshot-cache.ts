@@ -40,12 +40,16 @@ export interface CoreSnapshotCachePublishOptions
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
+  readonly freshnessWindowId?: number;
   readonly redis?: Redis;
 }
 
 export function prepareCoreSnapshotCache(
   snapshot: CoreSnapshot,
-  options: Pick<CoreSnapshotCachePublishOptions, 'revision' | 'publicationId' | 'sourceCheckedAt'>,
+  options: Pick<
+    CoreSnapshotCachePublishOptions,
+    'revision' | 'publicationId' | 'sourceCheckedAt' | 'freshnessWindowId'
+  >,
 ): PreparedCoreSnapshotCachePublication {
   return prepareDataPublication({
     dataset: 'fpl:core',
@@ -53,6 +57,7 @@ export function prepareCoreSnapshotCache(
     revision: options.revision,
     publicationId: options.publicationId,
     sourceCheckedAt: options.sourceCheckedAt,
+    freshnessWindowId: options.freshnessWindowId,
     state: 'active',
     items: [
       { name: 'events', value: snapshot.events },
@@ -95,6 +100,7 @@ export async function publishCoreSnapshotCache(
       revision: options.revision,
       publicationId: options.publicationId,
       sourceCheckedAt: options.sourceCheckedAt,
+      freshnessWindowId: options.freshnessWindowId,
       state: 'active',
       items: prepared.items.map((item) => ({
         name: item.manifest.name,

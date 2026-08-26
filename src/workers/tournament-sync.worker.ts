@@ -814,7 +814,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                         tournamentId: target.tournamentId,
                         officialH2HMode: 'full-reconcile',
                         officialH2HReconcileKey: reconcileKey,
-                        jobId: `official-h2h-${reconcileKey}`,
+                        // BullMQ job IDs cannot contain a colon. Keep the
+                        // human-readable reconcile key in job data, but use a
+                        // delimiter-safe deterministic identity for Bull.
+                        jobId: `official-h2h-${reconcileKey.replaceAll(':', '-')}`,
                       },
                     );
                     logInfo('Enqueued guarded official H2H full reconciliation', {

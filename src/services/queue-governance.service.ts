@@ -318,21 +318,24 @@ async function criticalAdmissionState(
   redis: Awaited<ReturnType<typeof queueRedisSingleton.getClient>>,
 ): Promise<{ red: boolean; greenSince: number | null }> {
   let red = false;
-  let greenSince: number | null = null;
+  let latestGreenSince = 0;
+  let missing = false;
   for (const queueName of CRITICAL_QUEUES) {
     const redCount = Number(await redis.get(`${RED_SAMPLE_PREFIX}${queueName}`));
     if (Number.isFinite(redCount) && redCount >= 2) red = true;
     const since = Number(await redis.get(`${GREEN_SAMPLE_PREFIX}${queueName}`));
     if (!Number.isFinite(since) || since <= 0) {
-      greenSince = null;
+      // A missing sample is not green. Keep the all-green interval invalid
+      // until every critical lane has emitted a valid sample again.
+      missing = true;
       continue;
     }
     // The all-green interval begins only after the last critical lane turns
     // green. Using the minimum would allow an old healthy lane to shorten the
     // required five-minute interval while another lane had just recovered.
-    greenSince = greenSince === null ? since : Math.max(greenSince, since);
+    latestGreenSince = Math.max(latestGreenSince, since);
   }
-  return { red, greenSince };
+  return { red, greenSince: missing || latestGreenSince <= 0 ? null : latestGreenSince };
 }
 
 /**

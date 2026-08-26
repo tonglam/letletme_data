@@ -57,6 +57,8 @@ export type MaintenanceJobData = {
   runId: string;
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired, carried into a downstream publication. */
+  freshnessWindowId?: number;
   entryId?: number;
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';

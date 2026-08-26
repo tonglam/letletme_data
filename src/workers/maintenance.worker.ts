@@ -103,7 +103,9 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
     return await runTrackedJob(context, async () => {
       switch (job.name) {
         case MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS:
-          return runPlayerMarketFreshnessWatchdog();
+          return runPlayerMarketFreshnessWatchdog(new Date(), {
+            freshnessWindowId: job.data.freshnessWindowId,
+          });
         case MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY:
           return repairPlayerSeasonSummaries();
         case MAINTENANCE_JOBS.TOURNAMENT_TRENDS:

@@ -9,9 +9,12 @@ import { notifyTwoBots } from '../utils/notify';
 import { CRON_TIMEZONE } from '../utils/timezone';
 import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
-export async function runPlayerMarketFreshnessWatchdog(now: Date = new Date()) {
+export async function runPlayerMarketFreshnessWatchdog(
+  now: Date = new Date(),
+  options: { freshnessWindowId?: number } = {},
+) {
   try {
-    return await checkPlayerMarketFreshness(now);
+    return await checkPlayerMarketFreshness(now, undefined, options);
   } catch (error) {
     logError('Player market freshness watchdog failed', error);
     await notifyTwoBots(
