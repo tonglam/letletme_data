@@ -113,6 +113,11 @@ restore_runtime_services() {
     export CONTENT_MANIFEST_GIT_REVISION="$previous_release_sha"
     export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"
     export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"
+    # The rollback image may predate the new provider-heavy lane entrypoints.
+    # Filter only services whose executable is actually present in that image;
+    # otherwise a pre-migration failure would restore the old API alongside
+    # crash-looping containers that never existed in the old runtime.
+    export RUNTIME_ROLLBACK=true
     start_all_runtime_services
   )
 }
@@ -141,12 +146,48 @@ restore_last_known_healthy_if_ledger_unchanged() {
   return 1
 }
 
+runtime_worker_entrypoint() {
+  case "$1" in
+    scheduler) printf '%s\n' scheduler.js ;;
+    worker) printf '%s\n' worker.js ;;
+    content-worker) printf '%s\n' content-worker.js ;;
+    live-picks-worker) printf '%s\n' live-picks-worker.js ;;
+    official-h2h-worker) printf '%s\n' official-h2h-worker.js ;;
+    media-worker) printf '%s\n' media-worker.js ;;
+    *) return 1 ;;
+  esac
+}
+
+rollback_image_has_service() {
+  local service=${1:-}
+  local image=${APP_IMAGE:-}
+  local entrypoint
+  [[ -n "$image" ]] || return 1
+  entrypoint=$(runtime_worker_entrypoint "$service") || return 1
+  docker image inspect "$image" >/dev/null 2>&1 || return 1
+  docker run --rm --entrypoint sh "$image" -c "test -f /app/dist/$entrypoint" >/dev/null 2>&1
+}
+
 runtime_worker_services() {
   # Every long-lived consumer is part of the runtime inventory. Keeping the
   # provider-heavy lanes in this list makes start/restore/health paths
   # symmetric; otherwise a successful deploy could silently leave a queue
   # without a consumer.
   local services=(scheduler worker content-worker live-picks-worker official-h2h-worker)
+  if [[ "${RUNTIME_ROLLBACK:-false}" == true ]]; then
+    local filtered=()
+    local service
+    for service in "${services[@]}"; do
+      if [[ "$service" == live-picks-worker || "$service" == official-h2h-worker ]]; then
+        if ! rollback_image_has_service "$service"; then
+          echo "rollback image does not contain $service; leaving it out of restore" >&2
+          continue
+        fi
+      fi
+      filtered+=("$service")
+    done
+    services=("${filtered[@]}")
+  fi
   if [[ "${RUNTIME_INCLUDE_MEDIA_WORKER:-auto}" != false ]] \
     && compose config --services | grep -qx 'media-worker'; then
     services+=(media-worker)

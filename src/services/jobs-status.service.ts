@@ -166,10 +166,17 @@ export async function getJobsStatus(
     listGovernanceCases({ limit: 100 }).catch(() => []),
     listQueueHealthWindows({
       since,
-      limit: Math.min(
-        1_000_000,
-        Math.max(1_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
-      ),
+      // Raw one-minute samples are useful for short incident windows.  A
+      // 28-day view is deliberately reduced to one SQL row per queue/hour so
+      // the status endpoint cannot build a million-row JSON response.
+      ...(window === '28d' ? { bucket: 'hour' as const } : {}),
+      limit:
+        window === '28d'
+          ? Math.min(100_000, allQueueNames.length * Math.ceil(windowMs[window] / 3_600_000) + 100)
+          : Math.min(
+              100_000,
+              Math.max(1_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
+            ),
     }).catch(() => []),
     countGovernanceCases().catch(() => 0),
   ]);
@@ -450,6 +457,7 @@ export async function getJobsStatus(
     },
     window,
     queueHealthWindows,
+    queueHealthWindowGranularity: window === '28d' ? 'hour' : 'raw',
     errorBudgetBurn: {
       target: 0.99,
       eligible: eligibleWindows.length,

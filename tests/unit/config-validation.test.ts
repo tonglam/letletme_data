@@ -147,6 +147,22 @@ describe('production environment preflight', () => {
     ).toBe(0);
   });
 
+  test('requires the server-side consumer evidence writer before enabling probes', async () => {
+    const digest = 'a'.repeat(64);
+    expect(
+      await runEnvCheck(digest, {
+        FRESHNESS_CONSUMER_PROBES_ENABLED: 'true',
+      }),
+    ).not.toBe(0);
+    expect(
+      await runEnvCheck(digest, {
+        FRESHNESS_CONSUMER_PROBES_ENABLED: 'true',
+        DATA_GOVERNANCE_WEB_URL: 'https://web.example.test',
+        DATA_GOVERNANCE_PROBE_TOKEN: 'p'.repeat(32),
+      }),
+    ).toBe(0);
+  });
+
   test('uses bounded preflight, verifies roles read-only, and publishes before restart', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
     const preflight = workflow.indexOf('bun run env:check');

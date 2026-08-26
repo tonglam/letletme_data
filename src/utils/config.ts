@@ -301,6 +301,15 @@ export function getConfig(): AppConfig {
     }
 
     if (
+      parsed.FRESHNESS_CONSUMER_PROBES_ENABLED &&
+      (!parsed.DATA_GOVERNANCE_WEB_URL || !parsed.DATA_GOVERNANCE_PROBE_TOKEN)
+    ) {
+      throw new Error(
+        'DATA_GOVERNANCE_WEB_URL and DATA_GOVERNANCE_PROBE_TOKEN are required when freshness consumer probes are enabled',
+      );
+    }
+
+    if (
       parsed.NODE_ENV === 'production' &&
       parsed.BUG_REPORT_SCREENSHOT_STORAGE_ENABLED &&
       (!parsed.BUG_REPORT_SCREENSHOT_SUPABASE_URL ||

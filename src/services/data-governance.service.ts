@@ -17,6 +17,19 @@ import {
 import { dataContractRegistry } from '../domain/data-contracts';
 import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
+import {
+  dataRepairQueueName,
+  dataSyncQueueName,
+  fplCriticalSyncQueueName,
+  liveDataQueueName,
+  livePicksQueueName,
+  myFplOrchestrationQueueName,
+  officialH2hLiveQueueName,
+  publicationOutboxQueueName,
+  entrySyncQueueName,
+  leagueSyncQueueName,
+} from '../queues/names';
+import { mapWithConcurrency } from '../utils/async';
 
 export type GovernanceCaseStatus =
   | 'OPEN'
@@ -24,6 +37,47 @@ export type GovernanceCaseStatus =
   | 'REQUIRES_REVIEW'
   | 'RECOVERED'
   | 'DISMISSED';
+
+/**
+ * Resolve the same concrete queue that the repair dispatcher will use.  A
+ * contract's primary lane is not always the lane of a particular period
+ * (market price-change latest-wins is the important example), so persist this
+ * result on the governance case for operators and admission decisions.
+ */
+export function freshnessRepairLaneForWindow(contractKey: string, periodKey: string): string {
+  switch (contractKey) {
+    case 'core-fixtures':
+      return dataSyncQueueName;
+    case 'market-price':
+      if (periodKey.startsWith('price-change-')) {
+        return getConfig().PRICE_CHANGE_SINGLE_FLIGHT_ENABLED
+          ? fplCriticalSyncQueueName
+          : dataSyncQueueName;
+      }
+      return periodKey.startsWith('maintenance-') ? dataRepairQueueName : dataSyncQueueName;
+    case 'live-snapshot':
+      return liveDataQueueName;
+    case 'live-picks':
+      return livePicksQueueName;
+    case 'entry-data':
+      return entrySyncQueueName;
+    case 'league-tournament':
+      return leagueSyncQueueName;
+    case 'my-fpl':
+      return periodKey.includes('outbox')
+        ? publicationOutboxQueueName
+        : myFplOrchestrationQueueName;
+    case 'official-h2h':
+      return officialH2hLiveQueueName;
+    case 'player-stats':
+      return dataSyncQueueName;
+    default:
+      return (
+        dataContractRegistry.find((item) => item.contractKey === contractKey)?.queueLane ??
+        contractKey
+      );
+  }
+}
 
 function asJsonObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -241,6 +295,147 @@ export async function recordDataPublicationEvidence(input: {
   return updated;
 }
 
+const CONSUMER_PROBE_PATH = '/api/internal/data-governance/probe';
+const CONSUMER_PROBE_TIMEOUT_MS = 5_000;
+
+type ConsumerProbePayload = Readonly<{
+  success?: boolean;
+  contractKey?: unknown;
+  scopeKey?: unknown;
+  graphqlSeenAt?: unknown;
+  webSeenAt?: unknown;
+  graphqlRevision?: unknown;
+  webRevision?: unknown;
+  expectedCount?: unknown;
+  observedCount?: unknown;
+  complete?: unknown;
+}>;
+
+function probeTimestamp(value: unknown): Date | undefined {
+  if (typeof value !== 'string' && !(value instanceof Date)) return undefined;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : undefined;
+}
+
+function probeRevision(value: unknown): string | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const revision = String(value).trim();
+  return revision.length > 0 ? revision : undefined;
+}
+
+function probeCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * Ask the Web server to execute the same GraphQL operation and server loader
+ * used by its public page, then persist both consumer milestones.  The route
+ * is deliberately authenticated with a separate probe token and returns only
+ * aggregate metadata; a missing/invalid response is evidence of a stale
+ * consumer, never a reason to mark the producer complete.
+ */
+export async function observeFreshnessConsumerEvidence(
+  input: { limit?: number; db?: DbHandle } = {},
+): Promise<{ scanned: number; observed: number; failed: number; disabled: boolean }> {
+  const config = getConfig();
+  if (!config.FRESHNESS_CONSUMER_PROBES_ENABLED) {
+    return { scanned: 0, observed: 0, failed: 0, disabled: true };
+  }
+  const baseUrl = config.DATA_GOVERNANCE_WEB_URL?.replace(/\/$/, '');
+  const token = config.DATA_GOVERNANCE_PROBE_TOKEN;
+  if (!baseUrl || !token) {
+    // Production configuration validation normally catches this before the
+    // worker starts. Keep the runtime guard for tests and hot environment
+    // reloads so an absent writer remains a visible failure.
+    throw new Error('FRESHNESS_CONSUMER_PROBE_CONFIG_MISSING');
+  }
+  const windows = await listFreshnessWindows({
+    status: ['PENDING', 'BREACHED'],
+    limit: Math.min(100, Math.max(1, input.limit ?? 100)),
+    db: input.db,
+  });
+  const candidates = windows.filter((window) => {
+    const contract = dataContractRegistry.find((item) => item.contractKey === window.contractKey);
+    const evidence = contract?.consumerEvidence;
+    return Boolean(
+      evidence &&
+        'graphql' in evidence &&
+        'web' in evidence &&
+        typeof evidence.graphql === 'string' &&
+        typeof evidence.web === 'string',
+    );
+  });
+  let observed = 0;
+  let failed = 0;
+  await mapWithConcurrency(candidates, 4, async (window) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CONSUMER_PROBE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${baseUrl}${CONSUMER_PROBE_PATH}`, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+          'x-data-governance-probe-token': token,
+        },
+        body: JSON.stringify({
+          contractKey: window.contractKey,
+          scopeKey: window.scopeKey,
+          periodKey: window.periodKey,
+          eventId: window.eventId,
+          sourceDay: window.sourceDay,
+          producerRevision: window.producerRevision,
+          expectedCount: window.expectedCount,
+          observedCount: window.observedCount,
+        }),
+        signal: controller.signal,
+      });
+      const payload = (await response.json().catch(() => null)) as ConsumerProbePayload | null;
+      const graphqlSeenAt = probeTimestamp(payload?.graphqlSeenAt);
+      const webSeenAt = probeTimestamp(payload?.webSeenAt);
+      const graphqlRevision = probeRevision(payload?.graphqlRevision);
+      const webRevision = probeRevision(payload?.webRevision);
+      if (
+        !response.ok ||
+        payload?.success !== true ||
+        payload.contractKey !== window.contractKey ||
+        payload.scopeKey !== window.scopeKey ||
+        !graphqlSeenAt ||
+        !webSeenAt ||
+        !graphqlRevision ||
+        !webRevision ||
+        typeof payload.complete !== 'boolean'
+      ) {
+        throw new Error('CONSUMER_PROBE_INVALID_RESPONSE');
+      }
+      const expectedCount = probeCount(payload.expectedCount) ?? window.expectedCount;
+      const observedCount = probeCount(payload.observedCount) ?? window.observedCount;
+      const status = await recordFreshnessObservation({
+        windowId: window.windowId,
+        graphqlSeenAt,
+        webSeenAt,
+        graphqlRevision,
+        webRevision,
+        expectedCount,
+        observedCount,
+        completenessStatus: payload.complete ? 'COMPLETE' : 'INCOMPLETE',
+        db: input.db,
+      });
+      if (status !== null) observed += 1;
+    } catch (error) {
+      failed += 1;
+      logInfo('Freshness consumer evidence probe failed', {
+        contractKey: window.contractKey,
+        windowId: window.windowId,
+        error: error instanceof Error ? error.name : 'UnknownError',
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+  return { scanned: candidates.length, observed, failed, disabled: false };
+}
+
 /**
  * Bind a publication freshness window to an already-reserved scheduler
  * obligation.  Window reservation is deliberately best-effort and happens
@@ -440,15 +635,104 @@ export async function getFreshnessWindow(windowId: number, db?: DbHandle) {
 }
 
 export async function listQueueHealthWindows(
-  input: { since?: Date; limit?: number; db?: DbHandle } = {},
+  input: {
+    since?: Date;
+    limit?: number;
+    /** Return bounded SQL buckets instead of raw one-minute samples. */
+    bucket?: 'hour';
+    db?: DbHandle;
+  } = {},
 ) {
   const db = input.db ?? (await getDb());
+  const limit = Math.min(100_000, Math.max(1, input.limit ?? 500));
+  if (input.bucket === 'hour') {
+    // A 28-day operator view can contain close to a million one-minute rows
+    // across all lanes. Aggregate at the database boundary so the API never
+    // materializes that raw history (and so a one-second sampling setting
+    // cannot silently change the advertised 28-day response size).
+    const bucketStart = sql<Date>`date_trunc('hour', ${queueHealthWindowsInOps.windowStart})`.as(
+      'window_start',
+    );
+    return db
+      .select({
+        windowStart: bucketStart,
+        queueName: queueHealthWindowsInOps.queueName,
+        waiting: sql<number>`max(${queueHealthWindowsInOps.waiting})`.as('waiting'),
+        active: sql<number>`max(${queueHealthWindowsInOps.active})`.as('active'),
+        delayed: sql<number>`max(${queueHealthWindowsInOps.delayed})`.as('delayed'),
+        prioritized: sql<number>`max(${queueHealthWindowsInOps.prioritized})`.as('prioritized'),
+        waitingChildren: sql<number>`max(${queueHealthWindowsInOps.waitingChildren})`.as(
+          'waiting_children',
+        ),
+        failed: sql<number>`max(${queueHealthWindowsInOps.failed})`.as('failed'),
+        completed: sql<number>`max(${queueHealthWindowsInOps.completed})`.as('completed'),
+        runnable: sql<number>`max(${queueHealthWindowsInOps.runnable})`.as('runnable'),
+        oldestRunnableAgeMs: sql<
+          number | null
+        >`max(${queueHealthWindowsInOps.oldestRunnableAgeMs})`.as('oldest_runnable_age_ms'),
+        arrivals: sql<number>`sum(${queueHealthWindowsInOps.arrivals})`.as('arrivals'),
+        completions: sql<number>`sum(${queueHealthWindowsInOps.completions})`.as('completions'),
+        failures: sql<number>`sum(${queueHealthWindowsInOps.failures})`.as('failures'),
+        stalled: sql<number>`sum(${queueHealthWindowsInOps.stalled})`.as('stalled'),
+        waitP50Ms: sql<number | null>`max(${queueHealthWindowsInOps.waitP50Ms})`.as('wait_p50_ms'),
+        waitP95Ms: sql<number | null>`max(${queueHealthWindowsInOps.waitP95Ms})`.as('wait_p95_ms'),
+        executionP50Ms: sql<number | null>`max(${queueHealthWindowsInOps.executionP50Ms})`.as(
+          'execution_p50_ms',
+        ),
+        executionP95Ms: sql<number | null>`max(${queueHealthWindowsInOps.executionP95Ms})`.as(
+          'execution_p95_ms',
+        ),
+        providerWaitP95Ms: sql<number | null>`max(${queueHealthWindowsInOps.providerWaitP95Ms})`.as(
+          'provider_wait_p95_ms',
+        ),
+        provider429Rate: sql<string | null>`max(${queueHealthWindowsInOps.provider429Rate})`.as(
+          'provider_429_rate',
+        ),
+        netGrowth: sql<number>`sum(${queueHealthWindowsInOps.netGrowth})`.as('net_growth'),
+        drainEtaMs: sql<number | null>`max(${queueHealthWindowsInOps.drainEtaMs})`.as(
+          'drain_eta_ms',
+        ),
+        // The lexical max is intentionally conservative only for display;
+        // the raw rows remain available for incident forensics.  A bucket
+        // with any red sample is never presented as HEALTHY by the API.
+        backlogClass: sql<string>`CASE
+          WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'NO_CONSUMER') THEN 'NO_CONSUMER'
+          WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'POISON_STORM') THEN 'POISON_STORM'
+          WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'STALLED') THEN 'STALLED'
+          WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'DEADLINE_RISK') THEN 'DEADLINE_RISK'
+          WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'PROVIDER_THROTTLED') THEN 'PROVIDER_THROTTLED'
+          WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'BURST') THEN 'BURST'
+          ELSE 'HEALTHY'
+        END`.as('backlog_class'),
+        admissionMode:
+          sql<string>`CASE WHEN bool_or(${queueHealthWindowsInOps.admissionMode} = 'DRAIN_ONLY') THEN 'DRAIN_ONLY' ELSE 'OPEN' END`.as(
+            'admission_mode',
+          ),
+        consumerHeartbeatAt:
+          sql<Date | null>`max(${queueHealthWindowsInOps.consumerHeartbeatAt})`.as(
+            'consumer_heartbeat_at',
+          ),
+        releaseSha: sql<string | null>`max(${queueHealthWindowsInOps.releaseSha})`.as(
+          'release_sha',
+        ),
+        evidence: sql<Record<string, unknown>>`jsonb_build_object('granularity', 'hour')`.as(
+          'evidence',
+        ),
+        createdAt: sql<Date>`min(${queueHealthWindowsInOps.createdAt})`.as('created_at'),
+        updatedAt: sql<Date>`max(${queueHealthWindowsInOps.updatedAt})`.as('updated_at'),
+      })
+      .from(queueHealthWindowsInOps)
+      .where(input.since ? gte(queueHealthWindowsInOps.windowStart, input.since) : undefined)
+      .groupBy(bucketStart, queueHealthWindowsInOps.queueName)
+      .orderBy(desc(bucketStart), asc(queueHealthWindowsInOps.queueName))
+      .limit(limit);
+  }
   return db
     .select()
     .from(queueHealthWindowsInOps)
     .where(input.since ? gte(queueHealthWindowsInOps.windowStart, input.since) : undefined)
     .orderBy(desc(queueHealthWindowsInOps.windowStart), asc(queueHealthWindowsInOps.queueName))
-    .limit(Math.min(1_000_000, Math.max(1, input.limit ?? 500)));
+    .limit(limit);
 }
 
 /**
@@ -489,7 +773,7 @@ export async function observeDueFreshnessWindows(
     const existing = await openGovernanceCase({
       caseKind: 'freshness-breach',
       contractKey: window.contractKey,
-      lane: contract?.queueLane ?? window.contractKey,
+      lane: freshnessRepairLaneForWindow(window.contractKey, window.periodKey),
       sloWindowId: window.windowId,
       scopeKey: window.scopeKey,
       targetRevision: window.producerRevision ?? undefined,
@@ -576,6 +860,8 @@ export async function listGovernanceCases(
   input: {
     status?: GovernanceCaseStatus | GovernanceCaseStatus[];
     limit?: number;
+    /** Claimable workers use oldest-first ordering; operator feeds stay newest-first. */
+    order?: 'updated-desc' | 'claimable-asc';
     db?: DbHandle;
   } = {},
 ) {
@@ -586,10 +872,16 @@ export async function listGovernanceCases(
       : Array.isArray(input.status)
         ? input.status
         : [input.status];
-  return db
+  const query = db
     .select()
     .from(dataGovernanceCasesInOps)
-    .where(statuses ? inArray(dataGovernanceCasesInOps.status, statuses) : undefined)
+    .where(statuses ? inArray(dataGovernanceCasesInOps.status, statuses) : undefined);
+  if (input.order === 'claimable-asc') {
+    return query
+      .orderBy(asc(dataGovernanceCasesInOps.updatedAt), asc(dataGovernanceCasesInOps.caseId))
+      .limit(Math.min(500, Math.max(1, input.limit ?? 100)));
+  }
+  return query
     .orderBy(desc(dataGovernanceCasesInOps.updatedAt), desc(dataGovernanceCasesInOps.caseId))
     .limit(Math.min(500, Math.max(1, input.limit ?? 100)));
 }

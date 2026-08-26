@@ -125,11 +125,19 @@ async function runPass(): Promise<void> {
         );
       }
     }
-    await runIndependentSchedulerStage(
+    const obligationResult = await runIndependentSchedulerStage(
       'obligation-registry',
       () => runSchedulerPass(now),
       stageState,
     );
+    // A scheduler pass can return normally after isolating definition/claim/
+    // enqueue failures.  Those failures are already persisted on the
+    // obligation, but they must also suppress the progress heartbeat: a
+    // healthy process with a non-progressing registry is not healthy for
+    // scheduling purposes.
+    if (obligationResult && obligationResult.failed > 0) {
+      stageState.failed = true;
+    }
     if (stageState.failed) {
       throw new Error('SCHEDULER_STAGE_FAILED: progress heartbeat withheld');
     }

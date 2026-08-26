@@ -23,6 +23,7 @@ import {
   claimGovernanceCaseRepair,
   getFreshnessWindow,
   listGovernanceCases,
+  observeFreshnessConsumerEvidence,
   observeDueFreshnessWindows,
   reopenExpiredGovernanceCaseRepair,
   updateGovernanceCaseStatus,
@@ -201,8 +202,11 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
           seasonId: job.data.seasonId,
           seasonCode: job.data.seasonCode,
         });
-      case DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER:
-        return observeDueFreshnessWindows({ limit: 100 });
+      case DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER: {
+        const consumers = await observeFreshnessConsumerEvidence({ limit: 100 });
+        const overdue = await observeDueFreshnessWindows({ limit: 100 });
+        return { ...overdue, consumers };
+      }
       case DATA_GOVERNANCE_JOBS.GW_AUDIT: {
         // Auditing is an evidence checkpoint. It must not mark data complete
         // on its own; the freshness observer and downstream probes settle the
@@ -219,10 +223,18 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
           // or enqueue any producer repair until enforcement is enabled.
           return { checked: 0, recovered: 0, dispatched: 0, requiresReview: 0, shadow: true };
         }
-        const openCases = await listGovernanceCases({
-          status: ['OPEN', 'AUTO_REPAIRING'],
-          limit: 100,
-        });
+        // Claimable OPEN cases and in-flight settlement checks have different
+        // ordering requirements.  Never let the newest 100 AUTO_REPAIRING
+        // rows crowd older OPEN cases out of the repair cursor.
+        const [claimableCases, settlingCases] = await Promise.all([
+          listGovernanceCases({ status: 'OPEN', limit: 100, order: 'claimable-asc' }),
+          listGovernanceCases({
+            status: 'AUTO_REPAIRING',
+            limit: 100,
+            order: 'claimable-asc',
+          }),
+        ]);
+        const openCases = [...claimableCases, ...settlingCases];
         let recovered = 0;
         let dispatched = 0;
         let requiresReview = 0;
