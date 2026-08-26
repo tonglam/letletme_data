@@ -56,7 +56,11 @@ export function createDataSyncJobData(
     seasonCode: season.seasonCode,
     source,
     triggeredAt: new Date().toISOString(),
-    runId: options.runId ?? randomUUID(),
+    // Scheduler-owned jobs use the durable obligation as their run
+    // correlation. This is the identity written to scheduler_obligations and
+    // later carried into the publication source_run_id, so freshness evidence
+    // can join the exact obligation without guessing from scope/period.
+    runId: options.runId ?? options.obligationId ?? randomUUID(),
     ...(options.obligationId ? { obligationId: options.obligationId } : {}),
     ...(options.obligationGeneration === undefined
       ? {}

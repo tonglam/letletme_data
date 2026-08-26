@@ -142,7 +142,11 @@ export async function enqueueLiveSnapshot(
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
-      runId: randomUUID(),
+      // Keep scheduler-owned live publications on the obligation's exact
+      // correlation identity. Manual/cascade jobs still receive a distinct
+      // UUID, while scheduled evidence can join scheduler_obligations to the
+      // resulting fpl:live publication without a scope/period heuristic.
+      runId: options.obligationId ?? randomUUID(),
       ...(options.obligationId ? { obligationId: options.obligationId } : {}),
       ...(options.obligationGeneration === undefined
         ? {}

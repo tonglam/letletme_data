@@ -41,7 +41,7 @@ import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { readQueueAdmission } from '../services/queue-governance.service';
 import { upsertFreshnessWindow } from '../services/data-governance.service';
 import { getConfig } from '../utils/config';
-import { mapWithConcurrency, withTimeout } from '../utils/async';
+import { mapWithConcurrency, TimeoutError, withTimeout } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 import { safeDataErrorCode } from '../domain/error-classification';
 import { contractForSchedulerJob } from '../domain/data-contracts';
@@ -247,6 +247,18 @@ export async function resolveSchedulerDefinition(
     );
     return { ok: true, plans };
   } catch (error) {
+    if (error instanceof TimeoutError) {
+      const underlying = definitionResolutionInFlight.get(definition);
+      if (underlying) {
+        // A resolver may be backed by a driver operation that cannot be
+        // cancelled by Promise.race. Keep this scheduler pass in-flight until
+        // the exact operation settles; the process heartbeat/progress stale
+        // guard will then expose a genuinely hung resolver and the VPS
+        // supervisor can restart it, rather than allowing every 30s pass to
+        // accumulate another live query on the same pool.
+        await underlying.catch(() => undefined);
+      }
+    }
     return { ok: false, error };
   }
 }
