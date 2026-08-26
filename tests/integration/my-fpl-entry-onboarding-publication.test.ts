@@ -150,7 +150,12 @@ async function seedBase(): Promise<void> {
     )
     SELECT
       ${SEASON.seasonId}, player.element_id, player.element_id + 100000,
-      ((player.ordinality - 1) % 4 + 1)::integer,
+      CASE
+        WHEN player.ordinality = 1 THEN 1
+        WHEN player.ordinality BETWEEN 2 AND 6 THEN 2
+        WHEN player.ordinality BETWEEN 7 AND 10 THEN 3
+        ELSE 4
+      END::integer,
       ${TEAM_ID}, 'Onboarding Player ' || player.ordinality::text
     FROM unnest(${PLAYER_IDS}::integer[])
       WITH ORDINALITY AS player(element_id, ordinality)

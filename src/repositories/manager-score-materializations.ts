@@ -167,11 +167,20 @@ for _ = 1, count do
   local current_raw = redis.call('HGET', head_key, entry_id)
   if current_raw then
     local decoded, current = pcall(cjson.decode, current_raw)
+    local current_generation = decoded and type(current) == 'table'
+      and tonumber(current.generation) or nil
+    local same_head = decoded and type(current) == 'table'
+      and current_generation == expected_generation
+      and current.inputRevision == expected_input_revision
+    -- A failed Redis publication can leave an older pointer behind even
+    -- though PostgreSQL has already committed the newer generation. Remove
+    -- that pointer as well; otherwise CACHE_ONLY would continue serving the
+    -- obsolete score until the 48-hour TTL expires. Never remove a pointer
+    -- that is newer than the durable head being invalidated.
     if decoded and type(current) == 'table'
-      and tonumber(current.generation) == expected_generation
-      and current.inputRevision == expected_input_revision then
+      and (current_generation < expected_generation or same_head) then
       redis.call('HDEL', head_key, entry_id)
-      redis.call('DEL', materialization_key)
+      if same_head then redis.call('DEL', materialization_key) end
       removed = removed + 1
     end
   end

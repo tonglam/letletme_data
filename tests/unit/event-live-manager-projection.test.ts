@@ -191,4 +191,31 @@ describe('revision-pinned projected manager score', () => {
       autoSub: false,
     });
   });
+
+  test('marks a promoted vice captain in official current multipliers', () => {
+    const managerPicks = picks();
+    managerPicks[0] = { ...managerPicks[0], multiplier: 0 };
+    managerPicks[1] = { ...managerPicks[1], multiplier: 2 };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+    liveByElement.set(1, live(1, 0, 0));
+
+    const result = projectOfficialCurrentMultiplierScore({
+      entryId: 101,
+      picks: managerPicks,
+      liveByElement,
+    });
+
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 1)).toMatchObject({
+      effectiveMultiplier: 0,
+      captainForScoring: false,
+    });
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 2)).toMatchObject({
+      effectiveMultiplier: 2,
+      isViceCaptain: true,
+      captainForScoring: true,
+    });
+    expect(result?.effectiveLineup.filter((pick) => pick.captainForScoring)).toHaveLength(1);
+  });
 });

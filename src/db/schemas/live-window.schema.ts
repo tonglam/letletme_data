@@ -236,6 +236,7 @@ export const managerEventScoreMaterializationsInFpl = fpl.table(
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
       name: 'manager_event_score_materializations_event_fk',
     }),
+    check('manager_event_score_materializations_ids_positive', sql`event_id > 0 AND entry_id > 0`),
     check(
       'manager_event_score_materializations_mode_valid',
       sql`calculation_mode = 'PROJECTED_AUTOSUBS'`,
@@ -320,6 +321,7 @@ export const managerEventScoreHeadsInFpl = fpl.table(
       ],
       name: 'manager_event_score_heads_materialization_fk',
     }),
+    check('manager_event_score_heads_ids_positive', sql`event_id > 0 AND entry_id > 0`),
     check('manager_event_score_heads_mode_valid', sql`calculation_mode = 'PROJECTED_AUTOSUBS'`),
     check('manager_event_score_heads_generation_positive', sql`generation > 0`),
     check(

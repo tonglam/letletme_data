@@ -3228,6 +3228,7 @@ export const entryEventResultsInCompetition = competition.table(
       'entry_event_results_auto_sub_array',
       sql`(automatic_substitutions IS NULL) OR (jsonb_typeof(automatic_substitutions) = 'array'::text)`,
     ),
+    check('entry_event_results_event_picks_array', sql`jsonb_typeof(event_picks) = 'array'::text`),
   ],
 );
 

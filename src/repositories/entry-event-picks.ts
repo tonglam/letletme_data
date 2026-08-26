@@ -100,10 +100,11 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       (earliest, row) => (row.sourceCreatedAt < earliest ? row.sourceCreatedAt : earliest),
       syncedAt,
     );
+    // Preserve a null event-scoped team as an explicit unknown. Falling back
+    // to the mutable current players.team_id on a retry could silently move a
+    // historical pick to a post-deadline club after a transfer.
     const previouslyCapturedTeamByElement = new Map(
-      existing.flatMap((row) =>
-        row.eventTeamId === null ? [] : [[row.elementId, row.eventTeamId] as const],
-      ),
+      existing.map((row) => [row.elementId, row.eventTeamId] as const),
     );
     await db
       .delete(entryEventPicksInCompetition)
@@ -141,10 +142,9 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         elementId: pick.element,
         // Capture the deadline-time observation. A missing player row stays
         // NULL and is never replaced with a later mutable players.team_id.
-        eventTeamId:
-          previouslyCapturedTeamByElement.get(pick.element) ??
-          teamByElement.get(pick.element) ??
-          null,
+        eventTeamId: previouslyCapturedTeamByElement.has(pick.element)
+          ? (previouslyCapturedTeamByElement.get(pick.element) ?? null)
+          : (teamByElement.get(pick.element) ?? null),
         multiplier: pick.multiplier,
         isCaptain: pick.is_captain,
         isViceCaptain: pick.is_vice_captain,

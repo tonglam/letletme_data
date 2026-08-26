@@ -797,13 +797,18 @@ const overlayPinnedEventFixtures = (
   eventId: number,
   rows: PickRow[],
   fixtures: readonly Fixture[],
+  teamShortNameById: ReadonlyMap<number, string>,
 ): void => {
+  const kickoffTimestamp = (value: Date | string | null): number => {
+    const timestamp = value instanceof Date ? value.getTime() : Date.parse(value ?? '');
+    return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
+  };
   const eventFixtures = fixtures
     .filter((fixture) => fixture.event === eventId)
     .sort(
       (left, right) =>
-        (left.kickoffTime?.getTime() ?? Number.MAX_SAFE_INTEGER) -
-          (right.kickoffTime?.getTime() ?? Number.MAX_SAFE_INTEGER) || left.id - right.id,
+        kickoffTimestamp(left.kickoffTime as Date | string | null) -
+          kickoffTimestamp(right.kickoffTime as Date | string | null) || left.id - right.id,
     );
   const fixtureIds = new Set<number>();
   for (const fixture of eventFixtures) {
@@ -830,6 +835,18 @@ const overlayPinnedEventFixtures = (
       (fixture) => fixture.teamH === row.team_id || fixture.teamA === row.team_id,
     );
     row.fixture_count = playerFixtures.length;
+    row.against_short_name = playerFixtures
+      .map((fixture) => {
+        const opponentId = fixture.teamH === row.team_id ? fixture.teamA : fixture.teamH;
+        const opponentShortName = teamShortNameById.get(opponentId);
+        if (!opponentShortName) {
+          throw new MyFplSnapshotIncompleteError(
+            `Event-live publication is missing team metadata for opponent ${opponentId} in event ${eventId}`,
+          );
+        }
+        return opponentShortName;
+      })
+      .join(' / ');
     row.was_home = playerFixtures
       .map((fixture) => (fixture.teamH === row.team_id ? 'H' : 'A'))
       .join(' / ');
@@ -1987,7 +2004,24 @@ async function captureMyFplSnapshotOnce(
         );
       }
       overlayProjectedEventLiveStats(eventId, pickRows, pinnedLiveSnapshot.eventLives);
-      overlayPinnedEventFixtures(eventId, pickRows, pinnedLiveSnapshot.fixtures);
+      const pinnedTeamIds = Array.from(
+        new Set(pinnedLiveSnapshot.fixtures.flatMap((fixture) => [fixture.teamH, fixture.teamA])),
+      );
+      const pinnedTeamRows = await tx<{ team_id: number; short_name: string }[]>`
+        SELECT team_id, short_name
+        FROM fpl.teams
+        WHERE season_id = ${season.seasonId}
+          AND team_id = ANY(${pinnedTeamIds}::int[])
+      `;
+      const pinnedTeamShortNames = new Map(
+        pinnedTeamRows.map((team) => [team.team_id, team.short_name] as const),
+      );
+      overlayPinnedEventFixtures(
+        eventId,
+        pickRows,
+        pinnedLiveSnapshot.fixtures,
+        pinnedTeamShortNames,
+      );
       const startedEventByEntry = new Map(
         entries.map((entry) => [entry.entry_id, entry.started_event] as const),
       );

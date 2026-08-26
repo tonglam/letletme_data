@@ -152,7 +152,11 @@ export function projectOfficialCurrentMultiplierScore(input: {
       autoSub: false,
       isCaptain: pick.isCaptain,
       isViceCaptain: pick.isViceCaptain,
-      captainForScoring: pick.isCaptain && pick.multiplier > 1,
+      // FPL may promote the vice-captain in the official multiplier payload
+      // when the original captain did not play. The scoring captain is the
+      // captain-role pick carrying the applied multiplier, not necessarily the
+      // row marked isCaptain.
+      captainForScoring: (pick.isCaptain || pick.isViceCaptain) && pick.multiplier > 1,
     });
   }
   if (!Number.isSafeInteger(eventPoints) || !isEffectiveLineup(effectiveLineup)) return null;
