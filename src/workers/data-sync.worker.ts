@@ -85,6 +85,72 @@ function archivedCaptureTimestamps(
   return { requestStartedAt, fetchedAt };
 }
 
+async function priceChangeCoreRepairOptions(job: Job<DataSyncJobData>) {
+  const obligation = job.data.obligationId
+    ? await getSchedulerObligation({ obligationId: job.data.obligationId }).catch(() => null)
+    : null;
+  const evidence = obligation?.evidence;
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof evidence?.sourceHash === 'string' ? evidence.sourceHash : undefined);
+  const sourceArtifactId =
+    job.data.sourceArtifactId ??
+    (typeof evidence?.sourceArtifactId === 'string' ? evidence.sourceArtifactId : undefined);
+  const priceChangeBoardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof evidence?.priceChangeBoardRevision === 'string'
+      ? evidence.priceChangeBoardRevision
+      : undefined);
+  const sourceDetectedAt =
+    job.data.sourceDetectedAt ??
+    (typeof evidence?.sourceDetectedAt === 'string' ? evidence.sourceDetectedAt : undefined);
+  const sourceFetchedAt =
+    job.data.sourceFetchedAt ??
+    (typeof evidence?.sourceFetchedAt === 'string' ? evidence.sourceFetchedAt : undefined);
+  return {
+    jobId: priceChangeCoreRepairJobId(job),
+    removeOnSettle: false,
+    ...(sourceHash ? { sourceHash } : {}),
+    ...(sourceArtifactId ? { sourceArtifactId } : {}),
+    ...(priceChangeBoardRevision ? { priceChangeBoardRevision } : {}),
+    ...(sourceDetectedAt ? { sourceDetectedAt } : {}),
+    ...(sourceFetchedAt ? { sourceFetchedAt } : {}),
+  };
+}
+
+async function hotCoreSourceDependencies(job: Job<DataSyncJobData>) {
+  if (job.name !== 'core-snapshot' || !job.data.sourceArtifactId || !job.data.sourceHash) {
+    return undefined;
+  }
+  try {
+    const source = await loadPriceChangeHotSource({
+      artifactId: job.data.sourceArtifactId,
+      sourceHash: job.data.sourceHash,
+    });
+    const capturedAt = archivedCaptureTimestamps(
+      job.data.sourceDetectedAt,
+      job.data.sourceFetchedAt,
+    );
+    logInfo('Using archived provisional source for legacy Core repair', {
+      season: job.data.seasonCode,
+      artifactId: job.data.sourceArtifactId,
+      sourceHash: job.data.sourceHash,
+      priceChangeBoardRevision: job.data.priceChangeBoardRevision,
+    });
+    return {
+      bootstrap: source.payload,
+      ...(capturedAt ? { sourceCheckedAt: capturedAt.requestStartedAt } : {}),
+    };
+  } catch (error) {
+    logWarn('Archived provisional source unavailable; legacy Core repair will re-fetch', {
+      season: job.data.seasonCode,
+      artifactId: job.data.sourceArtifactId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
 async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
   if (job.name !== 'price-change-predictions') {
     return undefined;
@@ -388,10 +454,11 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           );
         } catch (error) {
           if (error instanceof PriceChangeCorePublicationRequiredError) {
-            await enqueueCoreSnapshotJob(season, 'reconcile', {
-              jobId: priceChangeCoreRepairJobId(job),
-              removeOnSettle: false,
-            }).catch((repairError) => {
+            await enqueueCoreSnapshotJob(
+              season,
+              'reconcile',
+              await priceChangeCoreRepairOptions(job),
+            ).catch((repairError) => {
               logError('Failed to enqueue core repair for price-change validation', repairError, {
                 season: season.seasonCode,
               });
@@ -411,10 +478,11 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             .failRun(prepared.sourceRunId, error)
             .catch(() => undefined);
           if (error instanceof PriceChangeCorePublicationRequiredError) {
-            await enqueueCoreSnapshotJob(season, 'reconcile', {
-              jobId: priceChangeCoreRepairJobId(job),
-              removeOnSettle: false,
-            }).catch((repairError) => {
+            await enqueueCoreSnapshotJob(
+              season,
+              'reconcile',
+              await priceChangeCoreRepairOptions(job),
+            ).catch((repairError) => {
               logError('Failed to enqueue core repair for price-change persistence', repairError, {
                 season: season.seasonCode,
               });
@@ -458,6 +526,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
               trigger: 'queue',
               sourceRunId: job.data.runId,
               freshnessWindowId: job.data.freshnessWindowId,
+              ...(await hotCoreSourceDependencies(job)),
             });
           case 'player-prices':
             if (!job.data.changeDate) {

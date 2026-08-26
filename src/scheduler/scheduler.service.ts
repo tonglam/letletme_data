@@ -116,6 +116,25 @@ function evidenceString(evidence: Readonly<Record<string, unknown>> | undefined,
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function hotSourcePeriodIdentity(options: {
+  readonly sourceHash?: string;
+  readonly sourceArtifactId?: string;
+  readonly priceChangeBoardRevision?: string;
+  readonly sourceDetectedAt?: string;
+}): string | undefined {
+  const identity =
+    options.sourceHash ?? options.priceChangeBoardRevision ?? options.sourceArtifactId;
+  if (!identity) return undefined;
+  const detectedAtMs = options.sourceDetectedAt ? Date.parse(options.sourceDetectedAt) : NaN;
+  // ISO timestamps are chronologically ordered when normalized, but a fixed
+  // millisecond prefix keeps the period key's tie-break deterministic even if
+  // callers use different valid ISO offsets. The source identity remains in
+  // the suffix so repeated callbacks for one capture still coalesce.
+  return Number.isFinite(detectedAtMs)
+    ? `${String(detectedAtMs).padStart(13, '0')}-${identity}`
+    : identity;
+}
+
 /**
  * Create the durable SLO window at the same point that the scheduler records
  * the obligation.  The window is an evidence ledger, not a success marker:
@@ -386,8 +405,7 @@ export async function triggerPriceChangeLane(
   // source-evidence fence can then distinguish the late hot target from the
   // payload the worker already prepared. Repeated enqueue attempts for the
   // same source still coalesce because this identity is deterministic.
-  const hotSourceIdentity =
-    options.sourceHash ?? options.priceChangeBoardRevision ?? options.sourceArtifactId;
+  const hotSourceIdentity = hotSourcePeriodIdentity(options);
   let plan: SchedulerObligationPlan = {
     ...basePlan,
     source: 'manual',
