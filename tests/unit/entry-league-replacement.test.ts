@@ -129,6 +129,15 @@ describe('entry league snapshot replacement', () => {
           entry_last_rank: 90,
           start_event: 1,
         },
+        {
+          id: 318,
+          name: 'Legacy Category League',
+          league_type: 'c',
+          short_name: null,
+          entry_rank: 81,
+          entry_last_rank: 92,
+          start_event: 1,
+        },
       ],
       h2h: [],
     });
@@ -157,6 +166,18 @@ describe('entry league snapshot replacement', () => {
         startedEvent: 1,
         entryRank: 80,
         entryLastRank: 90,
+      },
+      {
+        seasonId: TEST_SEASON.seasonId,
+        entryId: 42,
+        leagueId: 318,
+        leagueName: 'Legacy Category League',
+        leagueType: 'classic',
+        officialKind: null,
+        shortName: null,
+        startedEvent: 1,
+        entryRank: 81,
+        entryLastRank: 92,
       },
     ]);
   });

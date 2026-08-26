@@ -7,8 +7,13 @@ import type { RawFPLEntryLeagues } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-const mapOfficialKind = (value: string | null | undefined): 's' | 'x' | 'c' | null => {
-  return value === 's' || value === 'x' || value === 'c' ? value : null;
+/**
+ * FPL entry league payloads use s for system/public leagues and x for
+ * invitation/private leagues. c is not a valid category for this endpoint;
+ * keep it out of new snapshots instead of turning it into a public league.
+ */
+const mapOfficialKind = (value: string | null | undefined): 's' | 'x' | null => {
+  return value === 's' || value === 'x' ? value : null;
 };
 
 const mapShortName = (value: string | null | undefined): string | null => {
