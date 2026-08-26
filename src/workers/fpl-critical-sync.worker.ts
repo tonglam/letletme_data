@@ -99,6 +99,16 @@ function hotPriceSourceMetadata(
   };
 }
 
+function sameHotPriceSource(left: HotPriceSourceMetadata, right: HotPriceSourceMetadata): boolean {
+  return (
+    left.sourceHash === right.sourceHash &&
+    left.sourceArtifactId === right.sourceArtifactId &&
+    left.priceChangeBoardRevision === right.priceChangeBoardRevision &&
+    left.sourceDetectedAt === right.sourceDetectedAt &&
+    left.sourceFetchedAt === right.sourceFetchedAt
+  );
+}
+
 function captureTimestampsFromMetadata(
   metadata: HotPriceSourceMetadata,
 ): { readonly requestStartedAt: Date; readonly fetchedAt: Date } | null {
@@ -440,12 +450,19 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
       await syncOperationsRepository.failRun(prepared.sourceRunId, error);
       throw error;
     }
-    if (beforePersist.obligation.obligationId !== activeTarget.obligation.obligationId) {
+    const preparedSource = hotPriceSourceMetadata(job, activeTarget.obligation.evidence);
+    const currentSource = hotPriceSourceMetadata(job, beforePersist.obligation.evidence);
+    const targetChanged =
+      beforePersist.obligation.obligationId !== activeTarget.obligation.obligationId;
+    const sourceChanged = !sameHotPriceSource(preparedSource, currentSource);
+    if (targetChanged || sourceChanged) {
       const skippedItems = prepared.outcome === 'ready' ? prepared.board.players.length : 0;
-      await markSupersededPriceRunSkipped(activeTarget, job, skippedItems);
+      if (targetChanged) await markSupersededPriceRunSkipped(activeTarget, job, skippedItems);
       // preparePriceChangePublication owns a separate source run for the HTTP
       // fetch. Retire that run too; otherwise a superseded fetch remains
-      // RUNNING forever and blocks the deployment quiescence gate.
+      // RUNNING forever and blocks the deployment quiescence gate. A source
+      // evidence update can keep the same obligation ID, so this check must
+      // also retire and re-prepare when only the captured revision/hash changed.
       await markSupersededPriceRunSkipped(
         activeTarget,
         job,
@@ -548,8 +565,8 @@ async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
         trigger: 'queue',
         sourceRunId: job.data.runId,
         ...(hotSource?.bootstrap ? { bootstrap: hotSource.bootstrap } : {}),
-        ...(hotSource?.captureTimestamps?.fetchedAt
-          ? { sourceCheckedAt: hotSource.captureTimestamps.fetchedAt }
+        ...(hotSource?.captureTimestamps?.requestStartedAt
+          ? { sourceCheckedAt: hotSource.captureTimestamps.requestStartedAt }
           : {}),
       }),
   );

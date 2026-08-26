@@ -246,7 +246,11 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
           bootstrap: artifact.payload,
           sourceHash,
           artifactId,
-          detectedAt: new Date(),
+          // Use the request start as the ordering lower bound. The response
+          // may be replayed after a long queue/archive delay; stamping the
+          // post-response clock could make older bytes appear newer than a
+          // request that started later and already published.
+          detectedAt: new Date(probeStartedAt),
           fetchedAt: artifact.retrievedAt,
           corePlayerCount: observedCore?.players.length ?? null,
           corePlayerDelta: observedCore
@@ -320,7 +324,10 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       // quiet no-change day would hide an actual publication outage.
       if (!(error instanceof FPLClientError)) throw error;
       const status = error.status;
-      const retryable = status === 429 || (status !== undefined && status >= 500 && status <= 599);
+      const retryable =
+        error.code === 'UNKNOWN_ERROR' ||
+        status === 429 ||
+        (status !== undefined && status >= 500 && status <= 599);
       retryableFailureStreak = retryable ? Math.min(retryableFailureStreak + 1, 3) : 0;
       logWarn('Price-watch probe failed; continuing bounded watch', {
         season: season.seasonCode,
