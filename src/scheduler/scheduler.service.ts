@@ -254,12 +254,13 @@ export type SchedulerPassResult = Readonly<{
 export async function resolveSchedulerDefinition(
   definition: ScheduledJobDefinition,
   context: SchedulerContext,
+  options: Readonly<{ timeoutMs?: number }> = {},
 ): Promise<
   | Readonly<{ ok: true; plans: readonly SchedulerObligationPlan[] }>
   | Readonly<{ ok: false; error: unknown }>
 > {
   try {
-    const timeoutMs = getConfig().SCHEDULER_RESOLVE_TIMEOUT_MS;
+    const timeoutMs = options.timeoutMs ?? getConfig().SCHEDULER_RESOLVE_TIMEOUT_MS;
     let underlying = definitionResolutionInFlight.get(definition);
     if (!underlying) {
       const resolution = Promise.resolve().then(() => definition.resolve(context));
@@ -282,12 +283,13 @@ export async function resolveSchedulerDefinition(
       const underlying = definitionResolutionInFlight.get(definition);
       if (underlying) {
         // A resolver may be backed by a driver operation that cannot be
-        // cancelled by Promise.race. Keep this scheduler pass in-flight until
-        // the exact operation settles; the process heartbeat/progress stale
-        // guard will then expose a genuinely hung resolver and the VPS
-        // supervisor can restart it, rather than allowing every 30s pass to
-        // accumulate another live query on the same pool.
-        await underlying.catch(() => undefined);
+        // cancelled by Promise.race. Keep the single-flight promise in the
+        // map, but do not await it here: doing so would let one hung resolver
+        // hold the entire 30-second scheduler pass forever. The next pass
+        // will reuse the same underlying operation, time out independently,
+        // and the progress/heartbeat stale guard can surface a real hang
+        // without accumulating duplicate provider or database work.
+        void underlying.catch(() => undefined);
       }
     }
     return { ok: false, error };
