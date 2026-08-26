@@ -31,6 +31,7 @@ import {
   listFreshnessWindows,
   listGovernanceCases,
   listQueueHealthWindows,
+  countGovernanceCases,
 } from './data-governance.service';
 import { dataContractRegistry } from '../domain/data-contracts';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
@@ -138,6 +139,7 @@ export async function getJobsStatus(
     freshnessWindows,
     governanceCases,
     queueHealthWindows,
+    governanceCaseCount,
   ] = await Promise.all([
     schedulerObligationSummary(),
     readRuntimeHeartbeat('scheduler'),
@@ -151,9 +153,25 @@ export async function getJobsStatus(
     // Query the requested SLO window at the database boundary. The table is
     // ordered by due time; fetching the first 500 rows without a lower bound
     // would silently drop the newest evidence after a high-volume live day.
-    listFreshnessWindows({ dueAfter: since, dueBefore: new Date(), limit: 5_000 }).catch(() => []),
+    listFreshnessWindows({
+      dueAfter: since,
+      dueBefore: new Date(),
+      // One row per queue/minute is expected. Keep the requested window
+      // intact instead of returning an arbitrary first page on 28-day views.
+      limit: Math.min(
+        1_000_000,
+        Math.max(5_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
+      ),
+    }).catch(() => []),
     listGovernanceCases({ limit: 100 }).catch(() => []),
-    listQueueHealthWindows({ since, limit: 1_000 }).catch(() => []),
+    listQueueHealthWindows({
+      since,
+      limit: Math.min(
+        1_000_000,
+        Math.max(1_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
+      ),
+    }).catch(() => []),
+    countGovernanceCases().catch(() => 0),
   ]);
   const scheduler = Boolean(schedulerHeartbeat && (await checkRuntimeHeartbeat('scheduler')));
   const queueWorker = Boolean(queueWorkerHeartbeat && (await checkRuntimeHeartbeat('queueWorker')));
@@ -457,7 +475,7 @@ export async function getJobsStatus(
           .sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime())[0]?.dueAt ?? null,
     },
     governanceCases: [...governanceCaseBuckets.values()],
-    governanceCaseCount: governanceCases.length,
+    governanceCaseCount,
     admissions: queues
       .filter((queue) => queue.admission)
       .map((queue) => ({ name: queue.name, admission: queue.admission })),

@@ -26,10 +26,139 @@ import {
   observeDueFreshnessWindows,
   updateGovernanceCaseStatus,
 } from '../services/data-governance.service';
-import { enqueueDataGovernanceJob } from '../jobs/data-governance.jobs';
+import {
+  enqueueCoreSnapshotJob,
+  enqueuePlayerStatsSyncJob,
+  enqueuePlayerValuesSyncJob,
+  enqueuePriceChangePredictionsJob,
+} from '../jobs/data-sync-enqueue';
+import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
+import { enqueueLivePicksRefresh } from '../jobs/live-picks.jobs';
+import {
+  enqueueMyFplSnapshot,
+  enqueueMyFplSnapshotOutbox,
+  enqueuePlayerMarketFreshness,
+} from '../jobs/maintenance.jobs';
+import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
+import {
+  enqueueTournamentEventPicks,
+  enqueueTournamentEventResults,
+  enqueueTournamentOfficialH2H,
+} from '../jobs/tournament-sync.jobs';
+import { formatCronDateKey } from '../utils/timezone';
 import { persistLiveLifecycleStatus } from '../services/live-lifecycle-orchestrator';
 import { reconcileCoreAndMarketPublications } from '../services/data-publication-reconciler';
 import type { WorkerRuntime } from './worker-runtime';
+
+type GovernanceFreshnessCase = Awaited<ReturnType<typeof listGovernanceCases>>[number];
+
+/**
+ * Dispatch the concrete producer/repair lane for a freshness breach. The
+ * observer only changes the evidence ledger; it cannot repair a missing
+ * publication. Every automatic target is deterministic per case attempt so
+ * a retry after an enqueue timeout converges on one Bull identity.
+ */
+async function enqueueFreshnessCaseRepair(input: {
+  governanceCase: GovernanceFreshnessCase;
+  window: NonNullable<Awaited<ReturnType<typeof getFreshnessWindow>>>;
+  season: { seasonId: number; seasonCode: string };
+}): Promise<void> {
+  const { governanceCase: item, window, season } = input;
+  const jobId = `governance-case-${item.caseId}-attempt-${item.attempts}`;
+  const eventId = window.eventId ?? undefined;
+
+  switch (item.contractKey) {
+    case 'core-fixtures':
+      await enqueueCoreSnapshotJob(season, 'reconcile', {
+        jobId,
+        removeOnSettle: false,
+      });
+      return;
+    case 'market-price':
+      if (window.periodKey.startsWith('price-change-')) {
+        await enqueuePriceChangePredictionsJob(season, 'reconcile', {
+          jobId,
+          removeOnSettle: false,
+        });
+        return;
+      }
+      if (window.periodKey.startsWith('maintenance-')) {
+        await enqueuePlayerMarketFreshness(season, 'reconcile', { jobId });
+        return;
+      }
+      if (!window.sourceDay) {
+        throw new Error('SOURCE_ARCHIVE_MISSING: market freshness window has no source day');
+      }
+      const sourceDay = window.sourceDay.replaceAll('-', '');
+      if (sourceDay !== formatCronDateKey()) {
+        throw new Error(`SOURCE_ARCHIVE_MISSING: historical market day ${window.sourceDay}`);
+      }
+      await enqueuePlayerValuesSyncJob(season, 'reconcile', {
+        changeDate: sourceDay,
+        jobId,
+        removeOnSettle: false,
+      });
+      return;
+    case 'live-snapshot':
+      if (!eventId) throw new Error('Live freshness repair has no event id');
+      await enqueueLiveSnapshot(season, eventId, 'reconcile', {
+        persistEventLives: true,
+        jobId,
+      });
+      return;
+    case 'live-picks':
+      if (!eventId) throw new Error('Live picks freshness repair has no event id');
+      await enqueueLivePicksRefresh(season, eventId, { jobId });
+      return;
+    case 'entry-data':
+      if (!eventId) throw new Error('Entry freshness repair has no event id');
+      await enqueueEntryPicksSyncJob(season, 'reconcile', {
+        eventId,
+        lane: 'entry-sync',
+        jobId,
+      });
+      return;
+    case 'league-tournament':
+      if (!eventId) throw new Error('Tournament freshness repair has no event id');
+      if (window.periodKey.includes('results')) {
+        await enqueueTournamentEventResults(season, eventId, 'reconcile', { jobId });
+      } else {
+        await enqueueTournamentEventPicks(season, eventId, 'reconcile', { jobId });
+      }
+      return;
+    case 'my-fpl':
+      if (window.periodKey.includes('outbox')) {
+        await enqueueMyFplSnapshotOutbox(season, 'reconcile', { jobId });
+        return;
+      }
+      if (!eventId) throw new Error('My FPL freshness repair has no event id');
+      await enqueueMyFplSnapshot(season, 'reconcile', {
+        eventId,
+        snapshotKind: window.periodKey.startsWith('final-') ? 'FINAL' : 'PROVISIONAL',
+        jobId,
+      });
+      return;
+    case 'official-h2h':
+      if (!eventId) throw new Error('Official H2H freshness repair has no event id');
+      await enqueueTournamentOfficialH2H(season, eventId, 'reconcile', {
+        jobId,
+        officialH2HMode: 'full-reconcile',
+        officialH2HReconcileKey: `governance-case-${item.caseId}`,
+      });
+      return;
+    case 'player-stats':
+      await enqueuePlayerStatsSyncJob(season, 'reconcile', {
+        ...(eventId === undefined ? {} : { eventId }),
+        jobId,
+        removeOnSettle: false,
+      });
+      return;
+    default:
+      throw new Error(
+        `AUTOMATIC_REPAIR_NOT_SAFE: unsupported freshness contract ${item.contractKey}`,
+      );
+  }
+}
 
 async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promise<unknown> {
   if (
@@ -103,9 +232,11 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
             }
           }
 
-          // Only freshness observer replay is safe to automate here. H2H
-          // locked-hash drift, archive replay and denominator ambiguity stay
-          // behind the protected dry-run/execute case action.
+          // H2H locked-hash drift, archive replay and denominator ambiguity
+          // stay behind the protected dry-run/execute case action. A normal
+          // freshness breach is dispatched to the concrete producer lane;
+          // merely running the observer would leave the source unchanged and
+          // make the case churn forever.
           if (governanceCase.caseKind !== 'freshness-breach') {
             if (governanceCase.status === 'AUTO_REPAIRING') {
               const changed = await updateGovernanceCaseStatus({
@@ -136,14 +267,16 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
           });
           if (!claimed) continue;
           try {
-            await enqueueDataGovernanceJob(
-              { seasonId: job.data.seasonId, seasonCode: job.data.seasonCode },
-              DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER,
-              {
-                scopeKey: governanceCase.scopeKey,
-                jobId: `governance-freshness-repair-${governanceCase.caseId}-${claimed.attempts}`,
-              },
-            );
+            const window =
+              governanceCase.sloWindowId === null
+                ? null
+                : await getFreshnessWindow(governanceCase.sloWindowId);
+            if (!window) throw new Error('Freshness governance case has no linked SLO window');
+            await enqueueFreshnessCaseRepair({
+              governanceCase: claimed,
+              window,
+              season: { seasonId: job.data.seasonId, seasonCode: job.data.seasonCode },
+            });
             dispatched += 1;
           } catch (repairError) {
             const changed = await updateGovernanceCaseStatus({

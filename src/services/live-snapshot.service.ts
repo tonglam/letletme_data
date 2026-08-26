@@ -128,6 +128,8 @@ export interface LiveSnapshotSyncOptions {
   readonly trigger?: 'cron' | 'manual' | 'cascade' | 'queue' | 'catchup' | 'reconcile';
   readonly mutationScopes?: readonly string[];
   readonly dependencies?: LiveSnapshotDependencies;
+  /** Correlate the publication run with its scheduler/Bull obligation. */
+  readonly sourceRunId?: string;
 }
 
 function fixtureTeamCount(fixtures: readonly Fixture[]): number {
@@ -634,7 +636,7 @@ export async function syncLiveSnapshot(
     await recoverPendingLiveSnapshotPublication(season, eventId);
   }
 
-  const sourceRunId = randomUUID();
+  const sourceRunId = options.sourceRunId ?? randomUUID();
   await syncOperationsRepository.startRun({
     runId: sourceRunId,
     provider: 'fpl',

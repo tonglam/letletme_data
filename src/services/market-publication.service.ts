@@ -35,6 +35,8 @@ export type MarketPublicationOptions = Readonly<{
    * commits; Redis is never touched while the canonical transaction is open.
    */
   deferDelivery?: boolean;
+  /** Correlate the publication run with its scheduler/Bull obligation. */
+  sourceRunId?: string;
 }>;
 
 async function ensureMarketPublicationDelivered(
@@ -134,7 +136,7 @@ export async function ensureMarketPublication(
     }
   }
 
-  const sourceRunId = randomUUID();
+  const sourceRunId = options.sourceRunId ?? randomUUID();
   await syncOperationsRepository.startRun({
     runId: sourceRunId,
     provider: 'fpl',

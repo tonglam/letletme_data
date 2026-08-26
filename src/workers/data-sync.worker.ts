@@ -149,7 +149,10 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             deferMarketPublication: true,
             deferNotification: true,
           });
-          marketPublication = await ensureMarketPublication(season, { deferDelivery: true });
+          marketPublication = await ensureMarketPublication(season, {
+            deferDelivery: true,
+            sourceRunId: job.data.runId,
+          });
           return persisted;
         });
         if (marketPublication?.publicationId) {
@@ -213,6 +216,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             season,
             undefined,
             job.data.source === 'manual' ? 'manual' : 'queue',
+            job.data.runId,
           );
         } catch (error) {
           if (error instanceof PriceChangeCorePublicationRequiredError) {
@@ -276,7 +280,10 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
       runTrackedJob(context, async () => {
         switch (job.name) {
           case 'core-snapshot':
-            return syncCoreSnapshot(season);
+            return syncCoreSnapshot(season, {
+              trigger: 'queue',
+              sourceRunId: job.data.runId,
+            });
           case 'player-prices':
             if (!job.data.changeDate) {
               throw new Error('player-prices job requires changeDate');

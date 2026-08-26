@@ -21,6 +21,7 @@ import {
 } from './runtime-heartbeat';
 import { logDebug, logError, logInfo, logWarn } from './logger';
 import { readFplAdmissionTelemetry } from './fpl-admission';
+import { getConfig } from './config';
 
 type QueueCounts = Record<string, number>;
 
@@ -32,9 +33,6 @@ export interface QueueMonitorOptions {
   dispatchBudgetMs?: number;
   consumerHeartbeatRole?: RuntimeRole;
 }
-
-const defaultPollIntervalMs = 15_000;
-const WINDOW_MS = 60_000;
 
 const DEFAULT_DISPATCH_BUDGETS: Record<string, number> = {
   'official-h2h-live': 15_000,
@@ -107,14 +105,17 @@ async function resolveJobName(queue: Queue, jobId?: string) {
   }
 }
 
-function windowStart(now = Date.now()): Date {
-  return new Date(Math.floor(now / WINDOW_MS) * WINDOW_MS);
+function windowStart(
+  now = Date.now(),
+  intervalMs = getConfig().QUEUE_HEALTH_WINDOW_INTERVAL_MS,
+): Date {
+  return new Date(Math.floor(now / intervalMs) * intervalMs);
 }
 
-async function persistWindow(snapshot: QueueHealthSnapshot) {
+async function persistWindow(snapshot: QueueHealthSnapshot, intervalMs: number) {
   try {
     const db = await getDb();
-    const window = windowStart(Date.parse(snapshot.observedAt));
+    const window = windowStart(Date.parse(snapshot.observedAt), intervalMs);
     await db
       .insert(queueHealthWindowsInOps)
       .values({
@@ -196,12 +197,13 @@ async function persistWindow(snapshot: QueueHealthSnapshot) {
 export function startQueueMonitor(options: QueueMonitorOptions) {
   const { queue, queueEvents } = options;
   const queueName = options.queueName ?? queue.name;
-  const pollIntervalMs = options.pollIntervalMs ?? defaultPollIntervalMs;
+  const pollIntervalMs = options.pollIntervalMs ?? getConfig().QUEUE_HEALTH_SNAPSHOT_INTERVAL_MS;
+  const windowIntervalMs = getConfig().QUEUE_HEALTH_WINDOW_INTERVAL_MS;
   const dispatchBudgetMs = options.dispatchBudgetMs ?? DEFAULT_DISPATCH_BUDGETS[queueName];
   let pollInterval: NodeJS.Timeout | null = null;
   let lastCounts: QueueCounts | null = null;
   let lastSnapshot: QueueHealthSnapshot | undefined;
-  let eventWindowStartMs = windowStart().getTime();
+  let eventWindowStartMs = windowStart(Date.now(), windowIntervalMs).getTime();
   let windowArrivals = 0;
   let windowCompletions = 0;
   let windowFailures = 0;
@@ -267,8 +269,8 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         drainEtaMs: calculateDrainEtaMs(snapshot.runnable, windowArrivals, windowCompletions),
       };
       const observedMs = Date.parse(snapshot.observedAt);
-      if (Number.isFinite(observedMs) && observedMs >= eventWindowStartMs + WINDOW_MS) {
-        eventWindowStartMs = windowStart(observedMs).getTime();
+      if (Number.isFinite(observedMs) && observedMs >= eventWindowStartMs + windowIntervalMs) {
+        eventWindowStartMs = windowStart(observedMs, windowIntervalMs).getTime();
         windowArrivals = 0;
         windowCompletions = 0;
         windowFailures = 0;
@@ -309,6 +311,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           provider429Rate: snapshot.provider429Rate,
           arrivalsPerMinute: windowArrivals,
           completionsPerMinute: windowCompletions,
+          failuresPerMinute: windowFailures,
           ...(options.consumerHeartbeatRole
             ? {
                 consumerHeartbeatAgeMs: heartbeat?.lastSeenAt
@@ -345,7 +348,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         await evaluateAutomaticAdmission(withEvents).catch((error) =>
           logError('Automatic queue admission evaluation failed', error, { queue: queueName }),
         );
-        await persistWindow(withEvents);
+        await persistWindow(withEvents, windowIntervalMs);
       }
       lastCounts = counts;
       lastSnapshot = withEvents;

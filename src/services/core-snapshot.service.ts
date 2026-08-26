@@ -52,6 +52,12 @@ export interface CoreSnapshotDependencies {
 export interface CoreSnapshotSyncOptions {
   readonly trigger?: 'cron' | 'manual' | 'queue' | 'event-transition';
   readonly dependencies?: CoreSnapshotDependencies;
+  /**
+   * Correlate the durable publication run with the scheduler/Bull execution
+   * that owns it.  The scheduler stores this value on the obligation so the
+   * freshness ledger can join the publication back to the exact window.
+   */
+  readonly sourceRunId?: string;
 }
 
 const defaultDependencies: CoreSnapshotDependencies = {
@@ -107,7 +113,7 @@ export async function syncCoreSnapshot(
   ) {
     throw new Error(`FPL season ${currentSeason.seasonCode} is no longer current`);
   }
-  const sourceRunId = randomUUID();
+  const sourceRunId = options.sourceRunId ?? randomUUID();
   await syncOperationsRepository.startRun({
     runId: sourceRunId,
     provider: 'fpl',

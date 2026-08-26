@@ -27,6 +27,16 @@ export async function withTimeout<T>(
 
   try {
     return await Promise.race([promise, timeoutPromise]);
+  } catch (error) {
+    if (error instanceof TimeoutError) {
+      // Promise.race cannot cancel an arbitrary database/provider operation.
+      // The timeout error remains the reported failure, while the underlying
+      // rejection is consumed here to avoid an unhandled promise. Callers
+      // that need single-flight semantics must coalesce the underlying work;
+      // waiting here would turn a provider hang into an unbounded caller hang.
+      void promise.catch(() => undefined);
+    }
+    throw error;
   } finally {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);

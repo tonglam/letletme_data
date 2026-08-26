@@ -10,6 +10,12 @@ export type FreshnessCompletenessStatus =
 export type FreshnessWindowObservation = Readonly<{
   eligible: boolean;
   invalid?: boolean;
+  /**
+   * During the staged rollout Data may settle producer evidence before the
+   * GraphQL/Web probe services are enabled. Once true, every consumer hop is
+   * mandatory for MET and recovery evidence.
+   */
+  consumerEvidenceRequired?: boolean;
   dueAt: Date;
   now?: Date;
   sourceCheckedAt?: Date | null;
@@ -34,19 +40,25 @@ const MILESTONE_FIELDS = [
   'webSeenAt',
 ] as const;
 
+const PRODUCER_MILESTONE_FIELDS = ['sourceCheckedAt', 'pgPublishedAt', 'redisSeenAt'] as const;
+
+function requiredMilestoneFields(input: FreshnessWindowObservation) {
+  return input.consumerEvidenceRequired === false ? PRODUCER_MILESTONE_FIELDS : MILESTONE_FIELDS;
+}
+
 function isFiniteDate(value: Date | null | undefined): value is Date {
   return value instanceof Date && Number.isFinite(value.getTime());
 }
 
 /** Every hop in the publication chain must leave timestamped evidence. */
 export function milestonesAreComplete(input: FreshnessWindowObservation): boolean {
-  return MILESTONE_FIELDS.every((field) => isFiniteDate(input[field]));
+  return requiredMilestoneFields(input).every((field) => isFiniteDate(input[field]));
 }
 
 /** Evidence is only on time when no recorded hop crossed the SLO deadline. */
 export function milestonesMeetDeadline(input: FreshnessWindowObservation): boolean {
   if (!milestonesAreComplete(input)) return false;
-  return MILESTONE_FIELDS.every((field) => {
+  return requiredMilestoneFields(input).every((field) => {
     const timestamp = input[field];
     return (
       timestamp !== null && timestamp !== undefined && timestamp.getTime() <= input.dueAt.getTime()
@@ -79,18 +91,14 @@ export function evaluateFreshnessWindow(input: FreshnessWindowObservation): Fres
   const complete =
     input.completeness === 'COMPLETE' ||
     (input.completeness === undefined && isCompleteCount(input.expectedCount, input.observedCount));
-  const visible = Boolean(input.webSeenAt && input.webSeenAt.getTime() <= input.dueAt.getTime());
-  if (
-    complete &&
-    visible &&
-    milestonesMeetDeadline(input) &&
-    revisionsAgree([
-      input.producerRevision,
-      input.redisRevision,
-      input.graphqlRevision,
-      input.webRevision,
-    ])
-  ) {
+  const consumerRequired = input.consumerEvidenceRequired !== false;
+  const visible =
+    !consumerRequired ||
+    Boolean(input.webSeenAt && input.webSeenAt.getTime() <= input.dueAt.getTime());
+  const revisions = consumerRequired
+    ? [input.producerRevision, input.redisRevision, input.graphqlRevision, input.webRevision]
+    : [input.producerRevision, input.redisRevision];
+  if (complete && visible && milestonesMeetDeadline(input) && revisionsAgree(revisions)) {
     return 'MET';
   }
   return now.getTime() >= input.dueAt.getTime() ? 'BREACHED' : 'PENDING';
@@ -114,12 +122,16 @@ export function applyFreshnessObservation(
       !observation.invalid &&
       observation.completeness === 'COMPLETE' &&
       milestonesAreComplete(observation) &&
-      revisionsAgree([
-        observation.producerRevision,
-        observation.redisRevision,
-        observation.graphqlRevision,
-        observation.webRevision,
-      ]) &&
+      revisionsAgree(
+        observation.consumerEvidenceRequired === false
+          ? [observation.producerRevision, observation.redisRevision]
+          : [
+              observation.producerRevision,
+              observation.redisRevision,
+              observation.graphqlRevision,
+              observation.webRevision,
+            ],
+      ) &&
       (observation.expectedCount == null ||
         isCompleteCount(observation.expectedCount, observation.observedCount));
     return { status: 'BREACHED', recovered: complete };

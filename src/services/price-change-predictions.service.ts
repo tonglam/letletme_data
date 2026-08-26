@@ -873,8 +873,9 @@ export async function preparePriceChangePublication(
   season: FplSeasonRef,
   dependencies: PriceChangePublicationDependencies = defaultDependencies,
   trigger: 'cron' | 'manual' | 'queue' = 'queue',
+  sourceRunIdOverride?: string,
 ): Promise<PriceChangePreparationResult> {
-  const sourceRunId = randomUUID();
+  const sourceRunId = sourceRunIdOverride ?? randomUUID();
   await syncOperationsRepository.startRun({
     runId: sourceRunId,
     provider: 'fpl',

@@ -112,6 +112,22 @@ describe('GW queue and data governance primitives', () => {
       }),
     ).toBe('PENDING');
     expect(
+      evaluateFreshnessWindow({
+        eligible: true,
+        consumerEvidenceRequired: false,
+        dueAt,
+        now: new Date('2026-08-25T23:59:00.000Z'),
+        producerRevision: 'r1',
+        redisRevision: 'r1',
+        sourceCheckedAt: new Date('2026-08-25T23:50:00.000Z'),
+        pgPublishedAt: new Date('2026-08-25T23:52:00.000Z'),
+        redisSeenAt: new Date('2026-08-25T23:53:00.000Z'),
+        expectedCount: 4,
+        observedCount: 4,
+        completeness: 'COMPLETE',
+      }),
+    ).toBe('MET');
+    expect(
       evaluateFreshnessWindow({ eligible: true, dueAt, now: new Date('2026-08-26T00:01:00.000Z') }),
     ).toBe('BREACHED');
     expect(

@@ -88,6 +88,17 @@ const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
 ] as const;
 const observedPlanKeys = new Map<string, true>();
 
+// A definition resolver may still be unwinding after its bounded caller
+// timeout (for example, a driver socket that has not observed cancellation
+// yet). Coalesce that underlying operation per definition so the next 30s
+// pass cannot create another identical provider/DB request while the first is
+// still in flight. The entry is removed only after the actual resolver
+// settles; each pass still gets its own bounded timeout around that promise.
+const definitionResolutionInFlight = new WeakMap<
+  ScheduledJobDefinition,
+  Promise<readonly SchedulerObligationPlan[]>
+>();
+
 function evidenceNumber(evidence: Readonly<Record<string, unknown>> | undefined, key: string) {
   const value = evidence?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -217,8 +228,20 @@ export async function resolveSchedulerDefinition(
 > {
   try {
     const timeoutMs = getConfig().SCHEDULER_RESOLVE_TIMEOUT_MS;
+    let underlying = definitionResolutionInFlight.get(definition);
+    if (!underlying) {
+      const resolution = Promise.resolve().then(() => definition.resolve(context));
+      let tracked: Promise<readonly SchedulerObligationPlan[]>;
+      tracked = resolution.finally(() => {
+        if (definitionResolutionInFlight.get(definition) === tracked) {
+          definitionResolutionInFlight.delete(definition);
+        }
+      });
+      underlying = tracked;
+      definitionResolutionInFlight.set(definition, tracked);
+    }
     const plans = await withTimeout(
-      definition.resolve(context),
+      underlying,
       timeoutMs,
       `Scheduler definition ${definition.name} resolution exceeded ${timeoutMs}ms`,
     );

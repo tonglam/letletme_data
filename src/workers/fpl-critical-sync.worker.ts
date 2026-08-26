@@ -201,6 +201,7 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
         season,
         undefined,
         job.data.source === 'manual' ? 'manual' : 'queue',
+        job.data.runId,
       );
     } catch (error) {
       if (error instanceof PriceChangeCorePublicationRequiredError) {
@@ -332,7 +333,11 @@ async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
       jobName: job.name,
       jobId: blockerId,
     },
-    () => syncCoreSnapshot(season, { trigger: 'queue' }),
+    () =>
+      syncCoreSnapshot(season, {
+        trigger: 'queue',
+        sourceRunId: job.data.runId,
+      }),
   );
   if (result.outcome !== 'ready' || !result.publicationId || result.revision === undefined) {
     throw new Error('Core repair did not produce a durable publication');

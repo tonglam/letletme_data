@@ -101,6 +101,8 @@ export function classifyBacklog(
     provider429Rate?: number | null;
     arrivalsPerMinute?: number;
     completionsPerMinute?: number;
+    /** Failed events observed in the current telemetry window. */
+    failuresPerMinute?: number;
     consumerHeartbeatAgeMs?: number | null;
   }>,
 ): BacklogClass {
@@ -111,7 +113,16 @@ export function classifyBacklog(
   ) {
     return 'NO_CONSUMER';
   }
-  if (input.failed >= 5 && input.failed >= Math.max(1, input.arrivalsPerMinute ?? 0) * 0.5) {
+  // `failed` is BullMQ's retained total and can represent weeks of history.
+  // Poison classification is only meaningful for failures observed in this
+  // window. Unit callers that provide arrivals but no explicit event count
+  // retain the old shorthand; production monitor calls always provide it.
+  const failuresInWindow =
+    input.failuresPerMinute ?? (input.arrivalsPerMinute === undefined ? 0 : input.failed);
+  if (
+    failuresInWindow >= 5 &&
+    failuresInWindow >= Math.max(1, input.arrivalsPerMinute ?? 0) * 0.5
+  ) {
     return 'POISON_STORM';
   }
   if ((input.stalled ?? 0) > 0) return 'STALLED';
@@ -316,7 +327,10 @@ async function criticalAdmissionState(
       greenSince = null;
       continue;
     }
-    greenSince = greenSince === null ? since : Math.min(greenSince, since);
+    // The all-green interval begins only after the last critical lane turns
+    // green. Using the minimum would allow an old healthy lane to shorten the
+    // required five-minute interval while another lane had just recovered.
+    greenSince = greenSince === null ? since : Math.max(greenSince, since);
   }
   return { red, greenSince };
 }
@@ -352,7 +366,7 @@ export async function evaluateAutomaticAdmission(
       criticalState.greenSince === null
         ? null
         : ownGreenSince > 0
-          ? Math.min(ownGreenSince, criticalState.greenSince)
+          ? Math.max(ownGreenSince, criticalState.greenSince)
           : null;
     if (
       existing?.changedBy === 'queue-governance' &&

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 
 import {
   dataGovernanceCasesInOps,
@@ -15,6 +15,7 @@ import {
   type FreshnessSloStatus,
 } from '../domain/freshness-slo';
 import { dataContractRegistry } from '../domain/data-contracts';
+import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
 
 export type GovernanceCaseStatus =
@@ -226,6 +227,7 @@ export async function recordFreshnessObservation(input: {
   const observation = {
     eligible: current.status !== 'NOT_APPLICABLE',
     invalid,
+    consumerEvidenceRequired: getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED,
     dueAt: current.dueAt,
     sourceCheckedAt: input.sourceCheckedAt ?? current.sourceCheckedAt,
     pgPublishedAt: input.pgPublishedAt ?? current.pgPublishedAt,
@@ -330,7 +332,7 @@ export async function listFreshnessWindows(
         : undefined,
     )
     .orderBy(asc(freshnessSloWindowsInOps.dueAt), desc(freshnessSloWindowsInOps.windowId))
-    .limit(Math.min(5_000, Math.max(1, input.limit ?? 100)));
+    .limit(Math.min(1_000_000, Math.max(1, input.limit ?? 100)));
 }
 
 export async function getFreshnessWindow(windowId: number, db?: DbHandle) {
@@ -352,7 +354,7 @@ export async function listQueueHealthWindows(
     .from(queueHealthWindowsInOps)
     .where(input.since ? gte(queueHealthWindowsInOps.windowStart, input.since) : undefined)
     .orderBy(desc(queueHealthWindowsInOps.windowStart), asc(queueHealthWindowsInOps.queueName))
-    .limit(Math.min(1_000, Math.max(1, input.limit ?? 500)));
+    .limit(Math.min(1_000_000, Math.max(1, input.limit ?? 500)));
 }
 
 /**
@@ -485,6 +487,13 @@ export async function listGovernanceCases(
     .where(statuses ? inArray(dataGovernanceCasesInOps.status, statuses) : undefined)
     .orderBy(desc(dataGovernanceCasesInOps.updatedAt), desc(dataGovernanceCasesInOps.caseId))
     .limit(Math.min(500, Math.max(1, input.limit ?? 100)));
+}
+
+/** Return the unbounded case total separately from the bounded operator feed. */
+export async function countGovernanceCases(db?: DbHandle): Promise<number> {
+  const handle = db ?? (await getDb());
+  const [row] = await handle.select({ count: count() }).from(dataGovernanceCasesInOps);
+  return Number(row?.count ?? 0);
 }
 
 export async function transitionGovernanceCase(input: {
