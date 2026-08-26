@@ -1910,11 +1910,11 @@ export const refreshClassicStandings = async (
         break;
       }
     }
-    if (!exhausted && nextPage > MAX_STANDINGS_PAGES && fetchedRows.size < targetIds.size) {
-      refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
-    } else if (exhausted && fetchedRows.size < targetIds.size) {
-      refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
-    }
+    // `fetchedRows` is intentionally scoped to this bounded invocation. A
+    // worker continuation can reach normal standings exhaustion with only the
+    // final page(s) in memory even though earlier pages are already durable in
+    // `rows`. Do not turn that normal end-of-list into an upstream failure; the
+    // durable roster is the coverage authority.
   } catch (error) {
     refreshErrorCode =
       error instanceof FPLClientError && error.status === 429
@@ -1927,6 +1927,7 @@ export const refreshClassicStandings = async (
     });
   }
   let publishedRows: ManagerLiveScoreRow[] = [];
+  let durableTargetEntryIds: number[] = [];
   if (fetchedRows.size > 0) {
     const uniqueFetchedRows = Array.from(fetchedRows.values());
     try {
@@ -2052,6 +2053,25 @@ export const refreshClassicStandings = async (
       });
     }
   }
+  durableTargetEntryIds = Array.from(targetIds).filter((entryId) => {
+    const row = rows.get(entryId);
+    return row !== undefined && typeof row.eventPoints === 'number';
+  });
+  if (
+    !refreshErrorCode &&
+    !exhausted &&
+    nextPage > MAX_STANDINGS_PAGES &&
+    fetchedRows.size < targetIds.size
+  ) {
+    refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
+  } else if (
+    !refreshErrorCode &&
+    exhausted &&
+    fetchedRows.size < targetIds.size &&
+    durableTargetEntryIds.length < targetIds.size
+  ) {
+    refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
+  }
 
   logDebug('Official classic manager live refresh completed', {
     eventId,
@@ -2062,7 +2082,10 @@ export const refreshClassicStandings = async (
     partial: refreshErrorCode !== null,
   });
   const result = {
-    complete: refreshErrorCode === null && fetchedRows.size >= targetIds.size,
+    complete:
+      refreshErrorCode === null &&
+      (fetchedRows.size >= targetIds.size ||
+        (exhausted && durableTargetEntryIds.length >= targetIds.size)),
     nextPage,
     errorCode: refreshErrorCode,
   };

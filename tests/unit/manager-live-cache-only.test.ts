@@ -157,13 +157,13 @@ const cachedRow = (entryId: number, checkedAt: string) => ({
   eventPoints: entryId % 100,
   netEventPoints: entryId % 100,
   totalPoints: 1000 + entryId,
-  totalScope: 'OVERALL',
+  totalScope: 'OVERALL' as const,
   eventRank: 10 + entryId,
   overallRank: 100 + entryId,
   leagueRank: null,
-  source: 'FPL_ENTRY_SUMMARY',
+  source: 'FPL_ENTRY_SUMMARY' as const,
   transferCost: 0,
-  eventPointSemantics: 'GROSS',
+  eventPointSemantics: 'GROSS' as const,
   revision: `revision-${entryId}`,
   checkedAt,
   revisionAt: checkedAt,
@@ -681,6 +681,41 @@ describe('manager live classic standings convergence', () => {
     expect(rows.get(101)).toMatchObject({ eventPoints: 51, leagueRank: 7 });
     expect(upsertCheckpoint).toHaveBeenCalledTimes(1);
     expect(upsertCheckpoint.mock.calls[0]?.[3]).toHaveLength(1);
+  });
+
+  test('treats normal standings exhaustion as complete when earlier pages are durable', async () => {
+    getClassicStandings.mockImplementationOnce(
+      async () =>
+        ({
+          last_updated_data: '2026-08-23T12:00:00Z',
+          standings: {
+            has_next: false,
+            page: 6,
+            results: [{ entry: 999, event_total: 51, total: 1_051, rank: 7 }],
+          },
+        }) as never,
+    );
+    const checkedAt = new Date().toISOString();
+    const rows = new Map([
+      [101, cachedRow(101, checkedAt)],
+      [102, cachedRow(102, checkedAt)],
+    ]);
+
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101, 102]),
+      rows,
+      null,
+      { startPage: 6, maxPages: 1 },
+    );
+
+    expect(result).toMatchObject({
+      complete: true,
+      nextPage: 7,
+      errorCode: null,
+    });
   });
 
   test('does not advance a page when both durable publications fail', async () => {
