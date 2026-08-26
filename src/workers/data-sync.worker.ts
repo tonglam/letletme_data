@@ -142,12 +142,16 @@ async function hotCoreSourceDependencies(job: Job<DataSyncJobData>) {
       ...(capturedAt ? { sourceCheckedAt: capturedAt.requestStartedAt } : {}),
     };
   } catch (error) {
-    logWarn('Archived provisional source unavailable; legacy Core repair will re-fetch', {
+    logWarn('Archived provisional source unavailable; legacy Core repair will retry source-bound', {
       season: job.data.seasonCode,
       artifactId: job.data.sourceArtifactId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return undefined;
+    throw new Error(
+      `Archived price-change source unavailable for legacy Core repair: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
 
@@ -221,12 +225,19 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
         : {}),
     };
   } catch (error) {
-    logWarn('Archived provisional source unavailable; durable reconciliation will re-fetch', {
-      season: job.data.seasonCode,
-      artifactId: sourceArtifactId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return undefined;
+    logWarn(
+      'Archived provisional source unavailable; durable reconciliation will retry source-bound',
+      {
+        season: job.data.seasonCode,
+        artifactId: sourceArtifactId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    throw new Error(
+      `Archived price-change source unavailable for durable reconciliation: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
 

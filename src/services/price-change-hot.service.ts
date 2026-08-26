@@ -29,6 +29,9 @@ const HOT_KEY_PREFIX = 'fpl:price-changes:hot';
 
 export type PriceChangeHotReconciliationState = 'pending' | 'reconciled' | 'failed';
 
+/** Prefix persisted in reconciliation metadata when the exact source archive is unavailable. */
+export const PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX = 'source-archive-failed:';
+
 export type PriceChangeHotSnapshot = Readonly<{
   schemaVersion: typeof PRICE_CHANGE_HOT_SCHEMA_VERSION;
   seasonCode: string;
@@ -696,6 +699,10 @@ export async function markPriceChangeHotReconciliation(
   snapshot: PriceChangeHotSnapshot,
   input:
     | {
+        readonly state: 'pending';
+        readonly error: string;
+      }
+    | {
         readonly state: 'reconciled';
         readonly durablePublicationId: string;
         readonly durableRevision: number;
@@ -711,9 +718,15 @@ export async function markPriceChangeHotReconciliation(
   // writing the reconciled marker (for example while completing its lane),
   // and a later Bull terminal callback must not turn that success into a
   // misleading failed state.
-  if (input.state === 'failed' && current.reconciliation.state === 'reconciled') {
+  if (input.state !== 'reconciled' && current.reconciliation.state === 'reconciled') {
     return true;
   }
+  const failureError =
+    input.state === 'reconciled'
+      ? ''
+      : input.state === 'failed' && current.reconciliation.error
+        ? `${current.reconciliation.error}; ${input.error}`
+        : input.error;
   const updated: PriceChangeHotSnapshot = {
     ...current,
     reconciliation:
@@ -725,10 +738,10 @@ export async function markPriceChangeHotReconciliation(
             error: null,
           }
         : {
-            state: 'failed',
+            state: input.state,
             durablePublicationId: null,
             durableRevision: null,
-            error: input.error.slice(0, 1_000),
+            error: failureError.slice(0, 1_000),
           },
   };
   const redis = await redisSingleton.getClient();
@@ -739,7 +752,7 @@ if not raw then return 0 end
 local ok, existing = pcall(cjson.decode, raw)
 if not ok or not existing then return 0 end
 if existing.revision ~= ARGV[1] or existing.sourceHash ~= ARGV[2] then return 0 end
-if ARGV[4] == 'failed' and existing.reconciliation and existing.reconciliation.state == 'reconciled' then
+if ARGV[4] ~= 'reconciled' and existing.reconciliation and existing.reconciliation.state == 'reconciled' then
   return 1
 end
 redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[5])

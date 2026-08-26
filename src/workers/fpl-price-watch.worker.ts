@@ -19,6 +19,7 @@ import {
   archivePriceChangeHotSource,
   createPriceChangeHotArtifactId,
   markPriceChangeHotReconciliation,
+  PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX,
   publishPriceChangeHotSnapshot,
   readPriceChangeHotSnapshot,
   sha256Bytes,
@@ -82,10 +83,18 @@ async function enqueueDurableReconciliation(
   season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>,
   snapshot: Awaited<ReturnType<typeof buildPriceChangeHotSnapshot>>,
 ): Promise<void> {
+  const archiveUnavailable = snapshot.reconciliation.error?.startsWith(
+    PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX,
+  );
+  // An artifact ID is only source-bound evidence when the archive was
+  // verified. If archiving failed, retry without that ID so the durable lane
+  // re-fetches authoritative data instead of retrying a permanently missing
+  // object forever.
+  const sourceArtifactId = archiveUnavailable ? undefined : (snapshot.artifactId ?? undefined);
   try {
     await triggerPriceChangeLane({
       sourceHash: snapshot.sourceHash,
-      sourceArtifactId: snapshot.artifactId ?? undefined,
+      sourceArtifactId,
       priceChangeBoardRevision: snapshot.revision,
       sourceDetectedAt: snapshot.detectedAt,
       sourceFetchedAt: snapshot.fetchedAt,
@@ -112,7 +121,7 @@ async function enqueueDurableReconciliation(
     jobId: `price-change-hot-reconcile-${randomUUID()}`,
     removeOnSettle: false,
     sourceHash: snapshot.sourceHash,
-    sourceArtifactId: snapshot.artifactId ?? undefined,
+    sourceArtifactId,
     priceChangeBoardRevision: snapshot.revision,
     sourceDetectedAt: snapshot.detectedAt,
     sourceFetchedAt: snapshot.fetchedAt,
@@ -297,6 +306,7 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
           // exact response so a worker cannot silently persist a different
           // bootstrap after an archive race or transient storage miss.
           let archived = false;
+          let archiveError: string | null = null;
           try {
             await archivePriceChangeHotSource({
               artifactId,
@@ -305,17 +315,34 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
             });
             archived = true;
           } catch (error) {
+            archiveError = error instanceof Error ? error.message : String(error);
             logWarn('Price-change hot source archive failed; provisional data remains visible', {
               season: season.seasonCode,
               revision: snapshot.revision,
               artifactId,
-              error: error instanceof Error ? error.message : String(error),
+              error: archiveError,
             });
+            const marked = await markPriceChangeHotReconciliation(snapshot, {
+              state: 'pending',
+              error: `${PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX} ${archiveError}`,
+            });
+            if (!marked) throw new Error('Price-change hot archive failure CAS failed');
           }
           try {
             await enqueueDurableReconciliation(
               season,
-              archived ? snapshot : { ...snapshot, artifactId: null },
+              archived
+                ? snapshot
+                : {
+                    ...snapshot,
+                    artifactId: null,
+                    reconciliation: archiveError
+                      ? {
+                          ...snapshot.reconciliation,
+                          error: `${PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX} ${archiveError}`,
+                        }
+                      : snapshot.reconciliation,
+                  },
             );
           } catch (error) {
             await markHotReconciliationFailed(snapshot, error);

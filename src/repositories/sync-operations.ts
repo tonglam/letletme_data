@@ -741,7 +741,6 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
     }): Promise<void> => {
       const db = await getDbInstance();
       await db.transaction(async (tx) => {
-        await input.beforeActivate?.(tx);
         await tx.execute(sql`
           SELECT pg_advisory_xact_lock(
             hashtext(${input.dataset}),
@@ -839,6 +838,11 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             ),
           )
           .for('update');
+        // Run caller-specific fences only after the target scope's active row
+        // is locked. Source-order checks performed before this point can race
+        // a concurrent activation and allow an older replay to retire newer
+        // authoritative data.
+        await input.beforeActivate?.(tx);
         const newerActive = activeRows.find(
           (row) => row.publicationId !== input.publicationId && row.revision >= targetRow.revision,
         );

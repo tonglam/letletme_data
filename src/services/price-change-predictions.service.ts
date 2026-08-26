@@ -13,7 +13,10 @@ import {
   loadDataPublicationDelivery,
 } from '../repositories/data-publication-outbox';
 import { seasonRepository } from '../repositories/seasons';
-import { syncOperationsRepository } from '../repositories/sync-operations';
+import {
+  createSyncOperationsRepository,
+  syncOperationsRepository,
+} from '../repositories/sync-operations';
 import { assertSchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -1201,40 +1204,45 @@ export async function persistPriceChangePublication(
       sourceRunId,
       manifest: preparedData.manifest,
       outbox: { outboxId },
-      ...(options.publicationFence
-        ? {
-            beforeActivate: async (tx) => {
-              await assertSchedulerLanePublicationFence(tx, options.publicationFence!);
-              const activeCore = await syncOperationsRepository.findActivePublication(
-                'fpl:core',
-                season,
-              );
-              if (
-                activeCore?.publicationId !== corePublicationId ||
-                activeCore.revision !== corePublicationRevision
-              ) {
-                throw new PriceChangeCorePublicationRequiredError(
-                  'The active fpl:core publication changed before price publication activation',
-                );
-              }
-            },
+      beforeActivate: async (tx) => {
+        // activatePublication invokes this callback after locking the active
+        // publication row for the target scope. Keep the legacy path's source
+        // ordering check in that same transaction so an older archived replay
+        // cannot retire a newer price board after its early preflight passed.
+        const txSyncOperationsRepository = createSyncOperationsRepository(tx);
+        const activePriceManifest = await txSyncOperationsRepository.findActivePublicationManifest(
+          PRICE_CHANGE_DATASET,
+          season,
+        );
+        if (activePriceManifest) {
+          const activeSourceCheckedAt = Date.parse(activePriceManifest.sourceCheckedAt);
+          if (!Number.isFinite(activeSourceCheckedAt)) {
+            throw new PriceChangePredictionUnavailableError(
+              'The active fpl:price-changes source timestamp is invalid',
+            );
           }
-        : {
-            beforeActivate: async () => {
-              const activeCore = await syncOperationsRepository.findActivePublication(
-                'fpl:core',
-                season,
-              );
-              if (
-                activeCore?.publicationId !== corePublicationId ||
-                activeCore.revision !== corePublicationRevision
-              ) {
-                throw new PriceChangeCorePublicationRequiredError(
-                  'The active fpl:core publication changed before price publication activation',
-                );
-              }
-            },
-          }),
+          if (requestStartedAt.getTime() < activeSourceCheckedAt) {
+            throw new PriceChangePredictionUnavailableError(
+              'The prepared price-change request started before the active publication',
+            );
+          }
+        }
+        if (options.publicationFence) {
+          await assertSchedulerLanePublicationFence(tx, options.publicationFence);
+        }
+        const activeCore = await txSyncOperationsRepository.findActivePublication(
+          'fpl:core',
+          season,
+        );
+        if (
+          activeCore?.publicationId !== corePublicationId ||
+          activeCore.revision !== corePublicationRevision
+        ) {
+          throw new PriceChangeCorePublicationRequiredError(
+            'The active fpl:core publication changed before price publication activation',
+          );
+        }
+      },
     });
     dbActivated = true;
     if (!options.deferDelivery) {
