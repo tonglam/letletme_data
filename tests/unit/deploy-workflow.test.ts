@@ -119,7 +119,7 @@ describe('release workflow gates', () => {
     expect(ciWorkflow).toContain(`bun-version: [${quote}1.3.14${quote}]`);
     expect(dockerfile).not.toContain('apk upgrade');
     expect(
-      dockerfile.match(/apk add --no-cache libcrypto3=3\.5\.7-r0 libssl3=3\.5\.7-r0/g),
+      dockerfile.match(/apk add --no-cache libcrypto3=3\.5\.8-r0 libssl3=3\.5\.8-r0/g),
     ).toHaveLength(2);
     expect(ciWorkflow).toContain('test -x /app/letletme-grok-runner');
     expect(ciWorkflow).toContain('getent group letletme-grok-bridge');
