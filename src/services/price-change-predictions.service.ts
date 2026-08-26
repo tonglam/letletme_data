@@ -269,6 +269,11 @@ function getDeadlines(bootstrap: FPLBootstrapResponse): string[] {
   return normalized;
 }
 
+/** Validated official deadlines for scheduler/watch-window discovery. */
+export function priceChangeDeadlines(bootstrap: FPLBootstrapResponse): readonly string[] {
+  return getDeadlines(bootstrap);
+}
+
 /**
  * Stable identity for an actual official price-change event. Deliberately
  * excludes transfer counts and prediction fields, which can move between

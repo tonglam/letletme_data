@@ -56,6 +56,19 @@ export type PriceChangeHotCursor = Readonly<{
   state: 'PROVISIONAL';
 }>;
 
+/** Return whether a valid hot board is newer than the durable board. */
+export function isPriceChangeHotSnapshotNewer(
+  snapshot: PriceChangeHotSnapshot | null,
+  durable: PriceChangeBoard,
+): snapshot is PriceChangeHotSnapshot {
+  if (!snapshot || durable.status === 'UNAVAILABLE' || !durable.fetchedAt) {
+    return Boolean(snapshot);
+  }
+  const hotAt = Date.parse(snapshot.fetchedAt);
+  const durableAt = Date.parse(durable.fetchedAt);
+  return Number.isFinite(hotAt) && (!Number.isFinite(durableAt) || hotAt > durableAt);
+}
+
 export function priceChangeHotPointerKey(seasonCode: string): string {
   return `${HOT_KEY_PREFIX}:${seasonCode}:active`;
 }

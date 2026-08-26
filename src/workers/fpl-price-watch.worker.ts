@@ -18,6 +18,7 @@ import {
   buildPriceChangeHotSnapshot,
   archivePriceChangeHotSource,
   createPriceChangeHotArtifactId,
+  markPriceChangeHotReconciliation,
   publishPriceChangeHotSnapshot,
   readPriceChangeHotSnapshot,
   sha256Bytes,
@@ -85,6 +86,19 @@ async function enqueueDurableReconciliation(
   });
 }
 
+async function markHotReconciliationFailed(
+  snapshot: Awaited<ReturnType<typeof buildPriceChangeHotSnapshot>>,
+  error: unknown,
+): Promise<void> {
+  const current = await readPriceChangeHotSnapshot(snapshot.seasonCode).catch(() => null);
+  if (!current || current.revision !== snapshot.revision) return;
+  const updated = await markPriceChangeHotReconciliation(current, {
+    state: 'failed',
+    error: error instanceof Error ? error.message : String(error),
+  });
+  if (!updated) throw new Error('Price-change hot reconciliation failure CAS failed');
+}
+
 async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
   if (
     !(await startCurrentSchedulerJob(job.data, {
@@ -146,6 +160,7 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
   let successfulProbes = 0;
   let hotPublications = 0;
   let noChangeObserved = false;
+  let postDeadlineSuccessfulProbe = false;
   let retryableFailureStreak = 0;
   const stopAt = deadlineAt.getTime() + PRICE_CHANGE_WATCH_MAX_WINDOW_MS;
 
@@ -162,6 +177,7 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       const valueFingerprint = priceChangeValueFingerprint(artifact.payload);
       const observedDeadline = priceChangePrimaryDeadline(artifact.payload);
       successfulProbes += 1;
+      const isPostDeadline = Date.now() >= deadlineAt.getTime();
       retryableFailureStreak = 0;
       if (!initialized) {
         initialized = true;
@@ -200,21 +216,35 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
             observedPlayerCount: snapshot.observedPlayerCount,
             detectionMs: Date.now() - probeStartedAt,
           });
-          void enqueueDurableReconciliation(season, snapshot).catch((error) =>
-            logError('Price-change durable reconciliation enqueue failed', error, {
+          // The hot Redis write is the user-visible fast path. Before handing
+          // the artifact identity to reconciliation, archive and verify the
+          // exact response so a worker cannot silently persist a different
+          // bootstrap after an archive race or transient storage miss.
+          let archived = false;
+          try {
+            await archivePriceChangeHotSource({
+              artifactId,
+              bytes: artifact.bytes,
+              sourceHash,
+            });
+            archived = true;
+          } catch (error) {
+            logWarn('Price-change hot source archive failed; provisional data remains visible', {
               season: season.seasonCode,
               revision: snapshot.revision,
-            }),
-          );
-          void archivePriceChangeHotSource({ artifactId, bytes: artifact.bytes, sourceHash }).catch(
-            (error) =>
-              logWarn('Price-change hot source archive failed; provisional data remains visible', {
-                season: season.seasonCode,
-                revision: snapshot.revision,
-                artifactId,
-                error: error instanceof Error ? error.message : String(error),
-              }),
-          );
+              artifactId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          try {
+            await enqueueDurableReconciliation(
+              season,
+              archived ? snapshot : { ...snapshot, artifactId: null },
+            );
+          } catch (error) {
+            await markHotReconciliationFailed(snapshot, error);
+            throw error;
+          }
         }
         previousValueFingerprint = valueFingerprint;
         previousDeadline = observedDeadline;
@@ -230,9 +260,11 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
           observedDeadline,
           pollCount,
         });
-      } else if (Date.now() >= deadlineAt.getTime()) {
+      } else if (isPostDeadline) {
+        postDeadlineSuccessfulProbe = true;
         noChangeObserved = true;
       }
+      if (isPostDeadline && initialized) postDeadlineSuccessfulProbe = true;
     } catch (error) {
       // Only upstream transport/admission failures are retryable inside the
       // bounded watcher. A malformed validated payload or a Redis hot-write
@@ -272,10 +304,14 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
     successfulProbes,
     hotPublications,
     noChangeObserved,
+    postDeadlineSuccessfulProbe,
     watchDurationMs: Date.now() - startedAt,
   });
   if (successfulProbes === 0) {
     throw new Error('Price-watch received no valid bootstrap response during its watch window');
+  }
+  if (hotPublications === 0 && !postDeadlineSuccessfulProbe) {
+    throw new Error('Price-watch received no valid post-deadline bootstrap observation');
   }
   if (job.data.obligationId && job.data.obligationGeneration !== undefined) {
     const completed = await completeSchedulerObligation({
@@ -288,6 +324,7 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
         successfulProbes,
         hotPublications,
         noChangeObserved,
+        postDeadlineSuccessfulProbe,
       },
     });
     if (!completed) throw new Error('Price-watch completion CAS failed');

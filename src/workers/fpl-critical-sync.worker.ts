@@ -71,16 +71,15 @@ function hotPriceSourceMetadata(
   evidence?: Record<string, unknown>,
 ): HotPriceSourceMetadata {
   const sourceHash =
-    job.data.sourceHash ??
-    (typeof evidence?.sourceHash === 'string' ? evidence.sourceHash : undefined);
+    (typeof evidence?.sourceHash === 'string' ? evidence.sourceHash : undefined) ??
+    job.data.sourceHash;
   const sourceArtifactId =
-    job.data.sourceArtifactId ??
-    (typeof evidence?.sourceArtifactId === 'string' ? evidence.sourceArtifactId : undefined);
+    (typeof evidence?.sourceArtifactId === 'string' ? evidence.sourceArtifactId : undefined) ??
+    job.data.sourceArtifactId;
   const priceChangeBoardRevision =
-    job.data.priceChangeBoardRevision ??
     (typeof evidence?.priceChangeBoardRevision === 'string'
       ? evidence.priceChangeBoardRevision
-      : undefined);
+      : undefined) ?? job.data.priceChangeBoardRevision;
   return { sourceHash, sourceArtifactId, priceChangeBoardRevision };
 }
 
@@ -118,17 +117,34 @@ async function markHotPriceReconciled(
   job: Job<FplCriticalJobData>,
   publicationId: string | undefined,
   revision: number | undefined,
+  preparedBoardRevision?: string,
   metadata: HotPriceSourceMetadata = hotPriceSourceMetadata(job),
 ): Promise<void> {
   if (!metadata.priceChangeBoardRevision || !publicationId || revision === undefined) return;
   const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
   if (!snapshot || snapshot.revision !== metadata.priceChangeBoardRevision) return;
+  if (preparedBoardRevision !== metadata.priceChangeBoardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {
     state: 'reconciled',
     durablePublicationId: publicationId,
     durableRevision: revision,
   });
   if (!updated) throw new Error('Price-change hot reconciliation CAS failed');
+}
+
+async function markHotPriceReconciliationFailed(
+  job: Job<FplCriticalJobData>,
+  error: unknown,
+): Promise<void> {
+  const metadata = hotPriceSourceMetadata(job);
+  if (!metadata.priceChangeBoardRevision) return;
+  const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+  if (!snapshot || snapshot.revision !== metadata.priceChangeBoardRevision) return;
+  const updated = await markPriceChangeHotReconciliation(snapshot, {
+    state: 'failed',
+    error: error instanceof Error ? error.message : String(error),
+  });
+  if (!updated) throw new Error('Price-change hot reconciliation failure CAS failed');
 }
 
 async function markSupersededPriceRunSkipped(
@@ -421,6 +437,7 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
       job,
       persisted.publicationId,
       persisted.revision,
+      prepared.board.revision,
       hotPriceSourceMetadata(job, activeTarget.obligation.evidence),
     );
     const completed = await completeSchedulerLane({
@@ -533,6 +550,12 @@ export function createFplCriticalSyncWorker(): WorkerRuntime {
     void alertOnFinalFailure(job, error);
     if (!isTerminalJobFailure(job, error)) return;
     void (async () => {
+      await markHotPriceReconciliationFailed(job, error).catch((reconciliationError) => {
+        logError('Price-change hot reconciliation failure update failed', reconciliationError, {
+          jobId: job.id,
+          season: job.data.seasonCode,
+        });
+      });
       if (job.name === 'core-snapshot-price-change-repair') {
         const unblocked = await unblockSchedulerLane({
           blockerJobId: String(job.id),

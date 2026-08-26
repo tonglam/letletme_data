@@ -118,6 +118,7 @@ async function markHotPriceReconciled(
   job: Job<DataSyncJobData>,
   publicationId: string | undefined,
   revision: number | undefined,
+  preparedBoardRevision?: string,
 ): Promise<void> {
   if (!publicationId || revision === undefined) return;
   const obligation =
@@ -132,12 +133,37 @@ async function markHotPriceReconciled(
   if (!boardRevision) return;
   const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
   if (!snapshot || snapshot.revision !== boardRevision) return;
+  if (preparedBoardRevision !== boardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {
     state: 'reconciled',
     durablePublicationId: publicationId,
     durableRevision: revision,
   });
   if (!updated) throw new Error('Price-change hot reconciliation CAS failed');
+}
+
+async function markHotPriceReconciliationFailed(
+  job: Job<DataSyncJobData>,
+  error: unknown,
+): Promise<void> {
+  if (job.name !== 'price-change-predictions') return;
+  const obligation =
+    !job.data.priceChangeBoardRevision && job.data.obligationId
+      ? await getSchedulerObligation({ obligationId: job.data.obligationId }).catch(() => null)
+      : null;
+  const boardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
+      ? obligation.evidence.priceChangeBoardRevision
+      : undefined);
+  if (!boardRevision) return;
+  const snapshot = await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+  if (!snapshot || snapshot.revision !== boardRevision) return;
+  const updated = await markPriceChangeHotReconciliation(snapshot, {
+    state: 'failed',
+    error: error instanceof Error ? error.message : String(error),
+  });
+  if (!updated) throw new Error('Price-change hot reconciliation failure CAS failed');
 }
 
 async function alertPriceChangePublicationOverdue(
@@ -354,7 +380,12 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             );
           }
         }
-        await markHotPriceReconciled(job, persisted.publicationId, persisted.revision);
+        await markHotPriceReconciled(
+          job,
+          persisted.publicationId,
+          persisted.revision,
+          prepared.board.revision,
+        );
         return persisted;
       });
     }
@@ -448,6 +479,12 @@ export function createDataSyncWorker(): WorkerRuntime {
         // current failed cycle.
         void (async () => {
           const fence = inspectSchedulerObligationFence(job.data);
+          await markHotPriceReconciliationFailed(job, error).catch((reconciliationError) => {
+            logError('Price-change hot reconciliation failure update failed', reconciliationError, {
+              jobId: job.id,
+              season: job.data.seasonCode,
+            });
+          });
           if (fence.kind === 'complete') {
             await failSchedulerObligation({
               obligationId: fence.obligationId,

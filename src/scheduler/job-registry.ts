@@ -1,6 +1,7 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Fixture } from '../types';
 import { formatCronDateKey } from '../utils/timezone';
+import { fplClient } from '../clients/fpl';
 import {
   enqueueCoreSnapshotJob,
   enqueuePriceChangePredictionsJob,
@@ -67,7 +68,11 @@ import { getConfig } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
 import { fplPriceWatchQueueName } from '../queues/fpl-price-watch.queue';
-import { getPriceChangePredictions } from '../services/price-change-predictions.service';
+import {
+  getPriceChangePredictions,
+  priceChangeDeadlines,
+} from '../services/price-change-predictions.service';
+import { logWarn } from '../utils/logger';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -819,7 +824,24 @@ function priceChangeWatchDefinition(): ScheduledJobDefinition {
       if (!priceHotWatchEnabled()) return [];
       const board = await getPriceChangePredictions();
       const nowMs = context.now.getTime();
-      const deadline = board.nextDeadlines
+      let deadlineCandidates = board.nextDeadlines;
+      if (deadlineCandidates.length === 0) {
+        try {
+          const bootstrap = await fplClient.getBootstrap({
+            edgeCacheKey: `price-watch-schedule-${Math.floor(nowMs / 30_000)}`,
+            priority: 'live',
+            deadlineMs: 5_000,
+          });
+          deadlineCandidates = [...priceChangeDeadlines(bootstrap)];
+        } catch (error) {
+          logWarn('Price-watch deadline discovery unavailable without a durable board', {
+            season: context.season.seasonCode,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return [];
+        }
+      }
+      const deadline = deadlineCandidates
         .map((value) => Date.parse(value))
         .filter((value) => Number.isFinite(value) && value >= nowMs - watchWindowMs)
         .sort((left, right) => left - right)[0];
