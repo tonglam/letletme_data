@@ -629,11 +629,12 @@ export const tournamentRosterRepository = {
           );
           await tx`
             INSERT INTO competition.entries (
-              season_id, entry_id, entry_name, player_name, overall_rank, overall_points
+              season_id, entry_id, entry_name, player_name, overall_rank, overall_points,
+              used_entry_names
             )
             SELECT
               ${season.seasonId}, source.entry_id, source.entry_name, source.player_name,
-              source.overall_rank, source.overall_points
+              source.overall_rank, source.overall_points, ARRAY[source.entry_name]::text[]
             FROM jsonb_to_recordset(${participantPayload}::jsonb) AS source(
               entry_id int,
               entry_name text,

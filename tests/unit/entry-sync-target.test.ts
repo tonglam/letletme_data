@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  isCronEntryInfoTableScan,
   isExplicitEntryRepairRequest,
   planEventEligibleEntrySyncWork,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
+  shouldRefreshEntryInfoFromSource,
   shouldRefreshEntryPicks,
 } from '../../src/domain/entry-sync';
 
@@ -34,10 +34,29 @@ describe('explicit entry repair selection', () => {
     expect(isExplicitEntryRepairRequest(undefined)).toBe(false);
   });
 
-  test('only treats cron jobs without an entry list as profile table scans', () => {
-    expect(isCronEntryInfoTableScan({ source: 'cron' })).toBe(true);
-    expect(isCronEntryInfoTableScan({ source: 'cron', entryIds: [42] })).toBe(false);
-    expect(isCronEntryInfoTableScan({ source: 'manual' })).toBe(false);
+  test('refreshes scheduled and explicit entry-info jobs from the upstream source', () => {
+    expect(shouldRefreshEntryInfoFromSource({ source: 'cron' })).toBe(true);
+    expect(shouldRefreshEntryInfoFromSource({ source: 'catchup', obligationId: 'daily-1' })).toBe(
+      true,
+    );
+    expect(shouldRefreshEntryInfoFromSource({ source: 'manual' })).toBe(true);
+    expect(shouldRefreshEntryInfoFromSource({ source: 'api', entryIds: [42] })).toBe(true);
+    expect(shouldRefreshEntryInfoFromSource({ source: 'catchup' })).toBe(false);
+    expect(shouldRefreshEntryInfoFromSource({ source: 'reconcile' })).toBe(false);
+    expect(
+      shouldRefreshEntryInfoFromSource({ source: 'catchup', entryIds: [42], retryCount: 1 }),
+    ).toBe(false);
+    expect(
+      shouldRefreshEntryInfoFromSource({ source: 'reconcile', entryIds: [42], retryCount: 1 }),
+    ).toBe(false);
+    expect(
+      shouldRefreshEntryInfoFromSource({
+        source: 'catchup',
+        entryIds: [42],
+        retryCount: 1,
+        obligationId: 'daily-1',
+      }),
+    ).toBe(true);
   });
 
   test('refreshes picks for every cron run and explicit repair', () => {

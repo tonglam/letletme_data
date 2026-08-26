@@ -3,8 +3,8 @@ import { and, asc, eq, gt } from 'drizzle-orm';
 
 import {
   isExplicitEntryRepairRequest,
-  isCronEntryInfoTableScan,
   planEventEligibleEntrySyncWork,
+  shouldRefreshEntryInfoFromSource,
   shouldRefreshEntryPicks,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
@@ -605,7 +605,7 @@ export function createEntrySyncWorker(
                   return planEntryInfoSyncWork(
                     entryIds,
                     requiredEntryIds,
-                    isCronEntryInfoTableScan(effectiveJobData),
+                    shouldRefreshEntryInfoFromSource(effectiveJobData),
                   );
                 },
               },

@@ -197,7 +197,13 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
                 END
               `,
               lastBank: sql`COALESCE(${entriesInCompetition.bank}, 0)`,
-              lastEntryName: sql`${entriesInCompetition.entryName}`,
+              lastEntryName: sql`
+                CASE
+                  WHEN ${entriesInCompetition.entryName} IS DISTINCT FROM excluded.entry_name
+                    THEN ${entriesInCompetition.entryName}
+                  ELSE ${entriesInCompetition.lastEntryName}
+                END
+              `,
               lastOverallPoints: sql`COALESCE(${entriesInCompetition.overallPoints}, 0)`,
               lastOverallRank: sql`COALESCE(${entriesInCompetition.overallRank}, 0)`,
               lastTeamValue: sql`COALESCE(${entriesInCompetition.teamValue}, 0)`,
@@ -208,12 +214,13 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
                     SELECT name, MIN(idx) AS first_idx
                     FROM unnest(
                       COALESCE(${entriesInCompetition.usedEntryNames}, '{}'::text[])
-                      || excluded.used_entry_names
                       || CASE
-                           WHEN ${entriesInCompetition.entryName} IS DISTINCT FROM excluded.entry_name
-                           THEN ARRAY[${entriesInCompetition.entryName}]
-                           ELSE '{}'::text[]
+                           WHEN ${entriesInCompetition.entryName} IS NULL
+                             OR ${entriesInCompetition.entryName} = ''
+                           THEN '{}'::text[]
+                           ELSE ARRAY[${entriesInCompetition.entryName}]
                          END
+                      || excluded.used_entry_names
                     ) WITH ORDINALITY AS names(name, idx)
                     WHERE name IS NOT NULL AND name <> ''
                     GROUP BY name
