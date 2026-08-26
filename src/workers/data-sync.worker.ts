@@ -341,7 +341,11 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             jobId: job.id,
             obligationId: job.data.obligationId,
           });
-          return { count: 0, outcome: 'noop' as const };
+          return {
+            count: 0,
+            outcome: 'noop' as const,
+            reason: 'latest-wins-cutover' as const,
+          };
         }
         // Bootstrap acquisition and all validation happen before the mutation
         // scopes are acquired.  The short locked section only activates the
@@ -471,10 +475,14 @@ export function createDataSyncWorker(): WorkerRuntime {
         'outcome' in result &&
         result.outcome === 'noop';
       const status = skippedPriceChange ? 'skipped' : 'succeeded';
+      const skipReason =
+        skippedPriceChange && 'reason' in result && typeof result.reason === 'string'
+          ? result.reason
+          : undefined;
       const evidence = {
         queue: dataSyncQueueName,
         jobName: job.name,
-        ...(skippedPriceChange ? { reason: 'official_fields_not_open' } : {}),
+        ...(skippedPriceChange ? { reason: skipReason ?? 'official_fields_not_open' } : {}),
       };
       const fence = inspectSchedulerObligationFence(job.data);
       const completion =
