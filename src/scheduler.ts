@@ -7,11 +7,9 @@ import { runSchedulerPass } from './scheduler/scheduler.service';
 import { dispatchDataPublicationOutbox } from './repositories/data-publication-outbox';
 import { reconcileCoreAndMarketPublications } from './services/data-publication-reconciler';
 import { seasonRepository } from './repositories/seasons';
-import {
-  persistLiveLifecycleStatus,
-  runPicksProbeAndSync,
-} from './services/live-lifecycle-orchestrator';
+import { persistLiveLifecycleStatus } from './services/live-lifecycle-orchestrator';
 import { enqueueDataGovernanceJob, DATA_GOVERNANCE_JOBS } from './jobs/data-governance.jobs';
+import { enqueueLivePicksRefresh } from './jobs/live-picks.jobs';
 import { enqueueMaintenanceJob } from './jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from './queues/maintenance.queue';
 import { QueueDrainOnlyError } from './services/queue-governance.service';
@@ -133,7 +131,15 @@ async function runPass(): Promise<void> {
       if (lifecycle?.decision.shouldProbePicks || lifecycle?.decision.shouldSyncPicks) {
         await runIndependentSchedulerStage(
           'live-picks-refresh-compatibility',
-          () => runPicksProbeAndSync(lifecycle.season, lifecycle.currentEvent.id, now),
+          // Keep the compatibility path scheduler-only as well.  The old
+          // implementation performed the canary/provider fan-out inline,
+          // which could hold the scheduler's in-flight pass indefinitely and
+          // leave its progress heartbeat falsely healthy.  The dedicated
+          // live-picks worker owns provider I/O in both rollout modes.
+          () =>
+            enqueueLivePicksRefresh(lifecycle.season, lifecycle.currentEvent.id, {
+              now,
+            }),
           stageState,
         );
       }
