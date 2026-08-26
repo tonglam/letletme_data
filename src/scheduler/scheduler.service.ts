@@ -32,6 +32,7 @@ import {
 } from '../repositories/scheduler-lanes';
 import {
   resolveSchedulerContext,
+  schedulerQueueLaneOverride,
   schedulerRegistry,
   type ScheduledJobDefinition,
   type SchedulerContext,
@@ -791,6 +792,8 @@ function schedulerLaneName(definition: Pick<ScheduledJobDefinition, 'name' | 'qu
   if (definition.name === 'tournament-official-h2h-live' && getConfig().QUEUE_LANES_V2_ENABLED) {
     return 'official-h2h-live';
   }
+  const override = schedulerQueueLaneOverride(definition.name);
+  if (override && getConfig().QUEUE_LANES_V2_ENABLED) return override;
   if (definition.queueName === 'maintenance' && getConfig().QUEUE_LANES_V2_ENABLED) {
     return (
       MAINTENANCE_JOB_LANES[definition.name as keyof typeof MAINTENANCE_JOB_LANES] ?? 'maintenance'

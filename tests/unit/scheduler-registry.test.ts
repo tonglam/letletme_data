@@ -7,6 +7,7 @@ import {
   officialH2HDefinition,
   resolveEntryInfoSnapshotTargetEventId,
   resolvePostMatchResultPlans,
+  schedulerQueueLaneOverride,
   understatDailyDefinition,
   type ScheduledJobDefinition,
 } from '../../src/scheduler/job-registry';
@@ -82,6 +83,11 @@ describe('standalone scheduler registry', () => {
       'my-fpl-finalization',
       'my-fpl-snapshot',
     ]);
+  });
+
+  test('routes My FPL finalization status and admission to its dedicated lane', () => {
+    expect(schedulerQueueLaneOverride('my-fpl-finalization')).toBe('my-fpl-orchestration');
+    expect(schedulerQueueLaneOverride('my-fpl-snapshot')).toBeUndefined();
   });
 
   test('schedules price changes as a critical five-minute latest-authoritative job', async () => {
