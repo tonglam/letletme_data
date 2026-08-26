@@ -2135,8 +2135,6 @@ export const entryEventPicksInCompetition = competition.table(
     eventId: integer('event_id').notNull(),
     position: smallint().notNull(),
     elementId: integer('element_id').notNull(),
-    /** Team captured with the event pick; never derive scoring identity from mutable players.team_id. */
-    eventTeamId: integer('event_team_id'),
     multiplier: smallint().notNull(),
     isCaptain: boolean('is_captain').notNull(),
     isViceCaptain: boolean('is_vice_captain').notNull(),
@@ -2150,6 +2148,8 @@ export const entryEventPicksInCompetition = competition.table(
       .notNull(),
     sourceCreatedAt: timestamp('source_created_at', { withTimezone: true, mode: 'date' }).notNull(),
     sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true, mode: 'date' }).notNull(),
+    /** Team captured with the event pick; never derive scoring identity from mutable players.team_id. */
+    eventTeamId: integer('event_team_id'),
   },
   (table) => [
     index('entry_event_picks_element_idx').using(

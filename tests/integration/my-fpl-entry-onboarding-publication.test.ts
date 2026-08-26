@@ -27,7 +27,10 @@ const TEAM_ID = 998_100;
 const ENTRY_IDS = [998_201, 998_202] as const;
 const PLAYER_IDS = Array.from({ length: 15 }, (_, index) => 998_301 + index);
 const SNAPSHOT_DATE = '2026-08-23';
-const CAPTURE_NOW = new Date('2026-08-23T04:00:00.000Z');
+// The provisional authority enforces a 90-second live-heartbeat fence and a
+// 15-minute picks fence. Keep the fixture inside those production freshness
+// bounds regardless of when CI runs.
+const CAPTURE_NOW = new Date();
 const MANIFEST_KEY = myFplSnapshotRedisManifestKey(SEASON.seasonCode, EVENT_ID);
 const LIVE_PUBLICATION_ID = '00000000-0000-4000-8000-000000000209';
 
