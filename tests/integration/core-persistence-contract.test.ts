@@ -542,7 +542,7 @@ persistenceTest(
       await client`
         UPDATE competition.entries
         SET used_entry_names = '{}'::text[]
-        WHERE season_id = ${season.seasonId} AND entry_id = 70_003
+        WHERE season_id = ${season.seasonId} AND entry_id = ${70_003}
       `;
       const repairedLegacy = await entryRepository.upsertFromSummary(
         season,
