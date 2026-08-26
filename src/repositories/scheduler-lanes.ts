@@ -965,7 +965,7 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
       )
       .for('update')
       .limit(1);
-    if (!lane || !['enqueued', 'running'].includes(lane.state)) return false;
+    if (!lane || !['dispatching', 'enqueued', 'running'].includes(lane.state)) return false;
     // A queued job can fail before startSchedulerLane assigns
     // active_obligation_id (for example after a season rollover). Prefer the
     // obligation carried by the Bull payload, then the accepted Bull identity
