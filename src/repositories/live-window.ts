@@ -83,6 +83,11 @@ export const createLiveLifecycleStatusRepository = (dbInstance?: DbOrTransaction
             sourceCheckedAt: sql`excluded.source_checked_at`,
             updatedAt: sql`excluded.updated_at`,
           },
+          // A late completion from an older lifecycle tick must never roll
+          // back a newer state or reset its quiet-revision clock. Bull
+          // single-flight prevents normal overlap; this database fence also
+          // protects against legacy/duplicate jobs and multiple workers.
+          where: sql`excluded.observed_at >= ${liveLifecycleStatusInOps.observedAt}`,
         });
     },
   };

@@ -63,6 +63,7 @@ async function runPass(): Promise<void> {
         () =>
           enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
             jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
+            deduplicationId: `governance-publication-reconcile-${season.seasonCode}`,
           }),
         stageState,
       );
@@ -71,6 +72,7 @@ async function runPass(): Promise<void> {
         () =>
           enqueueMaintenanceJob(season, MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX, 'reconcile', {
             jobId: `governance-publication-outbox-${season.seasonCode}-${halfMinute}`,
+            deduplicationId: `governance-publication-outbox-${season.seasonCode}`,
           }),
         stageState,
       );
@@ -79,6 +81,7 @@ async function runPass(): Promise<void> {
         () =>
           enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS, {
             jobId: `governance-lifecycle-${season.seasonCode}-${Math.floor(now.getTime() / 30_000)}`,
+            deduplicationId: `governance-lifecycle-${season.seasonCode}`,
           }),
         stageState,
       );
@@ -88,6 +91,7 @@ async function runPass(): Promise<void> {
           () =>
             enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER, {
               jobId: `governance-freshness-${season.seasonCode}-${minute}`,
+              deduplicationId: `governance-freshness-${season.seasonCode}`,
             }),
           stageState,
         );
@@ -96,6 +100,7 @@ async function runPass(): Promise<void> {
           () =>
             enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.GW_AUDIT, {
               jobId: `governance-audit-${season.seasonCode}-${minute}`,
+              deduplicationId: `governance-audit-${season.seasonCode}`,
             }),
           stageState,
         );
@@ -104,6 +109,7 @@ async function runPass(): Promise<void> {
           () =>
             enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.CASE_RECHECK, {
               jobId: `governance-case-recheck-${season.seasonCode}-${minute}`,
+              deduplicationId: `governance-case-recheck-${season.seasonCode}`,
             }),
           stageState,
         );
@@ -114,6 +120,7 @@ async function runPass(): Promise<void> {
         () =>
           enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
             jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
+            deduplicationId: `governance-publication-reconcile-${season.seasonCode}`,
           }),
         stageState,
       );
@@ -122,6 +129,7 @@ async function runPass(): Promise<void> {
         () =>
           enqueueMaintenanceJob(season, MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX, 'reconcile', {
             jobId: `governance-publication-outbox-${season.seasonCode}-${halfMinute}`,
+            deduplicationId: `governance-publication-outbox-${season.seasonCode}`,
           }),
         stageState,
       );
@@ -130,6 +138,7 @@ async function runPass(): Promise<void> {
         () =>
           enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.LIFECYCLE_STATUS, {
             jobId: `governance-lifecycle-${season.seasonCode}-${Math.floor(now.getTime() / 30_000)}`,
+            deduplicationId: `governance-lifecycle-${season.seasonCode}`,
           }),
         stageState,
       );

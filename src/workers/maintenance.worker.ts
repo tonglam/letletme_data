@@ -297,7 +297,7 @@ export function createMaintenanceWorker(): WorkerRuntime {
   };
   const lanes: MaintenanceLane[] = getConfig().QUEUE_LANES_V2_ENABLED
     ? (Object.keys(MAINTENANCE_LANE_QUEUE_NAMES) as MaintenanceLane[])
-    : ['maintenance'];
+    : ['maintenance', 'publication-outbox'];
   const workers: Worker<MaintenanceJobData>[] = [];
   const queueEvents: QueueEvents[] = [];
   const monitorTargets: WorkerRuntime['monitorTargets'] = [];
