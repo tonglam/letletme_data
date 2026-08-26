@@ -240,6 +240,48 @@ describe('standalone scheduler registry', () => {
     expect(schedulerSource).toContain('obligation-registry');
   });
 
+  test('does not await a hung single-flight resolver after its pass budget expires', async () => {
+    let release: ((plans: readonly never[]) => void) | undefined;
+    let calls = 0;
+    const pending = new Promise<readonly never[]>((resolve) => {
+      release = resolve;
+    });
+    const definition: ScheduledJobDefinition = {
+      name: 'hung-resolution',
+      cadence: 'test-only',
+      timezone: 'UTC',
+      catchUpPolicy: 'none',
+      criticality: 'normal',
+      queueName: 'test-only',
+      successPredicate: 'never reached',
+      resolve: async () => {
+        calls += 1;
+        return pending;
+      },
+      enqueue: async () => undefined,
+    };
+    const context = {
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T01:00:00.000Z'),
+      events: [],
+    };
+
+    const first = await Promise.race([
+      resolveSchedulerDefinition(definition, context, { timeoutMs: 10 }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 250)),
+    ]);
+    expect(first).not.toBeNull();
+    expect(first && 'ok' in first && first.ok).toBe(false);
+
+    const second = await resolveSchedulerDefinition(definition, context, { timeoutMs: 10 });
+    expect(second).toMatchObject({ ok: false });
+    // The second pass reuses the still-running operation instead of starting
+    // a duplicate provider/DB request.
+    expect(calls).toBe(1);
+
+    release?.([]);
+  });
+
   test('limits active player-stat refreshes to lifecycle states that can still change', () => {
     const ordinaryMinute = new Date('2026-08-22T10:17:00.000Z');
     const fiveMinuteBoundary = new Date('2026-08-22T10:20:00.000Z');
