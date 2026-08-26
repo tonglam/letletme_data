@@ -43,7 +43,7 @@ async function assertCoreSourceIsNotStale(
   db: DbOrTransaction,
 ): Promise<void> {
   if (!sourceCheckedAt) return;
-  const active = await db
+  const publications = await db
     .select({
       publicationId: datasetPublicationsInOps.publicationId,
       manifest: datasetPublicationsInOps.manifest,
@@ -54,13 +54,19 @@ async function assertCoreSourceIsNotStale(
         eq(datasetPublicationsInOps.dataset, 'fpl:core'),
         eq(datasetPublicationsInOps.seasonId, season.seasonId),
         isNull(datasetPublicationsInOps.eventId),
-        eq(datasetPublicationsInOps.status, 'active'),
+        // A newer Core source can have committed its staging publication
+        // before the canonical rows are activated. Treat that staging source
+        // as authoritative for source ordering too; otherwise a delayed
+        // repair could overwrite the newer rows between persistence and
+        // activation.
+        inArray(datasetPublicationsInOps.status, ['active', 'staging']),
       ),
     )
-    // Serialise the source ordering check with publication activation.  The
-    // activation path locks the same active row before retiring it.
+    // Serialise the source ordering check with publication activation. The
+    // activation path locks the same active/staging rows before retiring or
+    // promoting them.
     .for('update');
-  const newest = active
+  const newest = publications
     .map((row) => ({
       publicationId: row.publicationId,
       sourceCheckedAt: sourceCheckedAtFromManifest(row.manifest),

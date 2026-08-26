@@ -20,7 +20,10 @@ import { logInfo } from '../utils/logger';
 import { createFplSourceArtifactStorage } from './fpl-source-artifact-storage.service';
 
 export const PRICE_CHANGE_HOT_TTL_MS = 15 * 60 * 1000;
-export const PRICE_CHANGE_HOT_SCHEMA_VERSION = 2 as const;
+// The metadata-only cursor includes the validated deadline horizon. Bump the
+// envelope version whenever that shape changes so an older payload cannot be
+// advertised without the same validation evidence.
+export const PRICE_CHANGE_HOT_SCHEMA_VERSION = 3 as const;
 
 const HOT_KEY_PREFIX = 'fpl:price-changes:hot';
 
@@ -38,6 +41,7 @@ export type PriceChangeHotSnapshot = Readonly<{
   metadataHash: string;
   artifactId: string | null;
   deadline: string | null;
+  nextDeadlines: readonly string[];
   detectedAt: string;
   fetchedAt: string;
   expiresAt: string;
@@ -141,6 +145,7 @@ function priceChangeHotSnapshotMetadata(snapshot: PriceChangeHotSnapshot): strin
     metadataHash: snapshot.metadataHash,
     artifactId: snapshot.artifactId,
     deadline: snapshot.deadline,
+    nextDeadlines: snapshot.nextDeadlines,
     detectedAt: snapshot.detectedAt,
     fetchedAt: snapshot.fetchedAt,
     expiresAt: snapshot.expiresAt,
@@ -299,6 +304,7 @@ export function buildPriceChangeHotSnapshot(input: {
     metadataHash: '',
     artifactId: input.artifactId ?? null,
     deadline: board.deadline,
+    nextDeadlines: [...board.nextDeadlines],
     detectedAt: detectedAt.toISOString(),
     fetchedAt: fetchedAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
@@ -350,6 +356,13 @@ function isValidSnapshotMetadata(
     (value.artifactId !== null && typeof value.artifactId !== 'string') ||
     (value.deadline !== null &&
       (typeof value.deadline !== 'string' || !Number.isFinite(Date.parse(value.deadline)))) ||
+    !Array.isArray(value.nextDeadlines) ||
+    value.nextDeadlines.length === 0 ||
+    !value.nextDeadlines.every(
+      (deadline): deadline is string =>
+        typeof deadline === 'string' && Number.isFinite(Date.parse(deadline)),
+    ) ||
+    value.deadline !== value.nextDeadlines[0] ||
     typeof value.detectedAt !== 'string' ||
     typeof value.fetchedAt !== 'string' ||
     typeof value.expiresAt !== 'string' ||
@@ -367,6 +380,11 @@ function isValidSnapshotMetadata(
     !isRecord(value.reconciliation)
   ) {
     return false;
+  }
+  for (let index = 1; index < value.nextDeadlines.length; index += 1) {
+    if (Date.parse(value.nextDeadlines[index - 1]!) >= Date.parse(value.nextDeadlines[index]!)) {
+      return false;
+    }
   }
   const detectedAt = Date.parse(value.detectedAt);
   const fetchedAt = Date.parse(value.fetchedAt);
@@ -441,6 +459,10 @@ function isValidSnapshot(
     observedPlayerCount !== snapshot.board.observedPlayerCount ||
     snapshot.board.deadline !== snapshot.deadline ||
     !Array.isArray(snapshot.board.nextDeadlines) ||
+    snapshot.board.nextDeadlines.length !== snapshot.nextDeadlines.length ||
+    snapshot.board.nextDeadlines.some(
+      (deadline, index) => deadline !== snapshot.nextDeadlines[index],
+    ) ||
     !Array.isArray(snapshot.board.players) ||
     snapshot.board.players.length !== observedPlayerCount ||
     snapshot.board.revision !== snapshot.revision ||
