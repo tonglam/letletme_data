@@ -270,13 +270,14 @@ async function seedEntryEventData(entryId: number): Promise<void> {
   await sql`
     INSERT INTO competition.entry_event_picks (
       season_id, entry_id, event_id, position, element_id, multiplier,
-      is_captain, is_vice_captain, source_created_at, source_updated_at, event_team_id
+      is_captain, is_vice_captain, transfers_cost, source_created_at, source_updated_at, event_team_id
     )
     SELECT
       ${SEASON.seasonId}, ${entryId}, ${EVENT_ID}, player.ordinality::smallint,
       player.element_id,
       CASE WHEN player.ordinality = 1 THEN 2 WHEN player.ordinality <= 11 THEN 1 ELSE 0 END::smallint,
       player.ordinality = 1, player.ordinality = 2,
+      CASE WHEN player.ordinality = 1 THEN 0 ELSE NULL END::integer,
       ${CAPTURE_NOW.toISOString()}::timestamptz,
       ${CAPTURE_NOW.toISOString()}::timestamptz,
       ${TEAM_ID}

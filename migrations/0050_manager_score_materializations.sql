@@ -98,7 +98,7 @@ CREATE TABLE fpl.manager_event_score_heads (
 );
 
 CREATE INDEX manager_event_score_heads_generation_idx
-  ON fpl.manager_event_score_heads (season_id, event_id, calculation_mode, generation DESC);
+  ON fpl.manager_event_score_heads (season_id, event_id, calculation_mode, generation DESC NULLS LAST);
 
 GRANT SELECT, INSERT ON TABLE fpl.manager_event_score_materializations TO letletme_data_writer;
 GRANT SELECT ON TABLE fpl.manager_event_score_materializations TO letletme_graphql_reader;
