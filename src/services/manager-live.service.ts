@@ -91,6 +91,9 @@ const INCOMPLETE_CLASSIC_REFRESH_SECONDS = 15;
 const STALE_SECONDS = Math.max(90, 3 * REFRESH_SECONDS);
 const MAX_STANDINGS_PAGES = MANAGER_LIVE_CLASSIC_MAX_PAGE;
 const MAX_FOREGROUND_STANDINGS_PAGES = 4;
+export const MANAGER_LIVE_READ_THROUGH_BACKGROUND_STANDINGS_PAGE_LIMIT =
+  MANAGER_LIVE_WORKER_CLASSIC_STANDINGS_PAGE_LIMIT;
+const MAX_BACKGROUND_STANDINGS_PAGES = MANAGER_LIVE_READ_THROUGH_BACKGROUND_STANDINGS_PAGE_LIMIT;
 const MAX_FOREGROUND_SUMMARY_FETCHES = 4;
 // A small classic roster should receive a complete OR column in the initial
 // response. Larger leagues remain bounded and finish through the background
@@ -1000,7 +1003,7 @@ const readTournamentCoverage = async (
   }
 };
 
-const persistTournamentCoverage = async (input: {
+export const persistTournamentCoverage = async (input: {
   season: FplSeasonRef;
   eventId: number;
   tournamentId: number;
@@ -1087,6 +1090,7 @@ const persistTournamentCoverage = async (input: {
       tournamentId: input.tournamentId,
       error: error instanceof Error ? error.message : 'unknown',
     });
+    return null;
   }
   return coverage;
 };
@@ -2441,21 +2445,6 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       );
       result.managerRevision = fullManagerRevision;
       const finalCoverageRosterRevision = tournamentRosterRevision(coverageRosterEntryIds);
-      const finalCoverageComplete =
-        finalErrorCode === null && resolvedIds.size === coverageRosterEntryIds.length;
-      const finalCoverageCandidate: ManagerLiveTournamentCoverage = {
-        rosterRevision: finalCoverageRosterRevision,
-        expectedEntries: coverageRosterEntryIds.length,
-        resolvedEntries: resolvedIds.size,
-        fullyFetchedAt: finalCoverageComplete ? nowIso() : null,
-        managerRevision: finalManagerRevision(fullManagerRevision),
-        error: finalErrorCode,
-        state: finalCoverageComplete
-          ? 'COMPLETE'
-          : resolvedIds.size > 0
-            ? 'PARTIAL'
-            : 'UNAVAILABLE',
-      };
       const persistedCoverage = await persistTournamentCoverage({
         season,
         eventId: input.eventId,
@@ -2467,7 +2456,13 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         managerRevision: finalManagerRevision(fullManagerRevision),
         crawlComplete: resolvedIds.size === coverageRosterEntryIds.length,
       });
-      result.tournamentCoverage = persistedCoverage ?? finalCoverageCandidate;
+      result.tournamentCoverage = persistedCoverage;
+      if (!persistedCoverage) {
+        // A finalized result is not successful until its tournament coverage
+        // is durable. Keep the worker continuation and Bull retry eligible
+        // instead of treating an in-memory COMPLETE candidate as published.
+        result.errorCode = result.errorCode ?? 'UPSTREAM_UNAVAILABLE';
+      }
     }
     return result;
   }
@@ -3095,7 +3090,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         if (backgroundPlan.backgroundStandingsEntryIds.length > 0) {
           backgroundResult = await runManagerStandingsPageSequence(
             backgroundStandingsStartPage,
-            MAX_STANDINGS_PAGES,
+            MAX_BACKGROUND_STANDINGS_PAGES,
             async (page) => {
               const pageResult = await runClassicStandingsRefresh(
                 redis,
