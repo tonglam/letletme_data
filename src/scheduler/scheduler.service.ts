@@ -231,8 +231,7 @@ export async function resolveSchedulerDefinition(
     let underlying = definitionResolutionInFlight.get(definition);
     if (!underlying) {
       const resolution = Promise.resolve().then(() => definition.resolve(context));
-      let tracked: Promise<readonly SchedulerObligationPlan[]>;
-      tracked = resolution.finally(() => {
+      const tracked = resolution.finally(() => {
         if (definitionResolutionInFlight.get(definition) === tracked) {
           definitionResolutionInFlight.delete(definition);
         }
