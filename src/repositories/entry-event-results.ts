@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from 'drizzle-orm';
 
 import {
   entryEventResultsInCompetition,
@@ -8,6 +8,7 @@ import {
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import { deriveEventLiveManagerScore } from '../domain/event-live-manager-score';
+import { resolveEntryScoreBaseline } from '../domain/entry-score';
 import {
   hasCompleteEntryPickLiveCoverage,
   isCompleteEntryPicks,
@@ -17,7 +18,7 @@ import {
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryEventPicksResponse, RawFPLEntryHistoryCurrentItem } from '../types';
 import { DatabaseError } from '../utils/errors';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 import {
   buildCoreHistoryConflictSet,
   buildCoreHistoryUpsertPlan,
@@ -525,10 +526,41 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           );
         }
         const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
-        const previousOverallPoints =
+        const benchPoints = deriveBenchPointsFromEffectiveMultipliers(picks.picks, elementsPoints);
+        const sourcePreviousOverallPoints =
           picks.entry_history.total_points -
           (picks.entry_history.points - picks.entry_history.event_transfers_cost);
-        const benchPoints = deriveBenchPointsFromEffectiveMultipliers(picks.picks, elementsPoints);
+        let persistedPreviousOverallPoints: number | null = null;
+        if (!Number.isSafeInteger(sourcePreviousOverallPoints) || sourcePreviousOverallPoints < 0) {
+          const previous = await db
+            .select({ overallPoints: entryEventResultsInCompetition.overallPoints })
+            .from(entryEventResultsInCompetition)
+            .where(
+              and(
+                eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+                eq(entryEventResultsInCompetition.entryId, entryId),
+                lt(entryEventResultsInCompetition.eventId, eventId),
+              ),
+            )
+            .orderBy(desc(entryEventResultsInCompetition.eventId))
+            .limit(1);
+          persistedPreviousOverallPoints = previous[0]?.overallPoints ?? null;
+        }
+        const baseline = resolveEntryScoreBaseline({
+          sourceTotalPoints: picks.entry_history.total_points,
+          sourceEventPoints: picks.entry_history.points,
+          eventTransfersCost: picks.entry_history.event_transfers_cost,
+          persistedPreviousOverallPoints,
+        });
+        if (baseline.usedPersistedFallback) {
+          logWarn('FPL entry history cumulative total was inconsistent; derived prior score', {
+            season: season.seasonCode,
+            eventId,
+            sourcePreviousOverallPoints: baseline.sourcePreviousOverallPoints,
+            derivedPreviousOverallPoints: baseline.previousOverallPoints,
+            persistedBaselineAvailable: persistedPreviousOverallPoints !== null,
+          });
+        }
         const insert = {
           seasonId: season.seasonId,
           entryId,
@@ -551,7 +583,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
             is_vice_captain: pick.is_vice_captain,
           })),
           automaticSubstitutions: autoSubs,
-          overallPoints: previousOverallPoints + eventLiveScore.netEventPoints,
+          overallPoints: baseline.previousOverallPoints + eventLiveScore.netEventPoints,
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,
