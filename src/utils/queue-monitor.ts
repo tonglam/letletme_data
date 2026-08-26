@@ -104,7 +104,25 @@ export function resolveJobDispatchBudgetMs(
 
 type TimingJob = Pick<Job, 'timestamp' | 'processedOn' | 'finishedOn' | 'data'>;
 
-export function resolveQueueTimingMetrics(jobs: readonly TimingJob[]): Readonly<{
+/**
+ * Completed Bull jobs are retained for operational history, but that
+ * retention window is deliberately much longer than a queue-health sample.
+ * Timing metrics must therefore use a bounded recent lookback; otherwise an
+ * old replay can keep a queue's current p95 red for hours after the queue has
+ * drained.  A null metric when no job completed recently is more truthful
+ * than silently reporting stale latency.
+ */
+export const QUEUE_TIMING_LOOKBACK_MS = 15 * 60_000;
+
+export type QueueTimingMetricsOptions = Readonly<{
+  nowMs?: number;
+  lookbackMs?: number;
+}>;
+
+export function resolveQueueTimingMetrics(
+  jobs: readonly TimingJob[],
+  options: QueueTimingMetricsOptions = {},
+): Readonly<{
   waitP50Ms: number | null;
   waitP95Ms: number | null;
   executionP50Ms: number | null;
@@ -117,10 +135,19 @@ export function resolveQueueTimingMetrics(jobs: readonly TimingJob[]): Readonly<
   const providerWaits: number[] = [];
   let providerSamples = 0;
   let provider429 = 0;
+  const nowMs = options.nowMs ?? Date.now();
+  const lookbackMs = Math.max(1, options.lookbackMs ?? QUEUE_TIMING_LOOKBACK_MS);
+  const cutoffMs = nowMs - lookbackMs;
   for (const job of jobs) {
     const timestamp = Number(job.timestamp);
     const processedOn = Number(job.processedOn);
     const finishedOn = Number(job.finishedOn);
+    // `getJobs(['completed'])` returns retained history, not just the current
+    // telemetry interval.  A completed job is eligible only when its finish
+    // time falls inside the explicit rolling lookback.
+    if (!Number.isFinite(finishedOn) || finishedOn < cutoffMs || finishedOn > nowMs) {
+      continue;
+    }
     if (Number.isFinite(timestamp) && Number.isFinite(processedOn) && processedOn >= timestamp) {
       waits.push(Math.max(0, processedOn - timestamp));
     }
@@ -291,7 +318,12 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         ? await readRuntimeHeartbeat(options.consumerHeartbeatRole).catch(() => null)
         : undefined;
       const timingJobs = await queue.getJobs(['completed'], 0, 99, false).catch(() => [] as Job[]);
-      const timing = resolveQueueTimingMetrics(timingJobs);
+      const timing = resolveQueueTimingMetrics(timingJobs, {
+        nowMs: Date.now(),
+        // Keep latency rolling over a bounded recent period instead of
+        // allowing Bull's retained completed history to dominate p95.
+        lookbackMs: QUEUE_TIMING_LOOKBACK_MS,
+      });
       const providerTelemetry = await readFplAdmissionTelemetry().catch(() => ({
         waitP95Ms: null,
         response429Rate: null,
