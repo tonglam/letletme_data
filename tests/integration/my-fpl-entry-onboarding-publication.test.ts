@@ -26,6 +26,13 @@ const EVENT_ID = 1;
 const TEAM_ID = 998_100;
 const ENTRY_IDS = [998_201, 998_202] as const;
 const PLAYER_IDS = Array.from({ length: 15 }, (_, index) => 998_301 + index);
+const EVENT_PICKS = PLAYER_IDS.map((element, index) => ({
+  element,
+  position: index + 1,
+  multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+  is_captain: index === 0,
+  is_vice_captain: index === 1,
+}));
 const SNAPSHOT_DATE = '2026-08-23';
 // The provisional authority enforces a 90-second live-heartbeat fence and a
 // 15-minute picks fence. Keep the fixture inside those production freshness
@@ -205,19 +212,20 @@ async function seedEntryEventData(entryId: number): Promise<void> {
       event_transfers_cost, event_net_points, event_bench_points,
       event_auto_sub_points, overall_points, overall_rank,
       played_captain_element_id, captain_points, automatic_substitutions,
-      team_value, bank, rich_synced_at
+      team_value, bank, rich_synced_at, event_picks
     )
     VALUES (
       ${SEASON.seasonId}, ${entryId}, ${EVENT_ID}, 60, 0,
       0, 60, 5, 0, 60, 1000,
       ${PLAYER_IDS[0]}, 10, '[]'::jsonb, 1000, 10,
-      ${CAPTURE_NOW.toISOString()}::timestamptz
+      ${CAPTURE_NOW.toISOString()}::timestamptz,
+      ${JSON.stringify(EVENT_PICKS)}::jsonb
     )
   `;
   await sql`
     INSERT INTO competition.entry_event_picks (
       season_id, entry_id, event_id, position, element_id, multiplier,
-      is_captain, is_vice_captain, source_created_at, source_updated_at
+      is_captain, is_vice_captain, source_created_at, source_updated_at, event_team_id
     )
     SELECT
       ${SEASON.seasonId}, ${entryId}, ${EVENT_ID}, player.ordinality::smallint,
@@ -225,7 +233,8 @@ async function seedEntryEventData(entryId: number): Promise<void> {
       CASE WHEN player.ordinality = 1 THEN 2 WHEN player.ordinality <= 11 THEN 1 ELSE 0 END::smallint,
       player.ordinality = 1, player.ordinality = 2,
       ${CAPTURE_NOW.toISOString()}::timestamptz,
-      ${CAPTURE_NOW.toISOString()}::timestamptz
+      ${CAPTURE_NOW.toISOString()}::timestamptz,
+      ${TEAM_ID}
     FROM unnest(${PLAYER_IDS}::integer[])
       WITH ORDINALITY AS player(element_id, ordinality)
   `;

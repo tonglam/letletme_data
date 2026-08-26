@@ -3157,7 +3157,6 @@ export const entryEventResultsInCompetition = competition.table(
     eventChip: chipInCompetition('event_chip'),
     playedCaptainElementId: integer('played_captain_element_id'),
     captainPoints: integer('captain_points'),
-    eventPicks: jsonb('event_picks').default([]).notNull(),
     automaticSubstitutions: jsonb('automatic_substitutions'),
     overallPoints: integer('overall_points').default(0).notNull(),
     overallRank: integer('overall_rank').default(0).notNull(),
@@ -3166,6 +3165,8 @@ export const entryEventResultsInCompetition = competition.table(
     richSyncedAt: timestamp('rich_synced_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    /** Immutable picks payload captured with the finalized result. */
+    eventPicks: jsonb('event_picks').default([]).notNull(),
   },
   (table) => [
     index('entry_event_results_captain_fk_idx').using(
@@ -3251,6 +3252,11 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
     expectedTournamentCount: integer('expected_tournament_count').notNull(),
     readyTournamentCount: integer('ready_tournament_count').notNull(),
     contentSha256: text('content_sha256').notNull(),
+    overrideActor: text('override_actor'),
+    overrideReason: text('override_reason'),
+    idempotencyKey: text('idempotency_key'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     scoreSource: text('score_source'),
     livePublicationId: uuid('live_publication_id'),
     liveRevision: text('live_revision'),
@@ -3263,11 +3269,6 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       withTimezone: true,
       mode: 'date',
     }),
-    overrideActor: text('override_actor'),
-    overrideReason: text('override_reason'),
-    idempotencyKey: text('idempotency_key'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
     index('my_fpl_snapshot_publications_gc_idx').on(
