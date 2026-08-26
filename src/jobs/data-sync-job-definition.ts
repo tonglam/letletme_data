@@ -51,6 +51,11 @@ export function createDataSyncJobData(
   source: DataSyncJobSource,
   options: DataSyncEnqueueOptions,
 ) {
+  const runId =
+    options.runId ??
+    (options.obligationId && (options.obligationGeneration ?? 0) === 0
+      ? options.obligationId
+      : randomUUID());
   return {
     seasonId: season.seasonId,
     seasonCode: season.seasonCode,
@@ -60,7 +65,7 @@ export function createDataSyncJobData(
     // correlation. This is the identity written to scheduler_obligations and
     // later carried into the publication source_run_id, so freshness evidence
     // can join the exact obligation without guessing from scope/period.
-    runId: options.runId ?? options.obligationId ?? randomUUID(),
+    runId,
     ...(options.obligationId ? { obligationId: options.obligationId } : {}),
     ...(options.obligationGeneration === undefined
       ? {}

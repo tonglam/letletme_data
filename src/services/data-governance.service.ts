@@ -441,6 +441,13 @@ export async function openGovernanceCase(input: {
   compensator: string;
   db?: DbHandle;
 }) {
+  // Shadow mode records freshness breaches in the SLO ledger but must remain
+  // observation-only.  Keep this invariant at the case boundary as well as
+  // in the overdue observer so a future caller cannot accidentally turn a
+  // shadow observation into repair traffic.
+  if (input.caseKind === 'freshness-breach' && getConfig().FRESHNESS_SLO_MODE !== 'enforced') {
+    return null;
+  }
   const db = input.db ?? (await getDb());
   const [row] = await db
     .insert(dataGovernanceCasesInOps)

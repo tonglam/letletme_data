@@ -72,6 +72,7 @@ export async function enqueueLiveSnapshot(
     finalizeEvent?: boolean;
     now?: Date;
     jobId?: string;
+    runId?: string;
     obligationId?: string;
     obligationGeneration?: number;
     /** Scheduler reconciliation may join an already-enqueued deterministic job. */
@@ -142,11 +143,16 @@ export async function enqueueLiveSnapshot(
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
-      // Keep scheduler-owned live publications on the obligation's exact
-      // correlation identity. Manual/cascade jobs still receive a distinct
-      // UUID, while scheduled evidence can join scheduler_obligations to the
-      // resulting fpl:live publication without a scope/period heuristic.
-      runId: options.obligationId ?? randomUUID(),
+      // The first scheduler generation uses the obligation as its evidence
+      // join key. A failed generation must receive a fresh sync-run identity;
+      // otherwise a retry would reuse the terminal failed run and be unable to
+      // activate its publication. Bull retries within one generation keep the
+      // same runId, while a new generation is fenced by a new UUID.
+      runId:
+        options.runId ??
+        (options.obligationId && (options.obligationGeneration ?? 0) === 0
+          ? options.obligationId
+          : randomUUID()),
       ...(options.obligationId ? { obligationId: options.obligationId } : {}),
       ...(options.obligationGeneration === undefined
         ? {}
