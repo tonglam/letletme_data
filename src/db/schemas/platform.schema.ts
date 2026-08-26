@@ -2299,6 +2299,10 @@ export const entryLeaguesInCompetition = competition.table(
       sql`(short_name IS NULL) OR (btrim(short_name) <> ''::text)`,
     ),
     check(
+      'entry_leagues_official_kind_supported',
+      sql`(official_kind IS NULL) OR (official_kind <> 'c'::competition.official_league_kind)`,
+    ),
+    check(
       'entry_leagues_started_event_positive',
       sql`(started_event IS NULL) OR (started_event > 0)`,
     ),
