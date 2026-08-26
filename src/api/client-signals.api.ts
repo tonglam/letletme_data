@@ -2,6 +2,7 @@ import { Elysia, t } from 'elysia';
 
 import { apiKeyFailureHttpResponse, verifyRequestApiKey } from './auth.guard';
 import {
+  CLIENT_SIGNAL_MAX_BYTES,
   ClientSignalValidationError,
   ingestClientSignalBatch,
 } from '../services/client-signals.service';
@@ -23,7 +24,7 @@ function declaredBodyBytes(request: Request): number | null {
 
 async function parseJsonBodyWithLimit(request: Request): Promise<unknown | undefined> {
   const declared = declaredBodyBytes(request);
-  if (declared !== null && declared > 16 * 1024) {
+  if (declared !== null && declared > CLIENT_SIGNAL_MAX_BYTES) {
     bodyProblems.set(request, { status: 413, message: 'payload exceeds 16 KiB' });
     return null;
   }
@@ -43,7 +44,7 @@ async function parseJsonBodyWithLimit(request: Request): Promise<unknown | undef
       if (part.done) break;
       if (!part.value) continue;
       byteLength += part.value.byteLength;
-      if (byteLength > 16 * 1024) {
+      if (byteLength > CLIENT_SIGNAL_MAX_BYTES) {
         await reader.cancel();
         bodyProblems.set(request, { status: 413, message: 'payload exceeds 16 KiB' });
         return null;

@@ -371,6 +371,21 @@ function representativeBucket(metric: string, bucket: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function quantileBucket(accumulator: SummaryAccumulator, quantile: number): string | null {
+  const target = accumulator.sampleCount * quantile;
+  let seen = 0;
+  const buckets = [...accumulator.buckets.entries()].sort(
+    (left, right) =>
+      (representativeBucket(accumulator.metric, left[0]) ?? Number.POSITIVE_INFINITY) -
+      (representativeBucket(accumulator.metric, right[0]) ?? Number.POSITIVE_INFINITY),
+  );
+  for (const [bucket, count] of buckets) {
+    seen += count;
+    if (seen >= target) return bucket;
+  }
+  return null;
+}
+
 function approximateQuantile(accumulator: SummaryAccumulator, quantile: number): number | null {
   if (
     ![
@@ -384,28 +399,27 @@ function approximateQuantile(accumulator: SummaryAccumulator, quantile: number):
     ].includes(accumulator.metric)
   )
     return null;
-  const target = accumulator.sampleCount * quantile;
-  let seen = 0;
-  const buckets = [...accumulator.buckets.entries()].sort(
-    (left, right) =>
-      (representativeBucket(accumulator.metric, left[0]) ?? Number.POSITIVE_INFINITY) -
-      (representativeBucket(accumulator.metric, right[0]) ?? Number.POSITIVE_INFINITY),
-  );
-  for (const [bucket, count] of buckets) {
-    seen += count;
-    if (seen >= target) return representativeBucket(accumulator.metric, bucket);
-  }
-  return null;
+  const bucket = quantileBucket(accumulator, quantile);
+  return bucket === null || bucket === 'overflow'
+    ? null
+    : representativeBucket(accumulator.metric, bucket);
 }
 
-export async function getClientSignalSummary(since: Date): Promise<Record<string, unknown>> {
+function quantileIsOverflow(accumulator: SummaryAccumulator, quantile: number): boolean {
+  return quantileBucket(accumulator, quantile) === 'overflow';
+}
+
+export async function getClientSignalSummary(
+  since: Date,
+  until: Date,
+): Promise<Record<string, unknown>> {
   const client = await getDbClient();
   const rows = await client<SummaryRow[]>`
     SELECT client, release, surface, metric, device_group, sample_source, result, bucket,
            SUM(sample_count)::bigint AS sample_count,
            SUM(value_sum)::double precision AS value_sum
     FROM ops.client_signal_windows
-    WHERE window_start >= ${since}
+    WHERE window_start >= ${since} AND window_start < ${until}
     GROUP BY client, release, surface, metric, device_group, sample_source, result, bucket
   `;
   const grouped = new Map<string, SummaryAccumulator>();
@@ -455,12 +469,15 @@ export async function getClientSignalSummary(since: Date): Promise<Record<string
     sampleCount: item.sampleCount,
     approximateP75: approximateQuantile(item, 0.75),
     approximateP95: approximateQuantile(item, 0.95),
+    approximateP75Overflow: quantileIsOverflow(item, 0.75),
+    approximateP95Overflow: quantileIsOverflow(item, 0.95),
     errorRate: item.sampleCount > 0 ? item.errorCount / item.sampleCount : 0,
     staleRate: item.sampleCount > 0 ? item.staleCount / item.sampleCount : 0,
     unavailableRate: item.sampleCount > 0 ? item.unavailableCount / item.sampleCount : 0,
   }));
   return {
     windowStart: since.toISOString(),
+    windowEnd: until.toISOString(),
     sampleCount: metrics.reduce((total, item) => total + item.sampleCount, 0),
     groups: metrics,
   };

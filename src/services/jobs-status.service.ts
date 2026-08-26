@@ -37,7 +37,7 @@ import { dataContractRegistry } from '../domain/data-contracts';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
-import { getClientSignalSummary } from './client-signals.service';
+import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 
 type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
 type PublicationDelivery = Readonly<{
@@ -129,7 +129,16 @@ export async function getJobsStatus(
     '7d': 7 * 24 * 60 * 60_000,
     '28d': 28 * 24 * 60 * 60_000,
   };
-  const since = new Date(Date.now() - windowMs[window]);
+  const nowMs = Date.now();
+  const since = new Date(nowMs - windowMs[window]);
+  const clientSignalSince = new Date(
+    Math.floor((nowMs - windowMs[window]) / CLIENT_SIGNAL_WINDOW_MS) * CLIENT_SIGNAL_WINDOW_MS,
+  );
+  // Include the current five-minute bucket, whose samples are still arriving,
+  // while keeping both query boundaries aligned to stored window_start values.
+  const clientSignalUntil = new Date(
+    (Math.floor(nowMs / CLIENT_SIGNAL_WINDOW_MS) + 1) * CLIENT_SIGNAL_WINDOW_MS,
+  );
   const [
     obligations,
     schedulerHeartbeat,
@@ -174,18 +183,18 @@ export async function getJobsStatus(
       // Raw one-minute samples are useful for short incident windows.  A
       // 28-day view is deliberately reduced to one SQL row per queue/hour so
       // the status endpoint cannot build a million-row JSON response.
-      ...(window === '28d' ? { bucket: 'hour' as const } : {}),
-      limit:
-        window === '28d'
-          ? Math.min(100_000, allQueueNames.length * Math.ceil(windowMs[window] / 3_600_000) + 100)
-          : Math.min(
-              100_000,
-              Math.max(1_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
-            ),
+      ...(['7d', '28d'].includes(window) ? { bucket: 'hour' as const } : {}),
+      limit: ['7d', '28d'].includes(window)
+        ? Math.min(100_000, allQueueNames.length * Math.ceil(windowMs[window] / 3_600_000) + 100)
+        : Math.min(
+            100_000,
+            Math.max(1_000, allQueueNames.length * Math.ceil(windowMs[window] / 60_000) + 100),
+          ),
     }).catch(() => []),
     countGovernanceCases().catch(() => 0),
-    getClientSignalSummary(since).catch(() => ({
-      windowStart: since.toISOString(),
+    getClientSignalSummary(clientSignalSince, clientSignalUntil).catch(() => ({
+      windowStart: clientSignalSince.toISOString(),
+      windowEnd: clientSignalUntil.toISOString(),
       sampleCount: 0,
       groups: [],
       unavailable: true,
@@ -470,7 +479,7 @@ export async function getJobsStatus(
     },
     window,
     queueHealthWindows,
-    queueHealthWindowGranularity: window === '28d' ? 'hour' : 'raw',
+    queueHealthWindowGranularity: ['7d', '28d'].includes(window) ? 'hour' : 'raw',
     errorBudgetBurn: {
       target: 0.99,
       eligible: eligibleWindows.length,
