@@ -144,6 +144,30 @@ describe('revision-pinned projected manager score', () => {
     ).toBeNull();
   });
 
+  test('does not mark an inactive vice captain as the scoring captain', () => {
+    const managerPicks = picks();
+    managerPicks[1] = { ...managerPicks[1], multiplier: 0 };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+    liveByElement.set(1, live(1, 0, 0));
+
+    const result = projectEventLiveManagerScore({
+      entryId: 101,
+      picks: managerPicks,
+      liveByElement,
+      fixtures: [fixture(1, 99, true), fixture(2, 98, true)],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 2)).toMatchObject({
+      pickActive: false,
+      effectiveMultiplier: 0,
+      captainForScoring: false,
+    });
+    expect(result?.effectiveLineup.filter((pick) => pick.captainForScoring)).toHaveLength(0);
+  });
+
   test('keeps official current multipliers separate from projected autosubs', () => {
     const managerPicks = picks();
     const liveByElement = new Map(

@@ -286,6 +286,10 @@ export const managerEventScoreHeadsInFpl = fpl.table(
     scoreRevision: text('score_revision').notNull(),
     generation: bigint('generation', { mode: 'number' }).notNull(),
     verifiedLiveRevision: text('verified_live_revision').notNull(),
+    verifiedLiveCheckedAt: timestamp('verified_live_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
     verifiedPicksRevision: text('verified_picks_revision').notNull(),
     verifiedPreviousTotalsRevision: text('verified_previous_totals_revision').notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),

@@ -1362,6 +1362,7 @@ const materializedProjectedRows = (
       row.livePublicationId === null ||
       row.liveRevision === null ||
       row.liveCheckedAt === null ||
+      row.verifiedLiveCheckedAt === null ||
       row.algorithmVersion === null ||
       row.picksRevision === null ||
       row.picksCheckedAt === null ||
@@ -1376,6 +1377,7 @@ const materializedProjectedRows = (
       !isEffectiveLineup(row.effectiveLineup) ||
       row.netEventPoints !== row.eventPoints - row.transferCost ||
       !Number.isFinite(row.liveCheckedAt.getTime()) ||
+      !Number.isFinite(row.verifiedLiveCheckedAt.getTime()) ||
       !Number.isFinite(row.picksCheckedAt.getTime()) ||
       contentHash({
         inputRevision: row.inputRevision,
@@ -1388,14 +1390,12 @@ const materializedProjectedRows = (
       return [];
     }
     const rankMetadataCandidate = rankMetadataByEntry.get(entryId);
-    const liveCheckedAt = row.liveCheckedAt.getTime();
     const rankMetadata =
       rankMetadataCandidate &&
       (rankMetadataCandidate.source === 'FPL_ENTRY_SUMMARY' ||
         rankMetadataCandidate.source === 'FPL_CLASSIC_STANDINGS') &&
       Number.isFinite(Date.parse(rankMetadataCandidate.checkedAt)) &&
-      Date.parse(rankMetadataCandidate.checkedAt) <= liveCheckedAt &&
-      isWithinStaleWindow(rankMetadataCandidate, liveCheckedAt)
+      isWithinStaleWindow(rankMetadataCandidate)
         ? rankMetadataCandidate
         : undefined;
     const rankRevision = rankMetadata
@@ -1408,7 +1408,7 @@ const materializedProjectedRows = (
           leagueRank: rankMetadata.leagueRank,
         })
       : null;
-    const checkedAt = row.liveCheckedAt.toISOString();
+    const checkedAt = row.verifiedLiveCheckedAt.toISOString();
     const effectiveLineup =
       includeEffectiveLineup && isEffectiveLineup(row.effectiveLineup)
         ? (row.effectiveLineup as CachedRow['effectiveLineup'])

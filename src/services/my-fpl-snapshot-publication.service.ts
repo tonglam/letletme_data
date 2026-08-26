@@ -5,6 +5,7 @@ import { redisSingleton } from '../cache/singleton';
 import { EVENT_LIVE_PROJECTION_ALGORITHM_VERSION } from '../domain/event-live-manager-projection';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import type { Fixture } from '../types';
 import { getDbClient } from '../db/singleton';
 import { contentHash, postgresJsonbCanonicalJson } from '../utils/content-hash';
 import { logInfo, logWarn } from '../utils/logger';
@@ -327,7 +328,8 @@ type PickRow = {
   team_short_name: string | null;
   team_name: string | null;
   element_type: number;
-  team_id: number;
+  /** Team observed for this event pick, never the mutable current player team. */
+  team_id: number | null;
   is_captain: boolean;
   is_vice_captain: boolean;
   active_chip: string | null;
@@ -781,6 +783,64 @@ const overlayProjectedEventLiveStats = (
     row.expected_assists = live.expectedAssists;
     row.expected_goal_involvements = live.expectedGoalInvolvements;
     row.expected_goals_conceded = live.expectedGoalsConceded;
+  }
+};
+
+/**
+ * Fixture display facts must come from the same pinned fpl:live publication as
+ * the projected score. The mutable fixtures table may advance while a My FPL
+ * capture is assembling its children, so only team labels remain database
+ * presentation metadata here; fixture membership, home/away and score are
+ * rebuilt from the pinned immutable fixture payload.
+ */
+const overlayPinnedEventFixtures = (
+  eventId: number,
+  rows: PickRow[],
+  fixtures: readonly Fixture[],
+): void => {
+  const eventFixtures = fixtures
+    .filter((fixture) => fixture.event === eventId)
+    .sort(
+      (left, right) =>
+        (left.kickoffTime?.getTime() ?? Number.MAX_SAFE_INTEGER) -
+          (right.kickoffTime?.getTime() ?? Number.MAX_SAFE_INTEGER) || left.id - right.id,
+    );
+  const fixtureIds = new Set<number>();
+  for (const fixture of eventFixtures) {
+    if (fixtureIds.has(fixture.id)) {
+      throw new MyFplSnapshotIncompleteError(
+        `Event-live publication contains duplicate fixture ${fixture.id} for event ${eventId}`,
+      );
+    }
+    fixtureIds.add(fixture.id);
+  }
+  if (fixtures.some((fixture) => fixture.event !== null && fixture.event !== eventId)) {
+    throw new MyFplSnapshotIncompleteError(
+      `Event-live publication contains fixtures outside event ${eventId}`,
+    );
+  }
+
+  for (const row of rows) {
+    if (row.team_id === null || !Number.isSafeInteger(row.team_id) || row.team_id <= 0) {
+      throw new MyFplSnapshotIncompleteError(
+        `Event pick ${row.element} has no event-scoped team for event ${eventId}`,
+      );
+    }
+    const playerFixtures = eventFixtures.filter(
+      (fixture) => fixture.teamH === row.team_id || fixture.teamA === row.team_id,
+    );
+    row.fixture_count = playerFixtures.length;
+    row.was_home = playerFixtures
+      .map((fixture) => (fixture.teamH === row.team_id ? 'H' : 'A'))
+      .join(' / ');
+    row.score = playerFixtures
+      .map((fixture) => {
+        if (fixture.teamHScore === null || fixture.teamAScore === null) return '';
+        return fixture.teamH === row.team_id
+          ? `${fixture.teamHScore}-${fixture.teamAScore}`
+          : `${fixture.teamAScore}-${fixture.teamHScore}`;
+      })
+      .join(' / ');
   }
 };
 
@@ -1801,7 +1861,7 @@ async function captureMyFplSnapshotOnce(
       SELECT pick.entry_id, pick.element_id AS element, pick.position,
              player.web_name, team.short_name AS team_short_name,
              team.name AS team_name, player.element_type,
-             player.team_id,
+             COALESCE(historical_team.team_id, pick.event_team_id) AS team_id,
              pick.is_captain, pick.is_vice_captain, pick.active_chip::text,
              pick.transfers, pick.transfers_cost, pick.multiplier, pick.source_updated_at,
              stats.total_points, stats.minutes, stats.goals_scored,
@@ -1815,17 +1875,16 @@ async function captureMyFplSnapshotOnce(
       JOIN fpl.players player
         ON player.season_id = pick.season_id AND player.element_id = pick.element_id
       LEFT JOIN LATERAL (
-        SELECT fixture_stats.team_id
+        SELECT min(fixture_stats.team_id) AS team_id
         FROM fpl.player_fixture_stats fixture_stats
         WHERE fixture_stats.season_id = pick.season_id
           AND fixture_stats.event_id = pick.event_id
           AND fixture_stats.element_id = pick.element_id
-        ORDER BY fixture_stats.fixture_id
-        LIMIT 1
+        HAVING count(DISTINCT fixture_stats.team_id) = 1
       ) historical_team ON TRUE
       LEFT JOIN fpl.teams team
         ON team.season_id = player.season_id
-       AND team.team_id = COALESCE(historical_team.team_id, player.team_id)
+       AND team.team_id = COALESCE(historical_team.team_id, pick.event_team_id)
       LEFT JOIN fpl.player_gameweek_stats stats
         ON stats.season_id = pick.season_id
        AND stats.event_id = pick.event_id
@@ -1851,7 +1910,7 @@ async function captureMyFplSnapshotOnce(
            ELSE fixture.team_h_id END
         WHERE fixture.season_id = pick.season_id
           AND fixture.event_id = pick.event_id
-          AND fixture_stats.team_id = COALESCE(historical_team.team_id, player.team_id)
+          AND fixture_stats.team_id = COALESCE(historical_team.team_id, pick.event_team_id)
       ) fixture ON TRUE
       WHERE pick.season_id = ${season.seasonId} AND pick.event_id = ${eventId}
       ORDER BY pick.entry_id, pick.position
@@ -1928,6 +1987,7 @@ async function captureMyFplSnapshotOnce(
         );
       }
       overlayProjectedEventLiveStats(eventId, pickRows, pinnedLiveSnapshot.eventLives);
+      overlayPinnedEventFixtures(eventId, pickRows, pinnedLiveSnapshot.fixtures);
       const startedEventByEntry = new Map(
         entries.map((entry) => [entry.entry_id, entry.started_event] as const),
       );

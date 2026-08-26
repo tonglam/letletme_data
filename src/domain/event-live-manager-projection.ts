@@ -347,7 +347,10 @@ export function projectEventLiveManagerScore(input: {
   const captainForScoring =
     captainAppeared || !captainCompleted
       ? originalCaptain
-      : viceCaptain && (viceLive?.minutes ?? 0) > 0
+      : viceCaptain &&
+          (viceLive?.minutes ?? 0) > 0 &&
+          viceCaptain.pickActive &&
+          viceCaptain.effectiveMultiplier > 0
         ? viceCaptain
         : null;
 

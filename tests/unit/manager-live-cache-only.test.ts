@@ -196,10 +196,18 @@ const cachedRow = (entryId: number, checkedAt: string) => ({
   staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
 });
 
-const putProjectedMaterialization = (entryId: number, checkedAt: string, generation = 1): void => {
+const putProjectedMaterialization = (
+  entryId: number,
+  checkedAt: string,
+  generation = 1,
+  verifiedLiveCheckedAt = checkedAt,
+): void => {
   const inputRevision = `input-${entryId}`;
   const key = `ManagerScoreMaterialization:2627:1:${entryId}:${inputRevision}`;
-  materializationPointers.set(entryId, JSON.stringify({ inputRevision, generation }));
+  materializationPointers.set(
+    entryId,
+    JSON.stringify({ inputRevision, generation, verifiedLiveCheckedAt }),
+  );
   const lineup = effectiveLineup(entryId);
   const eventPoints = entryId % 100;
   const totalPoints = 1000 + entryId;
@@ -223,6 +231,7 @@ const putProjectedMaterialization = (entryId: number, checkedAt: string, generat
       livePublicationId: '00000000-0000-4000-8000-000000000001',
       liveRevision: '8',
       liveCheckedAt: checkedAt,
+      verifiedLiveCheckedAt,
       picksRevision: `picks-${entryId}`,
       picksCheckedAt: checkedAt,
       previousTotalsRevision: `previous-${entryId}`,
@@ -430,6 +439,25 @@ describe('manager live CACHE_ONLY reads', () => {
         }),
       },
     });
+  });
+
+  test('serves the durable head heartbeat instead of the immutable materialization timestamp', async () => {
+    const materializedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const verifiedAt = new Date().toISOString();
+    putProjectedMaterialization(101, materializedAt, 1, verifiedAt);
+
+    const result = await resolveManagerLiveScores({
+      eventId: 1,
+      entryIds: [101],
+      readMode: 'CACHE_ONLY',
+    });
+
+    expect(result).toMatchObject({
+      dataAvailability: 'FRESH',
+      checkedAt: verifiedAt,
+      servedFrom: 'REDIS',
+    });
+    expect(result.rows[0]?.provenance?.liveCheckedAt).toBe(verifiedAt);
   });
 
   test('does not serve a different live revision for a pinned CACHE_ONLY request', async () => {

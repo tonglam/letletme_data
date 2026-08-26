@@ -66,6 +66,8 @@ export type ManagerScoreMaterializedRow = Readonly<{
   livePublicationId: string | null;
   liveRevision: string | null;
   liveCheckedAt: Date | null;
+  /** Mutable head verification time; immutable materializations keep their source timestamp. */
+  verifiedLiveCheckedAt: Date | null;
   picksRevision: string | null;
   picksCheckedAt: Date | null;
   previousTotalsRevision: string | null;
@@ -109,23 +111,44 @@ for _ = 1, count do
   local input_revision = ARGV[index + 2]
   local materialization_key = ARGV[index + 3]
   local payload = ARGV[index + 4]
+  local verified_live_checked_at = ARGV[index + 5]
   local current_raw = redis.call('HGET', head_key, entry_id)
   local current_generation = 0
+  local current_input_revision = nil
+  local current_verified_live_checked_at = nil
   if current_raw then
     local decoded, current = pcall(cjson.decode, current_raw)
     if decoded and type(current) == 'table' and current.generation then
       current_generation = tonumber(current.generation) or 0
+      current_input_revision = current.inputRevision
+      current_verified_live_checked_at = current.verifiedLiveCheckedAt
     end
   end
   if generation > current_generation then
     redis.call('SET', materialization_key, payload, 'EX', ttl)
     redis.call('HSET', head_key, entry_id, cjson.encode({
       inputRevision = input_revision,
-      generation = generation
+      generation = generation,
+      verifiedLiveCheckedAt = verified_live_checked_at
     }))
     updated = updated + 1
+  elseif generation == current_generation and current_input_revision == input_revision then
+    -- Recreate a materialization key if Redis evicted it independently of the
+    -- hash, then refresh the verification timestamp for an unchanged head.
+    if redis.call('EXISTS', materialization_key) == 0 then
+      redis.call('SET', materialization_key, payload, 'EX', ttl)
+    end
+    if current_verified_live_checked_at == nil or
+      verified_live_checked_at > current_verified_live_checked_at then
+      redis.call('HSET', head_key, entry_id, cjson.encode({
+        inputRevision = input_revision,
+        generation = generation,
+        verifiedLiveCheckedAt = verified_live_checked_at
+      }))
+      updated = updated + 1
+    end
   end
-  index = index + 5
+  index = index + 6
 end
 if updated > 0 then redis.call('EXPIRE', head_key, ttl) end
 return updated
@@ -189,49 +212,62 @@ type RedisMaterializationRow = Readonly<{
   rankRevision: string | null;
   rankSource: ManagerScoreMaterializedRow['rankSource'];
   rankCheckedAt: string | null;
+  verifiedLiveCheckedAt: string | null;
 }>;
 
 const toRedisMaterializationRow = (
   row: ManagerScoreMaterializedRow | (ManagerScoreMaterializationInput & { generation: number }),
-): RedisMaterializationRow => ({
-  entryId: row.entryId,
-  inputRevision: row.inputRevision,
-  scoreRevision: row.scoreRevision,
-  generation: row.generation,
-  calculationMode: row.calculationMode,
-  algorithmVersion: row.algorithmVersion,
-  scoreSource: row.scoreSource,
-  livePublicationId: row.livePublicationId,
-  liveRevision: row.liveRevision,
-  liveCheckedAt:
-    typeof row.liveCheckedAt === 'string'
-      ? row.liveCheckedAt
-      : (row.liveCheckedAt?.toISOString() ?? null),
-  picksRevision: row.picksRevision,
-  picksCheckedAt:
-    typeof row.picksCheckedAt === 'string'
-      ? row.picksCheckedAt
-      : (row.picksCheckedAt?.toISOString() ?? null),
-  previousTotalsRevision: row.previousTotalsRevision,
-  previousTotalsThroughEventId: row.previousTotalsThroughEventId,
-  eventPoints: row.eventPoints,
-  netEventPoints: row.netEventPoints,
-  totalPoints: row.totalPoints,
-  transferCost: row.transferCost,
-  effectiveLineup: row.effectiveLineup,
-  rankRevision: row.rankRevision ?? null,
-  rankSource: row.rankSource ?? null,
-  rankCheckedAt:
-    typeof row.rankCheckedAt === 'string'
-      ? row.rankCheckedAt
-      : (row.rankCheckedAt?.toISOString() ?? null),
-});
+): RedisMaterializationRow => {
+  const verifiedLiveCheckedAt =
+    'verifiedLiveCheckedAt' in row ? row.verifiedLiveCheckedAt : undefined;
+  return {
+    entryId: row.entryId,
+    inputRevision: row.inputRevision,
+    scoreRevision: row.scoreRevision,
+    generation: row.generation,
+    calculationMode: row.calculationMode,
+    algorithmVersion: row.algorithmVersion,
+    scoreSource: row.scoreSource,
+    livePublicationId: row.livePublicationId,
+    liveRevision: row.liveRevision,
+    liveCheckedAt:
+      typeof row.liveCheckedAt === 'string'
+        ? row.liveCheckedAt
+        : (row.liveCheckedAt?.toISOString() ?? null),
+    picksRevision: row.picksRevision,
+    picksCheckedAt:
+      typeof row.picksCheckedAt === 'string'
+        ? row.picksCheckedAt
+        : (row.picksCheckedAt?.toISOString() ?? null),
+    previousTotalsRevision: row.previousTotalsRevision,
+    previousTotalsThroughEventId: row.previousTotalsThroughEventId,
+    eventPoints: row.eventPoints,
+    netEventPoints: row.netEventPoints,
+    totalPoints: row.totalPoints,
+    transferCost: row.transferCost,
+    effectiveLineup: row.effectiveLineup,
+    rankRevision: row.rankRevision ?? null,
+    rankSource: row.rankSource ?? null,
+    rankCheckedAt:
+      typeof row.rankCheckedAt === 'string'
+        ? row.rankCheckedAt
+        : (row.rankCheckedAt?.toISOString() ?? null),
+    verifiedLiveCheckedAt:
+      typeof verifiedLiveCheckedAt === 'string'
+        ? verifiedLiveCheckedAt
+        : (verifiedLiveCheckedAt?.toISOString() ??
+          (typeof row.liveCheckedAt === 'string'
+            ? row.liveCheckedAt
+            : (row.liveCheckedAt?.toISOString() ?? null))),
+  };
+};
 
 const parseRedisMaterializationRow = (
   raw: string | null,
   expectedEntryId: number,
   expectedInputRevision: string,
   expectedMode: ManagerScoreMaterializedRow['calculationMode'],
+  expectedVerifiedLiveCheckedAt?: string | null,
 ): ManagerScoreMaterializedRow | null => {
   if (!raw) return null;
   try {
@@ -265,9 +301,12 @@ const parseRedisMaterializationRow = (
       return new Date(value);
     };
     const liveCheckedAt = asDate(parsed.liveCheckedAt);
+    const verifiedLiveCheckedAt = asDate(
+      expectedVerifiedLiveCheckedAt ?? parsed.verifiedLiveCheckedAt,
+    );
     const picksCheckedAt = asDate(parsed.picksCheckedAt);
     const rankCheckedAt = asDate(parsed.rankCheckedAt);
-    if (!liveCheckedAt || !picksCheckedAt) return null;
+    if (!liveCheckedAt || !verifiedLiveCheckedAt || !picksCheckedAt) return null;
     if (parsed.rankCheckedAt !== null && parsed.rankCheckedAt !== undefined && !rankCheckedAt)
       return null;
     if (
@@ -312,6 +351,7 @@ const parseRedisMaterializationRow = (
       livePublicationId: parsed.livePublicationId ?? null,
       liveRevision: parsed.liveRevision ?? null,
       liveCheckedAt,
+      verifiedLiveCheckedAt,
       picksRevision: parsed.picksRevision ?? null,
       picksCheckedAt,
       previousTotalsRevision: parsed.previousTotalsRevision ?? null,
@@ -350,6 +390,7 @@ const publishMaterializationHeadsToRedis = async (
       row.inputRevision,
       managerScoreMaterializationRedisKey(season, eventId, row.entryId, row.inputRevision),
       JSON.stringify(normalized),
+      normalized.verifiedLiveCheckedAt ?? '',
     );
   }
   const result = await redis.eval(
@@ -376,23 +417,33 @@ const readMaterializationHeadsFromRedis = async (
     managerScoreHeadRedisKey(season, eventId, calculationMode),
     ...uniqueEntryIds.map(String),
   );
-  const pointerByEntry = new Map<number, { inputRevision: string; generation: number }>();
+  const pointerByEntry = new Map<
+    number,
+    { inputRevision: string; generation: number; verifiedLiveCheckedAt: string }
+  >();
   for (let index = 0; index < uniqueEntryIds.length; index += 1) {
     const raw = pointers[index];
     if (!raw) continue;
     try {
-      const parsed = JSON.parse(raw) as { inputRevision?: unknown; generation?: unknown };
+      const parsed = JSON.parse(raw) as {
+        inputRevision?: unknown;
+        generation?: unknown;
+        verifiedLiveCheckedAt?: unknown;
+      };
       const generation = parsed.generation;
       if (
         typeof parsed.inputRevision === 'string' &&
         parsed.inputRevision.length > 0 &&
         typeof generation === 'number' &&
         Number.isSafeInteger(generation) &&
-        generation > 0
+        generation > 0 &&
+        typeof parsed.verifiedLiveCheckedAt === 'string' &&
+        isValidTimestamp(parsed.verifiedLiveCheckedAt)
       ) {
         pointerByEntry.set(uniqueEntryIds[index]!, {
           inputRevision: parsed.inputRevision,
           generation,
+          verifiedLiveCheckedAt: parsed.verifiedLiveCheckedAt,
         });
       }
     } catch {
@@ -416,6 +467,7 @@ const readMaterializationHeadsFromRedis = async (
       entryId,
       pointer.inputRevision,
       calculationMode,
+      pointer.verifiedLiveCheckedAt,
     );
     if (row && row.generation === pointer.generation) rows.push(row);
   }
@@ -549,6 +601,7 @@ export async function readManagerScoreMaterializationsByInputRevision(
         livePublicationId: row.live_publication_id,
         liveRevision: row.live_revision,
         liveCheckedAt: row.live_checked_at,
+        verifiedLiveCheckedAt: row.live_checked_at,
         picksRevision: row.picks_revision,
         picksCheckedAt: row.picks_checked_at,
         previousTotalsRevision: row.previous_totals_revision,
@@ -608,7 +661,9 @@ export async function persistManagerScoreMaterializations(
   }
 
   const db = await getDbClient();
-  const rowsForRedis: Array<ManagerScoreMaterializationInput & { generation: number }> = [];
+  const rowsForRedis: Array<
+    ManagerScoreMaterializationInput & { generation: number; verifiedLiveCheckedAt?: string }
+  > = [];
   const result = await db.begin(async (tx) => {
     const rejectedEntryIds = new Set<number>();
     // Lock each entry identity before assigning generations. Different input
@@ -720,12 +775,14 @@ export async function persistManagerScoreMaterializations(
           input_revision: string;
           score_revision: string;
           verified_live_revision: string | null;
+          verified_live_checked_at: Date | null;
           verified_picks_revision: string | null;
           verified_previous_totals_revision: string | null;
         }[]
       >`
         SELECT generation, input_revision, score_revision,
-               verified_live_revision, verified_picks_revision,
+               verified_live_revision, verified_live_checked_at,
+               verified_picks_revision,
                verified_previous_totals_revision
         FROM fpl.manager_event_score_heads
         WHERE season_id = ${season.seasonId}
@@ -743,30 +800,61 @@ export async function persistManagerScoreMaterializations(
         currentHead.verified_picks_revision === row.picksRevision &&
         currentHead.verified_previous_totals_revision === row.previousTotalsRevision
       ) {
+        const headTouch = await tx<
+          Array<{ generation: number | string; verified_live_checked_at: Date }>
+        >`
+          UPDATE fpl.manager_event_score_heads
+          SET verified_live_checked_at = GREATEST(
+                COALESCE(verified_live_checked_at, ${row.liveCheckedAt}::timestamptz),
+                ${row.liveCheckedAt}::timestamptz
+              ),
+              updated_at = now()
+          WHERE season_id = ${season.seasonId}
+            AND event_id = ${eventId}
+            AND entry_id = ${row.entryId}
+            AND calculation_mode = ${row.calculationMode}
+          RETURNING generation, verified_live_checked_at
+        `;
+        const touched = headTouch[0];
+        if (!touched) {
+          headsRejected += 1;
+          rejectedEntryIds.add(row.entryId);
+          continue;
+        }
+        rowsForRedis.push({
+          ...row,
+          generation: Number(touched.generation),
+          verifiedLiveCheckedAt: touched.verified_live_checked_at.toISOString(),
+        });
+        headsUpdated += 1;
         continue;
       }
       const generation = Number(existing[0]?.generation ?? 0) + 1;
-      const headWrite = await tx<Array<{ generation: number | string }>>`
+      const headWrite = await tx<
+        Array<{ generation: number | string; verified_live_checked_at: Date }>
+      >`
         INSERT INTO fpl.manager_event_score_heads (
           season_id, event_id, entry_id, calculation_mode,
           input_revision, score_revision, generation,
           verified_live_revision, verified_picks_revision,
-          verified_previous_totals_revision, updated_at
+          verified_previous_totals_revision, verified_live_checked_at, updated_at
         ) VALUES (
           ${season.seasonId}, ${eventId}, ${row.entryId}, ${row.calculationMode},
           ${row.inputRevision}, ${row.scoreRevision}, ${generation},
-          ${row.liveRevision}, ${row.picksRevision}, ${row.previousTotalsRevision}, now()
+          ${row.liveRevision}, ${row.picksRevision}, ${row.previousTotalsRevision},
+          ${row.liveCheckedAt}::timestamptz, now()
         )
         ON CONFLICT (season_id, event_id, entry_id, calculation_mode) DO UPDATE
         SET input_revision = EXCLUDED.input_revision,
             score_revision = EXCLUDED.score_revision,
             generation = EXCLUDED.generation,
             verified_live_revision = EXCLUDED.verified_live_revision,
+            verified_live_checked_at = EXCLUDED.verified_live_checked_at,
             verified_picks_revision = EXCLUDED.verified_picks_revision,
             verified_previous_totals_revision = EXCLUDED.verified_previous_totals_revision,
             updated_at = now()
         WHERE fpl.manager_event_score_heads.generation < EXCLUDED.generation
-        RETURNING generation
+        RETURNING generation, verified_live_checked_at
       `;
       if (headWrite.length === 0) {
         headsRejected += 1;
@@ -774,7 +862,11 @@ export async function persistManagerScoreMaterializations(
         continue;
       }
       const publishedGeneration = Number(headWrite[0]!.generation);
-      rowsForRedis.push({ ...row, generation: publishedGeneration });
+      rowsForRedis.push({
+        ...row,
+        generation: publishedGeneration,
+        verifiedLiveCheckedAt: headWrite[0]!.verified_live_checked_at.toISOString(),
+      });
       headsUpdated += 1;
     }
     return {
@@ -919,6 +1011,7 @@ async function readManagerScoreHeadRowsFromPostgres(
       live_publication_id: string | null;
       live_revision: string | null;
       live_checked_at: Date | null;
+      verified_live_checked_at: Date | null;
       picks_revision: string | null;
       picks_checked_at: Date | null;
       previous_totals_revision: string | null;
@@ -944,6 +1037,7 @@ async function readManagerScoreHeadRowsFromPostgres(
       materialization.live_publication_id,
       materialization.live_revision,
       materialization.live_checked_at,
+      head.verified_live_checked_at,
       materialization.picks_revision,
       materialization.picks_checked_at,
       materialization.previous_totals_revision,
@@ -979,6 +1073,7 @@ async function readManagerScoreHeadRowsFromPostgres(
     livePublicationId: row.live_publication_id,
     liveRevision: row.live_revision,
     liveCheckedAt: row.live_checked_at,
+    verifiedLiveCheckedAt: row.verified_live_checked_at,
     picksRevision: row.picks_revision,
     picksCheckedAt: row.picks_checked_at,
     previousTotalsRevision: row.previous_totals_revision,
@@ -1051,6 +1146,7 @@ export async function readManagerScoreHeadRowsWithSource(
               row.livePublicationId === null ||
               row.liveRevision === null ||
               row.liveCheckedAt === null ||
+              row.verifiedLiveCheckedAt === null ||
               row.picksRevision === null ||
               row.picksCheckedAt === null ||
               row.previousTotalsRevision === null ||
@@ -1072,6 +1168,7 @@ export async function readManagerScoreHeadRowsWithSource(
                 livePublicationId: row.livePublicationId,
                 liveRevision: row.liveRevision,
                 liveCheckedAt: row.liveCheckedAt.toISOString(),
+                verifiedLiveCheckedAt: row.verifiedLiveCheckedAt.toISOString(),
                 picksRevision: row.picksRevision,
                 picksCheckedAt: row.picksCheckedAt.toISOString(),
                 previousTotalsRevision: row.previousTotalsRevision,

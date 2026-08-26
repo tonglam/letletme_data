@@ -401,7 +401,6 @@ async function loadEventLiveManagerScoreBatch(
   // explicitly opts in, while persistence always records the complete
   // scoring evidence.
   const projectedLineupByEntry = new Map<number, readonly EffectiveLineupRow[]>();
-  const computedEntryIds = new Set<number>();
   for (const entryId of uniqueEntryIds) {
     const picks = picksByEntry.get(entryId) ?? [];
     const inputRevisionData = inputRevisionByEntry.get(entryId);
@@ -458,7 +457,6 @@ async function loadEventLiveManagerScoreBatch(
       previousTotalsThroughEventId: eventId > 1 ? eventId - 1 : null,
       previousResultEvidence: previousResultEvidenceByEntry.get(entryId) ?? [],
     });
-    computedEntryIds.add(entryId);
     const revision = contentHash({
       inputRevision: computedInputRevisionData.inputRevision,
       eventPoints: score.eventPoints,
@@ -492,8 +490,7 @@ async function loadEventLiveManagerScoreBatch(
             } =>
               typeof score.inputRevision === 'string' &&
               typeof score.picksRevision === 'string' &&
-              typeof score.previousTotalsRevision === 'string' &&
-              computedEntryIds.has(score.entryId),
+              typeof score.previousTotalsRevision === 'string',
           )
           .map((score) => ({
             entryId: score.entryId,
