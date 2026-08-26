@@ -3252,6 +3252,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     checkedAt: nowIso(),
     nextRefreshAt: nextRefresh(event.finished),
     sourceByEntry,
+    ...(input.tournamentId === undefined ? {} : { tournamentCoverage }),
   });
 };
 
