@@ -1775,7 +1775,12 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
   // its worker has already completed (or after the obligation was deferred).
   let completedDueProgress = schedulerDueProgress(schedulerRegistry, [], new Date());
   try {
-    const remainingDueCandidates = await findDueSchedulerObligationCandidates();
+    const remainingDueCandidates = await findDueSchedulerObligationCandidates({
+      // Keep the post-pass view aligned with the claim view. Latest-wins lane
+      // jobs and admission-disabled definitions are reconciled by their own
+      // owner, so they must not reappear as generic scheduler due work.
+      excludedJobNames: disabledJobNames,
+    });
     completedDueProgress = schedulerDueProgress(
       schedulerRegistry,
       remainingDueCandidates,
