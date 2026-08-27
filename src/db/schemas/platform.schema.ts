@@ -766,7 +766,10 @@ export const dataGovernanceCasesInOps = ops.table(
     openedAt: timestamp('opened_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+    // Preserve PostgreSQL microseconds for the compare-and-set token. A
+    // JavaScript Date rounds this value to milliseconds, which would make an
+    // operator's expectedUpdatedAt fail every CAS against the durable row.
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
       .default(sql`clock_timestamp()`)
       .notNull(),
     recoveredAt: timestamp('recovered_at', { withTimezone: true, mode: 'date' }),

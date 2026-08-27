@@ -1047,7 +1047,8 @@ export async function countGovernanceCases(
 
 export async function transitionGovernanceCase(input: {
   caseId: number;
-  expectedUpdatedAt: Date;
+  /** Exact PostgreSQL timestamptz text returned by listGovernanceCases. */
+  expectedUpdatedAt: string;
   action: 'dry-run' | 'execute' | 'dismiss';
   db?: DbHandle;
 }): Promise<boolean> {
@@ -1092,7 +1093,8 @@ export async function transitionGovernanceCase(input: {
  */
 export async function reopenExpiredGovernanceCaseRepair(input: {
   caseId: number;
-  expectedUpdatedAt: Date;
+  /** Exact PostgreSQL timestamptz text returned by listGovernanceCases. */
+  expectedUpdatedAt: string;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -1125,7 +1127,8 @@ export async function reopenExpiredGovernanceCaseRepair(input: {
  */
 export async function claimGovernanceCaseRepair(input: {
   caseId: number;
-  expectedUpdatedAt: Date;
+  /** Exact PostgreSQL timestamptz text returned by listGovernanceCases. */
+  expectedUpdatedAt: string;
   repairJobId: string;
   settlementMs: number;
   db?: DbHandle;
@@ -1159,7 +1162,8 @@ export async function claimGovernanceCaseRepair(input: {
 
 export async function updateGovernanceCaseStatus(input: {
   caseId: number;
-  expectedUpdatedAt: Date;
+  /** Exact PostgreSQL timestamptz text returned by listGovernanceCases. */
+  expectedUpdatedAt: string;
   status: Extract<GovernanceCaseStatus, 'RECOVERED' | 'REQUIRES_REVIEW'>;
   lastError?: string | null;
   recoveryRevision?: string | null;
