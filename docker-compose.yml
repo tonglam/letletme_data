@@ -1,4 +1,7 @@
 x-app-image: &app-image ${APP_IMAGE:-letletme-data:local}
+# The backup image is intentionally immutable.  DATABASE_BACKUP_PG_MAJOR is
+# still passed to the script so it can verify the server major after restore.
+x-postgres-backup-image: &postgres-backup-image postgres:15@sha256:6eb0add3b77c081df18aa518ce43df58fdcc40f2e6d868a6fd08038dc7acd425
 x-logging: &default-logging
   driver: json-file
   options:
@@ -25,7 +28,7 @@ services:
     restart: 'no'
 
   backup:
-    image: postgres:${DATABASE_BACKUP_PG_MAJOR:-15}
+    image: *postgres-backup-image
     profiles: ['migration']
     env_file:
       - path: ${MIGRATION_ENV_FILE:-.env.migrate}
@@ -39,6 +42,19 @@ services:
       - ${DATABASE_BACKUP_DIR:-/var/backups/letletme-data}:/var/backups/letletme-data
       - ./scripts:/app/scripts:ro
     command: ['bash', '/app/scripts/pre-migration-backup.sh']
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+    cap_drop:
+      - ALL
+    # The backup script normalizes the mounted directory to mode 0700 before
+    # writing. Keep the root filesystem read-only and grant only the two
+    # capabilities needed when the host mount is owned by the deploy user.
+    cap_add:
+      - FOWNER
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
     restart: 'no'
 
   api:
@@ -63,6 +79,14 @@ services:
     logging: *default-logging
     ports:
       - '127.0.0.1:3000:3000'
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
       test:
@@ -92,6 +116,14 @@ services:
       - DEPLOY_SHA=${DEPLOY_SHA:-unknown}
       - DATABASE_POOL_MAX=2
     logging: *default-logging
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
       # worker.ts touches /tmp/worker-heartbeat every 30s; a stale file means
@@ -119,6 +151,14 @@ services:
       - DATABASE_POOL_MAX=2
       - LIVE_PICKS_WORKER_HEARTBEAT_PATH=/tmp/live-picks-worker-heartbeat
     logging: *default-logging
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
       test:
@@ -144,6 +184,14 @@ services:
       - DATABASE_POOL_MAX=1
       - OFFICIAL_H2H_WORKER_HEARTBEAT_PATH=/tmp/official-h2h-worker-heartbeat
     logging: *default-logging
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
       test:
@@ -170,6 +218,14 @@ services:
       - SCHEDULER_HEARTBEAT_PATH=/tmp/scheduler-heartbeat
       - DATABASE_POOL_MAX=1
     logging: *default-logging
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'test -n "$$(find /tmp/scheduler-heartbeat -mmin -2 2>/dev/null)"']
@@ -208,6 +264,7 @@ services:
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
+    stop_grace_period: 45s
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'test -n "$$(find /tmp/content-worker-heartbeat -mmin -2 2>/dev/null)"']
@@ -241,6 +298,7 @@ services:
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
+    stop_grace_period: 45s
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'test -n "$$(find /tmp/media-worker-heartbeat -mmin -2 2>/dev/null)"']

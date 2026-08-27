@@ -16,6 +16,7 @@ import {
   recordFreshnessObservation,
 } from '../services/data-governance.service';
 import { logError } from '../utils/logger';
+import { getConfig } from '../utils/config';
 
 export type SchedulerObligationStatus =
   | 'pending'
@@ -55,9 +56,7 @@ const SUPERSEDED_BY_LATEST_AUTHORITATIVE = 'superseded-by-latest-authoritative';
 const DEFAULT_SCHEDULER_LEASE_MS = 15 * 60_000;
 
 function resolveSchedulerLeaseMs(): number {
-  const configured = Number(process.env.SCHEDULER_LEASE_MS);
-  if (Number.isSafeInteger(configured) && configured >= 60_000) return configured;
-  return DEFAULT_SCHEDULER_LEASE_MS;
+  return getConfig().SCHEDULER_LEASE_MS ?? DEFAULT_SCHEDULER_LEASE_MS;
 }
 
 function dateValue(value: Date | string | null | undefined): Date | null {

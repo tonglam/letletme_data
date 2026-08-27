@@ -29,11 +29,13 @@ import { isFreshnessBoundaryNewer, latestFreshnessTimestamp } from '../domain/fr
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { findEventEligibleEntryIds } from '../domain/entry-infos';
 import { entryInfoRepository } from '../repositories/entry-infos';
+import { getConfig } from '../utils/config';
 
 const DEFAULT_CONCURRENCY = 5;
-const EVENT_LIVE_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS ?? 45_000);
-const ENTRY_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_ENTRY_FETCH_TIMEOUT_MS ?? 45_000);
-const ENTRY_PERSIST_TIMEOUT_MS = Number(process.env.TOURNAMENT_ENTRY_PERSIST_TIMEOUT_MS ?? 60_000);
+const runtimeConfig = getConfig();
+const EVENT_LIVE_FETCH_TIMEOUT_MS = runtimeConfig.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS;
+const ENTRY_FETCH_TIMEOUT_MS = runtimeConfig.TOURNAMENT_ENTRY_FETCH_TIMEOUT_MS;
+const ENTRY_PERSIST_TIMEOUT_MS = runtimeConfig.TOURNAMENT_ENTRY_PERSIST_TIMEOUT_MS;
 
 type EntrySyncOutcome = {
   entryId: number;

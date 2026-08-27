@@ -27,6 +27,9 @@ import { understatAPI } from './api/understat.api';
 import { trendsAPI } from './api/trends.api';
 import { dataGovernanceAPI } from './api/data-governance.api';
 import { databaseSingleton } from './db/singleton';
+import { redisSingleton } from './cache/singleton';
+import { queueRedisSingleton } from './queues/redis';
+import { closeAllProducerQueues } from './queues/close-all';
 
 // Import job registration functions
 import { registerDataJobs } from './jobs/data-jobs';
@@ -50,6 +53,7 @@ import { getHttpErrorLogLevel, getHttpRequestLogContext } from './utils/http-log
 import { logDebug, logError, logInfo, logWarn } from './utils/logger';
 import { schedulerRegistry } from './scheduler/job-registry';
 import { isStandaloneSchedulerEnabled } from './utils/scheduler-mode';
+import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 /**
  * Letletme Data API - Elysia Application
@@ -222,14 +226,24 @@ const app = new Elysia()
     hostname: '0.0.0.0',
   });
 
-async function shutdown(signal: string) {
-  logInfo('API server shutting down', { signal });
-  await app.stop();
-  process.exit(0);
-}
+const shutdownController = createShutdownController({
+  stopIntake: () => app.stop().then(() => undefined),
+  closeResources: () =>
+    Promise.all([
+      closeAllProducerQueues(),
+      databaseSingleton.disconnect(),
+      redisSingleton.disconnect(),
+      queueRedisSingleton.disconnect(),
+    ]).then(() => undefined),
+});
 
-process.on('SIGINT', () => void shutdown('SIGINT'));
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
+installShutdownSignals(shutdownController);
+process.on('uncaughtException', (error) =>
+  shutdownController.fatal(error, 'API uncaught exception'),
+);
+process.on('unhandledRejection', (error) =>
+  shutdownController.fatal(error, 'API unhandled rejection'),
+);
 
 // Log startup after successful listen
 logInfo('🚀 Elysia server started', {

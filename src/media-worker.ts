@@ -13,11 +13,13 @@ import { createSourceMediaStorage } from './content/media/source-media-storage';
 import type { SourceMediaProbeMode } from './content/media/source-media-storage';
 import { runSourceMediaRetention } from './content/media/source-media-retention';
 import { databaseSingleton } from './db/singleton';
+import { redisSingleton } from './cache/singleton';
 import { queueRedisSingleton } from './queues/redis';
 import { getConfig } from './utils/config';
 import { logError, logInfo, logWarn } from './utils/logger';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
+import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 const CLAIM_INTERVAL_MS = 2_000;
 const GATE_LEASE_MS = 5 * 60_000;
@@ -220,36 +222,57 @@ async function start(): Promise<void> {
   });
 }
 
-async function shutdown(signal: string, exitCode = 0): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  logInfo('Source-media worker shutting down', { signal, active: active.size });
-  if (pollTimer) clearInterval(pollTimer);
-  if (retentionTimer) clearInterval(retentionTimer);
-  if (disabledKeepAliveTimer) clearInterval(disabledKeepAliveTimer);
-  for (const running of active.values()) running.controller.abort('media-worker shutdown');
-  retentionController?.abort('media-worker shutdown');
-  await Promise.allSettled([...active.values()].map((running) => running.promise));
-  await Promise.allSettled([retentionInFlight]);
-  if (flags.enabled) {
-    const released = await releaseSourceMediaGateLeases({ workerId }).catch((error) => {
-      logWarn('Source-media graceful lease release failed', {
-        error: error instanceof Error ? error.name : 'unknown',
+const shutdownController = createShutdownController({
+  stopIntake: () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    if (pollTimer) clearInterval(pollTimer);
+    if (retentionTimer) clearInterval(retentionTimer);
+    if (disabledKeepAliveTimer) clearInterval(disabledKeepAliveTimer);
+    for (const running of active.values()) running.controller.abort('media-worker shutdown');
+    retentionController?.abort('media-worker shutdown');
+    stopFileHeartbeat();
+    stopRuntimeHeartbeat();
+  },
+  waitForInFlight: async () => {
+    const results = await Promise.allSettled([
+      ...[...active.values()].map((running) => running.promise),
+      retentionInFlight,
+    ]);
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `${failures.length} media task(s) failed to drain`);
+    }
+  },
+  closeResources: async () => {
+    if (flags.enabled) {
+      const released = await releaseSourceMediaGateLeases({ workerId }).catch((error) => {
+        logWarn('Source-media graceful lease release failed', {
+          error: error instanceof Error ? error.name : 'unknown',
+        });
+        return 0;
       });
-      return 0;
-    });
-    logInfo('Source-media graceful leases released', { released });
-  }
-  stopFileHeartbeat();
-  stopRuntimeHeartbeat();
-  await Promise.allSettled([databaseSingleton.disconnect(), queueRedisSingleton.disconnect()]);
-  process.exit(exitCode);
-}
+      logInfo('Source-media graceful leases released', { released });
+    }
+    await Promise.all([
+      databaseSingleton.disconnect(),
+      redisSingleton.disconnect(),
+      queueRedisSingleton.disconnect(),
+    ]);
+  },
+});
 
-process.on('SIGINT', () => void shutdown('SIGINT'));
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
+installShutdownSignals(shutdownController);
+process.on('uncaughtException', (error) =>
+  shutdownController.fatal(error, 'Source-media worker uncaught exception'),
+);
+process.on('unhandledRejection', (error) =>
+  shutdownController.fatal(error, 'Source-media worker unhandled rejection'),
+);
 
 void start().catch((error) => {
   logError('Source-media worker startup failed', error);
-  void shutdown('STARTUP_FAILED', 1);
+  void shutdownController.request('STARTUP_FAILED', 1);
 });

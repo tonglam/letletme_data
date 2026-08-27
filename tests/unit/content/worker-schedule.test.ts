@@ -65,6 +65,27 @@ describe('content worker poll policy', () => {
     expect(() =>
       assertContentRuntimeFlags({
         ...flags,
+        grokConcurrency: 2,
+        grokTimeoutMs: 240_001,
+      }),
+    ).toThrow('CONTENT_GROK_TIMEOUT_MS must be a safe integer between 1000 and 240000');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        grokConcurrency: 2,
+        grokTimeoutMs: Number.NaN,
+      }),
+    ).toThrow('CONTENT_GROK_TIMEOUT_MS must be a safe integer');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        grokConcurrency: 2,
+        grokMaxOutputBytes: 4 * 1024 * 1024 + 1,
+      }),
+    ).toThrow('CONTENT_GROK_MAX_OUTPUT_BYTES must be a safe integer between 1024 and 4194304');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
         httpAcquisitionEnabled: true,
         youtubeDiscoveryEnabled: true,
         youtubeNativeEnabled: true,

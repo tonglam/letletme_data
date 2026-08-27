@@ -129,6 +129,27 @@ describe('production environment preflight', () => {
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '3' })).toBe(0);
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '0' })).not.toBe(0);
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '6' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '' })).toBe(0);
+  });
+
+  test('keeps scheduler definition resolution bounded to one minute', async () => {
+    const digest = 'a'.repeat(64);
+    expect(await runEnvCheck(digest, { SCHEDULER_RESOLVE_TIMEOUT_MS: '60000' })).toBe(0);
+    expect(await runEnvCheck(digest, { SCHEDULER_RESOLVE_TIMEOUT_MS: '60001' })).not.toBe(0);
+  });
+
+  test('preserves scheduler, provider, and FPL admission safety ceilings', async () => {
+    const digest = 'a'.repeat(64);
+    expect(await runEnvCheck(digest, { SCHEDULER_LEASE_MS: '60000' })).toBe(0);
+    expect(await runEnvCheck(digest, { SCHEDULER_LEASE_MS: '59999' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { UNDERSTAT_TIMEOUT_MS: '60000' })).toBe(0);
+    expect(await runEnvCheck(digest, { UNDERSTAT_TIMEOUT_MS: '60001' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { UNDERSTAT_MAX_CONCURRENCY: '4' })).toBe(0);
+    expect(await runEnvCheck(digest, { UNDERSTAT_MAX_CONCURRENCY: '5' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { FPL_MAX_INFLIGHT: '5' })).toBe(0);
+    expect(await runEnvCheck(digest, { FPL_MAX_INFLIGHT: '6' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { FPL_REQUESTS_PER_SECOND: '4' })).toBe(0);
+    expect(await runEnvCheck(digest, { FPL_REQUESTS_PER_SECOND: '5' })).not.toBe(0);
   });
 
   test('rejects non-positive and unbounded queue governance intervals', async () => {
@@ -352,7 +373,9 @@ describe('production environment preflight', () => {
     expect(migrationEnv).toBeGreaterThan(migrationService);
     expect(migrationEnv).toBeLessThan(apiService);
     expect(apiService).toBeLessThan(workerService);
-    expect(compose).toContain('image: postgres:${DATABASE_BACKUP_PG_MAJOR:-15}');
+    expect(compose).toContain(
+      'postgres:15@sha256:6eb0add3b77c081df18aa518ce43df58fdcc40f2e6d868a6fd08038dc7acd425',
+    );
   });
 
   test('reuses the immutable active core cache before reading mutable database tables', () => {

@@ -4,6 +4,7 @@ import { getQueueConnection } from '../utils/queue';
 import { entrySyncQueueName } from './names';
 import { livePicksQueue } from './live-picks.queue';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
+import { getConfig } from '../utils/config';
 
 export { entrySyncQueueName } from './names';
 
@@ -12,28 +13,10 @@ export type EntrySyncJobName = 'entry-info' | 'entry-picks' | 'entry-transfers' 
 export type EntrySyncJobSource = 'cron' | 'manual' | 'api' | 'catchup' | 'reconcile';
 export type EntrySyncLane = 'entry-sync' | 'live-picks';
 
-function parsePositiveInt(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  return Math.floor(parsed);
-}
-
-export const ENTRY_SYNC_DEFAULT_CHUNK_SIZE = parsePositiveInt(
-  process.env.ENTRY_SYNC_CHUNK_SIZE,
-  500,
-);
-
-export const ENTRY_SYNC_DEFAULT_CONCURRENCY = parsePositiveInt(
-  process.env.ENTRY_SYNC_CONCURRENCY,
-  5,
-);
-
-export const ENTRY_SYNC_DEFAULT_THROTTLE_MS = parsePositiveInt(
-  process.env.ENTRY_SYNC_THROTTLE_MS,
-  200,
-);
+const runtimeConfig = getConfig();
+export const ENTRY_SYNC_DEFAULT_CHUNK_SIZE = runtimeConfig.ENTRY_SYNC_CHUNK_SIZE;
+export const ENTRY_SYNC_DEFAULT_CONCURRENCY = runtimeConfig.ENTRY_SYNC_CONCURRENCY;
+export const ENTRY_SYNC_DEFAULT_THROTTLE_MS = runtimeConfig.ENTRY_SYNC_THROTTLE_MS;
 
 export interface EntrySyncJobData {
   seasonId: number;

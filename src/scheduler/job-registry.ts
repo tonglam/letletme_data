@@ -63,7 +63,7 @@ import {
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
-import { getConfig } from '../utils/config';
+import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
 import { fplPriceWatchQueueName } from '../queues/fpl-price-watch.queue';
@@ -712,12 +712,11 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
   // install the migration/worker first, then restart with the flag enabled;
   // changing it mid-process would make the registry's queue contract
   // ambiguous for obligations already reserved by that process.
-  const singleFlightEnabled =
-    process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED === undefined
-      ? process.env.NODE_ENV !== 'production'
-      : ['1', 'true', 'yes', 'on'].includes(
-          process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED.trim().toLowerCase(),
-        );
+  const singleFlightEnabled = parseStrictBooleanEnvValue(
+    process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED,
+    process.env.NODE_ENV !== 'production',
+    'PRICE_CHANGE_SINGLE_FLIGHT_ENABLED',
+  );
   return {
     name: 'price-change-predictions',
     cadence: 'every five minutes at UTC minute 01/06/11...',
@@ -811,9 +810,11 @@ function priceChangePredictionsDefinition(): ScheduledJobDefinition {
 }
 
 function priceHotWatchEnabled(): boolean {
-  const raw = process.env.PRICE_CHANGE_HOT_WATCH_ENABLED;
-  if (raw === undefined) return process.env.NODE_ENV !== 'production';
-  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+  return parseStrictBooleanEnvValue(
+    process.env.PRICE_CHANGE_HOT_WATCH_ENABLED,
+    process.env.NODE_ENV !== 'production',
+    'PRICE_CHANGE_HOT_WATCH_ENABLED',
+  );
 }
 
 export function resolvePriceChangeWatchPlans(input: {

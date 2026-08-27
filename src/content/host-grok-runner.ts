@@ -22,6 +22,7 @@ import {
 } from './acquisition/host-grok-runner-contract';
 import { sha256CanonicalJson } from './acquisition/canonicalization';
 import { compileXUserRequest } from './acquisition/x-query-compiler';
+import { parseStrictIntegerEnv } from './config';
 
 const CONFIG = {
   socketPath: process.env.GROK_RUNNER_SOCKET?.trim() || '/run/letletme-grok-runner/runner.sock',
@@ -34,10 +35,19 @@ const CONFIG = {
   releaseFile:
     process.env.GROK_RUNNER_RELEASE_FILE?.trim() ||
     '/home/workspace/letletme-grok-runner/current.release',
-  timeoutMs: Math.min(240_000, Math.max(1, Number(process.env.CONTENT_GROK_TIMEOUT_MS ?? 240_000))),
-  maximumOutputBytes: Math.min(
-    4_194_304,
-    Math.max(1, Number(process.env.CONTENT_GROK_MAX_OUTPUT_BYTES ?? 4_194_304)),
+  timeoutMs: parseStrictIntegerEnv(
+    process.env.CONTENT_GROK_TIMEOUT_MS,
+    240_000,
+    1_000,
+    2 * 60 * 60_000,
+    'CONTENT_GROK_TIMEOUT_MS',
+  ),
+  maximumOutputBytes: parseStrictIntegerEnv(
+    process.env.CONTENT_GROK_MAX_OUTPUT_BYTES,
+    4 * 1024 * 1024,
+    1024,
+    16 * 1024 * 1024,
+    'CONTENT_GROK_MAX_OUTPUT_BYTES',
   ),
   maximumRequestBytes: 16 * 1024,
   maximumResponseBytes: 4 * 1024 * 1024,

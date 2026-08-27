@@ -6,6 +6,7 @@ import {
   type FplRequestMetricsSnapshot,
 } from './fpl-request-metrics';
 import { logInfo } from './logger';
+import { parseStrictBooleanEnvValue } from './config';
 
 export const DATA_SYNC_ATTEMPT_OUTCOMES = ['ready', 'partial', 'failed', 'noop'] as const;
 export type DataSyncAttemptOutcome = (typeof DATA_SYNC_ATTEMPT_OUTCOMES)[number];
@@ -205,8 +206,11 @@ function normalizeSource(context: DataSyncAttemptContext): DataSyncAttemptSource
 }
 
 function reportingEnabled(): boolean {
-  const value = process.env.DATA_SYNC_ATTEMPT_REPORTING_ENABLED;
-  return value === undefined || !['false', '0', 'off', 'no'].includes(value.toLowerCase());
+  return parseStrictBooleanEnvValue(
+    process.env.DATA_SYNC_ATTEMPT_REPORTING_ENABLED,
+    true,
+    'DATA_SYNC_ATTEMPT_REPORTING_ENABLED',
+  );
 }
 
 function resolveOutcome(summary: DataSyncWorkSummary): DataSyncAttemptOutcome {

@@ -3,16 +3,21 @@ import { randomUUID } from 'node:crypto';
 import { queueRedisSingleton } from '../queues/redis';
 import { FPLClientError } from './errors';
 import { logDebug } from './logger';
+import { getConfig, parseStrictBooleanEnvValue } from './config';
 
 export type FplRequestPriority = 'live' | 'bulk';
 
-const MAX_INFLIGHT = Math.min(5, Math.max(1, Number(process.env.FPL_MAX_INFLIGHT ?? 5)));
-const BULK_MAX_INFLIGHT = Math.max(1, Math.min(MAX_INFLIGHT - Math.min(2, MAX_INFLIGHT), 3));
-const REQUESTS_PER_SECOND = Math.min(
-  4,
-  Math.max(1, Number(process.env.FPL_REQUESTS_PER_SECOND ?? 4)),
+const runtimeConfig = getConfig();
+const MAX_INFLIGHT = runtimeConfig.FPL_MAX_INFLIGHT;
+const BULK_MAX_INFLIGHT = Math.max(
+  1,
+  Math.min(
+    MAX_INFLIGHT - Math.min(2, MAX_INFLIGHT),
+    runtimeConfig.FPL_BULK_MAX_INFLIGHT_DURING_LIVE,
+  ),
 );
-const LEASE_MS = Math.max(5_000, Number(process.env.FPL_ADMISSION_LEASE_MS ?? 45_000));
+const REQUESTS_PER_SECOND = runtimeConfig.FPL_REQUESTS_PER_SECOND;
+const LEASE_MS = runtimeConfig.FPL_ADMISSION_LEASE_MS;
 const STATE_KEY = 'llm:fpl:admission:state';
 const LEASES_KEY = 'llm:fpl:admission:leases';
 const LEASE_KEY_PREFIX = 'llm:fpl:admission:lease:';
@@ -237,7 +242,14 @@ let localLastError = 0;
 const localWaiters: LocalWaiter[] = [];
 
 function useLocalTestScheduler(): boolean {
-  return process.env.NODE_ENV === 'test' || process.env.FPL_ADMISSION_TEST_MODE === '1';
+  return (
+    runtimeConfig.NODE_ENV === 'test' ||
+    parseStrictBooleanEnvValue(
+      process.env.FPL_ADMISSION_TEST_MODE,
+      false,
+      'FPL_ADMISSION_TEST_MODE',
+    )
+  );
 }
 
 function localCanStart(priority: FplRequestPriority): boolean {

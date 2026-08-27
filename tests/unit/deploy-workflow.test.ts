@@ -108,6 +108,18 @@ describe('release workflow gates', () => {
     expect(backupScript).not.toContain('*pooler.supabase.com*');
     expect(backupScript).toContain('Supabase session pooler on port 5432');
     expect(backupScript).toContain('--dbname="$DATABASE_URL"');
+    expect(backupScript).toContain('DATABASE_BACKUP_PG_MAJOR must be 15');
+  });
+
+  test('keeps the read-only backup container able to normalize its writable mount', () => {
+    const backupServiceStart = composeFile.indexOf('  backup:');
+    const apiServiceStart = composeFile.indexOf('  api:', backupServiceStart);
+    const backupService = composeFile.slice(backupServiceStart, apiServiceStart);
+    expect(backupService).toContain('read_only: true');
+    expect(backupService).toContain('cap_drop:\n      - ALL');
+    expect(backupService).toContain('cap_add:\n      - FOWNER\n      - DAC_OVERRIDE');
+    expect(backupService).toContain('/var/backups/letletme-data');
+    expect(backupService).toContain('no-new-privileges:true');
   });
 
   test('pins all actions and aligns CI with the production Bun version', () => {

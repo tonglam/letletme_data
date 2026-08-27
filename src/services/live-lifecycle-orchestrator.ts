@@ -25,37 +25,26 @@ import {
   isStandaloneSchedulerEnabled,
 } from '../utils/scheduler-mode';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
+import { getConfig } from '../utils/config';
 
-/** The live producer cadence is a data contract: one fresh poll every 30s. */
-export const LIVE_POLL_MS = 30_000;
-export const PICKS_FIRST_PROBE_OFFSET_MS = Number(
-  process.env.PICKS_FIRST_PROBE_OFFSET_MS ?? 60 * 60_000,
-);
-export const PICKS_RETRY_SCHEDULE_MS = (
-  process.env.PICKS_RETRY_SCHEDULE_MS ?? '120000,180000,300000,600000'
-)
-  .split(',')
+const runtimeConfig = getConfig();
+/** The live producer cadence is a data contract: one fresh poll every 30s by default. */
+export const LIVE_POLL_MS = runtimeConfig.LIVE_POLL_MS;
+export const PICKS_FIRST_PROBE_OFFSET_MS = runtimeConfig.PICKS_FIRST_PROBE_OFFSET_MS;
+export const PICKS_RETRY_SCHEDULE_MS = runtimeConfig.PICKS_RETRY_SCHEDULE_MS.split(',')
   .map((value) => Number(value.trim()))
   .filter((value) => Number.isFinite(value) && value > 0);
-export const FPL_BULK_MAX_INFLIGHT_DURING_LIVE = Number(
-  process.env.FPL_BULK_MAX_INFLIGHT_DURING_LIVE ?? 3,
-);
-export const PICKS_REFRESH_INTERVAL_MS = Number(
-  process.env.PICKS_REFRESH_INTERVAL_MS ?? 10 * 60_000,
-);
-const BETWEEN_FIXTURES_POLL_MS = Number(process.env.BETWEEN_FIXTURES_POLL_MS ?? 5 * 60_000);
-const DAY_SETTLING_INITIAL_POLL_MS = Number(process.env.DAY_SETTLING_INITIAL_POLL_MS ?? 60_000);
-const DAY_SETTLING_STABLE_POLL_MS = Number(process.env.DAY_SETTLING_STABLE_POLL_MS ?? 5 * 60_000);
-const DAY_SETTLING_STABLE_AFTER_MS = Number(
-  process.env.DAY_SETTLING_STABLE_AFTER_MS ?? 10 * 60_000,
-);
-const PICKS_PROBE_POLL_MS = Number(process.env.PICKS_PROBE_POLL_MS ?? 120_000);
-const PRE_DEADLINE_POLL_MS = Number(process.env.PRE_DEADLINE_POLL_MS ?? 5 * 60_000);
-const GW_REVIEW_POLL_MS = Number(process.env.GW_REVIEW_POLL_MS ?? 10 * 60_000);
-const GW_REVIEW_FINALIZATION_POLL_MS = Number(
-  process.env.GW_REVIEW_FINALIZATION_POLL_MS ?? 2 * 60_000,
-);
-const FINALIZED_POLL_MS = Number(process.env.FINALIZED_POLL_MS ?? 5 * 60_000);
+export const FPL_BULK_MAX_INFLIGHT_DURING_LIVE = runtimeConfig.FPL_BULK_MAX_INFLIGHT_DURING_LIVE;
+export const PICKS_REFRESH_INTERVAL_MS = runtimeConfig.PICKS_REFRESH_INTERVAL_MS;
+const BETWEEN_FIXTURES_POLL_MS = runtimeConfig.BETWEEN_FIXTURES_POLL_MS;
+const DAY_SETTLING_INITIAL_POLL_MS = runtimeConfig.DAY_SETTLING_INITIAL_POLL_MS;
+const DAY_SETTLING_STABLE_POLL_MS = runtimeConfig.DAY_SETTLING_STABLE_POLL_MS;
+const DAY_SETTLING_STABLE_AFTER_MS = runtimeConfig.DAY_SETTLING_STABLE_AFTER_MS;
+const PICKS_PROBE_POLL_MS = runtimeConfig.PICKS_PROBE_POLL_MS;
+const PRE_DEADLINE_POLL_MS = runtimeConfig.PRE_DEADLINE_POLL_MS;
+const GW_REVIEW_POLL_MS = runtimeConfig.GW_REVIEW_POLL_MS;
+const GW_REVIEW_FINALIZATION_POLL_MS = runtimeConfig.GW_REVIEW_FINALIZATION_POLL_MS;
+const FINALIZED_POLL_MS = runtimeConfig.FINALIZED_POLL_MS;
 
 export type LiveLifecycleState =
   | 'PRE_DEADLINE'

@@ -1,24 +1,90 @@
 import { z } from 'zod';
 import { logError, logInfo } from './logger';
 
-function booleanEnv(defaultValue: boolean) {
+export function parseStrictBooleanEnvValue(
+  value: string | undefined,
+  fallback: boolean,
+  name: string,
+): boolean {
+  if (value === undefined || value.trim() === '') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  throw new Error(`${name} must be a boolean (true/false, 1/0, yes/no or on/off)`);
+}
+
+export function booleanEnv(defaultValue: boolean) {
   return z.preprocess((value) => {
-    if (value === undefined) return defaultValue;
+    if (value === undefined || (typeof value === 'string' && value.trim() === '')) {
+      return defaultValue;
+    }
     if (typeof value === 'boolean') return value;
     if (typeof value !== 'string') return value;
-    const normalized = value.trim().toLowerCase();
-    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
-    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
-    return value;
+    try {
+      return parseStrictBooleanEnvValue(value, defaultValue, 'boolean environment variable');
+    } catch {
+      return value;
+    }
   }, z.boolean());
 }
 
-function integerEnv(defaultValue: number) {
-  return z.coerce.number().int().default(defaultValue);
+function strictNumericValue(value: unknown): unknown {
+  if (value === undefined || (typeof value === 'string' && value.trim() === '')) {
+    return undefined;
+  }
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  // Do not accept exponent, hexadecimal, Infinity or other Number() coercions
+  // for environment configuration.  A typo must fail closed at startup.
+  if (!/^[+-]?\d+$/.test(trimmed)) return value;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && Number.isSafeInteger(parsed) ? parsed : value;
+}
+
+/** Parse one runtime integer override without coercing malformed input. */
+export function parseStrictIntegerEnvValue(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  if (value === undefined || value.trim() === '') return fallback;
+  const normalized = value.trim();
+  if (!/^[+-]?\d+$/.test(normalized)) {
+    throw new Error(`${name} must be a finite safe integer`);
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be a finite safe integer between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+function integerEnv(
+  defaultValue: number,
+  minimum = Number.MIN_SAFE_INTEGER,
+  maximum = Number.MAX_SAFE_INTEGER,
+): z.ZodType<number, z.ZodTypeDef, unknown> {
+  const schema = z
+    .number()
+    .finite()
+    .int()
+    .min(minimum)
+    .max(maximum)
+    .refine(Number.isSafeInteger, { message: 'must be a finite safe integer' });
+  // `.default()` observes the raw value before Zod runs `preprocess`.  A
+  // dotenv blank (`KEY=`) would therefore become `undefined` inside the
+  // number schema without receiving its fallback.  Apply the fallback in the
+  // preprocessor so both omitted and blank values have identical semantics.
+  return z.preprocess((value) => {
+    const normalized = strictNumericValue(value);
+    return normalized === undefined ? defaultValue : normalized;
+  }, schema);
 }
 
 function boundedIntegerEnv(defaultValue: number, minimum: number, maximum: number) {
-  return z.coerce.number().int().min(minimum).max(maximum).default(defaultValue);
+  return integerEnv(defaultValue, minimum, maximum);
 }
 
 /** dotenv turns `KEY=` into `""`; treat that as unset for optional secrets/URLs. */
@@ -39,21 +105,21 @@ const EnvSchema = z.object({
   // pool, so the default must leave headroom for all four services rather
   // than exhausting the project pool as soon as the standalone scheduler is
   // enabled.
-  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(5).default(3),
+  DATABASE_POOL_MAX: boundedIntegerEnv(3, 1, 5),
   // Rebuildable Data publications only. Queue/coordination state must never use this client.
   CACHE_REDIS_HOST: z.string().default('localhost'),
-  CACHE_REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),
+  CACHE_REDIS_PORT: boundedIntegerEnv(6379, 1, 65535),
   CACHE_REDIS_PASSWORD: z.string().optional(),
-  CACHE_REDIS_DB: z.coerce.number().int().min(0).default(0),
+  CACHE_REDIS_DB: integerEnv(0, 0),
   // BullMQ and all worker coordination. Defaults remain isolated for local development/tests.
   QUEUE_REDIS_HOST: z.string().default('localhost'),
-  QUEUE_REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),
+  QUEUE_REDIS_PORT: boundedIntegerEnv(6379, 1, 65535),
   QUEUE_REDIS_PASSWORD: z.string().optional(),
-  QUEUE_REDIS_DB: z.coerce.number().int().min(0).default(1),
+  QUEUE_REDIS_DB: integerEnv(1, 0),
   // Server
-  PORT: z.coerce.number().default(3000),
+  PORT: boundedIntegerEnv(3000, 1, 65535),
   WORKER_HEARTBEAT_PATH: z.string().optional(),
-  WORKER_HEARTBEAT_INTERVAL_MS: integerEnv(30_000),
+  WORKER_HEARTBEAT_INTERVAL_MS: boundedIntegerEnv(30_000, 1_000, 24 * 60 * 60_000),
   NODE_ENV: z.enum(['production', 'development', 'test']).optional(),
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
@@ -70,7 +136,7 @@ const EnvSchema = z.object({
   BUG_REPORT_SCREENSHOT_SUPABASE_URL: optionalEnv(z.string().url().optional()),
   BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY: optionalEnv(z.string().min(1).optional()),
   BUG_REPORT_SCREENSHOT_BUCKET: z.string().min(1).default('bug-report-screenshots'),
-  BUG_REPORT_SCREENSHOT_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
+  BUG_REPORT_SCREENSHOT_RETENTION_DAYS: boundedIntegerEnv(90, 1, 3650),
   // Exact-byte bootstrap-static archive. Production market capture and every
   // historical replay fail closed unless this private object store is ready.
   FPL_RAW_SNAPSHOT_STORAGE_ENABLED: booleanEnv(false),
@@ -78,24 +144,34 @@ const EnvSchema = z.object({
   FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY: optionalEnv(z.string().min(1).optional()),
   FPL_RAW_SNAPSHOT_BUCKET: z.string().min(1).default('fpl-raw-snapshots'),
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
-  RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
+  RATE_LIMIT_MUTATIONS_PER_MINUTE: integerEnv(60, 0),
   DATA_SYNC_ATTEMPT_REPORTING_ENABLED: booleanEnv(true),
   // Keep the latest-wins producer opt-in in production during the first
   // rollout. Development and tests exercise the new lane by default.
   PRICE_CHANGE_SINGLE_FLIGHT_ENABLED: booleanEnv(process.env.NODE_ENV !== 'production'),
+  PRICE_CHANGE_HOT_WATCH_ENABLED: booleanEnv(process.env.NODE_ENV !== 'production'),
+  FPL_ADMISSION_TEST_MODE: booleanEnv(false),
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(true),
-  FPL_MAX_INFLIGHT: z.coerce.number().int().min(1).max(32).default(5),
-  FPL_REQUESTS_PER_SECOND: z.coerce.number().int().min(1).max(20).default(4),
-  FPL_BULK_MAX_INFLIGHT_DURING_LIVE: z.coerce.number().int().min(1).max(32).default(3),
-  FPL_ADMISSION_LEASE_MS: integerEnv(45_000),
-  FPL_REQUEST_TIMEOUT_MS: integerEnv(10_000),
-  FPL_REQUEST_DEADLINE_MS: integerEnv(40_000),
-  FPL_RETRY_BASE_DELAY_MS: integerEnv(500),
-  FPL_RETRY_MAX_DELAY_MS: integerEnv(5_000),
+  // Keep admission ceilings aligned with the production-safe historical
+  // caps. Raising these values requires a separate provider-capacity rollout.
+  FPL_MAX_INFLIGHT: boundedIntegerEnv(5, 1, 5),
+  FPL_REQUESTS_PER_SECOND: boundedIntegerEnv(4, 1, 4),
+  FPL_BULK_MAX_INFLIGHT_DURING_LIVE: boundedIntegerEnv(3, 1, 3),
+  FPL_ADMISSION_LEASE_MS: boundedIntegerEnv(45_000, 1_000, 2 * 60 * 60_000),
+  FPL_REQUEST_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 2 * 60 * 60_000),
+  FPL_REQUEST_DEADLINE_MS: boundedIntegerEnv(40_000, 1_000, 2 * 60 * 60_000),
+  FPL_RETRY_BASE_DELAY_MS: boundedIntegerEnv(500, 0, 5 * 60_000),
+  FPL_RETRY_MAX_DELAY_MS: boundedIntegerEnv(5_000, 0, 5 * 60_000),
   // A scheduler definition is a planning stage, not an unbounded provider
   // request.  Keep one slow definition from holding the 30-second pass (and
   // its progress heartbeat) forever.
-  SCHEDULER_RESOLVE_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  // Definition resolution runs inside the scheduler's 30-second pass. Keep
+  // its historical one-minute ceiling even though provider request timeouts
+  // may use the broader two-hour runtime bound.
+  SCHEDULER_RESOLVE_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 60_000),
+  // A scheduler pass runs every 30 seconds; a lease shorter than one minute
+  // can expire while a slow claim is still executing.
+  SCHEDULER_LEASE_MS: boundedIntegerEnv(15 * 60_000, 60_000, 2 * 60 * 60_000),
   // Queue governance rollout switches.  They are deliberately opt-in so a
   // rolling deploy can start the new consumers before routing new work.
   QUEUE_LANES_V2_ENABLED: booleanEnv(false),
@@ -105,31 +181,32 @@ const EnvSchema = z.object({
   FRESHNESS_SLO_MODE: z.enum(['shadow', 'enforced']).default('shadow'),
   QUEUE_HEALTH_SNAPSHOT_INTERVAL_MS: boundedIntegerEnv(15_000, 1_000, 15 * 60_000),
   QUEUE_HEALTH_WINDOW_INTERVAL_MS: boundedIntegerEnv(60_000, 1_000, 60 * 60_000),
-  QUEUE_HEALTH_SNAPSHOT_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
+  QUEUE_HEALTH_SNAPSHOT_TTL_SECONDS: boundedIntegerEnv(180, 30, 900),
   QUEUE_ADMISSION_GREEN_CLEAR_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
-  QUEUE_ADMISSION_GATE_TTL_SECONDS: z.coerce.number().int().min(1).max(900).default(900),
+  QUEUE_ADMISSION_GATE_TTL_SECONDS: boundedIntegerEnv(900, 1, 900),
   DATA_GOVERNANCE_WEB_URL: optionalEnv(z.string().url().optional()),
   DATA_GOVERNANCE_PROBE_TOKEN: optionalEnv(z.string().min(16).optional()),
-  ENTRY_SYNC_CHUNK_SIZE: integerEnv(500),
-  ENTRY_SYNC_CONCURRENCY: integerEnv(5),
-  ENTRY_SYNC_THROTTLE_MS: integerEnv(200),
-  TOURNAMENT_SETUP_STUCK_CUTOFF_MINUTES: integerEnv(15),
-  TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS: integerEnv(300_000),
-  TOURNAMENT_EVENT_LIVE_TIMEOUT_MS: integerEnv(45_000),
-  TOURNAMENT_ENTRY_FETCH_TIMEOUT_MS: integerEnv(45_000),
-  TOURNAMENT_ENTRY_PERSIST_TIMEOUT_MS: integerEnv(60_000),
-  LIVE_POLL_MS: integerEnv(30_000),
-  PICKS_FIRST_PROBE_OFFSET_MS: integerEnv(60 * 60_000),
+  ENTRY_SYNC_CHUNK_SIZE: boundedIntegerEnv(500, 1, 5_000),
+  ENTRY_SYNC_CONCURRENCY: boundedIntegerEnv(5, 1, 32),
+  ENTRY_SYNC_THROTTLE_MS: boundedIntegerEnv(200, 0, 60_000),
+  TOURNAMENT_SETUP_STUCK_CUTOFF_MINUTES: boundedIntegerEnv(15, 1, 24 * 60),
+  TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS: boundedIntegerEnv(300_000, 1_000, 24 * 60 * 60_000),
+  TOURNAMENT_EVENT_LIVE_TIMEOUT_MS: boundedIntegerEnv(45_000, 1_000, 2 * 60 * 60_000),
+  TOURNAMENT_ENTRY_FETCH_TIMEOUT_MS: boundedIntegerEnv(45_000, 1_000, 2 * 60 * 60_000),
+  TOURNAMENT_ENTRY_PERSIST_TIMEOUT_MS: boundedIntegerEnv(60_000, 1_000, 2 * 60 * 60_000),
+  LIVE_POLL_MS: boundedIntegerEnv(30_000, 1_000, 24 * 60 * 60_000),
+  PICKS_FIRST_PROBE_OFFSET_MS: boundedIntegerEnv(60 * 60_000, 1_000, 24 * 60 * 60_000),
+  PICKS_REFRESH_INTERVAL_MS: boundedIntegerEnv(10 * 60_000, 1_000, 24 * 60 * 60_000),
   PICKS_RETRY_SCHEDULE_MS: z.string().default('120000,180000,300000,600000'),
-  BETWEEN_FIXTURES_POLL_MS: integerEnv(5 * 60_000),
-  DAY_SETTLING_INITIAL_POLL_MS: integerEnv(60_000),
-  DAY_SETTLING_STABLE_POLL_MS: integerEnv(5 * 60_000),
-  DAY_SETTLING_STABLE_AFTER_MS: integerEnv(10 * 60_000),
-  PICKS_PROBE_POLL_MS: integerEnv(120_000),
-  PRE_DEADLINE_POLL_MS: integerEnv(5 * 60_000),
-  GW_REVIEW_POLL_MS: integerEnv(10 * 60_000),
-  GW_REVIEW_FINALIZATION_POLL_MS: integerEnv(2 * 60_000),
-  FINALIZED_POLL_MS: integerEnv(5 * 60_000),
+  BETWEEN_FIXTURES_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
+  DAY_SETTLING_INITIAL_POLL_MS: boundedIntegerEnv(60_000, 1_000, 24 * 60 * 60_000),
+  DAY_SETTLING_STABLE_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
+  DAY_SETTLING_STABLE_AFTER_MS: boundedIntegerEnv(10 * 60_000, 1_000, 24 * 60 * 60_000),
+  PICKS_PROBE_POLL_MS: boundedIntegerEnv(120_000, 1_000, 24 * 60 * 60_000),
+  PRE_DEADLINE_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
+  GW_REVIEW_POLL_MS: boundedIntegerEnv(10 * 60_000, 1_000, 24 * 60 * 60_000),
+  GW_REVIEW_FINALIZATION_POLL_MS: boundedIntegerEnv(2 * 60_000, 1_000, 24 * 60 * 60_000),
+  FINALIZED_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
   // Disabled until automated Understat access is explicitly approved.
   UNDERSTAT_ENABLED: booleanEnv(false),
   UNDERSTAT_BASE_URL: z.string().url().default('https://understat.com'),
@@ -142,8 +219,8 @@ const EnvSchema = z.object({
     .string()
     .regex(/^\d{4}$/)
     .default('2627'),
-  UNDERSTAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
-  UNDERSTAT_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(4),
+  UNDERSTAT_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 60_000),
+  UNDERSTAT_MAX_CONCURRENCY: boundedIntegerEnv(4, 1, 4),
   // Telegram notifications (optional)
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
@@ -341,6 +418,20 @@ export function getConfig(): AppConfig {
 
     if (parsed.FPL_ADMISSION_LEASE_MS < parsed.FPL_REQUEST_DEADLINE_MS + 5_000) {
       throw new Error('FPL_ADMISSION_LEASE_MS must exceed the FPL request deadline by 5 seconds');
+    }
+
+    if (parsed.FPL_RETRY_MAX_DELAY_MS < parsed.FPL_RETRY_BASE_DELAY_MS) {
+      throw new Error('FPL_RETRY_MAX_DELAY_MS must be greater than or equal to the base delay');
+    }
+
+    const retrySchedule = parsed.PICKS_RETRY_SCHEDULE_MS.split(',').map((value) => value.trim());
+    if (
+      retrySchedule.length === 0 ||
+      retrySchedule.some((value) => !/^\d+$/.test(value) || Number(value) > 24 * 60 * 60_000)
+    ) {
+      throw new Error(
+        'PICKS_RETRY_SCHEDULE_MS must contain integer delays between 0 and 86400000ms',
+      );
     }
 
     resolveAuthConfig(parsed);

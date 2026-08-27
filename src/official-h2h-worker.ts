@@ -1,11 +1,19 @@
 import { databaseSingleton } from './db/singleton';
+import { redisSingleton } from './cache/singleton';
 import { getConfig } from './utils/config';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { logInfo } from './utils/logger';
-import { officialH2hLiveQueue, officialH2hLiveQueueName } from './queues/official-h2h-live.queue';
+import {
+  closeOfficialH2HLiveQueue,
+  officialH2hLiveQueue,
+  officialH2hLiveQueueName,
+} from './queues/official-h2h-live.queue';
 import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
+import { drainWorkers } from './workers/worker-runtime';
 import { startQueueMonitor } from './utils/queue-monitor';
+import { queueRedisSingleton } from './queues/redis';
+import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 const config = getConfig();
 if (config.NODE_ENV === 'production') await databaseSingleton.connect();
@@ -28,20 +36,29 @@ const stopHeartbeat = startWorkerHeartbeat({
 });
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('officialH2HWorker');
 
-async function shutdown(signal: string) {
-  logInfo('Official H2H worker shutting down', { signal });
-  stopHeartbeat();
-  stopRuntimeHeartbeat();
-  queueMonitors.forEach((monitor) => monitor.stop());
-  await Promise.allSettled([
-    ...runtime.workers.map((worker) => worker.close()),
-    ...runtime.queueEvents.map((events) => events.close()),
-    officialH2hLiveQueue.close(),
-  ]);
-  await databaseSingleton.disconnect();
-  process.exit(0);
-}
+const shutdownController = createShutdownController({
+  stopIntake: () => {
+    stopHeartbeat();
+    stopRuntimeHeartbeat();
+    queueMonitors.forEach((monitor) => monitor.stop());
+    runtime.stop?.();
+  },
+  waitForInFlight: () => drainWorkers(runtime.workers),
+  closeResources: () =>
+    Promise.all([
+      ...runtime.queueEvents.map((events) => events.close()),
+      closeOfficialH2HLiveQueue(),
+      databaseSingleton.disconnect(),
+      redisSingleton.disconnect(),
+      queueRedisSingleton.disconnect(),
+    ]).then(() => undefined),
+});
 
-process.on('SIGINT', () => void shutdown('SIGINT'));
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
+installShutdownSignals(shutdownController);
+process.on('uncaughtException', (error) =>
+  shutdownController.fatal(error, 'Official H2H worker uncaught exception'),
+);
+process.on('unhandledRejection', (error) =>
+  shutdownController.fatal(error, 'Official H2H worker unhandled rejection'),
+);
 logInfo('Official H2H worker started', { queue: officialH2hLiveQueueName, concurrency: 1 });

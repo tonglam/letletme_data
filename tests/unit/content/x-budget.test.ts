@@ -28,7 +28,7 @@ test('scales recurring lane caps without changing global provider guards', async
   expect(relaxed.final90Rolling90mLimit).toBe(300);
 });
 
-test('rejects a non-positive or overflowing lane cap multiplier', async () => {
+test('bounds fractional lane multipliers and call budgets', async () => {
   const bundle = await loadBriefingManifest();
   const input = {
     coverage: bundle.coverage,
@@ -37,10 +37,23 @@ test('rejects a non-positive or overflowing lane cap multiplier', async () => {
     identityRolling24hLimit: 100,
   };
 
-  expect(() => compileXBudgetPolicy({ ...input, laneCapMultiplier: 0 })).toThrow(
-    'CONTENT_X_LANE_CAP_MULTIPLIER must be a positive integer',
+  expect(() => compileXBudgetPolicy({ ...input, laneCapMultiplier: 0.09 })).toThrow(
+    'CONTENT_X_LANE_CAP_MULTIPLIER must be between 0.1 and 10',
   );
+  const fractional = compileXBudgetPolicy({ ...input, laneCapMultiplier: 0.5 });
+  expect(fractional.laneCapMultiplier).toBe(0.5);
+  expect(fractional.laneCaps.NORMAL.CREATOR).toBe(
+    Math.floor(bundle.coverage.xLaneCallCaps.NORMAL.CREATOR * 0.5),
+  );
+  expect(
+    compileXBudgetPolicy({
+      ...input,
+      globalRolling24hLimit: 0,
+      final90Rolling90mLimit: 0,
+      identityRolling24hLimit: 0,
+    }),
+  ).toMatchObject({ globalRolling24hLimit: 0, final90Rolling90mLimit: 0 });
   expect(() =>
     compileXBudgetPolicy({ ...input, laneCapMultiplier: Number.MAX_SAFE_INTEGER }),
-  ).toThrow('X lane cap overflow');
+  ).toThrow('CONTENT_X_LANE_CAP_MULTIPLIER must be between 0.1 and 10');
 });

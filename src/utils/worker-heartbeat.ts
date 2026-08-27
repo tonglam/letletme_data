@@ -1,5 +1,7 @@
 import { closeSync, openSync, utimesSync } from 'node:fs';
 
+import { getConfig } from './config';
+
 /**
  * Worker liveness heartbeat.
  *
@@ -40,9 +42,7 @@ export interface WorkerHeartbeatOptions {
  */
 export function startWorkerHeartbeat(options: WorkerHeartbeatOptions = {}): () => void {
   const path = options.path ?? process.env.WORKER_HEARTBEAT_PATH ?? DEFAULT_WORKER_HEARTBEAT_PATH;
-  const intervalMs =
-    options.intervalMs ??
-    Number(process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS);
+  const intervalMs = options.intervalMs ?? getConfig().WORKER_HEARTBEAT_INTERVAL_MS;
 
   touchWorkerHeartbeat(path);
   const timer = setInterval(() => {

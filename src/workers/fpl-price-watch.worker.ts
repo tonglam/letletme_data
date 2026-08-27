@@ -38,7 +38,7 @@ import {
   failSchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
-import { getConfig } from '../utils/config';
+import { parseStrictBooleanEnvValue } from '../utils/config';
 import { FPLClientError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { getQueueConnection } from '../utils/queue';
@@ -51,15 +51,19 @@ import {
 } from '../domain/price-change-watch-policy';
 
 function enabled(): boolean {
-  const raw = process.env.PRICE_CHANGE_HOT_WATCH_ENABLED;
-  if (raw === undefined) return getConfig().NODE_ENV !== 'production';
-  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+  return parseStrictBooleanEnvValue(
+    process.env.PRICE_CHANGE_HOT_WATCH_ENABLED,
+    process.env.NODE_ENV !== 'production',
+    'PRICE_CHANGE_HOT_WATCH_ENABLED',
+  );
 }
 
 function singleFlightEnabled(): boolean {
-  const raw = process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED;
-  if (raw === undefined) return process.env.NODE_ENV !== 'production';
-  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+  return parseStrictBooleanEnvValue(
+    process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED,
+    process.env.NODE_ENV !== 'production',
+    'PRICE_CHANGE_SINGLE_FLIGHT_ENABLED',
+  );
 }
 
 const sleep = (ms: number): Promise<void> =>

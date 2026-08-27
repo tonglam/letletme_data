@@ -12,13 +12,21 @@ import { createUnderstatWorker } from './workers/understat.worker';
 import { createMaintenanceWorker } from './workers/maintenance.worker';
 import { createDataGovernanceWorker } from './workers/data-governance.worker';
 import { databaseSingleton } from './db/singleton';
+import { redisSingleton } from './cache/singleton';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
-import { logError, logInfo } from './utils/logger';
+import { logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { closeUnderstatPermitClient } from './utils/understat-rate-limit';
-import { WORKER_SHUTDOWN_TIMEOUT_MS, type WorkerRuntime } from './workers/worker-runtime';
+import {
+  drainWorkers,
+  WORKER_SHUTDOWN_TIMEOUT_MS,
+  type WorkerRuntime,
+} from './workers/worker-runtime';
+import { queueRedisSingleton } from './queues/redis';
+import { closeAllProducerQueues } from './queues/close-all';
+import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 getConfig();
 
@@ -60,35 +68,33 @@ const allQueueEvents = runtimes.flatMap((runtime) => runtime.queueEvents);
 const stopHeartbeat = startWorkerHeartbeat();
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('queueWorker');
 
-async function shutdown(signal: string) {
-  logInfo('Worker shutting down', { signal });
-  stopHeartbeat();
-  stopRuntimeHeartbeat();
-  queueMonitors.forEach((monitor) => monitor.stop());
-  runtimes.forEach((runtime) => runtime.stop?.());
+const shutdownController = createShutdownController({
+  timeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,
+  stopIntake: () => {
+    stopHeartbeat();
+    stopRuntimeHeartbeat();
+    queueMonitors.forEach((monitor) => monitor.stop());
+    runtimes.forEach((runtime) => runtime.stop?.());
+  },
+  waitForInFlight: () => drainWorkers(allWorkers),
+  closeResources: () =>
+    Promise.all([
+      ...allQueueEvents.map((events) => events.close()),
+      closeAllProducerQueues(),
+      closeUnderstatPermitClient(),
+      databaseSingleton.disconnect(),
+      redisSingleton.disconnect(),
+      queueRedisSingleton.disconnect(),
+    ]).then(() => undefined),
+});
 
-  const closeAll = Promise.allSettled([
-    ...allWorkers.map((worker) => worker.close()),
-    ...allQueueEvents.map((events) => events.close()),
-    closeUnderstatPermitClient(),
-  ]);
-
-  const timeout = new Promise<void>((_, reject) => {
-    setTimeout(() => reject(new Error('Shutdown timed out')), WORKER_SHUTDOWN_TIMEOUT_MS).unref?.();
-  });
-
-  try {
-    await Promise.race([closeAll, timeout]);
-  } catch (error) {
-    logError('Worker shutdown did not complete within timeout; exiting uncleanly', error);
-    process.exit(1);
-  }
-
-  process.exit(0);
-}
-
-process.on('SIGINT', () => void shutdown('SIGINT'));
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
+installShutdownSignals(shutdownController);
+process.on('uncaughtException', (error) =>
+  shutdownController.fatal(error, 'Background worker uncaught exception'),
+);
+process.on('unhandledRejection', (error) =>
+  shutdownController.fatal(error, 'Background worker unhandled rejection'),
+);
 
 logInfo('Background worker started', {
   mutationCoordination: 'postgresql-transaction-scoped',

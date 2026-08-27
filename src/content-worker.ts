@@ -35,10 +35,14 @@ import {
   getContentMediaTranscriptQueue,
 } from './content/workers/content-media-transcript.queue';
 import { databaseSingleton } from './db/singleton';
+import { redisSingleton } from './cache/singleton';
+import { queueRedisSingleton } from './queues/redis';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat, type QueueMonitorRuntimeState } from './utils/runtime-heartbeat';
 import { startQueueMonitor } from './utils/queue-monitor';
+import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
+import { drainWorkers } from './workers/worker-runtime';
 
 const FORMAL_SCHEDULER_INTERVAL_MS = 30_000;
 const ACQUISITION_JOB_OUTBOX_INTERVAL_MS = 5_000;
@@ -76,6 +80,7 @@ let formalScheduleInFlight: Promise<void> | null = null;
 let formalXInitializationInFlight: Promise<void> | null = null;
 let acquisitionJobOutboxDispatchInFlight: Promise<void> | null = null;
 let publicationOutboxDispatchInFlight: Promise<void> | null = null;
+let shuttingDown = false;
 
 function runtimeGitRevision(): string {
   return (
@@ -95,6 +100,7 @@ function enabledAcquisitionQueues(): readonly AcquisitionQueueName[] {
 }
 
 async function dispatchPendingPublicationOutbox(): Promise<void> {
+  if (shuttingDown) return;
   if (publicationOutboxDispatchInFlight) return publicationOutboxDispatchInFlight;
 
   const dispatch = dispatchPublicationOutbox()
@@ -112,6 +118,7 @@ async function dispatchPendingPublicationOutbox(): Promise<void> {
 }
 
 async function dispatchPendingAcquisitionJobOutbox(): Promise<void> {
+  if (shuttingDown) return;
   if (acquisitionJobOutboxDispatchInFlight) return acquisitionJobOutboxDispatchInFlight;
   const queueNames = enabledAcquisitionQueues();
   if (queueNames.length === 0) return;
@@ -150,6 +157,7 @@ async function dispatchPendingAcquisitionJobOutbox(): Promise<void> {
 
 async function ensureFormalXRuntime(): Promise<void> {
   if (
+    shuttingDown ||
     !flags.pipelineEnabled ||
     !flags.xScanEnabled ||
     !flags.realGrokEnabled ||
@@ -190,6 +198,7 @@ async function ensureFormalXRuntime(): Promise<void> {
 }
 
 async function schedulePendingFormalAcquisition(): Promise<void> {
+  if (shuttingDown) return;
   if (formalScheduleInFlight) return formalScheduleInFlight;
   if (!manifestBundle) return;
 
@@ -222,7 +231,7 @@ async function schedulePendingFormalAcquisition(): Promise<void> {
 }
 
 async function startFormalAcquisition(): Promise<void> {
-  if (!flags.pipelineEnabled) return;
+  if (shuttingDown || !flags.pipelineEnabled) return;
   try {
     const bundle = await loadBriefingManifest();
     const reconciliation = await reconcileBriefingSourceRegistry({
@@ -258,6 +267,7 @@ async function startFormalAcquisition(): Promise<void> {
     return;
   }
 
+  if (shuttingDown) return;
   if (flags.httpAcquisitionEnabled) {
     formalHttpRuntime = createFormalHttpWorkerRuntime();
     queueMonitorStates[contentHttpAcquisitionQueueName] = 'ENABLED';
@@ -303,36 +313,56 @@ void startFormalAcquisition().catch((error) => {
   logError('Formal acquisition startup failed; publication delivery remains active', error);
 });
 
-async function shutdown(signal: string): Promise<void> {
-  logInfo('Content worker shutting down', { signal });
-  queueMonitors.forEach((monitor) => monitor.stop());
-  if (formalScheduler) clearInterval(formalScheduler);
-  if (acquisitionJobOutboxDispatcher) clearInterval(acquisitionJobOutboxDispatcher);
-  if (publicationOutboxDispatcher) clearInterval(publicationOutboxDispatcher);
-  stopHeartbeat();
-  stopRuntimeHeartbeat();
-  await Promise.allSettled([
-    formalScheduleInFlight,
-    acquisitionJobOutboxDispatchInFlight,
-    publicationOutboxDispatchInFlight,
-  ]);
-  await Promise.allSettled([
-    formalHttpRuntime?.worker.close(),
-    formalHttpRuntime?.queueEvents.close(),
-    formalXRuntime?.worker.close(),
-    formalXRuntime?.queueEvents.close(),
-    formalMediaRuntime?.worker.close(),
-    formalMediaRuntime?.queueEvents.close(),
-    closeContentHttpAcquisitionQueue(),
-    closeContentXQueue(),
-    closeContentMediaTranscriptQueue(),
-  ]);
-  await databaseSingleton.disconnect();
-  process.exit(0);
-}
+const shutdownController = createShutdownController({
+  stopIntake: () => {
+    shuttingDown = true;
+    queueMonitors.forEach((monitor) => monitor.stop());
+    if (formalScheduler) clearInterval(formalScheduler);
+    if (acquisitionJobOutboxDispatcher) clearInterval(acquisitionJobOutboxDispatcher);
+    if (publicationOutboxDispatcher) clearInterval(publicationOutboxDispatcher);
+    stopHeartbeat();
+    stopRuntimeHeartbeat();
+  },
+  waitForInFlight: async () => {
+    const inFlight = await Promise.allSettled([
+      formalScheduleInFlight,
+      formalXInitializationInFlight,
+      acquisitionJobOutboxDispatchInFlight,
+      publicationOutboxDispatchInFlight,
+    ]);
+    const failures = inFlight
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason);
+    await drainWorkers(
+      [formalHttpRuntime, formalXRuntime, formalMediaRuntime]
+        .filter((runtime): runtime is NonNullable<typeof runtime> => runtime != null)
+        .map((runtime) => runtime.worker),
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `${failures.length} content task(s) failed to drain`);
+    }
+  },
+  closeResources: () =>
+    Promise.all([
+      formalHttpRuntime?.queueEvents.close(),
+      formalXRuntime?.queueEvents.close(),
+      formalMediaRuntime?.queueEvents.close(),
+      closeContentHttpAcquisitionQueue(),
+      closeContentXQueue(),
+      closeContentMediaTranscriptQueue(),
+      databaseSingleton.disconnect(),
+      redisSingleton.disconnect(),
+      queueRedisSingleton.disconnect(),
+    ]).then(() => undefined),
+});
 
-process.on('SIGINT', () => void shutdown('SIGINT'));
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
+installShutdownSignals(shutdownController);
+process.on('uncaughtException', (error) =>
+  shutdownController.fatal(error, 'Content worker uncaught exception'),
+);
+process.on('unhandledRejection', (error) =>
+  shutdownController.fatal(error, 'Content worker unhandled rejection'),
+);
 
 logInfo('Content worker process ready', {
   pipelineEnabled: flags.pipelineEnabled,
