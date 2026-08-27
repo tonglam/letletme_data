@@ -37,7 +37,7 @@ import { dataContractRegistry } from '../domain/data-contracts';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
-import { safeDataErrorCode } from '../domain/error-classification';
+import { safePersistedDataErrorCode } from '../domain/error-classification';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
 import { readPriceChangeHotSnapshotMetadata } from './price-change-hot.service';
@@ -62,8 +62,7 @@ type PriceChangeContextSelection = Readonly<{
  * authenticated governance case endpoint for the redacted case metadata.
  */
 export function safeSchedulerLaneErrorCode(lastError: string | null): string | null {
-  if (!lastError) return null;
-  return safeDataErrorCode(new Error(lastError));
+  return safePersistedDataErrorCode(lastError);
 }
 
 type SchedulerObligationLatest = NonNullable<
@@ -366,7 +365,7 @@ export async function getJobsStatus(
       fetchedAt: priceChangeHotCursor?.fetchedAt ?? null,
       expiresAt: priceChangeHotCursor?.expiresAt ?? null,
       reconciliationErrorCode: priceChangeHotCursor?.reconciliation.error
-        ? safeDataErrorCode(new Error(priceChangeHotCursor.reconciliation.error))
+        ? safePersistedDataErrorCode(priceChangeHotCursor.reconciliation.error)
         : null,
       ageMs: priceChangeHotCursor
         ? Math.max(0, Date.now() - Date.parse(priceChangeHotCursor.detectedAt))

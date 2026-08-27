@@ -14,6 +14,7 @@ import {
 } from './price-change-predictions.service';
 import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { parsePersistedDataError, summarizeDataError } from '../domain/error-classification';
 import { redisSingleton } from '../cache/singleton';
 import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
@@ -107,6 +108,35 @@ export function priceChangeHotPayloadKey(
     throw new Error('Price-change hot source hash is invalid');
   }
   return `${HOT_KEY_PREFIX}:${seasonCode}:${revision}:${sourceHash}`;
+}
+
+/**
+ * Persist only bounded, classified reconciliation evidence.  Hot snapshots
+ * are read by operational status tooling, so provider URLs, identifiers and
+ * stack/message details must never be the only durable representation of a
+ * terminal failure.
+ */
+export function formatPriceChangeHotError(error: unknown): string {
+  if (typeof error === 'string' && error.startsWith(PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX)) {
+    const detail = error.slice(PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX.length).trim();
+    const summary = summarizeDataError(new Error(detail));
+    return `SOURCE_ARCHIVE_MISSING:SOURCE_ARCHIVE_MISSING ${summary.summary}`.slice(0, 1_000);
+  }
+
+  if (typeof error === 'string') {
+    const parsed = parsePersistedDataError(error);
+    if (parsed) {
+      const detail = error.slice(parsed.prefixLength).trim();
+      const summary = detail ? summarizeDataError(new Error(detail)).summary : '';
+      return `${parsed.errorClass}:${parsed.errorCode}${summary ? ` ${summary}` : ''}`.slice(
+        0,
+        1_000,
+      );
+    }
+  }
+
+  const summary = summarizeDataError(error);
+  return `${summary.errorClass}:${summary.errorCode} ${summary.summary}`.slice(0, 1_000);
 }
 
 /** Redis index retaining source-bound payload keys for a board revision. */
@@ -764,7 +794,7 @@ export async function markPriceChangeHotReconciliation(
         readonly durablePublicationId: string;
         readonly durableRevision: number;
       }
-    | { readonly state: 'failed'; readonly error: string },
+    | { readonly state: 'failed'; readonly error: unknown },
 ): Promise<boolean> {
   const current = await readPriceChangeHotSnapshotAtRevision(
     snapshot.seasonCode,
@@ -781,12 +811,13 @@ export async function markPriceChangeHotReconciliation(
   if (input.state !== 'reconciled' && current.reconciliation.state === 'reconciled') {
     return true;
   }
+  const persistedError = input.state === 'reconciled' ? '' : formatPriceChangeHotError(input.error);
   const failureError =
     input.state === 'reconciled'
       ? ''
       : input.state === 'failed' && current.reconciliation.error
-        ? `${current.reconciliation.error}; ${input.error}`
-        : input.error;
+        ? `${current.reconciliation.error}; ${persistedError}`
+        : persistedError;
   const updated: PriceChangeHotSnapshot = {
     ...current,
     reconciliation:

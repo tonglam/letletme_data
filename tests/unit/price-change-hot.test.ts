@@ -3,10 +3,12 @@ import { describe, expect, test } from 'bun:test';
 import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   buildPriceChangeHotSnapshot,
+  formatPriceChangeHotError,
   isPriceChangeHotSnapshotNewer,
   PRICE_CHANGE_HOT_TTL_MS,
   sha256Bytes,
 } from '../../src/services/price-change-hot.service';
+import { FPLClientError } from '../../src/utils/errors';
 import type { PriceChangeBoard } from '../../src/services/price-change-predictions.service';
 import { buildCoreSnapshotFixture } from '../fixtures/core-snapshot.fixtures';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
@@ -130,5 +132,22 @@ describe('price-change hot snapshot', () => {
     };
 
     expect(isPriceChangeHotSnapshotNewer(snapshot, durable)).toBe(true);
+  });
+
+  test('persists a bounded provider classification and code', () => {
+    const encoded = formatPriceChangeHotError(
+      new FPLClientError('HTTP 429: Too Many Requests', 429, 'HTTP_ERROR'),
+    );
+    expect(encoded).toBe('TRANSIENT_PROVIDER:HTTP_ERROR HTTP 429: Too Many Requests');
+    expect(encoded).not.toContain('secret');
+  });
+
+  test('marks missing source archives with a stable error class', () => {
+    const encoded = formatPriceChangeHotError(
+      'source-archive-failed: provider https://example.invalid/bootstrap token=secret',
+    );
+    expect(encoded.startsWith('SOURCE_ARCHIVE_MISSING:SOURCE_ARCHIVE_MISSING ')).toBe(true);
+    expect(encoded).not.toContain('example.invalid');
+    expect(encoded).not.toContain('secret');
   });
 });

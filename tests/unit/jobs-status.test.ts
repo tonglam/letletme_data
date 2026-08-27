@@ -103,6 +103,17 @@ describe('safeSchedulerLaneErrorCode', () => {
     expect(safeSchedulerLaneErrorCode(null)).toBeNull();
     expect(safeSchedulerLaneErrorCode('')).toBeNull();
   });
+
+  test('preserves the bounded classification and provider code prefix', () => {
+    expect(
+      safeSchedulerLaneErrorCode(
+        'SOURCE_NOT_READY:HTTP_ERROR provider https://example.invalid/entry/123 unavailable',
+      ),
+    ).toBe('SOURCE_NOT_READY:HTTP_ERROR');
+    expect(safeSchedulerLaneErrorCode('CONFIG_AUTH:AUTH_FAILED credentials=secret')).toBe(
+      'CONFIG_AUTH:AUTH_FAILED',
+    );
+  });
 });
 
 describe('safeSchedulerObligationLatest', () => {
