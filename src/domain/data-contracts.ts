@@ -538,6 +538,15 @@ export function assertDataContractRegistry(jobNames: readonly string[]): void {
         (!contract.visibilityReason || contract.visibilityReason.trim().length === 0),
     )
     .map((contract) => contract.contractKey);
+  const publicFreshnessContractsMissingConsumerEvidence = contracts
+    .filter(
+      (contract) =>
+        contract.visibility === 'public' &&
+        (contract.freshnessEvidence === 'checkpoint' ||
+          contract.freshnessEvidence === 'publication') &&
+        !contractHasConsumerEvidence(contract),
+    )
+    .map((contract) => contract.contractKey);
   if (
     missing.length > 0 ||
     unrepresented.length > 0 ||
@@ -545,7 +554,8 @@ export function assertDataContractRegistry(jobNames: readonly string[]): void {
     duplicates.length > 0 ||
     invalidFreshnessJobs.length > 0 ||
     checkpointContractsWithoutJobs.length > 0 ||
-    contractsMissingVisibilityReason.length > 0
+    contractsMissingVisibilityReason.length > 0 ||
+    publicFreshnessContractsMissingConsumerEvidence.length > 0
   ) {
     throw new Error(
       [
@@ -567,6 +577,9 @@ export function assertDataContractRegistry(jobNames: readonly string[]): void {
           : '',
         contractsMissingVisibilityReason.length > 0
           ? `Internal/excluded contracts missing visibility reasons: ${contractsMissingVisibilityReason.join(', ')}`
+          : '',
+        publicFreshnessContractsMissingConsumerEvidence.length > 0
+          ? `Public freshness contracts missing GraphQL/Web evidence: ${publicFreshnessContractsMissingConsumerEvidence.join(', ')}`
           : '',
       ]
         .filter(Boolean)

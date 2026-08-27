@@ -434,14 +434,17 @@ export async function observeFreshnessConsumerEvidence(
         });
   const windows = [...pending, ...breached];
   const candidates = windows.filter((window) => {
-    const contract = dataContractRegistry.find((item) => item.contractKey === window.contractKey);
-    const evidence = contract?.consumerEvidence;
-    return Boolean(
-      evidence &&
-        'graphql' in evidence &&
-        'web' in evidence &&
-        typeof evidence.graphql === 'string' &&
-        typeof evidence.web === 'string',
+    // The reservation freezes whether consumer evidence is part of this
+    // window's SLO. A later global flag change must not make a producer-only
+    // window recover from a consumer probe that never observed its producer
+    // revision. Legacy windows without the flag remain probeable when their
+    // public contract names both consumer hops.
+    const contract = findDataContract(window.contractKey);
+    const windowEvidence = asJsonObject(window.evidence);
+    return (
+      windowEvidence.consumerEvidenceRequired !== false &&
+      contract !== undefined &&
+      contractHasConsumerEvidence(contract)
     );
   });
   let observed = 0;

@@ -395,6 +395,16 @@ describe('GW queue and data governance primitives', () => {
         dataContractRegistry.find((contract) => contract.contractKey === 'housekeeping')!,
       ),
     ).toBe(false);
+    expect(
+      dataContractRegistry
+        .filter(
+          (contract) =>
+            contract.visibility === 'public' &&
+            (contract.freshnessEvidence === 'checkpoint' ||
+              contract.freshnessEvidence === 'publication'),
+        )
+        .every((contract) => contractHasConsumerEvidence(contract)),
+    ).toBe(true);
   });
 
   test('routes My FPL outbox freshness repairs to the publication lane', () => {
