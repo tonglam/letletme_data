@@ -325,6 +325,64 @@ describe('scheduler latest-wins lanes', () => {
     expect(targets?.desired?.bullJobId).toBe('integration-price-job-fast-success');
   });
 
+  test('clears a previous lane error when a retry succeeds or is observed terminal', async () => {
+    const first = await reserve('2026-08-25T04:12:00.000Z', 'price-clears-lane-error');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-price-job-clears-lane-error',
+    });
+
+    const sql = await getDbClient();
+    // Model a prior Bull-loss error surviving until the next attempt starts.
+    await sql`
+      UPDATE ops.scheduler_lanes
+      SET last_error = 'Bull job failed before durable completion'
+      WHERE lane_id = ${initial.lane.laneId}
+    `;
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId: 'integration-price-job-clears-lane-error',
+    });
+    expect(started?.lane.lastError).toBeNull();
+
+    const completed = await completeSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      activeObligationId: first.obligationId,
+      status: 'succeeded',
+    });
+    expect(completed.lane?.lastError).toBeNull();
+
+    // A legacy runtime may have already persisted a terminal obligation while
+    // leaving a lane error behind. The next scheduler observation must repair
+    // that stale diagnostic without redispatching the completed target.
+    await sql`
+      UPDATE ops.scheduler_lanes
+      SET last_error = 'stale terminal lane error'
+      WHERE lane_id = ${initial.lane.laneId}
+    `;
+    const observed = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    expect(observed.lane.lastError).toBeNull();
+    expect(observed.shouldDispatch).toBe(false);
+  });
+
   test('accepts a late enqueue confirmation after a pre-start Bull failure', async () => {
     const first = await reserve('2026-08-25T04:15:00.000Z', 'price-confirm-after-failure');
     const initial = await advanceSchedulerLane({
