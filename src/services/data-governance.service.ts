@@ -350,6 +350,29 @@ function probeCount(value: unknown): number | undefined {
 }
 
 /**
+ * Select the revision from the final hop required by the current SLO mode.
+ * A producer-only checkpoint must not inherit an unrelated stale Web value;
+ * conversely, a consumer-visible window is recovered only by its Web probe.
+ */
+export function selectFreshnessRecoveryRevision(input: {
+  consumerEvidenceRequired: boolean;
+  redisEvidenceRequired: boolean;
+  webRevision?: string | null;
+  currentWebRevision?: string | null;
+  redisRevision?: string | null;
+  currentRedisRevision?: string | null;
+  producerRevision?: string | null;
+  currentProducerRevision?: string | null;
+}): string | null {
+  const revision = input.consumerEvidenceRequired
+    ? (input.webRevision ?? input.currentWebRevision)
+    : input.redisEvidenceRequired
+      ? (input.redisRevision ?? input.currentRedisRevision)
+      : (input.producerRevision ?? input.currentProducerRevision);
+  return revision ?? null;
+}
+
+/**
  * Ask the Web server to execute the same GraphQL operation and server loader
  * used by its public page, then persist both consumer milestones.  The route
  * is deliberately authenticated with a separate probe token and returns only
@@ -620,18 +643,22 @@ export async function recordFreshnessObservation(input: {
     }
     if (applied.recovered) {
       updates.recoveredAt = sql`COALESCE(${freshnessSloWindowsInOps.recoveredAt}, clock_timestamp())`;
-      // Checkpoint contracts intentionally do not require GraphQL/Web
-      // evidence.  Preserve the strongest revision available for the hop
-      // that actually proved recovery instead of leaving a recovered window
-      // without a revision when consumer probes are disabled.
-      updates.recoveryRevision =
-        input.webRevision ??
-        current.webRevision ??
-        input.redisRevision ??
-        current.redisRevision ??
-        input.producerRevision ??
-        current.producerRevision ??
-        null;
+      // Keep the first recovery immutable.  A later complete observation can
+      // be useful evidence, but it must not make the original recovery appear
+      // to have happened at a different revision.
+      if (current.recoveryRevision === null) {
+        const recoveryRevision = selectFreshnessRecoveryRevision({
+          consumerEvidenceRequired: observation.consumerEvidenceRequired !== false,
+          redisEvidenceRequired,
+          webRevision: input.webRevision,
+          currentWebRevision: current.webRevision,
+          redisRevision: input.redisRevision,
+          currentRedisRevision: current.redisRevision,
+          producerRevision: input.producerRevision,
+          currentProducerRevision: current.producerRevision,
+        });
+        if (recoveryRevision !== null) updates.recoveryRevision = recoveryRevision;
+      }
     }
     await tx
       .update(freshnessSloWindowsInOps)
