@@ -47,6 +47,23 @@ export type QueueHealthSnapshot = Readonly<{
   releaseSha: string;
 }>;
 
+/**
+ * A missing point-in-time snapshot is not itself proof that a queue has no
+ * consumer. Optional feature queues may deliberately have no worker when the
+ * feature is disabled, while an enabled queue with no snapshot is an
+ * observation gap. Keep that distinction explicit in status responses rather
+ * than manufacturing a healthy-looking snapshot.
+ */
+export type QueueHealthState = 'OBSERVED' | 'DISABLED' | 'UNOBSERVED';
+
+export function resolveQueueHealthState(input: {
+  snapshot: QueueHealthSnapshot | null;
+  monitorEnabled?: boolean;
+}): QueueHealthState {
+  if (input.monitorEnabled === false) return 'DISABLED';
+  return input.snapshot ? 'OBSERVED' : 'UNOBSERVED';
+}
+
 export type QueueAdmission = Readonly<{
   queueName: string;
   mode: QueueAdmissionMode;
