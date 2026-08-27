@@ -6,6 +6,7 @@ import {
   fplPriceWatchQueueName,
   type FplPriceWatchJobData,
 } from '../queues/fpl-price-watch.queue';
+import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 import { logInfo } from '../utils/logger';
 
 export async function enqueueFplPriceWatchJob(
@@ -20,6 +21,12 @@ export async function enqueueFplPriceWatchJob(
 ) {
   if (!Number.isFinite(input.deadlineAt.getTime())) {
     throw new Error('Price-watch deadline is invalid');
+  }
+  // Re-check admission immediately before Queue.add. Scheduler admission is
+  // intentionally advisory; this boundary closes the drain/deploy race where
+  // a pass observes OPEN and the queue flips to DRAIN_ONLY before insertion.
+  if (await isQueueDrainOnly(fplPriceWatchQueue.name)) {
+    throw new QueueDrainOnlyError(fplPriceWatchQueue.name);
   }
   const data: FplPriceWatchJobData = {
     seasonId: season.seasonId,

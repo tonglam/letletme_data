@@ -1,5 +1,6 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
+import { fplClient } from '../clients/fpl';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { enqueueFplCriticalCoreRepairJob } from '../jobs/fpl-critical-sync-enqueue';
 import {
@@ -25,6 +26,7 @@ import {
   preparePriceChangePublication,
   persistPriceChangePublication,
   PriceChangeCorePublicationRequiredError,
+  priceChangeTriggerFingerprint,
 } from '../services/price-change-predictions.service';
 import {
   loadPriceChangeHotSource,
@@ -129,14 +131,61 @@ async function hotPriceSourceDependencies(
   job: Job<FplCriticalJobData>,
   metadata: HotPriceSourceMetadata = hotPriceSourceMetadata(job),
 ) {
-  if (!metadata.sourceArtifactId || !metadata.sourceHash) return undefined;
+  if (!metadata.sourceHash) return undefined;
   try {
     const hotSnapshot = metadata.priceChangeBoardRevision
       ? await readPriceChangeHotSnapshotAtRevision(
           job.data.seasonCode,
           metadata.priceChangeBoardRevision,
+          metadata.sourceHash,
         ).catch(() => null)
       : await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+    if (!hotSnapshot || hotSnapshot.sourceHash !== metadata.sourceHash) {
+      throw new Error('The provisional price-change source identity is unavailable');
+    }
+    const capturedAt =
+      metadata.priceChangeBoardRevision &&
+      hotSnapshot.revision === metadata.priceChangeBoardRevision
+        ? {
+            requestStartedAt: new Date(hotSnapshot.detectedAt),
+            fetchedAt: new Date(hotSnapshot.fetchedAt),
+          }
+        : captureTimestampsFromMetadata(metadata);
+    if (!metadata.sourceArtifactId) {
+      // Archive storage is deliberately optional on the hot path. Re-fetch
+      // with a source-bound cache key and require the exact official trigger
+      // fingerprint before using the response for Core or Price publication.
+      const expectedTriggerFingerprint = hotSnapshot.triggerFingerprint;
+      const sourceHash = metadata.sourceHash;
+      const revision = metadata.priceChangeBoardRevision ?? hotSnapshot.revision;
+      const fetched = await fplClient.getBootstrapArtifact({
+        edgeCacheKey: `price-hot-reconcile-${revision}-${sourceHash}`,
+        priority: 'live',
+        deadlineMs: 5_000,
+      });
+      if (priceChangeTriggerFingerprint(fetched.payload) !== expectedTriggerFingerprint) {
+        throw new Error(
+          'Price-change reconciliation source fingerprint differs from the detected hot source',
+        );
+      }
+      logInfo('Using verified re-fetched provisional source for critical reconciliation', {
+        season: job.data.seasonCode,
+        sourceHash,
+        priceChangeBoardRevision: metadata.priceChangeBoardRevision,
+      });
+      return {
+        bootstrap: fetched.payload,
+        getBootstrap: async () => fetched.payload,
+        ...(capturedAt
+          ? {
+              captureTimestamps: {
+                requestStartedAt: capturedAt.requestStartedAt,
+                fetchedAt: capturedAt.fetchedAt,
+              },
+            }
+          : {}),
+      };
+    }
     const source = await loadPriceChangeHotSource({
       artifactId: metadata.sourceArtifactId,
       sourceHash: metadata.sourceHash,
@@ -147,16 +196,6 @@ async function hotPriceSourceDependencies(
       sourceHash: metadata.sourceHash,
       priceChangeBoardRevision: metadata.priceChangeBoardRevision,
     });
-    const capturedAt =
-      hotSnapshot !== null &&
-      hotSnapshot.sourceHash === metadata.sourceHash &&
-      (!metadata.priceChangeBoardRevision ||
-        hotSnapshot.revision === metadata.priceChangeBoardRevision)
-        ? {
-            requestStartedAt: new Date(hotSnapshot.detectedAt),
-            fetchedAt: new Date(hotSnapshot.fetchedAt),
-          }
-        : captureTimestampsFromMetadata(metadata);
     return {
       bootstrap: source.payload,
       getBootstrap: async () => source.payload,
@@ -197,6 +236,7 @@ async function markHotPriceReconciled(
   const snapshot = await readPriceChangeHotSnapshotAtRevision(
     job.data.seasonCode,
     metadata.priceChangeBoardRevision,
+    metadata.sourceHash,
   ).catch(() => null);
   if (!snapshot || snapshot.revision !== metadata.priceChangeBoardRevision) return;
   if (preparedBoardRevision !== metadata.priceChangeBoardRevision) return;
@@ -226,6 +266,7 @@ async function markHotPriceReconciliationFailed(
   const snapshot = await readPriceChangeHotSnapshotAtRevision(
     job.data.seasonCode,
     metadata.priceChangeBoardRevision,
+    metadata.sourceHash,
   ).catch(() => null);
   if (!snapshot || snapshot.revision !== metadata.priceChangeBoardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {

@@ -98,13 +98,29 @@ export function priceChangeHotPointerKey(seasonCode: string): string {
   return `${HOT_KEY_PREFIX}:${seasonCode}:active`;
 }
 
-export function priceChangeHotPayloadKey(seasonCode: string, revision: string): string {
-  return `${HOT_KEY_PREFIX}:${seasonCode}:${revision}`;
+export function priceChangeHotPayloadKey(
+  seasonCode: string,
+  revision: string,
+  sourceHash: string,
+): string {
+  if (!/^[0-9a-f]{64}$/.test(sourceHash)) {
+    throw new Error('Price-change hot source hash is invalid');
+  }
+  return `${HOT_KEY_PREFIX}:${seasonCode}:${revision}:${sourceHash}`;
+}
+
+/** Redis index retaining source-bound payload keys for a board revision. */
+function priceChangeHotRevisionIndexKey(seasonCode: string, revision: string): string {
+  return `${HOT_KEY_PREFIX}:${seasonCode}:revision:${revision}:sources`;
 }
 
 /** Small metadata envelope used by cursor polling without loading the board. */
-export function priceChangeHotMetadataKey(seasonCode: string, revision: string): string {
-  return `${HOT_KEY_PREFIX}:${seasonCode}:${revision}:metadata`;
+export function priceChangeHotMetadataKey(
+  seasonCode: string,
+  revision: string,
+  sourceHash: string,
+): string {
+  return `${priceChangeHotPayloadKey(seasonCode, revision, sourceHash)}:metadata`;
 }
 
 type PriceChangeHotSnapshotMetadata = Omit<PriceChangeHotSnapshot, 'board'>;
@@ -533,6 +549,8 @@ if current then
 end
 redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[4])
 redis.call('SET', KEYS[3], ARGV[5], 'PX', ARGV[4])
+redis.call('SADD', KEYS[4], KEYS[2])
+redis.call('PEXPIRE', KEYS[4], ARGV[4])
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[4])
 return 1
 `;
@@ -541,9 +559,18 @@ export async function publishPriceChangeHotSnapshot(
   snapshot: PriceChangeHotSnapshot,
 ): Promise<{ readonly published: boolean; readonly payloadKey: string }> {
   const redis = await redisSingleton.getClient();
-  const payloadKey = priceChangeHotPayloadKey(snapshot.seasonCode, snapshot.revision);
-  const metadataKey = priceChangeHotMetadataKey(snapshot.seasonCode, snapshot.revision);
+  const payloadKey = priceChangeHotPayloadKey(
+    snapshot.seasonCode,
+    snapshot.revision,
+    snapshot.sourceHash,
+  );
+  const metadataKey = priceChangeHotMetadataKey(
+    snapshot.seasonCode,
+    snapshot.revision,
+    snapshot.sourceHash,
+  );
   const pointerKey = priceChangeHotPointerKey(snapshot.seasonCode);
+  const revisionIndexKey = priceChangeHotRevisionIndexKey(snapshot.seasonCode, snapshot.revision);
   const payload = JSON.stringify(snapshot);
   const pointer = JSON.stringify({
     revision: snapshot.revision,
@@ -554,10 +581,11 @@ export async function publishPriceChangeHotSnapshot(
   });
   const result = await redis.eval(
     POINTER_CAS_SCRIPT,
-    3,
+    4,
     pointerKey,
     payloadKey,
     metadataKey,
+    revisionIndexKey,
     payload,
     pointer,
     Date.parse(snapshot.detectedAt),
@@ -574,8 +602,7 @@ export async function readPriceChangeHotSnapshot(
   const redis = await redisSingleton.getClient();
   const pointer = parsePointer(await redis.get(priceChangeHotPointerKey(seasonCode)));
   if (!pointer) return null;
-  if (pointer.payloadKey !== priceChangeHotPayloadKey(seasonCode, pointer.revision)) return null;
-  return readPriceChangeHotSnapshotPayload(
+  const snapshot = await readPriceChangeHotSnapshotPayload(
     redis,
     seasonCode,
     pointer.payloadKey,
@@ -583,6 +610,14 @@ export async function readPriceChangeHotSnapshot(
     now,
     pointer.payloadHash,
   );
+  if (
+    !snapshot ||
+    pointer.payloadKey !==
+      priceChangeHotPayloadKey(seasonCode, snapshot.revision, snapshot.sourceHash)
+  ) {
+    return null;
+  }
+  return snapshot;
 }
 
 /**
@@ -593,17 +628,33 @@ export async function readPriceChangeHotSnapshot(
 export async function readPriceChangeHotSnapshotAtRevision(
   seasonCode: string,
   revision: string,
+  sourceHashOrNow?: string | Date,
   now = new Date(),
 ): Promise<PriceChangeHotSnapshot | null> {
   if (!/^[0-9a-f]{16}$/.test(revision)) return null;
+  const sourceHash = sourceHashOrNow instanceof Date ? undefined : sourceHashOrNow;
+  const readAt = sourceHashOrNow instanceof Date ? sourceHashOrNow : now;
   const redis = await redisSingleton.getClient();
-  return readPriceChangeHotSnapshotPayload(
-    redis,
-    seasonCode,
-    priceChangeHotPayloadKey(seasonCode, revision),
-    revision,
-    now,
-  );
+  if (sourceHash !== undefined && !/^[0-9a-f]{64}$/.test(sourceHash)) return null;
+  const payloadKeys = sourceHash
+    ? [priceChangeHotPayloadKey(seasonCode, revision, sourceHash)]
+    : await redis.smembers(priceChangeHotRevisionIndexKey(seasonCode, revision));
+  for (const payloadKey of payloadKeys) {
+    const snapshot = await readPriceChangeHotSnapshotPayload(
+      redis,
+      seasonCode,
+      payloadKey,
+      revision,
+      readAt,
+    );
+    if (
+      snapshot &&
+      payloadKey === priceChangeHotPayloadKey(seasonCode, snapshot.revision, snapshot.sourceHash)
+    ) {
+      return snapshot;
+    }
+  }
+  return null;
 }
 
 /**
@@ -619,8 +670,7 @@ export async function readPriceChangeHotSnapshotMetadata(
   const redis = await redisSingleton.getClient();
   const pointer = parsePointer(await redis.get(priceChangeHotPointerKey(seasonCode)));
   if (!pointer) return null;
-  if (pointer.payloadKey !== priceChangeHotPayloadKey(seasonCode, pointer.revision)) return null;
-  const raw = await redis.get(priceChangeHotMetadataKey(seasonCode, pointer.revision));
+  const raw = await redis.get(`${pointer.payloadKey}:metadata`);
   if (!raw) return null;
   let parsed: unknown;
   try {
@@ -628,11 +678,12 @@ export async function readPriceChangeHotSnapshotMetadata(
   } catch {
     return null;
   }
+  if (!isValidSnapshotMetadata(parsed, seasonCode, now)) return null;
   if (
-    !isValidSnapshotMetadata(parsed, seasonCode, now) ||
     parsed.revision !== pointer.revision ||
     parsed.payloadHash !== pointer.payloadHash ||
-    parsed.metadataHash !== pointer.metadataHash
+    parsed.metadataHash !== pointer.metadataHash ||
+    pointer.payloadKey !== priceChangeHotPayloadKey(seasonCode, parsed.revision, parsed.sourceHash)
   ) {
     return null;
   }
@@ -712,6 +763,7 @@ export async function markPriceChangeHotReconciliation(
   const current = await readPriceChangeHotSnapshotAtRevision(
     snapshot.seasonCode,
     snapshot.revision,
+    snapshot.sourceHash,
   );
   if (!current || current.sourceHash !== snapshot.sourceHash) return false;
   // Keep a verified durable publication terminal. A worker can fail after
@@ -760,8 +812,8 @@ redis.call('SET', KEYS[2], ARGV[6], 'PX', ARGV[5])
 return 1
 `,
     2,
-    priceChangeHotPayloadKey(updated.seasonCode, updated.revision),
-    priceChangeHotMetadataKey(updated.seasonCode, updated.revision),
+    priceChangeHotPayloadKey(updated.seasonCode, updated.revision, updated.sourceHash),
+    priceChangeHotMetadataKey(updated.seasonCode, updated.revision, updated.sourceHash),
     updated.revision,
     updated.sourceHash,
     JSON.stringify(updated),

@@ -1,6 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { fplClient } from '../clients/fpl';
 import { enqueueCoreSnapshotJob, enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
 import { type DataSyncJobData, dataSyncQueue, dataSyncQueueName } from '../queues/data-sync.queue';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
@@ -18,6 +19,7 @@ import {
   preparePriceChangePublication,
   persistPriceChangePublication,
   PriceChangeCorePublicationRequiredError,
+  priceChangeTriggerFingerprint,
 } from '../services/price-change-predictions.service';
 import {
   loadPriceChangeHotSource,
@@ -178,27 +180,20 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
     (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
       ? obligation.evidence.priceChangeBoardRevision
       : undefined);
-  if (!sourceArtifactId || !sourceHash) return undefined;
+  if (!sourceHash) return undefined;
   try {
     const hotSnapshot = boardRevision
-      ? await readPriceChangeHotSnapshotAtRevision(job.data.seasonCode, boardRevision).catch(
-          () => null,
-        )
+      ? await readPriceChangeHotSnapshotAtRevision(
+          job.data.seasonCode,
+          boardRevision,
+          sourceHash,
+        ).catch(() => null)
       : await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
-    const source = await loadPriceChangeHotSource({
-      artifactId: sourceArtifactId,
-      sourceHash,
-    });
-    logInfo('Using archived provisional source for durable price reconciliation', {
-      season: job.data.seasonCode,
-      artifactId: sourceArtifactId,
-      sourceHash,
-      priceChangeBoardRevision: boardRevision,
-    });
+    if (!hotSnapshot || hotSnapshot.sourceHash !== sourceHash) {
+      throw new Error('The provisional price-change source identity is unavailable');
+    }
     const capturedAt =
-      hotSnapshot !== null &&
-      hotSnapshot.sourceHash === sourceHash &&
-      (!boardRevision || hotSnapshot.revision === boardRevision)
+      boardRevision && hotSnapshot.revision === boardRevision
         ? {
             requestStartedAt: new Date(hotSnapshot.detectedAt),
             fetchedAt: new Date(hotSnapshot.fetchedAt),
@@ -213,6 +208,53 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
                 ? obligation.evidence.sourceFetchedAt
                 : undefined),
           );
+    if (!sourceArtifactId) {
+      // The watcher publishes the hot board before archive I/O. If the raw
+      // archive is unavailable, re-fetch with a source-bound cache key and
+      // accept it only when the official trigger fingerprint is identical.
+      // This prevents a five-minute edge-cache replay from overwriting the
+      // detected board while still allowing durable reconciliation to recover.
+      const expectedTriggerFingerprint = hotSnapshot.triggerFingerprint;
+      logInfo('Re-fetching provisional source for durable reconciliation', {
+        season: job.data.seasonCode,
+        sourceHash,
+        priceChangeBoardRevision: boardRevision,
+      });
+      return {
+        getBootstrap: async (_requestStartedAtMs: number) => {
+          const fetched = await fplClient.getBootstrapArtifact({
+            edgeCacheKey: `price-hot-reconcile-${boardRevision ?? hotSnapshot.revision}-${sourceHash}`,
+            priority: 'live',
+            deadlineMs: 5_000,
+          });
+          const actualTriggerFingerprint = priceChangeTriggerFingerprint(fetched.payload);
+          if (actualTriggerFingerprint !== expectedTriggerFingerprint) {
+            throw new Error(
+              'Price-change reconciliation source fingerprint differs from the detected hot source',
+            );
+          }
+          return fetched.payload;
+        },
+        ...(capturedAt
+          ? {
+              captureTimestamps: {
+                requestStartedAt: capturedAt.requestStartedAt,
+                fetchedAt: capturedAt.fetchedAt,
+              },
+            }
+          : {}),
+      };
+    }
+    const source = await loadPriceChangeHotSource({
+      artifactId: sourceArtifactId,
+      sourceHash,
+    });
+    logInfo('Using archived provisional source for durable price reconciliation', {
+      season: job.data.seasonCode,
+      artifactId: sourceArtifactId,
+      sourceHash,
+      priceChangeBoardRevision: boardRevision,
+    });
     return {
       getBootstrap: async () => source.payload,
       ...(capturedAt
@@ -257,10 +299,16 @@ async function markHotPriceReconciled(
     (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
       ? obligation.evidence.priceChangeBoardRevision
       : undefined);
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof obligation?.evidence.sourceHash === 'string'
+      ? obligation.evidence.sourceHash
+      : undefined);
   if (!boardRevision) return;
   const snapshot = await readPriceChangeHotSnapshotAtRevision(
     job.data.seasonCode,
     boardRevision,
+    sourceHash,
   ).catch(() => null);
   if (!snapshot || snapshot.revision !== boardRevision) return;
   if (preparedBoardRevision !== boardRevision) return;
@@ -286,10 +334,16 @@ async function markHotPriceReconciliationFailed(
     (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
       ? obligation.evidence.priceChangeBoardRevision
       : undefined);
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof obligation?.evidence.sourceHash === 'string'
+      ? obligation.evidence.sourceHash
+      : undefined);
   if (!boardRevision) return;
   const snapshot = await readPriceChangeHotSnapshotAtRevision(
     job.data.seasonCode,
     boardRevision,
+    sourceHash,
   ).catch(() => null);
   if (!snapshot || snapshot.revision !== boardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {
