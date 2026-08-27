@@ -261,6 +261,14 @@ describe('GW queue and data governance primitives', () => {
         observedCount: 4,
       }),
     ).toEqual({ status: 'BREACHED', recovered: true });
+    expect(
+      applyFreshnessObservation('NOT_APPLICABLE', {
+        eligible: false,
+        dueAt,
+        completeness: 'COMPLETE',
+        producerRevision: 'late-checkpoint',
+      }),
+    ).toEqual({ status: 'NOT_APPLICABLE', recovered: false });
     expect(calculateBurnRate(1, 100, 0.99)).toBeCloseTo(1, 10);
   });
 

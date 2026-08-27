@@ -568,6 +568,12 @@ export async function recordFreshnessObservation(input: {
       .for('update')
       .limit(1);
     if (!current) return null;
+    // NOT_APPLICABLE is a terminal eligibility decision. A late scheduler
+    // completion callback (for example, the checkpoint callback that runs
+    // after an outbox no-op has already been retired) may still carry a
+    // generic COMPLETE payload. Do not let that payload rewrite the
+    // completeness semantics or append consumer evidence to an N/A window.
+    if (current.status === 'NOT_APPLICABLE') return 'NOT_APPLICABLE';
     const completeness =
       input.completenessStatus ??
       (input.invalid ? 'INVALID' : (current.completenessStatus as FreshnessCompletenessStatus));
