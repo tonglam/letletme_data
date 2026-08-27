@@ -20,6 +20,8 @@ export type LeagueSyncEnqueueOptions = {
   runId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired. */
+  freshnessWindowId?: number;
   freshAfter?: string;
 };
 
@@ -48,6 +50,9 @@ async function enqueueLeagueSyncJob(
       ...(options.obligationGeneration === undefined
         ? {}
         : { obligationGeneration: options.obligationGeneration }),
+      ...(options.freshnessWindowId === undefined
+        ? {}
+        : { freshnessWindowId: options.freshnessWindowId }),
       ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
     };
 

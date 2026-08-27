@@ -41,6 +41,8 @@ export interface TournamentSyncJobData {
   /** Durable scheduler obligation identity carried through the root job. */
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired, inherited by cascade children. */
+  freshnessWindowId?: number;
   /** Stable database-clock reuse cutoff retained across BullMQ attempts. */
   freshAfter?: string;
   /**

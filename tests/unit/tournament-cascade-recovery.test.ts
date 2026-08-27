@@ -44,7 +44,11 @@ describe('tournament cascade recovery contract', () => {
         12,
         [],
         'run-12',
-        { obligationId: 'obligation-12', obligationGeneration: 4 },
+        {
+          obligationId: 'obligation-12',
+          obligationGeneration: 4,
+          freshnessWindowId: 314,
+        },
         {
           createId: () => cascadeId,
           initBarrier,
@@ -66,6 +70,7 @@ describe('tournament cascade recovery contract', () => {
           runId: 'run-12',
           obligationId: 'obligation-12',
           obligationGeneration: 4,
+          freshnessWindowId: 314,
         }),
       ),
     );
@@ -88,7 +93,11 @@ describe('tournament cascade recovery contract', () => {
         'tournament-selection-stats',
         [],
         'run-12',
-        { obligationId: 'obligation-12', obligationGeneration: 4 },
+        {
+          obligationId: 'obligation-12',
+          obligationGeneration: 4,
+          freshnessWindowId: 314,
+        },
         {
           claim: async () => 'claimed',
           enqueue: enqueue as never,
@@ -104,6 +113,7 @@ describe('tournament cascade recovery contract', () => {
       cascadeId,
       obligationId: 'obligation-12',
       obligationGeneration: 4,
+      freshnessWindowId: 314,
     });
   });
 

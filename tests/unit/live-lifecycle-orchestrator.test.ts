@@ -43,6 +43,16 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain('resolveLiveLifecycleDelay(');
   });
 
+  test('carries a freshness window from the live-picks root into its child scan', () => {
+    const jobSource = readFileSync('src/jobs/live-picks.jobs.ts', 'utf8');
+    const enqueueSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
+    expect(jobSource).toContain('freshnessWindowId: job.freshnessWindowId');
+    expect(enqueueSource).toContain('freshnessWindowId: obligation.freshnessWindowId');
+    expect(readFileSync('src/jobs/entry-sync-enqueue.ts', 'utf8')).toContain(
+      'freshnessWindowId: options?.freshnessWindowId',
+    );
+  });
+
   test('starts the first picks probe 60 minutes after the deadline', () => {
     expect(PICKS_FIRST_PROBE_OFFSET_MS).toBe(60 * 60_000);
 

@@ -122,7 +122,10 @@ async function enqueueFreshnessCaseRepair(input: {
       return;
     case 'live-picks':
       if (!eventId) throw new Error('Live picks freshness repair has no event id');
-      await enqueueLivePicksRefresh(season, eventId, { jobId });
+      await enqueueLivePicksRefresh(season, eventId, {
+        jobId,
+        freshnessWindowId: window.windowId,
+      });
       return;
     case 'entry-data':
       if (!eventId) throw new Error('Entry freshness repair has no event id');
@@ -130,19 +133,29 @@ async function enqueueFreshnessCaseRepair(input: {
         eventId,
         lane: 'entry-sync',
         jobId,
+        freshnessWindowId: window.windowId,
       });
       return;
     case 'league-tournament':
       if (!eventId) throw new Error('Tournament freshness repair has no event id');
       if (window.periodKey.includes('results')) {
-        await enqueueTournamentEventResults(season, eventId, 'reconcile', { jobId });
+        await enqueueTournamentEventResults(season, eventId, 'reconcile', {
+          jobId,
+          freshnessWindowId: window.windowId,
+        });
       } else {
-        await enqueueTournamentEventPicks(season, eventId, 'reconcile', { jobId });
+        await enqueueTournamentEventPicks(season, eventId, 'reconcile', {
+          jobId,
+          freshnessWindowId: window.windowId,
+        });
       }
       return;
     case 'my-fpl':
       if (window.periodKey.includes('outbox')) {
-        await enqueueMyFplSnapshotOutbox(season, 'reconcile', { jobId });
+        await enqueueMyFplSnapshotOutbox(season, 'reconcile', {
+          jobId,
+          freshnessWindowId: window.windowId,
+        });
         return;
       }
       if (!eventId) throw new Error('My FPL freshness repair has no event id');
@@ -150,6 +163,7 @@ async function enqueueFreshnessCaseRepair(input: {
         eventId,
         snapshotKind: window.periodKey.startsWith('final-') ? 'FINAL' : 'PROVISIONAL',
         jobId,
+        freshnessWindowId: window.windowId,
       });
       return;
     case 'official-h2h':
@@ -158,6 +172,7 @@ async function enqueueFreshnessCaseRepair(input: {
         jobId,
         officialH2HMode: 'full-reconcile',
         officialH2HReconcileKey: `governance-case-${item.caseId}`,
+        freshnessWindowId: window.windowId,
       });
       return;
     case 'player-stats':
@@ -165,6 +180,7 @@ async function enqueueFreshnessCaseRepair(input: {
         ...(eventId === undefined ? {} : { eventId }),
         jobId,
         removeOnSettle: false,
+        freshnessWindowId: window.windowId,
       });
       return;
     default:

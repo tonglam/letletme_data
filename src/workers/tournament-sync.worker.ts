@@ -89,6 +89,7 @@ type ScopedTournamentJobResult = {
 type CascadeObligation = Readonly<{
   obligationId?: string;
   obligationGeneration?: number;
+  freshnessWindowId?: number;
 }>;
 
 export type TournamentCascadeEnqueueDependencies = Readonly<{
@@ -221,6 +222,9 @@ export async function enqueueTournamentCascade(
       ...(obligation.obligationGeneration === undefined
         ? {}
         : { obligationGeneration: obligation.obligationGeneration }),
+      ...(obligation.freshnessWindowId === undefined
+        ? {}
+        : { freshnessWindowId: obligation.freshnessWindowId }),
     };
 
     // All five roots carry the cascade and scheduler generation. Transfers
@@ -303,6 +307,9 @@ export async function maybeEnqueueCascadeMaterializedRefresh(
       ...(obligation.obligationGeneration === undefined
         ? {}
         : { obligationGeneration: obligation.obligationGeneration }),
+      ...(obligation.freshnessWindowId === undefined
+        ? {}
+        : { freshnessWindowId: obligation.freshnessWindowId }),
     });
     await dependencies.markEnqueued(cascadeId);
     logInfo('Enqueued tournament materialized views refresh after structure cascade', {
@@ -415,6 +422,9 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
     ...(job.data.obligationGeneration === undefined
       ? {}
       : { obligationGeneration: job.data.obligationGeneration }),
+    ...(job.data.freshnessWindowId === undefined
+      ? {}
+      : { freshnessWindowId: job.data.freshnessWindowId }),
   };
   const context = {
     jobType: 'queue' as const,
@@ -814,6 +824,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                         tournamentId: target.tournamentId,
                         officialH2HMode: 'full-reconcile',
                         officialH2HReconcileKey: reconcileKey,
+                        freshnessWindowId: job.data.freshnessWindowId,
                         // BullMQ job IDs cannot contain a colon. Keep the
                         // human-readable reconcile key in job data, but use a
                         // delimiter-safe deterministic identity for Bull.

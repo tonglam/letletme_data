@@ -413,6 +413,8 @@ export async function syncLeagueEventResultsByTournament(
     freshAfter?: Date | string;
     entryIds?: number[];
     mutationJobId?: string;
+    /** Exact freshness window being repaired by the coordinator. */
+    freshnessWindowId?: number;
   },
 ): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });

@@ -55,6 +55,8 @@ export interface EntrySyncJobData {
   /** Durable scheduler obligation carried through every scan chunk/retry. */
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired. */
+  freshnessWindowId?: number;
   /** Stable source checkpoint retained across scan chunks and retries. */
   freshAfter?: string;
   queueKey?: string;

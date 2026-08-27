@@ -117,6 +117,7 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
                 return processLeagueEventResultsJob(season, eventId, tournamentId, {
                   runId,
                   freshAfter,
+                  freshnessWindowId: job.data.freshnessWindowId,
                 });
               }
 

@@ -34,6 +34,8 @@ export interface EntrySyncJobOptions {
   runId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired, inherited by retries/continuations. */
+  freshnessWindowId?: number;
   /** Stable source checkpoint shared by a post-match pipeline. */
   freshAfter?: string;
   /** Stable deduplication key for every table-scan chunk in one trigger lane. */
@@ -55,6 +57,7 @@ export function retainEntrySyncChainOptions(
         | 'removeOnSettle'
         | 'obligationId'
         | 'obligationGeneration'
+        | 'freshnessWindowId'
         | 'freshAfter'
         | 'lane'
       >
@@ -66,6 +69,7 @@ export function retainEntrySyncChainOptions(
   | 'removeOnSettle'
   | 'obligationId'
   | 'obligationGeneration'
+  | 'freshnessWindowId'
   | 'freshAfter'
   | 'lane'
 > {
@@ -73,6 +77,7 @@ export function retainEntrySyncChainOptions(
     runId: options?.runId,
     obligationId: options?.obligationId,
     obligationGeneration: options?.obligationGeneration,
+    freshnessWindowId: options?.freshnessWindowId,
     queueKey: options?.queueKey,
     removeOnSettle: options?.removeOnSettle,
     freshAfter: options?.freshAfter,
@@ -308,6 +313,7 @@ async function enqueueEntrySyncJob(
       runId,
       obligationId: options.obligationId,
       obligationGeneration: options.obligationGeneration,
+      freshnessWindowId: options.freshnessWindowId,
       freshAfter: options.freshAfter,
       queueKey: tableScanQueueKey,
       deduplicationId: explicitDeduplicationId,
