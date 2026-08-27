@@ -43,6 +43,10 @@ describe('My FPL daily snapshot publication contract', () => {
   test('persists late-entry eligibility separately from the eligible denominator', () => {
     expect(eligibilityMigration).toContain('not_applicable_entry_count');
     expect(eligibilityMigration).toContain('snapshot_entry.is_empty');
+    expect(eligibilityMigration).toContain(
+      'expected_entry_count = captured_counts.eligible_entry_count',
+    );
+    expect(eligibilityMigration).not.toContain('updated_at = clock_timestamp()');
     expect(publicationService).toContain('countEntryEligibility');
     expect(publicationService).toContain('notApplicableEntryCount');
   });
