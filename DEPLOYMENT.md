@@ -16,7 +16,7 @@ through migration, publication, and service startup.
 GitHub's `GITHUB_TOKEN` authenticates the workflow to GHCR. The VPS keeps two untracked environment
 files:
 
-- `.env.deploy` for API/worker runtime configuration;
+- `.env.deploy` for the seven long-lived runtime services;
 - `.env.migrate` for the direct Supabase `postgres` migration login, or the
   Supavisor session-mode equivalent on port 5432 when the host has no IPv6 route.
 
@@ -31,12 +31,16 @@ The `Deploy` workflow:
 2. builds and pushes one `linux/amd64` image, then resolves its digest;
 3. records the currently running image as the one retained rollback digest;
 4. pulls the new digest and validates runtime environment plus migration-login capabilities;
-5. stops API, worker, and content-worker, then requires database and queue work to be quiescent;
+5. stops all seven long-lived services (`api`, `worker`, `scheduler`,
+   `live-picks-worker`, `official-h2h-worker`, `content-worker`, and
+   `media-worker`) with the 45-second Compose grace period, then requires
+   database and queue work to be quiescent;
 6. creates and validates an external custom-format PostgreSQL backup before migration;
 7. applies the migration chain and verifies its checksums/status;
 8. verifies the database ownership and login contract;
 9. rebuilds the active FPL core publication from PostgreSQL;
-10. starts API, worker, and content-worker and verifies `/health`, `/ready`, and all heartbeats.
+10. starts all seven services and verifies `/health`, `/ready`, and the six
+    worker/scheduler runtime heartbeats.
 
 Failure before migration starts restores the prior image. Once a destructive migration commits,
 production moves forward with a correcting migration; an older application image must not be started
@@ -94,7 +98,7 @@ fresh connections before traffic resumes.
 bash scripts/deploy.sh deploy
 bash scripts/deploy.sh status
 bash scripts/deploy.sh logs api
-docker compose logs --since 1h api worker
+docker compose logs --since 1h api worker scheduler live-picks-worker official-h2h-worker content-worker media-worker
 docker compose run --rm -T migration bun run db:migrate:status
 docker compose run --rm -T migration bun run db:migrate -- --storage-migration
 docker compose run --rm -T migration bun run db:migrate -- --storage-migration --apply
@@ -122,7 +126,7 @@ them by `tournamentId` or `runId`; do not log raw provider payloads, manager nam
 credentials.
 
 ```bash
-docker compose logs --no-color --no-log-prefix --since 24h api worker \
+docker compose logs --no-color --no-log-prefix --since 24h api worker scheduler live-picks-worker official-h2h-worker content-worker media-worker \
   | jq -Rc --arg runId 'entry-picks-2627-7' '
       fromjson?
       | select(.event == "data_sync_attempt" and .runId == $runId)

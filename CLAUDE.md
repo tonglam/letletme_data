@@ -1,131 +1,163 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the contributor contract for `letletme_data`. Keep it aligned with
+the executable inventory; the documentation contract test checks the queues,
+runtime entrypoints, and migration policy described here.
 
-## Hard rules
+## Non-negotiable boundaries
 
-1. **Redis has one canonical contract.** Coordinate producer and consumer changes; do not add alternate readers, writers, or compatibility namespaces.
-2. **Database DDL has one migration path.** Add the next hand-written `migrations/NNNN_name.sql` file and update the typed Drizzle mapping; see `migrations/README.md`.
+1. PostgreSQL is the authority for business facts, current-season selection,
+   scheduler obligations, and publication state. Redis is rebuildable state.
+2. `CACHE_REDIS_*` and `QUEUE_REDIS_*` are separate endpoints. Never add an
+   alternate namespace or silently fall back from one endpoint to the other.
+3. `bun run db:migrate` is the only migration engine. A migration's complete
+   filename is its identity; never rename or rewrite an applied migration.
+4. Keep a PR independently releasable. Do not rely on a later PR to restore
+   correctness, and preserve unrelated dirty worktrees.
 
 ## Commands
 
 ```bash
 # Development
-bun run dev          # API server with hot reload (src/index.ts)
-bun run worker:dev   # BullMQ worker with hot reload (src/worker.ts)
+bun run dev
+bun run worker:dev
 
-# Production
-bun run build        # Compile to dist/
-bun run start        # Run compiled API
-bun run worker:start # Run compiled worker
+# Production bundles (seven entrypoints are built together)
+bun run build
+bun run start
+bun run worker:start
+bun run scheduler:start
+bun run live-picks-worker:start
+bun run official-h2h-worker:start
+bun run media-worker:start
 
-# Testing
-bun test                             # All tests
-bun test tests/unit                  # Unit tests only (no infra needed)
-bun test tests/unit/events.test.ts   # Single test file
-bun test --coverage                  # With coverage
+# Tests: the default command is hermetic unit-only
+bun run test
+bun run test:integration       # requires explicit RUN_INTEGRATION=1 and safe targets
+bun run test:all               # unit followed by guarded integration
+bun run coverage               # unit LCOV/summary
+bun run coverage:integration   # explicit integration coverage
 
-# Code quality
-bun run lint         # ESLint check
-bun run lint:fix     # ESLint auto-fix
-bun run format:fix   # Prettier format
-
-# Database
-bun run db:migrate          # Apply canonical SQL migrations
-bun run db:migrate:status   # Verify ledger and checksums
-bun run db:studio           # Open Drizzle Studio (DB browser)
+# Quality and database
+bun run typecheck
+bun run lint
+bun run format:check
+bun run db:migrate
+bun run db:migrate:status
+bun run docs:contract
 ```
 
-Integration tests require a live PostgreSQL + Redis instance. Unit tests run without any infrastructure.
+Unit tests must pass with no PostgreSQL, Redis, provider, or outbound network.
+Integration tests fail closed unless `RUN_INTEGRATION=1` and the environment
+guard proves a disposable loopback/test database plus distinct non-zero Redis
+databases. Never copy production credentials into a test command.
 
-## Architecture
+## Runtime topology
 
-The system has **two separate processes**:
+Production runs seven long-lived services from the same immutable image:
 
-1. **API server** (`src/index.ts`) — Elysia HTTP server + cron job registration
-2. **Worker** (`src/worker.ts`) — BullMQ workers consuming queued jobs
+| Service | Bundle | Responsibility |
+| --- | --- | --- |
+| `api` | `src/index.ts` | HTTP routes, readiness, compatibility/manual API surface |
+| `worker` | `src/worker.ts` | Core, entry, league, tournament, Understat, and maintenance workers |
+| `scheduler` | `src/scheduler.ts` | Durable obligation registry, claim, lease, and dispatch |
+| `live-picks-worker` | `src/live-picks-worker.ts` | Live entry-picks refresh lane |
+| `official-h2h-worker` | `src/official-h2h-worker.ts` | Official H2H live lane |
+| `content-worker` | `src/content-worker.ts` | Content acquisition and publication delivery |
+| `media-worker` | `src/media-worker.ts` | Source-media gates and archival delivery |
 
-Both must run concurrently in development. Crons fire in the API process, enqueue jobs to BullMQ, and workers execute the actual work.
+`docker-compose.yml` is the deployment inventory. Every long-lived service
+uses the shared shutdown controller: stop intake, stop scheduler heartbeat and
+new claims, drain in-flight work, close workers/queues, then close databases and
+Redis. Compose gives each service a 45-second stop grace period; the application
+shutdown budget is 30 seconds and fatal/timeout paths exit non-zero.
 
-### Data Flow
+The standalone scheduler owns cadence and durable `ops.scheduler_obligations`.
+API-side cron registrations are compatibility triggers only and must not become
+a second schedule authority. Scheduler definitions, catch-up policy, and
+success evidence live in `src/scheduler/job-registry.ts` and are exposed by
+`GET /jobs`; `GET /jobs/status` is a protected operational endpoint.
 
+## Queues and data flow
+
+There are 24 queue names: 21 core queues plus three content queues. The
+canonical list is `src/queues/names.ts`; do not hand-maintain another list.
+BullMQ delivers work; it does not define business truth or scheduler success.
+
+```text
+official provider -> boundary schema/transformer -> service/domain
+                  -> PostgreSQL canonical rows
+                  -> immutable Redis publication (when the contract requires it)
+                  -> GraphQL read model/cache -> product clients
+
+scheduler obligation -> BullMQ queue -> worker -> durable checkpoint/publication
 ```
-FPL API → transformer (Zod validate + camelCase) → service (upsert to DB + cache) → API endpoints read cache-first
-```
 
-Cron → enqueue job → BullMQ queue → worker → service function → PostgreSQL upsert + Redis cache update
+PostgreSQL commits before a Redis publication pointer moves. Publication
+manifests are validated as a complete unit; readers never mix arbitrary Redis
+items with PostgreSQL rows. My FPL deletion invalidation uses the durable
+PostgreSQL outbox and a revision-aware Redis CAS worker.
 
-### Layer Responsibilities
+## Layer responsibilities
 
 | Layer | Directory | Responsibility |
-|-------|-----------|----------------|
-| API | `src/api/` | Elysia route handlers, thin wrappers over services |
-| Service | `src/services/` | Business logic, orchestrates repository + cache |
-| Repository | `src/repositories/` | Drizzle ORM queries, factory pattern (`createXRepository(dbInstance?)`) |
-| Cache | `src/cache/` | Per-entity Redis operations, entity-specific hash structures |
-| Transformer | `src/transformers/` | Raw FPL JSON → domain types, Zod validation at boundary |
-| Domain | `src/domain/` | Types + Zod schemas + validate functions + business logic predicates |
-| Jobs | `src/jobs/` | Cron registration (`register*Jobs`) + enqueue helpers |
-| Queues | `src/queues/` | BullMQ queue instances + job name enums |
-| Workers | `src/workers/` | BullMQ worker switch handlers, delegate to services |
+| --- | --- | --- |
+| API | `src/api/` | Thin Elysia handlers, auth, validation, and enqueueing |
+| Domain | `src/domain/` | Types, Zod contracts, predicates, and pure policy |
+| Services | `src/services/` | Business orchestration and transaction boundaries |
+| Repositories | `src/repositories/` | Schema-qualified Drizzle/PostgreSQL access |
+| Cache | `src/cache/` | Publication manifests and rebuildable Redis operations |
+| Transformers | `src/transformers/` | Provider payload validation and domain mapping |
+| Jobs | `src/jobs/` | Schedule compatibility adapters and enqueue contracts |
+| Scheduler | `src/scheduler/` | Durable obligation registry and recovery |
+| Queues | `src/queues/` | BullMQ instances, names, and Redis connection boundary |
+| Workers | `src/workers/` | Queue handlers and worker runtime composition |
 
-### Job System
+Domain code must not runtime-import infrastructure. Repositories must not
+import API, service, worker, or job modules. Services must not import API
+handlers. New exceptions require an explicit architecture-test allowlist entry.
 
-Five BullMQ queues: `data-sync`, `entry-sync`, `live-data`, `league-sync`, `tournament-sync`.
+## Redis contract
 
-**Cascade pattern**: A primary DB sync job completes → enqueues secondary jobs (summary, explain, bonus, overall result, live fixtures) via `source: 'cascade'`. Example: `event-lives-db-sync` → enqueues `event-live-summary`, `event-live-explain`, `event-overall-result`, `live-fixture-cache`, `live-bonus-cache`.
+`CACHE_REDIS_*` holds `llm:data:*` immutable publications and is also the
+separate owner of GraphQL's `llm:gql:*` cache. `QUEUE_REDIS_*` holds all
+`bull:<queue>:*` state and bounded `llm:queue:coordination:*` leases/markers.
+Understat business facts, player-market history, summaries, and tournament
+reporting remain PostgreSQL reads. See [docs/redis-contract.md](docs/redis-contract.md)
+and [docs/cache-ttl-summary.md](docs/cache-ttl-summary.md) for exact keys and
+retention.
 
-**Cron schedules** (all in `src/jobs/`):
-- Data sync jobs: daily 6:35–9:45 AM (`data-jobs.ts`)
-- Live data: every 1 min (cache update), 10 min (DB sync), 15 min (live scores) (`live.jobs.ts`)
-- Entry/league/tournament: various windows (`entry-sync.jobs.ts`, `league-jobs.ts`, `tournament-jobs.ts`)
+Never use `KEYS`, `FLUSHDB`, `FLUSHALL`, or unbounded deletion. Operational
+cleanup must resolve an exact namespace, use bounded cursor `SCAN`, and delete
+only validated keys with bounded `UNLINK` batches.
 
-All cron handlers call `isFPLSeason()` and `isMatchDayTime()` / `isMatchHours()` guards before enqueuing.
+## Configuration and safety
 
-### Cache Key Pattern
+Runtime configuration is parsed by the strict schemas in `src/utils/config.ts`
+and `src/content/config.ts`. Malformed booleans, non-finite/non-integer
+numbers, and out-of-range values fail startup; valid defaults are unchanged.
+Do not use `Number(...) || default` for runtime configuration. Keep the total
+database-pool budget within the documented application/Supavisor limits.
 
-Redis keys follow `Entity:season` (e.g., `Event:2526`, `PlayerStats:2526`). All TTLs are set to `-1` (no expiration) — data is refreshed on write, never expired. Cache operations return `null` on miss; services fall back to DB.
+Containers run with a read-only root filesystem, a 256 MiB `noexec,nosuid,nodev`
+`/tmp`, `cap_drop: ALL`, and `no-new-privileges`. The backup image is pinned to
+the approved PostgreSQL 15 digest and may write only the backup volume.
 
-### Domain Layer Pattern
+## Migrations
 
-Every domain file in `src/domain/` must have:
-1. TypeScript interface(s)
-2. Zod schema(s) matching the interface
-3. `validate*()` and `safeValidate*()` functions
-4. Business logic predicates (e.g., `hasPlayed()`, `isFinished()`)
+Add one hand-written SQL file using the next available identity, update the
+typed Drizzle mapping, and run migration status checks. Existing duplicate
+numeric prefixes (`0016`, `0017`, `0018`, `0019`, `0020`, `0025`, `0026`,
+`0032`) are grandfathered historical files; a new duplicate prefix is rejected.
+The full filename, not the numeric prefix, is the ledger key. See
+[migrations/README.md](migrations/README.md).
 
-### Type Flow
+## Pull-request verification
 
-`RawFPL*` types (from `src/types/index.ts`) → Zod validated in transformer → domain types (`src/domain/*.ts`) → stored as `DbX` types (Drizzle schema in `src/db/schemas/`) → returned as domain types from services.
-
-`EventChipData` and `EventTopElementData` are defined in `src/domain/event-overall-results.ts` and re-exported from `src/types/index.ts`.
-
-### Adding a New Entity
-
-1. Add the next SQL migration and update `src/db/schemas/` → run `bun run db:migrate`
-2. Add domain interface + Zod schema + predicates to `src/domain/`
-3. Add transformer in `src/transformers/` (Zod validate raw input, map to domain type)
-4. Add repository in `src/repositories/` using `createXRepository(dbInstance?)` factory
-5. Add cache operations in `src/cache/` following the entity hash pattern
-6. Add service in `src/services/` (sync writes DB + cache; getters read cache → DB fallback)
-7. Add API routes in `src/api/` and register in `src/index.ts`
-8. Add job/queue/worker entries if background sync is needed
-9. Add fixtures in `tests/fixtures/` and unit tests in `tests/unit/`
-
-<!-- autoskills:start -->
-
-Summary generated by `autoskills`. Check the full files inside `.claude/skills`.
-
-## Bun Skill
-
-Use when building JavaScript/TypeScript applications, setting up HTTP servers, managing dependencies, bundling code, running tests, or working with full-stack applications. Bun is a complete JavaScript runtime, package manager, bundler, and test runner that replaces Node.js, npm, and other tools.
-
-- `.claude/skills/bun/SKILL.md`
-
-## TypeScript Advanced Types
-
-Master TypeScript's advanced type system including generics, conditional types, mapped types, template literals, and utility types for building type-safe applications. Use when implementing complex type logic, creating reusable type utilities, or ensuring compile-time type safety in TypeScript pr...
-
-- `.claude/skills/typescript-advanced-types/SKILL.md`
-
-<!-- autoskills:end -->
+Run format, lint, typecheck, unit, guarded integration (when a safe disposable
+environment exists), seven-entrypoint build, compose validation, migration
+contract, secret/dependency scans, and the documentation contract test. Keep a
+PR Draft until the final head is stable. Exact-head review, required CI, and
+unresolved actionable-thread checks remain merge gates; an explicitly recorded
+Tong-authorized Codex quota waiver is a waiver, never a claim that review was
+clean.

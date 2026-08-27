@@ -37,10 +37,18 @@ flowchart LR
     G --> C["Product clients"]
 ```
 
-The API process owns HTTP routes and cron registration. The worker process
-consumes the data, entry, live, league, tournament, and tournament-setup queue
-families, plus independent Understat Team and Player queues when enabled. Run both processes; an
-API-only deployment can enqueue work but cannot complete it.
+Production uses seven long-lived services from one immutable image: `api`,
+`worker`, `scheduler`, `live-picks-worker`, `official-h2h-worker`,
+`content-worker`, and `media-worker`. The standalone scheduler owns durable
+cadence and obligations; API-side cron registrations are compatibility triggers
+only. The worker consumes the core, entry, live, league, tournament, Understat,
+maintenance, and content delivery lanes. An API-only deployment can enqueue
+work but cannot complete it.
+
+The canonical queue inventory contains 24 names (21 core plus three content)
+and lives in [`src/queues/names.ts`](src/queues/names.ts). `GET /jobs` is
+generated from the scheduler registry and compatibility aliases; `GET /jobs/status`
+is protected operational evidence.
 
 PostgreSQL is authoritative. Redis is disposable acceleration state. A failed
 FPL request or validation error fails the sync without replacing the last
@@ -122,7 +130,7 @@ and staged update matrix in the
 
 Prerequisites:
 
-- Bun `1.3.3` (the version pinned in `package.json`)
+- Bun `1.3.14` (the version pinned in `package.json`)
 - PostgreSQL
 - Redis with distinct cache-publication and BullMQ/coordination endpoints or databases
 
@@ -154,7 +162,9 @@ The caller logs only status/category/request ID. It never logs the token,
 notification body, or provider response body. `401`, `409`, `429`, `5xx`,
 timeouts, and network failures are classified separately for operations.
 
-Start the two processes in separate terminals:
+Start the API and general worker in separate terminals for a minimal local
+development loop; add the standalone scheduler and specialized workers when
+testing their lanes:
 
 ```bash
 bun run dev
@@ -162,6 +172,14 @@ bun run dev
 
 ```bash
 bun run worker:dev
+```
+
+```bash
+bun run scheduler
+bun run live-picks-worker
+bun run official-h2h-worker
+bun run content-worker
+bun run media-worker
 ```
 
 The API listens on `http://localhost:3000` by default.
@@ -212,9 +230,13 @@ in the [API cheat sheet](docs/api-cheat-sheet.md).
 |---|---|
 | `bun run dev` | Start the API with watch mode |
 | `bun run worker:dev` | Start all BullMQ workers with watch mode |
-| `bun run build` | Build API and worker into `dist/` |
+| `bun run build` | Build all seven runtime entrypoints into `dist/` |
 | `bun start` | Run the production API bundle |
 | `bun run worker:start` | Run the production worker bundle |
+| `bun run scheduler:start` | Run the durable scheduler bundle |
+| `bun run live-picks-worker:start` | Run the live-picks worker bundle |
+| `bun run official-h2h-worker:start` | Run the official H2H worker bundle |
+| `bun run media-worker:start` | Run the media worker bundle |
 | `bun run test` or `bun test tests/unit` | Run the hermetic unit suite |
 | `bun run test:integration` | Run guarded PostgreSQL/Redis integration tests |
 | `RUN_INTEGRATION=1 bun run test:all` | Run unit and integration tests with the guarded test environment |
@@ -229,9 +251,12 @@ Integration tests refuse production-like database or Redis targets. See
 
 ## Deployment
 
-Production uses the API and worker images in `docker-compose.yml`. Migrations
-run before either service is restarted, logs go to bounded Docker JSON files,
-and the worker health check uses its heartbeat file.
+Production uses the seven long-lived services in `docker-compose.yml`.
+Migrations run before services are restarted, logs go to bounded Docker JSON
+files, and every long-lived service uses a shared 30-second shutdown controller
+with a 45-second Compose stop grace period. Containers have a read-only root,
+256 MiB `noexec,nosuid,nodev` `/tmp`, `cap_drop: ALL`, and
+`no-new-privileges`.
 
 ```bash
 cp .env.deploy.example .env.deploy
@@ -239,7 +264,8 @@ bash scripts/deploy.sh deploy
 ```
 
 After `main` CI succeeds, the deployment workflow builds one image digest, stops writers, applies
-migrations, republishes core data from PostgreSQL, and verifies API/worker health. See
+migrations, republishes core data from PostgreSQL, and verifies API health plus the six worker/scheduler
+heartbeats. See
 [DEPLOYMENT.md](DEPLOYMENT.md) for host bootstrap, GitHub configuration, recovery boundaries, and
 troubleshooting. A successful image rollout does not replace the data audit in the season-readiness
 runbook.
@@ -255,4 +281,5 @@ runbook.
 - [Internal API cheat sheet](docs/api-cheat-sheet.md)
 - [Migration ownership](migrations/README.md)
 - [Test strategy](tests/README.md)
+- [Runtime/documentation contract](tests/unit/documentation-contract.test.ts)
 - [Deployment guide](DEPLOYMENT.md)

@@ -1,80 +1,109 @@
 # LetLetMe system contracts
 
+This is the cross-repository runtime contract. It describes ownership and
+authority, not a deployment claim. The executable inventory is checked by
+`tests/unit/documentation-contract.test.ts`.
+
 ## Repository ownership
 
 | Repository | Responsibility | May write |
 | --- | --- | --- |
-| `letletme_data` | Provider ingestion, canonical facts, jobs, reporting refreshes, Data publications | `fpl`, `competition`, `understat`, `bridge`, `reporting`, `ops`; `llm:data:*`; DB1 queue state |
+| `letletme_data` | Provider ingestion, canonical facts, jobs, reporting refreshes, Data publications | `fpl`, `competition`, `understat`, `bridge`, `reporting`, `ops`; `llm:data:*`; BullMQ/coordination state |
 | `letletme-graphql` | Authorized public read API and query shaping | `llm:gql:*` query/security cache only |
-| `letletme-web` | Browser UI, Better Auth, FPL binding, Mini Program session issuer | `bauth` only; trusted Data commands |
+| `letletme-web` | Browser identity, FPL binding, Mini Program session issuer | `bauth` and authorized Data commands |
 | `letletme-wechat-miniprogram` | Native client | No database or shared-cache writes |
 
-## Sources of truth
+## Authority and read models
 
-| Concern | Canonical source | Rebuildable state |
+| Concern | Durable authority | Rebuildable or derived state |
 | --- | --- | --- |
-| Current season | Exactly one `fpl.seasons.is_current=true` row | none |
-| FPL facts | `fpl.*` | Data core/live publications and GraphQL caches |
-| Entry and tournament facts | `competition.*` | reporting models and GraphQL caches |
-| Understat facts | `understat.*` | TTL-bound GraphQL query results only |
+| Current season | exactly one `fpl.seasons.is_current = true` row | none |
+| FPL facts | `fpl.*` | immutable core/live publications and GraphQL caches |
+| Entry/tournament facts | `competition.*` | reporting models and GraphQL caches |
+| Understat facts | `understat.*` | PostgreSQL staging and optional GraphQL query cache |
 | Cross-provider links | verified `bridge.*` rows | query results |
-| Sync/publication state | `ops.sync_runs`, `ops.sync_items`, `ops.dataset_publications` | logs and metrics |
+| Sync/publication state | `ops.sync_runs`, `ops.sync_items`, `ops.dataset_publications`, outboxes | logs and metrics |
+| Scheduler state | `ops.scheduler_obligations` and scheduler lanes | BullMQ delivery records |
 | Identity | `bauth.*` | signed ingress and sessions |
 
-PostgreSQL always wins when it disagrees with Redis. A provider or validation failure cannot
-replace the last accepted database state or active publication.
+PostgreSQL wins when it disagrees with Redis. A provider, validation, or Redis
+failure cannot replace the last accepted canonical state or active publication.
 
-## End-to-end data flow
+## End-to-end flow
 
-1. Data validates provider payloads at the HTTP boundary.
-2. Data writes complete season-keyed PostgreSQL units through schema-qualified repositories.
-3. Data refreshes reporting views/materialized views only after completeness checks pass.
-4. Data publishes complete core/live revisions under `llm:data:*`.
-5. GraphQL validates one publication as a unit or reads one coherent PostgreSQL read model.
-6. GraphQL caches query results by dataset revision, query name, arguments, and TTL.
-7. Web owns identity and forwards authorized mutations to Data with a server credential.
+1. A provider payload is validated at the HTTP/provider boundary and transformed
+   into domain values.
+2. A service/repository commits complete, season- or event-scoped PostgreSQL
+   units and their durable checkpoints.
+3. When the contract requires a read model, a complete immutable Redis revision
+   is staged and its active pointer is swapped only after verification.
+4. GraphQL reads one publication as a unit or one coherent PostgreSQL fallback,
+   then may cache the result by dataset revision and query arguments.
+5. Product clients read through GraphQL; Web remains the identity/mutation
+   boundary.
+
+The scheduler reserves a durable obligation before dispatching a BullMQ job.
+BullMQ is a delivery mechanism and retained history, not the source of
+schedule truth or business completion. `GET /jobs` is generated from the
+registry and compatibility aliases; `GET /jobs/status` is protected.
+
+## Runtime topology
+
+The production image is used by seven long-lived services:
+
+`api`, `worker`, `scheduler`, `live-picks-worker`, `official-h2h-worker`,
+`content-worker`, and `media-worker`.
+
+Each service uses the shared idempotent shutdown controller. On SIGTERM/SIGINT
+it stops intake and scheduler claims, drains in-flight work, closes workers and
+queues, then closes database and Redis clients. The application budget is 30
+seconds; Compose provides a 45-second stop grace period. A fatal or timed-out
+shutdown exits non-zero.
 
 ## Database boundary
 
 - Data schemas are private and excluded from Supabase Data API roles.
 - `anon`, `authenticated`, and `service_role` have no Data-schema privileges.
-- Data uses `letletme_data_writer`; GraphQL uses schema-qualified read-only access through
-  `letletme_graphql_reader`.
+- Runtime writes use `letletme_data_writer`; GraphQL uses the
+  schema-qualified read-only contract.
 - GraphQL performs no Data-owned DDL. Web is the only writer to `bauth`.
-- FPL and Understat remain independent providers and combine only through verified `bridge` rows.
+- FPL and Understat remain independent providers and combine only through
+  verified `bridge` rows.
 - `public` contains no application object.
+
+`bun run db:migrate` is the sole migration entry point. The ledger identity is
+the complete migration filename and checksums are verified before every apply.
+The historical duplicate numeric prefixes are explicitly grandfathered; a new
+duplicate prefix is rejected by the migration contract test.
 
 ## Redis boundary
 
-- `CACHE_REDIS_*` contains `llm:data:*` publications and `llm:gql:*` cache entries.
-- `QUEUE_REDIS_*` contains eight BullMQ queues and `llm:queue:coordination:*` state.
+- `CACHE_REDIS_*` contains Data's `llm:data:*` publications. GraphQL owns its
+  separate `llm:gql:*` query/security cache on the same cache endpoint.
+- `QUEUE_REDIS_*` contains all 24 BullMQ queue namespaces and bounded
+  `llm:queue:coordination:*` state.
 - Startup rejects an identical cache/queue host, port, and database tuple.
-- Understat facts, player market history, summaries, and tournament reporting are not Data cache
-  entities.
-- Broad key enumeration or database flushes are prohibited.
+- Understat facts, player market history, summaries, and tournament reporting
+  are not Data-owned business caches.
+- Redis cleanup is exact and bounded (`SCAN` + validated `UNLINK`); never use
+  `KEYS`, `FLUSHDB`, or `FLUSHALL`.
 
-The binding field, key, TTL, and ownership rules are in
-[redis-contract.md](redis-contract.md).
+See [redis-contract.md](redis-contract.md) and
+[cache-ttl-summary.md](cache-ttl-summary.md) for key shapes and retention.
 
-## Authentication boundary
+## Authentication and operational invariants
 
-- End users authenticate only with Web.
-- GraphQL accepts a signed Web ingress envelope, the Web public RSC service token, or a Mini Program
-  bearer carried by signed ingress and verified against `bauth.mini_program_session`.
-- Data mutation routes require `x-api-key` when `ENABLE_AUTH=true`; Data stores only SHA-256 digests.
-- Web derives tournament administrator identity from the verified session and overwrites any
-  browser-supplied identity before forwarding.
-
-## Operational invariants
-
-- The migration login, checksums, pending set, schema ownership, and database contract fail closed.
-- `/health` is process liveness. `/ready` additionally requires PostgreSQL, both Redis endpoints,
-  and one current season row.
-- Core discovery commits events, teams, players, phases, and fixtures as one season-scoped unit.
-- A different provider season fails before mutation; the wall clock never selects a season.
-- Live publication validates the full player and fixture identity baseline before pointer swap.
-- Tournament selection reporting refreshes only after every eligible entry has 15 valid picks and
-  the event transfer checkpoint.
-- League/tournament finalization remains eligible during the bounded 24-hour post-match window,
-  including after GW38.
-- There is one writer and one reader contract: no dual-write, shadow read, or alternate contract.
+- End users authenticate through Web. Data mutation routes require `x-api-key`
+  when `ENABLE_AUTH=true`; only SHA-256 digests are stored.
+- `/health` is process liveness. `/ready` requires PostgreSQL, both Redis
+  endpoints, the current-season row, runtime heartbeats, and publication
+  consistency checks.
+- Core discovery commits events, teams, players, phases, and fixtures as one
+  season-scoped unit; a different provider season fails before mutation.
+- Live and manager-live publications validate their complete identity baseline
+  before pointer swap. My FPL deletion writes the invalidation outbox in the
+  same PostgreSQL transaction as deletion and uses revision-aware Redis CAS.
+- Tournament and league finalization remain eligible in the bounded post-match
+  window, including after GW38.
+- There is one reader/writer contract: no dual-write, shadow read, or alternate
+  namespace introduced for compatibility.

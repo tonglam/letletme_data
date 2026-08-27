@@ -1,6 +1,7 @@
 # Briefing 多来源采集案例验证 Checklist
 
-> 状态：2026-08-22 的 live feasibility record 与当前 worktree 验证记录，不是已上线能力说明。
+> 文档状态：historical（2026-08-22 live feasibility record）；其中的 worktree/shadow 结果
+> 不能替代当前 `main` 的合并、部署、进程健康或消费者可见证据。
 >
 > 本文前半保留最初的可行性 probe。后续 implementation follow-up 已把 RSS/Atom、Substack、
 > 公开网页、Podcast、YouTube 和 X 接入当前 worktree 的 scheduler、PostgreSQL、outbox 与
