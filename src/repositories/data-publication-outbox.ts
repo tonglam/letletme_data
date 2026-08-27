@@ -241,10 +241,22 @@ export async function markDataPublicationOutboxDelivered(input: {
  * newer ghost publication.  The caller must invoke this only after the CAS
  * has succeeded against the expected Redis manifest.
  */
-export async function markDataPublicationOutboxReconciled(input: {
+export type ReconciledDataPublicationReceipt = Readonly<{
+  publicationId: string;
+  sourceRunId: string | null;
+  dbActivatedAt: Date | null;
+}>;
+
+/**
+ * Reconcile a receipt and return the metadata needed by governance evidence.
+ * Keeping this result at the repository boundary prevents the delivery
+ * service from losing the source-run fallback when the manifest has no
+ * freshness-window IDs.
+ */
+export async function reconcileDataPublicationOutbox(input: {
   publicationId: string;
   db?: DbHandle;
-}): Promise<boolean> {
+}): Promise<ReconciledDataPublicationReceipt | null> {
   const db = input.db ?? (await getDb());
   const row = await db.transaction(async (tx) => {
     const updated = await tx
@@ -296,9 +308,17 @@ export async function markDataPublicationOutboxReconciled(input: {
     }
     return row;
   });
-  if (!row) return false;
+  if (!row) return null;
 
-  return true;
+  return row;
+}
+
+/** Compatibility boolean API retained for existing repository consumers. */
+export async function markDataPublicationOutboxReconciled(input: {
+  publicationId: string;
+  db?: DbHandle;
+}): Promise<boolean> {
+  return (await reconcileDataPublicationOutbox(input)) !== null;
 }
 
 /** Persist a delivery milestone; Redis/cache side effects belong to the delivery service. */

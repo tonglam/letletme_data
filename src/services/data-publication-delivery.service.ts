@@ -4,7 +4,7 @@ import {
   failDataPublicationOutbox,
   loadDataPublicationDelivery,
   markDataPublicationOutboxDelivered,
-  markDataPublicationOutboxReconciled as markReconciledReceipt,
+  reconcileDataPublicationOutbox,
   markDataPublicationOutboxStage,
   releaseDataPublicationOutbox,
   type ClaimedDataPublicationOutbox,
@@ -57,15 +57,15 @@ async function recordPublicationEvidenceBestEffort(input: {
  */
 export async function markDataPublicationOutboxReconciled(input: {
   publicationId: string;
-  db?: Parameters<typeof markReconciledReceipt>[0]['db'];
+  db?: Parameters<typeof reconcileDataPublicationOutbox>[0]['db'];
 }): Promise<boolean> {
-  const marked = await markReconciledReceipt(input);
-  if (!marked) return false;
+  const receipt = await reconcileDataPublicationOutbox(input);
+  if (!receipt) return false;
   try {
     const prepared = await loadDataPublicationDelivery(input.publicationId);
     await recordDataPublicationEvidence({
       manifest: prepared.manifest,
-      sourceRunId: null,
+      sourceRunId: receipt.sourceRunId,
       payloads: Object.fromEntries(
         prepared.items.flatMap((item) => {
           try {
@@ -75,6 +75,7 @@ export async function markDataPublicationOutboxReconciled(input: {
           }
         }),
       ),
+      pgPublishedAt: receipt.dbActivatedAt,
       redisSeenAt: new Date(),
     });
   } catch (error) {
