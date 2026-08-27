@@ -32,7 +32,10 @@ import {
 } from '../../src/domain/data-contracts';
 import { MAINTENANCE_JOBS } from '../../src/queues/maintenance.queue';
 import { MAINTENANCE_JOB_LANES } from '../../src/jobs/maintenance.jobs';
-import { consumerProbeUrl } from '../../src/services/data-governance.service';
+import {
+  consumerProbeUrl,
+  selectFreshnessRecoveryRevision,
+} from '../../src/services/data-governance.service';
 import { shouldCreateFreshnessWindowForObligation } from '../../src/scheduler/scheduler.service';
 
 describe('GW queue and data governance primitives', () => {
@@ -376,6 +379,36 @@ describe('GW queue and data governance primitives', () => {
     expect(consumerProbeUrl('https://web.example', 'entry/data')).toBe(
       'https://web.example/api/ops/data-contracts/entry%2Fdata',
     );
+  });
+
+  test('selects recovery revision from the SLO-required final hop', () => {
+    expect(
+      selectFreshnessRecoveryRevision({
+        consumerEvidenceRequired: true,
+        redisEvidenceRequired: true,
+        webRevision: 'web-r2',
+        currentWebRevision: 'web-r1',
+        redisRevision: 'redis-r2',
+        producerRevision: 'producer-r2',
+      }),
+    ).toBe('web-r2');
+    expect(
+      selectFreshnessRecoveryRevision({
+        consumerEvidenceRequired: false,
+        redisEvidenceRequired: true,
+        webRevision: 'stale-web-r1',
+        redisRevision: 'redis-r2',
+        producerRevision: 'producer-r2',
+      }),
+    ).toBe('redis-r2');
+    expect(
+      selectFreshnessRecoveryRevision({
+        consumerEvidenceRequired: false,
+        redisEvidenceRequired: false,
+        webRevision: 'stale-web-r1',
+        producerRevision: 'producer-r2',
+      }),
+    ).toBe('producer-r2');
   });
 
   test('redacts durable error summaries', () => {
