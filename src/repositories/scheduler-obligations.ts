@@ -1109,7 +1109,11 @@ export async function claimSchedulerObligations(
           latestAuthoritativeScope,
         ),
       )
-      .orderBy(asc(schedulerObligationsInOps.dueAt), asc(schedulerObligationsInOps.obligationId))
+      // Keep the transactional claimant on the same immutable deadline used
+      // by the scheduler prefilter. due_at remains mutable retry eligibility;
+      // ordering by it here could dispatch a newer bucket and strand the
+      // older deadline that selected this job name.
+      .orderBy(asc(currentDueAt), asc(schedulerObligationsInOps.obligationId))
       .limit(limit)
       .for('update', { skipLocked: true });
     const claimed: { obligation: SchedulerObligation; owner: string }[] = [];

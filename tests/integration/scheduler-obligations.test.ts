@@ -31,6 +31,8 @@ const SECOND_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000005';
 const LATE_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000006';
 const LATEST_OBLIGATION_ID = '30000000-0000-4000-8000-000000000007';
 const IMMUTABLE_DEADLINE_OBLIGATION_ID = '30000000-0000-4000-8000-000000000008';
+const IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000009';
+const IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000010';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -44,7 +46,9 @@ async function cleanup(): Promise<void> {
       ${SECOND_CURRENT_OBLIGATION_ID}::uuid,
       ${LATE_OLDER_OBLIGATION_ID}::uuid,
       ${LATEST_OBLIGATION_ID}::uuid,
-      ${IMMUTABLE_DEADLINE_OBLIGATION_ID}::uuid
+      ${IMMUTABLE_DEADLINE_OBLIGATION_ID}::uuid,
+      ${IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID}::uuid,
+      ${IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID}::uuid
     )
        OR scope_key IN (
          'integration:event:atomic-reschedule',
@@ -53,7 +57,8 @@ async function cleanup(): Promise<void> {
          'integration:event:retry-delay',
          'integration:event:same-slot-correction',
          'integration:event:lane-race',
-         'integration:event:immutable-deadline'
+         'integration:event:immutable-deadline',
+         'integration:event:immutable-claim'
        )
   `;
 }
@@ -91,6 +96,51 @@ describe('scheduler obligation generation fencing', () => {
     );
     expect(candidate?.earliestScheduledDueAt).toEqual(scheduledDueAt);
     expect(candidate?.earliestDueAt.getTime()).toBeGreaterThan(scheduledDueAt.getTime());
+  });
+
+  test('claims the obligation whose immutable deadline selected the job', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES
+        (
+          ${IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID}::uuid,
+          'integration-immutable-claim',
+          'integration:event:immutable-claim',
+          'scheduled-older-retried',
+          'integration',
+          'UTC',
+          'failed',
+          'reconcile',
+          clock_timestamp() - interval '1 minute',
+          1,
+          2,
+          jsonb_build_object('scheduledDueAtMs', ${Date.parse('2026-08-23T00:01:00Z')}::bigint)
+        ),
+        (
+          ${IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID}::uuid,
+          'integration-immutable-claim',
+          'integration:event:immutable-claim',
+          'scheduled-newer',
+          'integration',
+          'UTC',
+          'pending',
+          'schedule',
+          clock_timestamp() - interval '2 minutes',
+          0,
+          0,
+          jsonb_build_object('scheduledDueAtMs', ${Date.parse('2026-08-23T00:02:00Z')}::bigint)
+        )
+    `;
+
+    const [claimed] = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['integration-immutable-claim'],
+    });
+    expect(claimed?.obligation.obligationId).toBe(IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID);
   });
 
   test('claims one atomic capacity lane and leaves a conflicting job pending', async () => {
