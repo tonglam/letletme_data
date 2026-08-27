@@ -66,6 +66,29 @@ export function safeSchedulerLaneErrorCode(lastError: string | null): string | n
   return safeDataErrorCode(new Error(lastError));
 }
 
+type SchedulerObligationLatest = NonNullable<
+  Awaited<ReturnType<typeof schedulerObligationStatus>>['latest']
+>;
+
+/**
+ * Keep the price-change operational summary useful without leaking the
+ * persisted scheduler error text.  The detailed error belongs to the
+ * protected governance case feed and is never part of `/jobs/status`.
+ */
+export function safeSchedulerObligationLatest(
+  latest: SchedulerObligationLatest | null,
+): (Omit<SchedulerObligationLatest, 'lastError'> & { lastErrorCode: string | null }) | null {
+  if (!latest) return null;
+  return {
+    periodKey: latest.periodKey,
+    status: latest.status,
+    dueAt: latest.dueAt,
+    generation: latest.generation,
+    attempts: latest.attempts,
+    lastErrorCode: safeSchedulerLaneErrorCode(latest.lastError),
+  };
+}
+
 function asContext(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -324,7 +347,7 @@ export async function getJobsStatus(
       criticality: schedulerRegistry.find(
         (definition) => definition.name === 'price-change-predictions',
       )?.criticality,
-      latest: priceChangeObligation.latest,
+      latest: safeSchedulerObligationLatest(priceChangeObligation.latest),
       summary: obligations,
     },
     hotWatch: {
@@ -342,7 +365,9 @@ export async function getJobsStatus(
       detectedAt: priceChangeHotCursor?.detectedAt ?? null,
       fetchedAt: priceChangeHotCursor?.fetchedAt ?? null,
       expiresAt: priceChangeHotCursor?.expiresAt ?? null,
-      reconciliationError: priceChangeHotCursor?.reconciliation.error ?? null,
+      reconciliationErrorCode: priceChangeHotCursor?.reconciliation.error
+        ? safeDataErrorCode(new Error(priceChangeHotCursor.reconciliation.error))
+        : null,
       ageMs: priceChangeHotCursor
         ? Math.max(0, Date.now() - Date.parse(priceChangeHotCursor.detectedAt))
         : null,

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   safeSchedulerLaneErrorCode,
+  safeSchedulerObligationLatest,
   selectCanonicalPriceChangeContext,
 } from '../../src/services/jobs-status.service';
 
@@ -101,5 +102,32 @@ describe('safeSchedulerLaneErrorCode', () => {
   test('keeps an empty lane error distinguishable from a classified error', () => {
     expect(safeSchedulerLaneErrorCode(null)).toBeNull();
     expect(safeSchedulerLaneErrorCode('')).toBeNull();
+  });
+});
+
+describe('safeSchedulerObligationLatest', () => {
+  test('keeps operational fields and replaces raw error text with a code', () => {
+    const result = safeSchedulerObligationLatest({
+      periodKey: 'price-change-1',
+      status: 'failed',
+      dueAt: new Date('2026-08-27T03:00:00.000Z'),
+      generation: 4,
+      attempts: 2,
+      lastError: 'provider https://example.invalid/entry/123 failed token=secret',
+    });
+
+    expect(result).toEqual({
+      periodKey: 'price-change-1',
+      status: 'failed',
+      dueAt: new Date('2026-08-27T03:00:00.000Z'),
+      generation: 4,
+      attempts: 2,
+      lastErrorCode: 'TRANSIENT_INFRA',
+    });
+    expect(result).not.toHaveProperty('lastError');
+  });
+
+  test('returns null when there is no latest obligation', () => {
+    expect(safeSchedulerObligationLatest(null)).toBeNull();
   });
 });
