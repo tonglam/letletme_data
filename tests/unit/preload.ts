@@ -10,14 +10,19 @@
 const integrationPathRequested = process.argv.some((argument) =>
   /(?:^|[\\/])tests[\\/]integration(?:[\\/]|$)/.test(argument),
 );
+const unitPathRequested = process.argv.some((argument) =>
+  /(?:^|[\\/])tests[\\/]unit(?:[\\/]|$)/.test(argument),
+);
 if (integrationPathRequested && process.env.RUN_INTEGRATION !== '1') {
   throw new Error('Integration tests require RUN_INTEGRATION=1 and disposable infrastructure');
 }
 
 // Integration tests opt in explicitly and must retain their disposable
-// Postgres/Redis endpoints and provider fixtures. Every other test process is
-// a unit process and receives the synthetic endpoint/network fence below.
-if (process.env.RUN_INTEGRATION !== '1') {
+// Postgres/Redis endpoints and provider fixtures. A process that requests unit
+// tests is always fenced, even when RUN_INTEGRATION=1 is present for a later
+// command in a shell sequence such as `test:all`.
+const unitProcess = unitPathRequested || !integrationPathRequested;
+if (unitProcess) {
   const UNIT_DATABASE_URL = 'postgresql://unit:unit@127.0.0.1:1/unit';
 
   process.env.NODE_ENV = 'test';

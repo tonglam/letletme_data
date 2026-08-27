@@ -50,6 +50,42 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
 mock.module('../../src/services/events.service', () => ({
   getCurrentEvent: async () => ({ id: currentEventId }),
   getNextEvent: async () => ({ id: currentEventId + 1 }),
+  selectCachedCurrentEvent: (publication: {
+    currentEventId: number | null;
+    events: Array<{ id: number }>;
+  }) =>
+    publication.currentEventId === null
+      ? null
+      : (publication.events.find((event) => event.id === publication.currentEventId) ?? null),
+  selectCachedEventNeighbour: (
+    publication: {
+      currentEventId: number | null;
+      events: Array<{ id: number; deadlineTime?: string | null }>;
+      manifest: { sourceCheckedAt: string };
+    },
+    offset: -1 | 1,
+  ) => {
+    if (publication.currentEventId === null) {
+      if (offset === -1) return null;
+      const checkedAt = new Date(publication.manifest.sourceCheckedAt).getTime();
+      return (
+        [...publication.events]
+          .filter(
+            (event) =>
+              event.deadlineTime !== null &&
+              event.deadlineTime !== undefined &&
+              new Date(event.deadlineTime).getTime() > checkedAt,
+          )
+          .sort(
+            (left, right) =>
+              new Date(left.deadlineTime!).getTime() - new Date(right.deadlineTime!).getTime(),
+          )[0] ?? null
+      );
+    }
+    return (
+      publication.events.find((event) => event.id === publication.currentEventId! + offset) ?? null
+    );
+  },
 }));
 
 mock.module('../../src/services/queue-run-tracker', () => ({

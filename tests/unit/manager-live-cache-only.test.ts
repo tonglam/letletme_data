@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 import { redisSingleton } from '../../src/cache/singleton';
-import { fplClient } from '../../src/clients/fpl';
 import { MANAGER_LIVE_CLASSIC_CAPPED_CURSOR } from '../../src/domain/manager-live-refresh';
 import { eventRepository } from '../../src/repositories/events';
 import { managerScoreCheckpointRepository } from '../../src/repositories/live-window';
 import { seasonRepository } from '../../src/repositories/seasons';
 import { eventLiveManagerScoreService } from '../../src/services/event-live-manager-scores.service';
+import { fplClient } from '../../src/clients/fpl';
 import { contentHash } from '../../src/utils/content-hash';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
@@ -143,7 +143,6 @@ fplClient.getEntrySummary = getEntrySummary;
 const getClassicStandings = mock(async (..._args: unknown[]) => {
   throw new Error('CACHE_ONLY must not call FPL standings');
 });
-fplClient.getLeagueClassicStandings = getClassicStandings;
 
 // A few legacy unit files call bun:test's global mock.restore() in afterEach.
 // Bun 1.2 can run those files in the same process, so reattach these stable
@@ -160,7 +159,6 @@ const reattachManagerLiveSpies = (): void => {
     dispatchModule.dispatchManagerLiveRefresh = dispatchRefresh;
   }
   fplClient.getEntrySummary = getEntrySummary;
-  fplClient.getLeagueClassicStandings = getClassicStandings;
 };
 
 const {
@@ -176,6 +174,7 @@ const {
 const { managerLiveAPI } = await import('../../src/api/manager-live.api');
 
 const classicStandingsTestDependencies = {
+  fetchStandings: getClassicStandings as never,
   runPublication: async <T>(_key: string, task: () => Promise<T>): Promise<T> => task(),
   readOrderingTimestamp: async () => ({
     date: new Date('2026-08-23T12:00:00.000Z'),
@@ -619,6 +618,8 @@ describe('manager live classic standings convergence', () => {
       new Map(),
       null,
       { startPage: 5, maxPages: 2 },
+      async () => undefined,
+      classicStandingsTestDependencies,
     );
 
     expect(result).toMatchObject({
@@ -649,6 +650,8 @@ describe('manager live classic standings convergence', () => {
       new Map(),
       null,
       { startPage: 100, maxPages: 2 },
+      async () => undefined,
+      classicStandingsTestDependencies,
     );
     expect(first).toMatchObject({
       complete: false,
@@ -664,6 +667,8 @@ describe('manager live classic standings convergence', () => {
       new Map(),
       null,
       { startPage: MANAGER_LIVE_CLASSIC_CAPPED_CURSOR, maxPages: 2 },
+      async () => undefined,
+      classicStandingsTestDependencies,
     );
     expect(second).toMatchObject(first);
     expect(getClassicStandings).toHaveBeenCalledTimes(1);
@@ -695,6 +700,8 @@ describe('manager live classic standings convergence', () => {
       rows,
       null,
       { startPage: 100, maxPages: 1 },
+      async () => undefined,
+      classicStandingsTestDependencies,
     );
 
     expect(result).toMatchObject({
@@ -729,6 +736,8 @@ describe('manager live classic standings convergence', () => {
       rows,
       null,
       { startPage: 5, maxPages: 2 },
+      async () => undefined,
+      classicStandingsTestDependencies,
     );
 
     expect(result).toMatchObject({
@@ -767,6 +776,8 @@ describe('manager live classic standings convergence', () => {
       rows,
       null,
       { startPage: 6, maxPages: 1 },
+      async () => undefined,
+      classicStandingsTestDependencies,
     );
 
     expect(result).toMatchObject({
@@ -797,6 +808,8 @@ describe('manager live classic standings convergence', () => {
       new Map(),
       null,
       { startPage: 6, maxPages: 1 },
+      async () => undefined,
+      classicStandingsTestDependencies,
     );
 
     expect(result).toMatchObject({
@@ -861,6 +874,8 @@ describe('manager live classic standings convergence', () => {
       new Map(),
       null,
       { startPage: 7, maxPages: 2 },
+      async () => undefined,
+      classicStandingsTestDependencies,
     );
 
     expect(standings).toEqual({

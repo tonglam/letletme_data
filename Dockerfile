@@ -32,7 +32,7 @@ FROM deps AS test
 ENV NODE_ENV=test
 RUN apk add --no-cache bash coreutils
 COPY . ./
-CMD ["bun", "scripts/run-unit-isolated.ts"]
+CMD ["bun", "test", "tests/unit"]
 
 # Build the host-side runner as a glibc Linux executable. The final image only
 # carries the artifact so deploy can extract it to the VPS; it is never run in

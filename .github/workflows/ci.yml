@@ -65,7 +65,13 @@ jobs:
           letletme-data:test
 
       - name: Unit files are order-independent
-        run: bun run test:unit:isolated
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r test_file; do
+            echo "[unit-isolated] ${test_file}"
+            bun test "${test_file}"
+          done < <(find tests/unit -type f -name '*.test.ts' -print | sort)
 
       - name: Build
         env:
