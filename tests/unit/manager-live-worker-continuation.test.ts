@@ -60,6 +60,21 @@ describe('manager live worker continuation', () => {
         },
       }),
     ).toBe(false);
+    expect(
+      shouldRetryFinalizedTournamentManagerLive({
+        partial: false,
+        errorCode: 'UPSTREAM_UNAVAILABLE',
+        tournamentCoverage: {
+          rosterRevision: 'roster',
+          expectedEntries: 104,
+          resolvedEntries: 104,
+          fullyFetchedAt: '2026-08-26T00:00:00.000Z',
+          managerRevision: 'final:manager',
+          error: null,
+          state: 'COMPLETE',
+        },
+      }),
+    ).toBe(false);
   });
 
   test('pins a retry to its failed cursors while allowing a roster rotation to adopt new cursors', () => {

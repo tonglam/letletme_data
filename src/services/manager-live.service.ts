@@ -12,6 +12,7 @@ import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import { entryInfoRepository } from '../repositories/entry-infos';
 import {
   managerScoreCheckpointRepository,
   managerLiveTournamentCoverageRepository,
@@ -25,6 +26,8 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { contentHash } from '../utils/content-hash';
 import { logDebug, logWarn } from '../utils/logger';
 import { isCompleteEntryPicks } from '../domain/entry-picks';
+import { findEventEligibleEntryIds } from '../domain/entry-infos';
+import type { EntryInfo } from '../domain/entry-infos';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   finalManagerRevision,
@@ -250,6 +253,29 @@ type EntrySummaryRefreshResult = {
 };
 
 const entryScope: ManagerScoreScope = { scopeType: 'ENTRY', scopeId: 0 };
+
+/**
+ * Finalized manager-live data is scoped by the entry's event eligibility. An
+ * entry that joined in GW4 is a valid tournament member, but it has no GW1-3
+ * result to fetch. Keep that entry out of the finalized denominator so it
+ * cannot create a synthetic missing-row retry storm.
+ *
+ * Unknown start metadata remains eligible (the shared helper deliberately
+ * treats it as such), which fails closed at the final-result persistence
+ * boundary instead of silently declaring a row not applicable.
+ */
+export const selectFinalizedManagerLiveEntryIds = (
+  entryIds: readonly number[],
+  entryInfos: ReadonlyArray<Pick<EntryInfo, 'id' | 'startedEvent'>>,
+  eventId: number,
+): { eligibleEntryIds: number[]; notApplicableEntryIds: number[] } => {
+  const uniqueEntryIds = Array.from(new Set(entryIds));
+  const eligible = new Set(findEventEligibleEntryIds(uniqueEntryIds, entryInfos, eventId));
+  return {
+    eligibleEntryIds: uniqueEntryIds.filter((entryId) => eligible.has(entryId)),
+    notApplicableEntryIds: uniqueEntryIds.filter((entryId) => !eligible.has(entryId)),
+  };
+};
 
 const scopeKey = (scope: ManagerScoreScope): string => `${scope.scopeType}:${scope.scopeId}`;
 
@@ -2792,11 +2818,43 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           coverageRosterEntryIds,
           tournamentRosterLifecycleMarker(tournament),
         );
+
+  // Once the event is finalized, only entries that were eligible for that
+  // event belong in the result denominator. The authoritative tournament
+  // roster can legitimately contain late entrants whose earlier GW rows do
+  // not exist. Resolve the eligibility set once and reuse it for both the
+  // public response and durable tournament coverage.
+  const finalizedEligibility =
+    event.finished && event.dataChecked
+      ? selectFinalizedManagerLiveEntryIds(
+          input.tournamentId === undefined ? uniqueEntryIds : coverageRosterEntryIds,
+          await entryInfoRepository.findByIds(
+            season,
+            input.tournamentId === undefined ? uniqueEntryIds : coverageRosterEntryIds,
+          ),
+          input.eventId,
+        )
+      : null;
+  const finalizedRequestedEntryIds = finalizedEligibility?.eligibleEntryIds ?? uniqueEntryIds;
+  const finalizedCoverageEntryIds =
+    input.tournamentId === undefined
+      ? finalizedRequestedEntryIds
+      : (finalizedEligibility?.eligibleEntryIds ?? coverageRosterEntryIds);
+  if (finalizedEligibility && finalizedEligibility.notApplicableEntryIds.length > 0) {
+    logDebug('Excluded not-applicable finalized manager live entries', {
+      eventId: input.eventId,
+      tournamentId: input.tournamentId ?? null,
+      requestedEntries: uniqueEntryIds.length,
+      coverageEntries: coverageRosterEntryIds.length,
+      eligibleEntries: finalizedCoverageEntryIds.length,
+      notApplicableEntries: finalizedEligibility.notApplicableEntryIds.length,
+    });
+  }
   const tournamentCoverage = currentTournamentRosterRevision
     ? invalidateManagerLiveTournamentCoverage(
         existingTournamentCoverage,
         currentTournamentRosterRevision,
-        coverageRosterEntryIds.length,
+        finalizedCoverageEntryIds.length,
       )
     : existingTournamentCoverage;
 
@@ -2808,7 +2866,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         season: season.seasonCode,
         eventId: input.eventId,
         rows: [],
-        missingEntryIds: uniqueEntryIds,
+        missingEntryIds: finalizedRequestedEntryIds,
         errorCode: 'UPSTREAM_UNAVAILABLE',
         checkedAt: nowIso(),
         nextRefreshAt: nextRefresh(true),
@@ -2819,14 +2877,19 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
     const finalRows = await finalResultRows(
       season,
       input.eventId,
-      uniqueEntryIds,
+      finalizedRequestedEntryIds,
       event.dataCheckedAt,
       input.includeEffectiveLineup === true,
     );
     const resolvedIds = new Set(finalRows.map((row) => row.entryId));
     const finalErrorCode =
-      resolvedIds.size === uniqueEntryIds.length ? null : ('UPSTREAM_UNAVAILABLE' as const);
-    const projectionEntryIds = workerProjectionEntryIds(uniqueEntryIds, workerTournamentRefresh);
+      resolvedIds.size === finalizedRequestedEntryIds.length
+        ? null
+        : ('UPSTREAM_UNAVAILABLE' as const);
+    const projectionEntryIds = workerProjectionEntryIds(
+      finalizedRequestedEntryIds,
+      workerTournamentRefresh,
+    );
     const projectionEntryIdSet = new Set(projectionEntryIds);
     const projectedFinalRows = finalRows.filter((row) => projectionEntryIdSet.has(row.entryId));
     const projectedResolvedIds = new Set(projectedFinalRows.map((row) => row.entryId));
@@ -2837,16 +2900,16 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       tournamentCoverage?.state === 'COMPLETE' &&
       isFinalManagerLiveRevision(tournamentCoverage.managerRevision)
     ) {
-      const requestedEntryIdSet = new Set(uniqueEntryIds);
+      const requestedEntryIdSet = new Set(finalizedRequestedEntryIds);
       const requestedTheFullRoster =
-        coverageRosterEntryIds.length === uniqueEntryIds.length &&
-        coverageRosterEntryIds.every((entryId) => requestedEntryIdSet.has(entryId));
+        finalizedCoverageEntryIds.length === finalizedRequestedEntryIds.length &&
+        finalizedCoverageEntryIds.every((entryId) => requestedEntryIdSet.has(entryId));
       const coverageFinalRows = requestedTheFullRoster
         ? finalRows
         : await finalResultRows(
             season,
             input.eventId,
-            coverageRosterEntryIds,
+            finalizedCoverageEntryIds,
             event.dataCheckedAt,
             false,
           );
@@ -2856,7 +2919,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           season.seasonCode,
           input.eventId,
           coverageFinalRows,
-          coverageRosterEntryIds.filter((entryId) => !coverageResolvedIds.has(entryId)),
+          finalizedCoverageEntryIds.filter((entryId) => !coverageResolvedIds.has(entryId)),
         ),
       );
     }
@@ -2868,7 +2931,7 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       shouldQueueFinalizedManagerLiveCoverage(
         tournamentCoverage,
         currentTournamentRosterRevision,
-        coverageRosterEntryIds.length,
+        finalizedCoverageEntryIds.length,
         currentFinalManagerRevision,
       )
     ) {
@@ -2906,7 +2969,9 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
       calculationMode: 'FINAL_RESULT',
     });
     if (workerTournamentRefresh && input.tournamentId !== undefined) {
-      const fullMissingEntryIds = uniqueEntryIds.filter((entryId) => !resolvedIds.has(entryId));
+      const fullMissingEntryIds = finalizedCoverageEntryIds.filter(
+        (entryId) => !resolvedIds.has(entryId),
+      );
       const fullManagerRevision = managerRevision(
         season.seasonCode,
         input.eventId,
@@ -2920,11 +2985,11 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
         eventId: input.eventId,
         tournamentId: input.tournamentId,
         rosterRevision: finalCoverageRosterRevision,
-        expectedEntries: coverageRosterEntryIds.length,
+        expectedEntries: finalizedCoverageEntryIds.length,
         rows: finalRows,
         errorCode: finalErrorCode,
         managerRevision: finalManagerRevision(fullManagerRevision),
-        crawlComplete: resolvedIds.size === coverageRosterEntryIds.length,
+        crawlComplete: resolvedIds.size === finalizedCoverageEntryIds.length,
       });
       result.tournamentCoverage = persistedCoverage;
       if (!persistedCoverage) {

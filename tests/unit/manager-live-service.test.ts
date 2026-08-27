@@ -5,6 +5,7 @@ import {
   MANAGER_LIVE_READ_THROUGH_BACKGROUND_STANDINGS_PAGE_LIMIT,
   persistTournamentCoverage,
   projectEventLiveManagerRows,
+  selectFinalizedManagerLiveEntryIds,
   type ManagerLiveScoreRow,
 } from '../../src/services/manager-live.service';
 import { managerLiveTournamentCoverageRepository } from '../../src/repositories/live-window';
@@ -32,6 +33,23 @@ const row = (overrides: Partial<ManagerLiveScoreRow> = {}): ManagerLiveScoreRow 
 });
 
 describe('Classic manager headline projection', () => {
+  test('excludes late entrants from a finalized event denominator', () => {
+    expect(
+      selectFinalizedManagerLiveEntryIds(
+        [101, 102, 103, 104],
+        [
+          { id: 101, startedEvent: 1 },
+          { id: 102, startedEvent: 4 },
+          { id: 103, startedEvent: null },
+        ],
+        3,
+      ),
+    ).toEqual({
+      eligibleEntryIds: [101, 103, 104],
+      notApplicableEntryIds: [102],
+    });
+  });
+
   test('keeps read-through background standings bounded to the worker page budget', () => {
     expect(MANAGER_LIVE_READ_THROUGH_BACKGROUND_STANDINGS_PAGE_LIMIT).toBe(2);
   });
