@@ -630,6 +630,7 @@ export async function readPriceChangeHotSnapshotAtRevision(
   revision: string,
   sourceHashOrNow?: string | Date,
   now = new Date(),
+  projectStatus = true,
 ): Promise<PriceChangeHotSnapshot | null> {
   if (!/^[0-9a-f]{16}$/.test(revision)) return null;
   const sourceHash = sourceHashOrNow instanceof Date ? undefined : sourceHashOrNow;
@@ -646,6 +647,8 @@ export async function readPriceChangeHotSnapshotAtRevision(
       payloadKey,
       revision,
       readAt,
+      undefined,
+      projectStatus,
     );
     if (
       snapshot &&
@@ -697,6 +700,7 @@ async function readPriceChangeHotSnapshotPayload(
   expectedRevision: string,
   now: Date,
   expectedPayloadHash?: string,
+  projectStatus = true,
 ): Promise<PriceChangeHotSnapshot | null> {
   const raw = await redis.get(payloadKey);
   if (!raw) return null;
@@ -715,10 +719,12 @@ async function readPriceChangeHotSnapshotPayload(
   const ageMs = now.getTime() - Date.parse(parsed.fetchedAt);
   return {
     ...parsed,
-    board: {
-      ...parsed.board,
-      status: ageMs < PRICE_CHANGE_READY_MS ? 'READY' : 'STALE',
-    },
+    board: projectStatus
+      ? {
+          ...parsed.board,
+          status: ageMs < PRICE_CHANGE_READY_MS ? 'READY' : 'STALE',
+        }
+      : parsed.board,
   };
 }
 
@@ -764,6 +770,8 @@ export async function markPriceChangeHotReconciliation(
     snapshot.seasonCode,
     snapshot.revision,
     snapshot.sourceHash,
+    new Date(),
+    false,
   );
   if (!current || current.sourceHash !== snapshot.sourceHash) return false;
   // Keep a verified durable publication terminal. A worker can fail after
