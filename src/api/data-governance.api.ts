@@ -166,8 +166,8 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
     '/data-governance/cases/:id/action',
     async ({ request, set, params, body }) => {
       if (!(await requireOpsKey(request, set))) return { success: false, error: 'Unauthorized' };
-      const expectedUpdatedAt = new Date(body.expectedUpdatedAt);
-      if (!Number.isFinite(expectedUpdatedAt.getTime())) {
+      const expectedUpdatedAt = body.expectedUpdatedAt.trim();
+      if (!expectedUpdatedAt || !Number.isFinite(Date.parse(expectedUpdatedAt))) {
         set.status = 400;
         return { success: false, error: 'Invalid expectedUpdatedAt' };
       }
