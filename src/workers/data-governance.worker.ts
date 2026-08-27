@@ -25,6 +25,7 @@ import {
   listGovernanceCases,
   observeFreshnessConsumerEvidence,
   observeDueFreshnessWindows,
+  retireEmptyMyFplOutboxFreshnessWindows,
   reopenExpiredGovernanceCaseRepair,
   updateGovernanceCaseStatus,
 } from '../services/data-governance.service';
@@ -259,9 +260,10 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
           seasonCode: job.data.seasonCode,
         });
       case DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER: {
+        const retiredNoopOutbox = await retireEmptyMyFplOutboxFreshnessWindows({ limit: 100 });
         const consumers = await observeFreshnessConsumerEvidence({ limit: 100 });
         const overdue = await observeDueFreshnessWindows({ limit: 100 });
-        return { ...overdue, consumers };
+        return { ...overdue, consumers, retiredNoopOutbox };
       }
       case DATA_GOVERNANCE_JOBS.GW_AUDIT: {
         // Auditing is an evidence checkpoint. It must not mark data complete

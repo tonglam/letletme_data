@@ -26,6 +26,7 @@ const publicationService = readFileSync(
   'src/services/my-fpl-snapshot-publication.service.ts',
   'utf8',
 );
+const governanceService = readFileSync('src/services/data-governance.service.ts', 'utf8');
 const scheduler = readFileSync('src/scheduler/job-registry.ts', 'utf8');
 const worker = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
 const entryWorker = readFileSync('src/workers/entry-sync.worker.ts', 'utf8');
@@ -236,7 +237,12 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).toContain('dispatchMyFplSnapshotPublicationOutbox');
     expect(worker).toContain('My FPL snapshot outbox left ${result.failed}');
     expect(worker).toContain('recordMyFplOutboxRedisEvidence');
-    expect(worker).toContain('deliveredRevisions: result.deliveredRevisions');
+    expect(worker).toContain('deliveredEvidence: result.deliveredEvidence');
+    expect(worker).toContain('OUTBOX_NO_PENDING_ACTIVE_PUBLICATION');
+    expect(worker).toContain('maintenanceCompletionEvidence');
+    expect(publicationService).toContain('getActiveMyFplSnapshotRedisManifest');
+    expect(publicationService).toContain('remaining?: number');
+    expect(governanceService).toContain('retireEmptyMyFplOutboxFreshnessWindows');
   });
 
   test('allows the full current-season refresh barrier to settle', () => {

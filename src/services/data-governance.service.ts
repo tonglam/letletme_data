@@ -676,6 +676,160 @@ export async function recordFreshnessObservation(input: {
   });
 }
 
+/**
+ * Mark a periodic checkpoint as not applicable when its durable producer has
+ * no active work to deliver.  This is intentionally narrower than a generic
+ * status mutation: only a still-pending window can be retired, while MET and
+ * BREACHED history remains immutable for SLO accounting.  The evidence keeps
+ * the reason machine-readable so an operator can distinguish a legitimate
+ * outbox no-op from an unobserved or failed delivery.
+ */
+export async function markFreshnessWindowNotApplicable(input: {
+  windowId: number;
+  reasonCode: string;
+  evidence?: Record<string, unknown>;
+  db?: DbHandle;
+}): Promise<boolean> {
+  if (!Number.isSafeInteger(input.windowId) || input.windowId <= 0) return false;
+  const reasonCode = input.reasonCode.trim();
+  if (reasonCode.length === 0) throw new Error('Freshness N/A reason code is required');
+  const db = input.db ?? (await getDb());
+  const payload = {
+    ...asJsonObject(input.evidence),
+    notApplicableReason: reasonCode,
+  };
+  const updated = await db
+    .update(freshnessSloWindowsInOps)
+    .set({
+      status: 'NOT_APPLICABLE',
+      completenessStatus: 'NOT_APPLICABLE',
+      breachCode: null,
+      evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify(payload)}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(freshnessSloWindowsInOps.windowId, input.windowId),
+        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'NOT_APPLICABLE']),
+      ),
+    )
+    .returning({ windowId: freshnessSloWindowsInOps.windowId });
+  return updated.length === 1;
+}
+
+/**
+ * A Redis manifest delivery can settle more than the periodic outbox window
+ * that initiated it. Update only event windows for the same snapshot kind and
+ * immutable publication so a delayed outbox retry completes the original
+ * snapshot/finalization checkpoint without making a provisional window look
+ * complete from a later FINAL revision.
+ */
+export async function recordMyFplPublicationRedisEvidence(input: {
+  seasonId: number;
+  eventId: number;
+  revision: number;
+  kind: 'PROVISIONAL' | 'FINAL';
+  sourceCheckedAt: Date;
+  pgPublishedAt: Date;
+  redisSeenAt?: Date;
+  db?: DbHandle;
+}): Promise<number> {
+  if (
+    !Number.isSafeInteger(input.seasonId) ||
+    input.seasonId <= 0 ||
+    !Number.isSafeInteger(input.eventId) ||
+    input.eventId <= 0 ||
+    !Number.isSafeInteger(input.revision) ||
+    input.revision <= 0 ||
+    (input.kind !== 'PROVISIONAL' && input.kind !== 'FINAL') ||
+    !Number.isFinite(input.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(input.pgPublishedAt.getTime())
+  ) {
+    return 0;
+  }
+  const db = input.db ?? (await getDb());
+  const windows = await db
+    .select({ windowId: freshnessSloWindowsInOps.windowId })
+    .from(freshnessSloWindowsInOps)
+    .where(
+      and(
+        eq(freshnessSloWindowsInOps.contractKey, 'my-fpl'),
+        eq(freshnessSloWindowsInOps.seasonId, input.seasonId),
+        eq(freshnessSloWindowsInOps.eventId, input.eventId),
+        input.kind === 'FINAL'
+          ? sql`${freshnessSloWindowsInOps.periodKey} LIKE 'final-%'`
+          : sql`(${freshnessSloWindowsInOps.periodKey} LIKE 'daily-%' OR ${freshnessSloWindowsInOps.periodKey} LIKE 'post-match-%')`,
+        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED']),
+      ),
+    );
+  const redisSeenAt = input.redisSeenAt ?? new Date();
+  let updated = 0;
+  for (const window of windows) {
+    const status = await recordFreshnessObservation({
+      windowId: window.windowId,
+      sourceCheckedAt: input.sourceCheckedAt,
+      pgPublishedAt: input.pgPublishedAt,
+      redisSeenAt,
+      producerRevision: String(input.revision),
+      redisRevision: String(input.revision),
+      completenessStatus: 'COMPLETE',
+      db,
+    });
+    if (status !== null) updated += 1;
+  }
+  return updated;
+}
+
+/**
+ * Retire historical My FPL outbox windows that were created by a periodic
+ * no-op before the outbox worker learned to classify that condition.  The
+ * query requires that no active publication outbox row exists for the same
+ * season, and only changes still-pending windows; a real pending delivery or
+ * an already-recorded breach is never hidden by this reconciliation.
+ */
+export async function retireEmptyMyFplOutboxFreshnessWindows(
+  input: { limit?: number; db?: DbHandle } = {},
+): Promise<number> {
+  const limit = Math.min(100, Math.max(1, input.limit ?? 100));
+  const db = input.db ?? (await getDb());
+  const rows = (await db.execute(sql`
+    WITH candidates AS (
+      SELECT slo_window.window_id
+      FROM ops.freshness_slo_windows AS slo_window
+      WHERE slo_window.contract_key = 'my-fpl'
+        AND slo_window.status = 'PENDING'
+        AND (slo_window.period_key LIKE 'outbox-%' OR slo_window.period_key LIKE 'maintenance-%')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_publication_outbox AS outbox
+          INNER JOIN competition.my_fpl_snapshot_publications AS publication
+            ON publication.season_id = outbox.season_id
+           AND publication.event_id = outbox.event_id
+           AND publication.revision = outbox.revision
+           AND publication.active = true
+          WHERE slo_window.season_id = outbox.season_id
+            AND outbox.status IN ('PENDING', 'PROCESSING', 'FAILED')
+        )
+      ORDER BY slo_window.window_id
+      LIMIT ${limit}
+    )
+    UPDATE ops.freshness_slo_windows AS slo_window
+    SET status = 'NOT_APPLICABLE',
+        completeness_status = 'NOT_APPLICABLE',
+        breach_code = NULL,
+        evidence = slo_window.evidence || jsonb_build_object(
+          'notApplicableReason', 'OUTBOX_NO_PENDING_ACTIVE_PUBLICATION',
+          'retiredBy', 'freshness-observer'
+        ),
+        updated_at = clock_timestamp()
+    FROM candidates
+    WHERE slo_window.window_id = candidates.window_id
+      AND slo_window.status = 'PENDING'
+    RETURNING slo_window.window_id
+  `)) as unknown as readonly unknown[];
+  return rows.length;
+}
+
 export async function listFreshnessWindows(
   input: {
     status?: FreshnessSloStatus | FreshnessSloStatus[];
