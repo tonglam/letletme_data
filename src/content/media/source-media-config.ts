@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { parseStrictIntegerEnv } from '../config';
+
 function booleanEnv(defaultValue: boolean) {
   return z.preprocess((value) => {
     if (value === undefined || value === '') return defaultValue;
@@ -23,11 +25,6 @@ const sourceMediaEnvSchema = z.object({
   CONTENT_MEDIA_SUPABASE_URL: optionalTrimmedString().pipe(z.string().url().optional()),
   CONTENT_MEDIA_SUPABASE_SECRET_KEY: optionalTrimmedString(),
   CONTENT_MEDIA_BUCKET: z.literal('briefing-source-media').default('briefing-source-media'),
-  CONTENT_MEDIA_CONCURRENCY: z.coerce
-    .number()
-    .int()
-    .refine((value) => value === 2, 'CONTENT_MEDIA_CONCURRENCY is fixed at 2')
-    .default(2),
   CONTENT_MEDIA_RETENTION_ENABLED: booleanEnv(false),
 });
 
@@ -44,6 +41,17 @@ export function getSourceMediaRuntimeConfig(
   options: { requireCredentials?: boolean } = {},
 ): SourceMediaRuntimeConfig {
   const parsed = sourceMediaEnvSchema.parse(process.env);
+  const rawConcurrency = process.env.CONTENT_MEDIA_CONCURRENCY?.trim();
+  if (rawConcurrency && /^[+-]?\d+$/.test(rawConcurrency) && Number(rawConcurrency) !== 2) {
+    throw new Error('CONTENT_MEDIA_CONCURRENCY is fixed at 2');
+  }
+  const concurrency = parseStrictIntegerEnv(
+    process.env.CONTENT_MEDIA_CONCURRENCY,
+    2,
+    2,
+    2,
+    'CONTENT_MEDIA_CONCURRENCY',
+  );
   const requireCredentials = options.requireCredentials || parsed.CONTENT_MEDIA_WORKER_ENABLED;
   if (
     requireCredentials &&
@@ -67,7 +75,7 @@ export function getSourceMediaRuntimeConfig(
     supabaseUrl: parsed.CONTENT_MEDIA_SUPABASE_URL ?? null,
     secretKey: parsed.CONTENT_MEDIA_SUPABASE_SECRET_KEY ?? null,
     bucket: parsed.CONTENT_MEDIA_BUCKET,
-    concurrency: parsed.CONTENT_MEDIA_CONCURRENCY,
+    concurrency,
     retentionEnabled: parsed.CONTENT_MEDIA_RETENTION_ENABLED,
   };
 }

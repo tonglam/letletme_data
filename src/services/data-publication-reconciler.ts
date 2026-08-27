@@ -17,6 +17,7 @@ import { eventRepository } from '../repositories/events';
 import { randomUUID } from 'node:crypto';
 import { logInfo, logWarn } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
+import { parseStrictBooleanEnvValue } from '../utils/config';
 
 export type DataPublicationReconciliationResult = Readonly<{
   status: 'matched' | 'repaired' | 'ghost' | 'missing' | 'failed';
@@ -27,9 +28,11 @@ export type DataPublicationReconciliationResult = Readonly<{
 const PRICE_CHANGE_STAGING_ORPHAN_AFTER_MS = 2 * 60_000;
 
 function priceChangeSingleFlightEnabled(): boolean {
-  const value = process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED;
-  if (value === undefined) return process.env.NODE_ENV !== 'production';
-  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+  return parseStrictBooleanEnvValue(
+    process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED,
+    process.env.NODE_ENV !== 'production',
+    'PRICE_CHANGE_SINGLE_FLIGHT_ENABLED',
+  );
 }
 
 /**

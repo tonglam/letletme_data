@@ -1,11 +1,14 @@
 import { databaseSingleton } from './db/singleton';
+import { redisSingleton } from './cache/singleton';
 import { getConfig } from './utils/config';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
-import { logError, logInfo } from './utils/logger';
+import { logInfo } from './utils/logger';
 import { startQueueMonitor } from './utils/queue-monitor';
-import { livePicksQueue, livePicksQueueName } from './queues/live-picks.queue';
+import { closeLivePicksQueue, livePicksQueue, livePicksQueueName } from './queues/live-picks.queue';
+import { queueRedisSingleton } from './queues/redis';
 import { createEntrySyncWorker } from './workers/entry-sync.worker';
+import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 /**
  * The live-picks queue contains a small root canary job and its entry-picks
@@ -36,32 +39,28 @@ const stopHeartbeat = startWorkerHeartbeat({
 });
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('livePicksWorker');
 
-async function shutdown(signal: string) {
-  logInfo('Live picks worker shutting down', { signal });
-  stopHeartbeat();
-  stopRuntimeHeartbeat();
-  queueMonitors.forEach((monitor) => monitor.stop());
-  await Promise.allSettled([
-    ...runtime.workers.map((worker) => worker.close()),
-    ...runtime.queueEvents.map((events) => events.close()),
-    livePicksQueue.close(),
-  ]);
-  await databaseSingleton.disconnect();
-  process.exit(0);
-}
+const shutdownController = createShutdownController({
+  stopIntake: () => {
+    stopHeartbeat();
+    stopRuntimeHeartbeat();
+    queueMonitors.forEach((monitor) => monitor.stop());
+    runtime.stop?.();
+  },
+  waitForInFlight: () =>
+    Promise.all(runtime.workers.map((worker) => worker.close())).then(() => undefined),
+  closeResources: () =>
+    Promise.all([
+      ...runtime.queueEvents.map((events) => events.close()),
+      closeLivePicksQueue(),
+      databaseSingleton.disconnect(),
+      redisSingleton.disconnect(),
+      queueRedisSingleton.disconnect(),
+    ]).then(() => undefined),
+});
 
-process.on('SIGINT', () => void shutdown('SIGINT'));
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
+installShutdownSignals(shutdownController);
 const failFast = (message: string, error: unknown) => {
-  // A fatal asynchronous error can leave Bull workers and the heartbeat loop
-  // alive. Stop advertising this process as healthy and let Compose restart it
-  // with a non-zero exit instead of accepting more work in an unknown state.
-  stopHeartbeat();
-  stopRuntimeHeartbeat();
-  queueMonitors.forEach((monitor) => monitor.stop());
-  logError(message, error);
-  process.exitCode = 1;
-  process.exit(1);
+  shutdownController.fatal(error, message);
 };
 process.on('uncaughtException', (error) => failFast('Live picks worker uncaught exception', error));
 process.on('unhandledRejection', (error) =>

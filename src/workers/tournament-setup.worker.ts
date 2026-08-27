@@ -35,11 +35,11 @@ import { getQueueConnection } from '../utils/queue';
 import { isTerminalJobAttemptFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
+import { getConfig } from '../utils/config';
 
-const STUCK_PROCESSING_CUTOFF_MINUTES = Number(
-  process.env.TOURNAMENT_SETUP_STUCK_CUTOFF_MINUTES ?? 15,
-);
-const WATCHDOG_INTERVAL_MS = Number(process.env.TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS ?? 300_000);
+const runtimeConfig = getConfig();
+const STUCK_PROCESSING_CUTOFF_MINUTES = runtimeConfig.TOURNAMENT_SETUP_STUCK_CUTOFF_MINUTES;
+const WATCHDOG_INTERVAL_MS = runtimeConfig.TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS;
 
 type SetupFailure = { error: unknown };
 const setupFailuresPersistedInProcessor = new Set<string>();

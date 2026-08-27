@@ -8,6 +8,7 @@ import {
   classifyFplResponseStatus,
 } from '../utils/fpl-request-metrics';
 import { logDebug } from '../utils/logger';
+import { parseStrictIntegerEnvValue } from '../utils/config';
 import {
   acquireFplRequest,
   reportFplResponse,
@@ -22,17 +23,19 @@ const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5_000;
 const USER_AGENT = 'letletme-data/1.0.0 (+https://github.com/tonglam/letletme_data)';
 
-// Env overrides exist for tests (keep retry waits in the millisecond range);
-// production uses the constants above.
+// Env overrides are parsed through the same strict configuration rules as the
+// long-lived runtimes.  Test-only sub-second values remain available so the
+// resilience suite can exercise timeout/retry branches without real waits.
 function getEnvMs(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw !== undefined) {
-    const parsed = Number.parseInt(raw, 10);
-    if (Number.isFinite(parsed) && parsed >= 0) {
-      return parsed;
-    }
-  }
-  return fallback;
+  const isRetry = name.includes('RETRY');
+  const isTest = process.env.NODE_ENV === 'test';
+  return parseStrictIntegerEnvValue(
+    process.env[name],
+    fallback,
+    isRetry || isTest ? 0 : 1_000,
+    isRetry ? 5 * 60_000 : 2 * 60 * 60_000,
+    name,
+  );
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

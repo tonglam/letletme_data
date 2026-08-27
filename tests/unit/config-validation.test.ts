@@ -352,7 +352,9 @@ describe('production environment preflight', () => {
     expect(migrationEnv).toBeGreaterThan(migrationService);
     expect(migrationEnv).toBeLessThan(apiService);
     expect(apiService).toBeLessThan(workerService);
-    expect(compose).toContain('image: postgres:${DATABASE_BACKUP_PG_MAJOR:-15}');
+    expect(compose).toContain(
+      'postgres:15@sha256:6eb0add3b77c081df18aa518ce43df58fdcc40f2e6d868a6fd08038dc7acd425',
+    );
   });
 
   test('reuses the immutable active core cache before reading mutable database tables', () => {

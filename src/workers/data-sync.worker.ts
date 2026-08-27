@@ -1,6 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
+import { parseStrictBooleanEnvValue } from '../utils/config';
 import { fplClient } from '../clients/fpl';
 import { enqueueCoreSnapshotJob, enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
 import { type DataSyncJobData, dataSyncQueue, dataSyncQueueName } from '../queues/data-sync.queue';
@@ -62,13 +63,15 @@ function priceChangeCoreRepairJobId(job: Job<DataSyncJobData>): string {
 }
 
 function priceSingleFlightEnabled(): boolean {
-  const value = process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED;
   // Keep the legacy worker's default aligned with the scheduler registry and
   // publication reconciler: local/test processes opt into the lane unless an
   // explicit flag says otherwise, while production remains opt-in during the
   // staged rollout.
-  if (value === undefined) return process.env.NODE_ENV !== 'production';
-  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+  return parseStrictBooleanEnvValue(
+    process.env.PRICE_CHANGE_SINGLE_FLIGHT_ENABLED,
+    process.env.NODE_ENV !== 'production',
+    'PRICE_CHANGE_SINGLE_FLIGHT_ENABLED',
+  );
 }
 
 function archivedCaptureTimestamps(

@@ -1,4 +1,5 @@
 import { databaseSingleton } from './db/singleton';
+import { redisSingleton } from './cache/singleton';
 import { getConfig } from './utils/config';
 import { logError, logInfo } from './utils/logger';
 import { touchWorkerHeartbeat } from './utils/worker-heartbeat';
@@ -9,6 +10,8 @@ import { enqueueDataGovernanceJob, DATA_GOVERNANCE_JOBS } from './jobs/data-gove
 import { enqueueMaintenanceJob } from './jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from './queues/maintenance.queue';
 import { QueueDrainOnlyError } from './services/queue-governance.service';
+import { queueRedisSingleton } from './queues/redis';
+import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
 
@@ -19,6 +22,8 @@ const schedulerHeartbeatPath = process.env.SCHEDULER_HEARTBEAT_PATH ?? '/tmp/sch
 const stopHeartbeat = () => undefined;
 const stopRuntimeHeartbeat = startRuntimeHeartbeat('scheduler');
 let inFlight: Promise<unknown> | null = null;
+let shuttingDown = false;
+let timer: ReturnType<typeof setInterval> | null = null;
 
 async function runIndependentSchedulerStage<T>(
   stage: string,
@@ -50,6 +55,7 @@ async function runIndependentSchedulerStage<T>(
 }
 
 async function runPass(): Promise<void> {
+  if (shuttingDown) return;
   if (inFlight) return inFlight.then(() => undefined);
   const pass = (async () => {
     const stageState = { failed: false };
@@ -174,21 +180,34 @@ async function runPass(): Promise<void> {
 }
 
 await runPass();
-const timer = setInterval(() => void runPass(), SCHEDULER_INTERVAL_MS);
-timer.unref?.();
+timer = setInterval(() => void runPass(), SCHEDULER_INTERVAL_MS);
+timer?.unref?.();
 
-async function shutdown(signal: string): Promise<void> {
-  logInfo('Scheduler shutting down', { signal });
-  clearInterval(timer);
-  stopHeartbeat();
-  stopRuntimeHeartbeat();
-  await inFlight;
-  await databaseSingleton.disconnect();
-  process.exit(0);
-}
+const shutdownController = createShutdownController({
+  stopIntake: () => {
+    shuttingDown = true;
+    if (timer) clearInterval(timer);
+    stopHeartbeat();
+    stopRuntimeHeartbeat();
+  },
+  waitForInFlight: async () => {
+    await inFlight;
+  },
+  closeResources: () =>
+    Promise.all([
+      databaseSingleton.disconnect(),
+      redisSingleton.disconnect(),
+      queueRedisSingleton.disconnect(),
+    ]).then(() => undefined),
+});
 
-process.on('SIGINT', () => void shutdown('SIGINT'));
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
+installShutdownSignals(shutdownController);
+process.on('uncaughtException', (error) =>
+  shutdownController.fatal(error, 'Scheduler uncaught exception'),
+);
+process.on('unhandledRejection', (error) =>
+  shutdownController.fatal(error, 'Scheduler unhandled rejection'),
+);
 
 logInfo('Scheduler process ready', {
   intervalMs: SCHEDULER_INTERVAL_MS,
