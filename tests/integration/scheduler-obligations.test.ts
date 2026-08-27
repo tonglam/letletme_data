@@ -1858,6 +1858,7 @@ describe('scheduler obligation generation fencing', () => {
         attempts,
         bull_job_id,
         run_id,
+        last_error,
         evidence
       )
       VALUES (
@@ -1874,6 +1875,7 @@ describe('scheduler obligation generation fencing', () => {
         2,
         'old-generation-job',
         '30000000-0000-4000-8000-000000000099'::uuid,
+        'TRANSIENT_INFRA:old generation failed',
         '{}'::jsonb
       )
     `;
@@ -1885,6 +1887,12 @@ describe('scheduler obligation generation fencing', () => {
       bullJobId: null,
       runId: null,
     });
+    const rows = await sql<Array<{ last_error: string | null }>>`
+      SELECT last_error
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]?.last_error).toBeNull();
   });
 
   test('selects every expired in-flight generation for Bull reconciliation', async () => {

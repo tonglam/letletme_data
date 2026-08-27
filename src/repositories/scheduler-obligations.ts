@@ -914,7 +914,28 @@ export async function deferSchedulerObligationByIdentity(input: {
     .update(schedulerObligationsInOps)
     .set({
       dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
-      ...(deferredError ? { lastError: `TRANSIENT_INFRA:${deferredError}` } : {}),
+      // A pending obligation is deferred, not failed. Preserve any defer
+      // diagnostic in evidence while keeping the durable current-state error
+      // marker limited to failed/irrecoverable rows.
+      ...(deferredError
+        ? {
+            lastError: sql`CASE
+              WHEN ${schedulerObligationsInOps.status} = 'failed'::text
+                THEN ${`TRANSIENT_INFRA:${deferredError}`}
+              ELSE NULL
+            END`,
+            evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
+              'deferredError', ${`TRANSIENT_INFRA:${deferredError}`}::text,
+              'deferredAt', clock_timestamp()
+            )`,
+          }
+        : {
+            lastError: sql`CASE
+              WHEN ${schedulerObligationsInOps.status} = 'failed'::text
+                THEN ${schedulerObligationsInOps.lastError}
+              ELSE NULL
+            END`,
+          }),
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -1128,6 +1149,7 @@ export async function claimSchedulerObligations(
           // not make a new claim look Bull-confirmed before its own enqueue.
           bullJobId: null,
           runId: null,
+          lastError: null,
           updatedAt: dbNow,
         })
         .where(eq(schedulerObligationsInOps.obligationId, row.obligationId))
@@ -1438,7 +1460,8 @@ export async function markSchedulerObligationIrrecoverable(input: {
       completedAt: sql`clock_timestamp()`,
       leaseOwner: null,
       leaseExpiresAt: null,
-      lastError: input.lastError ?? null,
+      lastError:
+        (input.status ?? 'irrecoverable') === 'irrecoverable' ? (input.lastError ?? null) : null,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(

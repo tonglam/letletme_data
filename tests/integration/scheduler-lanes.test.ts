@@ -224,6 +224,24 @@ describe('scheduler latest-wins lanes', () => {
       }),
     ).toBe(true);
 
+    const sql = await getDbClient();
+    const blockedObligation = await sql<
+      Array<{
+        status: string;
+        last_error: string | null;
+        blocker_job_id: string | null;
+      }>
+    >`
+      SELECT status, last_error, evidence->>'blockerJobId' AS blocker_job_id
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${first.obligationId}::uuid
+    `;
+    expect(blockedObligation[0]).toEqual({
+      status: 'pending',
+      last_error: null,
+      blocker_job_id: 'integration-core-repair-stale',
+    });
+
     const replaced = await replaceBlockedSchedulerLaneAfterCoreSourceStale({
       laneId: initial.lane.laneId,
       dispatchGeneration: dispatch!.lane.dispatchGeneration,
@@ -244,7 +262,6 @@ describe('scheduler latest-wins lanes', () => {
       desiredObligationId: replaced.obligation?.obligationId,
     });
 
-    const sql = await getDbClient();
     const old = await sql<Array<{ status: string; reason: string | null }>>`
       SELECT status, evidence->>'reason' AS reason
       FROM ops.scheduler_obligations
