@@ -26,7 +26,10 @@ import {
 import {
   captureMyFplSnapshot,
   dispatchMyFplSnapshotPublicationOutbox,
+  getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
+  type MyFplSnapshotOutboxDeliveryEvidence,
+  type MyFplSnapshotPublication,
 } from '../services/my-fpl-snapshot-publication.service';
 import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
 import { runEntryOnboarding } from '../services/entry-onboarding.service';
@@ -55,7 +58,11 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { createQueueRunAttemptId } from '../utils/queue-run-id';
 import type { WorkerRuntime } from './worker-runtime';
-import { recordFreshnessObservation } from '../services/data-governance.service';
+import {
+  markFreshnessWindowNotApplicable,
+  recordFreshnessObservation,
+  recordMyFplPublicationRedisEvidence,
+} from '../services/data-governance.service';
 import {
   inspectSchedulerObligationFence,
   startCurrentSchedulerJob,
@@ -64,31 +71,143 @@ const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
 
 /**
  * A My FPL outbox job can deliver more than one event revision in one batch.
- * The linked governance window is a Redis milestone, so retain the newest
- * activated revision as evidence without pretending that one revision covers
- * every event in the batch. Consumer probes still have to prove final parity.
+ * Persist evidence for every activated event window, while using only the
+ * matching publication revision for the periodic window that triggered this
+ * call. Consumer probes still have to prove final parity.
  */
 async function recordMyFplOutboxRedisEvidence(input: {
   freshnessWindowId?: number;
-  deliveredRevisions?: readonly number[];
+  deliveredEvidence?: readonly MyFplSnapshotOutboxDeliveryEvidence[];
+  publication?: MyFplSnapshotPublication | null;
+  redisRevision?: number;
 }): Promise<void> {
   const windowId = input.freshnessWindowId;
-  const revisions = (input.deliveredRevisions ?? []).filter(
-    (revision): revision is number => Number.isSafeInteger(revision) && revision > 0,
-  );
-  if (!Number.isSafeInteger(windowId) || (windowId ?? 0) <= 0 || revisions.length === 0) return;
-  const redisRevision = Math.max(...revisions);
+  const deliveryEvidence = (input.deliveredEvidence ?? [])
+    .filter(
+      (evidence) =>
+        Number.isSafeInteger(evidence.seasonId) &&
+        evidence.seasonId > 0 &&
+        Number.isSafeInteger(evidence.eventId) &&
+        evidence.eventId > 0 &&
+        Number.isSafeInteger(evidence.revision) &&
+        evidence.revision > 0 &&
+        Number.isFinite(Date.parse(evidence.sourceCheckedAt)) &&
+        Number.isFinite(Date.parse(evidence.publishedAt)),
+    )
+    .sort((left, right) => right.revision - left.revision);
+  const publication = input.publication;
+  const publicationEvidence =
+    publication &&
+    Number.isSafeInteger(input.redisRevision) &&
+    input.redisRevision === publication.revision
+      ? {
+          seasonId: publication.seasonId,
+          eventId: publication.eventId,
+          revision: publication.revision,
+          kind: publication.kind,
+          sourceCheckedAt: publication.sourceCheckedAt.toISOString(),
+          publishedAt: publication.publishedAt.toISOString(),
+        }
+      : null;
+  const evidenceCandidates =
+    deliveryEvidence.length > 0
+      ? deliveryEvidence
+      : publicationEvidence
+        ? [publicationEvidence]
+        : [];
+  if (evidenceCandidates.length === 0) return;
+  const redisSeenAt = new Date();
   try {
+    for (const evidence of evidenceCandidates) {
+      const sourceCheckedAt = new Date(evidence.sourceCheckedAt);
+      const pgPublishedAt = new Date(evidence.publishedAt);
+      await recordMyFplPublicationRedisEvidence({
+        seasonId: evidence.seasonId,
+        eventId: evidence.eventId,
+        revision: evidence.revision,
+        kind: evidence.kind,
+        sourceCheckedAt,
+        pgPublishedAt,
+        redisSeenAt,
+      });
+    }
+    if (!Number.isSafeInteger(windowId) || (windowId ?? 0) <= 0) return;
+    const selected = publication
+      ? (deliveryEvidence.find(
+          (evidence) =>
+            evidence.eventId === publication.eventId && evidence.revision === publication.revision,
+        ) ?? publicationEvidence)
+      : deliveryEvidence[0];
+    if (!selected) return;
+    const sourceCheckedAt = new Date(selected.sourceCheckedAt);
+    const pgPublishedAt = new Date(selected.publishedAt);
     await recordFreshnessObservation({
       windowId: windowId!,
-      redisSeenAt: new Date(),
-      redisRevision: String(redisRevision),
+      sourceCheckedAt,
+      pgPublishedAt,
+      redisSeenAt,
+      producerRevision: String(selected.revision),
+      redisRevision: String(selected.revision),
+      completenessStatus: 'COMPLETE',
     });
   } catch (error) {
     // Delivery is already durable; a governance evidence outage must not turn
     // a successful Redis activation into a duplicate outbox retry.
     logError('My FPL outbox governance evidence update failed', error, { windowId });
   }
+}
+
+function maintenanceCompletionEvidence(jobName: string, result: unknown): Record<string, unknown> {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return {};
+  const value = result as Record<string, unknown>;
+  if (jobName === MAINTENANCE_JOBS.MY_FPL_SNAPSHOT) {
+    const publication = value.publication;
+    if (!publication || typeof publication !== 'object' || Array.isArray(publication)) return {};
+    const candidate = publication as Record<string, unknown>;
+    const revision = candidate.revision;
+    const expectedCount = candidate.expectedEntryCount;
+    const readyCount = candidate.readyEntryCount;
+    const emptyCount = candidate.emptyEntryCount;
+    if (
+      typeof revision !== 'number' ||
+      !Number.isSafeInteger(revision) ||
+      revision <= 0 ||
+      typeof expectedCount !== 'number' ||
+      !Number.isSafeInteger(expectedCount) ||
+      expectedCount < 0 ||
+      typeof readyCount !== 'number' ||
+      !Number.isSafeInteger(readyCount) ||
+      readyCount < 0 ||
+      typeof emptyCount !== 'number' ||
+      !Number.isSafeInteger(emptyCount) ||
+      emptyCount < 0
+    ) {
+      return {};
+    }
+    return {
+      revision,
+      snapshotRevision: revision,
+      expectedCount,
+      observedCount: readyCount + emptyCount,
+      complete: true,
+    };
+  }
+  if (jobName !== MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX) return {};
+  const deliveredEvidence = value.deliveredEvidence;
+  if (!Array.isArray(deliveredEvidence)) return {};
+  const evidence = deliveredEvidence
+    .filter((item): item is Record<string, unknown> => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+      const revision = (item as Record<string, unknown>).revision;
+      return Number.isSafeInteger(revision) && Number(revision) > 0;
+    })
+    .sort((left, right) => Number(right.revision) - Number(left.revision))[0];
+  if (!evidence) return {};
+  return {
+    revision: evidence.revision,
+    publicationRevision: evidence.revision,
+    complete: true,
+  };
 }
 
 function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void {
@@ -192,6 +311,21 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             active?.kind === 'FINAL' &&
             (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
           ) {
+            const redisManifest = await getActiveMyFplSnapshotRedisManifest(
+              season.seasonCode,
+              eventId,
+            );
+            if (
+              redisManifest?.seasonCode === season.seasonCode &&
+              redisManifest.eventId === eventId &&
+              redisManifest.revision === active.revision
+            ) {
+              await recordMyFplOutboxRedisEvidence({
+                freshnessWindowId: job.data.freshnessWindowId,
+                publication: active,
+                redisRevision: redisManifest.revision,
+              });
+            }
             return { status: 'noop', publication: active };
           }
 
@@ -299,19 +433,38 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               ? { idempotencyKey: job.data.snapshotIdempotencyKey }
               : {}),
           });
-          const redis = await dispatchMyFplSnapshotPublicationOutbox({ limit: 20 });
+          const redis = await dispatchMyFplSnapshotPublicationOutbox({
+            limit: 20,
+            eventId,
+            seasonCode: season.seasonCode,
+          });
           await recordMyFplOutboxRedisEvidence({
             freshnessWindowId: job.data.freshnessWindowId,
-            deliveredRevisions: redis.deliveredRevisions,
+            deliveredEvidence: redis.deliveredEvidence,
+            publication: capture.publication,
+            redisRevision: redis.deliveredEvidence?.find(
+              (evidence) =>
+                evidence.eventId === eventId && evidence.revision === capture.publication.revision,
+            )?.revision,
           });
           return { ...capture, redis };
         }
         case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX: {
-          const result = await dispatchMyFplSnapshotPublicationOutbox({ limit: 50 });
+          const result = await dispatchMyFplSnapshotPublicationOutbox({
+            limit: 50,
+            seasonCode: job.data.seasonCode,
+          });
           await recordMyFplOutboxRedisEvidence({
             freshnessWindowId: job.data.freshnessWindowId,
-            deliveredRevisions: result.deliveredRevisions,
+            deliveredEvidence: result.deliveredEvidence,
           });
+          if (result.remaining === 0 && result.delivered === 0 && result.failed === 0) {
+            await markFreshnessWindowNotApplicable({
+              windowId: job.data.freshnessWindowId ?? 0,
+              reasonCode: 'OUTBOX_NO_PENDING_ACTIVE_PUBLICATION',
+              evidence: { claimed: result.claimed, superseded: result.superseded },
+            });
+          }
           if (result.failed > 0) {
             throw new Error(
               `My FPL snapshot outbox left ${result.failed} delivery receipt(s) for retry`,
@@ -362,11 +515,16 @@ export function createMaintenanceWorker(): WorkerRuntime {
       stalledInterval: 15_000,
     });
     const events = new QueueEvents(queueName, { connection });
-    worker.on('completed', (job) => {
+    worker.on('completed', (job, result) => {
       logInfo('Maintenance job completed', { jobId: job.id, name: job.name, lane });
       if (job.id !== undefined) {
         const fence = inspectSchedulerObligationFence(job.data);
-        const evidence = { queue: queueName, lane, jobName: job.name };
+        const evidence = {
+          queue: queueName,
+          lane,
+          jobName: job.name,
+          ...maintenanceCompletionEvidence(job.name, result),
+        };
         const completion =
           fence.kind === 'complete'
             ? completeSchedulerObligation({

@@ -87,6 +87,19 @@ export type MyFplSnapshotOutboxDispatchResult = Readonly<{
   failed: number;
   /** Revisions whose Redis manifests were actually activated in this call. */
   deliveredRevisions?: readonly number[];
+  /** Publication evidence for manifests activated in this call. */
+  deliveredEvidence?: readonly MyFplSnapshotOutboxDeliveryEvidence[];
+  /** Active outbox rows still pending after this dispatch attempt. */
+  remaining?: number;
+}>;
+
+export type MyFplSnapshotOutboxDeliveryEvidence = Readonly<{
+  seasonId: number;
+  eventId: number;
+  revision: number;
+  kind: MyFplSnapshotKind;
+  sourceCheckedAt: string;
+  publishedAt: string;
 }>;
 
 export type MyFplSnapshotCoverageState =
@@ -2889,6 +2902,8 @@ type SnapshotOutboxRow = {
   season_id: number;
   event_id: number;
   revision: number;
+  source_checked_at: Date | string;
+  published_at: Date | string;
   manifest: unknown;
 };
 
@@ -2934,6 +2949,34 @@ const isMyFplSnapshotRedisManifest = (value: unknown): value is MyFplSnapshotRed
     candidate.sourceCheckedAt === candidate.sourceMinCheckedAt
   );
 };
+
+/**
+ * Read the currently active My FPL Redis pointer without treating a malformed
+ * or missing value as delivery evidence.  A capture retry can legitimately
+ * return `noop` after the PostgreSQL publication already exists; verifying the
+ * pointer here lets that retry settle the same freshness window without
+ * fabricating a new publication or replaying the provider fan-out.
+ */
+export async function getActiveMyFplSnapshotRedisManifest(
+  seasonCode: string,
+  eventId: number,
+): Promise<MyFplSnapshotRedisManifest | null> {
+  const redis = await redisSingleton.getClient();
+  const raw = await redis.get(myFplSnapshotRedisManifestKey(seasonCode, eventId));
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    logWarn('My FPL Redis manifest is not valid JSON', { seasonCode, eventId });
+    return null;
+  }
+  if (!isMyFplSnapshotRedisManifest(parsed)) {
+    logWarn('My FPL Redis manifest failed schema validation', { seasonCode, eventId });
+    return null;
+  }
+  return parsed;
+}
 
 async function releaseMyFplSnapshotOutbox(
   tx: postgres.TransactionSql,
@@ -2992,7 +3035,8 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
         )
     `;
     const rows = await tx<SnapshotOutboxRow[]>`
-      SELECT outbox.outbox_id, outbox.season_id, outbox.event_id, outbox.revision, outbox.manifest
+      SELECT outbox.outbox_id, outbox.season_id, outbox.event_id, outbox.revision,
+             outbox.manifest, publication.source_checked_at, publication.published_at
       FROM competition.my_fpl_snapshot_publication_outbox outbox
       JOIN competition.my_fpl_snapshot_publications publication
         ON publication.season_id = outbox.season_id
@@ -3030,6 +3074,7 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
   let superseded = 0;
   let failed = 0;
   const deliveredRevisions: number[] = [];
+  const deliveredEvidence: MyFplSnapshotOutboxDeliveryEvidence[] = [];
   const redis = await redisSingleton.getClient();
   for (const row of claimed) {
     try {
@@ -3037,6 +3082,11 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
         throw new Error(`Invalid My FPL snapshot outbox manifest ${row.outbox_id}`);
       }
       const manifest = row.manifest;
+      const sourceCheckedAt = new Date(row.source_checked_at);
+      const publishedAt = new Date(row.published_at);
+      if (!Number.isFinite(sourceCheckedAt.getTime()) || !Number.isFinite(publishedAt.getTime())) {
+        throw new Error(`Invalid My FPL publication timestamps ${row.outbox_id}`);
+      }
       // Keep the publication advisory lock until the Redis activation and
       // delivery receipt commit. A capture racing after the claim either
       // waits for this transaction or is observed as inactive before Redis is
@@ -3103,6 +3153,14 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
       else {
         delivered += 1;
         deliveredRevisions.push(row.revision);
+        deliveredEvidence.push({
+          seasonId: row.season_id,
+          eventId: row.event_id,
+          revision: row.revision,
+          kind: manifest.kind,
+          sourceCheckedAt: sourceCheckedAt.toISOString(),
+          publishedAt: publishedAt.toISOString(),
+        });
       }
     } catch (error) {
       failed += 1;
@@ -3114,5 +3172,25 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
       await db.begin((tx) => releaseMyFplSnapshotOutbox(tx, row.outbox_id, owner, error));
     }
   }
-  return { claimed: claimed.length, delivered, superseded, failed, deliveredRevisions };
+  const remainingRows = await db<{ count: number | string }[]>`
+    SELECT count(*)::int AS count
+    FROM competition.my_fpl_snapshot_publication_outbox outbox
+    JOIN competition.my_fpl_snapshot_publications publication
+      ON publication.season_id = outbox.season_id
+     AND publication.event_id = outbox.event_id
+     AND publication.revision = outbox.revision
+     AND publication.active = true
+    WHERE outbox.status IN ('PENDING', 'PROCESSING', 'FAILED')
+      ${options.eventId ? db`AND outbox.event_id = ${options.eventId}` : db``}
+      ${options.seasonCode ? db`AND outbox.manifest->>'seasonCode' = ${options.seasonCode}` : db``}
+  `;
+  return {
+    claimed: claimed.length,
+    delivered,
+    superseded,
+    failed,
+    deliveredRevisions,
+    deliveredEvidence,
+    remaining: Number(remainingRows[0]?.count ?? 0),
+  };
 }
