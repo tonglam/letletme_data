@@ -2835,11 +2835,14 @@ const resolveManagerLiveScoresUncoalesced = async (input: {
           input.eventId,
         )
       : null;
-  const finalizedRequestedEntryIds = finalizedEligibility?.eligibleEntryIds ?? uniqueEntryIds;
   const finalizedCoverageEntryIds =
     input.tournamentId === undefined
-      ? finalizedRequestedEntryIds
+      ? (finalizedEligibility?.eligibleEntryIds ?? uniqueEntryIds)
       : (finalizedEligibility?.eligibleEntryIds ?? coverageRosterEntryIds);
+  const finalizedCoverageEntryIdSet = new Set(finalizedCoverageEntryIds);
+  const finalizedRequestedEntryIds = uniqueEntryIds.filter((entryId) =>
+    finalizedCoverageEntryIdSet.has(entryId),
+  );
   if (finalizedEligibility && finalizedEligibility.notApplicableEntryIds.length > 0) {
     logDebug('Excluded not-applicable finalized manager live entries', {
       eventId: input.eventId,
