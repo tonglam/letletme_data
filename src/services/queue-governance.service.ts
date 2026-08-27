@@ -4,6 +4,7 @@ import { queueRedisSingleton } from '../queues/redis';
 import { canonicalQueueCatalog } from '../domain/data-contracts';
 import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
+import type { QueueMonitorRuntimeState } from '../utils/runtime-heartbeat';
 
 export type BacklogClass =
   | 'NO_CONSUMER'
@@ -46,6 +47,24 @@ export type QueueHealthSnapshot = Readonly<{
   consumerHeartbeatAt: string | null;
   releaseSha: string;
 }>;
+
+/**
+ * A missing point-in-time snapshot is not itself proof that a queue has no
+ * consumer. Optional feature queues may deliberately have no worker when the
+ * feature is disabled, while an enabled queue with no snapshot is an
+ * observation gap. Keep that distinction explicit in status responses rather
+ * than manufacturing a healthy-looking snapshot.
+ */
+export type QueueHealthState = 'OBSERVED' | 'DISABLED' | 'UNOBSERVED';
+
+export function resolveQueueHealthState(input: {
+  snapshot: QueueHealthSnapshot | null;
+  monitorEnabled?: boolean;
+  monitorState?: QueueMonitorRuntimeState;
+}): QueueHealthState {
+  if (input.monitorEnabled === false || input.monitorState === 'DISABLED') return 'DISABLED';
+  return input.snapshot ? 'OBSERVED' : 'UNOBSERVED';
+}
 
 export type QueueAdmission = Readonly<{
   queueName: string;

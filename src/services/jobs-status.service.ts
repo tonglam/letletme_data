@@ -38,6 +38,7 @@ import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
+import { resolveQueueHealthState } from './queue-governance.service';
 
 type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
 type PublicationDelivery = Readonly<{
@@ -374,6 +375,14 @@ export async function getJobsStatus(
       try {
         const healthSnapshot = await readQueueHealthSnapshot(name);
         const admission = await readQueueAdmission(name);
+        // Optional content monitors report their actual state in the content
+        // worker's shared Redis heartbeat. Never read the API process's env
+        // here: a rollout can recreate content-worker without recreating API.
+        const monitorState = contentWorkerHeartbeat?.queueMonitors?.[name];
+        const healthState = resolveQueueHealthState({
+          snapshot: healthSnapshot,
+          monitorState,
+        });
         return {
           name,
           counts: await queue.getJobCounts(
@@ -386,6 +395,8 @@ export async function getJobsStatus(
             'failed',
           ),
           health: healthSnapshot,
+          healthState,
+          monitorState: monitorState ?? null,
           admission,
         };
       } finally {

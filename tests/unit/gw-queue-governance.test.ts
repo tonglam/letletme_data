@@ -12,6 +12,7 @@ import {
   classifyBacklog,
   calculateDrainEtaMs,
   percentile,
+  resolveQueueHealthState,
 } from '../../src/services/queue-governance.service';
 import {
   resolveJobDispatchBudgetMs,
@@ -130,6 +131,49 @@ describe('GW queue and data governance primitives', () => {
     expect(() => queueHealthRetentionCutoff(new Date(), 0)).toThrow(
       'Queue health retention days must be a positive integer',
     );
+  });
+
+  test('distinguishes disabled optional monitors from missing observations', () => {
+    expect(resolveQueueHealthState({ snapshot: null, monitorEnabled: false })).toBe('DISABLED');
+    expect(resolveQueueHealthState({ snapshot: null, monitorState: 'DISABLED' })).toBe('DISABLED');
+    expect(resolveQueueHealthState({ snapshot: null, monitorState: 'STARTING' })).toBe(
+      'UNOBSERVED',
+    );
+    expect(resolveQueueHealthState({ snapshot: null, monitorEnabled: true })).toBe('UNOBSERVED');
+    expect(
+      resolveQueueHealthState({
+        snapshot: {
+          queueName: 'data-sync',
+          observedAt: '2026-08-27T00:00:00.000Z',
+          waiting: 0,
+          active: 0,
+          delayed: 0,
+          prioritized: 0,
+          waitingChildren: 0,
+          failed: 0,
+          completed: 0,
+          runnable: 0,
+          oldestRunnableAgeMs: null,
+          arrivals: 0,
+          completions: 0,
+          failures: 0,
+          stalled: 0,
+          waitP50Ms: null,
+          waitP95Ms: null,
+          executionP50Ms: null,
+          executionP95Ms: null,
+          providerWaitP95Ms: null,
+          provider429Rate: null,
+          netGrowth: 0,
+          drainEtaMs: 0,
+          backlogClass: 'HEALTHY',
+          admissionMode: 'OPEN',
+          consumerHeartbeatAt: null,
+          releaseSha: 'test',
+        },
+        monitorEnabled: false,
+      }),
+    ).toBe('DISABLED');
   });
 
   test('requires all producer and consumer revisions for MET', () => {
