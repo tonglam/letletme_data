@@ -364,16 +364,6 @@ jobs:
 
             deployment_started=true
             migration_started=false
-            restore_before_migration() {
-              if [ "$migration_started" = false ] && [ "$services_stopped" = true ] && [ -n "$old_image" ]; then
-                if restore_runtime_services \
-                  "$old_image" "$old_release_sha" "$old_runner_release_sha" \
-                  "$old_media_present"; then
-                  services_stopped=false
-                fi
-              fi
-            }
-            trap restore_before_migration ERR
 
             start_stage quiescence
             echo "deploy preflight: validating migration plan and queue quiescence before stopping services"

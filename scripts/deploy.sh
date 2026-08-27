@@ -135,6 +135,9 @@ source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
 restore_stopped_services() {
   local restored=false
   log_warn "Restoring existing services because migration has not started"
+  if [[ -n "$DEPLOY_OLD_REVISION" ]]; then
+    git -C "$PROJECT_DIR" reset --hard "$DEPLOY_OLD_REVISION" || true
+  fi
   # The API container is deliberately removed after it stops so a delayed
   # listener cannot retain port 3000.  `compose start` cannot recreate that
   # exact container, therefore recovery must use `up`; pin the last image when

@@ -218,6 +218,7 @@ describe('production environment preflight', () => {
     expect(workflow).toContain('deployment_started=true');
     expect(workflow).toContain('services_stopped=false');
     expect(workflow).toContain('services_stopped=true');
+    expect(workflow).not.toContain('restore_before_migration');
     expect(workflow).not.toContain('/usr/local/libexec/vps-maintenance');
     expect(workflow).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(workflow).not.toContain('GRAPHQL_RUNTIME_DATABASE_URL');
@@ -316,6 +317,9 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain(
       '"$DEPLOY_MIGRATION_STARTED" = false && \\\n        -n "$DEPLOY_OLD_REVISION"',
     );
+    expect(
+      deployScript.indexOf('git -C "$PROJECT_DIR" reset --hard "$DEPLOY_OLD_REVISION"'),
+    ).toBeLessThan(deployScript.indexOf('restore_runtime_services'));
     expect(deployScript).toContain('deploy-host-grok-runner.sh');
     expect(deployScript).toContain('run-briefing-control-probe.sh');
     expect(deployScript).toContain('rearm-briefing-x-after-probe.sh');
