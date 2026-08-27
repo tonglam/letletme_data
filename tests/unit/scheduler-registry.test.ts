@@ -14,6 +14,7 @@ import {
 } from '../../src/scheduler/job-registry';
 import {
   isSchedulerDefinitionEnabled,
+  orderSchedulerDefinitionsByEarliestDue,
   orderSchedulerDefinitionsForClaim,
   postMatchReservationWasPersisted,
   resolveSchedulerDefinition,
@@ -83,6 +84,125 @@ describe('standalone scheduler registry', () => {
       'league-event-results',
       'my-fpl-finalization',
       'my-fpl-snapshot',
+    ]);
+  });
+
+  test('orders claims by dispatch deadline, criticality, priority and stable name', () => {
+    const definitions: ScheduledJobDefinition[] = [
+      {
+        name: 'market-daily',
+        cadence: 'test-only',
+        timezone: 'UTC',
+        catchUpPolicy: 'none',
+        criticality: 'critical',
+        queueName: 'data-sync',
+        successPredicate: 'test',
+        resolve: async () => [],
+        enqueue: async () => undefined,
+      },
+      {
+        name: 'tournament-official-h2h-live',
+        cadence: 'test-only',
+        timezone: 'UTC',
+        catchUpPolicy: 'none',
+        criticality: 'critical',
+        queueName: 'official-h2h-live',
+        successPredicate: 'test',
+        resolve: async () => [],
+        enqueue: async () => undefined,
+      },
+      {
+        name: 'normal-a',
+        cadence: 'test-only',
+        timezone: 'UTC',
+        catchUpPolicy: 'none',
+        criticality: 'normal',
+        queueName: 'test-only',
+        successPredicate: 'test',
+        resolve: async () => [],
+        enqueue: async () => undefined,
+      },
+      {
+        name: 'critical-b',
+        cadence: 'test-only',
+        timezone: 'UTC',
+        catchUpPolicy: 'none',
+        criticality: 'critical',
+        queueName: 'test-only',
+        successPredicate: 'test',
+        resolve: async () => [],
+        enqueue: async () => undefined,
+      },
+      {
+        name: 'critical-a',
+        cadence: 'test-only',
+        timezone: 'UTC',
+        catchUpPolicy: 'none',
+        criticality: 'critical',
+        queueName: 'test-only',
+        claimPriority: 10,
+        successPredicate: 'test',
+        resolve: async () => [],
+        enqueue: async () => undefined,
+      },
+      {
+        name: 'deadline-late',
+        cadence: 'test-only',
+        timezone: 'UTC',
+        catchUpPolicy: 'none',
+        criticality: 'critical',
+        queueName: 'test-only',
+        successPredicate: 'test',
+        resolve: async () => [],
+        enqueue: async () => undefined,
+      },
+    ];
+    const deadlineOrdered = orderSchedulerDefinitionsByEarliestDue(definitions.slice(0, 2), [
+      // H2H is due one second later, but its 15-second dispatch budget makes
+      // its actual deadline much earlier than market's 10-minute budget.
+      { jobName: 'market-daily', earliestDueAt: new Date('2026-08-23T00:00:00.000Z') },
+      {
+        jobName: 'tournament-official-h2h-live',
+        earliestDueAt: new Date('2026-08-23T00:00:01.000Z'),
+      },
+    ]);
+    expect(deadlineOrdered.map((definition) => definition.name)).toEqual([
+      'tournament-official-h2h-live',
+      'market-daily',
+    ]);
+
+    const retryDeadlineOrdered = orderSchedulerDefinitionsByEarliestDue(definitions.slice(0, 2), [
+      {
+        jobName: 'market-daily',
+        // A retry moved mutable due_at past the newer H2H bucket. The
+        // immutable schedule must still determine its dispatch deadline.
+        earliestDueAt: new Date('2026-08-23T00:20:00.000Z'),
+        earliestScheduledDueAt: new Date('2026-08-23T00:00:00.000Z'),
+      },
+      {
+        jobName: 'tournament-official-h2h-live',
+        earliestDueAt: new Date('2026-08-23T00:10:00.000Z'),
+        earliestScheduledDueAt: new Date('2026-08-23T00:10:00.000Z'),
+      },
+    ]);
+    expect(retryDeadlineOrdered.map((definition) => definition.name)).toEqual([
+      'market-daily',
+      'tournament-official-h2h-live',
+    ]);
+
+    const ordered = orderSchedulerDefinitionsByEarliestDue(definitions.slice(2), [
+      // Unknown test definitions have a zero dispatch budget. The equal
+      // deadline is resolved by criticality, priority, then stable name.
+      { jobName: 'deadline-late', earliestDueAt: new Date('2026-08-23T00:00:01.000Z') },
+      { jobName: 'critical-b', earliestDueAt: new Date('2026-08-23T00:00:00.000Z') },
+      { jobName: 'normal-a', earliestDueAt: new Date('2026-08-23T00:00:00.000Z') },
+      { jobName: 'critical-a', earliestDueAt: new Date('2026-08-23T00:00:00.000Z') },
+    ]);
+    expect(ordered.map((definition) => definition.name)).toEqual([
+      'critical-a',
+      'critical-b',
+      'normal-a',
+      'deadline-late',
     ]);
   });
 

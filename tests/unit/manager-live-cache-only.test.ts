@@ -810,7 +810,11 @@ describe('manager live classic standings convergence', () => {
           },
         }) as never,
     );
-    upsertCheckpoint.mockImplementationOnce(async () => {
+    // The publication gate attempts the checkpoint once, then retries directly
+    // when Redis is unavailable.  This case is specifically asserting that
+    // neither durable attempt succeeded, so fail every checkpoint write rather
+    // than only the first call (which would exercise the intentional fallback).
+    upsertCheckpoint.mockImplementation(async () => {
       throw new Error('checkpoint unavailable');
     });
 

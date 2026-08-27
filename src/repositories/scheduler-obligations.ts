@@ -92,6 +92,7 @@ function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerOb
 function immutableScheduledDueAtForSql(evidence: SQL, dueAt: SQL) {
   return sql`CASE
     WHEN ${evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
+      AND (${evidence}->>'scheduledDueAtMs')::numeric BETWEEN 0 AND 8640000000000000
       THEN to_timestamp((${evidence}->>'scheduledDueAtMs')::double precision / 1000)
     ELSE ${dueAt}
   END`;
@@ -1108,7 +1109,11 @@ export async function claimSchedulerObligations(
           latestAuthoritativeScope,
         ),
       )
-      .orderBy(asc(schedulerObligationsInOps.dueAt), asc(schedulerObligationsInOps.obligationId))
+      // Keep the transactional claimant on the same immutable deadline used
+      // by the scheduler prefilter. due_at remains mutable retry eligibility;
+      // ordering by it here could dispatch a newer bucket and strand the
+      // older deadline that selected this job name.
+      .orderBy(asc(currentDueAt), asc(schedulerObligationsInOps.obligationId))
       .limit(limit)
       .for('update', { skipLocked: true });
     const claimed: { obligation: SchedulerObligation; owner: string }[] = [];
@@ -1200,13 +1205,29 @@ export async function findDueSchedulerObligationCandidates(
     excludedJobNames?: readonly string[];
     db?: DbHandle;
   } = {},
-): Promise<readonly { jobName: string; earliestDueAt: Date }[]> {
+): Promise<
+  readonly {
+    jobName: string;
+    /** Mutable retry eligibility timestamp. */
+    earliestDueAt: Date;
+    /** Immutable schedule boundary used for dispatch deadlines and lateness. */
+    earliestScheduledDueAt: Date;
+  }[]
+> {
   const db = input.db ?? (await getDb());
   const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
     (name) => name.length > 0,
   );
-  const rows = await db.execute<{ jobName: string; earliestDueAt: Date | string }>(sql`
-    SELECT job_name AS "jobName", min(due_at) AS "earliestDueAt"
+  const scheduledDueAt = immutableScheduledDueAtSql();
+  const rows = await db.execute<{
+    jobName: string;
+    earliestDueAt: Date | string;
+    earliestScheduledDueAt: Date | string;
+  }>(sql`
+    SELECT
+      job_name AS "jobName",
+      min(due_at) AS "earliestDueAt",
+      min(${scheduledDueAt}) AS "earliestScheduledDueAt"
     FROM ops.scheduler_obligations
     WHERE due_at <= clock_timestamp()
       AND status IN ('pending', 'failed')
@@ -1219,17 +1240,31 @@ export async function findDueSchedulerObligationCandidates(
           : sql``
       }
     GROUP BY job_name
-    ORDER BY min(due_at) ASC, min(obligation_id::text) ASC
+    ORDER BY min(${scheduledDueAt}) ASC, min(obligation_id::text) ASC
   `);
   return rows
     .map((row) => {
       const dueAt =
         row.earliestDueAt instanceof Date ? row.earliestDueAt : new Date(row.earliestDueAt);
-      return Number.isFinite(dueAt.getTime())
-        ? { jobName: row.jobName, earliestDueAt: dueAt }
-        : null;
+      if (!Number.isFinite(dueAt.getTime())) return null;
+      const scheduledDueAtValue =
+        row.earliestScheduledDueAt instanceof Date
+          ? row.earliestScheduledDueAt
+          : new Date(row.earliestScheduledDueAt);
+      const earliestScheduledDueAt = Number.isFinite(scheduledDueAtValue.getTime())
+        ? scheduledDueAtValue
+        : dueAt;
+      return { jobName: row.jobName, earliestDueAt: dueAt, earliestScheduledDueAt };
     })
-    .filter((row): row is { jobName: string; earliestDueAt: Date } => row !== null);
+    .filter(
+      (
+        row,
+      ): row is {
+        jobName: string;
+        earliestDueAt: Date;
+        earliestScheduledDueAt: Date;
+      } => row !== null,
+    );
 }
 
 /**

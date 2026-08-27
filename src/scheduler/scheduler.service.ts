@@ -953,23 +953,71 @@ export function orderSchedulerDefinitionsForClaim(
     .map(({ definition }) => definition);
 }
 
+type SchedulerDueCandidate = {
+  jobName: string;
+  /** Mutable retry eligibility timestamp. */
+  earliestDueAt: Date;
+  /** Immutable schedule boundary; old callers may omit it. */
+  earliestScheduledDueAt?: Date;
+};
+
+type SchedulerCandidateTimes = {
+  earliestDueAt: number;
+  earliestScheduledDueAt: number;
+};
+
+function aggregateSchedulerCandidateTimes(
+  candidates: readonly SchedulerDueCandidate[],
+): Map<string, SchedulerCandidateTimes> {
+  const candidateTimes = new Map<string, SchedulerCandidateTimes>();
+  for (const candidate of candidates) {
+    const dueAt = candidate.earliestDueAt.getTime();
+    if (!Number.isFinite(dueAt)) continue;
+    const scheduledDueAt = candidate.earliestScheduledDueAt?.getTime() ?? dueAt;
+    const effectiveScheduledDueAt = Number.isFinite(scheduledDueAt) ? scheduledDueAt : dueAt;
+    const previous = candidateTimes.get(candidate.jobName);
+    // Candidate queries normally return one row per job, but keeping the
+    // earliest value here makes the ordering safe if a future query adds a
+    // scope dimension or returns duplicate candidates. Retry due_at is only
+    // used for eligibility/metrics; dispatch ordering must retain the
+    // immutable schedule boundary so a deferred job cannot lose its place.
+    candidateTimes.set(candidate.jobName, {
+      earliestDueAt: Math.min(previous?.earliestDueAt ?? dueAt, dueAt),
+      earliestScheduledDueAt: Math.min(
+        previous?.earliestScheduledDueAt ?? effectiveScheduledDueAt,
+        effectiveScheduledDueAt,
+      ),
+    });
+  }
+  return candidateTimes;
+}
+
 export function orderSchedulerDefinitionsByEarliestDue(
   definitions: readonly ScheduledJobDefinition[],
-  candidates: readonly { jobName: string; earliestDueAt: Date }[],
+  candidates: readonly SchedulerDueCandidate[],
 ): readonly ScheduledJobDefinition[] {
-  const dueByName = new Map(
-    candidates.map((candidate) => [candidate.jobName, candidate.earliestDueAt.getTime()]),
-  );
+  const candidateTimes = aggregateSchedulerCandidateTimes(candidates);
+  const criticalityRank: Record<ScheduledJobDefinition['criticality'], number> = {
+    critical: 0,
+    normal: 1,
+    maintenance: 2,
+  };
   return definitions
     .map((definition, index) => ({
       definition,
       index,
-      dueAt: dueByName.get(definition.name) ?? Number.POSITIVE_INFINITY,
+      dueAt: candidateTimes.get(definition.name)?.earliestDueAt ?? Number.POSITIVE_INFINITY,
+      dispatchDeadline:
+        (candidateTimes.get(definition.name)?.earliestScheduledDueAt ?? Number.POSITIVE_INFINITY) +
+        (contractForSchedulerJob(definition.name)?.dispatchWithinMs ?? 0),
     }))
     .sort(
       (left, right) =>
-        left.dueAt - right.dueAt ||
+        left.dispatchDeadline - right.dispatchDeadline ||
+        criticalityRank[left.definition.criticality] -
+          criticalityRank[right.definition.criticality] ||
         (left.definition.claimPriority ?? 100) - (right.definition.claimPriority ?? 100) ||
+        left.definition.name.localeCompare(right.definition.name) ||
         left.index - right.index,
     )
     .map(({ definition }) => definition);
@@ -990,6 +1038,7 @@ async function claimSchedulerWork(input: {
   const candidates = await findDueSchedulerObligationCandidates({
     excludedJobNames: input.disabledJobNames,
   });
+  const candidateTimes = aggregateSchedulerCandidateTimes(candidates);
   const dueJobNames = new Set(candidates.map((candidate) => candidate.jobName));
   const lanesByJob = new Map(
     input.definitions.map((definition) => [definition.name, schedulerExecutionLanes(definition)]),
@@ -1031,12 +1080,14 @@ async function claimSchedulerWork(input: {
     lateCount: candidates.filter((candidate) => {
       const definition = input.definitions.find((item) => item.name === candidate.jobName);
       const dispatchWithinMs = contractForSchedulerJob(candidate.jobName)?.dispatchWithinMs ?? 0;
+      const scheduledDueAt = candidateTimes.get(candidate.jobName)?.earliestScheduledDueAt;
       return (
         definition !== undefined &&
-        candidate.earliestDueAt.getTime() + dispatchWithinMs < (input.now ?? new Date()).getTime()
+        scheduledDueAt !== undefined &&
+        scheduledDueAt + dispatchWithinMs < (input.now ?? new Date()).getTime()
       );
     }).length,
-    oldestDueAt: candidates[0]?.earliestDueAt ?? null,
+    oldestDueAt: candidates[0]?.earliestScheduledDueAt ?? candidates[0]?.earliestDueAt ?? null,
   };
 }
 
