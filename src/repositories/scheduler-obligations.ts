@@ -249,7 +249,7 @@ function checkpointCompleteness(evidence: Record<string, unknown>) {
  * freshness window.  Keep this side-channel best-effort: a telemetry outage
  * must never turn an already committed scheduler completion into a failure.
  */
-async function recordCheckpointFreshnessEvidence(input: {
+export async function recordCheckpointFreshnessEvidence(input: {
   jobName: string;
   evidence: unknown;
   completedAt: Date | null;

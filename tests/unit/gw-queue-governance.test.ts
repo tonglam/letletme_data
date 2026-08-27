@@ -32,6 +32,8 @@ import {
 } from '../../src/domain/data-contracts';
 import { MAINTENANCE_JOBS } from '../../src/queues/maintenance.queue';
 import { MAINTENANCE_JOB_LANES } from '../../src/jobs/maintenance.jobs';
+import { consumerProbeUrl } from '../../src/services/data-governance.service';
+import { shouldCreateFreshnessWindowForObligation } from '../../src/scheduler/scheduler.service';
 
 describe('GW queue and data governance primitives', () => {
   test('uses one late-entry denominator rule across GW1-GW4', () => {
@@ -330,6 +332,33 @@ describe('GW queue and data governance primitives', () => {
         completeness: 'COMPLETE',
       }),
     ).toBe('MET');
+  });
+
+  test('does not create a freshness window for an old terminal obligation without an identity', () => {
+    expect(shouldCreateFreshnessWindowForObligation({ status: 'pending', evidence: {} })).toBe(
+      true,
+    );
+    expect(shouldCreateFreshnessWindowForObligation({ status: 'succeeded', evidence: {} })).toBe(
+      false,
+    );
+    expect(
+      shouldCreateFreshnessWindowForObligation({
+        status: 'succeeded',
+        evidence: { freshnessWindowId: 42 },
+      }),
+    ).toBe(true);
+    expect(shouldCreateFreshnessWindowForObligation({ status: 'skipped', evidence: {} })).toBe(
+      false,
+    );
+  });
+
+  test('builds the scoped Web consumer probe route', () => {
+    expect(consumerProbeUrl('https://web.example/', 'market-price')).toBe(
+      'https://web.example/api/ops/data-contracts/market-price',
+    );
+    expect(consumerProbeUrl('https://web.example', 'entry/data')).toBe(
+      'https://web.example/api/ops/data-contracts/entry%2Fdata',
+    );
   });
 
   test('redacts durable error summaries', () => {

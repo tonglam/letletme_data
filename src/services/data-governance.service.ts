@@ -303,8 +303,22 @@ export async function recordDataPublicationEvidence(input: {
   return updated;
 }
 
-const CONSUMER_PROBE_PATH = '/api/internal/data-governance/probe';
+// The Web consumer evidence writer is the POST variant of the protected
+// contract route. Keep the contract key in the path so a response for one
+// business envelope can never be accidentally recorded against another
+// window. This must stay in lockstep with the Web route
+// `/api/ops/data-contracts/[contractKey]`.
+const CONSUMER_PROBE_PATH = '/api/ops/data-contracts';
 const CONSUMER_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Keep the probe route construction testable and encode the contract key as
+ * a path segment.  The Web endpoint is scoped by this segment, so putting the
+ * key only in the JSON body would permit an accidental cross-window write.
+ */
+export function consumerProbeUrl(baseUrl: string, contractKey: string): string {
+  return `${baseUrl.replace(/\/$/, '')}${CONSUMER_PROBE_PATH}/${encodeURIComponent(contractKey)}`;
+}
 
 type ConsumerProbePayload = Readonly<{
   success?: boolean;
@@ -393,7 +407,7 @@ export async function observeFreshnessConsumerEvidence(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), CONSUMER_PROBE_TIMEOUT_MS);
     try {
-      const response = await fetch(`${baseUrl}${CONSUMER_PROBE_PATH}`, {
+      const response = await fetch(consumerProbeUrl(baseUrl, window.contractKey), {
         method: 'POST',
         headers: {
           accept: 'application/json',

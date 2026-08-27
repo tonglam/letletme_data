@@ -15,6 +15,7 @@ import {
   markSchedulerObligationIrrecoverable,
   mergeSchedulerObligationEvidence,
   reconcilePostMatchSchedulerObligations,
+  recordCheckpointFreshnessEvidence,
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
@@ -136,6 +137,23 @@ function hotSourcePeriodIdentity(options: {
 }
 
 /**
+ * A scheduler restart can observe a terminal obligation that was completed by
+ * an older runtime before freshness evidence was wired through the payload.
+ * Creating a brand-new pending SLO window for that historical completion would
+ * manufacture a breach that no producer can ever fill. Terminal obligations
+ * are therefore eligible for a new window only when they already carry an
+ * exact window identity; active/failed obligations still create the window so
+ * their next generation can settle it normally.
+ */
+export function shouldCreateFreshnessWindowForObligation(
+  obligation?: Pick<SchedulerObligation, 'status' | 'evidence'>,
+): boolean {
+  if (!obligation) return true;
+  if (!['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) return true;
+  return freshnessWindowIdsFromEvidence(obligation.evidence).length > 0;
+}
+
+/**
  * Create the durable SLO window at the same point that the scheduler records
  * the obligation.  The window is an evidence ledger, not a success marker:
  * downstream publication and consumer probes fill the milestone columns and
@@ -147,6 +165,7 @@ async function recordFreshnessWindowForPlan(
   definition: ScheduledJobDefinition,
   plan: SchedulerObligationPlan,
   seasonId: number,
+  obligation?: Pick<SchedulerObligation, 'status' | 'evidence'>,
 ): Promise<number | null> {
   // The price watcher is an observation obligation. It may publish a hot
   // board, or legitimately observe that the official provider did not change
@@ -161,6 +180,7 @@ async function recordFreshnessWindowForPlan(
     !contractHasFreshnessWindow(contract, definition.name)
   )
     return null;
+  if (!shouldCreateFreshnessWindowForObligation(obligation)) return null;
   const eligibleAtMs = evidenceNumber(plan.evidence, 'eligibleAtMs') ?? plan.dueAt.getTime();
   const eligibleAt = new Date(eligibleAtMs);
   // The freshness deadline is end-to-end: the scheduler must dispatch within
@@ -177,7 +197,7 @@ async function recordFreshnessWindowForPlan(
     (definition.name === 'market-daily' && /^\d{8}$/.test(plan.periodKey)
       ? `${plan.periodKey.slice(0, 4)}-${plan.periodKey.slice(4, 6)}-${plan.periodKey.slice(6, 8)}`
       : undefined);
-  return upsertFreshnessWindow({
+  const windowId = await upsertFreshnessWindow({
     sloKey: contract.contractKey,
     contractKey: contract.contractKey,
     seasonId,
@@ -202,6 +222,31 @@ async function recordFreshnessWindowForPlan(
     });
     return null;
   });
+  if (
+    windowId !== null &&
+    obligation &&
+    ['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status) &&
+    contract.freshnessEvidence === 'checkpoint'
+  ) {
+    // The exact window identity may have been attached by a previous runtime,
+    // while the completion callback ran before that attachment. Re-apply the
+    // durable checkpoint evidence using the terminal obligation's retained
+    // counts/revision. The helper keeps a historical breach immutable and
+    // records recovery separately, so this cannot turn a late repair into an
+    // on-time MET result.
+    await recordCheckpointFreshnessEvidence({
+      jobName: definition.name,
+      evidence: { ...obligation.evidence, freshnessWindowId: windowId },
+      completedAt: null,
+      runId: null,
+    }).catch((error) => {
+      logError('Terminal checkpoint freshness backfill failed', error, {
+        jobName: definition.name,
+        windowId,
+      });
+    });
+  }
+  return windowId;
 }
 
 export function freshnessWindowIdsFromEvidence(
@@ -1214,6 +1259,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
             definition,
             plan,
             context.season.seasonId,
+            obligation,
           );
           if (freshnessWindowId !== null) {
             await attachFreshnessWindowToSchedulerObligation({
@@ -1287,6 +1333,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
           postMatchReservations[index].definition,
           plan,
           context.season.seasonId,
+          result.reservations[index],
         );
         if (freshnessWindowId !== null) {
           const obligation = result.reservations[index];
