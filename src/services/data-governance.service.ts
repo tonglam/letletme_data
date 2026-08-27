@@ -646,7 +646,12 @@ export async function recordFreshnessObservation(input: {
       // Keep the first recovery immutable.  A later complete observation can
       // be useful evidence, but it must not make the original recovery appear
       // to have happened at a different revision.
-      if (current.recoveryRevision === null) {
+      // Older deployments may have recorded recoveredAt before recoveryRevision
+      // was introduced.  Treat that timestamp as an already-settled recovery;
+      // attaching a later revision would make the two pieces of evidence refer
+      // to different repairs.  The legacy null revision remains null rather
+      // than being rewritten after the fact.
+      if (current.recoveredAt === null && current.recoveryRevision === null) {
         const recoveryRevision = selectFreshnessRecoveryRevision({
           consumerEvidenceRequired: observation.consumerEvidenceRequired !== false,
           redisEvidenceRequired,
