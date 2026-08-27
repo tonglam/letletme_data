@@ -6,7 +6,7 @@
 -- stale current-state marker before installing the invariant.
 UPDATE ops.scheduler_obligations
 SET last_error = NULL
-WHERE status IN ('succeeded', 'skipped')
+WHERE status NOT IN ('failed', 'irrecoverable')
   AND last_error IS NOT NULL;
 
 ALTER TABLE ops.scheduler_obligations
