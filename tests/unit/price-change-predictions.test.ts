@@ -285,6 +285,7 @@ describe('price-change prediction normalization', () => {
         state: 'active',
         publicationId: 'price-publication-test',
         revision: 1,
+        sourceCheckedAt: fetchedAt.toISOString(),
         items: [{ name: 'context' }, { name: 'players' }],
       },
       items: {
