@@ -18,6 +18,7 @@ import {
   orderSchedulerDefinitionsForClaim,
   postMatchReservationWasPersisted,
   resolveSchedulerDefinition,
+  schedulerDueProgress,
   schedulerExecutionLanes,
   schedulerPlanKey,
 } from '../../src/scheduler/scheduler.service';
@@ -204,6 +205,33 @@ describe('standalone scheduler registry', () => {
       'normal-a',
       'deadline-late',
     ]);
+  });
+
+  test('recomputes due progress from the post-pass candidate set', () => {
+    const dueAt = new Date('2026-08-23T00:00:00.000Z');
+    const progress = schedulerDueProgress(
+      registry,
+      [
+        { jobName: 'tournament-official-h2h-live', earliestDueAt: dueAt },
+        {
+          jobName: 'tournament-official-h2h-live',
+          earliestDueAt: new Date('2026-08-23T00:00:02.000Z'),
+          earliestScheduledDueAt: dueAt,
+        },
+      ],
+      new Date('2026-08-23T00:00:16.000Z'),
+    );
+
+    expect(progress).toEqual({
+      dueCount: 1,
+      lateCount: 1,
+      oldestUnfinishedDueAt: dueAt,
+    });
+    expect(schedulerDueProgress(registry, [], new Date('2026-08-23T00:00:16.000Z'))).toEqual({
+      dueCount: 0,
+      lateCount: 0,
+      oldestUnfinishedDueAt: null,
+    });
   });
 
   test('routes My FPL finalization status and admission to its dedicated lane', () => {

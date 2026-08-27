@@ -963,7 +963,7 @@ export function orderSchedulerDefinitionsForClaim(
     .map(({ definition }) => definition);
 }
 
-type SchedulerDueCandidate = {
+export type SchedulerDueCandidate = {
   jobName: string;
   /** Mutable retry eligibility timestamp. */
   earliestDueAt: Date;
@@ -975,6 +975,12 @@ type SchedulerCandidateTimes = {
   earliestDueAt: number;
   earliestScheduledDueAt: number;
 };
+
+export type SchedulerDueProgress = Readonly<{
+  dueCount: number;
+  lateCount: number;
+  oldestUnfinishedDueAt: Date | null;
+}>;
 
 function aggregateSchedulerCandidateTimes(
   candidates: readonly SchedulerDueCandidate[],
@@ -1000,6 +1006,35 @@ function aggregateSchedulerCandidateTimes(
     });
   }
   return candidateTimes;
+}
+
+/**
+ * Convert the claimer's grouped due candidates into the progress metrics shown
+ * by the operations endpoint.  Keep this calculation pure so the pass-start
+ * and post-pass refresh use identical dispatch-deadline semantics.
+ */
+export function schedulerDueProgress(
+  definitions: readonly ScheduledJobDefinition[],
+  candidates: readonly SchedulerDueCandidate[],
+  now = new Date(),
+): SchedulerDueProgress {
+  const candidateTimes = aggregateSchedulerCandidateTimes(candidates);
+  const knownDefinitions = new Set(definitions.map((definition) => definition.name));
+  let lateCount = 0;
+  for (const [jobName, times] of candidateTimes) {
+    if (!knownDefinitions.has(jobName)) continue;
+    const dispatchWithinMs = contractForSchedulerJob(jobName)?.dispatchWithinMs ?? 0;
+    if (times.earliestScheduledDueAt + dispatchWithinMs < now.getTime()) lateCount += 1;
+  }
+  const oldest = [...candidateTimes.values()]
+    .map((times) => times.earliestScheduledDueAt)
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => left - right)[0];
+  return {
+    dueCount: candidateTimes.size,
+    lateCount,
+    oldestUnfinishedDueAt: oldest === undefined ? null : new Date(oldest),
+  };
 }
 
 export function orderSchedulerDefinitionsByEarliestDue(
@@ -1048,7 +1083,6 @@ async function claimSchedulerWork(input: {
   const candidates = await findDueSchedulerObligationCandidates({
     excludedJobNames: input.disabledJobNames,
   });
-  const candidateTimes = aggregateSchedulerCandidateTimes(candidates);
   const dueJobNames = new Set(candidates.map((candidate) => candidate.jobName));
   const lanesByJob = new Map(
     input.definitions.map((definition) => [definition.name, schedulerExecutionLanes(definition)]),
@@ -1084,20 +1118,12 @@ async function claimSchedulerWork(input: {
     });
     if (result[0]) claimed.push(result[0]);
   }
+  const dueProgress = schedulerDueProgress(input.definitions, candidates, input.now);
   return {
     claimed,
-    dueCount: candidates.length,
-    lateCount: candidates.filter((candidate) => {
-      const definition = input.definitions.find((item) => item.name === candidate.jobName);
-      const dispatchWithinMs = contractForSchedulerJob(candidate.jobName)?.dispatchWithinMs ?? 0;
-      const scheduledDueAt = candidateTimes.get(candidate.jobName)?.earliestScheduledDueAt;
-      return (
-        definition !== undefined &&
-        scheduledDueAt !== undefined &&
-        scheduledDueAt + dispatchWithinMs < (input.now ?? new Date()).getTime()
-      );
-    }).length,
-    oldestDueAt: candidates[0]?.earliestScheduledDueAt ?? candidates[0]?.earliestDueAt ?? null,
+    dueCount: dueProgress.dueCount,
+    lateCount: dueProgress.lateCount,
+    oldestDueAt: dueProgress.oldestUnfinishedDueAt,
   };
 }
 
@@ -1743,12 +1769,35 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     failed,
     enqueueRecovery,
   });
+  // The claim query is intentionally evaluated before enqueueing so it can
+  // order this pass.  Refresh it after all enqueue callbacks have settled so
+  // /jobs/status does not keep reporting a just-claimed bucket as due after
+  // its worker has already completed (or after the obligation was deferred).
+  let completedDueProgress = schedulerDueProgress(schedulerRegistry, [], new Date());
+  try {
+    const remainingDueCandidates = await findDueSchedulerObligationCandidates();
+    completedDueProgress = schedulerDueProgress(
+      schedulerRegistry,
+      remainingDueCandidates,
+      new Date(),
+    );
+  } catch (error) {
+    // A telemetry refresh failure must not turn a successfully reconciled pass
+    // into a failed pass.  Keep the pass-start values as a conservative
+    // fallback; the next 30-second pass will retry the authoritative query.
+    logError('Scheduler post-pass due-state refresh failed', error);
+    completedDueProgress = {
+      dueCount: claimResult.dueCount,
+      lateCount: claimResult.lateCount,
+      oldestUnfinishedDueAt: claimResult.oldestDueAt,
+    };
+  }
   progress = completeSchedulerProgress(progress, new Date());
   progress = {
     ...progress,
-    dueCount: claimResult.dueCount,
-    lateCount: claimResult.lateCount,
-    oldestUnfinishedDueAt: claimResult.oldestDueAt?.toISOString() ?? null,
+    dueCount: completedDueProgress.dueCount,
+    lateCount: completedDueProgress.lateCount,
+    oldestUnfinishedDueAt: completedDueProgress.oldestUnfinishedDueAt?.toISOString() ?? null,
     leaseRecoveryCount: (enqueueRecovery?.running ?? 0) + (enqueueRecovery?.retained ?? 0),
     generationRecoveryCount: enqueueRecovery?.retried ?? 0,
   };
