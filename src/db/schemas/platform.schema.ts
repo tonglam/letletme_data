@@ -3576,7 +3576,6 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
     expectedEntryCount: integer('expected_entry_count').notNull(),
     readyEntryCount: integer('ready_entry_count').notNull(),
     emptyEntryCount: integer('empty_entry_count').notNull(),
-    notApplicableEntryCount: integer('not_applicable_entry_count').default(0).notNull(),
     expectedTournamentCount: integer('expected_tournament_count').notNull(),
     readyTournamentCount: integer('ready_tournament_count').notNull(),
     contentSha256: text('content_sha256').notNull(),
@@ -3597,6 +3596,7 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       withTimezone: true,
       mode: 'date',
     }),
+    notApplicableEntryCount: integer('not_applicable_entry_count').default(0).notNull(),
   },
   (table) => [
     index('my_fpl_snapshot_publications_gc_idx').on(
