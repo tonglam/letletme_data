@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 import {
+  isAuthoritativeUnrankedFirstEventResult,
   isRetryableMyFplCaptureContention,
   isMatchingProvisionalMyFplPublication,
   myFplSnapshotRedisManifestKey,
@@ -12,6 +13,10 @@ import {
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
+const eligibilityMigration = readFileSync(
+  'migrations/0064_my_fpl_entry_eligibility_counts.sql',
+  'utf8',
+);
 const resultPicksMigration = readFileSync('migrations/0055_entry_event_result_picks.sql', 'utf8');
 const retainedRevisionMigration = readFileSync(
   'migrations/0038_my_fpl_retained_revision_reads.sql',
@@ -35,6 +40,52 @@ const tournamentTransfers = readFileSync(
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 
 describe('My FPL daily snapshot publication contract', () => {
+  test('persists late-entry eligibility separately from the eligible denominator', () => {
+    expect(eligibilityMigration).toContain('not_applicable_entry_count');
+    expect(eligibilityMigration).toContain('snapshot_entry.is_empty');
+    expect(publicationService).toContain('countEntryEligibility');
+    expect(publicationService).toContain('notApplicableEntryCount');
+  });
+
+  test('accepts only the authoritative unranked first-event total edge', () => {
+    expect(
+      isAuthoritativeUnrankedFirstEventResult({
+        firstScoringEvent: 1,
+        eventId: 1,
+        hasPreviousResult: false,
+        overallPoints: 0,
+        overallRank: 0,
+      }),
+    ).toBe(true);
+    expect(
+      isAuthoritativeUnrankedFirstEventResult({
+        firstScoringEvent: 1,
+        eventId: 1,
+        hasPreviousResult: true,
+        overallPoints: 0,
+        overallRank: 0,
+      }),
+    ).toBe(false);
+    expect(
+      isAuthoritativeUnrankedFirstEventResult({
+        firstScoringEvent: 1,
+        eventId: 2,
+        hasPreviousResult: false,
+        overallPoints: 0,
+        overallRank: 0,
+      }),
+    ).toBe(false);
+    expect(
+      isAuthoritativeUnrankedFirstEventResult({
+        firstScoringEvent: 1,
+        eventId: 1,
+        hasPreviousResult: false,
+        overallPoints: 1,
+        overallRank: 0,
+      }),
+    ).toBe(false);
+  });
+
   test('serializes in-process captures without hiding a newer data revision', async () => {
     const publication: MyFplSnapshotPublication = {
       seasonId: 2026,
@@ -47,6 +98,7 @@ describe('My FPL daily snapshot publication contract', () => {
       expectedEntryCount: 1,
       readyEntryCount: 1,
       emptyEntryCount: 0,
+      notApplicableEntryCount: 0,
       expectedTournamentCount: 1,
       readyTournamentCount: 1,
       contentSha256: 'a'.repeat(64),
@@ -291,6 +343,7 @@ describe('My FPL daily snapshot publication contract', () => {
       expectedEntryCount: 10,
       readyEntryCount: 10,
       emptyEntryCount: 0,
+      notApplicableEntryCount: 0,
       expectedTournamentCount: 1,
       readyTournamentCount: 1,
       contentSha256: 'a'.repeat(64),

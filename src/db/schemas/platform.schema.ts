@@ -3576,6 +3576,7 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
     expectedEntryCount: integer('expected_entry_count').notNull(),
     readyEntryCount: integer('ready_entry_count').notNull(),
     emptyEntryCount: integer('empty_entry_count').notNull(),
+    notApplicableEntryCount: integer('not_applicable_entry_count').default(0).notNull(),
     expectedTournamentCount: integer('expected_tournament_count').notNull(),
     readyTournamentCount: integer('ready_tournament_count').notNull(),
     contentSha256: text('content_sha256').notNull(),
@@ -3633,6 +3634,10 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
     check(
       'my_fpl_snapshot_publications_counts_check',
       sql`expected_entry_count >= 0 AND ready_entry_count >= 0 AND empty_entry_count >= 0 AND ready_entry_count + empty_entry_count = expected_entry_count AND expected_tournament_count >= 0 AND ready_tournament_count >= 0 AND ready_tournament_count <= expected_tournament_count`,
+    ),
+    check(
+      'my_fpl_snapshot_publications_eligibility_counts_check',
+      sql`not_applicable_entry_count >= 0`,
     ),
     check('my_fpl_snapshot_publications_hash_check', sql`content_sha256 ~ '^[0-9a-f]{64}$'::text`),
     check(
