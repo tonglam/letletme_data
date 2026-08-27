@@ -61,8 +61,19 @@ export async function scheduleManagerLiveContinuation(
 export const shouldRetryFinalizedTournamentManagerLive = (
   result: Pick<ManagerLiveResolveResult, 'partial' | 'errorCode' | 'tournamentCoverage'>,
 ): boolean => {
-  if (result.errorCode === 'UPSTREAM_UNAVAILABLE') return true;
   const coverage = result.tournamentCoverage;
+  // A finalized tournament is complete when the durable eligible denominator
+  // is resolved. Do not keep a Bull retry chain alive for a stale/secondary
+  // error once that fenced coverage is already complete (for example, a late
+  // entrant that is NOT_APPLICABLE for this historical event).
+  if (
+    !result.partial &&
+    coverage?.state === 'COMPLETE' &&
+    coverage.resolvedEntries >= coverage.expectedEntries
+  ) {
+    return false;
+  }
+  if (result.errorCode === 'UPSTREAM_UNAVAILABLE') return true;
   return (
     result.partial ||
     coverage === undefined ||
