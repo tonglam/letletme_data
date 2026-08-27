@@ -188,8 +188,10 @@ runtime_worker_services() {
     done
     services=("${filtered[@]}")
   fi
+  # Do not use grep -q here: with pipefail, an early grep exit can turn the
+  # compose producer's SIGPIPE into a false negative and omit this consumer.
   if [[ "${RUNTIME_INCLUDE_MEDIA_WORKER:-auto}" != false ]] \
-    && compose config --services | grep -qx 'media-worker'; then
+    && compose config --services | grep -x 'media-worker' >/dev/null; then
     services+=(media-worker)
   fi
   printf '%s\n' "${services[@]}"
