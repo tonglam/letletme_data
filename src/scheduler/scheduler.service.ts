@@ -957,19 +957,36 @@ export function orderSchedulerDefinitionsByEarliestDue(
   definitions: readonly ScheduledJobDefinition[],
   candidates: readonly { jobName: string; earliestDueAt: Date }[],
 ): readonly ScheduledJobDefinition[] {
-  const dueByName = new Map(
-    candidates.map((candidate) => [candidate.jobName, candidate.earliestDueAt.getTime()]),
-  );
+  const dueByName = new Map<string, number>();
+  for (const candidate of candidates) {
+    const dueAt = candidate.earliestDueAt.getTime();
+    const previous = dueByName.get(candidate.jobName);
+    // Candidate queries normally return one row per job, but keeping the
+    // earliest value here makes the ordering safe if a future query adds a
+    // scope dimension or returns duplicate candidates.
+    if (previous === undefined || dueAt < previous) dueByName.set(candidate.jobName, dueAt);
+  }
+  const criticalityRank: Record<ScheduledJobDefinition['criticality'], number> = {
+    critical: 0,
+    normal: 1,
+    maintenance: 2,
+  };
   return definitions
     .map((definition, index) => ({
       definition,
       index,
       dueAt: dueByName.get(definition.name) ?? Number.POSITIVE_INFINITY,
+      dispatchDeadline:
+        (dueByName.get(definition.name) ?? Number.POSITIVE_INFINITY) +
+        (contractForSchedulerJob(definition.name)?.dispatchWithinMs ?? 0),
     }))
     .sort(
       (left, right) =>
-        left.dueAt - right.dueAt ||
+        left.dispatchDeadline - right.dispatchDeadline ||
+        criticalityRank[left.definition.criticality] -
+          criticalityRank[right.definition.criticality] ||
         (left.definition.claimPriority ?? 100) - (right.definition.claimPriority ?? 100) ||
+        left.definition.name.localeCompare(right.definition.name) ||
         left.index - right.index,
     )
     .map(({ definition }) => definition);
