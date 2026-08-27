@@ -130,6 +130,9 @@ export type MyFplSnapshotOperationalStatus = Readonly<{
   coverageState: MyFplSnapshotCoverageState;
   pendingOutboxCount: number;
   outboxAttempts: number;
+  /** Pending Redis invalidations left by committed tournament deletions. */
+  pendingInvalidationCount: number;
+  invalidationAttempts: number;
   finalSla: 'NOT_DUE' | 'DUE' | 'MET' | 'BREACHED';
 }>;
 
@@ -1616,6 +1619,8 @@ export async function getMyFplSnapshotOperationalStatus(
       missing_active_entry_count: number;
       pending_outbox_count: number;
       outbox_attempts: number;
+      pending_invalidation_count: number;
+      invalidation_attempts: number;
     }[]
   >`
     SELECT event.event_id, event.deadline_time, event.finished, event.data_checked,
@@ -1626,7 +1631,10 @@ export async function getMyFplSnapshotOperationalStatus(
            coverage.current_entry_count, coverage.not_applicable_entry_count,
            coverage.missing_active_entry_count,
            COALESCE(outbox.pending_outbox_count, 0)::integer AS pending_outbox_count,
-           COALESCE(outbox.outbox_attempts, 0)::integer AS outbox_attempts
+           COALESCE(outbox.outbox_attempts, 0)::integer AS outbox_attempts,
+           COALESCE(invalidation.pending_invalidation_count, 0)::integer
+             AS pending_invalidation_count,
+           COALESCE(invalidation.invalidation_attempts, 0)::integer AS invalidation_attempts
     FROM fpl.events event
     LEFT JOIN competition.my_fpl_snapshot_publications publication
       ON publication.season_id = event.season_id
@@ -1660,6 +1668,14 @@ export async function getMyFplSnapshotOperationalStatus(
       WHERE outbox_row.season_id = event.season_id
         AND outbox_row.event_id = event.event_id
     ) outbox ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT count(*) FILTER (WHERE status IN ('PENDING', 'PROCESSING', 'FAILED'))::integer
+               AS pending_invalidation_count,
+             COALESCE(max(attempts), 0)::integer AS invalidation_attempts
+      FROM competition.my_fpl_snapshot_invalidation_outbox invalidation_row
+      WHERE invalidation_row.season_id = event.season_id
+        AND invalidation_row.event_id = event.event_id
+    ) invalidation ON TRUE
     WHERE event.season_id = ${season.seasonId}
     ORDER BY event.event_id
   `;
@@ -1703,6 +1719,8 @@ export async function getMyFplSnapshotOperationalStatus(
       coverageState: resolveMyFplSnapshotCoverageState(row.kind, pendingCorrectionEntryCount),
       pendingOutboxCount: row.pending_outbox_count,
       outboxAttempts: row.outbox_attempts,
+      pendingInvalidationCount: row.pending_invalidation_count,
+      invalidationAttempts: row.invalidation_attempts,
       finalSla,
     };
   });

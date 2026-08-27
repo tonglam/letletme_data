@@ -281,6 +281,50 @@ describe('tournament management service', () => {
     expect(calls).toEqual(['delete', 'refresh-views']);
   });
 
+  test('keeps DELETE successful when committed Redis invalidation is pending', async () => {
+    const calls: string[] = [];
+    const service = createTestService(
+      createRepository({
+        deleteOwned: async () => ({
+          status: 'deleted',
+          tournament,
+          invalidationOutboxIds: ['00000000-0000-4000-8000-000000000319'],
+        }),
+      }),
+      {
+        dispatchInvalidations: async (options) => {
+          calls.push(`dispatch:${options.outboxIds?.length ?? 0}`);
+          return { claimed: 1, delivered: 0, superseded: 0, failed: 1, remaining: 1 };
+        },
+        refreshViews: async () => {
+          calls.push('refresh-views');
+        },
+      },
+    );
+
+    await expect(service.deleteTournament(42, { adminEntryId: 123 })).resolves.toEqual(tournament);
+    expect(calls).toEqual(['dispatch:1', 'refresh-views']);
+  });
+
+  test('reconciles pending invalidation receipts when DELETE is retried', async () => {
+    const calls: string[] = [];
+    const service = createTestService(createRepository({ findById: async () => null }), {
+      reconcileInvalidations: async (_season, tournamentId) => {
+        calls.push(`reconcile:${tournamentId}`);
+        return { claimed: 1, delivered: 1, superseded: 0, failed: 0, remaining: 0 };
+      },
+      repairDeletedViews: async (tournamentId) => {
+        calls.push(`repair-views:${tournamentId}`);
+        return true;
+      },
+    });
+
+    await expect(
+      service.deleteTournament(42, { adminEntryId: tournament.adminEntryId }),
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(calls).toEqual(['reconcile:42', 'repair-views:42']);
+  });
+
   test('rejects deletion from a different FPL entry', async () => {
     const service = createTestService(
       createRepository({ deleteOwned: async () => ({ status: 'forbidden' }) }),

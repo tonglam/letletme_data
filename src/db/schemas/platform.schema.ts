@@ -3712,6 +3712,76 @@ export const myFplSnapshotPublicationOutboxInCompetition = competition.table(
   ],
 );
 
+/**
+ * Durable tombstones for Redis manifests removed by tournament deletion.
+ *
+ * There is intentionally no foreign key to a publication or tournament: the
+ * deletion transaction removes both records, while this receipt must remain
+ * available for a later Redis retry.
+ */
+export const myFplSnapshotInvalidationOutboxInCompetition = competition.table(
+  'my_fpl_snapshot_invalidation_outbox',
+  {
+    outboxId: uuid('outbox_id').defaultRandom().primaryKey().notNull(),
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    reason: text().default('TOURNAMENT_DELETED').notNull(),
+    status: text().default('PENDING').notNull(),
+    attempts: integer().default(0).notNull(),
+    leaseOwner: text('lease_owner'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
+    availableAt: timestamp('available_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true, mode: 'date' }),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('my_fpl_snapshot_invalidation_outbox_revision_key').on(
+      table.seasonId,
+      table.eventId,
+      table.revision,
+    ),
+    index('my_fpl_snapshot_invalidation_outbox_pending_idx')
+      .on(table.availableAt, table.outboxId)
+      .where(sql`status IN ('PENDING', 'FAILED') AND delivered_at IS NULL`),
+    index('my_fpl_snapshot_invalidation_outbox_reclaim_idx')
+      .on(table.leaseExpiresAt, table.outboxId)
+      .where(sql`status = 'PROCESSING' AND delivered_at IS NULL`),
+    index('my_fpl_snapshot_invalidation_outbox_tournament_idx').on(
+      table.seasonId,
+      table.tournamentId,
+      table.status,
+      table.outboxId,
+    ),
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'my_fpl_snapshot_invalidation_outbox_season_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'my_fpl_snapshot_invalidation_outbox_event_fk',
+    }),
+    check('my_fpl_snapshot_invalidation_outbox_tournament_id_check', sql`tournament_id > 0`),
+    check('my_fpl_snapshot_invalidation_outbox_reason_check', sql`reason = 'TOURNAMENT_DELETED'`),
+    check(
+      'my_fpl_snapshot_invalidation_outbox_status_check',
+      sql`status = ANY (ARRAY['PENDING'::text, 'PROCESSING'::text, 'DELIVERED'::text, 'SUPERSEDED'::text, 'FAILED'::text])`,
+    ),
+    check('my_fpl_snapshot_invalidation_outbox_attempts_check', sql`attempts >= 0`),
+    check(
+      'my_fpl_snapshot_invalidation_outbox_lease_check',
+      sql`(lease_owner IS NULL AND lease_expires_at IS NULL) OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)`,
+    ),
+  ],
+);
+
 export const myFplSnapshotEntriesInCompetition = competition.table(
   'my_fpl_snapshot_entries',
   {
