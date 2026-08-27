@@ -27,6 +27,7 @@ import {
   persistPriceChangePublication,
   PriceChangeCorePublicationRequiredError,
   priceChangeTriggerFingerprint,
+  resolvePriceChangeSourceRunId,
 } from '../services/price-change-predictions.service';
 import {
   loadPriceChangeHotSource,
@@ -455,7 +456,7 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
         season,
         hotSource,
         job.data.source === 'manual' ? 'manual' : 'queue',
-        job.data.runId,
+        resolvePriceChangeSourceRunId(job.data.runId, activeTarget.obligation.runId),
         freshnessWindowId,
         freshnessWindowIds,
       );

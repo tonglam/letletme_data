@@ -974,6 +974,22 @@ export async function getPriceChangePredictions(): Promise<PriceChangeBoard> {
   return legacy ?? unavailableBoard();
 }
 
+/**
+ * Resolve the durable source-run identity for a latest-wins price dispatch.
+ *
+ * A Bull retry can outlive the obligation that originally created its
+ * payload. Once the lane advances, the active obligation owns the only run
+ * that may publish; reusing the stale payload run would attempt to publish
+ * from a run already marked `skipped` and turn a controlled supersession into
+ * a poison failure.
+ */
+export function resolvePriceChangeSourceRunId(
+  jobRunId: string | undefined,
+  activeObligationRunId: string | null | undefined,
+): string | undefined {
+  return activeObligationRunId ?? jobRunId;
+}
+
 export async function preparePriceChangePublication(
   season: FplSeasonRef,
   dependencies: PriceChangePublicationDependencies = defaultDependencies,

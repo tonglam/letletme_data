@@ -10,6 +10,7 @@ import {
   priceChangePrimaryDeadline,
   priceChangeTriggerFingerprint,
   priceChangeValueFingerprint,
+  resolvePriceChangeSourceRunId,
   shouldPublishPriceChangeHotSnapshot,
   PriceChangePredictionValidationError,
   PRICE_CHANGE_MAX_AGE_MS,
@@ -98,6 +99,14 @@ function bootstrapFixture(overrides: Record<string, unknown> = {}): FPLBootstrap
 }
 
 describe('price-change prediction normalization', () => {
+  it('uses the active obligation run after a latest-wins retry advances the lane', () => {
+    expect(resolvePriceChangeSourceRunId('stale-job-run', 'active-obligation-run')).toBe(
+      'active-obligation-run',
+    );
+    expect(resolvePriceChangeSourceRunId('job-run', null)).toBe('job-run');
+    expect(resolvePriceChangeSourceRunId(undefined, undefined)).toBeUndefined();
+  });
+
   it('only changes the hot trigger when official prices or player IDs change', () => {
     const baseline = bootstrapFixture();
     const transferOnly = bootstrapFixture({ transfers_in_event: 99, transfers_out_event: 1 });
