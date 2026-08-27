@@ -1363,3 +1363,63 @@ describe('official H2H standings projector', () => {
     expect(projected[0]?.totalNetPoints).toBe(-3);
   });
 });
+
+describe('official H2H request budget', () => {
+  test('keeps locked incremental fetches at least 60% below a full page scan', async () => {
+    const totalPages = 35;
+    const makeClient = () => {
+      const standingsPages: number[] = [];
+      const matchPages: number[] = [];
+      return {
+        calls: { standingsPages, matchPages },
+        client: {
+          getLeagueH2HStandings: async (_leagueId: number, page: number) => {
+            standingsPages.push(page);
+            return {
+              standings: {
+                has_next: false,
+                results: [{ entry: 1 }],
+              },
+              new_entries: { has_next: false, results: [] },
+              league: { id: 34879, name: 'H2H' },
+            } as never;
+          },
+          getLeagueH2HMatches: async (_leagueId: number, page: number) => {
+            matchPages.push(page);
+            return {
+              has_next: page < totalPages,
+              page,
+              results: [
+                {
+                  id: page,
+                  event: Math.min(page, 38),
+                  entry_1_entry: 1,
+                  entry_1_points: 10,
+                  entry_2_entry: null,
+                  entry_2_points: null,
+                  winner: 1,
+                },
+              ],
+            } as never;
+          },
+        },
+      };
+    };
+
+    const full = makeClient();
+    const fullSnapshot = await fetchOfficialH2HSourceSnapshot(34879, full.client);
+    const incremental = makeClient();
+    const incrementalSnapshot = await fetchOfficialH2HSourceSnapshot(34879, incremental.client, {
+      matchPages: [2, 17],
+    });
+
+    const fullRequestCount = full.calls.standingsPages.length + full.calls.matchPages.length;
+    const incrementalRequestCount =
+      incremental.calls.standingsPages.length + incremental.calls.matchPages.length;
+
+    expect(fullSnapshot.matches).toHaveLength(totalPages);
+    expect(incrementalSnapshot.matches.map((match) => match.id)).toEqual([2, 17]);
+    expect(incremental.calls.matchPages).toEqual([2, 17]);
+    expect(incrementalRequestCount).toBeLessThanOrEqual(fullRequestCount * 0.4);
+  });
+});
