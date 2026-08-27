@@ -32,6 +32,8 @@ import {
 } from '../../src/domain/data-contracts';
 import { MAINTENANCE_JOBS } from '../../src/queues/maintenance.queue';
 import { MAINTENANCE_JOB_LANES } from '../../src/jobs/maintenance.jobs';
+import { consumerProbeUrl } from '../../src/services/data-governance.service';
+import { shouldCreateFreshnessWindowForObligation } from '../../src/scheduler/scheduler.service';
 
 describe('GW queue and data governance primitives', () => {
   test('uses one late-entry denominator rule across GW1-GW4', () => {
@@ -330,6 +332,50 @@ describe('GW queue and data governance primitives', () => {
         completeness: 'COMPLETE',
       }),
     ).toBe('MET');
+  });
+
+  test('does not create a freshness window for an old terminal obligation without an identity', () => {
+    expect(
+      shouldCreateFreshnessWindowForObligation({
+        status: 'pending',
+        evidence: {},
+        runId: null,
+        completedAt: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldCreateFreshnessWindowForObligation({
+        status: 'succeeded',
+        evidence: {},
+        runId: null,
+        completedAt: null,
+      }),
+    ).toBe(false);
+    expect(
+      shouldCreateFreshnessWindowForObligation({
+        status: 'succeeded',
+        evidence: { freshnessWindowId: 42 },
+        runId: 'run-id',
+        completedAt: new Date('2026-08-27T00:00:00.000Z'),
+      }),
+    ).toBe(true);
+    expect(
+      shouldCreateFreshnessWindowForObligation({
+        status: 'skipped',
+        evidence: {},
+        runId: null,
+        completedAt: null,
+      }),
+    ).toBe(false);
+  });
+
+  test('builds the scoped Web consumer probe route', () => {
+    expect(consumerProbeUrl('https://web.example/', 'market-price')).toBe(
+      'https://web.example/api/ops/data-contracts/market-price',
+    );
+    expect(consumerProbeUrl('https://web.example', 'entry/data')).toBe(
+      'https://web.example/api/ops/data-contracts/entry%2Fdata',
+    );
   });
 
   test('redacts durable error summaries', () => {

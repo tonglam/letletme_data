@@ -40,6 +40,7 @@ export type SchedulerObligation = Readonly<{
   attempts: number;
   bullJobId: string | null;
   runId: string | null;
+  completedAt: Date | null;
   leaseOwner: string | null;
   leaseExpiresAt: Date | null;
   evidence: Record<string, unknown>;
@@ -81,6 +82,7 @@ function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerOb
     attempts: row.attempts,
     bullJobId: row.bullJobId,
     runId: row.runId,
+    completedAt: row.completedAt,
     leaseOwner: row.leaseOwner,
     leaseExpiresAt: row.leaseExpiresAt,
     evidence: (row.evidence ?? {}) as Record<string, unknown>,
@@ -249,7 +251,7 @@ function checkpointCompleteness(evidence: Record<string, unknown>) {
  * freshness window.  Keep this side-channel best-effort: a telemetry outage
  * must never turn an already committed scheduler completion into a failure.
  */
-async function recordCheckpointFreshnessEvidence(input: {
+export async function recordCheckpointFreshnessEvidence(input: {
   jobName: string;
   evidence: unknown;
   completedAt: Date | null;
