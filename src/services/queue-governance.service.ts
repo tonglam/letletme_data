@@ -4,6 +4,7 @@ import { queueRedisSingleton } from '../queues/redis';
 import { canonicalQueueCatalog } from '../domain/data-contracts';
 import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
+import type { QueueMonitorRuntimeState } from '../utils/runtime-heartbeat';
 
 export type BacklogClass =
   | 'NO_CONSUMER'
@@ -59,8 +60,9 @@ export type QueueHealthState = 'OBSERVED' | 'DISABLED' | 'UNOBSERVED';
 export function resolveQueueHealthState(input: {
   snapshot: QueueHealthSnapshot | null;
   monitorEnabled?: boolean;
+  monitorState?: QueueMonitorRuntimeState;
 }): QueueHealthState {
-  if (input.monitorEnabled === false) return 'DISABLED';
+  if (input.monitorEnabled === false || input.monitorState === 'DISABLED') return 'DISABLED';
   return input.snapshot ? 'OBSERVED' : 'UNOBSERVED';
 }
 

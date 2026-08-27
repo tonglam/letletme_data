@@ -11,10 +11,17 @@ export type RuntimeRole =
   | 'officialH2HWorker'
   | 'contentWorker'
   | 'mediaWorker';
+export type QueueMonitorRuntimeState = 'ENABLED' | 'DISABLED' | 'STARTING';
+export type RuntimeHeartbeatDetails = Readonly<{
+  queueMonitors?: Readonly<Record<string, QueueMonitorRuntimeState>>;
+}>;
+export type RuntimeHeartbeatDetailsProvider = () => RuntimeHeartbeatDetails;
 export type RuntimeHeartbeat = Readonly<{
   role: RuntimeRole;
   releaseSha: string;
   lastSeenAt: string;
+  /** Actual optional queue monitor state reported by the owning worker. */
+  queueMonitors?: Readonly<Record<string, QueueMonitorRuntimeState>>;
 }>;
 
 function heartbeatKey(role: RuntimeRole): string {
@@ -30,14 +37,19 @@ export function runtimeReleaseRevision(): string {
   );
 }
 
-export async function writeRuntimeHeartbeat(role: RuntimeRole): Promise<void> {
+export async function writeRuntimeHeartbeat(
+  role: RuntimeRole,
+  details: RuntimeHeartbeatDetails = {},
+): Promise<void> {
   const redis = await queueRedisSingleton.getClient();
+  const queueMonitors = details.queueMonitors ? { ...details.queueMonitors } : undefined;
   await redis.set(
     heartbeatKey(role),
     JSON.stringify({
       role,
       releaseSha: runtimeReleaseRevision(),
       lastSeenAt: new Date().toISOString(),
+      ...(queueMonitors ? { queueMonitors } : {}),
     }),
     'EX',
     RUNTIME_HEARTBEAT_TTL_SECONDS,
@@ -73,21 +85,39 @@ export async function readRuntimeHeartbeat(role: RuntimeRole): Promise<RuntimeHe
     ) {
       return null;
     }
-    return parsed as RuntimeHeartbeat;
+    const queueMonitors: Record<string, QueueMonitorRuntimeState> = {};
+    if (
+      parsed.queueMonitors &&
+      typeof parsed.queueMonitors === 'object' &&
+      !Array.isArray(parsed.queueMonitors)
+    ) {
+      for (const [queueName, state] of Object.entries(parsed.queueMonitors)) {
+        if (state === 'ENABLED' || state === 'DISABLED' || state === 'STARTING') {
+          queueMonitors[queueName] = state;
+        }
+      }
+    }
+    return {
+      role: parsed.role,
+      releaseSha: parsed.releaseSha,
+      lastSeenAt: parsed.lastSeenAt,
+      ...(Object.keys(queueMonitors).length > 0 ? { queueMonitors } : {}),
+    };
   } catch (error) {
     logError('Runtime heartbeat probe failed', error, { role });
     return null;
   }
 }
 
-export function startRuntimeHeartbeat(role: RuntimeRole, intervalMs = 30_000): () => void {
-  void writeRuntimeHeartbeat(role).catch((error) =>
-    logError('Runtime heartbeat write failed', error, { role }),
-  );
+export function startRuntimeHeartbeat(
+  role: RuntimeRole,
+  intervalMs = 30_000,
+  detailsProvider?: RuntimeHeartbeatDetailsProvider,
+): () => void {
+  const write = () => writeRuntimeHeartbeat(role, detailsProvider?.() ?? {});
+  void write().catch((error) => logError('Runtime heartbeat write failed', error, { role }));
   const timer = setInterval(() => {
-    void writeRuntimeHeartbeat(role).catch((error) =>
-      logError('Runtime heartbeat write failed', error, { role }),
-    );
+    void write().catch((error) => logError('Runtime heartbeat write failed', error, { role }));
   }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);

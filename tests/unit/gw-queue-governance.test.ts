@@ -135,6 +135,10 @@ describe('GW queue and data governance primitives', () => {
 
   test('distinguishes disabled optional monitors from missing observations', () => {
     expect(resolveQueueHealthState({ snapshot: null, monitorEnabled: false })).toBe('DISABLED');
+    expect(resolveQueueHealthState({ snapshot: null, monitorState: 'DISABLED' })).toBe('DISABLED');
+    expect(resolveQueueHealthState({ snapshot: null, monitorState: 'STARTING' })).toBe(
+      'UNOBSERVED',
+    );
     expect(resolveQueueHealthState({ snapshot: null, monitorEnabled: true })).toBe('UNOBSERVED');
     expect(
       resolveQueueHealthState({

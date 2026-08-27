@@ -38,8 +38,6 @@ import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
-import { contentMediaTranscriptQueueName } from '../queues/names';
-import { getContentRuntimeFlags } from '../content/config';
 import { resolveQueueHealthState } from './queue-governance.service';
 
 type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
@@ -371,22 +369,19 @@ export async function getJobsStatus(
   }
 
   const connection = getQueueConnection();
-  // The API and content worker share the deployment environment. This lets
-  // status distinguish an intentionally disabled optional queue from an
-  // enabled queue whose monitor has gone missing, without fabricating a
-  // synthetic healthy snapshot.
-  const contentRuntimeFlags = getContentRuntimeFlags();
   const queues = await Promise.all(
     allQueueNames.map(async (name) => {
       const queue = new Queue(name, { connection });
       try {
         const healthSnapshot = await readQueueHealthSnapshot(name);
         const admission = await readQueueAdmission(name);
+        // Optional content monitors report their actual state in the content
+        // worker's shared Redis heartbeat. Never read the API process's env
+        // here: a rollout can recreate content-worker without recreating API.
+        const monitorState = contentWorkerHeartbeat?.queueMonitors?.[name];
         const healthState = resolveQueueHealthState({
           snapshot: healthSnapshot,
-          ...(name === contentMediaTranscriptQueueName
-            ? { monitorEnabled: contentRuntimeFlags.podcastTranscriptEnabled }
-            : {}),
+          monitorState,
         });
         return {
           name,
@@ -401,6 +396,7 @@ export async function getJobsStatus(
           ),
           health: healthSnapshot,
           healthState,
+          monitorState: monitorState ?? null,
           admission,
         };
       } finally {

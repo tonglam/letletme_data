@@ -14,12 +14,14 @@ import { assertContentRuntimeFlags, getContentRuntimeFlags } from './content/con
 import { dispatchPublicationOutbox } from './content/publication/revalidation';
 import {
   closeContentHttpAcquisitionQueue,
+  contentHttpAcquisitionQueueName,
   createFormalHttpWorkerRuntime,
   enqueueFormalHttpRun,
   getContentHttpAcquisitionQueue,
 } from './content/workers/content-http-acquisition.queue';
 import {
   closeContentXQueue,
+  contentXScanQueueName,
   createConfiguredHostGrokRunner,
   createFormalXWorkerRuntime,
   enqueueFormalXRun,
@@ -27,6 +29,7 @@ import {
 } from './content/workers/content-x.queue';
 import {
   closeContentMediaTranscriptQueue,
+  contentMediaTranscriptQueueName,
   createFormalMediaWorkerRuntime,
   enqueueFormalMediaRun,
   getContentMediaTranscriptQueue,
@@ -34,7 +37,7 @@ import {
 import { databaseSingleton } from './db/singleton';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
-import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
+import { startRuntimeHeartbeat, type QueueMonitorRuntimeState } from './utils/runtime-heartbeat';
 import { startQueueMonitor } from './utils/queue-monitor';
 
 const FORMAL_SCHEDULER_INTERVAL_MS = 30_000;
@@ -44,10 +47,21 @@ const PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS = 30_000;
 const flags = getContentRuntimeFlags();
 assertContentRuntimeFlags(flags);
 
+const queueMonitorStates: Record<string, QueueMonitorRuntimeState> = {
+  [contentXScanQueueName]:
+    flags.pipelineEnabled && flags.xScanEnabled && flags.realGrokEnabled ? 'STARTING' : 'DISABLED',
+  [contentHttpAcquisitionQueueName]:
+    flags.pipelineEnabled && flags.httpAcquisitionEnabled ? 'STARTING' : 'DISABLED',
+  [contentMediaTranscriptQueueName]:
+    flags.pipelineEnabled && flags.podcastTranscriptEnabled ? 'STARTING' : 'DISABLED',
+};
+
 const stopHeartbeat = startWorkerHeartbeat({
   path: process.env.WORKER_HEARTBEAT_PATH ?? '/tmp/content-worker-heartbeat',
 });
-const stopRuntimeHeartbeat = startRuntimeHeartbeat('contentWorker');
+const stopRuntimeHeartbeat = startRuntimeHeartbeat('contentWorker', 30_000, () => ({
+  queueMonitors: queueMonitorStates,
+}));
 
 let manifestBundle: BriefingManifestBundle | null = null;
 let xBudgetPolicy: XBudgetPolicy | null = null;
@@ -150,6 +164,7 @@ async function ensureFormalXRuntime(): Promise<void> {
     try {
       const executor = createConfiguredHostGrokRunner();
       formalXRuntime = createFormalXWorkerRuntime(executor, xBudgetPolicy ?? undefined);
+      queueMonitorStates[contentXScanQueueName] = 'ENABLED';
       queueMonitors.push(
         startQueueMonitor({
           queue: getContentXScanQueue(),
@@ -245,6 +260,7 @@ async function startFormalAcquisition(): Promise<void> {
 
   if (flags.httpAcquisitionEnabled) {
     formalHttpRuntime = createFormalHttpWorkerRuntime();
+    queueMonitorStates[contentHttpAcquisitionQueueName] = 'ENABLED';
     queueMonitors.push(
       startQueueMonitor({
         queue: getContentHttpAcquisitionQueue(),
@@ -256,6 +272,7 @@ async function startFormalAcquisition(): Promise<void> {
   }
   if (flags.podcastTranscriptEnabled) {
     formalMediaRuntime = createFormalMediaWorkerRuntime();
+    queueMonitorStates[contentMediaTranscriptQueueName] = 'ENABLED';
     queueMonitors.push(
       startQueueMonitor({
         queue: getContentMediaTranscriptQueue(),
