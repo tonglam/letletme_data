@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { selectCanonicalPriceChangeContext } from '../../src/services/jobs-status.service';
+import {
+  safeSchedulerLaneErrorCode,
+  selectCanonicalPriceChangeContext,
+} from '../../src/services/jobs-status.service';
 
 const dbActive = {
   publicationId: '00000000-0000-4000-8000-000000000010',
@@ -82,5 +85,21 @@ describe('selectCanonicalPriceChangeContext', () => {
     });
 
     expect(result).toEqual({ context: null, publicationId: null, source: 'none' });
+  });
+});
+
+describe('safeSchedulerLaneErrorCode', () => {
+  test('does not expose persisted lane error text or identifiers', () => {
+    const raw =
+      'provider https://example.invalid/entry/123456 failed for entry_id=987654 token=secret-value';
+
+    expect(safeSchedulerLaneErrorCode(raw)).toBe('TRANSIENT_INFRA');
+    expect(safeSchedulerLaneErrorCode(raw)).not.toContain('123456');
+    expect(safeSchedulerLaneErrorCode(raw)).not.toContain('secret-value');
+  });
+
+  test('keeps an empty lane error distinguishable from a classified error', () => {
+    expect(safeSchedulerLaneErrorCode(null)).toBeNull();
+    expect(safeSchedulerLaneErrorCode('')).toBeNull();
   });
 });
