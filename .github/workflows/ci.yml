@@ -48,6 +48,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Shell syntax and static analysis
+        run: scripts/check-shell-scripts.sh
+
       - name: Build hermetic unit-test image
         run: docker build --target test --tag letletme-data:test .
 

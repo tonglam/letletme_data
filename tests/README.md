@@ -47,12 +47,10 @@ tests/
 │   ├── *.test.ts      # Domain, transformer, repository structure, API handler tests
 │   └── ...
 ├── integration/       # End-to-end tests that write real data
-│   ├── helpers/       # Env guard and recorded FPL client override
+│   ├── helpers/       # Integration environment guard and test helpers
 │   └── *.test.ts      # Service + worker + cache + DB tests
 ├── fixtures/          # Static FPL-shaped test data
 │   └── *.fixtures.ts
-└── utils/
-    └── test-config.ts # Shared test config (used by integration env guard)
 ```
 
 ### Unit tests (`tests/unit`)
@@ -98,7 +96,7 @@ database and must complete within five minutes.
 
 ## Hermetic FPL boundary
 
-Integration tests that need FPL payloads should use recorded fixtures from `tests/fixtures/` and override the FPL client methods via `tests/integration/helpers/mock-fpl.ts` instead of calling the real API. This keeps the suite deterministic and removes the dependency on an internet connection.
+Integration tests that need FPL payloads should use recorded fixtures from `tests/fixtures/` and inject provider fakes at the service boundary instead of calling the real API. This keeps the suite deterministic and removes the dependency on an internet connection.
 
 ## Adding tests
 

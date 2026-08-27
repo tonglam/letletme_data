@@ -26,6 +26,7 @@ const sourceMediaBootstrapScript = readFileSync(
   'scripts/bootstrap-briefing-source-media-env.sh',
   'utf8',
 );
+const managedEnvLibrary = readFileSync('scripts/lib/managed-env.sh', 'utf8');
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 const runtimeHealthScript = readFileSync('scripts/verify-runtime-health.sh', 'utf8');
 const composeFile = readFileSync('docker-compose.yml', 'utf8');
@@ -82,9 +83,11 @@ describe('release workflow gates', () => {
     expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_WORKER_ENABLED=false');
     expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_RETENTION_ENABLED=false');
     expect(sourceMediaBootstrapScript).toContain('chmod 600');
-    expect(sourceMediaBootstrapScript).toContain('-nT');
-    expect(sourceMediaBootstrapScript).toContain('--no-target-directory');
-    expect(sourceMediaBootstrapScript).toContain('! -f "$media_env_file"');
+    expect(sourceMediaBootstrapScript).toContain('managed_env_atomic_create');
+    expect(managedEnvLibrary).toContain('-nT');
+    expect(managedEnvLibrary).toContain('--no-target-directory');
+    expect(managedEnvLibrary).toContain('managed_env_atomic_replace');
+    expect(managedEnvLibrary).toContain('managed_env_require_regular_file');
     expect(sourceMediaBootstrapScript).not.toContain('set -x');
     expect(deployScript).toContain('briefing_source_media_health');
     expect(runtimeHealthScript).toContain('attempts=${HEALTH_ATTEMPTS:-90}');

@@ -4,6 +4,10 @@ set -euo pipefail
 
 mode=${1:-}
 env_file=${2:-}
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# shellcheck source=lib/managed-env.sh
+source "$script_dir/lib/managed-env.sh"
 
 case "$mode" in
   status | shadow-http | host-shadow | disabled) ;;
@@ -13,35 +17,8 @@ case "$mode" in
     ;;
 esac
 
-if [[ -z "$env_file" || ! -f "$env_file" || -L "$env_file" ]]; then
-  echo 'briefing rollout refused: env file must be an existing regular file' >&2
-  exit 1
-fi
-
-file_mode() {
-  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
-}
-
-file_uid() {
-  stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1"
-}
-
-file_gid() {
-  stat -c '%g' "$1" 2>/dev/null || stat -f '%g' "$1"
-}
-
-file_links() {
-  stat -c '%h' "$1" 2>/dev/null || stat -f '%l' "$1"
-}
-
-target_mode=$(file_mode "$env_file")
-target_uid=$(file_uid "$env_file")
-target_gid=$(file_gid "$env_file")
-target_mode_value=$((8#$target_mode))
-test $((target_mode_value & 077)) -eq 0
-test "$(file_links "$env_file")" -eq 1
-test "$target_uid" -eq "$(id -u)"
-test "$target_gid" -eq "$(id -g)"
+managed_env_capture_target "$env_file" 'briefing rollout refused: env file' || exit 1
+target_mode=$MANAGED_ENV_TARGET_MODE
 
 managed_keys=(
   CONTENT_PIPELINE_ENABLED
@@ -206,14 +183,16 @@ if [[ "$mode" != status ]]; then
     printf '%s\n' "$setting" >>"$temporary_file"
   done
   chmod "$target_mode" "$temporary_file"
-  test "$(file_mode "$temporary_file")" = "$target_mode"
-  test "$(file_uid "$temporary_file")" -eq "$target_uid"
-  test "$(file_gid "$temporary_file")" -eq "$target_gid"
+  managed_env_assert_temp_metadata "$temporary_file" \
+    'briefing rollout refused: replacement file'
 
   if cmp -s "$env_file" "$temporary_file"; then
     rm -f -- "$temporary_file"
   else
-    mv "$temporary_file" "$env_file"
+    managed_env_atomic_replace \
+      "$temporary_file" \
+      "$env_file" \
+      'briefing rollout refused: env file'
     changed=true
   fi
   temporary_file=''
