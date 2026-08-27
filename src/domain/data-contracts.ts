@@ -215,7 +215,14 @@ export const dataContractRegistry = [
       'post-match-consolidation',
     ],
     publicationEvidence: ['active snapshot revision', 'scope manifest', 'outbox'],
-    consumerEvidence: publicConsumers('MyFplSnapshotMeta', 'My FPL pages'),
+    consumerEvidence: {
+      ...publicConsumers('MyFplSnapshotMeta', 'My FPL pages'),
+      // My FPL is published through an immutable Redis manifest/outbox before
+      // the GraphQL and Web loaders can observe the active snapshot. Keep that
+      // hop in the freshness contract so a PostgreSQL-only checkpoint cannot
+      // be reported as consumer-ready.
+      redis: 'active snapshot manifest and publication outbox',
+    },
     retry: { maxGenerations: 6, policy: 'latest snapshot target wins' },
     compensator: 'snapshot rebuild and outbox reconcile',
     visibility: 'public',
