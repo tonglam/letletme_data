@@ -177,6 +177,58 @@ describe('scheduler obligation generation fencing', () => {
     expect(running[0]?.status).toBe('running');
   });
 
+  test('clears current errors when a terminal obligation succeeds', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, last_error, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'entry-results',
+        'integration:terminal-error-state',
+        'event-1-final-error-state',
+        'integration',
+        'UTC',
+        'running',
+        'reconcile',
+        clock_timestamp(),
+        0,
+        1,
+        NULL,
+        '{}'::jsonb
+      )
+    `;
+
+    expect(
+      await completeSchedulerObligation({
+        obligationId: OBLIGATION_ID,
+        generation: 0,
+        status: 'succeeded',
+      }),
+    ).toBe(true);
+
+    const rows = await sql<Array<{ status: string; last_error: string | null }>>`
+      SELECT status, last_error
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]).toEqual({ status: 'succeeded', last_error: null });
+
+    let rejected = false;
+    try {
+      await sql`
+        UPDATE ops.scheduler_obligations
+        SET last_error = 'must be rejected'
+        WHERE obligation_id = ${OBLIGATION_ID}::uuid
+      `;
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+  });
+
   test('accepts enqueue acknowledgement after a fast worker crosses its fence', async () => {
     const sql = await getDbClient();
     await sql`

@@ -531,6 +531,10 @@ export const schedulerObligationsInOps = ops.table(
     check('scheduler_obligations_generation_check', sql`generation >= 0`),
     check('scheduler_obligations_attempts_check', sql`attempts >= 0`),
     check(
+      'scheduler_obligations_last_error_status_check',
+      sql`last_error IS NULL OR status IN ('failed'::text, 'irrecoverable'::text)`,
+    ),
+    check(
       'scheduler_obligations_evidence_object_check',
       sql`jsonb_typeof(evidence) = 'object'::text`,
     ),
