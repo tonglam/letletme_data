@@ -194,9 +194,19 @@ describe('production environment preflight', () => {
     expect(configuredRuntimeUrl).toBeLessThan(preflight);
     expect(identityContract).toBeGreaterThan(preflight);
     expect(stopServices).toBeGreaterThan(identityContract);
-    expect(databaseQuiescence).toBeGreaterThan(stopServices);
-    expect(redisQuiescence).toBeGreaterThan(databaseQuiescence);
-    expect(migrate).toBeGreaterThan(redisQuiescence);
+    expect(databaseQuiescence).toBeLessThan(stopServices);
+    expect(redisQuiescence).toBeLessThan(stopServices);
+    const postStopDatabaseQuiescence = workflow.indexOf(
+      'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
+      stopServices,
+    );
+    const postStopRedisQuiescence = workflow.indexOf(
+      'bun scripts/assert-queue-quiescence.ts --redis-only --scoped',
+      stopServices,
+    );
+    expect(postStopDatabaseQuiescence).toBeGreaterThan(stopServices);
+    expect(postStopRedisQuiescence).toBeGreaterThan(postStopDatabaseQuiescence);
+    expect(migrate).toBeGreaterThan(postStopRedisQuiescence);
     expect(canonicalContract).toBeGreaterThan(migrate);
     expect(roleVerify).toBeGreaterThan(canonicalContract);
     expect(publishCore).toBeGreaterThan(canonicalContract);
@@ -206,6 +216,9 @@ describe('production environment preflight', () => {
     expect(workflow).not.toContain('letletme-vps-ops');
     expect(workflow).not.toContain('flock -w 300 9');
     expect(workflow).toContain('deployment_started=true');
+    expect(workflow).toContain('services_stopped=false');
+    expect(workflow).toContain('services_stopped=true');
+    expect(workflow).not.toContain('restore_before_migration');
     expect(workflow).not.toContain('/usr/local/libexec/vps-maintenance');
     expect(workflow).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(workflow).not.toContain('GRAPHQL_RUNTIME_DATABASE_URL');
@@ -232,6 +245,31 @@ describe('production environment preflight', () => {
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
     const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+    const stopServices = deployScript.indexOf('if ! compose stop -t 45 api worker; then');
+    const databaseQuiescenceCommand =
+      'compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only --scoped';
+    const redisQuiescenceCommand =
+      'compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only --scoped';
+    const databaseQuiescenceBeforeStop = deployScript.lastIndexOf(
+      databaseQuiescenceCommand,
+      stopServices,
+    );
+    const redisQuiescenceBeforeStop = deployScript.lastIndexOf(
+      redisQuiescenceCommand,
+      stopServices,
+    );
+    const databaseQuiescenceAfterStop = deployScript.indexOf(
+      databaseQuiescenceCommand,
+      stopServices,
+    );
+    const redisQuiescenceAfterStop = deployScript.indexOf(redisQuiescenceCommand, stopServices);
+
+    expect(databaseQuiescenceBeforeStop).toBeGreaterThan(0);
+    expect(redisQuiescenceBeforeStop).toBeGreaterThan(databaseQuiescenceBeforeStop);
+    expect(databaseQuiescenceBeforeStop).toBeLessThan(stopServices);
+    expect(redisQuiescenceBeforeStop).toBeLessThan(stopServices);
+    expect(databaseQuiescenceAfterStop).toBeGreaterThan(stopServices);
+    expect(redisQuiescenceAfterStop).toBeGreaterThan(databaseQuiescenceAfterStop);
 
     expect(deployScript).toMatch(
       /if ! compose stop -t 45 api worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
@@ -271,6 +309,12 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('load_backup_settings');
     expect(deployScript).toContain('read_env_setting DATABASE_BACKUP_DIR "$ENV_FILE"');
     expect(deployScript).toContain('DEPLOY_COMMITTED=false');
+    expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=false');
+    expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=true');
+    expect(deployScript).toContain(
+      '"$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true',
+    );
+    expect(deployScript).not.toContain('git -C "$PROJECT_DIR" reset --hard');
     expect(deployScript).toContain('deploy-host-grok-runner.sh');
     expect(deployScript).toContain('run-briefing-control-probe.sh');
     expect(deployScript).toContain('rearm-briefing-x-after-probe.sh');
