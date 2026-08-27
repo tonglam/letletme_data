@@ -19,6 +19,12 @@ export function clientSignalRetentionCutoffs(now: Date): {
   };
 }
 
+function clientSignalSqlTimestamp(value: Date, label: string): string {
+  const timestamp = value.getTime();
+  if (!Number.isFinite(timestamp)) throw new Error(`Client signal ${label} is invalid`);
+  return value.toISOString();
+}
+
 const CLIENTS = ['web', 'wechat_miniprogram'] as const;
 const SURFACES = [
   'home',
@@ -310,7 +316,7 @@ export async function ingestClientSignalBatch(
         .map((row) => {
           const start = parameters.length + 1;
           parameters.push(
-            row.windowStart,
+            clientSignalSqlTimestamp(row.windowStart, 'window start'),
             row.client,
             row.release,
             row.surface,
@@ -426,12 +432,15 @@ export async function getClientSignalSummary(
   until: Date,
 ): Promise<Record<string, unknown>> {
   const client = await getDbClient();
+  const sinceTimestamp = clientSignalSqlTimestamp(since, 'summary start');
+  const untilTimestamp = clientSignalSqlTimestamp(until, 'summary end');
   const rows = await client<SummaryRow[]>`
     SELECT client, release, surface, metric, device_group, sample_source, result, bucket,
            SUM(sample_count)::bigint AS sample_count,
            SUM(value_sum)::double precision AS value_sum
     FROM ops.client_signal_windows
-    WHERE window_start >= ${since} AND window_start < ${until}
+    WHERE window_start >= ${sinceTimestamp}::timestamptz
+      AND window_start < ${untilTimestamp}::timestamptz
     GROUP BY client, release, surface, metric, device_group, sample_source, result, bucket
   `;
   const grouped = new Map<string, SummaryAccumulator>();

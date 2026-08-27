@@ -10,6 +10,13 @@ import {
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { seasonRepository } from '../repositories/seasons';
 
+export function formatOperationalTimestamp(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const timestamp =
+    value instanceof Date ? value.getTime() : typeof value === 'string' ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
 /**
  * Read-only operational evidence for the live window. The global API-key
  * guard protects this route in production; it intentionally never calls FPL
@@ -94,9 +101,9 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
       lifecycle: lifecycle
         ? {
             state: lifecycle.state,
-            observedAt: lifecycle.observedAt.toISOString(),
-            lastChangedAt: lifecycle.lastChangedAt.toISOString(),
-            nextRefreshAt: lifecycle.nextRefreshAt?.toISOString() ?? null,
+            observedAt: formatOperationalTimestamp(lifecycle.observedAt),
+            lastChangedAt: formatOperationalTimestamp(lifecycle.lastChangedAt),
+            nextRefreshAt: formatOperationalTimestamp(lifecycle.nextRefreshAt),
           }
         : null,
       publication: selectedPublication
@@ -129,7 +136,7 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
           ? {
               checkpointRows: managerRead.value.checkpointRows,
               scopes: managerRead.value.scopes,
-              latestCheckedAt: managerRead.value.latestCheckedAt?.toISOString() ?? null,
+              latestCheckedAt: formatOperationalTimestamp(managerRead.value.latestCheckedAt),
             }
           : null,
         managerState: managerRead.error ? 'UNAVAILABLE' : managerRead.value ? 'AVAILABLE' : 'EMPTY',
