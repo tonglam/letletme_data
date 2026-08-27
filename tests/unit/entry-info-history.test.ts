@@ -17,6 +17,7 @@ describe('entry snapshot history coverage', () => {
   test('accepts preseason and every contiguous event since the entry started', () => {
     expect(() => validateEntryHistoryCoverage(1, 0, [])).not.toThrow();
     expect(() => validateEntryHistoryCoverage(3, 5, history(3, 4, 5))).not.toThrow();
+    expect(() => validateEntryHistoryCoverage(2, 1, [])).not.toThrow();
     expect(() => validateEntryHistoryCoverage(10, 5, [])).not.toThrow();
   });
 
