@@ -315,6 +315,7 @@ export async function advanceSchedulerLane(input: {
           completedAt: dbNow,
           leaseOwner: null,
           leaseExpiresAt: null,
+          lastError: null,
           updatedAt: dbNow,
         })
         .where(
@@ -402,6 +403,7 @@ export async function advanceSchedulerLane(input: {
         })}::jsonb`,
         completedAt: dbNow,
         leaseOwner: null,
+        lastError: null,
         leaseExpiresAt: null,
         updatedAt: dbNow,
       })
@@ -714,6 +716,7 @@ export async function startSchedulerLane(input: {
         bullJobId: String(input.bullJobId),
         runId: input.runId,
         attempts: sql`${schedulerObligationsInOps.attempts} + 1`,
+        lastError: null,
         updatedAt: dbNow,
       })
       .where(
@@ -784,6 +787,7 @@ export async function fenceSchedulerLaneTarget(input: {
           completedAt: dbNow,
           leaseOwner: null,
           leaseExpiresAt: null,
+          lastError: null,
           updatedAt: dbNow,
         })
         .where(
@@ -809,6 +813,7 @@ export async function fenceSchedulerLaneTarget(input: {
         runId: input.runId,
         leaseOwner: null,
         leaseExpiresAt: null,
+        lastError: null,
         updatedAt: dbNow,
       })
       .where(
@@ -907,6 +912,7 @@ export async function completeSchedulerLane(input: {
         completedAt: dbNow,
         leaseOwner: null,
         leaseExpiresAt: null,
+        lastError: null,
         updatedAt: dbNow,
       })
       .where(eq(schedulerObligationsInOps.obligationId, input.activeObligationId));
@@ -1059,11 +1065,15 @@ export async function blockSchedulerLane(input: {
       .set({
         status: 'pending',
         dueAt: new Date(dbNow.getTime() + RETRY_DELAY_MS),
-        lastError: summary,
+        // The blocker is a lane-level admission state, not a failed
+        // obligation attempt. Keep the diagnostic in evidence and on the
+        // lane, while satisfying the obligation error-state invariant.
+        lastError: null,
         leaseOwner: null,
         leaseExpiresAt: null,
         evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
           blockerJobId: input.blockerJobId,
+          blockerError: summary,
           ...(input.blockerEvidence ?? {}),
         })}::jsonb`,
         updatedAt: dbNow,
@@ -1269,6 +1279,7 @@ export async function replaceBlockedSchedulerLaneAfterCoreSourceStale(input: {
         completedAt: dbNow,
         leaseOwner: null,
         leaseExpiresAt: null,
+        lastError: null,
         updatedAt: dbNow,
       })
       .where(
