@@ -336,8 +336,12 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
       throw new Error(`${name} must be a safe integer between 1000 and 7200000`);
     }
   }
-  if (flags.grokTimeoutMs > 240_000) {
-    throw new Error('CONTENT_GROK_TIMEOUT_MS above 240000 requires a separately validated rollout');
+  if (
+    !Number.isSafeInteger(flags.grokTimeoutMs) ||
+    flags.grokTimeoutMs < 1_000 ||
+    flags.grokTimeoutMs > 240_000
+  ) {
+    throw new Error('CONTENT_GROK_TIMEOUT_MS must be a safe integer between 1000 and 240000');
   }
   for (const [name, value] of [
     ['CONTENT_SUPADATA_JOB_POLL_INTERVAL_MS', flags.supadataJobPollIntervalMs],

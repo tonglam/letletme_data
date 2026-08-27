@@ -68,7 +68,14 @@ describe('content worker poll policy', () => {
         grokConcurrency: 2,
         grokTimeoutMs: 240_001,
       }),
-    ).toThrow('CONTENT_GROK_TIMEOUT_MS above 240000');
+    ).toThrow('CONTENT_GROK_TIMEOUT_MS must be a safe integer between 1000 and 240000');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
+        grokConcurrency: 2,
+        grokTimeoutMs: Number.NaN,
+      }),
+    ).toThrow('CONTENT_GROK_TIMEOUT_MS must be a safe integer');
     expect(() =>
       assertContentRuntimeFlags({
         ...flags,
