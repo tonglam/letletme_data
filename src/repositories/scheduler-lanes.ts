@@ -1065,16 +1065,15 @@ export async function blockSchedulerLane(input: {
       .set({
         status: 'pending',
         dueAt: new Date(dbNow.getTime() + RETRY_DELAY_MS),
-        // A blocked lane is deliberately waiting for its Core repair and is
-        // therefore not a failed obligation. Keep the diagnostic in the
-        // structured blocker evidence instead of leaving `last_error` on a
-        // pending row (the obligation invariant reserves that column for
-        // failed/irrecoverable states).
+        // The blocker is a lane-level admission state, not a failed
+        // obligation attempt. Keep the diagnostic in evidence and on the
+        // lane, while satisfying the obligation error-state invariant.
         lastError: null,
         leaseOwner: null,
         leaseExpiresAt: null,
         evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
           blockerJobId: input.blockerJobId,
+          blockerError: summary,
           ...(input.blockerEvidence ?? {}),
         })}::jsonb`,
         updatedAt: dbNow,
@@ -1280,6 +1279,7 @@ export async function replaceBlockedSchedulerLaneAfterCoreSourceStale(input: {
         completedAt: dbNow,
         leaseOwner: null,
         leaseExpiresAt: null,
+        lastError: null,
         updatedAt: dbNow,
       })
       .where(

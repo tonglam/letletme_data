@@ -230,9 +230,13 @@ describe('scheduler latest-wins lanes', () => {
         status: string;
         last_error: string | null;
         blocker_job_id: string | null;
+        blocker_error: string | null;
       }>
     >`
-      SELECT status, last_error, evidence->>'blockerJobId' AS blocker_job_id
+      SELECT status,
+             last_error,
+             evidence->>'blockerJobId' AS blocker_job_id,
+             evidence->>'blockerError' AS blocker_error
       FROM ops.scheduler_obligations
       WHERE obligation_id = ${first.obligationId}::uuid
     `;
@@ -240,6 +244,7 @@ describe('scheduler latest-wins lanes', () => {
       status: 'pending',
       last_error: null,
       blocker_job_id: 'integration-core-repair-stale',
+      blocker_error: 'Core source is older than active publication',
     });
 
     const replaced = await replaceBlockedSchedulerLaneAfterCoreSourceStale({

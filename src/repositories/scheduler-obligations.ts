@@ -914,9 +914,9 @@ export async function deferSchedulerObligationByIdentity(input: {
     .update(schedulerObligationsInOps)
     .set({
       dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
-      // A pending obligation is deferred, not failed. Preserve any defer
-      // diagnostic in evidence while keeping the durable current-state error
-      // marker limited to failed/irrecoverable rows.
+      // A pending obligation is deferred work, not a failed terminal attempt.
+      // Preserve the diagnostic in structured evidence and only expose a
+      // current obligation error while the row remains failed.
       ...(deferredError
         ? {
             lastError: sql`CASE
