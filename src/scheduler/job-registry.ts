@@ -69,6 +69,10 @@ import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/d
 import { fplPriceWatchQueueName } from '../queues/fpl-price-watch.queue';
 import { getPriceChangePredictions } from '../services/price-change-predictions.service';
 import { logWarn } from '../utils/logger';
+import {
+  PRICE_CHANGE_WATCH_LEAD_MS,
+  PRICE_CHANGE_WATCH_MAX_WINDOW_MS,
+} from '../domain/price-change-watch-policy';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -809,12 +813,40 @@ function priceHotWatchEnabled(): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+export function resolvePriceChangeWatchPlans(input: {
+  readonly now: Date;
+  readonly seasonCode: string;
+  readonly deadlineCandidates: readonly string[];
+  readonly watchWindowMs?: number;
+}): readonly SchedulerObligationPlan[] {
+  const nowMs = input.now.getTime();
+  const watchWindowMs = input.watchWindowMs ?? PRICE_CHANGE_WATCH_MAX_WINDOW_MS;
+  const deadline = input.deadlineCandidates
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isFinite(value) && value >= nowMs - watchWindowMs)
+    .sort((left, right) => left - right)[0];
+  if (deadline === undefined) return [];
+  const deadlineAt = new Date(deadline);
+  return [
+    {
+      scopeKey: input.seasonCode,
+      periodKey: `price-change-watch-${deadline}`,
+      dueAt: new Date(deadline - PRICE_CHANGE_WATCH_LEAD_MS),
+      source: 'catchup',
+      evidence: {
+        deadlineAt: deadlineAt.toISOString(),
+        leadMs: PRICE_CHANGE_WATCH_LEAD_MS,
+        watchWindowMs,
+      },
+    },
+  ];
+}
+
 function priceChangeWatchDefinition(): ScheduledJobDefinition {
-  const leadMs = 30_000;
-  const watchWindowMs = 5 * 60_000;
+  const watchWindowMs = PRICE_CHANGE_WATCH_MAX_WINDOW_MS;
   return {
     name: 'price-change-watch',
-    cadence: 'deadline window (30 seconds before each official price-change deadline)',
+    cadence: 'deadline window (5 minutes before each official price-change deadline)',
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
@@ -847,25 +879,12 @@ function priceChangeWatchDefinition(): ScheduledJobDefinition {
         });
         return [];
       }
-      const deadline = deadlineCandidates
-        .map((value) => Date.parse(value))
-        .filter((value) => Number.isFinite(value) && value >= nowMs - watchWindowMs)
-        .sort((left, right) => left - right)[0];
-      if (deadline === undefined) return [];
-      const deadlineAt = new Date(deadline);
-      return [
-        {
-          scopeKey: context.season.seasonCode,
-          periodKey: `price-change-watch-${deadline}`,
-          dueAt: new Date(deadline - leadMs),
-          source: 'catchup' as const,
-          evidence: {
-            deadlineAt: deadlineAt.toISOString(),
-            leadMs,
-            watchWindowMs,
-          },
-        },
-      ];
+      return resolvePriceChangeWatchPlans({
+        now: context.now,
+        seasonCode: context.season.seasonCode,
+        deadlineCandidates,
+        watchWindowMs,
+      });
     },
     enqueue: async ({ context, plan, obligationId, generation }) => {
       const rawDeadline = plan.evidence?.deadlineAt;
