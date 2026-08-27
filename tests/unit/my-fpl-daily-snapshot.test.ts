@@ -246,12 +246,17 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).not.toContain('await Promise.all([\n          enqueueCoreSnapshotJob');
     expect(worker).toContain('eventRepository.findLatestFinalized(season)');
     expect(worker).toContain('eventId: entryInfoTargetEventId');
-    expect(worker).toContain('const freshAfter = await resolveJobFreshAfter(job)');
+    expect(worker).toContain(
+      'const finalFreshAfter = resolveFinalizationFreshAfter(finalizationEvent)',
+    );
+    expect(worker).toContain(
+      'const freshAfter = finalFreshAfter ?? (await resolveJobFreshAfter(job))',
+    );
     expect(worker).toMatch(
       /enqueueEntryTransfersSyncJob\(season, source, \{[\s\S]{0,120}freshAfter,/,
     );
     expect(worker).toMatch(
-      /enqueueTournamentTransfersPre\(season, job\.data\.eventId, source, \{[\s\S]{0,120}freshAfter,/,
+      /enqueueTournamentTransfersPre\(season, eventId, source, \{[\s\S]{0,120}freshAfter,/,
     );
     expect(entryWorker).toContain('findEntryIdsNeedingSourceRefresh');
     expect(tournamentWorker).toContain('job.name === TOURNAMENT_JOBS.TRANSFERS_PRE');

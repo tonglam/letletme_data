@@ -61,6 +61,17 @@ export function resolveRichResultFreshnessCutoff(
   return event?.finished && event.dataChecked ? event.dataCheckedAt : null;
 }
 
+/**
+ * Finalized source data is immutable at the FPL data_checked fence.  Replays
+ * must therefore use that persisted checkpoint as their lower freshness bound
+ * instead of the coordinator's wall clock.  This lets a finalization retry
+ * reuse rows already captured after the authoritative fence while still
+ * refreshing any row that genuinely predates it.
+ */
+export function resolveFinalizationFreshAfter(event: EventFinalizationState | null): string | null {
+  return resolveRichResultFreshnessCutoff(event)?.toISOString() ?? null;
+}
+
 export async function resolveEntrySyncTargetEventId(
   jobName: EntrySyncJobName,
   requestedEventId: number | undefined,

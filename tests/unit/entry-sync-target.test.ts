@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   isExplicitEntryRepairRequest,
   planEventEligibleEntrySyncWork,
+  resolveFinalizationFreshAfter,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
   shouldRefreshEntryInfoFromSource,
@@ -108,6 +109,27 @@ describe('rich result finalization cutoff', () => {
         dataCheckedAt: checkedAt,
       }),
     ).toBe(checkedAt);
+  });
+
+  test('serializes the finalized source fence for replay freshness', () => {
+    expect(
+      resolveFinalizationFreshAfter({
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: checkedAt,
+      }),
+    ).toBe('2026-08-04T10:00:00.000Z');
+  });
+
+  test('returns no replay fence for an active or malformed event', () => {
+    expect(resolveFinalizationFreshAfter(null)).toBeNull();
+    expect(
+      resolveFinalizationFreshAfter({
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: null,
+      }),
+    ).toBeNull();
   });
 
   test('keeps active, unchecked, and uncheckpointed events refreshable', () => {
