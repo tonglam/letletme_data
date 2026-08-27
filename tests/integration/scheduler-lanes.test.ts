@@ -585,6 +585,15 @@ describe('scheduler latest-wins lanes', () => {
     expect(started).not.toBeNull();
 
     const second = await reserve('2026-08-25T06:35:00.000Z', 'price-active-newer');
+    const sql = await getDbClient();
+    // Model the scheduler having already confirmed the newer Bull payload.
+    // A stale retry of the first payload must not overwrite this source-run
+    // identity when it fences onto the newer desired target.
+    await sql`
+      UPDATE ops.scheduler_obligations
+      SET run_id = ${second.obligationId}::uuid
+      WHERE obligation_id = ${second.obligationId}::uuid
+    `;
     await advanceSchedulerLane({
       laneKey: LANE_KEY,
       jobName: DEFINITION.name,
@@ -599,9 +608,9 @@ describe('scheduler latest-wins lanes', () => {
       bullJobId: 'integration-price-job-active',
     });
     expect(target?.obligation.obligationId).toBe(second.obligationId);
+    expect(target?.obligation.runId).toBe(second.obligationId);
     const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
     expect(targets?.lane.activeObligationId).toBe(second.obligationId);
-    const sql = await getDbClient();
     const retired = await sql<Array<{ status: string }>>`
       SELECT status FROM ops.scheduler_obligations WHERE obligation_id = ${first.obligationId}::uuid
     `;

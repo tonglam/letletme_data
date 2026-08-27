@@ -810,7 +810,15 @@ export async function fenceSchedulerLaneTarget(input: {
       .set({
         status: 'running',
         bullJobId: String(input.bullJobId),
-        runId: input.runId,
+        // When an older Bull retry adopts a newer desired target, that target
+        // may already have its own source-run identity from the scheduler
+        // enqueue. Preserve it instead of rebinding the new obligation to the
+        // stale payload run (which may already be terminal/skipped).
+        ...(input.runId === undefined
+          ? {}
+          : {
+              runId: sql`COALESCE(${schedulerObligationsInOps.runId}, ${input.runId}::uuid)`,
+            }),
         leaseOwner: null,
         leaseExpiresAt: null,
         lastError: null,
