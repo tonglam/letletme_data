@@ -187,7 +187,7 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
       'CONTENT_GROK_MAX_OUTPUT_BYTES',
       4 * 1024 * 1024,
       1024,
-      16 * 1024 * 1024,
+      4 * 1024 * 1024,
     ),
     grokExpectedVersion: process.env.CONTENT_GROK_EXPECTED_VERSION?.trim() || '1.0.5',
     grokRunnerSocket:
@@ -353,12 +353,20 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   for (const [name, value] of [
     ['CONTENT_HERMES_TRANSCRIPT_MAX_OUTPUT_BYTES', flags.hermesTranscriptMaxOutputBytes],
     ['CONTENT_SUPADATA_MAX_OUTPUT_BYTES', flags.supadataMaxOutputBytes],
-    ['CONTENT_GROK_MAX_OUTPUT_BYTES', flags.grokMaxOutputBytes],
     ['CONTENT_HTTP_MAX_OUTPUT_BYTES', flags.httpMaxOutputBytes],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 1024 || value > 16 * 1024 * 1024) {
       throw new Error(`${name} must be a safe integer between 1024 and 16777216`);
     }
+  }
+  if (
+    !Number.isSafeInteger(flags.grokMaxOutputBytes) ||
+    flags.grokMaxOutputBytes < 1024 ||
+    flags.grokMaxOutputBytes > 4 * 1024 * 1024
+  ) {
+    throw new Error(
+      'CONTENT_GROK_MAX_OUTPUT_BYTES must be a safe integer between 1024 and 4194304',
+    );
   }
   if (
     !Number.isFinite(flags.xLaneCapMultiplier) ||
