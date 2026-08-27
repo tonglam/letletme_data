@@ -138,6 +138,20 @@ describe('production environment preflight', () => {
     expect(await runEnvCheck(digest, { SCHEDULER_RESOLVE_TIMEOUT_MS: '60001' })).not.toBe(0);
   });
 
+  test('preserves scheduler, provider, and FPL admission safety ceilings', async () => {
+    const digest = 'a'.repeat(64);
+    expect(await runEnvCheck(digest, { SCHEDULER_LEASE_MS: '60000' })).toBe(0);
+    expect(await runEnvCheck(digest, { SCHEDULER_LEASE_MS: '59999' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { UNDERSTAT_TIMEOUT_MS: '60000' })).toBe(0);
+    expect(await runEnvCheck(digest, { UNDERSTAT_TIMEOUT_MS: '60001' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { UNDERSTAT_MAX_CONCURRENCY: '4' })).toBe(0);
+    expect(await runEnvCheck(digest, { UNDERSTAT_MAX_CONCURRENCY: '5' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { FPL_MAX_INFLIGHT: '5' })).toBe(0);
+    expect(await runEnvCheck(digest, { FPL_MAX_INFLIGHT: '6' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { FPL_REQUESTS_PER_SECOND: '4' })).toBe(0);
+    expect(await runEnvCheck(digest, { FPL_REQUESTS_PER_SECOND: '5' })).not.toBe(0);
+  });
+
   test('rejects non-positive and unbounded queue governance intervals', async () => {
     const digest = 'a'.repeat(64);
     expect(await runEnvCheck(digest, { QUEUE_HEALTH_SNAPSHOT_INTERVAL_MS: '0' })).not.toBe(0);

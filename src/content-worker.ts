@@ -335,7 +335,7 @@ const shutdownController = createShutdownController({
       .map((result) => result.reason);
     await drainWorkers(
       [formalHttpRuntime, formalXRuntime, formalMediaRuntime]
-        .filter((runtime): runtime is NonNullable<typeof runtime> => runtime !== undefined)
+        .filter((runtime): runtime is NonNullable<typeof runtime> => runtime != null)
         .map((runtime) => runtime.worker),
     );
     if (failures.length > 0) {

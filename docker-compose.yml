@@ -47,6 +47,12 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
     cap_drop:
       - ALL
+    # The backup script normalizes the mounted directory to mode 0700 before
+    # writing. Keep the root filesystem read-only and grant only the two
+    # capabilities needed when the host mount is owned by the deploy user.
+    cap_add:
+      - FOWNER
+      - DAC_OVERRIDE
     security_opt:
       - no-new-privileges:true
     restart: 'no'

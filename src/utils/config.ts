@@ -152,9 +152,11 @@ const EnvSchema = z.object({
   PRICE_CHANGE_HOT_WATCH_ENABLED: booleanEnv(process.env.NODE_ENV !== 'production'),
   FPL_ADMISSION_TEST_MODE: booleanEnv(false),
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(true),
-  FPL_MAX_INFLIGHT: boundedIntegerEnv(5, 1, 32),
-  FPL_REQUESTS_PER_SECOND: boundedIntegerEnv(4, 1, 32),
-  FPL_BULK_MAX_INFLIGHT_DURING_LIVE: boundedIntegerEnv(3, 1, 32),
+  // Keep admission ceilings aligned with the production-safe historical
+  // caps. Raising these values requires a separate provider-capacity rollout.
+  FPL_MAX_INFLIGHT: boundedIntegerEnv(5, 1, 5),
+  FPL_REQUESTS_PER_SECOND: boundedIntegerEnv(4, 1, 4),
+  FPL_BULK_MAX_INFLIGHT_DURING_LIVE: boundedIntegerEnv(3, 1, 3),
   FPL_ADMISSION_LEASE_MS: boundedIntegerEnv(45_000, 1_000, 2 * 60 * 60_000),
   FPL_REQUEST_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 2 * 60 * 60_000),
   FPL_REQUEST_DEADLINE_MS: boundedIntegerEnv(40_000, 1_000, 2 * 60 * 60_000),
@@ -167,7 +169,9 @@ const EnvSchema = z.object({
   // its historical one-minute ceiling even though provider request timeouts
   // may use the broader two-hour runtime bound.
   SCHEDULER_RESOLVE_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 60_000),
-  SCHEDULER_LEASE_MS: boundedIntegerEnv(15 * 60_000, 1_000, 2 * 60 * 60_000),
+  // A scheduler pass runs every 30 seconds; a lease shorter than one minute
+  // can expire while a slow claim is still executing.
+  SCHEDULER_LEASE_MS: boundedIntegerEnv(15 * 60_000, 60_000, 2 * 60 * 60_000),
   // Queue governance rollout switches.  They are deliberately opt-in so a
   // rolling deploy can start the new consumers before routing new work.
   QUEUE_LANES_V2_ENABLED: booleanEnv(false),
@@ -215,8 +219,8 @@ const EnvSchema = z.object({
     .string()
     .regex(/^\d{4}$/)
     .default('2627'),
-  UNDERSTAT_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 2 * 60 * 60_000),
-  UNDERSTAT_MAX_CONCURRENCY: boundedIntegerEnv(4, 1, 32),
+  UNDERSTAT_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 60_000),
+  UNDERSTAT_MAX_CONCURRENCY: boundedIntegerEnv(4, 1, 4),
   // Telegram notifications (optional)
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),

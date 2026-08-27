@@ -234,11 +234,18 @@ const shutdownController = createShutdownController({
     stopFileHeartbeat();
     stopRuntimeHeartbeat();
   },
-  waitForInFlight: () =>
-    Promise.all([
+  waitForInFlight: async () => {
+    const results = await Promise.allSettled([
       ...[...active.values()].map((running) => running.promise),
       retentionInFlight,
-    ]).then(() => undefined),
+    ]);
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `${failures.length} media task(s) failed to drain`);
+    }
+  },
   closeResources: async () => {
     if (flags.enabled) {
       const released = await releaseSourceMediaGateLeases({ workerId }).catch((error) => {
