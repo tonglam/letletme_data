@@ -42,9 +42,16 @@ type BudgetScope = Readonly<{
   limit: number;
 }>;
 
-function positiveInteger(name: string, value: number): number {
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`${name} must be a positive integer`);
+function nonNegativeInteger(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000) {
+    throw new Error(`${name} must be a non-negative safe integer between 0 and 1000000`);
+  }
+  return value;
+}
+
+function laneMultiplier(value: number): number {
+  if (!Number.isFinite(value) || value < 0.1 || value > 10) {
+    throw new Error('CONTENT_X_LANE_CAP_MULTIPLIER must be between 0.1 and 10');
   }
   return value;
 }
@@ -58,7 +65,10 @@ function scaleLaneCaps(
       phase,
       Object.fromEntries(
         Object.entries(phaseCaps).map(([lane, cap]) => {
-          const scaledCap = cap * multiplier;
+          // Database reservations are integral.  A fractional multiplier is
+          // intentionally rounded down so it can only reduce a configured
+          // lane budget, never grant an accidental extra call.
+          const scaledCap = Math.floor(cap * multiplier);
           if (!Number.isSafeInteger(scaledCap) || scaledCap < 0) {
             throw new Error(`X lane cap overflow for ${phase}:${lane}`);
           }
@@ -78,20 +88,17 @@ export function compileXBudgetPolicy(input: {
   laneCapMultiplier?: number;
   enforceLaneCaps?: boolean;
 }): XBudgetPolicy {
-  const laneCapMultiplier = positiveInteger(
-    'CONTENT_X_LANE_CAP_MULTIPLIER',
-    input.laneCapMultiplier ?? 1,
-  );
+  const laneCapMultiplier = laneMultiplier(input.laneCapMultiplier ?? 1);
   return {
-    globalRolling24hLimit: positiveInteger(
+    globalRolling24hLimit: nonNegativeInteger(
       'CONTENT_X_DAILY_CALL_LIMIT',
       input.globalRolling24hLimit,
     ),
-    final90Rolling90mLimit: positiveInteger(
+    final90Rolling90mLimit: nonNegativeInteger(
       'CONTENT_X_FINAL90_CALL_LIMIT',
       input.final90Rolling90mLimit,
     ),
-    identityRolling24hLimit: positiveInteger(
+    identityRolling24hLimit: nonNegativeInteger(
       'X identity rolling limit',
       input.identityRolling24hLimit ?? 100,
     ),
