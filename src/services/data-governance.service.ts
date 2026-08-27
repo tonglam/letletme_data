@@ -813,8 +813,14 @@ export async function retireEmptyMyFplOutboxFreshnessWindows(
            AND publication.event_id = outbox.event_id
            AND publication.revision = outbox.revision
            AND publication.active = true
-          WHERE slo_window.season_id = outbox.season_id
+        WHERE slo_window.season_id = outbox.season_id
             AND outbox.status IN ('PENDING', 'PROCESSING', 'FAILED')
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_invalidation_outbox AS invalidation
+          WHERE invalidation.season_id = slo_window.season_id
+            AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
         )
       ORDER BY slo_window.window_id
       LIMIT ${limit}

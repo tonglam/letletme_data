@@ -10,7 +10,6 @@ import type {
 } from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-import { invalidateMyFplSnapshotRedisManifest } from '../services/my-fpl-snapshot-publication.service';
 
 export interface TournamentManagementRecord {
   id: number;
@@ -35,7 +34,12 @@ export interface TournamentManagementRecord {
 }
 
 export type TournamentDeleteResult =
-  | { status: 'deleted'; tournament: TournamentManagementRecord }
+  | {
+      status: 'deleted';
+      tournament: TournamentManagementRecord;
+      /** Durable Redis cleanup receipts created before the delete commits. */
+      invalidationOutboxIds?: readonly string[];
+    }
   | { status: 'not_found' }
   | { status: 'forbidden' };
 
@@ -445,6 +449,31 @@ export const createTournamentManagementRepository = () => ({
             AND publication.active
             AND snapshot_row.tournament_id = ${tournamentId}
         `;
+        const invalidationOutboxIds: string[] = [];
+        for (const pointer of activeSnapshotPointers) {
+          // The receipt deliberately has no publication/tournament foreign key:
+          // both records are removed below, while this row must survive for a
+          // Redis retry after the transaction commits.
+          const outboxRows = await tx<{ outbox_id: string }[]>`
+            INSERT INTO competition.my_fpl_snapshot_invalidation_outbox
+              (season_id, event_id, revision, tournament_id, reason, status,
+               attempts, available_at, updated_at)
+            VALUES
+              (${season.seasonId}, ${pointer.event_id}, ${pointer.revision}, ${tournamentId},
+               'TOURNAMENT_DELETED', 'PENDING', 0, clock_timestamp(), clock_timestamp())
+            ON CONFLICT (season_id, event_id, revision)
+            DO UPDATE SET updated_at = clock_timestamp()
+            RETURNING outbox_id
+          `;
+          const outboxId = outboxRows[0]?.outbox_id;
+          if (!outboxId) {
+            throw new Error(
+              `My FPL invalidation outbox receipt was not created for event ${pointer.event_id}`,
+            );
+          }
+          invalidationOutboxIds.push(outboxId);
+        }
+
         // A snapshot that contains this tournament is no longer a coherent
         // publication once the tournament is deleted. Remove that publication
         // inside the same transaction; its child rows/outbox are cascaded and
@@ -466,22 +495,21 @@ export const createTournamentManagementRepository = () => ({
           WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
         `;
 
-        return { status: 'deleted', tournament: row, activeSnapshotPointers } as const;
+        return { status: 'deleted', tournament: row, invalidationOutboxIds } as const;
       });
       if (result.status === 'deleted') {
-        await Promise.all(
-          result.activeSnapshotPointers.map((pointer) =>
-            invalidateMyFplSnapshotRedisManifest(
-              season.seasonCode,
-              pointer.event_id,
-              pointer.revision,
-            ),
-          ),
-        );
-        logInfo('Deleted tournament and related data', { tournamentId, adminEntryId });
+        logInfo('Deleted tournament and related data', {
+          tournamentId,
+          adminEntryId,
+          invalidationOutboxCount: result.invalidationOutboxIds.length,
+        });
       }
       if (result.status === 'deleted') {
-        return { status: result.status, tournament: result.tournament };
+        return {
+          status: result.status,
+          tournament: result.tournament,
+          invalidationOutboxIds: result.invalidationOutboxIds,
+        };
       }
       return result;
     } catch (error) {

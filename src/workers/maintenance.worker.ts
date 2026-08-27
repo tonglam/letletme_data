@@ -31,6 +31,7 @@ import {
   type MyFplSnapshotOutboxDeliveryEvidence,
   type MyFplSnapshotPublication,
 } from '../services/my-fpl-snapshot-publication.service';
+import { dispatchMyFplSnapshotInvalidationOutbox } from '../services/my-fpl-snapshot-invalidation.service';
 import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
 import { runEntryOnboarding } from '../services/entry-onboarding.service';
 import { runQueueRunPhase } from '../services/queue-run-barrier';
@@ -301,6 +302,19 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           const eventId = job.data.eventId;
           const snapshotKind = job.data.snapshotKind;
           const season = await requireCurrentSeasonForJob(job.data);
+          // Deletion tombstones share the same Redis pointer as publication
+          // activation. Drain them first so a stale deleted revision cannot
+          // win a race with this capture's publication outbox.
+          const invalidation = await dispatchMyFplSnapshotInvalidationOutbox({
+            limit: 20,
+            seasonId: season.seasonId,
+            eventId,
+          });
+          if (invalidation.failed > 0) {
+            throw new Error(
+              `My FPL invalidation outbox left ${invalidation.failed} receipt(s) for retry`,
+            );
+          }
           const active = await getActiveMyFplPublication(season, eventId);
           const hasExplicitFinalOverride =
             snapshotKind === 'FINAL' &&
@@ -447,9 +461,21 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 evidence.eventId === eventId && evidence.revision === capture.publication.revision,
             )?.revision,
           });
-          return { ...capture, redis };
+          return { ...capture, invalidation, redis };
         }
         case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX: {
+          // Invalidation receipts are intentionally delivered before normal
+          // publication receipts during the shared five-minute maintenance
+          // cadence. A newer publication remains protected by the CAS.
+          const invalidation = await dispatchMyFplSnapshotInvalidationOutbox({
+            limit: 50,
+            seasonId: job.data.seasonId,
+          });
+          if (invalidation.failed > 0) {
+            throw new Error(
+              `My FPL invalidation outbox left ${invalidation.failed} receipt(s) for retry`,
+            );
+          }
           const result = await dispatchMyFplSnapshotPublicationOutbox({
             limit: 50,
             seasonCode: job.data.seasonCode,
@@ -458,7 +484,12 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             freshnessWindowId: job.data.freshnessWindowId,
             deliveredEvidence: result.deliveredEvidence,
           });
-          if (result.remaining === 0 && result.delivered === 0 && result.failed === 0) {
+          if (
+            result.remaining === 0 &&
+            result.delivered === 0 &&
+            result.failed === 0 &&
+            invalidation.remaining === 0
+          ) {
             await markFreshnessWindowNotApplicable({
               windowId: job.data.freshnessWindowId ?? 0,
               reasonCode: 'OUTBOX_NO_PENDING_ACTIVE_PUBLICATION',
@@ -470,7 +501,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               `My FPL snapshot outbox left ${result.failed} delivery receipt(s) for retry`,
             );
           }
-          return result;
+          return { ...result, invalidation };
         }
         case MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX: {
           const result = await dispatchDataPublicationOutbox({ limit: 20 });

@@ -23,6 +23,11 @@ import { findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { assertTournamentRosterPreGameweekBoundary } from './tournament-roster.service';
+import {
+  dispatchMyFplSnapshotInvalidationOutbox,
+  type MyFplSnapshotInvalidationDispatchOptions,
+} from './my-fpl-snapshot-invalidation.service';
+import { logWarn } from '../utils/logger';
 
 const updateTournamentSchema = z.object({
   name: z.string().trim().min(3).max(80),
@@ -88,7 +93,11 @@ export type TournamentManagementRepository = {
     tournamentId: number,
     adminEntryId: number,
   ): Promise<
-    | { status: 'deleted'; tournament: TournamentManagementRecord }
+    | {
+        status: 'deleted';
+        tournament: TournamentManagementRecord;
+        invalidationOutboxIds?: readonly string[];
+      }
     | { status: 'not_found' }
     | { status: 'forbidden' }
   >;
@@ -100,6 +109,13 @@ export type TournamentManagementLifecycle = {
     tournamentId: number,
     adminEntryId: number,
   ) => ReturnType<TournamentManagementRepository['deleteOwned']>;
+  dispatchInvalidations?: (
+    options: MyFplSnapshotInvalidationDispatchOptions,
+  ) => ReturnType<typeof dispatchMyFplSnapshotInvalidationOutbox>;
+  reconcileInvalidations?: (
+    season: FplSeasonRef,
+    tournamentId: number,
+  ) => ReturnType<typeof dispatchMyFplSnapshotInvalidationOutbox>;
   refreshViews?: () => Promise<unknown>;
   repairDeletedViews?: (tournamentId: number) => Promise<boolean>;
   /** Injectable for hermetic service tests; production keeps the DB scopes. */
@@ -215,7 +231,21 @@ export function createTournamentManagementService(
     }
   };
 
-  const repairMissingDeletion = async (tournamentId: number): Promise<void> => {
+  const repairMissingDeletion = async (
+    season: FplSeasonRef,
+    tournamentId: number,
+  ): Promise<void> => {
+    try {
+      await lifecycle.reconcileInvalidations?.(season, tournamentId);
+    } catch (error) {
+      // The canonical delete already committed. A retry should still return
+      // the stable not-found contract when Redis remains unavailable; the
+      // durable outbox will be picked up by the maintenance worker.
+      logWarn('Unable to reconcile My FPL invalidation after missing tournament', {
+        tournamentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     try {
       const repaired = await lifecycle.repairDeletedViews?.(tournamentId);
       if (repaired) return;
@@ -547,7 +577,7 @@ export function createTournamentManagementService(
       const payload = deleteTournamentSchema.parse(input);
       const current = await repository.findById(season, tournamentId);
       if (!current) {
-        await repairMissingDeletion(tournamentId);
+        await repairMissingDeletion(season, tournamentId);
         throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       }
       if (!canManage(current, payload)) {
@@ -560,7 +590,7 @@ export function createTournamentManagementService(
         ? await lifecycle.deleteOwned(season, tournamentId, current.adminEntryId)
         : await repository.deleteOwned(season, tournamentId, current.adminEntryId);
       if (result.status === 'not_found') {
-        await repairMissingDeletion(tournamentId);
+        await repairMissingDeletion(season, tournamentId);
         throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       }
       if (result.status === 'forbidden') {
@@ -568,6 +598,32 @@ export function createTournamentManagementService(
           'Only the tournament administrator can delete this tournament.',
           'TOURNAMENT_ADMIN_REQUIRED',
         );
+      }
+      if (result.invalidationOutboxIds && result.invalidationOutboxIds.length > 0) {
+        try {
+          const dispatchResult = await (
+            lifecycle.dispatchInvalidations ?? dispatchMyFplSnapshotInvalidationOutbox
+          )({
+            outboxIds: result.invalidationOutboxIds,
+            limit: result.invalidationOutboxIds.length,
+          });
+          if (dispatchResult.failed > 0 || dispatchResult.remaining > 0) {
+            logWarn('Tournament deleted with pending My FPL Redis invalidation', {
+              tournamentId,
+              failed: dispatchResult.failed,
+              remaining: dispatchResult.remaining,
+            });
+          }
+        } catch (error) {
+          // PostgreSQL is authoritative and the delete transaction has
+          // committed. Redis cleanup is durable and will be retried by the
+          // five-minute maintenance job, so it must not turn DELETE into a
+          // misleading 500 response.
+          logWarn('Tournament deleted but My FPL Redis invalidation dispatch failed', {
+            tournamentId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
       let refreshError: unknown = null;
       try {
@@ -588,6 +644,13 @@ export const tournamentManagementService = createTournamentManagementService(
       await refreshTournamentSelectionStatsMaterializedView();
       await refreshTournamentEntryEventSummariesMaterializedView();
     },
+    dispatchInvalidations: dispatchMyFplSnapshotInvalidationOutbox,
+    reconcileInvalidations: async (season, tournamentId) =>
+      dispatchMyFplSnapshotInvalidationOutbox({
+        seasonId: season.seasonId,
+        tournamentId,
+        limit: 50,
+      }),
     repairDeletedViews: repairDeletedTournamentMaterializedViews,
     deleteOwned: async (season, tournamentId, adminEntryId) => {
       const { cancelWaitingTournamentSetupJobs } = await import('../jobs/tournament-setup.jobs');
