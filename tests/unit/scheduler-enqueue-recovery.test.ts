@@ -28,6 +28,7 @@ function obligation(
     attempts: 1,
     bullJobId: null,
     runId: null,
+    completedAt: null,
     leaseOwner: `owner-${obligationId}`,
     leaseExpiresAt: new Date('2026-08-25T00:01:00.000Z'),
     evidence: {},

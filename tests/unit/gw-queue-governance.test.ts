@@ -335,21 +335,38 @@ describe('GW queue and data governance primitives', () => {
   });
 
   test('does not create a freshness window for an old terminal obligation without an identity', () => {
-    expect(shouldCreateFreshnessWindowForObligation({ status: 'pending', evidence: {} })).toBe(
-      true,
-    );
-    expect(shouldCreateFreshnessWindowForObligation({ status: 'succeeded', evidence: {} })).toBe(
-      false,
-    );
+    expect(
+      shouldCreateFreshnessWindowForObligation({
+        status: 'pending',
+        evidence: {},
+        runId: null,
+        completedAt: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldCreateFreshnessWindowForObligation({
+        status: 'succeeded',
+        evidence: {},
+        runId: null,
+        completedAt: null,
+      }),
+    ).toBe(false);
     expect(
       shouldCreateFreshnessWindowForObligation({
         status: 'succeeded',
         evidence: { freshnessWindowId: 42 },
+        runId: 'run-id',
+        completedAt: new Date('2026-08-27T00:00:00.000Z'),
       }),
     ).toBe(true);
-    expect(shouldCreateFreshnessWindowForObligation({ status: 'skipped', evidence: {} })).toBe(
-      false,
-    );
+    expect(
+      shouldCreateFreshnessWindowForObligation({
+        status: 'skipped',
+        evidence: {},
+        runId: null,
+        completedAt: null,
+      }),
+    ).toBe(false);
   });
 
   test('builds the scoped Web consumer probe route', () => {

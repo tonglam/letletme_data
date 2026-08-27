@@ -132,6 +132,7 @@ function mapObligation(row: typeof schedulerObligationsInOps.$inferSelect): Sche
     attempts: row.attempts,
     bullJobId: row.bullJobId,
     runId: row.runId,
+    completedAt: row.completedAt,
     leaseOwner: row.leaseOwner,
     leaseExpiresAt: row.leaseExpiresAt,
     evidence: (row.evidence ?? {}) as Record<string, unknown>,

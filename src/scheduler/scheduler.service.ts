@@ -146,7 +146,7 @@ function hotSourcePeriodIdentity(options: {
  * their next generation can settle it normally.
  */
 export function shouldCreateFreshnessWindowForObligation(
-  obligation?: Pick<SchedulerObligation, 'status' | 'evidence'>,
+  obligation?: Pick<SchedulerObligation, 'status' | 'evidence' | 'runId' | 'completedAt'>,
 ): boolean {
   if (!obligation) return true;
   if (!['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) return true;
@@ -165,7 +165,7 @@ async function recordFreshnessWindowForPlan(
   definition: ScheduledJobDefinition,
   plan: SchedulerObligationPlan,
   seasonId: number,
-  obligation?: Pick<SchedulerObligation, 'status' | 'evidence'>,
+  obligation?: Pick<SchedulerObligation, 'status' | 'evidence' | 'runId' | 'completedAt'>,
 ): Promise<number | null> {
   // The price watcher is an observation obligation. It may publish a hot
   // board, or legitimately observe that the official provider did not change
@@ -237,8 +237,8 @@ async function recordFreshnessWindowForPlan(
     await recordCheckpointFreshnessEvidence({
       jobName: definition.name,
       evidence: { ...obligation.evidence, freshnessWindowId: windowId },
-      completedAt: null,
-      runId: null,
+      completedAt: obligation.completedAt,
+      runId: obligation.runId,
     }).catch((error) => {
       logError('Terminal checkpoint freshness backfill failed', error, {
         jobName: definition.name,
