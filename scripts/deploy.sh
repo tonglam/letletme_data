@@ -79,6 +79,7 @@ DEPLOY_RUNNER_PROBE_SUCCEEDED=false
 DEPLOY_RUNNER_PREVIOUS_TARGET=''
 DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 DEPLOY_OLD_MEDIA_PRESENT=false
+DEPLOY_SERVICES_STOPPED=false
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -132,19 +133,27 @@ compose() {
 source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
 
 restore_stopped_services() {
+  local restored=false
   log_warn "Restoring existing services because migration has not started"
   # The API container is deliberately removed after it stops so a delayed
   # listener cannot retain port 3000.  `compose start` cannot recreate that
   # exact container, therefore recovery must use `up`; pin the last image when
   # one was captured so a pre-migration failure never boots the new release.
   if [[ -n "${DEPLOY_OLD_IMAGE:-}" ]]; then
-    if ! restore_runtime_services \
+    if restore_runtime_services \
       "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
       "$DEPLOY_OLD_MEDIA_PRESENT"; then
+      restored=true
+    else
       log_error "Last-known-healthy services could not be restored; manual recovery is required."
     fi
-  elif ! start_all_runtime_services; then
+  elif start_all_runtime_services; then
+    restored=true
+  else
     log_error "Existing services could not be restored; manual recovery is required."
+  fi
+  if [[ "$restored" = true ]]; then
+    DEPLOY_SERVICES_STOPPED=false
   fi
 }
 
@@ -168,7 +177,7 @@ deploy() {
           "$DEPLOY_OLD_MEDIA_PRESENT"; then
           log_error "Migration changed or obscured the ledger; leaving services stopped for forward recovery."
         fi
-      elif [[ "$DEPLOY_COMMITTED" = false ]]; then
+      elif [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true ]]; then
         restore_stopped_services || true
       fi
     fi
@@ -265,7 +274,18 @@ deploy() {
   DEPLOY_LEDGER_BEFORE=$(migration_ledger_fingerprint)
   [[ -n "$DEPLOY_LEDGER_BEFORE" ]] || { log_error "Could not capture migration ledger fingerprint"; exit 1; }
   log_info "Migration ledger before=${DEPLOY_LEDGER_BEFORE}"
+  log_info "Checking queue quiescence before stopping services"
+  if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
+    log_error "Database work is not quiescent; services were not stopped."
+    exit 1
+  fi
+  if ! compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
+    log_error "Queue work is not quiescent; services were not stopped."
+    exit 1
+  fi
+  log_info "Migration plan and queue quiescence passed before stopping services"
   log_info "Stopping services and waiting for workers to settle"
+  DEPLOY_SERVICES_STOPPED=true
   if ! compose stop -t 45 api worker; then
     log_error "Services did not stop cleanly; migration was not started."
     restore_stopped_services
