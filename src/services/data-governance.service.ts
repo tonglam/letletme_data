@@ -14,7 +14,11 @@ import {
   type FreshnessCompletenessStatus,
   type FreshnessSloStatus,
 } from '../domain/freshness-slo';
-import { dataContractRegistry } from '../domain/data-contracts';
+import {
+  contractHasConsumerEvidence,
+  dataContractRegistry,
+  findDataContract,
+} from '../domain/data-contracts';
 import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
 import {
@@ -133,7 +137,20 @@ export async function upsertFreshnessWindow(input: {
         eligibleAt: sql`LEAST(${freshnessSloWindowsInOps.eligibleAt}, excluded.eligible_at)`,
         dueAt: sql`LEAST(${freshnessSloWindowsInOps.dueAt}, excluded.due_at)`,
         obligationDueAt: sql`COALESCE(${freshnessSloWindowsInOps.obligationDueAt}, excluded.obligation_due_at)`,
-        evidence: sql`${freshnessSloWindowsInOps.evidence} || excluded.evidence`,
+        // `consumerEvidenceRequired` is a reservation-time decision.  Keep
+        // the first explicit value across scheduler restarts or configuration
+        // changes, while still merging newly discovered evidence fields.
+        evidence: sql`
+          (${freshnessSloWindowsInOps.evidence} || excluded.evidence)
+          || CASE
+            WHEN ${freshnessSloWindowsInOps.evidence} ? 'consumerEvidenceRequired'
+            THEN jsonb_build_object(
+              'consumerEvidenceRequired',
+              ${freshnessSloWindowsInOps.evidence}->'consumerEvidenceRequired'
+            )
+            ELSE '{}'::jsonb
+          END
+        `,
         updatedAt: sql`clock_timestamp()`,
       },
     })
@@ -403,6 +420,7 @@ export async function observeFreshnessConsumerEvidence(
   const limit = Math.min(100, Math.max(1, input.limit ?? 100));
   const pending = await listFreshnessWindows({
     status: 'PENDING',
+    consumerEvidenceRequired: true,
     limit,
     db: input.db,
   });
@@ -412,19 +430,23 @@ export async function observeFreshnessConsumerEvidence(
       : await listFreshnessWindows({
           status: 'BREACHED',
           recovered: 'unrecovered',
+          consumerEvidenceRequired: true,
           limit: limit - pending.length,
           db: input.db,
         });
   const windows = [...pending, ...breached];
   const candidates = windows.filter((window) => {
-    const contract = dataContractRegistry.find((item) => item.contractKey === window.contractKey);
-    const evidence = contract?.consumerEvidence;
-    return Boolean(
-      evidence &&
-        'graphql' in evidence &&
-        'web' in evidence &&
-        typeof evidence.graphql === 'string' &&
-        typeof evidence.web === 'string',
+    // The reservation freezes whether consumer evidence is part of this
+    // window's SLO. A later global flag change must not make a producer-only
+    // window recover from a consumer probe that never observed its producer
+    // revision. Legacy windows without the flag remain probeable when their
+    // public contract names both consumer hops.
+    const contract = findDataContract(window.contractKey);
+    const windowEvidence = asJsonObject(window.evidence);
+    return (
+      windowEvidence.consumerEvidenceRequired !== false &&
+      contract !== undefined &&
+      contractHasConsumerEvidence(contract)
     );
   });
   let observed = 0;
@@ -579,11 +601,26 @@ export async function recordFreshnessObservation(input: {
       (input.invalid ? 'INVALID' : (current.completenessStatus as FreshnessCompletenessStatus));
     const invalid = input.invalid ?? current.status === 'INVALID';
     const windowEvidence = asJsonObject(current.evidence);
-    const redisEvidenceRequired = windowEvidence.redisEvidenceRequired !== false;
+    const contract = findDataContract(current.contractKey);
+    // Persisted windows created before the consumer-probe rollout do not have
+    // an explicit flag. Derive their requirements from the contract rather
+    // than the global feature flag so internal checkpoints never wait for
+    // nonexistent GraphQL/Web evidence. Once a window has an explicit value,
+    // keep that decision stable across flag changes and restarts.
+    const consumerEvidenceRequired =
+      windowEvidence.consumerEvidenceRequired === true ||
+      (windowEvidence.consumerEvidenceRequired === undefined &&
+        getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED &&
+        contract !== undefined &&
+        contractHasConsumerEvidence(contract));
+    const redisEvidenceRequired =
+      windowEvidence.redisEvidenceRequired === undefined
+        ? contract?.freshnessEvidence === 'publication' || Boolean(contract?.consumerEvidence.redis)
+        : windowEvidence.redisEvidenceRequired !== false;
     const observation = {
       eligible: current.status !== 'NOT_APPLICABLE',
       invalid,
-      consumerEvidenceRequired: getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED,
+      consumerEvidenceRequired,
       redisEvidenceRequired,
       dueAt: current.dueAt,
       sourceCheckedAt: input.sourceCheckedAt ?? current.sourceCheckedAt,
@@ -846,6 +883,8 @@ export async function listFreshnessWindows(
   input: {
     status?: FreshnessSloStatus | FreshnessSloStatus[];
     recovered?: 'any' | 'unrecovered' | 'recovered';
+    /** When true, exclude windows explicitly frozen to producer-only evidence. */
+    consumerEvidenceRequired?: boolean;
     dueAfter?: Date;
     dueBefore?: Date;
     limit?: number;
@@ -866,6 +905,9 @@ export async function listFreshnessWindows(
       : input.recovered === 'recovered'
         ? sql`${freshnessSloWindowsInOps.recoveredAt} IS NOT NULL`
         : undefined,
+    input.consumerEvidenceRequired === true
+      ? sql`${freshnessSloWindowsInOps.evidence}->>'consumerEvidenceRequired' IS DISTINCT FROM 'false'`
+      : undefined,
     input.dueAfter ? gte(freshnessSloWindowsInOps.dueAt, input.dueAfter) : undefined,
     input.dueBefore ? lte(freshnessSloWindowsInOps.dueAt, input.dueBefore) : undefined,
   ].filter(Boolean);

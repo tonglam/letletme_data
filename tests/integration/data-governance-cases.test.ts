@@ -8,17 +8,24 @@ import { getDbClient } from '../../src/db/singleton';
 import {
   listGovernanceCases,
   openGovernanceCase,
+  upsertFreshnessWindow,
   transitionGovernanceCase,
 } from '../../src/services/data-governance.service';
 
 const SCOPE_KEY = 'integration:governance-case-cas';
 const FINGERPRINT = 'integration:governance-case-cas:v1';
+const WINDOW_SLO_KEY = 'integration:consumer-evidence-freeze';
+const WINDOW_SCOPE_KEY = 'integration:consumer-evidence-freeze';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
   await sql`
     DELETE FROM ops.data_governance_cases
     WHERE scope_key = ${SCOPE_KEY} AND fingerprint = ${FINGERPRINT}
+  `;
+  await sql`
+    DELETE FROM ops.freshness_slo_windows
+    WHERE slo_key = ${WINDOW_SLO_KEY} AND scope_key = ${WINDOW_SCOPE_KEY}
   `;
 }
 
@@ -76,5 +83,37 @@ describe('data governance case CAS', () => {
         action: 'dismiss',
       }),
     ).toBe(true);
+  });
+
+  test('freezes consumer evidence requirements on freshness-window re-reservation', async () => {
+    const base = {
+      sloKey: WINDOW_SLO_KEY,
+      contractKey: 'my-fpl',
+      scopeKey: WINDOW_SCOPE_KEY,
+      periodKey: 'freeze-v1',
+      eligibleAt: new Date('2026-08-28T00:00:00.000Z'),
+      dueAt: new Date('2026-08-28T00:15:00.000Z'),
+    } as const;
+
+    await upsertFreshnessWindow({
+      ...base,
+      evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
+    });
+    await upsertFreshnessWindow({
+      ...base,
+      evidence: { consumerEvidenceRequired: true, redisEvidenceRequired: true },
+    });
+
+    const sql = await getDbClient();
+    const [row] = await sql<Array<{ consumer: boolean; redis: boolean }>>`
+      SELECT
+        (evidence ->> 'consumerEvidenceRequired')::boolean AS consumer,
+        (evidence ->> 'redisEvidenceRequired')::boolean AS redis
+      FROM ops.freshness_slo_windows
+      WHERE slo_key = ${WINDOW_SLO_KEY}
+        AND scope_key = ${WINDOW_SCOPE_KEY}
+        AND period_key = 'freeze-v1'
+    `;
+    expect(row).toEqual({ consumer: false, redis: true });
   });
 });

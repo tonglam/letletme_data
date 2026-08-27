@@ -33,7 +33,7 @@ import {
   listQueueHealthWindows,
   countGovernanceCases,
 } from './data-governance.service';
-import { dataContractRegistry } from '../domain/data-contracts';
+import { dataContractRegistry, findDataContract } from '../domain/data-contracts';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
@@ -526,9 +526,18 @@ export async function getJobsStatus(
               : definition.queueName,
       executionPolicy: definition.executionPolicy?.kind ?? null,
       successPredicate: definition.successPredicate,
-      contractKey: dataContractRegistry.find((contract) =>
-        (contract.schedulerJobs as readonly string[]).includes(definition.name),
-      )?.contractKey,
+      ...(() => {
+        const contract = findDataContract(
+          dataContractRegistry.find((item) =>
+            (item.schedulerJobs as readonly string[]).includes(definition.name),
+          )?.contractKey ?? '',
+        );
+        return {
+          contractKey: contract?.contractKey,
+          visibility: contract?.visibility ?? null,
+          visibilityReason: contract?.visibilityReason ?? null,
+        };
+      })(),
     })),
     runtime: {
       scheduler: { healthy: scheduler, heartbeat: schedulerHeartbeat },
