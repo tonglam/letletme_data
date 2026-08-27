@@ -4,6 +4,7 @@ import {
   CLIENT_SIGNAL_MAX_BYTES,
   CLIENT_SIGNAL_MAX_SAMPLES,
   ClientSignalValidationError,
+  clientSignalRetentionCutoffs,
   parseClientSignalBatch,
 } from '../../src/services/client-signals.service';
 
@@ -94,5 +95,15 @@ describe('anonymous client signal contract', () => {
 
   test('keeps the body budget explicit', () => {
     expect(CLIENT_SIGNAL_MAX_BYTES).toBe(16 * 1024);
+  });
+
+  test('serializes retention cutoffs before binding SQL parameters', () => {
+    expect(clientSignalRetentionCutoffs(new Date('2026-08-27T00:00:00.000Z'))).toEqual({
+      windowBefore: '2026-07-30T00:00:00.000Z',
+      batchesBefore: '2026-08-25T00:00:00.000Z',
+    });
+    expect(() => clientSignalRetentionCutoffs(new Date('invalid'))).toThrow(
+      'Client signal retention time is invalid',
+    );
   });
 });

@@ -7,6 +7,18 @@ export const CLIENT_SIGNAL_WINDOW_MS = 5 * 60 * 1000;
 export const CLIENT_SIGNAL_BATCH_RETENTION_MS = 48 * 60 * 60 * 1000;
 export const CLIENT_SIGNAL_WINDOW_RETENTION_MS = 28 * 24 * 60 * 60 * 1000;
 
+export function clientSignalRetentionCutoffs(now: Date): {
+  windowBefore: string;
+  batchesBefore: string;
+} {
+  const timestamp = now.getTime();
+  if (!Number.isFinite(timestamp)) throw new Error('Client signal retention time is invalid');
+  return {
+    windowBefore: new Date(timestamp - CLIENT_SIGNAL_WINDOW_RETENTION_MS).toISOString(),
+    batchesBefore: new Date(timestamp - CLIENT_SIGNAL_BATCH_RETENTION_MS).toISOString(),
+  };
+}
+
 const CLIENTS = ['web', 'wechat_miniprogram'] as const;
 const SURFACES = [
   'home',
@@ -486,16 +498,17 @@ export async function getClientSignalSummary(
 export async function purgeClientSignalRetention(
   now = new Date(),
 ): Promise<{ windows: number; batches: number }> {
+  const cutoffs = clientSignalRetentionCutoffs(now);
   return withDatabaseTransaction(async (transaction) => {
     await transaction`SET LOCAL statement_timeout = '5s'`;
     const windows = await transaction`
-      DELETE FROM ops.client_signal_windows
-      WHERE window_start < ${new Date(now.getTime() - CLIENT_SIGNAL_WINDOW_RETENTION_MS)}
-    `;
+			DELETE FROM ops.client_signal_windows
+			WHERE window_start < ${cutoffs.windowBefore}::timestamptz
+		`;
     const batches = await transaction`
-      DELETE FROM ops.client_signal_batches
-      WHERE received_at < ${new Date(now.getTime() - CLIENT_SIGNAL_BATCH_RETENTION_MS)}
-    `;
+			DELETE FROM ops.client_signal_batches
+			WHERE received_at < ${cutoffs.batchesBefore}::timestamptz
+		`;
     return { windows: windows.count ?? 0, batches: batches.count ?? 0 };
   });
 }
