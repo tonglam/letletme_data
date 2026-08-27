@@ -748,13 +748,18 @@ class FPLClient {
         if (remaining <= 0) break;
 
         let attemptRecorded = false;
+        const attemptController = new AbortController();
+        const attemptTimeout = Math.max(
+          1,
+          Math.floor(Math.min(getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS), remaining)),
+        );
+        const attemptTimeoutHandle = setTimeout(() => {
+          attemptController.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+        }, attemptTimeout);
+        const clearAttemptTimeout = (): void => clearTimeout(attemptTimeoutHandle);
         try {
-          const attemptTimeout = Math.min(
-            getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS),
-            remaining,
-          );
           const response = await fetch(url, {
-            signal: AbortSignal.timeout(attemptTimeout),
+            signal: attemptController.signal,
             headers: { 'User-Agent': USER_AGENT },
           });
           reportFplResponse(priority, response.status);
@@ -773,6 +778,7 @@ class FPLClient {
 
             if (attempt === MAX_RETRIES) {
               pendingBackoffMs = null;
+              clearAttemptTimeout();
               return buffered;
             }
 
@@ -787,6 +793,7 @@ class FPLClient {
             if (delayMs > 0) {
               await sleep(delayMs);
             }
+            clearAttemptTimeout();
             continue;
           }
 
@@ -795,6 +802,7 @@ class FPLClient {
           if (!response.ok) {
             requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
             pendingBackoffMs = null;
+            clearAttemptTimeout();
             return response;
           }
 
@@ -804,8 +812,10 @@ class FPLClient {
           pendingBackoffMs = null;
           const buffered = await bufferResponse(response);
           requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+          clearAttemptTimeout();
           return buffered;
         } catch (error) {
+          clearAttemptTimeout();
           if (!attemptRecorded) reportFplResponse(priority, null);
           if (!attemptRecorded) {
             requestMetric.recordAttempt(classifyFplRequestError(error));

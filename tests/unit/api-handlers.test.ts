@@ -4,6 +4,40 @@ import type { TournamentSetupStatusRow } from '../../src/repositories/tournament
 import { seasonRepository } from '../../src/repositories/seasons';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
+type CachedEvent = { id: number; deadlineTime?: string | null };
+type CachedEvents = {
+  currentEventId: number | null;
+  events: CachedEvent[];
+  manifest: { sourceCheckedAt: string };
+};
+
+const selectCachedCurrentEvent = (publication: CachedEvents) =>
+  publication.currentEventId === null
+    ? null
+    : (publication.events.find((event) => event.id === publication.currentEventId) ?? null);
+const selectCachedEventNeighbour = (publication: CachedEvents, offset: -1 | 1) => {
+  if (publication.currentEventId === null) {
+    if (offset === -1) return null;
+    const checkedAt = new Date(publication.manifest.sourceCheckedAt).getTime();
+    return (
+      [...publication.events]
+        .filter(
+          (event) =>
+            event.deadlineTime !== null &&
+            event.deadlineTime !== undefined &&
+            new Date(event.deadlineTime).getTime() > checkedAt,
+        )
+        .sort(
+          (left, right) =>
+            new Date(left.deadlineTime!).getTime() - new Date(right.deadlineTime!).getTime(),
+        )[0] ?? null
+    );
+  }
+  return (
+    publication.events.find((event) => event.id === publication.currentEventId! + offset) ?? null
+  );
+};
+
 spyOn(seasonRepository, 'findCurrent').mockImplementation(async () => TEST_SEASON as never);
 
 const getCurrentEvent = mock(async () => ({ id: 20, name: 'Gameweek 20' }));
@@ -12,6 +46,8 @@ const getNextEvent = mock(async () => ({ id: 21, name: 'Gameweek 21' }));
 mock.module('../../src/services/events.service', () => ({
   getCurrentEvent,
   getNextEvent,
+  selectCachedCurrentEvent,
+  selectCachedEventNeighbour,
 }));
 
 const enqueueEventsSyncJob = mock(async () => ({ id: 'events-job-1' }));
@@ -24,6 +60,12 @@ const enqueuePriceChangePredictionsJob = mock(async () => ({ id: 'price-change-j
 const enqueueTeamsSyncJob = mock(async () => ({ id: 'teams-job-1' }));
 const enqueuePhasesSyncJob = mock(async () => ({ id: 'phases-job-1' }));
 mock.module('../../src/jobs/data-sync-enqueue', () => ({
+  getCoreSnapshotJobId: (source: string, options?: { jobId?: string }) => {
+    if (options?.jobId) return options.jobId;
+    if (source === 'event-transition') return undefined;
+    if (source === 'cron') return `core-snapshot-${new Date().toISOString().slice(0, 10)}`;
+    return 'core-snapshot-repair';
+  },
   enqueueCoreSnapshotJob,
   enqueueEventsSyncJob,
   enqueuePlayerPricesSyncJob,

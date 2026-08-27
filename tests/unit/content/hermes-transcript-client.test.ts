@@ -9,6 +9,7 @@ describe('Hermes fixed transcript service contract', () => {
       token: 'fixture-secret',
       timeoutMs: 1_000,
       maximumResponseBytes: 10_000,
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
       fetchImpl: async (_input, init) => {
         expect(init?.headers).toMatchObject({ Authorization: 'Bearer fixture-secret' });
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -67,6 +68,7 @@ describe('Hermes fixed transcript service contract', () => {
       token: 'fixture-secret',
       timeoutMs: 1_000,
       maximumResponseBytes: 10_000,
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
       fetchImpl: async () =>
         new Response(
           JSON.stringify({

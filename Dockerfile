@@ -26,6 +26,14 @@ ENV NODE_ENV=production
 COPY . ./
 RUN bun run build
 
+# Test image retains dev dependencies and source/tests so CI can execute the
+# hermetic unit suite with Docker networking disabled.
+FROM deps AS test
+ENV NODE_ENV=test
+RUN apk add --no-cache bash coreutils
+COPY . ./
+CMD ["bun", "test", "tests/unit"]
+
 # Build the host-side runner as a glibc Linux executable. The final image only
 # carries the artifact so deploy can extract it to the VPS; it is never run in
 # the application container.

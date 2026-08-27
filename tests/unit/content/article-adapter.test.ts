@@ -99,6 +99,7 @@ describe('public article adapter', () => {
       allowedOrigins: ['https://example.com'],
       now: new Date('2026-08-22T00:00:00.000Z'),
       fetchImpl: mockFetch({}),
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
     });
 
     expect(result.stateHint).toBe('COMPLETED');
@@ -124,6 +125,7 @@ describe('public article adapter', () => {
       discoveryItem,
       allowedOrigins: ['https://example.com'],
       fetchImpl: mockFetch({ robots: 'User-agent: *\nDisallow: /articles/' }),
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
     });
     await expect(promise).rejects.toMatchObject({ failureClass: 'ROBOTS_DISALLOWED' });
   });
@@ -139,6 +141,7 @@ describe('public article adapter', () => {
           headers: { 'content-type': 'text/html' },
         }),
       }),
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
     });
     await expect(promise).rejects.toBeInstanceOf(ArticleAdapterError);
     await expect(promise).rejects.toMatchObject({
@@ -155,6 +158,7 @@ describe('public article adapter', () => {
       fetchImpl: mockFetch({
         article: new Response(null, { status: 304, headers: { etag: '"article-v1"' } }),
       }),
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
     });
     expect(result.stateHint).toBe('CHECKED_NO_CHANGE');
     expect(result.batch.items).toEqual([]);

@@ -11,16 +11,6 @@ jobs:
       fail-fast: false
       matrix:
         bun-version: ['1.3.14']
-    services:
-      redis:
-        image: redis:7
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 6379:6379
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,18 +48,30 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Unit tests only
-        env:
-          # Unit tests should not require live infra; placeholder env keeps config Zod happy
-          # if any module still evaluates getConfig() during import.
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-          CACHE_REDIS_HOST: 127.0.0.1
-          CACHE_REDIS_PORT: '6379'
-          CACHE_REDIS_DB: '9'
-          QUEUE_REDIS_HOST: 127.0.0.1
-          QUEUE_REDIS_PORT: '6379'
-          QUEUE_REDIS_DB: '10'
-        run: bun test tests/unit
+      - name: Build hermetic unit-test image
+        run: docker build --target test --tag letletme-data:test .
+
+      - name: Unit tests only (no network or live infrastructure)
+        run: >-
+          docker run --rm --network none
+          --env NODE_ENV=test
+          --env DATABASE_URL=postgresql://unit:unit@127.0.0.1:1/unit
+          --env CACHE_REDIS_HOST=127.0.0.1
+          --env CACHE_REDIS_PORT=1
+          --env CACHE_REDIS_DB=9
+          --env QUEUE_REDIS_HOST=127.0.0.1
+          --env QUEUE_REDIS_PORT=2
+          --env QUEUE_REDIS_DB=10
+          letletme-data:test
+
+      - name: Unit files are order-independent
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r test_file; do
+            echo "[unit-isolated] ${test_file}"
+            bun test "${test_file}"
+          done < <(find tests/unit -type f -name '*.test.ts' -print | sort)
 
       - name: Build
         env:
