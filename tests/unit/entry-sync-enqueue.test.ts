@@ -427,6 +427,7 @@ describe('entry-sync enqueue runId propagation', () => {
       runId: 'daily-scan',
       removeOnSettle: true,
       freshAfter,
+      freshnessWindowId: 314,
     });
     const rootData = addCalls[0].data;
     const continuation = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', {
@@ -438,10 +439,12 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(continuation.id).toBe('entry-picks-2627-daily-scan-chunk-500');
     expect(rootData.removeOnSettle).toBe(false);
     expect(rootData.freshAfter).toBe(freshAfter);
+    expect(rootData.freshnessWindowId).toBe(314);
     expect(addCalls[0].opts.removeOnComplete).toBeUndefined();
     expect(addCalls[0].opts.removeOnFail).toBeUndefined();
     expect(addCalls[1].data.removeOnSettle).toBe(false);
     expect(addCalls[1].data.freshAfter).toBe(freshAfter);
+    expect(addCalls[1].data.freshnessWindowId).toBe(314);
     expect(addCalls[1].opts.removeOnComplete).toBeUndefined();
     expect(addCalls[1].opts.removeOnFail).toBeUndefined();
   });

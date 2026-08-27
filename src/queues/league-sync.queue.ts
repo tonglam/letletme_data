@@ -27,6 +27,8 @@ export interface LeagueSyncJobData {
   /** Durable scheduler obligation identity carried through coordinator jobs. */
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired. */
+  freshnessWindowId?: number;
 }
 
 export const leagueSyncQueue = new Queue<LeagueSyncJobData>(leagueSyncQueueName, {

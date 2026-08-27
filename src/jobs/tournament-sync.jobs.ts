@@ -40,6 +40,8 @@ export type TournamentSyncEnqueueOptions = {
   operationId?: string;
   obligationId?: string;
   obligationGeneration?: number;
+  /** Exact freshness window being repaired, inherited by cascade children. */
+  freshnessWindowId?: number;
   finalizedEventId?: number;
   freshAfter?: string;
   /** Force a page-manifest guarded full reconciliation after incremental drift. */
@@ -315,6 +317,9 @@ async function enqueueTournamentSyncJob(
       ...(options.obligationGeneration === undefined
         ? {}
         : { obligationGeneration: options.obligationGeneration }),
+      ...(options.freshnessWindowId === undefined
+        ? {}
+        : { freshnessWindowId: options.freshnessWindowId }),
       ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
       ...(options.cascadeId ? { cascadeId: options.cascadeId } : {}),
       ...(options.finalizationTargets

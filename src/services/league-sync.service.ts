@@ -147,7 +147,7 @@ async function syncPicksAcrossTournaments(season: FplSeasonRef, eventId: number,
 async function syncResultsAcrossTournaments(
   season: FplSeasonRef,
   eventId: number,
-  context?: { runId?: string; freshAfter?: string },
+  context?: { runId?: string; freshAfter?: string; freshnessWindowId?: number },
 ) {
   return syncActiveLeagueTournaments({
     season,
@@ -160,6 +160,7 @@ async function syncResultsAcrossTournaments(
     syncTournament: (tournamentId) =>
       syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
         freshAfter: context?.freshAfter,
+        freshnessWindowId: context?.freshnessWindowId,
         mutationJobId: `${context?.runId ?? 'coordinator'}:t${tournamentId}`,
       }),
   });
@@ -181,11 +182,12 @@ export async function processLeagueEventResultsJob(
   season: FplSeasonRef,
   eventId: number,
   tournamentId?: number,
-  context?: { runId?: string; freshAfter?: string },
+  context?: { runId?: string; freshAfter?: string; freshnessWindowId?: number },
 ) {
   if (tournamentId) {
     return syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
       freshAfter: context?.freshAfter,
+      freshnessWindowId: context?.freshnessWindowId,
       mutationJobId: `${context?.runId ?? 'direct'}:t${tournamentId}`,
     });
   }

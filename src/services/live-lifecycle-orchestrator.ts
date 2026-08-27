@@ -368,6 +368,7 @@ export async function runPicksProbeAndSync(
   obligation: Readonly<{
     obligationId?: string;
     obligationGeneration?: number;
+    freshnessWindowId?: number;
   }> = {},
 ): Promise<{
   canaryCount: number;
@@ -483,6 +484,7 @@ export async function runPicksProbeAndSync(
       jobId: `entry-picks-${season.seasonCode}-live-refresh-${eventId}-${nowMs}`,
       obligationId: obligation.obligationId,
       obligationGeneration: obligation.obligationGeneration,
+      freshnessWindowId: obligation.freshnessWindowId,
       // In-memory fan-out claims are lost on scheduler restart. BullMQ keeps
       // this event lane single-flight until the accepted job settles, while
       // the completed-job cadence window prevents an immediate restart sweep.
