@@ -52,7 +52,10 @@ describe('data governance case CAS', () => {
       FROM ops.data_governance_cases
       WHERE scope_key = ${SCOPE_KEY} AND fingerprint = ${FINGERPRINT}
     `;
-    expect(rawRow?.updatedAt).toMatch(/\.\d{4,}\+/);
+    // PostgreSQL preserves the exact text token used by the CAS predicate;
+    // the server may expose milliseconds or microseconds depending on the
+    // configured timestamp precision, so do not couple the test to a scale.
+    expect(rawRow?.updatedAt).toMatch(/\.\d+\+\d{2}$/);
 
     const [listed] = await listGovernanceCases({ status: 'OPEN', limit: 10 });
     expect(listed?.scopeKey).toBe(SCOPE_KEY);
