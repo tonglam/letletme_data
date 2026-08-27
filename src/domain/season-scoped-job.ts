@@ -1,10 +1,13 @@
 import { explicitSeasonRef, type FplSeasonRef } from './fpl-season';
-import { seasonRepository } from '../repositories/seasons';
 import { ConflictError, ValidationError } from '../utils/errors';
 
 export interface SeasonScopedJobData {
   readonly seasonId: number;
   readonly seasonCode: string;
+}
+
+export interface CurrentSeasonReader {
+  findCurrent(): Promise<Pick<FplSeasonRef, 'seasonId' | 'seasonCode'>>;
 }
 
 export function seasonRefFromJobData(data: SeasonScopedJobData): FplSeasonRef {
@@ -27,9 +30,12 @@ export function seasonRefFromJobData(data: SeasonScopedJobData): FplSeasonRef {
   return season;
 }
 
-export async function requireCurrentSeasonForJob(data: SeasonScopedJobData): Promise<FplSeasonRef> {
+export async function requireCurrentSeasonForJob(
+  data: SeasonScopedJobData,
+  seasonReader: CurrentSeasonReader,
+): Promise<FplSeasonRef> {
   const requested = seasonRefFromJobData(data);
-  const current = await seasonRepository.findCurrent();
+  const current = await seasonReader.findCurrent();
   if (current.seasonId !== requested.seasonId || current.seasonCode !== requested.seasonCode) {
     throw new ConflictError(
       `Queued FPL job belongs to season ${requested.seasonCode}; current season is ${current.seasonCode}.`,

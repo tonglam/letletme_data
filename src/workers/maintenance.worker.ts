@@ -10,7 +10,7 @@ import { runLaunchMonitor } from '../jobs/launch.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { reconcileUnderstatOrphanedRuns } from '../services/understat-recovery.service';
 import { enqueueCoreSnapshotJob, enqueuePlayerStatsSyncJob } from '../jobs/data-sync-enqueue';
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
   enqueueEntryInfoSyncJob,
   enqueueEntryPicksSyncJob,
@@ -32,7 +32,7 @@ import {
   type MyFplSnapshotPublication,
 } from '../services/my-fpl-snapshot-publication.service';
 import { dispatchMyFplSnapshotInvalidationOutbox } from '../services/my-fpl-snapshot-invalidation.service';
-import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
+import { dispatchDataPublicationOutbox } from '../services/data-publication-delivery.service';
 import { runEntryOnboarding } from '../services/entry-onboarding.service';
 import { runQueueRunPhase } from '../services/queue-run-barrier';
 import { eventRepository } from '../repositories/events';

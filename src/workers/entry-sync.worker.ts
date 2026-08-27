@@ -13,7 +13,7 @@ import { decideEntrySyncChain, planEntryInfoSyncWork } from '../domain/entry-syn
 import { entriesInCompetition } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
   type EntrySyncJobData,
   type EntrySyncJobSource,

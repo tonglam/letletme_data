@@ -2,7 +2,7 @@ import { Worker, Job, QueueEvents, type Queue } from 'bullmq';
 
 import { finalizeTournamentEventLifecycle } from '../domain/tournament-event-finalization';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import { shouldEnqueueTournamentCascade } from '../domain/tournament-event-results';
 import {
   tournamentSyncQueue,

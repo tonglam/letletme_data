@@ -21,7 +21,7 @@ import {
   tournamentSetupErrorCode,
 } from '../services/tournament-setup-failure.service';
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import { seasonRepository } from '../repositories/seasons';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';

@@ -8,10 +8,8 @@ import {
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { playerMarketSnapshotsRepository } from '../repositories/player-market-snapshots';
 import { syncOperationsRepository } from '../repositories/sync-operations';
-import {
-  dispatchDataPublicationOutbox,
-  loadDataPublicationDelivery,
-} from '../repositories/data-publication-outbox';
+import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
 import { recordDataPublicationEvidence } from './data-governance.service';
 import { contentHash } from '../utils/content-hash';
 import { logInfo } from '../utils/logger';

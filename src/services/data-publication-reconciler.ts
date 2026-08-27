@@ -6,15 +6,15 @@ import {
   type DataPublicationScope,
 } from '../cache/data-publication';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
 import {
-  loadDataPublicationDelivery,
+  dispatchDataPublicationOutbox,
   markDataPublicationOutboxReconciled,
-} from '../repositories/data-publication-outbox';
+} from './data-publication-delivery.service';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { getSchedulerLane } from '../repositories/scheduler-lanes';
 import { eventRepository } from '../repositories/events';
 import { randomUUID } from 'node:crypto';
-import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
 import { logInfo, logWarn } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 
