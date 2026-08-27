@@ -137,7 +137,20 @@ export async function upsertFreshnessWindow(input: {
         eligibleAt: sql`LEAST(${freshnessSloWindowsInOps.eligibleAt}, excluded.eligible_at)`,
         dueAt: sql`LEAST(${freshnessSloWindowsInOps.dueAt}, excluded.due_at)`,
         obligationDueAt: sql`COALESCE(${freshnessSloWindowsInOps.obligationDueAt}, excluded.obligation_due_at)`,
-        evidence: sql`${freshnessSloWindowsInOps.evidence} || excluded.evidence`,
+        // `consumerEvidenceRequired` is a reservation-time decision.  Keep
+        // the first explicit value across scheduler restarts or configuration
+        // changes, while still merging newly discovered evidence fields.
+        evidence: sql`
+          (${freshnessSloWindowsInOps.evidence} || excluded.evidence)
+          || CASE
+            WHEN ${freshnessSloWindowsInOps.evidence} ? 'consumerEvidenceRequired'
+            THEN jsonb_build_object(
+              'consumerEvidenceRequired',
+              ${freshnessSloWindowsInOps.evidence}->'consumerEvidenceRequired'
+            )
+            ELSE '{}'::jsonb
+          END
+        `,
         updatedAt: sql`clock_timestamp()`,
       },
     })
