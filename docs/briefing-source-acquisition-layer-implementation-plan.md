@@ -1,6 +1,8 @@
 # Briefing 第一层：多来源采集实施计划
 
-> 状态：目标实施合同与当前 worktree 实施记录；尚未合并、部署或开启 production rollout。
+> 文档状态：rollout pending（实施合同/历史 worktree 记录，不是生产状态证明）。
+> 代码与生产状态：尚未由本文档证明已合并、部署或开启 production rollout；以当前 `main`
+> 的 CI、部署和运行验收记录为准。
 >
 > 本文根据
 > [Briefing 多来源采集案例验证 Checklist](./briefing-source-acquisition-checklist.md)

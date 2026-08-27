@@ -6,11 +6,18 @@ This directory contains the test suite for `letletme_data`. Tests are split by s
 
 | Command | What it runs | Infrastructure |
 |---|---|---|
-| `bun run test` or `bun test tests/unit` | Unit tests only (`tests/unit`) | None |
+| `bun run test` or `bun test tests/unit` | Unit tests only (`tests/unit`) | None; preload forces synthetic loopback endpoints |
 | `bun run test:integration` | Integration tests (`tests/integration`) | Postgres + Redis (test instance only) |
 | `bun run test:publication:integration` | Immutable publication + Redis separation | Postgres + Redis (test instance only) |
 | `bun run test:core-publication-benchmark` | Full B0 core publication budget | Restored B0 Postgres + Redis; `RUN_B0_ACCEPTANCE=1` |
 | `RUN_INTEGRATION=1 bun run test:all` | Unit + integration | Postgres + Redis (test instance only) |
+| `bun run docs:contract` | Runtime/documentation inventory contract | None |
+
+The unit suite is configured by `bunfig.toml` to preload `tests/unit/preload.ts`.
+Before any application module is imported it sets `NODE_ENV=test` and replaces
+database, cache, queue, and provider endpoints with unreachable loopback values.
+It never copies credentials or URLs from the invoking shell. A unit run therefore
+must remain green with no network, PostgreSQL, Redis, or provider available.
 
 Do not use bare `bun test` as a unit-test shortcut. Bun discovers both test
 directories directly, so the integration environment guard will reject the run
@@ -25,6 +32,12 @@ Integration tests are gated by `tests/integration/helpers/env-guard.ts`. They re
 - `CACHE_REDIS_DB` and `QUEUE_REDIS_DB` are non-zero and distinct
 
 This prevents accidental runs against production infrastructure.
+
+The CI unit job also runs a no-network Docker variant and a per-file isolation
+gate. The isolation gate starts each unit file in a fresh subprocess so module
+cache pollution, test-order dependence, and leaked global mocks cannot create a
+false green result. Integration coverage is separate and must be explicitly
+requested; ordinary coverage is unit-only.
 
 ## Directory layout
 

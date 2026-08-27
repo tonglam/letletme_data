@@ -17,6 +17,63 @@ registry declares each obligation's timezone explicitly. Cron ticks are
 candidates, not guarantees of a write: each job applies its documented season,
 current event, fixture-window, and data-availability gates before enqueueing.
 
+## Canonical executable inventory
+
+The following names are the current `schedulerRegistry` entries. Cadence,
+timezone, catch-up policy, queue lane, and success evidence are defined in
+`src/scheduler/job-registry.ts`; this document explains the business gates
+below. The documentation contract test fails if a registry name disappears
+from this inventory.
+
+```text
+core-current-reconcile
+price-change-predictions
+price-change-watch
+core-snapshot
+market-daily
+player-stats
+understat-team-incremental
+understat-player-incremental
+understat-orphan-reconciler
+player-market-freshness-watchdog
+bug-report-cleanup
+bug-report-screenshot-retention
+client-signal-retention
+player-season-summary-repair
+tournament-trends-repair
+launch-monitor
+post-match-consolidation
+my-fpl-snapshot
+my-fpl-finalization
+my-fpl-snapshot-outbox
+entry-info
+tournament-roster
+tournament-info
+entry-picks
+entry-transfers
+entry-results
+league-event-picks
+league-event-results
+tournament-event-results
+tournament-event-picks
+tournament-transfers-pre
+live-snapshot
+live-picks-refresh
+tournament-official-h2h-live
+live-finalization
+player-stats-active
+content-acquisition
+```
+
+`GET /jobs` is the operator-facing view of this registry, filtered by the
+`manualTrigger` flag and merged with these compatibility aliases:
+`core-snapshot-sync`, `event-current-refresh`, `player-prices`,
+`player-stats-sync`, `player-values-sync`, `entry-info-daily`,
+`entry-event-results-daily`, `league-event-results-sync`,
+`tournament-event-results-sync`, `tournament-selection-stats-sync`,
+`tournament-info-sync`, and `tournament-materialized-views-refresh`. An alias
+does not own a second cadence.
+
 ## Core season discovery
 
 This job runs year-round so a newly published season can be discovered before

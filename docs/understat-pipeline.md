@@ -54,7 +54,9 @@ Season acceptance comes from these explicit Understat settings. It is independen
 `fpl.seasons.is_current`; neither wall-clock inference nor a Redis key decides the Understat season.
 The two BullMQ clients are created only after an accepted explicit sync or after the enabled worker
 passes its feature-flag gate. With the default `UNDERSTAT_ENABLED=false`, importing either process
-does not open an Understat queue connection.
+does not open an Understat queue connection. All queues use the shared retention
+contract: completed jobs are retained for 24 hours (maximum 500) and failed
+jobs for seven days (maximum 500).
 
 ## 4. Queues and jobs
 
