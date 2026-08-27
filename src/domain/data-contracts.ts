@@ -53,6 +53,12 @@ export type DataContract = Readonly<{
   retry: Readonly<{ maxGenerations: number; policy: string }>;
   compensator: string;
   visibility: ContractVisibility;
+  /**
+   * Required for contracts which intentionally have no public consumer.  A
+   * reason keeps internal/excluded work visible in the catalog and prevents a
+   * future definition from silently escaping the cross-stack audit.
+   */
+  visibilityReason?: string;
 }>;
 
 const publicConsumers = (graphql: string, web: string) => ({ graphql, web });
@@ -306,6 +312,7 @@ export const dataContractRegistry = [
     retry: { maxGenerations: 3, policy: 'bounded retry' },
     compensator: 'housekeeping reconcile',
     visibility: 'internal-only',
+    visibilityReason: 'Operations-only maintenance checkpoints; no user-facing dataset.',
   },
   {
     contractKey: 'public-league-trends',
@@ -322,6 +329,8 @@ export const dataContractRegistry = [
     retry: { maxGenerations: 3, policy: 'bounded repair' },
     compensator: 'repair lane reconcile',
     visibility: 'excluded',
+    visibilityReason:
+      'Explicitly excluded from this acceptance cycle; retained only for mechanical repair migration.',
   },
   {
     contractKey: 'bootstrap-archive',
@@ -338,6 +347,8 @@ export const dataContractRegistry = [
     retry: { maxGenerations: 6, policy: 'no replay without archived artifact' },
     compensator: 'protected source-day replay',
     visibility: 'internal-only',
+    visibilityReason:
+      'Internal immutable source evidence used to validate source-day replay; not a user-facing dataset.',
   },
 ] as const satisfies readonly DataContract[];
 
@@ -345,6 +356,13 @@ export const canonicalQueueCatalog = [...queueNames, ...contentQueueNames] as co
 
 export type CanonicalQueueName = (typeof canonicalQueueCatalog)[number];
 export type ContractKey = (typeof dataContractRegistry)[number]['contractKey'];
+
+/** Return a contract through the widened schema type used by runtime code. */
+export function findDataContract(contractKey: string): DataContract | undefined {
+  return dataContractRegistry.find((contract) => contract.contractKey === contractKey) as
+    | DataContract
+    | undefined;
+}
 
 /** Runtime inventory used by CI/status/quiescence checks. Keep this list
  * explicit: adding a consumer without adding its operational owner is a
@@ -438,6 +456,21 @@ export function contractHasFreshnessWindow(contract: DataContract, jobName: stri
   return contract.freshnessJobs === undefined || contract.freshnessJobs.includes(jobName);
 }
 
+/**
+ * Consumer evidence is required only when the contract names both sides of
+ * the public read path.  Keeping this decision in the registry prevents the
+ * global probe feature flag from accidentally making internal checkpoints
+ * wait for GraphQL/Web milestones that do not exist.
+ */
+export function contractHasConsumerEvidence(contract: DataContract): boolean {
+  return (
+    typeof contract.consumerEvidence.graphql === 'string' &&
+    contract.consumerEvidence.graphql.trim().length > 0 &&
+    typeof contract.consumerEvidence.web === 'string' &&
+    contract.consumerEvidence.web.trim().length > 0
+  );
+}
+
 /** Resolve the concrete queue lane for a contract job. A contract can span
  * several lanes (for example My FPL orchestration versus its publication
  * outbox), so governance cases must not blindly use the contract's primary
@@ -498,13 +531,21 @@ export function assertDataContractRegistry(jobNames: readonly string[]): void {
         (!contract.freshnessJobs || contract.freshnessJobs.length === 0),
     )
     .map((contract) => contract.contractKey);
+  const contractsMissingVisibilityReason = contracts
+    .filter(
+      (contract) =>
+        (contract.visibility === 'internal-only' || contract.visibility === 'excluded') &&
+        (!contract.visibilityReason || contract.visibilityReason.trim().length === 0),
+    )
+    .map((contract) => contract.contractKey);
   if (
     missing.length > 0 ||
     unrepresented.length > 0 ||
     invalidManualOnly.length > 0 ||
     duplicates.length > 0 ||
     invalidFreshnessJobs.length > 0 ||
-    checkpointContractsWithoutJobs.length > 0
+    checkpointContractsWithoutJobs.length > 0 ||
+    contractsMissingVisibilityReason.length > 0
   ) {
     throw new Error(
       [
@@ -523,6 +564,9 @@ export function assertDataContractRegistry(jobNames: readonly string[]): void {
           : '',
         checkpointContractsWithoutJobs.length > 0
           ? `Checkpoint contracts missing freshness job mappings: ${checkpointContractsWithoutJobs.join(', ')}`
+          : '',
+        contractsMissingVisibilityReason.length > 0
+          ? `Internal/excluded contracts missing visibility reasons: ${contractsMissingVisibilityReason.join(', ')}`
           : '',
       ]
         .filter(Boolean)

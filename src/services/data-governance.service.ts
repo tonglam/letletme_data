@@ -14,7 +14,11 @@ import {
   type FreshnessCompletenessStatus,
   type FreshnessSloStatus,
 } from '../domain/freshness-slo';
-import { dataContractRegistry } from '../domain/data-contracts';
+import {
+  contractHasConsumerEvidence,
+  dataContractRegistry,
+  findDataContract,
+} from '../domain/data-contracts';
 import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
 import {
@@ -579,11 +583,26 @@ export async function recordFreshnessObservation(input: {
       (input.invalid ? 'INVALID' : (current.completenessStatus as FreshnessCompletenessStatus));
     const invalid = input.invalid ?? current.status === 'INVALID';
     const windowEvidence = asJsonObject(current.evidence);
-    const redisEvidenceRequired = windowEvidence.redisEvidenceRequired !== false;
+    const contract = findDataContract(current.contractKey);
+    // Persisted windows created before the consumer-probe rollout do not have
+    // an explicit flag. Derive their requirements from the contract rather
+    // than the global feature flag so internal checkpoints never wait for
+    // nonexistent GraphQL/Web evidence. Once a window has an explicit value,
+    // keep that decision stable across flag changes and restarts.
+    const consumerEvidenceRequired =
+      windowEvidence.consumerEvidenceRequired === true ||
+      (windowEvidence.consumerEvidenceRequired === undefined &&
+        getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED &&
+        contract !== undefined &&
+        contractHasConsumerEvidence(contract));
+    const redisEvidenceRequired =
+      windowEvidence.redisEvidenceRequired === undefined
+        ? contract?.freshnessEvidence === 'publication' || Boolean(contract?.consumerEvidence.redis)
+        : windowEvidence.redisEvidenceRequired !== false;
     const observation = {
       eligible: current.status !== 'NOT_APPLICABLE',
       invalid,
-      consumerEvidenceRequired: getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED,
+      consumerEvidenceRequired,
       redisEvidenceRequired,
       dueAt: current.dueAt,
       sourceCheckedAt: input.sourceCheckedAt ?? current.sourceCheckedAt,

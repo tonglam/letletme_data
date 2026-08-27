@@ -52,7 +52,11 @@ import { getConfig } from '../utils/config';
 import { mapWithConcurrency, TimeoutError, withTimeout } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 import { safeDataErrorCode } from '../domain/error-classification';
-import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
+import {
+  contractForSchedulerJob,
+  contractHasConsumerEvidence,
+  contractHasFreshnessWindow,
+} from '../domain/data-contracts';
 import {
   advanceSchedulerProgress,
   completeSchedulerProgress,
@@ -210,6 +214,12 @@ async function recordFreshnessWindowForPlan(
     obligationDueAt: plan.dueAt,
     evidence: {
       freshnessEvidence: contract.freshnessEvidence,
+      // Freeze whether this window participates in the consumer-visible SLO
+      // at reservation time. Internal/checkpoint contracts without a named
+      // GraphQL+Web path must remain producer-only even after probes are
+      // enabled globally.
+      consumerEvidenceRequired:
+        getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED && contractHasConsumerEvidence(contract),
       redisEvidenceRequired:
         contract.freshnessEvidence === 'publication' || Boolean(contract.consumerEvidence.redis),
     },

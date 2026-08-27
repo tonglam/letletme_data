@@ -25,6 +25,7 @@ import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-of
 import { missingLockedPageNumbers } from '../../src/domain/official-h2h-manifest';
 import {
   assertDataContractRegistry,
+  contractHasConsumerEvidence,
   dataContractRegistry,
   canonicalQueueCatalog,
   queueRuntimeCatalog,
@@ -376,6 +377,24 @@ describe('GW queue and data governance primitives', () => {
         redis: 'active snapshot manifest and publication outbox',
       },
     });
+    expect(
+      dataContractRegistry
+        .filter(
+          (contract) =>
+            contract.visibility === 'internal-only' || contract.visibility === 'excluded',
+        )
+        .every((contract) => contract.visibilityReason?.trim().length),
+    ).toBe(true);
+    expect(
+      contractHasConsumerEvidence(
+        dataContractRegistry.find((contract) => contract.contractKey === 'my-fpl')!,
+      ),
+    ).toBe(true);
+    expect(
+      contractHasConsumerEvidence(
+        dataContractRegistry.find((contract) => contract.contractKey === 'housekeeping')!,
+      ),
+    ).toBe(false);
   });
 
   test('routes My FPL outbox freshness repairs to the publication lane', () => {
