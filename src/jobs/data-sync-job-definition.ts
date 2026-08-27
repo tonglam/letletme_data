@@ -27,6 +27,13 @@ export interface DataSyncEnqueueOptions {
   freshnessWindowId?: number;
   /** All joined freshness windows for a shared latest-wins publication. */
   freshnessWindowIds?: readonly number[];
+  /** Exact provisional source identity handed to durable price reconciliation. */
+  sourceHash?: string;
+  sourceArtifactId?: string;
+  priceChangeBoardRevision?: string;
+  /** Provider capture timestamps retained after the hot Redis TTL expires. */
+  sourceDetectedAt?: string;
+  sourceFetchedAt?: string;
   /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
   removeOnSettle?: boolean;
 }
@@ -77,6 +84,13 @@ export function createDataSyncJobData(
     ...(options.laneId ? { laneId: options.laneId } : {}),
     ...(options.laneGeneration === undefined ? {} : { laneGeneration: options.laneGeneration }),
     ...(options.blockerLaneId ? { blockerLaneId: options.blockerLaneId } : {}),
+    ...(options.sourceHash ? { sourceHash: options.sourceHash } : {}),
+    ...(options.sourceArtifactId ? { sourceArtifactId: options.sourceArtifactId } : {}),
+    ...(options.priceChangeBoardRevision
+      ? { priceChangeBoardRevision: options.priceChangeBoardRevision }
+      : {}),
+    ...(options.sourceDetectedAt ? { sourceDetectedAt: options.sourceDetectedAt } : {}),
+    ...(options.sourceFetchedAt ? { sourceFetchedAt: options.sourceFetchedAt } : {}),
     ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
     ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
     ...(options.freshnessWindowId === undefined

@@ -4,7 +4,13 @@ import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   normalizePriceChangeBoard,
   parsePublishedPriceChangeBoard,
+  priceChangeBoardTriggerFingerprint,
+  priceChangeBoardValueFingerprint,
   priceChangeBootstrapEdgeCacheKey,
+  priceChangePrimaryDeadline,
+  priceChangeTriggerFingerprint,
+  priceChangeValueFingerprint,
+  shouldPublishPriceChangeHotSnapshot,
   PriceChangePredictionValidationError,
   PRICE_CHANGE_MAX_AGE_MS,
   PRICE_CHANGE_READY_MS,
@@ -92,6 +98,54 @@ function bootstrapFixture(overrides: Record<string, unknown> = {}): FPLBootstrap
 }
 
 describe('price-change prediction normalization', () => {
+  it('only changes the hot trigger when official prices or player IDs change', () => {
+    const baseline = bootstrapFixture();
+    const transferOnly = bootstrapFixture({ transfers_in_event: 99, transfers_out_event: 1 });
+    const priceChanged = bootstrapFixture({ now_cost: 76 });
+
+    expect(priceChangeTriggerFingerprint(transferOnly)).toBe(
+      priceChangeTriggerFingerprint(baseline),
+    );
+    expect(priceChangeTriggerFingerprint(priceChanged)).not.toBe(
+      priceChangeTriggerFingerprint(baseline),
+    );
+
+    const board = normalizePriceChangeBoard(baseline, new Date('2026-08-22T00:00:00Z'));
+    expect(priceChangeBoardTriggerFingerprint(board)).toBe(priceChangeTriggerFingerprint(baseline));
+    expect(priceChangeBoardValueFingerprint(board)).toBe(priceChangeValueFingerprint(baseline));
+    expect(priceChangePrimaryDeadline(baseline)).toBe('2026-08-23T18:30:00.000Z');
+  });
+
+  it('keeps a deadline rollover separate from the no-change value identity', () => {
+    const baseline = bootstrapFixture();
+    const nextDeadline = {
+      ...baseline,
+      game_config: {
+        settings: { price_change_deadlines: ['2026-08-24T18:30:00Z'] },
+      },
+    } as unknown as FPLBootstrapResponse;
+
+    expect(priceChangeValueFingerprint(nextDeadline)).toBe(priceChangeValueFingerprint(baseline));
+    expect(priceChangeTriggerFingerprint(nextDeadline)).not.toBe(
+      priceChangeTriggerFingerprint(baseline),
+    );
+    expect(
+      shouldPublishPriceChangeHotSnapshot(
+        priceChangeValueFingerprint(baseline),
+        priceChangeValueFingerprint(nextDeadline),
+      ),
+    ).toBe(false);
+    expect(shouldPublishPriceChangeHotSnapshot(null, priceChangeValueFingerprint(baseline))).toBe(
+      false,
+    );
+    expect(
+      shouldPublishPriceChangeHotSnapshot(
+        priceChangeValueFingerprint(baseline),
+        priceChangeValueFingerprint(bootstrapFixture({ now_cost: 76 })),
+      ),
+    ).toBe(true);
+  });
+
   it('rotates the official bootstrap edge-cache key once per five-minute bucket', () => {
     expect(priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:01:00Z'))).toBe(
       priceChangeBootstrapEdgeCacheKey(Date.parse('2026-08-24T06:04:59.999Z')),
@@ -147,6 +201,21 @@ describe('price-change prediction normalization', () => {
     ]);
     expect(older.requestStartedAt.getTime()).toBeLessThan(newer.requestStartedAt.getTime());
     expect(older.fetchedAt.getTime()).toBeGreaterThan(newer.fetchedAt.getTime());
+  });
+
+  it('preserves the provider capture timestamps for archived reconciliation', async () => {
+    const capturedRequest = new Date('2026-08-24T06:05:00.100Z');
+    const capturedFetch = new Date('2026-08-24T06:05:01.000Z');
+    const result = await requestPriceChangeBootstrap({
+      getBootstrap: async () => bootstrapFixture(),
+      captureTimestamps: {
+        requestStartedAt: capturedRequest,
+        fetchedAt: capturedFetch,
+      },
+    });
+
+    expect(result.requestStartedAt.toISOString()).toBe(capturedRequest.toISOString());
+    expect(result.fetchedAt.toISOString()).toBe(capturedFetch.toISOString());
   });
 
   it('keeps official preseason zero values as a usable board row', () => {
@@ -216,6 +285,7 @@ describe('price-change prediction normalization', () => {
         state: 'active',
         publicationId: 'price-publication-test',
         revision: 1,
+        sourceCheckedAt: fetchedAt.toISOString(),
         items: [{ name: 'context' }, { name: 'players' }],
       },
       items: {

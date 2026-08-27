@@ -27,6 +27,13 @@ export interface DataSyncJobData {
   laneId?: string;
   laneGeneration?: number;
   blockerLaneId?: string;
+  /** Exact provisional source identity handed to durable price reconciliation. */
+  sourceHash?: string;
+  sourceArtifactId?: string;
+  priceChangeBoardRevision?: string;
+  /** Provider capture timestamps retained after the hot Redis TTL expires. */
+  sourceDetectedAt?: string;
+  sourceFetchedAt?: string;
   /** Optional event filter (fixtures, player-stats); absent = current/all behavior */
   eventId?: number;
   /** Price-history date in the configured cron timezone (YYYYMMDD). */

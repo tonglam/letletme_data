@@ -368,6 +368,44 @@ export async function reserveSchedulerObligation(input: {
   return mapRow(row);
 }
 
+/**
+ * Attach immutable source hand-off metadata to an already-reserved
+ * obligation. A hot watcher often observes the price move after the ordinary
+ * five-minute scheduler has reserved/enqueued the same waterline. Updating
+ * the evidence keeps that single Bull job in place while allowing its worker
+ * to replay the exact captured bootstrap instead of creating a parallel job.
+ */
+export async function mergeSchedulerObligationEvidence(input: {
+  obligationId: string;
+  evidence: Record<string, unknown>;
+  db?: DbOrTransaction;
+}): Promise<SchedulerObligation> {
+  const db = input.db ?? (await getDb());
+  const rows = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(input.evidence)}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+    .returning();
+  if (!rows[0]) throw new Error('Scheduler obligation disappeared while merging evidence');
+  return mapRow(rows[0]);
+}
+
+export async function getSchedulerObligation(input: {
+  obligationId: string;
+  db?: DbHandle;
+}): Promise<SchedulerObligation | null> {
+  const db = input.db ?? (await getDb());
+  const rows = await db
+    .select()
+    .from(schedulerObligationsInOps)
+    .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+    .limit(1);
+  return rows[0] ? mapRow(rows[0]) : null;
+}
+
 async function refreshPostMatchObligationAuthority(input: {
   obligation: SchedulerObligation;
   plan: SchedulerObligationPlan;

@@ -1,6 +1,12 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 
-import { eventsInFpl, playersInFpl, seasonsInFpl, teamsInFpl } from '../db/schemas/index.schema';
+import {
+  datasetPublicationsInOps,
+  eventsInFpl,
+  playersInFpl,
+  seasonsInFpl,
+  teamsInFpl,
+} from '../db/schemas/index.schema';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
@@ -15,6 +21,78 @@ import { DatabaseError } from '../utils/errors';
 import type { CoreSnapshot } from '../domain/core-snapshot';
 
 export const CORE_SNAPSHOT_WRITE_LOCK_KEY = 912_883_472;
+
+/**
+ * A watcher repair may arrive after a newer Core publication has already
+ * become authoritative.  It must be recorded as skipped, never persisted as
+ * canonical facts or allowed to retire the newer publication.
+ */
+export const CORE_SNAPSHOT_STALE_SOURCE_CODE = 'CORE_SNAPSHOT_STALE_SOURCE';
+
+function sourceCheckedAtFromManifest(value: unknown): Date | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = (value as Record<string, unknown>).sourceCheckedAt;
+  if (typeof raw !== 'string') return null;
+  const timestamp = new Date(raw);
+  return Number.isFinite(timestamp.getTime()) ? timestamp : null;
+}
+
+async function assertCoreSourceIsNotStale(
+  season: FplSeasonRef,
+  sourceCheckedAt: Date | undefined,
+  db: DbOrTransaction,
+): Promise<void> {
+  if (!sourceCheckedAt) return;
+  // Use the same scope advisory lock as activatePublication before taking
+  // publication-row locks.  The activation path locks its target staging row
+  // before the active rows; serialising the source fence at the scope level
+  // prevents a concurrent Core persist from acquiring those rows in the
+  // opposite order and deadlocking the publication transaction.
+  await db.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtext('fpl:core'),
+      hashtext(${`${season.seasonId}:0`})
+    )
+  `);
+  const publications = await db
+    .select({
+      publicationId: datasetPublicationsInOps.publicationId,
+      manifest: datasetPublicationsInOps.manifest,
+    })
+    .from(datasetPublicationsInOps)
+    .where(
+      and(
+        eq(datasetPublicationsInOps.dataset, 'fpl:core'),
+        eq(datasetPublicationsInOps.seasonId, season.seasonId),
+        isNull(datasetPublicationsInOps.eventId),
+        // A newer Core source can have committed its staging publication
+        // before the canonical rows are activated. Treat that staging source
+        // as authoritative for source ordering too; otherwise a delayed
+        // repair could overwrite the newer rows between persistence and
+        // activation.
+        inArray(datasetPublicationsInOps.status, ['active', 'staging']),
+      ),
+    )
+    // Serialise the source ordering check with publication activation. The
+    // activation path locks the same active/staging rows before retiring or
+    // promoting them.
+    .for('update');
+  const newest = publications
+    .map((row) => ({
+      publicationId: row.publicationId,
+      sourceCheckedAt: sourceCheckedAtFromManifest(row.manifest),
+    }))
+    .filter((row): row is { publicationId: string; sourceCheckedAt: Date } =>
+      Boolean(row.sourceCheckedAt),
+    )
+    .sort((left, right) => right.sourceCheckedAt.getTime() - left.sourceCheckedAt.getTime())[0];
+  if (newest && newest.sourceCheckedAt.getTime() > sourceCheckedAt.getTime()) {
+    throw new DatabaseError(
+      `Core snapshot source is older than active publication ${newest.publicationId}`,
+      CORE_SNAPSHOT_STALE_SOURCE_CODE,
+    );
+  }
+}
 
 export interface CoreSnapshotPersistenceResult {
   readonly events: number;
@@ -306,6 +384,7 @@ export async function persistCoreSnapshot(
   return withCoreSnapshotWriteLock(
     season,
     async (transaction) => {
+      await assertCoreSourceIsNotStale(season, sourceCheckedAt, transaction);
       await assertIdentityAlignment(season, snapshot, transaction);
       const reconciled = await reconcileDurableWinners(
         season,

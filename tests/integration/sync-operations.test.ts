@@ -99,6 +99,7 @@ function publicationManifest(
   publicationId: string,
   revision: number,
   season: FplSeasonRef,
+  sourceCheckedAt = '2026-08-09T01:00:00.000Z',
 ): DataPublicationManifest {
   const payload = '[]';
   return {
@@ -107,7 +108,7 @@ function publicationManifest(
     eventId: null,
     revision,
     publicationId,
-    sourceCheckedAt: '2026-08-09T01:00:00.000Z',
+    sourceCheckedAt,
     publishedAt: '2026-08-09T01:00:01.000Z',
     state: 'active',
     items: ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'].map((name) => ({
@@ -432,5 +433,59 @@ describe('ops sync state machine', () => {
       WHERE publication.publication_id = ${PUBLICATION_IDS[2]}::uuid
     `;
     expect(rows[0]).toEqual({ publication_status: 'failed', run_status: 'failed' });
+  });
+
+  test('fences a delayed Core activation by provider source time', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[0], season);
+    await startRun(RUN_IDS[1], season);
+    await startRun(RUN_IDS[2], season);
+
+    const current = await syncOperationsRepository.preparePublication({
+      publicationId: PUBLICATION_IDS[0],
+      dataset: 'fpl:core',
+      season,
+      sourceRunId: RUN_IDS[0],
+    });
+    await syncOperationsRepository.activatePublication({
+      publicationId: current.publicationId,
+      dataset: 'fpl:core',
+      season,
+      sourceRunId: RUN_IDS[0],
+      manifest: publicationManifest(
+        current.publicationId,
+        current.revision,
+        season,
+        '2026-08-09T01:05:00.000Z',
+      ),
+    });
+
+    const delayed = await syncOperationsRepository.preparePublication({
+      publicationId: PUBLICATION_IDS[1],
+      dataset: 'fpl:core',
+      season,
+      sourceRunId: RUN_IDS[1],
+    });
+    await expectDatabaseErrorCode(
+      syncOperationsRepository.activatePublication({
+        publicationId: delayed.publicationId,
+        dataset: 'fpl:core',
+        season,
+        sourceRunId: RUN_IDS[1],
+        manifest: publicationManifest(
+          delayed.publicationId,
+          delayed.revision,
+          season,
+          '2026-08-09T01:04:00.000Z',
+        ),
+      }),
+      'CORE_SNAPSHOT_STALE_SOURCE',
+    );
+
+    expect(await syncOperationsRepository.findActivePublication('fpl:core', season)).toEqual({
+      publicationId: current.publicationId,
+      revision: current.revision,
+      status: 'active',
+    });
   });
 });

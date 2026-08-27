@@ -1,6 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { fplClient } from '../clients/fpl';
 import { enqueueCoreSnapshotJob, enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
 import { type DataSyncJobData, dataSyncQueue, dataSyncQueueName } from '../queues/data-sync.queue';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
@@ -18,7 +19,14 @@ import {
   preparePriceChangePublication,
   persistPriceChangePublication,
   PriceChangeCorePublicationRequiredError,
+  priceChangeTriggerFingerprint,
 } from '../services/price-change-predictions.service';
+import {
+  loadPriceChangeHotSource,
+  markPriceChangeHotReconciliation,
+  readPriceChangeHotSnapshot,
+  readPriceChangeHotSnapshotAtRevision,
+} from '../services/price-change-hot.service';
 import {
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
@@ -26,7 +34,7 @@ import {
 } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 import { alertOnFinalFailure, notifyTwoBots } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -41,6 +49,7 @@ import {
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
+  getSchedulerObligation,
   schedulerObligationStatus,
 } from '../repositories/scheduler-obligations';
 
@@ -60,6 +69,288 @@ function priceSingleFlightEnabled(): boolean {
   // staged rollout.
   if (value === undefined) return process.env.NODE_ENV !== 'production';
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function archivedCaptureTimestamps(
+  sourceDetectedAt: string | undefined,
+  sourceFetchedAt: string | undefined,
+): { readonly requestStartedAt: Date; readonly fetchedAt: Date } | null {
+  if (!sourceDetectedAt && !sourceFetchedAt) return null;
+  if (!sourceDetectedAt || !sourceFetchedAt) {
+    throw new Error('Archived price-change source capture timestamps are incomplete');
+  }
+  const requestStartedAt = new Date(sourceDetectedAt);
+  const fetchedAt = new Date(sourceFetchedAt);
+  if (!Number.isFinite(requestStartedAt.getTime()) || !Number.isFinite(fetchedAt.getTime())) {
+    throw new Error('Archived price-change source capture timestamps are invalid');
+  }
+  return { requestStartedAt, fetchedAt };
+}
+
+async function priceChangeCoreRepairOptions(job: Job<DataSyncJobData>) {
+  const obligation = job.data.obligationId
+    ? await getSchedulerObligation({ obligationId: job.data.obligationId }).catch(() => null)
+    : null;
+  const evidence = obligation?.evidence;
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof evidence?.sourceHash === 'string' ? evidence.sourceHash : undefined);
+  const sourceArtifactId =
+    job.data.sourceArtifactId ??
+    (typeof evidence?.sourceArtifactId === 'string' ? evidence.sourceArtifactId : undefined);
+  const priceChangeBoardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof evidence?.priceChangeBoardRevision === 'string'
+      ? evidence.priceChangeBoardRevision
+      : undefined);
+  const sourceDetectedAt =
+    job.data.sourceDetectedAt ??
+    (typeof evidence?.sourceDetectedAt === 'string' ? evidence.sourceDetectedAt : undefined);
+  const sourceFetchedAt =
+    job.data.sourceFetchedAt ??
+    (typeof evidence?.sourceFetchedAt === 'string' ? evidence.sourceFetchedAt : undefined);
+  return {
+    jobId: priceChangeCoreRepairJobId(job),
+    removeOnSettle: false,
+    ...(sourceHash ? { sourceHash } : {}),
+    ...(sourceArtifactId ? { sourceArtifactId } : {}),
+    ...(priceChangeBoardRevision ? { priceChangeBoardRevision } : {}),
+    ...(sourceDetectedAt ? { sourceDetectedAt } : {}),
+    ...(sourceFetchedAt ? { sourceFetchedAt } : {}),
+  };
+}
+
+async function hotCoreSourceDependencies(job: Job<DataSyncJobData>) {
+  if (job.name !== 'core-snapshot' || !job.data.sourceArtifactId || !job.data.sourceHash) {
+    return undefined;
+  }
+  try {
+    const source = await loadPriceChangeHotSource({
+      artifactId: job.data.sourceArtifactId,
+      sourceHash: job.data.sourceHash,
+    });
+    const capturedAt = archivedCaptureTimestamps(
+      job.data.sourceDetectedAt,
+      job.data.sourceFetchedAt,
+    );
+    logInfo('Using archived provisional source for legacy Core repair', {
+      season: job.data.seasonCode,
+      artifactId: job.data.sourceArtifactId,
+      sourceHash: job.data.sourceHash,
+      priceChangeBoardRevision: job.data.priceChangeBoardRevision,
+    });
+    return {
+      bootstrap: source.payload,
+      ...(capturedAt ? { sourceCheckedAt: capturedAt.requestStartedAt } : {}),
+    };
+  } catch (error) {
+    logWarn('Archived provisional source unavailable; legacy Core repair will retry source-bound', {
+      season: job.data.seasonCode,
+      artifactId: job.data.sourceArtifactId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw new Error(
+      `Archived price-change source unavailable for legacy Core repair: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
+  if (job.name !== 'price-change-predictions') {
+    return undefined;
+  }
+  const obligation =
+    (!job.data.sourceArtifactId || !job.data.sourceHash) && job.data.obligationId
+      ? await getSchedulerObligation({ obligationId: job.data.obligationId }).catch(() => null)
+      : null;
+  const sourceArtifactId =
+    job.data.sourceArtifactId ??
+    (typeof obligation?.evidence.sourceArtifactId === 'string'
+      ? obligation.evidence.sourceArtifactId
+      : undefined);
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof obligation?.evidence.sourceHash === 'string'
+      ? obligation.evidence.sourceHash
+      : undefined);
+  const boardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
+      ? obligation.evidence.priceChangeBoardRevision
+      : undefined);
+  if (!sourceHash) return undefined;
+  try {
+    const hotSnapshot = boardRevision
+      ? await readPriceChangeHotSnapshotAtRevision(
+          job.data.seasonCode,
+          boardRevision,
+          sourceHash,
+        ).catch(() => null)
+      : await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null);
+    if (!hotSnapshot || hotSnapshot.sourceHash !== sourceHash) {
+      throw new Error('The provisional price-change source identity is unavailable');
+    }
+    const capturedAt =
+      boardRevision && hotSnapshot.revision === boardRevision
+        ? {
+            requestStartedAt: new Date(hotSnapshot.detectedAt),
+            fetchedAt: new Date(hotSnapshot.fetchedAt),
+          }
+        : archivedCaptureTimestamps(
+            job.data.sourceDetectedAt ??
+              (typeof obligation?.evidence.sourceDetectedAt === 'string'
+                ? obligation.evidence.sourceDetectedAt
+                : undefined),
+            job.data.sourceFetchedAt ??
+              (typeof obligation?.evidence.sourceFetchedAt === 'string'
+                ? obligation.evidence.sourceFetchedAt
+                : undefined),
+          );
+    if (!sourceArtifactId) {
+      // The watcher publishes the hot board before archive I/O. If the raw
+      // archive is unavailable, re-fetch with a source-bound cache key and
+      // accept it only when the official trigger fingerprint is identical.
+      // This prevents a five-minute edge-cache replay from overwriting the
+      // detected board while still allowing durable reconciliation to recover.
+      const expectedTriggerFingerprint = hotSnapshot.triggerFingerprint;
+      logInfo('Re-fetching provisional source for durable reconciliation', {
+        season: job.data.seasonCode,
+        sourceHash,
+        priceChangeBoardRevision: boardRevision,
+      });
+      return {
+        getBootstrap: async (_requestStartedAtMs: number) => {
+          const fetched = await fplClient.getBootstrapArtifact({
+            edgeCacheKey: `price-hot-reconcile-${boardRevision ?? hotSnapshot.revision}-${sourceHash}`,
+            priority: 'live',
+            deadlineMs: 5_000,
+          });
+          const actualTriggerFingerprint = priceChangeTriggerFingerprint(fetched.payload);
+          if (actualTriggerFingerprint !== expectedTriggerFingerprint) {
+            throw new Error(
+              'Price-change reconciliation source fingerprint differs from the detected hot source',
+            );
+          }
+          return fetched.payload;
+        },
+        ...(capturedAt
+          ? {
+              captureTimestamps: {
+                requestStartedAt: capturedAt.requestStartedAt,
+                fetchedAt: capturedAt.fetchedAt,
+              },
+            }
+          : {}),
+      };
+    }
+    const source = await loadPriceChangeHotSource({
+      artifactId: sourceArtifactId,
+      sourceHash,
+    });
+    logInfo('Using archived provisional source for durable price reconciliation', {
+      season: job.data.seasonCode,
+      artifactId: sourceArtifactId,
+      sourceHash,
+      priceChangeBoardRevision: boardRevision,
+    });
+    return {
+      getBootstrap: async () => source.payload,
+      ...(capturedAt
+        ? {
+            captureTimestamps: {
+              requestStartedAt: capturedAt.requestStartedAt,
+              fetchedAt: capturedAt.fetchedAt,
+            },
+          }
+        : {}),
+    };
+  } catch (error) {
+    logWarn(
+      'Archived provisional source unavailable; durable reconciliation will retry source-bound',
+      {
+        season: job.data.seasonCode,
+        artifactId: sourceArtifactId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    throw new Error(
+      `Archived price-change source unavailable for durable reconciliation: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+async function markHotPriceReconciled(
+  job: Job<DataSyncJobData>,
+  publicationId: string | undefined,
+  revision: number | undefined,
+  preparedBoardRevision?: string,
+): Promise<void> {
+  if (!publicationId || revision === undefined) return;
+  const obligation =
+    !job.data.priceChangeBoardRevision && job.data.obligationId
+      ? await getSchedulerObligation({ obligationId: job.data.obligationId }).catch(() => null)
+      : null;
+  const boardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
+      ? obligation.evidence.priceChangeBoardRevision
+      : undefined);
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof obligation?.evidence.sourceHash === 'string'
+      ? obligation.evidence.sourceHash
+      : undefined);
+  if (!boardRevision) return;
+  const snapshot = await readPriceChangeHotSnapshotAtRevision(
+    job.data.seasonCode,
+    boardRevision,
+    sourceHash,
+  ).catch(() => null);
+  if (!snapshot || snapshot.revision !== boardRevision) return;
+  if (preparedBoardRevision !== boardRevision) return;
+  const updated = await markPriceChangeHotReconciliation(snapshot, {
+    state: 'reconciled',
+    durablePublicationId: publicationId,
+    durableRevision: revision,
+  });
+  if (!updated) throw new Error('Price-change hot reconciliation CAS failed');
+}
+
+async function markHotPriceReconciliationFailed(
+  job: Job<DataSyncJobData>,
+  error: unknown,
+): Promise<void> {
+  if (job.name !== 'price-change-predictions') return;
+  const obligation =
+    !job.data.priceChangeBoardRevision && job.data.obligationId
+      ? await getSchedulerObligation({ obligationId: job.data.obligationId }).catch(() => null)
+      : null;
+  const boardRevision =
+    job.data.priceChangeBoardRevision ??
+    (typeof obligation?.evidence.priceChangeBoardRevision === 'string'
+      ? obligation.evidence.priceChangeBoardRevision
+      : undefined);
+  const sourceHash =
+    job.data.sourceHash ??
+    (typeof obligation?.evidence.sourceHash === 'string'
+      ? obligation.evidence.sourceHash
+      : undefined);
+  if (!boardRevision) return;
+  const snapshot = await readPriceChangeHotSnapshotAtRevision(
+    job.data.seasonCode,
+    boardRevision,
+    sourceHash,
+  ).catch(() => null);
+  if (!snapshot || snapshot.revision !== boardRevision) return;
+  const updated = await markPriceChangeHotReconciliation(snapshot, {
+    state: 'failed',
+    error: error instanceof Error ? error.message : String(error),
+  });
+  if (!updated) throw new Error('Price-change hot reconciliation failure CAS failed');
 }
 
 async function alertPriceChangePublicationOverdue(
@@ -206,16 +497,21 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             jobId: job.id,
             obligationId: job.data.obligationId,
           });
-          return { count: 0, outcome: 'noop' as const };
+          return {
+            count: 0,
+            outcome: 'noop' as const,
+            reason: 'latest-wins-cutover' as const,
+          };
         }
         // Bootstrap acquisition and all validation happen before the mutation
         // scopes are acquired.  The short locked section only activates the
         // immutable DB publication and its outbox receipt.
         let prepared;
         try {
+          const hotSource = await hotPriceSourceDependencies(job);
           prepared = await preparePriceChangePublication(
             season,
-            undefined,
+            hotSource,
             job.data.source === 'manual' ? 'manual' : 'queue',
             job.data.runId,
             job.data.freshnessWindowId,
@@ -223,10 +519,11 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           );
         } catch (error) {
           if (error instanceof PriceChangeCorePublicationRequiredError) {
-            await enqueueCoreSnapshotJob(season, 'reconcile', {
-              jobId: priceChangeCoreRepairJobId(job),
-              removeOnSettle: false,
-            }).catch((repairError) => {
+            await enqueueCoreSnapshotJob(
+              season,
+              'reconcile',
+              await priceChangeCoreRepairOptions(job),
+            ).catch((repairError) => {
               logError('Failed to enqueue core repair for price-change validation', repairError, {
                 season: season.seasonCode,
               });
@@ -246,10 +543,11 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             .failRun(prepared.sourceRunId, error)
             .catch(() => undefined);
           if (error instanceof PriceChangeCorePublicationRequiredError) {
-            await enqueueCoreSnapshotJob(season, 'reconcile', {
-              jobId: priceChangeCoreRepairJobId(job),
-              removeOnSettle: false,
-            }).catch((repairError) => {
+            await enqueueCoreSnapshotJob(
+              season,
+              'reconcile',
+              await priceChangeCoreRepairOptions(job),
+            ).catch((repairError) => {
               logError('Failed to enqueue core repair for price-change persistence', repairError, {
                 season: season.seasonCode,
               });
@@ -275,6 +573,12 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             );
           }
         }
+        await markHotPriceReconciled(
+          job,
+          persisted.publicationId,
+          persisted.revision,
+          prepared.board.revision,
+        );
         return persisted;
       });
     }
@@ -287,6 +591,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
               trigger: 'queue',
               sourceRunId: job.data.runId,
               freshnessWindowId: job.data.freshnessWindowId,
+              ...(await hotCoreSourceDependencies(job)),
             });
           case 'player-prices':
             if (!job.data.changeDate) {
@@ -329,10 +634,14 @@ export function createDataSyncWorker(): WorkerRuntime {
         'outcome' in result &&
         result.outcome === 'noop';
       const status = skippedPriceChange ? 'skipped' : 'succeeded';
+      const skipReason =
+        skippedPriceChange && 'reason' in result && typeof result.reason === 'string'
+          ? result.reason
+          : undefined;
       const evidence = {
         queue: dataSyncQueueName,
         jobName: job.name,
-        ...(skippedPriceChange ? { reason: 'official_fields_not_open' } : {}),
+        ...(skippedPriceChange ? { reason: skipReason ?? 'official_fields_not_open' } : {}),
       };
       const fence = inspectSchedulerObligationFence(job.data);
       const completion =
@@ -368,6 +677,12 @@ export function createDataSyncWorker(): WorkerRuntime {
         // current failed cycle.
         void (async () => {
           const fence = inspectSchedulerObligationFence(job.data);
+          await markHotPriceReconciliationFailed(job, error).catch((reconciliationError) => {
+            logError('Price-change hot reconciliation failure update failed', reconciliationError, {
+              jobId: job.id,
+              season: job.data.seasonCode,
+            });
+          });
           if (fence.kind === 'complete') {
             await failSchedulerObligation({
               obligationId: fence.obligationId,

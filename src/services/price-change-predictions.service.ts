@@ -13,7 +13,10 @@ import {
   loadDataPublicationDelivery,
 } from '../repositories/data-publication-outbox';
 import { seasonRepository } from '../repositories/seasons';
-import { syncOperationsRepository } from '../repositories/sync-operations';
+import {
+  createSyncOperationsRepository,
+  syncOperationsRepository,
+} from '../repositories/sync-operations';
 import { assertSchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -74,6 +77,8 @@ export type PriceChangeBoard = {
   deadline: string | null;
   nextDeadlines: string[];
   fetchedAt: string | null;
+  /** Provider request-start ordering evidence; kept internal to Data. */
+  sourceCheckedAt?: string | null;
   staleAt: string | null;
   revision: string;
   expectedPlayerCount: number;
@@ -99,6 +104,15 @@ export type PriceChangePublicationDependencies = {
    * client and the publication fence use the same cache bucket/order value.
    */
   readonly getBootstrap: (requestStartedAtMs: number) => Promise<FPLBootstrapResponse>;
+  /**
+   * An archived watcher response carries the provider capture time that must
+   * survive queue delay. Live requests leave this unset and use the local
+   * request/fetch clocks below.
+   */
+  readonly captureTimestamps?: Readonly<{
+    requestStartedAt: Date;
+    fetchedAt: Date;
+  }>;
 };
 
 export type PreparedPriceChangePublication = {
@@ -189,6 +203,22 @@ export async function requestPriceChangeBootstrap(
 }> {
   const requestStartedAtMs = now();
   const bootstrap = await dependencies.getBootstrap(requestStartedAtMs);
+  const captured = dependencies.captureTimestamps;
+  if (captured) {
+    if (
+      !Number.isFinite(captured.requestStartedAt.getTime()) ||
+      !Number.isFinite(captured.fetchedAt.getTime())
+    ) {
+      throw new PriceChangePredictionValidationError(
+        'Archived price-change capture timestamps are invalid',
+      );
+    }
+    return {
+      bootstrap,
+      requestStartedAt: new Date(captured.requestStartedAt),
+      fetchedAt: new Date(captured.fetchedAt),
+    };
+  }
   return {
     bootstrap,
     requestStartedAt: new Date(requestStartedAtMs),
@@ -267,6 +297,66 @@ function getDeadlines(bootstrap: FPLBootstrapResponse): string[] {
     }
   }
   return normalized;
+}
+
+/** Validated official deadlines for scheduler/watch-window discovery. */
+export function priceChangeDeadlines(bootstrap: FPLBootstrapResponse): readonly string[] {
+  return getDeadlines(bootstrap);
+}
+
+/**
+ * Stable identity for an actual official price-change event. Deliberately
+ * excludes transfer counts and prediction fields, which can move between
+ * polls without a price change. The deadline is included so a new deadline
+ * never reuses the previous event's baseline.
+ */
+export function priceChangeTriggerFingerprint(bootstrap: FPLBootstrapResponse): string {
+  const deadlines = getDeadlines(bootstrap);
+  const values = priceChangeValueFingerprint(bootstrap);
+  return createHash('sha256')
+    .update(JSON.stringify({ deadline: deadlines[0], values }), 'utf8')
+    .digest('hex');
+}
+
+/** Stable identity for the provider's current player prices and ID set. */
+export function priceChangeValueFingerprint(bootstrap: FPLBootstrapResponse): string {
+  const players = bootstrap.elements
+    .map((element) => ({ id: element.id, nowCost: element.now_cost }))
+    .sort((left, right) => left.id - right.id);
+  return createHash('sha256').update(JSON.stringify(players), 'utf8').digest('hex');
+}
+
+/**
+ * A deadline is only a polling window. Publish a provisional board after a
+ * baseline exists and the provider's player-price identity actually changes;
+ * a day with no official price movement therefore produces no hot update.
+ */
+export function shouldPublishPriceChangeHotSnapshot(
+  previousValueFingerprint: string | null,
+  nextValueFingerprint: string,
+): boolean {
+  return previousValueFingerprint !== null && previousValueFingerprint !== nextValueFingerprint;
+}
+
+/** The first official deadline is the event identity used by the hot watcher. */
+export function priceChangePrimaryDeadline(bootstrap: FPLBootstrapResponse): string {
+  return getDeadlines(bootstrap)[0]!;
+}
+
+/** Build the same event identity from a previously published board. */
+export function priceChangeBoardTriggerFingerprint(board: PriceChangeBoard): string {
+  const values = priceChangeBoardValueFingerprint(board);
+  return createHash('sha256')
+    .update(JSON.stringify({ deadline: board.deadline, values }), 'utf8')
+    .digest('hex');
+}
+
+/** Stable identity for the player prices and ID set in a published board. */
+export function priceChangeBoardValueFingerprint(board: PriceChangeBoard): string {
+  const players = board.players
+    .map((player) => ({ id: player.playerId, nowCost: player.currentPrice }))
+    .sort((left, right) => left.id - right.id);
+  return createHash('sha256').update(JSON.stringify(players), 'utf8').digest('hex');
 }
 
 function hasPredictionFields(bootstrap: FPLBootstrapResponse): boolean {
@@ -641,12 +731,15 @@ export function parsePublishedPriceChangeBoard(
   const expectedPlayerCount = context.expectedPlayerCount as number;
   const observedPlayerCount = context.observedPlayerCount as number;
   const fetchedAt = Date.parse(context.fetchedAt);
+  const sourceCheckedAt = Date.parse(manifest.sourceCheckedAt);
   const staleAt = Date.parse(context.staleAt);
   const hardExpiresAt = Date.parse(context.hardExpiresAt);
   if (
+    !Number.isFinite(sourceCheckedAt) ||
     !Number.isFinite(fetchedAt) ||
     !Number.isFinite(staleAt) ||
     !Number.isFinite(hardExpiresAt) ||
+    sourceCheckedAt > fetchedAt ||
     staleAt !== fetchedAt + PRICE_CHANGE_READY_MS ||
     hardExpiresAt !== fetchedAt + PRICE_CHANGE_MAX_AGE_MS
   ) {
@@ -691,6 +784,7 @@ export function parsePublishedPriceChangeBoard(
     deadline: context.deadline,
     nextDeadlines: [...nextDeadlines],
     fetchedAt: new Date(fetchedAt).toISOString(),
+    sourceCheckedAt: new Date(sourceCheckedAt).toISOString(),
     staleAt: new Date(staleAt).toISOString(),
     revision: manifest.publicationId,
     expectedPlayerCount,
@@ -857,6 +951,11 @@ async function readLegacyPriceChangeBoard(season: FplSeasonRef): Promise<PriceCh
     return {
       ...(candidate as unknown as PriceChangeBoard),
       status: 'STALE',
+      sourceCheckedAt:
+        typeof candidate.sourceCheckedAt === 'string' &&
+        Number.isFinite(Date.parse(candidate.sourceCheckedAt))
+          ? new Date(Date.parse(candidate.sourceCheckedAt)).toISOString()
+          : undefined,
       revision: typeof candidate.revision === 'string' ? candidate.revision : 'legacy',
       expectedPlayerCount: ids.size,
       observedPlayerCount: players.length,
@@ -926,7 +1025,10 @@ export async function preparePriceChangePublication(
     }
 
     const core = await readCorePublicationEvidence(season);
-    const board = normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds);
+    const board = {
+      ...normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds),
+      sourceCheckedAt: requestStartedAt.toISOString(),
+    };
     const context = contextFromBoard(board, fetchedAt);
     return {
       outcome: 'ready',
@@ -1102,40 +1204,45 @@ export async function persistPriceChangePublication(
       sourceRunId,
       manifest: preparedData.manifest,
       outbox: { outboxId },
-      ...(options.publicationFence
-        ? {
-            beforeActivate: async (tx) => {
-              await assertSchedulerLanePublicationFence(tx, options.publicationFence!);
-              const activeCore = await syncOperationsRepository.findActivePublication(
-                'fpl:core',
-                season,
-              );
-              if (
-                activeCore?.publicationId !== corePublicationId ||
-                activeCore.revision !== corePublicationRevision
-              ) {
-                throw new PriceChangeCorePublicationRequiredError(
-                  'The active fpl:core publication changed before price publication activation',
-                );
-              }
-            },
+      beforeActivate: async (tx) => {
+        // activatePublication invokes this callback after locking the active
+        // publication row for the target scope. Keep the legacy path's source
+        // ordering check in that same transaction so an older archived replay
+        // cannot retire a newer price board after its early preflight passed.
+        const txSyncOperationsRepository = createSyncOperationsRepository(tx);
+        const activePriceManifest = await txSyncOperationsRepository.findActivePublicationManifest(
+          PRICE_CHANGE_DATASET,
+          season,
+        );
+        if (activePriceManifest) {
+          const activeSourceCheckedAt = Date.parse(activePriceManifest.sourceCheckedAt);
+          if (!Number.isFinite(activeSourceCheckedAt)) {
+            throw new PriceChangePredictionUnavailableError(
+              'The active fpl:price-changes source timestamp is invalid',
+            );
           }
-        : {
-            beforeActivate: async () => {
-              const activeCore = await syncOperationsRepository.findActivePublication(
-                'fpl:core',
-                season,
-              );
-              if (
-                activeCore?.publicationId !== corePublicationId ||
-                activeCore.revision !== corePublicationRevision
-              ) {
-                throw new PriceChangeCorePublicationRequiredError(
-                  'The active fpl:core publication changed before price publication activation',
-                );
-              }
-            },
-          }),
+          if (requestStartedAt.getTime() < activeSourceCheckedAt) {
+            throw new PriceChangePredictionUnavailableError(
+              'The prepared price-change request started before the active publication',
+            );
+          }
+        }
+        if (options.publicationFence) {
+          await assertSchedulerLanePublicationFence(tx, options.publicationFence);
+        }
+        const activeCore = await txSyncOperationsRepository.findActivePublication(
+          'fpl:core',
+          season,
+        );
+        if (
+          activeCore?.publicationId !== corePublicationId ||
+          activeCore.revision !== corePublicationRevision
+        ) {
+          throw new PriceChangeCorePublicationRequiredError(
+            'The active fpl:core publication changed before price publication activation',
+          );
+        }
+      },
     });
     dbActivated = true;
     if (!options.deferDelivery) {

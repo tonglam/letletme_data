@@ -262,7 +262,70 @@ persistenceTest(
         fixtures: 380,
       });
 
-      const second = await persistCoreSnapshot(snapshot, new Date('2026-08-09T12:02:00.000Z'), db);
+      // A newer Core source may already have a committed staging publication
+      // while its Redis/active handoff is still pending. An older repair must
+      // stop before touching canonical rows in that interval.
+      const season = { seasonId: 2026, seasonCode: '2627' } as const;
+      const stagingRunId = '10000000-0000-4000-8000-000000000004';
+      const stagingPublicationId = '20000000-0000-4000-8000-000000000004';
+      await client`
+        INSERT INTO ops.sync_runs (
+          run_id,
+          provider,
+          lane,
+          scope,
+          season_id,
+          season_code,
+          mode,
+          trigger,
+          status,
+          started_at,
+          metadata
+        ) VALUES (
+          ${stagingRunId}::uuid,
+          'fpl',
+          'core',
+          'core-staging-fence-test',
+          ${season.seasonId},
+          ${season.seasonCode},
+          'full',
+          'test',
+          'running',
+          '2026-08-09T12:05:00.000Z'::timestamptz,
+          '{}'::jsonb
+        )
+      `;
+      try {
+        await client`
+          INSERT INTO ops.dataset_publications (
+            publication_id,
+            dataset,
+            season_id,
+            event_id,
+            status,
+            manifest,
+            source_run_id,
+            expires_at
+          ) VALUES (
+            ${stagingPublicationId}::uuid,
+            'fpl:core',
+            ${season.seasonId},
+            NULL,
+            'staging',
+            '{"sourceCheckedAt":"2026-08-09T12:05:00.000Z"}'::jsonb,
+            ${stagingRunId}::uuid,
+            '2026-08-10T12:05:00.000Z'::timestamptz
+          )
+        `;
+        await expect(
+          persistCoreSnapshot(snapshot, new Date('2026-08-09T12:04:00.000Z'), db),
+        ).rejects.toMatchObject({ code: 'CORE_SNAPSHOT_STALE_SOURCE' });
+      } finally {
+        await client`DELETE FROM ops.dataset_publications WHERE publication_id = ${stagingPublicationId}::uuid`;
+        await client`DELETE FROM ops.sync_runs WHERE run_id = ${stagingRunId}::uuid`;
+      }
+
+      const second = await persistCoreSnapshot(snapshot, new Date('2026-08-09T12:06:00.000Z'), db);
       expect(second.persistence).toEqual(first.persistence);
       expect(await readCoreCounts(client)).toEqual([
         { relation: 'events', rows: 38 },
@@ -272,7 +335,6 @@ persistenceTest(
         { relation: 'teams', rows: 20 },
       ]);
 
-      const season = { seasonId: 2026, seasonCode: '2627' } as const;
       const marketSnapshots = transformPlayerMarketSnapshots(
         {
           elements: source.bootstrap.elements.slice(0, 2),

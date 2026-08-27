@@ -589,6 +589,10 @@ export type FPLBootstrapRequestOptions = Readonly<{
    * rotate this key at their own cadence while retries reuse the same key.
    */
   edgeCacheKey?: string;
+  /** Admission class for deadline-sensitive bootstrap probes. */
+  priority?: FplRequestPriority;
+  /** Optional short wall-clock cap for a single watcher probe. */
+  deadlineMs?: number;
 }>;
 export type FPLBootstrapArtifactResponse = Readonly<{
   bytes: Uint8Array;
@@ -645,6 +649,8 @@ type FPLRequestAttemptContext = Readonly<{
 export type FPLRequestOptions = Readonly<{
   /** Optional wall-clock cap for this logical request, including retries/backoff. */
   deadlineMs?: number;
+  /** Optional admission class override for the endpoint. */
+  priority?: FplRequestPriority;
   beforeAttempt?: (attempt: number, context: FPLRequestAttemptContext) => void | Promise<void>;
 }>;
 
@@ -665,9 +671,10 @@ class FPLClient {
    */
   private async request(url: string, options: FPLRequestOptions = {}): Promise<Response> {
     const priority: FplRequestPriority =
-      /\/event\/\d+\/live\/?$/.test(url) || /\/fixtures\/?(?:\?event=\d+)?$/.test(url)
+      options.priority ??
+      (/\/event\/\d+\/live\/?$/.test(url) || /\/fixtures\/?(?:\?event=\d+)?$/.test(url)
         ? 'live'
-        : 'bulk';
+        : 'bulk');
     const deadlineMs = Math.max(
       1,
       options.deadlineMs ?? getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS),
@@ -838,7 +845,10 @@ class FPLClient {
     try {
       logDebug('Fetching FPL bootstrap data', { url });
 
-      const response = await this.request(url);
+      const response = await this.request(url, {
+        priority: options.priority,
+        deadlineMs: options.deadlineMs,
+      });
 
       if (!response.ok) {
         throw new FPLClientError(
@@ -899,7 +909,10 @@ class FPLClient {
 
     try {
       logDebug('Fetching exact FPL bootstrap artifact', { url });
-      const response = await this.request(url);
+      const response = await this.request(url, {
+        priority: options.priority,
+        deadlineMs: options.deadlineMs,
+      });
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,

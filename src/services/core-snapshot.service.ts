@@ -13,6 +13,7 @@ import {
 import { seasonRepository } from '../repositories/seasons';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { syncOperationsRepository } from '../repositories/sync-operations';
+import { DatabaseError } from '../utils/errors';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import {
   persistCoreSnapshotPublication,
@@ -20,6 +21,7 @@ import {
   readCoreSnapshotOrderingTimestamp,
   recoverPendingCoreSnapshotPublication,
 } from './core-snapshot-publication.service';
+import { CORE_SNAPSHOT_STALE_SOURCE_CODE } from './core-snapshot-persistence.service';
 
 import type { RawFPLFixture } from '../types';
 
@@ -60,6 +62,19 @@ export interface CoreSnapshotSyncOptions {
   readonly sourceRunId?: string;
   /** Exact freshness window being repaired, carried into the publication manifest. */
   readonly freshnessWindowId?: number;
+  /**
+   * Optional exact bootstrap captured by a deadline-sensitive price watcher.
+   * Core still fetches fixtures through its normal dependency, but the player,
+   * team, event and phase rows come from the same provider response that
+   * triggered the provisional price board.
+   */
+  readonly bootstrap?: FPLBootstrapResponse;
+  /**
+   * Preserve the provider capture time when a watcher replays an archived
+   * bootstrap. A delayed repair must not look newer than an intervening Core
+   * publication merely because the worker started later.
+   */
+  readonly sourceCheckedAt?: Date;
 }
 
 const defaultDependencies: CoreSnapshotDependencies = {
@@ -128,15 +143,22 @@ export async function syncCoreSnapshot(
 
   let preparedPublicationId: string | null = null;
   let persistenceCommitted = false;
+  let validatedSnapshot: CoreSnapshot | null = null;
   try {
-    const sourceCheckedAt = await dependencies.readOrderingTimestamp();
+    const sourceCheckedAt = options.sourceCheckedAt
+      ? new Date(options.sourceCheckedAt)
+      : await dependencies.readOrderingTimestamp();
+    if (!Number.isFinite(sourceCheckedAt.getTime())) {
+      throw new Error('Core snapshot source capture timestamp is invalid');
+    }
     const [bootstrap, fixtures] = await Promise.all([
-      dependencies.getBootstrap(),
+      options.bootstrap ? Promise.resolve(options.bootstrap) : dependencies.getBootstrap(),
       dependencies.getFixtures(),
     ]);
     dependencies.onMilestone?.('fetched');
 
     const snapshot = prepareCoreSnapshot(bootstrap, fixtures);
+    validatedSnapshot = snapshot;
     if (snapshot.season !== currentSeason.seasonCode) {
       throw new Error(
         `Upstream core season ${snapshot.season} does not match current database season ${currentSeason.seasonCode}`,
@@ -227,6 +249,27 @@ export async function syncCoreSnapshot(
       revision: preparedAndPersisted.prepared.revision,
     });
   } catch (error) {
+    if (
+      error instanceof DatabaseError &&
+      error.code === CORE_SNAPSHOT_STALE_SOURCE_CODE &&
+      preparedPublicationId
+    ) {
+      await syncOperationsRepository
+        .skipPublication(preparedPublicationId, 'superseded-by-newer-core-source')
+        .catch(() => undefined);
+      if (!validatedSnapshot) throw error;
+      await syncOperationsRepository.finishRun(sourceRunId, {
+        status: 'skipped',
+        completedItems: 0,
+        skippedItems: workUnits(validatedSnapshot),
+        dataChanged: false,
+        metadata: {
+          reason: 'superseded-by-newer-core-source',
+          sourceCheckedAt: options.sourceCheckedAt?.toISOString() ?? null,
+        },
+      });
+      return result(validatedSnapshot, false);
+    }
     if (preparedPublicationId && !persistenceCommitted) {
       await syncOperationsRepository
         .failPublication(preparedPublicationId, error)
