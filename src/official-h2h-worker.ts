@@ -10,6 +10,7 @@ import {
   officialH2hLiveQueueName,
 } from './queues/official-h2h-live.queue';
 import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
+import { drainWorkers } from './workers/worker-runtime';
 import { startQueueMonitor } from './utils/queue-monitor';
 import { queueRedisSingleton } from './queues/redis';
 import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
@@ -42,8 +43,7 @@ const shutdownController = createShutdownController({
     queueMonitors.forEach((monitor) => monitor.stop());
     runtime.stop?.();
   },
-  waitForInFlight: () =>
-    Promise.all(runtime.workers.map((worker) => worker.close())).then(() => undefined),
+  waitForInFlight: () => drainWorkers(runtime.workers),
   closeResources: () =>
     Promise.all([
       ...runtime.queueEvents.map((events) => events.close()),

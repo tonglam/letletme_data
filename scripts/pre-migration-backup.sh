@@ -26,6 +26,10 @@ fi
 case "$expected_major" in
   ''|*[!0-9]*) echo 'DATABASE_BACKUP_PG_MAJOR must be an integer' >&2; exit 1 ;;
 esac
+if [ "$expected_major" -ne 15 ]; then
+  echo 'DATABASE_BACKUP_PG_MAJOR must be 15 because the backup image is pinned to PostgreSQL 15' >&2
+  exit 1
+fi
 
 mkdir -p "$backup_dir"
 chmod 700 "$backup_dir"

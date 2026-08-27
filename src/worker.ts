@@ -19,7 +19,11 @@ import { logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
 import { closeUnderstatPermitClient } from './utils/understat-rate-limit';
-import { WORKER_SHUTDOWN_TIMEOUT_MS, type WorkerRuntime } from './workers/worker-runtime';
+import {
+  drainWorkers,
+  WORKER_SHUTDOWN_TIMEOUT_MS,
+  type WorkerRuntime,
+} from './workers/worker-runtime';
 import { queueRedisSingleton } from './queues/redis';
 import { closeAllProducerQueues } from './queues/close-all';
 import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
@@ -72,8 +76,7 @@ const shutdownController = createShutdownController({
     queueMonitors.forEach((monitor) => monitor.stop());
     runtimes.forEach((runtime) => runtime.stop?.());
   },
-  waitForInFlight: () =>
-    Promise.all(allWorkers.map((worker) => worker.close())).then(() => undefined),
+  waitForInFlight: () => drainWorkers(allWorkers),
   closeResources: () =>
     Promise.all([
       ...allQueueEvents.map((events) => events.close()),

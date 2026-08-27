@@ -8,6 +8,7 @@ import { startQueueMonitor } from './utils/queue-monitor';
 import { closeLivePicksQueue, livePicksQueue, livePicksQueueName } from './queues/live-picks.queue';
 import { queueRedisSingleton } from './queues/redis';
 import { createEntrySyncWorker } from './workers/entry-sync.worker';
+import { drainWorkers } from './workers/worker-runtime';
 import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 /**
@@ -46,8 +47,7 @@ const shutdownController = createShutdownController({
     queueMonitors.forEach((monitor) => monitor.stop());
     runtime.stop?.();
   },
-  waitForInFlight: () =>
-    Promise.all(runtime.workers.map((worker) => worker.close())).then(() => undefined),
+  waitForInFlight: () => drainWorkers(runtime.workers),
   closeResources: () =>
     Promise.all([
       ...runtime.queueEvents.map((events) => events.close()),

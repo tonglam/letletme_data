@@ -108,6 +108,7 @@ describe('release workflow gates', () => {
     expect(backupScript).not.toContain('*pooler.supabase.com*');
     expect(backupScript).toContain('Supabase session pooler on port 5432');
     expect(backupScript).toContain('--dbname="$DATABASE_URL"');
+    expect(backupScript).toContain('DATABASE_BACKUP_PG_MAJOR must be 15');
   });
 
   test('pins all actions and aligns CI with the production Bun version', () => {

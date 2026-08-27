@@ -42,6 +42,7 @@ import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat, type QueueMonitorRuntimeState } from './utils/runtime-heartbeat';
 import { startQueueMonitor } from './utils/queue-monitor';
 import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
+import { drainWorkers } from './workers/worker-runtime';
 
 const FORMAL_SCHEDULER_INTERVAL_MS = 30_000;
 const ACQUISITION_JOB_OUTBOX_INTERVAL_MS = 5_000;
@@ -322,20 +323,29 @@ const shutdownController = createShutdownController({
     stopHeartbeat();
     stopRuntimeHeartbeat();
   },
-  waitForInFlight: () =>
-    Promise.all([
+  waitForInFlight: async () => {
+    const inFlight = await Promise.allSettled([
       formalScheduleInFlight,
       formalXInitializationInFlight,
       acquisitionJobOutboxDispatchInFlight,
       publicationOutboxDispatchInFlight,
-    ]).then(() => undefined),
+    ]);
+    const failures = inFlight
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason);
+    await drainWorkers(
+      [formalHttpRuntime, formalXRuntime, formalMediaRuntime]
+        .filter((runtime): runtime is NonNullable<typeof runtime> => runtime !== undefined)
+        .map((runtime) => runtime.worker),
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `${failures.length} content task(s) failed to drain`);
+    }
+  },
   closeResources: () =>
     Promise.all([
-      formalHttpRuntime?.worker.close(),
       formalHttpRuntime?.queueEvents.close(),
-      formalXRuntime?.worker.close(),
       formalXRuntime?.queueEvents.close(),
-      formalMediaRuntime?.worker.close(),
       formalMediaRuntime?.queueEvents.close(),
       closeContentHttpAcquisitionQueue(),
       closeContentXQueue(),

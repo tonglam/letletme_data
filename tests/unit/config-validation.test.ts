@@ -129,6 +129,13 @@ describe('production environment preflight', () => {
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '3' })).toBe(0);
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '0' })).not.toBe(0);
     expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '6' })).not.toBe(0);
+    expect(await runEnvCheck(digest, { DATABASE_POOL_MAX: '' })).toBe(0);
+  });
+
+  test('keeps scheduler definition resolution bounded to one minute', async () => {
+    const digest = 'a'.repeat(64);
+    expect(await runEnvCheck(digest, { SCHEDULER_RESOLVE_TIMEOUT_MS: '60000' })).toBe(0);
+    expect(await runEnvCheck(digest, { SCHEDULER_RESOLVE_TIMEOUT_MS: '60001' })).not.toBe(0);
   });
 
   test('rejects non-positive and unbounded queue governance intervals', async () => {

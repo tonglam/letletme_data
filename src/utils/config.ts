@@ -73,7 +73,14 @@ function integerEnv(
     .min(minimum)
     .max(maximum)
     .refine(Number.isSafeInteger, { message: 'must be a finite safe integer' });
-  return z.preprocess(strictNumericValue, schema).default(defaultValue);
+  // `.default()` observes the raw value before Zod runs `preprocess`.  A
+  // dotenv blank (`KEY=`) would therefore become `undefined` inside the
+  // number schema without receiving its fallback.  Apply the fallback in the
+  // preprocessor so both omitted and blank values have identical semantics.
+  return z.preprocess((value) => {
+    const normalized = strictNumericValue(value);
+    return normalized === undefined ? defaultValue : normalized;
+  }, schema);
 }
 
 function boundedIntegerEnv(defaultValue: number, minimum: number, maximum: number) {
@@ -156,7 +163,10 @@ const EnvSchema = z.object({
   // A scheduler definition is a planning stage, not an unbounded provider
   // request.  Keep one slow definition from holding the 30-second pass (and
   // its progress heartbeat) forever.
-  SCHEDULER_RESOLVE_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 2 * 60 * 60_000),
+  // Definition resolution runs inside the scheduler's 30-second pass. Keep
+  // its historical one-minute ceiling even though provider request timeouts
+  // may use the broader two-hour runtime bound.
+  SCHEDULER_RESOLVE_TIMEOUT_MS: boundedIntegerEnv(10_000, 1_000, 60_000),
   SCHEDULER_LEASE_MS: boundedIntegerEnv(15 * 60_000, 1_000, 2 * 60 * 60_000),
   // Queue governance rollout switches.  They are deliberately opt-in so a
   // rolling deploy can start the new consumers before routing new work.
