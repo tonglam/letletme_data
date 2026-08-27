@@ -1,6 +1,6 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import { fplClient } from '../clients/fpl';
 import { enqueueCoreSnapshotJob, enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
 import { type DataSyncJobData, dataSyncQueue, dataSyncQueueName } from '../queues/data-sync.queue';
@@ -12,7 +12,7 @@ import {
 } from '../services/player-values.service';
 import { ensureMarketPublication } from '../services/market-publication.service';
 import { readActiveDataPublication } from '../cache/data-publication';
-import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
+import { dispatchDataPublicationOutbox } from '../services/data-publication-delivery.service';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
 import {

@@ -8,10 +8,8 @@ import {
 import { redisSingleton } from '../cache/singleton';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import {
-  dispatchDataPublicationOutbox,
-  loadDataPublicationDelivery,
-} from '../repositories/data-publication-outbox';
+import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
 import { seasonRepository } from '../repositories/seasons';
 import {
   createSyncOperationsRepository,

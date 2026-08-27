@@ -1,7 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { fplClient } from '../clients/fpl';
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import { enqueueFplCriticalCoreRepairJob } from '../jobs/fpl-critical-sync-enqueue';
 import {
   fplCriticalSyncQueue,
@@ -20,7 +20,7 @@ import {
   type SchedulerLaneTarget,
   getSchedulerLaneTargets,
 } from '../repositories/scheduler-lanes';
-import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
+import { dispatchDataPublicationOutbox } from '../services/data-publication-delivery.service';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import {
   preparePriceChangePublication,

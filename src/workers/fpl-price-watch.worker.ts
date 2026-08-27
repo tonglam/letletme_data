@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { fplClient } from '../clients/fpl';
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import { enqueuePriceChangePredictionsJob } from '../jobs/data-sync-enqueue';
 import {
   readCoreSnapshotCache,

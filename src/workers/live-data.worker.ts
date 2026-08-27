@@ -4,7 +4,7 @@ import {
   shouldCascadePersistedLiveSnapshot,
   shouldSkipQueuedLiveSnapshot,
 } from '../domain/live-snapshot';
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
   LIVE_JOBS,
   type LiveDataJobData,

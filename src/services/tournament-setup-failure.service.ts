@@ -2,7 +2,7 @@ import type { Job } from 'bullmq';
 
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { getTournamentSetupRetryDelayMs } from '../domain/tournament-setup-retry';
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from './season-scoped-job.service';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { TournamentSetupJobData } from '../queues/tournament-setup.queue';
 import {

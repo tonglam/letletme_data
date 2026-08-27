@@ -1,6 +1,6 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
-import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
   leagueSyncQueue,
   leagueSyncQueueName,

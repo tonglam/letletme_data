@@ -21,7 +21,7 @@ import { createFixtureRepository, fixtureRepository } from '../repositories/fixt
 import { createPlayerRepository } from '../repositories/players';
 import { createTeamRepository } from '../repositories/teams';
 import { syncOperationsRepository } from '../repositories/sync-operations';
-import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
+import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
 import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
 import { postgresJsonbCanonicalJson } from '../utils/content-hash';

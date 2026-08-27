@@ -16,7 +16,6 @@ import { entryInfoRepository } from '../repositories/entry-infos';
 import {
   managerScoreCheckpointRepository,
   managerLiveTournamentCoverageRepository,
-  type ManagerLiveTournamentCoverageState,
   type ManagerScoreCheckpoint,
   type ManagerScoreScope,
 } from '../repositories/live-window';
@@ -26,8 +25,6 @@ import { FPLClientError, ValidationError } from '../utils/errors';
 import { contentHash } from '../utils/content-hash';
 import { logDebug, logWarn } from '../utils/logger';
 import { isCompleteEntryPicks } from '../domain/entry-picks';
-import { findEventEligibleEntryIds } from '../domain/entry-infos';
-import type { EntryInfo } from '../domain/entry-infos';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   finalManagerRevision,
@@ -89,14 +86,50 @@ import {
   isEffectiveLineup,
   type EffectiveLineupRow,
 } from '../domain/event-live-manager-projection';
-import {
-  eventLiveManagerScoreService,
-  type EventLiveManagerScoreBatch,
-} from './event-live-manager-scores.service';
+import { eventLiveManagerScoreService } from './event-live-manager-scores.service';
 import {
   readManagerScoreHeadRowsWithSource,
   type ManagerScoreMaterializedRow,
 } from '../repositories/manager-score-materializations';
+import type {
+  ManagerLiveCalculationMode,
+  ManagerLiveDataAvailability,
+  ManagerLiveReadMode,
+  ManagerLiveResolveResult,
+  ManagerLiveScoreRow,
+  ManagerLiveServedFrom,
+  ManagerLiveSource,
+  ManagerLiveTotalScope,
+  ManagerLiveTournamentCoverage,
+} from './manager-live/contracts';
+import {
+  deriveManagerLiveTournamentCoverageState,
+  invalidateManagerLiveTournamentCoverage,
+  shouldPreserveManagerLiveTournamentCoverage,
+  shouldQueueFinalizedManagerLiveCoverage,
+} from './manager-live/coverage';
+import { projectEventLiveManagerRows } from './manager-live/final-projection';
+import { selectFinalizedManagerLiveEntryIds } from './manager-live/row-model';
+export { selectFinalizedManagerLiveEntryIds } from './manager-live/row-model';
+export { projectEventLiveManagerRows } from './manager-live/final-projection';
+export {
+  deriveManagerLiveTournamentCoverageState,
+  invalidateManagerLiveTournamentCoverage,
+  shouldPreserveManagerLiveTournamentCoverage,
+  shouldQueueFinalizedManagerLiveCoverage,
+} from './manager-live/coverage';
+export type {
+  ManagerLiveCalculationMode,
+  ManagerLiveDataAvailability,
+  ManagerLiveReadMode,
+  ManagerLiveResolveResult,
+  ManagerLiveScoreRow,
+  ManagerLiveServedFrom,
+  ManagerLiveSource,
+  ManagerLiveTotalScope,
+  ManagerLiveTournamentCoverage,
+  ManagerScoreProvenance,
+} from './manager-live/contracts';
 
 const CACHE_TTL_SECONDS = 48 * 60 * 60;
 // Refresh at 30s while an event is active, but keep a successfully published
@@ -138,111 +171,6 @@ end
 return 0
 `;
 
-export type ManagerLiveSource =
-  | 'FPL_EVENT_LIVE'
-  | 'FPL_ENTRY_SUMMARY'
-  | 'FPL_CLASSIC_STANDINGS'
-  | 'FPL_FINAL_RESULT';
-export type ManagerLiveTotalScope = 'OVERALL' | 'CLASSIC_PHASE';
-export type ManagerLiveReadMode = 'CACHE_ONLY' | 'READ_THROUGH';
-export type ManagerLiveDataAvailability = 'FRESH' | 'LAST_GOOD' | 'PARTIAL' | 'UNAVAILABLE';
-export type ManagerLiveServedFrom = 'REDIS' | 'POSTGRES' | 'MIXED' | 'NONE';
-export type ManagerLiveCalculationMode =
-  | 'OFFICIAL_CURRENT_MULTIPLIERS'
-  | 'PROJECTED_AUTOSUBS'
-  | 'FINAL_RESULT';
-
-export type ManagerLiveTournamentCoverage = {
-  rosterRevision: string;
-  expectedEntries: number;
-  resolvedEntries: number;
-  fullyFetchedAt: string | null;
-  managerRevision: string | null;
-  error: string | null;
-  state: ManagerLiveTournamentCoverageState;
-};
-
-export type ManagerScoreProvenance = {
-  scoreSource: 'FPL_EVENT_LIVE' | 'FPL_FINAL_RESULT';
-  calculationMode: ManagerLiveCalculationMode;
-  algorithmVersion: string | null;
-  inputRevision: string;
-  scoreRevision: string;
-  rankRevision: string | null;
-  livePublicationId: string | null;
-  liveRevision: string | null;
-  liveCheckedAt: string | null;
-  picksRevision: string | null;
-  picksCheckedAt: string | null;
-  previousTotalsRevision: string | null;
-  previousTotalsThroughEventId: number | null;
-  resultRevision: string | null;
-  resultCheckedAt: string | null;
-  dataCheckedAt: string | null;
-  rankSource: 'FPL_ENTRY_SUMMARY' | 'FPL_CLASSIC_STANDINGS' | null;
-  rankCheckedAt: string | null;
-};
-
-export type ManagerLiveScoreRow = {
-  season: string;
-  eventId: number;
-  entryId: number;
-  eventPoints: number | null;
-  netEventPoints: number | null;
-  totalPoints: number | null;
-  totalScope: ManagerLiveTotalScope;
-  eventRank: number | null;
-  overallRank: number | null;
-  leagueRank: number | null;
-  source: ManagerLiveSource;
-  transferCost: number | null;
-  eventPointSemantics: 'GROSS' | 'NET' | 'ZERO_COST_EQUIVALENT' | 'UNKNOWN';
-  revision: string;
-  checkedAt: string;
-  upstreamUpdatedAt: string | null;
-  staleAt: string;
-  calculationMode?: ManagerLiveCalculationMode;
-  algorithmVersion?: string | null;
-  provenance?: ManagerScoreProvenance;
-  effectiveLineup?: readonly {
-    elementId: number;
-    position: number;
-    sourceMultiplier: number;
-    effectiveMultiplier: number;
-    pickActive: boolean;
-    autoSub: boolean;
-    isCaptain: boolean;
-    isViceCaptain: boolean;
-    captainForScoring: boolean;
-  }[];
-};
-
-export type ManagerLiveResolveResult = {
-  season: string;
-  eventId: number;
-  managerRevision: string;
-  dataAvailability: ManagerLiveDataAvailability;
-  servedFrom: ManagerLiveServedFrom;
-  refreshQueued: boolean;
-  rows: ManagerLiveScoreRow[];
-  missingEntryIds: number[];
-  partial: boolean;
-  errorCode:
-    | 'UNSUPPORTED_H2H_LIVE'
-    | 'UPSTREAM_UNAVAILABLE'
-    | 'UPSTREAM_RATE_LIMITED'
-    | 'REVISION_UNAVAILABLE'
-    | 'INPUT_INCOMPLETE'
-    | null;
-  checkedAt: string;
-  servedAt?: string;
-  calculationMode: ManagerLiveCalculationMode;
-  nextRefreshAt: string;
-  tournamentCoverage?: ManagerLiveTournamentCoverage | null;
-  /** Internal worker continuation; absent on public cache-only reads. */
-  classicStandingsNextPage?: number | null;
-};
-
 type CachedRow = ManagerLiveScoreRow;
 type ManagerLiveRowBacking = 'REDIS' | 'POSTGRES' | 'UPSTREAM';
 type ManagerSummaryRefreshError = 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null;
@@ -264,19 +192,6 @@ const entryScope: ManagerScoreScope = { scopeType: 'ENTRY', scopeId: 0 };
  * treats it as such), which fails closed at the final-result persistence
  * boundary instead of silently declaring a row not applicable.
  */
-export const selectFinalizedManagerLiveEntryIds = (
-  entryIds: readonly number[],
-  entryInfos: ReadonlyArray<Pick<EntryInfo, 'id' | 'startedEvent'>>,
-  eventId: number,
-): { eligibleEntryIds: number[]; notApplicableEntryIds: number[] } => {
-  const uniqueEntryIds = Array.from(new Set(entryIds));
-  const eligible = new Set(findEventEligibleEntryIds(uniqueEntryIds, entryInfos, eventId));
-  return {
-    eligibleEntryIds: uniqueEntryIds.filter((entryId) => eligible.has(entryId)),
-    notApplicableEntryIds: uniqueEntryIds.filter((entryId) => !eligible.has(entryId)),
-  };
-};
-
 const scopeKey = (scope: ManagerScoreScope): string => `${scope.scopeType}:${scope.scopeId}`;
 
 const cacheKey = (season: string, eventId: number, scope: ManagerScoreScope): string =>
@@ -820,116 +735,6 @@ export type ClassicStandingsRefreshDependencies = {
   reconcileCache: typeof reconcileClassicRowsAfterCachePublication;
 };
 
-/**
- * Replace every active score field with a value derived from one coherent
- * event-live publication. Entry Summary and Classic rows contribute ranks
- * only; they can never override the active score.
- */
-export const projectEventLiveManagerRows = (
-  season: string,
-  eventId: number,
-  entryIds: readonly number[],
-  metadataRows: readonly ManagerLiveScoreRow[],
-  batch: EventLiveManagerScoreBatch | null,
-): ManagerLiveScoreRow[] => {
-  if (!batch || batch.season !== season || batch.eventId !== eventId) return [];
-  const batchCalculationMode = batch.calculationMode;
-  const batchAlgorithmVersion = batch.algorithmVersion;
-  const metadataByEntry = new Map(metadataRows.map((row) => [row.entryId, row] as const));
-  return entryIds.flatMap((entryId) => {
-    const score = batch.scores.get(entryId);
-    if (!score) return [];
-    const metadataCandidate = metadataByEntry.get(entryId);
-    const batchCheckedAt = Date.parse(batch.checkedAt);
-    const metadata =
-      metadataCandidate &&
-      Number.isFinite(batchCheckedAt) &&
-      isFresh(metadataCandidate, batchCheckedAt)
-        ? metadataCandidate
-        : undefined;
-    const rankMetadata =
-      metadata?.source === 'FPL_ENTRY_SUMMARY'
-        ? {
-            revision: contentHash({
-              entryId,
-              eventId,
-              source: metadata.source,
-              eventRank: metadata.eventRank,
-              overallRank: metadata.overallRank,
-              leagueRank: metadata.leagueRank,
-            }),
-            checkedAt: metadata.checkedAt,
-            source: 'FPL_ENTRY_SUMMARY' as const,
-          }
-        : metadata?.source === 'FPL_CLASSIC_STANDINGS'
-          ? {
-              revision: contentHash({
-                entryId,
-                eventId,
-                source: metadata.source,
-                eventRank: metadata.eventRank,
-                overallRank: metadata.overallRank,
-                leagueRank: metadata.leagueRank,
-              }),
-              checkedAt: metadata.checkedAt,
-              source: 'FPL_CLASSIC_STANDINGS' as const,
-            }
-          : undefined;
-    // Keep the row revision explicitly compositional: score consumers can
-    // use `provenance.scoreRevision` while rank-only refreshes advance the
-    // independent rank revision without changing the score revision.
-    const compositeRevision = `${score.revision}:${rankMetadata?.revision ?? 'none'}`;
-    return [
-      {
-        ...(metadata && 'revisionAt' in metadata
-          ? { revisionAt: (metadata as CachedRow & { revisionAt?: string }).revisionAt }
-          : {}),
-        season,
-        eventId,
-        entryId,
-        eventPoints: score.eventPoints,
-        netEventPoints: score.netEventPoints,
-        totalPoints: score.totalPoints,
-        totalScope: 'OVERALL' as const,
-        eventRank: metadata?.eventRank ?? null,
-        overallRank: metadata?.overallRank ?? null,
-        leagueRank: metadata?.leagueRank ?? null,
-        source: 'FPL_EVENT_LIVE' as const,
-        transferCost: score.transferCost,
-        eventPointSemantics:
-          score.transferCost === 0 ? ('ZERO_COST_EQUIVALENT' as const) : ('GROSS' as const),
-        revision: compositeRevision,
-        checkedAt: batch.checkedAt,
-        upstreamUpdatedAt: batch.sourceCheckedAt,
-        staleAt: plusSeconds(batch.checkedAt, STALE_SECONDS),
-        calculationMode: batchCalculationMode,
-        algorithmVersion: batchAlgorithmVersion,
-        ...(score.effectiveLineup ? { effectiveLineup: score.effectiveLineup } : {}),
-        provenance: {
-          scoreSource: 'FPL_EVENT_LIVE',
-          calculationMode: batchCalculationMode,
-          algorithmVersion: batchAlgorithmVersion,
-          inputRevision: score.inputRevision ?? score.revision,
-          scoreRevision: score.revision,
-          rankRevision: rankMetadata?.revision ?? null,
-          livePublicationId: batch.publicationId,
-          liveRevision: batch.liveRevision,
-          liveCheckedAt: batch.checkedAt,
-          picksRevision: score.picksRevision ?? null,
-          picksCheckedAt: score.picksCheckedAt,
-          previousTotalsRevision: score.previousTotalsRevision ?? null,
-          previousTotalsThroughEventId: eventId > 1 ? eventId - 1 : null,
-          resultRevision: null,
-          resultCheckedAt: null,
-          dataCheckedAt: null,
-          rankSource: rankMetadata?.source ?? null,
-          rankCheckedAt: rankMetadata?.checkedAt ?? null,
-        },
-      },
-    ];
-  });
-};
-
 const classicStandingNeedsOverallRank = (
   row: Pick<CachedRow, 'source' | 'overallRank'> | undefined,
 ): boolean =>
@@ -1045,73 +850,6 @@ const managerDataAvailability = (
   if (missingEntryIds.length > 0) return 'PARTIAL';
   return rows.every((row) => isFresh(row, now)) ? 'FRESH' : 'LAST_GOOD';
 };
-
-export const deriveManagerLiveTournamentCoverageState = (input: {
-  expectedEntries: number;
-  resolvedEntries: number;
-  errorCode: ManagerLiveResolveResult['errorCode'];
-  crawlComplete: boolean;
-}): ManagerLiveTournamentCoverageState => {
-  const complete =
-    input.crawlComplete &&
-    input.errorCode === null &&
-    input.resolvedEntries === input.expectedEntries;
-  if (complete) return 'COMPLETE';
-  if (input.resolvedEntries > 0) return 'PARTIAL';
-  if (input.errorCode) return 'UNAVAILABLE';
-  return 'WARMING';
-};
-
-export const invalidateManagerLiveTournamentCoverage = (
-  coverage: ManagerLiveTournamentCoverage | null,
-  rosterRevision: string,
-  expectedEntries: number,
-): ManagerLiveTournamentCoverage | null => {
-  if (!coverage || coverage.rosterRevision === rosterRevision) return coverage;
-  return {
-    ...coverage,
-    rosterRevision,
-    expectedEntries,
-    resolvedEntries: 0,
-    fullyFetchedAt: null,
-    managerRevision: null,
-    error: null,
-    state: 'WARMING',
-  };
-};
-
-export const shouldPreserveManagerLiveTournamentCoverage = (
-  coverage: {
-    state: string;
-    rosterRevision: string;
-    expectedEntries: number;
-    resolvedEntries: number;
-  } | null,
-  rosterRevision: string,
-  expectedEntries: number,
-): boolean =>
-  coverage?.state === 'COMPLETE' &&
-  coverage.rosterRevision === rosterRevision &&
-  coverage.expectedEntries === expectedEntries &&
-  coverage.resolvedEntries === expectedEntries;
-
-export const shouldQueueFinalizedManagerLiveCoverage = (
-  coverage: Pick<
-    ManagerLiveTournamentCoverage,
-    'state' | 'rosterRevision' | 'expectedEntries' | 'resolvedEntries' | 'managerRevision'
-  > | null,
-  rosterRevision: string,
-  expectedEntries: number,
-  currentManagerRevision?: string | null,
-): boolean =>
-  !(
-    coverage?.state === 'COMPLETE' &&
-    coverage.rosterRevision === rosterRevision &&
-    coverage.expectedEntries === expectedEntries &&
-    coverage.resolvedEntries === expectedEntries &&
-    isFinalManagerLiveRevision(coverage.managerRevision) &&
-    (currentManagerRevision === undefined || coverage.managerRevision === currentManagerRevision)
-  );
 
 const mapTournamentCoverage = (row: {
   rosterRevision: string;

@@ -5,7 +5,7 @@ import {
   type CoreSnapshotCachePublication,
 } from '../cache/core-snapshot-cache';
 import { stageDataPublication } from '../cache/data-publication';
-import { dispatchDataPublicationOutbox } from '../repositories/data-publication-outbox';
+import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
 import { randomUUID } from 'node:crypto';
 import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
 import { seasonRepository } from '../repositories/seasons';
