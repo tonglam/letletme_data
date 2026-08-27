@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 
-import { FixtureSchema, TeamSchema, fplClient } from '../../src/clients/fpl';
+import { ElementSchema, FixtureSchema, TeamSchema, fplClient } from '../../src/clients/fpl';
 import { toDbChip, toNullableDbChip } from '../../src/domain/chips';
 import { FPLClientError } from '../../src/utils/errors';
 import { buildCoreSnapshotFixture } from '../fixtures/core-snapshot.fixtures';
 import { preseasonRawFPLFixture } from '../fixtures/fixtures.fixtures';
+import { rawFPLElementsFixture } from '../fixtures/player-stats.fixtures';
 import { preseasonRawTeamFixture } from '../fixtures/teams.fixtures';
 
 const originalFetch = globalThis.fetch;
@@ -141,6 +142,25 @@ describe('FPL boundary schemas (FP-04)', () => {
     expect(team.position).toBe(0);
     expect(team.strength).toBeNull();
     expect(fixture.pulse_id).toBe(0);
+  });
+
+  test('accepts null optional player ranks during upstream recalibration', () => {
+    const payload = {
+      ...rawFPLElementsFixture[0],
+      influence_rank: null,
+      influence_rank_type: null,
+      creativity_rank: null,
+      creativity_rank_type: null,
+      threat_rank: null,
+      threat_rank_type: null,
+      ict_index_rank: null,
+      ict_index_rank_type: null,
+    };
+
+    const element = ElementSchema.parse(payload);
+
+    expect(element.influence_rank).toBeNull();
+    expect(element.creativity_rank_type).toBeNull();
   });
 
   test('getEventLive tolerates elements with explain: null', async () => {

@@ -192,14 +192,17 @@ export const ElementSchema = z.object({
   expected_goals_conceded: z.string(),
   // Optional fields — available in some endpoint responses (e.g. element-summary)
   starts: z.number().optional(),
-  influence_rank: z.number().optional(),
-  influence_rank_type: z.number().optional(),
-  creativity_rank: z.number().optional(),
-  creativity_rank_type: z.number().optional(),
-  threat_rank: z.number().optional(),
-  threat_rank_type: z.number().optional(),
-  ict_index_rank: z.number().optional(),
-  ict_index_rank_type: z.number().optional(),
+  // FPL returns these fields as null for players without a ranking (for
+  // example, during preseason/recalibration). Keep both omitted and null
+  // values valid while preserving the numeric type when a rank exists.
+  influence_rank: z.number().nullable().optional(),
+  influence_rank_type: z.number().nullable().optional(),
+  creativity_rank: z.number().nullable().optional(),
+  creativity_rank_type: z.number().nullable().optional(),
+  threat_rank: z.number().nullable().optional(),
+  threat_rank_type: z.number().nullable().optional(),
+  ict_index_rank: z.number().nullable().optional(),
+  ict_index_rank_type: z.number().nullable().optional(),
   // Official price-change prediction fields. These are optional because the
   // FPL bootstrap has historically changed their presence during preseason
   // and while the upstream is recalibrating.
