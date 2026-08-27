@@ -620,7 +620,18 @@ export async function recordFreshnessObservation(input: {
     }
     if (applied.recovered) {
       updates.recoveredAt = sql`COALESCE(${freshnessSloWindowsInOps.recoveredAt}, clock_timestamp())`;
-      updates.recoveryRevision = input.webRevision ?? current.webRevision ?? null;
+      // Checkpoint contracts intentionally do not require GraphQL/Web
+      // evidence.  Preserve the strongest revision available for the hop
+      // that actually proved recovery instead of leaving a recovered window
+      // without a revision when consumer probes are disabled.
+      updates.recoveryRevision =
+        input.webRevision ??
+        current.webRevision ??
+        input.redisRevision ??
+        current.redisRevision ??
+        input.producerRevision ??
+        current.producerRevision ??
+        null;
     }
     await tx
       .update(freshnessSloWindowsInOps)
