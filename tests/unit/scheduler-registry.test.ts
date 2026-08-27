@@ -5,6 +5,7 @@ import { describe, expect, mock, test } from 'bun:test';
 import {
   createSchedulerRegistry,
   officialH2HDefinition,
+  resolvePriceChangeWatchPlans,
   resolveEntryInfoSnapshotTargetEventId,
   resolvePostMatchResultPlans,
   schedulerQueueLaneOverride,
@@ -118,6 +119,34 @@ describe('standalone scheduler registry', () => {
       source: 'catchup',
       evidence: { cadence: 'five-minute', offsetMs: 60_000 },
     });
+  });
+
+  test('opens the dedicated price-change watcher five minutes before deadline', () => {
+    const deadline = new Date('2026-08-23T07:00:00.000Z');
+    const plans = resolvePriceChangeWatchPlans({
+      now: new Date('2026-08-23T06:55:00.000Z'),
+      seasonCode: TEST_SEASON.seasonCode,
+      deadlineCandidates: [deadline.toISOString()],
+    });
+
+    expect(registry.find((definition) => definition.name === 'price-change-watch')).toMatchObject({
+      cadence: 'deadline window (5 minutes before each official price-change deadline)',
+      queueName: 'fpl-price-watch',
+      criticality: 'critical',
+    });
+    expect(plans).toEqual([
+      {
+        scopeKey: TEST_SEASON.seasonCode,
+        periodKey: `price-change-watch-${deadline.getTime()}`,
+        dueAt: new Date('2026-08-23T06:55:00.000Z'),
+        source: 'catchup',
+        evidence: {
+          deadlineAt: deadline.toISOString(),
+          leadMs: 5 * 60_000,
+          watchWindowMs: 5 * 60_000,
+        },
+      },
+    ]);
   });
 
   test('treats definitions without an enablement hook as always enabled', () => {

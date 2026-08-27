@@ -43,12 +43,12 @@ import { FPLClientError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { getQueueConnection } from '../utils/queue';
 import { type WorkerRuntime } from './worker-runtime';
-
-export const PRICE_CHANGE_WATCH_LEAD_MS = 30_000;
-export const PRICE_CHANGE_WATCH_FAST_POLL_MS = 2_000;
-export const PRICE_CHANGE_WATCH_SLOW_POLL_MS = 5_000;
-export const PRICE_CHANGE_WATCH_FAST_WINDOW_MS = 90_000;
-export const PRICE_CHANGE_WATCH_MAX_WINDOW_MS = 5 * 60_000;
+import {
+  PRICE_CHANGE_WATCH_LEAD_MS,
+  PRICE_CHANGE_WATCH_MAX_WINDOW_MS,
+  PRICE_CHANGE_WATCH_RETRY_DELAYS_MS,
+  resolvePriceChangeWatchSleepDelay,
+} from '../domain/price-change-watch-policy';
 
 function enabled(): boolean {
   const raw = process.env.PRICE_CHANGE_HOT_WATCH_ENABLED;
@@ -388,20 +388,20 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       });
       if (!retryable) throw error;
     }
-    const elapsedFromDeadline = Date.now() - deadlineAt.getTime();
-    const interval =
-      elapsedFromDeadline <= PRICE_CHANGE_WATCH_FAST_WINDOW_MS
-        ? PRICE_CHANGE_WATCH_FAST_POLL_MS
-        : PRICE_CHANGE_WATCH_SLOW_POLL_MS;
+    const probeCompletedAt = Date.now();
     const retryDelay =
       retryableFailureStreak === 0
         ? 0
-        : [PRICE_CHANGE_WATCH_FAST_POLL_MS, PRICE_CHANGE_WATCH_SLOW_POLL_MS, 10_000][
-            retryableFailureStreak - 1
-          ];
-    const remaining = stopAt - Date.now();
-    if (remaining <= 0) break;
-    await sleep(Math.min(Math.max(interval, retryDelay), remaining));
+        : PRICE_CHANGE_WATCH_RETRY_DELAYS_MS[retryableFailureStreak - 1]!;
+    const delay = resolvePriceChangeWatchSleepDelay({
+      probeStartedAtMs: probeStartedAt,
+      probeCompletedAtMs: probeCompletedAt,
+      deadlineMs: deadlineAt.getTime(),
+      stopAtMs: stopAt,
+      retryDelayMs: retryDelay,
+    });
+    if (delay === null) break;
+    await sleep(delay);
   }
 
   logInfo('Price-watch window completed', {
