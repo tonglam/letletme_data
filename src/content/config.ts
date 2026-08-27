@@ -180,7 +180,9 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
       1_000,
       24 * 60 * 60_000,
     ),
-    grokTimeoutMs: integerEnv('CONTENT_GROK_TIMEOUT_MS', 240_000, 1_000, 2 * 60 * 60_000),
+    // The host runner's execution contract historically caps one Grok call
+    // at four minutes; longer values need a separately validated rollout.
+    grokTimeoutMs: integerEnv('CONTENT_GROK_TIMEOUT_MS', 240_000, 1_000, 240_000),
     grokMaxOutputBytes: integerEnv(
       'CONTENT_GROK_MAX_OUTPUT_BYTES',
       4 * 1024 * 1024,
@@ -328,12 +330,14 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   for (const [name, value] of [
     ['CONTENT_HERMES_TRANSCRIPT_TIMEOUT_MS', flags.hermesTranscriptTimeoutMs],
     ['CONTENT_SUPADATA_TIMEOUT_MS', flags.supadataTimeoutMs],
-    ['CONTENT_GROK_TIMEOUT_MS', flags.grokTimeoutMs],
     ['CONTENT_HTTP_TIMEOUT_MS', flags.httpTimeoutMs],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 1_000 || value > 2 * 60 * 60_000) {
       throw new Error(`${name} must be a safe integer between 1000 and 7200000`);
     }
+  }
+  if (flags.grokTimeoutMs > 240_000) {
+    throw new Error('CONTENT_GROK_TIMEOUT_MS above 240000 requires a separately validated rollout');
   }
   for (const [name, value] of [
     ['CONTENT_SUPADATA_JOB_POLL_INTERVAL_MS', flags.supadataJobPollIntervalMs],

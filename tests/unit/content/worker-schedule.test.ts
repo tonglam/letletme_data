@@ -65,6 +65,13 @@ describe('content worker poll policy', () => {
     expect(() =>
       assertContentRuntimeFlags({
         ...flags,
+        grokConcurrency: 2,
+        grokTimeoutMs: 240_001,
+      }),
+    ).toThrow('CONTENT_GROK_TIMEOUT_MS above 240000');
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...flags,
         httpAcquisitionEnabled: true,
         youtubeDiscoveryEnabled: true,
         youtubeNativeEnabled: true,
