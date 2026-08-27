@@ -225,15 +225,16 @@ async function recordFreshnessWindowForPlan(
   if (
     windowId !== null &&
     obligation &&
-    ['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status) &&
+    obligation.status === 'succeeded' &&
     contract.freshnessEvidence === 'checkpoint'
   ) {
     // The exact window identity may have been attached by a previous runtime,
-    // while the completion callback ran before that attachment. Re-apply the
-    // durable checkpoint evidence using the terminal obligation's retained
-    // counts/revision. The helper keeps a historical breach immutable and
-    // records recovery separately, so this cannot turn a late repair into an
-    // on-time MET result.
+    // while the successful completion callback ran before that attachment.
+    // Re-apply the durable checkpoint evidence using the obligation's retained
+    // counts/revision. Failed or irrecoverable rows are deliberately excluded:
+    // their timestamps prove an attempt, not a successful checkpoint. The
+    // helper keeps a historical breach immutable and records recovery
+    // separately, so this cannot turn a late repair into an on-time MET result.
     await recordCheckpointFreshnessEvidence({
       jobName: definition.name,
       evidence: { ...obligation.evidence, freshnessWindowId: windowId },
