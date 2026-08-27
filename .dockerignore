@@ -8,8 +8,6 @@ dist
 
 # VCS
 .git
-.gitignore
-.github
 
 # IDE/editor
 .vscode
@@ -24,6 +22,7 @@ coverage
 # Environment files
 .env
 .env.*
+!.env.example
 .env.production
 .env.deploy
 

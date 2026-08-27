@@ -58,35 +58,36 @@ function evalScript(numKeys: number, args: string[]): number {
   throw new Error(`Unexpected eval numKeys=${numKeys}`);
 }
 
-mock.module('../../src/cache/singleton', () => ({
-  redisSingleton: {
-    getClient: async () => ({
-      set: async (
-        key: string,
-        value: string,
-        ...args: Array<string | number>
-      ): Promise<string | null> => {
-        const nx = args.includes('NX');
-        if (nx && store.has(key)) {
-          return null;
-        }
-        store.set(key, String(value));
-        return 'OK';
-      },
-      expire: async (key: string) => (store.has(key) ? 1 : 0),
-      eval: async (_script: string, numKeys: number, ...args: string[]): Promise<number> =>
-        evalScript(numKeys, args),
-      del: async (...keys: string[]) => {
-        let n = 0;
-        for (const key of keys) {
-          if (store.delete(key)) n += 1;
-        }
-        return n;
-      },
-      exists: async (...keys: string[]) => keys.filter((k) => store.has(k)).length,
-    }),
-  },
-}));
+const fakeRedis = {
+  getClient: async () => ({
+    set: async (
+      key: string,
+      value: string,
+      ...args: Array<string | number>
+    ): Promise<string | null> => {
+      const nx = args.includes('NX');
+      if (nx && store.has(key)) {
+        return null;
+      }
+      store.set(key, String(value));
+      return 'OK';
+    },
+    expire: async (key: string) => (store.has(key) ? 1 : 0),
+    eval: async (_script: string, numKeys: number, ...args: string[]): Promise<number> =>
+      evalScript(numKeys, args),
+    del: async (...keys: string[]) => {
+      let n = 0;
+      for (const key of keys) {
+        if (store.delete(key)) n += 1;
+      }
+      return n;
+    },
+    exists: async (...keys: string[]) => keys.filter((k) => store.has(k)).length,
+  }),
+};
+
+mock.module('../../src/cache/singleton', () => ({ redisSingleton: fakeRedis }));
+mock.module('../../src/queues/redis', () => ({ queueRedisSingleton: fakeRedis }));
 
 const {
   createCascadeId,

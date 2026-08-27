@@ -64,6 +64,7 @@ Second cue
       item,
       timeoutMs: 1_000,
       maximumBytes: 10_000,
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
       fetchImpl: async () =>
         new Response('WEBVTT\n\n00:00:00.000 --> 00:00:01.500\nOpening line\n', {
           status: 200,
@@ -81,6 +82,7 @@ Second cue
         item,
         timeoutMs: 1_000,
         maximumBytes: 10_000,
+        lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
         fetchImpl: async () =>
           new Response('Untimed publisher transcript', {
             status: 200,

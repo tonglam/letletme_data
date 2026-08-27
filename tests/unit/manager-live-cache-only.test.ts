@@ -175,6 +175,14 @@ const {
 } = await import('../../src/services/manager-live.service');
 const { managerLiveAPI } = await import('../../src/api/manager-live.api');
 
+const classicStandingsTestDependencies = {
+  runPublication: async <T>(_key: string, task: () => Promise<T>): Promise<T> => task(),
+  readOrderingTimestamp: async () => ({
+    date: new Date('2026-08-23T12:00:00.000Z'),
+    exact: '2026-08-23T12:00:00.000000Z',
+  }),
+};
+
 const cachedRow = (entryId: number, checkedAt: string) => ({
   season: TEST_SEASON.seasonCode,
   eventId: 1,
@@ -819,10 +827,20 @@ describe('manager live classic standings convergence', () => {
     });
 
     const rows = new Map();
-    const result = await refreshClassicStandings(TEST_SEASON, 1, 99, new Set([101]), rows, null, {
-      startPage: 5,
-      maxPages: 1,
-    });
+    const result = await refreshClassicStandings(
+      TEST_SEASON,
+      1,
+      99,
+      new Set([101]),
+      rows,
+      null,
+      {
+        startPage: 5,
+        maxPages: 1,
+      },
+      async () => undefined,
+      classicStandingsTestDependencies,
+    );
 
     expect(result).toEqual({
       complete: false,
@@ -831,6 +849,7 @@ describe('manager live classic standings convergence', () => {
       refreshedEntryIds: [],
     });
     expect(rows.has(101)).toBe(false);
+    expect(upsertCheckpoint).toHaveBeenCalledTimes(2);
   });
 
   test('marks an empty standings pass complete so the queue clears its cursor', async () => {

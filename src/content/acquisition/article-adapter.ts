@@ -14,6 +14,7 @@ import {
   publicHttpTrace,
   type AcquisitionHttpTrace,
   type HttpValidator,
+  type PublicDnsLookup,
   type PublicFetch,
   type PublicHttpResult,
 } from './http-transport';
@@ -298,6 +299,7 @@ export async function runArticleAdapter(input: {
   validator?: Partial<HttpValidator>;
   now?: Date;
   fetchImpl?: PublicFetch;
+  lookupImpl?: PublicDnsLookup;
   timeoutMs?: number;
   maximumBytes?: number;
 }): Promise<ArticleAdapterResult> {
@@ -328,6 +330,7 @@ export async function runArticleAdapter(input: {
     accept: 'text/plain, */*;q=0.1',
     now,
     fetchImpl: input.fetchImpl,
+    lookupImpl: input.lookupImpl,
     timeoutMs: input.timeoutMs,
   });
   if (robotsTransport.status === 200) {
@@ -352,6 +355,7 @@ export async function runArticleAdapter(input: {
     acceptedContentTypes: [/text\/html/i, /application\/xhtml\+xml/i],
     now,
     fetchImpl: input.fetchImpl,
+    lookupImpl: input.lookupImpl,
     timeoutMs: input.timeoutMs,
   });
   const transports = [

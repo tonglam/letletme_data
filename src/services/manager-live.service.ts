@@ -797,6 +797,30 @@ const plusSeconds = (checkedAt: string, seconds: number): string =>
   new Date(Date.parse(checkedAt) + seconds * 1000).toISOString();
 
 /**
+ * Side-effect ports for the bounded Classic standings crawl.
+ *
+ * Production callers use the adapters below by default. Unit callers can
+ * supply deterministic fakes without constructing a database transaction or
+ * opening a Redis connection, which keeps the refresh contract hermetic while
+ * preserving the existing public refreshClassicStandings signature.
+ */
+export type ClassicStandingsRefreshDependencies = {
+  fetchStandings: (
+    leagueId: number,
+    standingsPage: number,
+    newEntriesPage?: number,
+    requestOptions?: Parameters<typeof fplClient.getLeagueClassicStandings>[3],
+  ) => Promise<RawFPLLeagueStandingsResponse>;
+  readCachedRowsForPublication: typeof readCachedRowsForPublication;
+  readPublicationState: typeof readClassicPublicationState;
+  runPublication: <T>(key: string, task: () => Promise<T>, signal?: AbortSignal) => Promise<T>;
+  readOrderingTimestamp: typeof readDatabaseOrderingTimestamp;
+  writeCheckpointRows: typeof writeCheckpointRows;
+  writeCache: typeof writeClassicRowsMonotonically;
+  reconcileCache: typeof reconcileClassicRowsAfterCachePublication;
+};
+
+/**
  * Replace every active score field with a value derived from one coherent
  * event-live publication. Entry Summary and Classic rows contribute ranks
  * only; they can never override the active score.
@@ -2216,12 +2240,22 @@ export const refreshClassicStandings = async (
   redis: Redis | null,
   options: { startPage?: number; maxPages?: number; requestDeadlineMs?: number } = {},
   assertLeaseOwned: () => Promise<void> = async () => undefined,
+  dependencies: Partial<ClassicStandingsRefreshDependencies> = {},
 ): Promise<{
   complete: boolean;
   nextPage: number;
   errorCode: 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_UNAVAILABLE' | null;
   refreshedEntryIds: readonly number[];
 }> => {
+  const fetchStandings =
+    dependencies.fetchStandings ?? fplClient.getLeagueClassicStandings.bind(fplClient);
+  const readCachedRows = dependencies.readCachedRowsForPublication ?? readCachedRowsForPublication;
+  const readPublicationState = dependencies.readPublicationState ?? readClassicPublicationState;
+  const runPublication = dependencies.runPublication ?? runManagerLivePublication;
+  const readOrderingTimestamp = dependencies.readOrderingTimestamp ?? readDatabaseOrderingTimestamp;
+  const writeCheckpoint = dependencies.writeCheckpointRows ?? writeCheckpointRows;
+  const writeCache = dependencies.writeCache ?? writeClassicRowsMonotonically;
+  const reconcileCache = dependencies.reconcileCache ?? reconcileClassicRowsAfterCachePublication;
   const crawlStartedAt = nowIso();
   let fetchedRows = new Map<number, ManagerLiveScoreRow>();
   const classicScope: ManagerScoreScope = { scopeType: 'CLASSIC_LEAGUE', scopeId: leagueId };
@@ -2246,7 +2280,7 @@ export const refreshClassicStandings = async (
       fetchedRows.size < targetIds.size;
       page += 1
     ) {
-      const response = await fplClient.getLeagueClassicStandings(
+      const response = await fetchStandings(
         leagueId,
         page,
         1,
@@ -2283,21 +2317,21 @@ export const refreshClassicStandings = async (
   if (fetchedRows.size > 0) {
     const uniqueFetchedRows = Array.from(fetchedRows.values());
     try {
-      const cachedPublicationRows = await readCachedRowsForPublication(
+      const cachedPublicationRows = await readCachedRows(
         redis,
         season.seasonCode,
         eventId,
         classicScope,
         uniqueFetchedRows.map((row) => row.entryId),
       );
-      const publication = await runManagerLivePublication(
+      const publication = await runPublication(
         managerLivePublicationKey(season.seasonCode, eventId, classicScope),
         async () => {
           // Network pagination happens outside the publication gate. Stamp the
           // rows only after the gate is acquired so a crawl that finishes after
           // an OR write is also ordered after that write during reconciliation.
           const publicationCheckedAt = nowIso();
-          const publicationState = await readClassicPublicationState(
+          const publicationState = await readPublicationState(
             season,
             eventId,
             classicScope,
@@ -2318,7 +2352,7 @@ export const refreshClassicStandings = async (
             return mergeLatestManagerLiveRow(latest, candidate);
           });
           await assertLeaseOwned();
-          const checkpointPublished = await writeCheckpointRows(
+          const checkpointPublished = await writeCheckpoint(
             season,
             eventId,
             classicScope,
@@ -2329,14 +2363,14 @@ export const refreshClassicStandings = async (
           }
           return {
             rows: mergedRows,
-            cachePublicationOrder: (await readDatabaseOrderingTimestamp()).exact,
+            cachePublicationOrder: (await readOrderingTimestamp()).exact,
             overallRankPublicationOrders: publicationState.overallRankPublicationStartedAtByEntryId,
           };
         },
       );
       publishedRows = publication.rows;
       await assertLeaseOwned();
-      const cacheUpdatedEntryIds = await writeClassicRowsMonotonically(
+      const cacheUpdatedEntryIds = await writeCache(
         redis,
         season.seasonCode,
         eventId,
@@ -2356,7 +2390,7 @@ export const refreshClassicStandings = async (
         publication.cachePublicationOrder,
         publication.overallRankPublicationOrders,
       );
-      const responseRows = await reconcileClassicRowsAfterCachePublication(
+      const responseRows = await reconcileCache(
         redis,
         season,
         eventId,
@@ -2374,7 +2408,7 @@ export const refreshClassicStandings = async (
         const fallbackRows = uniqueFetchedRows.map((row) =>
           withPreservedOverallRank(row, rows.get(row.entryId)?.overallRank),
         );
-        const fallbackPublished = await writeCheckpointRows(
+        const fallbackPublished = await writeCheckpoint(
           season,
           eventId,
           classicScope,

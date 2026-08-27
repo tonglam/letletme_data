@@ -251,6 +251,9 @@ export async function writeQueueHealthSnapshot(snapshot: QueueHealthSnapshot): P
 export async function readQueueHealthSnapshot(
   queueName: string,
 ): Promise<QueueHealthSnapshot | null> {
+  // Unit tests run without Redis by design. Integration tests set the
+  // explicit RUN_INTEGRATION flag and retain the real queue-health reader.
+  if (process.env.NODE_ENV === 'test' && process.env.RUN_INTEGRATION !== '1') return null;
   try {
     const redis = await queueRedisSingleton.getClient();
     const raw = await redis.get(queueHealthSnapshotKey(queueName));
@@ -310,6 +313,9 @@ export async function setQueueAdmission(input: {
 }
 
 export async function readQueueAdmission(queueName: string): Promise<QueueAdmission | null> {
+  // Keep queue producers hermetic in unit tests. The production and guarded
+  // integration paths still read the durable Redis admission gate.
+  if (process.env.NODE_ENV === 'test' && process.env.RUN_INTEGRATION !== '1') return null;
   try {
     const redis = await queueRedisSingleton.getClient();
     const raw = await redis.get(queueAdmissionKey(queueName));

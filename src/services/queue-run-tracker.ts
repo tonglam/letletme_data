@@ -9,6 +9,9 @@ export type QueueRunJobReference = Readonly<{
 
 const trackerKey = (runId: string): string => `llm:queue:coordination:run:${runId}:jobs`;
 
+const isHermeticUnitTest = (): boolean =>
+  process.env.NODE_ENV === 'test' && process.env.RUN_INTEGRATION !== '1';
+
 const encodeReference = (reference: QueueRunJobReference): string => JSON.stringify(reference);
 
 const decodeReference = (value: string): QueueRunJobReference | null => {
@@ -34,6 +37,7 @@ export async function trackQueueRunJob(
   jobId: string | number | undefined,
 ): Promise<void> {
   if (!runId || jobId === undefined) return;
+  if (isHermeticUnitTest()) return;
   const redis = await queueRedisSingleton.getClient();
   const key = trackerKey(runId);
   await redis.sadd(key, encodeReference({ queueName, jobId: String(jobId) }));
@@ -41,6 +45,7 @@ export async function trackQueueRunJob(
 }
 
 export async function listQueueRunJobs(runId: string): Promise<readonly QueueRunJobReference[]> {
+  if (isHermeticUnitTest()) return [];
   const redis = await queueRedisSingleton.getClient();
   const values = await redis.smembers(trackerKey(runId));
   return values.flatMap((value) => {
@@ -50,6 +55,7 @@ export async function listQueueRunJobs(runId: string): Promise<readonly QueueRun
 }
 
 export async function clearQueueRunJobs(runId: string): Promise<void> {
+  if (isHermeticUnitTest()) return;
   const redis = await queueRedisSingleton.getClient();
   await redis.del(trackerKey(runId));
 }

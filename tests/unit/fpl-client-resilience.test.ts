@@ -33,6 +33,8 @@ afterEach(() => {
   }
 });
 
+// These cases intentionally mutate process-wide fetch/env state. The runner
+// executes the file in its own process so this state cannot leak to siblings.
 describe('FPL client resilience (FP-18)', () => {
   test('hung socket aborts after the timeout and exhausts retries', async () => {
     process.env.FPL_REQUEST_TIMEOUT_MS = '20';
