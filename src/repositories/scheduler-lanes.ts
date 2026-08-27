@@ -473,12 +473,29 @@ export async function advanceSchedulerLane(input: {
         );
     }
 
-    const lane = mapLane(row);
     const [desiredRow] = await tx
       .select({ status: schedulerObligationsInOps.status })
       .from(schedulerObligationsInOps)
-      .where(eq(schedulerObligationsInOps.obligationId, lane.desiredObligationId))
+      .where(eq(schedulerObligationsInOps.obligationId, row.desiredObligationId))
       .limit(1);
+    // A terminal desired obligation is authoritative for an idle latest-wins
+    // lane. If an older Bull-loss callback left a lane error behind, clear it
+    // on the next scheduler observation instead of exposing a false active
+    // failure forever. Failed/pending targets retain their current error
+    // until the next dispatch begins.
+    if (
+      row.state === 'idle' &&
+      row.lastError !== null &&
+      (desiredRow?.status === 'succeeded' || desiredRow?.status === 'skipped')
+    ) {
+      const [cleared] = await tx
+        .update(schedulerLanesInOps)
+        .set({ lastError: null, updatedAt: dbNow })
+        .where(eq(schedulerLanesInOps.laneId, row.laneId))
+        .returning();
+      if (cleared) row = cleared;
+    }
+    const lane = mapLane(row);
     const shouldDispatch =
       lane.state === 'idle' &&
       (desiredRow?.status === 'pending' || desiredRow?.status === 'failed') &&
@@ -532,6 +549,10 @@ export async function claimSchedulerLaneDispatch(input: {
         dispatchLeaseExpiresAt: new Date(dbNow.getTime() + DISPATCH_LEASE_MS),
         bullJobId: null,
         runId: null,
+        // A new dispatch makes any previous terminal error historical. Keep
+        // lastError scoped to the current lane state so retrying a failed
+        // generation does not report a stale error while it is in flight.
+        lastError: null,
         lastProgressAt: dbNow,
         updatedAt: dbNow,
       })
@@ -602,6 +623,7 @@ export async function confirmSchedulerLaneEnqueued(input: {
         dispatchLeaseExpiresAt: null,
         bullJobId,
         runId: input.runId,
+        lastError: null,
         lastProgressAt: sql`clock_timestamp()`,
         updatedAt: sql`clock_timestamp()`,
       })
@@ -702,6 +724,7 @@ export async function startSchedulerLane(input: {
         activeObligationId: row.activeObligationId ?? row.desiredObligationId,
         bullJobId: String(input.bullJobId),
         runId: input.runId ?? row.runId,
+        lastError: null,
         lastProgressAt: dbNow,
         updatedAt: dbNow,
       })
@@ -800,6 +823,7 @@ export async function fenceSchedulerLaneTarget(input: {
         .update(schedulerLanesInOps)
         .set({
           activeObligationId: row.desiredObligationId,
+          lastError: null,
           lastProgressAt: dbNow,
           updatedAt: dbNow,
         })
@@ -935,6 +959,7 @@ export async function completeSchedulerLane(input: {
         dispatchLeaseExpiresAt: null,
         blockerJobId: null,
         retryNotBefore: null,
+        lastError: null,
         lastProgressAt: dbNow,
         updatedAt: dbNow,
       })
