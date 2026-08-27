@@ -205,14 +205,16 @@ jobs:
                   APP_IMAGE="$IMAGE_REF" docker compose ps || true
                   ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
-                if [ "$migration_started" = false ] && [ "$services_stopped" = true ] && [ -n "$old_image" ]; then
-                  echo "Data deployment failed before migration; restoring previous API and worker image" >&2
+                if [ "$migration_started" = false ]; then
                   if [ -n "$old_revision" ]; then
                     git reset --hard "$old_revision" || true
                   fi
-                  restore_runtime_services \
-                    "$old_image" "$old_release_sha" "$old_runner_release_sha" \
-                    "$old_media_present" || true
+                  if [ "$services_stopped" = true ] && [ -n "$old_image" ]; then
+                    echo "Data deployment failed before migration; restoring previous API and worker image" >&2
+                    restore_runtime_services \
+                      "$old_image" "$old_release_sha" "$old_runner_release_sha" \
+                      "$old_media_present" || true
+                  fi
                 elif [ "$migration_started" = true ]; then
                   if ! restore_last_known_healthy_if_ledger_unchanged \
                     "$old_image" "$ledger_before" "$old_revision" "$old_release_sha" \

@@ -170,6 +170,10 @@ deploy() {
           /home/workspace/letletme-grok-runner \
           "$DEPLOY_RUNNER_PREVIOUS_TARGET" "$DEPLOY_RUNNER_PREVIOUS_RELEASE" || true
       fi
+      if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = false && \
+        -n "$DEPLOY_OLD_REVISION" ]]; then
+        git -C "$PROJECT_DIR" reset --hard "$DEPLOY_OLD_REVISION" || true
+      fi
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = true ]]; then
         if ! restore_last_known_healthy_if_ledger_unchanged \
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \

@@ -313,6 +313,9 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain(
       '"$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true',
     );
+    expect(deployScript).toContain(
+      '"$DEPLOY_MIGRATION_STARTED" = false && \\\n        -n "$DEPLOY_OLD_REVISION"',
+    );
     expect(deployScript).toContain('deploy-host-grok-runner.sh');
     expect(deployScript).toContain('run-briefing-control-probe.sh');
     expect(deployScript).toContain('rearm-briefing-x-after-probe.sh');
