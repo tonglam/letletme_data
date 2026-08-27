@@ -648,6 +648,7 @@ function myFplSnapshotOutboxDefinition(): ScheduledJobDefinition {
     name: MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX,
     cadence: 'every five minutes',
     periodMs: 5 * 60_000,
+    periodPrefix: 'outbox',
     criticality: 'critical',
     successPredicate: 'committed My FPL Redis manifests are delivered or retried',
     enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
@@ -667,6 +668,8 @@ function periodicMaintenanceDefinition(input: {
   cadence: string;
   periodMs: number;
   minuteOfHour?: number;
+  /** Stable identity prefix used by governance repair routing. */
+  periodPrefix?: string;
   criticality: ScheduledJobDefinition['criticality'];
   successPredicate: string;
   enqueue: ScheduledJobDefinition['enqueue'];
@@ -692,7 +695,7 @@ function periodicMaintenanceDefinition(input: {
       return [
         {
           scopeKey: context.season.seasonCode,
-          periodKey: `maintenance-${bucket}`,
+          periodKey: `${input.periodPrefix ?? 'maintenance'}-${bucket}`,
           dueAt,
           source: 'catchup' as const,
         },

@@ -85,6 +85,8 @@ export type MyFplSnapshotOutboxDispatchResult = Readonly<{
   delivered: number;
   superseded: number;
   failed: number;
+  /** Revisions whose Redis manifests were actually activated in this call. */
+  deliveredRevisions?: readonly number[];
 }>;
 
 export type MyFplSnapshotCoverageState =
@@ -3027,6 +3029,7 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
   let delivered = 0;
   let superseded = 0;
   let failed = 0;
+  const deliveredRevisions: number[] = [];
   const redis = await redisSingleton.getClient();
   for (const row of claimed) {
     try {
@@ -3097,7 +3100,10 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
         return 'delivered' as const;
       });
       if (status === 'superseded') superseded += 1;
-      else delivered += 1;
+      else {
+        delivered += 1;
+        deliveredRevisions.push(row.revision);
+      }
     } catch (error) {
       failed += 1;
       logWarn('My FPL snapshot Redis manifest delivery failed', {
@@ -3108,5 +3114,5 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
       await db.begin((tx) => releaseMyFplSnapshotOutbox(tx, row.outbox_id, owner, error));
     }
   }
-  return { claimed: claimed.length, delivered, superseded, failed };
+  return { claimed: claimed.length, delivered, superseded, failed, deliveredRevisions };
 }
