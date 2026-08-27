@@ -361,6 +361,13 @@ describe('GW queue and data governance primitives', () => {
         .filter((contract) => contract.freshnessEvidence === 'checkpoint')
         .every((contract) => (contract.freshnessJobs?.length ?? 0) > 0),
     ).toBe(true);
+    expect(
+      dataContractRegistry.find((contract) => contract.contractKey === 'my-fpl'),
+    ).toMatchObject({
+      consumerEvidence: {
+        redis: 'active snapshot manifest and publication outbox',
+      },
+    });
   });
 
   test('routes My FPL outbox freshness repairs to the publication lane', () => {
