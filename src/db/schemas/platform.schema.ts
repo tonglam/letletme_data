@@ -3596,6 +3596,7 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       withTimezone: true,
       mode: 'date',
     }),
+    notApplicableEntryCount: integer('not_applicable_entry_count').default(0).notNull(),
   },
   (table) => [
     index('my_fpl_snapshot_publications_gc_idx').on(
@@ -3633,6 +3634,10 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
     check(
       'my_fpl_snapshot_publications_counts_check',
       sql`expected_entry_count >= 0 AND ready_entry_count >= 0 AND empty_entry_count >= 0 AND ready_entry_count + empty_entry_count = expected_entry_count AND expected_tournament_count >= 0 AND ready_tournament_count >= 0 AND ready_tournament_count <= expected_tournament_count`,
+    ),
+    check(
+      'my_fpl_snapshot_publications_eligibility_counts_check',
+      sql`not_applicable_entry_count >= 0`,
     ),
     check('my_fpl_snapshot_publications_hash_check', sql`content_sha256 ~ '^[0-9a-f]{64}$'::text`),
     check(

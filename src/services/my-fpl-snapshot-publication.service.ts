@@ -3,6 +3,7 @@ import type postgres from 'postgres';
 
 import { redisSingleton } from '../cache/singleton';
 import { EVENT_LIVE_PROJECTION_ALGORITHM_VERSION } from '../domain/event-live-manager-projection';
+import { countEntryEligibility, isEntryEligibleForEvent } from '../domain/entry-eligibility';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Fixture } from '../types';
@@ -31,6 +32,9 @@ export type MyFplSnapshotPublication = Readonly<{
   expectedEntryCount: number;
   readyEntryCount: number;
   emptyEntryCount: number;
+  /** Entries added after this gameweek are represented in the payload as EMPTY,
+   * but are explicitly excluded from the eligible denominator. */
+  notApplicableEntryCount: number;
   expectedTournamentCount: number;
   readyTournamentCount: number;
   contentSha256: string;
@@ -103,6 +107,7 @@ export type MyFplSnapshotOperationalStatus = Readonly<{
   expectedEntryCount: number | null;
   readyEntryCount: number | null;
   emptyEntryCount: number | null;
+  notApplicableEntryCount: number | null;
   expectedTournamentCount: number | null;
   readyTournamentCount: number | null;
   currentEntryCount: number;
@@ -157,6 +162,28 @@ export function isMatchingProvisionalMyFplPublication(
     active.algorithmVersion === candidate.algorithmVersion &&
     active.sourceMinCheckedAt?.toISOString() === candidate.sourceMinCheckedAt &&
     active.sourceMaxCheckedAt?.toISOString() === candidate.sourceMaxCheckedAt
+  );
+}
+
+/**
+ * FPL reports an unranked manager's first-event cumulative total as zero even
+ * when the event itself has points. This is an authoritative source semantic,
+ * not a reason to relax reconciliation for later events or ranked entries.
+ */
+export function isAuthoritativeUnrankedFirstEventResult(
+  input: Readonly<{
+    firstScoringEvent: number;
+    eventId: number;
+    hasPreviousResult: boolean;
+    overallPoints: number;
+    overallRank: number | null;
+  }>,
+): boolean {
+  return (
+    input.firstScoringEvent === input.eventId &&
+    !input.hasPreviousResult &&
+    input.overallPoints === 0 &&
+    input.overallRank === 0
   );
 }
 
@@ -1377,6 +1404,7 @@ type MyFplPublicationRow = {
   expected_entry_count: number;
   ready_entry_count: number;
   empty_entry_count: number;
+  not_applicable_entry_count: number;
   expected_tournament_count: number;
   ready_tournament_count: number;
   content_sha256: string;
@@ -1407,6 +1435,7 @@ function mapMyFplPublication(row: MyFplPublicationRow): MyFplSnapshotPublication
     expectedEntryCount: row.expected_entry_count,
     readyEntryCount: row.ready_entry_count,
     emptyEntryCount: row.empty_entry_count,
+    notApplicableEntryCount: row.not_applicable_entry_count,
     expectedTournamentCount: row.expected_tournament_count,
     readyTournamentCount: row.ready_tournament_count,
     contentSha256: row.content_sha256,
@@ -1455,6 +1484,8 @@ export function isCompleteMyFplPublication(
     publication.readyEntryCount < 0 ||
     !Number.isSafeInteger(publication.emptyEntryCount) ||
     publication.emptyEntryCount < 0 ||
+    !Number.isSafeInteger(publication.notApplicableEntryCount) ||
+    publication.notApplicableEntryCount < 0 ||
     publication.readyEntryCount + publication.emptyEntryCount !== publication.expectedEntryCount ||
     !Number.isSafeInteger(publication.expectedTournamentCount) ||
     publication.expectedTournamentCount < 0 ||
@@ -1490,7 +1521,8 @@ async function loadActivePublication(
   const rows = await client<MyFplPublicationRow[]>`
     SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
            published_at, kind, expected_entry_count, ready_entry_count,
-           empty_entry_count, expected_tournament_count, ready_tournament_count,
+           empty_entry_count, not_applicable_entry_count,
+           expected_tournament_count, ready_tournament_count,
            content_sha256, score_source, live_publication_id, live_revision,
            algorithm_version, source_min_checked_at, source_max_checked_at,
            override_actor, override_reason, idempotency_key
@@ -1514,7 +1546,8 @@ async function loadPublicationByIdempotencyKey(
   const rows = await client<MyFplPublicationRow[]>`
     SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
            published_at, kind, expected_entry_count, ready_entry_count,
-           empty_entry_count, expected_tournament_count, ready_tournament_count,
+           empty_entry_count, not_applicable_entry_count,
+           expected_tournament_count, ready_tournament_count,
            content_sha256, score_source, live_publication_id, live_revision,
            algorithm_version, source_min_checked_at, source_max_checked_at,
            override_actor, override_reason, idempotency_key
@@ -1561,6 +1594,7 @@ export async function getMyFplSnapshotOperationalStatus(
       expected_entry_count: number | null;
       ready_entry_count: number | null;
       empty_entry_count: number | null;
+      not_applicable_entry_count: number | null;
       expected_tournament_count: number | null;
       ready_tournament_count: number | null;
       current_entry_count: number;
@@ -1574,7 +1608,8 @@ export async function getMyFplSnapshotOperationalStatus(
            publication.kind, publication.published_at, publication.expected_entry_count,
            publication.ready_entry_count, publication.empty_entry_count,
            publication.expected_tournament_count, publication.ready_tournament_count,
-           coverage.current_entry_count, coverage.missing_active_entry_count,
+           coverage.current_entry_count, coverage.not_applicable_entry_count,
+           coverage.missing_active_entry_count,
            COALESCE(outbox.pending_outbox_count, 0)::integer AS pending_outbox_count,
            COALESCE(outbox.outbox_attempts, 0)::integer AS outbox_attempts
     FROM fpl.events event
@@ -1585,7 +1620,12 @@ export async function getMyFplSnapshotOperationalStatus(
     LEFT JOIN LATERAL (
       SELECT count(*)::integer AS current_entry_count,
              count(*) FILTER (
+               WHERE current_entry.started_event IS NOT NULL
+                 AND current_entry.started_event > event.event_id
+             )::integer AS not_applicable_entry_count,
+             count(*) FILTER (
                WHERE publication.revision IS NOT NULL
+                 AND (current_entry.started_event IS NULL OR current_entry.started_event <= event.event_id)
                  AND NOT EXISTS (
                    SELECT 1
                    FROM competition.my_fpl_snapshot_entries snapshot_entry
@@ -1640,6 +1680,7 @@ export async function getMyFplSnapshotOperationalStatus(
       expectedEntryCount: row.expected_entry_count,
       readyEntryCount: row.ready_entry_count,
       emptyEntryCount: row.empty_entry_count,
+      notApplicableEntryCount: row.not_applicable_entry_count,
       expectedTournamentCount: row.expected_tournament_count,
       readyTournamentCount: row.ready_tournament_count,
       currentEntryCount: row.current_entry_count,
@@ -1751,6 +1792,11 @@ async function captureMyFplSnapshotOnce(
     if (entries.length === 0) {
       throw new MyFplSnapshotIncompleteError('No current-season entries are available');
     }
+    const entryEligibility = countEntryEligibility(
+      entries.map((entry) => ({ startedEvent: entry.started_event, eventId })),
+    );
+    const expectedEntryCount = entryEligibility.eligibleCount;
+    const notApplicableEntryCount = entryEligibility.notApplicableCount;
 
     // Provisional scores never read the current event result. Final scores read
     // the current event only after the final fence has passed.
@@ -1785,7 +1831,7 @@ async function captureMyFplSnapshotOnce(
         ? new Date(event.data_checked_at).getTime()
         : Number.NaN;
       for (const entry of entries) {
-        if ((entry.started_event ?? 1) > eventId) continue;
+        if (!isEntryEligibleForEvent({ startedEvent: entry.started_event, eventId })) continue;
         const current = currentResults.get(entry.entry_id);
         if (!current) continue;
         if (
@@ -1807,10 +1853,24 @@ async function captureMyFplSnapshotOnce(
           )
           .at(-1);
         const previousTotal = previous?.overall_points ?? 0;
-        if (current.overall_points !== previousTotal + current.event_net_points) {
+        const reconciles = current.overall_points === previousTotal + current.event_net_points;
+        const acceptsUnrankedFirstEvent = isAuthoritativeUnrankedFirstEventResult({
+          firstScoringEvent,
+          eventId,
+          hasPreviousResult: previous !== undefined,
+          overallPoints: current.overall_points,
+          overallRank: current.overall_rank,
+        });
+        if (!reconciles && !acceptsUnrankedFirstEvent) {
           throw new MyFplSnapshotIncompleteError(
             `Entry ${entry.entry_id} final total does not reconcile for event ${eventId}`,
           );
+        }
+        if (acceptsUnrankedFirstEvent && !reconciles) {
+          logWarn('Accepted authoritative unranked first-event cumulative total', {
+            season: season.seasonCode,
+            eventId,
+          });
         }
         if (current.event_net_points !== current.event_points - current.event_transfers_cost) {
           throw new MyFplSnapshotIncompleteError(
@@ -1984,7 +2044,7 @@ async function captureMyFplSnapshotOnce(
     let projectedBatch: Awaited<ReturnType<typeof eventLiveManagerScoreService.load>> = null;
     if (kind === 'PROVISIONAL') {
       const activeEntryIds = entries
-        .filter((entry) => (entry.started_event ?? 1) <= eventId)
+        .filter((entry) => isEntryEligibleForEvent({ startedEvent: entry.started_event, eventId }))
         .map((entry) => entry.entry_id);
       projectedBatch = await eventLiveManagerScoreService.load(season, eventId, activeEntryIds, {
         includeEffectiveLineup: true,
@@ -2195,10 +2255,13 @@ async function captureMyFplSnapshotOnce(
       number,
       { inputRevision: string; scoreRevision: string } | null
     >();
-    let emptyEntryCount = 0;
+    const emptyEntryCount = 0;
     for (const entry of entries) {
       const entryPicks = picksByEntry.get(entry.entry_id) ?? [];
-      const isEmpty = (entry.started_event ?? 1) > eventId;
+      const isEmpty = !isEntryEligibleForEvent({
+        startedEvent: entry.started_event,
+        eventId,
+      });
       const projectedScore = projectedScoresByEntry.get(entry.entry_id);
       const currentResult =
         kind === 'PROVISIONAL'
@@ -2250,8 +2313,7 @@ async function captureMyFplSnapshotOnce(
           `Entry ${entry.entry_id} is incomplete for event ${eventId}: picks=${entryPicks.length}, result=${Boolean(currentResult)}, transferCheckpoint=${entry.transfers_synced_through_event_id ?? 'missing'}`,
         );
       }
-      if (isEmpty) emptyEntryCount += 1;
-      else readyEntryIds.add(entry.entry_id);
+      if (!isEmpty) readyEntryIds.add(entry.entry_id);
       scoreRevisionsByEntry.set(
         entry.entry_id,
         currentResult?.input_revision && currentResult.score_revision
@@ -2444,7 +2506,10 @@ async function captureMyFplSnapshotOnce(
       const row = tournamentRowByMembership.get(
         `${membership.tournament_id}:${membership.entry_id}`,
       );
-      const isEmpty = (entry.started_event ?? 1) > eventId;
+      const isEmpty = !isEntryEligibleForEvent({
+        startedEvent: entry.started_event,
+        eventId,
+      });
       if (
         !row ||
         (!isEmpty &&
@@ -2483,7 +2548,10 @@ async function captureMyFplSnapshotOnce(
             `Tournament ${tournamentId} entry ${sourceRow.entry_id} has no complete event result`,
           );
         }
-        const isEmpty = (entryById.get(sourceRow.entry_id)?.started_event ?? 1) > eventId;
+        const isEmpty = !isEntryEligibleForEvent({
+          startedEvent: entryById.get(sourceRow.entry_id)?.started_event,
+          eventId,
+        });
         const entryRevisions = scoreRevisionsByEntry.get(sourceRow.entry_id) ?? null;
         if (
           !isEmpty &&
@@ -2630,14 +2698,16 @@ async function captureMyFplSnapshotOnce(
          source_max_checked_at, score_source, live_publication_id, live_revision,
          algorithm_version, published_at, kind,
          active, expected_entry_count, ready_entry_count, empty_entry_count,
-         expected_tournament_count, ready_tournament_count, content_sha256,
+         not_applicable_entry_count, expected_tournament_count, ready_tournament_count,
+         content_sha256,
          override_actor, override_reason, idempotency_key)
       VALUES
         (${season.seasonId}, ${eventId}, ${snapshotDate}::date, ${sourceCheckedAtIso}::timestamptz,
          ${sourceCheckedAtIso}::timestamptz, ${sourceMaxCheckedAtIso}::timestamptz,
          ${scoreSource}, ${livePublicationId}, ${liveRevision}, ${algorithmVersion},
          ${nowIso}::timestamptz, ${kind},
-         false, ${entries.length}, ${readyEntryIds.size}, ${emptyEntryCount},
+         false, ${expectedEntryCount}, ${readyEntryIds.size}, ${emptyEntryCount},
+         ${notApplicableEntryCount},
          ${tournamentIds.length}, ${tournamentIds.length}, ${contentSha256},
          ${overrideActor}, ${overrideReason}, ${idempotencyKey})
       RETURNING revision, published_at
@@ -2767,9 +2837,10 @@ async function captureMyFplSnapshotOnce(
       sourceMaxCheckedAt,
       publishedAt: new Date(publicationRows[0].published_at),
       kind,
-      expectedEntryCount: entries.length,
+      expectedEntryCount,
       readyEntryCount: readyEntryIds.size,
       emptyEntryCount,
+      notApplicableEntryCount,
       expectedTournamentCount: tournamentIds.length,
       readyTournamentCount: tournamentIds.length,
       contentSha256,
@@ -2783,9 +2854,10 @@ async function captureMyFplSnapshotOnce(
       kind,
       revision,
       snapshotDate,
-      expectedEntries: entries.length,
+      expectedEntries: expectedEntryCount,
       readyEntries: readyEntryIds.size,
       emptyEntries: emptyEntryCount,
+      notApplicableEntries: notApplicableEntryCount,
       tournaments: tournamentIds.length,
     });
     return { status: 'published', publication };

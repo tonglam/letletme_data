@@ -20,6 +20,7 @@ const activePublication = (
   expectedEntryCount: 10,
   readyEntryCount: 10,
   emptyEntryCount: 0,
+  notApplicableEntryCount: 0,
   expectedTournamentCount: 1,
   readyTournamentCount: 1,
   contentSha256: 'a'.repeat(64),
