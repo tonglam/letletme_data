@@ -301,7 +301,8 @@ describe('production environment preflight', () => {
     expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?start_all_runtime_services/);
     const stateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
     expect(stateMachine).toContain('runtime_worker_services');
-    expect(stateMachine).toContain(String.raw`grep -qx 'media-worker'`);
+    expect(stateMachine).toContain(String.raw`grep -x 'media-worker' >/dev/null`);
+    expect(stateMachine).not.toContain(String.raw`grep -qx 'media-worker'`);
     expect(stateMachine).toContain('RUNTIME_INCLUDE_MEDIA_WORKER');
     expect(stateMachine).toContain('start_all_runtime_services');
     expect(stateMachine).toContain('export APP_IMAGE="$previous_image"');
