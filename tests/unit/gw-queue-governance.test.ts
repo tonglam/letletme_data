@@ -24,9 +24,11 @@ import { summarizeDataError } from '../../src/domain/error-classification';
 import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-official-h2h.service';
 import { missingLockedPageNumbers } from '../../src/domain/official-h2h-manifest';
 import {
+  assertDataContractRegistry,
   dataContractRegistry,
   canonicalQueueCatalog,
   queueRuntimeCatalog,
+  type DataContract,
 } from '../../src/domain/data-contracts';
 import { MAINTENANCE_JOBS } from '../../src/queues/maintenance.queue';
 import { MAINTENANCE_JOB_LANES } from '../../src/jobs/maintenance.jobs';
@@ -303,6 +305,31 @@ describe('GW queue and data governance primitives', () => {
       dataContractRegistry.flatMap((contract) => contract.schedulerJobs),
     );
     expect(registryJobs.size).toBeGreaterThanOrEqual(35);
+    expect(() => assertDataContractRegistry([...registryJobs])).not.toThrow();
+    const contracts: readonly DataContract[] = dataContractRegistry;
+    expect(
+      contracts
+        .filter((contract) => contract.freshnessEvidence === 'checkpoint')
+        .every((contract) => (contract.freshnessJobs?.length ?? 0) > 0),
+    ).toBe(true);
+  });
+
+  test('settles PostgreSQL checkpoint windows without requiring a Redis pointer', () => {
+    const timestamp = new Date('2026-08-27T00:00:00.000Z');
+    expect(
+      evaluateFreshnessWindow({
+        eligible: true,
+        consumerEvidenceRequired: false,
+        redisEvidenceRequired: false,
+        dueAt: new Date('2026-08-27T00:05:00.000Z'),
+        sourceCheckedAt: timestamp,
+        pgPublishedAt: timestamp,
+        producerRevision: 'checkpoint-1',
+        expectedCount: 15,
+        observedCount: 15,
+        completeness: 'COMPLETE',
+      }),
+    ).toBe('MET');
   });
 
   test('redacts durable error summaries', () => {

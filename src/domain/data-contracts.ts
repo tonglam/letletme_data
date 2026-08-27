@@ -35,6 +35,13 @@ export type DataContract = Readonly<{
   executionBudgetMs: number;
   /** Evidence writer currently attached to this contract's producer. */
   freshnessEvidence?: 'publication' | 'checkpoint' | 'none';
+  /**
+   * Scheduler definitions that own an SLO window for this contract.  A
+   * contract can cover more jobs than its user-visible checkpoint (for
+   * example entry onboarding and transfers), so the list keeps internal
+   * maintenance obligations out of the public freshness denominator.
+   */
+  freshnessJobs?: readonly string[];
   integrity: string;
   publicationEvidence: readonly string[];
   consumerEvidence: Readonly<{
@@ -122,6 +129,8 @@ export const dataContractRegistry = [
     dispatchWithinMs: 15 * 60_000,
     executionBudgetMs: 15 * 60_000,
     integrity: 'eligible entries covered; picks contain exactly 15 unique positions',
+    freshnessEvidence: 'checkpoint',
+    freshnessJobs: ['entry-picks', 'entry-results'],
     publicationEvidence: ['entry checkpoint', 'sync run finalizer'],
     consumerEvidence: publicConsumers('entry and My FPL loaders', 'entry/live pages'),
     retry: { maxGenerations: 3, policy: 'failed IDs and keyset continuation inherit lane' },
@@ -138,6 +147,8 @@ export const dataContractRegistry = [
     dispatchWithinMs: 30_000,
     executionBudgetMs: 10 * 60_000,
     integrity: 'all eligible entries contain exactly 15 unique pick positions',
+    freshnessEvidence: 'checkpoint',
+    freshnessJobs: ['live-picks-refresh'],
     publicationEvidence: ['entry event picks rows', 'sync run finalizer'],
     consumerEvidence: publicConsumers('entry/live and My FPL loaders', 'live pages'),
     retry: { maxGenerations: 2, policy: 'one latest event sweep with exact child retries' },
@@ -162,6 +173,13 @@ export const dataContractRegistry = [
     dispatchWithinMs: 15 * 60_000,
     executionBudgetMs: 20 * 60_000,
     integrity: 'checkpoint and cascade barrier cover eligible tournament scope',
+    freshnessEvidence: 'checkpoint',
+    freshnessJobs: [
+      'league-event-picks',
+      'league-event-results',
+      'tournament-event-picks',
+      'tournament-event-results',
+    ],
     publicationEvidence: ['sync checkpoint', 'queue-run barrier', 'cascade finalizer'],
     consumerEvidence: publicConsumers('tournament desk and competitions', 'tournament pages'),
     retry: { maxGenerations: 3, policy: 'bounded retry plus finalizer' },
@@ -183,6 +201,13 @@ export const dataContractRegistry = [
     dispatchWithinMs: 15 * 60_000,
     executionBudgetMs: 60 * 60_000,
     integrity: 'scope manifest complete and FINAL matches provisional scope',
+    freshnessEvidence: 'checkpoint',
+    freshnessJobs: [
+      'my-fpl-snapshot',
+      'my-fpl-finalization',
+      'my-fpl-snapshot-outbox',
+      'post-match-consolidation',
+    ],
     publicationEvidence: ['active snapshot revision', 'scope manifest', 'outbox'],
     consumerEvidence: publicConsumers('MyFplSnapshotMeta', 'My FPL pages'),
     retry: { maxGenerations: 6, policy: 'latest snapshot target wins' },
@@ -199,6 +224,8 @@ export const dataContractRegistry = [
     dispatchWithinMs: 15_000,
     executionBudgetMs: 45_000,
     integrity: 'locked page manifest, standings and current-event matches agree',
+    freshnessEvidence: 'checkpoint',
+    freshnessJobs: ['tournament-official-h2h-live'],
     publicationEvidence: ['page manifest', 'schedule hash', 'atomic tournament publication'],
     consumerEvidence: publicConsumers('official H2H envelope', 'tournament detail/home'),
     retry: { maxGenerations: 2, policy: 'one root per event minute' },
@@ -222,6 +249,8 @@ export const dataContractRegistry = [
     dispatchWithinMs: 15 * 60_000,
     executionBudgetMs: 75 * 60_000,
     integrity: 'current core player IDs fully represented with provider lineage',
+    freshnessEvidence: 'checkpoint',
+    freshnessJobs: ['player-stats', 'player-stats-active', 'player-season-summary-repair'],
     publicationEvidence: ['sync run checkpoint'],
     consumerEvidence: publicConsumers('player stats contexts', 'player stats/detail'),
     retry: { maxGenerations: 3, policy: 'bounded repair' },
@@ -385,6 +414,12 @@ export function contractForSchedulerJob(jobName: string): DataContract | undefin
   );
 }
 
+/** Whether a scheduler definition owns a machine-settled freshness window. */
+export function contractHasFreshnessWindow(contract: DataContract, jobName: string): boolean {
+  if (!contract.freshnessEvidence || contract.freshnessEvidence === 'none') return false;
+  return contract.freshnessJobs === undefined || contract.freshnessJobs.includes(jobName);
+}
+
 /** Resolve the concrete queue lane for a contract job. A contract can span
  * several lanes (for example My FPL orchestration versus its publication
  * outbox), so governance cases must not blindly use the contract's primary
@@ -431,11 +466,26 @@ export function assertDataContractRegistry(jobNames: readonly string[]): void {
         (contract.schedulerJobs as readonly string[]).includes(jobName),
       ).length > 1,
   );
+  const contracts: readonly DataContract[] = dataContractRegistry;
+  const invalidFreshnessJobs = contracts.flatMap((contract) =>
+    (contract.freshnessJobs ?? [])
+      .filter((jobName) => !(contract.schedulerJobs as readonly string[]).includes(jobName))
+      .map((jobName) => `${contract.contractKey}:${jobName}`),
+  );
+  const checkpointContractsWithoutJobs = contracts
+    .filter(
+      (contract) =>
+        contract.freshnessEvidence === 'checkpoint' &&
+        (!contract.freshnessJobs || contract.freshnessJobs.length === 0),
+    )
+    .map((contract) => contract.contractKey);
   if (
     missing.length > 0 ||
     unrepresented.length > 0 ||
     invalidManualOnly.length > 0 ||
-    duplicates.length > 0
+    duplicates.length > 0 ||
+    invalidFreshnessJobs.length > 0 ||
+    checkpointContractsWithoutJobs.length > 0
   ) {
     throw new Error(
       [
@@ -448,6 +498,12 @@ export function assertDataContractRegistry(jobNames: readonly string[]): void {
           : '',
         duplicates.length > 0
           ? `Scheduler jobs have multiple data contracts: ${duplicates.join(', ')}`
+          : '',
+        invalidFreshnessJobs.length > 0
+          ? `Freshness jobs are outside their contract scheduler jobs: ${invalidFreshnessJobs.join(', ')}`
+          : '',
+        checkpointContractsWithoutJobs.length > 0
+          ? `Checkpoint contracts missing freshness job mappings: ${checkpointContractsWithoutJobs.join(', ')}`
           : '',
       ]
         .filter(Boolean)

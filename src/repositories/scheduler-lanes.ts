@@ -8,7 +8,7 @@ import {
   schedulerObligationsInOps,
 } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
-import { contractForSchedulerJob } from '../domain/data-contracts';
+import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
 import {
   reserveSchedulerObligation,
   type SchedulerObligation,
@@ -415,7 +415,7 @@ export async function advanceSchedulerLane(input: {
     // denominator as well; otherwise the selected target is the only one that
     // can publish while every superseded window eventually breaches.
     const contract = contractForSchedulerJob(input.jobName);
-    if (contract?.freshnessEvidence === 'publication') {
+    if (contract && contractHasFreshnessWindow(contract, input.jobName)) {
       await tx
         .update(freshnessSloWindowsInOps)
         .set({

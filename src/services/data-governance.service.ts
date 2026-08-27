@@ -101,6 +101,7 @@ export async function upsertFreshnessWindow(input: {
   eligibleAt: Date;
   dueAt: Date;
   obligationDueAt?: Date;
+  evidence?: Record<string, unknown>;
   db?: DbHandle;
 }): Promise<number> {
   const db = input.db ?? (await getDb());
@@ -117,6 +118,7 @@ export async function upsertFreshnessWindow(input: {
       eligibleAt: input.eligibleAt,
       dueAt: input.dueAt,
       obligationDueAt: input.obligationDueAt,
+      evidence: asJsonObject(input.evidence),
     })
     .onConflictDoUpdate({
       target: [
@@ -128,6 +130,7 @@ export async function upsertFreshnessWindow(input: {
         eligibleAt: sql`LEAST(${freshnessSloWindowsInOps.eligibleAt}, excluded.eligible_at)`,
         dueAt: sql`LEAST(${freshnessSloWindowsInOps.dueAt}, excluded.due_at)`,
         obligationDueAt: sql`COALESCE(${freshnessSloWindowsInOps.obligationDueAt}, excluded.obligation_due_at)`,
+        evidence: sql`${freshnessSloWindowsInOps.evidence} || excluded.evidence`,
         updatedAt: sql`clock_timestamp()`,
       },
     })
@@ -529,10 +532,13 @@ export async function recordFreshnessObservation(input: {
       input.completenessStatus ??
       (input.invalid ? 'INVALID' : (current.completenessStatus as FreshnessCompletenessStatus));
     const invalid = input.invalid ?? current.status === 'INVALID';
+    const windowEvidence = asJsonObject(current.evidence);
+    const redisEvidenceRequired = windowEvidence.redisEvidenceRequired !== false;
     const observation = {
       eligible: current.status !== 'NOT_APPLICABLE',
       invalid,
       consumerEvidenceRequired: getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED,
+      redisEvidenceRequired,
       dueAt: current.dueAt,
       sourceCheckedAt: input.sourceCheckedAt ?? current.sourceCheckedAt,
       pgPublishedAt: input.pgPublishedAt ?? current.pgPublishedAt,

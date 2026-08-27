@@ -16,6 +16,12 @@ export type FreshnessWindowObservation = Readonly<{
    * mandatory for MET and recovery evidence.
    */
   consumerEvidenceRequired?: boolean;
+  /**
+   * Some checkpoint datasets are published directly from PostgreSQL and do
+   * not have a Redis pointer. Publication-backed windows keep the historical
+   * default (`true`); checkpoint windows explicitly set this to `false`.
+   */
+  redisEvidenceRequired?: boolean;
   dueAt: Date;
   now?: Date;
   sourceCheckedAt?: Date | null;
@@ -43,7 +49,10 @@ const MILESTONE_FIELDS = [
 const PRODUCER_MILESTONE_FIELDS = ['sourceCheckedAt', 'pgPublishedAt', 'redisSeenAt'] as const;
 
 function requiredMilestoneFields(input: FreshnessWindowObservation) {
-  return input.consumerEvidenceRequired === false ? PRODUCER_MILESTONE_FIELDS : MILESTONE_FIELDS;
+  if (input.consumerEvidenceRequired !== false) return MILESTONE_FIELDS;
+  return input.redisEvidenceRequired === false
+    ? (['sourceCheckedAt', 'pgPublishedAt'] as const)
+    : PRODUCER_MILESTONE_FIELDS;
 }
 
 function isFiniteDate(value: Date | null | undefined): value is Date {
@@ -97,7 +106,9 @@ export function evaluateFreshnessWindow(input: FreshnessWindowObservation): Fres
     Boolean(input.webSeenAt && input.webSeenAt.getTime() <= input.dueAt.getTime());
   const revisions = consumerRequired
     ? [input.producerRevision, input.redisRevision, input.graphqlRevision, input.webRevision]
-    : [input.producerRevision, input.redisRevision];
+    : input.redisEvidenceRequired === false
+      ? [input.producerRevision]
+      : [input.producerRevision, input.redisRevision];
   if (complete && visible && milestonesMeetDeadline(input) && revisionsAgree(revisions)) {
     return 'MET';
   }
@@ -124,7 +135,9 @@ export function applyFreshnessObservation(
       milestonesAreComplete(observation) &&
       revisionsAgree(
         observation.consumerEvidenceRequired === false
-          ? [observation.producerRevision, observation.redisRevision]
+          ? observation.redisEvidenceRequired === false
+            ? [observation.producerRevision]
+            : [observation.producerRevision, observation.redisRevision]
           : [
               observation.producerRevision,
               observation.redisRevision,

@@ -49,7 +49,7 @@ import { getConfig } from '../utils/config';
 import { mapWithConcurrency, TimeoutError, withTimeout } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 import { safeDataErrorCode } from '../domain/error-classification';
-import { contractForSchedulerJob } from '../domain/data-contracts';
+import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
 import {
   advanceSchedulerProgress,
   completeSchedulerProgress,
@@ -131,7 +131,7 @@ async function recordFreshnessWindowForPlan(
   if (
     !contract ||
     contract.visibility === 'excluded' ||
-    contract.freshnessEvidence !== 'publication'
+    !contractHasFreshnessWindow(contract, definition.name)
   )
     return null;
   const eligibleAtMs = evidenceNumber(plan.evidence, 'eligibleAtMs') ?? plan.dueAt.getTime();
@@ -161,6 +161,11 @@ async function recordFreshnessWindowForPlan(
     eligibleAt,
     dueAt,
     obligationDueAt: plan.dueAt,
+    evidence: {
+      freshnessEvidence: contract.freshnessEvidence,
+      redisEvidenceRequired:
+        contract.freshnessEvidence === 'publication' || Boolean(contract.consumerEvidence.redis),
+    },
   }).catch((error) => {
     logError('Freshness window reservation evidence failed', error, {
       contractKey: contract.contractKey,
@@ -1191,11 +1196,20 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     for (const [index, { plan, planKey }] of postMatchReservations.entries()) {
       if (postMatchReservationWasPersisted(plan, result.reservations[index])) {
         rememberObservedPlan(planKey);
-        await recordFreshnessWindowForPlan(
+        const freshnessWindowId = await recordFreshnessWindowForPlan(
           postMatchReservations[index].definition,
           plan,
           context.season.seasonId,
         );
+        if (freshnessWindowId !== null) {
+          const obligation = result.reservations[index];
+          if (obligation) {
+            await attachFreshnessWindowToSchedulerObligation({
+              obligationId: obligation.obligationId,
+              freshnessWindowId,
+            });
+          }
+        }
       }
     }
     reserved += result.reservations.length;

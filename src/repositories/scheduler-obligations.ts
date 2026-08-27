@@ -5,9 +5,16 @@ import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'dri
 import { freshnessSloWindowsInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
-import { contractForSchedulerJob, queueLaneForSchedulerJob } from '../domain/data-contracts';
+import {
+  contractForSchedulerJob,
+  contractHasFreshnessWindow,
+  queueLaneForSchedulerJob,
+} from '../domain/data-contracts';
 import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
-import { openGovernanceCase } from '../services/data-governance.service';
+import {
+  openGovernanceCase,
+  recordFreshnessObservation,
+} from '../services/data-governance.service';
 import { logError } from '../utils/logger';
 
 export type SchedulerObligationStatus =
@@ -186,7 +193,114 @@ function terminalSchedulerEvidence(evidence?: Record<string, unknown>) {
         ${schedulerObligationsInOps.evidence}->'resultScheduleAnchorMs'
       )
     ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'freshnessWindowId'
+      THEN jsonb_build_object(
+        'freshnessWindowId',
+        ${schedulerObligationsInOps.evidence}->'freshnessWindowId'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'freshnessWindowIds'
+      THEN jsonb_build_object(
+        'freshnessWindowIds',
+        ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
+      )
+    ELSE '{}'::jsonb
   END`;
+}
+
+function freshnessWindowIdsFromEvidence(evidence: unknown): number[] {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
+  const record = evidence as Record<string, unknown>;
+  const values = [
+    ...(Array.isArray(record.freshnessWindowIds) ? record.freshnessWindowIds : []),
+    record.freshnessWindowId,
+  ];
+  return [
+    ...new Set(
+      values.filter(
+        (value): value is number =>
+          typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
+      ),
+    ),
+  ];
+}
+
+function finiteEvidenceCount(evidence: Record<string, unknown>, keys: readonly string[]) {
+  for (const key of keys) {
+    const value = evidence[key];
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
+  }
+  return undefined;
+}
+
+function checkpointCompleteness(evidence: Record<string, unknown>) {
+  if (evidence.complete === false || evidence.scanComplete === false) return 'INCOMPLETE' as const;
+  if (evidence.hasMore === true) return 'INCOMPLETE' as const;
+  const failedUnits = finiteEvidenceCount(evidence, ['failedUnits', 'failedCount']);
+  if (failedUnits !== undefined && failedUnits > 0) return 'INCOMPLETE' as const;
+  return 'COMPLETE' as const;
+}
+
+/**
+ * Checkpoint jobs do not necessarily publish a Redis pointer, but their
+ * semantic finalizer is still the PostgreSQL evidence boundary for a
+ * freshness window.  Keep this side-channel best-effort: a telemetry outage
+ * must never turn an already committed scheduler completion into a failure.
+ */
+async function recordCheckpointFreshnessEvidence(input: {
+  jobName: string;
+  evidence: unknown;
+  completedAt: Date | null;
+  runId?: string | null;
+}): Promise<void> {
+  const contract = contractForSchedulerJob(input.jobName);
+  if (contract?.freshnessEvidence !== 'checkpoint') return;
+  const evidence =
+    input.evidence && typeof input.evidence === 'object' && !Array.isArray(input.evidence)
+      ? (input.evidence as Record<string, unknown>)
+      : {};
+  const windowIds = freshnessWindowIdsFromEvidence(evidence);
+  if (windowIds.length === 0) return;
+  const completedAt = input.completedAt ?? new Date();
+  const producerRevision = [
+    evidence.revision,
+    evidence.snapshotRevision,
+    evidence.checkpointRevision,
+    evidence.publicationRevision,
+    input.runId,
+  ].find(
+    (value): value is string | number => typeof value === 'string' || typeof value === 'number',
+  );
+  const expectedCount = finiteEvidenceCount(evidence, [
+    'expectedCount',
+    'requiredUnits',
+    'expectedUnits',
+  ]);
+  const observedCount = finiteEvidenceCount(evidence, [
+    'observedCount',
+    'succeededUnits',
+    'observedUnits',
+  ]);
+  for (const windowId of windowIds) {
+    try {
+      await recordFreshnessObservation({
+        windowId,
+        sourceCheckedAt: completedAt,
+        pgPublishedAt: completedAt,
+        ...(producerRevision === undefined ? {} : { producerRevision: String(producerRevision) }),
+        ...(expectedCount === undefined ? {} : { expectedCount }),
+        ...(observedCount === undefined ? {} : { observedCount }),
+        completenessStatus: checkpointCompleteness(evidence),
+      });
+    } catch (error) {
+      logError('Checkpoint freshness evidence update failed', error, {
+        jobName: input.jobName,
+        windowId,
+      });
+    }
+  }
 }
 
 function immutableScheduledDueAt(dueAt: Date, scheduledDueAtMs: string | null): Date {
@@ -458,7 +572,7 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
     )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });
   const contract = contractForSchedulerJob(input.jobName);
-  if (contract?.freshnessEvidence === 'publication') {
+  if (contract && contractHasFreshnessWindow(contract, input.jobName)) {
     await db
       .update(freshnessSloWindowsInOps)
       .set({
@@ -558,7 +672,11 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
     sql`obligation.evidence`,
     sql`obligation.due_at`,
   );
-  const [result] = await db.execute<{ updatedCount: number | string }>(sql`
+  const updated = await db.execute<{
+    jobName: string;
+    scopeKey: string;
+    periodKey: string;
+  }>(sql`
     WITH boundaries AS (
       SELECT job_name, scope_key, period_key, result_slot,
              result_authority_at_ms, result_schedule_anchor_ms, before_due_at
@@ -602,10 +720,66 @@ export async function supersedeSchedulerObligationsByDueAtBatch(input: {
         AND obligation.status IN ('pending', 'failed')
       RETURNING obligation.obligation_id
     )
-    SELECT count(*)::integer AS "updatedCount"
-    FROM updated
+    SELECT obligation.job_name AS "jobName",
+           obligation.scope_key AS "scopeKey",
+           obligation.period_key AS "periodKey"
+    FROM ops.scheduler_obligations AS obligation
+    INNER JOIN updated
+      ON updated.obligation_id = obligation.obligation_id
   `);
-  return Number(result?.updatedCount ?? 0);
+  if (updated.length === 0) return 0;
+
+  // The obligation update above is the authority for supersession.  Mirror
+  // only those rows into the SLO ledger; marking every earlier period for a
+  // stale boundary would incorrectly turn a still-valid checkpoint into
+  // NOT_APPLICABLE.  Keep the update in the caller's transaction so a
+  // post-match reservation, supersession and window retirement commit
+  // together.
+  const boundaryByIdentity = new Map(
+    input.boundaries.map((boundary) => [`${boundary.jobName}\u0000${boundary.scopeKey}`, boundary]),
+  );
+  const windowGroups = new Map<
+    string,
+    { contractKey: string; jobName: string; scopeKey: string; periods: string[] }
+  >();
+  for (const row of updated) {
+    const contract = contractForSchedulerJob(row.jobName);
+    if (!contract || !contractHasFreshnessWindow(contract, row.jobName)) continue;
+    const key = `${row.jobName}\u0000${row.scopeKey}`;
+    const group = windowGroups.get(key) ?? {
+      contractKey: contract.contractKey,
+      jobName: row.jobName,
+      scopeKey: row.scopeKey,
+      periods: [],
+    };
+    if (!group.periods.includes(row.periodKey)) group.periods.push(row.periodKey);
+    windowGroups.set(key, group);
+  }
+  for (const group of windowGroups.values()) {
+    const boundary = boundaryByIdentity.get(`${group.jobName}\u0000${group.scopeKey}`);
+    await db
+      .update(freshnessSloWindowsInOps)
+      .set({
+        status: 'NOT_APPLICABLE',
+        completenessStatus: 'NOT_APPLICABLE',
+        breachCode: null,
+        evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify({
+          reason: 'SUPERSEDED_BY_LATEST',
+          ...(boundary ? { supersededByPeriodKey: boundary.periodKey } : {}),
+          ...(input.evidence ?? {}),
+        })}::jsonb`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(freshnessSloWindowsInOps.contractKey, group.contractKey),
+          eq(freshnessSloWindowsInOps.scopeKey, group.scopeKey),
+          inArray(freshnessSloWindowsInOps.periodKey, group.periods),
+          inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
+        ),
+      );
+  }
+  return updated.length;
 }
 
 export type SchedulerObligationReservation = Readonly<{
@@ -1181,8 +1355,17 @@ export async function completeSchedulerObligation(input: {
         inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
       ),
     )
-    .returning({ obligationId: schedulerObligationsInOps.obligationId });
-  return updated.length === 1;
+    .returning({
+      obligationId: schedulerObligationsInOps.obligationId,
+      jobName: schedulerObligationsInOps.jobName,
+      evidence: schedulerObligationsInOps.evidence,
+      completedAt: schedulerObligationsInOps.completedAt,
+      runId: schedulerObligationsInOps.runId,
+    });
+  const row = updated[0];
+  if (!row) return false;
+  await recordCheckpointFreshnessEvidence(row);
+  return true;
 }
 
 /**
@@ -1255,8 +1438,17 @@ export async function completeSchedulerObligationByBullJobId(input: {
         inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
       ),
     )
-    .returning({ obligationId: schedulerObligationsInOps.obligationId });
-  return updated.length === 1;
+    .returning({
+      obligationId: schedulerObligationsInOps.obligationId,
+      jobName: schedulerObligationsInOps.jobName,
+      evidence: schedulerObligationsInOps.evidence,
+      completedAt: schedulerObligationsInOps.completedAt,
+      runId: schedulerObligationsInOps.runId,
+    });
+  const row = updated[0];
+  if (!row) return false;
+  await recordCheckpointFreshnessEvidence(row);
+  return true;
 }
 
 export async function failSchedulerObligationByBullJobId(input: {

@@ -642,11 +642,12 @@ function myFplSnapshotOutboxDefinition(): ScheduledJobDefinition {
     periodMs: 5 * 60_000,
     criticality: 'critical',
     successPredicate: 'committed My FPL Redis manifests are delivered or retried',
-    enqueue: async ({ context, obligationId, generation }) => {
+    enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
       const job = await enqueueMyFplSnapshotOutbox(context.season, 'catchup', {
         jobId: `scheduler-${obligationId}-g${generation}`,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -822,11 +823,12 @@ function postMatchMaintenanceDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, obligationId, generation }) => {
+    enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
       const job = await enqueuePostMatchConsolidation(context.season, 'catchup', {
         jobId: `scheduler-${obligationId}-g${generation}`,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -1150,7 +1152,7 @@ function activePlayerStatsDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, plan, obligationId, generation }) => {
+    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;
       if (!eventId) throw new Error('Active player stats obligation has no event checkpoint');
       const job = await enqueuePlayerStatsSyncJob(context.season, 'reconcile', {
@@ -1159,6 +1161,7 @@ function activePlayerStatsDefinition(): ScheduledJobDefinition {
         removeOnSettle: false,
         obligationId,
         obligationGeneration: generation,
+        freshnessWindowId,
       });
       return { bullJobId: job.id, runId: job.data.runId };
     },
@@ -1586,7 +1589,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       recoveryCompletionMode: 'tournament-cascade-finalizer',
       executionLanes: ['queue:tournament-sync', 'post-match-results'],
       claimPriority: 30,
-      enqueue: async ({ context, plan, obligationId, generation }) => {
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Tournament results obligation has no event checkpoint');
         const job = await enqueueTournamentEventResults(context.season, eventId, 'reconcile', {
@@ -1594,6 +1597,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },
@@ -1606,13 +1610,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       queueName: 'tournament-sync',
       successPredicate: 'tournament picks checkpoint advances',
       allDueEvents: true,
-      enqueue: async ({ context, plan, obligationId, generation }) => {
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Tournament picks obligation has no event checkpoint');
         const job = await enqueueTournamentEventPicks(context.season, eventId, 'reconcile', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return {
           bullJobId: job.id ?? `scheduler-${obligationId}-g${generation}`,
@@ -1628,13 +1633,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       queueName: 'tournament-sync',
       successPredicate: 'tournament transfer checkpoint advances',
       allDueEvents: true,
-      enqueue: async ({ context, plan, obligationId, generation }) => {
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Tournament transfers obligation has no event checkpoint');
         const job = await enqueueTournamentTransfersPre(context.season, eventId, 'reconcile', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return {
           bullJobId: job.id ?? `scheduler-${obligationId}-g${generation}`,
