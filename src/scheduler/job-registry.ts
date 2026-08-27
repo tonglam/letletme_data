@@ -1,7 +1,6 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Fixture } from '../types';
 import { formatCronDateKey } from '../utils/timezone';
-import { fplClient } from '../clients/fpl';
 import {
   enqueueCoreSnapshotJob,
   enqueuePriceChangePredictionsJob,
@@ -68,10 +67,7 @@ import { getConfig } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
 import { fplPriceWatchQueueName } from '../queues/fpl-price-watch.queue';
-import {
-  getPriceChangePredictions,
-  priceChangeDeadlines,
-} from '../services/price-change-predictions.service';
+import { getPriceChangePredictions } from '../services/price-change-predictions.service';
 import { logWarn } from '../utils/logger';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
@@ -828,32 +824,28 @@ function priceChangeWatchDefinition(): ScheduledJobDefinition {
     successPredicate: 'observe an official price-change fingerprint or record no change',
     resolve: async (context) => {
       if (!priceHotWatchEnabled()) return [];
-      // Deadline discovery must remain available during a cold rollout or
-      // after the durable publication has expired. The durable board is an
-      // optimization, not the authority for whether an official watch exists.
+      // The durable board carries the latest authoritative deadline list. A
+      // missing/stale board is handled by the normal price publication lane;
+      // the scheduler must not make a provider request to discover an
+      // optional hot-watch target.
       const board = await getPriceChangePredictions().catch(() => null);
       const nowMs = context.now.getTime();
-      let deadlineCandidates =
+      const deadlineCandidates =
         board && ['READY', 'STALE'].includes(board.status) ? board.nextDeadlines : [];
       const hasCandidateInWindow = deadlineCandidates.some((value) => {
         const timestamp = Date.parse(value);
         return Number.isFinite(timestamp) && timestamp >= nowMs - watchWindowMs;
       });
       if (deadlineCandidates.length === 0 || !hasCandidateInWindow) {
-        try {
-          const bootstrap = await fplClient.getBootstrap({
-            edgeCacheKey: `price-watch-schedule-${Math.floor(nowMs / 30_000)}`,
-            priority: 'live',
-            deadlineMs: 5_000,
-          });
-          deadlineCandidates = [...priceChangeDeadlines(bootstrap)];
-        } catch (error) {
-          logWarn('Price-watch deadline discovery unavailable without a durable board', {
-            season: context.season.seasonCode,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          return [];
-        }
+        // The scheduler is a control-plane process. Do not make a provider
+        // request here just to discover an optional hot-watch deadline: a
+        // stale/missing board is evidence for the worker to observe on its
+        // next durable cycle, not a reason to block every scheduler pass.
+        logWarn('Price-watch deadline discovery unavailable from durable board', {
+          season: context.season.seasonCode,
+          boardStatus: board?.status ?? 'UNAVAILABLE',
+        });
+        return [];
       }
       const deadline = deadlineCandidates
         .map((value) => Date.parse(value))

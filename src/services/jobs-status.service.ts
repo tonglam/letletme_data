@@ -37,6 +37,7 @@ import { dataContractRegistry } from '../domain/data-contracts';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { getConfig } from '../utils/config';
 import { calculateBurnRate } from '../domain/freshness-slo';
+import { safeDataErrorCode } from '../domain/error-classification';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
 import { readPriceChangeHotSnapshotMetadata } from './price-change-hot.service';
@@ -52,6 +53,18 @@ type PriceChangeContextSelection = Readonly<{
   publicationId: string | null;
   source: 'redis' | 'database' | 'none';
 }>;
+
+/**
+ * `/jobs/status` is an operational aggregate, not an error-log endpoint.
+ * Scheduler lane errors are persisted for the protected governance workflow,
+ * but they can contain provider URLs, identifiers, or driver diagnostics.
+ * Expose only a stable classification here; operators can use the separately
+ * authenticated governance case endpoint for the redacted case metadata.
+ */
+export function safeSchedulerLaneErrorCode(lastError: string | null): string | null {
+  if (!lastError) return null;
+  return safeDataErrorCode(new Error(lastError));
+}
 
 function asContext(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -465,7 +478,7 @@ export async function getJobsStatus(
         supersededCount: lane.supersededCount,
         blockerJobId: lane.blockerJobId,
         retryNotBefore: lane.retryNotBefore?.toISOString() ?? null,
-        lastError: lane.lastError,
+        lastErrorCode: safeSchedulerLaneErrorCode(lane.lastError),
       };
     }),
   );

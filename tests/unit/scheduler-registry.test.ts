@@ -289,6 +289,12 @@ describe('standalone scheduler registry', () => {
     release?.([]);
   });
 
+  test('keeps optional price-watch planning provider-free', () => {
+    const schedulerSource = readFileSync('src/scheduler/job-registry.ts', 'utf8');
+    expect(schedulerSource).not.toMatch(/from ['"]\.\.\/clients\/fpl['"]/);
+    expect(schedulerSource).not.toContain('fplClient.getBootstrap');
+  });
+
   test('limits active player-stat refreshes to lifecycle states that can still change', () => {
     const ordinaryMinute = new Date('2026-08-22T10:17:00.000Z');
     const fiveMinuteBoundary = new Date('2026-08-22T10:20:00.000Z');
