@@ -365,6 +365,7 @@ describe('GW queue and data governance primitives', () => {
 
   test('routes My FPL outbox freshness repairs to the publication lane', () => {
     expect(freshnessRepairLaneForWindow('my-fpl', 'outbox-123')).toBe('publication-outbox');
+    expect(freshnessRepairLaneForWindow('my-fpl', 'maintenance-123')).toBe('publication-outbox');
   });
 
   test('settles PostgreSQL checkpoint windows without requiring a Redis pointer', () => {

@@ -155,7 +155,11 @@ async function enqueueFreshnessCaseRepair(input: {
       // Prefer the durable lane recorded on the governance case. The period
       // prefix was added after older windows were created, so the lane is the
       // only reliable discriminator for historical outbox cases.
-      if (item.lane === publicationOutboxQueueName || window.periodKey.includes('outbox')) {
+      if (
+        item.lane === publicationOutboxQueueName ||
+        window.periodKey.includes('outbox') ||
+        window.periodKey.startsWith('maintenance-')
+      ) {
         await enqueueMyFplSnapshotOutbox(season, 'reconcile', {
           jobId,
           freshnessWindowId: window.windowId,

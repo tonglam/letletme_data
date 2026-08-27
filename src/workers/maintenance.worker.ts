@@ -55,11 +55,41 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { createQueueRunAttemptId } from '../utils/queue-run-id';
 import type { WorkerRuntime } from './worker-runtime';
+import { recordFreshnessObservation } from '../services/data-governance.service';
 import {
   inspectSchedulerObligationFence,
   startCurrentSchedulerJob,
 } from '../utils/scheduler-obligation-fence';
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
+
+/**
+ * A My FPL outbox job can deliver more than one event revision in one batch.
+ * The linked governance window is a Redis milestone, so retain the newest
+ * activated revision as evidence without pretending that one revision covers
+ * every event in the batch. Consumer probes still have to prove final parity.
+ */
+async function recordMyFplOutboxRedisEvidence(input: {
+  freshnessWindowId?: number;
+  deliveredRevisions?: readonly number[];
+}): Promise<void> {
+  const windowId = input.freshnessWindowId;
+  const revisions = (input.deliveredRevisions ?? []).filter(
+    (revision): revision is number => Number.isSafeInteger(revision) && revision > 0,
+  );
+  if (!Number.isSafeInteger(windowId) || (windowId ?? 0) <= 0 || revisions.length === 0) return;
+  const redisRevision = Math.max(...revisions);
+  try {
+    await recordFreshnessObservation({
+      windowId: windowId!,
+      redisSeenAt: new Date(),
+      redisRevision: String(redisRevision),
+    });
+  } catch (error) {
+    // Delivery is already durable; a governance evidence outage must not turn
+    // a successful Redis activation into a duplicate outbox retry.
+    logError('My FPL outbox governance evidence update failed', error, { windowId });
+  }
+}
 
 function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void {
   const fence = inspectSchedulerObligationFence(job.data);
@@ -270,10 +300,18 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               : {}),
           });
           const redis = await dispatchMyFplSnapshotPublicationOutbox({ limit: 20 });
+          await recordMyFplOutboxRedisEvidence({
+            freshnessWindowId: job.data.freshnessWindowId,
+            deliveredRevisions: redis.deliveredRevisions,
+          });
           return { ...capture, redis };
         }
         case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX: {
           const result = await dispatchMyFplSnapshotPublicationOutbox({ limit: 50 });
+          await recordMyFplOutboxRedisEvidence({
+            freshnessWindowId: job.data.freshnessWindowId,
+            deliveredRevisions: result.deliveredRevisions,
+          });
           if (result.failed > 0) {
             throw new Error(
               `My FPL snapshot outbox left ${result.failed} delivery receipt(s) for retry`,

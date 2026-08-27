@@ -69,7 +69,10 @@ export function freshnessRepairLaneForWindow(contractKey: string, periodKey: str
     case 'league-tournament':
       return leagueSyncQueueName;
     case 'my-fpl':
-      return periodKey.includes('outbox')
+      // Pre-lane-v2 outbox windows used the generic maintenance prefix. That
+      // prefix is unambiguous for this contract because snapshot/final and
+      // post-match checkpoints use event/daily/post-match identities.
+      return periodKey.includes('outbox') || periodKey.startsWith('maintenance-')
         ? publicationOutboxQueueName
         : myFplOrchestrationQueueName;
     case 'official-h2h':

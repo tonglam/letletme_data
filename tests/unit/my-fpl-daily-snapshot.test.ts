@@ -235,6 +235,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scheduler).toContain('event.finished && event.dataChecked');
     expect(worker).toContain('dispatchMyFplSnapshotPublicationOutbox');
     expect(worker).toContain('My FPL snapshot outbox left ${result.failed}');
+    expect(worker).toContain('recordMyFplOutboxRedisEvidence');
+    expect(worker).toContain('deliveredRevisions: result.deliveredRevisions');
   });
 
   test('allows the full current-season refresh barrier to settle', () => {
