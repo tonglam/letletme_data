@@ -420,6 +420,7 @@ export async function observeFreshnessConsumerEvidence(
   const limit = Math.min(100, Math.max(1, input.limit ?? 100));
   const pending = await listFreshnessWindows({
     status: 'PENDING',
+    consumerEvidenceRequired: true,
     limit,
     db: input.db,
   });
@@ -429,6 +430,7 @@ export async function observeFreshnessConsumerEvidence(
       : await listFreshnessWindows({
           status: 'BREACHED',
           recovered: 'unrecovered',
+          consumerEvidenceRequired: true,
           limit: limit - pending.length,
           db: input.db,
         });
@@ -881,6 +883,8 @@ export async function listFreshnessWindows(
   input: {
     status?: FreshnessSloStatus | FreshnessSloStatus[];
     recovered?: 'any' | 'unrecovered' | 'recovered';
+    /** When true, exclude windows explicitly frozen to producer-only evidence. */
+    consumerEvidenceRequired?: boolean;
     dueAfter?: Date;
     dueBefore?: Date;
     limit?: number;
@@ -901,6 +905,9 @@ export async function listFreshnessWindows(
       : input.recovered === 'recovered'
         ? sql`${freshnessSloWindowsInOps.recoveredAt} IS NOT NULL`
         : undefined,
+    input.consumerEvidenceRequired === true
+      ? sql`${freshnessSloWindowsInOps.evidence}->>'consumerEvidenceRequired' IS DISTINCT FROM 'false'`
+      : undefined,
     input.dueAfter ? gte(freshnessSloWindowsInOps.dueAt, input.dueAfter) : undefined,
     input.dueBefore ? lte(freshnessSloWindowsInOps.dueAt, input.dueBefore) : undefined,
   ].filter(Boolean);
