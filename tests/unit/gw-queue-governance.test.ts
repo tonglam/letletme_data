@@ -34,6 +34,7 @@ import { MAINTENANCE_JOBS } from '../../src/queues/maintenance.queue';
 import { MAINTENANCE_JOB_LANES } from '../../src/jobs/maintenance.jobs';
 import {
   consumerProbeUrl,
+  freshnessRepairLaneForWindow,
   selectFreshnessRecoveryRevision,
 } from '../../src/services/data-governance.service';
 import { shouldCreateFreshnessWindowForObligation } from '../../src/scheduler/scheduler.service';
@@ -263,6 +264,49 @@ describe('GW queue and data governance primitives', () => {
     expect(calculateBurnRate(1, 100, 0.99)).toBeCloseTo(1, 10);
   });
 
+  test('keeps Redis optional for consumer probes on PostgreSQL checkpoints', () => {
+    const dueAt = new Date('2026-08-26T00:00:00.000Z');
+    const timestamp = new Date('2026-08-25T23:58:00.000Z');
+    expect(
+      evaluateFreshnessWindow({
+        eligible: true,
+        consumerEvidenceRequired: true,
+        redisEvidenceRequired: false,
+        dueAt,
+        now: new Date('2026-08-25T23:59:00.000Z'),
+        producerRevision: 'checkpoint-1',
+        graphqlRevision: 'checkpoint-1',
+        webRevision: 'checkpoint-1',
+        sourceCheckedAt: timestamp,
+        pgPublishedAt: timestamp,
+        graphqlSeenAt: timestamp,
+        webSeenAt: timestamp,
+        expectedCount: 15,
+        observedCount: 15,
+        completeness: 'COMPLETE',
+      }),
+    ).toBe('MET');
+    expect(
+      evaluateFreshnessWindow({
+        eligible: true,
+        consumerEvidenceRequired: true,
+        redisEvidenceRequired: false,
+        dueAt,
+        now: new Date('2026-08-25T23:59:00.000Z'),
+        producerRevision: 'checkpoint-1',
+        graphqlRevision: 'checkpoint-1',
+        webRevision: 'checkpoint-1',
+        sourceCheckedAt: timestamp,
+        pgPublishedAt: timestamp,
+        graphqlSeenAt: timestamp,
+        webSeenAt: timestamp,
+        expectedCount: 15,
+        observedCount: 14,
+        completeness: 'INCOMPLETE',
+      }),
+    ).toBe('PENDING');
+  });
+
   test('selects only manifest pages containing the current H2H event', () => {
     expect(
       resolveOfficialH2HPagesToFetch(
@@ -317,6 +361,10 @@ describe('GW queue and data governance primitives', () => {
         .filter((contract) => contract.freshnessEvidence === 'checkpoint')
         .every((contract) => (contract.freshnessJobs?.length ?? 0) > 0),
     ).toBe(true);
+  });
+
+  test('routes My FPL outbox freshness repairs to the publication lane', () => {
+    expect(freshnessRepairLaneForWindow('my-fpl', 'outbox-123')).toBe('publication-outbox');
   });
 
   test('settles PostgreSQL checkpoint windows without requiring a Redis pointer', () => {

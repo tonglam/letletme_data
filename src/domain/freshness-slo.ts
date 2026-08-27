@@ -49,7 +49,11 @@ const MILESTONE_FIELDS = [
 const PRODUCER_MILESTONE_FIELDS = ['sourceCheckedAt', 'pgPublishedAt', 'redisSeenAt'] as const;
 
 function requiredMilestoneFields(input: FreshnessWindowObservation) {
-  if (input.consumerEvidenceRequired !== false) return MILESTONE_FIELDS;
+  if (input.consumerEvidenceRequired !== false) {
+    return input.redisEvidenceRequired === false
+      ? (['sourceCheckedAt', 'pgPublishedAt', 'graphqlSeenAt', 'webSeenAt'] as const)
+      : MILESTONE_FIELDS;
+  }
   return input.redisEvidenceRequired === false
     ? (['sourceCheckedAt', 'pgPublishedAt'] as const)
     : PRODUCER_MILESTONE_FIELDS;
@@ -105,7 +109,9 @@ export function evaluateFreshnessWindow(input: FreshnessWindowObservation): Fres
     !consumerRequired ||
     Boolean(input.webSeenAt && input.webSeenAt.getTime() <= input.dueAt.getTime());
   const revisions = consumerRequired
-    ? [input.producerRevision, input.redisRevision, input.graphqlRevision, input.webRevision]
+    ? input.redisEvidenceRequired === false
+      ? [input.producerRevision, input.graphqlRevision, input.webRevision]
+      : [input.producerRevision, input.redisRevision, input.graphqlRevision, input.webRevision]
     : input.redisEvidenceRequired === false
       ? [input.producerRevision]
       : [input.producerRevision, input.redisRevision];
@@ -138,12 +144,14 @@ export function applyFreshnessObservation(
           ? observation.redisEvidenceRequired === false
             ? [observation.producerRevision]
             : [observation.producerRevision, observation.redisRevision]
-          : [
-              observation.producerRevision,
-              observation.redisRevision,
-              observation.graphqlRevision,
-              observation.webRevision,
-            ],
+          : observation.redisEvidenceRequired === false
+            ? [observation.producerRevision, observation.graphqlRevision, observation.webRevision]
+            : [
+                observation.producerRevision,
+                observation.redisRevision,
+                observation.graphqlRevision,
+                observation.webRevision,
+              ],
       ) &&
       (observation.expectedCount == null ||
         isCompleteCount(observation.expectedCount, observation.observedCount));

@@ -91,6 +91,18 @@ describe('standalone scheduler registry', () => {
     expect(schedulerQueueLaneOverride('my-fpl-snapshot')).toBeUndefined();
   });
 
+  test('keeps My FPL outbox period identities distinct for governance repair routing', async () => {
+    const outbox = registry.find((definition) => definition.name === 'my-fpl-snapshot-outbox');
+    expect(outbox).toBeDefined();
+    const plans = await outbox!.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T00:07:00.000Z'),
+      events: [],
+    });
+    expect(plans).toHaveLength(1);
+    expect(plans[0]?.periodKey).toMatch(/^outbox-\d+$/);
+  });
+
   test('schedules price changes as a critical five-minute latest-authoritative job', async () => {
     const priceChanges = registry.find(
       (definition) => definition.name === 'price-change-predictions',

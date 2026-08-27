@@ -54,6 +54,7 @@ import { reconcileCoreAndMarketPublications } from '../services/data-publication
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import { seasonRepository } from '../repositories/seasons';
 import { QueueDrainOnlyError } from '../services/queue-governance.service';
+import { publicationOutboxQueueName } from '../queues/names';
 import type { WorkerRuntime } from './worker-runtime';
 
 type GovernanceFreshnessCase = Awaited<ReturnType<typeof listGovernanceCases>>[number];
@@ -151,7 +152,10 @@ async function enqueueFreshnessCaseRepair(input: {
       }
       return;
     case 'my-fpl':
-      if (window.periodKey.includes('outbox')) {
+      // Prefer the durable lane recorded on the governance case. The period
+      // prefix was added after older windows were created, so the lane is the
+      // only reliable discriminator for historical outbox cases.
+      if (item.lane === publicationOutboxQueueName || window.periodKey.includes('outbox')) {
         await enqueueMyFplSnapshotOutbox(season, 'reconcile', {
           jobId,
           freshnessWindowId: window.windowId,
