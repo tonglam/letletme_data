@@ -171,6 +171,25 @@ describe('standalone scheduler registry', () => {
       'market-daily',
     ]);
 
+    const retryDeadlineOrdered = orderSchedulerDefinitionsByEarliestDue(definitions.slice(0, 2), [
+      {
+        jobName: 'market-daily',
+        // A retry moved mutable due_at past the newer H2H bucket. The
+        // immutable schedule must still determine its dispatch deadline.
+        earliestDueAt: new Date('2026-08-23T00:20:00.000Z'),
+        earliestScheduledDueAt: new Date('2026-08-23T00:00:00.000Z'),
+      },
+      {
+        jobName: 'tournament-official-h2h-live',
+        earliestDueAt: new Date('2026-08-23T00:10:00.000Z'),
+        earliestScheduledDueAt: new Date('2026-08-23T00:10:00.000Z'),
+      },
+    ]);
+    expect(retryDeadlineOrdered.map((definition) => definition.name)).toEqual([
+      'market-daily',
+      'tournament-official-h2h-live',
+    ]);
+
     const ordered = orderSchedulerDefinitionsByEarliestDue(definitions.slice(2), [
       // Unknown test definitions have a zero dispatch budget. The equal
       // deadline is resolved by criticality, priority, then stable name.

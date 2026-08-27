@@ -10,6 +10,7 @@ import {
   completeSchedulerObligation,
   confirmSchedulerObligationEnqueued,
   failSchedulerObligation,
+  findDueSchedulerObligationCandidates,
   findDueSchedulerJobNames,
   listExpiredSchedulerObligations,
   markSchedulerObligationIrrecoverable,
@@ -29,6 +30,7 @@ const SECOND_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000004';
 const SECOND_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000005';
 const LATE_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000006';
 const LATEST_OBLIGATION_ID = '30000000-0000-4000-8000-000000000007';
+const IMMUTABLE_DEADLINE_OBLIGATION_ID = '30000000-0000-4000-8000-000000000008';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -41,7 +43,8 @@ async function cleanup(): Promise<void> {
       ${SECOND_OLDER_OBLIGATION_ID}::uuid,
       ${SECOND_CURRENT_OBLIGATION_ID}::uuid,
       ${LATE_OLDER_OBLIGATION_ID}::uuid,
-      ${LATEST_OBLIGATION_ID}::uuid
+      ${LATEST_OBLIGATION_ID}::uuid,
+      ${IMMUTABLE_DEADLINE_OBLIGATION_ID}::uuid
     )
        OR scope_key IN (
          'integration:event:atomic-reschedule',
@@ -49,7 +52,8 @@ async function cleanup(): Promise<void> {
          'integration:event:in-flight-correction',
          'integration:event:retry-delay',
          'integration:event:same-slot-correction',
-         'integration:event:lane-race'
+         'integration:event:lane-race',
+         'integration:event:immutable-deadline'
        )
   `;
 }
@@ -58,6 +62,37 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler obligation generation fencing', () => {
+  test('keeps immutable schedule time separate from mutable retry due time', async () => {
+    const sql = await getDbClient();
+    const scheduledDueAt = new Date('2026-08-23T00:01:00.000Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${IMMUTABLE_DEADLINE_OBLIGATION_ID}::uuid,
+        'integration-immutable-deadline',
+        'integration:event:immutable-deadline',
+        'retry-after-scheduled-boundary',
+        'integration',
+        'UTC',
+        'failed',
+        'reconcile',
+        clock_timestamp() - interval '1 minute',
+        1,
+        2,
+        jsonb_build_object('scheduledDueAtMs', ${scheduledDueAt.getTime()}::bigint)
+      )
+    `;
+
+    const candidate = (await findDueSchedulerObligationCandidates({})).find(
+      (row) => row.jobName === 'integration-immutable-deadline',
+    );
+    expect(candidate?.earliestScheduledDueAt).toEqual(scheduledDueAt);
+    expect(candidate?.earliestDueAt.getTime()).toBeGreaterThan(scheduledDueAt.getTime());
+  });
+
   test('claims one atomic capacity lane and leaves a conflicting job pending', async () => {
     const sql = await getDbClient();
     await sql`
