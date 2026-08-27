@@ -348,7 +348,7 @@ async function markHotPriceReconciliationFailed(
   if (!snapshot || snapshot.revision !== boardRevision) return;
   const updated = await markPriceChangeHotReconciliation(snapshot, {
     state: 'failed',
-    error: error instanceof Error ? error.message : String(error),
+    error,
   });
   if (!updated) throw new Error('Price-change hot reconciliation failure CAS failed');
 }

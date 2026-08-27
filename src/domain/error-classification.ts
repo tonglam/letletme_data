@@ -11,6 +11,44 @@ export type DataErrorClass =
   | 'SOURCE_ARCHIVE_MISSING'
   | 'CONSUMER_STALE';
 
+const DATA_ERROR_CLASSES = new Set<DataErrorClass>([
+  'SOURCE_NOT_READY',
+  'TRANSIENT_PROVIDER',
+  'TRANSIENT_INFRA',
+  'DATA_INCOMPLETE',
+  'CONTRACT_DRIFT',
+  'CONFIG_AUTH',
+  'STALE_GENERATION',
+  'SOURCE_ARCHIVE_MISSING',
+  'CONSUMER_STALE',
+]);
+
+const PERSISTED_ERROR_PREFIX = /^([A-Z][A-Z0-9_]{1,79}):([A-Z][A-Z0-9_.-]{0,79})(?:\s|$)/;
+
+export type PersistedDataError = Readonly<{
+  errorClass: DataErrorClass;
+  errorCode: string;
+  prefixLength: number;
+}>;
+
+/**
+ * Parse the bounded `CLASS:CODE` prefix written to durable scheduler and hot
+ * reconciliation evidence. The remainder is deliberately ignored: it is
+ * diagnostic text and must never be returned by an operational status API.
+ */
+export function parsePersistedDataError(
+  value: string | null | undefined,
+): PersistedDataError | null {
+  if (!value) return null;
+  const match = PERSISTED_ERROR_PREFIX.exec(value);
+  if (!match || !DATA_ERROR_CLASSES.has(match[1] as DataErrorClass)) return null;
+  return {
+    errorClass: match[1] as DataErrorClass,
+    errorCode: match[2].slice(0, 80),
+    prefixLength: match[0].length,
+  };
+}
+
 export type RetryPolicy = Readonly<{
   errorClass: DataErrorClass;
   retryable: boolean;
@@ -137,6 +175,18 @@ export function safeDataErrorCode(error: unknown, errorClass = classifyDataError
         : errorClass;
   const normalized = candidate.toUpperCase().replace(/[^A-Z0-9_.-]/g, '_');
   return normalized.slice(0, 80) || errorClass;
+}
+
+/**
+ * Return a stable, bounded token for an already-persisted error. Preserve the
+ * original classification/code prefix when it exists; older rows without the
+ * prefix fall back to the generic classifier without exposing their message.
+ */
+export function safePersistedDataErrorCode(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = parsePersistedDataError(value);
+  if (parsed) return `${parsed.errorClass}:${parsed.errorCode}`;
+  return safeDataErrorCode(new Error(value));
 }
 
 /** Keep durable control-plane error text useful without persisting secrets or
