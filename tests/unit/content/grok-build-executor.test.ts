@@ -207,7 +207,6 @@ describe('Grok Build single-X-tool executor', () => {
       PATH: '/usr/bin:/bin',
       LANG: 'C.UTF-8',
       DATABASE_URL: 'postgresql://secret',
-      REDIS_PASSWORD: 'secret',
       SUPABASE_SERVICE_ROLE_KEY: 'secret',
     });
     expect(environment).toEqual({

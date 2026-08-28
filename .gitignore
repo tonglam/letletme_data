@@ -185,3 +185,6 @@ $RECYCLE.BIN/
 data/raw/understat/
 data/raw/fpl/
 .admin-api-key
+
+# Local agent/editor settings may contain credentials or permissions.
+.claude/settings.local.json

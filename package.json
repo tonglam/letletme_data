@@ -35,6 +35,7 @@
     "lint:fix": "bunx eslint . --ext .ts,.tsx --cache --fix --config eslint.config.mjs",
     "format:check": "bunx prettier --check .",
     "format:fix": "bunx prettier --write .",
+    "config:hard-cut": "bash scripts/check-retired-config.sh",
     "docs:contract": "bun test tests/unit/documentation-contract.test.ts",
     "db:export": "bunx drizzle-kit export",
     "db:migrate": "bun scripts/apply-sql-migrations.ts",

@@ -12,8 +12,12 @@ through migration, publication, and service startup.
 | Variable | `VPS_USER` | SSH user with Docker access |
 | Variable | `VPS_WORKDIR` | Directory containing `docker-compose.yml` |
 | Secret | `VPS_SSH_KEY` | SSH private key for the deploy user |
+| Secret | `VPS_SSH_KNOWN_HOSTS` | Out-of-band verified host key entries |
+| Secret | `VPS_SSH_FINGERPRINT` | SHA-256 fingerprint matched against `VPS_SSH_KNOWN_HOSTS` |
 
-GitHub's `GITHUB_TOKEN` authenticates the workflow to GHCR. The VPS keeps two untracked environment
+GitHub's `GITHUB_TOKEN` authenticates the workflow to GHCR. VPS workflows use the repository's
+pinned OpenSSH composite action with `StrictHostKeyChecking=yes` and `IdentitiesOnly=yes`; they
+never discover host keys at deploy time. The VPS keeps two untracked environment
 files:
 
 - `.env.deploy` for the seven long-lived runtime services;
@@ -70,7 +74,8 @@ against the newer database contract.
 6. Run `docker compose run --rm -T migration bun run db:verify-runtime-logins`, then run
    `bash scripts/deploy.sh deploy`. Ordinary deployments only run this read-only verifier and must
    never run either bootstrap command.
-7. Configure the GitHub variables and secret above.
+7. Configure the GitHub variables and secrets above. Verify `VPS_SSH_KNOWN_HOSTS` and
+   `VPS_SSH_FINGERPRINT` through a separate trusted channel before saving them.
 8. Terminate TLS at the reverse proxy and expose only the required service ports.
 
 ## Service-key rotation

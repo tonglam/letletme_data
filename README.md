@@ -201,7 +201,7 @@ not create Redis manifests manually:
 
 ```bash
 curl -X POST http://localhost:3000/events/sync \
-  -H "x-api-key: $DATA_API_KEY"
+  -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
 The header is required when `ENABLE_AUTH=true` and may be omitted in an
@@ -221,7 +221,7 @@ worker running and inspect the resulting job/report before continuing:
 
 ```bash
 curl -X POST http://localhost:3000/events/sync \
-  -H "x-api-key: $DATA_API_KEY"
+  -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
 `POST /events/sync`, `/teams/sync`, `/players/sync`, `/phases/sync`, and

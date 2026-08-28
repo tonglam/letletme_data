@@ -13,6 +13,7 @@ const sourceMediaRolloutWorkflow = readFileSync(
   '.github/workflows/briefing-source-media-rollout.yml',
   'utf8',
 );
+const pinnedOpenSshAction = readFileSync('.github/actions/pinned-openssh/action.yml', 'utf8');
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
 const dockerfile = readFileSync('Dockerfile', 'utf8');
@@ -96,7 +97,7 @@ describe('release workflow gates', () => {
     expect(workflow).toContain(
       'HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300',
     );
-    expect(workflow).toContain('command_timeout: 20m');
+    expect(workflow).toContain('timeout: 20m');
     expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
     expect(workflow).toContain('"$old_media_present" || true');
     expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
@@ -148,6 +149,31 @@ describe('release workflow gates', () => {
     expect(ciWorkflow).toContain('test -f /app/dist/media-worker.js');
     expect(ciWorkflow).toContain('! id -Gn');
     expect(dockerfile).not.toContain('addgroup appuser letletme-grok-bridge');
+  });
+
+  test('uses system OpenSSH with an out-of-band pinned host identity', () => {
+    for (const remoteWorkflow of [
+      workflow,
+      cleanupWorkflow,
+      briefingRolloutWorkflow,
+      sourceMediaRolloutWorkflow,
+    ]) {
+      expect(remoteWorkflow).toContain('uses: ./.github/actions/pinned-openssh');
+      expect(remoteWorkflow).toContain('known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}');
+      expect(remoteWorkflow).toContain('fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}');
+      expect(remoteWorkflow).not.toContain('appleboy/ssh-action');
+      expect(remoteWorkflow).not.toContain('ssh-keyscan');
+    }
+
+    expect(pinnedOpenSshAction).toContain('StrictHostKeyChecking=yes');
+    expect(pinnedOpenSshAction).toContain('IdentitiesOnly=yes');
+    expect(pinnedOpenSshAction).toContain('ssh-keygen -lf');
+    expect(pinnedOpenSshAction).toContain('chmod 0600');
+    expect(pinnedOpenSshAction).toContain('trap cleanup EXIT');
+    expect(pinnedOpenSshAction).toContain(`printf ${quote}export %s=${quote}`);
+    expect(pinnedOpenSshAction).toContain('"$INPUT_USERNAME@$INPUT_HOST" \'bash -s\'');
+    expect(pinnedOpenSshAction).not.toContain('remote_command=');
+    expect(pinnedOpenSshAction).not.toContain('ssh-keyscan');
   });
 
   test('keeps source-media rollout protected, reversible, and Storage-gated', () => {
