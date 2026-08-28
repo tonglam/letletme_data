@@ -36,28 +36,28 @@ describe('Briefing acquisition manifest', () => {
     });
     expect(bundle.coverage.partitionCount).toBe(44);
     expect(bundle.coverage.forecastCalls).toEqual({
-      NORMAL: 1794,
-      APPROACHING: 4548,
-      FINAL90: 8616,
+      NORMAL: 856,
+      APPROACHING: 1672,
+      FINAL90: 2440,
     });
     expect(
       Object.values(bundle.coverage.xLaneForecastCalls.NORMAL).reduce(
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(1186);
+    ).toBe(248);
     expect(
       Object.values(bundle.coverage.xLaneForecastCalls.FINAL90).reduce(
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(561);
+    ).toBe(212);
     expect(
       Object.values(bundle.coverage.xLaneCallCaps.FINAL90).reduce(
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(677);
+    ).toBe(255);
     expect(bundle.coverage.backstopMainCalls).toBe(80);
     expect(bundle.coverage.backstopSaturationFollowupCalls).toBe(80);
     expect(bundle.coverage.backstopHeadroomCalls).toBe(32);
@@ -134,5 +134,21 @@ describe('Briefing acquisition manifest', () => {
       maxItems: 15,
       maxContentJobs: 5,
     });
+  });
+
+  test('keeps every X account profile at one scan per day in every phase', () => {
+    for (const profileKey of [
+      'x-official-v1',
+      'x-club-v1',
+      'x-reporter-v1',
+      'x-creator-v1',
+      'x-longform-v1',
+    ]) {
+      expect(ACQUISITION_PROFILES[profileKey]?.cadenceMinutes).toEqual({
+        NORMAL: 24 * 60,
+        APPROACHING: 24 * 60,
+        FINAL90: 24 * 60,
+      });
+    }
   });
 });

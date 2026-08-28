@@ -6,6 +6,7 @@ import {
   initialEndpointIdentity,
   reconcileEndpointIdentity,
 } from '../../../src/content/acquisition/manifest-reconciler';
+import { getAcquisitionProfile } from '../../../src/content/acquisition/acquisition-profiles';
 import { compileBriefingRegistryState } from '../../../src/content/acquisition/registry-state';
 
 describe('Briefing source manifest reconciler', () => {
@@ -149,6 +150,8 @@ describe('Briefing source manifest reconciler', () => {
     const first = deterministicScheduleJitterMs(input);
     expect(first).toBe(deterministicScheduleJitterMs(input));
     expect(first).toBeGreaterThanOrEqual(0);
-    expect(first).toBeLessThan(30 * 60_000);
+    expect(first).toBeLessThan(
+      (getAcquisitionProfile(input.profileKey)?.cadenceMinutes.NORMAL ?? 0) * 60_000,
+    );
   });
 });

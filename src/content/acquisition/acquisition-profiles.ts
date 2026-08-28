@@ -99,31 +99,35 @@ export const ACQUISITION_PROFILES: Readonly<Record<string, AcquisitionProfile>> 
     profileKey: 'x-official-v1',
     lane: 'OFFICIAL',
     priority: 10,
-    cadenceMinutes: { NORMAL: 30, APPROACHING: 10, FINAL90: 3 },
+    // Account scans are deliberately bounded to one pass per day in every
+    // phase.  Deadline acceleration is not safe while the host runner has a
+    // fixed two-process capacity; urgent coverage is handled by the explicit
+    // sentinel plan once that rollout is enabled.
+    cadenceMinutes: { NORMAL: 24 * 60, APPROACHING: 24 * 60, FINAL90: 24 * 60 },
   }),
   'x-club-v1': xProfile({
     profileKey: 'x-club-v1',
     lane: 'CLUB',
     priority: 30,
-    cadenceMinutes: { NORMAL: 60, APPROACHING: 20, FINAL90: 10 },
+    cadenceMinutes: { NORMAL: 24 * 60, APPROACHING: 24 * 60, FINAL90: 24 * 60 },
   }),
   'x-reporter-v1': xProfile({
     profileKey: 'x-reporter-v1',
     lane: 'REPORTER',
     priority: 20,
-    cadenceMinutes: { NORMAL: 60, APPROACHING: 20, FINAL90: 10 },
+    cadenceMinutes: { NORMAL: 24 * 60, APPROACHING: 24 * 60, FINAL90: 24 * 60 },
   }),
   'x-creator-v1': xProfile({
     profileKey: 'x-creator-v1',
     lane: 'CREATOR',
     priority: 50,
-    cadenceMinutes: { NORMAL: 120, APPROACHING: 60, FINAL90: 30 },
+    cadenceMinutes: { NORMAL: 24 * 60, APPROACHING: 24 * 60, FINAL90: 24 * 60 },
   }),
   'x-longform-v1': xProfile({
     profileKey: 'x-longform-v1',
     lane: 'LONGFORM',
     priority: 60,
-    cadenceMinutes: { NORMAL: 240, APPROACHING: 120, FINAL90: 60 },
+    cadenceMinutes: { NORMAL: 24 * 60, APPROACHING: 24 * 60, FINAL90: 24 * 60 },
   }),
   'x-semantic-official-v1': semanticProfile('x-semantic-official-v1', 40),
   'x-semantic-availability-v1': semanticProfile('x-semantic-availability-v1', 40),
