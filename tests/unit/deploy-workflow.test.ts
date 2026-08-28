@@ -36,6 +36,16 @@ const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'ut
 const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
 const quote = String.fromCharCode(39);
 
+function expectNonInteractiveComposeRuns(source: string, label: string) {
+  const runLines = source
+    .split('\n')
+    .filter((line) => /\brun --rm -T\b/.test(line) && !line.trim().startsWith('#'));
+  expect(runLines.length, `${label} should contain Compose run commands`).toBeGreaterThan(0);
+  for (const line of runLines) {
+    expect(line, `${label} has an interactive Compose run: ${line}`).toContain('--no-interactive');
+  }
+}
+
 describe('release workflow gates', () => {
   test('keeps the content worker alive when the pipeline is disabled', () => {
     expect(contentWorker).toContain('publicationOutboxDispatcher = setInterval');
@@ -189,6 +199,16 @@ describe('release workflow gates', () => {
     expect(pinnedOpenSshAction).toContain('"$INPUT_USERNAME@$INPUT_HOST" \'bash -s\'');
     expect(pinnedOpenSshAction).not.toContain('remote_command=');
     expect(pinnedOpenSshAction).not.toContain('ssh-keyscan');
+  });
+
+  test('prevents streamed deployment scripts from consuming bash stdin', () => {
+    expectNonInteractiveComposeRuns(workflow, 'main deploy workflow');
+    expectNonInteractiveComposeRuns(deployScript, 'local deploy script');
+    expectNonInteractiveComposeRuns(deployStateMachine, 'shared deploy state machine');
+    expectNonInteractiveComposeRuns(sourceMediaRolloutWorkflow, 'source-media rollout workflow');
+    expect(workflow).toContain('streams this script through `bash -s`');
+    expect(workflow).toContain('Never let Compose attach to that stdin');
+    expect(deployStateMachine).toContain('Callers may execute this state machine from an SSH');
   });
 
   test('keeps source-media rollout protected, reversible, and Storage-gated', () => {
