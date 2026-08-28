@@ -205,7 +205,7 @@ jobs:
 
             capture_worker_restart_started_at() {
               worker_restart_started_at=$(MIGRATION_ENV_FILE="$migration_env_file" docker compose \
-                --profile migration run --rm -T --no-deps --entrypoint sh backup -euc \
+                --profile migration run --rm -T --interactive=false --no-deps --entrypoint sh backup -euc \
                 'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 -c "SELECT clock_timestamp()::text;"')
               test -n "$worker_restart_started_at"
             }

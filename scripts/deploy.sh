@@ -433,7 +433,7 @@ status() {
   require_compose
   require_files
   compose ps
-  compose --profile migration run --rm -T --interactive=false --no-deps --entrypoint sh backup -euc \
+  compose --profile migration run --rm -T --no-deps --entrypoint sh backup -euc \
     'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<'SQL'
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout = '15s';
