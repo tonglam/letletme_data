@@ -9,15 +9,6 @@
     "noImplicitAny": true,
     "outDir": "./build",
     "rootDir": ".",
-    "baseUrl": ".",
-    "paths": {
-      "@app/*": ["src/*"],
-      "@app/schemas/*": ["src/infrastructure/persistence/drizzle/schemas/*"],
-      "@app/repositories/*": ["src/infrastructure/persistence/drizzle/repositories/*"],
-      "@app/cache/*": ["src/infrastructure/cache/*"],
-      "@app/tests/*": ["tests/*"],
-      "@app/dependencies": ["src/dependencies.ts"]
-    },
     "strictNullChecks": true,
     "noImplicitThis": true,
     "alwaysStrict": true,
@@ -33,10 +24,8 @@
     "src/**/*.ts",
     "scripts/**/*.ts",
     "tests/**/*.ts",
-    "tests/**/*.json",
-    "*.ts",
     "drizzle.config.ts",
-    "node_modules/enums.schema.ts"
+    "validate-env.ts"
   ],
   "exclude": ["node_modules", "build"]
 }

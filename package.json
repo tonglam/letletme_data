@@ -2,7 +2,6 @@
   "name": "letletme_data",
   "version": "1.0.0",
   "description": "Letletme_data fetches data from the Fantasy Premier League servers, cleans and transforms the data, and then stores it in PostgreSQL and Redis, providing APIs for querying data.",
-  "main": "index.js",
   "type": "module",
   "packageManager": "bun@1.3.14",
   "scripts": {
@@ -82,7 +81,6 @@
     "@elysiajs/cron": "1.4.2",
     "@mozilla/readability": "0.6.0",
     "bullmq": "5.81.3",
-    "date-fns": "^4.1.0",
     "dotenv": "^16.5.0",
     "drizzle-orm": "^0.45.2",
     "elysia": "1.4.29",
