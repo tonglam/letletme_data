@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "seasonKey": "2026-27",
-  "manifestHash": "0df05414cd9adf5c82219bd5367b39a726f0c9f6d0a7883702fdb16b1dd608eb",
+  "manifestHash": "7582bff0cbe111a0891ddd633bb4a41f2cc7f3a086e80372c346699fd6279840",
   "entityCount": 85,
   "endpointCount": 108,
   "endpointCounts": {
@@ -13,9 +13,9 @@
   },
   "partitionCount": 44,
   "forecastCalls": {
-    "NORMAL": 1794,
-    "APPROACHING": 4548,
-    "FINAL90": 8616
+    "NORMAL": 856,
+    "APPROACHING": 1672,
+    "FINAL90": 2440
   },
   "xForecastWindowMinutes": {
     "NORMAL": 1440,
@@ -24,53 +24,53 @@
   },
   "xLaneForecastCalls": {
     "NORMAL": {
-      "OFFICIAL": 104,
-      "CLUB": 392,
-      "REPORTER": 616,
-      "CREATOR": 16,
-      "LONGFORM": 10,
+      "OFFICIAL": 10,
+      "CLUB": 70,
+      "REPORTER": 110,
+      "CREATOR": 5,
+      "LONGFORM": 5,
       "SEMANTIC": 48
     },
     "APPROACHING": {
-      "OFFICIAL": 296,
-      "CLUB": 1064,
-      "REPORTER": 1672,
-      "CREATOR": 28,
-      "LONGFORM": 16,
+      "OFFICIAL": 10,
+      "CLUB": 70,
+      "REPORTER": 110,
+      "CREATOR": 5,
+      "LONGFORM": 5,
       "SEMANTIC": 96
     },
     "FINAL90": {
-      "OFFICIAL": 68,
-      "CLUB": 182,
-      "REPORTER": 286,
-      "CREATOR": 7,
-      "LONGFORM": 6,
+      "OFFICIAL": 10,
+      "CLUB": 70,
+      "REPORTER": 110,
+      "CREATOR": 5,
+      "LONGFORM": 5,
       "SEMANTIC": 12
     }
   },
   "xLaneCallCaps": {
     "NORMAL": {
-      "OFFICIAL": 125,
-      "CLUB": 471,
-      "REPORTER": 740,
-      "CREATOR": 20,
-      "LONGFORM": 12,
+      "OFFICIAL": 12,
+      "CLUB": 84,
+      "REPORTER": 132,
+      "CREATOR": 6,
+      "LONGFORM": 6,
       "SEMANTIC": 58
     },
     "APPROACHING": {
-      "OFFICIAL": 356,
-      "CLUB": 1277,
-      "REPORTER": 2007,
-      "CREATOR": 34,
-      "LONGFORM": 20,
+      "OFFICIAL": 12,
+      "CLUB": 84,
+      "REPORTER": 132,
+      "CREATOR": 6,
+      "LONGFORM": 6,
       "SEMANTIC": 116
     },
     "FINAL90": {
-      "OFFICIAL": 82,
-      "CLUB": 219,
-      "REPORTER": 344,
-      "CREATOR": 9,
-      "LONGFORM": 8,
+      "OFFICIAL": 12,
+      "CLUB": 84,
+      "REPORTER": 132,
+      "CREATOR": 6,
+      "LONGFORM": 6,
       "SEMANTIC": 15
     }
   },

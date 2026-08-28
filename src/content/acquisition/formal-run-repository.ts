@@ -304,8 +304,11 @@ function requestWindow(input: {
     const overlapped = checkpointEnd
       ? new Date(Math.min(checkpointEnd.getTime() - 120_000, windowEnd.getTime()))
       : defaultStart;
-    const maximumStart = new Date(windowEnd.getTime() - 24 * 60 * 60_000);
-    const boundedStart = overlapped < maximumStart ? maximumStart : overlapped;
+    // Once a checkpoint exists, preserve it even when execution has been
+    // delayed beyond the nominal daily cadence. Bounding a checkpoint-based
+    // window would silently skip the uncovered interval; saturation handling
+    // and Receipt ID deduplication keep an extended recovery window safe.
+    const boundedStart = checkpointEnd ? overlapped : defaultStart;
     if (input.adapterKind === 'X_SEMANTIC') {
       boundedStart.setUTCHours(0, 0, 0, 0);
     }

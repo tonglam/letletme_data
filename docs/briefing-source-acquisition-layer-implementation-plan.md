@@ -216,7 +216,7 @@ entities:
         adapterKind: X_ACCOUNT
         locator:
           handle: FPLFocal
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
       - endpointKey: fpl-focal-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator:
@@ -330,9 +330,9 @@ Candidate yield 回传。`TRIAL → ACTIVE_DYNAMIC → DORMANT` 由确定性阈�
 
 | Lane | Adapter | NORMAL / APPROACHING / FINAL90 | 说明 |
 | --- | --- | --- | --- |
-| Official core | X | 30m / 10m / 3m | OfficialFPL、league official 单账号 |
-| Club/reporters | X | 60m / 20m / 10m | 高流量单账号，低流量小分区 |
-| Creators/KOL | X | 120m / 60m / 30m | 不按页面或 topic 重复 |
+| Official core | X | 24h / 24h / 24h | OfficialFPL、league official 单账号 |
+| Club/reporters | X | 24h / 24h / 24h | 高流量单账号，低流量小分区 |
+| Creators/KOL | X | 24h / 24h / 24h | 不按页面或 topic 重复 |
 | X semantic | X | 120m / 60m / 30m | 四个版本化主题 profile |
 | News/publication feeds | RSS/Atom | 60m / 30m / 15m | 尊重 response cache floor |
 | Podcast feeds | RSS/Atom | 60m / 30m / 30m | 新 episode 才触发 transcript |
@@ -366,7 +366,9 @@ X 继续使用“高流量单账号、低流量小分区”的原则，但 parti
   `fromDate` 的 UTC 00:00；返回 10 条直接保存并记录 `SEMANTIC_RESULT_CAP`，不追加第二次
   semantic 搜索。
 
-实现补充：每个 X_ACCOUNT partition 仍只有一个 PRIMARY 快线查询，不按页面模块拆分请求；开启
+实现补充：每个 X_ACCOUNT partition 仍只有一个 PRIMARY 查询，每个账号按新 profile 每 24 小时运行一次，
+不按页面模块拆分请求；新 profile 首次 bootstrap 回看 26 小时并将首轮 jitter 限在 24 小时内，
+旧的 v1 profile 仅保留给历史 request replay。开启
 manifest reconciler 始终为 40 个 X_ACCOUNT partition 保留一个 `schedule_role=BACKSTOP`；
 `CONTENT_X_BACKSTOP_ENABLED=false` 时这些行是 `paused`，开启后才变为 `active` 并参与 claim。
 Backstop 固定在 UTC 00:00/12:00 slot 结束后 10 分钟开始，带 0–10 分钟

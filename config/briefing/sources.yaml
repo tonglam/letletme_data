@@ -7,7 +7,7 @@ entities:
       - endpointKey: official-fpl-x
         adapterKind: X_ACCOUNT
         locator: { handle: OfficialFPL }
-        profileKey: x-official-v1
+        profileKey: x-official-v2
 
   - sourceKey: premier-league
     sourceType: LEAGUE_OFFICIAL
@@ -16,7 +16,7 @@ entities:
       - endpointKey: premier-league-x
         adapterKind: X_ACCOUNT
         locator: { handle: premierleague }
-        profileKey: x-official-v1
+        profileKey: x-official-v2
 
   - sourceKey: arsenal
     sourceType: CLUB_OFFICIAL
@@ -26,7 +26,7 @@ entities:
       - endpointKey: arsenal-x
         adapterKind: X_ACCOUNT
         locator: { handle: Arsenal }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: aston-villa
     sourceType: CLUB_OFFICIAL
@@ -36,7 +36,7 @@ entities:
       - endpointKey: aston-villa-x
         adapterKind: X_ACCOUNT
         locator: { handle: AstonVilla }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: bournemouth
     sourceType: CLUB_OFFICIAL
@@ -46,7 +46,7 @@ entities:
       - endpointKey: bournemouth-x
         adapterKind: X_ACCOUNT
         locator: { handle: afcbournemouth }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: brentford
     sourceType: CLUB_OFFICIAL
@@ -56,7 +56,7 @@ entities:
       - endpointKey: brentford-x
         adapterKind: X_ACCOUNT
         locator: { handle: BrentfordFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: brighton
     sourceType: CLUB_OFFICIAL
@@ -66,7 +66,7 @@ entities:
       - endpointKey: brighton-x
         adapterKind: X_ACCOUNT
         locator: { handle: BHAFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: chelsea
     sourceType: CLUB_OFFICIAL
@@ -76,7 +76,7 @@ entities:
       - endpointKey: chelsea-x
         adapterKind: X_ACCOUNT
         locator: { handle: ChelseaFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: coventry
     sourceType: CLUB_OFFICIAL
@@ -86,7 +86,7 @@ entities:
       - endpointKey: coventry-x
         adapterKind: X_ACCOUNT
         locator: { handle: CoventryCityFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: crystal-palace
     sourceType: CLUB_OFFICIAL
@@ -96,7 +96,7 @@ entities:
       - endpointKey: crystal-palace-x
         adapterKind: X_ACCOUNT
         locator: { handle: CPFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: everton
     sourceType: CLUB_OFFICIAL
@@ -106,7 +106,7 @@ entities:
       - endpointKey: everton-x
         adapterKind: X_ACCOUNT
         locator: { handle: Everton }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: fulham
     sourceType: CLUB_OFFICIAL
@@ -116,7 +116,7 @@ entities:
       - endpointKey: fulham-x
         adapterKind: X_ACCOUNT
         locator: { handle: FulhamFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: hull
     sourceType: CLUB_OFFICIAL
@@ -126,7 +126,7 @@ entities:
       - endpointKey: hull-x
         adapterKind: X_ACCOUNT
         locator: { handle: HullCity }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: ipswich
     sourceType: CLUB_OFFICIAL
@@ -136,7 +136,7 @@ entities:
       - endpointKey: ipswich-x
         adapterKind: X_ACCOUNT
         locator: { handle: IpswichTown }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: leeds
     sourceType: CLUB_OFFICIAL
@@ -146,7 +146,7 @@ entities:
       - endpointKey: leeds-x
         adapterKind: X_ACCOUNT
         locator: { handle: LUFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: liverpool
     sourceType: CLUB_OFFICIAL
@@ -156,7 +156,7 @@ entities:
       - endpointKey: liverpool-x
         adapterKind: X_ACCOUNT
         locator: { handle: LFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: man-city
     sourceType: CLUB_OFFICIAL
@@ -166,7 +166,7 @@ entities:
       - endpointKey: man-city-x
         adapterKind: X_ACCOUNT
         locator: { handle: ManCity }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: man-utd
     sourceType: CLUB_OFFICIAL
@@ -176,7 +176,7 @@ entities:
       - endpointKey: man-utd-x
         adapterKind: X_ACCOUNT
         locator: { handle: ManUtd }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: newcastle
     sourceType: CLUB_OFFICIAL
@@ -186,7 +186,7 @@ entities:
       - endpointKey: newcastle-x
         adapterKind: X_ACCOUNT
         locator: { handle: NUFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: nottingham-forest
     sourceType: CLUB_OFFICIAL
@@ -196,7 +196,7 @@ entities:
       - endpointKey: nottingham-forest-x
         adapterKind: X_ACCOUNT
         locator: { handle: NFFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: sunderland
     sourceType: CLUB_OFFICIAL
@@ -206,7 +206,7 @@ entities:
       - endpointKey: sunderland-x
         adapterKind: X_ACCOUNT
         locator: { handle: SunderlandAFC }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: tottenham
     sourceType: CLUB_OFFICIAL
@@ -216,7 +216,7 @@ entities:
       - endpointKey: tottenham-x
         adapterKind: X_ACCOUNT
         locator: { handle: SpursOfficial }
-        profileKey: x-club-v1
+        profileKey: x-club-v2
 
   - sourceKey: ben-dinnery
     sourceType: REPORTER
@@ -225,7 +225,7 @@ entities:
       - endpointKey: ben-dinnery-x
         adapterKind: X_ACCOUNT
         locator: { handle: BenDinnery }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: david-ornstein
     sourceType: REPORTER
@@ -235,7 +235,7 @@ entities:
       - endpointKey: david-ornstein-x
         adapterKind: X_ACCOUNT
         locator: { handle: David_Ornstein }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: fabrizio-romano
     sourceType: REPORTER
@@ -244,7 +244,7 @@ entities:
       - endpointKey: fabrizio-romano-x
         adapterKind: X_ACCOUNT
         locator: { handle: FabrizioRomano }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: sami-mokbel
     sourceType: REPORTER
@@ -254,7 +254,7 @@ entities:
       - endpointKey: sami-mokbel-x
         adapterKind: X_ACCOUNT
         locator: { handle: SamiMokbel_BBC }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: sam-lee
     sourceType: REPORTER
@@ -264,7 +264,7 @@ entities:
       - endpointKey: sam-lee-x
         adapterKind: X_ACCOUNT
         locator: { handle: SamLee }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: james-pearce
     sourceType: REPORTER
@@ -274,7 +274,7 @@ entities:
       - endpointKey: james-pearce-x
         adapterKind: X_ACCOUNT
         locator: { handle: JamesPearceLFC }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: simon-stone
     sourceType: REPORTER
@@ -284,7 +284,7 @@ entities:
       - endpointKey: simon-stone-x
         adapterKind: X_ACCOUNT
         locator: { handle: sistoney67 }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: nizaar-kinsella
     sourceType: REPORTER
@@ -294,7 +294,7 @@ entities:
       - endpointKey: nizaar-kinsella-x
         adapterKind: X_ACCOUNT
         locator: { handle: NizaarKinsella }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: john-townley
     sourceType: REPORTER
@@ -304,7 +304,7 @@ entities:
       - endpointKey: john-townley-x
         adapterKind: X_ACCOUNT
         locator: { handle: johntownley11 }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: jacob-tanswell
     sourceType: REPORTER
@@ -314,7 +314,7 @@ entities:
       - endpointKey: jacob-tanswell-x
         adapterKind: X_ACCOUNT
         locator: { handle: J_Tanswell }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: alexander-smith
     sourceType: REPORTER
@@ -324,7 +324,7 @@ entities:
       - endpointKey: alexander-smith-x
         adapterKind: X_ACCOUNT
         locator: { handle: AlexSmithEcho }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: tom-crocker
     sourceType: REPORTER
@@ -334,7 +334,7 @@ entities:
       - endpointKey: tom-crocker-x
         adapterKind: X_ACCOUNT
         locator: { handle: TomJCrocker }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: sam-tabuteau
     sourceType: REPORTER
@@ -346,7 +346,7 @@ entities:
       - endpointKey: sam-tabuteau-x
         adapterKind: X_ACCOUNT
         locator: { handle: tabuteauS }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: david-mcintyre
     sourceType: REPORTER
@@ -356,7 +356,7 @@ entities:
       - endpointKey: david-mcintyre-x
         adapterKind: X_ACCOUNT
         locator: { handle: davidmcintyre76 }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: andy-naylor
     sourceType: REPORTER
@@ -366,7 +366,7 @@ entities:
       - endpointKey: andy-naylor-x
         adapterKind: X_ACCOUNT
         locator: { handle: AndyNaylorBHAFC }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: brian-owen
     sourceType: REPORTER
@@ -376,7 +376,7 @@ entities:
       - endpointKey: brian-owen-x
         adapterKind: X_ACCOUNT
         locator: { handle: Brian__Owen }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: liam-twomey
     sourceType: REPORTER
@@ -386,7 +386,7 @@ entities:
       - endpointKey: liam-twomey-x
         adapterKind: X_ACCOUNT
         locator: { handle: liam_twomey }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: andy-turner
     sourceType: REPORTER
@@ -396,7 +396,7 @@ entities:
       - endpointKey: andy-turner-x
         adapterKind: X_ACCOUNT
         locator: { handle: AndyTurnerccfc }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: bbc-coventry-warwickshire-sport
     sourceType: PUBLICATION
@@ -406,7 +406,7 @@ entities:
       - endpointKey: bbc-coventry-warwickshire-sport-x
         adapterKind: X_ACCOUNT
         locator: { handle: BBCCWRSport }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: matt-woosnam
     sourceType: REPORTER
@@ -416,7 +416,7 @@ entities:
       - endpointKey: matt-woosnam-x
         adapterKind: X_ACCOUNT
         locator: { handle: MattWoosie }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: edmund-brack
     sourceType: REPORTER
@@ -426,7 +426,7 @@ entities:
       - endpointKey: edmund-brack-x
         adapterKind: X_ACCOUNT
         locator: { handle: EdmundBrack }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: patrick-boyland
     sourceType: REPORTER
@@ -436,7 +436,7 @@ entities:
       - endpointKey: patrick-boyland-x
         adapterKind: X_ACCOUNT
         locator: { handle: Paddy_Boyland }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: joe-thomas
     sourceType: REPORTER
@@ -446,7 +446,7 @@ entities:
       - endpointKey: joe-thomas-x
         adapterKind: X_ACCOUNT
         locator: { handle: joe_thomas18 }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: jack-kelly
     sourceType: REPORTER
@@ -456,7 +456,7 @@ entities:
       - endpointKey: jack-kelly-x
         adapterKind: X_ACCOUNT
         locator: { handle: jackellyffc }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: barry-cooper
     sourceType: REPORTER
@@ -466,7 +466,7 @@ entities:
       - endpointKey: barry-cooper-x
         adapterKind: X_ACCOUNT
         locator: { handle: bazdjcooper }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: james-smailes
     sourceType: REPORTER
@@ -476,7 +476,7 @@ entities:
       - endpointKey: james-smailes-x
         adapterKind: X_ACCOUNT
         locator: { handle: James_Smailes }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: stuart-watson
     sourceType: REPORTER
@@ -486,7 +486,7 @@ entities:
       - endpointKey: stuart-watson-x
         adapterKind: X_ACCOUNT
         locator: { handle: Stuart_Watson }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: ross-halls
     sourceType: REPORTER
@@ -496,7 +496,7 @@ entities:
       - endpointKey: ross-halls-x
         adapterKind: X_ACCOUNT
         locator: { handle: rossmediauk }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: phil-hay
     sourceType: REPORTER
@@ -506,7 +506,7 @@ entities:
       - endpointKey: phil-hay-x
         adapterKind: X_ACCOUNT
         locator: { handle: PhilHay_ }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: graham-smyth
     sourceType: REPORTER
@@ -516,7 +516,7 @@ entities:
       - endpointKey: graham-smyth-x
         adapterKind: X_ACCOUNT
         locator: { handle: GrahamSmyth }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: david-lynch
     sourceType: REPORTER
@@ -526,7 +526,7 @@ entities:
       - endpointKey: david-lynch-x
         adapterKind: X_ACCOUNT
         locator: { handle: davidlynchlfc }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: simon-bajkowski
     sourceType: REPORTER
@@ -536,7 +536,7 @@ entities:
       - endpointKey: simon-bajkowski-x
         adapterKind: X_ACCOUNT
         locator: { handle: spbajko }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: laurie-whitwell
     sourceType: REPORTER
@@ -546,7 +546,7 @@ entities:
       - endpointKey: laurie-whitwell-x
         adapterKind: X_ACCOUNT
         locator: { handle: lauriewhitwell }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: chris-waugh
     sourceType: REPORTER
@@ -556,7 +556,7 @@ entities:
       - endpointKey: chris-waugh-x
         adapterKind: X_ACCOUNT
         locator: { handle: ChrisDHWaugh }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: george-caulkin
     sourceType: REPORTER
@@ -566,7 +566,7 @@ entities:
       - endpointKey: george-caulkin-x
         adapterKind: X_ACCOUNT
         locator: { handle: GeorgeCaulkin }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: paul-taylor-forest
     sourceType: REPORTER
@@ -576,7 +576,7 @@ entities:
       - endpointKey: paul-taylor-forest-x
         adapterKind: X_ACCOUNT
         locator: { handle: nottmtails }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: sarah-clapson
     sourceType: REPORTER
@@ -586,7 +586,7 @@ entities:
       - endpointKey: sarah-clapson-x
         adapterKind: X_ACCOUNT
         locator: { handle: Sarah_Clapson }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: phil-smith-sunderland
     sourceType: REPORTER
@@ -596,7 +596,7 @@ entities:
       - endpointKey: phil-smith-sunderland-x
         adapterKind: X_ACCOUNT
         locator: { handle: Phil__Smith }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: bbc-newcastle-sport
     sourceType: PUBLICATION
@@ -606,7 +606,7 @@ entities:
       - endpointKey: bbc-newcastle-sport-x
         adapterKind: X_ACCOUNT
         locator: { handle: bbcnewcastle }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: charlie-eccleshare
     sourceType: REPORTER
@@ -616,7 +616,7 @@ entities:
       - endpointKey: charlie-eccleshare-x
         adapterKind: X_ACCOUNT
         locator: { handle: CDEccleshare }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: alasdair-gold
     sourceType: REPORTER
@@ -626,7 +626,7 @@ entities:
       - endpointKey: alasdair-gold-x
         adapterKind: X_ACCOUNT
         locator: { handle: AlasdairGold }
-        profileKey: x-reporter-v1
+        profileKey: x-reporter-v2
 
   - sourceKey: ben-crellin
     sourceType: CREATOR
@@ -635,7 +635,7 @@ entities:
       - endpointKey: ben-crellin-x
         adapterKind: X_ACCOUNT
         locator: { handle: BenCrellin }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
 
   - sourceKey: fpl-general
     sourceType: CREATOR
@@ -644,7 +644,7 @@ entities:
       - endpointKey: fpl-general-x
         adapterKind: X_ACCOUNT
         locator: { handle: FPLGeneral }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
       - endpointKey: fpl-general-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCxj4WVoWBuwXPGJsvUFPVig }
@@ -657,7 +657,7 @@ entities:
       - endpointKey: fpl-focal-x
         adapterKind: X_ACCOUNT
         locator: { handle: FPLFocal }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
       - endpointKey: fpl-focal-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UC72QokPHXQ9r98ROfNZmaDw }
@@ -670,7 +670,7 @@ entities:
       - endpointKey: lateriser-x
         adapterKind: X_ACCOUNT
         locator: { handle: lateriser12 }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
 
   - sourceKey: pras
     sourceType: CREATOR
@@ -679,7 +679,7 @@ entities:
       - endpointKey: pras-x
         adapterKind: X_ACCOUNT
         locator: { handle: Pras_fpl }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
 
   - sourceKey: big-man-bakar
     sourceType: CREATOR
@@ -688,7 +688,7 @@ entities:
       - endpointKey: big-man-bakar-x
         adapterKind: X_ACCOUNT
         locator: { handle: BigManBakar }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
 
   - sourceKey: fpl-raptor
     sourceType: CREATOR
@@ -697,7 +697,7 @@ entities:
       - endpointKey: fpl-raptor-x
         adapterKind: X_ACCOUNT
         locator: { handle: FPL_Raptor }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
       - endpointKey: fpl-raptor-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UC54QLWzsMifTRjNQ02z5pCw }
@@ -710,7 +710,7 @@ entities:
       - endpointKey: fpl-harry-x
         adapterKind: X_ACCOUNT
         locator: { handle: FPL_Harry }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
       - endpointKey: fpl-harry-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCcPWnCj5AKC19HaySZjb25g }
@@ -723,7 +723,7 @@ entities:
       - endpointKey: lets-talk-fpl-x
         adapterKind: X_ACCOUNT
         locator: { handle: LetsTalk_FPL }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
       - endpointKey: lets-talk-fpl-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCxeOc7eFxq37yW_Nc-69deA }
@@ -736,7 +736,7 @@ entities:
       - endpointKey: fpl-salah-x
         adapterKind: X_ACCOUNT
         locator: { handle: FPL_Salah }
-        profileKey: x-creator-v1
+        profileKey: x-creator-v2
 
   - sourceKey: fantasy-football-scout
     sourceType: PUBLICATION
@@ -745,7 +745,7 @@ entities:
       - endpointKey: fantasy-football-scout-x
         adapterKind: X_ACCOUNT
         locator: { handle: FFScout }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: fantasy-football-scout-rss
         adapterKind: RSS_ATOM
         locator: { url: https://www.fantasyfootballscout.co.uk/feed/ }
@@ -762,7 +762,7 @@ entities:
       - endpointKey: planet-fpl-x
         adapterKind: X_ACCOUNT
         locator: { handle: PlanetFPLPod }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: planet-fpl-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UC8043oOKTB4uP8Nq15Kz6bg }
@@ -779,7 +779,7 @@ entities:
       - endpointKey: the-fpl-wire-x
         adapterKind: X_ACCOUNT
         locator: { handle: TheFPLWire }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: the-fpl-wire-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCtIPFexB6PLKNNl0XH3SKKw }
@@ -796,7 +796,7 @@ entities:
       - endpointKey: fpl-blackbox-x
         adapterKind: X_ACCOUNT
         locator: { handle: FPLBlackBox_ }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: fpl-blackbox-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCGJ8-xqhOLwyJNuPMsVoQWQ }
@@ -813,7 +813,7 @@ entities:
       - endpointKey: who-got-the-assist-x
         adapterKind: X_ACCOUNT
         locator: { handle: WGTA_FPL }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: who-got-the-assist-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCkk58co4Qe1A1GFRPVziSGQ }
@@ -830,7 +830,7 @@ entities:
       - endpointKey: fml-fpl-x
         adapterKind: X_ACCOUNT
         locator: { handle: FMLFPL }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: fml-fpl-podcast
         adapterKind: PODCAST_FEED
         locator: { url: https://feeds.megaphone.fm/COMG5321018029 }
@@ -843,7 +843,7 @@ entities:
       - endpointKey: fifty-ninth-minute-x
         adapterKind: X_ACCOUNT
         locator: { handle: 59thMinutePod }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: fifty-ninth-minute-podcast
         adapterKind: PODCAST_FEED
         locator: { url: https://feeds.megaphone.fm/COMG4750541235 }
@@ -856,7 +856,7 @@ entities:
       - endpointKey: fpl-podcast-x
         adapterKind: X_ACCOUNT
         locator: { handle: FPLPod }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: fpl-podcast-feed
         adapterKind: PODCAST_FEED
         locator: { url: https://audioboom.com/channels/5001585.rss }
@@ -869,7 +869,7 @@ entities:
       - endpointKey: fantasy-football-hub-x
         adapterKind: X_ACCOUNT
         locator: { handle: FFH_HQ }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: fantasy-football-hub-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCcqEr3DfrRwtoF2a1yW8qgQ }
@@ -882,7 +882,7 @@ entities:
       - endpointKey: all-about-fpl-x
         adapterKind: X_ACCOUNT
         locator: { handle: allaboutfpl }
-        profileKey: x-longform-v1
+        profileKey: x-longform-v2
       - endpointKey: all-about-fpl-rss
         adapterKind: RSS_ATOM
         locator: { url: https://allaboutfpl.com/feed/ }
