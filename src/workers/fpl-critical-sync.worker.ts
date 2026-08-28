@@ -458,6 +458,19 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
       const freshnessWindowId = freshnessWindowIds[0];
       const sourceMetadata = hotPriceSourceMetadata(job, activeTarget.obligation.evidence);
       const hotSource = await hotPriceSourceDependencies(job, sourceMetadata);
+      // A normal five-minute run may begin after the watcher has published a
+      // provisional event but before the durable reconciliation commits. Read
+      // that event as evidence while keeping this run's own fresh provider
+      // timestamps; otherwise the new publication can race the active
+      // manifest fence or silently drop the still-undurable event.
+      const hotSnapshotForEvent =
+        hotSource === undefined
+          ? await readPriceChangeHotSnapshot(job.data.seasonCode).catch(() => null)
+          : null;
+      const eventEvidenceOverride =
+        hotSnapshotForEvent && hotSnapshotForEvent.schemaVersion >= 4
+          ? (hotSnapshotForEvent.board.latestEvent ?? null)
+          : undefined;
       prepared = await preparePriceChangePublication(
         season,
         hotSource,
@@ -465,6 +478,7 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
         resolvePriceChangeSourceRunId(job.data.runId, activeTarget.obligation.runId),
         freshnessWindowId,
         freshnessWindowIds,
+        eventEvidenceOverride,
       );
     } catch (error) {
       if (error instanceof PriceChangeCorePublicationRequiredError) {

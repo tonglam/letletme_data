@@ -401,4 +401,61 @@ describe('price-change prediction normalization', () => {
       ),
     ).toMatchObject({ status: 'UNAVAILABLE', revision: 'unavailable' });
   });
+
+  it('preserves an observed event when the prediction board hard-expires', () => {
+    const baselineFetchedAt = new Date('2026-08-22T00:00:00.000Z');
+    const fetchedAt = new Date('2026-08-24T00:00:00.000Z');
+    const baseline = normalizePriceChangeBoard(bootstrapFixture(), baselineFetchedAt);
+    const changedBootstrap = bootstrapFixture({ now_cost: 76 });
+    const event = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: changedBootstrap,
+      deadline: '2026-08-23T18:30:00.000Z',
+      fetchedAt: new Date('2026-08-23T18:30:02.000Z'),
+      outcome: 'CHANGED',
+    });
+    const changedBoard = normalizePriceChangeBoard(
+      changedBootstrap,
+      fetchedAt,
+      undefined,
+      undefined,
+      event,
+    );
+    const publication = {
+      manifest: {
+        dataset: 'fpl:price-changes',
+        eventId: null,
+        state: 'active',
+        publicationId: 'price-publication-with-event',
+        revision: 1,
+        sourceCheckedAt: fetchedAt.toISOString(),
+        items: [{ name: 'context' }, { name: 'players' }],
+      },
+      items: {
+        context: {
+          schemaVersion: 2,
+          source: 'FPL_BOOTSTRAP',
+          fetchedAt: fetchedAt.toISOString(),
+          staleAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_READY_MS).toISOString(),
+          hardExpiresAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS).toISOString(),
+          deadline: changedBoard.deadline,
+          nextDeadlines: changedBoard.nextDeadlines,
+          expectedPlayerCount: changedBoard.expectedPlayerCount,
+          observedPlayerCount: changedBoard.observedPlayerCount,
+          latestEvent: event,
+        },
+        players: changedBoard.players,
+      },
+    } as never;
+
+    expect(
+      parsePublishedPriceChangeBoard(
+        publication,
+        new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS),
+      ),
+    ).toMatchObject({
+      status: 'UNAVAILABLE',
+      latestEvent: event,
+    });
+  });
 });

@@ -886,7 +886,7 @@ function isPriceChangePlayer(value: unknown): value is PriceChangePlayer {
   );
 }
 
-function unavailableBoard(): PriceChangeBoard {
+function unavailableBoard(latestEvent: PriceChangeObservedEvent | null = null): PriceChangeBoard {
   return {
     status: 'UNAVAILABLE',
     source: 'FPL_BOOTSTRAP',
@@ -898,7 +898,7 @@ function unavailableBoard(): PriceChangeBoard {
     expectedPlayerCount: 0,
     observedPlayerCount: 0,
     players: [],
-    latestEvent: null,
+    latestEvent,
   };
 }
 
@@ -1013,9 +1013,6 @@ export function parsePublishedPriceChangeBoard(
   }
   const ageMs = now.getTime() - fetchedAt;
   if (ageMs < 0) return null;
-  // The hard boundary is inclusive: at exactly one hour the last-good
-  // publication is no longer contract-valid for any consumer.
-  if (ageMs >= PRICE_CHANGE_MAX_AGE_MS) return unavailableBoard();
   const board: PriceChangeBoard = {
     status: ageMs < PRICE_CHANGE_READY_MS ? 'READY' : 'STALE',
     source: 'FPL_BOOTSTRAP',
@@ -1045,6 +1042,11 @@ export function parsePublishedPriceChangeBoard(
     }
     board.latestEvent = context.latestEvent as PriceChangeObservedEvent;
   }
+  // The hard boundary is inclusive: at exactly one hour the last-good
+  // publication is no longer contract-valid for any consumer. Preserve the
+  // immutable observed event as evidence so the hot event can still be
+  // displayed/reconciled independently of prediction freshness.
+  if (ageMs >= PRICE_CHANGE_MAX_AGE_MS) return unavailableBoard(board.latestEvent ?? null);
   return board;
 }
 
@@ -1251,6 +1253,7 @@ export async function preparePriceChangePublication(
   sourceRunIdOverride?: string,
   freshnessWindowId?: number,
   freshnessWindowIds?: readonly number[],
+  eventEvidenceOverride?: PriceChangeObservedEvent | null,
 ): Promise<PriceChangePreparationResult> {
   const sourceRunId = sourceRunIdOverride ?? randomUUID();
   await syncOperationsRepository.startRun({
@@ -1294,24 +1297,25 @@ export async function preparePriceChangePublication(
       };
     }
 
+    const eventEvidence = dependencies.eventEvidence ?? eventEvidenceOverride;
     const existingCanonical =
-      dependencies.eventEvidence === undefined || dependencies.eventEvidence === null
+      eventEvidence === undefined || eventEvidence === null
         ? await readCanonicalPriceChangePublication(season)
         : null;
     const latestEvent = selectLatestPriceChangeEvent(
       existingCanonical?.board?.latestEvent,
-      dependencies.eventEvidence,
+      eventEvidence,
     );
     const core = await readCorePublicationEvidence(season);
     const board = {
       ...normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds, latestEvent),
       sourceCheckedAt: requestStartedAt.toISOString(),
     };
-    if (dependencies.eventEvidence) {
+    if (eventEvidence) {
       // A hot event is source-bound evidence. The archived bootstrap used for
       // reconciliation must contain the same post-change prices; regular
       // five-minute publications inherit older events without this check.
-      validatePriceChangeObservedEvent(dependencies.eventEvidence, board.players, {
+      validatePriceChangeObservedEvent(eventEvidence, board.players, {
         requireCurrentPriceMatch: true,
       });
     }

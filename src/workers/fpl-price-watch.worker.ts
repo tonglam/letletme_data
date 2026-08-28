@@ -30,6 +30,7 @@ import {
   priceChangeTriggerFingerprint,
   priceChangeValueFingerprint,
   priceChangeObservedEventFromBaseline,
+  normalizePriceChangeBoard,
   shouldPublishPriceChangeHotSnapshot,
   type PriceChangeBoard,
 } from '../services/price-change-predictions.service';
@@ -91,27 +92,31 @@ function watchBaselineFromBoard(
 ): PriceChangeBoard | null {
   if (!board) return null;
   const event = board.latestEvent;
-  if (
-    !event ||
-    event.outcome !== 'CHANGED' ||
-    Date.parse(event.deadline) !== deadlineAt.getTime()
-  ) {
-    return board;
+  if (event && event.outcome === 'CHANGED' && Date.parse(event.deadline) === deadlineAt.getTime()) {
+    const usableBoard = usablePriceChangeBaseline(board);
+    if (!usableBoard) return null;
+    const oldPrices = new Map(event.changes.map((change) => [change.playerId, change.oldPrice]));
+    return {
+      ...usableBoard,
+      // The hot board revision includes the observed event and therefore is no
+      // longer the identity of the fixed pre-cutover baseline. Keep the
+      // original revision on the reconstructed board so every later provider
+      // wave carries the same baselineRevision through cumulative diffs.
+      revision: event.baselineRevision,
+      latestEvent: null,
+      players: usableBoard.players.map((player) => {
+        const oldPrice = oldPrices.get(player.playerId);
+        return oldPrice === undefined ? player : { ...player, currentPrice: oldPrice };
+      }),
+    };
   }
-  const oldPrices = new Map(event.changes.map((change) => [change.playerId, change.oldPrice]));
-  return {
-    ...board,
-    // The hot board revision includes the observed event and therefore is no
-    // longer the identity of the fixed pre-cutover baseline. Keep the
-    // original revision on the reconstructed board so every later provider
-    // wave carries the same baselineRevision through cumulative diffs.
-    revision: event.baselineRevision,
-    latestEvent: null,
-    players: board.players.map((player) => {
-      const oldPrice = oldPrices.get(player.playerId);
-      return oldPrice === undefined ? player : { ...player, currentPrice: oldPrice };
-    }),
-  };
+  const usableBoard = usablePriceChangeBaseline(board);
+  if (!usableBoard) return null;
+  // A durable publication captured at or after the watched deadline is not a
+  // valid pre-cutover baseline. It may already contain the first price wave.
+  const sourceCheckedAt = Date.parse(usableBoard.sourceCheckedAt ?? usableBoard.fetchedAt ?? '');
+  if (Number.isFinite(sourceCheckedAt) && sourceCheckedAt >= deadlineAt.getTime()) return null;
+  return usableBoard;
 }
 
 async function enqueueDurableReconciliation(
@@ -314,10 +319,7 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
   // already visible in the first post-restart probe. Conversely, when the
   // value fingerprint is unchanged, a deadline rollover remains a no-change
   // day and must not create a provisional board.
-  const baselineBoard = watchBaselineFromBoard(
-    priorHot?.board ?? usablePriceChangeBaseline(durableBoard),
-    deadlineAt,
-  );
+  let baselineBoard = watchBaselineFromBoard(priorHot?.board ?? durableBoard, deadlineAt);
   const baselineEvent = priorHot?.board.latestEvent ?? durableBoard?.latestEvent;
   const existingEventForDeadline = Boolean(
     baselineEvent && Date.parse(baselineEvent.deadline) === deadlineAt.getTime(),
@@ -374,15 +376,30 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
             pollCount,
           });
         } else {
-          initialized = true;
-          previousValueFingerprint = valueFingerprint;
-          previousDeadline = observedDeadline;
-          logInfo('Price-watch baseline established without an event', {
-            season: season.seasonCode,
-            deadlineAt: deadlineAt.toISOString(),
-            fingerprint,
-            pollCount,
-          });
+          try {
+            baselineBoard = normalizePriceChangeBoard(artifact.payload, artifact.retrievedAt);
+            initialized = true;
+            previousValueFingerprint = priceChangeBoardValueFingerprint(baselineBoard);
+            previousDeadline = observedDeadline;
+            logInfo('Price-watch baseline established without an event', {
+              season: season.seasonCode,
+              deadlineAt: deadlineAt.toISOString(),
+              fingerprint,
+              pollCount,
+            });
+          } catch (error) {
+            // Before the official fields open, a bootstrap may be structurally
+            // valid but still lack the prediction payload required to form a
+            // trustworthy baseline. Keep the watcher inconclusive until a
+            // complete pre-deadline response arrives.
+            logWarn('Price-watch pre-deadline baseline is not complete', {
+              season: season.seasonCode,
+              deadlineAt: deadlineAt.toISOString(),
+              fingerprint,
+              pollCount,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
       } else if (
         validPostDeadlineResponse &&
