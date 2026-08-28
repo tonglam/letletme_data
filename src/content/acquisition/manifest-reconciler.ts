@@ -185,8 +185,12 @@ export function deterministicScheduleJitterMs(input: {
     throw new Error(`Invalid schedule profile ${input.profileKey} for ${input.adapterKind}`);
   }
   const cadenceMs = profile.cadenceMinutes.NORMAL * 60_000;
+  const jitterWindowMs =
+    input.adapterKind === 'X_ACCOUNT'
+      ? Math.min(cadenceMs, profile.bootstrap.lookbackMinutes * 60_000)
+      : cadenceMs;
   const hash = createHash('sha256').update(input.scheduleKey, 'utf8').digest();
-  return hash.readUInt32BE(0) % cadenceMs;
+  return hash.readUInt32BE(0) % jitterWindowMs;
 }
 
 function errorSummary(error: unknown): string {

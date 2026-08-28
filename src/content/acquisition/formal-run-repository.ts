@@ -284,6 +284,11 @@ function requestWindow(input: {
   bootstrapEnabled: boolean;
   lookbackMinutes: number;
 }): { windowStart: Date; windowEnd: Date } {
+  // A daily account cadence is anchored to completion time.  Allow two hours
+  // beyond the nominal 24-hour interval so provider latency and scheduler
+  // delay do not move the start past the previous checkpoint and create a
+  // silent gap.  The extra overlap is harmless because Receipt IDs dedupe it.
+  const maxXRequestWindowMs = 26 * 60 * 60_000;
   if (input.adapterKind === 'X_ACCOUNT' || input.adapterKind === 'X_SEMANTIC') {
     const windowEnd =
       input.scheduleRole === 'BACKSTOP' && input.scheduleKey && input.scheduleDueAt
@@ -304,7 +309,7 @@ function requestWindow(input: {
     const overlapped = checkpointEnd
       ? new Date(Math.min(checkpointEnd.getTime() - 120_000, windowEnd.getTime()))
       : defaultStart;
-    const maximumStart = new Date(windowEnd.getTime() - 24 * 60 * 60_000);
+    const maximumStart = new Date(windowEnd.getTime() - maxXRequestWindowMs);
     const boundedStart = overlapped < maximumStart ? maximumStart : overlapped;
     if (input.adapterKind === 'X_SEMANTIC') {
       boundedStart.setUTCHours(0, 0, 0, 0);

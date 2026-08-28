@@ -105,7 +105,7 @@ describe('Briefing acquisition manifest', () => {
       '    displayName: Official FPL\n    enabled: false\n    endpoints:',
     );
     const acquisitionPlanYaml = input.acquisitionPlanYaml.replace(
-      '  - partitionKey: official-fpl\n    profileKey: x-official-v1\n    priority: 10\n    endpointKeys: [official-fpl-x]\n',
+      '  - partitionKey: official-fpl\n    profileKey: x-official-v2\n    priority: 10\n    endpointKeys: [official-fpl-x]\n',
       '',
     );
 
@@ -138,11 +138,11 @@ describe('Briefing acquisition manifest', () => {
 
   test('keeps every X account profile at one scan per day in every phase', () => {
     for (const profileKey of [
-      'x-official-v1',
-      'x-club-v1',
-      'x-reporter-v1',
-      'x-creator-v1',
-      'x-longform-v1',
+      'x-official-v2',
+      'x-club-v2',
+      'x-reporter-v2',
+      'x-creator-v2',
+      'x-longform-v2',
     ]) {
       expect(ACQUISITION_PROFILES[profileKey]?.cadenceMinutes).toEqual({
         NORMAL: 24 * 60,
@@ -150,5 +150,8 @@ describe('Briefing acquisition manifest', () => {
         FINAL90: 24 * 60,
       });
     }
+    expect(ACQUISITION_PROFILES['x-official-v2']?.bootstrap.lookbackMinutes).toBe(26 * 60);
+    expect(ACQUISITION_PROFILES['x-official-v1']?.revision).toBe(1);
+    expect(ACQUISITION_PROFILES['x-official-v2']?.revision).toBe(2);
   });
 });
