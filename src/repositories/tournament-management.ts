@@ -363,6 +363,19 @@ export const createTournamentManagementRepository = () => ({
     try {
       const client = await getDbClient();
       const result = await client.begin(async (tx) => {
+        // Acquire the season lock before taking a row lock. Snapshot capture
+        // uses the same season -> event order and inserts child rows that need
+        // a key-share lock on competition.tournaments; reversing this order
+        // would allow a lock inversion and PostgreSQL deadlock.
+        await tx`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${myFplSnapshotSeasonLockScope(season.seasonId)}, 0)
+          )
+        `;
+
+        // Re-read and validate ownership while the tournament row is locked.
+        // The advisory lock above serializes this lookup with snapshot
+        // capture, while FOR UPDATE prevents a concurrent management update.
         const rows = await tx<TournamentManagementDatabaseRow[]>`
           SELECT
             tournament_id AS id,
@@ -386,17 +399,6 @@ export const createTournamentManagementRepository = () => ({
         const row = normalize(rows[0]);
         if (!row) return { status: 'not_found' } as const;
         if (row.adminEntryId !== adminEntryId) return { status: 'forbidden' } as const;
-
-        // Serialize the season against snapshot capture before discovering
-        // event-specific publications. Otherwise the first capture for a new
-        // event could begin after discovery and publish a tournament whose
-        // deletion has already committed. Capture uses the same season ->
-        // event lock order.
-        await tx`
-          SELECT pg_advisory_xact_lock(
-            hashtextextended(${myFplSnapshotSeasonLockScope(season.seasonId)}, 0)
-          )
-        `;
 
         await tx`
           DELETE FROM competition.tournament_knockout_results

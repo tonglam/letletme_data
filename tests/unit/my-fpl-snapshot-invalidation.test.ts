@@ -91,12 +91,14 @@ describe('My FPL snapshot invalidation outbox contract', () => {
     expect(captureEventLock).toBeGreaterThan(captureSeasonLock);
 
     const deleteSeasonLock = tournamentRepository.indexOf('myFplSnapshotSeasonLockScope(');
+    const deleteTournamentRowLock = tournamentRepository.indexOf('FOR UPDATE');
     const publicationDiscovery = tournamentRepository.indexOf('const snapshotEvents = await tx');
     const deleteEventLock = tournamentRepository.indexOf(
       'myFplSnapshotEventLockScope(',
       publicationDiscovery,
     );
     expect(deleteSeasonLock).toBeGreaterThan(0);
+    expect(deleteSeasonLock).toBeLessThan(deleteTournamentRowLock);
     expect(publicationDiscovery).toBeGreaterThan(deleteSeasonLock);
     expect(deleteEventLock).toBeGreaterThan(publicationDiscovery);
   });
