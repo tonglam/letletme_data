@@ -4,6 +4,7 @@ import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   normalizePriceChangeBoard,
   parsePublishedPriceChangeBoard,
+  priceChangeObservedEventFromBaseline,
   priceChangeBoardTriggerFingerprint,
   priceChangeBoardValueFingerprint,
   priceChangeBootstrapEdgeCacheKey,
@@ -11,6 +12,9 @@ import {
   priceChangeTriggerFingerprint,
   priceChangeValueFingerprint,
   resolvePriceChangeSourceRunId,
+  isPriceChangeHotEventNewer,
+  validatePriceChangeObservedEvent,
+  validatePriceChangeObservedEventAgainstFetchedAt,
   shouldPublishPriceChangeHotSnapshot,
   PriceChangePredictionValidationError,
   PRICE_CHANGE_MAX_AGE_MS,
@@ -284,6 +288,133 @@ describe('price-change prediction normalization', () => {
     expect(PRICE_CHANGE_STALE_MS).toBe(60 * 60 * 1_000);
   });
 
+  it('diffs every provider wave against the fixed baseline and emits no-change evidence', () => {
+    const baseline = normalizePriceChangeBoard(
+      bootstrapFixture(),
+      new Date('2026-08-22T00:00:00Z'),
+    );
+    const firstWave = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: bootstrapFixture({ now_cost: 76 }),
+      deadline: '2026-08-23T18:30:00Z',
+      fetchedAt: new Date('2026-08-23T18:30:02Z'),
+      outcome: 'CHANGED',
+    });
+    const secondWave = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: bootstrapFixture({ now_cost: 77 }),
+      deadline: '2026-08-23T18:30:00Z',
+      fetchedAt: new Date('2026-08-23T18:30:04Z'),
+      outcome: 'CHANGED',
+    });
+    const noChange = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: bootstrapFixture(),
+      deadline: '2026-08-23T18:30:00Z',
+      fetchedAt: new Date('2026-08-23T18:30:06Z'),
+      outcome: 'NO_CHANGE',
+    });
+
+    expect(firstWave.changes).toEqual([{ playerId: 1, oldPrice: 75, newPrice: 76 }]);
+    expect(secondWave.baselineRevision).toBe(baseline.revision);
+    expect(secondWave.changes).toEqual([{ playerId: 1, oldPrice: 75, newPrice: 77 }]);
+    const rolledDeadline = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: {
+        ...bootstrapFixture({ now_cost: 78 }),
+        game_config: {
+          settings: { price_change_deadlines: ['2026-08-24T18:30:00Z'] },
+        },
+      } as unknown as FPLBootstrapResponse,
+      deadline: '2026-08-23T18:30:00Z',
+      fetchedAt: new Date('2026-08-23T18:30:06Z'),
+      outcome: 'CHANGED',
+    });
+    expect(rolledDeadline.deadline).toBe('2026-08-23T18:30:00.000Z');
+    expect(rolledDeadline.changes).toEqual([{ playerId: 1, oldPrice: 75, newPrice: 78 }]);
+    expect(noChange).toMatchObject({
+      outcome: 'NO_CHANGE',
+      changedPlayerCount: 0,
+      changes: [],
+      changeDate: '2026-08-24',
+    });
+  });
+
+  it('rejects hot event evidence newer than the bootstrap being published', () => {
+    const baseline = normalizePriceChangeBoard(
+      bootstrapFixture(),
+      new Date('2026-08-23T00:00:00Z'),
+    );
+    const event = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: bootstrapFixture({ now_cost: 76 }),
+      deadline: '2026-08-23T18:30:00Z',
+      fetchedAt: new Date('2026-08-23T18:30:02Z'),
+      outcome: 'CHANGED',
+    });
+
+    expect(() =>
+      validatePriceChangeObservedEventAgainstFetchedAt(event, new Date('2026-08-23T18:30:01Z')),
+    ).toThrow('newer than the fetched bootstrap');
+    expect(() =>
+      validatePriceChangeObservedEventAgainstFetchedAt(event, new Date('2026-08-23T18:30:02Z')),
+    ).not.toThrow();
+  });
+
+  it('advances a publication fence only for a newer hot event payload', () => {
+    const baseline = normalizePriceChangeBoard(
+      bootstrapFixture(),
+      new Date('2026-08-23T00:00:00Z'),
+    );
+    const event = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: bootstrapFixture({ now_cost: 76 }),
+      deadline: '2026-08-23T18:30:00Z',
+      fetchedAt: new Date('2026-08-23T18:30:02Z'),
+      outcome: 'CHANGED',
+    });
+    const evidence = {
+      event,
+      revision: 'a'.repeat(16),
+      sourceHash: 'b'.repeat(64),
+      artifactId: null,
+      detectedAt: '2026-08-23T18:30:01Z',
+      fetchedAt: event.observedAt,
+    } as const;
+
+    expect(isPriceChangeHotEventNewer(evidence, event)).toBe(false);
+    expect(
+      isPriceChangeHotEventNewer(
+        {
+          ...evidence,
+          event: { ...event, observedAt: '2026-08-23T18:30:03Z' },
+        },
+        event,
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects duplicate or unsorted event evidence', () => {
+    const board = normalizePriceChangeBoard(bootstrapFixture());
+    expect(() =>
+      validatePriceChangeObservedEvent(
+        {
+          deadline: '2026-08-23T18:30:00.000Z',
+          changeDate: '2026-08-24',
+          observedAt: '2026-08-23T18:30:02.000Z',
+          outcome: 'CHANGED',
+          baselineRevision: 'baseline',
+          changedPlayerCount: 2,
+          changes: [
+            { playerId: 1, oldPrice: 75, newPrice: 76 },
+            { playerId: 1, oldPrice: 75, newPrice: 77 },
+          ],
+        },
+        board.players,
+      ),
+    ).toThrow('invalid or duplicate player change');
+  });
+
   it('hard-expires the canonical publication at exactly one hour', () => {
     const fetchedAt = new Date('2026-08-22T00:00:00.000Z');
     const board = normalizePriceChangeBoard(bootstrapFixture(), fetchedAt);
@@ -325,5 +456,62 @@ describe('price-change prediction normalization', () => {
         new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS),
       ),
     ).toMatchObject({ status: 'UNAVAILABLE', revision: 'unavailable' });
+  });
+
+  it('preserves an observed event when the prediction board hard-expires', () => {
+    const baselineFetchedAt = new Date('2026-08-22T00:00:00.000Z');
+    const fetchedAt = new Date('2026-08-24T00:00:00.000Z');
+    const baseline = normalizePriceChangeBoard(bootstrapFixture(), baselineFetchedAt);
+    const changedBootstrap = bootstrapFixture({ now_cost: 76 });
+    const event = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: changedBootstrap,
+      deadline: '2026-08-23T18:30:00.000Z',
+      fetchedAt: new Date('2026-08-23T18:30:02.000Z'),
+      outcome: 'CHANGED',
+    });
+    const changedBoard = normalizePriceChangeBoard(
+      changedBootstrap,
+      fetchedAt,
+      undefined,
+      undefined,
+      event,
+    );
+    const publication = {
+      manifest: {
+        dataset: 'fpl:price-changes',
+        eventId: null,
+        state: 'active',
+        publicationId: 'price-publication-with-event',
+        revision: 1,
+        sourceCheckedAt: fetchedAt.toISOString(),
+        items: [{ name: 'context' }, { name: 'players' }],
+      },
+      items: {
+        context: {
+          schemaVersion: 2,
+          source: 'FPL_BOOTSTRAP',
+          fetchedAt: fetchedAt.toISOString(),
+          staleAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_READY_MS).toISOString(),
+          hardExpiresAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS).toISOString(),
+          deadline: changedBoard.deadline,
+          nextDeadlines: changedBoard.nextDeadlines,
+          expectedPlayerCount: changedBoard.expectedPlayerCount,
+          observedPlayerCount: changedBoard.observedPlayerCount,
+          latestEvent: event,
+        },
+        players: changedBoard.players,
+      },
+    } as never;
+
+    expect(
+      parsePublishedPriceChangeBoard(
+        publication,
+        new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS),
+      ),
+    ).toMatchObject({
+      status: 'UNAVAILABLE',
+      latestEvent: event,
+    });
   });
 });

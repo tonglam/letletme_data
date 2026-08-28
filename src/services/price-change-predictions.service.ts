@@ -18,6 +18,7 @@ import {
 import { assertSchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
+import { formatCronCalendarDate } from '../utils/timezone';
 
 export const PRICE_CHANGE_READY_MS = 10 * 60 * 1000;
 /** Maximum age at which a price-change publication may be served. */
@@ -26,7 +27,7 @@ export const PRICE_CHANGE_MAX_AGE_MS = PRICE_CHANGE_STALE_MS;
 export const PRICE_CHANGE_DATASET = 'fpl:price-changes' as const;
 
 const PRICE_CHANGE_CACHE_KEY = 'fpl:price-change-predictions:v1';
-const PRICE_CHANGE_CONTEXT_SCHEMA_VERSION = 1;
+export const PRICE_CHANGE_CONTEXT_SCHEMA_VERSION = 2 as const;
 const PRICE_CHANGE_SOURCE_CACHE_BUCKET_MS = 5 * 60 * 1000;
 
 export type PriceChangePredictionStatus =
@@ -45,6 +46,39 @@ export type PriceChangeProjection = {
   projectedPercent: number;
   likelihood: number;
 };
+
+export type PriceChangeObservedOutcome = 'CHANGED' | 'NO_CHANGE';
+
+export type PriceChangeObservedChange = Readonly<{
+  playerId: number;
+  oldPrice: number;
+  newPrice: number;
+}>;
+
+export type PriceChangeObservedEvent = Readonly<{
+  deadline: string;
+  changeDate: string;
+  observedAt: string;
+  outcome: PriceChangeObservedOutcome;
+  baselineRevision: string;
+  changedPlayerCount: number;
+  changes: readonly PriceChangeObservedChange[];
+}>;
+
+/**
+ * The immutable hot-source identity that was used to carry an observed event
+ * into a durable publication.  The event payload alone is not enough for a
+ * publication fence: two hot revisions can contain different provider waves
+ * with the same player count.
+ */
+export type PriceChangeHotEventEvidence = Readonly<{
+  event: PriceChangeObservedEvent;
+  revision: string;
+  sourceHash: string;
+  artifactId: string | null;
+  detectedAt: string;
+  fetchedAt: string;
+}>;
 
 export type PriceChangePlayer = {
   playerId: number;
@@ -82,10 +116,12 @@ export type PriceChangeBoard = {
   expectedPlayerCount: number;
   observedPlayerCount: number;
   players: PriceChangePlayer[];
+  /** Immutable evidence for the latest official price-change observation. */
+  latestEvent?: PriceChangeObservedEvent | null;
 };
 
 export type PriceChangePublicationContext = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   source: 'FPL_BOOTSTRAP';
   fetchedAt: string;
   staleAt: string;
@@ -94,6 +130,7 @@ export type PriceChangePublicationContext = {
   nextDeadlines: string[];
   expectedPlayerCount: number;
   observedPlayerCount: number;
+  latestEvent?: PriceChangeObservedEvent | null;
 };
 
 export type PriceChangePublicationDependencies = {
@@ -111,6 +148,14 @@ export type PriceChangePublicationDependencies = {
     requestStartedAt: Date;
     fetchedAt: Date;
   }>;
+  /**
+   * A hot watcher supplies the exact event it observed. `undefined` means
+   * preserve the event already carried by the canonical publication; a
+   * concrete event is never recomputed during durable reconciliation.
+   */
+  readonly eventEvidence?: PriceChangeObservedEvent | null;
+  /** Exact hot revision carrying `eventEvidence`, when the source is hot-bound. */
+  readonly hotEventEvidence?: PriceChangeHotEventEvidence | null;
 };
 
 export type PreparedPriceChangePublication = {
@@ -128,6 +173,8 @@ export type PreparedPriceChangePublication = {
   readonly corePublicationRevision: number;
   readonly board: PriceChangeBoard;
   readonly context: PriceChangePublicationContext;
+  /** Hot event identity checked again immediately before publication. */
+  readonly hotEventEvidence?: PriceChangeHotEventEvidence;
 };
 
 export type PriceChangePreparationResult =
@@ -166,6 +213,13 @@ export class PriceChangePredictionUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'PriceChangePredictionUnavailableError';
+  }
+}
+
+export class PriceChangeHotEventSupersededError extends Error {
+  constructor(message = 'A newer hot price-change event superseded this publication') {
+    super(message);
+    this.name = 'PriceChangeHotEventSupersededError';
   }
 }
 
@@ -276,6 +330,175 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+/**
+ * Validate the immutable evidence attached to a price-change publication.
+ * Historical events are intentionally allowed to point at a price which is
+ * no longer the current price in a later five-minute prediction publication;
+ * the hot watcher uses `requireCurrentPriceMatch` for its first publication.
+ */
+export function validatePriceChangeObservedEvent(
+  event: PriceChangeObservedEvent,
+  players: readonly PriceChangePlayer[],
+  options: Readonly<{ requireCurrentPriceMatch?: boolean }> = {},
+): void {
+  if (!isRecord(event)) {
+    throw new PriceChangePredictionValidationError('Price-change observed event is invalid');
+  }
+  const deadline = normalizeDate(event.deadline);
+  const observedAt = normalizeDate(event.observedAt);
+  if (
+    !deadline ||
+    !observedAt ||
+    !hasExactKeys(event, [
+      'deadline',
+      'changeDate',
+      'observedAt',
+      'outcome',
+      'baselineRevision',
+      'changedPlayerCount',
+      'changes',
+    ]) ||
+    event.changeDate !== formatCronCalendarDate(new Date(deadline)) ||
+    Date.parse(deadline) > Date.parse(observedAt) ||
+    typeof event.baselineRevision !== 'string' ||
+    event.baselineRevision.trim().length === 0 ||
+    (event.outcome !== 'CHANGED' && event.outcome !== 'NO_CHANGE') ||
+    !Number.isSafeInteger(event.changedPlayerCount) ||
+    event.changedPlayerCount < 0 ||
+    !Array.isArray(event.changes)
+  ) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed event metadata is invalid',
+    );
+  }
+
+  const playersById = new Map(players.map((player) => [player.playerId, player]));
+  const seen = new Set<number>();
+  let previousPlayerId = 0;
+  for (const rawChange of event.changes) {
+    if (!isRecord(rawChange) || !hasExactKeys(rawChange, ['playerId', 'oldPrice', 'newPrice'])) {
+      throw new PriceChangePredictionValidationError(
+        'Price-change observed event contains an invalid player change',
+      );
+    }
+    const playerId = rawChange.playerId;
+    const oldPrice = rawChange.oldPrice;
+    const newPrice = rawChange.newPrice;
+    if (
+      typeof playerId !== 'number' ||
+      !Number.isSafeInteger(playerId) ||
+      playerId <= 0 ||
+      playerId <= previousPlayerId ||
+      seen.has(playerId) ||
+      !playersById.has(playerId) ||
+      typeof oldPrice !== 'number' ||
+      !Number.isSafeInteger(oldPrice) ||
+      oldPrice < 0 ||
+      typeof newPrice !== 'number' ||
+      !Number.isSafeInteger(newPrice) ||
+      newPrice < 0 ||
+      oldPrice === newPrice
+    ) {
+      throw new PriceChangePredictionValidationError(
+        'Price-change observed event contains an invalid or duplicate player change',
+      );
+    }
+    if (options.requireCurrentPriceMatch && playersById.get(playerId)?.currentPrice !== newPrice) {
+      throw new PriceChangePredictionValidationError(
+        `Price-change observed event player ${playerId} does not match the current price`,
+      );
+    }
+    seen.add(playerId);
+    previousPlayerId = playerId;
+  }
+
+  if (
+    event.changedPlayerCount !== event.changes.length ||
+    (event.outcome === 'CHANGED' && event.changes.length === 0) ||
+    (event.outcome === 'NO_CHANGE' && event.changes.length !== 0)
+  ) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed event outcome and count do not match its changes',
+    );
+  }
+}
+
+/** Keep event evidence from making a publication temporally self-contradictory. */
+export function validatePriceChangeObservedEventAgainstFetchedAt(
+  event: PriceChangeObservedEvent,
+  fetchedAt: Date,
+): void {
+  if (!Number.isFinite(fetchedAt.getTime())) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change publication fetchedAt is invalid for observed event',
+    );
+  }
+  const observedAt = Date.parse(event.observedAt);
+  if (!Number.isFinite(observedAt) || observedAt > fetchedAt.getTime()) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed event is newer than the fetched bootstrap',
+    );
+  }
+}
+
+function eventOrder(event: PriceChangeObservedEvent): [number, number] {
+  return [Date.parse(event.deadline), Date.parse(event.observedAt)];
+}
+
+/**
+ * Return true when a hot source contains evidence that is newer than the
+ * event attached to a prepared publication. Equal event payloads are not
+ * considered newer merely because prediction fields caused a new hot board
+ * revision; only a new event payload or event ordering advances the fence.
+ */
+export function isPriceChangeHotEventNewer(
+  candidate: PriceChangeHotEventEvidence | null | undefined,
+  baseline: PriceChangeObservedEvent | null | undefined,
+): boolean {
+  if (!candidate) return false;
+  if (!baseline) return true;
+  const [candidateDeadline, candidateObservedAt] = eventOrder(candidate.event);
+  const [baselineDeadline, baselineObservedAt] = eventOrder(baseline);
+  if (
+    !Number.isFinite(candidateDeadline) ||
+    !Number.isFinite(candidateObservedAt) ||
+    !Number.isFinite(baselineDeadline) ||
+    !Number.isFinite(baselineObservedAt)
+  ) {
+    throw new PriceChangePredictionValidationError('Price-change hot event ordering is invalid');
+  }
+  if (candidateDeadline !== baselineDeadline) return candidateDeadline > baselineDeadline;
+  if (candidateObservedAt !== baselineObservedAt) {
+    return candidateObservedAt > baselineObservedAt;
+  }
+  return JSON.stringify(candidate.event) !== JSON.stringify(baseline);
+}
+
+/** Keep the newest immutable official event when a delayed reconcile arrives. */
+export function selectLatestPriceChangeEvent(
+  existing: PriceChangeObservedEvent | null | undefined,
+  candidate: PriceChangeObservedEvent | null | undefined,
+): PriceChangeObservedEvent | null {
+  if (!candidate) return existing ?? null;
+  if (!existing) return candidate;
+  const [candidateDeadline, candidateObservedAt] = eventOrder(candidate);
+  const [existingDeadline, existingObservedAt] = eventOrder(existing);
+  if (
+    !Number.isFinite(candidateDeadline) ||
+    !Number.isFinite(candidateObservedAt) ||
+    !Number.isFinite(existingDeadline) ||
+    !Number.isFinite(existingObservedAt)
+  ) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed event ordering is invalid',
+    );
+  }
+  return candidateDeadline > existingDeadline ||
+    (candidateDeadline === existingDeadline && candidateObservedAt >= existingObservedAt)
+    ? candidate
+    : existing;
 }
 
 function getDeadlines(bootstrap: FPLBootstrapResponse): string[] {
@@ -507,6 +730,7 @@ export function normalizePriceChangeBoard(
   fetchedAt = new Date(),
   staleAt = new Date(fetchedAt.getTime() + PRICE_CHANGE_READY_MS),
   expectedPlayerIds?: ReadonlySet<number>,
+  latestEvent: PriceChangeObservedEvent | null = null,
 ): PriceChangeBoard {
   const { deadlines, teamsById } = validateBootstrap(bootstrap, fetchedAt, expectedPlayerIds);
   const players: PriceChangePlayer[] = bootstrap.elements.map((element) => {
@@ -552,10 +776,11 @@ export function normalizePriceChangeBoard(
   });
   players.sort((left, right) => left.playerId - right.playerId);
   const revision = createHash('sha1')
-    .update(JSON.stringify({ deadline: deadlines[0], players }), 'utf8')
+    .update(JSON.stringify({ deadline: deadlines[0], players, latestEvent }), 'utf8')
     .digest('hex')
     .slice(0, 16);
   const expectedPlayerCount = expectedPlayerIds?.size ?? bootstrap.elements.length;
+  if (latestEvent) validatePriceChangeObservedEvent(latestEvent, players);
   return {
     status: 'READY',
     source: 'FPL_BOOTSTRAP',
@@ -567,7 +792,85 @@ export function normalizePriceChangeBoard(
     expectedPlayerCount,
     observedPlayerCount: players.length,
     players,
+    latestEvent,
   };
+}
+
+/**
+ * Compare an authoritative post-deadline bootstrap with the fixed pre-cutover
+ * baseline. The returned event is cumulative across provider waves because it
+ * never compares against a previously changed response.
+ */
+export function priceChangeObservedEventFromBaseline(input: {
+  readonly baseline: PriceChangeBoard;
+  readonly bootstrap: FPLBootstrapResponse;
+  readonly deadline: string;
+  readonly fetchedAt: Date;
+  readonly outcome: PriceChangeObservedOutcome;
+}): PriceChangeObservedEvent {
+  const deadline = normalizeDate(input.deadline);
+  if (!deadline || !Number.isFinite(input.fetchedAt.getTime())) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed event timestamps are invalid',
+    );
+  }
+  if (Date.parse(deadline) > input.fetchedAt.getTime()) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed event was captured before its deadline',
+    );
+  }
+  const baselineIds = new Set(input.baseline.players.map((player) => player.playerId));
+  if (
+    baselineIds.size === 0 ||
+    baselineIds.size !== input.baseline.players.length ||
+    input.baseline.players.some(
+      (player) => !Number.isSafeInteger(player.currentPrice) || player.currentPrice < 0,
+    )
+  ) {
+    throw new PriceChangePredictionValidationError('Price-change baseline is invalid');
+  }
+  const observedDeadline = priceChangePrimaryDeadline(input.bootstrap);
+  if (Date.parse(observedDeadline) < Date.parse(deadline)) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed bootstrap predates the watched deadline',
+    );
+  }
+  const normalized = normalizePriceChangeBoard(
+    input.bootstrap,
+    input.fetchedAt,
+    undefined,
+    baselineIds,
+  );
+  const baselinePrices = new Map(
+    input.baseline.players.map((player) => [player.playerId, player.currentPrice]),
+  );
+  const changes = normalized.players
+    .map((player) => {
+      const oldPrice = baselinePrices.get(player.playerId);
+      if (oldPrice === undefined || oldPrice === player.currentPrice) return null;
+      return { playerId: player.playerId, oldPrice, newPrice: player.currentPrice };
+    })
+    .filter((change): change is PriceChangeObservedChange => change !== null)
+    .sort((left, right) => left.playerId - right.playerId);
+  if (
+    (input.outcome === 'CHANGED' && changes.length === 0) ||
+    (input.outcome === 'NO_CHANGE' && changes.length !== 0)
+  ) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed event outcome does not match the bootstrap diff',
+    );
+  }
+  const event: PriceChangeObservedEvent = {
+    deadline,
+    changeDate: formatCronCalendarDate(new Date(deadline)),
+    observedAt: input.fetchedAt.toISOString(),
+    outcome: input.outcome,
+    baselineRevision: input.baseline.revision,
+    changedPlayerCount: changes.length,
+    changes,
+  };
+  validatePriceChangeObservedEvent(event, normalized.players, { requireCurrentPriceMatch: true });
+  return event;
 }
 
 function contextFromBoard(board: PriceChangeBoard, fetchedAt: Date): PriceChangePublicationContext {
@@ -584,6 +887,7 @@ function contextFromBoard(board: PriceChangeBoard, fetchedAt: Date): PriceChange
     nextDeadlines: board.nextDeadlines,
     expectedPlayerCount: board.expectedPlayerCount,
     observedPlayerCount: board.observedPlayerCount,
+    latestEvent: board.latestEvent ?? null,
   };
 }
 
@@ -655,7 +959,7 @@ function isPriceChangePlayer(value: unknown): value is PriceChangePlayer {
   );
 }
 
-function unavailableBoard(): PriceChangeBoard {
+function unavailableBoard(latestEvent: PriceChangeObservedEvent | null = null): PriceChangeBoard {
   return {
     status: 'UNAVAILABLE',
     source: 'FPL_BOOTSTRAP',
@@ -667,10 +971,11 @@ function unavailableBoard(): PriceChangeBoard {
     expectedPlayerCount: 0,
     observedPlayerCount: 0,
     players: [],
+    latestEvent,
   };
 }
 
-const CONTEXT_KEYS = [
+const CONTEXT_KEYS_V1 = [
   'schemaVersion',
   'source',
   'fetchedAt',
@@ -681,6 +986,8 @@ const CONTEXT_KEYS = [
   'expectedPlayerCount',
   'observedPlayerCount',
 ] as const;
+
+const CONTEXT_KEYS_V2 = [...CONTEXT_KEYS_V1, 'latestEvent'] as const;
 
 export function parsePublishedPriceChangeBoard(
   publication: DataPublicationReadResult,
@@ -699,14 +1006,20 @@ export function parsePublishedPriceChangeBoard(
   }
   const context = items.context;
   const players = items.players;
-  if (!isRecord(context) || !hasExactKeys(context, CONTEXT_KEYS) || !Array.isArray(players)) {
+  if (!isRecord(context) || !Array.isArray(players)) {
+    return null;
+  }
+  const contextSchemaVersion = context.schemaVersion;
+  if (
+    (contextSchemaVersion !== 1 && contextSchemaVersion !== 2) ||
+    !hasExactKeys(context, contextSchemaVersion === 1 ? CONTEXT_KEYS_V1 : CONTEXT_KEYS_V2)
+  ) {
     return null;
   }
   const nextDeadlinesValue = context.nextDeadlines;
   const expectedPlayerCountValue = context.expectedPlayerCount;
   const observedPlayerCountValue = context.observedPlayerCount;
   if (
-    context.schemaVersion !== PRICE_CHANGE_CONTEXT_SCHEMA_VERSION ||
     context.source !== 'FPL_BOOTSTRAP' ||
     typeof context.fetchedAt !== 'string' ||
     typeof context.staleAt !== 'string' ||
@@ -773,9 +1086,6 @@ export function parsePublishedPriceChangeBoard(
   }
   const ageMs = now.getTime() - fetchedAt;
   if (ageMs < 0) return null;
-  // The hard boundary is inclusive: at exactly one hour the last-good
-  // publication is no longer contract-valid for any consumer.
-  if (ageMs >= PRICE_CHANGE_MAX_AGE_MS) return unavailableBoard();
   const board: PriceChangeBoard = {
     status: ageMs < PRICE_CHANGE_READY_MS ? 'READY' : 'STALE',
     source: 'FPL_BOOTSTRAP',
@@ -788,7 +1098,29 @@ export function parsePublishedPriceChangeBoard(
     expectedPlayerCount,
     observedPlayerCount,
     players: [...players].sort((left, right) => left.playerId - right.playerId),
+    latestEvent: null,
   };
+  if (contextSchemaVersion === 2 && context.latestEvent !== null) {
+    if (!isRecord(context.latestEvent)) return null;
+    try {
+      validatePriceChangeObservedEvent(
+        context.latestEvent as PriceChangeObservedEvent,
+        board.players,
+      );
+      validatePriceChangeObservedEventAgainstFetchedAt(
+        context.latestEvent as PriceChangeObservedEvent,
+        new Date(fetchedAt),
+      );
+    } catch {
+      return null;
+    }
+    board.latestEvent = context.latestEvent as PriceChangeObservedEvent;
+  }
+  // The hard boundary is inclusive: at exactly one hour the last-good
+  // publication is no longer contract-valid for any consumer. Preserve the
+  // immutable observed event as evidence so the hot event can still be
+  // displayed/reconciled independently of prediction freshness.
+  if (ageMs >= PRICE_CHANGE_MAX_AGE_MS) return unavailableBoard(board.latestEvent ?? null);
   return board;
 }
 
@@ -995,6 +1327,9 @@ export async function preparePriceChangePublication(
   sourceRunIdOverride?: string,
   freshnessWindowId?: number,
   freshnessWindowIds?: readonly number[],
+  eventEvidenceOverride?: PriceChangeObservedEvent | null,
+  readLatestEvent?: () => Promise<PriceChangeHotEventEvidence | null | undefined>,
+  initialHotEventEvidence?: PriceChangeHotEventEvidence | null,
 ): Promise<PriceChangePreparationResult> {
   const sourceRunId = sourceRunIdOverride ?? randomUUID();
   await syncOperationsRepository.startRun({
@@ -1038,11 +1373,48 @@ export async function preparePriceChangePublication(
       };
     }
 
+    // A source-bound hot replay is authoritative for the archived bootstrap
+    // and deliberately does not read an older canonical publication. A live
+    // event override is only a snapshot taken before this bootstrap request;
+    // keep the canonical read enabled and refresh the hot event after the
+    // request so a later provider wave cannot be hidden by the older override.
+    const sourceEventEvidence = dependencies.eventEvidence;
+    const eventEvidence =
+      sourceEventEvidence !== undefined ? sourceEventEvidence : eventEvidenceOverride;
+    const existingCanonical =
+      sourceEventEvidence === undefined ? await readCanonicalPriceChangePublication(season) : null;
+    const initialHotEvent = dependencies.hotEventEvidence ?? initialHotEventEvidence;
+    let latestEvent = selectLatestPriceChangeEvent(
+      existingCanonical?.board?.latestEvent,
+      initialHotEvent?.event ?? eventEvidence,
+    );
+    const refreshedHotEvent = readLatestEvent ? await readLatestEvent() : undefined;
+    latestEvent = selectLatestPriceChangeEvent(latestEvent, refreshedHotEvent?.event);
+    const selectedHotEventEvidence =
+      refreshedHotEvent && latestEvent === refreshedHotEvent.event
+        ? refreshedHotEvent
+        : initialHotEvent && latestEvent === initialHotEvent.event
+          ? initialHotEvent
+          : undefined;
     const core = await readCorePublicationEvidence(season);
     const board = {
-      ...normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds),
+      ...normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds, latestEvent),
       sourceCheckedAt: requestStartedAt.toISOString(),
     };
+    if (latestEvent) {
+      // A hot event is source-bound evidence. The archived bootstrap used for
+      // reconciliation must contain the same post-change prices; regular
+      // five-minute publications inherit older canonical events without this
+      // current-price check.
+      validatePriceChangeObservedEvent(latestEvent, board.players, {
+        requireCurrentPriceMatch:
+          latestEvent === sourceEventEvidence ||
+          latestEvent === eventEvidence ||
+          latestEvent === refreshedHotEvent?.event ||
+          latestEvent === initialHotEvent?.event,
+      });
+      validatePriceChangeObservedEventAgainstFetchedAt(latestEvent, fetchedAt);
+    }
     const context = contextFromBoard(board, fetchedAt);
     return {
       outcome: 'ready',
@@ -1056,6 +1428,7 @@ export async function preparePriceChangePublication(
       corePublicationRevision: core.revision,
       board,
       context,
+      ...(selectedHotEventEvidence ? { hotEventEvidence: selectedHotEventEvidence } : {}),
     };
   } catch (error) {
     const skipReason = priceRunSkipReason(error);
@@ -1098,6 +1471,10 @@ export async function persistPriceChangePublication(
   prepared: PreparedPriceChangePublication,
   options: {
     readonly deferDelivery?: boolean;
+    /** Read-only Redis evidence used for the optimistic hot-event fence. */
+    readonly readLatestHotEvent?: () => Promise<PriceChangeHotEventEvidence | null | undefined>;
+    /** Requeue a newer hot event observed after the DB commit. */
+    readonly onHotEventSuperseded?: (evidence: PriceChangeHotEventEvidence) => Promise<void>;
     readonly publicationFence?: {
       readonly laneId: string;
       readonly dispatchGeneration: number;
@@ -1244,6 +1621,22 @@ export async function persistPriceChangePublication(
         if (options.publicationFence) {
           await assertSchedulerLanePublicationFence(tx, options.publicationFence);
         }
+        // The hot pointer and this SQL transaction cannot share one atomic
+        // commit. Carry the exact hot event revision selected during prepare
+        // and perform a final read-only check while the publication row is
+        // locked. A newer event aborts this activation; the worker retries it
+        // with the newer source instead of making the old event canonical.
+        const latestHotEvent = options.readLatestHotEvent
+          ? await options.readLatestHotEvent()
+          : null;
+        if (
+          isPriceChangeHotEventNewer(
+            latestHotEvent,
+            prepared.hotEventEvidence?.event ?? board.latestEvent,
+          )
+        ) {
+          throw new PriceChangeHotEventSupersededError();
+        }
         const activeCore = await txSyncOperationsRepository.findActivePublication(
           'fpl:core',
           season,
@@ -1259,6 +1652,28 @@ export async function persistPriceChangePublication(
       },
     });
     dbActivated = true;
+    // A hot pointer can advance in the small interval after the transaction
+    // fence and before this function returns. Compensate that unavoidable
+    // cross-system race by immediately creating a durable latest-wins target
+    // for the exact newer hot revision. The hot board remains user-visible
+    // while that target converges the DB and outbox.
+    if (options.readLatestHotEvent) {
+      const latestHotEvent = await options.readLatestHotEvent();
+      if (
+        latestHotEvent &&
+        isPriceChangeHotEventNewer(
+          latestHotEvent,
+          prepared.hotEventEvidence?.event ?? board.latestEvent,
+        )
+      ) {
+        if (!options.onHotEventSuperseded) {
+          throw new PriceChangeHotEventSupersededError(
+            'A newer hot price-change event was published after activation',
+          );
+        }
+        await options.onHotEventSuperseded(latestHotEvent);
+      }
+    }
     if (!options.deferDelivery) {
       await ensurePriceChangePublicationDelivered(
         season,

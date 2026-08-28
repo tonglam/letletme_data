@@ -29,6 +29,8 @@ import {
   priceChangePrimaryDeadline,
   priceChangeTriggerFingerprint,
   priceChangeValueFingerprint,
+  priceChangeObservedEventFromBaseline,
+  normalizePriceChangeBoard,
   shouldPublishPriceChangeHotSnapshot,
   type PriceChangeBoard,
 } from '../services/price-change-predictions.service';
@@ -81,6 +83,40 @@ function usablePriceChangeBaseline(board: PriceChangeBoard | null): PriceChangeB
     return null;
   }
   return board;
+}
+
+/** Reconstruct the pre-event prices when a worker restarts after hot publish. */
+function watchBaselineFromBoard(
+  board: PriceChangeBoard | null,
+  deadlineAt: Date,
+): PriceChangeBoard | null {
+  if (!board) return null;
+  const event = board.latestEvent;
+  if (event && event.outcome === 'CHANGED' && Date.parse(event.deadline) === deadlineAt.getTime()) {
+    const usableBoard = usablePriceChangeBaseline(board);
+    if (!usableBoard) return null;
+    const oldPrices = new Map(event.changes.map((change) => [change.playerId, change.oldPrice]));
+    return {
+      ...usableBoard,
+      // The hot board revision includes the observed event and therefore is no
+      // longer the identity of the fixed pre-cutover baseline. Keep the
+      // original revision on the reconstructed board so every later provider
+      // wave carries the same baselineRevision through cumulative diffs.
+      revision: event.baselineRevision,
+      latestEvent: null,
+      players: usableBoard.players.map((player) => {
+        const oldPrice = oldPrices.get(player.playerId);
+        return oldPrice === undefined ? player : { ...player, currentPrice: oldPrice };
+      }),
+    };
+  }
+  const usableBoard = usablePriceChangeBaseline(board);
+  if (!usableBoard) return null;
+  // A durable publication captured at or after the watched deadline is not a
+  // valid pre-cutover baseline. It may already contain the first price wave.
+  const sourceCheckedAt = Date.parse(usableBoard.sourceCheckedAt ?? usableBoard.fetchedAt ?? '');
+  if (Number.isFinite(sourceCheckedAt) && sourceCheckedAt >= deadlineAt.getTime()) return null;
+  return usableBoard;
 }
 
 async function enqueueDurableReconciliation(
@@ -143,6 +179,70 @@ async function markHotReconciliationFailed(
     error,
   });
   if (!updated) throw new Error('Price-change hot reconciliation failure CAS failed');
+}
+
+async function publishAndReconcilePriceChangeHotSnapshot(input: {
+  readonly season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>;
+  readonly snapshot: Awaited<ReturnType<typeof buildPriceChangeHotSnapshot>>;
+  readonly bytes: Uint8Array;
+  readonly artifactId: string;
+  readonly probeStartedAt: number;
+}): Promise<boolean> {
+  const { season, snapshot, bytes, artifactId, probeStartedAt } = input;
+  const published = await publishPriceChangeHotSnapshot(snapshot);
+  if (!published.published) return false;
+  logInfo('Price-change hot snapshot published', {
+    season: season.seasonCode,
+    deadlineAt: snapshot.deadline,
+    revision: snapshot.revision,
+    triggerFingerprint: snapshot.triggerFingerprint,
+    observedPlayerCount: snapshot.observedPlayerCount,
+    outcome: snapshot.board.latestEvent?.outcome ?? null,
+    changedPlayerCount: snapshot.board.latestEvent?.changedPlayerCount ?? null,
+    detectionMs: Date.now() - probeStartedAt,
+  });
+  // The hot Redis write is the user-visible fast path. Archive and durable
+  // reconciliation happen only after that write has succeeded.
+  let archived = false;
+  let archiveError: string | null = null;
+  try {
+    await archivePriceChangeHotSource({ artifactId, bytes, sourceHash: snapshot.sourceHash });
+    archived = true;
+  } catch (error) {
+    archiveError = error instanceof Error ? error.message : String(error);
+    logWarn('Price-change hot source archive failed; provisional data remains visible', {
+      season: season.seasonCode,
+      revision: snapshot.revision,
+      artifactId,
+      error: archiveError,
+    });
+    const marked = await markPriceChangeHotReconciliation(snapshot, {
+      state: 'pending',
+      error: `${PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX} ${archiveError}`,
+    });
+    if (!marked) throw new Error('Price-change hot archive failure CAS failed');
+  }
+  try {
+    await enqueueDurableReconciliation(
+      season,
+      archived
+        ? snapshot
+        : {
+            ...snapshot,
+            artifactId: null,
+            reconciliation: archiveError
+              ? {
+                  ...snapshot.reconciliation,
+                  error: `${PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX} ${archiveError}`,
+                }
+              : snapshot.reconciliation,
+          },
+    );
+  } catch (error) {
+    await markHotReconciliationFailed(snapshot, error);
+    throw error;
+  }
+  return true;
 }
 
 async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
@@ -219,7 +319,11 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
   // already visible in the first post-restart probe. Conversely, when the
   // value fingerprint is unchanged, a deadline rollover remains a no-change
   // day and must not create a provisional board.
-  const baselineBoard = priorHot?.board ?? usablePriceChangeBaseline(durableBoard);
+  let baselineBoard = watchBaselineFromBoard(priorHot?.board ?? durableBoard, deadlineAt);
+  const baselineEvent = priorHot?.board.latestEvent ?? durableBoard?.latestEvent;
+  const existingEventForDeadline = Boolean(
+    baselineEvent && Date.parse(baselineEvent.deadline) === deadlineAt.getTime(),
+  );
   let previousValueFingerprint: string | null = baselineBoard
     ? priceChangeBoardValueFingerprint(baselineBoard)
     : null;
@@ -230,6 +334,9 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
   let hotPublications = 0;
   let noChangeObserved = false;
   let postDeadlineSuccessfulProbe = false;
+  let lastPostDeadlineArtifact: Awaited<ReturnType<typeof fplClient.getBootstrapArtifact>> | null =
+    null;
+  let lastPostDeadlineProbeStartedAt: number | null = null;
   let retryableFailureStreak = 0;
   const stopAt = deadlineAt.getTime() + PRICE_CHANGE_WATCH_MAX_WINDOW_MS;
 
@@ -245,12 +352,17 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       const fingerprint = priceChangeTriggerFingerprint(artifact.payload);
       const valueFingerprint = priceChangeValueFingerprint(artifact.payload);
       const observedDeadline = priceChangePrimaryDeadline(artifact.payload);
+      const observedDeadlineMs = Date.parse(observedDeadline);
       successfulProbes += 1;
       // A request that began before the official cutover can complete after it
       // and still contain the pre-change response. Only a probe initiated at
       // or after the deadline is evidence about the post-deadline state.
       const isPostDeadline = probeStartedAt >= deadlineAt.getTime();
       retryableFailureStreak = 0;
+      const validPostDeadlineResponse =
+        isPostDeadline &&
+        Number.isFinite(observedDeadlineMs) &&
+        observedDeadlineMs >= deadlineAt.getTime();
       if (!initialized) {
         if (isPostDeadline) {
           // A first valid response after the official deadline may already
@@ -264,17 +376,43 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
             pollCount,
           });
         } else {
-          initialized = true;
-          previousValueFingerprint = valueFingerprint;
-          previousDeadline = observedDeadline;
-          logInfo('Price-watch baseline established without an event', {
-            season: season.seasonCode,
-            deadlineAt: deadlineAt.toISOString(),
-            fingerprint,
-            pollCount,
-          });
+          try {
+            baselineBoard = normalizePriceChangeBoard(artifact.payload, artifact.retrievedAt);
+            initialized = true;
+            previousValueFingerprint = priceChangeBoardValueFingerprint(baselineBoard);
+            previousDeadline = observedDeadline;
+            logInfo('Price-watch baseline established without an event', {
+              season: season.seasonCode,
+              deadlineAt: deadlineAt.toISOString(),
+              fingerprint,
+              pollCount,
+            });
+          } catch (error) {
+            // Before the official fields open, a bootstrap may be structurally
+            // valid but still lack the prediction payload required to form a
+            // trustworthy baseline. Keep the watcher inconclusive until a
+            // complete pre-deadline response arrives.
+            logWarn('Price-watch pre-deadline baseline is not complete', {
+              season: season.seasonCode,
+              deadlineAt: deadlineAt.toISOString(),
+              fingerprint,
+              pollCount,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
-      } else if (shouldPublishPriceChangeHotSnapshot(previousValueFingerprint, valueFingerprint)) {
+      } else if (
+        validPostDeadlineResponse &&
+        shouldPublishPriceChangeHotSnapshot(previousValueFingerprint, valueFingerprint)
+      ) {
+        if (!baselineBoard) throw new Error('Price-change watcher baseline disappeared');
+        const latestEvent = priceChangeObservedEventFromBaseline({
+          baseline: baselineBoard,
+          bootstrap: artifact.payload,
+          deadline: deadlineAt.toISOString(),
+          fetchedAt: artifact.retrievedAt,
+          outcome: 'CHANGED',
+        });
         const sourceHash = sha256Bytes(artifact.bytes);
         const artifactId = createPriceChangeHotArtifactId();
         const observedCore = coreSnapshot as CoreSnapshotCacheContents | null;
@@ -283,6 +421,7 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
           bootstrap: artifact.payload,
           sourceHash,
           artifactId,
+          latestEvent,
           // Use the request start as the ordering lower bound. The response
           // may be replayed after a long queue/archive delay; stamping the
           // post-response clock could make older bytes appear newer than a
@@ -294,64 +433,16 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
             ? artifact.payload.elements.length - observedCore.players.length
             : null,
         });
-        const published = await publishPriceChangeHotSnapshot(snapshot);
-        if (published.published) {
+        if (
+          await publishAndReconcilePriceChangeHotSnapshot({
+            season,
+            snapshot,
+            bytes: artifact.bytes,
+            artifactId,
+            probeStartedAt,
+          })
+        ) {
           hotPublications += 1;
-          logInfo('Price-change hot snapshot published', {
-            season: season.seasonCode,
-            deadlineAt: deadlineAt.toISOString(),
-            revision: snapshot.revision,
-            triggerFingerprint: snapshot.triggerFingerprint,
-            observedPlayerCount: snapshot.observedPlayerCount,
-            detectionMs: Date.now() - probeStartedAt,
-          });
-          // The hot Redis write is the user-visible fast path. Before handing
-          // the artifact identity to reconciliation, archive and verify the
-          // exact response so a worker cannot silently persist a different
-          // bootstrap after an archive race or transient storage miss.
-          let archived = false;
-          let archiveError: string | null = null;
-          try {
-            await archivePriceChangeHotSource({
-              artifactId,
-              bytes: artifact.bytes,
-              sourceHash,
-            });
-            archived = true;
-          } catch (error) {
-            archiveError = error instanceof Error ? error.message : String(error);
-            logWarn('Price-change hot source archive failed; provisional data remains visible', {
-              season: season.seasonCode,
-              revision: snapshot.revision,
-              artifactId,
-              error: archiveError,
-            });
-            const marked = await markPriceChangeHotReconciliation(snapshot, {
-              state: 'pending',
-              error: `${PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX} ${archiveError}`,
-            });
-            if (!marked) throw new Error('Price-change hot archive failure CAS failed');
-          }
-          try {
-            await enqueueDurableReconciliation(
-              season,
-              archived
-                ? snapshot
-                : {
-                    ...snapshot,
-                    artifactId: null,
-                    reconciliation: archiveError
-                      ? {
-                          ...snapshot.reconciliation,
-                          error: `${PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX} ${archiveError}`,
-                        }
-                      : snapshot.reconciliation,
-                  },
-            );
-          } catch (error) {
-            await markHotReconciliationFailed(snapshot, error);
-            throw error;
-          }
         }
         previousValueFingerprint = valueFingerprint;
         previousDeadline = observedDeadline;
@@ -367,11 +458,15 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
           observedDeadline,
           pollCount,
         });
-      } else if (isPostDeadline) {
-        postDeadlineSuccessfulProbe = true;
+        if (validPostDeadlineResponse && initialized) noChangeObserved = true;
+      } else if (validPostDeadlineResponse) {
         noChangeObserved = true;
       }
-      if (isPostDeadline && initialized) postDeadlineSuccessfulProbe = true;
+      if (validPostDeadlineResponse && initialized) {
+        postDeadlineSuccessfulProbe = true;
+        lastPostDeadlineArtifact = artifact;
+        lastPostDeadlineProbeStartedAt = probeStartedAt;
+      }
     } catch (error) {
       // Only upstream transport/admission failures are retryable inside the
       // bounded watcher. A malformed validated payload or a Redis hot-write
@@ -418,6 +513,49 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
     postDeadlineSuccessfulProbe,
     watchDurationMs: Date.now() - startedAt,
   });
+  if (
+    hotPublications === 0 &&
+    !existingEventForDeadline &&
+    noChangeObserved &&
+    baselineBoard &&
+    lastPostDeadlineArtifact &&
+    lastPostDeadlineProbeStartedAt !== null
+  ) {
+    const latestEvent = priceChangeObservedEventFromBaseline({
+      baseline: baselineBoard,
+      bootstrap: lastPostDeadlineArtifact.payload,
+      deadline: deadlineAt.toISOString(),
+      fetchedAt: lastPostDeadlineArtifact.retrievedAt,
+      outcome: 'NO_CHANGE',
+    });
+    const sourceHash = sha256Bytes(lastPostDeadlineArtifact.bytes);
+    const artifactId = createPriceChangeHotArtifactId();
+    const observedCore = coreSnapshot as CoreSnapshotCacheContents | null;
+    const snapshot = buildPriceChangeHotSnapshot({
+      season,
+      bootstrap: lastPostDeadlineArtifact.payload,
+      sourceHash,
+      artifactId,
+      latestEvent,
+      detectedAt: new Date(lastPostDeadlineProbeStartedAt),
+      fetchedAt: lastPostDeadlineArtifact.retrievedAt,
+      corePlayerCount: observedCore?.players.length ?? null,
+      corePlayerDelta: observedCore
+        ? lastPostDeadlineArtifact.payload.elements.length - observedCore.players.length
+        : null,
+    });
+    if (
+      await publishAndReconcilePriceChangeHotSnapshot({
+        season,
+        snapshot,
+        bytes: lastPostDeadlineArtifact.bytes,
+        artifactId,
+        probeStartedAt: lastPostDeadlineProbeStartedAt,
+      })
+    ) {
+      hotPublications += 1;
+    }
+  }
   if (hotPublications === 0 && !postDeadlineSuccessfulProbe) {
     const evidence = {
       reason: 'price-watch-window-expired-without-post-deadline-evidence',
