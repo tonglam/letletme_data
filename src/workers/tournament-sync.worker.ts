@@ -70,13 +70,13 @@ import {
 } from '../utils/scheduler-obligation-fence';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
+import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
 import {
   completeSchedulerObligation,
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
-  renewSchedulerObligation,
-} from '../repositories/scheduler-obligations';
+} from '../services/scheduler-obligation-lifecycle.service';
 import { openGovernanceCase } from '../services/data-governance.service';
 
 type PostCommitIntent = () => Promise<void>;

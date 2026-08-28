@@ -1,5 +1,6 @@
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { myFplSnapshotEventLockScope, myFplSnapshotSeasonLockScope } from '../domain/my-fpl-locks';
 import type {
   GroupMode,
   KnockoutMode,
@@ -362,6 +363,19 @@ export const createTournamentManagementRepository = () => ({
     try {
       const client = await getDbClient();
       const result = await client.begin(async (tx) => {
+        // Acquire the season lock before taking a row lock. Snapshot capture
+        // uses the same season -> event order and inserts child rows that need
+        // a key-share lock on competition.tournaments; reversing this order
+        // would allow a lock inversion and PostgreSQL deadlock.
+        await tx`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${myFplSnapshotSeasonLockScope(season.seasonId)}, 0)
+          )
+        `;
+
+        // Re-read and validate ownership while the tournament row is locked.
+        // The advisory lock above serializes this lookup with snapshot
+        // capture, while FOR UPDATE prevents a concurrent management update.
         const rows = await tx<TournamentManagementDatabaseRow[]>`
           SELECT
             tournament_id AS id,
@@ -434,7 +448,10 @@ export const createTournamentManagementRepository = () => ({
         for (const snapshotEvent of snapshotEvents) {
           await tx`
             SELECT pg_advisory_xact_lock(
-              hashtextextended(${`my-fpl:${season.seasonId}:${snapshotEvent.event_id}`}, 0)
+              hashtextextended(${myFplSnapshotEventLockScope(
+                season.seasonId,
+                snapshotEvent.event_id,
+              )}, 0)
             )
           `;
         }

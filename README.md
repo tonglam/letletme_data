@@ -209,10 +209,11 @@ explicitly unauthenticated local environment.
 
 For a release-quality local check, run `bun run coverage:critical`. It writes
 the unit LCOV profile to `coverage/lcov.info` and enforces thresholds only for
-the dependency-free Manager Live, invalidation, publication-delivery,
-scheduler, tournament-policy, and runtime-lifecycle decision modules. The
-repository-wide percentage is informational; database and Redis adapters are
-covered by the explicit integration suites.
+the production Manager Live result/Classic-refresh, My FPL invalidation,
+publication-delivery, scheduler-obligation, tournament-management, and
+runtime-lifecycle implementations. Pure helpers cannot substitute for those
+service gates. The repository-wide percentage is informational; disposable
+database and Redis behavior remains covered by the explicit integration suites.
 
 ## Manual core-season bootstrap
 

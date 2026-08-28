@@ -47,6 +47,13 @@ BullMQ is a delivery mechanism and retained history, not the source of
 schedule truth or business completion. `GET /jobs` is generated from the
 registry and compatibility aliases; `GET /jobs/status` is protected.
 
+Manager Live keeps its public compatibility facade at
+`src/services/manager-live.service.ts`, while contracts, publication storage,
+coverage/result assembly, provider coordination, Classic refresh, final-result
+projection, and orchestration are separate modules. The orchestration module
+reaches PostgreSQL, Redis, queues, providers, and the clock only through ports
+bound by the production composition adapter.
+
 ## Runtime topology
 
 The production image is used by seven long-lived services:
@@ -75,6 +82,12 @@ shutdown exits non-zero.
 the complete migration filename and checksums are verified before every apply.
 The historical duplicate numeric prefixes are explicitly grandfathered; a new
 duplicate prefix is rejected by the migration contract test.
+
+The typed Drizzle platform schema follows the same ownership boundaries:
+namespaces/enums, FPL, competition/My FPL, ops, Understat/bridge, market, and
+reporting are separate declaration modules. `platform.schema.ts` and
+`index.schema.ts` remain compatibility barrels; runtime export names and the
+resulting disposable PostgreSQL catalog are parity-gated.
 
 ## Redis boundary
 

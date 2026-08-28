@@ -1,15 +1,14 @@
 import { z } from 'zod';
 
 import { parseStrictIntegerEnv } from '../config';
+import { parseStrictBooleanEnvValue } from '../../utils/config';
 
 function booleanEnv(defaultValue: boolean) {
   return z.preprocess((value) => {
     if (value === undefined || value === '') return defaultValue;
     if (typeof value === 'boolean') return value;
     if (typeof value !== 'string') return value;
-    if (['true', '1', 'yes', 'on'].includes(value.trim().toLowerCase())) return true;
-    if (['false', '0', 'no', 'off'].includes(value.trim().toLowerCase())) return false;
-    return value;
+    return parseStrictBooleanEnvValue(value, defaultValue, 'content media boolean');
   }, z.boolean());
 }
 

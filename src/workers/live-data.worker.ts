@@ -26,7 +26,7 @@ import {
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
-} from '../repositories/scheduler-obligations';
+} from '../services/scheduler-obligation-lifecycle.service';
 import type { WorkerRuntime } from './worker-runtime';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 import {

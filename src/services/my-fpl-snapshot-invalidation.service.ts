@@ -10,6 +10,7 @@ import {
   isSupportedMyFplInvalidationReason,
   parseMyFplSnapshotInvalidationResult,
 } from '../domain/my-fpl-invalidation';
+import { myFplSnapshotEventLockScope } from '../domain/my-fpl-locks';
 
 export {
   MY_FPL_SNAPSHOT_INVALIDATION_REASON,
@@ -46,7 +47,7 @@ type InvalidationOutboxRow = {
   season_code: string;
 };
 
-type InvalidationOutboxDependencies = Readonly<{
+export type InvalidationOutboxDependencies = Readonly<{
   getDbClient?: () => Promise<postgres.Sql>;
   getRedisClient?: () => Promise<Redis>;
   makeOwner?: () => string;
@@ -242,7 +243,7 @@ export function createMyFplSnapshotInvalidationDispatcher(
           // newer publication cannot be activated between the CAS and receipt.
           await tx`
             SELECT pg_advisory_xact_lock(
-              hashtextextended(${`my-fpl:${row.season_id}:${row.event_id}`}, 0)
+              hashtextextended(${myFplSnapshotEventLockScope(row.season_id, row.event_id)}, 0)
             )
           `;
           const ownership = await tx<{ outbox_id: string }[]>`

@@ -6,6 +6,7 @@ import { EVENT_LIVE_PROJECTION_ALGORITHM_VERSION } from '../domain/event-live-ma
 import { countEntryEligibility, isEntryEligibleForEvent } from '../domain/entry-eligibility';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { myFplSnapshotEventLockScope, myFplSnapshotSeasonLockScope } from '../domain/my-fpl-locks';
 import type { Fixture } from '../types';
 import { getDbClient } from '../db/singleton';
 import { contentHash, postgresJsonbCanonicalJson } from '../utils/content-hash';
@@ -232,7 +233,7 @@ export function serializeMyFplSnapshotCapture(
 
 async function runMyFplCaptureTransaction(
   client: postgres.Sql,
-  lockScope: string,
+  lockScopes: readonly string[],
   operation: (transaction: postgres.TransactionSql) => Promise<MyFplSnapshotCaptureResult>,
 ): Promise<MyFplSnapshotCaptureResult> {
   // A production transaction pool does not preserve session affinity between
@@ -249,11 +250,13 @@ async function runMyFplCaptureTransaction(
     const lockAttemptStartedAt = Date.now();
     try {
       return await client.begin('isolation level repeatable read', async (tx) => {
-        const lockRows = await tx<{ acquired: boolean }[]>`
-          SELECT pg_try_advisory_xact_lock(hashtextextended(${lockScope}, 0)) AS acquired
-        `;
-        if (!lockRows[0]?.acquired) {
-          throw new MyFplCaptureLockBusyError();
+        for (const lockScope of lockScopes) {
+          const lockRows = await tx<{ acquired: boolean }[]>`
+            SELECT pg_try_advisory_xact_lock(hashtextextended(${lockScope}, 0)) AS acquired
+          `;
+          if (!lockRows[0]?.acquired) {
+            throw new MyFplCaptureLockBusyError();
+          }
         }
         return operation(tx);
       });
@@ -262,7 +265,7 @@ async function runMyFplCaptureTransaction(
       if (contention === 'lock-busy') {
         lockWaitRemainingMs -= Date.now() - lockAttemptStartedAt;
         if (lockWaitRemainingMs <= 0) {
-          throw new Error(`Timed out waiting for My FPL capture lock ${lockScope}`, {
+          throw new Error(`Timed out waiting for My FPL capture locks ${lockScopes.join(',')}`, {
             cause: error,
           });
         }
@@ -270,7 +273,7 @@ async function runMyFplCaptureTransaction(
         await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, lockWaitRemainingMs)));
         lockWaitRemainingMs -= Date.now() - waitStartedAt;
         if (lockWaitRemainingMs <= 0) {
-          throw new Error(`Timed out waiting for My FPL capture lock ${lockScope}`, {
+          throw new Error(`Timed out waiting for My FPL capture locks ${lockScopes.join(',')}`, {
             cause: error,
           });
         }
@@ -279,16 +282,19 @@ async function runMyFplCaptureTransaction(
       if (contention === null) throw error;
       if (contention === 'idempotency') {
         if (idempotencyConflictRetries >= 1) {
-          throw new Error(`My FPL capture idempotency conflict did not converge for ${lockScope}`, {
-            cause: error,
-          });
+          throw new Error(
+            `My FPL capture idempotency conflict did not converge for ${lockScopes.join(',')}`,
+            {
+              cause: error,
+            },
+          );
         }
         idempotencyConflictRetries += 1;
         continue;
       }
       if (commitBoundaryConflictRetries >= MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES) {
         throw new Error(
-          `My FPL capture commit-boundary contention did not converge for ${lockScope}`,
+          `My FPL capture commit-boundary contention did not converge for ${lockScopes.join(',')}`,
           { cause: error },
         );
       }
@@ -1756,8 +1762,11 @@ async function captureMyFplSnapshotOnce(
   // template serializer (which rejects Date at runtime).
   const nowIso = now.toISOString();
   const supersededBeforeIso = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
-  const lockScope = `my-fpl:${season.seasonId}:${eventId}`;
-  return runMyFplCaptureTransaction(client, lockScope, async (tx) => {
+  const lockScopes = [
+    myFplSnapshotSeasonLockScope(season.seasonId),
+    myFplSnapshotEventLockScope(season.seasonId, eventId),
+  ] as const;
+  return runMyFplCaptureTransaction(client, lockScopes, async (tx) => {
     const eventRows = await tx<
       {
         finished: boolean;
@@ -2903,7 +2912,7 @@ export function captureMyFplSnapshot(
   kind: MyFplSnapshotKind,
   options: MyFplSnapshotCaptureOptions = {},
 ): Promise<MyFplSnapshotCaptureResult> {
-  return serializeMyFplSnapshotCapture(`my-fpl:${season.seasonId}:${eventId}`, () =>
+  return serializeMyFplSnapshotCapture(myFplSnapshotEventLockScope(season.seasonId, eventId), () =>
     captureMyFplSnapshotOnce(season, eventId, kind, options),
   );
 }
@@ -3112,7 +3121,7 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
       const status = await db.begin(async (tx) => {
         await tx`
           SELECT pg_advisory_xact_lock(
-            hashtextextended(${`my-fpl:${row.season_id}:${row.event_id}`}, 0)
+            hashtextextended(${myFplSnapshotEventLockScope(row.season_id, row.event_id)}, 0)
           )
         `;
         const ownership = await tx<{ active: boolean }[]>`

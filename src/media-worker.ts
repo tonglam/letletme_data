@@ -64,6 +64,11 @@ if (provisionAndProbe) {
   process.exit(0);
 }
 
+// Every long-lived runtime validates the shared application environment even
+// when its feature-specific worker is disabled. Provision/probe remains a
+// standalone storage command and exits before this runtime preflight.
+const appConfig = getConfig();
+
 const workerId = `media-worker:${process.pid}:${randomUUID()}`;
 let stopFileHeartbeat = (): void => undefined;
 let stopRuntimeHeartbeat = (): void => undefined;
@@ -200,7 +205,6 @@ async function start(): Promise<void> {
     return;
   }
   if (!storage) throw new Error('Source-media Storage is unavailable');
-  const appConfig = getConfig();
   if (appConfig.DATABASE_POOL_MAX !== 1) {
     throw new Error('media-worker requires DATABASE_POOL_MAX=1');
   }
@@ -246,7 +250,7 @@ const shutdownController = createShutdownController({
       throw new AggregateError(failures, `${failures.length} media task(s) failed to drain`);
     }
   },
-  closeResources: async () => {
+  closeWorkers: async () => {
     if (flags.enabled) {
       const released = await releaseSourceMediaGateLeases({ workerId }).catch((error) => {
         logWarn('Source-media graceful lease release failed', {
@@ -256,12 +260,10 @@ const shutdownController = createShutdownController({
       });
       logInfo('Source-media graceful leases released', { released });
     }
-    await Promise.all([
-      databaseSingleton.disconnect(),
-      redisSingleton.disconnect(),
-      queueRedisSingleton.disconnect(),
-    ]);
   },
+  closeDatabase: () => databaseSingleton.disconnect(),
+  closeCacheRedis: () => redisSingleton.disconnect(),
+  closeQueueRedis: () => queueRedisSingleton.disconnect(),
 });
 
 installShutdownSignals(shutdownController);

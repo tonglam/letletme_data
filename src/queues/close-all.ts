@@ -17,7 +17,7 @@ import { closeUnderstatTeamQueue } from './understat-team.queue';
 
 /** Close every producer queue owned by the Data process. */
 export async function closeAllProducerQueues(): Promise<void> {
-  await Promise.allSettled([
+  const settled = await Promise.allSettled([
     closeDataGovernanceQueue(),
     closeDataSyncQueue(),
     closeEntrySyncQueue(),
@@ -35,4 +35,10 @@ export async function closeAllProducerQueues(): Promise<void> {
     closeUnderstatPlayerQueue(),
     closeUnderstatTeamQueue(),
   ]);
+  const failures = settled
+    .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    .map((result) => result.reason);
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `${failures.length} producer queue(s) failed to close`);
+  }
 }

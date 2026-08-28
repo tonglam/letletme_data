@@ -36,7 +36,7 @@ import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
   completeSchedulerObligation,
   failSchedulerObligation,
-} from '../repositories/scheduler-obligations';
+} from '../services/scheduler-obligation-lifecycle.service';
 import { startCurrentSchedulerJob } from '../utils/scheduler-obligation-fence';
 import { parseStrictBooleanEnvValue } from '../utils/config';
 import { FPLClientError } from '../utils/errors';

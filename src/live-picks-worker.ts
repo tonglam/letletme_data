@@ -48,14 +48,12 @@ const shutdownController = createShutdownController({
     runtime.stop?.();
   },
   waitForInFlight: () => drainWorkers(runtime.workers),
-  closeResources: () =>
-    Promise.all([
-      ...runtime.queueEvents.map((events) => events.close()),
-      closeLivePicksQueue(),
-      databaseSingleton.disconnect(),
-      redisSingleton.disconnect(),
-      queueRedisSingleton.disconnect(),
-    ]).then(() => undefined),
+  closeMonitors: () =>
+    Promise.all(runtime.queueEvents.map((events) => events.close())).then(() => undefined),
+  closeProducerQueues: closeLivePicksQueue,
+  closeDatabase: () => databaseSingleton.disconnect(),
+  closeCacheRedis: () => redisSingleton.disconnect(),
+  closeQueueRedis: () => queueRedisSingleton.disconnect(),
 });
 
 installShutdownSignals(shutdownController);

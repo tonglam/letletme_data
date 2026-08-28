@@ -120,6 +120,25 @@ export type TournamentManagementLifecycle = {
   repairDeletedViews?: (tournamentId: number) => Promise<boolean>;
   /** Injectable for hermetic service tests; production keeps the DB scopes. */
   withMutationScopes?: MutationScopeRunner;
+  findRosterReconcileJob?: typeof findTournamentRosterReconcileJob;
+  findSetupJob?: typeof findTournamentSetupJob;
+  assertRosterBoundary?: typeof assertTournamentRosterPreGameweekBoundary;
+  rosterRepository?: Pick<
+    typeof tournamentRosterRepository,
+    'findById' | 'markResumeProcessingWithMarker' | 'markResumeProcessing' | 'markSyncFailed'
+  >;
+  infoRepository?: Pick<typeof tournamentInfoRepository, 'markSetupResult'>;
+  enqueueRosterReconcile?: typeof enqueueTournamentRosterReconcile;
+  enqueueSnapshotSetup?: (
+    season: FplSeasonRef,
+    tournamentId: number,
+    source: 'resume',
+    options: Parameters<SnapshotResumeDependencies['enqueue']>[2],
+  ) => Promise<unknown>;
+  requeueSetup?: (
+    season: FplSeasonRef,
+    tournamentId: number,
+  ) => Promise<{ readonly id?: string | number | null }>;
 };
 
 type MutationScopeRunner = <T>(
@@ -175,6 +194,27 @@ export function createTournamentManagementService(
   getSeason: () => Promise<FplSeasonRef> = () => seasonRepository.findCurrent(),
 ) {
   const scopeRunner = lifecycle.withMutationScopes ?? withMutationScopes;
+  const findRosterReconcileJob =
+    lifecycle.findRosterReconcileJob ?? findTournamentRosterReconcileJob;
+  const findSetupJob = lifecycle.findSetupJob ?? findTournamentSetupJob;
+  const assertRosterBoundary =
+    lifecycle.assertRosterBoundary ?? assertTournamentRosterPreGameweekBoundary;
+  const rosterRepository = lifecycle.rosterRepository ?? tournamentRosterRepository;
+  const infoRepository = lifecycle.infoRepository ?? tournamentInfoRepository;
+  const enqueueRosterReconcile =
+    lifecycle.enqueueRosterReconcile ?? enqueueTournamentRosterReconcile;
+  const enqueueSnapshotSetup =
+    lifecycle.enqueueSnapshotSetup ??
+    (async (season, tournamentId, source, options) => {
+      const { enqueueTournamentSetup } = await import('../jobs/tournament-setup.jobs');
+      return enqueueTournamentSetup(season, tournamentId, source, options);
+    });
+  const requeueSetup =
+    lifecycle.requeueSetup ??
+    (async (season, tournamentId) => {
+      const { requeueTournamentSetup } = await import('./tournament-setup.service');
+      return requeueTournamentSetup(season, tournamentId);
+    });
 
   const assertCanManage = async (
     season: FplSeasonRef,
@@ -210,13 +250,13 @@ export function createTournamentManagementService(
         tournament.setupPhase === 'failed')
     ) {
       const [reconcileJob, setupJob] = await Promise.all([
-        findTournamentRosterReconcileJob(
+        findRosterReconcileJob(
           season,
           tournament.id,
           true,
           tournament.setupProgressUpdatedAt ?? undefined,
         ),
-        findTournamentSetupJob(season, tournament.id, tournament.setupProgressUpdatedAt),
+        findSetupJob(season, tournament.id, tournament.setupProgressUpdatedAt),
       ]);
       if (!reconcileJob && !setupJob) return;
       throw new ConflictError(
@@ -314,13 +354,13 @@ export function createTournamentManagementService(
               lockedCurrent.setupError != null
             ) {
               const [reconcileJob, setupJob] = await Promise.all([
-                findTournamentRosterReconcileJob(
+                findRosterReconcileJob(
                   season,
                   tournamentId,
                   true,
                   lockedCurrent.setupProgressUpdatedAt ?? undefined,
                 ),
-                findTournamentSetupJob(season, tournamentId, lockedCurrent.setupProgressUpdatedAt),
+                findSetupJob(season, tournamentId, lockedCurrent.setupProgressUpdatedAt),
               ]);
               settleResume = Boolean(reconcileJob || setupJob);
             }
@@ -364,16 +404,16 @@ export function createTournamentManagementService(
           }
 
           if (lockedCurrent.rosterMode === 'official_sync') {
-            await assertTournamentRosterPreGameweekBoundary(season);
+            await assertRosterBoundary(season);
             // Publish the cancellable intent before queueing. A newer pause
             // changes this marker back to ready, so a queued worker can never
             // reactivate a tournament after the owner has paused it.
-            const resumeMarker = await tournamentRosterRepository.markResumeProcessingWithMarker(
+            const resumeMarker = await rosterRepository.markResumeProcessingWithMarker(
               season,
               tournamentId,
             );
             try {
-              await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+              await enqueueRosterReconcile(season, tournamentId, 'manual', {
                 resumeAfterSetup: true,
                 resumeMarker,
                 allowInactive: true,
@@ -381,7 +421,7 @@ export function createTournamentManagementService(
             } catch (error) {
               // A lost Redis response is ambiguous. If the deterministic
               // resume job exists, keep the accepted transition intact.
-              const accepted = await findTournamentRosterReconcileJob(
+              const accepted = await findRosterReconcileJob(
                 season,
                 tournamentId,
                 true,
@@ -390,21 +430,19 @@ export function createTournamentManagementService(
               if (accepted) return;
               const message = error instanceof Error ? error.message : 'Unable to enqueue resume.';
               await Promise.allSettled([
-                tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
-                tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message),
+                rosterRepository.markSyncFailed(season, tournamentId, message),
+                infoRepository.markSetupResult(season, tournamentId, 'failed', message),
               ]);
               throw error;
             }
           } else {
-            const { enqueueTournamentSetup } = await import('../jobs/tournament-setup.jobs');
             await requestSnapshotTournamentResume(tournamentId, {
-              enqueue: (id, source, options) => enqueueTournamentSetup(season, id, source, options),
-              markResumeProcessing: (id) =>
-                tournamentRosterRepository.markResumeProcessing(season, id),
+              enqueue: (id, source, options) => enqueueSnapshotSetup(season, id, source, options),
+              markResumeProcessing: (id) => rosterRepository.markResumeProcessing(season, id),
               markRosterFailed: (id, message) =>
-                tournamentRosterRepository.markSyncFailed(season, id, message),
+                rosterRepository.markSyncFailed(season, id, message),
               markSetupFailed: (id, message) =>
-                tournamentInfoRepository.markSetupResult(season, id, 'failed', message),
+                infoRepository.markSetupResult(season, id, 'failed', message),
             });
           }
         },
@@ -438,9 +476,9 @@ export function createTournamentManagementService(
             );
           }
           const ensureActiveRosterReconcile = async () => {
-            const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
+            const rosterState = await rosterRepository.findById(season, tournamentId);
             const expectedProgressMarker = rosterState?.setupProgressUpdatedAt ?? null;
-            const existing = await findTournamentRosterReconcileJob(
+            const existing = await findRosterReconcileJob(
               season,
               tournamentId,
               false,
@@ -448,7 +486,7 @@ export function createTournamentManagementService(
               expectedProgressMarker,
             );
             if (existing) return;
-            await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+            await enqueueRosterReconcile(season, tournamentId, 'manual', {
               settleBoundaryFailure: true,
               expectedProgressMarker,
             });
@@ -463,7 +501,7 @@ export function createTournamentManagementService(
               try {
                 await ensureActiveRosterReconcile();
               } catch (error) {
-                await tournamentRosterRepository.markSyncFailed(
+                await rosterRepository.markSyncFailed(
                   season,
                   tournamentId,
                   error instanceof Error
@@ -478,7 +516,7 @@ export function createTournamentManagementService(
           if (current.state === 'active') {
             // Do not persist an opt-in that cannot be reconciled at the current
             // gameweek boundary. The check happens before the mode mutation.
-            await assertTournamentRosterPreGameweekBoundary(season);
+            await assertRosterBoundary(season);
           }
           const updated = await repository.updateRosterModeOwned(
             season,
@@ -491,7 +529,7 @@ export function createTournamentManagementService(
             try {
               await ensureActiveRosterReconcile();
             } catch (error) {
-              await tournamentRosterRepository.markSyncFailed(
+              await rosterRepository.markSyncFailed(
                 season,
                 tournamentId,
                 error instanceof Error ? error.message : 'Unable to enqueue roster reconciliation.',
@@ -517,8 +555,7 @@ export function createTournamentManagementService(
         async () => {
           const current = await assertCanManage(season, tournamentId, payload);
           await assertNoPendingOfficialResume(season, current);
-          const { requeueTournamentSetup } = await import('./tournament-setup.service');
-          return requeueTournamentSetup(season, tournamentId);
+          return requeueSetup(season, tournamentId);
         },
       );
     },
@@ -545,9 +582,9 @@ export function createTournamentManagementService(
             throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
           }
           await assertNoPendingOfficialResume(season, current);
-          await assertTournamentRosterPreGameweekBoundary(season);
-          const rosterState = await tournamentRosterRepository.findById(season, tournamentId);
-          const job = await enqueueTournamentRosterReconcile(season, tournamentId, 'manual', {
+          await assertRosterBoundary(season);
+          const rosterState = await rosterRepository.findById(season, tournamentId);
+          const job = await enqueueRosterReconcile(season, tournamentId, 'manual', {
             allowInactive: true,
             settleBoundaryFailure: true,
             expectedProgressMarker: rosterState?.setupProgressUpdatedAt ?? null,
@@ -616,13 +653,26 @@ export function createTournamentManagementService(
           });
         }
       }
-      let refreshError: unknown = null;
       try {
         await lifecycle.refreshViews?.();
       } catch (error) {
-        refreshError = error;
+        // The canonical deletion and durable invalidation receipt have
+        // already committed. A derived reporting refresh must not turn that
+        // success into a misleading 500 response. Retry the targeted repair
+        // once and let later maintenance/retries converge if it is unavailable.
+        logWarn('Tournament deleted but reporting view refresh failed', {
+          tournamentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        try {
+          await lifecycle.repairDeletedViews?.(tournamentId);
+        } catch (repairError) {
+          logWarn('Tournament deleted with reporting view repair still pending', {
+            tournamentId,
+            error: repairError instanceof Error ? repairError.message : String(repairError),
+          });
+        }
       }
-      if (refreshError) throw refreshError;
       return result.tournament;
     },
   };

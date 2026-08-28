@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { redisSingleton } from '../../src/cache/singleton';
 import { getDbClient } from '../../src/db/singleton';
 import { explicitSeasonRef } from '../../src/domain/fpl-season';
+import { myFplSnapshotSeasonLockScope } from '../../src/domain/my-fpl-locks';
 import {
   createTournamentManagementRepository,
   type TournamentDeleteResult,
@@ -180,10 +181,38 @@ describe('My FPL snapshot invalidation outbox', () => {
     const redis = await redisSingleton.getClient();
     await redis.set(KEY, JSON.stringify({ revision: REVISION }));
 
-    const result = (await repository.deleteOwned(SEASON, TOURNAMENT_ID, ENTRY_ID)) as Extract<
-      TournamentDeleteResult,
-      { status: 'deleted' }
-    >;
+    // Hold the same season lock used by capture. The delete must wait before
+    // publication discovery so an event's first capture cannot appear in the
+    // gap and publish a now-deleted tournament.
+    const sql = await getDbClient();
+    let releaseSeasonLock!: () => void;
+    let markSeasonLockAcquired!: () => void;
+    const seasonLockAcquired = new Promise<void>((resolve) => {
+      markSeasonLockAcquired = resolve;
+    });
+    const seasonLockRelease = new Promise<void>((resolve) => {
+      releaseSeasonLock = resolve;
+    });
+    const blocker = sql.begin(async (tx) => {
+      await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${myFplSnapshotSeasonLockScope(SEASON.seasonId)}, 0)
+        )
+      `;
+      markSeasonLockAcquired();
+      await seasonLockRelease;
+    });
+    await seasonLockAcquired;
+    let deleteSettled = false;
+    const deletion = repository
+      .deleteOwned(SEASON, TOURNAMENT_ID, ENTRY_ID)
+      .finally(() => (deleteSettled = true));
+    await Bun.sleep(75);
+    expect(deleteSettled).toBe(false);
+    releaseSeasonLock();
+    await blocker;
+
+    const result = (await deletion) as Extract<TournamentDeleteResult, { status: 'deleted' }>;
     expect(result.status).toBe('deleted');
     expect(result.invalidationOutboxIds).toHaveLength(1);
     const outboxId = result.invalidationOutboxIds?.[0];
@@ -221,7 +250,6 @@ describe('My FPL snapshot invalidation outbox', () => {
       invalidationAttempts: 1,
     });
 
-    const sql = await getDbClient();
     await sql`
       UPDATE competition.my_fpl_snapshot_invalidation_outbox
       SET available_at = now()

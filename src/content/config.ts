@@ -1,3 +1,9 @@
+import {
+  parseStrictBooleanEnvValue,
+  parseStrictIntegerEnvValue,
+  parseStrictNumberEnvValue,
+} from '../utils/config';
+
 export type ContentRuntimeFlags = Readonly<{
   pipelineEnabled: boolean;
   acquisitionShadowMode: boolean;
@@ -61,11 +67,7 @@ export function parseStrictBooleanEnv(
   fallback: boolean,
   name = 'boolean environment variable',
 ): boolean {
-  if (value === undefined || value.trim() === '') return fallback;
-  const normalized = value.trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-  throw new Error(`${name} must be a boolean (true/false, 1/0, yes/no or on/off)`);
+  return parseStrictBooleanEnvValue(value, fallback, name);
 }
 
 export function parseStrictIntegerEnv(
@@ -75,16 +77,7 @@ export function parseStrictIntegerEnv(
   maximum: number,
   name: string,
 ): number {
-  if (value === undefined || value.trim() === '') return fallback;
-  const normalized = value.trim();
-  if (!/^[+-]?\d+$/.test(normalized)) {
-    throw new Error(`${name} must be a finite safe integer`);
-  }
-  const parsed = Number(normalized);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
-    throw new Error(`${name} must be a finite safe integer between ${minimum} and ${maximum}`);
-  }
-  return parsed;
+  return parseStrictIntegerEnvValue(value, fallback, minimum, maximum, name);
 }
 
 export function parseStrictNumberEnv(
@@ -94,19 +87,7 @@ export function parseStrictNumberEnv(
   maximum: number,
   name: string,
 ): number {
-  if (value === undefined || value.trim() === '') return fallback;
-  const normalized = value.trim();
-  if (!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) {
-    throw new Error(`${name} must be a finite safe number`);
-  }
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER) {
-    throw new Error(`${name} must be a finite safe number`);
-  }
-  if (parsed < minimum || parsed > maximum) {
-    throw new Error(`${name} must be between ${minimum} and ${maximum}`);
-  }
-  return parsed;
+  return parseStrictNumberEnvValue(value, fallback, minimum, maximum, name);
 }
 
 const booleanEnv = (name: string, fallback: boolean): boolean =>

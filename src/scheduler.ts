@@ -193,12 +193,9 @@ const shutdownController = createShutdownController({
   waitForInFlight: async () => {
     await inFlight;
   },
-  closeResources: () =>
-    Promise.all([
-      databaseSingleton.disconnect(),
-      redisSingleton.disconnect(),
-      queueRedisSingleton.disconnect(),
-    ]).then(() => undefined),
+  closeDatabase: () => databaseSingleton.disconnect(),
+  closeCacheRedis: () => redisSingleton.disconnect(),
+  closeQueueRedis: () => queueRedisSingleton.disconnect(),
 });
 
 installShutdownSignals(shutdownController);

@@ -1,20 +1,37 @@
-import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, test } from 'bun:test';
 
-import { redisSingleton } from '../../src/cache/singleton';
-import { MANAGER_LIVE_CLASSIC_CAPPED_CURSOR } from '../../src/domain/manager-live-refresh';
-import { eventRepository } from '../../src/repositories/events';
-import { managerScoreCheckpointRepository } from '../../src/repositories/live-window';
-import { seasonRepository } from '../../src/repositories/seasons';
-import { eventLiveManagerScoreService } from '../../src/services/event-live-manager-scores.service';
-import { fplClient } from '../../src/clients/fpl';
+import {
+  MANAGER_LIVE_CLASSIC_CAPPED_CURSOR,
+  classicStandingsCursorAfterRefresh,
+} from '../../src/domain/manager-live-refresh';
 import { contentHash } from '../../src/utils/content-hash';
+import { createManagerLiveAPI } from '../../src/api/manager-live.api';
+import {
+  createManagerLiveOrchestration,
+  type ManagerLiveOrchestrationDependencies,
+} from '../../src/services/manager-live/orchestration';
+import {
+  enrichClassicStandingOverallRank,
+  preserveClassicOverallRank,
+  refreshClassicStandings,
+  selectClassicOverallRankRefreshTargets,
+  selectWorkerClassicFallbackTargets,
+  selectWorkerSummaryRefreshTargets,
+  refreshEntrySummaries,
+  type EntrySummaryRefreshDependencies,
+} from '../../src/services/manager-live/provider-refresh';
+import {
+  buildActiveManagerLiveResult,
+  buildManagerLiveResult,
+  materializedProjectedRows,
+} from '../../src/services/manager-live/result-assembly';
+import type { ManagerScoreMaterializedRow } from '../../src/repositories/manager-score-materializations';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
-
-const dispatchModule = await import('../../src/services/manager-live-refresh-dispatch');
 
 const redisRows = new Map<number, string>();
 const materializationPointers = new Map<number, string>();
 const materializationPayloads = new Map<string, string>();
+const materializedRows = new Map<number, ManagerScoreMaterializedRow>();
 let redisReadFails = false;
 let redisWriteSucceeds = false;
 let postgresRows: Array<Record<string, unknown>> = [];
@@ -75,7 +92,6 @@ const loadEventLiveManagerScores = mock(
     };
   },
 );
-eventLiveManagerScoreService.load = loadEventLiveManagerScores as never;
 
 const effectiveLineup = (entryId: number) =>
   Array.from({ length: 15 }, (_, index) => {
@@ -94,7 +110,6 @@ const effectiveLineup = (entryId: number) =>
   });
 
 const findCurrent = mock(async () => TEST_SEASON as never);
-seasonRepository.findCurrent = findCurrent;
 const findEventById = mock(
   async () =>
     ({
@@ -104,7 +119,6 @@ const findEventById = mock(
       dataCheckedAt: null,
     }) as never,
 );
-eventRepository.findById = findEventById;
 const getRedisClient = mock(async () => {
   const transaction = {
     hset: () => transaction,
@@ -126,60 +140,54 @@ const getRedisClient = mock(async () => {
     multi: () => transaction,
   } as never;
 });
-redisSingleton.getClient = getRedisClient;
 const findCheckpointRows = mock(async () => postgresRows as never);
-managerScoreCheckpointRepository.findByScopeAndEntryIds = findCheckpointRows;
 const successfulCheckpointWrite = async (...args: unknown[]): Promise<number> =>
   Array.isArray(args[3]) ? args[3].length : 0;
 const upsertCheckpoint = mock(successfulCheckpointWrite);
-managerScoreCheckpointRepository.upsertBatch = upsertCheckpoint;
-const dispatchRefresh = spyOn(dispatchModule, 'dispatchManagerLiveRefresh').mockImplementation(
-  async () => undefined,
-);
-const getEntrySummary = mock(async () => {
+const dispatchRefresh = mock(async (..._args: unknown[]): Promise<void> => undefined);
+const getEntrySummary = mock(async (_entryId?: number) => {
   throw new Error('CACHE_ONLY must not call FPL entry summary');
 });
-fplClient.getEntrySummary = getEntrySummary;
 const getClassicStandings = mock(async (..._args: unknown[]) => {
   throw new Error('CACHE_ONLY must not call FPL standings');
 });
 
-// A few legacy unit files call bun:test's global mock.restore() in afterEach.
-// Bun 1.2 can run those files in the same process, so reattach these stable
-// spies before every case; otherwise an unrelated test can restore one of the
-// service dependencies while this contract suite is still exercising it.
-const reattachManagerLiveSpies = (): void => {
-  seasonRepository.findCurrent = findCurrent;
-  eventRepository.findById = findEventById;
-  redisSingleton.getClient = getRedisClient;
-  managerScoreCheckpointRepository.findByScopeAndEntryIds = findCheckpointRows;
-  managerScoreCheckpointRepository.upsertBatch = upsertCheckpoint;
-  eventLiveManagerScoreService.load = loadEventLiveManagerScores as never;
-  if (dispatchModule.dispatchManagerLiveRefresh !== dispatchRefresh) {
-    dispatchModule.dispatchManagerLiveRefresh = dispatchRefresh;
-  }
-  fplClient.getEntrySummary = getEntrySummary;
-};
-
-const {
-  classicStandingsCursorAfterRefresh,
-  enrichClassicStandingOverallRank,
-  preserveClassicOverallRank,
-  refreshClassicStandings,
-  resolveManagerLiveScores,
-  selectClassicOverallRankRefreshTargets,
-  selectWorkerSummaryRefreshTargets,
-  selectWorkerClassicFallbackTargets,
-} = await import('../../src/services/manager-live.service');
-const { managerLiveAPI } = await import('../../src/api/manager-live.api');
-
 const classicStandingsTestDependencies = {
   fetchStandings: getClassicStandings as never,
   runPublication: async <T>(_key: string, task: () => Promise<T>): Promise<T> => task(),
+  readCachedRowsForPublication: async () => new Map(),
+  readPublicationState: (async (
+    _season: unknown,
+    _eventId: number,
+    _scope: unknown,
+    _entryIds: readonly number[],
+    capturedRows: ReadonlyMap<number, unknown> = new Map(),
+  ) => ({
+    rows: new Map(capturedRows),
+    overallRankPublicationStartedAtByEntryId: new Map(),
+  })) as never,
   readOrderingTimestamp: async () => ({
     date: new Date('2026-08-23T12:00:00.000Z'),
     exact: '2026-08-23T12:00:00.000000Z',
   }),
+  writeCheckpointRows: (async (...args: unknown[]) => {
+    try {
+      const accepted = await upsertCheckpoint(...args);
+      const rows = args[3];
+      return Array.isArray(rows) && accepted === rows.length;
+    } catch {
+      return false;
+    }
+  }) as never,
+  writeCache: (async (...args: unknown[]) => {
+    const rows = args[4];
+    return Array.isArray(rows)
+      ? rows.flatMap((row) =>
+          typeof row === 'object' && row !== null && 'entryId' in row ? [Number(row.entryId)] : [],
+        )
+      : [];
+  }) as never,
+  reconcileCache: (async (...args: unknown[]) => args[4]) as never,
 };
 
 const cachedRow = (entryId: number, checkedAt: string) => ({
@@ -225,42 +233,148 @@ const putProjectedMaterialization = (
     totalPoints,
     effectiveLineup: lineup,
   });
-  materializationPayloads.set(
-    key,
-    JSON.stringify({
-      entryId,
-      inputRevision,
-      scoreRevision,
-      generation,
-      calculationMode: 'PROJECTED_AUTOSUBS',
-      algorithmVersion: 'fpl-projected-autosubs-v1',
-      scoreSource: 'FPL_EVENT_LIVE',
-      livePublicationId: '00000000-0000-4000-8000-000000000001',
-      liveRevision: '8',
-      liveCheckedAt: checkedAt,
-      verifiedLiveCheckedAt,
-      picksRevision: `picks-${entryId}`,
-      picksCheckedAt: checkedAt,
-      previousTotalsRevision: `previous-${entryId}`,
-      previousTotalsThroughEventId: null,
-      eventPoints,
-      netEventPoints: eventPoints,
-      totalPoints,
-      transferCost: 0,
-      effectiveLineup: lineup,
-      rankRevision: null,
-      rankSource: null,
-      rankCheckedAt: null,
-    }),
-  );
+  const payload = {
+    entryId,
+    inputRevision,
+    scoreRevision,
+    generation,
+    calculationMode: 'PROJECTED_AUTOSUBS' as const,
+    algorithmVersion: 'fpl-projected-autosubs-v1',
+    scoreSource: 'FPL_EVENT_LIVE' as const,
+    livePublicationId: '00000000-0000-4000-8000-000000000001',
+    liveRevision: '8',
+    liveCheckedAt: checkedAt,
+    verifiedLiveCheckedAt,
+    picksRevision: `picks-${entryId}`,
+    picksCheckedAt: checkedAt,
+    previousTotalsRevision: `previous-${entryId}`,
+    previousTotalsThroughEventId: null,
+    eventPoints,
+    netEventPoints: eventPoints,
+    totalPoints,
+    transferCost: 0,
+    effectiveLineup: lineup,
+    rankRevision: null,
+    rankSource: null,
+    rankCheckedAt: null,
+  };
+  materializationPayloads.set(key, JSON.stringify(payload));
+  materializedRows.set(entryId, {
+    ...payload,
+    liveCheckedAt: new Date(payload.liveCheckedAt),
+    verifiedLiveCheckedAt: new Date(payload.verifiedLiveCheckedAt),
+    picksCheckedAt: new Date(payload.picksCheckedAt),
+    rankCheckedAt: null,
+  });
 };
+
+const readCachedRowsForTest: ManagerLiveOrchestrationDependencies['readCachedAndCheckpointRows'] =
+  async (_redis, _season, _eventId, _scope, entryIds) => {
+    const rows = new Map<number, never>();
+    if (!redisReadFails) {
+      for (const entryId of entryIds) {
+        const raw = redisRows.get(entryId);
+        if (raw) rows.set(entryId, JSON.parse(raw) as never);
+      }
+    }
+    for (const candidate of postgresRows) {
+      const entryId = candidate.entryId;
+      if (typeof entryId === 'number' && entryIds.includes(entryId) && !rows.has(entryId)) {
+        rows.set(entryId, candidate as never);
+      }
+    }
+    return rows;
+  };
+
+const summaryRefreshDependencies: Partial<EntrySummaryRefreshDependencies> = {
+  clock: { now: () => new Date() },
+  fetchSummary: (async (_redis: unknown, _season: string, _eventId: number, entryId: number) => ({
+    summary: await getEntrySummary(entryId),
+    observedAt: new Date().toISOString(),
+    publicationOrder: null,
+  })) as never,
+  writeRows: (async () => redisWriteSucceeds) as never,
+  writeCheckpointRows: (async (...args: unknown[]) => {
+    try {
+      const accepted = await upsertCheckpoint(...args);
+      const rows = args[3];
+      return Array.isArray(rows) && accepted === rows.length;
+    } catch {
+      return false;
+    }
+  }) as never,
+};
+
+const dispatchRefreshBounded: ManagerLiveOrchestrationDependencies['dispatchManagerLiveRefreshBounded'] =
+  async (input) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        dispatchRefresh(input).then(() => 'QUEUED' as const),
+        new Promise<'PENDING'>((resolve) => {
+          timer = setTimeout(() => resolve('PENDING'), 100);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+const testOrchestrationDependencies: ManagerLiveOrchestrationDependencies = {
+  clock: { now: () => new Date() },
+  redisSingleton: { getClient: getRedisClient },
+  seasonRepository: { findCurrent },
+  eventRepository: { findById: findEventById },
+  tournamentEntryRepository: { findEntryIdsByTournamentId: async () => [] },
+  tournamentInfoRepository: { findById: async () => null },
+  entryInfoRepository: { findByIds: async () => [] },
+  managerScoreCheckpointRepository: { findByScopeAndEntryIds: findCheckpointRows },
+  readManagerScoreHeadRowsWithSource: async (_season, _eventId, entryIds) => {
+    const rows = entryIds.flatMap((entryId) => {
+      if (!materializationPointers.has(entryId)) return [];
+      const row = materializedRows.get(entryId);
+      return row ? [row] : [];
+    });
+    return {
+      rows,
+      sourceByEntry: new Map(rows.map((row) => [row.entryId, 'REDIS' as const])),
+    };
+  },
+  readCachedAndCheckpointRows: readCachedRowsForTest,
+  readBackgroundRows: async (_redis, season, eventId, scope, entryIds) =>
+    readCachedRowsForTest(null, season, eventId, scope, entryIds),
+  readTournamentCoverage: async () => null,
+  persistTournamentCoverage: async () => null,
+  buildActiveManagerLiveResult: (input) =>
+    buildActiveManagerLiveResult(input, { load: loadEventLiveManagerScores as never }),
+  buildManagerLiveResult,
+  materializedProjectedRows,
+  refreshClassicStandings,
+  refreshEntrySummaries: (season, eventId, entryIds, rows, redis, scope, options) =>
+    refreshEntrySummaries(
+      season,
+      eventId,
+      entryIds,
+      rows,
+      redis,
+      scope,
+      options,
+      summaryRefreshDependencies,
+    ),
+  dispatchManagerLiveRefreshBounded: dispatchRefreshBounded,
+  finalResultRows: async () => [],
+};
+
+const testManagerLiveOrchestration = createManagerLiveOrchestration(testOrchestrationDependencies);
+const resolveManagerLiveScores = testManagerLiveOrchestration.resolve;
+const managerLiveAPI = createManagerLiveAPI(resolveManagerLiveScores);
 
 describe('manager live CACHE_ONLY reads', () => {
   beforeEach(() => {
-    reattachManagerLiveSpies();
     redisRows.clear();
     materializationPointers.clear();
     materializationPayloads.clear();
+    materializedRows.clear();
     redisReadFails = false;
     redisWriteSucceeds = false;
     postgresRows = [];
@@ -492,7 +606,6 @@ describe('manager live CACHE_ONLY reads', () => {
 
 describe('manager live READ_THROUGH source reporting', () => {
   beforeEach(() => {
-    reattachManagerLiveSpies();
     redisRows.clear();
     materializationPointers.clear();
     materializationPayloads.clear();
@@ -574,9 +687,9 @@ describe('manager live READ_THROUGH source reporting', () => {
           summary_overall_rank: 34_567,
         }) as never,
     );
-    managerScoreCheckpointRepository.upsertBatch = (async () => {
+    upsertCheckpoint.mockImplementation(async () => {
       throw new Error('checkpoint unavailable');
-    }) as never;
+    });
 
     const result = await resolveManagerLiveScores({
       eventId: 1,
@@ -595,7 +708,6 @@ describe('manager live READ_THROUGH source reporting', () => {
 
 describe('manager live classic standings convergence', () => {
   beforeEach(() => {
-    managerScoreCheckpointRepository.upsertBatch = upsertCheckpoint;
     upsertCheckpoint.mockReset();
     upsertCheckpoint.mockImplementation(successfulCheckpointWrite);
     getClassicStandings.mockReset();
@@ -1006,7 +1118,6 @@ describe('manager live classic standings convergence', () => {
 
 describe('manager live API read mode contract', () => {
   beforeEach(() => {
-    reattachManagerLiveSpies();
     redisRows.clear();
     redisReadFails = false;
     postgresRows = [];

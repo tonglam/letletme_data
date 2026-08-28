@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const migration = readFileSync('migrations/0014_entries_name_trigram_search.sql', 'utf8');
-const schema = readFileSync('src/db/schemas/platform.schema.ts', 'utf8');
+const schema = readFileSync('src/db/schemas/platform/competition.schema.ts', 'utf8');
 const sqlQuote = String.fromCharCode(39);
 
 describe('entry name trigram search contract', () => {

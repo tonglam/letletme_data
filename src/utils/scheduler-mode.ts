@@ -1,3 +1,5 @@
+import { getConfig } from './config';
+
 /**
  * Production Compose runs one no-port scheduler service.  API cron modules
  * remain registered for local/dev compatibility and for maintenance jobs that
@@ -5,7 +7,7 @@
  * enqueue a second independent Bull job in standalone mode.
  */
 export function isStandaloneSchedulerEnabled(): boolean {
-  return process.env.SCHEDULER_MODE === 'standalone';
+  return getConfig().SCHEDULER_MODE === 'standalone';
 }
 
 /**
@@ -16,5 +18,5 @@ export function isStandaloneSchedulerEnabled(): boolean {
  * bridge.
  */
 export function isCompatibilitySchedulerEnabled(): boolean {
-  return process.env.SCHEDULER_MODE === 'compatibility';
+  return getConfig().SCHEDULER_MODE === 'compatibility';
 }

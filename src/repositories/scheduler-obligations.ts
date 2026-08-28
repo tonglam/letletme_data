@@ -5,17 +5,8 @@ import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'dri
 import { freshnessSloWindowsInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
-import {
-  contractForSchedulerJob,
-  contractHasFreshnessWindow,
-  queueLaneForSchedulerJob,
-} from '../domain/data-contracts';
+import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
 import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
-import {
-  openGovernanceCase,
-  recordFreshnessObservation,
-} from '../services/data-governance.service';
-import { logError } from '../utils/logger';
 import { getConfig } from '../utils/config';
 
 export type SchedulerObligationStatus =
@@ -212,99 +203,6 @@ function terminalSchedulerEvidence(evidence?: Record<string, unknown>) {
   END`;
 }
 
-function freshnessWindowIdsFromEvidence(evidence: unknown): number[] {
-  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
-  const record = evidence as Record<string, unknown>;
-  const values = [
-    ...(Array.isArray(record.freshnessWindowIds) ? record.freshnessWindowIds : []),
-    record.freshnessWindowId,
-  ];
-  return [
-    ...new Set(
-      values.filter(
-        (value): value is number =>
-          typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
-      ),
-    ),
-  ];
-}
-
-function finiteEvidenceCount(evidence: Record<string, unknown>, keys: readonly string[]) {
-  for (const key of keys) {
-    const value = evidence[key];
-    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
-  }
-  return undefined;
-}
-
-function checkpointCompleteness(evidence: Record<string, unknown>) {
-  if (evidence.complete === false || evidence.scanComplete === false) return 'INCOMPLETE' as const;
-  if (evidence.hasMore === true) return 'INCOMPLETE' as const;
-  const failedUnits = finiteEvidenceCount(evidence, ['failedUnits', 'failedCount']);
-  if (failedUnits !== undefined && failedUnits > 0) return 'INCOMPLETE' as const;
-  return 'COMPLETE' as const;
-}
-
-/**
- * Checkpoint jobs do not necessarily publish a Redis pointer, but their
- * semantic finalizer is still the PostgreSQL evidence boundary for a
- * freshness window.  Keep this side-channel best-effort: a telemetry outage
- * must never turn an already committed scheduler completion into a failure.
- */
-export async function recordCheckpointFreshnessEvidence(input: {
-  jobName: string;
-  evidence: unknown;
-  completedAt: Date | null;
-  runId?: string | null;
-}): Promise<void> {
-  const contract = contractForSchedulerJob(input.jobName);
-  if (contract?.freshnessEvidence !== 'checkpoint') return;
-  const evidence =
-    input.evidence && typeof input.evidence === 'object' && !Array.isArray(input.evidence)
-      ? (input.evidence as Record<string, unknown>)
-      : {};
-  const windowIds = freshnessWindowIdsFromEvidence(evidence);
-  if (windowIds.length === 0) return;
-  const completedAt = input.completedAt ?? new Date();
-  const producerRevision = [
-    evidence.revision,
-    evidence.snapshotRevision,
-    evidence.checkpointRevision,
-    evidence.publicationRevision,
-    input.runId,
-  ].find(
-    (value): value is string | number => typeof value === 'string' || typeof value === 'number',
-  );
-  const expectedCount = finiteEvidenceCount(evidence, [
-    'expectedCount',
-    'requiredUnits',
-    'expectedUnits',
-  ]);
-  const observedCount = finiteEvidenceCount(evidence, [
-    'observedCount',
-    'succeededUnits',
-    'observedUnits',
-  ]);
-  for (const windowId of windowIds) {
-    try {
-      await recordFreshnessObservation({
-        windowId,
-        sourceCheckedAt: completedAt,
-        pgPublishedAt: completedAt,
-        ...(producerRevision === undefined ? {} : { producerRevision: String(producerRevision) }),
-        ...(expectedCount === undefined ? {} : { expectedCount }),
-        ...(observedCount === undefined ? {} : { observedCount }),
-        completenessStatus: checkpointCompleteness(evidence),
-      });
-    } catch (error) {
-      logError('Checkpoint freshness evidence update failed', error, {
-        jobName: input.jobName,
-        windowId,
-      });
-    }
-  }
-}
-
 function immutableScheduledDueAt(dueAt: Date, scheduledDueAtMs: string | null): Date {
   if (!scheduledDueAtMs || !/^[0-9]+$/.test(scheduledDueAtMs)) return dueAt;
   const timestamp = Number(scheduledDueAtMs);
@@ -404,6 +302,20 @@ export async function getSchedulerObligation(input: {
     .select()
     .from(schedulerObligationsInOps)
     .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+    .limit(1);
+  return rows[0] ? mapRow(rows[0]) : null;
+}
+
+export async function getSchedulerObligationByBullJobId(input: {
+  bullJobId: string | number;
+  db?: DbHandle;
+}): Promise<SchedulerObligation | null> {
+  const db = input.db ?? (await getDb());
+  const rows = await db
+    .select()
+    .from(schedulerObligationsInOps)
+    .where(eq(schedulerObligationsInOps.bullJobId, String(input.bullJobId)))
+    .orderBy(desc(schedulerObligationsInOps.updatedAt))
     .limit(1);
   return rows[0] ? mapRow(rows[0]) : null;
 }
@@ -1458,10 +1370,7 @@ export async function completeSchedulerObligation(input: {
       completedAt: schedulerObligationsInOps.completedAt,
       runId: schedulerObligationsInOps.runId,
     });
-  const row = updated[0];
-  if (!row) return false;
-  await recordCheckpointFreshnessEvidence(row);
-  return true;
+  return updated.length === 1;
 }
 
 /**
@@ -1542,10 +1451,7 @@ export async function completeSchedulerObligationByBullJobId(input: {
       completedAt: schedulerObligationsInOps.completedAt,
       runId: schedulerObligationsInOps.runId,
     });
-  const row = updated[0];
-  if (!row) return false;
-  await recordCheckpointFreshnessEvidence(row);
-  return true;
+  return updated.length === 1;
 }
 
 export async function failSchedulerObligationByBullJobId(input: {
@@ -1625,53 +1531,6 @@ export async function failSchedulerObligation(input: {
       obligationId: schedulerObligationsInOps.obligationId,
       status: schedulerObligationsInOps.status,
     });
-  if (updated.length === 1) {
-    // A terminal worker failure is durable evidence that needs an actionable
-    // repair case. Persisting the case is best-effort and must never mask the
-    // already-recorded obligation failure.
-    // Retryable provider/source-not-ready errors should not open a governance
-    // case on every bounded attempt.  Once the scheduler exhausts the policy
-    // and marks the obligation irrecoverable, keep an actionable case even if
-    // the individual error class normally relies on the SLO observer.
-    if (retryPolicy.createGovernanceCase || updated[0]?.status === 'irrecoverable') {
-      try {
-        const [obligation] = await db
-          .select({
-            jobName: schedulerObligationsInOps.jobName,
-            scopeKey: schedulerObligationsInOps.scopeKey,
-            generation: schedulerObligationsInOps.generation,
-          })
-          .from(schedulerObligationsInOps)
-          .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
-          .limit(1);
-        const contract = obligation ? contractForSchedulerJob(obligation.jobName) : undefined;
-        if (obligation && contract) {
-          await openGovernanceCase({
-            caseKind: 'scheduler-failure',
-            contractKey: contract.contractKey,
-            lane: queueLaneForSchedulerJob(obligation.jobName) ?? contract.queueLane,
-            obligationId: input.obligationId,
-            scopeKey: obligation.scopeKey,
-            errorClass: classified.errorClass,
-            errorCode: classified.errorCode,
-            fingerprint: `${obligation.jobName}:${obligation.scopeKey}:${classified.errorCode}`,
-            evidence: {
-              generation: obligation.generation,
-              retryable: retryPolicy.retryable,
-              maxAttempts: retryPolicy.maxAttempts,
-            },
-            repairTarget: { jobName: obligation.jobName, scopeKey: obligation.scopeKey },
-            compensator: contract.compensator,
-            db,
-          });
-        }
-      } catch (caseError) {
-        logError('Scheduler failure governance case persistence failed', caseError, {
-          obligationId: input.obligationId,
-        });
-      }
-    }
-  }
   return updated.length === 1;
 }
 
