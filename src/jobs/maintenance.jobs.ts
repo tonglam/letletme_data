@@ -20,6 +20,8 @@ export type MaintenanceEnqueueOptions = Readonly<{
   obligationGeneration?: number;
   /** Exact freshness window being repaired, carried into a downstream publication. */
   freshnessWindowId?: number;
+  /** Actual standalone market-daily Bull identity observed by the watchdog. */
+  playerValuesBullJobId?: string;
   entryId?: number;
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
@@ -98,6 +100,9 @@ export async function enqueueMaintenanceJob(
     ...(options.freshnessWindowId === undefined
       ? {}
       : { freshnessWindowId: options.freshnessWindowId }),
+    ...(options.playerValuesBullJobId === undefined
+      ? {}
+      : { playerValuesBullJobId: options.playerValuesBullJobId }),
     ...(options.entryId === undefined ? {} : { entryId: options.entryId }),
     ...(options.eventId === undefined ? {} : { eventId: options.eventId }),
     ...(options.snapshotKind === undefined ? {} : { snapshotKind: options.snapshotKind }),

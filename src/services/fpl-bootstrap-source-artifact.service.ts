@@ -39,6 +39,8 @@ export type ResolvedFplBootstrapArtifact = Readonly<{
   artifact: FplSourceArtifact;
   bootstrap: FPLBootstrapResponse;
   provenance: 'captured' | 'archive';
+  /** Timestamp of this observation, independent of a deduplicated manifest row. */
+  observedAt: Date;
 }>;
 
 export type FplBootstrapSourceArtifactDependencies = Readonly<{
@@ -332,7 +334,7 @@ async function captureCurrentDay(
     byteSize: artifact.byteSize,
     objectKey: artifact.objectKey,
   });
-  return { artifact, bootstrap, provenance: 'captured' };
+  return { artifact, bootstrap, provenance: 'captured', observedAt: captured.retrievedAt };
 }
 
 export async function resolveFplBootstrapSourceArtifact(
@@ -374,5 +376,5 @@ export async function resolveFplBootstrapSourceArtifact(
     sourceDay,
     sha256: artifact.sha256,
   });
-  return { artifact, bootstrap, provenance: 'archive' };
+  return { artifact, bootstrap, provenance: 'archive', observedAt: artifact.retrievedAt };
 }

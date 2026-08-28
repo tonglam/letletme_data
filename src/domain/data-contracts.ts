@@ -94,6 +94,7 @@ export const dataContractRegistry = [
     queueLane: dataSyncQueueName,
     schedulerJobs: [
       'market-daily',
+      'player-prices',
       'price-change-predictions',
       'price-change-watch',
       'player-market-freshness-watchdog',

@@ -11,7 +11,11 @@ import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export async function runPlayerMarketFreshnessWatchdog(
   now: Date = new Date(),
-  options: { freshnessWindowId?: number; sourceRunId?: string } = {},
+  options: {
+    freshnessWindowId?: number;
+    sourceRunId?: string;
+    playerValuesBullJobId?: string | number;
+  } = {},
 ) {
   try {
     return await checkPlayerMarketFreshness(now, undefined, options);

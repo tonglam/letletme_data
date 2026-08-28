@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   getPlayerValuesQueueJobId,
+  getPlayerValuesSchedulerQueueJobId,
   waitForPlayerValuesSettlement,
   type ObservedPlayerValuesJobState,
 } from '../../src/jobs/player-values-settlement';
@@ -12,6 +13,23 @@ describe('player-values retry settlement', () => {
     expect(getPlayerValuesQueueJobId(TEST_SEASON, '20260813')).toBe(
       `${TEST_SEASON.seasonCode}-player-values-20260813`,
     );
+  });
+
+  test('uses the recorded standalone Bull ID and derives it before confirmation', () => {
+    expect(
+      getPlayerValuesSchedulerQueueJobId(TEST_SEASON, {
+        obligationId: 'obligation-1',
+        generation: 2,
+        bullJobId: '2627-scheduler-obligation-1-g2',
+      }),
+    ).toBe('2627-scheduler-obligation-1-g2');
+    expect(
+      getPlayerValuesSchedulerQueueJobId(TEST_SEASON, {
+        obligationId: 'obligation-1',
+        generation: 2,
+        bullJobId: null,
+      }),
+    ).toBe('2627-scheduler-obligation-1-g2');
   });
 
   test('waits through active and delayed retries without reporting stale data', async () => {

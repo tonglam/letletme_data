@@ -42,6 +42,8 @@ export interface DataSyncJobData {
   freshnessWindowId?: number;
   /** All joined freshness windows for a shared latest-wins publication. */
   freshnessWindowIds?: readonly number[];
+  /** Keep an in-season no-change market capture retrying through 07:05 UTC+8. */
+  pollUntilWindowEnd?: boolean;
 }
 
 const defaultJobOptions = {

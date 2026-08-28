@@ -7,8 +7,15 @@ import {
 } from './fpl-request-metrics';
 import { logInfo } from './logger';
 import { parseStrictBooleanEnvValue } from './config';
+import { isPlayerValuesWindowPendingError } from '../domain/player-values-window';
 
-export const DATA_SYNC_ATTEMPT_OUTCOMES = ['ready', 'partial', 'failed', 'noop'] as const;
+export const DATA_SYNC_ATTEMPT_OUTCOMES = [
+  'ready',
+  'partial',
+  'failed',
+  'noop',
+  'pending',
+] as const;
 export type DataSyncAttemptOutcome = (typeof DATA_SYNC_ATTEMPT_OUTCOMES)[number];
 
 export type DataSyncAttemptSource =
@@ -246,9 +253,13 @@ export async function runDataSyncAttempt<T>(
       outcome = resolveOutcome(summary);
       return result;
     } catch (error) {
-      // Bounded operational errors may carry useful unit counters even though
-      // a thrown attempt always remains failed.
-      summary = inferDataSyncWorkSummary(error);
+      // Bounded operational errors may carry useful unit counters. The market
+      // window's expected no-change wait is reported as pending, not failed.
+      summary = {
+        ...inferDataSyncWorkSummary(error),
+        ...(isPlayerValuesWindowPendingError(error) ? { outcome: 'pending' as const } : {}),
+      };
+      if (isPlayerValuesWindowPendingError(error)) outcome = 'pending';
       throw error;
     } finally {
       // Preserve the resolved target even when the runner fails after lookup;

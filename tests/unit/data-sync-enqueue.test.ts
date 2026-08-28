@@ -24,4 +24,13 @@ describe('data-sync enqueue correlation', () => {
     expect(getCoreSnapshotJobId('manual')).toBe('core-snapshot-repair');
     expect(getCoreSnapshotJobId('event-transition', { jobId: 'explicit-id' })).toBe('explicit-id');
   });
+
+  test('carries the bounded market polling flag through the job payload', () => {
+    expect(
+      createDataSyncJobData(TEST_SEASON, 'catchup', {
+        changeDate: '20260829',
+        pollUntilWindowEnd: true,
+      }),
+    ).toMatchObject({ changeDate: '20260829', pollUntilWindowEnd: true });
+  });
 });

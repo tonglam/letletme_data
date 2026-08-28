@@ -259,6 +259,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           return runPlayerMarketFreshnessWatchdog(new Date(), {
             freshnessWindowId: job.data.freshnessWindowId,
             sourceRunId: job.data.runId,
+            playerValuesBullJobId: job.data.playerValuesBullJobId,
           });
         case MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY:
           return repairPlayerSeasonSummaries();

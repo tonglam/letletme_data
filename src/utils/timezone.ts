@@ -31,6 +31,11 @@ export function getCronMinute(date: Date = new Date()): number {
   return Number.isFinite(minute) ? minute : 0;
 }
 
+export function getCronHour(date: Date = new Date()): number {
+  const hour = Number.parseInt(getPart(utc8Formatter.formatToParts(date), 'hour'), 10);
+  return Number.isFinite(hour) ? hour : 0;
+}
+
 /**
  * Format timestamp as ISO-like UTC+8 string.
  * Example: 2026-04-19T23:05:01.123+08:00

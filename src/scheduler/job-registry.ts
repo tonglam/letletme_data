@@ -4,6 +4,7 @@ import { formatCronDateKey } from '../utils/timezone';
 import {
   enqueueCoreSnapshotJob,
   enqueuePriceChangePredictionsJob,
+  enqueuePlayerPricesSyncJob,
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
 } from '../jobs/data-sync-enqueue';
@@ -41,6 +42,7 @@ import {
 } from '../jobs/maintenance.jobs';
 import { enqueueUnderstatPlayerSync, enqueueUnderstatTeamSync } from '../jobs/understat-enqueue';
 import { enqueueUnderstatOrphanReconciler } from '../jobs/understat-recovery.jobs';
+import { getPlayerValuesSchedulerQueueJobId } from '../jobs/player-values-settlement';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import {
@@ -55,6 +57,7 @@ import {
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { getSchedulerObligationByIdentity } from '../repositories/scheduler-obligations';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { isMatchDayTime } from '../utils/conditions';
 import {
@@ -68,6 +71,7 @@ import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
 import { fplPriceWatchQueueName } from '../queues/fpl-price-watch.queue';
 import { getPriceChangePredictions } from '../services/price-change-predictions.service';
+import { resolvePlayerSyncEvent } from '../services/player-sync-event.service';
 import { logWarn } from '../utils/logger';
 import {
   PRICE_CHANGE_WATCH_LEAD_MS,
@@ -1296,6 +1300,40 @@ function activePlayerStatsDefinition(): ScheduledJobDefinition {
   };
 }
 
+export function playerPricesDefinition(
+  resolveSyncEvent: typeof resolvePlayerSyncEvent = resolvePlayerSyncEvent,
+): ScheduledJobDefinition {
+  const definition = dailyDefinition({
+    name: 'player-prices',
+    hour: 7,
+    minute: 10,
+    cadence: 'daily',
+    catchUpPolicy: 'current-day-only',
+    criticality: 'normal',
+    queueName: 'data-sync',
+    successPredicate: 'current-day persisted player price changes replayed',
+    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+      const job = await enqueuePlayerPricesSyncJob(context.season, 'catchup', {
+        changeDate: plan.periodKey,
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        removeOnSettle: false,
+        obligationId,
+        obligationGeneration: generation,
+        freshnessWindowId,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  });
+
+  return {
+    ...definition,
+    resolve: async (context) => {
+      if (!(await resolveSyncEvent(context.season, context.now))) return [];
+      return definition.resolve(context);
+    },
+  };
+}
+
 export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
   const definitions: ScheduledJobDefinition[] = [
     coreLifecycleReconcileDefinition(),
@@ -1323,14 +1361,15 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
     }),
     dailyDefinition({
       name: 'market-daily',
-      hour: 9,
-      minute: 25,
+      hour: 6,
+      minute: 55,
       cadence: 'daily',
       catchUpPolicy: 'current-day-only',
       criticality: 'critical',
       queueName: 'data-sync',
       successPredicate: 'complete market snapshot and delivered publication',
       enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+        const syncEvent = await resolvePlayerSyncEvent(context.season, context.now);
         const job = await enqueuePlayerValuesSyncJob(context.season, 'catchup', {
           changeDate: plan.periodKey,
           jobId: `scheduler-${obligationId}-g${generation}`,
@@ -1338,10 +1377,12 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
           obligationId,
           obligationGeneration: generation,
           freshnessWindowId,
+          pollUntilWindowEnd: syncEvent?.phase === 'current',
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },
     }),
+    playerPricesDefinition(),
     dailyDefinition({
       name: 'player-stats',
       hour: 9,
@@ -1403,8 +1444,8 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
     understatOrphanReconcilerDefinition(),
     dailyDefinition({
       name: MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS,
-      hour: 9,
-      minute: 36,
+      hour: 7,
+      minute: 6,
       cadence: 'daily',
       // The watchdog only knows how to validate today's mutable market date.
       // Missed historical windows are terminal evidence, never replayed as if
@@ -1413,12 +1454,21 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'normal',
       queueName: 'maintenance',
       successPredicate: 'market freshness watchdog verifies a complete current snapshot',
-      enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+        const marketDailyObligation = await getSchedulerObligationByIdentity({
+          jobName: 'market-daily',
+          scopeKey: context.season.seasonCode,
+          periodKey: plan.periodKey,
+        });
+        const playerValuesBullJobId = marketDailyObligation
+          ? getPlayerValuesSchedulerQueueJobId(context.season, marketDailyObligation)
+          : undefined;
         const job = await enqueuePlayerMarketFreshness(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
           freshnessWindowId,
+          ...(playerValuesBullJobId ? { playerValuesBullJobId } : {}),
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },

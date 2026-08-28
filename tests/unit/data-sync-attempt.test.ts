@@ -11,6 +11,7 @@ import {
 import { IncompleteDataSyncError } from '../../src/utils/errors';
 import { beginFplLogicalRequest } from '../../src/utils/fpl-request-metrics';
 import { logger } from '../../src/utils/logger';
+import { PlayerValuesWindowPendingError } from '../../src/domain/player-values-window';
 
 afterEach(() => {
   mock.restore();
@@ -214,6 +215,37 @@ describe('data sync attempt reporting', () => {
       failedUnits: 0,
     });
     expect(JSON.stringify(reports[0])).not.toContain('private name');
+  });
+
+  test('reports an expected market-window wait as pending', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await expect(
+      runDataSyncAttempt(
+        { queue: 'data-sync', jobName: 'player-values', runId: 'market-window', source: 'cron' },
+        async () => {
+          throw new PlayerValuesWindowPendingError('20260829', {
+            requiredUnits: 581,
+            succeededUnits: 581,
+            failedUnits: 0,
+            timings: { bootstrap: 120, snapshotWrite: 80, derivedView: 15 },
+          });
+        },
+      ),
+    ).rejects.toBeInstanceOf(PlayerValuesWindowPendingError);
+
+    expect(reportsFrom(infoSpy)[0]).toMatchObject({
+      jobName: 'player-values',
+      outcome: 'pending',
+      requiredUnits: 581,
+      succeededUnits: 581,
+      failedUnits: 0,
+      timings: {
+        bootstrap: 120,
+        snapshotWrite: 80,
+        derivedView: 15,
+      },
+    });
   });
 
   test('keeps first-attempt API traffic distinct from operator manual traffic', async () => {
