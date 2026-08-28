@@ -76,6 +76,27 @@ jobs:
             bun test "${test_file}"
           done < <(find tests/unit -type f -name '*.test.ts' -print | sort)
 
+      - name: Unit coverage and critical-path thresholds
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unit:unit@127.0.0.1:1/unit
+          CACHE_REDIS_HOST: 127.0.0.1
+          CACHE_REDIS_PORT: '1'
+          CACHE_REDIS_DB: '9'
+          QUEUE_REDIS_HOST: 127.0.0.1
+          QUEUE_REDIS_PORT: '2'
+          QUEUE_REDIS_DB: '10'
+        run: bun run coverage:critical
+
+      - name: Upload unit LCOV artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-lcov-${{ matrix.bun-version }}
+          path: coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Build
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci

@@ -36,6 +36,7 @@ bun run test
 bun run test:integration       # requires explicit RUN_INTEGRATION=1 and safe targets
 bun run test:all               # unit followed by guarded integration
 bun run coverage               # unit LCOV/summary
+bun run coverage:critical     # unit LCOV plus critical-path gates
 bun run coverage:integration   # explicit integration coverage
 
 # Quality and database

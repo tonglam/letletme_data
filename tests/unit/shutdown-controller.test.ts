@@ -51,13 +51,43 @@ describe('shared shutdown controller', () => {
 
   test('returns a timeout result and exits non-zero', async () => {
     const exits: number[] = [];
+    const timeoutSignals: string[] = [];
     const controller = createShutdownController({
       timeoutMs: 10,
       waitForInFlight: () => new Promise<void>(() => undefined),
+      onTimeout: (signal) => {
+        timeoutSignals.push(signal);
+      },
       exit: (code) => exits.push(code),
     });
 
     await expect(controller.request('SIGTERM')).resolves.toMatchObject({ status: 'timed_out' });
     expect(exits).toEqual([1]);
+    expect(timeoutSignals).toEqual(['SIGTERM']);
+    expect(controller.getState()).toBe('stopped');
+  });
+
+  test('completes with optional stages absent and reports fatal errors once', async () => {
+    const exits: number[] = [];
+    const controller = createShutdownController({ exit: (code) => exits.push(code) });
+
+    await expect(controller.request('SIGINT')).resolves.toMatchObject({
+      signal: 'SIGINT',
+      status: 'completed',
+    });
+    controller.fatal(new Error('late fatal')); // stopped controllers do not exit twice
+    expect(exits).toEqual([0]);
+    expect(controller.getState()).toBe('stopped');
+  });
+
+  test('fatal paths exit non-zero while the process is still running', () => {
+    const exits: number[] = [];
+    const controller = createShutdownController({ exit: (code) => exits.push(code) });
+
+    controller.fatal(new Error('fatal worker failure'));
+    controller.fatal(new Error('duplicate fatal'));
+
+    expect(exits).toEqual([1]);
+    expect(controller.isShuttingDown()).toBe(true);
   });
 });

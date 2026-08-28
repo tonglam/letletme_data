@@ -6,17 +6,19 @@ import { redisSingleton } from '../cache/singleton';
 import { getDbClient } from '../db/singleton';
 import { logInfo, logWarn } from '../utils/logger';
 import { myFplSnapshotRedisManifestKey } from './my-fpl-snapshot-publication.service';
+import {
+  isSupportedMyFplInvalidationReason,
+  parseMyFplSnapshotInvalidationResult,
+} from '../domain/my-fpl-invalidation';
 
-/** The only invalidation currently emitted by the tournament delete path. */
-export const MY_FPL_SNAPSHOT_INVALIDATION_REASON = 'TOURNAMENT_DELETED' as const;
+export {
+  MY_FPL_SNAPSHOT_INVALIDATION_REASON,
+  parseMyFplSnapshotInvalidationResult,
+} from '../domain/my-fpl-invalidation';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export type MyFplSnapshotInvalidationStatus =
-  | 'absent'
-  | 'deleted'
-  | 'malformed_deleted'
-  | 'different';
+export type { MyFplSnapshotInvalidationStatus } from '../domain/my-fpl-invalidation';
 
 export type MyFplSnapshotInvalidationOutboxDispatchResult = Readonly<{
   claimed: number;
@@ -85,21 +87,6 @@ function validateOptions(options: MyFplSnapshotInvalidationDispatchOptions): {
     throw new Error('My FPL invalidation outbox IDs must be UUIDs');
   }
   return { limit, outboxIds: options.outboxIds };
-}
-
-export function parseMyFplSnapshotInvalidationResult(
-  result: unknown,
-): MyFplSnapshotInvalidationStatus {
-  const status = Array.isArray(result) ? result[0] : undefined;
-  if (
-    status !== 'absent' &&
-    status !== 'deleted' &&
-    status !== 'malformed_deleted' &&
-    status !== 'different'
-  ) {
-    throw new Error(`My FPL Redis manifest invalidation failed: ${String(status)}`);
-  }
-  return status;
 }
 
 async function releaseClaim(
@@ -247,7 +234,7 @@ export function createMyFplSnapshotInvalidationDispatcher(
 
     for (const row of claimed) {
       try {
-        if (row.reason !== MY_FPL_SNAPSHOT_INVALIDATION_REASON) {
+        if (!isSupportedMyFplInvalidationReason(row.reason)) {
           throw new Error(`Unsupported My FPL invalidation reason ${row.reason}`);
         }
         const status = await db.begin(async (tx) => {
