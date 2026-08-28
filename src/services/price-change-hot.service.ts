@@ -10,7 +10,9 @@ import {
   PRICE_CHANGE_READY_MS,
   priceChangeTriggerFingerprint,
   PriceChangePredictionValidationError,
+  validatePriceChangeObservedEvent,
   type PriceChangeBoard,
+  type PriceChangeObservedEvent,
 } from './price-change-predictions.service';
 import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -24,7 +26,8 @@ export const PRICE_CHANGE_HOT_TTL_MS = 15 * 60 * 1000;
 // The metadata-only cursor includes the validated deadline horizon. Bump the
 // envelope version whenever that shape changes so an older payload cannot be
 // advertised without the same validation evidence.
-export const PRICE_CHANGE_HOT_SCHEMA_VERSION = 3 as const;
+export const PRICE_CHANGE_HOT_SCHEMA_VERSION = 4 as const;
+export type PriceChangeHotSchemaVersion = 3 | 4;
 
 const HOT_KEY_PREFIX = 'fpl:price-changes:hot';
 
@@ -34,7 +37,7 @@ export type PriceChangeHotReconciliationState = 'pending' | 'reconciled' | 'fail
 export const PRICE_CHANGE_HOT_ARCHIVE_FAILURE_PREFIX = 'source-archive-failed:';
 
 export type PriceChangeHotSnapshot = Readonly<{
-  schemaVersion: typeof PRICE_CHANGE_HOT_SCHEMA_VERSION;
+  schemaVersion: PriceChangeHotSchemaVersion;
   seasonCode: string;
   revision: string;
   triggerFingerprint: string;
@@ -324,6 +327,7 @@ export function buildPriceChangeHotSnapshot(input: {
   fetchedAt?: Date;
   corePlayerCount?: number | null;
   corePlayerDelta?: number | null;
+  latestEvent?: PriceChangeObservedEvent | null;
 }): PriceChangeHotSnapshot {
   const detectedAt = input.detectedAt ?? new Date();
   const fetchedAt = input.fetchedAt ?? detectedAt;
@@ -341,7 +345,18 @@ export function buildPriceChangeHotSnapshot(input: {
       `FPL bootstrap season ${sourceSeason} does not match current season ${input.season.seasonCode}`,
     );
   }
-  const board = normalizePriceChangeBoard(input.bootstrap, fetchedAt);
+  const board = normalizePriceChangeBoard(
+    input.bootstrap,
+    fetchedAt,
+    undefined,
+    undefined,
+    input.latestEvent ?? null,
+  );
+  if (board.latestEvent) {
+    validatePriceChangeObservedEvent(board.latestEvent, board.players, {
+      requireCurrentPriceMatch: true,
+    });
+  }
   const expiresAt = new Date(detectedAt.getTime() + PRICE_CHANGE_HOT_TTL_MS);
   const base = {
     schemaVersion: PRICE_CHANGE_HOT_SCHEMA_VERSION,
@@ -390,7 +405,7 @@ function isValidSnapshotMetadata(
   const corePlayerCount = value.corePlayerCount;
   const corePlayerDelta = value.corePlayerDelta;
   if (
-    value.schemaVersion !== PRICE_CHANGE_HOT_SCHEMA_VERSION ||
+    (value.schemaVersion !== 3 && value.schemaVersion !== PRICE_CHANGE_HOT_SCHEMA_VERSION) ||
     value.seasonCode !== seasonCode ||
     typeof value.revision !== 'string' ||
     !/^[0-9a-f]{16}$/.test(value.revision) ||
@@ -531,6 +546,23 @@ function isValidSnapshot(
     boardStaleAt !== fetchedAt + PRICE_CHANGE_READY_MS
   ) {
     return false;
+  }
+  const boardRecord = snapshot.board as unknown as Record<string, unknown>;
+  if (
+    snapshot.schemaVersion === PRICE_CHANGE_HOT_SCHEMA_VERSION &&
+    !('latestEvent' in boardRecord)
+  ) {
+    return false;
+  }
+  if (snapshot.board.latestEvent) {
+    try {
+      validatePriceChangeObservedEvent(snapshot.board.latestEvent, snapshot.board.players, {
+        requireCurrentPriceMatch: true,
+      });
+    } catch {
+      return false;
+    }
+    if (Date.parse(snapshot.board.latestEvent.observedAt) > fetchedAt) return false;
   }
   return true;
 }

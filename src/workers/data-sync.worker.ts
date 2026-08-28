@@ -248,6 +248,9 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
               },
             }
           : {}),
+        ...(hotSnapshot.schemaVersion >= 4
+          ? { eventEvidence: hotSnapshot.board.latestEvent ?? null }
+          : {}),
       };
     }
     const source = await loadPriceChangeHotSource({
@@ -269,6 +272,9 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
               fetchedAt: capturedAt.fetchedAt,
             },
           }
+        : {}),
+      ...(hotSnapshot.schemaVersion >= 4
+        ? { eventEvidence: hotSnapshot.board.latestEvent ?? null }
         : {}),
     };
   } catch (error) {

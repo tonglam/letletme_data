@@ -94,6 +94,21 @@ function asContext(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function priceChangeEventSummary(
+  context: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const event = asContext(context?.latestEvent);
+  if (!event) return null;
+  return {
+    deadline: typeof event.deadline === 'string' ? event.deadline : null,
+    changeDate: typeof event.changeDate === 'string' ? event.changeDate : null,
+    observedAt: typeof event.observedAt === 'string' ? event.observedAt : null,
+    outcome: typeof event.outcome === 'string' ? event.outcome : null,
+    changedPlayerCount:
+      typeof event.changedPlayerCount === 'number' ? event.changedPlayerCount : null,
+  };
+}
+
 function readDeliveryContext(delivery: PublicationDelivery | null): Record<string, unknown> | null {
   const contextItem = delivery?.items.find((item) => item.manifest.name === 'context');
   if (!contextItem) return null;
@@ -313,6 +328,7 @@ export async function getJobsStatus(
         : ageMs < PRICE_CHANGE_MAX_AGE_MS
           ? 'STALE'
           : 'UNAVAILABLE';
+  const latestEvent = priceChangeEventSummary(priceChangeContext);
   const priceChangeObligation = await schedulerObligationStatus({
     jobName: 'price-change-predictions',
     scopeKey: season.seasonCode,
@@ -334,9 +350,23 @@ export async function getJobsStatus(
       typeof priceChangeContext?.observedPlayerCount === 'number'
         ? priceChangeContext.observedPlayerCount
         : 0,
+    latestEvent,
+    eventAgeSeconds: (() => {
+      const observedAt =
+        latestEvent && typeof latestEvent.observedAt === 'string'
+          ? Date.parse(latestEvent.observedAt)
+          : Number.NaN;
+      return Number.isFinite(observedAt)
+        ? Math.floor(Math.max(0, Date.now() - observedAt) / 1000)
+        : null;
+    })(),
     status: priceChangeStatus,
     dbRedisParity: publicationConsistency[PRICE_CHANGE_DATASET] ?? false,
-    overdue: priceChangeObligation.overdue,
+    // A price-change obligation is a five-minute production lane. Two
+    // consecutive unsuccessful cycles are overdue even when the latest row
+    // is already terminally skipped rather than still pending/failed.
+    overdue:
+      priceChangeObligation.overdue || priceChangeObligation.consecutiveUnsuccessfulCycles >= 2,
     consecutiveUnsuccessfulCycles: priceChangeObligation.consecutiveUnsuccessfulCycles,
     schedulerObligation: {
       name: 'price-change-predictions',
