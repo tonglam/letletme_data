@@ -526,7 +526,14 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
               : null;
           const eventEvidenceOverride =
             hotSnapshotForEvent && hotSnapshotForEvent.schemaVersion >= 4
-              ? (hotSnapshotForEvent.board.latestEvent ?? null)
+              ? (hotSnapshotForEvent.board.latestEvent ?? undefined)
+              : undefined;
+          const readLatestEvent =
+            hotSource === undefined
+              ? async () => {
+                  const latest = await readPriceChangeHotSnapshot(job.data.seasonCode);
+                  return latest?.schemaVersion === 4 ? (latest.board.latestEvent ?? null) : null;
+                }
               : undefined;
           prepared = await preparePriceChangePublication(
             season,
@@ -536,6 +543,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             job.data.freshnessWindowId,
             job.data.freshnessWindowIds,
             eventEvidenceOverride,
+            readLatestEvent,
           );
         } catch (error) {
           if (error instanceof PriceChangeCorePublicationRequiredError) {
