@@ -36,6 +36,33 @@ const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'ut
 const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
 const quote = String.fromCharCode(39);
 
+function expectNonInteractiveComposeRuns(source: string, label: string) {
+  const logicalLines: string[] = [];
+  let logicalLine = '';
+  for (const line of source.split('\n')) {
+    const trimmed = line.trim();
+    if (!logicalLine && trimmed.startsWith('#')) continue;
+    logicalLine += `${logicalLine ? ' ' : ''}${trimmed.replace(/\\$/, '').trim()}`;
+    if (!trimmed.endsWith('\\')) {
+      logicalLines.push(logicalLine);
+      logicalLine = '';
+    }
+  }
+  const runLines = logicalLines.filter(
+    (line) =>
+      /\brun\s+--rm -T\b/.test(line) &&
+      // A SQL heredoc is intentionally attached to psql so status/health
+      // queries can receive their query body; only detached runs belong here.
+      !line.includes('<<'),
+  );
+  expect(runLines.length, `${label} should contain Compose run commands`).toBeGreaterThan(0);
+  for (const line of runLines) {
+    expect(line, `${label} has an interactive Compose run: ${line}`).toContain(
+      '--interactive=false',
+    );
+  }
+}
+
 describe('release workflow gates', () => {
   test('keeps the content worker alive when the pipeline is disabled', () => {
     expect(contentWorker).toContain('publicationOutboxDispatcher = setInterval');
@@ -189,6 +216,34 @@ describe('release workflow gates', () => {
     expect(pinnedOpenSshAction).toContain('"$INPUT_USERNAME@$INPUT_HOST" \'bash -s\'');
     expect(pinnedOpenSshAction).not.toContain('remote_command=');
     expect(pinnedOpenSshAction).not.toContain('ssh-keyscan');
+  });
+
+  test('prevents streamed deployment scripts from consuming bash stdin', () => {
+    expectNonInteractiveComposeRuns(workflow, 'main deploy workflow');
+    expectNonInteractiveComposeRuns(deployScript, 'local deploy script');
+    expectNonInteractiveComposeRuns(deployStateMachine, 'shared deploy state machine');
+    expectNonInteractiveComposeRuns(
+      briefingRolloutWorkflow,
+      'briefing acquisition rollout workflow',
+    );
+    expectNonInteractiveComposeRuns(sourceMediaRolloutWorkflow, 'source-media rollout workflow');
+    const statusStart = deployScript.indexOf('status()');
+    const statusEnd = deployScript.indexOf('\nstream_logs()', statusStart);
+    expect(statusStart).toBeGreaterThan(-1);
+    expect(statusEnd).toBeGreaterThan(statusStart);
+    expect(deployScript.slice(statusStart, statusEnd)).toContain(
+      'compose --profile migration run --rm -T --no-deps --entrypoint sh backup -euc',
+    );
+    expect(deployScript.slice(statusStart, statusEnd)).not.toContain('--interactive=false');
+    expect(briefingRolloutWorkflow).toContain(
+      '--profile migration run --rm -T --no-deps --entrypoint sh backup -euc',
+    );
+    expect(briefingRolloutWorkflow).toContain(
+      '--profile migration run --rm -T --interactive=false --no-deps --entrypoint sh backup -euc',
+    );
+    expect(workflow).toContain('streams this script through `bash -s`');
+    expect(workflow).toContain('Never let Compose attach to that stdin');
+    expect(deployStateMachine).toContain('Callers may execute this state machine from an SSH');
   });
 
   test('keeps source-media rollout protected, reversible, and Storage-gated', () => {

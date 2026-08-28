@@ -275,9 +275,9 @@ describe('production environment preflight', () => {
     const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
     const stopServices = deployScript.indexOf('if ! compose stop -t 45 api worker; then');
     const databaseQuiescenceCommand =
-      'compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only --scoped';
+      'compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped';
     const redisQuiescenceCommand =
-      'compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only --scoped';
+      'compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped';
     const databaseQuiescenceBeforeStop = deployScript.lastIndexOf(
       databaseQuiescenceCommand,
       stopServices,
@@ -309,7 +309,7 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 media-worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T --interactive=false migration bun scripts\/assert-queue-quiescence\.ts --database-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
@@ -321,7 +321,7 @@ describe('production environment preflight', () => {
     expect(deployScript).not.toContain('db:provision-runtime-logins');
     expect(deployScript).not.toContain('sleep 60');
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T --interactive=false api bun scripts\/assert-queue-quiescence\.ts --redis-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toContain(
       '"$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"',

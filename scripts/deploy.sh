@@ -227,17 +227,17 @@ deploy() {
   start_stage preflight
   log_info "Using the configured Data runtime URL without rewriting it"
   log_info "Validating the application environment"
-  if ! compose run --rm -T api bun run env:check; then
+  if ! compose run --rm -T --interactive=false api bun run env:check; then
     log_error "Application environment contract failed; services were not stopped."
     exit 1
   fi
   log_info "Probing the private bug-report screenshot bucket"
-  if ! compose run --rm -T api bun validate-env.ts --probe-bug-report-storage; then
+  if ! compose run --rm -T --interactive=false api bun validate-env.ts --probe-bug-report-storage; then
     log_error "Bug-report screenshot storage contract failed; services were not stopped."
     exit 1
   fi
   log_info "Provisioning and probing the immutable FPL raw snapshot bucket"
-  if ! compose run --rm -T api bun validate-env.ts --probe-fpl-raw-snapshot-storage; then
+  if ! compose run --rm -T --interactive=false api bun validate-env.ts --probe-fpl-raw-snapshot-storage; then
     log_error "FPL raw snapshot storage contract failed; services were not stopped."
     exit 1
   fi
@@ -252,7 +252,7 @@ deploy() {
   fi
   if [[ "$media_worker_setting" =~ ^(1|true|yes|on)$ ]]; then
     log_info "Provisioning and probing the private Briefing source-media bucket"
-    if ! compose run --rm -T media-worker bun dist/media-worker.js --provision-and-probe; then
+    if ! compose run --rm -T --interactive=false media-worker bun dist/media-worker.js --provision-and-probe; then
       log_error "Briefing source-media Storage contract failed; services were not stopped."
       exit 1
     fi
@@ -260,7 +260,7 @@ deploy() {
     log_info "Briefing source-media worker is disabled; Storage provisioning is not required"
   fi
   log_info "Probing the migration LOGIN for at most 120 seconds"
-  if ! compose run --rm -T migration bun scripts/wait-for-migration-login.ts; then
+  if ! compose run --rm -T --interactive=false migration bun scripts/wait-for-migration-login.ts; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
     exit 1
   fi
@@ -275,11 +275,11 @@ deploy() {
   [[ -n "$DEPLOY_LEDGER_BEFORE" ]] || { log_error "Could not capture migration ledger fingerprint"; exit 1; }
   log_info "Migration ledger before=${DEPLOY_LEDGER_BEFORE}"
   log_info "Checking queue quiescence before stopping services"
-  if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
+  if ! compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
     log_error "Database work is not quiescent; services were not stopped."
     exit 1
   fi
-  if ! compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
+  if ! compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
     log_error "Queue work is not quiescent; services were not stopped."
     exit 1
   fi
@@ -313,18 +313,18 @@ deploy() {
   fi
   remove_exact_stopped_container api
   wait_for_port_3000_free 30 2
-  if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
+  if ! compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
     log_error "Database work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1
   fi
-  if ! compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
+  if ! compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
     log_error "Queue work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1
   fi
   log_info "Creating and validating the pre-migration PostgreSQL dump"
-  if ! compose --profile migration run --rm -T backup; then
+  if ! compose --profile migration run --rm -T --interactive=false backup; then
     log_error "Pre-migration backup failed; migration was not started."
     restore_stopped_services
     exit 1
@@ -366,25 +366,25 @@ deploy() {
   start_stage migration
   DEPLOY_MIGRATION_STARTED=true
   log_info "Running migrations"
-  if ! compose run --rm -T migration bun run db:migrate; then
+  if ! compose run --rm -T --interactive=false migration bun run db:migrate; then
     log_error "SQL migrations failed; aborting deploy before services start."
     exit 1
   fi
-  compose run --rm -T migration bun run db:migrate:status
-  if ! compose run --rm -T migration bun run db:migration-contract; then
+  compose run --rm -T --interactive=false migration bun run db:migrate:status
+  if ! compose run --rm -T --interactive=false migration bun run db:migration-contract; then
     log_error "Migration LOGIN contract failed after migrations."
     exit 1
   fi
   finish_stage
   start_stage roleVerify
-  if ! compose run --rm -T migration bun run db:verify-runtime-logins; then
+  if ! compose run --rm -T --interactive=false migration bun run db:verify-runtime-logins; then
     log_error "Runtime LOGIN verification failed; services remain stopped for a forward fix."
     exit 1
   fi
   finish_stage
   start_stage cachePublish
   log_info "Publishing and verifying the canonical core cache"
-  if ! compose run --rm -T \
+  if ! compose run --rm -T --interactive=false \
     -e "DATABASE_URL=${data_runtime_database_url}" api \
     bun run cache:publish-core -- --execute --allow-empty; then
     log_error "Core cache publication failed; services remain stopped for a forward fix."
