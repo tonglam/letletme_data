@@ -77,7 +77,7 @@ migration_ledger_fingerprint() {
   # Callers may execute this state machine from an SSH `bash -s` stream, so
   # Compose must not attach to the shell's stdin.
   local plan_output
-  plan_output=$(compose run --rm -T --no-interactive migration bun scripts/apply-sql-migrations.ts --plan)
+  plan_output=$(compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan)
   printf '%s\n' "$plan_output" | awk -F'"' '/"ledgerFingerprint"[[:space:]]*:/ { print $4; exit }'
 }
 
@@ -208,7 +208,7 @@ start_all_runtime_services() {
 }
 
 run_migration_plan() {
-  compose run --rm -T --no-interactive migration bun scripts/apply-sql-migrations.ts --plan
+  compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan
 }
 
 start_runtime_services() {

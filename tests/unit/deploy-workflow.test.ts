@@ -42,7 +42,9 @@ function expectNonInteractiveComposeRuns(source: string, label: string) {
     .filter((line) => /\brun --rm -T\b/.test(line) && !line.trim().startsWith('#'));
   expect(runLines.length, `${label} should contain Compose run commands`).toBeGreaterThan(0);
   for (const line of runLines) {
-    expect(line, `${label} has an interactive Compose run: ${line}`).toContain('--no-interactive');
+    expect(line, `${label} has an interactive Compose run: ${line}`).toContain(
+      '--interactive=false',
+    );
   }
 }
 

@@ -346,10 +346,10 @@ jobs:
             # The pinned OpenSSH action streams this script through `bash -s`.
             # Never let Compose attach to that stdin or it can consume the
             # remaining deployment script and return a false-successful job.
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive api bun run env:check
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive api \
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false api \
               bun validate-env.ts --probe-bug-report-storage
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive api \
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false api \
               bun validate-env.ts --probe-fpl-raw-snapshot-storage
             test -x scripts/bootstrap-briefing-source-media-env.sh
             scripts/bootstrap-briefing-source-media-env.sh "$env_file" "$media_env_file"
@@ -358,12 +358,12 @@ jobs:
               media_worker_setting=$(read_env_setting CONTENT_MEDIA_WORKER_ENABLED "$media_env_file" | tr '[:upper:]' '[:lower:]' || true)
             fi
             if [[ "$media_worker_setting" =~ ^(1|true|yes|on)$ ]]; then
-              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive media-worker \
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false media-worker \
                 bun dist/media-worker.js --provision-and-probe
             else
               echo 'deploy preflight: source-media worker disabled; Storage probe skipped'
             fi
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive migration \
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
               bun scripts/wait-for-migration-login.ts
             finish_stage
 
@@ -372,16 +372,16 @@ jobs:
 
             start_stage quiescence
             echo "deploy preflight: validating migration plan and queue quiescence before stopping services"
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive migration bun scripts/apply-sql-migrations.ts --plan
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan
             ledger_before=$(APP_IMAGE="$IMAGE_REF" migration_ledger_fingerprint)
             test -n "$ledger_before"
             echo "deploy preflight: migration_ledger_before=$ledger_before"
-            if ! APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive migration \
+            if ! APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
               bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
               echo "deploy preflight: database work is not quiescent; services were not stopped" >&2
               exit 1
             fi
-            if ! APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive api \
+            if ! APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false api \
               bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
               echo "deploy preflight: queue work is not quiescent; services were not stopped" >&2
               exit 1
@@ -395,11 +395,11 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 live-picks-worker official-h2h-worker
             remove_exact_stopped_container api
             wait_for_port_3000_free 30 2
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive migration \
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
               bun scripts/assert-queue-quiescence.ts --database-only --scoped
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive api \
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false api \
               bun scripts/assert-queue-quiescence.ts --redis-only --scoped
-            APP_IMAGE="$IMAGE_REF" docker compose --profile migration run --rm -T --no-interactive backup
+            APP_IMAGE="$IMAGE_REF" docker compose --profile migration run --rm -T --interactive=false backup
             finish_stage
 
             x_scan_setting=$(read_env_setting CONTENT_X_SCAN_ENABLED "$env_file" | tr '[:upper:]' '[:lower:]' || true)
@@ -437,16 +437,16 @@ jobs:
 
             migration_started=true
             start_stage migration
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive migration bun run db:migrate
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive migration bun run db:migrate:status
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive migration bun run db:migration-contract
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration bun run db:migrate:status
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration bun run db:migration-contract
             finish_stage
             start_stage roleVerify
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive migration \
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
               bun run db:verify-runtime-logins
             finish_stage
             start_stage cachePublish
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --no-interactive \
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
               -e "DATABASE_URL=$data_runtime_database_url" api \
               bun run cache:publish-core -- --execute --allow-empty
             finish_stage

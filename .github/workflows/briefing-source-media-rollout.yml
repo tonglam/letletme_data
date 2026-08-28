@@ -197,7 +197,7 @@ jobs:
                 release_deploy_lock
                 exit 0
               fi
-              if ! APP_IMAGE="$current_image" docker compose run --rm -T --no-interactive --no-deps api \
+              if ! APP_IMAGE="$current_image" docker compose run --rm -T --interactive=false --no-deps api \
                 bun validate-env.ts --probe-bug-report-storage; then
                 release_deploy_lock || true
                 exit 1
@@ -275,7 +275,7 @@ jobs:
                 echo 'enable modes require the production standard probe; use probe_mode=standard' >&2
                 exit 1
               fi
-              APP_IMAGE="$current_image" docker compose run --rm -T --no-interactive --no-deps media-worker \
+              APP_IMAGE="$current_image" docker compose run --rm -T --interactive=false --no-deps media-worker \
                 bun dist/media-worker.js --provision-and-probe "$probe_flag"
             fi
             if [ "$ROLLOUT_MODE" = provision ]; then
