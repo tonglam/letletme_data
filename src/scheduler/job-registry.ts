@@ -1323,8 +1323,8 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
     }),
     dailyDefinition({
       name: 'market-daily',
-      hour: 9,
-      minute: 25,
+      hour: 6,
+      minute: 55,
       cadence: 'daily',
       catchUpPolicy: 'current-day-only',
       criticality: 'critical',
@@ -1403,8 +1403,8 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
     understatOrphanReconcilerDefinition(),
     dailyDefinition({
       name: MAINTENANCE_JOBS.PLAYER_MARKET_FRESHNESS,
-      hour: 9,
-      minute: 36,
+      hour: 7,
+      minute: 6,
       cadence: 'daily',
       // The watchdog only knows how to validate today's mutable market date.
       // Missed historical windows are terminal evidence, never replayed as if

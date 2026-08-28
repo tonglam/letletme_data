@@ -81,7 +81,8 @@ function isFinalWindowCapture(snapshotDate: string, capturedAt: Date | null): bo
   const year = Number(snapshotDate.slice(0, 4));
   const month = Number(snapshotDate.slice(4, 6));
   const day = Number(snapshotDate.slice(6, 8));
-  const finalWindowStart = Date.UTC(year, month - 1, day, 1, 35);
+  // The final 07:05 Asia/Shanghai capture is 23:05 UTC on the previous day.
+  const finalWindowStart = Date.UTC(year, month - 1, day, -1, 5);
   return capturedAt.getTime() >= finalWindowStart;
 }
 
@@ -107,8 +108,8 @@ export async function checkPlayerMarketFreshness(
     syncEvent.phase === 'preseason' ||
     initialHasChanges ||
     isFinalWindowCapture(snapshotDate, initialCoverage.latestCapturedAt);
-  // A 09:35 capture can legitimately be active or delayed by BullMQ backoff
-  // when this 09:36 check begins. A missing queue row is conclusive only when
+  // A 07:05 capture can legitimately be active or delayed by BullMQ backoff
+  // when this 07:06 check begins. A missing queue row is conclusive only when
   // the final snapshot already proves completion; otherwise allow the producer
   // its full enqueue/retry horizon and distinguish a never-observed job.
   const settlement = await dependencies.waitForPlayerValuesSettlement(season, snapshotDate, {

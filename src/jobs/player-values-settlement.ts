@@ -33,8 +33,8 @@ async function readPlayerValuesJobState(
 }
 
 /**
- * The 09:36 watchdog starts immediately after the capture window, but the
- * deterministic 09:35 job may still be active or in BullMQ backoff. Wait only
+ * The 07:06 watchdog starts immediately after the capture window, but the
+ * deterministic 07:05 job may still be active or in BullMQ backoff. Wait only
  * for that read-only queue state to settle; a timeout is evidence of a stuck
  * capture rather than a reason to emit an early stale-data alert.
  */

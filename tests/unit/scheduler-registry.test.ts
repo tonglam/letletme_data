@@ -655,7 +655,7 @@ describe('standalone scheduler registry', () => {
     const market = registry.find((definition) => definition.name === 'market-daily');
     const plans = await market!.resolve({
       season: TEST_SEASON,
-      // 10:00 UTC is already after the 09:25 UTC+8 window on 2026-08-22.
+      // 10:00 UTC is already after the 06:55 UTC+8 window on 2026-08-22.
       now: new Date('2026-08-22T10:00:00.000Z'),
       events: [],
     });
@@ -708,9 +708,8 @@ describe('standalone scheduler registry', () => {
     expect(beforeDue.every((plan) => plan.terminalStatus === 'irrecoverable')).toBe(true);
     expect(beforeDue.some((plan) => plan.periodKey === '20260823')).toBe(false);
     const today = afterDue.find((plan) => plan.periodKey === '20260823');
-    expect(today).toMatchObject({
-      dueAt: new Date('2026-08-23T01:36:00.000Z'),
-    });
+    expect(today).toBeDefined();
+    expect(today?.dueAt).toEqual(new Date('2026-08-22T23:06:00.000Z'));
     expect(today?.terminalStatus).toBeUndefined();
   });
 

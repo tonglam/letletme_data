@@ -172,7 +172,7 @@ export const FRESHNESS_SLO_TARGETS = {
   live: { dispatchWithinMs: 90_000, completeness: 'event-roster-fixtures' },
   livePicks: { dispatchWithinMs: 10 * 60_000, completeness: 'eligible-entry-15-picks' },
   priceChange: { dispatchWithinMs: 10 * 60_000, completeness: 'expected-player-count' },
-  marketDaily: { dueAt: '09:35 Asia/Shanghai', completeness: 'source-day-artifact' },
+  marketDaily: { dueAt: '07:05 Asia/Shanghai', completeness: 'source-day-artifact' },
   entry: { dispatchWithinMs: 15 * 60_000, completeness: 'eligible-entry' },
   provisional: { dispatchWithinMs: 60 * 60_000, completeness: 'eligible-entry-tournament' },
   final: { dispatchWithinMs: 15 * 60_000, completeness: 'provisional-scope' },

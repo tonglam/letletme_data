@@ -6,19 +6,21 @@ import {
   PLAYER_PRICES_REPLAY_CRON_PATTERN,
   PLAYER_STATS_CRON_PATTERN,
   PLAYER_VALUES_CRON_PATTERN,
+  PLAYER_VALUES_CRON_ROLLOVER_PATTERN,
 } from '../../src/domain/job-schedules';
 
 describe('player synchronization schedules', () => {
-  test('polls values from 09:25 through 09:35', () => {
-    expect(PLAYER_VALUES_CRON_PATTERN).toBe('25-35 9 * * *');
+  test('polls values from 06:55 through 07:05 UTC+8', () => {
+    expect(PLAYER_VALUES_CRON_PATTERN).toBe('55-59 6 * * *');
+    expect(PLAYER_VALUES_CRON_ROLLOVER_PATTERN).toBe('0-5 7 * * *');
   });
 
-  test('checks market freshness at 09:36 UTC+8 without changing readiness', () => {
-    expect(PLAYER_MARKET_FRESHNESS_WATCHDOG_CRON_PATTERN).toBe('36 9 * * *');
+  test('checks market freshness at 07:06 UTC+8 without changing readiness', () => {
+    expect(PLAYER_MARKET_FRESHNESS_WATCHDOG_CRON_PATTERN).toBe('6 7 * * *');
   });
 
-  test('runs current-price replay and player stats daily at 09:40', () => {
-    expect(PLAYER_PRICES_REPLAY_CRON_PATTERN).toBe('40 9 * * *');
+  test('runs current-price replay at 07:10 and player stats daily at 09:40', () => {
+    expect(PLAYER_PRICES_REPLAY_CRON_PATTERN).toBe('10 7 * * *');
     expect(PLAYER_STATS_CRON_PATTERN).toBe('40 9 * * *');
   });
 

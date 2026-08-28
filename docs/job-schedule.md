@@ -106,9 +106,9 @@ and dispatches durable obligations.
 
 | Job | Cadence | Gate / behavior |
 |---|---|---|
-| `market-daily` | 09:25 UTC+8 plus durable retries | Before GW1 only the current UTC+8 date is eligible; failed or unavailable upstream responses retry through the same obligation without replaying old dates |
-| `player-market-freshness-watchdog` | after the market window | Maintenance queue final-capture check: verifies current-day cardinality and end-of-window evidence; alerts without changing `/ready` |
-| `player-prices` | after values capture | Replays that UTC+8 date's persisted Rise/Faller rows into affected current players; skips cleanly when none exist |
+| `market-daily` | 06:55 UTC+8 plus durable retries | Before GW1 only the current UTC+8 date is eligible; failed or unavailable upstream responses retry through the same obligation without replaying old dates |
+| `player-market-freshness-watchdog` | 07:06 UTC+8 after the market window | Maintenance queue final-capture check: verifies current-day cardinality and end-of-window evidence; alerts without changing `/ready` |
+| `player-prices` | 07:10 UTC+8 after values capture | Replays that UTC+8 date's persisted Rise/Faller rows into affected current players; skips cleanly when none exist |
 | `player-stats` | daily plus active-event reconciliation | Refreshes the current event, or the next event only when no current event exists |
 
 The standalone scheduler reserves one durable daily obligation before enqueueing

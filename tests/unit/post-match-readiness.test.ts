@@ -181,7 +181,7 @@ describe('player-values player-event guard', () => {
     ).toBe(true);
   });
 
-  test('allows only the 09:25 tick before GW1', async () => {
+  test('allows only the 06:55 tick before GW1', async () => {
     const dependencies = {
       resolvePlayerSyncEvent: async () => ({
         event: { id: 1 } as Event,
@@ -191,10 +191,10 @@ describe('player-values player-event guard', () => {
     };
 
     expect(
-      await shouldRunPlayerValuesSync(new Date('2026-08-22T01:25:00.000Z'), dependencies),
+      await shouldRunPlayerValuesSync(new Date('2026-08-21T22:55:00.000Z'), dependencies),
     ).toBe(true);
     expect(
-      await shouldRunPlayerValuesSync(new Date('2026-08-22T01:26:00.000Z'), dependencies),
+      await shouldRunPlayerValuesSync(new Date('2026-08-21T22:56:00.000Z'), dependencies),
     ).toBe(false);
   });
 });

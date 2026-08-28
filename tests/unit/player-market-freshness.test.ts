@@ -4,7 +4,7 @@ import type { PlayerMarketFreshnessDependencies } from '../../src/services/playe
 import { checkPlayerMarketFreshness } from '../../src/services/player-market-freshness.service';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
-const now = new Date('2026-08-13T01:36:00.000Z');
+const now = new Date('2026-08-12T23:06:00.000Z');
 
 function dependencies(
   overrides: Partial<PlayerMarketFreshnessDependencies> = {},
@@ -16,7 +16,7 @@ function dependencies(
     getDayCoverage: async () => ({
       snapshotCount: 581,
       captureCount: 1,
-      latestCapturedAt: new Date('2026-08-13T01:30:00.000Z'),
+      latestCapturedAt: new Date('2026-08-12T23:00:00.000Z'),
     }),
     hasChangesForDate: async () => false,
     waitForPlayerValuesSettlement: async () => ({ settled: true, state: 'removed' }),
@@ -25,7 +25,7 @@ function dependencies(
   };
 }
 
-describe('09:36 player market freshness watchdog', () => {
+describe('07:06 player market freshness watchdog', () => {
   test('accepts one complete current-day snapshot without alerting', async () => {
     const notify = mock(async (_message: string) => undefined);
     await expect(checkPlayerMarketFreshness(now, dependencies({ notify }))).resolves.toEqual({
@@ -36,7 +36,7 @@ describe('09:36 player market freshness watchdog', () => {
       expectedCount: 581,
       snapshotCount: 581,
       captureCount: 1,
-      latestCapturedAt: '2026-08-13T01:30:00.000Z',
+      latestCapturedAt: '2026-08-12T23:00:00.000Z',
       hasChanges: false,
       queueState: 'removed',
     });
@@ -65,7 +65,7 @@ describe('09:36 player market freshness watchdog', () => {
         getDayCoverage: async () => ({
           snapshotCount: 580,
           captureCount: 1,
-          latestCapturedAt: new Date('2026-08-13T01:30:00.000Z'),
+          latestCapturedAt: new Date('2026-08-12T23:00:00.000Z'),
         }),
       }),
     );
@@ -85,7 +85,7 @@ describe('09:36 player market freshness watchdog', () => {
         getDayCoverage: async () => ({
           snapshotCount,
           captureCount,
-          latestCapturedAt: snapshotCount ? new Date('2026-08-13T01:30:00.000Z') : null,
+          latestCapturedAt: snapshotCount ? new Date('2026-08-12T23:00:00.000Z') : null,
         }),
         notify,
       }),
@@ -144,7 +144,7 @@ describe('09:36 player market freshness watchdog', () => {
           getDayCoverage: async () => ({
             snapshotCount: 581,
             captureCount: 1,
-            latestCapturedAt: new Date('2026-08-13T01:35:00.000Z'),
+            latestCapturedAt: new Date('2026-08-12T23:05:00.000Z'),
           }),
         }),
       ),
@@ -174,7 +174,7 @@ describe('09:36 player market freshness watchdog', () => {
     expect(notify).toHaveBeenCalledTimes(1);
   });
 
-  test('does not treat a not-yet-enqueued 09:35 capture as settled', async () => {
+  test('does not treat a not-yet-enqueued 07:05 capture as settled', async () => {
     let missingIsSettled: boolean | undefined;
     const result = await checkPlayerMarketFreshness(
       now,
@@ -199,7 +199,7 @@ describe('09:36 player market freshness watchdog', () => {
         getDayCoverage: async () => ({
           snapshotCount: 581,
           captureCount: 1,
-          latestCapturedAt: new Date('2026-08-13T01:35:00.000Z'),
+          latestCapturedAt: new Date('2026-08-12T23:05:00.000Z'),
         }),
         waitForPlayerValuesSettlement: async () => ({
           settled: false,
