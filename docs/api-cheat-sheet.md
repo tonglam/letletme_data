@@ -13,39 +13,38 @@ Examples use `http://data.internal.example`; substitute the trusted environment 
   wall-clock inference.
 
 ```bash
-export DATA_URL='http://data.internal.example'
-export DATA_API_KEY='<secret from the trusted secret manager>'
-export DATA_AUTH_HEADER="x-api-key: $DATA_API_KEY"
+export LETLETME_DATA_URL='http://data.internal.example'
+export LETLETME_DATA_API_KEY='<secret from the trusted secret manager>'
 ```
 
 ## Base and readiness
 
 ```bash
-curl "$DATA_URL/"
-curl "$DATA_URL/health"
-curl "$DATA_URL/ready"
+curl "$LETLETME_DATA_URL/"
+curl "$LETLETME_DATA_URL/health"
+curl "$LETLETME_DATA_URL/ready"
 ```
 
 ## Core and FPL facts
 
 ```bash
-curl "$DATA_URL/events/current"
-curl "$DATA_URL/events/next"
+curl "$LETLETME_DATA_URL/events/current"
+curl "$LETLETME_DATA_URL/events/next"
 
-curl -X POST "$DATA_URL/events/sync" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/teams/sync" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/players/sync" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/phases/sync" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/fixtures/sync" -H "$DATA_AUTH_HEADER"
+curl -X POST "$LETLETME_DATA_URL/events/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/teams/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/players/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/phases/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/fixtures/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
 All five mutation routes enqueue the same complete core snapshot. There is no events-only writer,
 event-specific fixture writer, cache-delete endpoint, or 38-request fixture route.
 
 ```bash
-curl -X POST "$DATA_URL/player-stats/sync" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/player-stats/sync/1" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/player-values/sync" -H "$DATA_AUTH_HEADER"
+curl -X POST "$LETLETME_DATA_URL/player-stats/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/player-stats/sync/1" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/player-values/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
 Player value changes persist in PostgreSQL/reporting; Data does not publish a PlayerValue cache.
@@ -53,9 +52,9 @@ Player value changes persist in PostgreSQL/reporting; Data does not publish a Pl
 ## Live event
 
 ```bash
-curl "$DATA_URL/event-lives/1"
-curl -X POST "$DATA_URL/event-lives/cache/1" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/event-lives/sync/1" -H "$DATA_AUTH_HEADER"
+curl "$LETLETME_DATA_URL/event-lives/1"
+curl -X POST "$LETLETME_DATA_URL/event-lives/cache/1" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/event-lives/sync/1" -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
 `cache` publishes one coherent live revision. `sync` also persists event-live and explain facts.
@@ -74,8 +73,8 @@ for six hours and makes a bounded attempt to enqueue the independent `manager-li
 worker refreshes Classic standings, H2H entry summaries, and missing Overall Rank asynchronously.
 
 ```bash
-curl -X POST "$DATA_URL/internal/manager-live/resolve" \
-  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+curl -X POST "$LETLETME_DATA_URL/internal/manager-live/resolve" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY" -H 'content-type: application/json' \
   -d '{"eventId":1,"entryIds":[12345,67890],"tournamentId":42,"readMode":"CACHE_ONLY"}'
 ```
 
@@ -94,22 +93,22 @@ quiescence, and final-failure alerting.
 ## Entries
 
 ```bash
-curl -X POST "$DATA_URL/entry-info/12345/sync" -H "$DATA_AUTH_HEADER"
+curl -X POST "$LETLETME_DATA_URL/entry-info/12345/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
 
-curl -X POST "$DATA_URL/entry-sync/picks" \
-  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+curl -X POST "$LETLETME_DATA_URL/entry-sync/picks" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY" -H 'content-type: application/json' \
   -d '{"entryIds":[12345,67890],"eventId":1}'
 
-curl -X POST "$DATA_URL/entry-sync/transfers" \
-  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+curl -X POST "$LETLETME_DATA_URL/entry-sync/transfers" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY" -H 'content-type: application/json' \
   -d '{"entryIds":[12345,67890],"eventId":1}'
 
-curl -X POST "$DATA_URL/entry-sync/results" \
-  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+curl -X POST "$LETLETME_DATA_URL/entry-sync/results" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY" -H 'content-type: application/json' \
   -d '{"entryIds":[12345,67890],"eventId":1}'
 
-curl -X POST "$DATA_URL/entry-sync/all" \
-  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+curl -X POST "$LETLETME_DATA_URL/entry-sync/all" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY" -H 'content-type: application/json' \
   -d '{"entryIds":[12345,67890],"eventId":1}'
 ```
 
@@ -135,12 +134,12 @@ Mutation bodies include the verified `adminEntryId` contract documented by the W
 ## Manual jobs
 
 ```bash
-curl "$DATA_URL/jobs"
-curl "$DATA_URL/jobs/status" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/jobs/core-snapshot-sync/trigger" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/jobs/live-snapshot/trigger" -H "$DATA_AUTH_HEADER"
-curl -X POST "$DATA_URL/jobs/player-prices/trigger" \
-  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+curl "$LETLETME_DATA_URL/jobs"
+curl "$LETLETME_DATA_URL/jobs/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/jobs/core-snapshot-sync/trigger" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/jobs/live-snapshot/trigger" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/jobs/player-prices/trigger" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY" -H 'content-type: application/json' \
   -d '{"changeDate":"20260803"}'
 ```
 

@@ -14,8 +14,6 @@ afterEach(() => {
 describe('tournament lifecycle invariants', () => {
   test('does not reset readiness when a manual retry finds an active setup job', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-    process.env.REDIS_HOST ??= '127.0.0.1';
-    process.env.REDIS_PORT ??= '6379';
     const { decideExistingSetupJobAction } = await import('../../src/jobs/tournament-setup.jobs');
 
     expect(
@@ -61,8 +59,6 @@ describe('tournament lifecycle invariants', () => {
 
   test('reserves one stable setup successor slot per tournament', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-    process.env.REDIS_HOST ??= '127.0.0.1';
-    process.env.REDIS_PORT ??= '6379';
     const { getTournamentSetupJobIds, decideExistingSetupSuccessorAction } = await import(
       '../../src/jobs/tournament-setup.jobs'
     );
@@ -95,8 +91,6 @@ describe('tournament lifecycle invariants', () => {
 
   test('treats skipped structure units as a failed cascade slot', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-    process.env.REDIS_HOST ??= '127.0.0.1';
-    process.env.REDIS_PORT ??= '6379';
     const { assertTournamentStructureSyncComplete } = await import(
       '../../src/workers/tournament-sync.worker'
     );
@@ -111,8 +105,6 @@ describe('tournament lifecycle invariants', () => {
 
   test('blocks standings when failed entry snapshots cannot prove the active season', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-    process.env.REDIS_HOST ??= '127.0.0.1';
-    process.env.REDIS_PORT ??= '6379';
     const { classifyEntrySnapshotFailures } = await import(
       '../../src/services/tournament-backfill.service'
     );
@@ -134,8 +126,6 @@ describe('tournament lifecycle invariants', () => {
 
   test('normalizes audit causes into stable, capability-scoped issue codes', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-    process.env.REDIS_HOST ??= '127.0.0.1';
-    process.env.REDIS_PORT ??= '6379';
     const { tournamentSetupIssueFromAuditMessage } = await import(
       '../../src/services/tournament-backfill.service'
     );
@@ -172,8 +162,6 @@ describe('tournament lifecycle invariants', () => {
 
   test('resumes before terminalizing a post-publication warning', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-    process.env.REDIS_HOST ??= '127.0.0.1';
-    process.env.REDIS_PORT ??= '6379';
     const { finalizePublishedTournamentSetup } = await import(
       '../../src/services/tournament-setup.service'
     );
@@ -233,8 +221,6 @@ describe('tournament lifecycle invariants', () => {
 
   test('emits one setup-attempt report when initial state lookup fails', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-    process.env.REDIS_HOST ??= '127.0.0.1';
-    process.env.REDIS_PORT ??= '6379';
     const { setupTournamentStructure } = await import(
       '../../src/services/tournament-setup.service'
     );
@@ -262,8 +248,6 @@ describe('tournament lifecycle invariants', () => {
 
   test('treats resume failure before this attempt publishes standings as critical', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-    process.env.REDIS_HOST ??= '127.0.0.1';
-    process.env.REDIS_PORT ??= '6379';
     const { setupTournamentStructure } = await import(
       '../../src/services/tournament-setup.service'
     );

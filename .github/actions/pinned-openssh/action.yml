@@ -1,0 +1,103 @@
+name: Pinned OpenSSH remote script
+description: Run a workflow script through system OpenSSH with an out-of-band host identity
+
+inputs:
+  host:
+    description: SSH host name or address
+    required: true
+  username:
+    description: SSH user name
+    required: true
+  private-key:
+    description: OpenSSH private key
+    required: true
+  known-hosts:
+    description: Verified known_hosts content
+    required: true
+  fingerprint:
+    description: Expected SHA256 host-key fingerprint
+    required: true
+  envs:
+    description: Comma-separated names to forward to the remote script
+    required: false
+    default: ''
+  timeout:
+    description: GNU timeout duration for the SSH command
+    required: false
+    default: 15m
+  script:
+    description: Bash script to execute remotely
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Execute remote script with verified host identity
+      shell: bash
+      env:
+        INPUT_HOST: ${{ inputs.host }}
+        INPUT_USERNAME: ${{ inputs.username }}
+        INPUT_PRIVATE_KEY: ${{ inputs['private-key'] }}
+        INPUT_KNOWN_HOSTS: ${{ inputs['known-hosts'] }}
+        INPUT_FINGERPRINT: ${{ inputs.fingerprint }}
+        INPUT_ENVS: ${{ inputs.envs }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        INPUT_SCRIPT: ${{ inputs.script }}
+      run: |
+        set -euo pipefail
+        umask 077
+        : "${INPUT_HOST:?host is required}"
+        : "${INPUT_USERNAME:?username is required}"
+        : "${INPUT_PRIVATE_KEY:?private key is required}"
+        : "${INPUT_KNOWN_HOSTS:?known_hosts is required}"
+        : "${INPUT_FINGERPRINT:?host fingerprint is required}"
+        : "${INPUT_SCRIPT:?remote script is required}"
+        [[ "$INPUT_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]]
+        [[ "$INPUT_USERNAME" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]]
+        [[ "$INPUT_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]+={0,2}$ ]]
+        [[ "$INPUT_TIMEOUT" =~ ^[0-9]+[smhd]$ ]]
+
+        ssh_dir="$RUNNER_TEMP/letletme-pinned-openssh-${GITHUB_RUN_ID:-run}-${GITHUB_RUN_ATTEMPT:-1}"
+        test ! -e "$ssh_dir"
+        install -m 0700 -d "$ssh_dir"
+        cleanup() {
+          rm -f -- "$ssh_dir/id_ed25519" "$ssh_dir/known_hosts"
+          rmdir -- "$ssh_dir" 2>/dev/null || true
+        }
+        trap cleanup EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        printf '%s\n' "$INPUT_PRIVATE_KEY" > "$ssh_dir/id_ed25519"
+        printf '%s\n' "$INPUT_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+        chmod 0600 "$ssh_dir/id_ed25519" "$ssh_dir/known_hosts"
+
+        fingerprints=$(ssh-keygen -lf "$ssh_dir/known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+        test "$(printf '%s\n' "$fingerprints" | sed '/^$/d' | wc -l)" -eq 1
+        test "$fingerprints" = "$INPUT_FINGERPRINT"
+
+        emit_remote_script() {
+          if [ -n "$INPUT_ENVS" ]; then
+            IFS=',' read -r -a names <<< "$INPUT_ENVS"
+            for raw_name in "${names[@]}"; do
+              name=$(printf '%s' "$raw_name" | tr -d '[:space:]')
+              [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+              if [ "${!name+x}" != x ]; then
+                echo "requested remote environment variable is not present: $name" >&2
+                exit 1
+              fi
+              printf 'export %s=' "$name"
+              printf '%q' "${!name}"
+              printf '\n'
+            done
+          fi
+          printf '%s\n' "$INPUT_SCRIPT"
+        }
+
+        emit_remote_script | timeout --foreground "$INPUT_TIMEOUT" \
+          ssh -i "$ssh_dir/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" \
+            "$INPUT_USERNAME@$INPUT_HOST" 'bash -s'

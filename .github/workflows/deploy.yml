@@ -98,8 +98,8 @@ jobs:
           latest_digest=$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" | awk '/^Digest:/ { print $2; exit }')
           test "$latest_digest" = "$expected_digest"
 
-      - name: Deploy exact image digest
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+      - name: Deploy exact image digest over pinned OpenSSH
+        uses: ./.github/actions/pinned-openssh
         env:
           DEPLOY_SHA: ${{ steps.target.outputs.sha }}
           IMAGE_REF: ${{ env.IMAGE_REF }}
@@ -109,11 +109,13 @@ jobs:
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
+          private-key: ${{ secrets.VPS_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
           # The runtime verifier allows up to 10.5 minutes for a cold restart;
-          # leave the SSH action enough time for preflight, migration, and
+          # leave the SSH command enough time for preflight, migration, and
           # rollback/recovery if readiness never converges.
-          command_timeout: 20m
+          timeout: 20m
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail

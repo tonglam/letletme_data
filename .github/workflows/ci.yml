@@ -32,6 +32,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
 
+      - name: Reject retired configuration names
+        run: bun run config:hard-cut
+
       - name: Dependency vulnerability scan
         uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
         with:

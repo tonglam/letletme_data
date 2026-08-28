@@ -83,7 +83,7 @@ One job owns all five physical targets and one immutable Redis revision:
 Trigger any one core alias; all enqueue `core-snapshot-sync`:
 
 ```bash
-curl -X POST "$DATA_URL/events/sync" -H "x-api-key: $DATA_API_KEY"
+curl -X POST "$LETLETME_DATA_URL/events/sync" -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
 Wait for the BullMQ result. An HTTP `202` is not completion.

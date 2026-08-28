@@ -404,7 +404,10 @@ describe('production environment preflight', () => {
     expect(workflow).toMatch(/if: github\.ref == 'refs\/heads\/main'/);
     expect(workflow).toContain('group: deploy-main');
     expect(workflow).toContain('permissions:\n  contents: read');
-    expect(workflow).toContain('appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2');
+    expect(workflow).toContain('uses: ./.github/actions/pinned-openssh');
+    expect(workflow).toContain('known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}');
+    expect(workflow).toContain('fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}');
+    expect(workflow).not.toContain('appleboy/ssh-action');
     expect(workflow).toContain('expected_workdir=/home/workspace/letletme_data');
     expect(workflow).toContain('target_file="$expected_workdir/.env.migrate"');
     expect(workflow).toContain('test ! -L "$target_file"');

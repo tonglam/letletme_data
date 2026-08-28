@@ -27,7 +27,10 @@ This project uses Redis for two purposes:
 
 ### Step 1: Discover Configuration
 - Search for `.env`, `.env.local`, `.env.development`, `.env.production`, `.env.test` files in the project root.
-- Extract Redis-related variables: `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_URL`, `REDIS_DB`, `REDIS_TLS`, or any custom variable names containing `REDIS`.
+- Extract the configured Redis variables: `CACHE_REDIS_HOST`, `CACHE_REDIS_PORT`,
+  `CACHE_REDIS_PASSWORD`, `CACHE_REDIS_DB`, `QUEUE_REDIS_HOST`, `QUEUE_REDIS_PORT`,
+  `QUEUE_REDIS_PASSWORD`, and `QUEUE_REDIS_DB`, plus any custom variable names containing
+  `REDIS`.
 - If no env file is found or variables are missing, check `src/config/` or any config file that might define Redis connection settings.
 - Report the discovered configuration (mask passwords) before proceeding.
 

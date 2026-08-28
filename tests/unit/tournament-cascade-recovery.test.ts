@@ -3,8 +3,6 @@ import { describe, expect, mock, test } from 'bun:test';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
-process.env.REDIS_HOST ??= '127.0.0.1';
-process.env.REDIS_PORT ??= '6379';
 
 const {
   enqueueTournamentCascade,
