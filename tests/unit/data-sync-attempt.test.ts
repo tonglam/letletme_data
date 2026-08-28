@@ -224,7 +224,12 @@ describe('data sync attempt reporting', () => {
       runDataSyncAttempt(
         { queue: 'data-sync', jobName: 'player-values', runId: 'market-window', source: 'cron' },
         async () => {
-          throw new PlayerValuesWindowPendingError('20260829');
+          throw new PlayerValuesWindowPendingError('20260829', {
+            requiredUnits: 581,
+            succeededUnits: 581,
+            failedUnits: 0,
+            timings: { bootstrap: 120, snapshotWrite: 80, derivedView: 15 },
+          });
         },
       ),
     ).rejects.toBeInstanceOf(PlayerValuesWindowPendingError);
@@ -232,7 +237,14 @@ describe('data sync attempt reporting', () => {
     expect(reportsFrom(infoSpy)[0]).toMatchObject({
       jobName: 'player-values',
       outcome: 'pending',
+      requiredUnits: 581,
+      succeededUnits: 581,
       failedUnits: 0,
+      timings: {
+        bootstrap: 120,
+        snapshotWrite: 80,
+        derivedView: 15,
+      },
     });
   });
 

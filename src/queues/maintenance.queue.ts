@@ -60,6 +60,8 @@ export type MaintenanceJobData = {
   obligationGeneration?: number;
   /** Exact freshness window being repaired, carried into a downstream publication. */
   freshnessWindowId?: number;
+  /** Actual standalone market-daily Bull identity observed by the watchdog. */
+  playerValuesBullJobId?: string;
   entryId?: number;
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';

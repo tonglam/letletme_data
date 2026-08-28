@@ -42,6 +42,7 @@ import {
 } from '../jobs/maintenance.jobs';
 import { enqueueUnderstatPlayerSync, enqueueUnderstatTeamSync } from '../jobs/understat-enqueue';
 import { enqueueUnderstatOrphanReconciler } from '../jobs/understat-recovery.jobs';
+import { getPlayerValuesSchedulerQueueJobId } from '../jobs/player-values-settlement';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import {
@@ -56,6 +57,7 @@ import {
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { getSchedulerObligationByIdentity } from '../repositories/scheduler-obligations';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { isMatchDayTime } from '../utils/conditions';
 import {
@@ -1452,12 +1454,21 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       criticality: 'normal',
       queueName: 'maintenance',
       successPredicate: 'market freshness watchdog verifies a complete current snapshot',
-      enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+        const marketDailyObligation = await getSchedulerObligationByIdentity({
+          jobName: 'market-daily',
+          scopeKey: context.season.seasonCode,
+          periodKey: plan.periodKey,
+        });
+        const playerValuesBullJobId = marketDailyObligation
+          ? getPlayerValuesSchedulerQueueJobId(context.season, marketDailyObligation)
+          : undefined;
         const job = await enqueuePlayerMarketFreshness(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
           freshnessWindowId,
+          ...(playerValuesBullJobId ? { playerValuesBullJobId } : {}),
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },

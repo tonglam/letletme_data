@@ -57,6 +57,26 @@ describe('07:06 player market freshness watchdog', () => {
     });
   });
 
+  test('passes the standalone market job identity to settlement lookup', async () => {
+    let settlementOptions: { missingIsSettled: boolean; bullJobId?: string | number } | undefined;
+    await expect(
+      checkPlayerMarketFreshness(
+        now,
+        dependencies({
+          waitForPlayerValuesSettlement: async (_season, _snapshotDate, options) => {
+            settlementOptions = options;
+            return { settled: true, state: 'completed' };
+          },
+        }),
+        { playerValuesBullJobId: '2627-scheduler-market-g2' },
+      ),
+    ).resolves.toMatchObject({ status: 'ready' });
+    expect(settlementOptions).toEqual({
+      missingIsSettled: true,
+      bullJobId: '2627-scheduler-market-g2',
+    });
+  });
+
   test('uses the current bootstrap roster rather than the accumulated players table', async () => {
     const result = await checkPlayerMarketFreshness(
       now,

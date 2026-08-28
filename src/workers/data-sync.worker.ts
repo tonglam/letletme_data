@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
@@ -446,21 +448,23 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     return { skipped: true, staleSchedulerGeneration: true };
   }
   const season = await requireCurrentSeasonForJob(job.data);
+  const attempt = job.attemptsMade + 1;
+  const parentRunId = job.data?.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`);
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
     jobId: job.id,
     jobName: job.name,
     source: job.data?.source as string | undefined,
-    attempt: job.attemptsMade + 1,
+    attempt,
     queueWaitMs: resolveBullMqAttemptQueueWaitMs(job),
   };
   const attemptContext: DataSyncAttemptContext = {
     queue: job.queueName,
     jobName: job.name,
-    runId: job.data?.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+    runId: parentRunId,
     source: job.data?.source,
-    attempt: job.attemptsMade + 1,
+    attempt,
     targetEventId: job.data?.eventId,
     queueWaitMs: context.queueWaitMs,
   };
@@ -491,6 +495,10 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           onTargetEventResolved: recordResolvedTarget,
         });
         if (!prepared) return { count: 0, outcome: 'noop' as const };
+        // BullMQ retries reuse the logical job/run ID. A new market observation
+        // must instead own a fresh publication source run, otherwise the next
+        // publication conflicts with the prior attempt's bound publication.
+        const publicationSourceRunId = randomUUID();
         let marketPublication: Awaited<ReturnType<typeof ensureMarketPublication>> | undefined;
         const result = await withMutationScopes(mutationInput, async () => {
           const persisted = await persistPreparedPlayerValuesSync(prepared, undefined, {
@@ -500,7 +508,9 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           });
           marketPublication = await ensureMarketPublication(season, {
             deferDelivery: true,
-            sourceRunId: job.data.runId,
+            sourceRunId: publicationSourceRunId,
+            parentRunId,
+            attempt,
             freshnessWindowId: job.data.freshnessWindowId,
           });
           return persisted;
@@ -545,7 +555,12 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           job.data.pollUntilWindowEnd === true &&
           shouldRetryPlayerValuesNoChange(changeDate)
         ) {
-          throw new PlayerValuesWindowPendingError(changeDate);
+          throw new PlayerValuesWindowPendingError(changeDate, {
+            requiredUnits: result.requiredUnits,
+            succeededUnits: result.succeededUnits,
+            failedUnits: result.failedUnits,
+            timings: result.timings,
+          });
         }
         return result;
       });

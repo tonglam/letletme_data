@@ -9,6 +9,13 @@ export const PLAYER_VALUES_WINDOW_ATTEMPTS =
   PLAYER_VALUES_WINDOW_LAST_MINUTE - PLAYER_VALUES_WINDOW_START_MINUTE + 1;
 export const PLAYER_VALUES_WINDOW_BACKOFF_MS = 60_000;
 
+export type PlayerValuesWindowPendingEvidence = Readonly<{
+  requiredUnits?: number;
+  succeededUnits?: number;
+  failedUnits?: number;
+  timings?: Partial<Record<'bootstrap' | 'snapshotWrite' | 'derivedView', number>>;
+}>;
+
 function cronMinuteOfDay(date: Date): number {
   return getCronHour(date) * 60 + getCronMinute(date);
 }
@@ -29,11 +36,19 @@ export function shouldRetryPlayerValuesNoChange(
 
 export class PlayerValuesWindowPendingError extends Error {
   readonly changeDate: string;
+  readonly requiredUnits: number;
+  readonly succeededUnits: number;
+  readonly failedUnits: number;
+  readonly timings?: PlayerValuesWindowPendingEvidence['timings'];
 
-  constructor(changeDate: string) {
+  constructor(changeDate: string, evidence: PlayerValuesWindowPendingEvidence = {}) {
     super(`No player value changes observed yet for ${changeDate}; retrying until 07:05 UTC+8`);
     this.name = 'PlayerValuesWindowPendingError';
     this.changeDate = changeDate;
+    this.requiredUnits = evidence.requiredUnits ?? 0;
+    this.succeededUnits = evidence.succeededUnits ?? 0;
+    this.failedUnits = evidence.failedUnits ?? 0;
+    this.timings = evidence.timings;
   }
 }
 

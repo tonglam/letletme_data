@@ -36,6 +36,10 @@ export type MarketPublicationOptions = Readonly<{
   deferDelivery?: boolean;
   /** Correlate the publication run with its scheduler/Bull obligation. */
   sourceRunId?: string;
+  /** Parent Bull/data-sync run retained as metadata when a publication attempt gets its own run. */
+  parentRunId?: string;
+  /** Bull attempt number for the publication attempt metadata. */
+  attempt?: number;
   /** Exact freshness window being repaired, carried into the manifest. */
   freshnessWindowId?: number;
 }>;
@@ -186,6 +190,10 @@ export async function ensureMarketPublication(
     mode: 'publication',
     trigger: 'queue',
     expectedItems: 1,
+    metadata: {
+      ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
+      ...(options.attempt === undefined ? {} : { attempt: options.attempt }),
+    },
   });
   const publicationId = randomUUID();
   const outboxId = randomUUID();

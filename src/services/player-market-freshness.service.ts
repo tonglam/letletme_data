@@ -25,7 +25,7 @@ export type PlayerMarketFreshnessDependencies = {
   waitForPlayerValuesSettlement: (
     season: FplSeasonRef,
     snapshotDate: string,
-    options: { missingIsSettled: boolean },
+    options: { missingIsSettled: boolean; bullJobId?: string | number },
   ) => Promise<PlayerValuesSettlement>;
   notify: (message: string, options?: NotificationOptions) => Promise<void>;
   ensureMarketPublication?: typeof ensureMarketPublication;
@@ -89,7 +89,11 @@ function isFinalWindowCapture(snapshotDate: string, capturedAt: Date | null): bo
 export async function checkPlayerMarketFreshness(
   now: Date = new Date(),
   dependencies: PlayerMarketFreshnessDependencies = defaultDependencies,
-  options: { freshnessWindowId?: number; sourceRunId?: string } = {},
+  options: {
+    freshnessWindowId?: number;
+    sourceRunId?: string;
+    playerValuesBullJobId?: string | number;
+  } = {},
 ): Promise<PlayerMarketFreshnessResult> {
   const season = await dependencies.findCurrentSeason();
   const syncEvent = await dependencies.resolveSyncEvent(season, now);
@@ -114,6 +118,7 @@ export async function checkPlayerMarketFreshness(
   // its full enqueue/retry horizon and distinguish a never-observed job.
   const settlement = await dependencies.waitForPlayerValuesSettlement(season, snapshotDate, {
     missingIsSettled: initialFinalCaptureObserved,
+    bullJobId: options.playerValuesBullJobId,
   });
   const [expectedCount, coverage, hasChanges] = await Promise.all([
     // fpl.players is intentionally historical/accumulative. Compare against

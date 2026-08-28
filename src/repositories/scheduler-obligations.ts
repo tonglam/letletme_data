@@ -306,6 +306,27 @@ export async function getSchedulerObligation(input: {
   return rows[0] ? mapRow(rows[0]) : null;
 }
 
+export async function getSchedulerObligationByIdentity(input: {
+  jobName: string;
+  scopeKey: string;
+  periodKey: string;
+  db?: DbHandle;
+}): Promise<SchedulerObligation | null> {
+  const db = input.db ?? (await getDb());
+  const rows = await db
+    .select()
+    .from(schedulerObligationsInOps)
+    .where(
+      and(
+        eq(schedulerObligationsInOps.jobName, input.jobName),
+        eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
+        eq(schedulerObligationsInOps.periodKey, input.periodKey),
+      ),
+    )
+    .limit(1);
+  return rows[0] ? mapRow(rows[0]) : null;
+}
+
 export async function getSchedulerObligationByBullJobId(input: {
   bullJobId: string | number;
   db?: DbHandle;
