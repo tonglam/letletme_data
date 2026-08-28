@@ -26,17 +26,21 @@ import {
   preparePriceChangePublication,
   persistPriceChangePublication,
   PriceChangeCorePublicationRequiredError,
+  PriceChangeHotEventSupersededError,
+  type PriceChangeHotEventEvidence,
   priceChangeTriggerFingerprint,
   resolvePriceChangeSourceRunId,
 } from '../services/price-change-predictions.service';
 import {
   loadPriceChangeHotSource,
   markPriceChangeHotReconciliation,
+  priceChangeHotEventEvidence,
   readPriceChangeHotSnapshot,
   readPriceChangeHotSnapshotAtRevision,
 } from '../services/price-change-hot.service';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
 import { readActiveDataPublication } from '../cache/data-publication';
+import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
@@ -113,6 +117,16 @@ function sameHotPriceSource(left: HotPriceSourceMetadata, right: HotPriceSourceM
   );
 }
 
+async function enqueueNewerHotPriceEvent(evidence: PriceChangeHotEventEvidence): Promise<void> {
+  await triggerPriceChangeLane({
+    sourceHash: evidence.sourceHash,
+    sourceArtifactId: evidence.artifactId ?? undefined,
+    priceChangeBoardRevision: evidence.revision,
+    sourceDetectedAt: evidence.detectedAt,
+    sourceFetchedAt: evidence.fetchedAt,
+  });
+}
+
 function captureTimestampsFromMetadata(
   metadata: HotPriceSourceMetadata,
 ): { readonly requestStartedAt: Date; readonly fetchedAt: Date } | null {
@@ -186,7 +200,10 @@ async function hotPriceSourceDependencies(
             }
           : {}),
         ...(hotSnapshot.schemaVersion >= 4
-          ? { eventEvidence: hotSnapshot.board.latestEvent ?? null }
+          ? {
+              eventEvidence: hotSnapshot.board.latestEvent ?? null,
+              hotEventEvidence: priceChangeHotEventEvidence(hotSnapshot),
+            }
           : {}),
       };
     }
@@ -212,7 +229,10 @@ async function hotPriceSourceDependencies(
           }
         : {}),
       ...(hotSnapshot.schemaVersion >= 4
-        ? { eventEvidence: hotSnapshot.board.latestEvent ?? null }
+        ? {
+            eventEvidence: hotSnapshot.board.latestEvent ?? null,
+            hotEventEvidence: priceChangeHotEventEvidence(hotSnapshot),
+          }
         : {}),
     };
   } catch (error) {
@@ -439,6 +459,10 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
     }
     activeTarget = target;
 
+    const readLatestHotEvent = async (): Promise<PriceChangeHotEventEvidence | null> => {
+      const latest = await readPriceChangeHotSnapshot(job.data.seasonCode);
+      return priceChangeHotEventEvidence(latest);
+    };
     let prepared;
     try {
       const freshnessWindowIds = [
@@ -471,13 +495,8 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
         hotSnapshotForEvent && hotSnapshotForEvent.schemaVersion >= 4
           ? (hotSnapshotForEvent.board.latestEvent ?? undefined)
           : undefined;
-      const readLatestEvent =
-        hotSource === undefined
-          ? async () => {
-              const latest = await readPriceChangeHotSnapshot(job.data.seasonCode);
-              return latest?.schemaVersion === 4 ? (latest.board.latestEvent ?? null) : null;
-            }
-          : undefined;
+      const readLatestEvent = hotSource === undefined ? readLatestHotEvent : undefined;
+      const initialHotEventEvidence = priceChangeHotEventEvidence(hotSnapshotForEvent);
       prepared = await preparePriceChangePublication(
         season,
         hotSource,
@@ -487,6 +506,7 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
         freshnessWindowIds,
         eventEvidenceOverride,
         readLatestEvent,
+        initialHotEventEvidence,
       );
     } catch (error) {
       if (error instanceof PriceChangeCorePublicationRequiredError) {
@@ -568,6 +588,8 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
         () =>
           persistPriceChangePublication(prepared, {
             deferDelivery: true,
+            readLatestHotEvent,
+            onHotEventSuperseded: enqueueNewerHotPriceEvent,
             publicationFence: {
               laneId,
               dispatchGeneration,
@@ -576,6 +598,10 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
           }),
       );
     } catch (error) {
+      if (error instanceof PriceChangeHotEventSupersededError) {
+        const latestHotEvent = await readLatestHotEvent().catch(() => null);
+        if (latestHotEvent) await enqueueNewerHotPriceEvent(latestHotEvent);
+      }
       await syncOperationsRepository.failRun(prepared.sourceRunId, error).catch(() => undefined);
       if (error instanceof PriceChangeCorePublicationRequiredError) {
         return blockPriceLaneForCoreRepair(

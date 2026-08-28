@@ -12,7 +12,9 @@ import {
   priceChangeTriggerFingerprint,
   priceChangeValueFingerprint,
   resolvePriceChangeSourceRunId,
+  isPriceChangeHotEventNewer,
   validatePriceChangeObservedEvent,
+  validatePriceChangeObservedEventAgainstFetchedAt,
   shouldPublishPriceChangeHotSnapshot,
   PriceChangePredictionValidationError,
   PRICE_CHANGE_MAX_AGE_MS,
@@ -336,6 +338,60 @@ describe('price-change prediction normalization', () => {
       changes: [],
       changeDate: '2026-08-24',
     });
+  });
+
+  it('rejects hot event evidence newer than the bootstrap being published', () => {
+    const baseline = normalizePriceChangeBoard(
+      bootstrapFixture(),
+      new Date('2026-08-23T00:00:00Z'),
+    );
+    const event = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: bootstrapFixture({ now_cost: 76 }),
+      deadline: '2026-08-23T18:30:00Z',
+      fetchedAt: new Date('2026-08-23T18:30:02Z'),
+      outcome: 'CHANGED',
+    });
+
+    expect(() =>
+      validatePriceChangeObservedEventAgainstFetchedAt(event, new Date('2026-08-23T18:30:01Z')),
+    ).toThrow('newer than the fetched bootstrap');
+    expect(() =>
+      validatePriceChangeObservedEventAgainstFetchedAt(event, new Date('2026-08-23T18:30:02Z')),
+    ).not.toThrow();
+  });
+
+  it('advances a publication fence only for a newer hot event payload', () => {
+    const baseline = normalizePriceChangeBoard(
+      bootstrapFixture(),
+      new Date('2026-08-23T00:00:00Z'),
+    );
+    const event = priceChangeObservedEventFromBaseline({
+      baseline,
+      bootstrap: bootstrapFixture({ now_cost: 76 }),
+      deadline: '2026-08-23T18:30:00Z',
+      fetchedAt: new Date('2026-08-23T18:30:02Z'),
+      outcome: 'CHANGED',
+    });
+    const evidence = {
+      event,
+      revision: 'a'.repeat(16),
+      sourceHash: 'b'.repeat(64),
+      artifactId: null,
+      detectedAt: '2026-08-23T18:30:01Z',
+      fetchedAt: event.observedAt,
+    } as const;
+
+    expect(isPriceChangeHotEventNewer(evidence, event)).toBe(false);
+    expect(
+      isPriceChangeHotEventNewer(
+        {
+          ...evidence,
+          event: { ...event, observedAt: '2026-08-23T18:30:03Z' },
+        },
+        event,
+      ),
+    ).toBe(true);
   });
 
   it('rejects duplicate or unsorted event evidence', () => {

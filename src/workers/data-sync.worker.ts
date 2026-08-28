@@ -3,7 +3,11 @@ import { QueueEvents, Worker, type Job } from 'bullmq';
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import { parseStrictBooleanEnvValue } from '../utils/config';
 import { fplClient } from '../clients/fpl';
-import { enqueueCoreSnapshotJob, enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
+import {
+  enqueueCoreSnapshotJob,
+  enqueuePlayerPricesSyncJob,
+  enqueuePriceChangePredictionsJob,
+} from '../jobs/data-sync-enqueue';
 import { type DataSyncJobData, dataSyncQueue, dataSyncQueueName } from '../queues/data-sync.queue';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
@@ -20,11 +24,14 @@ import {
   preparePriceChangePublication,
   persistPriceChangePublication,
   PriceChangeCorePublicationRequiredError,
+  PriceChangeHotEventSupersededError,
+  type PriceChangeHotEventEvidence,
   priceChangeTriggerFingerprint,
 } from '../services/price-change-predictions.service';
 import {
   loadPriceChangeHotSource,
   markPriceChangeHotReconciliation,
+  priceChangeHotEventEvidence,
   readPriceChangeHotSnapshot,
   readPriceChangeHotSnapshotAtRevision,
 } from '../services/price-change-hot.service';
@@ -40,6 +47,7 @@ import { alertOnFinalFailure, notifyTwoBots } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { formatCronDateKey } from '../utils/timezone';
+import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
   inspectSchedulerObligationFence,
   startCurrentSchedulerJob,
@@ -74,6 +82,34 @@ function priceSingleFlightEnabled(): boolean {
     process.env.NODE_ENV !== 'production',
     'PRICE_CHANGE_SINGLE_FLIGHT_ENABLED',
   );
+}
+
+async function enqueueNewerHotPriceEvent(
+  season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>,
+  evidence: PriceChangeHotEventEvidence,
+): Promise<void> {
+  const sourceOptions = {
+    sourceHash: evidence.sourceHash,
+    sourceArtifactId: evidence.artifactId ?? undefined,
+    priceChangeBoardRevision: evidence.revision,
+    sourceDetectedAt: evidence.detectedAt,
+    sourceFetchedAt: evidence.fetchedAt,
+  };
+  try {
+    await triggerPriceChangeLane(sourceOptions);
+    return;
+  } catch (error) {
+    if (priceSingleFlightEnabled()) throw error;
+    logWarn('Latest-wins price reconciliation unavailable; using legacy queue', {
+      season: season.seasonCode,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  await enqueuePriceChangePredictionsJob(season, 'reconcile', {
+    ...sourceOptions,
+    jobId: `price-change-hot-reconcile-${evidence.revision}-${evidence.sourceHash}`,
+    removeOnSettle: false,
+  });
 }
 
 function archivedCaptureTimestamps(
@@ -249,7 +285,10 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
             }
           : {}),
         ...(hotSnapshot.schemaVersion >= 4
-          ? { eventEvidence: hotSnapshot.board.latestEvent ?? null }
+          ? {
+              eventEvidence: hotSnapshot.board.latestEvent ?? null,
+              hotEventEvidence: priceChangeHotEventEvidence(hotSnapshot),
+            }
           : {}),
       };
     }
@@ -274,7 +313,10 @@ async function hotPriceSourceDependencies(job: Job<DataSyncJobData>) {
           }
         : {}),
       ...(hotSnapshot.schemaVersion >= 4
-        ? { eventEvidence: hotSnapshot.board.latestEvent ?? null }
+        ? {
+            eventEvidence: hotSnapshot.board.latestEvent ?? null,
+            hotEventEvidence: priceChangeHotEventEvidence(hotSnapshot),
+          }
         : {}),
     };
   } catch (error) {
@@ -517,6 +559,10 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
         // Bootstrap acquisition and all validation happen before the mutation
         // scopes are acquired.  The short locked section only activates the
         // immutable DB publication and its outbox receipt.
+        const readLatestHotEvent = async (): Promise<PriceChangeHotEventEvidence | null> => {
+          const latest = await readPriceChangeHotSnapshot(job.data.seasonCode);
+          return priceChangeHotEventEvidence(latest);
+        };
         let prepared;
         try {
           const hotSource = await hotPriceSourceDependencies(job);
@@ -528,13 +574,8 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             hotSnapshotForEvent && hotSnapshotForEvent.schemaVersion >= 4
               ? (hotSnapshotForEvent.board.latestEvent ?? undefined)
               : undefined;
-          const readLatestEvent =
-            hotSource === undefined
-              ? async () => {
-                  const latest = await readPriceChangeHotSnapshot(job.data.seasonCode);
-                  return latest?.schemaVersion === 4 ? (latest.board.latestEvent ?? null) : null;
-                }
-              : undefined;
+          const readLatestEvent = hotSource === undefined ? readLatestHotEvent : undefined;
+          const initialHotEventEvidence = priceChangeHotEventEvidence(hotSnapshotForEvent);
           prepared = await preparePriceChangePublication(
             season,
             hotSource,
@@ -544,6 +585,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             job.data.freshnessWindowIds,
             eventEvidenceOverride,
             readLatestEvent,
+            initialHotEventEvidence,
           );
         } catch (error) {
           if (error instanceof PriceChangeCorePublicationRequiredError) {
@@ -564,9 +606,17 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
         let persisted;
         try {
           persisted = await withMutationScopes(mutationInput, () =>
-            persistPriceChangePublication(prepared, { deferDelivery: true }),
+            persistPriceChangePublication(prepared, {
+              deferDelivery: true,
+              readLatestHotEvent,
+              onHotEventSuperseded: (evidence) => enqueueNewerHotPriceEvent(season, evidence),
+            }),
           );
         } catch (error) {
+          if (error instanceof PriceChangeHotEventSupersededError) {
+            const latestHotEvent = await readLatestHotEvent().catch(() => null);
+            if (latestHotEvent) await enqueueNewerHotPriceEvent(season, latestHotEvent);
+          }
           await syncOperationsRepository
             .failRun(prepared.sourceRunId, error)
             .catch(() => undefined);

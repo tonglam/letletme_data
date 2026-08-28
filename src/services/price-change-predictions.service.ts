@@ -65,6 +65,21 @@ export type PriceChangeObservedEvent = Readonly<{
   changes: readonly PriceChangeObservedChange[];
 }>;
 
+/**
+ * The immutable hot-source identity that was used to carry an observed event
+ * into a durable publication.  The event payload alone is not enough for a
+ * publication fence: two hot revisions can contain different provider waves
+ * with the same player count.
+ */
+export type PriceChangeHotEventEvidence = Readonly<{
+  event: PriceChangeObservedEvent;
+  revision: string;
+  sourceHash: string;
+  artifactId: string | null;
+  detectedAt: string;
+  fetchedAt: string;
+}>;
+
 export type PriceChangePlayer = {
   playerId: number;
   playerCode: number;
@@ -139,6 +154,8 @@ export type PriceChangePublicationDependencies = {
    * concrete event is never recomputed during durable reconciliation.
    */
   readonly eventEvidence?: PriceChangeObservedEvent | null;
+  /** Exact hot revision carrying `eventEvidence`, when the source is hot-bound. */
+  readonly hotEventEvidence?: PriceChangeHotEventEvidence | null;
 };
 
 export type PreparedPriceChangePublication = {
@@ -156,6 +173,8 @@ export type PreparedPriceChangePublication = {
   readonly corePublicationRevision: number;
   readonly board: PriceChangeBoard;
   readonly context: PriceChangePublicationContext;
+  /** Hot event identity checked again immediately before publication. */
+  readonly hotEventEvidence?: PriceChangeHotEventEvidence;
 };
 
 export type PriceChangePreparationResult =
@@ -194,6 +213,13 @@ export class PriceChangePredictionUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'PriceChangePredictionUnavailableError';
+  }
+}
+
+export class PriceChangeHotEventSupersededError extends Error {
+  constructor(message = 'A newer hot price-change event superseded this publication') {
+    super(message);
+    this.name = 'PriceChangeHotEventSupersededError';
   }
 }
 
@@ -399,8 +425,55 @@ export function validatePriceChangeObservedEvent(
   }
 }
 
+/** Keep event evidence from making a publication temporally self-contradictory. */
+export function validatePriceChangeObservedEventAgainstFetchedAt(
+  event: PriceChangeObservedEvent,
+  fetchedAt: Date,
+): void {
+  if (!Number.isFinite(fetchedAt.getTime())) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change publication fetchedAt is invalid for observed event',
+    );
+  }
+  const observedAt = Date.parse(event.observedAt);
+  if (!Number.isFinite(observedAt) || observedAt > fetchedAt.getTime()) {
+    throw new PriceChangePredictionValidationError(
+      'Price-change observed event is newer than the fetched bootstrap',
+    );
+  }
+}
+
 function eventOrder(event: PriceChangeObservedEvent): [number, number] {
   return [Date.parse(event.deadline), Date.parse(event.observedAt)];
+}
+
+/**
+ * Return true when a hot source contains evidence that is newer than the
+ * event attached to a prepared publication. Equal event payloads are not
+ * considered newer merely because prediction fields caused a new hot board
+ * revision; only a new event payload or event ordering advances the fence.
+ */
+export function isPriceChangeHotEventNewer(
+  candidate: PriceChangeHotEventEvidence | null | undefined,
+  baseline: PriceChangeObservedEvent | null | undefined,
+): boolean {
+  if (!candidate) return false;
+  if (!baseline) return true;
+  const [candidateDeadline, candidateObservedAt] = eventOrder(candidate.event);
+  const [baselineDeadline, baselineObservedAt] = eventOrder(baseline);
+  if (
+    !Number.isFinite(candidateDeadline) ||
+    !Number.isFinite(candidateObservedAt) ||
+    !Number.isFinite(baselineDeadline) ||
+    !Number.isFinite(baselineObservedAt)
+  ) {
+    throw new PriceChangePredictionValidationError('Price-change hot event ordering is invalid');
+  }
+  if (candidateDeadline !== baselineDeadline) return candidateDeadline > baselineDeadline;
+  if (candidateObservedAt !== baselineObservedAt) {
+    return candidateObservedAt > baselineObservedAt;
+  }
+  return JSON.stringify(candidate.event) !== JSON.stringify(baseline);
 }
 
 /** Keep the newest immutable official event when a delayed reconcile arrives. */
@@ -1034,10 +1107,11 @@ export function parsePublishedPriceChangeBoard(
         context.latestEvent as PriceChangeObservedEvent,
         board.players,
       );
+      validatePriceChangeObservedEventAgainstFetchedAt(
+        context.latestEvent as PriceChangeObservedEvent,
+        new Date(fetchedAt),
+      );
     } catch {
-      return null;
-    }
-    if (Date.parse((context.latestEvent as PriceChangeObservedEvent).observedAt) > fetchedAt) {
       return null;
     }
     board.latestEvent = context.latestEvent as PriceChangeObservedEvent;
@@ -1254,7 +1328,8 @@ export async function preparePriceChangePublication(
   freshnessWindowId?: number,
   freshnessWindowIds?: readonly number[],
   eventEvidenceOverride?: PriceChangeObservedEvent | null,
-  readLatestEvent?: () => Promise<PriceChangeObservedEvent | null | undefined>,
+  readLatestEvent?: () => Promise<PriceChangeHotEventEvidence | null | undefined>,
+  initialHotEventEvidence?: PriceChangeHotEventEvidence | null,
 ): Promise<PriceChangePreparationResult> {
   const sourceRunId = sourceRunIdOverride ?? randomUUID();
   await syncOperationsRepository.startRun({
@@ -1308,12 +1383,19 @@ export async function preparePriceChangePublication(
       sourceEventEvidence !== undefined ? sourceEventEvidence : eventEvidenceOverride;
     const existingCanonical =
       sourceEventEvidence === undefined ? await readCanonicalPriceChangePublication(season) : null;
+    const initialHotEvent = dependencies.hotEventEvidence ?? initialHotEventEvidence;
     let latestEvent = selectLatestPriceChangeEvent(
       existingCanonical?.board?.latestEvent,
-      eventEvidence,
+      initialHotEvent?.event ?? eventEvidence,
     );
     const refreshedHotEvent = readLatestEvent ? await readLatestEvent() : undefined;
-    latestEvent = selectLatestPriceChangeEvent(latestEvent, refreshedHotEvent);
+    latestEvent = selectLatestPriceChangeEvent(latestEvent, refreshedHotEvent?.event);
+    const selectedHotEventEvidence =
+      refreshedHotEvent && latestEvent === refreshedHotEvent.event
+        ? refreshedHotEvent
+        : initialHotEvent && latestEvent === initialHotEvent.event
+          ? initialHotEvent
+          : undefined;
     const core = await readCorePublicationEvidence(season);
     const board = {
       ...normalizePriceChangeBoard(bootstrap, fetchedAt, undefined, core.playerIds, latestEvent),
@@ -1328,8 +1410,10 @@ export async function preparePriceChangePublication(
         requireCurrentPriceMatch:
           latestEvent === sourceEventEvidence ||
           latestEvent === eventEvidence ||
-          latestEvent === refreshedHotEvent,
+          latestEvent === refreshedHotEvent?.event ||
+          latestEvent === initialHotEvent?.event,
       });
+      validatePriceChangeObservedEventAgainstFetchedAt(latestEvent, fetchedAt);
     }
     const context = contextFromBoard(board, fetchedAt);
     return {
@@ -1344,6 +1428,7 @@ export async function preparePriceChangePublication(
       corePublicationRevision: core.revision,
       board,
       context,
+      ...(selectedHotEventEvidence ? { hotEventEvidence: selectedHotEventEvidence } : {}),
     };
   } catch (error) {
     const skipReason = priceRunSkipReason(error);
@@ -1386,6 +1471,10 @@ export async function persistPriceChangePublication(
   prepared: PreparedPriceChangePublication,
   options: {
     readonly deferDelivery?: boolean;
+    /** Read-only Redis evidence used for the optimistic hot-event fence. */
+    readonly readLatestHotEvent?: () => Promise<PriceChangeHotEventEvidence | null | undefined>;
+    /** Requeue a newer hot event observed after the DB commit. */
+    readonly onHotEventSuperseded?: (evidence: PriceChangeHotEventEvidence) => Promise<void>;
     readonly publicationFence?: {
       readonly laneId: string;
       readonly dispatchGeneration: number;
@@ -1532,6 +1621,22 @@ export async function persistPriceChangePublication(
         if (options.publicationFence) {
           await assertSchedulerLanePublicationFence(tx, options.publicationFence);
         }
+        // The hot pointer and this SQL transaction cannot share one atomic
+        // commit. Carry the exact hot event revision selected during prepare
+        // and perform a final read-only check while the publication row is
+        // locked. A newer event aborts this activation; the worker retries it
+        // with the newer source instead of making the old event canonical.
+        const latestHotEvent = options.readLatestHotEvent
+          ? await options.readLatestHotEvent()
+          : null;
+        if (
+          isPriceChangeHotEventNewer(
+            latestHotEvent,
+            prepared.hotEventEvidence?.event ?? board.latestEvent,
+          )
+        ) {
+          throw new PriceChangeHotEventSupersededError();
+        }
         const activeCore = await txSyncOperationsRepository.findActivePublication(
           'fpl:core',
           season,
@@ -1547,6 +1652,28 @@ export async function persistPriceChangePublication(
       },
     });
     dbActivated = true;
+    // A hot pointer can advance in the small interval after the transaction
+    // fence and before this function returns. Compensate that unavoidable
+    // cross-system race by immediately creating a durable latest-wins target
+    // for the exact newer hot revision. The hot board remains user-visible
+    // while that target converges the DB and outbox.
+    if (options.readLatestHotEvent) {
+      const latestHotEvent = await options.readLatestHotEvent();
+      if (
+        latestHotEvent &&
+        isPriceChangeHotEventNewer(
+          latestHotEvent,
+          prepared.hotEventEvidence?.event ?? board.latestEvent,
+        )
+      ) {
+        if (!options.onHotEventSuperseded) {
+          throw new PriceChangeHotEventSupersededError(
+            'A newer hot price-change event was published after activation',
+          );
+        }
+        await options.onHotEventSuperseded(latestHotEvent);
+      }
+    }
     if (!options.deferDelivery) {
       await ensurePriceChangePublicationDelivered(
         season,

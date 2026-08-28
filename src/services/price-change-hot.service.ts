@@ -12,6 +12,7 @@ import {
   PriceChangePredictionValidationError,
   validatePriceChangeObservedEvent,
   type PriceChangeBoard,
+  type PriceChangeHotEventEvidence,
   type PriceChangeObservedEvent,
 } from './price-change-predictions.service';
 import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
@@ -74,6 +75,23 @@ export type PriceChangeHotCursor = Readonly<{
   state: 'PROVISIONAL' | 'STALE' | 'RECONCILED' | 'FAILED';
   reconciliationError: string | null;
 }>;
+
+/** Expose the immutable hot revision needed by durable publication fences. */
+export function priceChangeHotEventEvidence(
+  snapshot: PriceChangeHotSnapshot | null | undefined,
+): PriceChangeHotEventEvidence | null {
+  if (!snapshot || snapshot.schemaVersion < 4 || !snapshot.board.latestEvent) {
+    return null;
+  }
+  return {
+    event: snapshot.board.latestEvent,
+    revision: snapshot.revision,
+    sourceHash: snapshot.sourceHash,
+    artifactId: snapshot.artifactId,
+    detectedAt: snapshot.detectedAt,
+    fetchedAt: snapshot.fetchedAt,
+  };
+}
 
 const DURABLE_PUBLICATION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
