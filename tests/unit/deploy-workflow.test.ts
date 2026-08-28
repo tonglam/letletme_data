@@ -165,6 +165,21 @@ describe('release workflow gates', () => {
       expect(remoteWorkflow).not.toContain('ssh-keyscan');
     }
 
+    for (const localActionWorkflow of [
+      cleanupWorkflow,
+      briefingRolloutWorkflow,
+      sourceMediaRolloutWorkflow,
+    ]) {
+      const checkoutIndex = localActionWorkflow.indexOf(
+        'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      );
+      const localActionIndex = localActionWorkflow.indexOf(
+        'uses: ./.github/actions/pinned-openssh',
+      );
+      expect(checkoutIndex).toBeGreaterThan(-1);
+      expect(localActionIndex).toBeGreaterThan(checkoutIndex);
+    }
+
     expect(pinnedOpenSshAction).toContain('StrictHostKeyChecking=yes');
     expect(pinnedOpenSshAction).toContain('IdentitiesOnly=yes');
     expect(pinnedOpenSshAction).toContain('ssh-keygen -lf');
