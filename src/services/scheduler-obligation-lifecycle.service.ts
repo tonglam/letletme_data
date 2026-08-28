@@ -137,13 +137,44 @@ export function createSchedulerObligationLifecycle(
     await recordCheckpointFreshnessEvidence(obligation);
   };
 
+  const getCompletionById = async (
+    input: Parameters<typeof getSchedulerObligation>[0],
+  ): Promise<SchedulerObligation | null> => {
+    try {
+      return await dependencies.getById(input);
+    } catch (error) {
+      // The durable transition already committed. A transient follow-up read
+      // must not make the worker retry its business work or retry an already
+      // terminal obligation; freshness evidence can be repaired separately.
+      dependencies.reportError('Scheduler obligation completion lookup failed', error, {
+        obligationId: input.obligationId,
+      });
+      return null;
+    }
+  };
+
+  const getCompletionByBullJobId = async (
+    input: Parameters<typeof getSchedulerObligationByBullJobId>[0],
+  ): Promise<SchedulerObligation | null> => {
+    try {
+      return await dependencies.getByBullJobId(input);
+    } catch (error) {
+      // See getCompletionById: post-commit telemetry is best effort and never
+      // masks the successful terminal transition.
+      dependencies.reportError('Scheduler obligation completion lookup failed', error, {
+        bullJobId: input.bullJobId,
+      });
+      return null;
+    }
+  };
+
   const complete = async (
     input: Parameters<typeof completeSchedulerObligationRecord>[0],
   ): Promise<boolean> => {
     const changed = await dependencies.complete(input);
     if (changed) {
       await recordCompletion(
-        await dependencies.getById({ obligationId: input.obligationId, db: input.db }),
+        await getCompletionById({ obligationId: input.obligationId, db: input.db }),
       );
     }
     return changed;
@@ -155,7 +186,7 @@ export function createSchedulerObligationLifecycle(
     const changed = await dependencies.completeByBullJobId(input);
     if (changed) {
       await recordCompletion(
-        await dependencies.getByBullJobId({ bullJobId: input.bullJobId, db: input.db }),
+        await getCompletionByBullJobId({ bullJobId: input.bullJobId, db: input.db }),
       );
     }
     return changed;
@@ -204,7 +235,7 @@ export function createSchedulerObligationLifecycle(
     if (changed) {
       await recordFailureCase(
         input,
-        await dependencies.getById({ obligationId: input.obligationId, db: input.db }),
+        await getCompletionById({ obligationId: input.obligationId, db: input.db }),
       );
     }
     return changed;
@@ -215,7 +246,7 @@ export function createSchedulerObligationLifecycle(
   ): Promise<boolean> => {
     const changed = await dependencies.failByBullJobId(input);
     if (!changed) return false;
-    const obligation = await dependencies.getByBullJobId({
+    const obligation = await getCompletionByBullJobId({
       bullJobId: input.bullJobId,
       db: input.db,
     });

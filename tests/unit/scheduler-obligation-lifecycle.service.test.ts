@@ -108,6 +108,34 @@ describe('scheduler obligation lifecycle service', () => {
     expect(dependencies.reportError).toHaveBeenCalledTimes(1);
   });
 
+  test('keeps post-commit obligation lookups best effort', async () => {
+    const dependencies = fakes(obligation({ status: 'irrecoverable' }));
+    dependencies.getById.mockImplementation(async () => {
+      throw new Error('completion lookup unavailable');
+    });
+    dependencies.getByBullJobId.mockImplementation(async () => {
+      throw new Error('failure lookup unavailable');
+    });
+    const lifecycle = createSchedulerObligationLifecycle(dependencies as never);
+
+    await expect(
+      lifecycle.completeSchedulerObligation({ obligationId: 'committed', status: 'succeeded' }),
+    ).resolves.toBe(true);
+    await expect(
+      lifecycle.failSchedulerObligation({ obligationId: 'failed', error: new Error('terminal') }),
+    ).resolves.toBe(true);
+    await expect(
+      lifecycle.failSchedulerObligationByBullJobId({
+        bullJobId: 'failed-bull',
+        error: new Error('terminal'),
+      }),
+    ).resolves.toBe(true);
+
+    expect(dependencies.recordFreshness).not.toHaveBeenCalled();
+    expect(dependencies.openCase).not.toHaveBeenCalled();
+    expect(dependencies.reportError).toHaveBeenCalledTimes(3);
+  });
+
   test('opens governance cases for durable terminal failures by id and Bull job id', async () => {
     const row = obligation({ status: 'irrecoverable' });
     const dependencies = fakes(row);
