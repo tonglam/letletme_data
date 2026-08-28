@@ -83,7 +83,7 @@ describe('runtime inventory documentation contract', () => {
 
   test('documents every scheduler registry definition and compatibility alias', () => {
     const names = schedulerRegistryNames();
-    expect(names).toHaveLength(37);
+    expect(names).toHaveLength(38);
     for (const name of names) expect(read('docs/job-schedule.md')).toContain(name);
 
     const aliases = [

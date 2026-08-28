@@ -134,6 +134,34 @@ describe('FPL bootstrap source-day archive', () => {
       /^fpl\/bootstrap-static\/2627\/20260825\/[0-9a-f]{64}\.json$/,
     );
     expect(calls).toEqual(['upload', 'download', 'insert', 'download']);
+    expect(result.observedAt).toEqual(retrievedAt);
+  });
+
+  test('keeps a later observation time when identical bytes reuse an older manifest', async () => {
+    const payload = buildCoreSnapshotFixture({ playerCount: 1 }).bootstrap;
+    const bytes = bytesFor(payload);
+    const existingArtifact = artifactFor(payload, bytes);
+    const observedAt = new Date('2026-08-25T07:05:00.000Z');
+    const objects = new Map([[existingArtifact.objectKey, bytes]]);
+
+    const result = await resolveFplBootstrapSourceArtifact(
+      TEST_SEASON,
+      sourceDay,
+      dependencies(payload, {
+        captureBootstrap: async () => ({
+          bytes,
+          payload,
+          sourceUrl: 'https://fantasy.premierleague.com/api/bootstrap-static/',
+          contentType: 'application/json',
+          retrievedAt: observedAt,
+        }),
+        insertIfAbsent: async () => existingArtifact,
+        getStorage: () => memoryStorage(objects),
+      }),
+    );
+
+    expect(result.artifact.retrievedAt).toEqual(retrievedAt);
+    expect(result.observedAt).toEqual(observedAt);
   });
 
   test('historical replay is archive-only and never calls the provider', async () => {

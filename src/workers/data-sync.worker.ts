@@ -47,6 +47,7 @@ import { alertOnFinalFailure, notifyTwoBots } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import {
   PlayerValuesWindowPendingError,
+  isPlayerValuesWindowPendingError,
   shouldRetryPlayerValuesNoChange,
 } from '../domain/player-values-window';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -753,6 +754,15 @@ export function createDataSyncWorker(): WorkerRuntime {
   });
 
   worker.on('failed', (job, error) => {
+    if (isPlayerValuesWindowPendingError(error)) {
+      logInfo('Data sync job pending; retry scheduled by BullMQ', {
+        jobId: job?.id,
+        name: job?.name,
+        attemptsMade: job?.attemptsMade,
+        changeDate: error.changeDate,
+      });
+      return;
+    }
     logError('Data sync job failed', error, {
       jobId: job?.id,
       name: job?.name,

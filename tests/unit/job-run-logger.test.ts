@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 import { runTrackedJob } from '../../src/utils/job-run-logger';
 import { logger } from '../../src/utils/logger';
+import { PlayerValuesWindowPendingError } from '../../src/domain/player-values-window';
 
 afterEach(() => {
   mock.restore();
@@ -28,5 +29,23 @@ describe('job lifecycle logging', () => {
 
     expect(debugSpy).toHaveBeenCalledTimes(1);
     expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps expected market-window waits at debug instead of error', async () => {
+    const debugSpy = spyOn(logger, 'debug').mockImplementation(() => undefined as never);
+    const errorSpy = spyOn(logger, 'error').mockImplementation(() => undefined as never);
+
+    await expect(
+      runTrackedJob({ jobType: 'queue', jobName: 'player-values' }, async () => {
+        throw new PlayerValuesWindowPendingError('20260829');
+      }),
+    ).rejects.toBeInstanceOf(PlayerValuesWindowPendingError);
+
+    expect(debugSpy).toHaveBeenCalledTimes(2);
+    expect(debugSpy.mock.calls[1]?.[0]).toMatchObject({
+      status: 'pending',
+      changeDate: '20260829',
+    });
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });

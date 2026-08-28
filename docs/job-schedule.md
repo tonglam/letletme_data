@@ -31,6 +31,7 @@ price-change-predictions
 price-change-watch
 core-snapshot
 market-daily
+player-prices
 player-stats
 understat-team-incremental
 understat-player-incremental

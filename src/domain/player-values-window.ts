@@ -36,3 +36,14 @@ export class PlayerValuesWindowPendingError extends Error {
     this.changeDate = changeDate;
   }
 }
+
+export function isPlayerValuesWindowPendingError(
+  error: unknown,
+): error is PlayerValuesWindowPendingError {
+  return (
+    error instanceof PlayerValuesWindowPendingError ||
+    (error instanceof Error &&
+      error.name === 'PlayerValuesWindowPendingError' &&
+      typeof (error as { changeDate?: unknown }).changeDate === 'string')
+  );
+}

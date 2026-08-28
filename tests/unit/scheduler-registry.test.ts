@@ -8,6 +8,7 @@ import {
   resolvePriceChangeWatchPlans,
   resolveEntryInfoSnapshotTargetEventId,
   resolvePostMatchResultPlans,
+  playerPricesDefinition,
   schedulerQueueLaneOverride,
   understatDailyDefinition,
   type ScheduledJobDefinition,
@@ -669,6 +670,29 @@ describe('standalone scheduler registry', () => {
       source: 'catchup',
     });
     expect(plans.find((plan) => plan.periodKey === '20260822')?.terminalStatus).toBeUndefined();
+  });
+
+  test('reserves the current-day player price replay after the market window', async () => {
+    const replay = playerPricesDefinition(async () => ({
+      event: { id: 1 } as never,
+      phase: 'current' as const,
+    }));
+    expect(replay).toMatchObject({
+      cadence: 'daily',
+      timezone: 'Asia/Shanghai',
+      catchUpPolicy: 'current-day-only',
+      queueName: 'data-sync',
+    });
+
+    const plans = await replay!.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-22T23:20:00.000Z'),
+      events: [],
+    });
+    expect(plans.find((plan) => plan.periodKey === '20260823')).toMatchObject({
+      source: 'catchup',
+    });
+    expect(plans.find((plan) => plan.periodKey === '20260823')?.terminalStatus).toBeUndefined();
   });
 
   test('catches up the latest authoritative daily checkpoint before today is due', async () => {

@@ -2,9 +2,10 @@ import { logDebug, logJobError } from './logger';
 import { runWithJobLogContext } from './job-log-context';
 import { formatUtc8Timestamp } from './timezone';
 import { isCompatibilitySchedulerEnabled } from './scheduler-mode';
+import { isPlayerValuesWindowPendingError } from '../domain/player-values-window';
 
 type JobRunType = 'cron' | 'queue';
-type JobRunStatus = 'started' | 'success' | 'failed';
+type JobRunStatus = 'started' | 'success' | 'pending' | 'failed';
 
 export interface JobRunContext {
   jobType: JobRunType;
@@ -71,12 +72,22 @@ export async function runTrackedJob<T>(
     } catch (error) {
       const finishedAtMs = Date.now();
 
-      logJobError('Job lifecycle', error, {
-        ...getBasePayload(context, 'failed'),
-        startedAtUtc8,
-        finishedAtUtc8: formatUtc8Timestamp(new Date(finishedAtMs)),
-        durationMs: finishedAtMs - startedAtMs,
-      });
+      if (isPlayerValuesWindowPendingError(error)) {
+        logDebug('Job lifecycle', {
+          ...getBasePayload(context, 'pending'),
+          startedAtUtc8,
+          finishedAtUtc8: formatUtc8Timestamp(new Date(finishedAtMs)),
+          durationMs: finishedAtMs - startedAtMs,
+          changeDate: error.changeDate,
+        });
+      } else {
+        logJobError('Job lifecycle', error, {
+          ...getBasePayload(context, 'failed'),
+          startedAtUtc8,
+          finishedAtUtc8: formatUtc8Timestamp(new Date(finishedAtMs)),
+          durationMs: finishedAtMs - startedAtMs,
+        });
+      }
 
       throw error;
     }

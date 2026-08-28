@@ -221,7 +221,10 @@ export async function preparePlayerValuesSync(
       throw new Error('No player market data returned from FPL API');
     }
     requiredUnits = bootstrap.elements.length;
-    const capturedAt = resolvedArtifact.artifact.retrievedAt;
+    // A current-day capture can reuse an existing content-addressed manifest
+    // when FPL returns identical bytes. The snapshot timestamp must still
+    // represent this observation, not the first manifest insertion time.
+    const capturedAt = resolvedArtifact.observedAt ?? resolvedArtifact.artifact.retrievedAt;
     if (formatCronDateKey(capturedAt) !== changeDate) {
       throw new Error(
         `Bootstrap artifact ${resolvedArtifact.artifact.artifactId} is outside source day ${changeDate}`,

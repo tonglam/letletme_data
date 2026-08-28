@@ -166,6 +166,35 @@ describe('daily player market snapshot synchronization', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  test('uses the current observation timestamp when a manifest is deduplicated', async () => {
+    const observedAt = new Date('2026-08-03T07:05:00.000Z');
+    const persistMarketSnapshot = mock(
+      async (_season, _eventId, snapshots: readonly unknown[]) => ({
+        snapshotDate: '2026-08-03',
+        persistedCount: snapshots.length,
+      }),
+    );
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        persistMarketSnapshot,
+        resolveBootstrapSourceArtifact: async () =>
+          ({
+            artifact: sourceArtifact,
+            bootstrap: { elements: [singleRawFPLElementFixture], teams: [rawTeam] },
+            provenance: 'captured',
+            observedAt,
+          }) as never,
+      }),
+    );
+
+    await sync(TEST_SEASON, changeDate);
+
+    const snapshots = persistMarketSnapshot.mock.calls[0]?.[2] as
+      | readonly { capturedAt: Date }[]
+      | undefined;
+    expect(snapshots?.[0]?.capturedAt).toEqual(observedAt);
+  });
+
   test('derives changed rows from reporting data, then enqueues reconciliation and notifies', async () => {
     const enqueuePlayerPrices = mock(async () => ({ id: 'prices' }) as never);
     const notify = mock(async (_message: string) => undefined);

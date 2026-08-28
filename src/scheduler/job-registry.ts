@@ -4,6 +4,7 @@ import { formatCronDateKey } from '../utils/timezone';
 import {
   enqueueCoreSnapshotJob,
   enqueuePriceChangePredictionsJob,
+  enqueuePlayerPricesSyncJob,
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
 } from '../jobs/data-sync-enqueue';
@@ -1297,6 +1298,40 @@ function activePlayerStatsDefinition(): ScheduledJobDefinition {
   };
 }
 
+export function playerPricesDefinition(
+  resolveSyncEvent: typeof resolvePlayerSyncEvent = resolvePlayerSyncEvent,
+): ScheduledJobDefinition {
+  const definition = dailyDefinition({
+    name: 'player-prices',
+    hour: 7,
+    minute: 10,
+    cadence: 'daily',
+    catchUpPolicy: 'current-day-only',
+    criticality: 'normal',
+    queueName: 'data-sync',
+    successPredicate: 'current-day persisted player price changes replayed',
+    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+      const job = await enqueuePlayerPricesSyncJob(context.season, 'catchup', {
+        changeDate: plan.periodKey,
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        removeOnSettle: false,
+        obligationId,
+        obligationGeneration: generation,
+        freshnessWindowId,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  });
+
+  return {
+    ...definition,
+    resolve: async (context) => {
+      if (!(await resolveSyncEvent(context.season, context.now))) return [];
+      return definition.resolve(context);
+    },
+  };
+}
+
 export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
   const definitions: ScheduledJobDefinition[] = [
     coreLifecycleReconcileDefinition(),
@@ -1345,6 +1380,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
         return { bullJobId: job.id, runId: job.data.runId };
       },
     }),
+    playerPricesDefinition(),
     dailyDefinition({
       name: 'player-stats',
       hour: 9,
