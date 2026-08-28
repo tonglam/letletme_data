@@ -207,6 +207,13 @@ curl -X POST http://localhost:3000/events/sync \
 The header is required when `ENABLE_AUTH=true` and may be omitted in an
 explicitly unauthenticated local environment.
 
+For a release-quality local check, run `bun run coverage:critical`. It writes
+the unit LCOV profile to `coverage/lcov.info` and enforces thresholds only for
+the dependency-free Manager Live, invalidation, publication-delivery,
+scheduler, tournament-policy, and runtime-lifecycle decision modules. The
+repository-wide percentage is informational; database and Redis adapters are
+covered by the explicit integration suites.
+
 ## Manual core-season bootstrap
 
 The mutation returns after enqueueing one atomic core-snapshot job. Keep the

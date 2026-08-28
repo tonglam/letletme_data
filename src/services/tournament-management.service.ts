@@ -28,6 +28,11 @@ import {
   type MyFplSnapshotInvalidationDispatchOptions,
 } from './my-fpl-snapshot-invalidation.service';
 import { logWarn } from '../utils/logger';
+import {
+  canManageTournament,
+  isOfficialRosterSyncEligible,
+  type TournamentManagementActor,
+} from '../domain/tournament-management';
 
 const updateTournamentSchema = z.object({
   name: z.string().trim().min(3).max(80),
@@ -56,11 +61,6 @@ const rosterModeSchema = z.object({
   platformAdmin: z.boolean().optional().default(false),
   rosterMode: z.literal('official_sync'),
 });
-
-type TournamentManagementActor = {
-  adminEntryId: number;
-  platformAdmin: boolean;
-};
 
 export type TournamentManagementRepository = {
   findById(season: FplSeasonRef, tournamentId: number): Promise<TournamentManagementRecord | null>;
@@ -176,11 +176,6 @@ export function createTournamentManagementService(
 ) {
   const scopeRunner = lifecycle.withMutationScopes ?? withMutationScopes;
 
-  const canManage = (
-    tournament: TournamentManagementRecord,
-    actor: TournamentManagementActor,
-  ): boolean => actor.platformAdmin || tournament.adminEntryId === actor.adminEntryId;
-
   const assertCanManage = async (
     season: FplSeasonRef,
     tournamentId: number,
@@ -190,7 +185,7 @@ export function createTournamentManagementService(
     if (!tournament) {
       throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
     }
-    if (!canManage(tournament, actor)) {
+    if (!canManageTournament(tournament, actor)) {
       throw new ForbiddenError(
         'Only the tournament administrator can manage this tournament.',
         'TOURNAMENT_ADMIN_REQUIRED',
@@ -303,7 +298,7 @@ export function createTournamentManagementService(
             if (!lockedCurrent) {
               throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
             }
-            if (!canManage(lockedCurrent, payload)) {
+            if (!canManageTournament(lockedCurrent, payload)) {
               throw new ForbiddenError(
                 'Only the tournament administrator can manage this tournament.',
                 'TOURNAMENT_ADMIN_REQUIRED',
@@ -355,7 +350,7 @@ export function createTournamentManagementService(
           if (!lockedCurrent) {
             throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
           }
-          if (!canManage(lockedCurrent, payload)) {
+          if (!canManageTournament(lockedCurrent, payload)) {
             throw new ForbiddenError(
               'Only the tournament administrator can manage this tournament.',
               'TOURNAMENT_ADMIN_REQUIRED',
@@ -435,11 +430,7 @@ export function createTournamentManagementService(
               'TOURNAMENT_FINISHED',
             );
           }
-          const eligible =
-            current.leagueType === 'classic' &&
-            current.groupMode === 'points_races' &&
-            current.groupNum === 1 &&
-            current.knockoutMode === 'no_knockout';
+          const eligible = isOfficialRosterSyncEligible(current);
           if (!eligible) {
             throw new ConflictError(
               'This tournament format cannot use official roster synchronization.',
@@ -580,7 +571,7 @@ export function createTournamentManagementService(
         await repairMissingDeletion(season, tournamentId);
         throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       }
-      if (!canManage(current, payload)) {
+      if (!canManageTournament(current, payload)) {
         throw new ForbiddenError(
           'Only the tournament administrator can delete this tournament.',
           'TOURNAMENT_ADMIN_REQUIRED',

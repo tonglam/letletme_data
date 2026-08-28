@@ -11,6 +11,7 @@ import {
 } from '../repositories/data-publication-outbox';
 import { recordDataPublicationEvidence } from './data-governance.service';
 import { logError } from '../utils/logger';
+import { classifyDataPublicationDeliveryFailure } from '../domain/data-publication-delivery';
 
 function decodePublicationPayloads(
   items: ClaimedDataPublicationOutbox['items'],
@@ -136,7 +137,7 @@ export async function dispatchDataPublicationOutbox(
           outboxId: row.outboxId,
           publicationId: row.publicationId,
         });
-        if (error instanceof Error && error.message.includes('Redis publication is newer')) {
+        if (classifyDataPublicationDeliveryFailure(error) === 'superseded') {
           // The DB publication is superseded; retrying it forever can never
           // legitimately move the pointer backwards.
           await failDataPublicationOutbox({
