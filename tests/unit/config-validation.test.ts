@@ -138,6 +138,13 @@ describe('production environment preflight', () => {
     expect(await runEnvCheck(digest, { SCHEDULER_RESOLVE_TIMEOUT_MS: '60001' })).not.toBe(0);
   });
 
+  test('rejects unknown scheduler modes instead of silently disabling both owners', async () => {
+    const digest = 'a'.repeat(64);
+    expect(await runEnvCheck(digest, { SCHEDULER_MODE: 'standalone' })).toBe(0);
+    expect(await runEnvCheck(digest, { SCHEDULER_MODE: 'compatibility' })).toBe(0);
+    expect(await runEnvCheck(digest, { SCHEDULER_MODE: 'typo' })).not.toBe(0);
+  });
+
   test('preserves scheduler, provider, and FPL admission safety ceilings', async () => {
     const digest = 'a'.repeat(64);
     expect(await runEnvCheck(digest, { SCHEDULER_LEASE_MS: '60000' })).toBe(0);

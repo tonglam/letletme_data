@@ -66,13 +66,13 @@ import { isTerminalJobFailure } from '../utils/worker-failure';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { getQueueConnection } from '../utils/queue';
+import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
 import {
   completeSchedulerObligation,
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
-  renewSchedulerObligation,
-} from '../repositories/scheduler-obligations';
+} from '../services/scheduler-obligation-lifecycle.service';
 import type { WorkerRuntime } from './worker-runtime';
 import {
   inspectSchedulerObligationFence,

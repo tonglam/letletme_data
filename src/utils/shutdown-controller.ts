@@ -6,6 +6,13 @@ export type ShutdownControllerOptions = Readonly<{
   timeoutMs?: number;
   stopIntake?: (signal: string) => void | Promise<void>;
   waitForInFlight?: () => void | Promise<void>;
+  closeWorkers?: () => void | Promise<void>;
+  closeMonitors?: () => void | Promise<void>;
+  closeProducerQueues?: () => void | Promise<void>;
+  closeDatabase?: () => void | Promise<void>;
+  closeCacheRedis?: () => void | Promise<void>;
+  closeQueueRedis?: () => void | Promise<void>;
+  /** Compatibility tail for resources that do not fit a shared lifecycle stage. */
   closeResources?: () => void | Promise<void>;
   exit?: (code: number) => void;
   onTimeout?: (signal: string) => void | Promise<void>;
@@ -32,6 +39,7 @@ export function createShutdownController(options: ShutdownControllerOptions = {}
   let state: ShutdownState = 'running';
   let inFlight: Promise<ShutdownResult> | null = null;
   let exitCalled = false;
+  let requestedExitCode = 0;
 
   const exit = (code: number): void => {
     if (exitCalled) return;
@@ -54,6 +62,7 @@ export function createShutdownController(options: ShutdownControllerOptions = {}
   };
 
   const request = (signal: string, exitCode = 0): Promise<ShutdownResult> => {
+    requestedExitCode = Math.max(requestedExitCode, exitCode);
     if (inFlight) return inFlight;
     state = 'stopping';
 
@@ -66,6 +75,12 @@ export function createShutdownController(options: ShutdownControllerOptions = {}
       if (stopIntakeError) errors.push(stopIntakeError);
       for (const [name, callback] of [
         ['wait-in-flight', options.waitForInFlight],
+        ['close-workers', options.closeWorkers],
+        ['close-monitors', options.closeMonitors],
+        ['close-producer-queues', options.closeProducerQueues],
+        ['close-database', options.closeDatabase],
+        ['close-cache-redis', options.closeCacheRedis],
+        ['close-queue-redis', options.closeQueueRedis],
         ['close-resources', options.closeResources],
       ] as const) {
         const error = await runStage(name, callback);
@@ -90,7 +105,7 @@ export function createShutdownController(options: ShutdownControllerOptions = {}
         const result = await Promise.race([sequence, timeout]);
         if (timeoutTimer) clearTimeout(timeoutTimer);
         state = 'stopped';
-        exit(result.status === 'completed' ? exitCode : 1);
+        exit(result.status === 'completed' ? requestedExitCode : 1);
         return result;
       } catch (error) {
         if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -111,11 +126,13 @@ export function createShutdownController(options: ShutdownControllerOptions = {}
     return inFlight;
   };
 
-  const fatal = (error: unknown, context = 'fatal runtime error'): void => {
-    if (state === 'stopped') return;
-    state = 'stopping';
+  const fatal = (
+    error: unknown,
+    context = 'fatal runtime error',
+  ): Promise<ShutdownResult> | null => {
+    if (state === 'stopped') return null;
     logError(context, error);
-    exit(1);
+    return request('FATAL', 1);
   };
 
   return {

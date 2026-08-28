@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { TournamentManagementRecord } from '../../src/repositories/tournament-management';
-import { eventRepository } from '../../src/repositories/events';
 import {
   createTournamentManagementService as createServiceUnderTest,
   requestSnapshotTournamentResume,
@@ -51,6 +50,22 @@ function createTestService(
     repository,
     {
       withMutationScopes: async (_input, operation) => operation(),
+      findRosterReconcileJob: async () => null,
+      findSetupJob: async () => null,
+      assertRosterBoundary: async () => undefined,
+      rosterRepository: {
+        findById: async () => null,
+        markResumeProcessingWithMarker: async () => 'resume-marker',
+        markResumeProcessing: async () => undefined,
+        markSyncFailed: async () => undefined,
+      },
+      infoRepository: { markSetupResult: async () => undefined },
+      enqueueRosterReconcile: async () => ({ id: 'roster-job' }) as never,
+      enqueueSnapshotSetup: async (_season, tournamentId, _source, options) => {
+        await options.prepareEnqueue();
+        return { id: `setup-${tournamentId}` };
+      },
+      requeueSetup: async (_season, tournamentId) => ({ id: `setup-${tournamentId}` }),
       ...lifecycle,
     },
     async () => TEST_SEASON,
@@ -216,28 +231,25 @@ describe('tournament management service', () => {
   });
 
   test('does not persist official-sync opt-in during an active gameweek', async () => {
-    const originalFindCurrent = eventRepository.findCurrent;
     let updates = 0;
-    eventRepository.findCurrent = async () =>
-      ({ dataChecked: false }) as Awaited<ReturnType<typeof originalFindCurrent>>;
+    const service = createTestService(
+      createRepository({
+        updateRosterModeOwned: async (_season, _id, _adminEntryId, rosterMode) => {
+          updates += 1;
+          return { ...tournament, rosterMode };
+        },
+      }),
+      {
+        assertRosterBoundary: async () => {
+          throw Object.assign(new Error('frozen'), { code: 'TOURNAMENT_ROSTER_FROZEN' });
+        },
+      },
+    );
 
-    try {
-      const service = createTestService(
-        createRepository({
-          updateRosterModeOwned: async (_season, _id, _adminEntryId, rosterMode) => {
-            updates += 1;
-            return { ...tournament, rosterMode };
-          },
-        }),
-      );
-
-      await expect(
-        service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' }),
-      ).rejects.toMatchObject({ code: 'TOURNAMENT_ROSTER_FROZEN' });
-      expect(updates).toBe(0);
-    } finally {
-      eventRepository.findCurrent = originalFindCurrent;
-    }
+    await expect(
+      service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' }),
+    ).rejects.toMatchObject({ code: 'TOURNAMENT_ROSTER_FROZEN' });
+    expect(updates).toBe(0);
   });
 
   test('re-applies an inactive state so a newer pause can withdraw a pending resume', async () => {
@@ -353,7 +365,7 @@ describe('tournament management service', () => {
     expect(persistedOwnerEntryIds).toEqual([tournament.adminEntryId]);
   });
 
-  test('surfaces a materialized-view refresh failure after canonical deletion', async () => {
+  test('does not turn a committed deletion into a false failure when view refresh is pending', async () => {
     const calls: string[] = [];
     const refreshError = new Error('refresh failed');
     const service = createTestService(createRepository(), {
@@ -361,10 +373,14 @@ describe('tournament management service', () => {
         calls.push('refresh-views');
         throw refreshError;
       },
+      repairDeletedViews: async () => {
+        calls.push('repair-views');
+        throw new Error('repair still pending');
+      },
     });
 
-    await expect(service.deleteTournament(42, { adminEntryId: 123 })).rejects.toBe(refreshError);
-    expect(calls).toEqual(['refresh-views']);
+    await expect(service.deleteTournament(42, { adminEntryId: 123 })).resolves.toEqual(tournament);
+    expect(calls).toEqual(['refresh-views', 'repair-views']);
   });
 
   test('repairs a stale deleted snapshot when an owner retries after refresh failure', async () => {
@@ -380,5 +396,283 @@ describe('tournament management service', () => {
       service.deleteTournament(42, { adminEntryId: tournament.adminEntryId }),
     ).rejects.toBeInstanceOf(NotFoundError);
     expect(calls).toEqual(['repair-views:42']);
+  });
+
+  test('rejects finished resume and returns an already-active tournament unchanged', async () => {
+    const activeService = createTestService(createRepository());
+    await expect(
+      activeService.setTournamentState(42, { adminEntryId: 123, state: 'active' }),
+    ).resolves.toEqual(tournament);
+
+    const finishedService = createTestService(
+      createRepository({ findById: async () => ({ ...tournament, state: 'finished' }) }),
+    );
+    await expect(
+      finishedService.setTournamentState(42, { adminEntryId: 123, state: 'active' }),
+    ).rejects.toMatchObject({ code: 'TOURNAMENT_FINISHED' });
+  });
+
+  test('settles a failed official resume only when its queue job still exists', async () => {
+    let settleResume: boolean | undefined;
+    const failedResume = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'failed' as const,
+      setupStatus: 'failed' as const,
+      setupPhase: 'failed' as const,
+      setupError: 'queue response lost',
+      setupProgressUpdatedAt: '2026-08-28T00:00:00.000Z',
+    };
+    const service = createTestService(
+      createRepository({
+        findById: async () => failedResume,
+        updateStateOwned: async (_season, _id, _owner, state, options) => {
+          settleResume = options?.settleResume;
+          return { ...failedResume, state };
+        },
+      }),
+      { findRosterReconcileJob: async () => ({ id: 'existing' }) as never },
+    );
+
+    await service.setTournamentState(42, { adminEntryId: 123, state: 'inactive' });
+    expect(settleResume).toBe(true);
+  });
+
+  test('resumes snapshot and official-sync tournaments through injected queue ports', async () => {
+    const calls: string[] = [];
+    const snapshot = { ...tournament, state: 'inactive' as const };
+    const snapshotService = createTestService(
+      createRepository({ findById: async () => snapshot }),
+      {
+        enqueueSnapshotSetup: async (_season, id, _source, options) => {
+          await options.prepareEnqueue();
+          calls.push(`snapshot-enqueue:${id}`);
+        },
+        rosterRepository: {
+          findById: async () => null,
+          markResumeProcessingWithMarker: async () => 'unused',
+          markResumeProcessing: async (_season, id) => {
+            calls.push(`snapshot-marker:${id}`);
+          },
+          markSyncFailed: async () => undefined,
+        },
+      },
+    );
+    await snapshotService.setTournamentState(42, { adminEntryId: 123, state: 'active' });
+
+    const official = {
+      ...snapshot,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'ready' as const,
+    };
+    const officialService = createTestService(
+      createRepository({ findById: async () => official }),
+      {
+        rosterRepository: {
+          findById: async () => null,
+          markResumeProcessingWithMarker: async () => 'marker-42',
+          markResumeProcessing: async () => undefined,
+          markSyncFailed: async () => undefined,
+        },
+        enqueueRosterReconcile: async (_season, id, _source, options) => {
+          calls.push(`official-enqueue:${id}:${options?.resumeMarker}`);
+          return { id: 'official-job' } as never;
+        },
+      },
+    );
+    await officialService.setTournamentState(42, { adminEntryId: 123, state: 'active' });
+
+    expect(calls).toEqual([
+      'snapshot-marker:42',
+      'snapshot-enqueue:42',
+      'official-enqueue:42:marker-42',
+    ]);
+  });
+
+  test('keeps an ambiguously accepted official resume and fails a definitely lost one', async () => {
+    const official = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'ready' as const,
+    };
+    const queueError = new Error('queue response lost');
+    const acceptedService = createTestService(
+      createRepository({ findById: async () => official }),
+      {
+        enqueueRosterReconcile: async () => {
+          throw queueError;
+        },
+        findRosterReconcileJob: async () => ({ id: 'accepted' }) as never,
+      },
+    );
+    await expect(
+      acceptedService.setTournamentState(42, { adminEntryId: 123, state: 'active' }),
+    ).resolves.toEqual(official);
+
+    const failures: string[] = [];
+    const rejectedService = createTestService(
+      createRepository({ findById: async () => official }),
+      {
+        enqueueRosterReconcile: async () => {
+          throw queueError;
+        },
+        rosterRepository: {
+          findById: async () => null,
+          markResumeProcessingWithMarker: async () => 'marker-42',
+          markResumeProcessing: async () => undefined,
+          markSyncFailed: async () => {
+            failures.push('roster');
+          },
+        },
+        infoRepository: {
+          markSetupResult: async () => {
+            failures.push('setup');
+          },
+        },
+      },
+    );
+    await expect(
+      rejectedService.setTournamentState(42, { adminEntryId: 123, state: 'active' }),
+    ).rejects.toBe(queueError);
+    expect(failures.sort()).toEqual(['roster', 'setup']);
+  });
+
+  test('rejects ineligible official sync and heals a missing pending reconcile job', async () => {
+    const ineligibleService = createTestService(
+      createRepository({ findById: async () => ({ ...tournament, groupNum: 2 }) }),
+    );
+    await expect(
+      ineligibleService.setRosterMode(42, {
+        adminEntryId: 123,
+        rosterMode: 'official_sync',
+      }),
+    ).rejects.toMatchObject({ code: 'TOURNAMENT_ROSTER_MODE_INELIGIBLE' });
+
+    let enqueued = 0;
+    const pending = {
+      ...tournament,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'pending' as const,
+    };
+    const pendingService = createTestService(createRepository({ findById: async () => pending }), {
+      enqueueRosterReconcile: async () => {
+        enqueued += 1;
+        return { id: 'healed' } as never;
+      },
+    });
+    await expect(
+      pendingService.setRosterMode(42, {
+        adminEntryId: 123,
+        rosterMode: 'official_sync',
+      }),
+    ).resolves.toEqual(pending);
+    expect(enqueued).toBe(1);
+  });
+
+  test('marks roster sync failed when an active official-sync enqueue fails', async () => {
+    const queueError = new Error('queue unavailable');
+    const failures: string[] = [];
+    const service = createTestService(createRepository(), {
+      enqueueRosterReconcile: async () => {
+        throw queueError;
+      },
+      rosterRepository: {
+        findById: async () => null,
+        markResumeProcessingWithMarker: async () => 'unused',
+        markResumeProcessing: async () => undefined,
+        markSyncFailed: async (_season, id, message) => {
+          failures.push(`${id}:${message}`);
+        },
+      },
+    });
+
+    await expect(
+      service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' }),
+    ).rejects.toBe(queueError);
+    expect(failures).toEqual(['42:queue unavailable']);
+  });
+
+  test('retries setup unless an authoritative official resume is already pending', async () => {
+    const pending = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'processing' as const,
+      setupStatus: 'processing' as const,
+      setupPhase: 'queued' as const,
+      setupProgressUpdatedAt: '2026-08-28T00:00:00.000Z',
+    };
+    const blocked = createTestService(createRepository({ findById: async () => pending }), {
+      findSetupJob: async () => ({ id: 'running' }) as never,
+    });
+    await expect(blocked.retrySetup(42, { adminEntryId: 123 })).rejects.toMatchObject({
+      code: 'TOURNAMENT_RESUME_PENDING',
+    });
+
+    const retry = createTestService(createRepository());
+    await expect(retry.retrySetup(42, { adminEntryId: 123 })).resolves.toEqual({
+      id: 'setup-42',
+    });
+  });
+
+  test('validates roster retries and returns the injected operation id', async () => {
+    const snapshotService = createTestService(createRepository());
+    await expect(snapshotService.retryRoster(42, { adminEntryId: 123 })).rejects.toMatchObject({
+      code: 'TOURNAMENT_ROSTER_SNAPSHOT',
+    });
+
+    const official = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'failed' as const,
+      setupStatus: 'ready' as const,
+    };
+    const service = createTestService(createRepository({ findById: async () => official }), {
+      enqueueRosterReconcile: async () => ({ id: 'retry-42' }) as never,
+    });
+    await expect(service.retryRoster(42, { adminEntryId: 123 })).resolves.toEqual({
+      tournamentId: 42,
+      changed: false,
+      queued: true,
+      operationId: 'retry-42',
+      status: 'pending',
+    });
+  });
+
+  test('maps repository deletion races and keeps committed dispatch failures successful', async () => {
+    const missing = createTestService(
+      createRepository({ deleteOwned: async () => ({ status: 'not_found' }) }),
+    );
+    await expect(missing.deleteTournament(42, { adminEntryId: 123 })).rejects.toBeInstanceOf(
+      NotFoundError,
+    );
+
+    const forbidden = createTestService(
+      createRepository({ deleteOwned: async () => ({ status: 'forbidden' }) }),
+    );
+    await expect(forbidden.deleteTournament(42, { adminEntryId: 123 })).rejects.toBeInstanceOf(
+      ForbiddenError,
+    );
+
+    const committed = createTestService(
+      createRepository({
+        deleteOwned: async () => ({
+          status: 'deleted',
+          tournament,
+          invalidationOutboxIds: ['00000000-0000-4000-8000-000000000001'],
+        }),
+      }),
+      {
+        dispatchInvalidations: async () => {
+          throw new Error('Redis unavailable');
+        },
+      },
+    );
+    await expect(committed.deleteTournament(42, { adminEntryId: 123 })).resolves.toEqual(
+      tournament,
+    );
   });
 });

@@ -46,13 +46,15 @@ import {
 } from '../utils/scheduler-obligation-fence';
 import type { WorkerRuntime } from './worker-runtime';
 import {
+  getSchedulerObligation,
+  schedulerObligationStatus,
+} from '../repositories/scheduler-obligations';
+import {
   completeSchedulerObligation,
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
-  getSchedulerObligation,
-  schedulerObligationStatus,
-} from '../repositories/scheduler-obligations';
+} from '../services/scheduler-obligation-lifecycle.service';
 
 function priceChangeCoreRepairJobId(job: Job<DataSyncJobData>): string {
   // Keep one repair per price-change attempt, not one repair forever.  The

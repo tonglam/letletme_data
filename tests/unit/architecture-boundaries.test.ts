@@ -97,15 +97,11 @@ describe('architecture boundaries', () => {
 
   test('repositories do not depend on service, API, worker or job orchestration', async () => {
     const graphModules = await modules();
-    const allowedOpsComposition = new Set([
-      'repositories/scheduler-obligations.ts -> services/data-governance.service.ts',
-    ]);
     const violations = graphModules.flatMap((module) => {
       if (!relativePath(module.path).startsWith('repositories/')) return [];
       return module.imports
         .filter(({ path, runtime }) => runtime && /\/(services|api|workers|jobs)\//.test(path))
-        .map(({ path }) => `${relativePath(module.path)} -> ${relativePath(path)}`)
-        .filter((edge) => !allowedOpsComposition.has(edge));
+        .map(({ path }) => `${relativePath(module.path)} -> ${relativePath(path)}`);
     });
     expect(violations).toEqual([]);
   });
@@ -116,6 +112,20 @@ describe('architecture boundaries', () => {
       if (!relativePath(module.path).startsWith('services/')) return [];
       return module.imports
         .filter(({ path, runtime }) => runtime && /\/api\//.test(path))
+        .map(({ path }) => `${relativePath(module.path)} -> ${relativePath(path)}`);
+    });
+    expect(violations).toEqual([]);
+  });
+
+  test('manager-live orchestration reaches infrastructure only through injected ports', async () => {
+    const graphModules = await modules();
+    const violations = graphModules.flatMap((module) => {
+      if (relativePath(module.path) !== 'services/manager-live/orchestration.ts') return [];
+      return module.imports
+        .filter(
+          ({ path, runtime }) =>
+            runtime && /\/(repositories|clients|cache|db|queues|workers|jobs)\//.test(path),
+        )
         .map(({ path }) => `${relativePath(module.path)} -> ${relativePath(path)}`);
     });
     expect(violations).toEqual([]);

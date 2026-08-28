@@ -14,7 +14,7 @@ import {
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
-} from '../repositories/scheduler-obligations';
+} from '../services/scheduler-obligation-lifecycle.service';
 import {
   inspectSchedulerObligationFence,
   startCurrentSchedulerJob,

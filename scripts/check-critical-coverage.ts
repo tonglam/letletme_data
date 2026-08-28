@@ -16,45 +16,44 @@ type CoverageGate = Readonly<{
 }>;
 
 /**
- * These are deliberately small, dependency-free decision modules.  The
- * repository-wide report remains informational; only the business safety
- * gates below block CI.  Database/Redis adapters are covered by integration
- * tests and are not treated as a mechanical whole-repository percentage.
+ * Gate the production service implementations that own the risky behavior.
+ * Pure policy helpers remain covered, but cannot substitute for exercising
+ * publication, lease, CAS, lifecycle and orchestration failure paths.
  */
 export const CRITICAL_COVERAGE_GATES: readonly CoverageGate[] = [
   {
-    name: 'Manager Live refresh projection',
-    file: 'src/services/manager-live/final-projection.ts',
+    name: 'Manager Live result assembly',
+    file: 'src/services/manager-live/result-assembly.ts',
     minimumLines: 80,
     minimumFunctions: 75,
   },
   {
-    name: 'Manager Live coverage state',
-    file: 'src/services/manager-live/coverage.ts',
+    name: 'Manager Live Classic standings refresh',
+    file: 'src/services/manager-live/classic-standings-refresh.ts',
     minimumLines: 80,
     minimumFunctions: 75,
   },
   {
-    name: 'My FPL invalidation state',
-    file: 'src/domain/my-fpl-invalidation.ts',
+    name: 'My FPL invalidation delivery',
+    file: 'src/services/my-fpl-snapshot-invalidation.service.ts',
     minimumLines: 80,
     minimumFunctions: 75,
   },
   {
-    name: 'Data publication delivery state',
-    file: 'src/domain/data-publication-delivery.ts',
+    name: 'Data publication delivery',
+    file: 'src/services/data-publication-delivery.service.ts',
     minimumLines: 80,
     minimumFunctions: 75,
   },
   {
-    name: 'Scheduler obligation fence',
-    file: 'src/utils/scheduler-obligation-fence.ts',
+    name: 'Scheduler obligation lifecycle',
+    file: 'src/services/scheduler-obligation-lifecycle.service.ts',
     minimumLines: 80,
     minimumFunctions: 75,
   },
   {
-    name: 'Tournament management policy',
-    file: 'src/domain/tournament-management.ts',
+    name: 'Tournament management service',
+    file: 'src/services/tournament-management.service.ts',
     minimumLines: 75,
     minimumFunctions: 70,
   },

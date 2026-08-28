@@ -61,6 +61,29 @@ export function parseStrictIntegerEnvValue(
   return parsed;
 }
 
+/** Parse one finite numeric override without accepting exponent or coercion syntax. */
+export function parseStrictNumberEnvValue(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  if (value === undefined || value.trim() === '') return fallback;
+  const normalized = value.trim();
+  if (!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) {
+    throw new Error(`${name} must be a finite safe number`);
+  }
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER) {
+    throw new Error(`${name} must be a finite safe number`);
+  }
+  if (parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
 function integerEnv(
   defaultValue: number,
   minimum = Number.MIN_SAFE_INTEGER,
@@ -121,6 +144,7 @@ const EnvSchema = z.object({
   WORKER_HEARTBEAT_PATH: z.string().optional(),
   WORKER_HEARTBEAT_INTERVAL_MS: boundedIntegerEnv(30_000, 1_000, 24 * 60 * 60_000),
   NODE_ENV: z.enum(['production', 'development', 'test']).optional(),
+  SCHEDULER_MODE: z.enum(['direct', 'standalone', 'compatibility']).default('direct'),
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
     .optional()

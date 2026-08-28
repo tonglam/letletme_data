@@ -163,22 +163,16 @@ describe('tournament setup transaction recovery', () => {
       publishTournamentTrendScope(explicitSeasonRef(SEASON_CODE), SUCCESS_TOURNAMENT_ID, 1),
     ]);
 
-    expect(first).toMatchObject({
-      tournamentId: SUCCESS_TOURNAMENT_ID,
-      eventId: 1,
-      state: 'COLLECTING',
-      ownershipState: 'NOT_READY',
-      transfersState: 'NOT_READY',
-      rows: 0,
-    });
-    expect(second).toMatchObject({
-      tournamentId: SUCCESS_TOURNAMENT_ID,
-      eventId: 1,
-      state: 'REUSED',
-      ownershipState: 'NOT_READY',
-      transfersState: 'NOT_READY',
-      rows: 0,
-    });
+    expect([first.state, second.state].sort()).toEqual(['COLLECTING', 'REUSED']);
+    for (const publication of [first, second]) {
+      expect(publication).toMatchObject({
+        tournamentId: SUCCESS_TOURNAMENT_ID,
+        eventId: 1,
+        ownershipState: 'NOT_READY',
+        transfersState: 'NOT_READY',
+        rows: 0,
+      });
+    }
     expect(first.publicationId).toBeNumber();
     expect(second.publicationId).toBe(first.publicationId);
   });

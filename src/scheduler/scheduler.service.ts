@@ -9,18 +9,20 @@ import {
   confirmSchedulerObligationEnqueued,
   deferSchedulerObligationByIdentity,
   deferSchedulerObligationForAdmission,
-  failSchedulerObligation,
   findDueSchedulerObligationCandidates,
   hasEarlierInFlightSchedulerObligation,
   markSchedulerObligationIrrecoverable,
   mergeSchedulerObligationEvidence,
   reconcilePostMatchSchedulerObligations,
-  recordCheckpointFreshnessEvidence,
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
   type SchedulerObligation,
 } from '../repositories/scheduler-obligations';
+import {
+  failSchedulerObligation,
+  recordCheckpointFreshnessEvidence,
+} from '../services/scheduler-obligation-lifecycle.service';
 import {
   advanceSchedulerLane,
   claimSchedulerLaneDispatch,

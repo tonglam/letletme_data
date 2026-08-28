@@ -43,13 +43,13 @@ import {
   type MaintenanceLane,
   type MaintenanceJobData,
 } from '../queues/maintenance.queue';
+import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
 import {
   completeSchedulerObligation,
   completeSchedulerObligationByBullJobId,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
-  renewSchedulerObligation,
-} from '../repositories/scheduler-obligations';
+} from '../services/scheduler-obligation-lifecycle.service';
 import { getQueueConnection } from '../utils/queue';
 import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';

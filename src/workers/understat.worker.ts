@@ -12,10 +12,8 @@ import {
   type UnderstatTeamJobData,
   understatTeamQueueName,
 } from '../queues/understat-team.queue';
-import {
-  completeSchedulerObligation,
-  renewSchedulerObligation,
-} from '../repositories/scheduler-obligations';
+import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
+import { completeSchedulerObligation } from '../services/scheduler-obligation-lifecycle.service';
 import {
   discoverUnderstatPlayers,
   finalizeUnderstatPlayerRun,

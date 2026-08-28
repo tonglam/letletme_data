@@ -18,8 +18,26 @@ describe('shared shutdown controller', () => {
         events.push('wait');
         await inFlight;
       },
+      closeWorkers: () => {
+        events.push('workers');
+      },
+      closeMonitors: () => {
+        events.push('monitors');
+      },
+      closeProducerQueues: () => {
+        events.push('producers');
+      },
+      closeDatabase: () => {
+        events.push('database');
+      },
+      closeCacheRedis: () => {
+        events.push('cache-redis');
+      },
+      closeQueueRedis: () => {
+        events.push('queue-redis');
+      },
       closeResources: () => {
-        events.push('close');
+        events.push('tail');
       },
       exit: (code) => exits.push(code),
     });
@@ -30,7 +48,17 @@ describe('shared shutdown controller', () => {
     releaseInFlight();
 
     await expect(first).resolves.toMatchObject({ signal: 'SIGTERM', status: 'completed' });
-    expect(events).toEqual(['stop:SIGTERM', 'wait', 'close']);
+    expect(events).toEqual([
+      'stop:SIGTERM',
+      'wait',
+      'workers',
+      'monitors',
+      'producers',
+      'database',
+      'cache-redis',
+      'queue-redis',
+      'tail',
+    ]);
     expect(exits).toEqual([0]);
     expect(controller.isShuttingDown()).toBe(true);
   });
@@ -80,14 +108,48 @@ describe('shared shutdown controller', () => {
     expect(controller.getState()).toBe('stopped');
   });
 
-  test('fatal paths exit non-zero while the process is still running', () => {
+  test('fatal paths drain once and exit non-zero while the process is still running', async () => {
+    const events: string[] = [];
     const exits: number[] = [];
-    const controller = createShutdownController({ exit: (code) => exits.push(code) });
+    const controller = createShutdownController({
+      stopIntake: () => {
+        events.push('stop');
+      },
+      waitForInFlight: () => {
+        events.push('wait');
+      },
+      closeDatabase: () => {
+        events.push('database');
+      },
+      exit: (code) => exits.push(code),
+    });
 
-    controller.fatal(new Error('fatal worker failure'));
-    controller.fatal(new Error('duplicate fatal'));
+    const first = controller.fatal(new Error('fatal worker failure'));
+    const second = controller.fatal(new Error('duplicate fatal'));
 
+    expect(second).toBe(first);
+    await expect(first).resolves.toMatchObject({ signal: 'FATAL', status: 'completed' });
+    expect(events).toEqual(['stop', 'wait', 'database']);
     expect(exits).toEqual([1]);
     expect(controller.isShuttingDown()).toBe(true);
+  });
+
+  test('escalates a graceful signal to a non-zero exit when a fatal error arrives', async () => {
+    const exits: number[] = [];
+    let release!: () => void;
+    const controller = createShutdownController({
+      waitForInFlight: () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      exit: (code) => exits.push(code),
+    });
+
+    const graceful = controller.request('SIGTERM');
+    expect(controller.fatal(new Error('fatal during drain'))).toBe(graceful);
+    await Promise.resolve();
+    release();
+    await graceful;
+    expect(exits).toEqual([1]);
   });
 });

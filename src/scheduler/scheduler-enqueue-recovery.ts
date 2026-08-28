@@ -1,14 +1,16 @@
 import { Queue, type Job, type JobType } from 'bullmq';
 
 import {
-  completeSchedulerObligation,
   confirmSchedulerObligationEnqueued,
-  failSchedulerObligation,
   listExpiredSchedulerObligations,
   renewSchedulerObligation,
   startSchedulerObligation,
   type SchedulerObligation,
 } from '../repositories/scheduler-obligations';
+import {
+  completeSchedulerObligation,
+  failSchedulerObligation,
+} from '../services/scheduler-obligation-lifecycle.service';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import type { ScheduledJobDefinition } from './job-registry';

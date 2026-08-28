@@ -1,5 +1,6 @@
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { myFplSnapshotEventLockScope, myFplSnapshotSeasonLockScope } from '../domain/my-fpl-locks';
 import type {
   GroupMode,
   KnockoutMode,
@@ -386,6 +387,17 @@ export const createTournamentManagementRepository = () => ({
         if (!row) return { status: 'not_found' } as const;
         if (row.adminEntryId !== adminEntryId) return { status: 'forbidden' } as const;
 
+        // Serialize the season against snapshot capture before discovering
+        // event-specific publications. Otherwise the first capture for a new
+        // event could begin after discovery and publish a tournament whose
+        // deletion has already committed. Capture uses the same season ->
+        // event lock order.
+        await tx`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${myFplSnapshotSeasonLockScope(season.seasonId)}, 0)
+          )
+        `;
+
         await tx`
           DELETE FROM competition.tournament_knockout_results
           WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
@@ -434,7 +446,10 @@ export const createTournamentManagementRepository = () => ({
         for (const snapshotEvent of snapshotEvents) {
           await tx`
             SELECT pg_advisory_xact_lock(
-              hashtextextended(${`my-fpl:${season.seasonId}:${snapshotEvent.event_id}`}, 0)
+              hashtextextended(${myFplSnapshotEventLockScope(
+                season.seasonId,
+                snapshotEvent.event_id,
+              )}, 0)
             )
           `;
         }

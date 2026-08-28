@@ -21,6 +21,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     DATABASE_POOL_MAX: 5,
     PORT: 3000,
     WORKER_HEARTBEAT_INTERVAL_MS: 30_000,
+    SCHEDULER_MODE: 'direct',
     LOG_LEVEL: 'error',
     ENABLE_AUTH: false,
     RATE_LIMIT_MUTATIONS_PER_MINUTE: 60,

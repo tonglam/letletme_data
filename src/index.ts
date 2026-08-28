@@ -52,7 +52,6 @@ import {
 import { getHttpErrorLogLevel, getHttpRequestLogContext } from './utils/http-logging';
 import { logDebug, logError, logInfo, logWarn } from './utils/logger';
 import { schedulerRegistry } from './scheduler/job-registry';
-import { isStandaloneSchedulerEnabled } from './utils/scheduler-mode';
 import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 /**
@@ -228,13 +227,10 @@ const app = new Elysia()
 
 const shutdownController = createShutdownController({
   stopIntake: () => app.stop().then(() => undefined),
-  closeResources: () =>
-    Promise.all([
-      closeAllProducerQueues(),
-      databaseSingleton.disconnect(),
-      redisSingleton.disconnect(),
-      queueRedisSingleton.disconnect(),
-    ]).then(() => undefined),
+  closeProducerQueues: closeAllProducerQueues,
+  closeDatabase: () => databaseSingleton.disconnect(),
+  closeCacheRedis: () => redisSingleton.disconnect(),
+  closeQueueRedis: () => queueRedisSingleton.disconnect(),
 });
 
 installShutdownSignals(shutdownController);
@@ -250,7 +246,7 @@ logInfo('🚀 Elysia server started', {
   port,
   environment: process.env.NODE_ENV || 'development',
   authEnabled: ENABLE_AUTH,
-  schedulerMode: isStandaloneSchedulerEnabled() ? 'standalone' : 'compatibility',
+  schedulerMode: config.SCHEDULER_MODE,
   apis: [
     'events',
     'event-lives',

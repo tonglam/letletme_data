@@ -5,10 +5,8 @@ import type { UnderstatSyncRun } from '../domain/understat';
 import { getUnderstatPlayerQueue } from '../queues/understat-player.queue';
 import { getUnderstatTeamQueue } from '../queues/understat-team.queue';
 import { understatSyncRepository } from '../repositories/understat-sync';
-import {
-  failSchedulerObligation,
-  markSchedulerObligationIrrecoverable,
-} from '../repositories/scheduler-obligations';
+import { markSchedulerObligationIrrecoverable } from '../repositories/scheduler-obligations';
+import { failSchedulerObligation } from './scheduler-obligation-lifecycle.service';
 import { logInfo, logWarn } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { notifyTwoBots } from '../utils/notify';

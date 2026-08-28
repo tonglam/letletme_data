@@ -37,6 +37,7 @@ import {
 import { databaseSingleton } from './db/singleton';
 import { redisSingleton } from './cache/singleton';
 import { queueRedisSingleton } from './queues/redis';
+import { getConfig } from './utils/config';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { startRuntimeHeartbeat, type QueueMonitorRuntimeState } from './utils/runtime-heartbeat';
@@ -48,6 +49,7 @@ const FORMAL_SCHEDULER_INTERVAL_MS = 30_000;
 const ACQUISITION_JOB_OUTBOX_INTERVAL_MS = 5_000;
 const PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS = 30_000;
 
+getConfig();
 const flags = getContentRuntimeFlags();
 assertContentRuntimeFlags(flags);
 
@@ -342,18 +344,21 @@ const shutdownController = createShutdownController({
       throw new AggregateError(failures, `${failures.length} content task(s) failed to drain`);
     }
   },
-  closeResources: () =>
+  closeMonitors: () =>
     Promise.all([
       formalHttpRuntime?.queueEvents.close(),
       formalXRuntime?.queueEvents.close(),
       formalMediaRuntime?.queueEvents.close(),
+    ]).then(() => undefined),
+  closeProducerQueues: () =>
+    Promise.all([
       closeContentHttpAcquisitionQueue(),
       closeContentXQueue(),
       closeContentMediaTranscriptQueue(),
-      databaseSingleton.disconnect(),
-      redisSingleton.disconnect(),
-      queueRedisSingleton.disconnect(),
     ]).then(() => undefined),
+  closeDatabase: () => databaseSingleton.disconnect(),
+  closeCacheRedis: () => redisSingleton.disconnect(),
+  closeQueueRedis: () => queueRedisSingleton.disconnect(),
 });
 
 installShutdownSignals(shutdownController);
