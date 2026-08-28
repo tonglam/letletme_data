@@ -170,4 +170,9 @@ describe('runtime inventory documentation contract', () => {
     expect(read('migrations/README.md')).toContain('complete filename');
     for (const prefix of duplicatePrefixes) expect(read('migrations/README.md')).toContain(prefix);
   });
+
+  test('does not advertise the removed generic Supabase client aliases', () => {
+    const deployExample = read('.env.deploy.example');
+    expect(deployExample).not.toMatch(/^SUPABASE_(URL|KEY)=/m);
+  });
 });

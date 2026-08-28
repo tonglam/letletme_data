@@ -1,0 +1,47 @@
+/**
+ * Environment values that can identify a remote service or authenticate to
+ * one. Keep this list shared by the preload and its regression test so a new
+ * adapter cannot silently reintroduce inherited deployment configuration.
+ */
+export const UNIT_REMOTE_ENV_KEYS = [
+  'SUPABASE_URL',
+  'SUPABASE_KEY',
+  'HERMES_TRANSCRIPT_URL',
+  'HERMES_TRANSCRIPT_TOKEN',
+  'SUPADATA_API_KEY',
+  'YOUTUBE_DATA_API_KEY',
+  'BRIEFING_REVALIDATE_URL',
+  'BRIEFING_REVALIDATE_SECRET',
+  'CONTENT_MEDIA_SUPABASE_URL',
+  'CONTENT_MEDIA_SUPABASE_SECRET_KEY',
+  'BUG_REPORT_SCREENSHOT_SUPABASE_URL',
+  'BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY',
+  'FPL_RAW_SNAPSHOT_SUPABASE_URL',
+  'FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY',
+  'BUG_REPORT_STORAGE_INTERNAL_URL',
+  'BUG_REPORT_STORAGE_LEGACY_ORIGIN',
+  'BUG_REPORT_CLEANUP_SECRET',
+  'DATA_GOVERNANCE_WEB_URL',
+  'DATA_GOVERNANCE_PROBE_TOKEN',
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_CHAT_ID',
+  'TELEGRAM_NOTIFICATION_URL',
+  'WECHAT_NOTIFICATION_URL',
+  'WECHAT_NOTIFICATION_API_TOKEN',
+  'SUPABASE_BUG_REPORT_BUCKET',
+  'DATA_API_KEY_HASHES',
+  'CONTENT_EDITOR_API_KEY_HASHES',
+  'CONTENT_PUBLISHER_API_KEY_HASHES',
+  'CORS_ORIGINS',
+  'UNDERSTAT_BASE_URL',
+  'SCHEMA_EXPORT_DATABASE_URL',
+  'RUNTIME_DATABASE_URL',
+] as const;
+
+/**
+ * Catch credentials and endpoint variables added by a provider or CI without
+ * requiring the preload to be updated before the next unit run. Paths such as
+ * `PWD` and ordinary runtime flags intentionally do not match this pattern.
+ */
+export const UNIT_REMOTE_ENV_NAME_PATTERN =
+  /(?:^|_)(?:URL|URI|ORIGIN|ORIGINS|TOKEN|SECRET|SECRETS|PASSWORD|PASS|API_KEY|ACCESS_KEY|SERVICE_ROLE_KEY|PRIVATE_KEY|CREDENTIALS?|KEY|HASHES?)(?:_|$)/i;

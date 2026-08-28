@@ -10,6 +10,7 @@ import {
   canManageTournament,
   isOfficialRosterSyncEligible,
 } from '../../src/domain/tournament-management';
+import { UNIT_REMOTE_ENV_KEYS, UNIT_REMOTE_ENV_NAME_PATTERN } from './unit-env-fence';
 
 describe('PR7 critical fault matrix', () => {
   test('unit preload fences database, Redis, provider and network access', async () => {
@@ -17,6 +18,21 @@ describe('PR7 critical fault matrix', () => {
     expect(process.env.DATABASE_URL).toBe('postgresql://unit:unit@127.0.0.1:1/unit');
     expect(process.env.CACHE_REDIS_PORT).toBe('1');
     expect(process.env.QUEUE_REDIS_PORT).toBe('2');
+    for (const key of UNIT_REMOTE_ENV_KEYS) {
+      expect(process.env[key]).toBeUndefined();
+    }
+    expect(process.env.CACHE_REDIS_PASSWORD).toBe('');
+    expect(process.env.QUEUE_REDIS_PASSWORD).toBe('');
+    const sanitizedConnectionKeys = new Set([
+      'DATABASE_URL',
+      'CACHE_REDIS_PASSWORD',
+      'QUEUE_REDIS_PASSWORD',
+    ]);
+    expect(
+      Object.keys(process.env).filter(
+        (key) => UNIT_REMOTE_ENV_NAME_PATTERN.test(key) && !sanitizedConnectionKeys.has(key),
+      ),
+    ).toEqual([]);
     await expect(fetch('https://provider.example.test')).rejects.toThrow(
       'Unit tests cannot access the network',
     );

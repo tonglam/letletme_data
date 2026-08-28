@@ -7,6 +7,8 @@
  * preload because they run through the explicit `test:integration` command.
  */
 
+import { UNIT_REMOTE_ENV_KEYS, UNIT_REMOTE_ENV_NAME_PATTERN } from './unit-env-fence';
+
 const integrationPathRequested = process.argv.some((argument) =>
   /(?:^|[\\/])tests[\\/]integration(?:[\\/]|$)/.test(argument),
 );
@@ -23,6 +25,18 @@ if (integrationPathRequested && process.env.RUN_INTEGRATION !== '1') {
 // command in a shell sequence such as `test:all`.
 const unitProcess = unitPathRequested || !integrationPathRequested;
 if (unitProcess) {
+  // Optional adapters and operational clients can read these values during
+  // module evaluation. Remove both credentials and endpoints instead of
+  // allowing an ignored dotenv file to leak remote configuration into a unit
+  // process. Tests that exercise an adapter set an explicit fixture value in
+  // their own setup.
+  for (const key of UNIT_REMOTE_ENV_KEYS) {
+    delete process.env[key];
+  }
+  for (const key of Object.keys(process.env)) {
+    if (UNIT_REMOTE_ENV_NAME_PATTERN.test(key)) delete process.env[key];
+  }
+
   const UNIT_DATABASE_URL = 'postgresql://unit:unit@127.0.0.1:1/unit';
 
   process.env.NODE_ENV = 'test';
@@ -35,21 +49,6 @@ if (unitProcess) {
   process.env.QUEUE_REDIS_PORT = '2';
   process.env.QUEUE_REDIS_DB = '10';
   process.env.QUEUE_REDIS_PASSWORD = '';
-
-  // These values are consumed by optional adapters during module evaluation.
-  // Remove them instead of allowing an ignored dotenv file to leak credentials
-  // into a unit process. Tests that exercise an adapter set an explicit fixture
-  // value in their own setup.
-  for (const key of [
-    'BUG_REPORT_CLEANUP_SECRET',
-    'BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY',
-    'FPL_RAW_SNAPSHOT_SUPABASE_SECRET_KEY',
-    'TELEGRAM_BOT_TOKEN',
-    'WECHAT_NOTIFICATION_API_TOKEN',
-    'SUPABASE_BUG_REPORT_BUCKET',
-  ]) {
-    delete process.env[key];
-  }
 
   globalThis.fetch = (async () => {
     throw new Error('Unit tests cannot access the network; install a fetch mock for this case');
