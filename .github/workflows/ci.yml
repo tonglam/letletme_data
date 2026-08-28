@@ -114,6 +114,9 @@ jobs:
       - name: Build production runtime image
         run: docker build --target runner --tag letletme-data:ci .
 
+      - name: Build host runner bundle image
+        run: docker build --target host-runner-build --tag letletme-host-runner:ci .
+
       - name: Validate Compose worker inventory and database pool budget
         run: |
           docker compose config --quiet
@@ -131,6 +134,18 @@ jobs:
              ! id -Gn | tr " " "\n" | grep -qx letletme-grok-bridge && \
              test -r /app/config/briefing/sources.yaml && \
              test -r /app/config/briefing/acquisition-plan.yaml'
+          set +e
+          runner_self_test_output=$(docker run --rm \
+            --entrypoint /out/letletme-grok-runner \
+            -e GROK_RUNNER_BINARY=/definitely-missing-grok-binary \
+            letletme-host-runner:ci --self-test 2>&1)
+          runner_exit_code=$?
+          set -e
+          test "$runner_exit_code" -ne 0
+          if printf '%s' "$runner_self_test_output" | grep -Fq 'thread-stream/lib/worker.js'; then
+            echo 'host runner bundle unexpectedly requires a runtime thread-stream module' >&2
+            exit 1
+          fi
 
       - name: Production dependency audit
         run: bun audit --production
