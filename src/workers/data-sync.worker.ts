@@ -45,6 +45,10 @@ import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { alertOnFinalFailure, notifyTwoBots } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
+import {
+  PlayerValuesWindowPendingError,
+  shouldRetryPlayerValuesNoChange,
+} from '../domain/player-values-window';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { formatCronDateKey } from '../utils/timezone';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
@@ -534,6 +538,13 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             jobId: `player-prices-${changeDate}-immediate`,
             removeOnSettle: false,
           });
+        }
+        if (
+          result.count === 0 &&
+          job.data.pollUntilWindowEnd === true &&
+          shouldRetryPlayerValuesNoChange(changeDate)
+        ) {
+          throw new PlayerValuesWindowPendingError(changeDate);
         }
         return result;
       });

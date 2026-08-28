@@ -68,6 +68,7 @@ import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
 import { fplPriceWatchQueueName } from '../queues/fpl-price-watch.queue';
 import { getPriceChangePredictions } from '../services/price-change-predictions.service';
+import { resolvePlayerSyncEvent } from '../services/player-sync-event.service';
 import { logWarn } from '../utils/logger';
 import {
   PRICE_CHANGE_WATCH_LEAD_MS,
@@ -1331,6 +1332,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       queueName: 'data-sync',
       successPredicate: 'complete market snapshot and delivered publication',
       enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+        const syncEvent = await resolvePlayerSyncEvent(context.season, context.now);
         const job = await enqueuePlayerValuesSyncJob(context.season, 'catchup', {
           changeDate: plan.periodKey,
           jobId: `scheduler-${obligationId}-g${generation}`,
@@ -1338,6 +1340,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
           obligationId,
           obligationGeneration: generation,
           freshnessWindowId,
+          pollUntilWindowEnd: syncEvent?.phase === 'current',
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },

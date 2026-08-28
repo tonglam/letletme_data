@@ -22,6 +22,11 @@ export type PlayerValuesWindowDependencies = {
   hasChangesForDate: (changeDate: string) => Promise<boolean>;
 };
 
+export type PlayerValuesSyncDecision = Readonly<{
+  shouldRun: boolean;
+  pollUntilWindowEnd: boolean;
+}>;
+
 const defaultDependencies: PlayerValuesWindowDependencies = {
   resolvePlayerSyncEvent: async (date) => {
     const season = await seasonRepository.findCurrent();
@@ -33,19 +38,19 @@ const defaultDependencies: PlayerValuesWindowDependencies = {
   },
 };
 
-export async function shouldRunPlayerValuesSync(
+export async function resolvePlayerValuesSyncDecision(
   now: Date,
   dependencies: PlayerValuesWindowDependencies = defaultDependencies,
-) {
+): Promise<PlayerValuesSyncDecision> {
   const syncEvent = await dependencies.resolvePlayerSyncEvent(now);
   if (!syncEvent) {
-    return false;
+    return { shouldRun: false, pollUntilWindowEnd: false };
   }
 
   // The cron covers the full in-season polling window. Before GW1, only its
   // first tick is allowed through so an unchanged bootstrap is checked once.
   if (syncEvent.phase === 'preseason' && getCronMinute(now) !== 55) {
-    return false;
+    return { shouldRun: false, pollUntilWindowEnd: false };
   }
 
   const changeDate = formatCronDateKey(now);
@@ -54,10 +59,17 @@ export async function shouldRunPlayerValuesSync(
     logInfo('Skipping player values sync - price changes already recorded for today', {
       changeDate,
     });
-    return false;
+    return { shouldRun: false, pollUntilWindowEnd: false };
   }
 
-  return true;
+  return { shouldRun: true, pollUntilWindowEnd: syncEvent.phase === 'current' };
+}
+
+export async function shouldRunPlayerValuesSync(
+  now: Date,
+  dependencies: PlayerValuesWindowDependencies = defaultDependencies,
+) {
+  return (await resolvePlayerValuesSyncDecision(now, dependencies)).shouldRun;
 }
 
 /**
@@ -71,16 +83,19 @@ async function runPlayerValuesSync() {
     await executeTrackedCron('player-values-sync', async () => {
       if (isStandaloneSchedulerEnabled()) return;
       const now = new Date();
-      if (!(await shouldRunPlayerValuesSync(now))) {
+      const decision = await resolvePlayerValuesSyncDecision(now);
+      if (!decision.shouldRun) {
         return;
       }
 
       const changeDate = formatCronDateKey(now);
       const season = await seasonRepository.findCurrent();
       const job = await enqueuePlayerValuesSyncJob(season, 'cron', {
-        // Stable id prevents stacking duplicate jobs during the 06:55-07:05 window.
+        // One stable ID owns the whole polling window; no-change results are
+        // retried by BullMQ so later upstream price updates are still observed.
         jobId: `player-values-${changeDate}`,
         changeDate,
+        pollUntilWindowEnd: decision.pollUntilWindowEnd,
       });
       logInfo('Player values sync job enqueued via cron', { jobId: job.id });
     });

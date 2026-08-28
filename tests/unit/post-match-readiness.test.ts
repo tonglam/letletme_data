@@ -6,7 +6,10 @@ import {
   POST_MATCH_RESULTS_WINDOW_MS,
 } from '../../src/domain/post-match-results';
 import { shouldEnqueueTournamentCascade } from '../../src/domain/tournament-event-results';
-import { shouldRunPlayerValuesSync } from '../../src/jobs/player-values-window.jobs';
+import {
+  resolvePlayerValuesSyncDecision,
+  shouldRunPlayerValuesSync,
+} from '../../src/jobs/player-values-window.jobs';
 import type { Event, Fixture } from '../../src/types';
 
 function buildFixture(kickoffIso: string, id: number): Fixture {
@@ -196,6 +199,20 @@ describe('player-values player-event guard', () => {
     expect(
       await shouldRunPlayerValuesSync(new Date('2026-08-21T22:56:00.000Z'), dependencies),
     ).toBe(false);
+  });
+
+  test('marks an in-season capture as retryable until the final window minute', async () => {
+    const dependencies = {
+      resolvePlayerSyncEvent: async () => ({
+        event: { id: 1 } as Event,
+        phase: 'current' as const,
+      }),
+      hasChangesForDate: async () => false,
+    };
+
+    await expect(
+      resolvePlayerValuesSyncDecision(new Date('2026-08-21T22:55:00.000Z'), dependencies),
+    ).resolves.toEqual({ shouldRun: true, pollUntilWindowEnd: true });
   });
 });
 

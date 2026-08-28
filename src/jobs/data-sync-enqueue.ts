@@ -5,6 +5,10 @@ import { formatCronDateKey } from '../utils/timezone';
 import { trackQueueRunJob } from '../services/queue-run-tracker';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 import {
+  PLAYER_VALUES_WINDOW_ATTEMPTS,
+  PLAYER_VALUES_WINDOW_BACKOFF_MS,
+} from '../domain/player-values-window';
+import {
   createDataSyncJobData,
   defaultDataSyncJobId,
   getExplicitDataSyncQueueJobId,
@@ -40,17 +44,17 @@ async function enqueueDataSyncJob(
     const jobId = options.jobId
       ? getExplicitDataSyncQueueJobId(season, options.jobId)
       : defaultDataSyncJobId(jobName, season, source, options);
+    const pollMarketWindow = jobName === 'player-values' && options.pollUntilWindowEnd === true;
     // Only an explicitly manual one-shot may opt into immediate cleanup.
     // Scheduled, cascade, API and reconciliation jobs retain failed evidence
     // for the incident window even when they use deterministic IDs.
     const removeOnSettle = source === 'manual' && (options.removeOnSettle ?? true);
     const jobData = createDataSyncJobData(season, source, options);
     const job = await queue.add(jobName, jobData, {
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 60_000,
-      },
+      attempts: pollMarketWindow ? PLAYER_VALUES_WINDOW_ATTEMPTS : 3,
+      backoff: pollMarketWindow
+        ? { type: 'fixed', delay: PLAYER_VALUES_WINDOW_BACKOFF_MS }
+        : { type: 'exponential', delay: 60_000 },
       jobId,
       ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
     });

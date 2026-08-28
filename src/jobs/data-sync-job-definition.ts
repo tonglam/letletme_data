@@ -27,6 +27,8 @@ export interface DataSyncEnqueueOptions {
   freshnessWindowId?: number;
   /** All joined freshness windows for a shared latest-wins publication. */
   freshnessWindowIds?: readonly number[];
+  /** Keep an in-season no-change market capture retrying through 07:05 UTC+8. */
+  pollUntilWindowEnd?: boolean;
   /** Exact provisional source identity handed to durable price reconciliation. */
   sourceHash?: string;
   sourceArtifactId?: string;
@@ -99,5 +101,6 @@ export function createDataSyncJobData(
     ...(options.freshnessWindowIds === undefined
       ? {}
       : { freshnessWindowIds: [...new Set(options.freshnessWindowIds)] }),
+    ...(options.pollUntilWindowEnd ? { pollUntilWindowEnd: true } : {}),
   };
 }

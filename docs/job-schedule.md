@@ -106,7 +106,7 @@ and dispatches durable obligations.
 
 | Job | Cadence | Gate / behavior |
 |---|---|---|
-| `market-daily` | 06:55 UTC+8 plus durable retries | Before GW1 only the current UTC+8 date is eligible; failed or unavailable upstream responses retry through the same obligation without replaying old dates |
+| `market-daily` | 06:55 UTC+8 plus one-minute retries through 07:05 | Before GW1 only the 06:55 tick runs; for a current event, a complete no-change capture remains retryable through the final minute, while failed or unavailable upstream responses retry through the same obligation |
 | `player-market-freshness-watchdog` | 07:06 UTC+8 after the market window | Maintenance queue final-capture check: verifies current-day cardinality and end-of-window evidence; alerts without changing `/ready` |
 | `player-prices` | 07:10 UTC+8 after values capture | Replays that UTC+8 date's persisted Rise/Faller rows into affected current players; skips cleanly when none exist |
 | `player-stats` | daily plus active-event reconciliation | Refreshes the current event, or the next event only when no current event exists |
@@ -116,8 +116,10 @@ the job. The data worker retries failures, while completed jobs remain for 24
 hours and failed jobs for seven days (bounded to 500 each) so an empty queue is
 never mistaken for success. Snapshot upsert, stale-row removal, and final
 cardinality verification share one database transaction. Zero derived price
-changes remains a successful complete capture. After recovery, only the current
-UTC+8 market date is retried; older dates are explicitly recorded as
+changes remains a successful complete capture after the final 07:05 attempt;
+before then, a current-event no-change result is a retryable observation so a
+late upstream price update is fetched. After recovery, only the current UTC+8
+market date is retried; older dates are explicitly recorded as
 `irrecoverable` rather than reconstructed from today's bootstrap.
 
 Daily latest-authoritative jobs recover yesterday's final due checkpoint before
