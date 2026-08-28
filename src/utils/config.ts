@@ -1,17 +1,12 @@
 import { z } from 'zod';
 import { logError, logInfo } from './logger';
+import { parseStrictBooleanEnvValue } from './strict-env';
 
-export function parseStrictBooleanEnvValue(
-  value: string | undefined,
-  fallback: boolean,
-  name: string,
-): boolean {
-  if (value === undefined || value.trim() === '') return fallback;
-  const normalized = value.trim().toLowerCase();
-  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
-  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
-  throw new Error(`${name} must be a boolean (true/false, 1/0, yes/no or on/off)`);
-}
+export {
+  parseStrictBooleanEnvValue,
+  parseStrictIntegerEnvValue,
+  parseStrictNumberEnvValue,
+} from './strict-env';
 
 export function booleanEnv(defaultValue: boolean) {
   return z.preprocess((value) => {
@@ -39,49 +34,6 @@ function strictNumericValue(value: unknown): unknown {
   if (!/^[+-]?\d+$/.test(trimmed)) return value;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) && Number.isSafeInteger(parsed) ? parsed : value;
-}
-
-/** Parse one runtime integer override without coercing malformed input. */
-export function parseStrictIntegerEnvValue(
-  value: string | undefined,
-  fallback: number,
-  minimum: number,
-  maximum: number,
-  name: string,
-): number {
-  if (value === undefined || value.trim() === '') return fallback;
-  const normalized = value.trim();
-  if (!/^[+-]?\d+$/.test(normalized)) {
-    throw new Error(`${name} must be a finite safe integer`);
-  }
-  const parsed = Number(normalized);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
-    throw new Error(`${name} must be a finite safe integer between ${minimum} and ${maximum}`);
-  }
-  return parsed;
-}
-
-/** Parse one finite numeric override without accepting exponent or coercion syntax. */
-export function parseStrictNumberEnvValue(
-  value: string | undefined,
-  fallback: number,
-  minimum: number,
-  maximum: number,
-  name: string,
-): number {
-  if (value === undefined || value.trim() === '') return fallback;
-  const normalized = value.trim();
-  if (!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) {
-    throw new Error(`${name} must be a finite safe number`);
-  }
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER) {
-    throw new Error(`${name} must be a finite safe number`);
-  }
-  if (parsed < minimum || parsed > maximum) {
-    throw new Error(`${name} must be between ${minimum} and ${maximum}`);
-  }
-  return parsed;
 }
 
 function integerEnv(

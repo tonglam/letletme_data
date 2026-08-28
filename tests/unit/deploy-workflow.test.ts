@@ -21,6 +21,7 @@ const hostRunnerDeployScript = readFileSync('scripts/deploy-host-grok-runner.sh'
 const controlProbeScript = readFileSync('scripts/run-briefing-control-probe.sh', 'utf8');
 const rearmScript = readFileSync('scripts/rearm-briefing-x-after-probe.sh', 'utf8');
 const hostRunnerRollbackScript = readFileSync('scripts/rollback-host-grok-runner.sh', 'utf8');
+const hostGrokRunner = readFileSync('src/content/host-grok-runner.ts', 'utf8');
 const hostRunnerService = readFileSync('deploy/letletme-grok-runner.service', 'utf8');
 const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
 const sourceMediaBootstrapScript = readFileSync(
@@ -68,6 +69,12 @@ describe('release workflow gates', () => {
     expect(contentWorker).toContain('publicationOutboxDispatcher = setInterval');
     expect(contentWorker).not.toContain('publicationOutboxDispatcher.unref?.()');
     expect(contentWorker).not.toContain('scheduler.unref?.()');
+  });
+
+  test('keeps the compiled host runner free of runtime logger transports', () => {
+    expect(hostGrokRunner).toContain(String.raw`from '../utils/strict-env'`);
+    expect(hostGrokRunner).not.toContain(String.raw`from './config'`);
+    expect(hostGrokRunner).not.toContain(String.raw`from '../utils/logger'`);
   });
 
   test('isolates the durable media worker and includes it in deployment gates', () => {
