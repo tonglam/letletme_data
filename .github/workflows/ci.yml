@@ -115,7 +115,7 @@ jobs:
         run: docker build --target runner --tag letletme-data:ci .
 
       - name: Build host runner bundle image
-        run: docker build --target host-runner-build --tag letletme-host-runner:ci .
+        run: docker build --target host-runner-smoke --tag letletme-host-runner:ci .
 
       - name: Validate Compose worker inventory and database pool budget
         run: |

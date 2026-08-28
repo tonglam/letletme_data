@@ -45,6 +45,12 @@ RUN bun install --frozen-lockfile
 COPY src ./src
 RUN bun build src/content/host-grok-runner.ts --compile --target=bun-linux-x64 --outfile=/out/letletme-grok-runner
 
+# Smoke-test image intentionally contains only the compiled artifact and the
+# Bun runtime. It must not inherit the builder's node_modules, because the
+# deployed host runner is extracted as a standalone executable on the VPS.
+FROM oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS host-runner-smoke
+COPY --from=host-runner-build /out/letletme-grok-runner /out/letletme-grok-runner
+
 # Final runtime image
 FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS runner
 WORKDIR /app
