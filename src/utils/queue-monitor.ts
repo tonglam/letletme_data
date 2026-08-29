@@ -239,7 +239,14 @@ async function persistWindow(snapshot: QueueHealthSnapshot, intervalMs: number) 
           ? new Date(snapshot.consumerHeartbeatAt)
           : null,
         releaseSha: snapshot.releaseSha,
-        evidence: { source: 'queue-monitor' },
+        evidence: {
+          source: 'queue-monitor',
+          admission: {
+            waitP95Ms: snapshot.admissionWaitP95Ms ?? null,
+            deadlineExceeded: snapshot.admissionDeadlineExceeded ?? 0,
+            storeUnavailable: snapshot.admissionStoreUnavailable ?? 0,
+          },
+        },
       })
       .onConflictDoUpdate({
         target: [queueHealthWindowsInOps.windowStart, queueHealthWindowsInOps.queueName],
@@ -263,6 +270,14 @@ async function persistWindow(snapshot: QueueHealthSnapshot, intervalMs: number) 
           executionP95Ms: snapshot.executionP95Ms,
           providerWaitP95Ms: snapshot.providerWaitP95Ms,
           provider429Rate: snapshot.provider429Rate?.toFixed(5) ?? null,
+          evidence: {
+            source: 'queue-monitor',
+            admission: {
+              waitP95Ms: snapshot.admissionWaitP95Ms ?? null,
+              deadlineExceeded: snapshot.admissionDeadlineExceeded ?? 0,
+              storeUnavailable: snapshot.admissionStoreUnavailable ?? 0,
+            },
+          },
           netGrowth: snapshot.netGrowth,
           drainEtaMs: snapshot.drainEtaMs,
           consumerHeartbeatAt: snapshot.consumerHeartbeatAt
@@ -324,19 +339,23 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         // allowing Bull's retained completed history to dominate p95.
         lookbackMs: QUEUE_TIMING_LOOKBACK_MS,
       });
-      const providerTelemetry = await readFplAdmissionTelemetry().catch(() => ({
-        waitP95Ms: null,
-        response429Rate: null,
-        waitSamples: 0,
-        responseSamples: 0,
-      }));
+      // Admission telemetry is written to both a global bucket and a
+      // queue-attributed bucket. A monitor must read only its own bucket;
+      // copying the global FPL sample into every queue creates false backlog
+      // and provider-throttled signals on unrelated workers.
+      const admissionTelemetry = await readFplAdmissionTelemetry(Date.now(), queueName).catch(
+        () => null,
+      );
       const snapshot = await inspectQueue(queue, {
         dispatchBudgetMs,
         dispatchBudgetForJob: (job) => resolveJobDispatchBudgetMs(queueName, job),
         releaseSha: heartbeat?.releaseSha ?? runtimeReleaseRevision(),
         ...timing,
-        providerWaitP95Ms: providerTelemetry.waitP95Ms,
-        provider429Rate: providerTelemetry.response429Rate,
+        providerWaitP95Ms: timing.providerWaitP95Ms,
+        provider429Rate: admissionTelemetry?.response429Rate ?? timing.provider429Rate,
+        admissionWaitP95Ms: admissionTelemetry?.waitP95Ms ?? null,
+        admissionDeadlineExceeded: admissionTelemetry?.deadlineExceeded ?? 0,
+        admissionStoreUnavailable: admissionTelemetry?.storeUnavailable ?? 0,
         ...(options.consumerHeartbeatRole
           ? { consumerHeartbeatAt: heartbeat?.lastSeenAt ?? null }
           : {}),
@@ -403,6 +422,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           dispatchBudgetMs: snapshot.dispatchBudgetMs ?? dispatchBudgetMs,
           providerWaitP95Ms: snapshot.providerWaitP95Ms,
           provider429Rate: snapshot.provider429Rate,
+          admissionWaitP95Ms: snapshot.admissionWaitP95Ms,
+          admissionDeadlineExceeded: snapshot.admissionDeadlineExceeded,
+          admissionStoreUnavailable: snapshot.admissionStoreUnavailable,
           arrivalsPerMinute: windowArrivals,
           completionsPerMinute: windowCompletions,
           failuresPerMinute: windowFailures,

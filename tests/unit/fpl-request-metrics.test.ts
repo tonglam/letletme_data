@@ -7,10 +7,12 @@ import {
   getFplRequestMetricsSnapshot,
   runWithFplRequestMetrics,
 } from '../../src/utils/fpl-request-metrics';
+import { resetFplAdmissionForTests } from '../../src/utils/fpl-admission';
 
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
+  resetFplAdmissionForTests();
   globalThis.fetch = originalFetch;
   delete process.env.FPL_RETRY_BASE_DELAY_MS;
   delete process.env.FPL_RETRY_MAX_DELAY_MS;
@@ -142,6 +144,7 @@ describe('FPL request metrics', () => {
       return getFplRequestMetricsSnapshot();
     });
 
+    resetFplAdmissionForTests();
     globalThis.fetch = mock(async () => {
       throw new TypeError('fixture connection reset');
     }) as unknown as typeof fetch;

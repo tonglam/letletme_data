@@ -11,6 +11,7 @@ export type BacklogClass =
   | 'POISON_STORM'
   | 'STALLED'
   | 'DEADLINE_RISK'
+  | 'ADMISSION_SATURATED'
   | 'PROVIDER_THROTTLED'
   | 'BURST'
   | 'HEALTHY';
@@ -40,6 +41,9 @@ export type QueueHealthSnapshot = Readonly<{
   executionP95Ms: number | null;
   providerWaitP95Ms: number | null;
   provider429Rate: number | null;
+  admissionWaitP95Ms?: number | null;
+  admissionDeadlineExceeded?: number;
+  admissionStoreUnavailable?: number;
   netGrowth: number;
   drainEtaMs: number | null;
   backlogClass: BacklogClass;
@@ -104,6 +108,7 @@ const AUTO_GATE_RED_CLASSES = new Set<BacklogClass>([
   'POISON_STORM',
   'STALLED',
   'DEADLINE_RISK',
+  'ADMISSION_SATURATED',
   'PROVIDER_THROTTLED',
 ]);
 const CRITICAL_QUEUES = new Set([
@@ -112,6 +117,7 @@ const CRITICAL_QUEUES = new Set([
   'official-h2h-live',
   'publication-outbox',
   'my-fpl-orchestration',
+  'fpl-price-watch',
 ]);
 
 export function queueHealthRetentionCutoff(
@@ -134,6 +140,9 @@ export function classifyBacklog(
     dispatchBudgetMs?: number;
     providerWaitP95Ms?: number | null;
     provider429Rate?: number | null;
+    admissionWaitP95Ms?: number | null;
+    admissionDeadlineExceeded?: number;
+    admissionStoreUnavailable?: number;
     arrivalsPerMinute?: number;
     completionsPerMinute?: number;
     /** Failed events observed in the current telemetry window. */
@@ -169,7 +178,16 @@ export function classifyBacklog(
   ) {
     return 'DEADLINE_RISK';
   }
-  if ((input.providerWaitP95Ms ?? 0) > 5_000 || (input.provider429Rate ?? 0) >= 0.05) {
+  if (
+    (input.admissionDeadlineExceeded ?? 0) > 0 ||
+    (input.admissionStoreUnavailable ?? 0) > 0 ||
+    (input.admissionWaitP95Ms ?? 0) > 500
+  ) {
+    return 'ADMISSION_SATURATED';
+  }
+  // Provider throttling is reserved for real FPL 429 responses. Local
+  // admission wait and 5xx/network failures have separate classifications.
+  if ((input.provider429Rate ?? 0) >= 0.05) {
     return 'PROVIDER_THROTTLED';
   }
   if ((input.arrivalsPerMinute ?? 0) > (input.completionsPerMinute ?? 0) * 1.5) {
@@ -470,6 +488,9 @@ export async function inspectQueue(
     consumerHeartbeatAt?: string | null;
     providerWaitP95Ms?: number | null;
     provider429Rate?: number | null;
+    admissionWaitP95Ms?: number | null;
+    admissionDeadlineExceeded?: number;
+    admissionStoreUnavailable?: number;
     waitP50Ms?: number | null;
     waitP95Ms?: number | null;
     executionP50Ms?: number | null;
@@ -520,6 +541,9 @@ export async function inspectQueue(
     dispatchBudgetMs,
     providerWaitP95Ms: input.providerWaitP95Ms,
     provider429Rate: input.provider429Rate,
+    admissionWaitP95Ms: input.admissionWaitP95Ms,
+    admissionDeadlineExceeded: input.admissionDeadlineExceeded,
+    admissionStoreUnavailable: input.admissionStoreUnavailable,
     ...heartbeatEvidence,
   });
   return {
@@ -545,6 +569,9 @@ export async function inspectQueue(
     executionP95Ms: input.executionP95Ms ?? null,
     providerWaitP95Ms: input.providerWaitP95Ms ?? null,
     provider429Rate: input.provider429Rate ?? null,
+    admissionWaitP95Ms: input.admissionWaitP95Ms ?? null,
+    admissionDeadlineExceeded: input.admissionDeadlineExceeded ?? 0,
+    admissionStoreUnavailable: input.admissionStoreUnavailable ?? 0,
     netGrowth: arrivals - completions,
     drainEtaMs: calculateDrainEtaMs(waiting + prioritized, arrivals, completions),
     backlogClass,

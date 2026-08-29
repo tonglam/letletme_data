@@ -1050,6 +1050,7 @@ export async function listQueueHealthWindows(
           WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'POISON_STORM') THEN 'POISON_STORM'
           WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'STALLED') THEN 'STALLED'
           WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'DEADLINE_RISK') THEN 'DEADLINE_RISK'
+          WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'ADMISSION_SATURATED') THEN 'ADMISSION_SATURATED'
           WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'PROVIDER_THROTTLED') THEN 'PROVIDER_THROTTLED'
           WHEN bool_or(${queueHealthWindowsInOps.backlogClass} = 'BURST') THEN 'BURST'
           ELSE 'HEALTHY'

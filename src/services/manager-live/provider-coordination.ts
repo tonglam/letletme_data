@@ -21,6 +21,7 @@ import {
   runYieldingKeyedTask,
   type ManagerSummaryFetchPriority,
 } from '../../domain/manager-live-fallback';
+import type { FplRequestPriority } from '../../utils/fpl-admission';
 import { dispatchManagerLiveRefresh } from '../manager-live-refresh-dispatch';
 import {
   CLASSIC_REFRESH_LOCK_SECONDS,
@@ -88,6 +89,10 @@ export const runManagerLiveBackgroundRefresh = createKeyedSerialTaskScheduler();
 // batching alone is insufficient because distinct tournaments can refresh at
 // the same time and otherwise multiply FPL entry-summary concurrency.
 export const runManagerSummaryFetch = createManagerSummaryFetchGate();
+
+function fplRequestPriority(priority: ManagerSummaryFetchPriority): FplRequestPriority {
+  return priority === 'foreground' ? 'live' : 'bulk';
+}
 
 // Every classic standings crawl and its OR enrichment share one prioritized
 // lane for a season/event/league. Foreground misses jump ahead of queued
@@ -259,6 +264,7 @@ export const fetchDistributedManagerSummary = async (
         publicationKey
           ? fplClient.getEntrySummary(entryId, {
               ...(requestDeadlineMs === undefined ? {} : { deadlineMs: requestDeadlineMs }),
+              priority: fplRequestPriority(priority),
               beforeAttempt: async (_attempt, { signal }) => {
                 try {
                   publicationOrder = (
@@ -313,6 +319,7 @@ export const fetchDistributedManagerSummary = async (
               publicationKey
                 ? fplClient.getEntrySummary(entryId, {
                     ...(requestDeadlineMs === undefined ? {} : { deadlineMs: requestDeadlineMs }),
+                    priority: fplRequestPriority(priority),
                     beforeAttempt: async (_attempt, { signal }) => {
                       try {
                         publicationOrder = (

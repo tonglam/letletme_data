@@ -84,6 +84,9 @@ export function classifyDataError(error: unknown): DataErrorClass {
   )
     return 'DATA_INCOMPLETE';
   if (error instanceof ValidationError) return 'CONTRACT_DRIFT';
+  if (code === 'FPL_ADMISSION_DEADLINE_EXCEEDED' || code === 'FPL_ADMISSION_STORE_UNAVAILABLE') {
+    return 'TRANSIENT_INFRA';
+  }
   if (error instanceof FPLClientError) {
     if (error.status === 401 || error.status === 403) return 'CONFIG_AUTH';
     if (error.status === 404 || error.status === 409) return 'SOURCE_NOT_READY';

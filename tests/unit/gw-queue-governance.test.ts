@@ -21,6 +21,7 @@ import {
 } from '../../src/utils/queue-monitor';
 import { queueHealthRetentionCutoff } from '../../src/services/queue-governance.service';
 import { summarizeDataError } from '../../src/domain/error-classification';
+import { FPLClientError } from '../../src/utils/errors';
 import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-official-h2h.service';
 import { missingLockedPageNumbers } from '../../src/domain/official-h2h-manifest';
 import {
@@ -76,6 +77,17 @@ describe('GW queue and data governance primitives', () => {
       }),
     ).toBe('DEADLINE_RISK');
     expect(classifyBacklog({ waiting: 1, active: 0, failed: 0, providerWaitP95Ms: 5_001 })).toBe(
+      'HEALTHY',
+    );
+    expect(
+      classifyBacklog({
+        waiting: 1,
+        active: 0,
+        failed: 0,
+        admissionWaitP95Ms: 501,
+      }),
+    ).toBe('ADMISSION_SATURATED');
+    expect(classifyBacklog({ waiting: 1, active: 0, failed: 0, provider429Rate: 0.05 })).toBe(
       'PROVIDER_THROTTLED',
     );
   });
@@ -511,5 +523,29 @@ describe('GW queue and data governance primitives', () => {
     expect(summary.summary).not.toContain('provider.invalid');
     expect(summary.summary).not.toContain('1234');
     expect(summary.errorClass).toBe('TRANSIENT_INFRA');
+  });
+
+  test('classifies admission-store outages as infrastructure', () => {
+    const summary = summarizeDataError(
+      new FPLClientError(
+        'FPL upstream admission store is temporarily unavailable; retry later',
+        503,
+        'FPL_ADMISSION_STORE_UNAVAILABLE',
+      ),
+    );
+    expect(summary.errorClass).toBe('TRANSIENT_INFRA');
+    expect(summary.errorCode).toBe('FPL_ADMISSION_STORE_UNAVAILABLE');
+  });
+
+  test('classifies admission deadline exhaustion as infrastructure', () => {
+    const summary = summarizeDataError(
+      new FPLClientError(
+        'FPL admission capacity deadline exceeded; retry later',
+        503,
+        'FPL_ADMISSION_DEADLINE_EXCEEDED',
+      ),
+    );
+    expect(summary.errorClass).toBe('TRANSIENT_INFRA');
+    expect(summary.errorCode).toBe('FPL_ADMISSION_DEADLINE_EXCEEDED');
   });
 });

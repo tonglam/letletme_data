@@ -41,6 +41,12 @@ import { safePersistedDataErrorCode } from '../domain/error-classification';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
 import { readPriceChangeHotSnapshotMetadata } from './price-change-hot.service';
+import {
+  FPL_BULK_MAX_INFLIGHT_HARD_CAP,
+  readFplAdmissionStats,
+  readFplAdmissionTelemetry,
+  type FplRequestPriority,
+} from '../utils/fpl-admission';
 
 type ActivePublication = Readonly<{ publicationId: string; revision: number }>;
 type PublicationDelivery = Readonly<{
@@ -254,6 +260,95 @@ export async function getJobsStatus(
     })),
     readPriceChangeHotSnapshotMetadata(season.seasonCode).catch(() => null),
   ]);
+  const [fplAdmissionStats, fplAdmissionTelemetry, fplUnattributedTelemetry] = await Promise.all([
+    readFplAdmissionStats().catch(() => null),
+    readFplAdmissionTelemetry().catch(() => null),
+    readFplAdmissionTelemetry(Date.now(), 'unattributed').catch(() => null),
+  ]);
+  const fplAdmissionPriorities: readonly FplRequestPriority[] = [
+    'deadline-critical',
+    'live',
+    'bulk',
+  ];
+  const fplAdmission = {
+    policyVersion: fplAdmissionStats?.policyVersion ?? 'unavailable',
+    hardCaps: {
+      maxInflight: getConfig().FPL_MAX_INFLIGHT,
+      criticalMaxInflight: 1,
+      bulkMaxInflight: FPL_BULK_MAX_INFLIGHT_HARD_CAP,
+      requestsPerSecond: getConfig().FPL_REQUESTS_PER_SECOND,
+      tokenBucketCapacity: getConfig().FPL_REQUESTS_PER_SECOND,
+      leaseMs: getConfig().FPL_ADMISSION_LEASE_MS,
+    },
+    current: fplAdmissionStats
+      ? {
+          tokens: fplAdmissionStats.tokens,
+          inflight: fplAdmissionStats.inflight,
+          liveInflight: fplAdmissionStats.liveInflight,
+          criticalInflight: fplAdmissionStats.criticalInflight,
+          bulkInflight: fplAdmissionStats.bulkInflight,
+          adaptiveBulkMaxInflight: fplAdmissionStats.bulkMaxInflight,
+          queued: fplAdmissionStats.queued,
+          queuedByPriority: fplAdmissionStats.queuedByPriority,
+          distributed: fplAdmissionStats.distributed,
+        }
+      : null,
+    criticalWindow: fplAdmissionStats?.criticalWindow ?? null,
+    byPriority: Object.fromEntries(
+      fplAdmissionPriorities.map((priority) => {
+        const telemetry = fplAdmissionTelemetry?.byPriority[priority];
+        return [
+          priority,
+          {
+            queued: fplAdmissionStats?.queuedByPriority[priority] ?? 0,
+            inflight:
+              priority === 'deadline-critical'
+                ? (fplAdmissionStats?.criticalInflight ?? 0)
+                : priority === 'live'
+                  ? (fplAdmissionStats?.liveInflight ?? 0)
+                  : (fplAdmissionStats?.bulkInflight ?? 0),
+            waitP50Ms: telemetry?.waitP50Ms ?? null,
+            waitP95Ms: telemetry?.waitP95Ms ?? null,
+            waitP99Ms: telemetry?.waitP99Ms ?? null,
+            waitSamples: telemetry?.waitSamples ?? 0,
+            grants: telemetry?.grants ?? 0,
+            deadlineExceeded: telemetry?.deadlineExceeded ?? 0,
+            storeUnavailable: telemetry?.storeUnavailable ?? 0,
+            cancelled: telemetry?.cancelled ?? 0,
+            providerDurationP50Ms: telemetry?.providerDurationP50Ms ?? null,
+            providerDurationP95Ms: telemetry?.providerDurationP95Ms ?? null,
+            providerDurationP99Ms: telemetry?.providerDurationP99Ms ?? null,
+            providerDurationSamples: telemetry?.providerDurationSamples ?? 0,
+            responseSamples: telemetry?.responseSamples ?? 0,
+            response429: telemetry?.response429 ?? 0,
+            response5xx: telemetry?.response5xx ?? 0,
+            networkErrors: telemetry?.networkErrors ?? 0,
+          },
+        ];
+      }),
+    ),
+    provider: {
+      responseSamples: fplAdmissionTelemetry?.responseSamples ?? 0,
+      response429Rate: fplAdmissionTelemetry?.response429Rate ?? null,
+      response5xxRate: fplAdmissionTelemetry?.response5xxRate ?? null,
+      networkErrorRate: fplAdmissionTelemetry?.networkErrorRate ?? null,
+    },
+    unattributed: {
+      waitSamples: fplUnattributedTelemetry?.waitSamples ?? 0,
+      grants: fplUnattributedTelemetry?.grants ?? 0,
+      deadlineExceeded: fplUnattributedTelemetry?.deadlineExceeded ?? 0,
+      storeUnavailable: fplUnattributedTelemetry?.storeUnavailable ?? 0,
+      cancelled: fplUnattributedTelemetry?.cancelled ?? 0,
+      responseSamples: fplUnattributedTelemetry?.responseSamples ?? 0,
+      response429: fplUnattributedTelemetry?.byPriority
+        ? fplAdmissionPriorities.reduce(
+            (sum, priority) =>
+              sum + (fplUnattributedTelemetry.byPriority[priority]?.response429 ?? 0),
+            0,
+          )
+        : 0,
+    },
+  };
   const scheduler = Boolean(schedulerHeartbeat && (await checkRuntimeHeartbeat('scheduler')));
   const queueWorker = Boolean(queueWorkerHeartbeat && (await checkRuntimeHeartbeat('queueWorker')));
   const contentWorker = Boolean(
@@ -580,6 +675,7 @@ export async function getJobsStatus(
     obligations,
     myFplSnapshots,
     publicationConsistency,
+    fplAdmission,
     priceChanges,
     schedulerLanes,
     queues,

@@ -556,7 +556,7 @@ export const queueHealthWindowsInOps = ops.table(
     ),
     check(
       'queue_health_windows_backlog_class_check',
-      sql`backlog_class = ANY (ARRAY['NO_CONSUMER','POISON_STORM','STALLED','DEADLINE_RISK','PROVIDER_THROTTLED','BURST','HEALTHY'])`,
+      sql`backlog_class = ANY (ARRAY['NO_CONSUMER','POISON_STORM','STALLED','DEADLINE_RISK','ADMISSION_SATURATED','PROVIDER_THROTTLED','BURST','HEALTHY'])`,
     ),
     check(
       'queue_health_windows_admission_check',
