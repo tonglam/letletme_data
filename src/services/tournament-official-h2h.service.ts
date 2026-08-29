@@ -329,8 +329,9 @@ export function suppressOfficialH2HActiveScores(
 
 /**
  * Overlay real manager sides with net scores from one coherent event-live
- * batch. Synthetic Average Team scores have no event/live manager authority,
- * so a round containing one remains unavailable instead of mixing revisions.
+ * batch. FPL itself owns the synthetic Average Team side, so retain its score
+ * from the same freshly fetched H2H snapshot. Reject the batch if that provider
+ * score is absent; one odd-sized league must not suppress every real matchup.
  */
 export function projectOfficialH2HEventLiveScores(
   snapshot: OfficialH2HSourceSnapshot,
@@ -355,7 +356,8 @@ export function projectOfficialH2HEventLiveScores(
       (match) =>
         match.event === eventId &&
         match.is_bye !== true &&
-        (match.entry_1_entry === null || match.entry_2_entry === null),
+        ((match.entry_1_entry === null && typeof match.entry_1_points !== 'number') ||
+          (match.entry_2_entry === null && typeof match.entry_2_points !== 'number')),
     )
   ) {
     return null;

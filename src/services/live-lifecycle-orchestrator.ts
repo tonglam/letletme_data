@@ -101,15 +101,23 @@ const picksProbeStates = new Map<string, PicksProbeState>();
 const daySettlingStates = new Map<string, { revision: number | null; unchangedSince: number }>();
 const picksFanoutClaims = new Map<string, Map<number, number>>();
 
+export function resolveLivePicksCoordinatorDeduplicationId(
+  seasonCode: string,
+  eventId: number,
+): string {
+  return `live-picks-refresh:${seasonCode}:event-${eventId}`;
+}
+
 export function resolveLivePicksRefreshDeduplicationId(
   seasonCode: string,
   eventId: number,
   _entryIds: readonly number[],
 ): string {
-  // Keep exactly one live-picks fan-out active per season/event. A cohort hash
-  // lets a newly discovered entry create a second broad sweep while the first
-  // is still running; onboarding already handles that new entry independently.
-  return `live-picks-refresh:${seasonCode}:event-${eventId}`;
+  // Keep exactly one entry-picks fan-out active per season/event. This must not
+  // share the live-picks-refresh coordinator's BullMQ deduplication identity:
+  // the coordinator enqueues this child while it is active, and BullMQ would
+  // otherwise return the coordinator itself instead of creating the sweep.
+  return `live-picks-entry-sweep:${seasonCode}:event-${eventId}`;
 }
 
 export function resolveLivePicksRefreshFanout(

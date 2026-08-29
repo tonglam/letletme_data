@@ -6,6 +6,7 @@ import {
   findPicksRefreshEntryIds,
   PICKS_FIRST_PROBE_OFFSET_MS,
   PICKS_REFRESH_INTERVAL_MS,
+  resolveLivePicksCoordinatorDeduplicationId,
   resolveLivePicksRefreshClaimedAt,
   resolveLivePicksRefreshDeduplicationId,
   resolveLivePicksRefreshFanout,
@@ -249,13 +250,14 @@ describe('live lifecycle decisions', () => {
     expect(findPicksRefreshEntryIds([1, 2, 3], claims, now)).toEqual([2, 3]);
   });
 
-  test('uses one restart-durable single-flight identity for the event lane', () => {
+  test('uses a restart-durable fan-out identity distinct from the coordinator', () => {
     const first = resolveLivePicksRefreshDeduplicationId('2627', 1, [30, 10, 20]);
     const reordered = resolveLivePicksRefreshDeduplicationId('2627', 1, [20, 10, 30, 20]);
     const expanded = resolveLivePicksRefreshDeduplicationId('2627', 1, [10, 20, 30, 40]);
     const nextEvent = resolveLivePicksRefreshDeduplicationId('2627', 2, [10, 20, 30]);
 
-    expect(first).toBe('live-picks-refresh:2627:event-1');
+    expect(first).toBe('live-picks-entry-sweep:2627:event-1');
+    expect(first).not.toBe(resolveLivePicksCoordinatorDeduplicationId('2627', 1));
     expect(reordered).toBe(first);
     expect(expanded).toBe(first);
     expect(nextEvent).not.toBe(first);
