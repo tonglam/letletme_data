@@ -35,6 +35,7 @@ import {
   writeClassicRowsMonotonically,
 } from './publication-store';
 import { managerLivePublicationKey, runManagerLivePublication } from './provider-coordination';
+import type { FplRequestPriority } from '../../utils/fpl-admission';
 
 export const refreshClassicStandings = async (
   season: FplSeasonRef,
@@ -43,7 +44,12 @@ export const refreshClassicStandings = async (
   targetIds: ReadonlySet<number>,
   rows: Map<number, CachedRow>,
   redis: Redis | null,
-  options: { startPage?: number; maxPages?: number; requestDeadlineMs?: number } = {},
+  options: {
+    startPage?: number;
+    maxPages?: number;
+    requestDeadlineMs?: number;
+    priority?: FplRequestPriority;
+  } = {},
   assertLeaseOwned: () => Promise<void> = async () => undefined,
   dependencies: Partial<ClassicStandingsRefreshDependencies> = {},
 ): Promise<{
@@ -85,12 +91,12 @@ export const refreshClassicStandings = async (
       fetchedRows.size < targetIds.size;
       page += 1
     ) {
-      const response = await fetchStandings(
-        leagueId,
-        page,
-        1,
-        options.requestDeadlineMs === undefined ? {} : { deadlineMs: options.requestDeadlineMs },
-      );
+      const response = await fetchStandings(leagueId, page, 1, {
+        ...(options.requestDeadlineMs === undefined
+          ? {}
+          : { deadlineMs: options.requestDeadlineMs }),
+        priority: options.priority ?? 'bulk',
+      });
       nextPage = page + 1;
       const pageRows = toClassicRows(season.seasonCode, eventId, response, crawlStartedAt);
       // A manager can move across the page boundary while a live crawl is in

@@ -941,7 +941,7 @@ export const resolveManagerLiveScoresUncoalesced = async (
                     new Set(standingsTargets),
                     rows,
                     redis,
-                    {},
+                    { priority: 'live' },
                     assertLeaseOwned,
                   )
                 : {

@@ -44,7 +44,14 @@ import { parseStrictBooleanEnvValue } from '../utils/config';
 import { FPLClientError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { getQueueConnection } from '../utils/queue';
+import { notifyTwoBots } from '../utils/notify';
 import { type WorkerRuntime } from './worker-runtime';
+import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
+import {
+  FplAdmissionDeadlineExceededError,
+  FplAdmissionStoreUnavailableError,
+  openFplCriticalWindow,
+} from '../utils/fpl-admission';
 import {
   PRICE_CHANGE_WATCH_LEAD_MS,
   PRICE_CHANGE_WATCH_MAX_WINDOW_MS,
@@ -187,10 +194,14 @@ async function publishAndReconcilePriceChangeHotSnapshot(input: {
   readonly bytes: Uint8Array;
   readonly artifactId: string;
   readonly probeStartedAt: number;
-}): Promise<boolean> {
+}): Promise<Readonly<{ published: boolean; provisionalPublishedAt: string | null }>> {
   const { season, snapshot, bytes, artifactId, probeStartedAt } = input;
   const published = await publishPriceChangeHotSnapshot(snapshot);
-  if (!published.published) return false;
+  if (!published.published) return { published: false, provisionalPublishedAt: null };
+  // This timestamp is taken immediately after the Redis hot write, before
+  // source archiving or durable reconciliation can add latency to the user
+  // visible path.
+  const provisionalPublishedAt = new Date().toISOString();
   logInfo('Price-change hot snapshot published', {
     season: season.seasonCode,
     deadlineAt: snapshot.deadline,
@@ -242,10 +253,10 @@ async function publishAndReconcilePriceChangeHotSnapshot(input: {
     await markHotReconciliationFailed(snapshot, error);
     throw error;
   }
-  return true;
+  return { published: true, provisionalPublishedAt };
 }
 
-async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
+async function processPriceWatchJobCore(job: Job<FplPriceWatchJobData>) {
   if (
     !(await startCurrentSchedulerJob(job.data, {
       queueName: fplPriceWatchQueueName,
@@ -272,6 +283,28 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
   if (!Number.isFinite(deadlineAt.getTime()))
     throw new Error('Price-watch job deadline is invalid');
   const startedAt = Date.now();
+  const stopAt = deadlineAt.getTime() + PRICE_CHANGE_WATCH_MAX_WINDOW_MS;
+  const criticalWindowOwner = String(job.data.obligationId ?? job.id ?? randomUUID());
+  let admissionStoreAlerted = false;
+  const alertAdmissionStoreFailure = (error: unknown): void => {
+    if (admissionStoreAlerted) return;
+    admissionStoreAlerted = true;
+    void notifyTwoBots(
+      [
+        'FPL admission store unavailable',
+        `Season: ${season.seasonCode}`,
+        `Deadline: ${deadlineAt.toISOString()}`,
+        `Error: ${error instanceof Error ? error.message : String(error)}`,
+      ].join('\n'),
+      { idempotencyKey: `fpl-admission-store:${season.seasonCode}:${deadlineAt.toISOString()}` },
+    ).catch(() => undefined);
+  };
+  try {
+    await openFplCriticalWindow({ owner: criticalWindowOwner, untilMs: stopAt });
+  } catch (error) {
+    if (error instanceof FplAdmissionStoreUnavailableError) alertAdmissionStoreFailure(error);
+    throw error;
+  }
   const windowStart = deadlineAt.getTime() - PRICE_CHANGE_WATCH_LEAD_MS;
   if (Date.now() < windowStart) await sleep(windowStart - Date.now());
 
@@ -338,16 +371,35 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
     null;
   let lastPostDeadlineProbeStartedAt: number | null = null;
   let retryableFailureStreak = 0;
-  const stopAt = deadlineAt.getTime() + PRICE_CHANGE_WATCH_MAX_WINDOW_MS;
+  let admissionStoreFailureStreak = 0;
+  let admissionDeadlineFailures = 0;
+  let admissionStoreFailures = 0;
+  let providerFailures = 0;
+  let firstChangedResponseAt: string | null = null;
+  let firstChangedAdmissionWaitMs: number | null = null;
+  let firstChangedProviderDurationMs: number | null = null;
+  let firstProvisionalPublishedAt: string | null = null;
 
   while (Date.now() <= stopAt) {
     pollCount += 1;
     const probeStartedAt = Date.now();
+    let probeAdmissionWaitMs: number | null = null;
+    let probeProviderDurationMs: number | null = null;
+    let probeResponseCompletedAt: Date | null = null;
     try {
       const artifact = await fplClient.getBootstrapArtifact({
         edgeCacheKey: `price-watch-${deadlineAt.getTime()}-${pollCount}`,
-        priority: 'live',
+        priority: 'deadline-critical',
         deadlineMs: 5_000,
+        admissionTimeoutMs: 750,
+        attemptTimeoutMs: 5_000,
+        overallDeadlineMs: 5_000,
+        maxRetries: 0,
+        onAttempt: ({ admissionWaitMs, providerDurationMs, completedAt }) => {
+          probeAdmissionWaitMs = admissionWaitMs;
+          probeProviderDurationMs = providerDurationMs;
+          probeResponseCompletedAt = completedAt;
+        },
       });
       const fingerprint = priceChangeTriggerFingerprint(artifact.payload);
       const valueFingerprint = priceChangeValueFingerprint(artifact.payload);
@@ -359,6 +411,7 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       // or after the deadline is evidence about the post-deadline state.
       const isPostDeadline = probeStartedAt >= deadlineAt.getTime();
       retryableFailureStreak = 0;
+      admissionStoreFailureStreak = 0;
       const validPostDeadlineResponse =
         isPostDeadline &&
         Number.isFinite(observedDeadlineMs) &&
@@ -413,6 +466,9 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
           fetchedAt: artifact.retrievedAt,
           outcome: 'CHANGED',
         });
+        firstChangedResponseAt ??= (probeResponseCompletedAt ?? artifact.retrievedAt).toISOString();
+        firstChangedAdmissionWaitMs ??= probeAdmissionWaitMs;
+        firstChangedProviderDurationMs ??= probeProviderDurationMs;
         const sourceHash = sha256Bytes(artifact.bytes);
         const artifactId = createPriceChangeHotArtifactId();
         const observedCore = coreSnapshot as CoreSnapshotCacheContents | null;
@@ -433,16 +489,16 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
             ? artifact.payload.elements.length - observedCore.players.length
             : null,
         });
-        if (
-          await publishAndReconcilePriceChangeHotSnapshot({
-            season,
-            snapshot,
-            bytes: artifact.bytes,
-            artifactId,
-            probeStartedAt,
-          })
-        ) {
+        const publication = await publishAndReconcilePriceChangeHotSnapshot({
+          season,
+          snapshot,
+          bytes: artifact.bytes,
+          artifactId,
+          probeStartedAt,
+        });
+        if (publication.published) {
           hotPublications += 1;
+          firstProvisionalPublishedAt ??= publication.provisionalPublishedAt;
         }
         previousValueFingerprint = valueFingerprint;
         previousDeadline = observedDeadline;
@@ -473,25 +529,55 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       // failure must fail the obligation explicitly; treating either as a
       // quiet no-change day would hide an actual publication outage.
       if (!(error instanceof FPLClientError)) throw error;
-      const status = error.status;
-      const retryable =
-        error.code === 'UNKNOWN_ERROR' ||
-        status === 429 ||
-        (status !== undefined && status >= 500 && status <= 599);
-      retryableFailureStreak = retryable ? Math.min(retryableFailureStreak + 1, 3) : 0;
-      logWarn('Price-watch probe failed; continuing bounded watch', {
-        season: season.seasonCode,
-        deadlineAt: deadlineAt.toISOString(),
-        pollCount,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      if (!retryable) throw error;
+      if (error instanceof FplAdmissionDeadlineExceededError) {
+        admissionDeadlineFailures += 1;
+        retryableFailureStreak = 0;
+        admissionStoreFailureStreak = 0;
+        logWarn('Price-watch probe admission deadline exceeded; keeping cadence', {
+          season: season.seasonCode,
+          deadlineAt: deadlineAt.toISOString(),
+          pollCount,
+          errorCode: error.code,
+        });
+      } else if (error instanceof FplAdmissionStoreUnavailableError) {
+        admissionStoreFailures += 1;
+        admissionStoreFailureStreak = Math.min(admissionStoreFailureStreak + 1, 3);
+        retryableFailureStreak = 0;
+        alertAdmissionStoreFailure(error);
+        logWarn('Price-watch admission store unavailable; using short jittered retry', {
+          season: season.seasonCode,
+          deadlineAt: deadlineAt.toISOString(),
+          pollCount,
+          errorCode: error.code,
+        });
+      } else {
+        admissionStoreFailureStreak = 0;
+        const status = error.status;
+        const retryable =
+          error.code === 'UNKNOWN_ERROR' ||
+          status === 429 ||
+          (status !== undefined && status >= 500 && status <= 599);
+        retryableFailureStreak = retryable ? Math.min(retryableFailureStreak + 1, 3) : 0;
+        if (retryable) providerFailures += 1;
+        logWarn('Price-watch probe failed; continuing bounded watch', {
+          season: season.seasonCode,
+          deadlineAt: deadlineAt.toISOString(),
+          pollCount,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (!retryable) throw error;
+      }
     }
     const probeCompletedAt = Date.now();
     const retryDelay =
-      retryableFailureStreak === 0
-        ? 0
-        : PRICE_CHANGE_WATCH_RETRY_DELAYS_MS[retryableFailureStreak - 1]!;
+      admissionStoreFailureStreak > 0
+        ? (() => {
+            const base = [250, 500, 1_000][admissionStoreFailureStreak - 1]!;
+            return base + Math.floor(Math.random() * Math.max(1, Math.floor(base * 0.25)));
+          })()
+        : retryableFailureStreak === 0
+          ? 0
+          : PRICE_CHANGE_WATCH_RETRY_DELAYS_MS[retryableFailureStreak - 1]!;
     const delay = resolvePriceChangeWatchSleepDelay({
       probeStartedAtMs: probeStartedAt,
       probeCompletedAtMs: probeCompletedAt,
@@ -503,6 +589,10 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
     await sleep(delay);
   }
 
+  const firstChangedResponseToProvisionalMs =
+    firstChangedResponseAt && firstProvisionalPublishedAt
+      ? Math.max(0, Date.parse(firstProvisionalPublishedAt) - Date.parse(firstChangedResponseAt))
+      : null;
   logInfo('Price-watch window completed', {
     season: season.seasonCode,
     deadlineAt: deadlineAt.toISOString(),
@@ -511,6 +601,14 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
     hotPublications,
     noChangeObserved,
     postDeadlineSuccessfulProbe,
+    firstChangedResponseAt,
+    firstChangedAdmissionWaitMs,
+    firstChangedProviderDurationMs,
+    firstProvisionalPublishedAt,
+    firstChangedResponseToProvisionalMs,
+    admissionDeadlineFailures,
+    admissionStoreFailures,
+    providerFailures,
     watchDurationMs: Date.now() - startedAt,
   });
   if (
@@ -544,16 +642,16 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
         ? lastPostDeadlineArtifact.payload.elements.length - observedCore.players.length
         : null,
     });
-    if (
-      await publishAndReconcilePriceChangeHotSnapshot({
-        season,
-        snapshot,
-        bytes: lastPostDeadlineArtifact.bytes,
-        artifactId,
-        probeStartedAt: lastPostDeadlineProbeStartedAt,
-      })
-    ) {
+    const publication = await publishAndReconcilePriceChangeHotSnapshot({
+      season,
+      snapshot,
+      bytes: lastPostDeadlineArtifact.bytes,
+      artifactId,
+      probeStartedAt: lastPostDeadlineProbeStartedAt,
+    });
+    if (publication.published) {
       hotPublications += 1;
+      firstProvisionalPublishedAt ??= publication.provisionalPublishedAt;
     }
   }
   if (hotPublications === 0 && !postDeadlineSuccessfulProbe) {
@@ -566,6 +664,14 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
       hotPublications,
       noChangeObserved,
       postDeadlineSuccessfulProbe,
+      firstChangedResponseAt,
+      firstChangedAdmissionWaitMs,
+      firstChangedProviderDurationMs,
+      firstProvisionalPublishedAt,
+      firstChangedResponseToProvisionalMs,
+      admissionDeadlineFailures,
+      admissionStoreFailures,
+      providerFailures,
     };
     logWarn('Price-watch window expired without conclusive evidence', {
       season: season.seasonCode,
@@ -594,6 +700,14 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
         hotPublications,
         noChangeObserved,
         postDeadlineSuccessfulProbe,
+        firstChangedResponseAt,
+        firstChangedAdmissionWaitMs,
+        firstChangedProviderDurationMs,
+        firstProvisionalPublishedAt,
+        firstChangedResponseToProvisionalMs,
+        admissionDeadlineFailures,
+        admissionStoreFailures,
+        providerFailures,
       },
     });
     if (!completed) throw new Error('Price-watch completion CAS failed');
@@ -603,6 +717,18 @@ async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
     hotPublications,
     pollCount,
   };
+}
+
+async function processPriceWatchJob(job: Job<FplPriceWatchJobData>) {
+  const context = {
+    jobType: 'queue' as const,
+    jobName: job.name,
+    queueName: fplPriceWatchQueueName,
+    jobId: job.id,
+    attempt: job.attemptsMade,
+  };
+  logJobTriggered(context);
+  return runTrackedJob(context, () => processPriceWatchJobCore(job));
 }
 
 export function createFplPriceWatchWorker(): WorkerRuntime {

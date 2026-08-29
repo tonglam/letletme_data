@@ -76,6 +76,17 @@ describe('GW queue and data governance primitives', () => {
       }),
     ).toBe('DEADLINE_RISK');
     expect(classifyBacklog({ waiting: 1, active: 0, failed: 0, providerWaitP95Ms: 5_001 })).toBe(
+      'HEALTHY',
+    );
+    expect(
+      classifyBacklog({
+        waiting: 1,
+        active: 0,
+        failed: 0,
+        admissionWaitP95Ms: 501,
+      }),
+    ).toBe('ADMISSION_SATURATED');
+    expect(classifyBacklog({ waiting: 1, active: 0, failed: 0, provider429Rate: 0.05 })).toBe(
       'PROVIDER_THROTTLED',
     );
   });

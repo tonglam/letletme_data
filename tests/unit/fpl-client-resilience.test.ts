@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'bun:test';
 
 import { fplClient } from '../../src/clients/fpl';
 import { FPLClientError } from '../../src/utils/errors';
+import { getFplAdmissionStats, resetFplAdmissionForTests } from '../../src/utils/fpl-admission';
 
 const ENV_KEYS = [
   'FPL_REQUEST_DEADLINE_MS',
@@ -24,6 +25,7 @@ const runWithIsolatedState = async (body: AsyncTestBody): Promise<void> => {
   process.env.FPL_RETRY_BASE_DELAY_MS = '1';
   process.env.FPL_RETRY_MAX_DELAY_MS = '50';
   try {
+    resetFplAdmissionForTests();
     await body();
   } finally {
     globalThis.fetch = originalFetch;
@@ -134,6 +136,7 @@ describe('FPL client resilience (FP-18)', () => {
     async () => {
       let calls = 0;
       const attempts: number[] = [];
+      const hookInflight: number[] = [];
       globalThis.fetch = mock(async () => {
         calls += 1;
         if (calls === 1) {
@@ -154,12 +157,63 @@ describe('FPL client resilience (FP-18)', () => {
       const summary = await fplClient.getEntrySummary(123, {
         beforeAttempt: (attempt) => {
           attempts.push(attempt);
+          hookInflight.push(getFplAdmissionStats().inflight);
         },
       });
 
       expect(summary.summary_overall_rank).toBe(456_789);
       expect(calls).toBe(2);
       expect(attempts).toEqual([0, 1]);
+      expect(hookInflight).toEqual([1, 1]);
+    },
+  );
+
+  isolatedTest(
+    're-admits each real HTTP retry and does not hold a lease during backoff',
+    async () => {
+      let calls = 0;
+      let inflightDuringBackoff = -1;
+      let observeBackoff: (() => void) | null = null;
+      const backoffObserved = new Promise<void>((resolve) => {
+        observeBackoff = resolve;
+      });
+      globalThis.fetch = mock(async () => {
+        calls += 1;
+        if (calls === 1) {
+          setTimeout(() => {
+            inflightDuringBackoff = getFplAdmissionStats().inflight;
+            observeBackoff?.();
+          }, 50);
+          return new Response('retry', { status: 500, headers: { 'Retry-After': '0.2' } });
+        }
+        return new Response('[]', { status: 200 });
+      }) as unknown as typeof fetch;
+
+      process.env.FPL_RETRY_MAX_DELAY_MS = '500';
+      await expect(fplClient.getFixtures(1)).resolves.toEqual([]);
+      await backoffObserved;
+      expect(calls).toBe(2);
+      expect(inflightDuringBackoff).toBe(0);
+      // Two attempts consume two bucket tokens; releasing a lease does not
+      // refund a token, which keeps retry traffic visible to the global rate cap.
+      expect(getFplAdmissionStats().tokens).toBeLessThan(3);
+      expect(getFplAdmissionStats().inflight).toBe(0);
+    },
+  );
+
+  isolatedTest(
+    'does not allow callers outside the watcher to request critical priority',
+    async () => {
+      const fetchMock = mock(async () => new Response('{}', { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        fplClient.getEntrySummary(123, {
+          priority: 'deadline-critical',
+          maxRetries: 0,
+        }),
+      ).rejects.toMatchObject({ code: 'FPL_INVALID_PRIORITY' });
+      expect(fetchMock).not.toHaveBeenCalled();
     },
   );
 

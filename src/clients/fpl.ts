@@ -14,6 +14,7 @@ import {
   reportFplResponse,
   type FplRequestPriority,
 } from '../utils/fpl-admission';
+import { getJobLogContext } from '../utils/job-log-context';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 /** Wall-clock budget for one logical request including retries/backoff. */
@@ -68,6 +69,25 @@ function computeBackoffMs(attempt: number): number {
   // the window instead of stampeding the API in lockstep.
   const ceiling = Math.min(base * 2 ** attempt, cap);
   return Math.floor(Math.random() * (ceiling + 1));
+}
+
+function resolveRequestPriority(url: string, requested?: FplRequestPriority): FplRequestPriority {
+  const priority =
+    requested ??
+    (/\/event\/\d+\/live\/?$/.test(url) || /\/fixtures\/?(?:\?event=\d+)?$/.test(url)
+      ? 'live'
+      : 'bulk');
+  if (priority === 'deadline-critical') {
+    const context = getJobLogContext();
+    if (context?.queueName !== 'fpl-price-watch' || context.jobName !== 'price-change-watch') {
+      throw new FPLClientError(
+        'deadline-critical FPL admission is restricted to the price-watch worker',
+        undefined,
+        'FPL_INVALID_PRIORITY',
+      );
+    }
+  }
+  return priority;
 }
 
 // ---------------------------------------------------------------------------
@@ -597,8 +617,18 @@ export type FPLBootstrapRequestOptions = Readonly<{
   edgeCacheKey?: string;
   /** Admission class for deadline-sensitive bootstrap probes. */
   priority?: FplRequestPriority;
-  /** Optional short wall-clock cap for a single watcher probe. */
+  /** Backward-compatible alias for the overall logical-request deadline. */
   deadlineMs?: number;
+  /** Admission wait budget for each real HTTP attempt. */
+  admissionTimeoutMs?: number;
+  /** Timeout for the real HTTP attempt after admission. */
+  attemptTimeoutMs?: number;
+  /** Overall logical-request wall-clock budget, including retry backoff. */
+  overallDeadlineMs?: number;
+  /** Maximum retry count after the first HTTP attempt. */
+  maxRetries?: number;
+  /** Non-blocking observer for the completed real HTTP attempts. */
+  onAttempt?: (result: FPLRequestAttemptResult) => void;
 }>;
 export type FPLBootstrapArtifactResponse = Readonly<{
   bytes: Uint8Array;
@@ -652,12 +682,30 @@ type FPLRequestAttemptContext = Readonly<{
   signal: AbortSignal;
 }>;
 
+export type FPLRequestAttemptResult = Readonly<{
+  attempt: number;
+  status: number | null;
+  admissionWaitMs: number;
+  providerDurationMs: number;
+  completedAt: Date;
+}>;
+
 export type FPLRequestOptions = Readonly<{
-  /** Optional wall-clock cap for this logical request, including retries/backoff. */
+  /** Backward-compatible alias for the overall logical-request deadline. */
   deadlineMs?: number;
+  /** Admission wait budget for each real HTTP attempt. */
+  admissionTimeoutMs?: number;
+  /** Timeout for the real HTTP attempt after admission. */
+  attemptTimeoutMs?: number;
+  /** Overall logical-request wall-clock budget, including retry backoff. */
+  overallDeadlineMs?: number;
+  /** Maximum retry count after the first HTTP attempt. */
+  maxRetries?: number;
   /** Optional admission class override for the endpoint. */
   priority?: FplRequestPriority;
   beforeAttempt?: (attempt: number, context: FPLRequestAttemptContext) => void | Promise<void>;
+  /** Non-blocking observer for the completed real HTTP attempts. */
+  onAttempt?: (result: FPLRequestAttemptResult) => void;
 }>;
 
 class FPLClient {
@@ -671,25 +719,27 @@ class FPLClient {
    *
    * Body handling inside the retry loop:
    * - 2xx: buffer fully so hung/truncated bodies after a 200 header are retried
-   * - 429/5xx: record status first, then buffer (status preserved if body stalls)
+   * - 429/5xx: retain status first, then buffer (status preserved if body stalls)
    * - other non-ok (e.g. 404): return immediately without buffering so hung 404
    *   bodies do not flip cup lookups to UNKNOWN_ERROR
    */
   private async request(url: string, options: FPLRequestOptions = {}): Promise<Response> {
-    const priority: FplRequestPriority =
-      options.priority ??
-      (/\/event\/\d+\/live\/?$/.test(url) || /\/fixtures\/?(?:\?event=\d+)?$/.test(url)
-        ? 'live'
-        : 'bulk');
-    const deadlineMs = Math.max(
+    const priority = resolveRequestPriority(url, options.priority);
+    const overallDeadlineMs = Math.max(
       1,
-      options.deadlineMs ?? getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS),
+      options.overallDeadlineMs ??
+        options.deadlineMs ??
+        getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS),
     );
     const started = Date.now();
-    const releaseAdmission = await acquireFplRequest(priority, {
-      deadlineAt: started + deadlineMs,
-    });
     const requestMetric = beginFplLogicalRequest(url);
+    const overallDeadlineAt = started + overallDeadlineMs;
+    const admissionTimeoutMs = Math.max(
+      1,
+      options.admissionTimeoutMs ??
+        (priority === 'deadline-critical' ? 750 : priority === 'live' ? 3_000 : 10_000),
+    );
+    const maxRetries = Math.max(0, Math.min(MAX_RETRIES, options.maxRetries ?? MAX_RETRIES));
     try {
       let lastError: unknown = null;
       /** Last 429/5xx (status-only or buffered) — preferred over UNKNOWN_ERROR. */
@@ -699,7 +749,7 @@ class FPLClient {
        * body buffering. Used if the body stalls so the catch path still honors it.
        */
       let pendingBackoffMs: number | null = null;
-      const remainingMs = (): number => Math.max(deadlineMs - (Date.now() - started), 0);
+      const remainingMs = (): number => Math.max(overallDeadlineAt - Date.now(), 0);
 
       const statusOnlyResponse = (response: Response): Response =>
         new Response(null, {
@@ -717,123 +767,158 @@ class FPLClient {
         });
       };
 
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
         let remaining = remainingMs();
         if (remaining <= 0) {
           break;
         }
 
-        // Endpoint-specific ordering hooks run after retry backoff and directly
-        // before the actual attempt. Errors abort the logical request instead
-        // of being mistaken for retryable network failures.
-        if (options.beforeAttempt) {
-          const controller = new AbortController();
-          try {
-            await withTimeout(
-              Promise.resolve(
-                options.beforeAttempt(attempt, {
-                  deadlineAt: started + deadlineMs,
-                  remainingMs: remaining,
-                  signal: controller.signal,
-                }),
-              ),
-              remaining,
-              'FPL pre-attempt hook exceeded the logical request deadline',
-            );
-          } catch (error) {
-            // Abort first so endpoint-specific work can cancel a queued DB lock
-            // before this request releases its distributed admission lease.
-            controller.abort(error);
-            throw error;
-          }
-        }
-        remaining = remainingMs();
-        if (remaining <= 0) break;
-
-        let attemptRecorded = false;
-        const attemptController = new AbortController();
-        const attemptTimeout = Math.max(
-          1,
-          Math.floor(Math.min(getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS), remaining)),
-        );
-        const attemptTimeoutHandle = setTimeout(() => {
-          attemptController.abort(new DOMException('The operation timed out.', 'TimeoutError'));
-        }, attemptTimeout);
-        const clearAttemptTimeout = (): void => clearTimeout(attemptTimeoutHandle);
+        const admissionDeadlineAt = Math.min(overallDeadlineAt, Date.now() + admissionTimeoutMs);
+        const admissionLease = await acquireFplRequest(priority, {
+          deadlineAt: admissionDeadlineAt,
+        });
+        let retryDelayMs: number | null = null;
+        let attemptStatus: number | null = null;
+        let providerStartedAt: number | null = null;
         try {
-          const response = await fetch(url, {
-            signal: attemptController.signal,
-            headers: { 'User-Agent': USER_AGENT },
-          });
-          reportFplResponse(priority, response.status);
+          // Endpoint-specific ordering hooks run after admission and directly
+          // before the actual attempt. They therefore share the lease with
+          // the HTTP request and cannot make an admitted slot look idle.
+          remaining = remainingMs();
+          if (remaining <= 0) break;
+          if (options.beforeAttempt) {
+            const controller = new AbortController();
+            try {
+              await withTimeout(
+                Promise.resolve(
+                  options.beforeAttempt(attempt, {
+                    deadlineAt: overallDeadlineAt,
+                    remainingMs: remaining,
+                    signal: controller.signal,
+                  }),
+                ),
+                remaining,
+                'FPL pre-attempt hook exceeded the logical request deadline',
+              );
+            } catch (error) {
+              // Abort first so endpoint-specific work can cancel a queued DB lock
+              // before this request releases its distributed admission lease.
+              controller.abort(error);
+              throw error;
+            }
+          }
+          let attemptRecorded = false;
+          const attemptController = new AbortController();
+          const attemptTimeout = Math.max(
+            1,
+            Math.floor(
+              Math.min(
+                options.attemptTimeoutMs ?? getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS),
+                remainingMs(),
+              ),
+            ),
+          );
+          const attemptTimeoutHandle = setTimeout(() => {
+            attemptController.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+          }, attemptTimeout);
+          const clearAttemptTimeout = (): void => clearTimeout(attemptTimeoutHandle);
+          try {
+            providerStartedAt = Date.now();
+            const response = await fetch(url, {
+              signal: attemptController.signal,
+              headers: { 'User-Agent': USER_AGENT },
+            });
+            attemptStatus = response.status;
 
-          if (isRetryableStatus(response.status)) {
-            // Record status + Retry-After before consuming the body so a hung
-            // 429/5xx body still preserves status and honors the rate-limit delay.
-            requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
-            attemptRecorded = true;
-            lastRetryableResponse = statusOnlyResponse(response);
-            const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
-            pendingBackoffMs = retryAfterMs ?? computeBackoffMs(attempt);
+            if (isRetryableStatus(response.status)) {
+              // Retain status + Retry-After before consuming the body so a hung
+              // 429/5xx body still preserves status and honors the rate-limit delay.
+              requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+              attemptRecorded = true;
+              lastRetryableResponse = statusOnlyResponse(response);
+              const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+              pendingBackoffMs = retryAfterMs ?? computeBackoffMs(attempt);
 
-            const buffered = await bufferResponse(response);
-            lastRetryableResponse = buffered;
+              const buffered = await bufferResponse(response);
+              lastRetryableResponse = buffered;
 
-            if (attempt === MAX_RETRIES) {
+              if (attempt === maxRetries) {
+                pendingBackoffMs = null;
+                return buffered;
+              }
+
+              const delayMs = Math.min(pendingBackoffMs, remainingMs());
               pendingBackoffMs = null;
-              clearAttemptTimeout();
+              logDebug('Retryable FPL response; backing off', {
+                url,
+                status: response.status,
+                attempt,
+                delayMs,
+              });
+              retryDelayMs = delayMs;
+            } else {
+              // Non-retryable error (404, 400, …): return without buffering — hung 404
+              // bodies must not flip cup lookups to UNKNOWN_ERROR.
+              if (!response.ok) {
+                requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+                pendingBackoffMs = null;
+                return response;
+              }
+
+              // A later 2xx supersedes any earlier 429/5xx: if the body stalls we should
+              // surface a body-read failure, not a stale HTTP_ERROR from a prior attempt.
+              lastRetryableResponse = null;
+              pendingBackoffMs = null;
+              const buffered = await bufferResponse(response);
+              requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
               return buffered;
             }
-
-            const delayMs = Math.min(pendingBackoffMs, remainingMs());
-            pendingBackoffMs = null;
-            logDebug('Retryable FPL response; backing off', {
-              url,
-              status: response.status,
-              attempt,
-              delayMs,
-            });
-            if (delayMs > 0) {
-              await sleep(delayMs);
+          } catch (error) {
+            if (!attemptRecorded) {
+              // A 2xx header followed by a failed body read is a transport
+              // failure, not a successful provider sample. Retryable statuses
+              // keep their status so a stalled 429/5xx remains visible.
+              attemptStatus = null;
+              requestMetric.recordAttempt(classifyFplRequestError(error));
             }
-            clearAttemptTimeout();
-            continue;
-          }
-
-          // Non-retryable error (404, 400, …): return without buffering — hung 404
-          // bodies must not flip cup lookups to UNKNOWN_ERROR.
-          if (!response.ok) {
-            requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+            lastError = error;
+            if (attempt === maxRetries || remainingMs() <= 0) {
+              pendingBackoffMs = null;
+              break;
+            }
+            const delayMs = Math.min(pendingBackoffMs ?? computeBackoffMs(attempt), remainingMs());
             pendingBackoffMs = null;
+            logDebug('FPL request failed; backing off', { url, attempt, delayMs });
+            retryDelayMs = delayMs;
+          } finally {
             clearAttemptTimeout();
-            return response;
           }
-
-          // A later 2xx supersedes any earlier 429/5xx: if the body stalls we should
-          // surface a body-read failure, not a stale HTTP_ERROR from a prior attempt.
-          lastRetryableResponse = null;
-          pendingBackoffMs = null;
-          const buffered = await bufferResponse(response);
-          requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
-          clearAttemptTimeout();
-          return buffered;
-        } catch (error) {
-          clearAttemptTimeout();
-          if (!attemptRecorded) reportFplResponse(priority, null);
-          if (!attemptRecorded) {
-            requestMetric.recordAttempt(classifyFplRequestError(error));
+        } finally {
+          const attemptCompletedAt = providerStartedAt === null ? null : new Date();
+          await admissionLease.release();
+          if (attemptCompletedAt) {
+            const providerDurationMs = Math.max(
+              0,
+              attemptCompletedAt.getTime() - providerStartedAt!,
+            );
+            reportFplResponse(priority, attemptStatus, providerDurationMs);
+            try {
+              options.onAttempt?.({
+                attempt,
+                status: attemptStatus,
+                admissionWaitMs: admissionLease.waitMs,
+                providerDurationMs,
+                completedAt: attemptCompletedAt,
+              });
+            } catch {
+              // Observability hooks must never turn a completed provider attempt
+              // into a failed FPL request.
+            }
           }
-          lastError = error;
-          if (attempt === MAX_RETRIES || remainingMs() <= 0) {
-            pendingBackoffMs = null;
-            break;
-          }
-          const delayMs = Math.min(pendingBackoffMs ?? computeBackoffMs(attempt), remainingMs());
-          pendingBackoffMs = null;
-          logDebug('FPL request failed; backing off', { url, attempt, delayMs });
-          if (delayMs > 0) {
-            await sleep(delayMs);
-          }
+        }
+        if (retryDelayMs !== null) {
+          if (retryDelayMs > 0) await sleep(retryDelayMs);
+          continue;
         }
       }
 
@@ -848,7 +933,6 @@ class FPLClient {
       throw lastError instanceof Error ? lastError : new Error(String(lastError));
     } finally {
       requestMetric.finish();
-      await releaseAdmission();
     }
   }
 
@@ -864,6 +948,11 @@ class FPLClient {
       const response = await this.request(url, {
         priority: options.priority,
         deadlineMs: options.deadlineMs,
+        admissionTimeoutMs: options.admissionTimeoutMs,
+        attemptTimeoutMs: options.attemptTimeoutMs,
+        overallDeadlineMs: options.overallDeadlineMs,
+        maxRetries: options.maxRetries,
+        onAttempt: options.onAttempt,
       });
 
       if (!response.ok) {
@@ -925,9 +1014,18 @@ class FPLClient {
 
     try {
       logDebug('Fetching exact FPL bootstrap artifact', { url });
+      let responseCompletedAt: Date | null = null;
       const response = await this.request(url, {
         priority: options.priority,
         deadlineMs: options.deadlineMs,
+        admissionTimeoutMs: options.admissionTimeoutMs,
+        attemptTimeoutMs: options.attemptTimeoutMs,
+        overallDeadlineMs: options.overallDeadlineMs,
+        maxRetries: options.maxRetries,
+        onAttempt: (result) => {
+          responseCompletedAt = result.completedAt;
+          options.onAttempt?.(result);
+        },
       });
       if (!response.ok) {
         throw new FPLClientError(
@@ -960,7 +1058,7 @@ class FPLClient {
       const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       const data: unknown = JSON.parse(decoded);
       const payload = BootstrapResponseSchema.parse(data);
-      const retrievedAt = new Date();
+      const retrievedAt = responseCompletedAt ?? new Date();
 
       logDebug('Successfully fetched exact FPL bootstrap artifact', {
         url,
