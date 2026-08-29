@@ -110,7 +110,7 @@ describe('My FPL daily snapshot publication contract', () => {
       scoreSource: 'FPL_EVENT_LIVE',
       livePublicationId: '00000000-0000-4000-8000-000000000001',
       liveRevision: '8',
-      algorithmVersion: 'fpl-projected-autosubs-v1',
+      algorithmVersion: 'live-points-v2-algorithm-1',
       sourceMinCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
       sourceMaxCheckedAt: new Date('2026-08-23T02:05:00.000Z'),
     };
@@ -367,7 +367,7 @@ describe('My FPL daily snapshot publication contract', () => {
       scoreSource: 'FPL_EVENT_LIVE',
       livePublicationId: '00000000-0000-4000-8000-000000000001',
       liveRevision: '8',
-      algorithmVersion: 'fpl-projected-autosubs-v1',
+      algorithmVersion: 'live-points-v2-algorithm-1',
       sourceMinCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
       sourceMaxCheckedAt: new Date('2026-08-23T02:05:00.000Z'),
     };

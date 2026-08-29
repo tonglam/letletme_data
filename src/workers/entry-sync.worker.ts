@@ -66,6 +66,10 @@ import { isTerminalJobFailure } from '../utils/worker-failure';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { getQueueConnection } from '../utils/queue';
+import {
+  findMissingEntryLiveInputIds,
+  markLivePicksEntryComplete,
+} from '../services/live-lifecycle-orchestrator';
 import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
 import {
   completeSchedulerObligation,
@@ -639,6 +643,17 @@ export function createEntrySyncWorker(
                   if (targetEventId === undefined) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
+                  if (effectiveJobData?.lane === 'live-picks') {
+                    const requiredEntryIds = await findMissingEntryLiveInputIds(
+                      season,
+                      targetEventId,
+                      entryIds,
+                    );
+                    return {
+                      requiredEntryIds,
+                      reusedUnits: entryIds.length - requiredEntryIds.length,
+                    };
+                  }
                   // Explicit API/manual entry lists are repair requests,
                   // so they must refetch even when a warm row exists. Only
                   // scheduled scans may reuse a complete picks row.
@@ -658,12 +673,14 @@ export function createEntrySyncWorker(
                   };
                 },
                 auditRequired: (entryIds) =>
-                  entryEventPicksRepository
-                    .findEntryIdsByEvent(season, targetEventId!, entryIds)
-                    .then((persisted) => {
-                      const persistedSet = new Set(persisted);
-                      return entryIds.filter((entryId) => !persistedSet.has(entryId));
-                    }),
+                  effectiveJobData?.lane === 'live-picks'
+                    ? findMissingEntryLiveInputIds(season, targetEventId!, entryIds)
+                    : entryEventPicksRepository
+                        .findEntryIdsByEvent(season, targetEventId!, entryIds)
+                        .then((persisted) => {
+                          const persistedSet = new Set(persisted);
+                          return entryIds.filter((entryId) => !persistedSet.has(entryId));
+                        }),
               },
             );
           case 'entry-transfers':
@@ -780,10 +797,24 @@ export function createEntrySyncWorker(
           ? inspectSchedulerObligationFence(effectiveJobData)
           : { kind: 'none' as const };
         const livePicksChildComplete =
+          job.name === 'entry-picks' &&
           effectiveJobData?.lane === 'live-picks' &&
           scoped.value.failedUnits === 0 &&
           scoped.value.hasMore === false;
-        if (fence.kind === 'complete' && (scoped.value.scanComplete || livePicksChildComplete)) {
+        let livePicksCoverageComplete = false;
+        if (livePicksChildComplete && targetEventId !== undefined) {
+          const entryIds = [...new Set(effectiveJobData?.entryIds ?? [])];
+          const drained = await Promise.all(
+            entryIds.map((entryId) =>
+              markLivePicksEntryComplete(season.seasonCode, targetEventId, entryId),
+            ),
+          );
+          // Only the worker that observes the pending set become empty may
+          // settle the event-scoped scheduler obligation. A successful child
+          // must never make a partial cohort look complete.
+          livePicksCoverageComplete = drained.some(Boolean);
+        }
+        if (fence.kind === 'complete' && (scoped.value.scanComplete || livePicksCoverageComplete)) {
           await completeSchedulerObligation({
             obligationId: fence.obligationId,
             generation: fence.generation,

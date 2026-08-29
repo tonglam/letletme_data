@@ -80,7 +80,7 @@ const EnvSchema = z.object({
   // pool, so the default must leave headroom for all four services rather
   // than exhausting the project pool as soon as the standalone scheduler is
   // enabled.
-  DATABASE_POOL_MAX: boundedIntegerEnv(3, 1, 5),
+  DATABASE_POOL_MAX: boundedIntegerEnv(1, 1, 2),
   // Rebuildable Data publications only. Queue/coordination state must never use this client.
   CACHE_REDIS_HOST: z.string().default('localhost'),
   CACHE_REDIS_PORT: boundedIntegerEnv(6379, 1, 65535),
@@ -171,8 +171,7 @@ const EnvSchema = z.object({
   TOURNAMENT_ENTRY_FETCH_TIMEOUT_MS: boundedIntegerEnv(45_000, 1_000, 2 * 60 * 60_000),
   TOURNAMENT_ENTRY_PERSIST_TIMEOUT_MS: boundedIntegerEnv(60_000, 1_000, 2 * 60 * 60_000),
   LIVE_POLL_MS: boundedIntegerEnv(30_000, 1_000, 24 * 60 * 60_000),
-  PICKS_FIRST_PROBE_OFFSET_MS: boundedIntegerEnv(60 * 60_000, 1_000, 24 * 60 * 60_000),
-  PICKS_REFRESH_INTERVAL_MS: boundedIntegerEnv(10 * 60_000, 1_000, 24 * 60 * 60_000),
+  PICKS_FIRST_PROBE_OFFSET_MS: boundedIntegerEnv(1_000, 1_000, 24 * 60 * 60_000),
   PICKS_RETRY_SCHEDULE_MS: z.string().default('120000,180000,300000,600000'),
   BETWEEN_FIXTURES_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
   DAY_SETTLING_INITIAL_POLL_MS: boundedIntegerEnv(60_000, 1_000, 24 * 60 * 60_000),

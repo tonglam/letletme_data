@@ -326,7 +326,7 @@ export const dataPublicationOutboxInOps = ops.table(
     }).onDelete('restrict'),
     check(
       'data_publication_outbox_dataset_check',
-      sql`dataset = ANY (ARRAY['fpl:core'::text, 'fpl:live'::text, 'fpl:market'::text, 'fpl:price-changes'::text])`,
+      sql`dataset = ANY (ARRAY['fpl:core'::text, 'fpl:market'::text, 'fpl:price-changes'::text])`,
     ),
     check(
       'data_publication_outbox_status_check',

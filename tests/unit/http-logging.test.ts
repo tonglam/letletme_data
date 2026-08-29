@@ -4,8 +4,8 @@ import { getHttpErrorLogLevel, getHttpRequestLogContext } from '../../src/utils/
 
 describe('HTTP logging policy', () => {
   test('suppresses health checks', () => {
-    const health = new Request('http://127.0.0.1:3000/health?source=docker');
-    const ready = new Request('http://127.0.0.1:3000/ready?source=monitor');
+    const health = new Request('http://127.0.0.1:3000/health/live?source=docker');
+    const ready = new Request('http://127.0.0.1:3000/health/ready?source=monitor');
 
     expect(getHttpRequestLogContext(health)).toBeNull();
     expect(getHttpRequestLogContext(ready)).toBeNull();

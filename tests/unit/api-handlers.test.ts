@@ -553,7 +553,7 @@ describe('eventLivesAPI handlers', () => {
     expect(response.status).toBe(202);
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.jobId).toBe('live-snapshot-2627-e12-manual-persist');
+    expect(body.jobId).toBe('live-snapshot-2627-e12-manual-v2');
   });
 
   test('POST /event-lives/cache/:eventId enqueues a coherent snapshot and returns 202', async () => {
@@ -562,7 +562,7 @@ describe('eventLivesAPI handlers', () => {
     );
     expect(response.status).toBe(202);
     const body = (await response.json()) as { jobId: string };
-    expect(body.jobId).toBe('live-snapshot-2627-e12-manual-cache');
+    expect(body.jobId).toBe('live-snapshot-2627-e12-manual-v2');
   });
 });
 

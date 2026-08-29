@@ -49,7 +49,7 @@ describe('runtime inventory documentation contract', () => {
       ),
     ];
 
-    expect(queueNames).toHaveLength(24);
+    expect(queueNames).toHaveLength(23);
     for (const queueName of queueNames) {
       expect(documentation).toContain(`\`${queueName}\``);
     }
@@ -83,7 +83,7 @@ describe('runtime inventory documentation contract', () => {
 
   test('documents every scheduler registry definition and compatibility alias', () => {
     const names = schedulerRegistryNames();
-    expect(names).toHaveLength(38);
+    expect(names).toHaveLength(37);
     for (const name of names) expect(read('docs/job-schedule.md')).toContain(name);
 
     const aliases = [
@@ -119,7 +119,7 @@ describe('runtime inventory documentation contract', () => {
     };
     const families = [
       `${constant(publicationSource, 'DATA_CACHE_NAMESPACE')}:fpl:core:`,
-      `${constant(publicationSource, 'DATA_CACHE_NAMESPACE')}:fpl:live:`,
+      'llm:data:v2:fpl:live:',
       'llm:data:fpl:my-fpl:',
       `${constant(hotSource, 'HOT_KEY_PREFIX')}:`,
       'llm:tournament:preview:',

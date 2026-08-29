@@ -3,13 +3,12 @@ import { describe, expect, test } from 'bun:test';
 import { checkReadiness } from '../../src/api/health';
 
 describe('data API readiness', () => {
-  test('is ready only when PostgreSQL, both Redis roles, and active season respond', async () => {
+  test('hot-path readiness ignores PostgreSQL and queue Redis', async () => {
     await expect(
       checkReadiness({
         postgres: async () => true,
         cacheRedis: async () => true,
         queueRedis: async () => true,
-        managerLiveQueue: async () => true,
         activeSeason: async () => true,
         screenshotRetentionConfigured: async () => true,
       }),
@@ -19,7 +18,6 @@ describe('data API readiness', () => {
         postgres: true,
         cacheRedis: true,
         queueRedis: true,
-        managerLiveQueue: true,
         activeSeason: true,
         screenshotRetentionConfigured: true,
       },
@@ -34,7 +32,6 @@ describe('data API readiness', () => {
         },
         cacheRedis: async () => false,
         queueRedis: async () => true,
-        managerLiveQueue: async () => false,
         activeSeason: async () => false,
         screenshotRetentionConfigured: async () => true,
       }),
@@ -44,7 +41,6 @@ describe('data API readiness', () => {
         postgres: false,
         cacheRedis: false,
         queueRedis: true,
-        managerLiveQueue: false,
         activeSeason: false,
         screenshotRetentionConfigured: true,
       },
@@ -57,9 +53,9 @@ describe('data API readiness', () => {
       postgres: () => new Promise<boolean>(() => undefined),
       cacheRedis: async () => true,
       queueRedis: async () => true,
-      managerLiveQueue: async () => true,
       activeSeason: async () => true,
       screenshotRetentionConfigured: async () => true,
+      strict: true,
       probeTimeoutMs: 10,
     });
 

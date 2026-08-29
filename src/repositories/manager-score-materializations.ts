@@ -719,7 +719,7 @@ const materializationEntryLockKey = (
 
 /**
  * Persist a batch after calculation. Materializations are immutable; heads
- * are advanced only while the durable fpl:live pointer still names the exact
+ * are advanced only while the durable Live Points V2 pointer still names the exact
  * publication/revision that produced the batch.
  */
 export async function persistManagerScoreMaterializations(
@@ -1341,7 +1341,7 @@ async function readActiveLivePointer(
   const rows = await tx<{ publication_id: string; revision: number | string }[]>`
     SELECT publication_id, revision
     FROM ops.dataset_publications
-    WHERE dataset = 'fpl:live'
+    WHERE dataset = 'redis:v2:fpl:live'
       AND season_id = ${seasonId}
       AND event_id = ${eventId}
       AND status = 'active'

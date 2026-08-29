@@ -7,12 +7,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { redisSingleton } from '../../src/cache/singleton';
 import type { EventLive } from '../../src/domain/event-lives';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
-import {
-  activateDataPublicationPointer,
-  prepareDataPublication,
-  stageDataPublication,
-} from '../../src/cache/data-publication';
-import { retireLiveSnapshotCache } from '../../src/cache/live-snapshot-cache';
+import { publishLivePublicationV2 } from '../../src/cache/live-publication-v2';
 import { getDbClient } from '../../src/db/singleton';
 import {
   captureMyFplSnapshot,
@@ -41,7 +36,6 @@ const SNAPSHOT_DATE = '2026-08-23';
 // bounds regardless of when CI runs.
 const CAPTURE_NOW = new Date();
 const MANIFEST_KEY = myFplSnapshotRedisManifestKey(SEASON.seasonCode, EVENT_ID);
-const LIVE_PUBLICATION_ID = '00000000-0000-4000-8000-000000000209';
 
 const liveRows: EventLive[] = PLAYER_IDS.map((elementId, index) => ({
   eventId: EVENT_ID,
@@ -77,7 +71,7 @@ async function cleanup(): Promise<void> {
   `;
   await sql`
     DELETE FROM ops.dataset_publications
-    WHERE dataset = 'fpl:live'
+    WHERE dataset = 'redis:v2:fpl:live'
       AND season_id = ${SEASON.seasonId}
       AND event_id = ${EVENT_ID}
   `;
@@ -131,7 +125,18 @@ async function cleanup(): Promise<void> {
     WHERE season_id = ${SEASON.seasonId} AND season_code = ${SEASON.seasonCode}
   `;
   const cache = await redisSingleton.getClient();
-  await retireLiveSnapshotCache(SEASON.seasonCode, EVENT_ID, cache);
+  let cursor = '0';
+  do {
+    const [next, keys] = await cache.scan(
+      cursor,
+      'MATCH',
+      `llm:data:v2:fpl:live:${SEASON.seasonCode}:${EVENT_ID}:*`,
+      'COUNT',
+      100,
+    );
+    cursor = next;
+    if (keys.length > 0) await cache.unlink(...keys);
+  } while (cursor !== '0');
   await cache.unlink(MANIFEST_KEY);
 }
 
@@ -186,53 +191,14 @@ async function seedBase(): Promise<void> {
     FROM unnest(${PLAYER_IDS}::integer[])
       WITH ORDINALITY AS player(element_id, ordinality)
   `;
-  // The projector validates the durable PostgreSQL publication pointer before
-  // promoting a materialization head. Build the same immutable proof that the
-  // live publication path persists, then deliver it to Redis after the DB row
-  // is active so the fixture exercises the production ordering.
-  const prepared = prepareDataPublication({
-    dataset: 'fpl:live',
-    seasonCode: SEASON.seasonCode,
+  await publishLivePublicationV2({
+    season: SEASON.seasonCode,
     eventId: EVENT_ID,
-    revision: 1,
-    publicationId: LIVE_PUBLICATION_ID,
+    state: 'LIVE_ACTIVE',
     sourceCheckedAt: CAPTURE_NOW,
-    lastSuccessfulFetchAt: CAPTURE_NOW,
-    state: 'live',
-    items: [
-      { name: 'eventLive', value: liveRows },
-      { name: 'fixtures', value: [] },
-    ],
+    eventLives: liveRows,
+    fixtures: [],
   });
-  await sql`
-    INSERT INTO ops.dataset_publications (
-      publication_id, dataset, season_id, event_id, revision,
-      status, manifest, activated_at
-    )
-    VALUES (
-      ${LIVE_PUBLICATION_ID}::uuid, 'fpl:live', ${SEASON.seasonId}, ${EVENT_ID}, 1,
-      'active', ${JSON.stringify(prepared.manifest)}::jsonb, ${CAPTURE_NOW.toISOString()}::timestamptz
-    )
-  `;
-  await sql`
-    INSERT INTO ops.dataset_publication_items (
-      publication_id, item_name, payload, item_count, checksum
-    )
-    VALUES
-      (
-        ${LIVE_PUBLICATION_ID}::uuid, 'eventLive', ${JSON.stringify(liveRows)}::jsonb,
-        ${prepared.manifest.items.find((item) => item.name === 'eventLive')?.count ?? 0},
-        ${prepared.manifest.items.find((item) => item.name === 'eventLive')?.sha256 ?? ''}
-      ),
-      (
-        ${LIVE_PUBLICATION_ID}::uuid, 'fixtures', '[]'::jsonb,
-        ${prepared.manifest.items.find((item) => item.name === 'fixtures')?.count ?? 0},
-        ${prepared.manifest.items.find((item) => item.name === 'fixtures')?.sha256 ?? ''}
-      )
-  `;
-  await stageDataPublication(prepared);
-  const activated = await activateDataPublicationPointer(prepared.manifest);
-  expect(activated.status).toBe('published');
 }
 
 async function seedEntry(entryId: number, complete: boolean): Promise<void> {

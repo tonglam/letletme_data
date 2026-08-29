@@ -401,9 +401,7 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueLiveSnapshot(season, currentEvent.id, 'manual', {
-        persistEventLives: false,
-      });
+      return enqueueLiveSnapshot(season, currentEvent.id, 'manual');
     },
     'live-finalization': runPostMatchConsolidation,
   };

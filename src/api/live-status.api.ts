@@ -1,13 +1,9 @@
 import { Elysia, t } from 'elysia';
 
-import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
+import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
-import {
-  liveLifecycleStatusRepository,
-  managerScoreCheckpointRepository,
-} from '../repositories/live-window';
-import { syncOperationsRepository } from '../repositories/sync-operations';
+import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { seasonRepository } from '../repositories/seasons';
 
 export function formatOperationalTimestamp(value: unknown): string | null {
@@ -34,61 +30,31 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
       return { success: false, code: 'LIVE_EVENT_NOT_FOUND' };
     }
 
-    const [fixtures, lifecycle, redisRead, postgresPublicationRead, managerRead] =
-      await Promise.all([
-        fixtureRepository.findByEvent(season, event.id),
-        liveLifecycleStatusRepository.findByEventId(season, event.id),
-        (async () => {
-          try {
-            return { value: await readLiveSnapshotCache(season.seasonCode, event.id), error: null };
-          } catch (error) {
-            return {
-              value: null,
-              error: error instanceof Error ? error.name : 'UNKNOWN',
-            };
-          }
-        })(),
-        (async () => {
-          try {
-            return {
-              value: await syncOperationsRepository.findActiveLivePublicationEvidence(
-                season,
-                event.id,
-              ),
-              error: null,
-            };
-          } catch (error) {
-            return {
-              value: null,
-              error: error instanceof Error ? error.name : 'UNKNOWN',
-            };
-          }
-        })(),
-        (async () => {
-          try {
-            return {
-              value: await managerScoreCheckpointRepository.findCoverageByEvent(season, event.id),
-              error: null,
-            };
-          } catch (error) {
-            return {
-              value: null,
-              error: error instanceof Error ? error.name : 'UNKNOWN',
-            };
-          }
-        })(),
-      ]);
+    const [fixtures, lifecycle, redisRead] = await Promise.all([
+      fixtureRepository.findByEvent(season, event.id),
+      liveLifecycleStatusRepository.findByEventId(season, event.id),
+      (async () => {
+        try {
+          return {
+            value: await readLivePublicationV2({ season: season.seasonCode, eventId: event.id }),
+            error: null,
+          };
+        } catch (error) {
+          return {
+            value: null,
+            error: error instanceof Error ? error.name : 'UNKNOWN',
+          };
+        }
+      })(),
+    ]);
     const cachedPublication = redisRead.value;
-    const postgresPublication = postgresPublicationRead.value;
-    const selectedPublication = cachedPublication ?? postgresPublication;
-    const selectedSource = cachedPublication ? 'REDIS' : postgresPublication ? 'POSTGRES' : null;
+    const selectedPublication = cachedPublication?.publication ?? null;
+    const selectedSource = cachedPublication ? cachedPublication.servedFrom : null;
     const finishedFixtures = fixtures.filter(
       (fixture) => fixture.finished || fixture.finishedProvisional,
     ).length;
-    const publishedFixtureCount =
-      selectedPublication?.manifest.items.find((item) => item.name === 'fixtures')?.count ?? null;
-    const publishedEventLiveCount =
-      selectedPublication?.manifest.items.find((item) => item.name === 'eventLive')?.count ?? null;
+    const publishedFixtureCount = selectedPublication?.items.fixtures.count ?? null;
+    const publishedEventLiveCount = selectedPublication?.items.eventLive.count ?? null;
 
     return {
       success: true,
@@ -108,13 +74,12 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         : null,
       publication: selectedPublication
         ? {
-            revision: String(selectedPublication.manifest.revision),
-            publicationId: selectedPublication.manifest.publicationId,
-            state: selectedPublication.manifest.state,
-            sourceCheckedAt: selectedPublication.manifest.sourceCheckedAt,
-            lastSuccessfulFetchAt:
-              selectedPublication.manifest.lastSuccessfulFetchAt ??
-              selectedPublication.manifest.sourceCheckedAt,
+            generation: selectedPublication.generation,
+            publicationId: selectedPublication.publicationId,
+            state: selectedPublication.state,
+            sourceCheckedAt: selectedPublication.sourceCheckedAt,
+            publishedAt: selectedPublication.publishedAt,
+            checkpointedAt: selectedPublication.checkpointedAt,
             source: selectedSource,
             fixtureCount: publishedFixtureCount,
             eventLiveCount: cachedPublication?.eventLives.length ?? publishedEventLiveCount,
@@ -125,21 +90,9 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         publication: selectedPublication ? 'AVAILABLE' : 'NO_NEW_REVISION',
         fallback: {
           redis: redisRead.error ? 'UNAVAILABLE' : cachedPublication ? 'AVAILABLE' : 'EMPTY',
-          postgres: postgresPublicationRead.error
-            ? 'UNAVAILABLE'
-            : postgresPublication
-              ? 'AVAILABLE'
-              : 'EMPTY',
+          postgres: 'CHECKPOINT_API',
           selected: selectedSource ?? 'NONE',
         },
-        manager: managerRead.value
-          ? {
-              checkpointRows: managerRead.value.checkpointRows,
-              scopes: managerRead.value.scopes,
-              latestCheckedAt: formatOperationalTimestamp(managerRead.value.latestCheckedAt),
-            }
-          : null,
-        managerState: managerRead.error ? 'UNAVAILABLE' : managerRead.value ? 'AVAILABLE' : 'EMPTY',
       },
       timestamp: new Date().toISOString(),
     };

@@ -1,4 +1,4 @@
-import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
+import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
@@ -152,7 +152,7 @@ async function resolveEventPointsPayload(
       };
     }
   } else {
-    const cached = await readLiveSnapshotCache(season.seasonCode, eventId);
+    const cached = await readLivePublicationV2({ season: season.seasonCode, eventId });
     if (cached && cached.eventLives.length > 0) {
       return {
         elements: cached.eventLives.map((row) => ({

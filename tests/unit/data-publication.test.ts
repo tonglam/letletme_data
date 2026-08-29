@@ -34,13 +34,10 @@ function validManifest(): DataPublicationManifest {
 }
 
 describe('data publication contract', () => {
-  test('builds canonical core, live, and price-change keys', () => {
+  test('builds canonical generic publication keys', () => {
     expect(activeDataPublicationKey(scope)).toBe('llm:data:fpl:core:2627:active');
     expect(dataPublicationItemKey(scope, 7, 'currentEventId')).toBe(
       'llm:data:fpl:core:2627:7:currentEventId',
-    );
-    expect(activeDataPublicationKey({ dataset: 'fpl:live', seasonCode: '2627', eventId: 12 })).toBe(
-      'llm:data:fpl:live:2627:12:active',
     );
     expect(activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: '2627' })).toBe(
       'llm:data:fpl:price-changes:2627:active',
@@ -49,7 +46,9 @@ describe('data publication contract', () => {
 
   test('rejects invalid scope, revision, and item identity', () => {
     expect(() => activeDataPublicationKey({ dataset: 'fpl:core', seasonCode: '26/27' })).toThrow();
-    expect(() => activeDataPublicationKey({ dataset: 'fpl:live', seasonCode: '2627' })).toThrow();
+    expect(() =>
+      activeDataPublicationKey({ dataset: 'fpl:core', seasonCode: '2627', eventId: 12 }),
+    ).toThrow();
     expect(() => dataPublicationItemKey(scope, 0, 'events')).toThrow();
     expect(() => dataPublicationItemKey(scope, 1, 'events:old')).toThrow();
   });
@@ -158,13 +157,8 @@ describe('data publication contract', () => {
     ).toBeNull();
   });
 
-  test('rejects a core manifest carrying an event and a live manifest without one', () => {
+  test('rejects a generic manifest carrying an event', () => {
     const manifest = validManifest();
     expect(parseDataPublicationManifest(JSON.stringify({ ...manifest, eventId: 1 }))).toBeNull();
-    expect(
-      parseDataPublicationManifest(
-        JSON.stringify({ ...manifest, dataset: 'fpl:live', eventId: null }),
-      ),
-    ).toBeNull();
   });
 });

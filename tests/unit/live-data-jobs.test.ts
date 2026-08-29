@@ -7,12 +7,7 @@ type AddCall = { name: string; data: Record<string, unknown>; opts: Record<strin
 const addCalls: AddCall[] = [];
 const waitingJobs: Array<{
   name: string;
-  data: {
-    seasonId: number;
-    eventId: number;
-    persistEventLives?: boolean;
-    finalizeEvent?: boolean;
-  };
+  data: { seasonId: number; eventId: number; finalizeEvent?: boolean };
 }> = [];
 const existingJobIds = new Set<string>();
 
@@ -24,33 +19,27 @@ mock.module('../../src/queues/live-data.queue', () => ({
       addCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
     },
-    getJob: async (jobId: string) => (existingJobIds.has(jobId) ? { id: jobId } : null),
+    getJob: async (jobId: string) =>
+      existingJobIds.has(jobId) ? { id: jobId, getState: async () => 'completed' } : null,
     getJobs: async () => waitingJobs,
   },
 }));
 
-const {
-  enqueueLiveActiveSnapshot,
-  enqueueLiveSnapshot,
-  liveSnapshotMinuteBucket,
-  liveSnapshotPersistenceJobId,
-} = await import('../../src/jobs/live-data.jobs');
+const { enqueueLiveActiveSnapshot, enqueueLiveSnapshot, liveSnapshotMinuteBucket } = await import(
+  '../../src/jobs/live-data.jobs'
+);
 
-describe('coherent live-snapshot enqueue', () => {
+describe('Live Points V2 snapshot enqueue', () => {
   beforeEach(() => {
     addCalls.length = 0;
     waitingJobs.length = 0;
     existingJobIds.clear();
   });
 
-  test('carries explicit season identity and one coherent job name', async () => {
-    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'manual', {
-      persistEventLives: true,
-      finalizeEvent: true,
-    });
+  test('uses one V2 job contract and never carries the removed persistence flag', async () => {
+    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'manual', { finalizeEvent: true });
 
-    expect(job!.id).toBe('live-snapshot-2627-e12-manual-persist');
-    expect(addCalls).toHaveLength(1);
+    expect(job!.id).toBe('live-snapshot-2627-e12-manual-v2');
     expect(addCalls[0]).toMatchObject({
       name: 'live-snapshot',
       data: {
@@ -58,144 +47,50 @@ describe('coherent live-snapshot enqueue', () => {
         seasonCode: '2627',
         eventId: 12,
         source: 'manual',
-        persistEventLives: true,
         finalizeEvent: true,
       },
     });
+    expect(addCalls[0]?.data).not.toHaveProperty('persistEventLives');
   });
 
-  test('suppresses a cron duplicate for the same season, event, and authority level', async () => {
+  test('suppresses a cron duplicate for the same season, event, and finalization level', async () => {
     waitingJobs.push({
       name: 'live-snapshot',
-      data: { seasonId: TEST_SEASON.seasonId, eventId: 12, persistEventLives: true },
+      data: { seasonId: TEST_SEASON.seasonId, eventId: 12 },
     });
 
-    await expect(
-      enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', { persistEventLives: true }),
-    ).resolves.toBeNull();
+    await expect(enqueueLiveSnapshot(TEST_SEASON, 12, 'cron')).resolves.toBeNull();
     expect(addCalls).toHaveLength(0);
   });
 
-  test('does not let a cache-only or different-season job suppress durable work', async () => {
-    waitingJobs.push(
-      {
-        name: 'live-snapshot',
-        data: { seasonId: TEST_SEASON.seasonId, eventId: 12, persistEventLives: false },
-      },
-      {
-        name: 'live-snapshot',
-        data: { seasonId: 2025, eventId: 12, persistEventLives: true },
-      },
-    );
-
-    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
-      persistEventLives: true,
-      now: new Date('2026-08-09T12:34:56.000Z'),
-    });
-    expect(job).not.toBeNull();
-    expect(addCalls).toHaveLength(1);
-  });
-
-  test('does not let an ordinary durable job suppress finalization', async () => {
+  test('does not let an ordinary job suppress finalization', async () => {
     waitingJobs.push({
       name: 'live-snapshot',
-      data: { seasonId: TEST_SEASON.seasonId, eventId: 12, persistEventLives: true },
+      data: { seasonId: TEST_SEASON.seasonId, eventId: 12 },
     });
 
-    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
-      persistEventLives: true,
-      finalizeEvent: true,
-    });
+    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', { finalizeEvent: true });
 
     expect(job).not.toBeNull();
-    expect(addCalls).toHaveLength(1);
     expect(addCalls[0]?.data.finalizeEvent).toBe(true);
   });
 
-  test('suppresses a duplicate while finalization is pending', async () => {
-    waitingJobs.push({
-      name: 'live-snapshot',
-      data: {
-        seasonId: TEST_SEASON.seasonId,
-        eventId: 12,
-        persistEventLives: true,
-        finalizeEvent: true,
-      },
-    });
-
-    await expect(
-      enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
-        persistEventLives: true,
-        finalizeEvent: true,
-      }),
-    ).resolves.toBeNull();
-    expect(addCalls).toHaveLength(0);
-  });
-
-  test('uses a deterministic 30-second bucket and separates cache from durable work', async () => {
+  test('uses a deterministic 30-second identity bucket while publication cadence stays in V2', async () => {
     const now = new Date('2026-08-09T12:34:56.000Z');
     expect(liveSnapshotMinuteBucket(now)).toBe('20260809123430');
 
-    const cacheOnly = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', { now });
-    const durable = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
-      now,
-      persistEventLives: true,
-    });
-    expect(cacheOnly?.id).toBe('live-snapshot-2627-e12-20260809123430-cache');
-    expect(durable?.id).toBe('live-snapshot-2627-e12-20260809123430-persist');
+    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', { now });
+    expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v2');
+    expect(addCalls[0]?.data).not.toHaveProperty('persistEventLives');
   });
 
-  test('uses one durable job ID per UTC ten-minute bucket', () => {
-    expect(liveSnapshotPersistenceJobId(12, new Date('2026-08-09T12:34:56.000Z'))).toBe(
-      'live-snapshot-e12-periodic-202608091230',
-    );
-    expect(liveSnapshotPersistenceJobId(12, new Date('2026-08-09T12:39:59.999Z'))).toBe(
-      'live-snapshot-e12-periodic-202608091230',
-    );
-    expect(liveSnapshotPersistenceJobId(12, new Date('2026-08-09T12:40:00.000Z'))).toBe(
-      'live-snapshot-e12-periodic-202608091240',
-    );
-  });
-
-  test('does not recreate an explicit durable bucket that already settled', async () => {
-    existingJobIds.add('2627-live-snapshot-e12-periodic-202608091230');
-
-    await expect(
-      enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
-        persistEventLives: true,
-        now: new Date('2026-08-09T12:34:56.000Z'),
-        jobId: 'live-snapshot-e12-periodic-202608091230',
-      }),
-    ).resolves.toBeNull();
-    expect(addCalls).toHaveLength(0);
-  });
-
-  test('enqueues only the durable snapshot on the first live tick in a bucket', async () => {
+  test('active snapshots always use the same V2 lane as ordinary cron snapshots', async () => {
     const job = await enqueueLiveActiveSnapshot(
       TEST_SEASON,
       12,
       new Date('2026-08-09T12:34:56.000Z'),
     );
-
-    expect(job?.id).toBe('2627-live-snapshot-e12-periodic-202608091230');
-    expect(addCalls).toHaveLength(1);
-    expect(addCalls[0]).toMatchObject({
-      data: { persistEventLives: true },
-      opts: { jobId: '2627-live-snapshot-e12-periodic-202608091230' },
-    });
-  });
-
-  test('enqueues only cache work after the durable bucket already exists', async () => {
-    existingJobIds.add('2627-live-snapshot-e12-periodic-202608091230');
-
-    const job = await enqueueLiveActiveSnapshot(
-      TEST_SEASON,
-      12,
-      new Date('2026-08-09T12:34:56.000Z'),
-    );
-
-    expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-cache');
-    expect(addCalls).toHaveLength(1);
-    expect(addCalls[0]).toMatchObject({ data: { persistEventLives: false } });
+    expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v2');
+    expect(addCalls[0]?.data).not.toHaveProperty('persistEventLives');
   });
 });

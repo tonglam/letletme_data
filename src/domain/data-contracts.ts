@@ -111,7 +111,7 @@ export const dataContractRegistry = [
   },
   {
     contractKey: 'live-snapshot',
-    dataset: 'fpl:live',
+    dataset: 'redis:v2:fpl:live',
     lifecycleStages: ['active', 'review', 'finished'],
     eligibility: 'event live or GW review checkpoint',
     queueLane: liveDataQueueName,
@@ -120,10 +120,10 @@ export const dataContractRegistry = [
     executionBudgetMs: 90_000,
     freshnessEvidence: 'publication',
     integrity: 'event roster and all fixture groups are complete',
-    publicationEvidence: ['active fpl:live publication', 'event checkpoint'],
+    publicationEvidence: ['Redis V2 current/previous publication', 'V2 event checkpoint'],
     consumerEvidence: publicConsumers('liveSnapshot/gameweekDesk', 'live pages'),
-    retry: { maxGenerations: 2, policy: 'latest event bucket wins' },
-    compensator: 'exact event generation redispatch',
+    retry: { maxGenerations: 2, policy: 'latest desired generation wins' },
+    compensator: 'merged V2 checkpoint obligation and exact-event repair',
     visibility: 'public',
   },
   {
@@ -154,7 +154,7 @@ export const dataContractRegistry = [
     contractKey: 'live-picks',
     dataset: 'competition:live-entry-picks',
     lifecycleStages: ['active', 'review'],
-    eligibility: 'source canary available and started_event IS NULL OR started_event <= event_id',
+    eligibility: 'source canary available; started_event IS NULL OR started_event <= event_id',
     queueLane: livePicksQueueName,
     schedulerJobs: ['live-picks-refresh'],
     dispatchWithinMs: 30_000,
@@ -164,8 +164,11 @@ export const dataContractRegistry = [
     freshnessJobs: ['live-picks-refresh'],
     publicationEvidence: ['entry event picks rows', 'sync run finalizer'],
     consumerEvidence: publicConsumers('entry/live and My FPL loaders', 'live pages'),
-    retry: { maxGenerations: 2, policy: 'one latest event sweep with exact child retries' },
-    compensator: 'failed-ID retry and keyset continuation',
+    retry: {
+      maxGenerations: 2,
+      policy: 'per-entry latest desired input with exact child retries; no cohort sweep',
+    },
+    compensator: 'failed-ID retry, per-entry single-flight repair, and keyset continuation',
     visibility: 'public',
   },
   {
@@ -260,7 +263,6 @@ export const dataContractRegistry = [
     queueLane: dataRepairQueueName,
     schedulerJobs: [
       'player-stats',
-      'player-stats-active',
       'player-season-summary-repair',
       'understat-orphan-reconciler',
       'understat-team-incremental',
@@ -270,7 +272,7 @@ export const dataContractRegistry = [
     executionBudgetMs: 75 * 60_000,
     integrity: 'current core player IDs fully represented with provider lineage',
     freshnessEvidence: 'checkpoint',
-    freshnessJobs: ['player-stats', 'player-stats-active', 'player-season-summary-repair'],
+    freshnessJobs: ['player-stats', 'player-season-summary-repair'],
     publicationEvidence: ['sync run checkpoint'],
     consumerEvidence: publicConsumers('player stats contexts', 'player stats/detail'),
     retry: { maxGenerations: 3, policy: 'bounded repair' },
@@ -383,7 +385,6 @@ export const queueRuntimeCatalog = [
   { queueName: entrySyncQueueName, service: 'queue-worker', serviceClass: 'entry-sync' },
   { queueName: leagueSyncQueueName, service: 'queue-worker', serviceClass: 'league-sync' },
   { queueName: liveDataQueueName, service: 'queue-worker', serviceClass: 'live-data' },
-  { queueName: 'manager-live', service: 'queue-worker', serviceClass: 'manager-live' },
   { queueName: 'tournament-sync', service: 'queue-worker', serviceClass: 'tournament-sync' },
   { queueName: 'tournament-setup', service: 'queue-worker', serviceClass: 'tournament-setup' },
   { queueName: 'tournament-repair', service: 'queue-worker', serviceClass: 'tournament-repair' },
@@ -479,7 +480,6 @@ export function contractHasConsumerEvidence(contract: DataContract): boolean {
 export function queueLaneForSchedulerJob(jobName: string): string | undefined {
   const explicit: Record<string, string> = {
     'player-stats': dataSyncQueueName,
-    'player-stats-active': dataSyncQueueName,
     'player-season-summary-repair': dataRepairQueueName,
     'understat-orphan-reconciler': dataRepairQueueName,
     'understat-team-incremental': 'understat-team-sync',

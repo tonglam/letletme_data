@@ -1,6 +1,10 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
-import { entryEventPicksInCompetition, playersInFpl } from '../db/schemas/index.schema';
+import {
+  entryEventPickHeadsInCompetition,
+  entryEventPicksInCompetition,
+  playersInFpl,
+} from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
@@ -8,6 +12,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { contentHash } from '../utils/content-hash';
 
 export type EventLiveManagerPickRow = {
   entryId: number;
@@ -23,6 +28,108 @@ export type EventLiveManagerPickRow = {
   teamId: number | null;
   activeChip: string | null;
 };
+
+export type EntryEventPicksPublicationMetadata = {
+  readonly publicationId?: string;
+  readonly generation?: number;
+  readonly picksBaseRevision?: string;
+  readonly contentUpdatedAt?: Date | string;
+  /** Durable completion time for a Redis-first V2 checkpoint. */
+  readonly checkpointedAt?: Date | string;
+};
+
+export type EntryEventPickHeadMetadata = {
+  readonly publicationId: string;
+  readonly generation: number;
+  readonly picksBaseRevision: string;
+  readonly contentSha256: string;
+  readonly rowCount: number;
+  readonly sourceCheckedAt: Date;
+  readonly contentUpdatedAt: Date;
+  readonly checkpointedAt: Date;
+  readonly state: string;
+};
+
+function normalizedPickContent(picks: RawFPLEntryEventPicksResponse) {
+  return {
+    picks: picks.picks
+      .map((pick) => ({
+        element: pick.element,
+        position: pick.position,
+        multiplier: pick.multiplier,
+        isCaptain: pick.is_captain,
+        isViceCaptain: pick.is_vice_captain,
+      }))
+      .sort((left, right) => left.position - right.position),
+    chip: picks.active_chip ?? null,
+    transferCost: picks.entry_history.event_transfers_cost,
+  };
+}
+
+function pickContentHash(picks: RawFPLEntryEventPicksResponse): string {
+  return contentHash(normalizedPickContent(picks));
+}
+
+async function upsertEntryEventPickHead(
+  db: DbOrTransaction,
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+  picks: RawFPLEntryEventPicksResponse,
+  syncedAt: Date,
+  publication: EntryEventPicksPublicationMetadata | undefined,
+  contentUpdatedAt: Date,
+): Promise<void> {
+  const contentSha256 = pickContentHash(picks);
+  const checkpointedAt = publication?.checkpointedAt
+    ? publication.checkpointedAt instanceof Date
+      ? publication.checkpointedAt
+      : new Date(publication.checkpointedAt)
+    : syncedAt;
+  if (!Number.isFinite(checkpointedAt.getTime())) {
+    throw new Error('A valid picks checkpoint timestamp is required');
+  }
+  const fallbackPublicationId = contentHash({
+    season: season.seasonCode,
+    entryId,
+    eventId,
+    contentSha256,
+  });
+  await db
+    .insert(entryEventPickHeadsInCompetition)
+    .values({
+      seasonId: season.seasonId,
+      entryId,
+      eventId,
+      publicationId: publication?.publicationId ?? fallbackPublicationId,
+      generation: publication?.generation ?? 1,
+      picksBaseRevision: publication?.picksBaseRevision ?? contentSha256,
+      contentSha256,
+      rowCount: 15,
+      sourceCheckedAt: syncedAt,
+      contentUpdatedAt,
+      checkpointedAt,
+      state: 'COMPLETE',
+    })
+    .onConflictDoUpdate({
+      target: [
+        entryEventPickHeadsInCompetition.seasonId,
+        entryEventPickHeadsInCompetition.entryId,
+        entryEventPickHeadsInCompetition.eventId,
+      ],
+      set: {
+        publicationId: publication?.publicationId ?? fallbackPublicationId,
+        generation: publication?.generation ?? 1,
+        picksBaseRevision: publication?.picksBaseRevision ?? contentSha256,
+        contentSha256,
+        rowCount: 15,
+        sourceCheckedAt: syncedAt,
+        contentUpdatedAt,
+        checkpointedAt,
+        state: 'COMPLETE',
+      },
+    });
+}
 
 function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -69,11 +176,18 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
     eventId: number,
     picks: RawFPLEntryEventPicksResponse,
     syncedAt: Date,
+    publication?: EntryEventPicksPublicationMetadata,
   ): Promise<boolean> => {
     const existing = await db
       .select({
+        position: entryEventPicksInCompetition.position,
         elementId: entryEventPicksInCompetition.elementId,
         eventTeamId: entryEventPicksInCompetition.eventTeamId,
+        multiplier: entryEventPicksInCompetition.multiplier,
+        isCaptain: entryEventPicksInCompetition.isCaptain,
+        isViceCaptain: entryEventPicksInCompetition.isViceCaptain,
+        activeChip: entryEventPicksInCompetition.activeChip,
+        transfersCost: entryEventPicksInCompetition.transfersCost,
         sourceCreatedAt: entryEventPicksInCompetition.sourceCreatedAt,
         sourceUpdatedAt: entryEventPicksInCompetition.sourceUpdatedAt,
       })
@@ -86,6 +200,70 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         ),
       )
       .for('update');
+
+    const candidateContent = normalizedPickContent(picks);
+    const candidateByPosition = new Map(
+      candidateContent.picks.map((pick) => [pick.position, pick] as const),
+    );
+    const existingContentIsComplete =
+      existing.length === 15 &&
+      existing.every((row) => {
+        const candidate = candidateByPosition.get(row.position);
+        return (
+          candidate !== undefined &&
+          candidate.element === row.elementId &&
+          candidate.multiplier === row.multiplier &&
+          candidate.isCaptain === row.isCaptain &&
+          candidate.isViceCaptain === row.isViceCaptain
+        );
+      });
+    const existingChip = existing.find((row) => row.position === 1)?.activeChip ?? null;
+    const existingTransferCost = existing.find((row) => row.position === 1)?.transfersCost ?? null;
+    const sameContent =
+      existingContentIsComplete &&
+      existingChip === candidateContent.chip &&
+      existingTransferCost === candidateContent.transferCost;
+
+    // A source heartbeat must not rewrite the 15 rows or move their content
+    // timestamp.  It may still repair a missing V2 head left by an interrupted
+    // Redis-first publication, so the head is checkpointed below without a
+    // delete/insert cycle.
+    if (sameContent) {
+      const [existingHead] = await db
+        .select({
+          publicationId: entryEventPickHeadsInCompetition.publicationId,
+          picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
+          contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
+        })
+        .from(entryEventPickHeadsInCompetition)
+        .where(
+          and(
+            eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+            eq(entryEventPickHeadsInCompetition.entryId, entryId),
+            eq(entryEventPickHeadsInCompetition.eventId, eventId),
+          ),
+        )
+        .limit(1);
+      const requestedContentUpdatedAt = publication?.contentUpdatedAt
+        ? publication.contentUpdatedAt instanceof Date
+          ? publication.contentUpdatedAt
+          : new Date(publication.contentUpdatedAt)
+        : (existingHead?.contentUpdatedAt ?? syncedAt);
+      if (!Number.isFinite(requestedContentUpdatedAt.getTime())) {
+        throw new Error('A valid picks content timestamp is required');
+      }
+      await upsertEntryEventPickHead(
+        db,
+        season,
+        entryId,
+        eventId,
+        picks,
+        syncedAt,
+        publication,
+        requestedContentUpdatedAt,
+      );
+      return false;
+    }
 
     const newestStoredAt = existing.reduce<Date | null>(
       (latest, row) =>
@@ -106,16 +284,6 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
     const previouslyCapturedTeamByElement = new Map(
       existing.map((row) => [row.elementId, row.eventTeamId] as const),
     );
-    await db
-      .delete(entryEventPicksInCompetition)
-      .where(
-        and(
-          eq(entryEventPicksInCompetition.seasonId, season.seasonId),
-          eq(entryEventPicksInCompetition.entryId, entryId),
-          eq(entryEventPicksInCompetition.eventId, eventId),
-        ),
-      );
-
     const activeChip = toNullableDbChip(picks.active_chip);
     const playerTeams = await db
       .select({
@@ -133,27 +301,91 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         ),
       );
     const teamByElement = new Map(playerTeams.map((row) => [row.elementId, row.teamId]));
-    await db.insert(entryEventPicksInCompetition).values(
-      picks.picks.map((pick) => ({
-        seasonId: season.seasonId,
-        entryId,
-        eventId,
-        position: pick.position,
-        elementId: pick.element,
-        // Capture the deadline-time observation. A missing player row stays
-        // NULL and is never replaced with a later mutable players.team_id.
-        eventTeamId: previouslyCapturedTeamByElement.has(pick.element)
-          ? (previouslyCapturedTeamByElement.get(pick.element) ?? null)
-          : (teamByElement.get(pick.element) ?? null),
-        multiplier: pick.multiplier,
-        isCaptain: pick.is_captain,
-        isViceCaptain: pick.is_vice_captain,
-        activeChip: pick.position === 1 ? activeChip : null,
-        transfers: pick.position === 1 ? picks.entry_history.event_transfers : null,
-        transfersCost: pick.position === 1 ? picks.entry_history.event_transfers_cost : null,
-        sourceCreatedAt,
-        sourceUpdatedAt: syncedAt,
-      })),
+    const candidatePositions = new Set(picks.picks.map((pick) => pick.position));
+    const candidateElementByPosition = new Map(
+      picks.picks.map((pick) => [pick.position, pick.element] as const),
+    );
+    const stalePositions = existing
+      .filter(
+        (row) =>
+          !candidatePositions.has(row.position) ||
+          candidateElementByPosition.get(row.position) !== row.elementId,
+      )
+      .map((row) => row.position);
+    if (stalePositions.length > 0) {
+      await db
+        .delete(entryEventPicksInCompetition)
+        .where(
+          and(
+            eq(entryEventPicksInCompetition.seasonId, season.seasonId),
+            eq(entryEventPicksInCompetition.entryId, entryId),
+            eq(entryEventPicksInCompetition.eventId, eventId),
+            inArray(entryEventPicksInCompetition.position, stalePositions),
+          ),
+        );
+    }
+
+    const rows = picks.picks.map((pick) => ({
+      seasonId: season.seasonId,
+      entryId,
+      eventId,
+      position: pick.position,
+      elementId: pick.element,
+      // Capture the deadline-time observation. A missing player row stays
+      // NULL and is never replaced with a later mutable players.team_id.
+      eventTeamId: previouslyCapturedTeamByElement.has(pick.element)
+        ? (previouslyCapturedTeamByElement.get(pick.element) ?? null)
+        : (teamByElement.get(pick.element) ?? null),
+      multiplier: pick.multiplier,
+      isCaptain: pick.is_captain,
+      isViceCaptain: pick.is_vice_captain,
+      activeChip: pick.position === 1 ? activeChip : null,
+      transfers: pick.position === 1 ? picks.entry_history.event_transfers : null,
+      transfersCost: pick.position === 1 ? picks.entry_history.event_transfers_cost : null,
+      sourceCreatedAt,
+      sourceUpdatedAt: syncedAt,
+    }));
+    await db
+      .insert(entryEventPicksInCompetition)
+      .values(rows)
+      .onConflictDoUpdate({
+        target: [
+          entryEventPicksInCompetition.seasonId,
+          entryEventPicksInCompetition.entryId,
+          entryEventPicksInCompetition.eventId,
+          entryEventPicksInCompetition.position,
+        ],
+        set: {
+          elementId: sql`excluded.element_id`,
+          eventTeamId: sql`excluded.event_team_id`,
+          multiplier: sql`excluded.multiplier`,
+          isCaptain: sql`excluded.is_captain`,
+          isViceCaptain: sql`excluded.is_vice_captain`,
+          activeChip: sql`excluded.active_chip`,
+          transfers: sql`excluded.transfers`,
+          transfersCost: sql`excluded.transfers_cost`,
+          sourceCreatedAt: sql`excluded.source_created_at`,
+          sourceUpdatedAt: sql`excluded.source_updated_at`,
+        },
+      });
+
+    const contentUpdatedAt = publication?.contentUpdatedAt
+      ? publication.contentUpdatedAt instanceof Date
+        ? publication.contentUpdatedAt
+        : new Date(publication.contentUpdatedAt)
+      : syncedAt;
+    if (!Number.isFinite(contentUpdatedAt.getTime())) {
+      throw new Error('A valid picks content timestamp is required');
+    }
+    await upsertEntryEventPickHead(
+      db,
+      season,
+      entryId,
+      eventId,
+      picks,
+      syncedAt,
+      publication,
+      contentUpdatedAt,
     );
     return true;
   };
@@ -260,12 +492,56 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       }
     },
 
+    findHead: async (
+      season: FplSeasonRef,
+      entryId: number,
+      eventId: number,
+    ): Promise<EntryEventPickHeadMetadata | null> => {
+      try {
+        const db = await getDbInstance();
+        const [row] = await db
+          .select({
+            publicationId: entryEventPickHeadsInCompetition.publicationId,
+            generation: entryEventPickHeadsInCompetition.generation,
+            picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
+            contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+            rowCount: entryEventPickHeadsInCompetition.rowCount,
+            sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+            contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
+            checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
+            state: entryEventPickHeadsInCompetition.state,
+          })
+          .from(entryEventPickHeadsInCompetition)
+          .where(
+            and(
+              eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+              eq(entryEventPickHeadsInCompetition.entryId, entryId),
+              eq(entryEventPickHeadsInCompetition.eventId, eventId),
+            ),
+          )
+          .limit(1);
+        return row ?? null;
+      } catch (error) {
+        logError('Failed to retrieve entry event picks head', error, {
+          season: season.seasonCode,
+          entryId,
+          eventId,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve entry event picks head',
+          'ENTRY_EVENT_PICKS_HEAD_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertFromPicks: async (
       season: FplSeasonRef,
       entryId: number,
       eventId: number,
       picks: RawFPLEntryEventPicksResponse,
       syncedAt: Date | string = new Date(),
+      publication?: EntryEventPicksPublicationMetadata,
     ): Promise<void> => {
       try {
         if (!isEntryPicksPayloadForEvent(picks, eventId)) {
@@ -283,10 +559,20 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         }
 
         const changed = dbInstance
-          ? await replaceScope(dbInstance, season, entryId, eventId, picks, exactSyncedAt)
+          ? await replaceScope(
+              dbInstance,
+              season,
+              entryId,
+              eventId,
+              picks,
+              exactSyncedAt,
+              publication,
+            )
           : await (
               await getDb()
-            ).transaction((tx) => replaceScope(tx, season, entryId, eventId, picks, exactSyncedAt));
+            ).transaction((tx) =>
+              replaceScope(tx, season, entryId, eventId, picks, exactSyncedAt, publication),
+            );
         logInfo(changed ? 'Replaced entry event picks' : 'Ignored stale entry event picks', {
           season: season.seasonCode,
           entryId,

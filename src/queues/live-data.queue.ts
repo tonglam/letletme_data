@@ -24,8 +24,6 @@ export interface LiveDataJobData {
   obligationGeneration?: number;
   /** Exact freshness window being repaired, carried into the publication manifest. */
   freshnessWindowId?: number;
-  /** Large event-live/explain UPSERTs run every ten minutes and at consolidation. */
-  persistEventLives?: boolean;
   /** Only the post-match consolidation may publish terminal live authority. */
   finalizeEvent?: boolean;
 }

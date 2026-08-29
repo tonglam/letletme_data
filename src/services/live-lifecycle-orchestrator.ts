@@ -14,16 +14,23 @@ import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { isMatchDayTime } from '../utils/conditions';
 import { logError, logInfo } from '../utils/logger';
-import { persistEntryEventPicksResponse } from './entries.service';
+import { checkpointEntryLiveInputV2, persistEntryEventPicksResponse } from './entries.service';
 import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { entryInfoRepository } from '../repositories/entry-infos';
-import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
 import {
-  isCompatibilitySchedulerEnabled,
-  isStandaloneSchedulerEnabled,
-} from '../utils/scheduler-mode';
+  liveV2LifecycleKey,
+  liveV2PicksCoordinatorKey,
+  liveV2PicksCoverageKey,
+  liveV2PicksPendingKey,
+  readEntryCheckpointDesiredV2,
+  readLivePublicationV2,
+  readEntryLiveInputV2,
+  setEntryCheckpointDesiredV2,
+} from '../cache/live-publication-v2';
+import { redisSingleton } from '../cache/singleton';
+import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
 
@@ -35,7 +42,6 @@ export const PICKS_RETRY_SCHEDULE_MS = runtimeConfig.PICKS_RETRY_SCHEDULE_MS.spl
   .map((value) => Number(value.trim()))
   .filter((value) => Number.isFinite(value) && value > 0);
 export const FPL_BULK_MAX_INFLIGHT_DURING_LIVE = runtimeConfig.FPL_BULK_MAX_INFLIGHT_DURING_LIVE;
-export const PICKS_REFRESH_INTERVAL_MS = runtimeConfig.PICKS_REFRESH_INTERVAL_MS;
 const BETWEEN_FIXTURES_POLL_MS = runtimeConfig.BETWEEN_FIXTURES_POLL_MS;
 const DAY_SETTLING_INITIAL_POLL_MS = runtimeConfig.DAY_SETTLING_INITIAL_POLL_MS;
 const DAY_SETTLING_STABLE_POLL_MS = runtimeConfig.DAY_SETTLING_STABLE_POLL_MS;
@@ -69,7 +75,7 @@ export type LiveLifecycleDecision = {
 
 export type LiveLifecycleObservation = {
   /** The last content revision observed for this event, if any. */
-  lastRevision?: number | null;
+  lastRevision?: number | string | null;
   /** When the current revision first became quiet. */
   unchangedSince?: number | null;
   /** Whether the current time is still inside an authoritative fixture window. */
@@ -97,9 +103,130 @@ type PicksProbeState = {
   failedCanaryEntryIds: Set<number>;
 };
 
-const picksProbeStates = new Map<string, PicksProbeState>();
-const daySettlingStates = new Map<string, { revision: number | null; unchangedSince: number }>();
-const picksFanoutClaims = new Map<string, Map<number, number>>();
+const COORDINATOR_STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
+const PICKS_COVERAGE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+type SharedPicksCoordinatorState = {
+  attempts: number;
+  nextProbeAt: number;
+  canarySucceeded: boolean;
+  failedCanaryEntryIds: number[];
+};
+
+type SharedLifecycleQuietState = {
+  revision: number | string | null;
+  unchangedSince: number;
+  state?: LiveLifecycleState;
+  expectedNextCheckAt?: string | null;
+};
+
+const defaultPicksCoordinatorState = (): SharedPicksCoordinatorState => ({
+  attempts: 0,
+  nextProbeAt: 0,
+  canarySucceeded: false,
+  failedCanaryEntryIds: [],
+});
+
+async function readPicksCoordinatorState(
+  seasonCode: string,
+  eventId: number,
+): Promise<SharedPicksCoordinatorState> {
+  try {
+    const redis = await redisSingleton.getClient();
+    const raw = await redis.get(liveV2PicksCoordinatorKey({ season: seasonCode, eventId }));
+    if (!raw) return defaultPicksCoordinatorState();
+    const value = JSON.parse(raw) as Partial<SharedPicksCoordinatorState>;
+    const attempts = value.attempts;
+    const nextProbeAt = value.nextProbeAt;
+    if (
+      !value ||
+      typeof attempts !== 'number' ||
+      !Number.isSafeInteger(attempts) ||
+      typeof nextProbeAt !== 'number' ||
+      !Number.isFinite(nextProbeAt) ||
+      typeof value.canarySucceeded !== 'boolean' ||
+      !Array.isArray(value.failedCanaryEntryIds) ||
+      !value.failedCanaryEntryIds.every((entryId) => Number.isSafeInteger(entryId) && entryId > 0)
+    )
+      return defaultPicksCoordinatorState();
+    return {
+      attempts: Math.max(0, attempts),
+      nextProbeAt: Math.max(0, nextProbeAt),
+      canarySucceeded: value.canarySucceeded,
+      failedCanaryEntryIds: [...new Set(value.failedCanaryEntryIds)],
+    };
+  } catch (error) {
+    logError('Failed to read shared live picks coordinator state', error, { seasonCode, eventId });
+    return defaultPicksCoordinatorState();
+  }
+}
+
+async function writePicksCoordinatorState(
+  seasonCode: string,
+  eventId: number,
+  state: SharedPicksCoordinatorState,
+): Promise<void> {
+  try {
+    const redis = await redisSingleton.getClient();
+    await redis.set(
+      liveV2PicksCoordinatorKey({ season: seasonCode, eventId }),
+      JSON.stringify(state),
+      'EX',
+      String(COORDINATOR_STATE_TTL_SECONDS),
+    );
+  } catch (error) {
+    logError('Failed to write shared live picks coordinator state', error, { seasonCode, eventId });
+  }
+}
+
+async function readLifecycleQuietState(
+  seasonCode: string,
+  eventId: number,
+): Promise<SharedLifecycleQuietState | null> {
+  try {
+    const redis = await redisSingleton.getClient();
+    const raw = await redis.get(liveV2LifecycleKey({ season: seasonCode, eventId }));
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<SharedLifecycleQuietState>;
+    const unchangedSince = value.unchangedSince;
+    if (
+      typeof unchangedSince !== 'number' ||
+      !Number.isFinite(unchangedSince) ||
+      unchangedSince <= 0
+    )
+      return null;
+    if (
+      !(
+        typeof value.revision === 'number' ||
+        typeof value.revision === 'string' ||
+        value.revision === null
+      )
+    )
+      return null;
+    return { revision: value.revision, unchangedSince };
+  } catch (error) {
+    logError('Failed to read shared live lifecycle state', error, { seasonCode, eventId });
+    return null;
+  }
+}
+
+async function writeLifecycleQuietState(
+  seasonCode: string,
+  eventId: number,
+  state: SharedLifecycleQuietState,
+): Promise<void> {
+  try {
+    const redis = await redisSingleton.getClient();
+    await redis.set(
+      liveV2LifecycleKey({ season: seasonCode, eventId }),
+      JSON.stringify(state),
+      'EX',
+      String(COORDINATOR_STATE_TTL_SECONDS),
+    );
+  } catch (error) {
+    logError('Failed to write shared live lifecycle state', error, { seasonCode, eventId });
+  }
+}
 
 export function resolveLivePicksCoordinatorDeduplicationId(
   seasonCode: string,
@@ -108,16 +235,32 @@ export function resolveLivePicksCoordinatorDeduplicationId(
   return `live-picks-refresh:${seasonCode}:event-${eventId}`;
 }
 
-export function resolveLivePicksRefreshDeduplicationId(
+export function resolveLivePicksEntryDeduplicationId(
   seasonCode: string,
   eventId: number,
-  _entryIds: readonly number[],
+  entryId: number,
 ): string {
-  // Keep exactly one entry-picks fan-out active per season/event. This must not
-  // share the live-picks-refresh coordinator's BullMQ deduplication identity:
-  // the coordinator enqueues this child while it is active, and BullMQ would
-  // otherwise return the coordinator itself instead of creating the sweep.
-  return `live-picks-entry-sweep:${seasonCode}:event-${eventId}`;
+  if (!Number.isSafeInteger(entryId) || entryId <= 0) {
+    throw new Error('Live picks entry deduplication requires a positive entry id');
+  }
+  return `live-picks-entry:${seasonCode}:event-${eventId}:entry-${entryId}`;
+}
+
+/**
+ * The scheduler asks the shared coordinator before creating a root probe.
+ * This keeps the retry schedule in one durable Redis state machine instead of
+ * manufacturing a ten-minute cohort obligation that wakes already-complete
+ * entries.  A Redis read failure is fail-open for the producer lane: the root
+ * will perform the same bounded check and preserve the last publication if
+ * the provider is unavailable.
+ */
+export async function isLivePicksProbeDue(
+  seasonCode: string,
+  eventId: number,
+  now = new Date(),
+): Promise<boolean> {
+  const state = await readPicksCoordinatorState(seasonCode, eventId);
+  return now.getTime() >= state.nextProbeAt;
 }
 
 export function resolveLivePicksRefreshFanout(
@@ -125,23 +268,48 @@ export function resolveLivePicksRefreshFanout(
   eventId: number,
   pendingEntryIds: readonly number[],
   canaryEntryIds: readonly number[],
-): { entryIds: number[]; deduplicationId: string } {
+): { entryIds: number[] } {
+  if (!/^\d{4}$/.test(seasonCode) || !Number.isSafeInteger(eventId) || eventId <= 0) {
+    throw new Error('Live picks fan-out requires a valid season and event');
+  }
   const canarySet = new Set(canaryEntryIds);
   return {
-    entryIds: pendingEntryIds.filter((entryId) => !canarySet.has(entryId)),
-    // A restart resets canary state, so the queued payload may change from N
-    // entries to N-2. The event lane remains the stable single-flight identity.
-    deduplicationId: resolveLivePicksRefreshDeduplicationId(seasonCode, eventId, pendingEntryIds),
+    entryIds: uniqueNumbers(pendingEntryIds).filter((entryId) => !canarySet.has(entryId)),
   };
 }
 
-export function resolveLivePicksRefreshClaimedAt(
-  triggeredAt: string | undefined,
-  nowMs: number,
-): number {
-  const parsed = triggeredAt ? Date.parse(triggeredAt) : Number.NaN;
-  if (!Number.isFinite(parsed)) return nowMs;
-  return Math.min(nowMs, Math.max(nowMs - PICKS_REFRESH_INTERVAL_MS, parsed));
+async function addPendingLivePicksEntries(
+  seasonCode: string,
+  eventId: number,
+  entryIds: readonly number[],
+): Promise<void> {
+  if (entryIds.length === 0) return;
+  const redis = await redisSingleton.getClient();
+  const pendingKey = liveV2PicksPendingKey({ season: seasonCode, eventId });
+  const coverageKey = liveV2PicksCoverageKey({ season: seasonCode, eventId });
+  await redis.sadd(pendingKey, ...uniqueNumbers(entryIds).map(String));
+  await redis.set(coverageKey, 'initialized', 'EX', String(PICKS_COVERAGE_TTL_SECONDS));
+  await redis.expire(pendingKey, PICKS_COVERAGE_TTL_SECONDS);
+}
+
+/**
+ * Marks a per-entry provider job complete only after its V2 input is visible.
+ * The marker remains after the set reaches zero, so a restarted worker cannot
+ * confuse an expired/missing cohort with an already drained cohort.
+ */
+export async function markLivePicksEntryComplete(
+  seasonCode: string,
+  eventId: number,
+  entryId: number,
+): Promise<boolean> {
+  const input = await readEntryLiveInputV2({ season: seasonCode, eventId, entryId });
+  if (!input) return false;
+  const redis = await redisSingleton.getClient();
+  const pendingKey = liveV2PicksPendingKey({ season: seasonCode, eventId });
+  await redis.srem(pendingKey, String(entryId));
+  const marker = await redis.get(liveV2PicksCoverageKey({ season: seasonCode, eventId }));
+  if (marker === null) return false;
+  return (await redis.scard(pendingKey)) === 0;
 }
 
 const firstKickoff = (fixtures: readonly Fixture[]): number | null => {
@@ -347,15 +515,62 @@ function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: 
   return payload.entry_history.event === eventId && isCompleteEntryPicks(payload.picks);
 }
 
-export function findPicksRefreshEntryIds(
+/**
+ * Picks are a one-time base-input publication for a live event. After a
+ * complete V2 input exists, automatic substitutions and captain promotion are
+ * calculated from the live publication; the source is not swept again every
+ * ten minutes. Only entries without a complete same-event input are admitted
+ * to the FPL lane.
+ */
+export async function findMissingEntryLiveInputIds(
+  season: FplSeasonRef,
+  eventId: number,
   entryIds: readonly number[],
-  claims: ReadonlyMap<number, number>,
-  nowMs: number,
-): number[] {
-  return entryIds.filter(
-    (entryId) =>
-      !claims.has(entryId) || nowMs - (claims.get(entryId) ?? 0) >= PICKS_REFRESH_INTERVAL_MS,
-  );
+): Promise<number[]> {
+  const results = await mapWithConcurrency(entryIds, 32, async (entryId) => {
+    const scope = {
+      season: season.seasonCode,
+      eventId,
+      entryId,
+    } as const;
+    const [input, desired] = await Promise.all([
+      readEntryLiveInputV2(scope),
+      readEntryCheckpointDesiredV2(scope),
+    ]);
+    if (input) {
+      // Redis already contains the complete input. Retry only the durable
+      // checkpoint; never refetch FPL merely because PostgreSQL was down. A
+      // missing desired pointer with an uncheckpointed publication is also a
+      // repair case, not a provider-missing case.
+      try {
+        if (!desired && input.publication.checkpointedAt === null) {
+          await setEntryCheckpointDesiredV2(input.publication);
+        }
+        await checkpointEntryLiveInputV2(season, eventId, entryId);
+      } catch (error) {
+        logError('Entry live V2 checkpoint repair failed', error, { entryId, eventId });
+      }
+      return null;
+    }
+    return input ? null : entryId;
+  });
+  return results.filter((entryId): entryId is number => entryId !== null);
+}
+
+export async function findPendingEntryLiveCheckpointIds(
+  season: FplSeasonRef,
+  eventId: number,
+  entryIds: readonly number[],
+): Promise<number[]> {
+  const results = await mapWithConcurrency(entryIds, 32, async (entryId) => {
+    const scope = { season: season.seasonCode, eventId, entryId } as const;
+    const [input, desired] = await Promise.all([
+      readEntryLiveInputV2(scope),
+      readEntryCheckpointDesiredV2(scope),
+    ]);
+    return input && (desired || input.publication.checkpointedAt === null) ? entryId : null;
+  });
+  return results.filter((entryId): entryId is number => entryId !== null);
 }
 
 export async function runPicksProbeAndSync(
@@ -376,12 +591,12 @@ export async function runPicksProbeAndSync(
   /** The complete eligible-entry sweep reached its semantic finalizer. */
   scanComplete: boolean;
 }> {
-  const key = `${season.seasonCode}:${eventId}`;
-  const state = picksProbeStates.get(key) ?? {
-    attempts: 0,
-    nextProbeAt: 0,
-    canarySucceeded: false,
-    failedCanaryEntryIds: new Set<number>(),
+  const sharedState = await readPicksCoordinatorState(season.seasonCode, eventId);
+  const state: PicksProbeState = {
+    attempts: sharedState.attempts,
+    nextProbeAt: sharedState.nextProbeAt,
+    canarySucceeded: sharedState.canarySucceeded,
+    failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
   };
   if (now.getTime() < state.nextProbeAt) {
     return {
@@ -402,19 +617,16 @@ export async function runPicksProbeAndSync(
       scanComplete: true,
     };
   }
-  const fanoutClaims = picksFanoutClaims.get(key) ?? new Map<number, number>();
   const nowMs = now.getTime();
-  // Complete picks are not immutable: FPL can update multipliers for automatic
-  // substitutions and vice-captain promotion. Refresh every active entry on a
-  // bounded cadence instead of treating one persisted 15-player rowset as final.
-  const pending = findPicksRefreshEntryIds(entryIds, fanoutClaims, nowMs);
+  const pending = await findMissingEntryLiveInputIds(season, eventId, entryIds);
+  const pendingCheckpoints = await findPendingEntryLiveCheckpointIds(season, eventId, entryIds);
   if (pending.length === 0) {
     return {
       canaryCount: 0,
       synced: 0,
-      pending: 0,
+      pending: pendingCheckpoints.length,
       sourceReady: true,
-      scanComplete: true,
+      scanComplete: pendingCheckpoints.length === 0,
     };
   }
 
@@ -441,7 +653,6 @@ export async function runPicksProbeAndSync(
     if (entryId === undefined) return;
     if (result.status === 'fulfilled') {
       state.failedCanaryEntryIds.delete(entryId);
-      fanoutClaims.set(entryId, nowMs);
     } else state.failedCanaryEntryIds.add(entryId);
   });
   if (!state.canarySucceeded && canaryCount === 0) {
@@ -450,7 +661,12 @@ export async function runPicksProbeAndSync(
       PICKS_RETRY_SCHEDULE_MS[Math.min(state.attempts - 1, PICKS_RETRY_SCHEDULE_MS.length - 1)] ??
       600_000;
     state.nextProbeAt = now.getTime() + delay;
-    picksProbeStates.set(key, state);
+    await writePicksCoordinatorState(season.seasonCode, eventId, {
+      attempts: state.attempts,
+      nextProbeAt: state.nextProbeAt,
+      canarySucceeded: state.canarySucceeded,
+      failedCanaryEntryIds: [...state.failedCanaryEntryIds].sort((left, right) => left - right),
+    });
     logInfo('Live picks canary is not ready; fan-out remains paused', {
       eventId,
       canaries: canaries.length,
@@ -464,58 +680,67 @@ export async function runPicksProbeAndSync(
     };
   }
 
-  state.canarySucceeded = true;
-  const fanout = resolveLivePicksRefreshFanout(season.seasonCode, eventId, pending, canaries);
+  const successfulCanaryIds = canaries.filter(
+    (entryId, index) => canaryResults[index]?.status === 'fulfilled',
+  );
+  state.canarySucceeded = state.canarySucceeded || successfulCanaryIds.length > 0;
+  const fanout = resolveLivePicksRefreshFanout(
+    season.seasonCode,
+    eventId,
+    pending,
+    successfulCanaryIds,
+  );
   const remaining = fanout.entryIds;
-  let reusedCompletedScan = false;
+  let completedEntryIds: boolean[] = [];
   if (remaining.length > 0) {
-    const queuedJob = await enqueueEntryPicksSyncJob(season, 'cron', {
-      eventId,
-      entryIds: remaining,
-      concurrency: Math.max(1, Math.min(FPL_BULK_MAX_INFLIGHT_DURING_LIVE, 3)),
-      throttleMs: 0,
-      lane: 'live-picks',
-      queueKey: `live-picks-${eventId}`,
-      // Entry-list cron IDs are otherwise content-stable and BullMQ would
-      // return the first completed job forever, defeating periodic refresh.
-      jobId: `entry-picks-${season.seasonCode}-live-refresh-${eventId}-${nowMs}`,
-      obligationId: obligation.obligationId,
-      obligationGeneration: obligation.obligationGeneration,
-      freshnessWindowId: obligation.freshnessWindowId,
-      // In-memory fan-out claims are lost on scheduler restart. BullMQ keeps
-      // this event lane single-flight until the accepted job settles, while
-      // the completed-job cadence window prevents an immediate restart sweep.
-      deduplicationId: fanout.deduplicationId,
-      deduplicationCadenceMs: PICKS_REFRESH_INTERVAL_MS,
+    await addPendingLivePicksEntries(season.seasonCode, eventId, remaining);
+    // Each entry gets its own BullMQ single-flight identity. The queue still
+    // limits provider concurrency to three, but one slow/new entry can no
+    // longer deduplicate or delay every other entry in the event cohort.
+    completedEntryIds = await mapWithConcurrency(remaining, 8, async (entryId) => {
+      const queuedJob = await enqueueEntryPicksSyncJob(season, 'cron', {
+        eventId,
+        entryIds: [entryId],
+        concurrency: 1,
+        throttleMs: 0,
+        lane: 'live-picks',
+        queueKey: `live-picks-${eventId}-entry-${entryId}`,
+        jobId: `entry-picks-${season.seasonCode}-live-repair-${eventId}-${entryId}-${nowMs}`,
+        obligationId: obligation.obligationId,
+        obligationGeneration: obligation.obligationGeneration,
+        freshnessWindowId: obligation.freshnessWindowId,
+        deduplicationId: resolveLivePicksEntryDeduplicationId(season.seasonCode, eventId, entryId),
+      });
+      const childState = await queuedJob.getState();
+      if (childState !== 'completed') return false;
+      // A retained completed job is only reusable when its V2 input is still
+      // visible. This prevents queue history from being mistaken for a live
+      // publication after Redis eviction or repair.
+      const input = await readEntryLiveInputV2({
+        season: season.seasonCode,
+        eventId,
+        entryId,
+      });
+      if (!input) return false;
+      await markLivePicksEntryComplete(season.seasonCode, eventId, entryId);
+      return true;
     });
-    // BullMQ returns the existing job when a deduplication key is active. Only
-    // claim IDs that are actually present in the returned job payload; this
-    // preserves retry eligibility even if an unexpected key collision occurs.
-    const acceptedEntryIds = new Set(uniqueNumbers(queuedJob.data.entryIds ?? []));
-    // A cadence deduplication can return a retained completed child from the
-    // previous refresh. Treat it as evidence for this obligation only when
-    // the child explicitly covered the same entry list and its final result
-    // proves that no continuation or failed IDs remained. A partial/active
-    // child still has to settle through its normal finalizer.
-    const childState = await queuedJob.getState();
-    const childResult = queuedJob.returnvalue as
-      | { hasMore?: unknown; failedUnits?: unknown }
-      | undefined;
-    reusedCompletedScan =
-      childState === 'completed' &&
-      childResult?.hasMore === false &&
-      childResult?.failedUnits === 0 &&
-      acceptedEntryIds.size === remaining.length &&
-      remaining.every((entryId) => acceptedEntryIds.has(entryId));
-    const claimedAt = resolveLivePicksRefreshClaimedAt(queuedJob.data.triggeredAt, nowMs);
-    for (const entryId of remaining) {
-      if (acceptedEntryIds.has(entryId)) fanoutClaims.set(entryId, claimedAt);
-    }
   }
-  picksFanoutClaims.set(key, fanoutClaims);
+  const pendingAfterQueue = remaining.filter((_, index) => !completedEntryIds[index]);
+  const pendingCheckpointAfterQueue = await findPendingEntryLiveCheckpointIds(
+    season,
+    eventId,
+    entryIds,
+  );
+  const reusedCompletedScan = remaining.length > 0 && pendingAfterQueue.length === 0;
   state.attempts += 1;
   state.nextProbeAt = now.getTime() + (PICKS_RETRY_SCHEDULE_MS[0] ?? 120_000);
-  picksProbeStates.set(key, state);
+  await writePicksCoordinatorState(season.seasonCode, eventId, {
+    attempts: state.attempts,
+    nextProbeAt: state.nextProbeAt,
+    canarySucceeded: state.canarySucceeded,
+    failedCanaryEntryIds: [...state.failedCanaryEntryIds].sort((left, right) => left - right),
+  });
   logInfo('Live picks sync accepted after canary', {
     eventId,
     canaryCount,
@@ -525,9 +750,11 @@ export async function runPicksProbeAndSync(
   return {
     canaryCount,
     synced: canaryCount,
-    pending: remaining.length,
+    pending: pendingAfterQueue.length + pendingCheckpointAfterQueue.length,
     sourceReady: true,
-    scanComplete: remaining.length === 0 || reusedCompletedScan,
+    scanComplete:
+      (pendingAfterQueue.length === 0 || reusedCompletedScan) &&
+      pendingCheckpointAfterQueue.length === 0,
   };
 }
 
@@ -541,15 +768,17 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
   const currentEvent = await (await import('./events.service')).getCurrentEvent(season);
   if (!currentEvent) return null;
   const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
-  const key = `${season.seasonCode}:${currentEvent.id}`;
-  const cache = await readLiveSnapshotCache(season.seasonCode, currentEvent.id).catch(() => null);
-  const revision = cache?.manifest.revision ?? null;
-  const sourceCheckedAt = cache?.manifest.lastSuccessfulFetchAt ?? cache?.manifest.sourceCheckedAt;
+  const cache = await readLivePublicationV2({
+    season: season.seasonCode,
+    eventId: currentEvent.id,
+  }).catch(() => null);
+  const generation = cache?.publication.generation ?? null;
+  const sourceCheckedAt = cache?.publication.sourceCheckedAt;
   const persisted = await liveLifecycleStatusRepository
     .findByEventId(season, currentEvent.id)
     .catch(() => null);
-  const publishedAtMs = cache?.manifest.publishedAt
-    ? new Date(cache.manifest.publishedAt).getTime()
+  const publishedAtMs = cache?.publication.publishedAt
+    ? new Date(cache.publication.publishedAt).getTime()
     : Number.NaN;
   const persistedSourceCheckedAtMs = persisted?.sourceCheckedAt?.getTime() ?? Number.NaN;
   const initialUnchangedSince = Number.isFinite(publishedAtMs)
@@ -557,13 +786,13 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
     : Number.isFinite(persistedSourceCheckedAtMs)
       ? Math.min(now.getTime(), persistedSourceCheckedAtMs)
       : now.getTime();
-  const previous = daySettlingStates.get(key);
-  if (!previous || previous.revision !== revision) {
-    daySettlingStates.set(key, { revision, unchangedSince: initialUnchangedSince });
-  }
-  const observation = daySettlingStates.get(key);
+  const previous = await readLifecycleQuietState(season.seasonCode, currentEvent.id);
+  const observation =
+    previous && previous.revision === generation
+      ? previous
+      : { revision: generation, unchangedSince: initialUnchangedSince };
   const decision = decideLiveLifecycle(currentEvent, fixtures, now, {
-    lastRevision: revision,
+    lastRevision: generation,
     unchangedSince: observation?.unchangedSince ?? null,
     matchDayTime: isMatchDayTime(currentEvent, fixtures, now),
     publicationStarted: cache?.fixtures.some((fixture) => fixture.started === true),
@@ -572,31 +801,48 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
     ),
   });
 
-  // DAY_SETTLING and BETWEEN_FIXTURES share the same quiet-revision clock.
-  // Other states do not need it and can start a fresh clock on the next match
-  // day.
-  if (decision.state !== 'DAY_SETTLING' && decision.state !== 'BETWEEN_FIXTURES') {
-    daySettlingStates.delete(`${season.seasonCode}:${currentEvent.id}`);
-  }
-
-  const nextRefreshDelay = resolveLiveLifecycleDelay(decision, season, currentEvent.id, now);
-  await liveLifecycleStatusRepository
-    .upsert(season, {
-      eventId: currentEvent.id,
+  const nextRefreshDelay = resolveLiveLifecycleDelay(
+    decision,
+    season,
+    currentEvent.id,
+    now,
+    observation.unchangedSince,
+  );
+  const nextRefreshAt =
+    nextRefreshDelay === null ? null : new Date(now.getTime() + nextRefreshDelay);
+  // The quiet clock and expected next check are shared restart-safe control
+  // state. Redis writes are intentionally cheap; PostgreSQL is boundary-only.
+  await writeLifecycleQuietState(season.seasonCode, currentEvent.id, {
+    ...observation,
+    state: decision.state,
+    expectedNextCheckAt: nextRefreshAt?.toISOString() ?? null,
+  });
+  if (
+    shouldPersistLiveLifecycleStatus({
+      persisted,
       state: decision.state,
-      observedAt: now,
-      lastChangedAt: persisted?.state === decision.state ? persisted.lastChangedAt : now,
-      nextRefreshAt: nextRefreshDelay === null ? null : new Date(now.getTime() + nextRefreshDelay),
-      liveRevision: revision === null ? null : String(revision),
-      publicationId: cache?.manifest.publicationId ?? null,
-      sourceCheckedAt: sourceCheckedAt ? new Date(sourceCheckedAt) : null,
+      generation,
+      publicationId: cache?.publication.publicationId ?? null,
     })
-    .catch((error) => {
-      logError('Failed to persist live lifecycle status', error, {
+  ) {
+    await liveLifecycleStatusRepository
+      .upsert(season, {
         eventId: currentEvent.id,
         state: decision.state,
+        observedAt: now,
+        lastChangedAt: persisted?.state === decision.state ? persisted.lastChangedAt : now,
+        nextRefreshAt,
+        generation,
+        publicationId: cache?.publication.publicationId ?? null,
+        sourceCheckedAt: sourceCheckedAt ? new Date(sourceCheckedAt) : null,
+      })
+      .catch((error) => {
+        logError('Failed to persist live lifecycle status', error, {
+          eventId: currentEvent.id,
+          state: decision.state,
+        });
       });
-    });
+  }
 
   return { season, currentEvent, fixtures, decision };
 }
@@ -606,7 +852,10 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
   if (!tick) return null;
   const { season, currentEvent, fixtures, decision } = tick;
 
-  if (decision.shouldProbePicks || decision.shouldSyncPicks) {
+  // The deadline canary and pre-start retry lane are the only coordinator
+  // probes. Once the live publication is active, complete picks are immutable
+  // base input; new entries arrive through their own onboarding/repair job.
+  if (decision.shouldProbePicks) {
     await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {
       logError('Live picks probe/sync failed', error, {
         eventId: currentEvent.id,
@@ -619,16 +868,10 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       ? (await eventRepository.findLiveSnapshotFinalizedAt(season, currentEvent.id)) === null
       : false;
     if (!decision.finalizeEvent || shouldEnqueueFinalization) {
-      const persistContinuously =
-        decision.state === 'DAY_SETTLING' ||
-        decision.state === 'GW_REVIEW' ||
-        decision.recoverStaleFixtures ||
-        decision.finalizeEvent;
-      if (decision.state === 'LIVE_ACTIVE' && !persistContinuously) {
+      if (decision.state === 'LIVE_ACTIVE') {
         await enqueueLiveActiveSnapshot(season, currentEvent.id, now);
       } else {
         await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
-          persistEventLives: persistContinuously,
           finalizeEvent: decision.finalizeEvent,
           now,
         });
@@ -670,7 +913,10 @@ export function resolveLiveLifecycleDelay(
   season: FplSeasonRef,
   eventId: number,
   now: Date,
+  unchangedSince?: number | null,
 ): number | null {
+  void season;
+  void eventId;
   if (decision.state === 'FINALIZED') return FINALIZED_POLL_MS;
   if (decision.nextRetryAt && decision.nextRetryAt.getTime() > now.getTime()) {
     return Math.max(1_000, decision.nextRetryAt.getTime() - now.getTime());
@@ -681,8 +927,9 @@ export function resolveLiveLifecycleDelay(
     case 'BETWEEN_FIXTURES':
       return BETWEEN_FIXTURES_POLL_MS;
     case 'DAY_SETTLING': {
-      const stable = daySettlingStates.get(`${season.seasonCode}:${eventId}`);
-      return stable && now.getTime() - stable.unchangedSince >= DAY_SETTLING_STABLE_AFTER_MS
+      return unchangedSince !== null &&
+        unchangedSince !== undefined &&
+        now.getTime() - unchangedSince >= DAY_SETTLING_STABLE_AFTER_MS
         ? DAY_SETTLING_STABLE_POLL_MS
         : DAY_SETTLING_INITIAL_POLL_MS;
     }
@@ -700,12 +947,32 @@ export function resolveLiveLifecycleDelay(
   }
 }
 
+/**
+ * Lifecycle is a hot Redis control signal. PostgreSQL records the first
+ * observation and lifecycle boundaries, but must not become a 30-second
+ * heartbeat write sink. Publication freshness remains available from the V2
+ * Redis manifest and is therefore not lost by this write reduction.
+ */
+export function shouldPersistLiveLifecycleStatus(input: {
+  readonly persisted: {
+    readonly state: string;
+    readonly generation: number | null;
+    readonly publicationId: string | null;
+  } | null;
+  readonly state: LiveLifecycleState;
+  readonly generation: number | null;
+  readonly publicationId: string | null;
+}): boolean {
+  if (!input.persisted) return true;
+  if (input.persisted.state !== input.state) return true;
+  return (
+    input.state !== 'LIVE_ACTIVE' &&
+    (input.persisted.generation !== input.generation ||
+      input.persisted.publicationId !== input.publicationId)
+  );
+}
+
 async function runLifecycleTick(now: Date): Promise<LiveLifecycleDecision | null> {
-  if (isCompatibilitySchedulerEnabled()) {
-    const { runCompatibilitySchedulerPass } = await import('../scheduler/scheduler.service');
-    await runCompatibilitySchedulerPass(now);
-    return null;
-  }
   return runLiveLifecycle(now);
 }
 

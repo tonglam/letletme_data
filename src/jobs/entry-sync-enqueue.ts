@@ -17,7 +17,6 @@ import { getCurrentEvent } from '../services/events.service';
 import { logError, logInfo } from '../utils/logger';
 import { stableHash } from '../utils/stable-hash';
 import { trackQueueRunJob } from '../services/queue-run-tracker';
-import { getConfig } from '../utils/config';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export interface EntrySyncJobOptions {
@@ -86,9 +85,11 @@ export function retainEntrySyncChainOptions(
 }
 
 export function entryQueueForLane(lane: EntrySyncLane | undefined) {
-  return lane === 'live-picks' && getConfig().QUEUE_LANES_V2_ENABLED
-    ? livePicksQueue
-    : entrySyncQueue;
+  // Live Points is a hard cut: the provider lane is always isolated from the
+  // generic entry-sync queue.  A rollout flag must never silently route live
+  // picks back to the old worker, because that recreates the mixed-version
+  // publication path this lane is designed to remove.
+  return lane === 'live-picks' ? livePicksQueue : entrySyncQueue;
 }
 
 function hashEntryListKey(
@@ -261,12 +262,14 @@ async function enqueueEntrySyncJob(
     const explicitDeduplicationId = options.deduplicationId?.trim();
     const explicitDeduplicationCadenceMs = options.deduplicationCadenceMs;
     if (
-      (explicitDeduplicationId === undefined) !== (explicitDeduplicationCadenceMs === undefined) ||
       explicitDeduplicationId === '' ||
+      (explicitDeduplicationId === undefined && explicitDeduplicationCadenceMs !== undefined) ||
       (explicitDeduplicationCadenceMs !== undefined &&
         (!Number.isFinite(explicitDeduplicationCadenceMs) || explicitDeduplicationCadenceMs < 1))
     ) {
-      throw new Error('Entry sync deduplication requires a non-empty id and positive cadence');
+      throw new Error(
+        'Entry sync deduplication requires a non-empty id; cadence is optional for active-only single-flight',
+      );
     }
     if (explicitDeduplicationId && explicitDeduplicationCadenceMs) {
       const reusable = await findReusableExplicitDeduplicationJob({

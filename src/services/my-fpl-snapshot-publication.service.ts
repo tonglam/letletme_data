@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
 
 import { redisSingleton } from '../cache/singleton';
-import { EVENT_LIVE_PROJECTION_ALGORITHM_VERSION } from '../domain/event-live-manager-projection';
 import { countEntryEligibility, isEntryEligibleForEvent } from '../domain/entry-eligibility';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -13,10 +12,11 @@ import { contentHash, postgresJsonbCanonicalJson } from '../utils/content-hash';
 import { logInfo, logWarn } from '../utils/logger';
 import {
   buildScoreInputRevision,
-  eventLiveManagerScoreService,
+  eventLiveV2ScoreService,
   loadFreshEventLiveAuthoritySnapshot,
-} from './event-live-manager-scores.service';
-import type { RevisionedEventLiveManagerScore } from './event-live-manager-scores.service';
+  LIVE_POINTS_V2_ALGORITHM_VERSION,
+} from './event-live-v2-score.service';
+import type { RevisionedEventLiveScore } from './event-live-v2-score.service';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -838,7 +838,7 @@ const overlayProjectedEventLiveStats = (
 };
 
 /**
- * Fixture display facts must come from the same pinned fpl:live publication as
+ * Fixture display facts must come from the same pinned Live Points V2 publication as
  * the projected score. The mutable fixtures table may advance while a My FPL
  * capture is assembling its children, so only team labels remain database
  * presentation metadata here; fixture membership, home/away and score are
@@ -997,7 +997,7 @@ const finalResultRevisions = (
   return { inputRevision, scoreRevision };
 };
 
-type ProjectedManagerScore = RevisionedEventLiveManagerScore;
+type ProjectedManagerScore = RevisionedEventLiveScore;
 
 const projectedResult = (
   entry: EntrySource,
@@ -1060,7 +1060,7 @@ const projectedResult = (
     automatic_substitutions: automaticSubstitutions,
     team_value: entry.team_value,
     bank: entry.bank,
-    // The projected row is sourced from the pinned fpl:live publication; it
+    // The projected row is sourced from the pinned Live Points V2 publication; it
     // intentionally has no rich result timestamp. Publication provenance is
     // carried separately by the My FPL header.
     rich_synced_at: null,
@@ -1095,7 +1095,7 @@ const projectedScoreUsesCaptureInputs = (
     0,
   );
   const inputRevision = buildScoreInputRevision({
-    algorithmVersion: EVENT_LIVE_PROJECTION_ALGORITHM_VERSION,
+    algorithmVersion: LIVE_POINTS_V2_ALGORITHM_VERSION,
     authorityRevision,
     entryId,
     entryStartedEvent,
@@ -1525,7 +1525,7 @@ export function isCompleteMyFplPublication(
       UUID_RE.test(publication.livePublicationId) &&
       publication.liveRevision !== null &&
       publication.liveRevision.trim() !== '' &&
-      publication.algorithmVersion === EVENT_LIVE_PROJECTION_ALGORITHM_VERSION
+      publication.algorithmVersion === LIVE_POINTS_V2_ALGORITHM_VERSION
     );
   }
   return (
@@ -2083,12 +2083,12 @@ async function captureMyFplSnapshotOnce(
     // reads the current event's entry_event_results. FINAL uses only the
     // finalized result path and never invokes the projector.
     const projectedScoresByEntry = new Map<number, ProjectedManagerScore>();
-    let projectedBatch: Awaited<ReturnType<typeof eventLiveManagerScoreService.load>> = null;
+    let projectedBatch: Awaited<ReturnType<typeof eventLiveV2ScoreService.load>> = null;
     if (kind === 'PROVISIONAL') {
       const activeEntryIds = entries
         .filter((entry) => isEntryEligibleForEvent({ startedEvent: entry.started_event, eventId }))
         .map((entry) => entry.entry_id);
-      projectedBatch = await eventLiveManagerScoreService.load(season, eventId, activeEntryIds, {
+      projectedBatch = await eventLiveV2ScoreService.load(season, eventId, activeEntryIds, {
         includeEffectiveLineup: true,
       });
       if (!projectedBatch) {
@@ -2098,7 +2098,7 @@ async function captureMyFplSnapshotOnce(
       }
       const pinnedLiveSnapshot = await loadFreshEventLiveAuthoritySnapshot(season, eventId, {
         publicationId: projectedBatch.publicationId,
-        revision: projectedBatch.liveRevision,
+        generation: projectedBatch.generation,
       });
       if (!pinnedLiveSnapshot) {
         throw new MyFplSnapshotIncompleteError(
@@ -2149,7 +2149,7 @@ async function captureMyFplSnapshotOnce(
             score,
             entryPicks,
             resultRows,
-            projectedBatch.revision,
+            `live-points-v2:${projectedBatch.publicationId}:${projectedBatch.generation}:${projectedBatch.scoreCoreRevision}`,
           )
         ) {
           throw new MyFplSnapshotIncompleteError(
@@ -2695,7 +2695,8 @@ async function captureMyFplSnapshotOnce(
     const scoreSource = kind === 'FINAL' ? 'FPL_FINAL_RESULT' : 'FPL_EVENT_LIVE';
     const livePublicationId =
       kind === 'PROVISIONAL' ? (projectedBatch?.publicationId ?? null) : null;
-    const liveRevision = kind === 'PROVISIONAL' ? (projectedBatch?.liveRevision ?? null) : null;
+    const liveRevision =
+      kind === 'PROVISIONAL' ? (projectedBatch?.scoreCoreRevision ?? null) : null;
     const algorithmVersion =
       kind === 'PROVISIONAL' ? (projectedBatch?.algorithmVersion ?? null) : null;
     const content = {
@@ -2963,7 +2964,7 @@ const isMyFplSnapshotRedisManifest = (value: unknown): value is MyFplSnapshotRed
         typeof candidate.liveRevision === 'string' &&
         candidate.liveRevision.trim() !== '' &&
         typeof candidate.algorithmVersion === 'string' &&
-        candidate.algorithmVersion === EVENT_LIVE_PROJECTION_ALGORITHM_VERSION
+        candidate.algorithmVersion === LIVE_POINTS_V2_ALGORITHM_VERSION
       : candidate.scoreSource === 'FPL_FINAL_RESULT' &&
         candidate.livePublicationId === null &&
         candidate.liveRevision === null &&

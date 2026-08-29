@@ -1,9 +1,5 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
-import {
-  shouldCascadePersistedLiveSnapshot,
-  shouldSkipQueuedLiveSnapshot,
-} from '../domain/live-snapshot';
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
   LIVE_JOBS,
@@ -11,11 +7,8 @@ import {
   liveDataQueue,
   liveDataQueueName,
 } from '../queues/live-data.queue';
-import {
-  enqueueFinalLeagueResultsAfterLiveSync,
-  isLiveMatchWindowForEvent,
-} from '../services/live-data-cascade.service';
-import { syncLiveSnapshot } from '../services/live-snapshot.service';
+import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-cascade.service';
+import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -69,33 +62,12 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
       throw new Error(`Unknown job name: ${job.name}`);
     }
-    const persistEventLives = job.data.persistEventLives ?? false;
-    if (source === 'cron') {
-      const windowOpen = await isLiveMatchWindowForEvent(season, eventId);
-      if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
-        logInfo('Skipping cache-only live snapshot job - not match time', {
-          season: season.seasonCode,
-          eventId,
-        });
-        return;
-      }
-    }
-    const snapshot = await syncLiveSnapshot(season, eventId, {
-      persistEventLives,
+    const snapshot = await syncLiveSnapshotV2(season, eventId, {
       finalizeEvent: job.data.finalizeEvent === true,
       trigger: source,
-      mutationScopes: ['data-core:fixtures', `live-snapshot:event:${eventId}`],
       sourceRunId: job.data.runId,
-      freshnessWindowId: job.data.freshnessWindowId,
     });
-    // A failed downstream enqueue causes BullMQ to retry this parent after the
-    // canonical live write has already committed. On that retry the unchanged
-    // snapshot path correctly reports `persistedEventLives: false`; the durable
-    // job intent still makes the idempotent cascade eligible.
-    if (
-      shouldCascadePersistedLiveSnapshot(snapshot) ||
-      (job.attemptsMade > 0 && persistEventLives)
-    ) {
+    if (snapshot.state === 'FINALIZED') {
       await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
     }
     return snapshot;

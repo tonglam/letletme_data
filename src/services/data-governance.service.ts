@@ -161,7 +161,6 @@ export async function upsertFreshnessWindow(input: {
 
 const PUBLICATION_CONTRACT_BY_DATASET = {
   'fpl:core': 'core-fixtures',
-  'fpl:live': 'live-snapshot',
   'fpl:market': 'market-price',
   'fpl:price-changes': 'market-price',
 } as const;
@@ -289,9 +288,6 @@ export async function recordDataPublicationEvidence(input: {
           .limit(20);
   const eligibleWindows = windows.filter((window) => {
     if (window.seasonCode !== input.manifest.seasonCode) return false;
-    if (contractKey === 'live-snapshot' && window.eventId !== input.manifest.eventId) {
-      return false;
-    }
     const scopeSeason = window.scopeKey.match(/^(\d{4})(?::|$)/)?.[1];
     return scopeSeason === input.manifest.seasonCode;
   });

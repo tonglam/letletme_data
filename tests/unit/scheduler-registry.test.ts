@@ -23,7 +23,6 @@ import {
   schedulerExecutionLanes,
   schedulerPlanKey,
 } from '../../src/scheduler/scheduler.service';
-import { resolvePlayerStatsActiveCadence } from '../../src/domain/job-schedules';
 import { mockFixture1 } from '../fixtures/fixtures.fixtures';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
@@ -483,24 +482,6 @@ describe('standalone scheduler registry', () => {
     const schedulerSource = readFileSync('src/scheduler/job-registry.ts', 'utf8');
     expect(schedulerSource).not.toMatch(/from ['"]\.\.\/clients\/fpl['"]/);
     expect(schedulerSource).not.toContain('fplClient.getBootstrap');
-  });
-
-  test('limits active player-stat refreshes to lifecycle states that can still change', () => {
-    const ordinaryMinute = new Date('2026-08-22T10:17:00.000Z');
-    const fiveMinuteBoundary = new Date('2026-08-22T10:20:00.000Z');
-
-    expect(resolvePlayerStatsActiveCadence('LIVE_ACTIVE', ordinaryMinute)).toBe('one-minute');
-    expect(resolvePlayerStatsActiveCadence('DAY_SETTLING', ordinaryMinute)).toBe('one-minute');
-    expect(resolvePlayerStatsActiveCadence('BETWEEN_FIXTURES', ordinaryMinute)).toBeNull();
-    expect(resolvePlayerStatsActiveCadence('BETWEEN_FIXTURES', fiveMinuteBoundary)).toBe(
-      'five-minute',
-    );
-    expect(resolvePlayerStatsActiveCadence('GW_REVIEW', fiveMinuteBoundary)).toBe('five-minute');
-    expect(resolvePlayerStatsActiveCadence('PICKS_SYNC', fiveMinuteBoundary)).toBe('five-minute');
-    expect(resolvePlayerStatsActiveCadence('PRE_DEADLINE', fiveMinuteBoundary)).toBeNull();
-    expect(resolvePlayerStatsActiveCadence('PICKS_WAIT', fiveMinuteBoundary)).toBeNull();
-    expect(resolvePlayerStatsActiveCadence('PICKS_PROBE', fiveMinuteBoundary)).toBeNull();
-    expect(resolvePlayerStatsActiveCadence('FINALIZED', fiveMinuteBoundary)).toBeNull();
   });
 
   test('runs official H2H through the durable standalone scheduler during match windows', async () => {

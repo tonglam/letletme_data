@@ -46,7 +46,8 @@
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
     "cache:publish-core": "bun scripts/publish-core-cache.ts",
     "contract:stage-week": "bun scripts/stage-graphql-contract-week.ts",
-    "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts"
+    "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts",
+    "ops:repair-live-points-v2": "bun scripts/repair-live-points-v2.ts"
   },
   "repository": {
     "type": "git",

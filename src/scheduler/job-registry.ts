@@ -49,7 +49,6 @@ import {
   coreLifecycleReconcilePeriodKey,
   coreSnapshotRefreshReason,
 } from '../domain/core-snapshot-refresh';
-import { resolvePlayerStatsActiveCadence } from '../domain/job-schedules';
 import {
   getPostMatchResultsCheckpoint,
   getPostMatchResultsSlot,
@@ -62,6 +61,7 @@ import { syncOperationsRepository } from '../repositories/sync-operations';
 import { isMatchDayTime } from '../utils/conditions';
 import {
   decideLiveLifecycle,
+  isLivePicksProbeDue,
   resolveLiveLifecycleDelay,
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
@@ -975,7 +975,8 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
     queueName: 'live-data',
-    successPredicate: 'live snapshot checked and publication/durable rows advanced',
+    successPredicate:
+      'live snapshot checked; Redis publication current and checkpoint obligation reconciled',
     resolve: async (context) => {
       if (!context.currentEventId) return [];
       const currentEvent = context.events.find((event) => event.id === context.currentEventId);
@@ -995,7 +996,6 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       );
       if (pollIntervalMs === null) return [];
       const bucket = Math.floor(context.now.getTime() / pollIntervalMs);
-      const persistBucket = Math.floor(context.now.getTime() / (10 * 60_000));
       return [
         {
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
@@ -1004,8 +1004,6 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
           eventId: event.id,
           source: 'reconcile',
           evidence: {
-            persistEventLives: context.now.getTime() % (10 * 60_000) < 30_000,
-            persistBucket,
             lifecycleState: decision.state,
             pollIntervalMs,
           },
@@ -1017,7 +1015,6 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       if (!eventId) throw new Error('Live snapshot obligation has no event checkpoint');
       const job = await enqueueLiveSnapshot(context.season, eventId, 'reconcile', {
         jobId: `scheduler-${obligationId}-g${generation}`,
-        persistEventLives: plan.evidence?.persistEventLives === true,
         reuseExisting: true,
         obligationId,
         obligationGeneration: generation,
@@ -1029,10 +1026,9 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
 }
 
 function livePicksDefinition(): ScheduledJobDefinition {
-  const refreshIntervalMs = 10 * 60_000;
   return {
     name: 'live-picks-refresh',
-    cadence: 'lifecycle-aware eligible-entry sweep after source canary',
+    cadence: 'deadline canary and pre-start missing-entry repair only',
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
@@ -1042,27 +1038,22 @@ function livePicksDefinition(): ScheduledJobDefinition {
     successPredicate: 'canary accepted and eligible entry picks finalizer completes',
     recoveryCompletionMode: 'live-picks-finalizer',
     manualTrigger: false,
-    isEnabled: () => getConfig().QUEUE_LANES_V2_ENABLED,
     resolve: async (context) => {
-      // Disabled rollout must not reserve historical obligations that will all
-      // become runnable when the lane is enabled later.
-      if (!getConfig().QUEUE_LANES_V2_ENABLED) return [];
       if (!context.currentEventId) return [];
       const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
       const decision = decideLiveLifecycle(event, fixtures, context.now);
-      if (!decision.shouldProbePicks && !decision.shouldSyncPicks) return [];
-      const bucket = Math.floor(context.now.getTime() / refreshIntervalMs);
-      const dueAt = new Date(bucket * refreshIntervalMs);
+      if (!decision.shouldProbePicks) return [];
+      if (!(await isLivePicksProbeDue(context.season.seasonCode, event.id, context.now))) return [];
       return [
         {
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-picks-${event.id}-${bucket}`,
-          dueAt,
+          periodKey: `live-picks-${event.id}-${Math.floor(context.now.getTime() / 30_000)}`,
+          dueAt: context.now,
           eventId: event.id,
           source: 'reconcile' as const,
-          evidence: { lifecycleState: decision.state, refreshIntervalMs },
+          evidence: { lifecycleState: decision.state, probe: 'deadline-or-pre-start' },
         },
       ];
     },
@@ -1233,7 +1224,6 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
             resultSlot: checkpoint.slot,
             ...postMatchFixtureAuthority(fixtures),
             finalizeEvent: true,
-            persistEventLives: true,
           },
         },
       ];
@@ -1243,7 +1233,6 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
       if (!eventId) throw new Error('Live finalization obligation has no event checkpoint');
       const job = await enqueueLiveSnapshot(context.season, eventId, 'reconcile', {
         jobId: `scheduler-${obligationId}-g${generation}`,
-        persistEventLives: true,
         finalizeEvent: true,
         reuseExisting: true,
         obligationId,
@@ -1251,51 +1240,6 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
         freshnessWindowId,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
-    },
-  };
-}
-
-function activePlayerStatsDefinition(): ScheduledJobDefinition {
-  return {
-    name: 'player-stats-active',
-    cadence: 'one-minute live/settling window; five-minute between-fixture/review repair',
-    timezone: 'UTC',
-    catchUpPolicy: 'latest-authoritative',
-    criticality: 'normal',
-    queueName: 'data-sync',
-    successPredicate: 'player stats for the active event persist for the current bucket',
-    resolve: async (context) => {
-      if (!context.currentEventId) return [];
-      const event = await loadSchedulerEvent(context, context.currentEventId);
-      if (!event) return [];
-      const fixtures = await loadSchedulerFixtures(context, event.id);
-      const decision = decideLiveLifecycle(event, fixtures, context.now);
-      const cadence = resolvePlayerStatsActiveCadence(decision.state, context.now);
-      if (!cadence) return [];
-      const bucket = Math.floor(context.now.getTime() / 60_000);
-      return [
-        {
-          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `player-stats-${event.id}-${bucket}`,
-          dueAt: context.now,
-          eventId: event.id,
-          source: 'reconcile' as const,
-          evidence: { lifecycleState: decision.state, cadence },
-        },
-      ];
-    },
-    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
-      const eventId = plan.eventId ?? context.currentEventId;
-      if (!eventId) throw new Error('Active player stats obligation has no event checkpoint');
-      const job = await enqueuePlayerStatsSyncJob(context.season, 'reconcile', {
-        eventId,
-        jobId: `scheduler-${obligationId}-g${generation}`,
-        removeOnSettle: false,
-        obligationId,
-        obligationGeneration: generation,
-        freshnessWindowId,
-      });
-      return { bullJobId: job.id, runId: job.data.runId };
     },
   };
 }
@@ -1831,7 +1775,6 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
     livePicksDefinition(),
     officialH2HDefinition(),
     liveFinalizationDefinition(),
-    activePlayerStatsDefinition(),
     contentDefinition(),
   ];
   assertDataContractRegistry(definitions.map((definition) => definition.name));

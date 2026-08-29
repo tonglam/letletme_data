@@ -17,7 +17,7 @@ export type LiveLifecycleStatusInput = {
   observedAt: Date;
   lastChangedAt: Date;
   nextRefreshAt: Date | null;
-  liveRevision: string | null;
+  generation: number | null;
   publicationId: string | null;
   sourceCheckedAt: Date | null;
 };
@@ -66,7 +66,7 @@ export const createLiveLifecycleStatusRepository = (dbInstance?: DbOrTransaction
           observedAt: input.observedAt,
           lastChangedAt: input.lastChangedAt,
           nextRefreshAt: input.nextRefreshAt,
-          liveRevision: input.liveRevision,
+          generation: input.generation,
           publicationId: input.publicationId,
           sourceCheckedAt: input.sourceCheckedAt,
           updatedAt: input.observedAt,
@@ -78,7 +78,7 @@ export const createLiveLifecycleStatusRepository = (dbInstance?: DbOrTransaction
             observedAt: sql`excluded.observed_at`,
             lastChangedAt: sql`excluded.last_changed_at`,
             nextRefreshAt: sql`excluded.next_refresh_at`,
-            liveRevision: sql`excluded.live_revision`,
+            generation: sql`excluded.generation`,
             publicationId: sql`excluded.publication_id`,
             sourceCheckedAt: sql`excluded.source_checked_at`,
             updatedAt: sql`excluded.updated_at`,

@@ -41,7 +41,7 @@ import {
   eventLiveHeartbeatIsFresh,
   eventLivePicksAreFresh,
   loadFreshEventLiveAuthoritySnapshot,
-} from './event-live-manager-scores.service';
+} from './event-live-v2-score.service';
 
 export { latestFreshnessTimestamp } from '../domain/freshness';
 export { findEventEligibleEntryIds } from '../domain/entry-infos';

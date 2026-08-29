@@ -650,6 +650,177 @@ export const entryEventPicksInCompetition = competition.table(
   ],
 );
 
+/**
+ * V2 completeness head for one immutable entry/event input.  The row is a
+ * checkpoint index, not the source of truth for individual picks: a head is
+ * valid only when it points at a 15-row set in entry_event_picks.
+ */
+export const entryEventPickHeadsInCompetition = competition.table(
+  'entry_event_pick_heads',
+  {
+    seasonId: smallint('season_id').notNull(),
+    entryId: integer('entry_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    publicationId: text('publication_id').notNull(),
+    generation: bigint('generation', { mode: 'number' }).notNull(),
+    picksBaseRevision: text('picks_base_revision').notNull(),
+    contentSha256: text('content_sha256').notNull(),
+    rowCount: smallint('row_count').notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    contentUpdatedAt: timestamp('content_updated_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    state: text().notNull().default('COMPLETE'),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.entryId, table.eventId],
+      name: 'entry_event_pick_heads_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.entryId],
+      foreignColumns: [entriesInCompetition.seasonId, entriesInCompetition.entryId],
+      name: 'entry_event_pick_heads_entry_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'entry_event_pick_heads_event_fk',
+    }),
+    index('entry_event_pick_heads_event_entry_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.entryId,
+    ),
+    check(
+      'entry_event_pick_heads_identity_valid',
+      sql`entry_id > 0 AND event_id > 0 AND generation > 0 AND row_count = 15 AND state = 'COMPLETE' AND picks_base_revision ~ '^[0-9a-f]{64}$' AND content_sha256 ~ '^[0-9a-f]{64}$'`,
+    ),
+    check('entry_event_pick_heads_time_order', sql`checkpointed_at >= source_checked_at`),
+  ],
+);
+
+/**
+ * Durable migration/repair worklist for legacy entry pick rowsets that do not
+ * satisfy the V2 exactly-15 contract.  Invalid scopes never receive a head.
+ */
+export const entryEventPickRepairsInCompetition = competition.table(
+  'entry_event_pick_repairs',
+  {
+    seasonId: smallint('season_id').notNull(),
+    entryId: integer('entry_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    reason: text().notNull(),
+    observedRowCount: integer('observed_row_count').notNull(),
+    observedAt: timestamp('observed_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    status: text().notNull().default('PENDING'),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true, mode: 'date' }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.entryId, table.eventId],
+      name: 'entry_event_pick_repairs_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.entryId],
+      foreignColumns: [entriesInCompetition.seasonId, entriesInCompetition.entryId],
+      name: 'entry_event_pick_repairs_entry_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'entry_event_pick_repairs_event_fk',
+    }),
+    index('entry_event_pick_repairs_pending_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.observedAt,
+    ),
+    check(
+      'entry_event_pick_repairs_scope_valid',
+      sql`season_id > 0 AND entry_id > 0 AND event_id > 0`,
+    ),
+    check('entry_event_pick_repairs_reason_valid', sql`btrim(reason) <> ''`),
+    check('entry_event_pick_repairs_row_count_valid', sql`observed_row_count >= 0`),
+    check(
+      'entry_event_pick_repairs_status_valid',
+      sql`status = ANY (ARRAY['PENDING', 'REPAIRED', 'IGNORED']::text[])`,
+    ),
+    check(
+      'entry_event_pick_repairs_resolution_valid',
+      sql`(status = 'PENDING' AND resolved_at IS NULL) OR (status IN ('REPAIRED', 'IGNORED') AND resolved_at IS NOT NULL)`,
+    ),
+  ],
+);
+
+/**
+ * Redis-first V2 global checkpoint.  This is deliberately not an ops
+ * publication row: it stores the complete same-event fallback payload that a
+ * GraphQL process can serve when Redis is unavailable.  It is a single
+ * checkpoint head per season/event; finalization is immutable at the writer.
+ */
+export const livePointsPublicationCheckpointsInCompetition = competition.table(
+  'live_points_publication_checkpoints',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    publicationId: text('publication_id').notNull(),
+    generation: bigint('generation', { mode: 'number' }).notNull(),
+    state: text().notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }).notNull(),
+    checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    expectedNextCheckAt: timestamp('expected_next_check_at', { withTimezone: true, mode: 'date' }),
+    revisions: jsonb().notNull(),
+    eventLive: jsonb('event_live').notNull(),
+    fixtures: jsonb().notNull(),
+    eventLiveBytes: integer('event_live_bytes').notNull(),
+    fixturesBytes: integer('fixtures_bytes').notNull(),
+    eventLiveSha256: text('event_live_sha256').notNull(),
+    fixturesSha256: text('fixtures_sha256').notNull(),
+    eventLiveCount: integer('event_live_count').notNull(),
+    fixturesCount: integer('fixtures_count').notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.eventId],
+      name: 'live_points_publication_checkpoints_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'live_points_publication_checkpoints_event_fk',
+    }),
+    unique('live_points_publication_checkpoints_publication_once').on(
+      table.seasonId,
+      table.eventId,
+      table.publicationId,
+    ),
+    index('live_points_publication_checkpoints_event_generation_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.generation,
+    ),
+    check(
+      'live_points_publication_checkpoints_identity_valid',
+      sql`event_id > 0 AND generation > 0 AND publication_id ~ '^[0-9a-f-]{36}$' AND state = ANY (ARRAY['PRE_DEADLINE','PICKS_WAIT','PICKS_PROBE','PICKS_SYNC','LIVE_ACTIVE','BETWEEN_FIXTURES','DAY_SETTLING','GW_REVIEW','FINALIZED']::text[])`,
+    ),
+    check(
+      'live_points_publication_checkpoints_payload_valid',
+      sql`jsonb_typeof(revisions) = 'object' AND jsonb_typeof(event_live) = 'array' AND jsonb_typeof(fixtures) = 'array' AND event_live_count = jsonb_array_length(event_live) AND fixtures_count = jsonb_array_length(fixtures) AND event_live_count >= 0 AND fixtures_count >= 0 AND event_live_bytes >= 0 AND fixtures_bytes >= 0 AND event_live_sha256 ~ '^[0-9a-f]{64}$' AND fixtures_sha256 ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'live_points_publication_checkpoints_time_order',
+      sql`published_at >= source_checked_at AND checkpointed_at >= published_at`,
+    ),
+  ],
+);
+
 export const entryEventTransfersInCompetition = competition.table(
   'entry_event_transfers',
   {

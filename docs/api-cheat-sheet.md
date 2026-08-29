@@ -3,9 +3,9 @@
 Examples use `http://data.internal.example`; substitute the trusted environment URL.
 
 - This is an ingestion/operations API, not the public product API.
-- `/health` is process liveness. `/ready` requires PostgreSQL, cache Redis, queue Redis, exactly
-  one current row in `fpl.seasons`, fresh scheduler/worker heartbeats, and DB/Redis publication
-  consistency (a transient publication mismatch is tolerated for 120 seconds).
+- `/health/live` is process liveness. `/health/ready` reports capability readiness: the Redis-hot
+  read path stays available while PostgreSQL is degraded. `/health/deploy` is the strict release
+  gate and requires Redis, PostgreSQL, release identity, and worker heartbeats.
 - Every `POST`, `PATCH`, and `DELETE` requires `x-api-key` when `ENABLE_AUTH=true`.
 - A `202` normally proves enqueueing only. Verify the BullMQ result and PostgreSQL/publication
   state separately.
@@ -21,8 +21,9 @@ export LETLETME_DATA_API_KEY='<secret from the trusted secret manager>'
 
 ```bash
 curl "$LETLETME_DATA_URL/"
-curl "$LETLETME_DATA_URL/health"
-curl "$LETLETME_DATA_URL/ready"
+curl "$LETLETME_DATA_URL/health/live"
+curl "$LETLETME_DATA_URL/health/ready"
+curl "$LETLETME_DATA_URL/health/deploy"
 ```
 
 ## Core and FPL facts
@@ -60,35 +61,34 @@ curl -X POST "$LETLETME_DATA_URL/event-lives/sync/1" -H "x-api-key: $LETLETME_DA
 `cache` publishes one coherent live revision. `sync` also persists event-live and explain facts.
 Both validate the complete current-season player and fixture identity baseline.
 
-## Official manager live cache and refresh
+## Live Points V2 publication
 
-The GraphQL service uses this protected endpoint for official manager headlines. It is
-season-scoped, accepts at most 500 entries, and does not accept caller-supplied league
-identities. A tournament ID is checked against the current-season roster.
-
-`readMode` defaults to `READ_THROUGH` for compatibility with older internal callers. Live GraphQL
-boards explicitly send `CACHE_ONLY`: that path reads only Redis and the PostgreSQL checkpoint,
-returns any durable last-good rows immediately, and makes no FPL request. It marks the scope hot
-for six hours and makes a bounded attempt to enqueue the independent `manager-live` worker. The
-worker refreshes Classic standings, H2H entry summaries, and missing Overall Rank asynchronously.
+Live Points is a breaking V2 contract. Data publishes a complete coherent event snapshot and a
+per-entry input under the `llm:data:v2:fpl:*` namespace. Redis current is promoted only after
+validating event/fixture identity, player roster, item count, bytes, and SHA-256; the previous
+complete publication remains in `previous`. PostgreSQL is an asynchronous checkpoint, not part of
+the hot read path.
 
 ```bash
-curl -X POST "$LETLETME_DATA_URL/internal/manager-live/resolve" \
-  -H "x-api-key: $LETLETME_DATA_API_KEY" -H 'content-type: application/json' \
-  -d '{"eventId":1,"entryIds":[12345,67890],"tournamentId":42,"readMode":"CACHE_ONLY"}'
+curl "$LETLETME_DATA_URL/internal/live/status"
+curl "$LETLETME_DATA_URL/jobs/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
-Rows are published under `OfficialManagerLive:{season}:{event}` with a 48-hour Redis
-retention window and in the PostgreSQL checkpoint. `staleAt` is a freshness signal, not a deletion
-boundary: an older official row is returned as `LAST_GOOD` until a newer official row replaces it.
-The response also exposes `managerRevision`, `dataAvailability`, `servedFrom`, `refreshQueued`,
-`checkedAt`, and `nextRefreshAt`. An entry with no durable official row remains unavailable; local
-lineup calculations never substitute for an official manager score.
+The global live lane observes event-live and fixtures together every 30 seconds while an event is
+active. A heartbeat updates `sourceCheckedAt` and `expectedNextCheckAt` without creating a new
+generation or database write. A content change creates one immutable generation and one merged
+checkpoint obligation. The reader order is Redis current, Redis previous, GraphQL process LKG, and
+then a complete PostgreSQL checkpoint; no request calls FPL, a Data manager API, or a queue.
 
-`manager-live` jobs deduplicate by scope and 30-second bucket, retry upstream 429/failures after
-30/60/120 seconds, and stop recurring after the six-hour hot marker expires or the event is both
-finished and data-checked. The queue participates in `/ready`, `/jobs/status`, worker heartbeat,
-quiescence, and final-failure alerting.
+Entry picks are a one-time post-deadline canary plus per-entry single-flight publication. Once a
+complete same-event V2 input exists, it is not swept again on a ten-minute cohort cadence. If Redis
+publishes before PostgreSQL is unavailable, the exact publication remains a Redis desired
+checkpoint and is repaired from Redis without refetching FPL.
+
+`sourceCheckedAt` describes the last successful coherent source check; `contentUpdatedAt`
+describes the last semantic change; `publishedAt` describes Redis promotion; `checkpointedAt`
+describes durable completion. Age changes delivery from `FRESH` to `STALE` or `DEGRADED`; it never
+deletes a same-event complete last-known-good response.
 
 ## Entries
 
@@ -143,9 +143,9 @@ curl -X POST "$LETLETME_DATA_URL/jobs/player-prices/trigger" \
   -d '{"changeDate":"20260803"}'
 ```
 
-`GET /jobs` is generated from the scheduler registry and the compatibility
-manual adapters; use it as the runtime authority rather than copying a static
-schedule list. Compatibility adapters include `core-snapshot-sync`,
+`GET /jobs` is generated from the scheduler registry and the explicit manual
+adapters; use it as the runtime authority rather than copying a static
+schedule list. Manual adapters include `core-snapshot-sync`,
 `event-current-refresh`, `player-prices`, `player-stats-sync`,
 `player-values-sync`, `entry-info-daily`, `entry-event-results-daily`,
 `league-event-results-sync`, `tournament-event-results-sync`,

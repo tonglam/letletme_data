@@ -14,9 +14,9 @@ import {
 
 const payload = JSON.stringify([{ id: 1 }]);
 const manifest: DataPublicationManifest = {
-  dataset: 'fpl:live',
+  dataset: 'fpl:market',
   seasonCode: '2627',
-  eventId: 1,
+  eventId: null,
   revision: 7,
   publicationId: '00000000-0000-4000-8000-000000000007',
   sourceCheckedAt: '2026-08-28T00:00:00.000Z',
@@ -24,12 +24,8 @@ const manifest: DataPublicationManifest = {
   state: 'active',
   items: [
     {
-      name: 'eventLive',
-      key: dataPublicationItemKey(
-        { dataset: 'fpl:live', seasonCode: '2627', eventId: 1 },
-        7,
-        'eventLive',
-      ),
+      name: 'context',
+      key: dataPublicationItemKey({ dataset: 'fpl:market', seasonCode: '2627' }, 7, 'context'),
       type: 'string',
       count: 1,
       bytes: Buffer.byteLength(payload),
@@ -112,7 +108,7 @@ describe('data publication delivery service', () => {
       'redis_activated',
     ]);
     expect(recordEvidence).toHaveBeenCalledTimes(2);
-    expect(recordEvidence.mock.calls[1]?.[0].payloads).toEqual({ eventLive: [{ id: 1 }] });
+    expect(recordEvidence.mock.calls[1]?.[0].payloads).toEqual({ context: [{ id: 1 }] });
     expect(reportError).toHaveBeenCalledTimes(1);
   });
 

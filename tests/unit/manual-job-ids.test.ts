@@ -4,25 +4,10 @@ import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 type AddCall = { name: string; data: Record<string, unknown>; opts: Record<string, unknown> };
 
-const liveDataAddCalls: AddCall[] = [];
 const entrySyncAddCalls: AddCall[] = [];
 const tournamentSyncAddCalls: AddCall[] = [];
 const pendingTournamentSyncJobs: Array<{ name: string; data: Record<string, unknown> }> = [];
 const leagueSyncAddCalls: AddCall[] = [];
-
-mock.module('../../src/queues/live-data.queue', () => ({
-  LIVE_JOBS: {
-    LIVE_SNAPSHOT: 'live-snapshot',
-  },
-  liveDataQueue: {
-    name: 'live-data',
-    getJobs: async () => [],
-    add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
-      liveDataAddCalls.push({ name, data, opts });
-      return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
-    },
-  },
-}));
 
 mock.module('../../src/queues/entry-sync.queue', () => ({
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE: 100,
@@ -81,7 +66,6 @@ mock.module('../../src/queues/league-sync.queue', () => ({
   },
 }));
 
-const { enqueueLiveSnapshot } = await import('../../src/jobs/live-data.jobs');
 const { enqueueEntryInfoSyncJob, enqueueEntryPicksSyncJob } = await import(
   '../../src/jobs/entry-sync-enqueue'
 );
@@ -90,67 +74,6 @@ const { enqueueTournamentEventResults, enqueueTournamentOfficialH2H } = await im
 );
 const { enqueueLeagueEventResults } = await import('../../src/jobs/league-sync.jobs');
 const { stableHash } = await import('../../src/utils/stable-hash');
-
-describe('live-data manual job IDs', () => {
-  beforeEach(() => {
-    liveDataAddCalls.length = 0;
-  });
-
-  test('manual triggers get a deterministic per-(job, event) ID', async () => {
-    const first = await enqueueLiveSnapshot(TEST_SEASON, 10, 'manual', {
-      persistEventLives: true,
-    });
-    const second = await enqueueLiveSnapshot(TEST_SEASON, 10, 'manual', {
-      persistEventLives: true,
-    });
-
-    expect(first).not.toBeNull();
-    expect(second).not.toBeNull();
-    expect(first!.id).toBe('live-snapshot-2627-e10-manual-persist');
-    expect(second!.id).toBe('live-snapshot-2627-e10-manual-persist');
-    // Repeat trigger hits BullMQ's jobId dedup instead of queueing duplicate work
-    expect(liveDataAddCalls[1].opts.jobId).toBe('live-snapshot-2627-e10-manual-persist');
-  });
-
-  test('manual jobs clean up on settle so later re-triggers actually re-run', async () => {
-    await enqueueLiveSnapshot(TEST_SEASON, 10, 'manual', { persistEventLives: true });
-
-    // Deterministic IDs dedupe across retained jobs too — without immediate cleanup,
-    // a completed manual job would swallow re-triggers for the retention window.
-    expect(liveDataAddCalls[0].opts.removeOnComplete).toBe(true);
-    expect(liveDataAddCalls[0].opts.removeOnFail).toBe(true);
-  });
-
-  test('manual IDs differ per persistence mode and event', async () => {
-    const persisted = await enqueueLiveSnapshot(TEST_SEASON, 10, 'manual', {
-      persistEventLives: true,
-    });
-    const cacheOnly = await enqueueLiveSnapshot(TEST_SEASON, 10, 'manual');
-    const otherEvent = await enqueueLiveSnapshot(TEST_SEASON, 11, 'manual', {
-      persistEventLives: true,
-    });
-
-    expect(persisted).not.toBeNull();
-    expect(cacheOnly).not.toBeNull();
-    expect(otherEvent).not.toBeNull();
-    expect(persisted!.id).toBe('live-snapshot-2627-e10-manual-persist');
-    expect(cacheOnly!.id).toBe('live-snapshot-2627-e10-manual-cache');
-    expect(otherEvent!.id).toBe('live-snapshot-2627-e11-manual-persist');
-  });
-
-  test('cron runs keep time-based IDs so every tick enqueues', async () => {
-    const job = await enqueueLiveSnapshot(TEST_SEASON, 10, 'cron', {
-      persistEventLives: true,
-      now: new Date('2026-08-09T12:34:00.000Z'),
-    });
-
-    expect(job).not.toBeNull();
-    expect(job!.id).toBe('live-snapshot-2627-e10-20260809123400-persist');
-    expect(job!.id).not.toBe('live-snapshot-2627-e10-manual-persist');
-    // Cron jobs keep queue-level retention (no per-job cleanup override)
-    expect(liveDataAddCalls[0].opts.removeOnComplete).toBeUndefined();
-  });
-});
 
 describe('entry-sync entry-list job IDs', () => {
   beforeEach(() => {

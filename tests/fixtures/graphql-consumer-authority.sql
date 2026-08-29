@@ -639,14 +639,13 @@ $$;
 DROP TABLE IF EXISTS pg_temp.graphql_live_identity;
 CREATE TEMP TABLE graphql_live_identity (
   publication_id uuid PRIMARY KEY,
-  revision bigint NOT NULL
+  generation bigint NOT NULL
 );
-INSERT INTO graphql_live_identity (publication_id, revision)
-SELECT gen_random_uuid(), COALESCE(max(publication.revision), 0) + 1
-FROM ops.dataset_publications publication
-WHERE publication.dataset = 'fpl:live'
-  AND publication.season_id = 2026
-  AND publication.event_id = 1;
+INSERT INTO graphql_live_identity (publication_id, generation)
+SELECT gen_random_uuid(), COALESCE(max(checkpoint.generation), 0) + 1
+FROM competition.live_points_publication_checkpoints checkpoint
+WHERE checkpoint.season_id = 2026
+  AND checkpoint.event_id = 1;
 
 DROP TABLE IF EXISTS pg_temp.graphql_live_clock;
 CREATE TEMP TABLE graphql_live_clock (
@@ -668,17 +667,8 @@ BEGIN
   -- fallback contract. Build it from the same current-season player and event-1
   -- fixture identities that the supported publisher receives from FPL; the item
   -- proof is derived from the resulting JSONB payloads. Each rerun allocates a
-  -- fresh publication identity and a revision above the existing history so a
-  -- retained Redis publication can never be overwritten by an older fixture.
-UPDATE ops.dataset_publications
-SET status = 'retired',
-    retired_at = COALESCE(retired_at, now()),
-    updated_at = now()
-WHERE dataset = 'fpl:live'
-  AND season_id = 2026
-  AND event_id = 1
-  AND status = 'active';
-
+  -- fresh publication identity and a generation above the existing history so
+  -- a retained Redis publication can never be overwritten by an older fixture.
 DELETE FROM ops.data_publication_outbox outbox
 USING ops.dataset_publications publication
 WHERE outbox.publication_id = publication.publication_id
@@ -687,6 +677,18 @@ WHERE outbox.publication_id = publication.publication_id
   AND publication.event_id = 1
   AND outbox.delivered_at IS NULL
   AND outbox.status IN ('pending', 'staged', 'db_activated', 'redis_activated');
+
+DELETE FROM ops.dataset_publication_items item
+USING ops.dataset_publications publication
+WHERE item.publication_id = publication.publication_id
+  AND publication.dataset = 'fpl:live'
+  AND publication.season_id = 2026
+  AND publication.event_id = 1;
+
+DELETE FROM ops.dataset_publications
+WHERE dataset = 'fpl:live'
+  AND season_id = 2026
+  AND event_id = 1;
 
   -- Finalization is only truthful when the complete event-live payload is also
   -- durable. Rebuild the disposable event-1 fact set and use one captured
@@ -959,175 +961,123 @@ SELECT
   item_name,
   payload,
   item_count,
-  payload::text,
-  octet_length(convert_to(payload::text, 'UTF8')),
-  encode(sha256(convert_to(payload::text, 'UTF8')), 'hex')
+  pg_temp.graphql_canonical_json(payload),
+  octet_length(convert_to(pg_temp.graphql_canonical_json(payload), 'UTF8')),
+  encode(sha256(convert_to(pg_temp.graphql_canonical_json(payload), 'UTF8')), 'hex')
 FROM payloads;
 
-WITH live_items AS (
-  SELECT jsonb_agg(
-    jsonb_build_object(
-      'name', item.item_name,
-      'key', 'llm:data:fpl:live:2627:1:' || (SELECT revision::text FROM graphql_live_identity) || ':' || item.item_name,
-      'type', 'string',
-      'count', item.item_count,
-      'bytes', item.payload_bytes,
-      'sha256', item.checksum
-    ) ORDER BY CASE item.item_name WHEN 'eventLive' THEN 1 WHEN 'fixtures' THEN 2 END
-  ) AS items
-  FROM graphql_live_items item
-)
-INSERT INTO ops.dataset_publications (
-  publication_id,
-  dataset,
+INSERT INTO competition.live_points_publication_checkpoints (
   season_id,
   event_id,
-  revision,
-  status,
-  manifest,
-  activated_at,
-  expires_at,
-  updated_at
+  publication_id,
+  generation,
+  state,
+  source_checked_at,
+  published_at,
+  checkpointed_at,
+  expected_next_check_at,
+  revisions,
+  event_live,
+  fixtures,
+  event_live_bytes,
+  fixtures_bytes,
+  event_live_sha256,
+  fixtures_sha256,
+  event_live_count,
+  fixtures_count
 )
 SELECT
-  (SELECT publication_id FROM graphql_live_identity),
-  'fpl:live',
   2026,
   1,
-  (SELECT revision FROM graphql_live_identity),
-  'active',
+  identity.publication_id::text,
+  identity.generation,
+  'FINALIZED',
+  clock.checked_at,
+  clock.checked_at,
+  clock.checked_at,
+  NULL,
   jsonb_build_object(
-    'dataset', 'fpl:live',
-    'seasonCode', '2627',
-    'eventId', 1,
-    'revision', (SELECT revision FROM graphql_live_identity),
-    'publicationId', (SELECT publication_id::text FROM graphql_live_identity),
-    'sourceCheckedAt', to_char((SELECT checked_at FROM graphql_live_clock) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-    'lastSuccessfulFetchAt', to_char((SELECT checked_at FROM graphql_live_clock) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-    'publishedAt', to_char((SELECT checked_at FROM graphql_live_clock) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-    'state', 'settled',
-    'items', live_items.items
+    'lifecycle', jsonb_build_object(
+      'revision', encode(sha256(convert_to('FINALIZED', 'UTF8')), 'hex'),
+      'contentUpdatedAt', to_char(clock.checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    ),
+    'fixtureIdentity', jsonb_build_object(
+      'revision', fixture_item.checksum,
+      'contentUpdatedAt', to_char(clock.checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    ),
+    'scoreCore', jsonb_build_object(
+      'revision', event_item.checksum,
+      'contentUpdatedAt', to_char(clock.checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    ),
+    'displayStats', jsonb_build_object(
+      'revision', event_item.checksum,
+      'contentUpdatedAt', to_char(clock.checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    ),
+    'explain', jsonb_build_object(
+      'revision', event_item.checksum,
+      'contentUpdatedAt', to_char(clock.checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    ),
+    'rules', jsonb_build_object(
+      'revision', encode(sha256(convert_to('live-points-v2-rules-1', 'UTF8')), 'hex'),
+      'contentUpdatedAt', to_char(clock.checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    )
   ),
-  (SELECT checked_at FROM graphql_live_clock),
-  NULL,
-  (SELECT checked_at FROM graphql_live_clock)
-FROM live_items
-ON CONFLICT (publication_id) DO UPDATE
+  event_item.payload,
+  fixture_item.payload,
+  event_item.payload_bytes,
+  fixture_item.payload_bytes,
+  event_item.checksum,
+  fixture_item.checksum,
+  event_item.item_count,
+  fixture_item.item_count
+FROM graphql_live_identity identity
+CROSS JOIN graphql_live_clock clock
+JOIN graphql_live_items event_item ON event_item.item_name = 'eventLive'
+JOIN graphql_live_items fixture_item ON fixture_item.item_name = 'fixtures'
+ON CONFLICT (season_id, event_id) DO UPDATE
 SET
-  dataset = EXCLUDED.dataset,
-  season_id = EXCLUDED.season_id,
-  event_id = EXCLUDED.event_id,
-  revision = EXCLUDED.revision,
-  status = EXCLUDED.status,
-  manifest = EXCLUDED.manifest,
-  activated_at = EXCLUDED.activated_at,
-  retired_at = NULL,
-  expires_at = EXCLUDED.expires_at,
-  updated_at = EXCLUDED.updated_at;
-
-INSERT INTO ops.dataset_publication_items (
-  publication_id, item_name, payload, item_count, checksum
-)
-SELECT
-  (SELECT publication_id FROM graphql_live_identity),
-  item.item_name,
-  item.payload,
-  item.item_count,
-  item.checksum
-FROM graphql_live_items item
-ON CONFLICT (publication_id, item_name) DO UPDATE
-SET
-  payload = EXCLUDED.payload,
-  item_count = EXCLUDED.item_count,
-  checksum = EXCLUDED.checksum;
-
--- Queue the immutable Live manifest for the Data delivery worker. The
--- publication and its receipt are committed together, so a process crash
--- cannot leave PostgreSQL active without durable Redis delivery work.
-INSERT INTO ops.data_publication_outbox (
-  outbox_id,
-  publication_id,
-  source_run_id,
-  dataset,
-  season_id,
-  event_id,
-  manifest,
-  status,
-  available_at,
-  attempts,
-  lease_owner,
-  lease_expires_at,
-  staged_at,
-  db_activated_at,
-  redis_activated_at,
-  delivered_at,
-  last_error,
-  created_at,
-  updated_at
-)
-SELECT
-  gen_random_uuid(),
-  publication.publication_id,
-  NULL,
-  publication.dataset,
-  publication.season_id,
-  publication.event_id,
-  publication.manifest,
-  'pending',
-  publication.activated_at,
-  0,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  publication.activated_at,
-  publication.updated_at
-FROM ops.dataset_publications publication
-WHERE publication.publication_id = (SELECT publication_id FROM graphql_live_identity)
-ON CONFLICT (publication_id) DO UPDATE
-SET manifest = EXCLUDED.manifest,
-    status = 'pending',
-    available_at = EXCLUDED.available_at,
-    attempts = 0,
-    lease_owner = NULL,
-    lease_expires_at = NULL,
-    staged_at = NULL,
-    db_activated_at = NULL,
-    redis_activated_at = NULL,
-    delivered_at = NULL,
-    last_error = NULL,
-    updated_at = EXCLUDED.updated_at;
+  publication_id = EXCLUDED.publication_id,
+  generation = EXCLUDED.generation,
+  state = EXCLUDED.state,
+  source_checked_at = EXCLUDED.source_checked_at,
+  published_at = EXCLUDED.published_at,
+  checkpointed_at = EXCLUDED.checkpointed_at,
+  expected_next_check_at = EXCLUDED.expected_next_check_at,
+  revisions = EXCLUDED.revisions,
+  event_live = EXCLUDED.event_live,
+  fixtures = EXCLUDED.fixtures,
+  event_live_bytes = EXCLUDED.event_live_bytes,
+  fixtures_bytes = EXCLUDED.fixtures_bytes,
+  event_live_sha256 = EXCLUDED.event_live_sha256,
+  fixtures_sha256 = EXCLUDED.fixtures_sha256,
+  event_live_count = EXCLUDED.event_live_count,
+  fixtures_count = EXCLUDED.fixtures_count;
 
 DO $$
 BEGIN
   IF (
     SELECT count(*)
-    FROM ops.dataset_publications
-    WHERE dataset = 'fpl:live'
-      AND season_id = 2026
+    FROM competition.live_points_publication_checkpoints
+    WHERE season_id = 2026
       AND event_id = 1
-      AND status = 'active'
+      AND state = 'FINALIZED'
   ) <> 1
     OR (
-    SELECT count(*)
-    FROM ops.dataset_publication_items
-    WHERE publication_id = (SELECT publication_id FROM graphql_live_identity)
-    ) <> 2
+      SELECT publication_id
+      FROM competition.live_points_publication_checkpoints
+      WHERE season_id = 2026 AND event_id = 1
+    ) <> (SELECT publication_id::text FROM graphql_live_identity)
     OR (
-      SELECT item_count
-      FROM ops.dataset_publication_items
-      WHERE publication_id = (SELECT publication_id FROM graphql_live_identity)
-        AND item_name = 'eventLive'
+      SELECT event_live_count
+      FROM competition.live_points_publication_checkpoints
+      WHERE season_id = 2026 AND event_id = 1
     ) <> 224
     OR (
-      SELECT manifest->>'lastSuccessfulFetchAt'
-      FROM ops.dataset_publications
-      WHERE publication_id = (SELECT publication_id FROM graphql_live_identity)
-    ) <> to_char((SELECT checked_at FROM graphql_live_clock) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') THEN
-    RAISE EXCEPTION 'expected active event-1 Live publication authority fixture';
+      SELECT event_live_sha256
+      FROM competition.live_points_publication_checkpoints
+      WHERE season_id = 2026 AND event_id = 1
+    ) <> (SELECT checksum FROM graphql_live_items WHERE item_name = 'eventLive') THEN
+    RAISE EXCEPTION 'expected complete event-1 Live V2 checkpoint authority fixture';
   END IF;
 END
 $$;
@@ -1139,7 +1089,7 @@ INSERT INTO ops.live_lifecycle_status (
   observed_at,
   last_changed_at,
   next_refresh_at,
-  live_revision,
+  generation,
   publication_id,
   source_checked_at,
   updated_at
@@ -1150,7 +1100,7 @@ INSERT INTO ops.live_lifecycle_status (
   (SELECT checked_at FROM graphql_live_clock),
   (SELECT checked_at FROM graphql_live_clock),
   NULL,
-  (SELECT revision FROM graphql_live_identity),
+  (SELECT generation FROM graphql_live_identity),
   (SELECT publication_id FROM graphql_live_identity),
   (SELECT checked_at FROM graphql_live_clock),
   (SELECT checked_at FROM graphql_live_clock)
@@ -1161,7 +1111,7 @@ SET
   observed_at = EXCLUDED.observed_at,
   last_changed_at = EXCLUDED.last_changed_at,
   next_refresh_at = EXCLUDED.next_refresh_at,
-  live_revision = EXCLUDED.live_revision,
+  generation = EXCLUDED.generation,
   publication_id = EXCLUDED.publication_id,
   source_checked_at = EXCLUDED.source_checked_at,
   updated_at = EXCLUDED.updated_at;
@@ -1230,6 +1180,12 @@ WHERE season_id = 2026
 -- stream. The publication readers must observe the same empty source the
 -- producer would capture for an entry joining at event 2.
 DELETE FROM competition.entry_event_picks
+WHERE season_id = 2026 AND entry_id = 1 AND event_id IN (1, 2);
+
+DELETE FROM competition.entry_event_pick_heads
+WHERE season_id = 2026 AND entry_id = 1 AND event_id IN (1, 2);
+
+DELETE FROM competition.entry_event_pick_repairs
 WHERE season_id = 2026 AND entry_id = 1 AND event_id IN (1, 2);
 
 DELETE FROM competition.entry_event_transfers
@@ -2961,6 +2917,94 @@ SET
   source_created_at = EXCLUDED.source_created_at,
   source_updated_at = EXCLUDED.source_updated_at,
   event_team_id = EXCLUDED.event_team_id;
+
+-- The event-2 rowset is the complete V2 entry input used by the cold
+-- PostgreSQL fallback. The head hash is calculated from the exact normalized
+-- object shape consumed by GraphQL, not from provider row ordering or heartbeat
+-- timestamps.
+WITH normalized AS (
+  SELECT
+    jsonb_agg(
+      jsonb_build_object(
+        'element', pick.element_id,
+        'position', pick.position,
+        'multiplier', pick.multiplier,
+        'isCaptain', pick.is_captain,
+        'isViceCaptain', pick.is_vice_captain
+      ) ORDER BY pick.position
+    ) AS picks,
+    MAX(pick.active_chip::text) AS chip,
+    MAX(pick.transfers_cost) AS transfer_cost,
+    MAX(pick.source_updated_at) AS source_checked_at
+  FROM competition.entry_event_picks pick
+  WHERE pick.season_id = 2026
+    AND pick.entry_id = 1
+    AND pick.event_id = 2
+), content AS (
+  SELECT
+    jsonb_build_object(
+      'picks', normalized.picks,
+      'chip', normalized.chip,
+      'transferCost', normalized.transfer_cost
+    ) AS value,
+    normalized.source_checked_at
+  FROM normalized
+)
+INSERT INTO competition.entry_event_pick_heads (
+  season_id,
+  entry_id,
+  event_id,
+  publication_id,
+  generation,
+  picks_base_revision,
+  content_sha256,
+  row_count,
+  source_checked_at,
+  content_updated_at,
+  checkpointed_at,
+  state
+)
+SELECT
+  2026,
+  1,
+  2,
+  gen_random_uuid()::text,
+  1,
+  encode(sha256(convert_to(pg_temp.graphql_canonical_json(content.value), 'UTF8')), 'hex'),
+  encode(sha256(convert_to(pg_temp.graphql_canonical_json(content.value), 'UTF8')), 'hex'),
+  jsonb_array_length(content.value -> 'picks'),
+  content.source_checked_at,
+  content.source_checked_at,
+  content.source_checked_at,
+  'COMPLETE'
+FROM content
+ON CONFLICT (season_id, entry_id, event_id) DO UPDATE
+SET
+  publication_id = EXCLUDED.publication_id,
+  generation = EXCLUDED.generation,
+  picks_base_revision = EXCLUDED.picks_base_revision,
+  content_sha256 = EXCLUDED.content_sha256,
+  row_count = EXCLUDED.row_count,
+  source_checked_at = EXCLUDED.source_checked_at,
+  content_updated_at = EXCLUDED.content_updated_at,
+  checkpointed_at = EXCLUDED.checkpointed_at,
+  state = EXCLUDED.state;
+
+DO $$
+BEGIN
+  IF (
+    SELECT count(*)
+    FROM competition.entry_event_pick_heads head
+    WHERE head.season_id = 2026
+      AND head.entry_id = 1
+      AND head.event_id = 2
+      AND head.state = 'COMPLETE'
+      AND head.row_count = 15
+  ) <> 1 THEN
+    RAISE EXCEPTION 'expected complete event-2 Entry Live V2 head authority fixture';
+  END IF;
+END
+$$;
 
 -- The public catalog is a complete season-owned set. Remove stale or
 -- disabled rows before inserting the single advertised contract tournament;

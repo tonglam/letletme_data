@@ -3,18 +3,42 @@ import { readFileSync } from 'node:fs';
 
 import {
   decideLiveLifecycle,
-  findPicksRefreshEntryIds,
   PICKS_FIRST_PROBE_OFFSET_MS,
-  PICKS_REFRESH_INTERVAL_MS,
   resolveLivePicksCoordinatorDeduplicationId,
-  resolveLivePicksRefreshClaimedAt,
-  resolveLivePicksRefreshDeduplicationId,
+  resolveLivePicksEntryDeduplicationId,
   resolveLivePicksRefreshFanout,
   resolveLiveLifecycleDelay,
+  shouldPersistLiveLifecycleStatus,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
 
 describe('live lifecycle decisions', () => {
+  test('does not write a PostgreSQL heartbeat for every live publication', () => {
+    const base = {
+      state: 'LIVE_ACTIVE' as const,
+      generation: 9,
+      publicationId: 'publication-9',
+    };
+    expect(shouldPersistLiveLifecycleStatus({ persisted: null, ...base })).toBe(true);
+    expect(shouldPersistLiveLifecycleStatus({ persisted: base, ...base })).toBe(false);
+    expect(
+      shouldPersistLiveLifecycleStatus({
+        persisted: base,
+        ...base,
+        generation: 10,
+        publicationId: 'publication-10',
+      }),
+    ).toBe(false);
+    expect(
+      shouldPersistLiveLifecycleStatus({
+        persisted: base,
+        state: 'DAY_SETTLING',
+        generation: 10,
+        publicationId: 'publication-10',
+      }),
+    ).toBe(true);
+  });
+
   test('standalone scheduler persists lifecycle independently of live publications', () => {
     const source = readFileSync('src/scheduler.ts', 'utf8');
     expect(source).toContain('runIndependentSchedulerStage');
@@ -28,9 +52,9 @@ describe('live lifecycle decisions', () => {
     expect(source).not.toContain('runPicksProbeAndSync(');
     const workerSource = readFileSync('src/workers/data-governance.worker.ts', 'utf8');
     expect(workerSource).toContain('persistLiveLifecycleStatus(new Date())');
-    expect(workerSource).toContain('enqueueLivePicksRefresh(tick.season, tick.currentEvent.id');
-    expect(workerSource).toContain('LIVE_PICKS_COMPATIBILITY_BUCKET_MS');
-    expect(workerSource).toContain('QueueDrainOnlyError');
+    expect(workerSource).not.toContain('live-picks-compatibility');
+    expect(workerSource).not.toContain('LIVE_PICKS_COMPATIBILITY_BUCKET_MS');
+    expect(workerSource).not.toContain('QueueDrainOnlyError');
     const maintenanceSource = readFileSync('src/jobs/maintenance.jobs.ts', 'utf8');
     expect(maintenanceSource).toContain('isPublicationOutbox');
     const maintenanceWorkerSource = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
@@ -54,8 +78,8 @@ describe('live lifecycle decisions', () => {
     );
   });
 
-  test('starts the first picks probe 60 minutes after the deadline', () => {
-    expect(PICKS_FIRST_PROBE_OFFSET_MS).toBe(60 * 60_000);
+  test('starts the first picks probe immediately after the deadline', () => {
+    expect(PICKS_FIRST_PROBE_OFFSET_MS).toBe(1_000);
 
     const event = {
       deadlineTime: '2026-08-15T10:00:00.000Z',
@@ -71,10 +95,10 @@ describe('live lifecycle decisions', () => {
       },
     ];
 
-    expect(decideLiveLifecycle(event, fixtures, new Date('2026-08-15T10:59:59.999Z')).state).toBe(
+    expect(decideLiveLifecycle(event, fixtures, new Date('2026-08-15T10:00:00.999Z')).state).toBe(
       'PICKS_WAIT',
     );
-    expect(decideLiveLifecycle(event, fixtures, new Date('2026-08-15T11:00:00.000Z')).state).toBe(
+    expect(decideLiveLifecycle(event, fixtures, new Date('2026-08-15T10:00:01.000Z')).state).toBe(
       'PICKS_PROBE',
     );
   });
@@ -240,47 +264,29 @@ describe('live lifecycle decisions', () => {
     ).toBe(10 * 60_000);
   });
 
-  test('refreshes complete picks again after the bounded live interval', () => {
-    const now = Date.parse('2026-08-24T01:00:00.000Z');
-    const claims = new Map([
-      [1, now - PICKS_REFRESH_INTERVAL_MS + 1],
-      [2, now - PICKS_REFRESH_INTERVAL_MS],
-    ]);
+  test('uses an independent per-entry single-flight identity', () => {
+    const first = resolveLivePicksEntryDeduplicationId('2627', 1, 30);
+    const sameEntry = resolveLivePicksEntryDeduplicationId('2627', 1, 30);
+    const anotherEntry = resolveLivePicksEntryDeduplicationId('2627', 1, 31);
+    const nextEvent = resolveLivePicksEntryDeduplicationId('2627', 2, 30);
 
-    expect(findPicksRefreshEntryIds([1, 2, 3], claims, now)).toEqual([2, 3]);
-  });
-
-  test('uses a restart-durable fan-out identity distinct from the coordinator', () => {
-    const first = resolveLivePicksRefreshDeduplicationId('2627', 1, [30, 10, 20]);
-    const reordered = resolveLivePicksRefreshDeduplicationId('2627', 1, [20, 10, 30, 20]);
-    const expanded = resolveLivePicksRefreshDeduplicationId('2627', 1, [10, 20, 30, 40]);
-    const nextEvent = resolveLivePicksRefreshDeduplicationId('2627', 2, [10, 20, 30]);
-
-    expect(first).toBe('live-picks-entry-sweep:2627:event-1');
+    expect(first).toBe('live-picks-entry:2627:event-1:entry-30');
     expect(first).not.toBe(resolveLivePicksCoordinatorDeduplicationId('2627', 1));
-    expect(reordered).toBe(first);
-    expect(expanded).toBe(first);
+    expect(sameEntry).toBe(first);
+    expect(anotherEntry).not.toBe(first);
     expect(nextEvent).not.toBe(first);
   });
 
-  test('keeps the pre-canary cohort identity stable across a scheduler restart', () => {
+  test('keeps the pending entry set stable across a scheduler restart', () => {
     const established = resolveLivePicksRefreshFanout('2627', 1, [10, 20, 30, 40], []);
     const restarted = resolveLivePicksRefreshFanout('2627', 1, [10, 20, 30, 40], [10, 20]);
 
-    expect(restarted.deduplicationId).toBe(established.deduplicationId);
     expect(established.entryIds).toEqual([10, 20, 30, 40]);
     expect(restarted.entryIds).toEqual([30, 40]);
   });
 
-  test('preserves a returned job claim time without extending the refresh interval', () => {
-    const now = Date.parse('2026-08-25T10:00:00.000Z');
-    const nineMinutesAgo = new Date(now - 9 * 60_000).toISOString();
-
-    expect(resolveLivePicksRefreshClaimedAt(nineMinutesAgo, now)).toBe(now - 9 * 60_000);
-    expect(resolveLivePicksRefreshClaimedAt('invalid', now)).toBe(now);
-    expect(resolveLivePicksRefreshClaimedAt(new Date(now + 60_000).toISOString(), now)).toBe(now);
-    expect(resolveLivePicksRefreshClaimedAt(new Date(now - 20 * 60_000).toISOString(), now)).toBe(
-      now - PICKS_REFRESH_INTERVAL_MS,
-    );
+  test('does not fan out entries that were accepted as canaries', () => {
+    const fanout = resolveLivePicksRefreshFanout('2627', 1, [10, 20, 30, 40], [10, 20]);
+    expect(fanout.entryIds).toEqual([30, 40]);
   });
 });

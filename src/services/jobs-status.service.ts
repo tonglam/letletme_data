@@ -23,7 +23,6 @@ import {
 } from '../repositories/scheduler-obligations';
 import { getSchedulerLaneTargets, listSchedulerLanes } from '../repositories/scheduler-lanes';
 import { schedulerQueueLaneOverride, schedulerRegistry } from '../scheduler/job-registry';
-import { eventRepository } from '../repositories/events';
 import { getMyFplSnapshotOperationalStatus } from './my-fpl-snapshot-publication.service';
 import { readSchedulerProgress, isSchedulerProgressHealthy } from '../scheduler/scheduler-progress';
 import { readQueueAdmission, readQueueHealthSnapshot } from './queue-governance.service';
@@ -362,12 +361,10 @@ export async function getJobsStatus(
     officialH2HWorkerHeartbeat && (await checkRuntimeHeartbeat('officialH2HWorker')),
   );
   const publicationConsistency: Record<string, boolean> = {};
-  const currentEvent = await eventRepository.findCurrent(season);
   const publicationScopes = [
-    { dataset: 'fpl:core' as const },
-    { dataset: 'fpl:market' as const },
-    { dataset: PRICE_CHANGE_DATASET },
-    ...(currentEvent ? [{ dataset: 'fpl:live' as const, eventId: currentEvent.id }] : []),
+    { dataset: 'fpl:core' as const, eventId: undefined },
+    { dataset: 'fpl:market' as const, eventId: undefined },
+    { dataset: PRICE_CHANGE_DATASET, eventId: undefined },
   ];
   let priceChangeDbActive: Awaited<
     ReturnType<typeof syncOperationsRepository.findActivePublication>

@@ -1,9 +1,9 @@
 # Redis contract
 
-PostgreSQL is canonical. Redis contains only rebuildable Data publications,
-bounded GraphQL caches, BullMQ delivery state, and short-lived coordination.
-Redis loss may reduce performance or delay delivery; it must not delete or
-replace a canonical business fact.
+PostgreSQL is the durable fact/checkpoint store. For Live Points serving,
+Redis V2 current/previous is the hot publication authority and is allowed to
+outlive a PostgreSQL outage. Redis loss may reduce performance or delay
+delivery; it must not delete or replace a canonical business fact.
 
 ## Endpoint ownership
 
@@ -28,41 +28,64 @@ llm:data:fpl:core:<season>:<revision>:<item>
 Core items are exactly `events`, `teams`, `players`, `phases`, `fixtures`, and
 `currentEventId`.
 
-Live keys:
+Live Points V2 keys:
 
 ```text
-llm:data:fpl:live:<season>:<event>:active
-llm:data:fpl:live:<season>:<event>:<revision>:<item>
+llm:data:v2:fpl:live:<season>:<event>:active
+llm:data:v2:fpl:live:<season>:<event>:previous
+llm:data:v2:fpl:live:<season>:<event>:sequence
+llm:data:v2:fpl:live:<season>:<event>:<generation>:eventLive
+llm:data:v2:fpl:live:<season>:<event>:<generation>:fixtures
+
+llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:active
+llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:previous
+llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:sequence
+llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:<generation>:input
+
+llm:data:v2:fpl:live:<season>:<event>:checkpoint-desired
+llm:data:v2:fpl:live:<season>:<event>:picks-coordinator
+llm:data:v2:fpl:live:<season>:<event>:picks-pending
+llm:data:v2:fpl:live:<season>:<event>:picks-coverage
+llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:checkpoint-desired
 ```
 
-Live items are exactly `eventLives`, `fixtures`, `liveFixtures`, and
-`liveBonus`. A live manifest is `scheduled`, `live`, or `settled`.
+The global publication items are exactly `eventLive` and `fixtures`. An entry
+publication contains one complete `input` item. A V2 manifest is scoped to one
+season/event (and, for entry input, one entry), carries a monotonic generation,
+and uses the lifecycle states defined by the V2 contract.
 
-An active manifest contains exactly `dataset`, `seasonCode`, nullable `eventId`,
-`revision`, `publicationId`, `sourceCheckedAt`, `publishedAt`, `state`, and
-`items`. Each item contains `name`, `key`, `type`, `count`, `bytes`, and
-`sha256`. Readers validate field sets, scope, key prefix, Redis type, byte
-length, count, JSON shape, and digest before accepting a revision. They either
-use that complete revision or a coherent PostgreSQL fallback; per-item mixing is
-forbidden.
+An active manifest contains the V2 contract version, publication identity,
+generation, scope, lifecycle state, source/publish/checkpoint timestamps,
+revision vector, and item metadata. Each item contains `name`, `key`, `type`,
+`count`, `bytes`, and `sha256`. Readers validate field sets, scope, key prefix,
+Redis type, byte length, count, JSON shape, and digest before accepting a
+generation. They either use that complete generation or a coherent fallback;
+per-item mixing is forbidden.
 
 Publication lifecycle:
 
-1. Reserve a monotonic revision in `ops.dataset_publications`.
+1. Fetch FPL source data coherently and validate the complete candidate.
 2. Stage every immutable item with a 15-minute TTL.
-3. Commit and validate the complete PostgreSQL scope.
-4. Verify staged keys and atomically replace the active manifest in Lua.
-5. Keep active items without expiry; retire the replaced revision for 24 hours.
-6. Mark the database publication active and its predecessor retired.
+3. Verify candidate metadata and scope in one Lua promotion.
+4. Atomically move the old active generation to `previous` and promote the candidate.
+5. Keep active items during the event and retain `previous` for 24 hours.
+6. Record one merged checkpoint obligation for asynchronous PostgreSQL durability; an entry
+   checkpoint retries directly from its immutable Redis input.
 
-Repeating one publication ID is idempotent. An older candidate cannot replace a
-newer active pointer.
+No-content-change source checks update heartbeat metadata only. They do not
+create a new generation, database row, or client refresh. A finalized generation
+cannot be superseded by a provisional candidate. A corrupt pointer is ignored
+only after the candidate itself passes the complete validation gate.
 
 | State | TTL |
 | --- | ---: |
 | Active manifest and active items | none |
 | Unactivated staging items | 15 minutes |
-| Replaced revision items | 24 hours |
+| Previous generation items | 24 hours (48 hours after final handoff) |
+
+The `checkpoint-desired` key is one latest-wins control-plane obligation per scope. The picks
+coordinator and pending/coverage keys are bounded scheduler state; they never contain a second
+business payload and are not read by GraphQL to construct a score.
 
 ## GraphQL cache ownership
 
@@ -78,12 +101,12 @@ Query invalidation follows the dataset revision and the GraphQL TTL policy.
 
 ## BullMQ and coordination on queue Redis
 
-`src/queues/names.ts` is the only queue inventory. It contains 24 names: 21
+`src/queues/names.ts` is the only queue inventory. It contains 23 names: 20
 core queues and three content queues:
 
 | Core queues | Content queues |
 | --- | --- |
-| `data-sync`, `fpl-critical-sync`, `fpl-price-watch`, `entry-sync`, `league-sync`, `live-data`, `manager-live`, `tournament-sync`, `tournament-setup`, `tournament-repair`, `understat-player-sync`, `understat-team-sync`, `maintenance`, `live-picks`, `official-h2h-live`, `my-fpl-orchestration`, `publication-outbox`, `entry-onboarding`, `data-repair`, `housekeeping`, `data-governance` | `content-http-acquisition`, `content-media-transcript`, `content-x-scan` |
+| `data-sync`, `fpl-critical-sync`, `fpl-price-watch`, `entry-sync`, `league-sync`, `live-data`, `tournament-sync`, `tournament-setup`, `tournament-repair`, `understat-player-sync`, `understat-team-sync`, `maintenance`, `live-picks`, `official-h2h-live`, `my-fpl-orchestration`, `publication-outbox`, `entry-onboarding`, `data-repair`, `housekeeping`, `data-governance` | `content-http-acquisition`, `content-media-transcript`, `content-x-scan` |
 
 BullMQ keys use `bull:<queue>:*`. Completed jobs are retained for 24 hours
 (maximum 500 per queue); failed jobs are retained for seven days (maximum 500).
@@ -100,7 +123,8 @@ The current key-builder families are:
 
 ```text
 llm:data:fpl:core:<season>:...
-llm:data:fpl:live:<season>:<event>:...
+llm:data:v2:fpl:live:<season>:<event>:...
+llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:...
 llm:data:fpl:my-fpl:<season>:<event>:active
 fpl:price-changes:hot:<season>:...
 llm:tournament:preview:...

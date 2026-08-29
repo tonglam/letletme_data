@@ -13,7 +13,6 @@ import {
 } from './data-publication-delivery.service';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { getSchedulerLane } from '../repositories/scheduler-lanes';
-import { eventRepository } from '../repositories/events';
 import { randomUUID } from 'node:crypto';
 import { logInfo, logWarn } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -238,14 +237,10 @@ export async function reconcileDataPublication(
 export async function reconcileCoreAndMarketPublications(
   season: FplSeasonRef,
 ): Promise<readonly DataPublicationReconciliationResult[]> {
-  const currentEvent = await eventRepository.findCurrent(season);
   const scopes: readonly DataPublicationScope[] = [
     { dataset: 'fpl:core', seasonCode: season.seasonCode },
     { dataset: 'fpl:market', seasonCode: season.seasonCode },
     { dataset: 'fpl:price-changes', seasonCode: season.seasonCode },
-    ...(currentEvent
-      ? [{ dataset: 'fpl:live' as const, seasonCode: season.seasonCode, eventId: currentEvent.id }]
-      : []),
   ];
   return Promise.all(
     scopes.map(async (scope): Promise<DataPublicationReconciliationResult> => {

@@ -14,7 +14,7 @@ import {
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
 } from '../cache/data-publication';
-import { canonicalJson, postgresJsonbCanonicalJson } from '../utils/content-hash';
+import { canonicalJson } from '../utils/content-hash';
 
 type DatabaseClock = Date | string;
 
@@ -54,13 +54,7 @@ async function loadPreparedPublication(
   for (const itemManifest of manifest.items) {
     const row = rows.find((candidate) => candidate.itemName === itemManifest.name);
     if (!row) throw new Error(`Publication ${publicationId} is missing ${itemManifest.name}`);
-    const payloadCandidates = [
-      manifest.dataset === 'fpl:live'
-        ? postgresJsonbCanonicalJson(row.payload)
-        : canonicalJson(row.payload),
-      JSON.stringify(row.payload),
-      postgresJsonbCanonicalJson(row.payload),
-    ];
+    const payloadCandidates = [canonicalJson(row.payload), JSON.stringify(row.payload)];
     const payload = payloadCandidates.find(
       (candidate) =>
         Buffer.byteLength(candidate, 'utf8') === itemManifest.bytes &&

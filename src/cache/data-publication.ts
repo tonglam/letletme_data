@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import type Redis from 'ioredis';
 
-import { canonicalJson, postgresJsonbCanonicalJson } from '../utils/content-hash';
+import { canonicalJson } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
 import { redisSingleton } from './singleton';
 
@@ -17,7 +17,7 @@ export function isDataPublicationId(value: unknown): value is string {
   );
 }
 
-export type DataPublicationDataset = 'fpl:core' | 'fpl:live' | 'fpl:market' | 'fpl:price-changes';
+export type DataPublicationDataset = 'fpl:core' | 'fpl:market' | 'fpl:price-changes';
 export type MarketSnapshotContextPayload = {
   readonly seasonCode: string;
   readonly snapshotDate: string;
@@ -28,7 +28,7 @@ export type MarketSnapshotContextPayload = {
   readonly expectedRowCount: number;
 };
 export type DataPublicationItemType = 'string';
-export type DataPublicationState = 'active' | 'scheduled' | 'live' | 'settled';
+export type DataPublicationState = 'active';
 
 export interface DataPublicationScope {
   readonly dataset: DataPublicationDataset;
@@ -144,7 +144,6 @@ const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
     'currentEventId',
     'selectionRules',
   ],
-  'fpl:live': ['eventLive', 'fixtures'],
   'fpl:market': ['context'],
   'fpl:price-changes': ['context', 'players'],
 };
@@ -196,9 +195,10 @@ function isCanonicalState(
   dataset: DataPublicationDataset,
   state: unknown,
 ): state is DataPublicationState {
-  if (dataset === 'fpl:core' || dataset === 'fpl:market' || dataset === 'fpl:price-changes')
-    return state === 'active';
-  return state === 'scheduled' || state === 'live' || state === 'settled';
+  return (
+    (dataset === 'fpl:core' || dataset === 'fpl:market' || dataset === 'fpl:price-changes') &&
+    state === 'active'
+  );
 }
 
 const ACTIVATE_REVISION_SCRIPT = `
@@ -317,28 +317,17 @@ function assertScope(scope: DataPublicationScope): void {
   if (!/^\d{4}$/.test(scope.seasonCode)) {
     throw new CacheError('Invalid publication season', 'DATA_PUBLICATION_SEASON_INVALID');
   }
-  if (scope.dataset === 'fpl:live') {
-    if (!Number.isInteger(scope.eventId) || (scope.eventId ?? 0) <= 0) {
-      throw new CacheError(
-        'A live publication requires a positive event ID',
-        'DATA_PUBLICATION_EVENT_INVALID',
-      );
-    }
-    return;
-  }
   if (scope.eventId !== undefined) {
     throw new CacheError(
-      'A core publication cannot have an event ID',
-      'DATA_PUBLICATION_CORE_EVENT_INVALID',
+      'A generic publication cannot have an event ID',
+      'DATA_PUBLICATION_EVENT_INVALID',
     );
   }
 }
 
 function scopePrefix(scope: DataPublicationScope): string {
   assertScope(scope);
-  return scope.dataset === 'fpl:live'
-    ? `${DATA_CACHE_NAMESPACE}:${scope.dataset}:${scope.seasonCode}:${scope.eventId}`
-    : `${DATA_CACHE_NAMESPACE}:${scope.dataset}:${scope.seasonCode}`;
+  return `${DATA_CACHE_NAMESPACE}:${scope.dataset}:${scope.seasonCode}`;
 }
 
 export function activeDataPublicationKey(scope: DataPublicationScope): string {
@@ -390,10 +379,7 @@ function serializeItems(input: PublishDataRevisionInput): SerializedItem[] {
     names.add(item.name);
     let payload: string;
     try {
-      payload =
-        input.dataset === 'fpl:live'
-          ? postgresJsonbCanonicalJson(item.value)
-          : canonicalJson(item.value);
+      payload = canonicalJson(item.value);
     } catch {
       throw new CacheError(
         `Publication item ${item.name} is not JSON serializable`,
@@ -633,7 +619,6 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
     if (!isRecord(value) || !hasManifestFields(value)) return null;
     if (
       value.dataset !== 'fpl:core' &&
-      value.dataset !== 'fpl:live' &&
       value.dataset !== 'fpl:market' &&
       value.dataset !== 'fpl:price-changes'
     )
@@ -668,20 +653,12 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
     ) {
       return null;
     }
-    if (
-      ((dataset === 'fpl:core' || dataset === 'fpl:market' || dataset === 'fpl:price-changes') &&
-        value.eventId !== null) ||
-      (dataset === 'fpl:live' &&
-        (typeof value.eventId !== 'number' ||
-          !Number.isSafeInteger(value.eventId) ||
-          value.eventId <= 0))
-    ) {
+    if (value.eventId !== null) {
       return null;
     }
     const scope: DataPublicationScope = {
       dataset,
       seasonCode: value.seasonCode,
-      ...(dataset === 'fpl:live' ? { eventId: value.eventId as number } : {}),
     };
     assertScope(scope);
     const revision = value.revision as number;

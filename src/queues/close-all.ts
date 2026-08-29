@@ -7,7 +7,6 @@ import { closeLeagueSyncQueue } from './league-sync.queue';
 import { closeLiveDataQueue } from './live-data.queue';
 import { closeLivePicksQueue } from './live-picks.queue';
 import { closeMaintenanceQueue } from './maintenance.queue';
-import { closeManagerLiveQueue } from './manager-live.queue';
 import { closeOfficialH2HLiveQueue } from './official-h2h-live.queue';
 import { closeTournamentRepairQueue } from './tournament-repair.queue';
 import { closeTournamentSetupQueue } from './tournament-setup.queue';
@@ -27,7 +26,6 @@ export async function closeAllProducerQueues(): Promise<void> {
     closeLiveDataQueue(),
     closeLivePicksQueue(),
     closeMaintenanceQueue(),
-    closeManagerLiveQueue(),
     closeOfficialH2HLiveQueue(),
     closeTournamentRepairQueue(),
     closeTournamentSetupQueue(),

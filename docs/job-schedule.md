@@ -5,12 +5,9 @@ The standalone `scheduler` service is the durable schedule authority. Its
 success evidence into `ops.scheduler_obligations`; BullMQ is only the delivery
 mechanism. `GET /jobs` is generated from the same registry plus the explicitly
 supported maintenance/manual adapters, and `GET /jobs/status` exposes overdue,
-failed and runtime-heartbeat evidence. The API-side cron registrations that
-remain during migration are compatibility triggers, not a second source of
-schedule truth. They are disabled when the standalone scheduler owns
-production cadence. If a rolling migration temporarily leaves the API as the
-timer owner, set `SCHEDULER_MODE=compatibility`; those ticks call the same
-obligation reservation pass instead of enqueueing directly.
+failed and runtime-heartbeat evidence. Live Points V2 has one scheduler
+authority and one queue contract; it has no legacy timer mode or alternate
+live-points enqueue path.
 
 Legacy API cron registrations use `Asia/Shanghai` (UTC+8); the standalone
 registry declares each obligation's timezone explicitly. Cron ticks are
@@ -62,12 +59,11 @@ live-snapshot
 live-picks-refresh
 tournament-official-h2h-live
 live-finalization
-player-stats-active
 content-acquisition
 ```
 
 `GET /jobs` is the operator-facing view of this registry, filtered by the
-`manualTrigger` flag and merged with these compatibility aliases:
+`manualTrigger` flag and merged with these explicit manual adapters:
 `core-snapshot-sync`, `event-current-refresh`, `player-prices`,
 `player-stats-sync`, `player-values-sync`, `entry-info-daily`,
 `entry-event-results-daily`, `league-event-results-sync`,
@@ -128,10 +124,10 @@ reserving today's checkpoint. Current-day-only jobs, including market capture
 and its watchdog, never synthesize an older date: missed historical periods are
 recorded explicitly as `irrecoverable` and only today's evidence is checked.
 
-The additional `player-stats-active` checkpoint runs every minute only during
-`LIVE_ACTIVE` and `DAY_SETTLING`, and every five minutes during `PICKS_SYNC`,
-`BETWEEN_FIXTURES`, and `GW_REVIEW`. Pre-match, finalized, and other static
-lifecycle states rely on the daily, transition, and final-repair checkpoints.
+Player statistics remain a low-priority observer during the live window. They
+do not perform a 1m/5m full-bootstrap replace and do not gate Live Points
+publication; their component hash is only recorded until the live-window
+cadence report establishes a durable SLO.
 
 ## Entry jobs
 
@@ -154,16 +150,14 @@ invalidate otherwise complete history.
 
 | Job | Cadence | Gate / behavior |
 |---|---|---|
-| `live-snapshot` | 30-second lifecycle obligation | `isFPLSeason`, current event, `isMatchDayTime`; one job concurrently fetches event-live + fixtures, atomically publishes every live Redis view, and persists fixture rows only when football content changes. Every UTC ten-minute boundary also persists event-live/explain rows and runs the dependent cascade. |
+| `live-snapshot` | 30-second lifecycle obligation | `isFPLSeason`, current event, and lifecycle window; one coherent fetch validates event-live + fixtures before atomically publishing the V2 Redis current/previous pair. Heartbeats update source freshness only; semantic changes advance the relevant revision and a merged PostgreSQL checkpoint obligation. |
 | `post-match-consolidation` | bounded post-match slots | Maintenance coordinator enqueues the separate live-finalization and player-stat checkpoint obligations; its success means downstream jobs were accepted, not that their writes are complete. |
 
-The snapshot derives `eventLives`, `fixtures`, `liveFixtures`, and `liveBonus` items from the same
-accepted upstream pair. Every changed item publishes under one immutable revision;
-content-identical minutes are a no-op. The standalone scheduler owns the 30-second
-lifecycle obligation, requests full event-live persistence on a ten-minute bucket,
-and has a separate post-match finalization obligation. This replaces the former independent
-cache, score, fixture, and bonus writers, which could race or derive from
-different minutes.
+The snapshot derives all global live items from the same accepted upstream pair. Every changed item
+publishes under one immutable generation; content-identical checks only update `sourceCheckedAt`
+and `expectedNextCheckAt`. The standalone scheduler owns the 30-second lifecycle obligation and
+the separate post-match finalization obligation. Redis is promoted before PostgreSQL checkpointing,
+so a database outage does not remove the last complete page response.
 
 A persistent snapshot writes `fpl.player_gameweek_stats` and
 `fpl.player_gameweek_scoring_items` in the same season/event scope. Player
@@ -173,11 +167,11 @@ a distinct final league-results correction after the durable rows commit.
 
 ## Selection publication window
 
-The former standalone picks/transfers cron modules are removed. The registry's
-event-checkpoint obligations are the only scheduled authority; API-side
-compatibility code does not own these windows. Selection time
-is the UTC match date from 30 through 90 minutes after the FPL deadline. It is
-the post-deadline publication window for immutable picks and pre-event transfer tracking.
+Live picks use a deadline canary and then one per-entry single-flight fetch. A complete same-event
+V2 input is not fetched again by a recurring cohort sweep. If PostgreSQL is unavailable after Redis
+promotion, the entry remains a durable Redis checkpoint obligation and the repair reads Redis
+directly; it does not refetch FPL. Selection time is the UTC match date from 30 through 90 minutes
+after the FPL deadline, with pre-start repair probes controlled by the shared lifecycle state.
 
 ## Post-match league and tournament results
 

@@ -26,8 +26,9 @@ authority, not a deployment claim. The executable inventory is checked by
 | Scheduler state | `ops.scheduler_obligations` and scheduler lanes | BullMQ delivery records |
 | Identity | `bauth.*` | signed ingress and sessions |
 
-PostgreSQL wins when it disagrees with Redis. A provider, validation, or Redis
-failure cannot replace the last accepted canonical state or active publication.
+Redis current/previous is the live serving authority; PostgreSQL is the durable
+checkpoint and cold fallback. A provider, validation, or PostgreSQL failure
+cannot replace or remove the last accepted complete publication.
 
 ## End-to-end flow
 
@@ -35,8 +36,9 @@ failure cannot replace the last accepted canonical state or active publication.
    into domain values.
 2. A service/repository commits complete, season- or event-scoped PostgreSQL
    units and their durable checkpoints.
-3. When the contract requires a read model, a complete immutable Redis revision
-   is staged and its active pointer is swapped only after verification.
+3. When the contract requires a read model, a complete immutable Redis V2
+   revision is staged and its current pointer is swapped only after verification;
+   the prior complete revision is retained as `previous`.
 4. GraphQL reads one publication as a unit or one coherent PostgreSQL fallback,
    then may cache the result by dataset revision and query arguments.
 5. Product clients read through GraphQL; Web remains the identity/mutation
@@ -45,14 +47,13 @@ failure cannot replace the last accepted canonical state or active publication.
 The scheduler reserves a durable obligation before dispatching a BullMQ job.
 BullMQ is a delivery mechanism and retained history, not the source of
 schedule truth or business completion. `GET /jobs` is generated from the
-registry and compatibility aliases; `GET /jobs/status` is protected.
+registry and explicit manual adapters; `GET /jobs/status` is protected.
 
-Manager Live keeps its public compatibility facade at
-`src/services/manager-live.service.ts`, while contracts, publication storage,
-coverage/result assembly, provider coordination, Classic refresh, final-result
-projection, and orchestration are separate modules. The orchestration module
-reaches PostgreSQL, Redis, queues, providers, and the clock only through ports
-bound by the production composition adapter.
+Live Points V2 has no manager-live facade. Data owns coherent FPL publication and
+checkpoint obligations; GraphQL owns pure local score projection. Entry live
+input, global event publication, and rules are validated as same-event revision
+vectors, so a partial source or unrelated rank failure cannot empty a valid
+score response.
 
 ## Runtime topology
 
@@ -108,15 +109,17 @@ See [redis-contract.md](redis-contract.md) and
 
 - End users authenticate through Web. Data mutation routes require `x-api-key`
   when `ENABLE_AUTH=true`; only SHA-256 digests are stored.
-- `/health` is process liveness. `/ready` requires PostgreSQL, both Redis
-  endpoints, the current-season row, runtime heartbeats, and publication
-  consistency checks.
+- `/health/live` is process liveness. `/health/ready` is capability readiness:
+  Redis-hot GraphQL reads remain available while PostgreSQL is degraded.
+  `/health/deploy` is the strict Redis, PostgreSQL, release-identity, and
+  worker-heartbeat gate.
 - Core discovery commits events, teams, players, phases, and fixtures as one
   season-scoped unit; a different provider season fails before mutation.
-- Live and manager-live publications validate their complete identity baseline
-  before pointer swap. My FPL deletion writes the invalidation outbox in the
+- Live Points V2 publications validate their complete identity baseline before
+  current-pointer swap, retain a previous complete version, and checkpoint
+  PostgreSQL asynchronously. My FPL deletion writes the invalidation outbox in the
   same PostgreSQL transaction as deletion and uses revision-aware Redis CAS.
 - Tournament and league finalization remain eligible in the bounded post-match
   window, including after GW38.
-- There is one reader/writer contract: no dual-write, shadow read, or alternate
-  namespace introduced for compatibility.
+- Live Points V2 has one reader/writer contract: no dual-write, dual-read,
+  compatibility namespace, legacy parser, or mixed-version deployment.
