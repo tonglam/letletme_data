@@ -1,4 +1,4 @@
-import { getDbClient } from '../db/singleton';
+import { getDbClient, withDatabaseTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { myFplSnapshotEventLockScope, myFplSnapshotSeasonLockScope } from '../domain/my-fpl-locks';
 import type {
@@ -361,8 +361,7 @@ export const createTournamentManagementRepository = () => ({
     adminEntryId: number,
   ): Promise<TournamentDeleteResult> => {
     try {
-      const client = await getDbClient();
-      const result = await client.begin(async (tx) => {
+      const result = await withDatabaseTransaction(async (tx) => {
         // Acquire the season lock before taking a row lock. Snapshot capture
         // uses the same season -> event order and inserts child rows that need
         // a key-share lock on competition.tournaments; reversing this order

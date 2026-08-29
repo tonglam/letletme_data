@@ -1,7 +1,12 @@
 import type postgres from 'postgres';
 
 import { redisSingleton } from '../cache/singleton';
-import { getDbClient } from '../db/singleton';
+import {
+  databaseTransactionStorage,
+  getDbClient,
+  registerDatabasePostCommit,
+  withDatabaseTransaction,
+} from '../db/singleton';
 import {
   EVENT_LIVE_PROJECTION_ALGORITHM_VERSION,
   isEffectiveLineup,
@@ -736,11 +741,15 @@ export async function persistManagerScoreMaterializations(
     throw new Error('A materialization batch must use one calculation mode');
   }
 
-  const db = await getDbClient();
   const rowsForRedis: Array<
     ManagerScoreMaterializationInput & { generation: number; verifiedLiveCheckedAt?: string }
   > = [];
-  const result = await db.begin(async (tx) => {
+  // This repository is called from manager-live's mutation-scope transaction.
+  // getDbClient() is AsyncLocalStorage-aware and returns the pinned
+  // TransactionSql in that path; TransactionSql has no .begin() method. Use
+  // the transaction helper so unscoped callers still get a root transaction
+  // while scoped callers use a savepoint on the existing transaction.
+  const result = await withDatabaseTransaction(async (tx) => {
     const rejectedEntryIds = new Set<number>();
     // Lock each entry identity before assigning generations. Different input
     // revisions for one entry must serialize even though their revision locks
@@ -975,26 +984,40 @@ export async function persistManagerScoreMaterializations(
       rejectedEntryIds: Array.from(rejectedEntryIds).sort((left, right) => left - right),
     };
   });
-  try {
-    await publishMaterializationHeadsToRedis(season, eventId, rowsForRedis);
-  } catch (error) {
-    // PostgreSQL heads remain authoritative. Remove any matching stale Redis
-    // pointers so a successful Redis read cannot serve the previous
-    // generation after the durable write. If Redis itself is unavailable,
-    // CACHE_ONLY falls back to PostgreSQL on the next read.
-    logWarn('Manager score materialization Redis publication failed', {
-      eventId,
-      entries: rowsForRedis.length,
-      error: error instanceof Error ? error.message : 'unknown',
-    });
+  const publishRedisHeads = async (): Promise<void> => {
     try {
-      await invalidateMaterializationHeadsInRedis(season, eventId, rowsForRedis);
-    } catch (invalidationError) {
-      logWarn('Manager score materialization Redis invalidation failed', {
+      await publishMaterializationHeadsToRedis(season, eventId, rowsForRedis);
+    } catch (error) {
+      // PostgreSQL heads remain authoritative. Remove any matching stale Redis
+      // pointers so a successful Redis read cannot serve the previous
+      // generation after the durable write. If Redis itself is unavailable,
+      // CACHE_ONLY falls back to PostgreSQL on the next read.
+      logWarn('Manager score materialization Redis publication failed', {
         eventId,
         entries: rowsForRedis.length,
-        error: invalidationError instanceof Error ? invalidationError.message : 'unknown',
+        error: error instanceof Error ? error.message : 'unknown',
       });
+      try {
+        await invalidateMaterializationHeadsInRedis(season, eventId, rowsForRedis);
+      } catch (invalidationError) {
+        logWarn('Manager score materialization Redis invalidation failed', {
+          eventId,
+          entries: rowsForRedis.length,
+          error: invalidationError instanceof Error ? invalidationError.message : 'unknown',
+        });
+      }
+    }
+  };
+  if (rowsForRedis.length > 0) {
+    if (databaseTransactionStorage.getStore()) {
+      // A manager-live/H2H caller may still be inside an outer mutation
+      // transaction. Publish only after that transaction commits, otherwise
+      // Redis could expose a head whose PostgreSQL write later rolls back.
+      registerDatabasePostCommit(publishRedisHeads);
+    } else {
+      // withDatabaseTransaction committed its root transaction before this
+      // unscoped path reaches the publication step.
+      await publishRedisHeads();
     }
   }
   return result;
