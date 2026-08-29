@@ -213,16 +213,6 @@ jobs:
           bun run db:migrate
           bun run db:migrate:status
 
-      - name: Validate producer-owned GraphQL authority fixture
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: |
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
-          BEGIN;
-          \i tests/fixtures/graphql-consumer-authority.sql
-          ROLLBACK;
-          SQL
-
       - name: Bootstrap and verify disposable runtime logins
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
@@ -282,3 +272,25 @@ jobs:
           UNDERSTAT_MIN_SEASON: '9798'
           UNDERSTAT_SEASON: '9899'
         run: bun run test:integration
+
+      - name: Validate producer-owned GraphQL authority fixture
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          CACHE_REDIS_HOST: 127.0.0.1
+          CACHE_REDIS_PORT: '6379'
+          CACHE_REDIS_DB: '9'
+          QUEUE_REDIS_HOST: 127.0.0.1
+          QUEUE_REDIS_PORT: '6379'
+          QUEUE_REDIS_DB: '10'
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/fixtures/graphql-consumer-authority.sql
+
+      - name: Stage GraphQL contract Week publication in cache
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          CACHE_REDIS_HOST: 127.0.0.1
+          CACHE_REDIS_PORT: '6379'
+          CACHE_REDIS_DB: '9'
+          QUEUE_REDIS_HOST: 127.0.0.1
+          QUEUE_REDIS_PORT: '6379'
+          QUEUE_REDIS_DB: '10'
+        run: bun run contract:stage-week
