@@ -4,6 +4,7 @@ import {
   ACQUIRE_SCRIPT,
   acquireFplRequest,
   closeFplCriticalWindow,
+  FplAdmissionCriticalWindowBusyError,
   getFplAdmissionStats,
   openFplCriticalWindow,
   resetFplAdmissionForTests,
@@ -126,5 +127,17 @@ describe('FPL admission reservations', () => {
     expect(getFplAdmissionStats().inflight).toBe(0);
     expect(ACQUIRE_SCRIPT).toContain('critical-priority');
     expect(ACQUIRE_SCRIPT).toContain('liveBurst');
+  });
+
+  test('reports a distinct error when another owner holds the critical window', async () => {
+    resetFplAdmissionForTests();
+    const owner = 'critical-window-owner';
+    await openFplCriticalWindow({ owner, untilMs: Date.now() + 2_000 });
+
+    await expect(
+      openFplCriticalWindow({ owner: 'second-owner', untilMs: Date.now() + 2_000 }),
+    ).rejects.toBeInstanceOf(FplAdmissionCriticalWindowBusyError);
+
+    await closeFplCriticalWindow(owner);
   });
 });

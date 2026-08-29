@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  FplAdmissionCriticalWindowBusyError,
   FplAdmissionStoreUnavailableError,
   type FplAdmissionStoreUnavailableError as FplAdmissionStoreUnavailableErrorType,
 } from '../../src/utils/fpl-admission';
@@ -47,6 +48,22 @@ describe('FPL price-watch Admission window', () => {
         sleep: async () => undefined,
       }),
     ).rejects.toThrow('owner conflict');
+    expect(attempts).toBe(1);
+  });
+
+  test('does not retry a critical-window ownership conflict as a store outage', async () => {
+    let attempts = 0;
+    await expect(
+      openPriceWatchCriticalWindowWithRetry({
+        owner: 'price-watch-test',
+        untilMs: Date.now() + 2_000,
+        openWindow: async () => {
+          attempts += 1;
+          throw new FplAdmissionCriticalWindowBusyError(Date.now() + 1_000);
+        },
+        sleep: async () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: 'FPL_ADMISSION_CRITICAL_WINDOW_BUSY' });
     expect(attempts).toBe(1);
   });
 });

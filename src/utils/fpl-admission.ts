@@ -561,6 +561,20 @@ export class FplAdmissionStoreUnavailableError extends FPLClientError {
   }
 }
 
+export class FplAdmissionCriticalWindowBusyError extends FPLClientError {
+  readonly untilMs: number;
+
+  constructor(untilMs: number) {
+    super(
+      'FPL critical admission window is already owned by another watcher',
+      409,
+      'FPL_ADMISSION_CRITICAL_WINDOW_BUSY',
+    );
+    this.name = 'FplAdmissionCriticalWindowBusyError';
+    this.untilMs = Number.isFinite(untilMs) ? Math.max(0, untilMs) : 0;
+  }
+}
+
 /** Backward-compatible alias for consumers that only knew the old error type. */
 export class FplAdmissionUnavailableError extends FplAdmissionDeadlineExceededError {
   constructor(cause?: unknown) {
@@ -1227,6 +1241,7 @@ async function distributedAcquire(
     }
     const remaining = deadlineAt - Date.now();
     if (remaining <= 0) {
+      if (registered) await cancelDistributedToken(redis, token).catch(() => undefined);
       const waitMs = Math.max(0, Date.now() - waitStartedAt);
       recordFplAdmissionResult({
         priority,
@@ -1271,7 +1286,21 @@ async function distributedAcquire(
       throw new FplAdmissionStoreUnavailableError(error);
     }
     if (result[0] === 'granted') {
-      const acquiredAt = Number(result[2] ?? Date.now());
+      const redisAcquiredAt = Number(result[2]);
+      const acquiredAt = Number.isFinite(redisAcquiredAt) ? redisAcquiredAt : Date.now();
+      if (acquiredAt > deadlineAt || Date.now() > deadlineAt) {
+        await cancelDistributedToken(redis, token).catch(() => undefined);
+        const waitMs = Math.max(0, Date.now() - waitStartedAt);
+        recordFplAdmissionResult({
+          priority,
+          outcome: 'deadline-exceeded',
+          waitMs,
+          reason: lastWaitReason ?? 'capacity',
+        });
+        throw new FplAdmissionDeadlineExceededError(
+          new Error('Admission lease was granted after its deadline'),
+        );
+      }
       const waitMs = Math.max(0, acquiredAt - waitStartedAt);
       logDebug('FPL request admitted by Redis lease', {
         priority,
@@ -1391,9 +1420,7 @@ export async function openFplCriticalWindow(input: {
       localCriticalOwner &&
       localCriticalOwner !== input.owner
     ) {
-      throw new FplAdmissionStoreUnavailableError(
-        new Error('FPL critical window is already owned'),
-      );
+      throw new FplAdmissionCriticalWindowBusyError(localCriticalUntil);
     }
     localCriticalOwner = input.owner;
     localCriticalUntil = input.untilMs;
@@ -1410,11 +1437,15 @@ export async function openFplCriticalWindow(input: {
       input.owner,
       input.untilMs,
     )) as string[];
+    if (result[0] === 'busy') {
+      throw new FplAdmissionCriticalWindowBusyError(Number(result[1] ?? 0));
+    }
     if (result[0] !== 'opened') {
       throw new Error(`Critical window could not open: ${result[0] ?? 'unknown'}`);
     }
   } catch (error) {
-    throw error instanceof FplAdmissionStoreUnavailableError
+    throw error instanceof FplAdmissionStoreUnavailableError ||
+      error instanceof FplAdmissionCriticalWindowBusyError
       ? error
       : new FplAdmissionStoreUnavailableError(error);
   }
