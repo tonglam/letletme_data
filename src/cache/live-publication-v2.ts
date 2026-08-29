@@ -937,6 +937,7 @@ export function buildLivePublicationRevisions(
   eventLives: readonly EventLive[],
   fixtures: readonly Fixture[],
   now: string,
+  contentTime = now,
 ): LivePublicationV2['revisions'] {
   const lifecycleRevision = contentHash({ state });
   const fixtureRevision = contentHash(
@@ -1002,12 +1003,16 @@ export function buildLivePublicationRevisions(
   );
   const rulesRevision = contentHash({ algorithm: 'live-points-v2-rules-1' });
   return {
-    lifecycle: contentUpdatedAt(previous?.revisions.lifecycle, lifecycleRevision, now),
-    fixtureIdentity: contentUpdatedAt(previous?.revisions.fixtureIdentity, fixtureRevision, now),
-    scoreCore: contentUpdatedAt(previous?.revisions.scoreCore, scoreRevision, now),
-    displayStats: contentUpdatedAt(previous?.revisions.displayStats, displayRevision, now),
-    explain: contentUpdatedAt(previous?.revisions.explain, explainRevision, now),
-    rules: contentUpdatedAt(previous?.revisions.rules, rulesRevision, now),
+    lifecycle: contentUpdatedAt(previous?.revisions.lifecycle, lifecycleRevision, contentTime),
+    fixtureIdentity: contentUpdatedAt(
+      previous?.revisions.fixtureIdentity,
+      fixtureRevision,
+      contentTime,
+    ),
+    scoreCore: contentUpdatedAt(previous?.revisions.scoreCore, scoreRevision, contentTime),
+    displayStats: contentUpdatedAt(previous?.revisions.displayStats, displayRevision, contentTime),
+    explain: contentUpdatedAt(previous?.revisions.explain, explainRevision, contentTime),
+    rules: contentUpdatedAt(previous?.revisions.rules, rulesRevision, contentTime),
   };
 }
 
@@ -1016,6 +1021,8 @@ export async function publishLivePublicationV2(input: {
   readonly eventId: number;
   readonly state: LivePublicationState;
   readonly sourceCheckedAt: Date | string;
+  /** Cutover seed may preserve the legacy publication's semantic content time. */
+  readonly contentUpdatedAt?: Date | string;
   readonly expectedNextCheckAt?: Date | string | null;
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
@@ -1031,6 +1038,8 @@ export async function publishLivePublicationV2(input: {
   const redis = input.redis ?? (await redisSingleton.getClient());
   const allocation = await allocateGeneration(redis, liveV2Key(scope, 'sequence'));
   const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
+  const contentUpdatedAt =
+    input.contentUpdatedAt == null ? allocation.now : sourceDate(input.contentUpdatedAt);
   const expectedNextCheckAt =
     input.expectedNextCheckAt == null ? null : sourceDate(input.expectedNextCheckAt);
   const liveItem = buildItem(scope, allocation.generation, 'eventLive', input.eventLives);
@@ -1052,6 +1061,7 @@ export async function publishLivePublicationV2(input: {
       input.eventLives,
       input.fixtures,
       allocation.now,
+      contentUpdatedAt,
     ),
     items: { eventLive: liveItem.manifest, fixtures: fixtureItem.manifest },
   };

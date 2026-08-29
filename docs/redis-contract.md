@@ -87,6 +87,22 @@ The `checkpoint-desired` key is one latest-wins control-plane obligation per sco
 coordinator and pending/coverage keys are bounded scheduler state; they never contain a second
 business payload and are not read by GraphQL to construct a score.
 
+## Cutover seed
+
+Before the breaking deployment, run the Data seed in dry-run mode for the exact season scope:
+
+```bash
+bun run seed:live-points-v2 --cache --season 2627 --event-id 2
+```
+
+The command validates the legacy durable `fpl:live` publication, converts its event-live and
+fixture payloads into a V2 current publication, publishes complete entry inputs from valid
+15-row pick sets, and checkpoints them. It never reads the legacy namespace at runtime. Add
+`--execute` only inside the maintenance window and set `LIVE_POINTS_SEED_CONFIRM=YES`; malformed
+legacy publications fail closed, while malformed entry rowsets go to the durable repair list and
+do not receive a fabricated head. The operation is idempotent for an unchanged V2 current
+publication and uses the normal V2 generation fence for newer source data.
+
 ## GraphQL cache ownership
 
 GraphQL owns these cache families on the cache endpoint:

@@ -148,21 +148,22 @@ async function ensureEntryLiveCheckpoint(
   publication: EntryLivePublicationV2,
   existingDesired: Awaited<ReturnType<typeof readEntryCheckpointDesiredV2>>,
 ): Promise<void> {
-  let desired = existingDesired;
   try {
+    // Redis publication is the serving boundary. Do not synchronously wait
+    // for PostgreSQL in the provider lane; the scheduler/reconciler consumes
+    // this one exact obligation and checkpoints the latest visible input.
     if (
-      desired === null ||
-      desired.publicationId !== publication.publicationId ||
-      desired.generation !== publication.generation
+      existingDesired === null ||
+      existingDesired.publicationId !== publication.publicationId ||
+      existingDesired.generation !== publication.generation
     ) {
-      desired = await setEntryCheckpointDesiredV2(publication);
+      await setEntryCheckpointDesiredV2(publication);
     }
-    await checkpointEntryLiveInputV2(season, eventId, entryId);
   } catch (error) {
-    // Redis publication is already authoritative. Leave the desired pointer
-    // for the reconciler; a database failure must not erase the live input or
-    // force the provider lane to refetch it.
-    logError('Entry live V2 checkpoint deferred after Redis publication', error, {
+    // Redis publication is already authoritative. A failed obligation write
+    // is recoverable from the current publication on the next scheduler pass;
+    // it must not erase the live input or force the provider lane to refetch it.
+    logError('Entry live V2 checkpoint obligation deferred after Redis publication', error, {
       season: season.seasonCode,
       eventId,
       entryId,

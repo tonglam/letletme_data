@@ -3,8 +3,32 @@ import { createHash } from 'node:crypto';
 
 import postgres from 'postgres';
 
+import type { EventLive } from '../src/domain/event-lives';
+import { validateEventLives } from '../src/domain/event-lives';
+import { explicitSeasonRef, type FplSeasonRef } from '../src/domain/fpl-season';
+import { validateFixtures } from '../src/domain/fixtures';
+import {
+  clearLiveCheckpointDesiredV2,
+  entryLiveInputFromFplPicks,
+  markLivePublicationCheckpointedV2,
+  publishEntryLiveInputV2,
+  publishLivePublicationV2,
+  readEntryLiveInputV2,
+  readLivePublicationV2,
+  setEntryCheckpointDesiredV2,
+  setLiveCheckpointDesiredV2,
+  type EntryLiveInputV2,
+  type Exactly15Picks,
+  type LivePublicationState,
+  type OfficialSubstitution,
+} from '../src/cache/live-publication-v2';
+import { redisSingleton } from '../src/cache/singleton';
+import { databaseSingleton } from '../src/db/singleton';
 import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
-import { contentHash } from '../src/utils/content-hash';
+import { checkpointLivePublicationV2 } from '../src/services/live-publication-v2-checkpoint.service';
+import { checkpointEntryLiveInputV2 } from '../src/services/entries.service';
+import { canonicalJson, contentHash, postgresJsonbContentHash } from '../src/utils/content-hash';
+import type { Fixture, RawFPLEntryEventPicksResponse } from '../src/types';
 
 type TimestampValue = Date | string;
 
@@ -47,20 +71,272 @@ export type InvalidPickScope = {
 
 export type SeedArguments = {
   readonly execute: boolean;
+  readonly seedCache: boolean;
   readonly season: string | null;
   readonly eventId: number | null;
 };
+
+type LegacyLivePublicationRow = {
+  publication_id: string;
+  season_id: number;
+  season_code: string;
+  event_id: number;
+  revision: number;
+  manifest: unknown;
+  event_live: unknown;
+  fixtures: unknown;
+  event_finished: boolean;
+  event_data_checked: boolean;
+  event_data_checked_at: TimestampValue | null;
+  event_live_snapshot_finalized_at: TimestampValue | null;
+  event_live_facts_persisted_at: TimestampValue | null;
+  event_live_item_count: number | null;
+  event_live_checksum: string | null;
+  fixtures_item_count: number | null;
+  fixtures_checksum: string | null;
+};
+
+export type PreviousTotalsRow = {
+  entry_id: number;
+  through_event_id: number;
+  total_points: number;
+  overall_rank: number | null;
+};
+
+export type FinalResultSeedRow = {
+  entry_id: number;
+  event_id: number;
+  event_points: number;
+  overall_points: number;
+  event_picks: unknown;
+  automatic_substitutions: unknown;
+  rich_synced_at: TimestampValue | null;
+  data_checked_at: TimestampValue | null;
+};
+
+export type ValidatedLiveSeed = {
+  readonly source: LegacyLivePublicationRow;
+  readonly season: FplSeasonRef;
+  readonly state: LivePublicationState;
+  readonly sourceCheckedAt: Date;
+  readonly contentUpdatedAt: Date;
+  readonly eventLives: readonly EventLive[];
+  readonly fixtures: readonly Fixture[];
+};
+
+export type InvalidLiveSeedScope = {
+  readonly seasonId: number;
+  readonly eventId: number;
+  readonly publicationId: string | null;
+  readonly reasons: readonly string[];
+};
+
+type LegacyManifestItem = {
+  readonly name: string;
+  readonly count: number;
+  readonly bytes: number;
+  readonly sha256: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function jsonValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function parseDate(value: unknown, label: string): Date {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(String(value));
+  if (!Number.isFinite(date.getTime())) throw new Error(`${label} is invalid`);
+  return date;
+}
+
+function nullableDateValue(value: unknown): Date | null {
+  if (value === null || value === undefined) return null;
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(String(value));
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function normalizeEventLivePayload(value: unknown, eventId: number): EventLive[] {
+  const parsed = jsonValue(value);
+  if (!Array.isArray(parsed)) throw new Error('eventLive payload is not an array');
+  const withDates = parsed.map((row) => {
+    if (!isRecord(row)) return row;
+    return {
+      ...row,
+      createdAt: nullableDateValue(row.createdAt),
+    };
+  });
+  const eventLives = [...validateEventLives(withDates)];
+  if (eventLives.length === 0) throw new Error('eventLive payload is empty');
+  if (eventLives.some((row) => row.eventId !== eventId)) {
+    throw new Error(`eventLive payload contains another event than ${eventId}`);
+  }
+  if (new Set(eventLives.map((row) => row.elementId)).size !== eventLives.length) {
+    throw new Error('eventLive payload contains duplicate elements');
+  }
+  return eventLives;
+}
+
+function normalizeFixturePayload(value: unknown, eventId: number): Fixture[] {
+  const parsed = jsonValue(value);
+  if (!Array.isArray(parsed)) throw new Error('fixtures payload is not an array');
+  const withDates = parsed.map((row) => {
+    if (!isRecord(row)) return row;
+    return {
+      ...row,
+      kickoffTime: nullableDateValue(row.kickoffTime),
+      createdAt: nullableDateValue(row.createdAt),
+      updatedAt: nullableDateValue(row.updatedAt),
+    };
+  });
+  const fixtures = validateFixtures(withDates);
+  if (fixtures.some((fixture) => fixture.event !== null && fixture.event !== eventId)) {
+    throw new Error(`fixtures payload contains another event than ${eventId}`);
+  }
+  if (new Set(fixtures.map((fixture) => fixture.id)).size !== fixtures.length) {
+    throw new Error('fixtures payload contains duplicate fixture IDs');
+  }
+  return fixtures;
+}
+
+function legacyManifestItems(value: unknown): Map<string, LegacyManifestItem> {
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    throw new Error('legacy publication manifest has no item list');
+  }
+  const items = new Map<string, LegacyManifestItem>();
+  for (const item of value.items) {
+    if (
+      !isRecord(item) ||
+      typeof item.name !== 'string' ||
+      typeof item.count !== 'number' ||
+      !Number.isSafeInteger(item.count) ||
+      typeof item.bytes !== 'number' ||
+      !Number.isSafeInteger(item.bytes) ||
+      typeof item.sha256 !== 'string'
+    ) {
+      throw new Error('legacy publication manifest contains an invalid item');
+    }
+    if (items.has(item.name)) throw new Error(`legacy publication duplicates ${item.name}`);
+    items.set(item.name, item as unknown as LegacyManifestItem);
+  }
+  if (items.size !== 2 || !items.has('eventLive') || !items.has('fixtures')) {
+    throw new Error('legacy publication does not contain the complete live item set');
+  }
+  return items;
+}
+
+function legacyPublicationState(
+  row: Pick<
+    LegacyLivePublicationRow,
+    'event_finished' | 'event_data_checked' | 'event_live_snapshot_finalized_at'
+  >,
+  manifest: Record<string, unknown>,
+): LivePublicationState {
+  if (
+    row.event_finished &&
+    row.event_data_checked &&
+    nullableDateValue(row.event_live_snapshot_finalized_at) !== null
+  ) {
+    return 'FINALIZED';
+  }
+  if (row.event_finished && row.event_data_checked) return 'GW_REVIEW';
+  if (manifest.state === 'scheduled') return 'PRE_DEADLINE';
+  if (manifest.state === 'settled') return 'DAY_SETTLING';
+  if (manifest.state === 'live') return 'LIVE_ACTIVE';
+  throw new Error(`unsupported legacy live state: ${String(manifest.state)}`);
+}
+
+export function validateLegacyLiveSeed(
+  row: LegacyLivePublicationRow,
+): { ok: true; value: ValidatedLiveSeed } | { ok: false; value: InvalidLiveSeedScope } {
+  const reasons = new Set<string>();
+  let manifest: Record<string, unknown> | null = null;
+  let eventLives: EventLive[] = [];
+  let fixtures: Fixture[] = [];
+  let sourceCheckedAt: Date | null = null;
+  let contentUpdatedAt: Date | null = null;
+  let state: LivePublicationState | null = null;
+  try {
+    const parsedManifest = jsonValue(row.manifest);
+    if (!isRecord(parsedManifest)) throw new Error('legacy manifest is not an object');
+    manifest = parsedManifest;
+    if (manifest.dataset !== 'fpl:live') reasons.add('DATASET_NOT_FPL_LIVE');
+    if (manifest.seasonCode !== row.season_code) reasons.add('SEASON_SCOPE_MISMATCH');
+    if (manifest.eventId !== row.event_id) reasons.add('EVENT_SCOPE_MISMATCH');
+    if (manifest.publicationId !== row.publication_id) reasons.add('PUBLICATION_ID_MISMATCH');
+    if (!/^[0-9a-f-]{36}$/i.test(row.publication_id)) reasons.add('PUBLICATION_ID_INVALID');
+    const items = legacyManifestItems(manifest);
+    eventLives = normalizeEventLivePayload(row.event_live, row.event_id);
+    fixtures = normalizeFixturePayload(row.fixtures, row.event_id);
+    const eventLiveItem = items.get('eventLive')!;
+    const fixtureItem = items.get('fixtures')!;
+    if (eventLiveItem.count !== eventLives.length) reasons.add('EVENT_LIVE_COUNT_MISMATCH');
+    if (fixtureItem.count !== fixtures.length) reasons.add('FIXTURE_COUNT_MISMATCH');
+    if (row.event_live_item_count !== eventLives.length)
+      reasons.add('EVENT_LIVE_ROW_COUNT_MISMATCH');
+    if (row.fixtures_item_count !== fixtures.length) reasons.add('FIXTURE_ROW_COUNT_MISMATCH');
+    if (row.event_live_checksum !== postgresJsonbContentHash(jsonValue(row.event_live)))
+      reasons.add('EVENT_LIVE_SOURCE_CHECKSUM_MISMATCH');
+    if (row.fixtures_checksum !== postgresJsonbContentHash(jsonValue(row.fixtures)))
+      reasons.add('FIXTURE_SOURCE_CHECKSUM_MISMATCH');
+    if (eventLiveItem.sha256 !== row.event_live_checksum)
+      reasons.add('EVENT_LIVE_MANIFEST_CHECKSUM_MISMATCH');
+    if (fixtureItem.sha256 !== row.fixtures_checksum)
+      reasons.add('FIXTURE_MANIFEST_CHECKSUM_MISMATCH');
+    contentUpdatedAt = parseDate(manifest.sourceCheckedAt, 'legacy sourceCheckedAt');
+    sourceCheckedAt = parseDate(
+      manifest.lastSuccessfulFetchAt ?? manifest.sourceCheckedAt,
+      'legacy lastSuccessfulFetchAt',
+    );
+    const publishedAt = parseDate(manifest.publishedAt, 'legacy publishedAt');
+    if (publishedAt.getTime() < sourceCheckedAt.getTime()) reasons.add('TIME_ORDER_INVALID');
+    state = legacyPublicationState(row, manifest);
+  } catch (error) {
+    reasons.add(error instanceof Error ? error.message : 'LEGACY_PAYLOAD_INVALID');
+  }
+  if (reasons.size > 0 || !manifest || !sourceCheckedAt || !contentUpdatedAt || !state) {
+    return {
+      ok: false,
+      value: {
+        seasonId: row.season_id,
+        eventId: row.event_id,
+        publicationId: row.publication_id ?? null,
+        reasons: [...reasons].sort(),
+      },
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      source: row,
+      season: explicitSeasonRef(row.season_code),
+      state,
+      sourceCheckedAt,
+      contentUpdatedAt,
+      eventLives,
+      fixtures,
+    },
+  };
+}
 
 type SqlExecutor = postgres.Sql | postgres.TransactionSql;
 
 function usage(): never {
   throw new Error(
-    'usage: bun scripts/seed-live-points-v2.ts [--execute] [--season YYYY] [--event-id N]',
+    'usage: bun scripts/seed-live-points-v2.ts [--execute] [--cache] [--season YYYY] [--event-id N]',
   );
 }
 
 export function parseSeedArguments(argv: readonly string[]): SeedArguments {
   let execute = false;
+  let seedCache = false;
   let season: string | null = null;
   let eventId: number | null = null;
   for (let index = 0; index < argv.length; index += 1) {
@@ -68,6 +344,11 @@ export function parseSeedArguments(argv: readonly string[]): SeedArguments {
     if (token === '--execute') {
       if (execute) usage();
       execute = true;
+      continue;
+    }
+    if (token === '--cache') {
+      if (seedCache) usage();
+      seedCache = true;
       continue;
     }
     if (token === '--season') {
@@ -84,7 +365,10 @@ export function parseSeedArguments(argv: readonly string[]): SeedArguments {
     }
     usage();
   }
-  return { execute, season, eventId };
+  if (seedCache && season === null) {
+    throw new Error('--cache requires an explicit --season scope');
+  }
+  return { execute, seedCache, season, eventId };
 }
 
 function asDate(value: TimestampValue): Date | null {
@@ -198,6 +482,214 @@ export function buildSeedHead(rows: readonly ExistingPickRow[]): SeedHead {
   };
 }
 
+function rowsToFplPicks(rows: readonly ExistingPickRow[]): RawFPLEntryEventPicksResponse {
+  const sorted = sortRows(rows);
+  const first = sorted[0]!;
+  return {
+    active_chip: first.chip,
+    automatic_subs: [],
+    entry_history: {
+      event: first.event_id,
+      points: 0,
+      total_points: 0,
+      rank: null,
+      overall_rank: null,
+      bank: 0,
+      value: 0,
+      event_transfers: 0,
+      event_transfers_cost: first.transfers_cost ?? 0,
+      points_on_bench: 0,
+    },
+    picks: sorted.map((row) => ({
+      element: row.element_id,
+      position: row.position,
+      multiplier: row.multiplier,
+      is_captain: row.is_captain,
+      is_vice_captain: row.is_vice_captain,
+    })),
+  };
+}
+
+function normalizeFinalPicks(value: unknown): Exactly15Picks | null {
+  const parsed = jsonValue(value);
+  if (!Array.isArray(parsed) || parsed.length !== 15) return null;
+  const picks = parsed.map((item) => {
+    if (!isRecord(item)) return null;
+    const element = item.element;
+    const position = item.position;
+    const multiplier = item.multiplier;
+    const isCaptain = item.isCaptain ?? item.is_captain;
+    const isViceCaptain = item.isViceCaptain ?? item.is_vice_captain;
+    if (
+      typeof element !== 'number' ||
+      !Number.isSafeInteger(element) ||
+      element <= 0 ||
+      typeof position !== 'number' ||
+      !Number.isSafeInteger(position) ||
+      position < 1 ||
+      position > 15 ||
+      typeof multiplier !== 'number' ||
+      !Number.isSafeInteger(multiplier) ||
+      multiplier < 0 ||
+      multiplier > 3 ||
+      typeof isCaptain !== 'boolean' ||
+      typeof isViceCaptain !== 'boolean' ||
+      (isCaptain && isViceCaptain)
+    ) {
+      return null;
+    }
+    return { element, position, multiplier, isCaptain, isViceCaptain };
+  });
+  if (picks.some((pick) => pick === null)) return null;
+  const normalized = picks as Exclude<(typeof picks)[number], null>[];
+  if (
+    new Set(normalized.map((pick) => pick.position)).size !== 15 ||
+    new Set(normalized.map((pick) => pick.element)).size !== 15 ||
+    normalized.filter((pick) => pick.isCaptain).length !== 1 ||
+    normalized.filter((pick) => pick.isViceCaptain).length !== 1
+  ) {
+    return null;
+  }
+  return [...normalized].sort(
+    (left, right) => left.position - right.position,
+  ) as unknown as Exactly15Picks;
+}
+
+function normalizeFinalAutomaticSubs(
+  value: unknown,
+  allowedElements: ReadonlySet<number>,
+): readonly OfficialSubstitution[] | null {
+  const parsed = jsonValue(value);
+  if (parsed === null || parsed === undefined) return [];
+  if (!Array.isArray(parsed)) return null;
+  const incoming = new Set<number>();
+  const outgoing = new Set<number>();
+  const result: Array<{ inElement: number; outElement: number }> = [];
+  for (const item of parsed) {
+    if (!isRecord(item)) return null;
+    const inElement = item.inElement ?? item.element_in;
+    const outElement = item.outElement ?? item.element_out;
+    if (
+      typeof inElement !== 'number' ||
+      !Number.isSafeInteger(inElement) ||
+      typeof outElement !== 'number' ||
+      !Number.isSafeInteger(outElement) ||
+      inElement <= 0 ||
+      outElement <= 0 ||
+      inElement === outElement ||
+      !allowedElements.has(inElement) ||
+      !allowedElements.has(outElement) ||
+      incoming.has(inElement) ||
+      outgoing.has(outElement) ||
+      incoming.has(outElement) ||
+      outgoing.has(inElement)
+    ) {
+      return null;
+    }
+    incoming.add(inElement);
+    outgoing.add(outElement);
+    result.push({ inElement, outElement });
+  }
+  return result;
+}
+
+export function buildSeedInput(
+  seasonCode: string,
+  rows: readonly ExistingPickRow[],
+  previousTotals: PreviousTotalsRow | null = null,
+  finalResult: FinalResultSeedRow | null = null,
+): { readonly input: EntryLiveInputV2; readonly sourceCheckedAt: Date } {
+  const head = buildSeedHead(rows);
+  const base = entryLiveInputFromFplPicks(
+    explicitSeasonRef(seasonCode),
+    head.eventId,
+    head.entryId,
+    rowsToFplPicks(rows),
+    head.sourceCheckedAt,
+  );
+  const previous =
+    previousTotals &&
+    previousTotals.through_event_id > 0 &&
+    previousTotals.total_points >= 0 &&
+    (previousTotals.overall_rank === null || previousTotals.overall_rank > 0)
+      ? {
+          revision: contentHash({
+            throughEventId: previousTotals.through_event_id,
+            totalPoints: previousTotals.total_points,
+            overallRank: previousTotals.overall_rank,
+          }),
+          throughEventId: previousTotals.through_event_id,
+          totalPoints: previousTotals.total_points,
+          overallRank: previousTotals.overall_rank,
+        }
+      : null;
+
+  let sourceCheckedAt = head.sourceCheckedAt;
+  let input: EntryLiveInputV2 = { ...base, previousTotals: previous };
+  if (finalResult) {
+    const dataCheckedAt = nullableDateValue(finalResult.data_checked_at);
+    const richSyncedAt = nullableDateValue(finalResult.rich_synced_at);
+    const finalPicks = normalizeFinalPicks(finalResult.event_picks);
+    const finalAutomaticSubs = finalPicks
+      ? normalizeFinalAutomaticSubs(
+          finalResult.automatic_substitutions,
+          new Set(finalPicks.map((pick) => pick.element)),
+        )
+      : null;
+    if (
+      dataCheckedAt &&
+      richSyncedAt &&
+      richSyncedAt.getTime() >= dataCheckedAt.getTime() &&
+      finalPicks &&
+      finalAutomaticSubs !== null &&
+      finalResult.event_id === head.eventId &&
+      finalResult.event_points >= 0 &&
+      finalResult.overall_points >= 0
+    ) {
+      sourceCheckedAt =
+        richSyncedAt.getTime() > sourceCheckedAt.getTime() ? richSyncedAt : sourceCheckedAt;
+      const score = {
+        eventPoints: finalResult.event_points,
+        totalPoints: finalResult.overall_points,
+      };
+      const finalPayload = {
+        score,
+        picks: finalPicks,
+        automaticSubs: finalAutomaticSubs,
+      };
+      const finalRevision = contentHash({
+        dataCheckedAt: dataCheckedAt.toISOString(),
+        ...finalPayload,
+      });
+      input = {
+        ...input,
+        officialAdjustment: {
+          revision: contentHash({
+            dataCheckedAt: dataCheckedAt.toISOString(),
+            multipliers: finalPicks.map((pick) => ({
+              element: pick.element,
+              multiplier: pick.multiplier,
+            })),
+            automaticSubs: finalAutomaticSubs,
+          }),
+          multipliers: finalPicks.map((pick) => ({
+            element: pick.element,
+            multiplier: pick.multiplier,
+          })),
+          automaticSubs: finalAutomaticSubs,
+        },
+        finalResult: {
+          revision: finalRevision,
+          score,
+          picks: finalPicks,
+          automaticSubs: finalAutomaticSubs,
+        },
+      };
+    }
+  }
+  return { input, sourceCheckedAt };
+}
+
 async function loadRows(database: postgres.Sql, args: SeedArguments): Promise<ExistingPickRow[]> {
   const predicates = ['TRUE'];
   const parameters: Array<string | number> = [];
@@ -229,6 +721,120 @@ async function loadRows(database: postgres.Sql, args: SeedArguments): Promise<Ex
     ORDER BY p.season_id, p.entry_id, p.event_id, p.position
   `;
   return database.unsafe<ExistingPickRow[]>(query, parameters);
+}
+
+async function loadLegacyLivePublications(
+  database: postgres.Sql,
+  args: SeedArguments,
+): Promise<LegacyLivePublicationRow[]> {
+  const parameters: Array<string | number> = ['fpl:live', 'active', 'eventLive', 'fixtures'];
+  const predicates = [
+    'publication.dataset = $1',
+    'publication.status = $2',
+    'event_item.item_name = $3',
+    'fixture_item.item_name = $4',
+  ];
+  if (args.season !== null) {
+    parameters.push(args.season);
+    predicates.push(`season.season_code = $${parameters.length}`);
+  }
+  if (args.eventId !== null) {
+    parameters.push(args.eventId);
+    predicates.push(`publication.event_id = $${parameters.length}`);
+  }
+  return database.unsafe<LegacyLivePublicationRow[]>(
+    `
+      SELECT
+        publication.publication_id,
+        publication.season_id,
+        season.season_code,
+        publication.event_id,
+        publication.revision,
+        publication.manifest,
+        event_item.payload AS event_live,
+        fixture_item.payload AS fixtures,
+        event.finished AS event_finished,
+        event.data_checked AS event_data_checked,
+        event.data_checked_at AS event_data_checked_at,
+        event.live_snapshot_finalized_at AS event_live_snapshot_finalized_at,
+        event.live_facts_persisted_at AS event_live_facts_persisted_at,
+        event_item.item_count AS event_live_item_count,
+        event_item.checksum AS event_live_checksum,
+        fixture_item.item_count AS fixtures_item_count,
+        fixture_item.checksum AS fixtures_checksum
+      FROM ops.dataset_publications publication
+      JOIN fpl.seasons season
+        ON season.season_id = publication.season_id
+      JOIN fpl.events event
+        ON event.season_id = publication.season_id
+       AND event.event_id = publication.event_id
+      JOIN ops.dataset_publication_items event_item
+        ON event_item.publication_id = publication.publication_id
+      JOIN ops.dataset_publication_items fixture_item
+        ON fixture_item.publication_id = publication.publication_id
+      WHERE ${predicates.join(' AND ')}
+      ORDER BY publication.season_id, publication.event_id, publication.revision DESC
+    `,
+    parameters,
+  );
+}
+
+async function loadPreviousTotals(
+  database: postgres.Sql,
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<PreviousTotalsRow[]> {
+  return database.unsafe<PreviousTotalsRow[]>(
+    `
+      SELECT DISTINCT ON (result.entry_id)
+        result.entry_id,
+        result.event_id AS through_event_id,
+        result.overall_points AS total_points,
+        NULLIF(result.overall_rank, 0) AS overall_rank
+      FROM competition.entry_event_results result
+      JOIN fpl.events event
+        ON event.season_id = result.season_id
+       AND event.event_id = result.event_id
+      WHERE result.season_id = $1
+        AND result.event_id < $2
+        AND event.finished = TRUE
+        AND event.data_checked = TRUE
+        AND result.rich_synced_at IS NOT NULL
+      ORDER BY result.entry_id, result.event_id DESC
+    `,
+    [season.seasonId, eventId],
+  );
+}
+
+async function loadFinalResults(
+  database: postgres.Sql,
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<FinalResultSeedRow[]> {
+  return database.unsafe<FinalResultSeedRow[]>(
+    `
+      SELECT
+        result.entry_id,
+        result.event_id,
+        result.event_points,
+        result.overall_points,
+        result.event_picks,
+        result.automatic_substitutions,
+        result.rich_synced_at,
+        event.data_checked_at
+      FROM competition.entry_event_results result
+      JOIN fpl.events event
+        ON event.season_id = result.season_id
+       AND event.event_id = result.event_id
+      WHERE result.season_id = $1
+        AND result.event_id = $2
+        AND event.finished = TRUE
+        AND event.data_checked = TRUE
+        AND result.rich_synced_at IS NOT NULL
+      ORDER BY result.entry_id, result.updated_at DESC
+    `,
+    [season.seasonId, eventId],
+  );
 }
 
 function groupRows(rows: readonly ExistingPickRow[]): ExistingPickRow[][] {
@@ -327,6 +933,179 @@ async function writeRepairs(
   }
 }
 
+function sameLiveSeed(
+  read: Awaited<ReturnType<typeof readLivePublicationV2>>,
+  seed: ValidatedLiveSeed,
+): boolean {
+  return Boolean(
+    read &&
+      read.servedFrom === 'REDIS_CURRENT' &&
+      read.publication.state === seed.state &&
+      canonicalJson(read.eventLives) === canonicalJson(seed.eventLives) &&
+      canonicalJson(read.fixtures) === canonicalJson(seed.fixtures),
+  );
+}
+
+function sameEntrySeed(
+  read: Awaited<ReturnType<typeof readEntryLiveInputV2>>,
+  input: EntryLiveInputV2,
+): boolean {
+  return Boolean(
+    read &&
+      read.servedFrom === 'REDIS_CURRENT' &&
+      canonicalJson(read.input) === canonicalJson(input),
+  );
+}
+
+async function checkpointSeededLive(
+  seed: ValidatedLiveSeed,
+  publication: Awaited<ReturnType<typeof publishLivePublicationV2>>['publication'],
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<'checkpointed' | 'already-checkpointed' | 'blocked'> {
+  if (publication.checkpointedAt !== null) return 'already-checkpointed';
+  const desired = await setLiveCheckpointDesiredV2(publication, new Date(), redis);
+  const checkpointed = await checkpointLivePublicationV2({
+    season: seed.season,
+    eventId: seed.source.event_id,
+    publication,
+    eventLives: seed.eventLives,
+    fixtures: seed.fixtures,
+  });
+  const marked = await markLivePublicationCheckpointedV2(publication, new Date(), redis);
+  if (marked) {
+    await clearLiveCheckpointDesiredV2(desired, redis);
+    return checkpointed ? 'checkpointed' : 'already-checkpointed';
+  }
+  return 'blocked';
+}
+
+async function seedLivePublication(
+  seed: ValidatedLiveSeed,
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<{
+  readonly status: 'published' | 'unchanged' | 'stale';
+  readonly checkpoint: 'checkpointed' | 'already-checkpointed' | 'blocked' | 'not-required';
+  readonly generation: number;
+  readonly publicationId: string;
+}> {
+  const scope = { season: seed.season.seasonCode, eventId: seed.source.event_id } as const;
+  const current = await readLivePublicationV2(scope, redis);
+  if (sameLiveSeed(current, seed)) {
+    const checkpoint = await checkpointSeededLive(seed, current!.publication, redis);
+    return {
+      status: 'unchanged',
+      checkpoint,
+      generation: current!.publication.generation,
+      publicationId: current!.publication.publicationId,
+    };
+  }
+  const promoted = await publishLivePublicationV2({
+    season: seed.season.seasonCode,
+    eventId: seed.source.event_id,
+    state: seed.state,
+    sourceCheckedAt: seed.sourceCheckedAt,
+    contentUpdatedAt: seed.contentUpdatedAt,
+    eventLives: seed.eventLives,
+    fixtures: seed.fixtures,
+    previous: current?.publication ?? null,
+    redis,
+  });
+  if (!promoted.published) {
+    return {
+      status: 'stale',
+      checkpoint: 'not-required',
+      generation: promoted.publication.generation,
+      publicationId: promoted.publication.publicationId,
+    };
+  }
+  const checkpoint = await checkpointSeededLive(seed, promoted.publication, redis);
+  return {
+    status: 'published',
+    checkpoint,
+    generation: promoted.publication.generation,
+    publicationId: promoted.publication.publicationId,
+  };
+}
+
+async function seedEntryInput(
+  season: FplSeasonRef,
+  rows: readonly ExistingPickRow[],
+  previousTotals: PreviousTotalsRow | null,
+  finalResult: FinalResultSeedRow | null,
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<{
+  readonly status: 'published' | 'unchanged' | 'stale';
+  readonly checkpoint: 'checkpointed' | 'already-checkpointed' | 'blocked' | 'not-required';
+  readonly entryId: number;
+  readonly generation: number;
+  readonly publicationId: string;
+  readonly final: boolean;
+}> {
+  const first = rows[0]!;
+  const { input, sourceCheckedAt } = buildSeedInput(
+    season.seasonCode,
+    rows,
+    previousTotals,
+    finalResult,
+  );
+  const scope = {
+    season: season.seasonCode,
+    eventId: first.event_id,
+    entryId: first.entry_id,
+  } as const;
+  const current = await readEntryLiveInputV2(scope, redis);
+  if (sameEntrySeed(current, input)) {
+    if (current!.publication.checkpointedAt !== null) {
+      return {
+        status: 'unchanged',
+        checkpoint: 'already-checkpointed',
+        entryId: first.entry_id,
+        generation: current!.publication.generation,
+        publicationId: current!.publication.publicationId,
+        final: input.finalResult !== null,
+      };
+    }
+    await setEntryCheckpointDesiredV2(current!.publication, new Date(), redis);
+    const result = await checkpointEntryLiveInputV2(season, first.event_id, first.entry_id);
+    return {
+      status: 'unchanged',
+      checkpoint: result === 'checkpointed' ? 'checkpointed' : 'blocked',
+      entryId: first.entry_id,
+      generation: current!.publication.generation,
+      publicationId: current!.publication.publicationId,
+      final: input.finalResult !== null,
+    };
+  }
+  const promoted = await publishEntryLiveInputV2({
+    season: season.seasonCode,
+    eventId: first.event_id,
+    entryId: first.entry_id,
+    input,
+    sourceCheckedAt,
+    redis,
+  });
+  if (!promoted.published) {
+    return {
+      status: 'stale',
+      checkpoint: 'not-required',
+      entryId: first.entry_id,
+      generation: promoted.publication.generation,
+      publicationId: promoted.publication.publicationId,
+      final: promoted.publication.state === 'FINAL',
+    };
+  }
+  await setEntryCheckpointDesiredV2(promoted.publication, new Date(), redis);
+  const result = await checkpointEntryLiveInputV2(season, first.event_id, first.entry_id);
+  return {
+    status: 'published',
+    checkpoint: result === 'checkpointed' ? 'checkpointed' : 'blocked',
+    entryId: first.entry_id,
+    generation: promoted.publication.generation,
+    publicationId: promoted.publication.publicationId,
+    final: input.finalResult !== null,
+  };
+}
+
 async function main(): Promise<void> {
   const args = parseSeedArguments(process.argv.slice(2));
   const databaseUrl = process.env.DATABASE_URL?.trim();
@@ -343,10 +1122,45 @@ async function main(): Promise<void> {
     const rows = await loadRows(database, args);
     const heads: SeedHead[] = [];
     const repairs: InvalidPickScope[] = [];
-    for (const group of groupRows(rows)) {
+    const rowGroups = groupRows(rows);
+    for (const group of rowGroups) {
       const invalid = inspectPickScope(group);
       if (invalid) repairs.push(invalid);
       else heads.push(buildSeedHead(group));
+    }
+
+    const cacheCandidates: ValidatedLiveSeed[] = [];
+    const cacheInvalid: InvalidLiveSeedScope[] = [];
+    if (args.seedCache) {
+      const legacyPublications = await loadLegacyLivePublications(database, args);
+      for (const legacyPublication of legacyPublications) {
+        const validated = validateLegacyLiveSeed(legacyPublication);
+        if (validated.ok) cacheCandidates.push(validated.value);
+        else cacheInvalid.push(validated.value);
+      }
+      const duplicateScopes = new Set<string>();
+      for (const seed of cacheCandidates) {
+        const key = `${seed.season.seasonCode}:${seed.source.event_id}`;
+        if (duplicateScopes.has(key)) {
+          cacheInvalid.push({
+            seasonId: seed.source.season_id,
+            eventId: seed.source.event_id,
+            publicationId: seed.source.publication_id,
+            reasons: ['DUPLICATE_ACTIVE_SCOPE'],
+          });
+        }
+        duplicateScopes.add(key);
+      }
+      if (args.execute && cacheInvalid.length > 0) {
+        throw new Error(
+          `V2 cache seed refused because ${cacheInvalid.length} legacy live publication scope(s) failed validation`,
+        );
+      }
+      if (args.execute && cacheCandidates.length === 0) {
+        throw new Error(
+          'V2 cache seed refused because no complete legacy live publication was found',
+        );
+      }
     }
     if (args.execute) {
       await database.begin(async (transaction) => {
@@ -354,11 +1168,63 @@ async function main(): Promise<void> {
         await writeRepairs(transaction, repairs);
       });
     }
+
+    const cacheResults: Array<Record<string, unknown>> = [];
+    const entryResults: Array<Record<string, unknown>> = [];
+    if (args.seedCache && args.execute) {
+      const redis = await redisSingleton.getClient();
+      try {
+        for (const seed of cacheCandidates) {
+          const globalResult = await seedLivePublication(seed, redis);
+          cacheResults.push({
+            season: seed.season.seasonCode,
+            eventId: seed.source.event_id,
+            ...globalResult,
+          });
+
+          const previousTotals = await loadPreviousTotals(
+            database,
+            seed.season,
+            seed.source.event_id,
+          );
+          const previousTotalsByEntry = new Map(
+            previousTotals.map((row) => [row.entry_id, row] as const),
+          );
+          const finalResults = await loadFinalResults(database, seed.season, seed.source.event_id);
+          const finalResultsByEntry = new Map(
+            finalResults.map((row) => [row.entry_id, row] as const),
+          );
+          const eventGroups = rowGroups.filter(
+            (group) =>
+              group[0]?.season_id === seed.source.season_id &&
+              group[0]?.event_id === seed.source.event_id,
+          );
+          for (const group of eventGroups) {
+            if (inspectPickScope(group)) continue;
+            const entryResult = await seedEntryInput(
+              seed.season,
+              group,
+              previousTotalsByEntry.get(group[0]!.entry_id) ?? null,
+              finalResultsByEntry.get(group[0]!.entry_id) ?? null,
+              redis,
+            );
+            entryResults.push({
+              season: seed.season.seasonCode,
+              eventId: seed.source.event_id,
+              ...entryResult,
+            });
+          }
+        }
+      } finally {
+        await Promise.allSettled([redisSingleton.disconnect(), databaseSingleton.disconnect()]);
+      }
+    }
     console.log(
       JSON.stringify(
         {
           operation: 'seed-live-points-v2',
           executed: args.execute,
+          seedCache: args.seedCache,
           season: args.season,
           eventId: args.eventId,
           sourceRows: rows.length,
@@ -366,6 +1232,12 @@ async function main(): Promise<void> {
           validHeads: heads.length,
           repairScopes: repairs.length,
           repairSample: repairs.slice(0, 20),
+          cacheCandidates: cacheCandidates.length,
+          cacheInvalid: cacheInvalid.length,
+          cacheInvalidSample: cacheInvalid.slice(0, 20),
+          cacheResults,
+          entryResults: entryResults.slice(0, 20),
+          entryResultCount: entryResults.length,
         },
         null,
         2,

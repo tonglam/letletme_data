@@ -2,9 +2,12 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   buildSeedHead,
+  buildSeedInput,
   inspectPickScope,
   parseSeedArguments,
   type ExistingPickRow,
+  type FinalResultSeedRow,
+  type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
 
 function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
@@ -54,12 +57,62 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(() => buildSeedHead(malformed)).toThrow('Cannot seed invalid pick scope');
   });
 
+  test('seeds previous totals and final evidence only when the data_checked fence is complete', () => {
+    const previous: PreviousTotalsRow = {
+      entry_id: 6953,
+      through_event_id: 1,
+      total_points: 71,
+      overall_rank: 123,
+    };
+    const final: FinalResultSeedRow = {
+      entry_id: 6953,
+      event_id: 2,
+      event_points: 17,
+      overall_points: 88,
+      event_picks: rows().map((row) => ({
+        element: row.element_id,
+        position: row.position,
+        multiplier: row.multiplier,
+        is_captain: row.is_captain,
+        is_vice_captain: row.is_vice_captain,
+      })),
+      automatic_substitutions: [],
+      rich_synced_at: new Date('2026-08-29T10:05:00.000Z'),
+      data_checked_at: new Date('2026-08-29T10:04:00.000Z'),
+    };
+    const seeded = buildSeedInput('2627', rows(), previous, final);
+    expect(seeded.input.previousTotals).toMatchObject({
+      throughEventId: 1,
+      totalPoints: 71,
+      overallRank: 123,
+    });
+    expect(seeded.input.finalResult).toMatchObject({
+      score: { eventPoints: 17, totalPoints: 88 },
+      automaticSubs: [],
+    });
+    expect(seeded.sourceCheckedAt.toISOString()).toBe('2026-08-29T10:05:00.000Z');
+
+    const stale = buildSeedInput('2627', rows(), previous, {
+      ...final,
+      rich_synced_at: new Date('2026-08-29T10:03:00.000Z'),
+    });
+    expect(stale.input.finalResult).toBeNull();
+  });
+
   test('requires explicit scope arguments and rejects duplicate switches', () => {
     expect(parseSeedArguments(['--execute', '--season', '2627', '--event-id', '2'])).toEqual({
       execute: true,
+      seedCache: false,
       season: '2627',
       eventId: 2,
     });
+    expect(parseSeedArguments(['--cache', '--season', '2627'])).toEqual({
+      execute: false,
+      seedCache: true,
+      season: '2627',
+      eventId: null,
+    });
+    expect(() => parseSeedArguments(['--cache'])).toThrow();
     expect(() => parseSeedArguments(['--season', '2627', '--season', '2627'])).toThrow();
     expect(() => parseSeedArguments(['--event-id', '0'])).toThrow();
   });
