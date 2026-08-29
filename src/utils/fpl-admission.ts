@@ -843,6 +843,73 @@ redis.call('HDEL', KEYS[1], 'criticalUntilMs', 'criticalOwner')
 return 1
 `;
 
+const CLEANUP_STATS_SCRIPT = `
+local nowParts = redis.call('TIME')
+local now = tonumber(nowParts[1]) * 1000 + math.floor(tonumber(nowParts[2]) / 1000)
+local configuredRate = tonumber(ARGV[1])
+local configuredCapacity = tonumber(ARGV[2])
+local configuredBulkLimit = tonumber(ARGV[3])
+
+local function waiterQueue(waiterPriority)
+  if waiterPriority == 'deadline-critical' then return KEYS[5] end
+  if waiterPriority == 'live' then return KEYS[6] end
+  return KEYS[7]
+end
+
+local expiredWaiters = redis.call('ZRANGEBYSCORE', KEYS[8], '-inf', now)
+for _, waiterToken in ipairs(expiredWaiters) do
+  local waiterPriority = redis.call('HGET', KEYS[9], waiterToken)
+  if waiterPriority then
+    redis.call('ZREM', waiterQueue(waiterPriority), waiterToken)
+    redis.call('HDEL', KEYS[9], waiterToken)
+  end
+  redis.call('ZREM', KEYS[8], waiterToken)
+end
+
+local expiredLeases = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now)
+for _, leaseToken in ipairs(expiredLeases) do
+  local leasePriority = redis.call('HGET', KEYS[4], leaseToken)
+  if leasePriority == 'deadline-critical' then redis.call('HINCRBY', KEYS[1], 'critical', -1) end
+  if leasePriority == 'live' then redis.call('HINCRBY', KEYS[1], 'live', -1) end
+  if leasePriority == 'bulk' then redis.call('HINCRBY', KEYS[1], 'bulk', -1) end
+  if leasePriority == 'deadline-critical' or leasePriority == 'live' or leasePriority == 'bulk' then
+    redis.call('HINCRBY', KEYS[1], 'inflight', -1)
+  end
+  redis.call('DEL', KEYS[3] .. leaseToken)
+  redis.call('HDEL', KEYS[4], leaseToken)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
+
+local lastRefill = tonumber(redis.call('HGET', KEYS[1], 'lastRefillMs') or now) or now
+local tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens') or configuredCapacity) or configuredCapacity
+local elapsed = math.max(0, now - lastRefill)
+tokens = math.min(configuredCapacity, math.max(0, tokens + elapsed * configuredRate / 1000))
+local bulkLimit = tonumber(redis.call('HGET', KEYS[1], 'bulkLimit') or configuredBulkLimit) or configuredBulkLimit
+bulkLimit = math.max(1, math.min(configuredBulkLimit, bulkLimit))
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'lastRefillMs', now, 'bulkLimit', bulkLimit)
+
+local inflight = tonumber(redis.call('HGET', KEYS[1], 'inflight') or '0') or 0
+local critical = tonumber(redis.call('HGET', KEYS[1], 'critical') or '0') or 0
+local live = tonumber(redis.call('HGET', KEYS[1], 'live') or '0') or 0
+local bulk = tonumber(redis.call('HGET', KEYS[1], 'bulk') or '0') or 0
+local criticalUntil = tonumber(redis.call('HGET', KEYS[1], 'criticalUntilMs') or '0') or 0
+local criticalOwner = redis.call('HGET', KEYS[1], 'criticalOwner') or ''
+return {
+  tostring(now),
+  tostring(tokens),
+  tostring(inflight),
+  tostring(critical),
+  tostring(live),
+  tostring(bulk),
+  tostring(bulkLimit),
+  tostring(criticalUntil),
+  criticalOwner,
+  tostring(redis.call('ZCARD', KEYS[5])),
+  tostring(redis.call('ZCARD', KEYS[6])),
+  tostring(redis.call('ZCARD', KEYS[7]))
+}
+`;
+
 const REPORT_SCRIPT = `
 local nowParts = redis.call('TIME')
 local now = tonumber(nowParts[1]) * 1000 + math.floor(tonumber(nowParts[2]) / 1000)
@@ -1504,33 +1571,40 @@ export async function readFplAdmissionStats(): Promise<FplAdmissionStats> {
   try {
     const redis = await queueRedisSingleton.getClient();
     const keys = admissionKeys();
-    const [state, criticalQueued, liveQueued, bulkQueued, redisTime] = await Promise.all([
-      redis.hgetall(keys.state),
-      redis.zcard(keys.waitersCritical),
-      redis.zcard(keys.waitersLive),
-      redis.zcard(keys.waitersBulk),
-      redis.time(),
-    ]);
-    const reportedNowMs =
-      Number.isFinite(Number(redisTime[0])) && Number.isFinite(Number(redisTime[1]))
-        ? Number(redisTime[0]) * 1_000 + Math.floor(Number(redisTime[1]) / 1_000)
-        : Date.now();
-    const untilMs = Number(state.criticalUntilMs ?? 0);
+    const result = (await redis.eval(
+      CLEANUP_STATS_SCRIPT,
+      9,
+      keys.state,
+      keys.leases,
+      keys.leasePrefix,
+      keys.leaseMeta,
+      keys.waitersCritical,
+      keys.waitersLive,
+      keys.waitersBulk,
+      keys.waitersExpiry,
+      keys.waitersPriority,
+      REQUESTS_PER_SECOND,
+      TOKEN_BUCKET_CAPACITY,
+      BULK_MAX_INFLIGHT,
+    )) as string[];
+    const reportedNowMs = Number(result[0]);
+    const tokens = Number(result[1]);
+    const inflight = Number(result[2]);
+    const critical = Number(result[3]);
+    const live = Number(result[4]);
+    const bulk = Number(result[5]);
+    const bulkLimit = Number(result[6]);
+    const untilMs = Number(result[7]);
     const criticalActive = Number.isFinite(untilMs) && untilMs > reportedNowMs;
-    const persistedTokens = Number(state.tokens ?? TOKEN_BUCKET_CAPACITY);
-    const lastRefillMs = Number(state.lastRefillMs ?? reportedNowMs);
-    const refilledTokens =
-      Number.isFinite(persistedTokens) && Number.isFinite(lastRefillMs)
-        ? persistedTokens +
-          (Math.max(0, reportedNowMs - lastRefillMs) * REQUESTS_PER_SECOND) / 1_000
-        : 0;
-    const persistedBulkLimit = Number(state.bulkLimit ?? BULK_MAX_INFLIGHT);
+    const criticalQueued = Number(result[9]);
+    const liveQueued = Number(result[10]);
+    const bulkQueued = Number(result[11]);
     return {
       policyVersion: ADMISSION_SCRIPT_VERSION,
-      inflight: Math.max(0, Number(state.inflight ?? 0)),
-      liveInflight: Math.max(0, Number(state.live ?? 0)),
-      criticalInflight: Math.max(0, Number(state.critical ?? 0)),
-      bulkInflight: Math.max(0, Number(state.bulk ?? 0)),
+      inflight: Math.max(0, Number.isFinite(inflight) ? inflight : 0),
+      liveInflight: Math.max(0, Number.isFinite(live) ? live : 0),
+      criticalInflight: Math.max(0, Number.isFinite(critical) ? critical : 0),
+      bulkInflight: Math.max(0, Number.isFinite(bulk) ? bulk : 0),
       queued: criticalQueued + liveQueued + bulkQueued,
       queuedByPriority: {
         'deadline-critical': criticalQueued,
@@ -1541,20 +1615,15 @@ export async function readFplAdmissionStats(): Promise<FplAdmissionStats> {
       criticalMaxInflight: CRITICAL_MAX_INFLIGHT,
       bulkMaxInflight: Math.max(
         1,
-        Math.min(
-          BULK_MAX_INFLIGHT,
-          Number.isFinite(persistedBulkLimit) ? persistedBulkLimit : BULK_MAX_INFLIGHT,
-        ),
+        Math.min(BULK_MAX_INFLIGHT, Number.isFinite(bulkLimit) ? bulkLimit : BULK_MAX_INFLIGHT),
       ),
       requestsPerSecond: REQUESTS_PER_SECOND,
       tokenBucketCapacity: TOKEN_BUCKET_CAPACITY,
-      tokens: Number.isFinite(refilledTokens)
-        ? Math.min(TOKEN_BUCKET_CAPACITY, Math.max(0, refilledTokens))
-        : 0,
+      tokens: Number.isFinite(tokens) ? Math.min(TOKEN_BUCKET_CAPACITY, Math.max(0, tokens)) : 0,
       criticalWindow: {
         active: criticalActive,
         untilMs: criticalActive ? untilMs : null,
-        owner: criticalActive ? (state.criticalOwner ?? null) : null,
+        owner: criticalActive ? result[8] || null : null,
       },
       distributed: true,
     };

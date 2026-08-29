@@ -246,6 +246,29 @@ describe('FPL client resilience (FP-18)', () => {
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
+  isolatedTest(
+    'does not start an HTTP attempt after a synchronous hook spends the deadline',
+    async () => {
+      process.env.FPL_REQUEST_DEADLINE_MS = '5';
+      const fetchMock = mock(async () => new Response('{}', { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        fplClient.getEntrySummary(123, {
+          maxRetries: 0,
+          beforeAttempt: () => {
+            const deadline = Date.now() + 20;
+            while (Date.now() < deadline) {
+              // Deliberately block the event loop to exercise the post-hook check.
+            }
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'UNKNOWN_ERROR' });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
   isolatedTest('persistent 5xx exhausts retries and surfaces the last status', async () => {
     const fetchMock = mock(
       async () => new Response('boom', { status: 503, statusText: 'Service Unavailable' }),

@@ -317,7 +317,6 @@ async function processPriceWatchJobCore(job: Job<FplPriceWatchJobData>) {
     }
     return { outcome: 'disabled' as const };
   }
-  const season = await requireCurrentSeasonForJob(job.data);
   const deadlineAt = new Date(job.data.deadlineAt);
   if (!Number.isFinite(deadlineAt.getTime()))
     throw new Error('Price-watch job deadline is invalid');
@@ -335,7 +334,7 @@ async function processPriceWatchJobCore(job: Job<FplPriceWatchJobData>) {
       postDeadlineSuccessfulProbe: false,
     };
     logWarn('Price-watch job started after its observation window expired', {
-      season: season.seasonCode,
+      season: job.data.seasonCode,
       ...evidence,
     });
     if (job.data.obligationId && job.data.obligationGeneration !== undefined) {
@@ -349,6 +348,7 @@ async function processPriceWatchJobCore(job: Job<FplPriceWatchJobData>) {
     }
     return { outcome: 'window-expired' as const, hotPublications: 0, pollCount: 0 };
   }
+  const season = await requireCurrentSeasonForJob(job.data);
   const criticalWindowOwner = String(job.data.obligationId ?? job.id ?? randomUUID());
   let admissionStoreAlerted = false;
   const alertAdmissionStoreFailure = (error: unknown): void => {

@@ -182,4 +182,31 @@ describe('distributed FPL admission v4', () => {
     expect(stats.tokens).toBeGreaterThan(3.5);
     expect(stats.tokens).toBeLessThanOrEqual(stats.tokenBucketCapacity);
   });
+
+  test('purges expired leases and waiters before reporting idle stats', async () => {
+    const redis = await queueRedisSingleton.getClient();
+    const leaseToken = `stale-lease-${process.pid}`;
+    const waiterToken = `stale-waiter-${process.pid}`;
+    const expiredAt = Date.now() - 1_000;
+    await redis.hset(`${PREFIX}:state`, {
+      inflight: '1',
+      live: '1',
+      critical: '0',
+      bulk: '0',
+    });
+    await redis.hset(`${PREFIX}:lease-meta`, leaseToken, 'live');
+    await redis.set(`${PREFIX}:lease:${leaseToken}`, 'live', 'PX', 10_000);
+    await redis.zadd(`${PREFIX}:leases`, expiredAt, leaseToken);
+    await redis.hset(`${PREFIX}:waiters:priority`, waiterToken, 'bulk');
+    await redis.zadd(`${PREFIX}:waiters:bulk`, expiredAt, waiterToken);
+    await redis.zadd(`${PREFIX}:waiters:expiry`, expiredAt, waiterToken);
+
+    const stats = await readFplAdmissionStats();
+    expect(stats.inflight).toBe(0);
+    expect(stats.liveInflight).toBe(0);
+    expect(stats.queued).toBe(0);
+    expect(await redis.exists(`${PREFIX}:lease:${leaseToken}`)).toBe(0);
+    expect(await redis.hget(`${PREFIX}:lease-meta`, leaseToken)).toBeNull();
+    expect(await redis.hget(`${PREFIX}:waiters:priority`, waiterToken)).toBeNull();
+  });
 });

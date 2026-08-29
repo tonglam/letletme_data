@@ -807,6 +807,14 @@ class FPLClient {
               throw error;
             }
           }
+          // The ordering hook may spend the remainder of the logical-request
+          // budget (for example while waiting for a publication lock). Do not
+          // turn an admitted lease into a late provider attempt.
+          remaining = remainingMs();
+          if (remaining <= 0) {
+            lastError = new Error('FPL logical request deadline exceeded before provider attempt');
+            break;
+          }
           let attemptRecorded = false;
           const attemptController = new AbortController();
           const attemptTimeout = Math.max(
