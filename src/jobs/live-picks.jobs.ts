@@ -1,5 +1,8 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { runPicksProbeAndSync } from '../services/live-lifecycle-orchestrator';
+import {
+  resolveLivePicksCoordinatorDeduplicationId,
+  runPicksProbeAndSync,
+} from '../services/live-lifecycle-orchestrator';
 import { livePicksQueue } from '../queues/live-picks.queue';
 import { logError, logInfo } from '../utils/logger';
 import { FPLClientError } from '../utils/errors';
@@ -59,7 +62,9 @@ export async function enqueueLivePicksRefresh(
     },
     {
       jobId: options.jobId ?? `live-picks-refresh-${season.seasonCode}-e${eventId}`,
-      deduplication: { id: `live-picks-refresh:${season.seasonCode}:event-${eventId}` },
+      deduplication: {
+        id: resolveLivePicksCoordinatorDeduplicationId(season.seasonCode, eventId),
+      },
       attempts: 3,
       backoff: { type: 'exponential', delay: 60_000 },
     },

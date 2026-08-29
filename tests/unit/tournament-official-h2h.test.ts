@@ -265,7 +265,64 @@ describe('official H2H source import', () => {
     });
   });
 
-  test('fails closed for an Average Team side without event-live manager authority', () => {
+  test('retains the freshly fetched FPL score for an Average Team side', () => {
+    const checkedAt = '2026-08-24T00:01:00.000Z';
+    const projected = projectOfficialH2HEventLiveScores(
+      {
+        standings: [],
+        matches: [
+          {
+            id: 2071743,
+            event: 1,
+            entry_1_entry: 109967,
+            entry_1_points: 23,
+            entry_2_entry: null,
+            entry_2_points: 31,
+            winner: null,
+            is_bye: false,
+            knockout_name: null,
+            sourceOrder: 0,
+          },
+        ],
+      },
+      1,
+      new Set([109967]),
+      {
+        season: '2627',
+        eventId: 1,
+        state: 'live',
+        revision: 'fpl:live:publication-8:8',
+        publicationId: 'publication-8',
+        liveRevision: '8',
+        checkedAt,
+        sourceCheckedAt: checkedAt,
+        calculationMode: 'PROJECTED_AUTOSUBS',
+        algorithmVersion: 'fpl-projected-autosubs-v1',
+        scores: new Map([
+          [
+            109967,
+            {
+              entryId: 109967,
+              eventPoints: 37,
+              netEventPoints: 37,
+              transferCost: 0,
+              totalPoints: 37,
+              picksCheckedAt: checkedAt,
+              revision: 'score-109967',
+            },
+          ],
+        ]),
+      },
+    );
+
+    expect(projected?.matches[0]).toMatchObject({
+      entry_1_points: 37,
+      entry_2_points: 31,
+      winner: 109967,
+    });
+  });
+
+  test('fails closed when an Average Team provider score is absent', () => {
     const checkedAt = '2026-08-24T00:01:00.000Z';
     expect(
       projectOfficialH2HEventLiveScores(
@@ -278,7 +335,7 @@ describe('official H2H source import', () => {
               entry_1_entry: 109967,
               entry_1_points: 23,
               entry_2_entry: null,
-              entry_2_points: 31,
+              entry_2_points: null,
               winner: null,
               is_bye: false,
               knockout_name: null,
