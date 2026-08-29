@@ -256,18 +256,6 @@ export const refreshClassicStandings = async (
     durableTargetEntryIds.length < targetIds.size
   ) {
     refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
-  } else if (
-    !refreshErrorCode &&
-    exhausted &&
-    fetchedRows.size < targetIds.size &&
-    durableTargetEntryIds.length < targetIds.size
-  ) {
-    // A normal end-of-list can still miss a target when the manager crossed a
-    // page boundary while this multi-job crawl was in progress. Do not persist
-    // the terminal cursor in that case: the next bounded invocation must restart
-    // from page one and give the moved entry a chance to be observed again.
-    nextPage = 1;
-    refreshErrorCode = 'UPSTREAM_UNAVAILABLE';
   }
 
   logDebug('Official classic manager live refresh completed', {
@@ -279,11 +267,15 @@ export const refreshClassicStandings = async (
     partial: refreshErrorCode !== null,
   });
   const result = {
+    // Reaching the provider's real end-of-list is a terminal pagination state,
+    // even when a fixed tournament roster contains managers no longer present
+    // in that league.  The caller uses `complete` to route those exact missing
+    // IDs through the bounded entry-summary fallback.
     complete:
       refreshErrorCode === null &&
       (fetchedRows.size >= targetIds.size ||
-        ((exhausted || nextPage > MAX_STANDINGS_PAGES) &&
-          durableTargetEntryIds.length >= targetIds.size)),
+        exhausted ||
+        (nextPage > MAX_STANDINGS_PAGES && durableTargetEntryIds.length >= targetIds.size)),
     nextPage,
     errorCode: refreshErrorCode,
     refreshedEntryIds: publishedRows.map((row) => row.entryId),
