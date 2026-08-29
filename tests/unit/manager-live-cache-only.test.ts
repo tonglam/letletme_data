@@ -899,7 +899,7 @@ describe('manager live classic standings convergence', () => {
     });
   });
 
-  test('restarts from page one when normal exhaustion misses a target', async () => {
+  test('finishes standings at normal exhaustion so an absent roster member can fall back', async () => {
     getClassicStandings.mockImplementationOnce(
       async () =>
         ({
@@ -912,12 +912,13 @@ describe('manager live classic standings convergence', () => {
         }) as never,
     );
 
+    const rows = new Map();
     const result = await refreshClassicStandings(
       TEST_SEASON,
       1,
       99,
       new Set([101]),
-      new Map(),
+      rows,
       null,
       { startPage: 6, maxPages: 1 },
       async () => undefined,
@@ -925,10 +926,11 @@ describe('manager live classic standings convergence', () => {
     );
 
     expect(result).toMatchObject({
-      complete: false,
-      nextPage: 1,
-      errorCode: 'UPSTREAM_UNAVAILABLE',
+      complete: true,
+      nextPage: 7,
+      errorCode: null,
     });
+    expect(selectWorkerClassicFallbackTargets([101], rows, result.complete)).toEqual([101]);
   });
 
   test('does not advance a page when both durable publications fail', async () => {
