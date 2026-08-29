@@ -83,6 +83,31 @@ export function eventLivePicksAreFresh(
   );
 }
 
+/**
+ * Projected auto-subs score from the event-scoped 15-player selection, not
+ * from the age of the last picks fetch. Once a complete event selection has
+ * been accepted, a later immutable live publication can safely reuse it: the
+ * content revision still changes when FPL changes a multiplier, while the
+ * projector itself handles unresolved substitutions and captain promotion.
+ *
+ * Keep the ordering fence so a picks observation from after the pinned live
+ * heartbeat cannot be mixed into that older publication. Paths that consume
+ * FPL's current multipliers directly must continue to use
+ * `eventLivePicksAreFresh`.
+ */
+export function eventLiveProjectedPicksAreCoherent(
+  picksCheckedAt: string,
+  liveCheckedAt: string,
+): boolean {
+  const picksTimestamp = Date.parse(picksCheckedAt);
+  const liveTimestamp = Date.parse(liveCheckedAt);
+  return (
+    Number.isFinite(picksTimestamp) &&
+    Number.isFinite(liveTimestamp) &&
+    picksTimestamp <= liveTimestamp
+  );
+}
+
 export function eventLiveHeartbeatIsFresh(
   liveCheckedAt: string,
   nowMs = Date.now(),
@@ -240,7 +265,7 @@ const materializedScoreForCurrentInput = (input: {
     (input.previousTotal === null
       ? row.totalPoints !== null
       : row.totalPoints !== input.previousTotal + row.netEventPoints) ||
-    !eventLivePicksAreFresh(input.picksCheckedAt, input.checkedAt)
+    !eventLiveProjectedPicksAreCoherent(input.picksCheckedAt, input.checkedAt)
   ) {
     return null;
   }
@@ -444,7 +469,11 @@ async function loadEventLiveManagerScoreBatch(
         : projectOfficialCurrentMultiplierScore({ entryId, picks, liveByElement });
     const score = projectedScore;
     if (!score) continue;
-    if (!eventLivePicksAreFresh(score.picksCheckedAt, checkedAt)) continue;
+    const picksAreUsable =
+      calculationMode === 'PROJECTED_AUTOSUBS'
+        ? eventLiveProjectedPicksAreCoherent(score.picksCheckedAt, checkedAt)
+        : eventLivePicksAreFresh(score.picksCheckedAt, checkedAt);
+    if (!picksAreUsable) continue;
     if (projectedScore) projectedLineupByEntry.set(entryId, projectedScore.effectiveLineup);
     const totalPoints = previousTotal === null ? null : previousTotal + score.netEventPoints;
     const computedInputRevisionData = buildScoreInputRevision({
