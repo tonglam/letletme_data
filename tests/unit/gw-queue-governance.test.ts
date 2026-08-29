@@ -21,6 +21,7 @@ import {
 } from '../../src/utils/queue-monitor';
 import { queueHealthRetentionCutoff } from '../../src/services/queue-governance.service';
 import { summarizeDataError } from '../../src/domain/error-classification';
+import { FPLClientError } from '../../src/utils/errors';
 import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-official-h2h.service';
 import { missingLockedPageNumbers } from '../../src/domain/official-h2h-manifest';
 import {
@@ -522,5 +523,17 @@ describe('GW queue and data governance primitives', () => {
     expect(summary.summary).not.toContain('provider.invalid');
     expect(summary.summary).not.toContain('1234');
     expect(summary.errorClass).toBe('TRANSIENT_INFRA');
+  });
+
+  test('classifies admission-store outages as infrastructure', () => {
+    const summary = summarizeDataError(
+      new FPLClientError(
+        'FPL upstream admission store is temporarily unavailable; retry later',
+        503,
+        'FPL_ADMISSION_STORE_UNAVAILABLE',
+      ),
+    );
+    expect(summary.errorClass).toBe('TRANSIENT_INFRA');
+    expect(summary.errorCode).toBe('FPL_ADMISSION_STORE_UNAVAILABLE');
   });
 });

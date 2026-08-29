@@ -174,4 +174,12 @@ describe('distributed FPL admission v4', () => {
     await Promise.all(leases.map((lease) => lease.release()));
     await closeFplCriticalWindow(owner);
   }, 15_000);
+
+  test('reports distributed token refill while admission is idle', async () => {
+    const redis = await queueRedisSingleton.getClient();
+    await redis.hset(`${PREFIX}:state`, 'tokens', '0', 'lastRefillMs', String(Date.now() - 2_000));
+    const stats = await readFplAdmissionStats();
+    expect(stats.tokens).toBeGreaterThan(3.5);
+    expect(stats.tokens).toBeLessThanOrEqual(stats.tokenBucketCapacity);
+  });
 });

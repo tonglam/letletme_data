@@ -78,6 +78,45 @@ function singleFlightEnabled(): boolean {
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 
+export async function openPriceWatchCriticalWindowWithRetry(input: {
+  readonly owner: string;
+  readonly untilMs: number;
+  readonly openWindow?: typeof openFplCriticalWindow;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly now?: () => number;
+  readonly random?: () => number;
+  readonly onStoreFailure?: (error: FplAdmissionStoreUnavailableError) => void;
+}): Promise<void> {
+  const openWindow = input.openWindow ?? openFplCriticalWindow;
+  const wait = input.sleep ?? sleep;
+  const now = input.now ?? Date.now;
+  const random = input.random ?? Math.random;
+  let failureCount = 0;
+  let lastError: FplAdmissionStoreUnavailableError | null = null;
+  while (now() <= input.untilMs) {
+    try {
+      await openWindow({ owner: input.owner, untilMs: input.untilMs });
+      return;
+    } catch (error) {
+      if (!(error instanceof FplAdmissionStoreUnavailableError)) throw error;
+      lastError = error;
+      input.onStoreFailure?.(error);
+      failureCount = Math.min(failureCount + 1, 3);
+      const baseDelay = [250, 500, 1_000][failureCount - 1]!;
+      const jitter = Math.floor(random() * Math.max(1, Math.floor(baseDelay * 0.25)));
+      const remainingMs = input.untilMs - now();
+      if (remainingMs <= 0) break;
+      await wait(Math.min(baseDelay + jitter, remainingMs));
+    }
+  }
+  throw (
+    lastError ??
+    new FplAdmissionStoreUnavailableError(
+      new Error('FPL critical window could not be opened before the watch window ended'),
+    )
+  );
+}
+
 function usablePriceChangeBaseline(board: PriceChangeBoard | null): PriceChangeBoard | null {
   if (
     !board ||
@@ -299,12 +338,11 @@ async function processPriceWatchJobCore(job: Job<FplPriceWatchJobData>) {
       { idempotencyKey: `fpl-admission-store:${season.seasonCode}:${deadlineAt.toISOString()}` },
     ).catch(() => undefined);
   };
-  try {
-    await openFplCriticalWindow({ owner: criticalWindowOwner, untilMs: stopAt });
-  } catch (error) {
-    if (error instanceof FplAdmissionStoreUnavailableError) alertAdmissionStoreFailure(error);
-    throw error;
-  }
+  await openPriceWatchCriticalWindowWithRetry({
+    owner: criticalWindowOwner,
+    untilMs: stopAt,
+    onStoreFailure: alertAdmissionStoreFailure,
+  });
   const windowStart = deadlineAt.getTime() - PRICE_CHANGE_WATCH_LEAD_MS;
   if (Date.now() < windowStart) await sleep(windowStart - Date.now());
 

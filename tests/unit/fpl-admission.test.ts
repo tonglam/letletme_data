@@ -100,6 +100,24 @@ describe('FPL admission reservations', () => {
     expect(getFplAdmissionStats().inflight).toBe(0);
   });
 
+  test('critical traffic can consume the reserved slot when regular traffic has four leases', async () => {
+    resetFplAdmissionForTests();
+    const owner = 'critical-slot-test';
+    const liveLeases = await Promise.all(
+      Array.from({ length: 4 }, () => acquireFplRequest('live')),
+    );
+    await openFplCriticalWindow({ owner, untilMs: Date.now() + 2_000 });
+    await new Promise((resolve) => setTimeout(resolve, 260));
+
+    const critical = await acquireFplRequest('deadline-critical', {
+      deadlineAt: Date.now() + 200,
+    });
+    expect(getFplAdmissionStats()).toMatchObject({ inflight: 5, criticalInflight: 1 });
+    await critical.release();
+    await Promise.all(liveLeases.map((lease) => lease.release()));
+    await closeFplCriticalWindow(owner);
+  });
+
   test('release is idempotent and critical priority is visible in the policy', async () => {
     resetFplAdmissionForTests();
     const lease = await acquireFplRequest('deadline-critical');

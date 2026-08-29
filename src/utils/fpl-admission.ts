@@ -938,7 +938,12 @@ function localCanStart(priority: FplRequestPriority): boolean {
   if (localInflight >= MAX_INFLIGHT) return false;
   if (priority === 'deadline-critical' && localCritical >= CRITICAL_MAX_INFLIGHT) return false;
   if (priority === 'bulk' && localBulk >= localBulkLimit) return false;
-  if (localCriticalActive() && localCritical === 0 && localInflight >= MAX_INFLIGHT - 1) {
+  if (
+    priority !== 'deadline-critical' &&
+    localCriticalActive() &&
+    localCritical === 0 &&
+    localInflight >= MAX_INFLIGHT - 1
+  ) {
     return false;
   }
   localRefillTokens();
@@ -1468,15 +1473,26 @@ export async function readFplAdmissionStats(): Promise<FplAdmissionStats> {
   try {
     const redis = await queueRedisSingleton.getClient();
     const keys = admissionKeys();
-    const [state, criticalQueued, liveQueued, bulkQueued] = await Promise.all([
+    const [state, criticalQueued, liveQueued, bulkQueued, redisTime] = await Promise.all([
       redis.hgetall(keys.state),
       redis.zcard(keys.waitersCritical),
       redis.zcard(keys.waitersLive),
       redis.zcard(keys.waitersBulk),
+      redis.time(),
     ]);
+    const reportedNowMs =
+      Number.isFinite(Number(redisTime[0])) && Number.isFinite(Number(redisTime[1]))
+        ? Number(redisTime[0]) * 1_000 + Math.floor(Number(redisTime[1]) / 1_000)
+        : Date.now();
     const untilMs = Number(state.criticalUntilMs ?? 0);
-    const criticalActive = Number.isFinite(untilMs) && untilMs > Date.now();
+    const criticalActive = Number.isFinite(untilMs) && untilMs > reportedNowMs;
     const persistedTokens = Number(state.tokens ?? TOKEN_BUCKET_CAPACITY);
+    const lastRefillMs = Number(state.lastRefillMs ?? reportedNowMs);
+    const refilledTokens =
+      Number.isFinite(persistedTokens) && Number.isFinite(lastRefillMs)
+        ? persistedTokens +
+          (Math.max(0, reportedNowMs - lastRefillMs) * REQUESTS_PER_SECOND) / 1_000
+        : 0;
     const persistedBulkLimit = Number(state.bulkLimit ?? BULK_MAX_INFLIGHT);
     return {
       policyVersion: ADMISSION_SCRIPT_VERSION,
@@ -1501,8 +1517,8 @@ export async function readFplAdmissionStats(): Promise<FplAdmissionStats> {
       ),
       requestsPerSecond: REQUESTS_PER_SECOND,
       tokenBucketCapacity: TOKEN_BUCKET_CAPACITY,
-      tokens: Number.isFinite(persistedTokens)
-        ? Math.min(TOKEN_BUCKET_CAPACITY, Math.max(0, persistedTokens))
+      tokens: Number.isFinite(refilledTokens)
+        ? Math.min(TOKEN_BUCKET_CAPACITY, Math.max(0, refilledTokens))
         : 0,
       criticalWindow: {
         active: criticalActive,
