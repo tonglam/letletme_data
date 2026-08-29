@@ -78,7 +78,10 @@ describe('FPL admission reservations', () => {
     );
     const reserved = getFplAdmissionStats();
     expect(reserved.inflight).toBe(3);
-    expect(reserved.tokens).toBeLessThanOrEqual(1);
+    // A few milliseconds of bucket refill can make this slightly greater than
+    // one; the reservation is enforced by requiring two tokens for regular
+    // traffic while the critical window is active.
+    expect(reserved.tokens).toBeLessThan(2);
 
     await expect(acquireFplRequest('live', { deadlineAt: Date.now() + 20 })).rejects.toMatchObject({
       code: 'FPL_ADMISSION_DEADLINE_EXCEEDED',
