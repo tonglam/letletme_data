@@ -42,6 +42,7 @@ import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signal
 import { resolveQueueHealthState } from './queue-governance.service';
 import { readPriceChangeHotSnapshotMetadata } from './price-change-hot.service';
 import {
+  FPL_BULK_MAX_INFLIGHT_HARD_CAP,
   readFplAdmissionStats,
   readFplAdmissionTelemetry,
   type FplRequestPriority,
@@ -274,7 +275,7 @@ export async function getJobsStatus(
     hardCaps: {
       maxInflight: getConfig().FPL_MAX_INFLIGHT,
       criticalMaxInflight: 1,
-      bulkMaxInflight: getConfig().FPL_BULK_MAX_INFLIGHT_DURING_LIVE,
+      bulkMaxInflight: FPL_BULK_MAX_INFLIGHT_HARD_CAP,
       requestsPerSecond: getConfig().FPL_REQUESTS_PER_SECOND,
       tokenBucketCapacity: getConfig().FPL_REQUESTS_PER_SECOND,
       leaseMs: getConfig().FPL_ADMISSION_LEASE_MS,

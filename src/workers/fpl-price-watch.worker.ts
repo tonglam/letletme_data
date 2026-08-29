@@ -295,6 +295,39 @@ async function publishAndReconcilePriceChangeHotSnapshot(input: {
   return { published: true, provisionalPublishedAt };
 }
 
+async function completeExpiredPriceWatch(
+  job: Job<FplPriceWatchJobData>,
+  deadlineAt: Date,
+  stopAt: number,
+  seasonCode: string,
+  reason: string,
+): Promise<{ outcome: 'window-expired'; hotPublications: 0; pollCount: 0 }> {
+  const evidence = {
+    reason,
+    deadlineAt: deadlineAt.toISOString(),
+    stopAt: new Date(stopAt).toISOString(),
+    pollCount: 0,
+    successfulProbes: 0,
+    hotPublications: 0,
+    noChangeObserved: false,
+    postDeadlineSuccessfulProbe: false,
+  };
+  logWarn('Price-watch job started after its observation window expired', {
+    season: seasonCode,
+    ...evidence,
+  });
+  if (job.data.obligationId && job.data.obligationGeneration !== undefined) {
+    const completed = await completeSchedulerObligation({
+      obligationId: job.data.obligationId,
+      generation: job.data.obligationGeneration,
+      status: 'skipped',
+      evidence,
+    });
+    if (!completed) throw new Error('Price-watch expired completion CAS failed');
+  }
+  return { outcome: 'window-expired', hotPublications: 0, pollCount: 0 };
+}
+
 async function processPriceWatchJobCore(job: Job<FplPriceWatchJobData>) {
   if (
     !(await startCurrentSchedulerJob(job.data, {
@@ -323,32 +356,24 @@ async function processPriceWatchJobCore(job: Job<FplPriceWatchJobData>) {
   const startedAt = Date.now();
   const stopAt = deadlineAt.getTime() + PRICE_CHANGE_WATCH_MAX_WINDOW_MS;
   if (Date.now() >= stopAt) {
-    const evidence = {
-      reason: 'price-watch-window-expired-before-start',
-      deadlineAt: deadlineAt.toISOString(),
-      stopAt: new Date(stopAt).toISOString(),
-      pollCount: 0,
-      successfulProbes: 0,
-      hotPublications: 0,
-      noChangeObserved: false,
-      postDeadlineSuccessfulProbe: false,
-    };
-    logWarn('Price-watch job started after its observation window expired', {
-      season: job.data.seasonCode,
-      ...evidence,
-    });
-    if (job.data.obligationId && job.data.obligationGeneration !== undefined) {
-      const completed = await completeSchedulerObligation({
-        obligationId: job.data.obligationId,
-        generation: job.data.obligationGeneration,
-        status: 'skipped',
-        evidence,
-      });
-      if (!completed) throw new Error('Price-watch expired completion CAS failed');
-    }
-    return { outcome: 'window-expired' as const, hotPublications: 0, pollCount: 0 };
+    return completeExpiredPriceWatch(
+      job,
+      deadlineAt,
+      stopAt,
+      job.data.seasonCode,
+      'price-watch-window-expired-before-start',
+    );
   }
   const season = await requireCurrentSeasonForJob(job.data);
+  if (Date.now() >= stopAt) {
+    return completeExpiredPriceWatch(
+      job,
+      deadlineAt,
+      stopAt,
+      season.seasonCode,
+      'price-watch-window-expired-after-season-check',
+    );
+  }
   const criticalWindowOwner = String(job.data.obligationId ?? job.id ?? randomUUID());
   let admissionStoreAlerted = false;
   const alertAdmissionStoreFailure = (error: unknown): void => {

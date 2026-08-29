@@ -28,6 +28,7 @@ const BULK_MAX_INFLIGHT = Math.max(
     runtimeConfig.FPL_BULK_MAX_INFLIGHT_DURING_LIVE,
   ),
 );
+export const FPL_BULK_MAX_INFLIGHT_HARD_CAP = BULK_MAX_INFLIGHT;
 const REQUESTS_PER_SECOND = runtimeConfig.FPL_REQUESTS_PER_SECOND;
 const TOKEN_BUCKET_CAPACITY = REQUESTS_PER_SECOND;
 const CRITICAL_MAX_INFLIGHT = 1;
@@ -886,6 +887,11 @@ local elapsed = math.max(0, now - lastRefill)
 tokens = math.min(configuredCapacity, math.max(0, tokens + elapsed * configuredRate / 1000))
 local bulkLimit = tonumber(redis.call('HGET', KEYS[1], 'bulkLimit') or configuredBulkLimit) or configuredBulkLimit
 bulkLimit = math.max(1, math.min(configuredBulkLimit, bulkLimit))
+local lastError = tonumber(redis.call('HGET', KEYS[1], 'lastBulkErrorMs') or '0') or 0
+if bulkLimit < configuredBulkLimit and lastError > 0 and now - lastError >= 300000 then
+  bulkLimit = math.min(configuredBulkLimit, bulkLimit + 1)
+  redis.call('HSET', KEYS[1], 'bulkLimit', bulkLimit, 'lastBulkErrorMs', bulkLimit < configuredBulkLimit and now or 0)
+end
 redis.call('HSET', KEYS[1], 'tokens', tokens, 'lastRefillMs', now, 'bulkLimit', bulkLimit)
 
 local inflight = tonumber(redis.call('HGET', KEYS[1], 'inflight') or '0') or 0
