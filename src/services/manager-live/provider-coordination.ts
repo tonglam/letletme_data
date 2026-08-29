@@ -4,7 +4,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import type Redis from 'ioredis';
 import type postgres from 'postgres';
 import { EntrySummarySchema, fplClient } from '../../clients/fpl';
-import { getDb, runInDatabaseTransaction } from '../../db/singleton';
+import {
+  databaseTransactionStorage,
+  getDb,
+  runDatabasePostCommitActions,
+  runInDatabaseTransaction,
+} from '../../db/singleton';
 import { readDatabaseOrderingTimestamp } from '../../db/ordering-timestamp';
 import { type ManagerScoreScope } from '../../repositories/live-window';
 import { FPLClientError } from '../../utils/errors';
@@ -383,27 +388,38 @@ export const runManagerLivePublication = <T>(
     async (): Promise<T> => {
       if (signal?.aborted) throw signal.reason;
       const db = await getDb();
-      return (await db.transaction(async (drizzleTransaction) => {
-        const transaction = (
-          drizzleTransaction as unknown as {
-            session?: { client?: postgres.TransactionSql };
+      const parentContext = databaseTransactionStorage.getStore();
+      const postCommitActions = parentContext?.postCommitActions ?? [];
+      const actionStart = postCommitActions.length;
+      let result: T;
+      try {
+        result = (await db.transaction(async (drizzleTransaction) => {
+          const transaction = (
+            drizzleTransaction as unknown as {
+              session?: { client?: postgres.TransactionSql };
+            }
+          ).session?.client;
+          if (!transaction) {
+            throw new Error('Drizzle transaction did not expose its pinned postgres client');
           }
-        ).session?.client;
-        if (!transaction) {
-          throw new Error('Drizzle transaction did not expose its pinned postgres client');
-        }
-        if (signal?.aborted) throw signal.reason;
-        const lockQuery = transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`manager-live:${key}`}, 0))`;
-        const cancelLock = (): void => lockQuery.cancel();
-        signal?.addEventListener('abort', cancelLock, { once: true });
-        try {
-          await lockQuery;
-        } finally {
-          signal?.removeEventListener('abort', cancelLock);
-        }
-        if (signal?.aborted) throw signal.reason;
-        return runInDatabaseTransaction(transaction, task, drizzleTransaction);
-      })) as T;
+          if (signal?.aborted) throw signal.reason;
+          const lockQuery = transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`manager-live:${key}`}, 0))`;
+          const cancelLock = (): void => lockQuery.cancel();
+          signal?.addEventListener('abort', cancelLock, { once: true });
+          try {
+            await lockQuery;
+          } finally {
+            signal?.removeEventListener('abort', cancelLock);
+          }
+          if (signal?.aborted) throw signal.reason;
+          return runInDatabaseTransaction(transaction, task, drizzleTransaction, postCommitActions);
+        })) as T;
+      } catch (error) {
+        postCommitActions.splice(actionStart);
+        throw error;
+      }
+      if (!parentContext) await runDatabasePostCommitActions(postCommitActions);
+      return result;
     },
     signal,
   );

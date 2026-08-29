@@ -14,9 +14,12 @@ import * as schema from './schemas/index.schema';
  * contracts while canonical writes execute on the same connection as the
  * mutation-scope row lock.
  */
+export type DatabasePostCommitAction = () => Promise<void> | void;
+
 type DatabaseTransactionContext = {
   raw: postgres.TransactionSql;
   db: ReturnType<typeof drizzle> | TransactionHandle;
+  postCommitActions: DatabasePostCommitAction[];
 };
 
 export const databaseTransactionStorage = new AsyncLocalStorage<DatabaseTransactionContext>();
@@ -205,7 +208,49 @@ export const runInDatabaseTransaction = <T>(
   transaction: postgres.TransactionSql,
   operation: () => Promise<T>,
   db: ReturnType<typeof drizzle> | TransactionHandle,
-): Promise<T> => databaseTransactionStorage.run({ raw: transaction, db }, operation);
+  postCommitActions?: DatabasePostCommitAction[],
+): Promise<T> => {
+  const inheritedActions = databaseTransactionStorage.getStore()?.postCommitActions;
+  return databaseTransactionStorage.run(
+    {
+      raw: transaction,
+      db,
+      postCommitActions: postCommitActions ?? inheritedActions ?? [],
+    },
+    operation,
+  );
+};
+
+/**
+ * Register work that must run only after the outermost database transaction
+ * commits. Nested savepoints share the same action list, so a rollback never
+ * publishes cache state for rows that did not become durable.
+ */
+export function registerDatabasePostCommit(action: DatabasePostCommitAction): void {
+  const context = databaseTransactionStorage.getStore();
+  if (!context) {
+    throw new Error('Database post-commit action requires an active database transaction');
+  }
+  context.postCommitActions.push(action);
+}
+
+/** Execute and clear actions after a successful root transaction commit. */
+export async function runDatabasePostCommitActions(
+  actions: DatabasePostCommitAction[],
+): Promise<void> {
+  const pending = actions.splice(0);
+  for (const action of pending) {
+    try {
+      await action();
+    } catch (error) {
+      // Post-commit work must not turn a committed canonical write into a
+      // retry that could duplicate business mutations. The action owns any
+      // cache invalidation/retry bookkeeping it needs; keep the failure
+      // observable and continue draining independent actions.
+      logError('Database post-commit action failed', error);
+    }
+  }
+}
 
 /**
  * Database handle, or an active transaction scoped to it. Repository factories
@@ -228,18 +273,27 @@ export async function withDatabaseSavepoint<T>(operation: () => Promise<T>): Pro
     throw new Error('Database savepoint requires an active database transaction');
   }
 
+  const actionStart = context.postCommitActions.length;
   const transaction = context.db as TransactionHandle;
-  return transaction.transaction(async (nestedTransaction) => {
-    const raw = (
-      nestedTransaction as unknown as {
-        session?: { client?: postgres.TransactionSql };
+  try {
+    return await transaction.transaction(async (nestedTransaction) => {
+      const raw = (
+        nestedTransaction as unknown as {
+          session?: { client?: postgres.TransactionSql };
+        }
+      ).session?.client;
+      if (!raw) {
+        throw new Error('Database savepoint did not expose its pinned postgres client');
       }
-    ).session?.client;
-    if (!raw) {
-      throw new Error('Database savepoint did not expose its pinned postgres client');
-    }
-    return runInDatabaseTransaction(raw, operation, nestedTransaction);
-  });
+      return runInDatabaseTransaction(raw, operation, nestedTransaction);
+    });
+  } catch (error) {
+    // A savepoint rollback must also discard post-commit work registered by
+    // the failed nested operation; otherwise a caller that catches the error
+    // could publish cache state for rows that were rolled back.
+    context.postCommitActions.splice(actionStart);
+    throw error;
+  }
 }
 
 /**
