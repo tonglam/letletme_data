@@ -209,4 +209,19 @@ describe('distributed FPL admission v4', () => {
     expect(await redis.hget(`${PREFIX}:lease-meta`, leaseToken)).toBeNull();
     expect(await redis.hget(`${PREFIX}:waiters:priority`, waiterToken)).toBeNull();
   });
+
+  test('recovers the adaptive bulk limit while reporting idle stats', async () => {
+    const redis = await queueRedisSingleton.getClient();
+    const previousErrorAt = Date.now() - 300_001;
+    await redis.hset(`${PREFIX}:state`, {
+      bulkLimit: '1',
+      lastBulkErrorMs: String(previousErrorAt),
+    });
+
+    const stats = await readFplAdmissionStats();
+    expect(stats.bulkMaxInflight).toBeGreaterThan(1);
+    const lastErrorAt = Number(await redis.hget(`${PREFIX}:state`, 'lastBulkErrorMs'));
+    expect(lastErrorAt).toBeGreaterThan(previousErrorAt);
+    expect(lastErrorAt).toBeLessThanOrEqual(Date.now());
+  });
 });
