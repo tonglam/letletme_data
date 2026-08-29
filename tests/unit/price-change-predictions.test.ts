@@ -430,7 +430,7 @@ describe('price-change prediction normalization', () => {
       },
       items: {
         context: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           source: 'FPL_BOOTSTRAP',
           fetchedAt: fetchedAt.toISOString(),
           staleAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_READY_MS).toISOString(),
@@ -439,6 +439,7 @@ describe('price-change prediction normalization', () => {
           nextDeadlines: board.nextDeadlines,
           expectedPlayerCount: board.expectedPlayerCount,
           observedPlayerCount: board.observedPlayerCount,
+          latestEvent: null,
         },
         players: board.players,
       },
@@ -456,6 +457,38 @@ describe('price-change prediction normalization', () => {
         new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS),
       ),
     ).toMatchObject({ status: 'UNAVAILABLE', revision: 'unavailable' });
+  });
+
+  it('rejects the removed v1 publication context instead of adapting it', () => {
+    const fetchedAt = new Date('2026-08-22T00:00:00.000Z');
+    const board = normalizePriceChangeBoard(bootstrapFixture(), fetchedAt);
+    const publication = {
+      manifest: {
+        dataset: 'fpl:price-changes',
+        eventId: null,
+        state: 'active',
+        publicationId: 'price-publication-v1',
+        revision: 1,
+        sourceCheckedAt: fetchedAt.toISOString(),
+        items: [{ name: 'context' }, { name: 'players' }],
+      },
+      items: {
+        context: {
+          schemaVersion: 1,
+          source: 'FPL_BOOTSTRAP',
+          fetchedAt: fetchedAt.toISOString(),
+          staleAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_READY_MS).toISOString(),
+          hardExpiresAt: new Date(fetchedAt.getTime() + PRICE_CHANGE_MAX_AGE_MS).toISOString(),
+          deadline: board.deadline,
+          nextDeadlines: board.nextDeadlines,
+          expectedPlayerCount: board.expectedPlayerCount,
+          observedPlayerCount: board.observedPlayerCount,
+        },
+        players: board.players,
+      },
+    } as never;
+
+    expect(parsePublishedPriceChangeBoard(publication, fetchedAt)).toBeNull();
   });
 
   it('preserves an observed event when the prediction board hard-expires', () => {

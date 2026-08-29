@@ -5,7 +5,6 @@ import {
   readActiveDataPublication,
   type DataPublicationReadResult,
 } from '../cache/data-publication';
-import { redisSingleton } from '../cache/singleton';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
@@ -26,7 +25,6 @@ export const PRICE_CHANGE_STALE_MS = 60 * 60 * 1000;
 export const PRICE_CHANGE_MAX_AGE_MS = PRICE_CHANGE_STALE_MS;
 export const PRICE_CHANGE_DATASET = 'fpl:price-changes' as const;
 
-const PRICE_CHANGE_CACHE_KEY = 'fpl:price-change-predictions:v1';
 export const PRICE_CHANGE_CONTEXT_SCHEMA_VERSION = 2 as const;
 const PRICE_CHANGE_SOURCE_CACHE_BUCKET_MS = 5 * 60 * 1000;
 
@@ -121,7 +119,7 @@ export type PriceChangeBoard = {
 };
 
 export type PriceChangePublicationContext = {
-  schemaVersion: 1 | 2;
+  schemaVersion: 2;
   source: 'FPL_BOOTSTRAP';
   fetchedAt: string;
   staleAt: string;
@@ -130,7 +128,7 @@ export type PriceChangePublicationContext = {
   nextDeadlines: string[];
   expectedPlayerCount: number;
   observedPlayerCount: number;
-  latestEvent?: PriceChangeObservedEvent | null;
+  latestEvent: PriceChangeObservedEvent | null;
 };
 
 export type PriceChangePublicationDependencies = {
@@ -975,7 +973,7 @@ function unavailableBoard(latestEvent: PriceChangeObservedEvent | null = null): 
   };
 }
 
-const CONTEXT_KEYS_V1 = [
+const CONTEXT_KEYS = [
   'schemaVersion',
   'source',
   'fetchedAt',
@@ -985,9 +983,8 @@ const CONTEXT_KEYS_V1 = [
   'nextDeadlines',
   'expectedPlayerCount',
   'observedPlayerCount',
+  'latestEvent',
 ] as const;
-
-const CONTEXT_KEYS_V2 = [...CONTEXT_KEYS_V1, 'latestEvent'] as const;
 
 export function parsePublishedPriceChangeBoard(
   publication: DataPublicationReadResult,
@@ -1009,11 +1006,7 @@ export function parsePublishedPriceChangeBoard(
   if (!isRecord(context) || !Array.isArray(players)) {
     return null;
   }
-  const contextSchemaVersion = context.schemaVersion;
-  if (
-    (contextSchemaVersion !== 1 && contextSchemaVersion !== 2) ||
-    !hasExactKeys(context, contextSchemaVersion === 1 ? CONTEXT_KEYS_V1 : CONTEXT_KEYS_V2)
-  ) {
+  if (context.schemaVersion !== 2 || !hasExactKeys(context, CONTEXT_KEYS)) {
     return null;
   }
   const nextDeadlinesValue = context.nextDeadlines;
@@ -1100,7 +1093,7 @@ export function parsePublishedPriceChangeBoard(
     players: [...players].sort((left, right) => left.playerId - right.playerId),
     latestEvent: null,
   };
-  if (contextSchemaVersion === 2 && context.latestEvent !== null) {
+  if (context.latestEvent !== null) {
     if (!isRecord(context.latestEvent)) return null;
     try {
       validatePriceChangeObservedEvent(
@@ -1246,62 +1239,10 @@ async function readCorePublicationEvidence(season: FplSeasonRef): Promise<CorePu
   return { publicationId: active.publicationId, revision: active.revision, playerIds: ids };
 }
 
-async function readCorePlayerIds(season: FplSeasonRef): Promise<ReadonlySet<number>> {
-  return (await readCorePublicationEvidence(season)).playerIds;
-}
-
-async function readLegacyPriceChangeBoard(season: FplSeasonRef): Promise<PriceChangeBoard | null> {
-  if (!redisSingleton.isHealthy()) return null;
-  try {
-    const redis = await redisSingleton.getClient();
-    const raw = await redis.get(PRICE_CHANGE_CACHE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    const candidate = isRecord(parsed) && isRecord(parsed.board) ? parsed.board : parsed;
-    if (
-      !isRecord(candidate) ||
-      !Array.isArray(candidate.players) ||
-      typeof candidate.fetchedAt !== 'string'
-    ) {
-      return null;
-    }
-    const fetchedAt = Date.parse(candidate.fetchedAt);
-    if (!Number.isFinite(fetchedAt) || Date.now() - fetchedAt >= PRICE_CHANGE_MAX_AGE_MS)
-      return null;
-    const ids = await readCorePlayerIds(season);
-    const players = candidate.players.filter(isPriceChangePlayer);
-    const playerIds = new Set(players.map((player) => player.playerId));
-    if (
-      players.length !== candidate.players.length ||
-      playerIds.size !== ids.size ||
-      [...ids].some((id) => !playerIds.has(id))
-    ) {
-      return null;
-    }
-    return {
-      ...(candidate as unknown as PriceChangeBoard),
-      status: 'STALE',
-      sourceCheckedAt:
-        typeof candidate.sourceCheckedAt === 'string' &&
-        Number.isFinite(Date.parse(candidate.sourceCheckedAt))
-          ? new Date(Date.parse(candidate.sourceCheckedAt)).toISOString()
-          : undefined,
-      revision: typeof candidate.revision === 'string' ? candidate.revision : 'legacy',
-      expectedPlayerCount: ids.size,
-      observedPlayerCount: players.length,
-      players: players.sort((left, right) => left.playerId - right.playerId),
-    };
-  } catch {
-    return null;
-  }
-}
-
 export async function getPriceChangePredictions(): Promise<PriceChangeBoard> {
   const season = await seasonRepository.findCurrent();
   const canonical = await readCanonicalPriceChangePublication(season);
-  if (canonical.board) return canonical.board;
-  const legacy = canonical.hasActivePublication ? null : await readLegacyPriceChangeBoard(season);
-  return legacy ?? unavailableBoard();
+  return canonical.board ?? unavailableBoard();
 }
 
 /**
