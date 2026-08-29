@@ -1351,6 +1351,10 @@ async function distributedAcquire(
         TOKEN_BUCKET_CAPACITY,
       )) as string[];
     } catch (error) {
+      // The script may have committed a waiter or lease before the client saw
+      // the Redis error. Cancel by token even when registration was not
+      // observed locally; the script is idempotent and removes either state.
+      await cancelDistributedToken(redis, token).catch(() => undefined);
       recordFplAdmissionResult({
         priority,
         outcome: 'store-unavailable',

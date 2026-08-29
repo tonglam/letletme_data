@@ -536,4 +536,16 @@ describe('GW queue and data governance primitives', () => {
     expect(summary.errorClass).toBe('TRANSIENT_INFRA');
     expect(summary.errorCode).toBe('FPL_ADMISSION_STORE_UNAVAILABLE');
   });
+
+  test('classifies admission deadline exhaustion as infrastructure', () => {
+    const summary = summarizeDataError(
+      new FPLClientError(
+        'FPL admission capacity deadline exceeded; retry later',
+        503,
+        'FPL_ADMISSION_DEADLINE_EXCEEDED',
+      ),
+    );
+    expect(summary.errorClass).toBe('TRANSIENT_INFRA');
+    expect(summary.errorCode).toBe('FPL_ADMISSION_DEADLINE_EXCEEDED');
+  });
 });
