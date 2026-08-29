@@ -8,6 +8,7 @@ import {
   buildScoreInputRevision,
   eventLiveHeartbeatIsFresh,
   eventLivePicksAreFresh,
+  eventLiveProjectedPicksAreCoherent,
   hasCompleteAggregateCoverage,
 } from '../../src/services/event-live-manager-scores.service';
 
@@ -95,6 +96,16 @@ describe('event-live manager score authority', () => {
     expect(eventLivePicksAreFresh('2026-08-24T00:15:00.001Z', '2026-08-24T00:00:00.000Z')).toBe(
       false,
     );
+  });
+
+  test('reuses coherent event picks for projected auto-subs across later live heartbeats', () => {
+    expect(
+      eventLiveProjectedPicksAreCoherent('2026-08-24T00:00:00.000Z', '2026-08-24T06:00:00.000Z'),
+    ).toBe(true);
+    expect(
+      eventLiveProjectedPicksAreCoherent('2026-08-24T06:00:00.001Z', '2026-08-24T06:00:00.000Z'),
+    ).toBe(false);
+    expect(eventLiveProjectedPicksAreCoherent('invalid', '2026-08-24T06:00:00.000Z')).toBe(false);
   });
 
   test('rejects an expired or future event-live heartbeat', () => {
