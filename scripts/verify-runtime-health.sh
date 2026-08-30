@@ -47,7 +47,7 @@ for attempt in $(seq 1 "$attempts"); do
     "$api_url/health/live" >/dev/null \
     && timeout=$(curl_timeout_with_deadline) \
     && curl --fail --silent --show-error --max-time "$timeout" \
-      "$api_url/health/ready" >/dev/null; then
+      "$api_url/health/deploy" >/dev/null; then
     api_ready=true
     break
   fi

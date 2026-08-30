@@ -1,6 +1,9 @@
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
-import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
+import {
+  createEntryEventPicksRepository,
+  entryEventPicksRepository,
+} from '../repositories/entry-event-picks';
 import {
   entryEventTransfersRepository,
   withEntrySeasonSyncTransaction,
@@ -302,12 +305,31 @@ export async function persistEntryEventPicksResponse(
     await ensureEntryLiveCheckpoint(season, eventId, entryId, existing!.publication, desired);
     return { entryId, eventId, changed: false };
   }
+  let generationFloor: number | undefined;
+  try {
+    // Redis can lose both the pointer and sequence during a rebuild while the
+    // durable V2 head remains authoritative.  Seed a replacement above that
+    // head so the checkpoint fence can make progress instead of retrying an
+    // equal/older generation forever.
+    generationFloor = (await entryEventPicksRepository.findHead(season, entryId, eventId))
+      ?.generation;
+  } catch (error) {
+    // Redis remains the serving boundary.  If PostgreSQL is unavailable, let
+    // the publication proceed and let the checkpoint/reconciler retry with a
+    // durable generation floor once the database is reachable.
+    logError('Entry V2 durable generation floor unavailable', error, {
+      season: season.seasonCode,
+      entryId,
+      eventId,
+    });
+  }
   const publication = await publishEntryLiveInputV2({
     season: season.seasonCode,
     eventId,
     entryId,
     input,
     sourceCheckedAt,
+    generationFloor,
   });
   if (!publication.published) {
     // A FINAL publication is fenced in Redis. Never checkpoint the provisional

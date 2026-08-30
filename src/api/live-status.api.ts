@@ -98,7 +98,9 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         publication: selectedPublication ? 'AVAILABLE' : 'NO_NEW_REVISION',
         fallback: {
           redis: redisRead.error ? 'UNAVAILABLE' : cachedPublication ? 'AVAILABLE' : 'EMPTY',
-          postgres: checkpointRead ? 'AVAILABLE' : 'EMPTY',
+          // Avoid an extra PostgreSQL probe on the healthy Redis path, but do
+          // not misreport that unprobed fallback as an empty checkpoint.
+          postgres: cachedPublication ? 'NOT_CHECKED' : checkpointRead ? 'AVAILABLE' : 'EMPTY',
           selected: selectedSource ?? 'NONE',
         },
       },

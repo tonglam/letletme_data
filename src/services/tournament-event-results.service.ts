@@ -144,7 +144,7 @@ async function resolveEventPointsPayload(
     // the finalized calculation. Do not mix a legacy relational rowset into a
     // V2 publication or allow a final calculation to fetch FPL again.
     const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
-    if (checkpoint && checkpoint.eventLives.length > 0) {
+    if (checkpoint?.publication.state === 'FINALIZED' && checkpoint.eventLives.length > 0) {
       return {
         elements: checkpoint.eventLives.map((row) => ({
           id: row.elementId,

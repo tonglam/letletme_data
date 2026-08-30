@@ -1,6 +1,9 @@
 import { and, eq, sql } from 'drizzle-orm';
 
-import { livePointsPublicationCheckpointsInCompetition } from '../db/schemas/index.schema';
+import {
+  eventsInFpl,
+  livePointsPublicationCheckpointsInCompetition,
+} from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { EventLive } from '../domain/event-lives';
@@ -232,6 +235,23 @@ export async function checkpointLivePublicationV2(
           fixturesCount: sql`excluded.fixtures_count`,
         },
       });
+    if (publication.state === 'FINALIZED') {
+      // The V2 checkpoint is the finalization boundary. Keep the existing
+      // checked timestamp invariant intact when a late core heartbeat won the
+      // race with this durable final write.
+      await tx
+        .update(eventsInFpl)
+        .set({
+          liveSnapshotFinalizedAt: sql`
+            GREATEST(
+              COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAt}),
+              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${checkpointedAt})
+            )
+          `,
+          updatedAt: checkpointedAt,
+        })
+        .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)));
+    }
     return true;
   });
 }

@@ -10,6 +10,7 @@ import { syncOperationsRepository } from '../repositories/sync-operations';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
 import { eventRepository } from '../repositories/events';
 import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
+import { readLiveCheckpointDesiredV2 } from '../cache/live-publication-v2';
 
 export type ReadinessResult = {
   ready: boolean;
@@ -146,23 +147,36 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   );
   if (currentEvent && !currentEventBeforeDeadline) {
     const liveKey = `live-points-v2:${season.seasonCode}:${currentEvent.id}`;
-    const [redisLive, checkpointLive] = await Promise.all([
+    const [redisLive, checkpointLive, desiredLive] = await Promise.all([
       readLivePublicationV2({ season: season.seasonCode, eventId: currentEvent.id }).catch(
         () => null,
       ),
       readLivePublicationV2Checkpoint(season, currentEvent.id).catch(() => null),
+      readLiveCheckpointDesiredV2({
+        season: season.seasonCode,
+        eventId: currentEvent.id,
+      }).catch(() => null),
     ]);
     // A Redis-first publication may legitimately be ahead of PostgreSQL while
     // its merged checkpoint obligation is pending.  Once Redis marks a
     // publication checkpointed, however, both authorities must identify the
     // same immutable generation.
+    const publicationTimes = [redisLive?.publication.publishedAt, desiredLive?.requestedAt]
+      .map((value) => (value ? Date.parse(value) : Number.NaN))
+      .filter(Number.isFinite);
+    const pendingCheckpointStartedAt =
+      publicationTimes.length > 0 ? Math.max(...publicationTimes) : Number.NaN;
+    const pendingCheckpointWithinGrace =
+      Number.isFinite(pendingCheckpointStartedAt) &&
+      Date.now() - pendingCheckpointStartedAt <= PUBLICATION_MISMATCH_GRACE_MS;
     const liveMatches =
       Boolean(redisLive) &&
       redisLive !== null &&
-      (redisLive.publication.checkpointedAt === null ||
-        (checkpointLive !== null &&
+      (redisLive.publication.checkpointedAt === null
+        ? pendingCheckpointWithinGrace
+        : checkpointLive !== null &&
           checkpointLive.publication.publicationId === redisLive.publication.publicationId &&
-          checkpointLive.publication.generation === redisLive.publication.generation));
+          checkpointLive.publication.generation === redisLive.publication.generation);
     if (!liveMatches) {
       consistent = false;
       publicationMismatchSince.set(liveKey, publicationMismatchSince.get(liveKey) ?? Date.now());

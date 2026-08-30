@@ -811,7 +811,7 @@ export const livePointsPublicationCheckpointsInCompetition = competition.table(
     ),
     check(
       'live_points_publication_checkpoints_time_order',
-      sql`published_at >= source_checked_at AND checkpointed_at >= published_at`,
+      sql`checkpointed_at >= published_at AND checkpointed_at >= source_checked_at`,
     ),
   ],
 );

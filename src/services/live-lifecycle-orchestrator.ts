@@ -546,7 +546,13 @@ export async function findMissingEntryLiveInputIds(
         if (!desired && input.publication.checkpointedAt === null) {
           await setEntryCheckpointDesiredV2(input.publication);
         }
-        await checkpointEntryLiveInputV2(season, eventId, entryId);
+        const checkpointResult = await checkpointEntryLiveInputV2(season, eventId, entryId);
+        if (checkpointResult === 'checkpointed') {
+          // This is a no-op until the cohort pending set is initialized.  Once
+          // it exists, it is the durable completion signal for canaries as well
+          // as queued entries.
+          await markLivePicksEntryComplete(season.seasonCode, eventId, entryId);
+        }
       } catch (error) {
         logError('Entry live V2 checkpoint repair failed', error, { entryId, eventId });
       }
@@ -701,9 +707,17 @@ export async function runPicksProbeAndSync(
     successfulCanaryIds,
   );
   const remaining = fanout.entryIds;
+  // Canary publications are also async checkpoint obligations. Keep them in
+  // the same durable pending set until checkpointEntryLiveInputV2 succeeds;
+  // otherwise the final queued child can settle the cohort too early. This
+  // must also run when the cohort contains only the two canaries.
+  await addPendingLivePicksEntries(
+    season.seasonCode,
+    eventId,
+    uniqueNumbers([...remaining, ...successfulCanaryIds]),
+  );
   let completedEntryIds: boolean[] = [];
   if (remaining.length > 0) {
-    await addPendingLivePicksEntries(season.seasonCode, eventId, remaining);
     // Each entry gets its own BullMQ single-flight identity. The queue still
     // limits provider concurrency to three, but one slow/new entry can no
     // longer deduplicate or delay every other entry in the event cohort.
