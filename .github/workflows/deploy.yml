@@ -351,7 +351,10 @@ jobs:
             export APP_IMAGE="$IMAGE_REF"
             compose() { docker compose "$@"; }
             source scripts/deploy-state-machine.sh
-            old_release_sha=$(release_sha_for_image "$old_image")
+            old_release_sha=$(release_sha_for_container "$old_container")
+            if ! [[ "$old_release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              old_release_sha=$(release_sha_for_image "$old_image")
+            fi
             old_runner_release_sha=$(cat \
               /home/workspace/letletme-grok-runner/current.release 2>/dev/null || printf unknown)
             old_runner_release_sha=${old_runner_release_sha:-unknown}

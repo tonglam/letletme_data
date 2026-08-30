@@ -535,6 +535,7 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=true');
     expect(deployScript).toContain('"$DEPLOY_ROLLBACK_ELIGIBLE" != true');
     expect(deployScript).toContain('DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat');
+    expect(workflow).toContain('old_release_sha=$(release_sha_for_container "$old_container")');
     expect(workflow).toContain('old_release_sha=$(release_sha_for_image "$old_image")');
     expect(workflow).toContain(String.raw`old_image_id=$(docker inspect --format '{{.Image}}'`);
     expect(workflow).toContain('old_runtime_rollback_eligible=false');
