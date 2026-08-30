@@ -213,7 +213,13 @@ async function checkpointClockInTransaction<T>(
   callback: (tx: TransactionHandle) => Promise<T>,
 ): Promise<T> {
   const db = await getDb();
-  return db.transaction(callback);
+  return db.transaction(async (tx) => {
+    // Checkpointing is asynchronous compensation, never a reason to retain a
+    // scarce runtime session behind a blocked statement. The latest desired
+    // marker remains in Redis and the reconciler retries the exact scope.
+    await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+    return callback(tx);
+  });
 }
 
 /**
