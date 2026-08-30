@@ -78,6 +78,7 @@ export type BegunFormalRun = Readonly<{
   providerJobId: string | null;
   providerUnits: number;
   providerTraceSequence: number;
+  leaseExpiresAt: Date | null;
   status: 'RUNNING' | 'TERMINAL';
 }>;
 
@@ -2261,6 +2262,7 @@ export async function beginFormalRun(input: {
         providerJobId: run.providerJobId,
         providerUnits,
         providerTraceSequence,
+        leaseExpiresAt: dateValue(run.leaseExpiresAt),
         status: 'TERMINAL',
       };
     }
@@ -2287,6 +2289,7 @@ export async function beginFormalRun(input: {
       providerJobId: run.providerJobId,
       providerUnits,
       providerTraceSequence,
+      leaseExpiresAt: dateValue(run.leaseExpiresAt),
       status: 'RUNNING',
     };
   });

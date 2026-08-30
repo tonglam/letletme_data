@@ -35,18 +35,19 @@ const pageDataSchema = z
     // timeline. Normalize either form after schema validation.
     next_cursor: z.string().max(20_000).nullable().optional(),
     timeline: z.array(z.unknown()).max(200),
-    user: z
-      .object({
-        rest_id: z.string().regex(/^\d{1,20}$/),
-      })
-      .passthrough(),
+    user: authorSchema,
   })
   .passthrough();
 
-const responseSchema = z
+const responseEnvelopeSchema = z
   .object({
     code: z.number().int(),
     request_id: z.string().min(1).max(512),
+  })
+  .passthrough();
+
+const responseSchema = responseEnvelopeSchema
+  .extend({
     data: pageDataSchema,
   })
   .passthrough();
@@ -59,6 +60,8 @@ export type TikHubXTimelineFetch = (
 ) => Promise<Response>;
 
 export type TikHubXExecutionHooks = Readonly<{
+  /** Local-clock deadline derived from the persisted PostgreSQL run lease. */
+  runDeadlineAtMs?: number;
   beforeProviderCall?: (callIndex: number) => Promise<void> | void;
   onProviderCallStart?: (callIndex: number) => Promise<void> | void;
 }>;
@@ -374,7 +377,19 @@ export class TikHubXTimelineClient {
       responseBytes: 0,
       httpStatus: null,
     };
-    const runDeadlineAt = attempt.startedAt + this.runTimeoutMs;
+    if (
+      hooks.runDeadlineAtMs !== undefined &&
+      (!Number.isSafeInteger(hooks.runDeadlineAtMs) || hooks.runDeadlineAtMs <= 0)
+    ) {
+      throw new TikHubXTimelineError(
+        'TIKHUB_REQUEST_INVALID',
+        'TikHub timeline run deadline is invalid',
+      );
+    }
+    const runDeadlineAt = Math.min(
+      attempt.startedAt + this.runTimeoutMs,
+      hooks.runDeadlineAtMs ?? Number.POSITIVE_INFINITY,
+    );
     const windowStart = Date.parse(request.windowStart);
     const windowEnd = Date.parse(request.windowEnd);
     const uniquePosts = new Map<string, GrokBuildXPostV1>();
@@ -485,6 +500,12 @@ export class TikHubXTimelineClient {
               bytes: body.bytes,
             }),
           );
+          const envelope = responseEnvelopeSchema.safeParse(body.decoded);
+          if (envelope.success) {
+            attempt.requestIdHashes.push(
+              createHash('sha256').update(envelope.data.request_id, 'utf8').digest('hex'),
+            );
+          }
           const parsed = responseSchema.safeParse(body.decoded);
           if (!response.ok || !parsed.success || parsed.data.code !== 200) {
             throw new TikHubXTimelineError(
@@ -492,19 +513,22 @@ export class TikHubXTimelineClient {
                 ? 'TIKHUB_AUTH_FAILED'
                 : response.status === 429
                   ? 'TIKHUB_RATE_LIMITED'
-                  : parsed.success
-                    ? 'TIKHUB_PROVIDER_REJECTED'
-                    : 'TIKHUB_SCHEMA_INVALID',
+                  : !parsed.success
+                    ? envelope.success && envelope.data.code !== 200
+                      ? 'TIKHUB_PROVIDER_REJECTED'
+                      : 'TIKHUB_SCHEMA_INVALID'
+                    : 'TIKHUB_PROVIDER_REJECTED',
               'TikHub timeline response failed HTTP, provider or schema validation',
             );
           }
-          attempt.requestIdHashes.push(
-            createHash('sha256').update(parsed.data.request_id, 'utf8').digest('hex'),
-          );
-          if (identity.key === 'rest_id' && parsed.data.data.user.rest_id !== identity.value) {
+          const responseUser = parsed.data.data.user;
+          if (
+            responseUser.screen_name.toLowerCase() !== identity.handle.toLowerCase() ||
+            (identity.key === 'rest_id' && responseUser.rest_id !== identity.value)
+          ) {
             throw new TikHubXTimelineError(
               'TIKHUB_IDENTITY_MISMATCH',
-              'TikHub timeline response user ID does not match the persisted endpoint',
+              'TikHub timeline response user does not match the persisted endpoint',
             );
           }
           pages += 1;
@@ -523,7 +547,7 @@ export class TikHubXTimelineClient {
             memberRawPosts += 1;
             if (
               post.data.author.screen_name.toLowerCase() !== identity.handle.toLowerCase() ||
-              (identity.key === 'rest_id' && post.data.author.rest_id !== identity.value)
+              post.data.author.rest_id !== responseUser.rest_id
             ) {
               throw new TikHubXTimelineError(
                 'TIKHUB_AUTHOR_MISMATCH',

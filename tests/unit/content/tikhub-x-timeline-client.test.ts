@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 
 import type { XScanRunRequestV1 } from '../../../src/content/acquisition/formal-run-contract';
 import {
@@ -6,6 +7,7 @@ import {
   TikHubXTimelineError,
   type TikHubXTimelineFetch,
 } from '../../../src/content/acquisition/tikhub-x-timeline-client';
+import { sha256CanonicalJson } from '../../../src/content/acquisition/canonicalization';
 import { adaptTikHubTimelinePosts } from '../../../src/content/acquisition/x-post-adapter';
 
 const X_SNOWFLAKE_EPOCH_MS = 1_288_834_974_657n;
@@ -104,7 +106,7 @@ describe('TikHub fixed-account timeline client', () => {
           code: 200,
           request_id: 'request-1',
           data: {
-            user: { rest_id: '123456789' },
+            user: { rest_id: '123456789', screen_name: 'FPLFocal' },
             next_cursor: 'cursor-1',
             timeline: [
               post({
@@ -130,7 +132,7 @@ describe('TikHub fixed-account timeline client', () => {
           code: 200,
           request_id: 'request-2',
           data: {
-            user: { rest_id: '123456789' },
+            user: { rest_id: '123456789', screen_name: 'FPLFocal' },
             next_cursor: 'cursor-2',
             timeline: [
               post({
@@ -155,7 +157,7 @@ describe('TikHub fixed-account timeline client', () => {
           code: 200,
           request_id: 'request-3',
           data: {
-            user: { rest_id: '123456789' },
+            user: { rest_id: '123456789', screen_name: 'FPLFocal' },
             // An empty cursor is another terminal form observed from the
             // provider and must not fail schema validation.
             next_cursor: '',
@@ -177,7 +179,7 @@ describe('TikHub fixed-account timeline client', () => {
         code: 200,
         request_id: 'request-4',
         data: {
-          user: { rest_id: '987654321' },
+          user: { rest_id: '987654321', screen_name: 'FPL_Raptor' },
           next_cursor: null,
           timeline: [],
         },
@@ -240,7 +242,7 @@ describe('TikHub fixed-account timeline client', () => {
           code: 200,
           request_id: 'request-cap',
           data: {
-            user: { rest_id: '123456789' },
+            user: { rest_id: '123456789', screen_name: 'FPLFocal' },
             next_cursor: 'more',
             timeline: [
               post({
@@ -290,7 +292,7 @@ describe('TikHub fixed-account timeline client', () => {
           code: 200,
           request_id: `request-conflict-${call}`,
           data: {
-            user: { rest_id: '123456789' },
+            user: { rest_id: '123456789', screen_name: 'FPLFocal' },
             next_cursor: call === 1 ? 'conflict-page-2' : null,
             timeline: [call === 1 ? conflictingPost : { ...conflictingPost, text: 'Changed body' }],
           },
@@ -338,6 +340,116 @@ describe('TikHub fixed-account timeline client', () => {
     }
   });
 
+  test('rejects a wrong top-level user even when a handle timeline is empty', async () => {
+    const client = new TikHubXTimelineClient({
+      apiKey: 'fixture-secret',
+      timeoutMs: 5_000,
+      maximumResponseBytes: 1_000_000,
+      maximumPagesPerMember: 1,
+      fetchImpl: async () =>
+        response({
+          code: 200,
+          request_id: 'wrong-handle-user',
+          data: {
+            user: { rest_id: '987654321', screen_name: 'DifferentAccount' },
+            next_cursor: null,
+            timeline: [],
+          },
+        }),
+      endpointUrl: 'https://fixture.invalid/timeline',
+    });
+
+    try {
+      await client.execute({
+        ...request,
+        partition: { ...request.partition, members: [request.partition.members[1]!] },
+      });
+      throw new Error('Expected TikHub handle identity rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TikHubXTimelineError);
+      expect(error).toMatchObject({
+        failureClass: 'TIKHUB_IDENTITY_MISMATCH',
+        evidence: { providerUnits: 1 },
+      });
+    }
+  });
+
+  test('binds handle-only posts to the page-level stable user ID', async () => {
+    const client = new TikHubXTimelineClient({
+      apiKey: 'fixture-secret',
+      timeoutMs: 5_000,
+      maximumResponseBytes: 1_000_000,
+      maximumPagesPerMember: 1,
+      fetchImpl: async () =>
+        response({
+          code: 200,
+          request_id: 'wrong-post-user-id',
+          data: {
+            user: { rest_id: '987654321', screen_name: 'FPL_Raptor' },
+            next_cursor: null,
+            timeline: [
+              post({
+                handle: 'FPL_Raptor',
+                restId: '111111111',
+                createdAt: '2026-08-30T17:00:00.000Z',
+                text: 'Post from the wrong stable user',
+              }),
+            ],
+          },
+        }),
+      endpointUrl: 'https://fixture.invalid/timeline',
+    });
+
+    try {
+      await client.execute({
+        ...request,
+        partition: { ...request.partition, members: [request.partition.members[1]!] },
+      });
+      throw new Error('Expected TikHub post identity rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TikHubXTimelineError);
+      expect(error).toMatchObject({
+        failureClass: 'TIKHUB_AUTHOR_MISMATCH',
+        evidence: { providerUnits: 1 },
+      });
+    }
+  });
+
+  test('retains the provider request ID when a validated envelope is rejected', async () => {
+    const requestId = 'provider-rejected-request';
+    const client = new TikHubXTimelineClient({
+      apiKey: 'fixture-secret',
+      timeoutMs: 5_000,
+      maximumResponseBytes: 1_000_000,
+      maximumPagesPerMember: 1,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ code: 429, request_id: requestId, data: null }), {
+          status: 429,
+          headers: { 'content-type': 'application/json' },
+        }),
+      endpointUrl: 'https://fixture.invalid/timeline',
+    });
+
+    try {
+      await client.execute({
+        ...request,
+        partition: { ...request.partition, members: [request.partition.members[0]!] },
+      });
+      throw new Error('Expected TikHub provider rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TikHubXTimelineError);
+      expect(error).toMatchObject({
+        failureClass: 'TIKHUB_RATE_LIMITED',
+        evidence: {
+          providerUnits: 1,
+          providerJobIdHash: sha256CanonicalJson([
+            createHash('sha256').update(requestId, 'utf8').digest('hex'),
+          ]),
+        },
+      });
+    }
+  });
+
   test('keeps the per-call timeout active while the response body stalls', async () => {
     const partialBody = new TextEncoder().encode('{"code":200,');
     const hangingBody = new ReadableStream<Uint8Array>({
@@ -376,7 +488,7 @@ describe('TikHub fixed-account timeline client', () => {
     }
   });
 
-  test('caps later pages by the remaining overall run deadline', async () => {
+  test('caps later pages by the supplied persisted-lease deadline', async () => {
     let call = 0;
     const hangingBody = new ReadableStream<Uint8Array>({
       pull: () => new Promise<void>(() => undefined),
@@ -384,7 +496,6 @@ describe('TikHub fixed-account timeline client', () => {
     const client = new TikHubXTimelineClient({
       apiKey: 'fixture-secret',
       timeoutMs: 5_000,
-      runTimeoutMs: 1_200,
       maximumResponseBytes: 1_000_000,
       maximumPagesPerMember: 3,
       fetchImpl: async () => {
@@ -394,7 +505,7 @@ describe('TikHub fixed-account timeline client', () => {
             code: 200,
             request_id: 'request-before-run-deadline',
             data: {
-              user: { rest_id: '123456789' },
+              user: { rest_id: '123456789', screen_name: 'FPLFocal' },
               next_cursor: 'next-page',
               timeline: [
                 post({
@@ -417,10 +528,15 @@ describe('TikHub fixed-account timeline client', () => {
 
     const startedAt = Date.now();
     try {
-      await client.execute({
-        ...request,
-        partition: { ...request.partition, members: [request.partition.members[0]!] },
-      });
+      await client.execute(
+        {
+          ...request,
+          partition: { ...request.partition, members: [request.partition.members[0]!] },
+        },
+        {
+          runDeadlineAtMs: startedAt + 1_200,
+        },
+      );
       throw new Error('Expected TikHub run timeout');
     } catch (error) {
       expect(error).toBeInstanceOf(TikHubXTimelineError);
