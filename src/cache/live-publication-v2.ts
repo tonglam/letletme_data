@@ -701,7 +701,10 @@ end
 if candidate.contractVersion ~= 'live-points-v2' or not candidate.item then return {'invalid_candidate'} end
 if current_scope_mismatch then return {'scope_mismatch'} end
 if current_generation and current_generation >= candidate.generation then return {'stale', current_raw} end
-if current_state == 'FINAL' then return {'stale', current_raw} end
+-- A FINAL publication is immutable only when its manifest and immutable item
+-- are both valid. A damaged current item must be repairable by a newer
+-- generation; otherwise the corrupt pointer can block finalization forever.
+if current_state == 'FINAL' and current then return {'stale', current_raw} end
 local item = candidate.item
 if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
 local type_result = redis.call('TYPE', item.key)

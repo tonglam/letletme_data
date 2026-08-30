@@ -1,6 +1,4 @@
 import {
-  clearLiveCheckpointDesiredV2,
-  markLivePublicationCheckpointedV2,
   promotePreviousLivePublicationV2,
   readLiveCheckpointDesiredV2,
   readLivePublicationV2Pointer,
@@ -10,10 +8,8 @@ import {
 import { redisSingleton } from '../src/cache/singleton';
 import { databaseSingleton } from '../src/db/singleton';
 import { seasonRepository } from '../src/repositories/seasons';
-import {
-  checkpointLivePublicationV2,
-  readLivePublicationV2Checkpoint,
-} from '../src/services/live-publication-v2-checkpoint.service';
+import { readLivePublicationV2Checkpoint } from '../src/services/live-publication-v2-checkpoint.service';
+import { syncLiveSnapshotV2 } from '../src/services/live-snapshot-v2.service';
 
 type RepairAction = 'inspect' | 'promote-previous' | 'rebuild-current' | 'replay-checkpoint';
 
@@ -155,41 +151,25 @@ async function runRepair(args: LivePointsV2RepairArguments) {
     };
   }
 
-  const current = await readLivePublicationV2Pointer(scope, 'active', redis);
-  if (!current)
-    throw new Error('no complete V2 Redis current publication is available to checkpoint');
-  const checkpointed = await checkpointLivePublicationV2({
-    season,
-    eventId: args.eventId,
-    publication: current.publication,
-    eventLives: current.eventLives,
-    fixtures: current.fixtures,
-  });
-  if (checkpointed) {
-    const marked = await markLivePublicationCheckpointedV2(current.publication, new Date(), redis);
-    if (!marked)
-      throw new Error(
-        'PostgreSQL checkpoint committed but Redis CAS mark failed; obligation remains for reconciliation',
-      );
-    const desired = await readLiveCheckpointDesiredV2(scope, redis);
-    if (
-      desired &&
-      desired.publicationId === current.publication.publicationId &&
-      desired.generation === current.publication.generation
-    ) {
-      await clearLiveCheckpointDesiredV2(desired, redis);
-    }
+  if (args.action === 'replay-checkpoint') {
+    // Redis V2 deliberately stores only the event-live and fixture siblings.
+    // A Redis-only replay would advance the relational checkpoint without the
+    // explain and fixture-evidence facts captured by a coherent source read.
+    // Re-run the bounded repair sync instead; it fetches and validates the
+    // complete fact set before checkpointLivePublicationV2 can commit it.
+    const result = await syncLiveSnapshotV2(season, args.eventId, {
+      trigger: 'reconcile',
+    });
+    return {
+      contractVersion: 'live-points-v2',
+      action: args.action,
+      reason: args.reason,
+      season: args.season,
+      ...result,
+    };
   }
-  return {
-    contractVersion: 'live-points-v2',
-    action: args.action,
-    reason: args.reason,
-    season: args.season,
-    eventId: args.eventId,
-    checkpointed,
-    publicationId: current.publication.publicationId,
-    generation: current.publication.generation,
-  };
+
+  throw new Error(`Unsupported Live Points V2 repair action: ${args.action}`);
 }
 
 async function main(): Promise<void> {
