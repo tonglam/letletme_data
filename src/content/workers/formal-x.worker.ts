@@ -86,6 +86,8 @@ export type TikHubXTimelineExecutorLike = Readonly<{
   ) => Promise<TikHubXTimelineExecutionResult>;
 }>;
 
+const TIKHUB_LEASE_COMPLETION_MARGIN_MS = 15_000;
+
 function errorFacts(error: unknown): {
   failureClass: string;
   summary: string;
@@ -444,7 +446,23 @@ export async function runFormalXWorker(
           'TikHub timeline executor is not configured',
         );
       }
+      if (!run.leaseExpiresAt) {
+        throw new TikHubXTimelineError(
+          'TIKHUB_RUN_TIMEOUT',
+          'TikHub timeline run has no active persisted lease',
+        );
+      }
+      const leaseCheckedAt = await databaseNow(db);
+      const leaseExecutionMs =
+        run.leaseExpiresAt.getTime() - leaseCheckedAt.getTime() - TIKHUB_LEASE_COMPLETION_MARGIN_MS;
+      if (leaseExecutionMs <= 0) {
+        throw new TikHubXTimelineError(
+          'TIKHUB_RUN_TIMEOUT',
+          'TikHub timeline run lease cannot safely admit another provider call',
+        );
+      }
       const execution = await tikhubExecutor.execute(scanRequest, {
+        runDeadlineAtMs: Date.now() + leaseExecutionMs,
         beforeProviderCall: reserveAdditionalXCallBudget,
         onProviderCallStart: () => {
           providerProcessStarted = true;

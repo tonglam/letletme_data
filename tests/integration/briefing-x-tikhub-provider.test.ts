@@ -127,6 +127,9 @@ test('persists a TikHub timeline run with exact call accounting and no Grok foll
     },
     tikhubExecutor: {
       execute: async (request, hooks): Promise<TikHubXTimelineExecutionResult> => {
+        expect(typeof hooks?.runDeadlineAtMs).toBe('number');
+        expect(hooks!.runDeadlineAtMs!).toBeGreaterThan(Date.now());
+        expect(hooks!.runDeadlineAtMs!).toBeLessThan(Date.now() + 6 * 60_000);
         await hooks?.beforeProviderCall?.(0);
         await hooks?.onProviderCallStart?.(0);
         await hooks?.beforeProviderCall?.(1);

@@ -212,3 +212,48 @@ test('shadow budget bypasses recurring lane caps but keeps the global guard', as
   expect(identityShadowAllowed.reserved).toBe(true);
   expect(identityShadowAllowed.deferredScope).toBeNull();
 });
+
+test('does not reserve pagination budget for an expired running acquisition', async () => {
+  await resetBriefingAcquisitionState();
+  const bundle = await loadBriefingManifest();
+  const db = await getDb();
+  const policy = compileXBudgetPolicy({
+    coverage: bundle.coverage,
+    globalRolling24hLimit: 100,
+    final90Rolling90mLimit: 10,
+    enforceLaneCaps: false,
+  });
+  const runId = randomUUID();
+  const dbNow = new Date();
+  await db.insert(contentAcquisitionRuns).values({
+    runId,
+    windowStart: dbNow,
+    windowEnd: dbNow,
+    idempotencyKey: `expired-budget-test:${runId}`,
+    status: 'RUNNING',
+    leaseExpiresAt: new Date(dbNow.getTime() - 1_000),
+  });
+
+  const result = await db.transaction((tx) =>
+    reserveXRunBudgets({
+      tx,
+      runId,
+      phase: 'NORMAL',
+      lane: 'OFFICIAL',
+      dbNow,
+      policy,
+    }),
+  );
+
+  expect(result).toMatchObject({
+    reserved: false,
+    deferredScope: 'RUN_INACTIVE',
+    remainingBeforeReservation: 0,
+  });
+  expect(
+    await db
+      .select()
+      .from(contentAcquisitionBudgetReservations)
+      .where(eq(contentAcquisitionBudgetReservations.runId, runId)),
+  ).toHaveLength(0);
+});
