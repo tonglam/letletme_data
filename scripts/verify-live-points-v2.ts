@@ -122,26 +122,27 @@ async function main(): Promise<void> {
   const args = parseVerifyArguments(process.argv.slice(2));
   const season = await seasonRepository.requireByCode(args.season);
   const [redis, db] = await Promise.all([redisSingleton.getClient(), getDb()]);
-  const eventIds = args.allFinalized
-    ? (
-        await db
-          .select({ eventId: eventsInFpl.eventId })
-          .from(eventsInFpl)
-          .where(
-            and(
-              eq(eventsInFpl.seasonId, season.seasonId),
-              eq(eventsInFpl.finished, true),
-              eq(eventsInFpl.dataChecked, true),
-              isNotNull(eventsInFpl.liveSnapshotFinalizedAt),
-            ),
-          )
-          .orderBy(eventsInFpl.eventId)
-      ).map((row) => row.eventId)
-    : [args.eventId];
-  if (eventIds.length === 0) throw new Error('No finalized V2 event scope exists for this season');
   const results: Array<Record<string, unknown>> = [];
 
   try {
+    const eventIds = args.allFinalized
+      ? (
+          await db
+            .select({ eventId: eventsInFpl.eventId })
+            .from(eventsInFpl)
+            .where(
+              and(
+                eq(eventsInFpl.seasonId, season.seasonId),
+                eq(eventsInFpl.finished, true),
+                eq(eventsInFpl.dataChecked, true),
+                isNotNull(eventsInFpl.liveSnapshotFinalizedAt),
+              ),
+            )
+            .orderBy(eventsInFpl.eventId)
+        ).map((row) => row.eventId)
+      : [args.eventId];
+    if (eventIds.length === 0)
+      throw new Error('No finalized V2 event scope exists for this season');
     for (const eventId of eventIds) {
       const scope = { season: args.season, eventId } as const;
       const headRows = await db

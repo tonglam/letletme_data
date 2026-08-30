@@ -381,6 +381,9 @@ export function parseSeedArguments(argv: readonly string[]): SeedArguments {
   if (seedCache && season === null) {
     throw new Error('--cache requires an explicit --season scope');
   }
+  if (allFinalized && !seedCache) {
+    throw new Error('--all-finalized requires --cache');
+  }
   if (allFinalized && season === null) {
     throw new Error('--all-finalized requires an explicit --season scope');
   }
