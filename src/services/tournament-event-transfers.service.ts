@@ -81,9 +81,10 @@ export async function loadCanonicalTournamentTransferPointsMap(
   findCanonicalRows: (
     targetEventId: number,
     targetSeason: FplSeasonRef,
-  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> =
-    async (targetEventId, targetSeason) =>
-      (await readLivePublicationV2Checkpoint(targetSeason, targetEventId))?.eventLives ?? [],
+  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> = async (
+    targetEventId,
+    targetSeason,
+  ) => (await readLivePublicationV2Checkpoint(targetSeason, targetEventId))?.eventLives ?? [],
 ): Promise<Map<number, number>> {
   return buildTournamentTransferPointsMap(
     eventId,
