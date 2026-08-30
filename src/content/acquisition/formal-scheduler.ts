@@ -69,6 +69,7 @@ export async function scheduleFormalAcquisition(input: {
     enabledAdapters: xAdapters(flags),
     claimLimit: xCapacity,
     xBudgetPolicy: input.xBudgetPolicy,
+    xAccountProvider: flags.xAccountProvider,
   });
   const runs = [...identityRuns, ...xRuns, ...httpRuns];
   let enqueued = 0;

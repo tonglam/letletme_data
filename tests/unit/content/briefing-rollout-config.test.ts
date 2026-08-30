@@ -93,9 +93,36 @@ describe('Briefing acquisition rollout env control', () => {
       youtubeDiscovery: true,
       youtubeNative: false,
       youtubeGenerated: false,
+      xAccountProvider: 'GROK_BUILD',
+      tikhubReady: false,
       hermesReady: false,
       youtubeNativeReady: false,
     });
+  });
+
+  test('enables TikHub only from an explicit provider choice plus an existing secret', () => {
+    const target = fixture([
+      'CONTENT_PUBLICATION_ENABLED=false',
+      'BRIEFING_PUBLIC_ENABLED=false',
+      'CONTENT_X_ACCOUNT_PROVIDER=TIKHUB',
+      'TIKHUB_API_KEY=fixture-tikhub-secret',
+    ]);
+    expect(parse(run('host-shadow', target))).toMatchObject({
+      x: true,
+      xAccountProvider: 'TIKHUB',
+      tikhubReady: true,
+      secretValueExposed: false,
+    });
+    expect(run('status', target).stdout).not.toContain('fixture-tikhub-secret');
+
+    const missingKey = fixture([
+      'CONTENT_PUBLICATION_ENABLED=false',
+      'BRIEFING_PUBLIC_ENABLED=false',
+      'CONTENT_X_ACCOUNT_PROVIDER=TIKHUB',
+    ]);
+    const rejected = run('host-shadow', missingKey);
+    expect(rejected.exitCode).not.toBe(0);
+    expect(rejected.stderr).toContain('TikHub X provider requires TIKHUB_API_KEY');
   });
 
   test('does not enable provider adapters from fractional budget settings', () => {

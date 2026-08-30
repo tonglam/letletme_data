@@ -23,6 +23,7 @@ import {
   closeContentXQueue,
   contentXScanQueueName,
   createConfiguredHostGrokRunner,
+  createConfiguredTikHubXTimeline,
   createFormalXWorkerRuntime,
   enqueueFormalXRun,
   getContentXScanQueue,
@@ -173,7 +174,13 @@ async function ensureFormalXRuntime(): Promise<void> {
   const initialization = (async () => {
     try {
       const executor = createConfiguredHostGrokRunner();
-      formalXRuntime = createFormalXWorkerRuntime(executor, xBudgetPolicy ?? undefined);
+      const tikhubExecutor =
+        flags.xAccountProvider === 'TIKHUB' ? createConfiguredTikHubXTimeline() : undefined;
+      formalXRuntime = createFormalXWorkerRuntime(
+        executor,
+        xBudgetPolicy ?? undefined,
+        tikhubExecutor,
+      );
       queueMonitorStates[contentXScanQueueName] = 'ENABLED';
       queueMonitors.push(
         startQueueMonitor({
@@ -183,9 +190,7 @@ async function ensureFormalXRuntime(): Promise<void> {
           consumerHeartbeatRole: 'contentWorker',
         }),
       );
-      logInfo(
-        'Host Grok runner client initialized; X acquisition will validate the host runner per run',
-      );
+      logInfo('X acquisition providers initialized', { xAccountProvider: flags.xAccountProvider });
       await dispatchPendingAcquisitionJobOutbox();
     } catch (error) {
       logError('Host Grok runner client initialization failed; X acquisition will retry', error);
@@ -375,6 +380,7 @@ logInfo('Content worker process ready', {
   httpAcquisitionEnabled: flags.httpAcquisitionEnabled,
   xScanEnabled: flags.xScanEnabled,
   realGrokEnabled: flags.realGrokEnabled,
+  xAccountProvider: flags.xAccountProvider,
   podcastTranscriptEnabled: flags.podcastTranscriptEnabled,
   httpConcurrency: flags.httpConcurrency,
 });

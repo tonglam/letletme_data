@@ -1,6 +1,7 @@
 import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 
 import { HostGrokRunnerClient } from '../acquisition/host-grok-runner-client';
+import { TikHubXTimelineClient } from '../acquisition/tikhub-x-timeline-client';
 import type { ClaimedAcquisitionJobOutbox } from '../acquisition/job-outbox';
 import type { XBudgetPolicy } from '../acquisition/x-budget';
 import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
@@ -8,7 +9,11 @@ import type { ClaimedFormalRun } from '../acquisition/formal-run-repository';
 import { getContentRuntimeFlags } from '../config';
 import { logError, logInfo } from '../../utils/logger';
 import { getQueueConnection } from '../../utils/queue';
-import { runFormalXWorker, type GrokBuildExecutorLike } from './formal-x.worker';
+import {
+  runFormalXWorker,
+  type GrokBuildExecutorLike,
+  type TikHubXTimelineExecutorLike,
+} from './formal-x.worker';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../../queues/retention';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../../services/queue-governance.service';
 
@@ -70,9 +75,22 @@ export function createConfiguredHostGrokRunner(): HostGrokRunnerClient {
   });
 }
 
+export function createConfiguredTikHubXTimeline(): TikHubXTimelineClient {
+  const flags = getContentRuntimeFlags();
+  const apiKey = process.env.TIKHUB_API_KEY?.trim();
+  if (!apiKey) throw new Error('TIKHUB_API_KEY is required for TikHub X account scans');
+  return new TikHubXTimelineClient({
+    apiKey,
+    timeoutMs: flags.tikhubTimeoutMs,
+    maximumResponseBytes: flags.tikhubMaxOutputBytes,
+    maximumPagesPerMember: flags.tikhubMaxPagesPerMember,
+  });
+}
+
 export function createFormalXWorkerRuntime(
   executor: GrokBuildExecutorLike = createConfiguredHostGrokRunner(),
   xBudgetPolicy?: XBudgetPolicy,
+  tikhubExecutor?: TikHubXTimelineExecutorLike,
 ) {
   const connection = getQueueConnection();
   const worker = new Worker<AcquisitionJobV1>(
@@ -80,22 +98,23 @@ export function createFormalXWorkerRuntime(
     async (job) =>
       runFormalXWorker(acquisitionJobV1Schema.parse(job.data), {
         executor,
+        tikhubExecutor,
         xBudgetPolicy,
       }),
     { connection, concurrency: getContentRuntimeFlags().grokConcurrency },
   );
   const queueEvents = new QueueEvents(contentXScanQueueName, { connection });
   worker.on('completed', (job) =>
-    logInfo('Formal Grok Build X job completed', { jobId: job.id, runId: job.data.runId }),
+    logInfo('Formal X acquisition job completed', { jobId: job.id, runId: job.data.runId }),
   );
   worker.on('failed', (job, error) =>
-    logError('Formal Grok Build X job failed', error, {
+    logError('Formal X acquisition job failed', error, {
       jobId: job?.id,
       runId: job?.data.runId,
     }),
   );
-  worker.on('error', (error) => logError('Formal Grok Build X worker runtime error', error));
-  return { worker, queueEvents, executor };
+  worker.on('error', (error) => logError('Formal X acquisition worker runtime error', error));
+  return { worker, queueEvents, executor, tikhubExecutor };
 }
 
 export async function closeContentXQueue(): Promise<void> {
