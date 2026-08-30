@@ -682,21 +682,27 @@ function hydrateExplainValuesFromEventLive(
   explain: EventLiveExplain,
   eventLive: EventLive,
 ): EventLiveExplain {
+  const preserveScoringValue = (current: number | null, published: number | null): number | null =>
+    current === null ? published : current;
+
   return {
     ...explain,
-    bonus: eventLive.bonus,
-    minutes: eventLive.minutes,
-    goalsScored: eventLive.goalsScored,
-    assists: eventLive.assists,
-    cleanSheets: eventLive.cleanSheets,
-    goalsConceded: eventLive.goalsConceded,
-    ownGoals: eventLive.ownGoals,
-    penaltiesSaved: eventLive.penaltiesSaved,
-    penaltiesMissed: eventLive.penaltiesMissed,
-    yellowCards: eventLive.yellowCards,
-    redCards: eventLive.redCards,
-    saves: eventLive.saves,
-    defensiveContribution: eventLive.defensiveContribution,
+    bonus: preserveScoringValue(explain.bonus, eventLive.bonus),
+    minutes: preserveScoringValue(explain.minutes, eventLive.minutes),
+    goalsScored: preserveScoringValue(explain.goalsScored, eventLive.goalsScored),
+    assists: preserveScoringValue(explain.assists, eventLive.assists),
+    cleanSheets: preserveScoringValue(explain.cleanSheets, eventLive.cleanSheets),
+    goalsConceded: preserveScoringValue(explain.goalsConceded, eventLive.goalsConceded),
+    ownGoals: preserveScoringValue(explain.ownGoals, eventLive.ownGoals),
+    penaltiesSaved: preserveScoringValue(explain.penaltiesSaved, eventLive.penaltiesSaved),
+    penaltiesMissed: preserveScoringValue(explain.penaltiesMissed, eventLive.penaltiesMissed),
+    yellowCards: preserveScoringValue(explain.yellowCards, eventLive.yellowCards),
+    redCards: preserveScoringValue(explain.redCards, eventLive.redCards),
+    saves: preserveScoringValue(explain.saves, eventLive.saves),
+    defensiveContribution: preserveScoringValue(
+      explain.defensiveContribution,
+      eventLive.defensiveContribution,
+    ),
   };
 }
 
@@ -835,6 +841,8 @@ function assertLegacyEvidenceMatchesEventLives(
   const fixtureIds = new Set(seed.fixtures.map((fixture) => fixture.id));
   const identities = new Set<string>();
   const elementsWithStartEvidence = new Set<number>();
+  const elementsWithUnknownStartEvidence = new Set<number>();
+  const rowsByElement = new Map<number, LegacyFixtureEvidenceRow[]>();
   const totals = new Map<
     number,
     {
@@ -876,10 +884,15 @@ function assertLegacyEvidenceMatchesEventLives(
     total.yellowCards += row.yellow_cards;
     total.redCards += row.red_cards;
     total.starts += row.starts ?? 0;
-    if (row.starts !== null) elementsWithStartEvidence.add(row.element_id);
+    if (row.starts === null) elementsWithUnknownStartEvidence.add(row.element_id);
+    else elementsWithStartEvidence.add(row.element_id);
+    const elementRows = rowsByElement.get(row.element_id) ?? [];
+    elementRows.push(row);
+    rowsByElement.set(row.element_id, elementRows);
     totals.set(row.element_id, total);
   }
   for (const eventLive of seed.eventLives) {
+    assertLegacyFixtureAttribution(eventLive, rowsByElement.get(eventLive.elementId) ?? []);
     const total = totals.get(eventLive.elementId) ?? {
       minutes: 0,
       goals: 0,
@@ -912,6 +925,7 @@ function assertLegacyEvidenceMatchesEventLives(
     if (
       eventLive.starts === true &&
       elementsWithStartEvidence.has(eventLive.elementId) &&
+      !elementsWithUnknownStartEvidence.has(eventLive.elementId) &&
       total.starts < 1
     ) {
       throw new Error(
@@ -919,6 +933,75 @@ function assertLegacyEvidenceMatchesEventLives(
       );
     }
   }
+}
+
+function assertLegacyFixtureAttribution(
+  eventLive: EventLive,
+  rows: readonly LegacyFixtureEvidenceRow[],
+): void {
+  const breakdown = eventLive.fixtureBreakdown;
+  if (!breakdown) {
+    throw new Error(
+      `Legacy fixture evidence cannot be attributed to publication: event=${eventLive.eventId} element=${eventLive.elementId}`,
+    );
+  }
+
+  const breakdownByFixture = new Map<number, EventLiveFixtureBreakdown>();
+  for (const fixture of breakdown) {
+    if (breakdownByFixture.has(fixture.fixtureId)) {
+      throw new Error(
+        `Legacy event live repeats fixture: event=${eventLive.eventId} fixture=${fixture.fixtureId} element=${eventLive.elementId}`,
+      );
+    }
+    breakdownByFixture.set(fixture.fixtureId, fixture);
+  }
+
+  const rowsByFixture = new Map<number, LegacyFixtureEvidenceRow>();
+  for (const row of rows) {
+    const fixture = breakdownByFixture.get(row.fixture_id);
+    if (!fixture) {
+      throw new Error(
+        `Legacy fixture evidence cannot be attributed to publication: event=${eventLive.eventId} fixture=${row.fixture_id} element=${eventLive.elementId}`,
+      );
+    }
+    rowsByFixture.set(row.fixture_id, row);
+
+    const checks: Array<[string, number | null, number | null]> = [
+      ['minutes', row.minutes, breakdownValue(fixture, 'minutes')],
+      ['goals_scored', row.goals, breakdownValue(fixture, 'goals_scored')],
+      ['assists', row.assists, breakdownValue(fixture, 'assists')],
+      ['own_goals', row.own_goals, breakdownValue(fixture, 'own_goals')],
+      ['yellow_cards', row.yellow_cards, breakdownValue(fixture, 'yellow_cards')],
+      ['red_cards', row.red_cards, breakdownValue(fixture, 'red_cards')],
+      ['starts', row.starts, breakdownValue(fixture, 'starts')],
+    ];
+    const mismatch = checks.find(([, actual, expected]) => {
+      if (expected === null || actual === null) return false;
+      return actual !== expected;
+    });
+    if (mismatch) {
+      throw new Error(
+        `Legacy fixture evidence disagrees with publication: event=${eventLive.eventId} fixture=${row.fixture_id} element=${eventLive.elementId} field=${mismatch[0]}`,
+      );
+    }
+  }
+
+  for (const fixture of breakdown) {
+    if (rowsByFixture.has(fixture.fixtureId)) continue;
+    const nonZeroStat = fixture.stats.find(
+      (stat) =>
+        EXPLAIN_IDENTIFIERS.includes(stat.identifier as ExplainIdentifier) && stat.value !== 0,
+    );
+    if (nonZeroStat) {
+      throw new Error(
+        `Legacy fixture evidence is missing publication fixture: event=${eventLive.eventId} fixture=${fixture.fixtureId} element=${eventLive.elementId}`,
+      );
+    }
+  }
+}
+
+function breakdownValue(fixture: EventLiveFixtureBreakdown, identifier: string): number | null {
+  return fixture.stats.find((stat) => stat.identifier === identifier)?.value ?? null;
 }
 
 async function loadLegacyLiveFacts(
