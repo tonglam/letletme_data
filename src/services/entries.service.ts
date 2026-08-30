@@ -14,6 +14,7 @@ import { entryInfoRepository } from '../repositories/entry-infos';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { contentHash } from '../utils/content-hash';
+import { CacheError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import {
@@ -333,8 +334,8 @@ export async function persistEntryEventPicksResponse(
       // the durable V2 head remains authoritative. Seed a replacement above
       // that head so the checkpoint fence can make progress instead of
       // retrying an equal/older generation forever.
-      generationFloor = (await entryEventPicksRepository.findHead(season, entryId, eventId))
-        ?.generation;
+      generationFloor =
+        (await entryEventPicksRepository.findHead(season, entryId, eventId))?.generation ?? 0;
     } catch (error) {
       // Redis remains the serving boundary. If PostgreSQL is unavailable, let
       // the publication proceed and let the checkpoint/reconciler retry with a
@@ -345,6 +346,12 @@ export async function persistEntryEventPicksResponse(
         eventId,
       });
     }
+  }
+  if (generationFloor === undefined) {
+    throw new CacheError(
+      'Entry V2 publication requires a durable generation floor before cache rebuild',
+      'LIVE_V2_ENTRY_GENERATION_FLOOR_UNAVAILABLE',
+    );
   }
   const publication = await publishEntryLiveInputV2({
     season: season.seasonCode,

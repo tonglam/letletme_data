@@ -1573,7 +1573,8 @@ export async function publishEntryLiveInputV2(input: {
   readonly entryId: number;
   readonly input: EntryLiveInputV2;
   readonly sourceCheckedAt: Date | string;
-  readonly generationFloor?: number;
+  /** Zero is explicit evidence that no durable V2 head exists. */
+  readonly generationFloor: number;
   readonly redis?: Redis;
 }): Promise<{
   readonly publication: EntryLivePublicationV2;
@@ -1584,12 +1585,18 @@ export async function publishEntryLiveInputV2(input: {
   assertEntryScope(scope);
   if (!validateEntryLiveInputV2(input.input, scope))
     throw new CacheError('Invalid V2 entry input', 'LIVE_V2_ENTRY_INPUT_INVALID');
+  if (!Number.isSafeInteger(input.generationFloor) || input.generationFloor < 0) {
+    throw new CacheError(
+      'Entry V2 publication requires a durable generation floor',
+      'LIVE_V2_ENTRY_GENERATION_FLOOR_REQUIRED',
+    );
+  }
   const redis = input.redis ?? (await redisSingleton.getClient());
   const current = await readEntryLiveInputV2(scope, redis);
   const allocation = await allocateGeneration(
     redis,
     entryLiveV2Key(scope, 'sequence'),
-    Math.max(0, input.generationFloor ?? current?.publication.generation ?? 0),
+    Math.max(input.generationFloor, current?.publication.generation ?? 0),
   );
   const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
   const item = buildEntryItem(scope, allocation.generation, input.input);
@@ -1716,6 +1723,7 @@ export async function publishEntryLiveFinalResultV2(input: {
     entryId: input.entryId,
     input: nextInput,
     sourceCheckedAt,
+    generationFloor: current.publication.generation,
     redis: input.redis,
   });
 }

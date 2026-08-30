@@ -402,6 +402,7 @@ describe('immutable Redis publication', () => {
       ...ENTRY_SCOPE,
       input: provisionalInput,
       sourceCheckedAt: '2026-08-09T04:00:00.000Z',
+      generationFloor: 0,
       redis,
     });
     const finalized = await publishEntryLiveFinalResultV2({
@@ -421,6 +422,7 @@ describe('immutable Redis publication', () => {
       ...ENTRY_SCOPE,
       input: provisionalInput,
       sourceCheckedAt: '2026-08-09T04:02:00.000Z',
+      generationFloor: 0,
       redis,
     });
 

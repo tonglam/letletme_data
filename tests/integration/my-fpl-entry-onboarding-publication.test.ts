@@ -308,6 +308,7 @@ async function seedEntryEventData(entryId: number): Promise<void> {
     entryId,
     input: entryInput,
     sourceCheckedAt: CAPTURE_NOW,
+    generationFloor: 0,
   });
 }
 
