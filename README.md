@@ -258,7 +258,7 @@ in the [API cheat sheet](docs/api-cheat-sheet.md).
 | `bun run coverage` | Run unit tests with coverage |
 | `bun run db:migrate` | Apply canonical SQL migrations |
 | `bun run db:migrate:status` | Verify the canonical migration ledger and checksums |
-| `bun run seed:live-points-v2` | Dry-run the Live Points V2 DB/head seed; add `--cache --season YYYY` for the legacy-to-V2 Redis cutover seed |
+| `bun run db:cutover-seed-live-points-v2` | Dry-run the Live Points V2 DB/head seed; add `--cache --season YYYY` for the legacy-to-V2 Redis cutover seed |
 
 Integration tests refuse production-like database or Redis targets. See
 [tests/README.md](tests/README.md) for the required isolated setup.

@@ -92,7 +92,7 @@ business payload and are not read by GraphQL to construct a score.
 Before the breaking deployment, run the Data seed in dry-run mode for the exact season scope:
 
 ```bash
-bun run seed:live-points-v2 --cache --season 2627 --event-id 2
+bun run db:cutover-seed-live-points-v2 --cache --season 2627 --event-id 2
 ```
 
 The command validates the legacy durable `fpl:live` publication, converts its event-live and

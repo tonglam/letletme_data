@@ -200,6 +200,47 @@ async function checkpoint(
   }
 }
 
+type LiveCheckpointDesired = Awaited<ReturnType<typeof setLiveCheckpointDesiredV2>>;
+
+/**
+ * A Redis FINAL without a durable row is a recovery obligation, not a reason
+ * to checkpoint the two Redis payloads on their own.  Keep one merged desired
+ * marker while the coherent upstream read below reconstructs the relational
+ * explain and fixture-evidence facts as well.
+ */
+async function ensureFinalRecoveryDesired(
+  season: FplSeasonRef,
+  eventId: number,
+  publication: LivePublicationRead['publication'],
+): Promise<LiveCheckpointDesired | null> {
+  let desired: LiveCheckpointDesired | null = null;
+  try {
+    desired = await readLiveCheckpointDesiredV2({
+      season: season.seasonCode,
+      eventId,
+    });
+  } catch (error) {
+    logError('Live Points V2 final recovery obligation read failed', error, {
+      season: season.seasonCode,
+      eventId,
+      publicationId: publication.publicationId,
+      generation: publication.generation,
+    });
+  }
+  if (desired !== null) return desired;
+  try {
+    return await setLiveCheckpointDesiredV2(publication);
+  } catch (error) {
+    logError('Live Points V2 final recovery obligation write failed', error, {
+      season: season.seasonCode,
+      eventId,
+      publicationId: publication.publicationId,
+      generation: publication.generation,
+    });
+    return null;
+  }
+}
+
 export async function syncLiveSnapshotV2(
   season: FplSeasonRef,
   eventId: number,
@@ -237,50 +278,19 @@ export async function syncLiveSnapshotV2(
     });
   const [current, durableRead] = await Promise.all([currentReadPromise, durableReadPromise]);
   const durableFloor = durableRead.value;
+  const recoveringFinalCheckpoint =
+    current?.publication.state === 'FINALIZED' && !durableRead.failed && !durableFloor;
   if (current?.publication.state === 'FINALIZED' && (durableRead.failed || !durableFloor)) {
     if (!durableRead.failed) {
       // Redis can retain a FINAL manifest after PostgreSQL has been restored
-      // from an older backup. Recreate the durable checkpoint directly from
-      // the complete Redis publication; do not fetch FPL or manufacture a
-      // provisional candidate. If the write cannot complete, report the
-      // publication as uncheckpointed and leave a single merged obligation.
-      let desired = null;
-      try {
-        desired = await readLiveCheckpointDesiredV2({
-          season: season.seasonCode,
-          eventId,
-        });
-      } catch (error) {
-        logError('Live Points V2 final recovery obligation read failed', error, {
-          season: season.seasonCode,
-          eventId,
-          publicationId: current.publication.publicationId,
-          generation: current.publication.generation,
-        });
-      }
-      const checkpointed = await checkpoint(
-        dependencies,
-        season,
-        eventId,
-        {
-          eventLives: current.eventLives,
-          fixtures: current.fixtures,
-        },
-        current.publication,
-        desired,
-      );
-      if (!checkpointed && desired === null) {
-        try {
-          desired = await setLiveCheckpointDesiredV2(current.publication);
-        } catch (error) {
-          logError('Live Points V2 final recovery obligation write failed', error, {
-            season: season.seasonCode,
-            eventId,
-            publicationId: current.publication.publicationId,
-            generation: current.publication.generation,
-          });
-        }
-      }
+      // from an older backup.  Do not checkpoint the Redis event/fixture
+      // payloads directly: the publication is only complete after the same
+      // coherent upstream response reconstructs scoring explains and
+      // player-fixture evidence.  The recovery path below performs that read
+      // and either checkpoints all facts or leaves one desired obligation.
+    } else {
+      // A failed durable read cannot prove that the row is absent. Keep the
+      // immutable Redis FINAL in service and retry the durable read later.
       return {
         eventId,
         changed: false,
@@ -292,24 +302,10 @@ export async function syncLiveSnapshotV2(
         state: 'FINALIZED',
         eventLiveCount: current.eventLives.length,
         fixtureCount: current.fixtures.length,
-        checkpointScheduled: !checkpointed && desired !== null,
-        checkpointed,
+        checkpointScheduled: false,
+        checkpointed: current.publication.checkpointedAt !== null,
       };
     }
-    return {
-      eventId,
-      changed: false,
-      stale: true,
-      published: false,
-      generation: current.publication.generation,
-      publicationId: current.publication.publicationId,
-      sourceCheckedAt: current.publication.sourceCheckedAt,
-      state: 'FINALIZED',
-      eventLiveCount: current.eventLives.length,
-      fixtureCount: current.fixtures.length,
-      checkpointScheduled: false,
-      checkpointed: current.publication.checkpointedAt !== null,
-    };
   }
   if (
     durableFloor?.publication.state === 'FINALIZED' &&
@@ -359,20 +355,116 @@ export async function syncLiveSnapshotV2(
     };
   }
 
-  const [liveResponse, rawFixtures, expectedFixtureIds, referenceData] = await Promise.all([
-    dependencies.getEventLive(eventId),
-    dependencies.getFixtures(eventId),
-    dependencies.getExpectedFixtureIds(season, eventId),
-    dependencies.getReferenceData(season),
-  ]);
-  const prepared = prepareCoherentLiveSnapshot(
-    eventId,
-    liveResponse,
-    rawFixtures,
-    referenceData,
-    expectedFixtureIds,
-    current?.eventLives.map((row) => row.elementId),
-  );
+  let prepared: PreparedLiveSnapshot;
+  try {
+    const [liveResponse, rawFixtures, expectedFixtureIds, referenceData] = await Promise.all([
+      dependencies.getEventLive(eventId),
+      dependencies.getFixtures(eventId),
+      dependencies.getExpectedFixtureIds(season, eventId),
+      dependencies.getReferenceData(season),
+    ]);
+    prepared = prepareCoherentLiveSnapshot(
+      eventId,
+      liveResponse,
+      rawFixtures,
+      referenceData,
+      expectedFixtureIds,
+      current?.eventLives.map((row) => row.elementId),
+    );
+  } catch (error) {
+    if (!recoveringFinalCheckpoint || !current) throw error;
+    logError('Live Points V2 final recovery facts unavailable', error, {
+      season: season.seasonCode,
+      eventId,
+      publicationId: current.publication.publicationId,
+      generation: current.publication.generation,
+    });
+    const desired = await ensureFinalRecoveryDesired(season, eventId, current.publication);
+    return {
+      eventId,
+      changed: false,
+      stale: true,
+      published: false,
+      generation: current.publication.generation,
+      publicationId: current.publication.publicationId,
+      sourceCheckedAt: current.publication.sourceCheckedAt,
+      state: 'FINALIZED',
+      eventLiveCount: current.eventLives.length,
+      fixtureCount: current.fixtures.length,
+      checkpointScheduled: desired !== null,
+      checkpointed: false,
+    };
+  }
+
+  if (recoveringFinalCheckpoint && current) {
+    const factsMatch =
+      canonicalJson(current.eventLives) === canonicalJson(prepared.eventLives.eventLives) &&
+      canonicalJson(current.fixtures) === canonicalJson(prepared.fixtures);
+    if (!factsMatch) {
+      // A changed upstream response must never supersede an immutable FINAL
+      // merely because its durable checkpoint is missing.  Keep the FINAL,
+      // record one obligation, and wait for a source response that proves the
+      // exact publication facts before checkpointing it.
+      logError(
+        'Live Points V2 final recovery facts differ from Redis FINAL',
+        new Error('fact mismatch'),
+        {
+          season: season.seasonCode,
+          eventId,
+          publicationId: current.publication.publicationId,
+          generation: current.publication.generation,
+          eventLiveCount: current.eventLives.length,
+          preparedEventLiveCount: prepared.eventLives.eventLives.length,
+          fixtureCount: current.fixtures.length,
+          preparedFixtureCount: prepared.fixtures.length,
+        },
+      );
+      const desired = await ensureFinalRecoveryDesired(season, eventId, current.publication);
+      return {
+        eventId,
+        changed: false,
+        stale: true,
+        published: false,
+        generation: current.publication.generation,
+        publicationId: current.publication.publicationId,
+        sourceCheckedAt: current.publication.sourceCheckedAt,
+        state: 'FINALIZED',
+        eventLiveCount: current.eventLives.length,
+        fixtureCount: current.fixtures.length,
+        checkpointScheduled: desired !== null,
+        checkpointed: false,
+      };
+    }
+
+    const desired = await ensureFinalRecoveryDesired(season, eventId, current.publication);
+    const checkpointed = await checkpoint(
+      dependencies,
+      season,
+      eventId,
+      {
+        eventLives: prepared.eventLives.eventLives,
+        fixtures: prepared.fixtures,
+        explains: prepared.eventLives.explains,
+        fixtureEvidence: prepared.eventLives.fixtureEvidence,
+      },
+      current.publication,
+      desired,
+    );
+    return {
+      eventId,
+      changed: false,
+      stale: true,
+      published: false,
+      generation: current.publication.generation,
+      publicationId: current.publication.publicationId,
+      sourceCheckedAt: current.publication.sourceCheckedAt,
+      state: 'FINALIZED',
+      eventLiveCount: current.eventLives.length,
+      fixtureCount: current.fixtures.length,
+      checkpointScheduled: !checkpointed && desired !== null,
+      checkpointed,
+    };
+  }
   // This timestamp is evidence that the coherent fetch and all completeness
   // checks finished successfully. Starting the clock before upstream work
   // would make a slow/partially failed observation look fresher than it is.

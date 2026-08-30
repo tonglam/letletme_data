@@ -719,7 +719,20 @@ async function loadRows(database: postgres.Sql, args: SeedArguments): Promise<Ex
   }
   if (args.eventId !== null) {
     parameters.push(args.eventId);
-    predicates.push(`p.event_id = $${parameters.length}`);
+    predicates.push(
+      args.allFinalized
+        ? `(p.event_id = $${parameters.length}
+            OR (event.finished = TRUE
+                AND event.data_checked = TRUE
+                AND event.live_snapshot_finalized_at IS NOT NULL))`
+        : `p.event_id = $${parameters.length}`,
+    );
+  } else if (args.allFinalized) {
+    predicates.push(
+      `event.finished = TRUE
+       AND event.data_checked = TRUE
+       AND event.live_snapshot_finalized_at IS NOT NULL`,
+    );
   }
   const query = `
     SELECT
@@ -738,6 +751,9 @@ async function loadRows(database: postgres.Sql, args: SeedArguments): Promise<Ex
       p.source_updated_at
     FROM competition.entry_event_picks p
     JOIN fpl.seasons season ON season.season_id = p.season_id
+    JOIN fpl.events event
+      ON event.season_id = p.season_id
+     AND event.event_id = p.event_id
     WHERE ${predicates.join(' AND ')}
     ORDER BY p.season_id, p.entry_id, p.event_id, p.position
   `;
