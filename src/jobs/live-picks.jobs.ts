@@ -93,7 +93,7 @@ export async function runLivePicksRefreshJob(
       // Raising a typed, bounded-retry error keeps the durable obligation
       // pending/failed instead of allowing enqueue recovery to mark it green.
       throw new FPLClientError(
-        'Live picks source canary is not ready; eligible sweep remains pending',
+        'Live picks source canary is not ready; per-entry input publication remains pending',
         409,
         'SOURCE_NOT_READY',
       );

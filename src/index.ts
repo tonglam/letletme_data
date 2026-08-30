@@ -11,7 +11,6 @@ import { eventLivesAPI } from './api/event-lives.api';
 import { eventsAPI } from './api/events.api';
 import { fixturesAPI } from './api/fixtures.api';
 import { jobsAPI } from './api/jobs.api';
-import { managerLiveAPI } from './api/manager-live.api';
 import { priceChangePredictionsAPI } from './api/price-change-predictions.api';
 import { liveStatusAPI } from './api/live-status.api';
 import { phasesAPI } from './api/phases.api';
@@ -161,19 +160,35 @@ const app = new Elysia()
     timestamp: new Date().toISOString(),
   }))
 
-  .get('/health', () => ({
+  .get('/health/live', () => ({
     success: true,
-    status: 'alive',
+    status: 'live',
+    contractVersion: 'live-points-v2',
     timestamp: new Date().toISOString(),
   }))
 
-  .get('/ready', async ({ set }) => {
+  .get('/health/ready', async ({ set }) => {
     const readiness = await checkReadiness();
     if (!readiness.ready) set.status = 503;
     return {
       success: readiness.ready,
       status: readiness.ready ? 'ready' : 'not_ready',
       dependencies: readiness.dependencies,
+      timestamp: new Date().toISOString(),
+    };
+  })
+
+  .get('/health/deploy', async ({ set }) => {
+    const readiness = await checkReadiness({
+      includeRuntimeDependencies: true,
+      strict: true,
+    });
+    if (!readiness.ready) set.status = 503;
+    return {
+      success: readiness.ready,
+      status: readiness.ready ? 'deploy_ready' : 'deploy_not_ready',
+      dependencies: readiness.dependencies,
+      deploySha: process.env.DEPLOY_SHA?.trim() || 'unknown',
       timestamp: new Date().toISOString(),
     };
   })
@@ -192,7 +207,6 @@ const app = new Elysia()
   .use(phasesAPI)
   .use(entryInfoAPI)
   .use(entrySyncAPI)
-  .use(managerLiveAPI)
   .use(priceChangePredictionsAPI)
   .use(liveStatusAPI)
   .use(jobsAPI)
@@ -257,7 +271,6 @@ logInfo('🚀 Elysia server started', {
     'player-values',
     'entry-info',
     'phases',
-    'manager-live',
     'price-change-predictions',
     'jobs',
     'tournaments',

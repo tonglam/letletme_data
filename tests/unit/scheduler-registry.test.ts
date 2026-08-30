@@ -7,6 +7,7 @@ import {
   officialH2HDefinition,
   resolvePriceChangeWatchPlans,
   resolveEntryInfoSnapshotTargetEventId,
+  resolveLiveFinalizationCatchupPlans,
   resolvePostMatchResultPlans,
   playerPricesDefinition,
   schedulerQueueLaneOverride,
@@ -23,7 +24,6 @@ import {
   schedulerExecutionLanes,
   schedulerPlanKey,
 } from '../../src/scheduler/scheduler.service';
-import { resolvePlayerStatsActiveCadence } from '../../src/domain/job-schedules';
 import { mockFixture1 } from '../fixtures/fixtures.fixtures';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
@@ -485,24 +485,6 @@ describe('standalone scheduler registry', () => {
     expect(schedulerSource).not.toContain('fplClient.getBootstrap');
   });
 
-  test('limits active player-stat refreshes to lifecycle states that can still change', () => {
-    const ordinaryMinute = new Date('2026-08-22T10:17:00.000Z');
-    const fiveMinuteBoundary = new Date('2026-08-22T10:20:00.000Z');
-
-    expect(resolvePlayerStatsActiveCadence('LIVE_ACTIVE', ordinaryMinute)).toBe('one-minute');
-    expect(resolvePlayerStatsActiveCadence('DAY_SETTLING', ordinaryMinute)).toBe('one-minute');
-    expect(resolvePlayerStatsActiveCadence('BETWEEN_FIXTURES', ordinaryMinute)).toBeNull();
-    expect(resolvePlayerStatsActiveCadence('BETWEEN_FIXTURES', fiveMinuteBoundary)).toBe(
-      'five-minute',
-    );
-    expect(resolvePlayerStatsActiveCadence('GW_REVIEW', fiveMinuteBoundary)).toBe('five-minute');
-    expect(resolvePlayerStatsActiveCadence('PICKS_SYNC', fiveMinuteBoundary)).toBe('five-minute');
-    expect(resolvePlayerStatsActiveCadence('PRE_DEADLINE', fiveMinuteBoundary)).toBeNull();
-    expect(resolvePlayerStatsActiveCadence('PICKS_WAIT', fiveMinuteBoundary)).toBeNull();
-    expect(resolvePlayerStatsActiveCadence('PICKS_PROBE', fiveMinuteBoundary)).toBeNull();
-    expect(resolvePlayerStatsActiveCadence('FINALIZED', fiveMinuteBoundary)).toBeNull();
-  });
-
   test('runs official H2H through the durable standalone scheduler during match windows', async () => {
     const event = {
       id: 1,
@@ -938,6 +920,47 @@ describe('standalone scheduler registry', () => {
     expect(plans.map((plan) => plan.periodKey)).toEqual(['event-2-final', 'event-1-final']);
     expect(plans[0]).toMatchObject({ dueAt: checkedAt, source: 'catchup' });
     expect(fixtureLoads).toBe(0);
+  });
+
+  test('keeps V2 finalization catch-up independent from the current event', () => {
+    const checkedAt = new Date('2026-08-22T22:00:00.000Z');
+    const plans = resolveLiveFinalizationCatchupPlans(
+      {
+        season: TEST_SEASON,
+        now: new Date('2026-08-25T12:00:00.000Z'),
+        currentEventId: 4,
+        events: [
+          {
+            id: 2,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: checkedAt,
+          },
+          {
+            id: 4,
+            deadlineTime: new Date('2026-08-25T17:30:00.000Z'),
+            finished: false,
+            dataChecked: false,
+            dataCheckedAt: null,
+          },
+        ],
+      },
+      new Set([2]),
+    );
+
+    expect(plans).toEqual([
+      expect.objectContaining({
+        eventId: 2,
+        dueAt: checkedAt,
+        source: 'catchup',
+        periodKey: `live-final-catchup-2-${checkedAt.getTime()}`,
+        evidence: expect.objectContaining({
+          finalization: 'missing-v2-checkpoint',
+          finalizeEvent: true,
+        }),
+      }),
+    ]);
   });
 
   test('resolves picks and transfers to the same event checkpoint window', async () => {

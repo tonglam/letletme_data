@@ -75,6 +75,14 @@ async function cleanup(): Promise<void> {
     WHERE season_id = ${SEASON.seasonId} AND tournament_id = ${TOURNAMENT_ID}
   `;
   await sql`
+    DELETE FROM competition.entry_event_pick_heads
+    WHERE season_id = ${SEASON.seasonId} AND entry_id = ${ENTRY_ID}
+  `;
+  await sql`
+    DELETE FROM competition.entry_event_pick_repairs
+    WHERE season_id = ${SEASON.seasonId} AND entry_id = ${ENTRY_ID}
+  `;
+  await sql`
     DELETE FROM competition.tournaments
     WHERE season_id = ${SEASON.seasonId} AND tournament_id = ${TOURNAMENT_ID}
   `;

@@ -8,11 +8,10 @@ import { redisSingleton } from '../../src/cache/singleton';
 import type { EventLive } from '../../src/domain/event-lives';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import {
-  activateDataPublicationPointer,
-  prepareDataPublication,
-  stageDataPublication,
-} from '../../src/cache/data-publication';
-import { retireLiveSnapshotCache } from '../../src/cache/live-snapshot-cache';
+  entryLiveInputFromFplPicks,
+  publishEntryLiveInputV2,
+  publishLivePublicationV2,
+} from '../../src/cache/live-publication-v2';
 import { getDbClient } from '../../src/db/singleton';
 import {
   captureMyFplSnapshot,
@@ -41,7 +40,6 @@ const SNAPSHOT_DATE = '2026-08-23';
 // bounds regardless of when CI runs.
 const CAPTURE_NOW = new Date();
 const MANIFEST_KEY = myFplSnapshotRedisManifestKey(SEASON.seasonCode, EVENT_ID);
-const LIVE_PUBLICATION_ID = '00000000-0000-4000-8000-000000000209';
 
 const liveRows: EventLive[] = PLAYER_IDS.map((elementId, index) => ({
   eventId: EVENT_ID,
@@ -77,7 +75,7 @@ async function cleanup(): Promise<void> {
   `;
   await sql`
     DELETE FROM ops.dataset_publications
-    WHERE dataset = 'fpl:live'
+    WHERE dataset = 'redis:v2:fpl:live'
       AND season_id = ${SEASON.seasonId}
       AND event_id = ${EVENT_ID}
   `;
@@ -92,17 +90,27 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM competition.entry_event_transfers
     WHERE season_id = ${SEASON.seasonId}
-      AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+      AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
+  `;
+  await sql`
+    DELETE FROM competition.entry_event_pick_heads
+    WHERE season_id = ${SEASON.seasonId}
+      AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
+  `;
+  await sql`
+    DELETE FROM competition.entry_event_pick_repairs
+    WHERE season_id = ${SEASON.seasonId}
+      AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
   `;
   await sql`
     DELETE FROM competition.entry_event_picks
     WHERE season_id = ${SEASON.seasonId}
-      AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+      AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
   `;
   await sql`
     DELETE FROM competition.entry_event_results
     WHERE season_id = ${SEASON.seasonId}
-      AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+      AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
   `;
   await sql`
     DELETE FROM competition.entries
@@ -116,7 +124,7 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM fpl.players
     WHERE season_id = ${SEASON.seasonId}
-      AND element_id = ANY(${PLAYER_IDS}::integer[])
+      AND element_id = ANY(${sql.array(PLAYER_IDS)}::integer[])
   `;
   await sql`
     DELETE FROM fpl.events
@@ -131,7 +139,17 @@ async function cleanup(): Promise<void> {
     WHERE season_id = ${SEASON.seasonId} AND season_code = ${SEASON.seasonCode}
   `;
   const cache = await redisSingleton.getClient();
-  await retireLiveSnapshotCache(SEASON.seasonCode, EVENT_ID, cache);
+  for (const pattern of [
+    `llm:data:v2:fpl:live:${SEASON.seasonCode}:${EVENT_ID}:*`,
+    `llm:data:v2:fpl:entry-live:${SEASON.seasonCode}:${EVENT_ID}:*`,
+  ]) {
+    let cursor = '0';
+    do {
+      const [next, keys] = await cache.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = next;
+      if (keys.length > 0) await cache.unlink(...keys);
+    } while (cursor !== '0');
+  }
   await cache.unlink(MANIFEST_KEY);
 }
 
@@ -186,53 +204,14 @@ async function seedBase(): Promise<void> {
     FROM unnest(${PLAYER_IDS}::integer[])
       WITH ORDINALITY AS player(element_id, ordinality)
   `;
-  // The projector validates the durable PostgreSQL publication pointer before
-  // promoting a materialization head. Build the same immutable proof that the
-  // live publication path persists, then deliver it to Redis after the DB row
-  // is active so the fixture exercises the production ordering.
-  const prepared = prepareDataPublication({
-    dataset: 'fpl:live',
-    seasonCode: SEASON.seasonCode,
+  await publishLivePublicationV2({
+    season: SEASON.seasonCode,
     eventId: EVENT_ID,
-    revision: 1,
-    publicationId: LIVE_PUBLICATION_ID,
+    state: 'LIVE_ACTIVE',
     sourceCheckedAt: CAPTURE_NOW,
-    lastSuccessfulFetchAt: CAPTURE_NOW,
-    state: 'live',
-    items: [
-      { name: 'eventLive', value: liveRows },
-      { name: 'fixtures', value: [] },
-    ],
+    eventLives: liveRows,
+    fixtures: [],
   });
-  await sql`
-    INSERT INTO ops.dataset_publications (
-      publication_id, dataset, season_id, event_id, revision,
-      status, manifest, activated_at
-    )
-    VALUES (
-      ${LIVE_PUBLICATION_ID}::uuid, 'fpl:live', ${SEASON.seasonId}, ${EVENT_ID}, 1,
-      'active', ${JSON.stringify(prepared.manifest)}::jsonb, ${CAPTURE_NOW.toISOString()}::timestamptz
-    )
-  `;
-  await sql`
-    INSERT INTO ops.dataset_publication_items (
-      publication_id, item_name, payload, item_count, checksum
-    )
-    VALUES
-      (
-        ${LIVE_PUBLICATION_ID}::uuid, 'eventLive', ${JSON.stringify(liveRows)}::jsonb,
-        ${prepared.manifest.items.find((item) => item.name === 'eventLive')?.count ?? 0},
-        ${prepared.manifest.items.find((item) => item.name === 'eventLive')?.sha256 ?? ''}
-      ),
-      (
-        ${LIVE_PUBLICATION_ID}::uuid, 'fixtures', '[]'::jsonb,
-        ${prepared.manifest.items.find((item) => item.name === 'fixtures')?.count ?? 0},
-        ${prepared.manifest.items.find((item) => item.name === 'fixtures')?.sha256 ?? ''}
-      )
-  `;
-  await stageDataPublication(prepared);
-  const activated = await activateDataPublicationPointer(prepared.manifest);
-  expect(activated.status).toBe('published');
 }
 
 async function seedEntry(entryId: number, complete: boolean): Promise<void> {
@@ -278,13 +257,15 @@ async function seedEntryEventData(entryId: number): Promise<void> {
   await sql`
     INSERT INTO competition.entry_event_picks (
       season_id, entry_id, event_id, position, element_id, multiplier,
-      is_captain, is_vice_captain, transfers_cost, source_created_at, source_updated_at, event_team_id
+      is_captain, is_vice_captain, transfers, transfers_cost,
+      source_created_at, source_updated_at, event_team_id
     )
     SELECT
       ${SEASON.seasonId}, ${entryId}, ${EVENT_ID}, player.ordinality::smallint,
       player.element_id,
       CASE WHEN player.ordinality = 1 THEN 2 WHEN player.ordinality <= 11 THEN 1 ELSE 0 END::smallint,
       player.ordinality = 1, player.ordinality = 2,
+      CASE WHEN player.ordinality = 1 THEN 0 ELSE NULL END::integer,
       CASE WHEN player.ordinality = 1 THEN 0 ELSE NULL END::integer,
       ${CAPTURE_NOW.toISOString()}::timestamptz,
       ${CAPTURE_NOW.toISOString()}::timestamptz,
@@ -298,6 +279,37 @@ async function seedEntryEventData(entryId: number): Promise<void> {
         transfers_source_checked_at = ${CAPTURE_NOW.toISOString()}::timestamptz
     WHERE season_id = ${SEASON.seasonId} AND entry_id = ${entryId}
   `;
+  const entryInput = entryLiveInputFromFplPicks(
+    SEASON,
+    EVENT_ID,
+    entryId,
+    {
+      active_chip: null,
+      automatic_subs: [],
+      entry_history: {
+        event: EVENT_ID,
+        points: 67,
+        total_points: 67,
+        rank: 1,
+        overall_rank: 1_000,
+        bank: 10,
+        value: 1_000,
+        event_transfers: 0,
+        event_transfers_cost: 0,
+        points_on_bench: 0,
+      },
+      picks: EVENT_PICKS,
+    },
+    CAPTURE_NOW,
+  );
+  await publishEntryLiveInputV2({
+    season: SEASON.seasonCode,
+    eventId: EVENT_ID,
+    entryId,
+    input: entryInput,
+    sourceCheckedAt: CAPTURE_NOW,
+    generationFloor: 0,
+  });
 }
 
 beforeAll(async () => {

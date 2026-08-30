@@ -9,15 +9,22 @@ ownership, and cleanup guardrails are in [redis-contract.md](redis-contract.md).
 | --- | --- | ---: |
 | Core active manifest | `llm:data:fpl:core:{season}:active` | no expiry |
 | Core active items | `llm:data:fpl:core:{season}:{revision}:*` | no expiry |
-| Live active manifest | `llm:data:fpl:live:{season}:{event}:active` | no expiry |
-| Live active items | `llm:data:fpl:live:{season}:{event}:{revision}:*` | no expiry |
+| Live V2 current manifest | `llm:data:v2:fpl:live:{season}:{event}:active` | event validity + 48h after final |
+| Live V2 previous manifest | `llm:data:v2:fpl:live:{season}:{event}:previous` | 24 hours |
+| Live V2 immutable items | `llm:data:v2:fpl:live:{season}:{event}:{generation}:*` | active lifetime; 24h after replacement |
+| Entry Live V2 current manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:active` | event validity + 48h after final |
+| Entry Live V2 previous manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:previous` | 24 hours |
+| Entry Live V2 immutable input | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:{generation}:*` | active lifetime; 24h after replacement |
 | Unactivated publication staging | immutable item key | 15 minutes |
 | Replaced publication items | immutable item key | 24 hours |
 
 Core items are `events`, `teams`, `players`, `phases`, `fixtures`, and
-`currentEventId`. Live items are `eventLives`, `fixtures`, `liveFixtures`, and
-`liveBonus`. A pointer swap is atomic and revision-aware; reads do not extend
-retention and a repeated publication ID is idempotent.
+`currentEventId`. Live V2 global items are `eventLive` and `fixtures`; entry
+items are the complete `input` envelope. A pointer swap is atomic and
+generation-aware; readers validate the manifest, item type, bytes, count, and
+SHA-256 before serving it. Reads do not extend retention and a repeated
+publication ID is idempotent. PostgreSQL is an asynchronous complete
+checkpoint/cold fallback, not a heartbeat write path.
 
 GraphQL owns its own bounded `llm:gql:*` query and security cache policy. Data
 does not scan or delete those keys.

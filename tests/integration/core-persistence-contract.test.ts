@@ -65,6 +65,8 @@ async function clearFixtureSeason(client: postgres.Sql): Promise<void> {
     await transaction`DELETE FROM competition.tournaments WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.entry_event_cup_results WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.entry_event_transfers WHERE season_id = 2026`;
+    await transaction`DELETE FROM competition.entry_event_pick_heads WHERE season_id IN (2025, 2026)`;
+    await transaction`DELETE FROM competition.entry_event_pick_repairs WHERE season_id IN (2025, 2026)`;
     await transaction`DELETE FROM competition.entry_event_picks WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.entry_event_results WHERE season_id = 2026`;
     await transaction`DELETE FROM competition.league_event_results WHERE season_id = 2026`;

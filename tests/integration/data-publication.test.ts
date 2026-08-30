@@ -16,17 +16,32 @@ import {
   type PublishDataRevisionInput,
 } from '../../src/cache/data-publication';
 import {
-  publishLiveSnapshotCache,
-  readLiveSnapshotCache,
-} from '../../src/cache/live-snapshot-cache';
+  liveV2Key,
+  entryLiveInputFromFplPicks,
+  entryLiveV2Key,
+  markLivePublicationCheckpointedV2,
+  publishEntryLiveFinalResultV2,
+  publishEntryLiveInputV2,
+  publishLivePublicationV2,
+  restoreLivePublicationV2Checkpoint,
+  readLiveCheckpointDesiredV2,
+  readEntryLiveInputV2,
+  readLivePublicationV2,
+  setLiveCheckpointDesiredV2,
+  touchLivePublicationV2,
+} from '../../src/cache/live-publication-v2';
+import { explicitSeasonRef } from '../../src/domain/fpl-season';
+import type { RawFPLEntryEventPicksResponse } from '../../src/clients/fpl';
 
 const CORE_SCOPE = { dataset: 'fpl:core' as const, seasonCode: '9899' };
 const LIVE_SCOPE = {
-  dataset: 'fpl:live' as const,
-  seasonCode: '9899',
+  season: '9899',
   eventId: 38,
 };
-
+const ENTRY_SCOPE = {
+  ...LIVE_SCOPE,
+  entryId: 6953,
+};
 const PUBLICATION_IDS = {
   one: '00000000-0000-4000-8000-000000000001',
   two: '00000000-0000-4000-8000-000000000002',
@@ -78,6 +93,32 @@ function input(
   };
 }
 
+function entryPicks(eventId: number): RawFPLEntryEventPicksResponse {
+  return {
+    active_chip: null,
+    automatic_subs: [],
+    entry_history: {
+      event: eventId,
+      points: 60,
+      total_points: 60,
+      rank: 100,
+      overall_rank: 1_000,
+      bank: 10,
+      value: 1_000,
+      event_transfers: 0,
+      event_transfers_cost: 0,
+      points_on_bench: 5,
+    },
+    picks: Array.from({ length: 15 }, (_, index) => ({
+      element: index + 1,
+      position: index + 1,
+      multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+      is_captain: index === 0,
+      is_vice_captain: index === 1,
+    })),
+  };
+}
+
 async function expectPermanent(redis: Redis, key: string): Promise<void> {
   expect(await redis.pttl(key)).toBe(-1);
 }
@@ -97,12 +138,14 @@ describe('immutable Redis publication', () => {
 
   beforeEach(async () => {
     await unlinkPattern(redis, 'llm:data:fpl:core:9899:*');
-    await unlinkPattern(redis, 'llm:data:fpl:live:9899:*');
+    await unlinkPattern(redis, 'llm:data:v2:fpl:live:9899:38:*');
+    await unlinkPattern(redis, 'llm:data:v2:fpl:entry-live:9899:38:6953:*');
   });
 
   afterAll(async () => {
     await unlinkPattern(redis, 'llm:data:fpl:core:9899:*');
-    await unlinkPattern(redis, 'llm:data:fpl:live:9899:*');
+    await unlinkPattern(redis, 'llm:data:v2:fpl:live:9899:38:*');
+    await unlinkPattern(redis, 'llm:data:v2:fpl:entry-live:9899:38:6953:*');
     await redis.quit();
   });
 
@@ -122,30 +165,357 @@ describe('immutable Redis publication', () => {
     for (const item of result.manifest.items) await expectPermanent(redis, item.key);
   });
 
-  test('publishes exactly one canonical two-item live contract', async () => {
-    const result = await publishLiveSnapshotCache(
-      {
-        season: LIVE_SCOPE.seasonCode,
-        eventId: LIVE_SCOPE.eventId,
-        state: 'live',
-        eventLives: [],
-        fixtures: [],
-      },
-      {
-        redis,
-        revision: 5,
-        publicationId: PUBLICATION_IDS.four,
-        sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
-      },
-    );
-
-    expect(result.manifest.items.map((item) => item.name)).toEqual(['eventLive', 'fixtures']);
-    expect(
-      await readLiveSnapshotCache(LIVE_SCOPE.seasonCode, LIVE_SCOPE.eventId, redis),
-    ).toMatchObject({
+  test('publishes V2 current and retains the previous complete publication', async () => {
+    const first = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
       eventLives: [],
       fixtures: [],
+      redis,
     });
+    const second = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:30.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: first.publication,
+      redis,
+    });
+
+    expect(first.publication.contractVersion).toBe('live-points-v2');
+    expect(second.publication.generation).toBeGreaterThan(first.publication.generation);
+    expect(second.previous?.publicationId).toBe(first.publication.publicationId);
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication.publicationId).toBe(
+      second.publication.publicationId,
+    );
+    expect(await redis.exists(liveV2Key(LIVE_SCOPE, 'previous'))).toBe(1);
+  });
+
+  test('coalesces a checkpoint window while advancing the desired generation', async () => {
+    const first = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    const second = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:30.000Z'),
+      eventLives: [
+        {
+          eventId: LIVE_SCOPE.eventId,
+          elementId: 1,
+          createdAt: new Date('2026-08-09T04:00:00.000Z'),
+          minutes: 1,
+          goalsScored: 0,
+          assists: 0,
+          cleanSheets: 0,
+          goalsConceded: 0,
+          ownGoals: 0,
+          penaltiesSaved: 0,
+          penaltiesMissed: 0,
+          yellowCards: 0,
+          redCards: 0,
+          saves: 0,
+          bonus: 0,
+          bps: 0,
+          defensiveContribution: 0,
+          starts: true,
+          expectedGoals: '0',
+          expectedAssists: '0',
+          expectedGoalInvolvements: '0',
+          expectedGoalsConceded: '0',
+          inDreamTeam: false,
+          totalPoints: 1,
+        },
+      ],
+      fixtures: [],
+      previous: first.publication,
+      redis,
+    });
+
+    await setLiveCheckpointDesiredV2(first.publication, '2026-08-09T04:00:00.000Z', redis);
+    await setLiveCheckpointDesiredV2(second.publication, '2026-08-09T04:00:30.000Z', redis);
+
+    await expect(readLiveCheckpointDesiredV2(LIVE_SCOPE, redis)).resolves.toMatchObject({
+      publicationId: second.publication.publicationId,
+      generation: second.publication.generation,
+      requestedAt: '2026-08-09T04:00:00.000Z',
+    });
+  });
+
+  test('a corrupt current item is rejected and the reader serves the previous publication', async () => {
+    const first = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    const second = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:30.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: first.publication,
+      redis,
+    });
+    await redis.set(second.publication.items.eventLive.key, JSON.stringify([{ broken: true }]));
+
+    const recovered = await readLivePublicationV2(LIVE_SCOPE, redis);
+    expect(recovered?.servedFrom).toBe('REDIS_PREVIOUS');
+    expect(recovered?.publication.publicationId).toBe(first.publication.publicationId);
+  });
+
+  test('a corrupt current pointer does not block the next complete publication', async () => {
+    const first = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    await redis.set(liveV2Key(LIVE_SCOPE, 'active'), 'not-json');
+
+    const recovered = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:30.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: first.publication,
+      redis,
+    });
+
+    expect(recovered.published).toBe(true);
+    expect(recovered.publication.generation).toBeGreaterThan(first.publication.generation);
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication.publicationId).toBe(
+      recovered.publication.publicationId,
+    );
+  });
+
+  test('rebuild-current restores a corrupted current item at the checkpoint generation', async () => {
+    const published = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    await redis.set(published.publication.items.eventLive.key, '{"corrupt":true}');
+
+    const restored = await restoreLivePublicationV2Checkpoint({
+      checkpoint: {
+        publication: published.publication,
+        eventLives: [],
+        fixtures: [],
+        servedFrom: 'POSTGRES_CHECKPOINT',
+      },
+      redis,
+    });
+
+    expect(restored.published).toBe(true);
+    expect(restored.publication.publicationId).toBe(published.publication.publicationId);
+    expect(restored.publication.generation).toBe(published.publication.generation);
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.servedFrom).toBe('REDIS_CURRENT');
+  });
+
+  test('durable FINAL restore replaces a conflicting Redis FINAL at the same scope', async () => {
+    const durableFinal = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+
+    await redis.del(liveV2Key(LIVE_SCOPE, 'active'));
+    const conflictingFinal = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:01:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    expect(conflictingFinal.published).toBe(true);
+    expect(conflictingFinal.publication.publicationId).not.toBe(
+      durableFinal.publication.publicationId,
+    );
+
+    const restored = await restoreLivePublicationV2Checkpoint({
+      checkpoint: {
+        publication: durableFinal.publication,
+        eventLives: [],
+        fixtures: [],
+        servedFrom: 'POSTGRES_CHECKPOINT',
+      },
+      redis,
+    });
+
+    expect(restored.published).toBe(true);
+    expect(restored.publication.publicationId).toBe(durableFinal.publication.publicationId);
+    expect(restored.publication.generation).toBe(durableFinal.publication.generation);
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication).toMatchObject({
+      publicationId: durableFinal.publication.publicationId,
+      generation: durableFinal.publication.generation,
+      state: 'FINALIZED',
+    });
+    expect(await redis.exists(conflictingFinal.publication.items.eventLive.key)).toBe(0);
+    expect(await redis.exists(`${conflictingFinal.publication.items.eventLive.key}:meta`)).toBe(0);
+    expect(await redis.exists(conflictingFinal.publication.items.fixtures.key)).toBe(0);
+    expect(await redis.exists(`${conflictingFinal.publication.items.fixtures.key}:meta`)).toBe(0);
+
+    // If the restored active payload is damaged, the rejected Redis FINAL
+    // must not reappear through the previous fallback pointer.
+    await redis.del(durableFinal.publication.items.eventLive.key);
+    const afterRestoreDamage = await readLivePublicationV2(LIVE_SCOPE, redis);
+    expect(afterRestoreDamage).toBeNull();
+    expect(afterRestoreDamage?.publication.publicationId).not.toBe(
+      conflictingFinal.publication.publicationId,
+    );
+  });
+
+  test('a finalized publication cannot be superseded by a provisional candidate, even if an item is corrupt', async () => {
+    const finalized = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    await redis.set(finalized.publication.items.eventLive.key, '{"corrupt":true}');
+
+    const provisional = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:30.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: finalized.publication,
+      redis,
+    });
+
+    expect(provisional.published).toBe(false);
+    expect(provisional.publication.publicationId).toBe(finalized.publication.publicationId);
+    expect(JSON.parse((await redis.get(liveV2Key(LIVE_SCOPE, 'active'))) ?? '{}')).toMatchObject({
+      state: 'FINALIZED',
+      publicationId: finalized.publication.publicationId,
+    });
+  });
+
+  test('a newer complete FINALIZED candidate repairs a corrupt final pointer', async () => {
+    const finalized = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    await redis.set(finalized.publication.items.eventLive.key, '{"corrupt":true}');
+
+    const repaired = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:30.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: finalized.publication,
+      redis,
+    });
+
+    expect(repaired.published).toBe(true);
+    expect(repaired.publication.generation).toBeGreaterThan(finalized.publication.generation);
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication).toMatchObject({
+      publicationId: repaired.publication.publicationId,
+      state: 'FINALIZED',
+    });
+  });
+
+  test('finalized manifest retention survives heartbeat and checkpoint CAS updates', async () => {
+    const finalized = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    const initialTtl = await redis.pttl(liveV2Key(LIVE_SCOPE, 'active'));
+    expect(initialTtl).toBeGreaterThan(0);
+
+    await touchLivePublicationV2(
+      finalized.publication,
+      '2026-08-09T04:00:30.000Z',
+      '2026-08-09T04:01:00.000Z',
+      redis,
+    );
+    const touchedTtl = await redis.pttl(liveV2Key(LIVE_SCOPE, 'active'));
+    expect(touchedTtl).toBeGreaterThan(0);
+    expect(touchedTtl).toBeLessThanOrEqual(initialTtl);
+
+    await markLivePublicationCheckpointedV2(
+      finalized.publication,
+      '2026-08-09T04:01:00.000Z',
+      redis,
+    );
+    const checkpointedTtl = await redis.pttl(liveV2Key(LIVE_SCOPE, 'active'));
+    expect(checkpointedTtl).toBeGreaterThan(0);
+    expect(checkpointedTtl).toBeLessThanOrEqual(touchedTtl);
+  });
+
+  test('a finalized entry input cannot be superseded by a provisional picks refresh', async () => {
+    const provisionalInput = entryLiveInputFromFplPicks(
+      explicitSeasonRef(ENTRY_SCOPE.season),
+      ENTRY_SCOPE.eventId,
+      ENTRY_SCOPE.entryId,
+      entryPicks(ENTRY_SCOPE.eventId),
+      '2026-08-09T04:00:00.000Z',
+    );
+    await publishEntryLiveInputV2({
+      ...ENTRY_SCOPE,
+      input: provisionalInput,
+      sourceCheckedAt: '2026-08-09T04:00:00.000Z',
+      generationFloor: 0,
+      redis,
+    });
+    const finalized = await publishEntryLiveFinalResultV2({
+      ...ENTRY_SCOPE,
+      sourceCheckedAt: '2026-08-09T04:01:00.000Z',
+      dataCheckedAt: '2026-08-09T04:01:00.000Z',
+      finalResult: {
+        score: { eventPoints: 62, totalPoints: 1_234 },
+        picks: provisionalInput.picksBase.picks,
+        automaticSubs: [],
+      },
+      redis,
+    });
+
+    expect(finalized.publication.state).toBe('FINAL');
+    const downgraded = await publishEntryLiveInputV2({
+      ...ENTRY_SCOPE,
+      input: provisionalInput,
+      sourceCheckedAt: '2026-08-09T04:02:00.000Z',
+      generationFloor: 0,
+      redis,
+    });
+
+    expect(downgraded.published).toBe(false);
+    expect(downgraded.publication.state).toBe('FINAL');
+    expect((await readEntryLiveInputV2(ENTRY_SCOPE, redis))?.publication.state).toBe('FINAL');
+    expect(await redis.exists(entryLiveV2Key(ENTRY_SCOPE, 'previous'))).toBe(1);
   });
 
   test('a crash after staging leaves the prior revision active and the stage bounded', async () => {
@@ -244,23 +614,13 @@ describe('immutable Redis publication', () => {
 
   test('retirement removes the pointer and gives every former active item a bounded TTL', async () => {
     const published = await publishDataRevision(
-      {
-        ...LIVE_SCOPE,
-        revision: 1,
-        publicationId: PUBLICATION_IDS.one,
-        sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
-        state: 'settled',
-        items: [
-          { name: 'eventLive', value: [{ elementId: 1 }] },
-          { name: 'fixtures', value: [] },
-        ],
-      },
+      input(1, PUBLICATION_IDS.one, '2026-08-09T01:00:00.000Z'),
       { redis },
     );
 
-    const retired = await retireActiveDataPublication(LIVE_SCOPE, redis);
+    const retired = await retireActiveDataPublication(CORE_SCOPE, redis);
     expect(retired?.publicationId).toBe(PUBLICATION_IDS.one);
-    expect(await redis.exists(activeDataPublicationKey(LIVE_SCOPE))).toBe(0);
+    expect(await redis.exists(activeDataPublicationKey(CORE_SCOPE))).toBe(0);
     for (const item of published.manifest.items) {
       await expectBoundedTtl(redis, item.key, DATA_PUBLICATION_RETIRED_TTL_MS);
     }

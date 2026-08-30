@@ -1,14 +1,11 @@
 import { Elysia, t } from 'elysia';
 
-import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
+import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
-import {
-  liveLifecycleStatusRepository,
-  managerScoreCheckpointRepository,
-} from '../repositories/live-window';
-import { syncOperationsRepository } from '../repositories/sync-operations';
+import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { seasonRepository } from '../repositories/seasons';
+import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 
 export function formatOperationalTimestamp(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -34,61 +31,44 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
       return { success: false, code: 'LIVE_EVENT_NOT_FOUND' };
     }
 
-    const [fixtures, lifecycle, redisRead, postgresPublicationRead, managerRead] =
-      await Promise.all([
-        fixtureRepository.findByEvent(season, event.id),
-        liveLifecycleStatusRepository.findByEventId(season, event.id),
-        (async () => {
-          try {
-            return { value: await readLiveSnapshotCache(season.seasonCode, event.id), error: null };
-          } catch (error) {
-            return {
-              value: null,
-              error: error instanceof Error ? error.name : 'UNKNOWN',
-            };
-          }
-        })(),
-        (async () => {
-          try {
-            return {
-              value: await syncOperationsRepository.findActiveLivePublicationEvidence(
-                season,
-                event.id,
-              ),
-              error: null,
-            };
-          } catch (error) {
-            return {
-              value: null,
-              error: error instanceof Error ? error.name : 'UNKNOWN',
-            };
-          }
-        })(),
-        (async () => {
-          try {
-            return {
-              value: await managerScoreCheckpointRepository.findCoverageByEvent(season, event.id),
-              error: null,
-            };
-          } catch (error) {
-            return {
-              value: null,
-              error: error instanceof Error ? error.name : 'UNKNOWN',
-            };
-          }
-        })(),
-      ]);
+    const [fixtures, lifecycle, redisRead] = await Promise.all([
+      fixtureRepository.findByEvent(season, event.id),
+      liveLifecycleStatusRepository.findByEventId(season, event.id),
+      (async () => {
+        try {
+          return {
+            value: await readLivePublicationV2({ season: season.seasonCode, eventId: event.id }),
+            error: null,
+          };
+        } catch (error) {
+          return {
+            value: null,
+            error: error instanceof Error ? error.name : 'UNKNOWN',
+          };
+        }
+      })(),
+    ]);
     const cachedPublication = redisRead.value;
-    const postgresPublication = postgresPublicationRead.value;
-    const selectedPublication = cachedPublication ?? postgresPublication;
-    const selectedSource = cachedPublication ? 'REDIS' : postgresPublication ? 'POSTGRES' : null;
+    let checkpointRead: Awaited<ReturnType<typeof readLivePublicationV2Checkpoint>> = null;
+    let checkpointProbeError: string | null = null;
+    if (!cachedPublication) {
+      try {
+        checkpointRead = await readLivePublicationV2Checkpoint(season, event.id);
+      } catch (error) {
+        // Keep a dependency failure distinct from an empty checkpoint. The
+        // operational response is used to decide whether the PostgreSQL
+        // fallback is unavailable or simply has no durable revision.
+        checkpointProbeError = error instanceof Error ? error.name : 'UNKNOWN';
+      }
+    }
+    const selectedPublication =
+      cachedPublication?.publication ?? checkpointRead?.publication ?? null;
+    const selectedSource = cachedPublication?.servedFrom ?? checkpointRead?.servedFrom ?? null;
     const finishedFixtures = fixtures.filter(
       (fixture) => fixture.finished || fixture.finishedProvisional,
     ).length;
-    const publishedFixtureCount =
-      selectedPublication?.manifest.items.find((item) => item.name === 'fixtures')?.count ?? null;
-    const publishedEventLiveCount =
-      selectedPublication?.manifest.items.find((item) => item.name === 'eventLive')?.count ?? null;
+    const publishedFixtureCount = selectedPublication?.items.fixtures.count ?? null;
+    const publishedEventLiveCount = selectedPublication?.items.eventLive.count ?? null;
 
     return {
       success: true,
@@ -108,38 +88,40 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         : null,
       publication: selectedPublication
         ? {
-            revision: String(selectedPublication.manifest.revision),
-            publicationId: selectedPublication.manifest.publicationId,
-            state: selectedPublication.manifest.state,
-            sourceCheckedAt: selectedPublication.manifest.sourceCheckedAt,
-            lastSuccessfulFetchAt:
-              selectedPublication.manifest.lastSuccessfulFetchAt ??
-              selectedPublication.manifest.sourceCheckedAt,
+            generation: selectedPublication.generation,
+            publicationId: selectedPublication.publicationId,
+            state: selectedPublication.state,
+            sourceCheckedAt: selectedPublication.sourceCheckedAt,
+            publishedAt: selectedPublication.publishedAt,
+            checkpointedAt: selectedPublication.checkpointedAt,
             source: selectedSource,
             fixtureCount: publishedFixtureCount,
-            eventLiveCount: cachedPublication?.eventLives.length ?? publishedEventLiveCount,
+            eventLiveCount:
+              cachedPublication?.eventLives.length ??
+              checkpointRead?.eventLives.length ??
+              publishedEventLiveCount,
           }
         : null,
       coverage: {
         fixtures: { finished: finishedFixtures, total: fixtures.length },
-        publication: selectedPublication ? 'AVAILABLE' : 'NO_NEW_REVISION',
+        publication: selectedPublication
+          ? 'AVAILABLE'
+          : checkpointProbeError
+            ? 'UNAVAILABLE'
+            : 'NO_NEW_REVISION',
         fallback: {
           redis: redisRead.error ? 'UNAVAILABLE' : cachedPublication ? 'AVAILABLE' : 'EMPTY',
-          postgres: postgresPublicationRead.error
-            ? 'UNAVAILABLE'
-            : postgresPublication
+          // Avoid an extra PostgreSQL probe on the healthy Redis path, but do
+          // not misreport that unprobed fallback as an empty checkpoint.
+          postgres: cachedPublication
+            ? 'NOT_CHECKED'
+            : checkpointRead
               ? 'AVAILABLE'
-              : 'EMPTY',
+              : checkpointProbeError
+                ? 'UNAVAILABLE'
+                : 'EMPTY',
           selected: selectedSource ?? 'NONE',
         },
-        manager: managerRead.value
-          ? {
-              checkpointRows: managerRead.value.checkpointRows,
-              scopes: managerRead.value.scopes,
-              latestCheckedAt: formatOperationalTimestamp(managerRead.value.latestCheckedAt),
-            }
-          : null,
-        managerState: managerRead.error ? 'UNAVAILABLE' : managerRead.value ? 'AVAILABLE' : 'EMPTY',
       },
       timestamp: new Date().toISOString(),
     };

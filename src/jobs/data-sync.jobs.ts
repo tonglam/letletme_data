@@ -7,14 +7,11 @@ import {
   enqueuePlayerPricesSyncJob,
 } from './data-sync-enqueue';
 import {
-  PLAYER_STATS_ACTIVE_CRON_PATTERN,
   PLAYER_PRICES_REPLAY_CRON_PATTERN,
   PLAYER_STATS_CRON_PATTERN,
 } from '../domain/job-schedules';
-import { decideLiveLifecycle } from '../services/live-lifecycle-orchestrator';
 import { resolvePlayerSyncEvent } from '../services/player-sync-event.service';
 import { seasonRepository } from '../repositories/seasons';
-import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { CRON_TIMEZONE, formatCronDateKey } from '../utils/timezone';
@@ -39,45 +36,6 @@ export function registerDataSyncJobs(app: Elysia) {
               const season = await seasonRepository.findCurrent();
               const job = await enqueueCoreSnapshotJob(season, 'cron');
               logInfo('Core snapshot job enqueued via cron', { jobId: job.id });
-            });
-          } catch {
-            // Failure details are already emitted by runTrackedJob.
-          }
-        },
-      }),
-    )
-    .use(
-      cron({
-        name: 'player-stats-active-sync',
-        pattern: PLAYER_STATS_ACTIVE_CRON_PATTERN,
-        timezone: CRON_TIMEZONE,
-        async run() {
-          try {
-            await executeTrackedCron('player-stats-active-sync', async () => {
-              if (isStandaloneSchedulerEnabled()) return;
-              const season = await seasonRepository.findCurrent();
-              const syncEvent = await resolvePlayerSyncEvent(season);
-              if (!syncEvent || syncEvent.phase !== 'current') return;
-
-              const fixtures = await fixtureRepository.findByEvent(season, syncEvent.event.id);
-              const decision = decideLiveLifecycle(syncEvent.event, fixtures);
-              const liveWindow =
-                decision.state === 'LIVE_ACTIVE' || decision.state === 'DAY_SETTLING';
-              const now = new Date();
-              if (!liveWindow && now.getUTCMinutes() % 5 !== 0) return;
-
-              const bucket = Math.floor(now.getTime() / 60_000);
-              const job = await enqueuePlayerStatsSyncJob(season, 'cron', {
-                eventId: syncEvent.event.id,
-                jobId: `player-stats-e${syncEvent.event.id}-m${bucket}`,
-                removeOnSettle: true,
-              });
-              logInfo('Player stats cadence job enqueued', {
-                jobId: job.id,
-                eventId: syncEvent.event.id,
-                state: decision.state,
-                cadence: liveWindow ? '1m' : '5m',
-              });
             });
           } catch {
             // Failure details are already emitted by runTrackedJob.

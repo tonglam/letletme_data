@@ -96,11 +96,97 @@ release_sha_for_image() {
   fi
 }
 
+release_sha_for_container() {
+  local container_id=${1:-}
+  local release_sha container_env_release_sha
+  [[ -n "$container_id" ]] || {
+    printf '%s\n' unknown
+    return 0
+  }
+  release_sha=$(docker inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$container_id" 2>/dev/null || true)
+  if [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "$release_sha"
+    return 0
+  fi
+  # Local images may not carry OCI labels, but every runtime started by the
+  # compose contract receives DEPLOY_SHA. Read only that controlled dimension;
+  # never dump the complete container environment into deploy logs.
+  container_env_release_sha=$(docker inspect \
+    --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" \
+    2>/dev/null | awk -F= '$1 == "DEPLOY_SHA" { print substr($0, index($0, "=") + 1); exit }' || true)
+  if [[ "$container_env_release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "$container_env_release_sha"
+    return 0
+  fi
+  echo 'running container has no valid exact release identity; rollback is ineligible' >&2
+  printf '%s\n' unknown
+}
+
+rollback_runtime_is_eligible() {
+  local container_id=${1:-}
+  local previous_image=${2:-}
+  local previous_revision=${3:-}
+  local previous_release_sha=${4:-unknown}
+  local previous_image_id=${5:-}
+  local container_image_id container_release_sha container_state container_health
+  [[ -n "$container_id" && -n "$previous_image" ]] || {
+    echo 'rollback target is ineligible: API container or image is missing' >&2
+    return 1
+  }
+  [[ "$previous_release_sha" =~ ^[0-9a-f]{40}$ ]] || {
+    echo 'rollback target is ineligible: image release identity is invalid' >&2
+    return 1
+  }
+  [[ "$previous_revision" = "$previous_release_sha" ]] || {
+    echo 'rollback target is ineligible: checkout and image revisions differ' >&2
+    return 1
+  }
+  if [[ -z "$previous_image_id" ]]; then
+    previous_image_id=$(docker image inspect --format '{{.Id}}' "$previous_image" 2>/dev/null || true)
+  fi
+  container_image_id=$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)
+  container_release_sha=$(release_sha_for_container "$container_id")
+  container_state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+  container_health=$(docker inspect \
+    --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+    "$container_id" 2>/dev/null || true)
+  [[ -n "$previous_image_id" && "$container_image_id" = "$previous_image_id" && \
+    "$container_release_sha" = "$previous_release_sha" ]] || {
+    echo 'rollback target is ineligible: immutable container image identity is inconsistent' >&2
+    return 1
+  }
+  [[ "$container_state" = running && "$container_health" = healthy ]] || {
+    echo 'rollback target is ineligible: API container is not running and healthy' >&2
+    return 1
+  }
+  if ! docker exec \
+    -e "EXPECTED_DEPLOY_SHA=$previous_release_sha" \
+    "$container_id" bun -e '
+      const expected = process.env.EXPECTED_DEPLOY_SHA;
+      const response = await fetch("http://127.0.0.1:3000/health/deploy", {
+        signal: AbortSignal.timeout(5000),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload?.success !== true ||
+          payload?.status !== "deploy_ready" || payload?.deploySha !== expected) {
+        process.exit(1);
+      }
+    ' >/dev/null 2>&1; then
+    echo 'rollback target is ineligible: strict deploy health or release identity failed' >&2
+    return 1
+  fi
+  echo "rollback target eligible at $previous_release_sha"
+}
+
 restore_runtime_services() {
   local previous_image=${1:-}
   local previous_release_sha=${2:-unknown}
   local previous_runner_release_sha=${3:-unknown}
   local previous_media_present=${4:-auto}
+  local previous_image_id=${5:-}
+  local resolved_image_id
   [[ -n "$previous_image" ]] || return 1
   if [[ ! "$previous_release_sha" =~ ^[0-9a-f]{40}$ ]]; then
     previous_release_sha=unknown
@@ -108,6 +194,22 @@ restore_runtime_services() {
   if [[ "$previous_runner_release_sha" != unknown && \
     ! "$previous_runner_release_sha" =~ ^[0-9a-f]{7,128}$ ]]; then
     previous_runner_release_sha=unknown
+  fi
+  if [[ -n "$previous_image_id" ]]; then
+    resolved_image_id=$(docker image inspect --format '{{.Id}}' "$previous_image" 2>/dev/null || true)
+    if [[ "$resolved_image_id" != "$previous_image_id" ]]; then
+      # A local build may have moved a mutable tag to the new image. Restore
+      # that tag to the exact old image ID before Compose recreates services;
+      # digest references are immutable and must never be retagged.
+      if [[ "$previous_image" == *@sha256:* ]]; then
+        echo 'rollback image reference no longer resolves to its captured immutable image' >&2
+        return 1
+      fi
+      docker tag "$previous_image_id" "$previous_image" || {
+        echo 'could not repin the previous local image tag to its captured image ID' >&2
+        return 1
+      }
+    fi
   fi
   (
     export APP_IMAGE="$previous_image"
@@ -131,7 +233,13 @@ restore_last_known_healthy_if_ledger_unchanged() {
   local previous_release_sha=${4:-unknown}
   local previous_runner_release_sha=${5:-unknown}
   local previous_media_present=${6:-auto}
+  local rollback_eligible=${7:-false}
+  local previous_image_id=${8:-}
   local ledger_after
+  if [[ "$rollback_eligible" != true ]]; then
+    echo 'rollback target was not proven healthy before deployment; forward-only recovery required' >&2
+    return 1
+  fi
   [[ -n "$previous_image" && -n "$ledger_before" ]] || return 1
   ledger_after=$(migration_ledger_fingerprint 2>/dev/null || true)
   if [[ -n "$ledger_after" && "$ledger_after" = "$ledger_before" ]]; then
@@ -141,7 +249,7 @@ restore_last_known_healthy_if_ledger_unchanged() {
     fi
     restore_runtime_services \
       "$previous_image" "$previous_release_sha" "$previous_runner_release_sha" \
-      "$previous_media_present"
+      "$previous_media_present" "$previous_image_id"
     return 0
   fi
   echo 'migration ledger changed or could not be proven unchanged; forward-only recovery required' >&2

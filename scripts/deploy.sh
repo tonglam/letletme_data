@@ -65,14 +65,37 @@ load_backup_settings() {
   export DATABASE_BACKUP_DIR DATABASE_BACKUP_KEEP DATABASE_BACKUP_PG_MAJOR
 }
 
+load_v2_seed_scope() {
+  local value
+  if [[ -z "${LIVE_POINTS_V2_SEED_SEASON:-}" ]]; then
+    value=$(read_env_setting LIVE_POINTS_V2_SEED_SEASON "$ENV_FILE")
+    LIVE_POINTS_V2_SEED_SEASON=$value
+  fi
+  if [[ -z "${LIVE_POINTS_V2_SEED_EVENT_ID:-}" ]]; then
+    value=$(read_env_setting LIVE_POINTS_V2_SEED_EVENT_ID "$ENV_FILE")
+    LIVE_POINTS_V2_SEED_EVENT_ID=$value
+  fi
+  if ! [[ "${LIVE_POINTS_V2_SEED_SEASON:-}" =~ ^[0-9]{4}$ ]]; then
+    log_error "LIVE_POINTS_V2_SEED_SEASON must be YYYY"
+    return 1
+  fi
+  if ! [[ "${LIVE_POINTS_V2_SEED_EVENT_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer"
+    return 1
+  fi
+  export LIVE_POINTS_V2_SEED_SEASON LIVE_POINTS_V2_SEED_EVENT_ID
+}
+
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
 DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
+DEPLOY_OLD_IMAGE_ID=''
 DEPLOY_OLD_REVISION=''
 DEPLOY_OLD_RELEASE_SHA=unknown
 DEPLOY_OLD_RUNNER_RELEASE_SHA=unknown
+DEPLOY_ROLLBACK_ELIGIBLE=false
 DEPLOY_LEDGER_BEFORE=''
 DEPLOY_RUNNER_UPDATED=false
 DEPLOY_RUNNER_PROBE_SUCCEEDED=false
@@ -134,6 +157,10 @@ source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
 
 restore_stopped_services() {
   local restored=false
+  if [[ "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
+    log_error "Previous runtime was not proven rollback-eligible; leaving services stopped for forward recovery."
+    return 1
+  fi
   log_warn "Restoring existing services because migration has not started"
   # The API container is deliberately removed after it stops so a delayed
   # listener cannot retain port 3000.  `compose start` cannot recreate that
@@ -142,7 +169,7 @@ restore_stopped_services() {
   if [[ -n "${DEPLOY_OLD_IMAGE:-}" ]]; then
     if restore_runtime_services \
       "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
-      "$DEPLOY_OLD_MEDIA_PRESENT"; then
+      "$DEPLOY_OLD_MEDIA_PRESENT" "$DEPLOY_OLD_IMAGE_ID"; then
       restored=true
     else
       log_error "Last-known-healthy services could not be restored; manual recovery is required."
@@ -174,8 +201,9 @@ deploy() {
         if ! restore_last_known_healthy_if_ledger_unchanged \
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \
           "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
-          "$DEPLOY_OLD_MEDIA_PRESENT"; then
-          log_error "Migration changed or obscured the ledger; leaving services stopped for forward recovery."
+          "$DEPLOY_OLD_MEDIA_PRESENT" "$DEPLOY_ROLLBACK_ELIGIBLE" \
+          "$DEPLOY_OLD_IMAGE_ID"; then
+          log_error "Rollback eligibility or migration ledger proof failed; leaving the deployment in forward recovery."
         fi
       elif [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true ]]; then
         restore_stopped_services || true
@@ -187,20 +215,41 @@ deploy() {
   trap deploy_on_exit EXIT
   require_compose
   require_files
+  # Validate the immutable V2 seed scope while services are still serving the
+  # old release. A missing deployment variable must never stop a healthy
+  # stack and discover the error only after migration has started.
+  if ! load_v2_seed_scope; then
+    log_error "Live Points V2 seed scope is invalid; services were not stopped."
+    exit 1
+  fi
   if ! DATABASE_CONNECTION_BUDGET="${DATABASE_CONNECTION_BUDGET:-15}" \
     COMPOSE_BIN="$COMPOSE_BIN" COMPOSE_FILE="$COMPOSE_FILE" PROJECT_DIR="$PROJECT_DIR" \
     "${PROJECT_DIR}/scripts/check-database-pool-budget.sh"; then
     log_error "Compose runtime pool budget or worker inventory check failed; services were not stopped."
     exit 1
   fi
-  DEPLOY_OLD_REVISION=$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf '')
   DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat \
     /home/workspace/letletme-grok-runner/current.release 2>/dev/null || printf unknown)
   DEPLOY_OLD_RUNNER_RELEASE_SHA=${DEPLOY_OLD_RUNNER_RELEASE_SHA:-unknown}
   old_container=$(compose ps -aq api | head -n 1)
   if [[ -n "$old_container" ]]; then
+    # Capture the image ID and release identity from the serving container
+    # before a local build can retag `letletme-data:local`. Never use the
+    # current checkout as the rollback revision: callers commonly check out
+    # the target commit before invoking this helper.
     DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$old_container")
-    DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_image "$DEPLOY_OLD_IMAGE")
+    DEPLOY_OLD_IMAGE_ID=$(docker inspect --format '{{.Image}}' "$old_container")
+    DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_container "$old_container")
+    DEPLOY_OLD_REVISION=''
+    if [[ "$DEPLOY_OLD_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+      resolved_old_revision=$(git -C "${PROJECT_DIR}" rev-parse \
+        --verify "${DEPLOY_OLD_RELEASE_SHA}^{commit}" 2>/dev/null || true)
+      if [[ "$resolved_old_revision" = "$DEPLOY_OLD_RELEASE_SHA" ]]; then
+        DEPLOY_OLD_REVISION=$resolved_old_revision
+      else
+        log_warn "Serving release ${DEPLOY_OLD_RELEASE_SHA} is not available in the local checkout; rollback is ineligible"
+      fi
+    fi
   fi
   old_media_container=$(compose ps -aq media-worker 2>/dev/null | head -n 1)
   if [[ -n "$old_media_container" ]]; then DEPLOY_OLD_MEDIA_PRESENT=true; fi
@@ -284,6 +333,12 @@ deploy() {
     exit 1
   fi
   log_info "Migration plan and queue quiescence passed before stopping services"
+  DEPLOY_ROLLBACK_ELIGIBLE=false
+  if rollback_runtime_is_eligible \
+    "$old_container" "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_REVISION" \
+    "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
+    DEPLOY_ROLLBACK_ELIGIBLE=true
+  fi
   log_info "Stopping services and waiting for workers to settle"
   DEPLOY_SERVICES_STOPPED=true
   if ! compose stop -t 45 api worker; then
@@ -379,6 +434,30 @@ deploy() {
   start_stage roleVerify
   if ! compose run --rm -T --interactive=false migration bun run db:verify-runtime-logins; then
     log_error "Runtime LOGIN verification failed; services remain stopped for a forward fix."
+    exit 1
+  fi
+  finish_stage
+  start_stage v2Seed
+  log_info "Seeding and verifying the Live Points V2 global and entry publications"
+  # The cutover seed is a one-shot operation: use the migration LOGIN's
+  # direct/session URL, while compose supplies the runtime database and Redis
+  # credentials to checkpoint services.
+  if ! compose run --rm -T --interactive=false \
+    -e "LIVE_POINTS_V2_SEED_DATABASE_URL=${migration_database_url}" \
+    -e LIVE_POINTS_SEED_CONFIRM=YES api \
+    bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
+    --season "$LIVE_POINTS_V2_SEED_SEASON" \
+    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
+    log_error "Live Points V2 seed failed; services remain stopped for a forward fix."
+    exit 1
+  fi
+  if ! compose run --rm -T --interactive=false \
+    api \
+    bun run verify:live-points-v2 -- \
+    --season "$LIVE_POINTS_V2_SEED_SEASON" \
+    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
+    --all-finalized; then
+    log_error "Live Points V2 verification failed; services remain stopped for a forward fix."
     exit 1
   fi
   finish_stage

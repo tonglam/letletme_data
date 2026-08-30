@@ -24,10 +24,7 @@ import {
 import { ValidationError } from '../utils/errors';
 import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
-import {
-  eventLiveManagerScoreService,
-  type EventLiveManagerScoreBatch,
-} from './event-live-manager-scores.service';
+import { eventLiveV2ScoreService, type EventLiveScoreBatch } from './event-live-v2-score.service';
 
 const MAX_H2H_PAGES = 100;
 
@@ -337,7 +334,7 @@ export function projectOfficialH2HEventLiveScores(
   snapshot: OfficialH2HSourceSnapshot,
   eventId: number,
   entryIds: ReadonlySet<number>,
-  batch: EventLiveManagerScoreBatch | null,
+  batch: EventLiveScoreBatch | null,
 ): OfficialH2HSourceSnapshot | null {
   if (
     !batch ||
@@ -1113,7 +1110,7 @@ export async function syncOfficialH2HTournament(
   const eventLiveBatch =
     requestedProvisionalEventId === null
       ? null
-      : await eventLiveManagerScoreService
+      : await eventLiveV2ScoreService
           .load(season, requestedProvisionalEventId, entryIds)
           .catch((error) => {
             logWarn('Official H2H event-live score batch unavailable', {
@@ -1153,7 +1150,7 @@ export async function syncOfficialH2HTournament(
           };
   const provisionalEventId = effectiveOptions.provisionalEventId ?? null;
   const checkedAt =
-    eventLiveSnapshot && eventLiveBatch ? new Date(eventLiveBatch.checkedAt) : new Date();
+    eventLiveSnapshot && eventLiveBatch ? new Date(eventLiveBatch.sourceCheckedAt) : new Date();
 
   if (reconcileEventId) {
     const localResults = await entryEventResultsRepository.findByEventAndEntryIds(
@@ -1186,7 +1183,7 @@ export async function syncOfficialH2HTournament(
             entryId,
             officialPoints,
             eventLivePoints: authoritativePoints,
-            eventLiveRevision: eventLiveBatch?.revision ?? null,
+            eventLiveRevision: eventLiveBatch?.scoreCoreRevision ?? null,
           });
         }
         if (authoritativePoints === null) continue;
@@ -1307,7 +1304,7 @@ export async function syncOfficialH2HTournament(
     standings: snapshot.standings.length,
     matches: snapshot.matches.length,
     scoreSource: eventLiveSnapshot ? 'FPL_EVENT_LIVE' : 'FPL_H2H_FINAL_OR_UNAVAILABLE',
-    scoreRevision: eventLiveBatch?.revision ?? null,
+    scoreRevision: eventLiveBatch?.scoreCoreRevision ?? null,
   });
   return {
     updatedGroups: published.groupRows,

@@ -45,8 +45,11 @@
     "db:bootstrap-runtime-login": "bun scripts/bootstrap-runtime-login.ts",
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
     "cache:publish-core": "bun scripts/publish-core-cache.ts",
+    "db:cutover-seed-live-points-v2": "bun scripts/seed-live-points-v2.ts",
+    "verify:live-points-v2": "bun scripts/verify-live-points-v2.ts",
     "contract:stage-week": "bun scripts/stage-graphql-contract-week.ts",
-    "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts"
+    "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts",
+    "ops:repair-live-points-v2": "bun scripts/repair-live-points-v2.ts"
   },
   "repository": {
     "type": "git",

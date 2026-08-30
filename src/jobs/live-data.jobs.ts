@@ -6,13 +6,10 @@ import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governa
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
-const LIVE_SNAPSHOT_PERSISTENCE_BUCKET_MS = 10 * 60_000;
-
 async function hasSupersedingPendingJob(
   queue: typeof liveDataQueue,
   season: FplSeasonRef,
   eventId: number,
-  persistEventLives: boolean,
   finalizeEvent: boolean,
 ): Promise<boolean> {
   try {
@@ -22,9 +19,7 @@ async function hasSupersedingPendingJob(
         job.name === LIVE_JOBS.LIVE_SNAPSHOT &&
         job.data.seasonId === season.seasonId &&
         job.data.eventId === eventId &&
-        (finalizeEvent
-          ? job.data.finalizeEvent === true
-          : !persistEventLives || job.data.persistEventLives === true),
+        (finalizeEvent ? job.data.finalizeEvent === true : job.data.finalizeEvent !== true),
     );
   } catch (error) {
     logError('Failed to check pending live-data jobs', error, {
@@ -40,27 +35,12 @@ export function liveSnapshotMinuteBucket(date: Date): string {
   return `${date.toISOString().slice(0, 16).replace(/\D/g, '')}${String(seconds).padStart(2, '0')}`;
 }
 
-export function liveSnapshotPersistenceJobId(eventId: number, date: Date): string {
-  const bucketStart = new Date(
-    Math.floor(date.getTime() / LIVE_SNAPSHOT_PERSISTENCE_BUCKET_MS) *
-      LIVE_SNAPSHOT_PERSISTENCE_BUCKET_MS,
-  );
-  return `live-snapshot-e${eventId}-periodic-${bucketStart
-    .toISOString()
-    .slice(0, 16)
-    .replace(/\D/g, '')}`;
-}
-
 export async function enqueueLiveActiveSnapshot(season: FplSeasonRef, eventId: number, now: Date) {
-  const periodicJobId = liveSnapshotPersistenceJobId(eventId, now);
-  const qualifiedPeriodicJobId = `${season.seasonCode}-${periodicJobId}`;
-  const periodicSnapshotExists = Boolean(await liveDataQueue.getJob(qualifiedPeriodicJobId));
-
-  return enqueueLiveSnapshot(season, eventId, 'cron', {
-    now,
-    persistEventLives: !periodicSnapshotExists,
-    ...(periodicSnapshotExists ? {} : { jobId: periodicJobId }),
-  });
+  // V2 publishes every valid source change to Redis. PostgreSQL checkpointing
+  // is decided by the publication service (first/boundary/final or at most
+  // once per ten minutes), so the scheduler must not manufacture a second
+  // periodic write lane.
+  return enqueueLiveSnapshot(season, eventId, 'cron', { now });
 }
 
 export async function enqueueLiveSnapshot(
@@ -68,7 +48,6 @@ export async function enqueueLiveSnapshot(
   eventId: number,
   source: LiveDataJobSource = 'cron',
   options: {
-    persistEventLives?: boolean;
     finalizeEvent?: boolean;
     now?: Date;
     jobId?: string;
@@ -80,7 +59,6 @@ export async function enqueueLiveSnapshot(
     reuseExisting?: boolean;
   } = {},
 ) {
-  const persistEventLives = options.persistEventLives ?? false;
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
   try {
     const queue = liveDataQueue;
@@ -96,7 +74,6 @@ export async function enqueueLiveSnapshot(
           jobId: explicitJobId,
           season: season.seasonCode,
           eventId,
-          persistEventLives,
         });
         return null;
       }
@@ -114,7 +91,6 @@ export async function enqueueLiveSnapshot(
           jobId: explicitJobId,
           season: season.seasonCode,
           eventId,
-          persistEventLives,
           state,
         });
         return options.reuseExisting ? existingExplicitJob : null;
@@ -122,18 +98,11 @@ export async function enqueueLiveSnapshot(
     }
     if (
       source === 'cron' &&
-      (await hasSupersedingPendingJob(
-        queue,
-        season,
-        eventId,
-        persistEventLives,
-        options.finalizeEvent === true,
-      ))
+      (await hasSupersedingPendingJob(queue, season, eventId, options.finalizeEvent === true))
     ) {
       logInfo('Live snapshot job already pending; skipping enqueue', {
         season: season.seasonCode,
         eventId,
-        persistEventLives,
       });
       return null;
     }
@@ -161,10 +130,9 @@ export async function enqueueLiveSnapshot(
       ...(options.freshnessWindowId === undefined
         ? {}
         : { freshnessWindowId: options.freshnessWindowId }),
-      persistEventLives,
       ...(options.finalizeEvent !== undefined ? { finalizeEvent: options.finalizeEvent } : {}),
     };
-    const suffix = persistEventLives ? 'persist' : 'cache';
+    const suffix = 'v2';
     const generatedJobId =
       source === 'cron'
         ? `live-snapshot-${season.seasonCode}-e${eventId}-${liveSnapshotMinuteBucket(options.now ?? new Date())}-${suffix}`
@@ -179,7 +147,6 @@ export async function enqueueLiveSnapshot(
       season: season.seasonCode,
       eventId,
       source,
-      persistEventLives,
       queue: queue.name,
     });
     return job;

@@ -1165,10 +1165,6 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     string,
     { periodKey: string; scopeKey: string; dueAt: Date }
   >();
-  const latestLivePicksPeriods = new Map<
-    string,
-    { periodKey: string; scopeKey: string; dueAt: Date }
-  >();
   const latestPostMatchPeriods: Array<{
     jobName: (typeof POST_MATCH_LATEST_AUTHORITATIVE_JOBS)[number];
     periodKey: string;
@@ -1225,25 +1221,6 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         jobName: definition.name,
       });
       continue;
-    }
-    if (definition.name === 'live-picks-refresh' && !isSchedulerDefinitionEnabled(definition)) {
-      // Do not reserve buckets while the dedicated lane is disabled. Existing
-      // pending buckets are coalesced to the newest target when the flag is
-      // enabled, so a rollout pause cannot create a historical burst.
-      continue;
-    }
-    if (definition.name === 'live-picks-refresh') {
-      const latestPlan = resolution.plans
-        .filter((plan) => plan.terminalStatus === undefined)
-        .sort((left, right) => left.dueAt.getTime() - right.dueAt.getTime())
-        .at(-1);
-      if (latestPlan) {
-        latestLivePicksPeriods.set(latestPlan.scopeKey, {
-          periodKey: latestPlan.periodKey,
-          scopeKey: latestPlan.scopeKey,
-          dueAt: latestPlan.dueAt,
-        });
-      }
     }
     if (
       UNDERSTAT_LATEST_AUTHORITATIVE_JOBS.includes(
@@ -1493,26 +1470,6 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       failed += 1;
       logError('Legacy price-change stale obligation coalescing failed', error, {
         jobName,
-        scopeKey: latest.scopeKey,
-        periodKey: latest.periodKey,
-      });
-    }
-  }
-
-  for (const latest of latestLivePicksPeriods.values()) {
-    try {
-      await supersedeSchedulerObligationsByDueAt({
-        jobName: 'live-picks-refresh',
-        scopeKey: latest.scopeKey,
-        beforeDueAt: latest.dueAt,
-        evidence: {
-          dataset: 'competition:live-entry-picks',
-          supersededByPeriodKey: latest.periodKey,
-        },
-      });
-    } catch (error) {
-      failed += 1;
-      logError('Live-picks stale obligation coalescing failed', error, {
         scopeKey: latest.scopeKey,
         periodKey: latest.periodKey,
       });

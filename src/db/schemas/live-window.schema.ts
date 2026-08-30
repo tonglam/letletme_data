@@ -24,7 +24,7 @@ export const liveLifecycleStatusInOps = ops.table(
     observedAt: timestamp('observed_at', { withTimezone: true, mode: 'date' }).notNull(),
     lastChangedAt: timestamp('last_changed_at', { withTimezone: true, mode: 'date' }).notNull(),
     nextRefreshAt: timestamp('next_refresh_at', { withTimezone: true, mode: 'date' }),
-    liveRevision: text('live_revision'),
+    generation: bigint('generation', { mode: 'number' }),
     publicationId: uuid('publication_id'),
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
@@ -45,6 +45,7 @@ export const liveLifecycleStatusInOps = ops.table(
         'FINALIZED'
       )`,
     ),
+    check('live_lifecycle_status_generation_valid', sql`generation IS NULL OR generation > 0`),
   ],
 );
 
