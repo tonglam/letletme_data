@@ -24,3 +24,10 @@
 - Use `$letletme-data-pipeline` for ingestion, scheduler/queue, persistence, migration, or publication work. Use `$letletme-stack-audit` when a symptom or contract crosses into GraphQL/Web/Mini/Ops, and `$letletme-release-acceptance` for an authorized end-to-end release.
 - Use `scripts/deploy.sh` for an authorized deployment. Process health is not acceptance: bind the immutable image/SHA, verify migration and queue gates, `/ready`, publication identity, and at least one representative consumer path.
 - Keep secrets in local environment files. Never print credentials, tokens, raw user identifiers, private payloads, or production connection strings.
+
+## Governance and review
+
+- Global routes in `.codex/global-skills.json` resolve through the versioned `/Users/tong/.codex` mount. If it is unavailable, stop and report the missing dependency.
+- Use `$gh-codex-review-loop` for PR work. A review may be skipped only after two consecutive explicit quota-limit responses for the unchanged head; record both responses and the exact SHA. This never waives CI, findings, or cleanup.
+- Every P0-P3 finding must be dispositioned and its thread resolved. Only a finding confined to tests/scripts gets the time exception: implement P0/P1, and explain plus resolve P2/P3 without implementation time. P2/P3 anywhere else must be actually fixed and verified.
+- After merge, clean only the exact corresponding worktree, local branch, and remote branch after verifying identity; leave unrelated WIP untouched.
