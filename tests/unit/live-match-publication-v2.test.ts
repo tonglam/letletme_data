@@ -3,17 +3,24 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 
 import {
   clearLiveMatchCheckpointDesiredV2,
+  LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES,
   LIVE_MATCH_MAX_FIXTURES,
   LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE,
   liveMatchActiveEventKey,
   liveMatchDeskKey,
   liveMatchDetailKey,
+  liveMatchDetailManifestKey,
+  promotePreviousLiveMatchV2,
   publishLiveMatchDeskV2,
   publishLiveMatchDetailV2,
   readLiveMatchCheckpointDesiredV2,
   readLiveMatchCheckpointLastAtV2,
   readLiveMatchDeskV2,
+  readLiveMatchDeskPointerV2,
   readLiveMatchDetailV2,
+  readLiveMatchDetailPointerV2,
+  restoreLiveMatchDeskCheckpointV2,
+  restoreLiveMatchDetailCheckpointV2,
   markLiveMatchDeskCheckpointedV2,
   setLiveMatchActiveEventV2,
   setLiveMatchCheckpointDesiredV2,
@@ -21,6 +28,7 @@ import {
   type MatchDeskPublication,
 } from '../../src/cache/live-match-publication-v2';
 import type { MatchDeskFixture, MatchFixtureDetail } from '../../src/services/live-match-v2';
+import { canonicalJson } from '../../src/utils/content-hash';
 
 const redis = new Redis({ host: '127.0.0.1', port: 6379, db: 15 });
 const scope = { season: '2627', eventId: 9876 } as const;
@@ -324,10 +332,10 @@ describe('Live Matches V2 Redis publications', () => {
     const oversized: MatchFixtureDetail[] = [
       {
         fixtureId: 401,
-        players: Array.from(
-          { length: LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE + 1 },
-          (_, index) => ({ ...template, id: 10_000 + index }),
-        ),
+        players: Array.from({ length: LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE + 1 }, (_, index) => ({
+          ...template,
+          id: 10_000 + index,
+        })),
       },
     ];
 
@@ -345,6 +353,56 @@ describe('Live Matches V2 Redis publications', () => {
     expect((await readLiveMatchDetailV2({ ...scope, redis }))?.publication.publicationId).toBe(
       current.publication.publicationId,
     );
+  });
+
+  test('rejects detail whose durable fixture envelope exceeds the total limit', async () => {
+    const desk = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const fixtures: MatchFixtureDetail[] = Array.from({ length: 9 }, (_, index) => ({
+      fixtureId: 500 + index,
+      players: [
+        {
+          id: 20_000 + index,
+          webName: 'x'.repeat(232_000),
+          position: 3,
+          teamId: 10,
+          totalPoints: 0,
+          stats: [],
+        },
+      ],
+    }));
+    const initialBytes = Buffer.byteLength(canonicalJson(fixtures), 'utf8');
+    const growth = LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES - initialBytes + 1;
+    const firstPlayer = fixtures[0]?.players[0];
+    if (!firstPlayer || growth <= 0) throw new Error('detail boundary fixture is invalid');
+    fixtures[0] = {
+      ...fixtures[0]!,
+      players: [{ ...firstPlayer, webName: `${firstPlayer.webName}${'x'.repeat(growth)}` }],
+    };
+    const itemBytes = fixtures.reduce(
+      (total, fixture) => total + Buffer.byteLength(canonicalJson(fixture.players), 'utf8'),
+      0,
+    );
+    expect(itemBytes).toBeLessThanOrEqual(LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES);
+    expect(Buffer.byteLength(canonicalJson(fixtures), 'utf8')).toBe(
+      LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES + 1,
+    );
+
+    await expect(
+      publishLiveMatchDetailV2({
+        ...scope,
+        observedDeskGeneration: desk.publication.generation,
+        fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+        fixtures,
+        sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+        redis,
+      }),
+    ).rejects.toMatchObject({ code: 'LIVE_MATCH_PAYLOAD_LIMIT_EXCEEDED' });
   });
 
   test('rotates a freshly validated active detail for a stale cold publisher', async () => {
@@ -428,6 +486,118 @@ describe('Live Matches V2 Redis publications', () => {
     expect(retained?.servedFrom).toBe('REDIS_PREVIOUS');
     expect(retained?.publication.publicationId).toBe(previous.publication.publicationId);
     expect(retained?.fixtures[0]?.players[0]?.stats[0]?.value).toBe(30);
+  });
+
+  test('CAS-promotes desk previous and retains the replaced current as previous', async () => {
+    const first = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const second = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      previous: await readLiveMatchDeskV2({ ...scope, redis }),
+      redis,
+    });
+
+    const result = await promotePreviousLiveMatchV2({ ...scope, kind: 'desk', redis });
+
+    expect(result.status).toBe('promoted');
+    expect(
+      (await readLiveMatchDeskPointerV2({ ...scope, redis }, 'active'))?.publication.publicationId,
+    ).toBe(first.publication.publicationId);
+    expect(
+      (await readLiveMatchDeskPointerV2({ ...scope, redis }, 'previous'))?.publication
+        .publicationId,
+    ).toBe(second.publication.publicationId);
+  });
+
+  test('never rolls a finalized desk back to previous', async () => {
+    await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const final = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'FINALIZED',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      previous: await readLiveMatchDeskV2({ ...scope, redis }),
+      redis,
+    });
+
+    expect(await promotePreviousLiveMatchV2({ ...scope, kind: 'desk', redis })).toMatchObject({
+      status: 'changed',
+      publication: null,
+    });
+    expect((await readLiveMatchDeskV2({ ...scope, redis }))?.publication.publicationId).toBe(
+      final.publication.publicationId,
+    );
+  });
+
+  test('restores the exact desk checkpoint identity after Redis current loss', async () => {
+    await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const checkpoint = await readLiveMatchDeskPointerV2({ ...scope, redis }, 'active');
+    if (!checkpoint) throw new Error('desk checkpoint fixture is missing');
+    await redis.del(
+      liveMatchDeskKey(scope, 'active'),
+      checkpoint.publication.desk.key,
+      `${checkpoint.publication.desk.key}:meta`,
+    );
+
+    const result = await restoreLiveMatchDeskCheckpointV2({ checkpoint, redis });
+
+    expect(result.published).toBe(true);
+    expect(result.publication.publicationId).toBe(checkpoint.publication.publicationId);
+    expect(result.publication.generation).toBe(checkpoint.publication.generation);
+  });
+
+  test('restores exact detail manifest and immutable item key from checkpoint', async () => {
+    const desk = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    await publishLiveMatchDetailV2({
+      ...scope,
+      observedDeskGeneration: desk.publication.generation,
+      fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(35),
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const checkpoint = await readLiveMatchDetailPointerV2({ ...scope, redis }, 'active');
+    const item = checkpoint?.publication.fixtures[0];
+    if (!checkpoint || !item) throw new Error('detail checkpoint fixture is missing');
+    await redis.del(
+      liveMatchDetailKey(scope, 'active'),
+      liveMatchDetailManifestKey(scope, checkpoint.publication.generation),
+      item.key,
+      `${item.key}:meta`,
+    );
+
+    const result = await restoreLiveMatchDetailCheckpointV2({ checkpoint, redis });
+    const restored = await readLiveMatchDetailPointerV2({ ...scope, redis }, 'active');
+
+    expect(result.published).toBe(true);
+    expect(result.publication.publicationId).toBe(checkpoint.publication.publicationId);
+    expect(restored?.publication.fixtures[0]?.key).toBe(item.key);
   });
 
   test('does not let a provisional detail publication supersede final detail', async () => {

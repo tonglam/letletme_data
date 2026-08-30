@@ -372,6 +372,15 @@ export async function syncLiveSnapshotV2(
               ? options.lifecycleState
               : nonFinalMatchLifecycleState,
           expectedNextCheckAt: options.expectedNextCheckAt,
+          publishedDesk:
+            early.result === null
+              ? undefined
+              : {
+                  publication: early.result.desk,
+                  fixtures: early.result.deskFixtures,
+                  changed: early.result.deskChanged,
+                  checkpointScheduled: early.result.deskCheckpointScheduled,
+                },
         });
         if (options.finalizeEvent && liveResult.status === 'rejected') throw liveResult.reason;
         return { result, error: null as unknown };
@@ -396,10 +405,15 @@ export async function syncLiveSnapshotV2(
       });
       return { result: null, error };
     });
-  const requireFinalMatchPublication = async (): Promise<void> => {
-    if (!options.finalizeEvent) return;
+  const settleMatchPublication = async (): Promise<void> => {
     const outcome = await matchPublicationOutcome;
-    if (outcome.error) throw outcome.error;
+    // Live Matches is a sibling publication: a provisional Match failure must
+    // not make an otherwise coherent Live Points publication unavailable. We
+    // still await the sibling so the sync job cannot report completion while
+    // Redis publication work is continuing in the background. At the final
+    // boundary both publications are exact durable obligations and therefore
+    // fail closed together.
+    if (options.finalizeEvent && outcome.error) throw outcome.error;
   };
 
   const durableRead = await durableReadPromise;
@@ -417,7 +431,7 @@ export async function syncLiveSnapshotV2(
     } else {
       // A failed durable read cannot prove that the row is absent. Keep the
       // immutable Redis FINAL in service and retry the durable read later.
-      await requireFinalMatchPublication();
+      await settleMatchPublication();
       return {
         eventId,
         changed: false,
@@ -466,7 +480,7 @@ export async function syncLiveSnapshotV2(
       published: restored.published,
       trigger: options.trigger ?? 'queue',
     });
-    await requireFinalMatchPublication();
+    await settleMatchPublication();
     return {
       eventId,
       changed: false,
@@ -487,6 +501,7 @@ export async function syncLiveSnapshotV2(
   try {
     const [liveResult, fixturesResult, expectedFixtureIdsResult, referenceDataResult] =
       await observationPromise;
+    await settleMatchPublication();
 
     const liveResponse = liveResult.status === 'fulfilled' ? liveResult.value : undefined;
     const rawFixtures = fixturesResult.status === 'fulfilled' ? fixturesResult.value : undefined;
@@ -500,7 +515,6 @@ export async function syncLiveSnapshotV2(
         `Live observation did not produce complete upstream facts for event ${eventId}`,
       );
     }
-    await requireFinalMatchPublication();
     prepared = prepareCoherentLiveSnapshot(
       eventId,
       liveResponse,

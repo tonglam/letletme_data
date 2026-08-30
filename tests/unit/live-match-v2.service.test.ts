@@ -2,6 +2,7 @@ import Redis from 'ioredis';
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 
 import { rawExplainElementsFixture } from '../fixtures/event-live-explains.fixtures';
+import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
 import {
   liveMatchDeskKey,
@@ -138,6 +139,51 @@ describe('Live Matches V2 observation publication', () => {
       (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.fixtures,
     ).toHaveLength(1);
     expect(await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis })).toBeNull();
+  });
+
+  test('reuses the fixture-phase desk without a second touch or checkpoint decision', async () => {
+    const checkpointKinds: Array<'desk' | 'detail'> = [];
+    const recordCheckpoint = async (
+      _season: FplSeasonRef,
+      _eventId: number,
+      kind: 'desk' | 'detail',
+    ): Promise<void> => {
+      checkpointKinds.push(kind);
+    };
+    const early = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(30)],
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+      enqueueCheckpoint: recordCheckpoint,
+    });
+    const complete = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(30)],
+      rawEventLive: { elements: eventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:30.000Z',
+      publishedDesk: {
+        publication: early.desk,
+        fixtures: early.deskFixtures,
+        changed: early.deskChanged,
+        checkpointScheduled: early.deskCheckpointScheduled,
+      },
+      redis,
+      enqueueCheckpoint: recordCheckpoint,
+    });
+
+    expect(complete.desk.publicationId).toBe(early.desk.publicationId);
+    expect(complete.desk.generation).toBe(early.desk.generation);
+    expect(complete.desk.sourceCheckedAt).toBe('2026-08-29T10:00:00.000Z');
+    expect(complete.detail).not.toBeNull();
+    expect(checkpointKinds.filter((kind) => kind === 'desk')).toHaveLength(1);
+    expect(checkpointKinds.filter((kind) => kind === 'detail')).toHaveLength(1);
   });
 
   test('rejects a first desk without an authoritative fixture identity set', async () => {

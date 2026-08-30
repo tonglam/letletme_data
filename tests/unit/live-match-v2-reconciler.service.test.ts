@@ -14,12 +14,14 @@ const season = { seasonId: 2026, seasonCode: '2627' } as const;
 const now = '2026-08-31T10:00:00.000Z';
 const revision = 'a'.repeat(64);
 
-const publication = (input: {
-  generation?: number;
-  publicationId?: string;
-  finalized?: boolean;
-  checkpointedAt?: string | null;
-} = {}): MatchDeskPublication => {
+const publication = (
+  input: {
+    generation?: number;
+    publicationId?: string;
+    finalized?: boolean;
+    checkpointedAt?: string | null;
+  } = {},
+): MatchDeskPublication => {
   const generation = input.generation ?? 12;
   return {
     contractVersion: 'live-matches-v2',
@@ -75,8 +77,7 @@ function dependencies(input: {
 }): LiveMatchCheckpointReconcilerDependencies {
   return {
     listScopes: async () => [{ eventId: 2, kind: 'desk' }],
-    readHeads: async () =>
-      new Map(input.head ? [['2:desk', input.head] as const] : []),
+    readHeads: async () => new Map(input.head ? [['2:desk', input.head] as const] : []),
     readCurrent: async () => ({ publication: input.current }),
     readDesired: async () => input.desired,
     setDesired: input.setDesired ?? (async () => desired(input.current)),

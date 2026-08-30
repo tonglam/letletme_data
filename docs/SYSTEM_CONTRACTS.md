@@ -130,6 +130,11 @@ See [redis-contract.md](redis-contract.md) and
   availability does not depend on detail, detail may lag but never lead the
   selected desk generation, and the warm page path does not call FPL, Data API,
   PostgreSQL, or a queue.
+- Live Matches repair is exact-scope only through
+  `bun run ops:repair-live-matches-v2`. Inspect is read-only; any pointer
+  promotion, PostgreSQL rebuild, or merged checkpoint replay requires season,
+  event, desk/detail kind, a reason, and `LIVE_MATCHES_REPAIR_CONFIRM=YES`.
+  The tool cannot select all events, delete a namespace, or refetch FPL.
 - Tournament and league finalization remain eligible in the bounded post-match
   window, including after GW38.
 - Live Points V2 has one reader/writer contract: no dual-write, dual-read,

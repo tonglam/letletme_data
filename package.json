@@ -49,7 +49,8 @@
     "verify:live-points-v2": "bun scripts/verify-live-points-v2.ts",
     "contract:stage-week": "bun scripts/stage-graphql-contract-week.ts",
     "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts",
-    "ops:repair-live-points-v2": "bun scripts/repair-live-points-v2.ts"
+    "ops:repair-live-points-v2": "bun scripts/repair-live-points-v2.ts",
+    "ops:repair-live-matches-v2": "bun scripts/repair-live-matches-v2.ts"
   },
   "repository": {
     "type": "git",

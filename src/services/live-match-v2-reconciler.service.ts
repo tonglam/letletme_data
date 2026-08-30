@@ -119,8 +119,7 @@ async function listRedisScopes(season: string): Promise<readonly LiveMatchCheckp
     ])
   ).flat();
   const scopes = new Map<string, LiveMatchCheckpointScope>();
-  const activePattern =
-    /^llm:data:v2:fpl:live-match:(desk|detail):(\d{4}):([1-9][0-9]*):active$/;
+  const activePattern = /^llm:data:v2:fpl:live-match:(desk|detail):(\d{4}):([1-9][0-9]*):active$/;
   const desiredPattern =
     /^llm:data:v2:fpl:live-match:checkpoint:(\d{4}):([1-9][0-9]*):(desk|detail)$/;
   for (const key of keys) {
@@ -204,14 +203,8 @@ const defaultDependencies: LiveMatchCheckpointReconcilerDependencies = {
     }),
   markCheckpointed: async (kind, publication, checkpointedAt) =>
     kind === 'desk'
-      ? markLiveMatchDeskCheckpointedV2(
-          publication as MatchDeskPublication,
-          checkpointedAt,
-        )
-      : markLiveMatchDetailCheckpointedV2(
-          publication as MatchDetailPublication,
-          checkpointedAt,
-        ),
+      ? markLiveMatchDeskCheckpointedV2(publication as MatchDeskPublication, checkpointedAt)
+      : markLiveMatchDetailCheckpointedV2(publication as MatchDetailPublication, checkpointedAt),
   clearDesired: clearLiveMatchCheckpointDesiredV2,
   enqueue: enqueueLiveMatchCheckpoint,
 };
@@ -242,10 +235,7 @@ export async function reconcileLiveMatchCheckpointObligationsV2(
         continue;
       }
       const publication = current.publication;
-      if (
-        existingDesired?.final === true &&
-        !sameIdentity(existingDesired, publication)
-      ) {
+      if (existingDesired?.final === true && !sameIdentity(existingDesired, publication)) {
         results.push({
           ...scope,
           status: 'blocked-final',

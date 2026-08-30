@@ -154,4 +154,48 @@ describe('Live Points and Live Matches shared observation', () => {
       },
     ]);
   });
+
+  test('hands the fixture-phase desk to the complete phase of the same observation', async () => {
+    const desk = {
+      publicationId: '00000000-0000-4000-8000-000000000001',
+      generation: 1,
+      season: season.seasonCode,
+      eventId: 2,
+    } as never;
+    const earlyResult = {
+      desk,
+      deskFixtures: [],
+      deskChanged: true,
+      deskCheckpointScheduled: true,
+    } as never;
+    const publishedDesks: unknown[] = [];
+    let calls = 0;
+    const sync = syncLiveSnapshotV2(season, 2, {
+      dependencies: {
+        getEventLive: async () => ({ elements: [] }),
+        getFixtures: async () => [],
+        getExpectedFixtureIds: async () => [],
+        getReferenceData: async () => ({ playerById: new Map() }) as never,
+        syncLiveMatches: async (observation) => {
+          calls += 1;
+          publishedDesks.push(observation.publishedDesk);
+          return earlyResult;
+        },
+        readPublished: async () => null,
+        readCheckpointed: async () => null,
+        checkpointPublication: async () => false,
+      },
+    });
+
+    await sync.catch(() => undefined);
+
+    expect(calls).toBe(2);
+    expect(publishedDesks[0]).toBeUndefined();
+    expect(publishedDesks[1]).toEqual({
+      publication: desk,
+      fixtures: [],
+      changed: true,
+      checkpointScheduled: true,
+    });
+  });
 });

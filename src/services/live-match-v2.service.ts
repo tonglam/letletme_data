@@ -24,6 +24,7 @@ import {
   prepareLiveMatchDesk,
   prepareLiveMatchDetail,
   normalizeMatchLifecycleState,
+  type MatchDeskFixture,
   type MatchFixtureDetail,
   type MatchLifecycleState,
 } from './live-match-v2';
@@ -56,6 +57,17 @@ export interface LiveMatchObservation {
   readonly lifecycleState?: MatchLifecycleState;
   readonly expectedNextCheckAt?: Date | string | null;
   readonly observedAt?: Date | string;
+  /**
+   * Desk already published from the fixture-only phase of this exact provider
+   * observation. The complete phase may reuse it without another Redis read,
+   * heartbeat touch, active-event write, or checkpoint decision.
+   */
+  readonly publishedDesk?: Readonly<{
+    publication: MatchDeskPublication;
+    fixtures: readonly MatchDeskFixture[];
+    changed: boolean;
+    checkpointScheduled: boolean;
+  }>;
   readonly redis?: Parameters<typeof readLiveMatchDeskV2>[0]['redis'];
   /** Test/repair seam; production uses the coalescing checkpoint queue. */
   readonly enqueueCheckpoint?: (
@@ -68,6 +80,7 @@ export interface LiveMatchObservationResult {
   readonly eventId: number;
   readonly state: MatchLifecycleState;
   readonly desk: MatchDeskPublication;
+  readonly deskFixtures: readonly MatchDeskFixture[];
   readonly detail: MatchDetailPublication | null;
   readonly deskChanged: boolean;
   readonly detailChanged: boolean;
@@ -216,7 +229,20 @@ async function scheduleCheckpoint(
 export async function syncLiveMatchesV2FromObservation(
   input: LiveMatchObservation,
 ): Promise<LiveMatchObservationResult> {
-  const currentDesk = await readDeskSafely(input);
+  if (
+    input.publishedDesk &&
+    (input.publishedDesk.publication.season !== input.season.seasonCode ||
+      input.publishedDesk.publication.eventId !== input.eventId)
+  ) {
+    throw new Error('Live Match published desk scope does not match observation');
+  }
+  const currentDesk: MatchDeskRead | null = input.publishedDesk
+    ? {
+        publication: input.publishedDesk.publication,
+        fixtures: input.publishedDesk.fixtures,
+        servedFrom: 'REDIS_CURRENT',
+      }
+    : await readDeskSafely(input);
   const deskIsFinal = currentDesk?.publication.state === 'FINALIZED';
   const expectedFixtureIds =
     input.expectedFixtureIds ?? currentDesk?.fixtures.map((fixture) => fixture.fixtureId);
@@ -242,11 +268,15 @@ export async function syncLiveMatchesV2FromObservation(
     observedAt,
     input.expectedNextCheckAt,
   );
-  let desk = deskIsFinal ? (currentDesk?.publication ?? null) : null;
-  let deskChanged = false;
+  const reusesPublishedDesk = Boolean(
+    input.publishedDesk && sameDesk(currentDesk, preparedDesk.fixtures, preparedDesk.state),
+  );
+  let desk = deskIsFinal || reusesPublishedDesk ? (currentDesk?.publication ?? null) : null;
+  let deskChanged = reusesPublishedDesk ? (input.publishedDesk?.changed ?? false) : false;
 
   if (
     !deskIsFinal &&
+    !reusesPublishedDesk &&
     sameDesk(currentDesk, preparedDesk.fixtures, preparedDesk.state) &&
     currentDesk?.servedFrom === 'REDIS_CURRENT'
   ) {
@@ -279,24 +309,28 @@ export async function syncLiveMatchesV2FromObservation(
     deskChanged = published.published;
   }
   if (!desk) throw new Error(`Live Match desk did not publish for event ${input.eventId}`);
-  await setLiveMatchActiveEventV2({
-    season: input.season.seasonCode,
-    eventId: input.eventId,
-    redis: input.redis,
-  });
+  if (!reusesPublishedDesk) {
+    await setLiveMatchActiveEventV2({
+      season: input.season.seasonCode,
+      eventId: input.eventId,
+      redis: input.redis,
+    });
+  }
 
-  const deskCheckpointScheduled = await scheduleCheckpoint(
-    'desk',
-    desk,
-    input.redis,
-    input.season,
-    desk.state === 'FINALIZED',
-    !currentDesk ||
-      currentDesk.publication.state !== desk.state ||
-      currentDesk.publication.revisions.fixtureIdentity.revision !==
-        desk.revisions.fixtureIdentity.revision,
-    input.enqueueCheckpoint,
-  );
+  const deskCheckpointScheduled = reusesPublishedDesk
+    ? (input.publishedDesk?.checkpointScheduled ?? false)
+    : await scheduleCheckpoint(
+        'desk',
+        desk,
+        input.redis,
+        input.season,
+        desk.state === 'FINALIZED',
+        !currentDesk ||
+          currentDesk.publication.state !== desk.state ||
+          currentDesk.publication.revisions.fixtureIdentity.revision !==
+            desk.revisions.fixtureIdentity.revision,
+        input.enqueueCheckpoint,
+      );
   let detail: MatchDetailPublication | null = null;
   let detailChanged = false;
   let detailCheckpointScheduled = false;
@@ -410,6 +444,7 @@ export async function syncLiveMatchesV2FromObservation(
     eventId: input.eventId,
     state: desk.state,
     desk,
+    deskFixtures: preparedDesk.fixtures,
     detail,
     deskChanged,
     detailChanged,

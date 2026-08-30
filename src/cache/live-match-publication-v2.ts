@@ -260,7 +260,6 @@ function assertDetailLimits(fixtures: readonly MatchFixtureDetail[]): void {
   if (fixtures.length > LIVE_MATCH_MAX_FIXTURES) {
     limitExceeded(`Live Match detail fixture count exceeds ${LIVE_MATCH_MAX_FIXTURES}`);
   }
-  let totalBytes = 0;
   for (const fixture of fixtures) {
     if (fixture.players.length > LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE) {
       limitExceeded(
@@ -280,10 +279,15 @@ function assertDetailLimits(fixtures: readonly MatchFixtureDetail[]): void {
         `Live Match detail payload exceeds ${LIVE_MATCH_MAX_DETAIL_ITEM_BYTES} bytes for fixture ${fixture.fixtureId}`,
       );
     }
-    totalBytes += bytes;
   }
-  if (totalBytes > LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES) {
-    limitExceeded(`Live Match detail payload exceeds ${LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES} total bytes`);
+  // The PostgreSQL checkpoint stores the self-contained fixture envelope, not
+  // just the concatenated player arrays. Gate the exact durable payload here
+  // so every Redis publication is guaranteed to be checkpointable, including
+  // final publications that may never be superseded.
+  if (Buffer.byteLength(canonicalJson(fixtures), 'utf8') > LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES) {
+    limitExceeded(
+      `Live Match detail payload exceeds ${LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES} total bytes`,
+    );
   }
 }
 
@@ -804,7 +808,8 @@ export function isValidLiveMatchDetailCheckpointPayloadV2(
 }
 
 function parseDeskPublication(raw: string | null, scope: MatchScope): MatchDeskPublication | null {
-  if (raw !== null && Buffer.byteLength(raw, 'utf8') > LIVE_MATCH_MAX_PUBLICATION_BYTES) return null;
+  if (raw !== null && Buffer.byteLength(raw, 'utf8') > LIVE_MATCH_MAX_PUBLICATION_BYTES)
+    return null;
   const value = parseJson(raw);
   if (!record(value)) return null;
   const generation = safeInteger(value.generation);
@@ -878,7 +883,8 @@ function parseDetailPublication(
   raw: string | null,
   scope: MatchScope,
 ): MatchDetailPublication | null {
-  if (raw !== null && Buffer.byteLength(raw, 'utf8') > LIVE_MATCH_MAX_PUBLICATION_BYTES) return null;
+  if (raw !== null && Buffer.byteLength(raw, 'utf8') > LIVE_MATCH_MAX_PUBLICATION_BYTES)
+    return null;
   const value = parseJson(raw);
   if (!record(value)) return null;
   const generation = safeInteger(value.generation);
@@ -1062,6 +1068,21 @@ export async function readLiveMatchDeskV2(input: {
   );
 }
 
+/** Exact pointer read for protected diagnostics and repair tooling. */
+export async function readLiveMatchDeskPointerV2(
+  input: {
+    readonly season: string;
+    readonly eventId: number;
+    readonly redis?: Redis;
+  },
+  pointer: 'active' | 'previous',
+): Promise<MatchDeskRead | null> {
+  const scope = { season: input.season, eventId: input.eventId } as const;
+  assertScope(scope);
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  return readDeskPointer(redis, scope, pointer);
+}
+
 export async function readLiveMatchDetailV2(input: {
   readonly season: string;
   readonly eventId: number;
@@ -1073,6 +1094,21 @@ export async function readLiveMatchDetailV2(input: {
   return (
     (await readDetailPointer(redis, scope, 'active')) ?? readDetailPointer(redis, scope, 'previous')
   );
+}
+
+/** Exact pointer read for protected diagnostics and repair tooling. */
+export async function readLiveMatchDetailPointerV2(
+  input: {
+    readonly season: string;
+    readonly eventId: number;
+    readonly redis?: Redis;
+  },
+  pointer: 'active' | 'previous',
+): Promise<MatchDetailRead | null> {
+  const scope = { season: input.season, eventId: input.eventId } as const;
+  assertScope(scope);
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  return readDetailPointer(redis, scope, pointer);
 }
 
 export async function setLiveMatchActiveEventV2(input: {
@@ -1396,7 +1432,11 @@ export async function restoreLiveMatchDeskCheckpointV2(input: {
   assertScope(scope);
   assertDeskLimits(fixtures);
   const parsed = parseLiveMatchDeskPublicationV2(publication, scope);
-  const expected = manifestItem('desk', liveMatchDeskItemKey(scope, publication.generation), fixtures);
+  const expected = manifestItem(
+    'desk',
+    liveMatchDeskItemKey(scope, publication.generation),
+    fixtures,
+  );
   if (
     !parsed ||
     canonicalJson(parsed) !== canonicalJson(publication) ||
@@ -1484,6 +1524,12 @@ export async function restoreLiveMatchDetailCheckpointV2(input: {
       );
     }
     const itemGeneration = Number(item.key.split(':').at(-3));
+    if (!Number.isSafeInteger(itemGeneration) || itemGeneration <= 0) {
+      throw new CacheError(
+        `Live Match detail checkpoint fixture ${fixture.fixtureId} has an invalid item generation`,
+        'LIVE_MATCH_CHECKPOINT_INVALID',
+      );
+    }
     const expected = detailItem(scope, itemGeneration, fixture.fixtureId, fixture.players);
     if (item.fixtureId !== fixture.fixtureId || !samePublicationItem(item, expected)) {
       throw new CacheError(
@@ -1568,13 +1614,18 @@ export async function promotePreviousLiveMatchV2(input: {
         'rollback',
       ),
     );
-    if (status === 'changed' || status === 'stale')
-      return { status: 'changed', publication: null };
+    if (status === 'changed' || status === 'stale') return { status: 'changed', publication: null };
     if (status !== 'published')
-      throw new CacheError(`Live Match desk rollback failed: ${status}`, 'LIVE_MATCH_REPAIR_FAILED');
+      throw new CacheError(
+        `Live Match desk rollback failed: ${status}`,
+        'LIVE_MATCH_REPAIR_FAILED',
+      );
     const promoted = await readDeskPointer(redis, scope, 'active');
     if (!promoted || promoted.publication.publicationId !== previous.publication.publicationId)
-      throw new CacheError('Live Match desk rollback verification failed', 'LIVE_MATCH_REPAIR_FAILED');
+      throw new CacheError(
+        'Live Match desk rollback verification failed',
+        'LIVE_MATCH_REPAIR_FAILED',
+      );
     await setLiveMatchActiveEventV2({ ...scope, redis });
     return { status: 'promoted', publication: promoted.publication };
   }
@@ -1598,13 +1649,18 @@ export async function promotePreviousLiveMatchV2(input: {
       'rollback',
     ),
   );
-  if (status === 'changed' || status === 'stale')
-    return { status: 'changed', publication: null };
+  if (status === 'changed' || status === 'stale') return { status: 'changed', publication: null };
   if (status !== 'published')
-    throw new CacheError(`Live Match detail rollback failed: ${status}`, 'LIVE_MATCH_REPAIR_FAILED');
+    throw new CacheError(
+      `Live Match detail rollback failed: ${status}`,
+      'LIVE_MATCH_REPAIR_FAILED',
+    );
   const promoted = await readDetailPointer(redis, scope, 'active');
   if (!promoted || promoted.publication.publicationId !== previous.publication.publicationId)
-    throw new CacheError('Live Match detail rollback verification failed', 'LIVE_MATCH_REPAIR_FAILED');
+    throw new CacheError(
+      'Live Match detail rollback verification failed',
+      'LIVE_MATCH_REPAIR_FAILED',
+    );
   return { status: 'promoted', publication: promoted.publication };
 }
 
