@@ -71,7 +71,7 @@ complete publication remains in `previous`. PostgreSQL is an asynchronous checkp
 the hot read path.
 
 ```bash
-curl "$LETLETME_DATA_URL/internal/live/status"
+curl "$LETLETME_DATA_URL/internal/live/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
 curl "$LETLETME_DATA_URL/jobs/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 

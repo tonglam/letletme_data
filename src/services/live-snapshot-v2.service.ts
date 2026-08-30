@@ -54,10 +54,12 @@ export interface LiveSnapshotV2Dependencies {
     readonly season: FplSeasonRef;
     readonly eventId: number;
     readonly publication: LivePublicationRead['publication'];
-    readonly eventLives: PreparedLiveSnapshot['eventLives']['eventLives'];
-    readonly fixtures: PreparedLiveSnapshot['fixtures'];
-    readonly explains: PreparedLiveSnapshot['eventLives']['explains'];
-    readonly fixtureEvidence: PreparedLiveSnapshot['eventLives']['fixtureEvidence'];
+    readonly eventLives: ReadonlyArray<PreparedLiveSnapshot['eventLives']['eventLives'][number]>;
+    readonly fixtures: ReadonlyArray<PreparedLiveSnapshot['fixtures'][number]>;
+    readonly explains?: ReadonlyArray<PreparedLiveSnapshot['eventLives']['explains'][number]>;
+    readonly fixtureEvidence?: ReadonlyArray<
+      PreparedLiveSnapshot['eventLives']['fixtureEvidence'][number]
+    >;
   }) => Promise<boolean>;
 }
 
@@ -158,7 +160,14 @@ async function checkpoint(
   dependencies: LiveSnapshotV2Dependencies,
   season: FplSeasonRef,
   eventId: number,
-  prepared: PreparedLiveSnapshot,
+  payload: {
+    readonly eventLives: ReadonlyArray<PreparedLiveSnapshot['eventLives']['eventLives'][number]>;
+    readonly fixtures: ReadonlyArray<PreparedLiveSnapshot['fixtures'][number]>;
+    readonly explains?: ReadonlyArray<PreparedLiveSnapshot['eventLives']['explains'][number]>;
+    readonly fixtureEvidence?: ReadonlyArray<
+      PreparedLiveSnapshot['eventLives']['fixtureEvidence'][number]
+    >;
+  },
   publication: LivePublicationRead['publication'],
   desired: Awaited<ReturnType<typeof setLiveCheckpointDesiredV2>> | null,
 ): Promise<boolean> {
@@ -167,10 +176,10 @@ async function checkpoint(
       season,
       eventId,
       publication,
-      eventLives: prepared.eventLives.eventLives,
-      fixtures: prepared.fixtures,
-      explains: prepared.eventLives.explains,
-      fixtureEvidence: prepared.eventLives.fixtureEvidence,
+      eventLives: payload.eventLives,
+      fixtures: payload.fixtures,
+      explains: payload.explains,
+      fixtureEvidence: payload.fixtureEvidence,
     });
     if (!checkpointed) return false;
     const marked = await markLivePublicationCheckpointedV2(publication, new Date());
@@ -229,6 +238,64 @@ export async function syncLiveSnapshotV2(
   const [current, durableRead] = await Promise.all([currentReadPromise, durableReadPromise]);
   const durableFloor = durableRead.value;
   if (current?.publication.state === 'FINALIZED' && (durableRead.failed || !durableFloor)) {
+    if (!durableRead.failed) {
+      // Redis can retain a FINAL manifest after PostgreSQL has been restored
+      // from an older backup. Recreate the durable checkpoint directly from
+      // the complete Redis publication; do not fetch FPL or manufacture a
+      // provisional candidate. If the write cannot complete, report the
+      // publication as uncheckpointed and leave a single merged obligation.
+      let desired = null;
+      try {
+        desired = await readLiveCheckpointDesiredV2({
+          season: season.seasonCode,
+          eventId,
+        });
+      } catch (error) {
+        logError('Live Points V2 final recovery obligation read failed', error, {
+          season: season.seasonCode,
+          eventId,
+          publicationId: current.publication.publicationId,
+          generation: current.publication.generation,
+        });
+      }
+      const checkpointed = await checkpoint(
+        dependencies,
+        season,
+        eventId,
+        {
+          eventLives: current.eventLives,
+          fixtures: current.fixtures,
+        },
+        current.publication,
+        desired,
+      );
+      if (!checkpointed && desired === null) {
+        try {
+          desired = await setLiveCheckpointDesiredV2(current.publication);
+        } catch (error) {
+          logError('Live Points V2 final recovery obligation write failed', error, {
+            season: season.seasonCode,
+            eventId,
+            publicationId: current.publication.publicationId,
+            generation: current.publication.generation,
+          });
+        }
+      }
+      return {
+        eventId,
+        changed: false,
+        stale: true,
+        published: false,
+        generation: current.publication.generation,
+        publicationId: current.publication.publicationId,
+        sourceCheckedAt: current.publication.sourceCheckedAt,
+        state: 'FINALIZED',
+        eventLiveCount: current.eventLives.length,
+        fixtureCount: current.fixtures.length,
+        checkpointScheduled: !checkpointed && desired !== null,
+        checkpointed,
+      };
+    }
     return {
       eventId,
       changed: false,
@@ -357,7 +424,19 @@ export async function syncLiveSnapshotV2(
       }
     }
     const checkpointed = checkpointDue
-      ? await checkpoint(dependencies, season, eventId, prepared, publication, desired)
+      ? await checkpoint(
+          dependencies,
+          season,
+          eventId,
+          {
+            eventLives: prepared.eventLives.eventLives,
+            fixtures: prepared.fixtures,
+            explains: prepared.eventLives.explains,
+            fixtureEvidence: prepared.eventLives.fixtureEvidence,
+          },
+          publication,
+          desired,
+        )
       : false;
     const servedPublication = checkpointed
       ? ((await dependencies.readPublished(season.seasonCode, eventId))?.publication ?? publication)
@@ -452,7 +531,12 @@ export async function syncLiveSnapshotV2(
     dependencies,
     season,
     eventId,
-    prepared,
+    {
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
+      explains: prepared.eventLives.explains,
+      fixtureEvidence: prepared.eventLives.fixtureEvidence,
+    },
     promoted.publication,
     desired,
   );
