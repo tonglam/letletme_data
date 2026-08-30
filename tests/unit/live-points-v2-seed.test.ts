@@ -9,11 +9,13 @@ import {
   isNoOpLegacyFixtureEvidence,
   inspectPickScope,
   parseSeedArguments,
+  rebaseLegacyFixturesAtCanonicalFence,
   resolveLivePointsV2SeedDatabaseUrl,
   resolveSeedObservationCheckedAt,
   type ExistingPickRow,
   type FinalResultSeedRow,
   type LegacyFixtureEvidenceRow,
+  type LegacyFixtureFactRow,
   type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
 
@@ -91,6 +93,77 @@ describe('Live Points V2 entry-pick seed', () => {
     ).toEqual(eventSnapshotCheckedAt);
     expect(() => resolveSeedObservationCheckedAt(new Date('invalid'), null)).toThrow(
       'seed source timestamp is invalid',
+    );
+  });
+
+  test('rebases the fixture sibling from canonical rows at a newer event fence', () => {
+    const fixture = {
+      id: 16,
+      code: 2442288,
+      event: 2,
+      finished: false,
+      finishedProvisional: false,
+      kickoffTime: new Date('2026-08-30T13:00:00.000Z'),
+      minutes: 45,
+      provisionalStartTime: false,
+      started: true,
+      teamA: 1,
+      teamAScore: 0,
+      teamH: 2,
+      teamHScore: 1,
+      stats: [],
+      teamHDifficulty: 3,
+      teamADifficulty: 4,
+      pulseId: 1234,
+      createdAt: null,
+      updatedAt: null,
+    };
+    const canonical: LegacyFixtureFactRow = {
+      fixture_id: fixture.id,
+      code: fixture.code,
+      event_id: fixture.event,
+      finished: fixture.finished,
+      finished_provisional: fixture.finishedProvisional,
+      kickoff_time: fixture.kickoffTime,
+      minutes: fixture.minutes,
+      provisional_start_time: fixture.provisionalStartTime,
+      started: fixture.started,
+      team_a_id: fixture.teamA,
+      team_a_score: fixture.teamAScore,
+      team_h_id: fixture.teamH,
+      team_h_score: fixture.teamHScore,
+      stats: fixture.stats,
+      team_h_difficulty: fixture.teamHDifficulty,
+      team_a_difficulty: fixture.teamADifficulty,
+      pulse_id: fixture.pulseId,
+      created_at: new Date('2026-08-29T10:00:00.000Z'),
+      updated_at: new Date('2026-08-30T15:31:08.555Z'),
+    };
+    const seed = {
+      source: { event_id: 2 },
+      sourceCheckedAt: new Date('2026-08-30T15:30:08.402Z'),
+      observationCheckedAt: new Date('2026-08-30T15:31:08.555Z'),
+      fixtures: [fixture],
+    };
+
+    const rebased = rebaseLegacyFixturesAtCanonicalFence(seed, [
+      {
+        ...canonical,
+        finished_provisional: true,
+        minutes: 90,
+        team_a_score: 2,
+        team_h_score: 5,
+      },
+    ]);
+    expect(rebased[0]).toMatchObject({
+      id: 16,
+      finishedProvisional: true,
+      minutes: 90,
+      teamAScore: 2,
+      teamHScore: 5,
+    });
+    expect(() => rebaseLegacyFixturesAtCanonicalFence(seed, [])).toThrow(
+      'Canonical fixtures do not prove the newer event fence',
     );
   });
 

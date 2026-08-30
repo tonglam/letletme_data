@@ -192,6 +192,10 @@ type LegacyLiveFacts = {
   readonly fixtureEvidence: readonly FplPlayerFixtureEvidence[];
 };
 
+type ValidatedLegacyLiveFacts = LegacyLiveFacts & {
+  readonly fixtures: readonly Fixture[];
+};
+
 type LegacyEventLiveFactRow = {
   event_id: number;
   element_id: number;
@@ -216,6 +220,28 @@ type LegacyEventLiveFactRow = {
   in_dream_team: boolean | null;
   total_points: number;
   defensive_contribution: number;
+};
+
+export type LegacyFixtureFactRow = {
+  fixture_id: number;
+  code: number;
+  event_id: number | null;
+  finished: boolean;
+  finished_provisional: boolean;
+  kickoff_time: TimestampValue | null;
+  minutes: number;
+  provisional_start_time: boolean;
+  started: boolean;
+  team_a_id: number | null;
+  team_a_score: number | null;
+  team_h_id: number | null;
+  team_h_score: number | null;
+  stats: unknown;
+  team_h_difficulty: number | null;
+  team_a_difficulty: number | null;
+  pulse_id: number;
+  created_at: TimestampValue | null;
+  updated_at: TimestampValue | null;
 };
 
 type LegacyScoringFactRow = {
@@ -861,6 +887,61 @@ function sameLegacyFact(left: unknown, right: unknown): boolean {
   return left === right || String(left) === String(right);
 }
 
+/**
+ * A newer event fence means Core may already own a more recent fixture state.
+ * After the event-live/scoring/evidence rows have proved that the live payload
+ * still matches PostgreSQL, rebuild the fixture sibling from the canonical rows
+ * observed behind that fence. Keeping the legacy fixture item would allow a
+ * pre-match sibling to overwrite a newer score or completion state.
+ */
+export function rebaseLegacyFixturesAtCanonicalFence(
+  seed: Pick<ValidatedLiveSeed, 'sourceCheckedAt' | 'observationCheckedAt' | 'fixtures'> & {
+    readonly source: Pick<ValidatedLiveSeed['source'], 'event_id'>;
+  },
+  rows: readonly LegacyFixtureFactRow[],
+): readonly Fixture[] {
+  if (seed.observationCheckedAt.getTime() <= seed.sourceCheckedAt.getTime()) {
+    return seed.fixtures;
+  }
+
+  const byId = new Map(rows.map((row) => [row.fixture_id, row] as const));
+  if (rows.length !== seed.fixtures.length || byId.size !== seed.fixtures.length) {
+    throw new Error(
+      `Canonical fixtures do not prove the newer event fence: expected ${seed.fixtures.length}, got ${rows.length}`,
+    );
+  }
+  const canonical = seed.fixtures.map((fixture) => {
+    const row = byId.get(fixture.id);
+    if (!row || row.event_id !== seed.source.event_id) {
+      throw new Error(
+        `Canonical fixture is outside the legacy event scope at newer event fence: fixture=${fixture.id}`,
+      );
+    }
+    return {
+      id: row.fixture_id,
+      code: row.code,
+      event: row.event_id,
+      finished: row.finished,
+      finishedProvisional: row.finished_provisional,
+      kickoffTime: nullableDateValue(row.kickoff_time),
+      minutes: row.minutes,
+      provisionalStartTime: row.provisional_start_time,
+      started: row.started,
+      teamA: row.team_a_id,
+      teamAScore: row.team_a_score,
+      teamH: row.team_h_id,
+      teamHScore: row.team_h_score,
+      stats: jsonValue(row.stats),
+      teamHDifficulty: row.team_h_difficulty,
+      teamADifficulty: row.team_a_difficulty,
+      pulseId: row.pulse_id,
+      createdAt: nullableDateValue(row.created_at),
+      updatedAt: nullableDateValue(row.updated_at),
+    };
+  });
+  return validateFixtures(canonical);
+}
+
 function assertLegacyEventLiveFacts(
   seed: ValidatedLiveSeed,
   rows: readonly LegacyEventLiveFactRow[],
@@ -1138,7 +1219,7 @@ function breakdownValue(fixture: EventLiveFixtureBreakdown, identifier: string):
 async function loadLegacyLiveFacts(
   database: postgres.Sql,
   seed: ValidatedLiveSeed,
-): Promise<LegacyLiveFacts> {
+): Promise<ValidatedLegacyLiveFacts> {
   let embedded: LegacyLiveFacts | null = null;
   let embeddedError: Error | null = null;
   try {
@@ -1159,7 +1240,11 @@ async function loadLegacyLiveFacts(
     }
     embeddedError = error;
   }
-  if (embedded) return embedded;
+  const requiresCanonicalFenceProof =
+    seed.observationCheckedAt.getTime() > seed.sourceCheckedAt.getTime();
+  if (embedded && !requiresCanonicalFenceProof) {
+    return { ...embedded, fixtures: seed.fixtures };
+  }
 
   const persistedAt = nullableDateValue(seed.source.event_live_facts_persisted_at);
   // The publication may be read after the facts transaction commits. The
@@ -1170,7 +1255,7 @@ async function loadLegacyLiveFacts(
     throw embeddedError ?? new Error('LEGACY_RELATIONAL_FACTS_NOT_PROVEN_FOR_PUBLICATION');
   }
 
-  const [eventLiveRows, scoringRows, evidenceRows] = await Promise.all([
+  const [eventLiveRows, scoringRows, evidenceRows, fixtureRows] = await Promise.all([
     database.unsafe<LegacyEventLiveFactRow[]>(
       `
         SELECT event_id, element_id, minutes, goals_scored, assists, clean_sheets,
@@ -1203,10 +1288,24 @@ async function loadLegacyLiveFacts(
       `,
       [seed.season.seasonId, seed.source.event_id],
     ),
+    database.unsafe<LegacyFixtureFactRow[]>(
+      `
+        SELECT fixture_id, code, event_id, finished, finished_provisional,
+               kickoff_time, minutes, provisional_start_time, started,
+               team_a_id, team_a_score, team_h_id, team_h_score, stats,
+               team_h_difficulty, team_a_difficulty, pulse_id,
+               created_at, updated_at
+        FROM fpl.fixtures
+        WHERE season_id = $1 AND event_id = $2
+        ORDER BY fixture_id
+      `,
+      [seed.season.seasonId, seed.source.event_id],
+    ),
   ]);
   assertLegacyEventLiveFacts(seed, eventLiveRows);
   assertLegacyEvidenceMatchesEventLives(seed, evidenceRows);
   assertLegacyScoringPointsMatchBreakdown(seed.eventLives, scoringRows);
+  const fixtures = rebaseLegacyFixturesAtCanonicalFence(seed, fixtureRows);
 
   const explainByElement = new Map(
     seed.eventLives.map(
@@ -1236,6 +1335,7 @@ async function loadLegacyLiveFacts(
   });
   return {
     explains,
+    fixtures,
     fixtureEvidence: evidenceRows.map((row) => ({
       eventId: row.event_id,
       fixtureId: row.fixture_id,
