@@ -23,7 +23,7 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
       const season = await seasonRepository.findCurrent();
       const job = await enqueueLiveSnapshot(season, params.eventId, 'manual', {});
       if (!job) {
-        throw new Error('Failed to enqueue event live DB sync job');
+        throw new Error('Failed to enqueue Live Points V2 snapshot job');
       }
       set.status = 202;
       return {

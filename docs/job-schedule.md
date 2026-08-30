@@ -159,11 +159,13 @@ and `expectedNextCheckAt`. The standalone scheduler owns the 30-second lifecycle
 the separate post-match finalization obligation. Redis is promoted before PostgreSQL checkpointing,
 so a database outage does not remove the last complete page response.
 
-A persistent snapshot writes `fpl.player_gameweek_stats` and
-`fpl.player_gameweek_scoring_items` in the same season/event scope. Player
-season summaries derive from those facts; there is no separate summary writer.
-If the event is data-checked inside the post-match window, the worker enqueues
-a distinct final league-results correction after the durable rows commit.
+The V2 snapshot does not synchronously write the legacy `fpl.player_gameweek_stats`
+rowset. Its complete event-live payload is checkpointed as one immutable V2
+publication in PostgreSQL after Redis promotion. Final league, tournament,
+knockout, and transfer consumers read that V2 checkpoint as their event-live
+authority; they do not reconstruct a final result from legacy rows or refetch
+FPL. Player-stat reporting is a separate observer/final-repair concern and is
+not a prerequisite for serving the live-points publication.
 
 ## Selection publication window
 

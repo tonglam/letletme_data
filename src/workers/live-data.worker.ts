@@ -33,7 +33,7 @@ import {
  *
  * Processes live data sync jobs:
  * - live-snapshot: coherent upstream fetch + atomic Redis publication (30-sec)
- * - optional durable event-live persistence and the final-results cascade
+ * - asynchronous V2 PostgreSQL checkpointing and the final-results cascade
  */
 async function processLiveDataJob(job: Job<LiveDataJobData>) {
   if (
