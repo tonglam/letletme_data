@@ -1,5 +1,10 @@
 import { resolveMutationScopes } from '../domain/mutation-scope';
-import { getDb, runInDatabaseTransaction } from '../db/singleton';
+import {
+  databaseTransactionStorage,
+  getDb,
+  runDatabasePostCommitActions,
+  runInDatabaseTransaction,
+} from '../db/singleton';
 import { logInfo } from './logger';
 import type postgres from 'postgres';
 
@@ -78,12 +83,15 @@ async function withDatabaseMutationScopes<T>(
   if (normalizedScopes.length === 0) return operation();
 
   const db = await getDb();
+  const parentContext = databaseTransactionStorage.getStore();
+  const postCommitActions = parentContext?.postCommitActions ?? [];
+  const actionStart = postCommitActions.length;
   // Use Drizzle's transaction API so the repository handle and raw postgres.js
   // client are pinned to the same connection. The raw client is an internal
   // property of PostgresJsTransaction, exposed here for raw SQL callers that
   // participate in the same scoped operation.
   try {
-    return (await db.transaction(async (drizzleTransaction) => {
+    const result = (await db.transaction(async (drizzleTransaction) => {
       const transaction = (
         drizzleTransaction as unknown as {
           session?: { client?: postgres.TransactionSql };
@@ -102,9 +110,17 @@ async function withDatabaseMutationScopes<T>(
       await transaction`SELECT set_config('statement_timeout', ${`${MUTATION_SCOPE_WAIT_TIMEOUT_MS}ms`}, true)`;
       await transaction`SELECT set_config('lock_timeout', ${`${MUTATION_SCOPE_WAIT_TIMEOUT_MS}ms`}, true)`;
       await acquireMutationScopes(transaction, normalizedScopes);
-      return runInDatabaseTransaction(transaction, operation, drizzleTransaction);
+      return runInDatabaseTransaction(
+        transaction,
+        operation,
+        drizzleTransaction,
+        postCommitActions,
+      );
     })) as T;
+    if (!parentContext) await runDatabasePostCommitActions(postCommitActions);
+    return result;
   } catch (error) {
+    postCommitActions.splice(actionStart);
     // Some legacy unit suites point at a disposable pre-0015 database.  Keep
     // those isolated tests useful without ever weakening a production guard:
     // a missing coordination table is fail-closed outside NODE_ENV=test.
