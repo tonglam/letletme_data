@@ -24,6 +24,7 @@ import {
 import type { LivePublicationV2 } from '../../src/cache/live-publication-v2';
 import {
   livePublicationSeedClaimAllowsCheckpoint,
+  livePublicationSeedClaimMatchesCandidate,
   livePublicationSeedClaimMatchesPublication,
 } from '../../src/services/live-publication-v2-checkpoint.service';
 
@@ -187,6 +188,7 @@ describe('Live Points V2 entry-pick seed', () => {
       candidateSourceCheckedAt: sourceCheckedAt,
       candidateEventLiveSha256: eventLiveSha256,
       candidateFixturesSha256: fixturesSha256,
+      claimedAt: '2026-08-30T15:30:07.402Z',
     };
 
     expect(livePublicationSeedClaimMatchesPublication(claim, publication)).toBe(true);
@@ -203,6 +205,22 @@ describe('Live Points V2 entry-pick seed', () => {
           ...publication.items,
           fixtures: { ...publication.items.fixtures, sha256: 'd'.repeat(64) },
         },
+      }),
+    ).toBe(false);
+    expect(
+      livePublicationSeedClaimMatchesCandidate(claim, {
+        candidateState: 'LIVE_ACTIVE',
+        candidateSourceCheckedAt: sourceCheckedAt,
+        candidateEventLiveSha256: eventLiveSha256,
+        candidateFixturesSha256: fixturesSha256,
+      }),
+    ).toBe(true);
+    expect(
+      livePublicationSeedClaimMatchesCandidate(claim, {
+        candidateState: 'LIVE_ACTIVE',
+        candidateSourceCheckedAt: sourceCheckedAt,
+        candidateEventLiveSha256: 'e'.repeat(64),
+        candidateFixturesSha256: fixturesSha256,
       }),
     ).toBe(false);
   });

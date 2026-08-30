@@ -62,12 +62,18 @@ export type LivePublicationV2SeedClaim = {
   readonly candidateSourceCheckedAt: string;
   readonly candidateEventLiveSha256: string;
   readonly candidateFixturesSha256: string;
+  readonly claimedAt: string;
 };
 
 export type LivePublicationV2SeedCandidate = Omit<
   LivePublicationV2SeedClaim,
-  'claimId' | 'expectedActiveSha256'
+  'claimId' | 'expectedActiveSha256' | 'claimedAt'
 >;
+
+// After the claim commits, promotion performs only bounded Redis commands
+// (5-second command timeout each). One minute is therefore a conservative
+// ownership lease, not a publication cadence or freshness threshold.
+export const LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS = 60_000;
 
 const LIVE_PUBLICATION_STATES: readonly LivePublicationState[] = [
   'PRE_DEADLINE',
@@ -120,6 +126,18 @@ export function livePublicationSeedClaimMatchesPublication(
   );
 }
 
+export function livePublicationSeedClaimMatchesCandidate(
+  claim: LivePublicationV2SeedClaim,
+  candidate: LivePublicationV2SeedCandidate,
+): boolean {
+  return (
+    claim.candidateState === candidate.candidateState &&
+    claim.candidateSourceCheckedAt === candidate.candidateSourceCheckedAt &&
+    claim.candidateEventLiveSha256 === candidate.candidateEventLiveSha256 &&
+    claim.candidateFixturesSha256 === candidate.candidateFixturesSha256
+  );
+}
+
 export async function readLivePublicationV2SeedClaim(
   season: FplSeasonRef,
   eventId: number,
@@ -137,6 +155,7 @@ export async function readLivePublicationV2SeedClaim(
           livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
         candidateFixturesSha256:
           livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+        claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt,
       })
       .from(livePointsPublicationSeedClaimsInCompetition)
       .where(
@@ -152,6 +171,7 @@ export async function readLivePublicationV2SeedClaim(
         ...row,
         candidateState: row.candidateState as LivePublicationState,
         candidateSourceCheckedAt: row.candidateSourceCheckedAt.toISOString(),
+        claimedAt: row.claimedAt.toISOString(),
       }
     : null;
 }
@@ -206,6 +226,7 @@ export async function acquireLivePublicationV2SeedClaim(
           livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
         candidateFixturesSha256:
           livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+        claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt,
       })
       .from(livePointsPublicationSeedClaimsInCompetition)
       .where(
@@ -222,31 +243,37 @@ export async function acquireLivePublicationV2SeedClaim(
         ...prior,
         candidateState: prior.candidateState as LivePublicationState,
         candidateSourceCheckedAt: prior.candidateSourceCheckedAt.toISOString(),
+        claimedAt: prior.claimedAt.toISOString(),
       };
       return prior.expectedActiveSha256 === expectedActiveSha256 &&
-        normalizedPrior.candidateState === candidate.candidateState &&
-        normalizedPrior.candidateSourceCheckedAt === candidate.candidateSourceCheckedAt &&
-        normalizedPrior.candidateEventLiveSha256 === candidate.candidateEventLiveSha256 &&
-        normalizedPrior.candidateFixturesSha256 === candidate.candidateFixturesSha256
+        livePublicationSeedClaimMatchesCandidate(normalizedPrior, candidate)
         ? { status: 'claimed', claim: normalizedPrior }
         : { status: 'blocked', claim: null };
     }
 
+    const claimId = randomUUID();
+    const inserted = (
+      await tx
+        .insert(livePointsPublicationSeedClaimsInCompetition)
+        .values({
+          seasonId: season.seasonId,
+          eventId,
+          claimId,
+          expectedActiveSha256,
+          candidateState: candidate.candidateState,
+          candidateSourceCheckedAt: new Date(candidate.candidateSourceCheckedAt),
+          candidateEventLiveSha256: candidate.candidateEventLiveSha256,
+          candidateFixturesSha256: candidate.candidateFixturesSha256,
+        })
+        .returning({ claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt })
+    )[0];
+    if (!inserted) throw new Error('Live Points V2 seed claim insert returned no row');
     const claim: LivePublicationV2SeedClaim = {
-      claimId: randomUUID(),
+      claimId,
       expectedActiveSha256,
       ...candidate,
+      claimedAt: inserted.claimedAt.toISOString(),
     };
-    await tx.insert(livePointsPublicationSeedClaimsInCompetition).values({
-      seasonId: season.seasonId,
-      eventId,
-      claimId: claim.claimId,
-      expectedActiveSha256,
-      candidateState: candidate.candidateState,
-      candidateSourceCheckedAt: new Date(candidate.candidateSourceCheckedAt),
-      candidateEventLiveSha256: candidate.candidateEventLiveSha256,
-      candidateFixturesSha256: candidate.candidateFixturesSha256,
-    });
     return { status: 'claimed', claim } as const;
   });
 }
@@ -267,6 +294,67 @@ export async function releaseLivePublicationV2SeedClaim(
           eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
           eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
           eq(livePointsPublicationSeedClaimsInCompetition.claimId, claimId),
+        ),
+      )
+      .returning({ claimId: livePointsPublicationSeedClaimsInCompetition.claimId });
+    return removed.length === 1;
+  });
+}
+
+/**
+ * Reclaim only an expired claim that still describes the exact active bytes
+ * observed before its abandoned promotion and whose candidate no longer
+ * matches this seed. The claim id is the ownership token; a delayed old owner
+ * cannot checkpoint after this exact row is deleted.
+ */
+export async function reclaimAbandonedLivePublicationV2SeedClaim(
+  season: FplSeasonRef,
+  eventId: number,
+  claimId: string,
+  observedActiveSha256: string,
+  candidate: LivePublicationV2SeedCandidate,
+): Promise<boolean> {
+  if (!/^[0-9a-f]{64}$/.test(observedActiveSha256)) {
+    throw new Error('Live Points V2 abandoned claim active hash is invalid');
+  }
+  const candidateSourceCheckedAt = new Date(candidate.candidateSourceCheckedAt);
+  if (!Number.isFinite(candidateSourceCheckedAt.getTime())) {
+    throw new Error('Live Points V2 abandoned claim candidate timestamp is invalid');
+  }
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const scopeLock = `${season.seasonCode}:${eventId}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+    const removed = await tx
+      .delete(livePointsPublicationSeedClaimsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+          eq(livePointsPublicationSeedClaimsInCompetition.claimId, claimId),
+          eq(
+            livePointsPublicationSeedClaimsInCompetition.expectedActiveSha256,
+            observedActiveSha256,
+          ),
+          sql`${livePointsPublicationSeedClaimsInCompetition.claimedAt} <= clock_timestamp() - (${LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS} * interval '1 millisecond')`,
+          or(
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateState,
+              candidate.candidateState,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt,
+              candidateSourceCheckedAt,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
+              candidate.candidateEventLiveSha256,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+              candidate.candidateFixturesSha256,
+            ),
+          ),
         ),
       )
       .returning({ claimId: livePointsPublicationSeedClaimsInCompetition.claimId });
@@ -486,6 +574,7 @@ export async function checkpointLivePublicationV2(
             livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
           candidateFixturesSha256:
             livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+          claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt,
         })
         .from(livePointsPublicationSeedClaimsInCompetition)
         .where(
@@ -502,6 +591,7 @@ export async function checkpointLivePublicationV2(
             ...seedClaims[0],
             candidateState: seedClaims[0].candidateState as LivePublicationState,
             candidateSourceCheckedAt: seedClaims[0].candidateSourceCheckedAt.toISOString(),
+            claimedAt: seedClaims[0].claimedAt.toISOString(),
           } satisfies LivePublicationV2SeedClaim)
         : null;
       if (

@@ -34,6 +34,8 @@ import {
   acquireLivePublicationV2SeedClaim,
   checkpointLivePublicationV2,
   livePublicationSeedClaimMatchesPublication,
+  livePublicationSeedClaimMatchesCandidate,
+  reclaimAbandonedLivePublicationV2SeedClaim,
   readLivePublicationV2Checkpoint,
   readLivePublicationV2SeedClaim,
   releaseLivePublicationV2SeedClaim,
@@ -2308,6 +2310,28 @@ async function seedLivePublication(
       generation: current!.publication.generation,
       publicationId: current!.publication.publicationId,
     };
+  }
+  if (
+    existingClaim &&
+    existingClaim.expectedActiveSha256 === activeSha256 &&
+    !livePublicationSeedClaimMatchesCandidate(existingClaim, claimCandidate)
+  ) {
+    if (!allowStaleClaimReset) {
+      throw new Error('V2 cache seed found a changing abandoned recovery claim');
+    }
+    const reclaimed = await reclaimAbandonedLivePublicationV2SeedClaim(
+      seed.season,
+      seed.source.event_id,
+      existingClaim.claimId,
+      activeSha256,
+      claimCandidate,
+    );
+    if (!reclaimed) {
+      throw new Error(
+        `V2 cache seed recovery claim ${existingClaim.claimId} is still owned until its bounded promotion lease expires`,
+      );
+    }
+    return seedLivePublication(seed, redis, false);
   }
   if (existingClaim && existingClaim.expectedActiveSha256 !== activeSha256) {
     // A prior seed either completed its Redis switch before crashing or lost
