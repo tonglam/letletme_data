@@ -8,7 +8,10 @@ import type {
   EventLiveManagerScore,
 } from '../domain/event-live-manager-score';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { entryEventPicksRepository } from '../repositories/entry-event-picks';
+import {
+  entryEventPicksRepository,
+  type EventLiveManagerPickRow,
+} from '../repositories/entry-event-picks';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import type { Fixture } from '../types';
 import {
@@ -18,6 +21,8 @@ import {
   type LivePublicationRead,
 } from '../cache/live-publication-v2';
 import { contentHash } from '../utils/content-hash';
+
+export type { EventLiveManagerPickRow } from '../repositories/entry-event-picks';
 
 /**
  * Internal background projection used by H2H/final snapshot jobs.
@@ -57,6 +62,11 @@ export type EventLiveScoreBatch = {
   readonly calculationMode: EventLiveScoreMode;
   readonly algorithmVersion: string;
   readonly scores: ReadonlyMap<number, RevisionedEventLiveScore>;
+};
+
+export type EventLiveScorePreloadedInputs = {
+  readonly pickRows: readonly EventLiveManagerPickRow[];
+  readonly entryInfos: readonly { id: number; startedEvent: number | null }[];
 };
 
 export const EVENT_LIVE_PICKS_MAX_AGE_MS = 15 * 60_000;
@@ -258,6 +268,13 @@ async function loadEventLiveScoreBatch(
     readonly includeEffectiveLineup?: boolean;
     readonly liveRef?: { readonly publicationId: string; readonly generation: number };
     readonly requestedCalculationMode?: EventLiveScoreMode;
+    /**
+     * Background captures may already own a repeatable-read transaction. In
+     * that case the caller must provide the rows read by that transaction so
+     * this pure projection does not open a second application connection and
+     * deadlock a pool with max=1.
+     */
+    readonly preloadedInputs?: EventLiveScorePreloadedInputs;
   } = {},
 ): Promise<EventLiveScoreBatch | null> {
   const uniqueEntryIds = [...new Set(entryIds)];
@@ -271,7 +288,8 @@ async function loadEventLiveScoreBatch(
   if (!authority) return null;
 
   const [pickRows, entryInputs, entryInfos] = await Promise.all([
-    entryEventPicksRepository.findScoringPicksByEventAndEntryIds(season, eventId, uniqueEntryIds),
+    options.preloadedInputs?.pickRows ??
+      entryEventPicksRepository.findScoringPicksByEventAndEntryIds(season, eventId, uniqueEntryIds),
     Promise.all(
       uniqueEntryIds.map(
         async (entryId) =>
@@ -281,9 +299,9 @@ async function loadEventLiveScoreBatch(
           ] as const,
       ),
     ),
-    entryInfoRepository.findByIds(season, uniqueEntryIds),
+    options.preloadedInputs?.entryInfos ?? entryInfoRepository.findByIds(season, uniqueEntryIds),
   ]);
-  const rowsByEntry = new Map<number, typeof pickRows>();
+  const rowsByEntry = new Map<number, EventLiveManagerPickRow[]>();
   for (const row of pickRows) {
     const rows = rowsByEntry.get(row.entryId) ?? [];
     rows.push(row);
@@ -327,7 +345,11 @@ async function loadEventLiveScoreBatch(
       previousTotal,
       previousTotalsThroughEventId: eventId > 1 ? eventId - 1 : null,
     });
-    if (inputRead.input.picksBase.revision !== inputRevisionData.picksRevision) continue;
+    // picksBase.revision is the source contract's content identity. The
+    // richer picksRevision below additionally includes event team and player
+    // metadata used by the calculator, so the two hashes intentionally differ.
+    // picksMatchInput above is the exact rowset-to-source guard; comparing the
+    // two unrelated hash domains would make every valid score disappear.
     const projected =
       calculationMode === 'PROJECTED_AUTOSUBS'
         ? projectEventLiveManagerScore({

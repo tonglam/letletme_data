@@ -16,7 +16,10 @@ import {
   loadFreshEventLiveAuthoritySnapshot,
   LIVE_POINTS_V2_ALGORITHM_VERSION,
 } from './event-live-v2-score.service';
-import type { RevisionedEventLiveScore } from './event-live-v2-score.service';
+import type {
+  EventLiveManagerPickRow,
+  RevisionedEventLiveScore,
+} from './event-live-v2-score.service';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -2090,6 +2093,30 @@ async function captureMyFplSnapshotOnce(
         .map((entry) => entry.entry_id);
       projectedBatch = await eventLiveV2ScoreService.load(season, eventId, activeEntryIds, {
         includeEffectiveLineup: true,
+        preloadedInputs: {
+          pickRows: pickRows.map(
+            (row): EventLiveManagerPickRow => ({
+              entryId: row.entry_id,
+              position: row.position,
+              elementId: row.element,
+              multiplier: row.multiplier,
+              isCaptain: row.is_captain,
+              isViceCaptain: row.is_vice_captain,
+              transfersCost: row.transfers_cost,
+              sourceUpdatedAt:
+                row.source_updated_at instanceof Date
+                  ? row.source_updated_at
+                  : new Date(row.source_updated_at),
+              elementType: row.element_type,
+              teamId: row.team_id,
+              activeChip: row.active_chip,
+            }),
+          ),
+          entryInfos: entries.map((entry) => ({
+            id: entry.entry_id,
+            startedEvent: entry.started_event,
+          })),
+        },
       });
       if (!projectedBatch) {
         throw new MyFplSnapshotIncompleteError(

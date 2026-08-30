@@ -7,7 +7,11 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { redisSingleton } from '../../src/cache/singleton';
 import type { EventLive } from '../../src/domain/event-lives';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
-import { publishLivePublicationV2 } from '../../src/cache/live-publication-v2';
+import {
+  entryLiveInputFromFplPicks,
+  publishEntryLiveInputV2,
+  publishLivePublicationV2,
+} from '../../src/cache/live-publication-v2';
 import { getDbClient } from '../../src/db/singleton';
 import {
   captureMyFplSnapshot,
@@ -135,18 +139,17 @@ async function cleanup(): Promise<void> {
     WHERE season_id = ${SEASON.seasonId} AND season_code = ${SEASON.seasonCode}
   `;
   const cache = await redisSingleton.getClient();
-  let cursor = '0';
-  do {
-    const [next, keys] = await cache.scan(
-      cursor,
-      'MATCH',
-      `llm:data:v2:fpl:live:${SEASON.seasonCode}:${EVENT_ID}:*`,
-      'COUNT',
-      100,
-    );
-    cursor = next;
-    if (keys.length > 0) await cache.unlink(...keys);
-  } while (cursor !== '0');
+  for (const pattern of [
+    `llm:data:v2:fpl:live:${SEASON.seasonCode}:${EVENT_ID}:*`,
+    `llm:data:v2:fpl:entry-live:${SEASON.seasonCode}:${EVENT_ID}:*`,
+  ]) {
+    let cursor = '0';
+    do {
+      const [next, keys] = await cache.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = next;
+      if (keys.length > 0) await cache.unlink(...keys);
+    } while (cursor !== '0');
+  }
   await cache.unlink(MANIFEST_KEY);
 }
 
@@ -274,6 +277,36 @@ async function seedEntryEventData(entryId: number): Promise<void> {
         transfers_source_checked_at = ${CAPTURE_NOW.toISOString()}::timestamptz
     WHERE season_id = ${SEASON.seasonId} AND entry_id = ${entryId}
   `;
+  const entryInput = entryLiveInputFromFplPicks(
+    SEASON,
+    EVENT_ID,
+    entryId,
+    {
+      active_chip: null,
+      automatic_subs: [],
+      entry_history: {
+        event: EVENT_ID,
+        points: 67,
+        total_points: 67,
+        rank: 1,
+        overall_rank: 1_000,
+        bank: 10,
+        value: 1_000,
+        event_transfers: 0,
+        event_transfers_cost: 0,
+        points_on_bench: 0,
+      },
+      picks: EVENT_PICKS,
+    },
+    CAPTURE_NOW,
+  );
+  await publishEntryLiveInputV2({
+    season: SEASON.seasonCode,
+    eventId: EVENT_ID,
+    entryId,
+    input: entryInput,
+    sourceCheckedAt: CAPTURE_NOW,
+  });
 }
 
 beforeAll(async () => {
