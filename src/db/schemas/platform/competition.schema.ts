@@ -812,6 +812,49 @@ export const livePointsPublicationCheckpointsInCompetition = competition.table(
   ],
 );
 
+/**
+ * Durable maintenance claim used only by the one-shot V2 cutover seed. The
+ * claim is committed before Redis promotion and checked by every checkpoint
+ * writer, closing the crash window where an inspected orphan could become
+ * durable while a replacement seed is already active in Redis.
+ */
+export const livePointsPublicationSeedClaimsInCompetition = competition.table(
+  'live_points_publication_seed_claims',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    claimId: uuid('claim_id').notNull(),
+    expectedActiveSha256: text('expected_active_sha256').notNull(),
+    candidateState: text('candidate_state').notNull(),
+    candidateSourceCheckedAt: timestamp('candidate_source_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    candidateEventLiveSha256: text('candidate_event_live_sha256').notNull(),
+    candidateFixturesSha256: text('candidate_fixtures_sha256').notNull(),
+    // Lease age must use post-lock wall-clock time, not transaction-start now().
+    claimedAt: timestamp('claimed_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.eventId],
+      name: 'live_points_publication_seed_claims_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'live_points_publication_seed_claims_event_fk',
+    }),
+    unique('live_points_publication_seed_claims_claim_once').on(table.claimId),
+    check(
+      'live_points_publication_seed_claims_identity_valid',
+      sql`event_id > 0 AND expected_active_sha256 ~ '^[0-9a-f]{64}$' AND candidate_event_live_sha256 ~ '^[0-9a-f]{64}$' AND candidate_fixtures_sha256 ~ '^[0-9a-f]{64}$' AND candidate_state = ANY (ARRAY['PRE_DEADLINE','PICKS_WAIT','PICKS_PROBE','PICKS_SYNC','LIVE_ACTIVE','BETWEEN_FIXTURES','DAY_SETTLING','GW_REVIEW','FINALIZED']::text[])`,
+    ),
+  ],
+);
+
 export const entryEventTransfersInCompetition = competition.table(
   'entry_event_transfers',
   {
