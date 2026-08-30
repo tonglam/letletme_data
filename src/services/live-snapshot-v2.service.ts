@@ -125,10 +125,19 @@ function shouldCheckpoint(
     current.publication.revisions.displayStats.revision !== promoted.revisions.displayStats.revision
   )
     return true;
-  // A missing checkpoint is an outstanding durability obligation. It must be
-  // repaired immediately even when the desired pointer was written recently;
-  // otherwise a heartbeat can indefinitely postpone the first DB copy.
-  if (!current.publication.checkpointedAt) return true;
+  // A missing checkpoint is an outstanding durability obligation. The first
+  // obligation is repaired immediately, but a deliberately coalesced score
+  // generation must honor its recent desired-request timestamp rather than
+  // writing again on the very next unchanged heartbeat.
+  if (!current.publication.checkpointedAt) {
+    if (desiredRequestedAt !== null) {
+      const requestedAt = Date.parse(desiredRequestedAt);
+      if (Number.isFinite(requestedAt)) {
+        return Date.now() - requestedAt >= SCORE_CHECKPOINT_INTERVAL_MS;
+      }
+    }
+    return true;
+  }
   if (desiredRequestedAt !== null) {
     const requestedAt = Date.parse(desiredRequestedAt);
     if (Number.isFinite(requestedAt)) {
