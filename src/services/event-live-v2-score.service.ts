@@ -249,6 +249,7 @@ function picksMatchInput(
     isViceCaptain: boolean;
     transfers: number | null;
     transfersCost: number | null;
+    activeChip: string | null;
   }[],
   input: NonNullable<Awaited<ReturnType<typeof readEntryLiveInputV2>>>['input'],
 ): boolean {
@@ -267,7 +268,8 @@ function picksMatchInput(
           : row.transfersCost === null) &&
         (row.position === 1
           ? row.transfers === input.picksBase.transferCount
-          : row.transfers === null),
+          : row.transfers === null) &&
+        (row.position === 1 ? row.activeChip === input.picksBase.chip : row.activeChip === null),
     );
   });
 }

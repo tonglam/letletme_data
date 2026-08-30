@@ -482,7 +482,8 @@ jobs:
               -e "DATABASE_URL=$v2_seed_database_url" \
               api bun run verify:live-points-v2 -- \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
-              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
+              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
+              --all-finalized
             finish_stage
             start_stage cachePublish
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \

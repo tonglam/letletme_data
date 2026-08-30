@@ -1451,6 +1451,16 @@ async function main(): Promise<void> {
           loadFinalizedEventIds(database, season),
           loadExistingV2EventIds(database, season),
         ]);
+        const finalizedEventIdSet = new Set(finalizedEventIds);
+        const blockedRepairScopes = repairs.filter(
+          (repair) =>
+            repair.seasonId === season.seasonId && finalizedEventIdSet.has(repair.eventId),
+        );
+        if (blockedRepairScopes.length > 0) {
+          throw new Error(
+            `V2 cache seed refused because ${blockedRepairScopes.length} finalized event entry repair scope(s) remain unresolved`,
+          );
+        }
         for (const eventId of existingEventIds) existingV2EventIds.add(eventId);
         const candidateEventIds = new Set(
           cacheCandidates
