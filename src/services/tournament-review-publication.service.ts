@@ -61,6 +61,7 @@ type TournamentRow = {
   setup_status: string;
   setup_finished_at: Date | string | null;
   standings_ready_at: Date | string | null;
+  tournament_updated_at: Date | string;
 };
 
 type EventRow = {
@@ -228,12 +229,15 @@ type PointsSourceRow = {
   event_points: number | null;
   event_cost: number | null;
   event_net_points: number | null;
+  result_updated_at: Date | string | null;
   event_rank: number | null;
   overall_points: number | null;
   overall_rank: number | null;
   rich_synced_at: Date | string | null;
   group_id: number | null;
   event_group_rank: number | null;
+  group_event_points: number | null;
+  group_event_cost: number | null;
   group_event_net_points: number | null;
   group_updated_at: Date | string | null;
   season_gross_points: number | null;
@@ -244,6 +248,7 @@ type PointsSourceRow = {
   history_source_min_checked_at: Date | string | null;
   history_source_max_checked_at: Date | string | null;
   previous_group_rank: number | null;
+  history_group_mismatch_count: number | string | null;
 };
 
 async function buildPointsPayload(
@@ -270,12 +275,15 @@ async function buildPointsPayload(
            result.event_points,
            result.event_transfers_cost AS event_cost,
            result.event_net_points,
+           result.updated_at AS result_updated_at,
            result.event_rank,
            result.overall_points,
            result.overall_rank,
            result.rich_synced_at,
            group_result.group_id,
            group_result.event_group_rank,
+           group_result.event_points AS group_event_points,
+           group_result.event_cost AS group_event_cost,
            group_result.event_net_points AS group_event_net_points,
            group_result.updated_at AS group_updated_at,
            (
@@ -374,6 +382,38 @@ async function buildPointsPayload(
                AND history.event_net_points IS NOT NULL
                AND history.updated_at >= history_event.data_checked_at
            ) AS season_net_result_count,
+           (
+             SELECT count(*)::integer
+             FROM competition.entry_event_results history_result
+             JOIN fpl.events history_event
+               ON history_event.season_id = history_result.season_id
+              AND history_event.event_id = history_result.event_id
+             LEFT JOIN competition.tournament_points_group_results history_group
+               ON history_group.season_id = history_result.season_id
+              AND history_group.tournament_id = roster.tournament_id
+              AND history_group.entry_id = history_result.entry_id
+              AND history_group.event_id = history_result.event_id
+             WHERE history_result.season_id = roster.season_id
+               AND history_result.entry_id = roster.entry_id
+               AND history_result.event_id >= GREATEST(
+                 COALESCE(tournament.group_started_event_id, 1),
+                 COALESCE(entry.started_event, 1)
+               )
+               AND history_result.event_id <= ${event.event_id}
+               AND history_event.finished = true
+               AND history_event.data_checked = true
+               AND history_event.data_checked_at IS NOT NULL
+               AND history_result.event_points IS NOT NULL
+               AND history_result.event_net_points IS NOT NULL
+               AND (
+                 history_group.event_net_points IS DISTINCT FROM history_result.event_net_points
+                 OR history_group.updated_at < GREATEST(
+                   history_result.updated_at,
+                   COALESCE(history_result.rich_synced_at, '-infinity'::timestamptz),
+                   history_event.data_checked_at
+                 )
+               )
+           ) AS history_group_mismatch_count,
            history_sources.source_min_checked_at AS history_source_min_checked_at,
            history_sources.source_max_checked_at AS history_source_max_checked_at
     FROM competition.tournament_entries roster
@@ -450,9 +490,12 @@ async function buildPointsPayload(
         row.event_points === null ||
         row.event_cost === null ||
         row.event_net_points === null ||
+        row.result_updated_at === null ||
         row.rich_synced_at === null ||
         row.group_id === null ||
         row.event_group_rank === null ||
+        row.group_event_points === null ||
+        row.group_event_cost === null ||
         row.group_event_net_points === null ||
         row.group_updated_at === null ||
         row.season_expected_event_count === null ||
@@ -461,10 +504,22 @@ async function buildPointsPayload(
         row.history_source_min_checked_at === null ||
         row.history_source_max_checked_at === null ||
         row.season_gross_result_count !== row.season_expected_event_count ||
-        row.season_net_result_count !== row.season_expected_event_count,
+        row.season_net_result_count !== row.season_expected_event_count ||
+        Number(row.history_group_mismatch_count ?? 0) !== 0 ||
+        row.group_event_points !== row.event_points ||
+        row.group_event_cost !== row.event_cost ||
+        row.group_event_net_points !== row.event_net_points ||
+        (asDate(row.group_updated_at)?.getTime() ?? 0) <
+          Math.max(
+            asDate(row.result_updated_at)?.getTime() ?? 0,
+            asDate(row.rich_synced_at)?.getTime() ?? 0,
+            asDate(event.data_checked_at)?.getTime() ?? 0,
+          ),
     )
   ) {
-    throw new TournamentReviewSourceNotReadyError('points result rows are incomplete');
+    throw new TournamentReviewSourceNotReadyError(
+      'points result or derived group rows are incomplete or inconsistent',
+    );
   }
   const sourceTimes: Array<Date | string | null> = rows.flatMap((row) => [
     row.entry_updated_at,
@@ -473,12 +528,43 @@ async function buildPointsPayload(
   sourceTimes.push(
     ...applicable.flatMap((row) => [
       row.rich_synced_at,
+      row.result_updated_at,
       row.group_updated_at,
       row.history_source_min_checked_at,
       row.history_source_max_checked_at,
     ]),
   );
   const rankFallback = new Map<number, number>();
+  const expectedGroupRanks = new Map<number, number>();
+  const groupedRows = new Map<number, PointsSourceRow[]>();
+  for (const row of applicable) {
+    const groupId = row.group_id;
+    if (groupId === null) continue;
+    const groupRows = groupedRows.get(groupId) ?? [];
+    groupRows.push(row);
+    groupedRows.set(groupId, groupRows);
+  }
+  for (const groupRows of groupedRows.values()) {
+    let previousKey: string | null = null;
+    let rank = 0;
+    [...groupRows]
+      .sort(
+        (left, right) =>
+          integer(right.season_net_points) - integer(left.season_net_points) ||
+          (left.overall_rank ?? Number.MAX_SAFE_INTEGER) -
+            (right.overall_rank ?? Number.MAX_SAFE_INTEGER) ||
+          left.entry_id - right.entry_id,
+      )
+      .forEach((row, index) => {
+        const key = `${row.season_net_points}:${row.overall_rank ?? Number.MAX_SAFE_INTEGER}`;
+        if (key !== previousKey) rank = index + 1;
+        previousKey = key;
+        expectedGroupRanks.set(row.entry_id, rank);
+      });
+  }
+  if (applicable.some((row) => row.event_group_rank !== expectedGroupRanks.get(row.entry_id))) {
+    throw new TournamentReviewSourceNotReadyError('points group ranks are inconsistent');
+  }
   [...applicable]
     .sort((left, right) => {
       const byGroup = sortRank(left.event_group_rank, right.event_group_rank);
@@ -683,6 +769,19 @@ export function isTournamentReviewEntryApplicable(
   return startedEvent === null || startedEvent <= eventId;
 }
 
+/** H2H match points are derived from the recorded net scores, never trusted
+ * independently from the score columns. */
+export function h2hMatchPointsMatchScore(
+  homeNetPoints: number,
+  awayNetPoints: number,
+  homeMatchPoints: number,
+  awayMatchPoints: number,
+): boolean {
+  const expectedHome = homeNetPoints > awayNetPoints ? 3 : homeNetPoints < awayNetPoints ? 0 : 1;
+  const expectedAway = homeNetPoints > awayNetPoints ? 0 : homeNetPoints < awayNetPoints ? 3 : 1;
+  return homeMatchPoints === expectedHome && awayMatchPoints === expectedAway;
+}
+
 async function buildH2HPayload(
   tx: postgres.TransactionSql,
   seasonId: number,
@@ -791,14 +890,27 @@ async function buildH2HPayload(
       entryGroupIds.set(entryId, match.group_id);
       seenCurrentEntries.add(entryId);
     }
-    if (
-      !match.is_bye &&
-      (match.home_net_points === null ||
+    if (!match.is_bye) {
+      if (
+        match.home_net_points === null ||
         match.home_match_points === null ||
         match.away_net_points === null ||
-        match.away_match_points === null)
-    ) {
-      throw new TournamentReviewSourceNotReadyError('H2H match score is incomplete');
+        match.away_match_points === null
+      ) {
+        throw new TournamentReviewSourceNotReadyError('H2H match score is incomplete');
+      }
+      if (
+        !h2hMatchPointsMatchScore(
+          match.home_net_points,
+          match.away_net_points,
+          match.home_match_points,
+          match.away_match_points,
+        )
+      ) {
+        throw new TournamentReviewSourceNotReadyError(
+          'H2H match points are inconsistent with scores',
+        );
+      }
     }
     const sourceCheckedAt = battleSourceCheckedAt(match);
     if (!sourceCheckedAt) {
@@ -815,6 +927,7 @@ async function buildH2HPayload(
             entryId: null,
             entryName: 'Average Team',
             isAverage: true,
+            applicable: true,
             grossPoints: null,
             transferCost: null,
             netPoints: match.home_net_points,
@@ -826,6 +939,7 @@ async function buildH2HPayload(
               entryId: home.entry_id,
               entryName: home.entry_name,
               isAverage: false,
+              applicable: isTournamentReviewEntryApplicable(home.started_event, event.event_id),
               grossPoints: home.event_points,
               transferCost: home.event_transfers_cost,
               netPoints: match.home_net_points,
@@ -838,6 +952,7 @@ async function buildH2HPayload(
             entryId: null,
             entryName: 'Average Team',
             isAverage: true,
+            applicable: true,
             grossPoints: null,
             transferCost: null,
             netPoints: match.away_net_points,
@@ -849,6 +964,7 @@ async function buildH2HPayload(
               entryId: away.entry_id,
               entryName: away.entry_name,
               isAverage: false,
+              applicable: isTournamentReviewEntryApplicable(away.started_event, event.event_id),
               grossPoints: away.event_points,
               transferCost: away.event_transfers_cost,
               netPoints: match.away_net_points,
@@ -973,6 +1089,7 @@ async function buildH2HPayload(
     groupId: number;
     entryId: number;
     entryName: string;
+    applicable: boolean;
     played: number;
     won: number;
     drawn: number;
@@ -991,6 +1108,7 @@ async function buildH2HPayload(
       groupId,
       entryId,
       entryName: score?.entry_name ?? `Entry ${entryId}`,
+      applicable: isTournamentReviewEntryApplicable(score?.started_event ?? null, event.event_id),
       played: 0,
       won: 0,
       drawn: 0,
@@ -1047,6 +1165,18 @@ async function buildH2HPayload(
     ) {
       if (match.is_bye) continue;
       throw new TournamentReviewSourceNotReadyError('H2H history score is incomplete');
+    }
+    if (
+      !h2hMatchPointsMatchScore(
+        match.home_net_points,
+        match.away_net_points,
+        match.home_match_points,
+        match.away_match_points,
+      )
+    ) {
+      throw new TournamentReviewSourceNotReadyError(
+        'H2H history match points are inconsistent with scores',
+      );
     }
 
     const home =
@@ -1301,6 +1431,7 @@ async function buildKnockoutPayload(
         ? {
             entryId: home.entry_id,
             entryName: home.entry_name,
+            applicable: isTournamentReviewEntryApplicable(home.started_event, event.event_id),
             grossPoints: home.event_points,
             transferCost: home.event_transfers_cost,
             netPoints: match.home_net_points,
@@ -1312,6 +1443,7 @@ async function buildKnockoutPayload(
         ? {
             entryId: away.entry_id,
             entryName: away.entry_name,
+            applicable: isTournamentReviewEntryApplicable(away.started_event, event.event_id),
             grossPoints: away.event_points,
             transferCost: away.event_transfers_cost,
             netPoints: match.away_net_points,
@@ -1354,8 +1486,9 @@ async function loadReviewContext(
            knockout_ended_event_id,
            setup_status,
            setup_finished_at,
-           standings_ready_at
-    FROM competition.tournaments
+           standings_ready_at,
+           tournament.updated_at AS tournament_updated_at
+    FROM competition.tournaments tournament
     WHERE season_id = ${seasonId} AND tournament_id = ${tournamentId}
     LIMIT 1
   `;
@@ -1407,8 +1540,11 @@ async function publishTournamentReviewScopeOnce(
     const eventDataCheckedAt = asDate(event.data_checked_at);
     if (!eventDataCheckedAt)
       throw new TournamentReviewSourceNotReadyError('data_checked_at missing');
-    const previousHead = await tx<Array<{ event_name: string | null }>>`
-      SELECT publication.payload #>> '{event,name}' AS event_name
+    const previousHead = await tx<
+      Array<{ event_name: string | null; tournament_payload: JsonRecord | null }>
+    >`
+      SELECT publication.payload #>> '{event,name}' AS event_name,
+             publication.payload #> '{tournament}' AS tournament_payload
       FROM competition.tournament_review_heads head
       JOIN competition.tournament_review_publications publication
         ON publication.season_id = head.season_id
@@ -1429,6 +1565,10 @@ async function publishTournamentReviewScopeOnce(
       sourceMin: eventDataCheckedAt,
       sourceMax: eventDataCheckedAt,
     });
+    const tournamentMetadataChanged =
+      previousHead.length === 0 ||
+      postgresJsonbCanonicalJson(previousHead[0].tournament_payload) !==
+        postgresJsonbCanonicalJson(header.tournament);
     const built =
       format === 'POINTS'
         ? await buildPointsPayload(tx, season.seasonId, tournament, event, header)
@@ -1438,6 +1578,7 @@ async function publishTournamentReviewScopeOnce(
     const freshness = sourceSpan([
       eventDataCheckedAt,
       ...(eventMetadataChanged ? [event.updated_at] : []),
+      ...(tournamentMetadataChanged ? [tournament.tournament_updated_at] : []),
       ...built.sourceTimes,
     ]);
     const payload = {
@@ -1586,11 +1727,12 @@ export async function reconcileTournamentReviewObligations(
   now = new Date(),
 ): Promise<number> {
   const rows = await withDatabaseTransaction(async (tx) => {
-    // Take the scope locks in a statement of their own. PostgreSQL assigns a
-    // statement snapshot before evaluating a locking CTE; keeping the lock
-    // acquisition separate ensures the retirement snapshot includes any
-    // publisher that was already holding the scope lock.
-    await tx`
+    // First identify only scopes that could be retired. The lock set is
+    // intentionally a bounded candidate set rather than the full review
+    // history, so reconciliation does not block publishers for every past
+    // gameweek. The later candidate statement revalidates this set after the
+    // locks are held using a fresh READ COMMITTED snapshot.
+    const potentialStaleScopes = await tx<Array<{ tournament_id: number; event_id: number }>>`
       WITH stored_scopes AS (
         SELECT tournament_id, event_id
         FROM competition.tournament_review_heads
@@ -1599,19 +1741,55 @@ export async function reconcileTournamentReviewObligations(
         SELECT tournament_id, event_id
         FROM competition.tournament_review_obligations
         WHERE season_id = ${season.seasonId}
-      ), ordered_scopes AS MATERIALIZED (
-        SELECT tournament_id, event_id
-        FROM stored_scopes
-        ORDER BY tournament_id, event_id
       )
-      SELECT pg_advisory_xact_lock(
-        hashtextextended(
-          'review:' || ${season.seasonId}::text || ':' || ordered.tournament_id::text || ':' || ordered.event_id::text,
-          0
-        )
+      SELECT stored.tournament_id, stored.event_id
+      FROM stored_scopes stored
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM competition.tournaments tournament
+        JOIN fpl.events event
+          ON event.season_id = tournament.season_id
+         AND event.event_id = stored.event_id
+        WHERE tournament.season_id = ${season.seasonId}
+          AND tournament.tournament_id = stored.tournament_id
+          AND tournament.setup_status = 'ready'
+          AND event.finished = true
+          AND event.data_checked = true
+          AND event.data_checked_at IS NOT NULL
+          AND (
+            (
+              tournament.knockout_mode <> 'no_knockout'
+              AND tournament.knockout_started_event_id IS NOT NULL
+              AND event.event_id >= tournament.knockout_started_event_id
+              AND (
+                tournament.knockout_ended_event_id IS NULL
+                OR event.event_id <= tournament.knockout_ended_event_id
+              )
+            )
+            OR (
+              tournament.group_mode IN ('points_races', 'battle_races')
+              AND tournament.group_started_event_id IS NOT NULL
+              AND event.event_id >= tournament.group_started_event_id
+              AND (
+                tournament.group_ended_event_id IS NULL
+                OR event.event_id <= tournament.group_ended_event_id
+              )
+            )
+          )
       )
-      FROM ordered_scopes ordered
+      ORDER BY stored.tournament_id, stored.event_id
     `;
+    for (const scope of potentialStaleScopes) {
+      await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(
+            'review:' || ${season.seasonId}::text || ':' || ${scope.tournament_id}::text || ':' || ${scope.event_id}::text,
+            0
+          )
+        )
+      `;
+    }
+    const lockedStaleScopesJson = JSON.stringify(potentialStaleScopes);
     return tx<
       Array<{
         upserted_count: number | string;
@@ -1735,6 +1913,9 @@ export async function reconcileTournamentReviewObligations(
                   ) payload_row
                   WHERE (payload_row->>'entryId')::integer = entry.entry_id
                     AND payload_row->>'entryName' IS NOT DISTINCT FROM entry.entry_name
+                    AND (payload_row->>'applicable')::boolean IS NOT DISTINCT FROM (
+                      entry.started_event IS NULL OR entry.started_event <= state.event_id
+                    )
                 )
               )
               OR (
@@ -1750,6 +1931,9 @@ export async function reconcileTournamentReviewObligations(
                   ) side
                   WHERE (side->>'entryId')::integer = entry.entry_id
                     AND side->>'entryName' IS NOT DISTINCT FROM entry.entry_name
+                    AND (side->>'applicable')::boolean IS NOT DISTINCT FROM (
+                      entry.started_event IS NULL OR entry.started_event <= state.event_id
+                    )
                 )
               )
             )
@@ -1850,11 +2034,15 @@ export async function reconcileTournamentReviewObligations(
        AND candidate.event_id = stored.event_id
       WHERE candidate.tournament_id IS NULL
     ), locked_stale_scopes AS MATERIALIZED (
-      -- Scope locks were acquired in the preceding statement of this
-      -- transaction, before this deletion snapshot was established.
-      SELECT stale.tournament_id,
-             stale.event_id
+      -- Restrict retirement to the scopes identified before locking. The
+      -- stale_scopes join above is re-evaluated after those locks, so a scope
+      -- repaired concurrently is retained and a newly stale scope waits for
+      -- the next reconciliation pass instead of being deleted unlocked.
+      SELECT stale.tournament_id, stale.event_id
       FROM stale_scopes stale
+      JOIN jsonb_array_elements(${lockedStaleScopesJson}::jsonb) locked(value)
+        ON (locked.value->>'tournament_id')::integer = stale.tournament_id
+       AND (locked.value->>'event_id')::integer = stale.event_id
     ), retired_heads AS (
       DELETE FROM competition.tournament_review_heads head
       USING locked_stale_scopes stale

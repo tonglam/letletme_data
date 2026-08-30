@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   hasCompleteTournamentReviewH2HGroupCoverage,
+  h2hMatchPointsMatchScore,
   isTournamentReviewEntryApplicable,
   rankTournamentReviewH2HStandings,
   resolveTournamentReviewFormat,
@@ -114,12 +115,24 @@ describe('My Tournament Review V2 format and retry policy', () => {
     ]);
   });
 
+  test('accepts only score-derived H2H match points', () => {
+    expect(h2hMatchPointsMatchScore(70, 55, 3, 0)).toBe(true);
+    expect(h2hMatchPointsMatchScore(70, 55, 1, 1)).toBe(false);
+    expect(h2hMatchPointsMatchScore(55, 55, 1, 1)).toBe(true);
+    expect(h2hMatchPointsMatchScore(55, 55, 3, 0)).toBe(false);
+  });
+
   test('reconciles incrementally and retires scopes under the publication lock', () => {
     expect(publicationSource).toContain('COALESCE(state.existing_eligible_at');
     expect(publicationSource).toContain('event.updated_at AS event_updated_at');
     expect(publicationSource).toContain('const eventMetadataChanged =');
     expect(publicationSource).toContain('eventMetadataChanged ? [event.updated_at] : []');
     expect(publicationSource).toContain('previous.payload AS existing_payload');
+    expect(publicationSource).toContain('tournament.updated_at AS tournament_updated_at');
+    expect(publicationSource).toContain('tournamentMetadataChanged');
+    expect(publicationSource).toContain('history_group_mismatch_count');
+    expect(publicationSource).toContain('points group ranks are inconsistent');
+    expect(publicationSource).toContain('payload_row->>\x27applicable\x27');
     expect(publicationSource).toContain('state.existing_eligible_at IS NULL');
     expect(publicationSource).toContain('state.existing_payload IS NOT NULL');
     expect(publicationSource).toMatch(/state\.existing_payload->'points'->'rows'/);
