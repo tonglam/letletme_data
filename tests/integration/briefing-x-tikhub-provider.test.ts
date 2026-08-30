@@ -196,7 +196,7 @@ test('persists a TikHub timeline run with exact call accounting and no Grok foll
     .where(eq(contentAcquisitionRuns.runId, claimed.runId));
   expect(run).toMatchObject({
     provider: 'tikhub',
-    providerUnits: '2',
+    providerUnits: '2.000000',
     xCallCount: 2,
     traceVerified: true,
     evidenceMode: 'PROVIDER_ATTESTED',
@@ -211,7 +211,11 @@ test('persists a TikHub timeline run with exact call accounting and no Grok foll
     .from(contentAcquisitionProviderTraces)
     .where(eq(contentAcquisitionProviderTraces.runId, claimed.runId));
   expect(traces).toEqual([
-    { provider: 'tikhub', providerUnits: '2', terminalState: 'HTTP_VALIDATED' },
+    {
+      provider: 'tikhub',
+      providerUnits: '2.000000',
+      terminalState: 'HTTP_VALIDATED',
+    },
   ]);
   const reservations = await db
     .select({ status: contentAcquisitionBudgetReservations.status })
@@ -301,7 +305,7 @@ test('records billable TikHub page failures without creating fake empty data', a
   expect(run).toEqual({
     status: 'FAILED',
     provider: 'tikhub',
-    providerUnits: '2',
+    providerUnits: '2.000000',
     xCallCount: 2,
     checkpointAdvanced: false,
     failureClass: 'TIKHUB_SCHEMA_INVALID',
@@ -318,7 +322,7 @@ test('records billable TikHub page failures without creating fake empty data', a
   ).toEqual([
     {
       provider: 'tikhub',
-      providerUnits: '2',
+      providerUnits: '2.000000',
       terminalState: 'FAILED:TIKHUB_SCHEMA_INVALID',
     },
   ]);
