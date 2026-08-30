@@ -2,20 +2,10 @@ name: instruction-integrity
 
 on:
   pull_request:
-    paths:
-      - AGENTS.md
-      - .agents/**
-      - .codex/**
-      - .github/workflows/instruction-integrity.yml
   push:
     branches:
       - main
       - master
-    paths:
-      - AGENTS.md
-      - .agents/**
-      - .codex/**
-      - .github/workflows/instruction-integrity.yml
 
 permissions:
   contents: read
