@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
+import { parseLiveMatchesV2RepairCliArguments } from '../../scripts/repair-live-matches-v2';
 import {
   assertLiveMatchesV2RepairAuthorization,
   LIVE_MATCHES_V2_REPAIR_CONFIRMATION,
@@ -8,6 +9,37 @@ import {
 } from '../../src/services/live-match-v2-repair.service';
 
 describe('Live Matches V2 repair guardrails', () => {
+  test('CLI maps one exact scope and rejects duplicate flags', () => {
+    expect(
+      parseLiveMatchesV2RepairCliArguments(
+        [
+          '--action=inspect',
+          '--season',
+          '2627',
+          '--event-id',
+          '2',
+          '--kind=detail',
+          '--reason',
+          'read the paired publication state',
+        ],
+        {},
+      ),
+    ).toEqual({
+      action: 'inspect',
+      season: '2627',
+      eventId: 2,
+      kind: 'detail',
+      reason: 'read the paired publication state',
+      confirmation: null,
+    });
+    expect(() =>
+      parseLiveMatchesV2RepairCliArguments(
+        ['--action', 'inspect', '--action', 'inspect', '--season', '2627', '--event-id', '2'],
+        {},
+      ),
+    ).toThrow('usage: bun scripts/repair-live-matches-v2.ts');
+  });
+
   test('parses an exact read-only scope without write authorization', () => {
     expect(
       parseLiveMatchesV2RepairRequest({
