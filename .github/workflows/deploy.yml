@@ -314,6 +314,21 @@ jobs:
               echo "deploy preflight: DATABASE_URL missing from $migration_env_file"
               exit 1
             fi
+            if [ -z "${LIVE_POINTS_V2_SEED_SEASON:-}" ]; then
+              LIVE_POINTS_V2_SEED_SEASON=$(read_env_setting LIVE_POINTS_V2_SEED_SEASON "$env_file")
+            fi
+            if [ -z "${LIVE_POINTS_V2_SEED_EVENT_ID:-}" ]; then
+              LIVE_POINTS_V2_SEED_EVENT_ID=$(read_env_setting LIVE_POINTS_V2_SEED_EVENT_ID "$env_file")
+            fi
+            if ! [[ "${LIVE_POINTS_V2_SEED_SEASON:-}" =~ ^[0-9]{4}$ ]]; then
+              echo 'deploy preflight: LIVE_POINTS_V2_SEED_SEASON must be YYYY' >&2
+              exit 1
+            fi
+            if ! [[ "${LIVE_POINTS_V2_SEED_EVENT_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+              echo 'deploy preflight: LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer' >&2
+              exit 1
+            fi
+            export LIVE_POINTS_V2_SEED_SEASON LIVE_POINTS_V2_SEED_EVENT_ID
 
             old_container=$(docker compose ps -aq api | head -n 1)
             old_image=""
@@ -450,16 +465,6 @@ jobs:
               bun run db:verify-runtime-logins
             finish_stage
             start_stage v2Seed
-            : "${LIVE_POINTS_V2_SEED_SEASON:?deploy requires LIVE_POINTS_V2_SEED_SEASON}"
-            : "${LIVE_POINTS_V2_SEED_EVENT_ID:?deploy requires LIVE_POINTS_V2_SEED_EVENT_ID}"
-            if ! [[ "$LIVE_POINTS_V2_SEED_SEASON" =~ ^[0-9]{4}$ ]]; then
-              echo 'deploy preflight: LIVE_POINTS_V2_SEED_SEASON must be YYYY' >&2
-              exit 1
-            fi
-            if ! [[ "$LIVE_POINTS_V2_SEED_EVENT_ID" =~ ^[1-9][0-9]*$ ]]; then
-              echo 'deploy preflight: LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer' >&2
-              exit 1
-            fi
             # The cutover seed needs the runtime Redis credentials and a
             # direct/session PostgreSQL URL. The migration env is the only
             # deploy-time source guaranteed to be direct/session (the runtime

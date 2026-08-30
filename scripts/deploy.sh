@@ -65,6 +65,27 @@ load_backup_settings() {
   export DATABASE_BACKUP_DIR DATABASE_BACKUP_KEEP DATABASE_BACKUP_PG_MAJOR
 }
 
+load_v2_seed_scope() {
+  local value
+  if [[ -z "${LIVE_POINTS_V2_SEED_SEASON:-}" ]]; then
+    value=$(read_env_setting LIVE_POINTS_V2_SEED_SEASON "$ENV_FILE")
+    LIVE_POINTS_V2_SEED_SEASON=$value
+  fi
+  if [[ -z "${LIVE_POINTS_V2_SEED_EVENT_ID:-}" ]]; then
+    value=$(read_env_setting LIVE_POINTS_V2_SEED_EVENT_ID "$ENV_FILE")
+    LIVE_POINTS_V2_SEED_EVENT_ID=$value
+  fi
+  if ! [[ "${LIVE_POINTS_V2_SEED_SEASON:-}" =~ ^[0-9]{4}$ ]]; then
+    log_error "LIVE_POINTS_V2_SEED_SEASON must be YYYY"
+    return 1
+  fi
+  if ! [[ "${LIVE_POINTS_V2_SEED_EVENT_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer"
+    return 1
+  fi
+  export LIVE_POINTS_V2_SEED_SEASON LIVE_POINTS_V2_SEED_EVENT_ID
+}
+
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
@@ -187,6 +208,13 @@ deploy() {
   trap deploy_on_exit EXIT
   require_compose
   require_files
+  # Validate the immutable V2 seed scope while services are still serving the
+  # old release. A missing deployment variable must never stop a healthy
+  # stack and discover the error only after migration has started.
+  if ! load_v2_seed_scope; then
+    log_error "Live Points V2 seed scope is invalid; services were not stopped."
+    exit 1
+  fi
   if ! DATABASE_CONNECTION_BUDGET="${DATABASE_CONNECTION_BUDGET:-15}" \
     COMPOSE_BIN="$COMPOSE_BIN" COMPOSE_FILE="$COMPOSE_FILE" PROJECT_DIR="$PROJECT_DIR" \
     "${PROJECT_DIR}/scripts/check-database-pool-budget.sh"; then
@@ -383,16 +411,6 @@ deploy() {
   fi
   finish_stage
   start_stage v2Seed
-  : "${LIVE_POINTS_V2_SEED_SEASON:?deploy requires LIVE_POINTS_V2_SEED_SEASON}"
-  : "${LIVE_POINTS_V2_SEED_EVENT_ID:?deploy requires LIVE_POINTS_V2_SEED_EVENT_ID}"
-  if ! [[ "$LIVE_POINTS_V2_SEED_SEASON" =~ ^[0-9]{4}$ ]]; then
-    log_error "LIVE_POINTS_V2_SEED_SEASON must be YYYY"
-    exit 1
-  fi
-  if ! [[ "$LIVE_POINTS_V2_SEED_EVENT_ID" =~ ^[1-9][0-9]*$ ]]; then
-    log_error "LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer"
-    exit 1
-  fi
   log_info "Seeding and verifying the Live Points V2 global and entry publications"
   # The cutover seed is a one-shot operation: use the migration LOGIN's
   # direct/session URL, while compose supplies the runtime Redis credentials.

@@ -1,8 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 
-import { checkReadiness } from '../../src/api/health';
+import { checkReadiness, mismatchSinceForPublication } from '../../src/api/health';
 
 describe('data API readiness', () => {
+  test('preserves an aged checkpoint mismatch across an API restart', () => {
+    const now = Date.parse('2026-08-30T12:00:00.000Z');
+    const requestedAt = now - 180_000;
+
+    expect(mismatchSinceForPublication(undefined, requestedAt, now)).toBe(requestedAt);
+    expect(mismatchSinceForPublication(now - 10_000, requestedAt, now)).toBe(requestedAt);
+    expect(mismatchSinceForPublication(undefined, undefined, now)).toBe(now);
+  });
+
   test('hot-path readiness ignores PostgreSQL and queue Redis', async () => {
     await expect(
       checkReadiness({

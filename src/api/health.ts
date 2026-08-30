@@ -111,6 +111,23 @@ const officialH2HWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('off
 const PUBLICATION_MISMATCH_GRACE_MS = 120_000;
 const publicationMismatchSince = new Map<string, number>();
 
+/**
+ * Keep a restarted API from granting a fresh grace window to an already-aged
+ * Redis checkpoint obligation. The durable requestedAt is the earliest known
+ * evidence for the mismatch; only an obligation without an evidence time may
+ * start its grace window at the current process time.
+ */
+export const mismatchSinceForPublication = (
+  existingSince: number | undefined,
+  durableAnchor: number | undefined,
+  now = Date.now(),
+): number => {
+  const safeNow = Number.isFinite(now) ? now : Date.now();
+  const anchor =
+    Number.isFinite(durableAnchor) ? Math.min(durableAnchor as number, safeNow) : safeNow;
+  return Number.isFinite(existingSince) ? Math.min(existingSince as number, anchor) : anchor;
+};
+
 const publicationConsistencyProbe: DependencyProbe = async () => {
   const season = await seasonRepository.findCurrent();
   let consistent = true;
@@ -185,7 +202,13 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
           checkpointLive.publication.generation === redisLive.publication.generation);
     if (!liveMatches) {
       consistent = false;
-      publicationMismatchSince.set(liveKey, publicationMismatchSince.get(liveKey) ?? Date.now());
+      publicationMismatchSince.set(
+        liveKey,
+        mismatchSinceForPublication(
+          publicationMismatchSince.get(liveKey),
+          pendingCheckpointStartedAt,
+        ),
+      );
     } else {
       publicationMismatchSince.delete(liveKey);
     }
