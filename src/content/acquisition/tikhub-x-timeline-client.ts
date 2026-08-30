@@ -578,6 +578,8 @@ export class TikHubXTimelineClient {
           memberMetric.pages += 1;
           const pageTimes: number[] = [];
           for (const rawPost of parsed.data.data.timeline) {
+            attempt.rawReturnedCount += 1;
+            memberMetric.rawPosts += 1;
             const post = timelinePostSchema.safeParse(rawPost);
             if (!post.success) {
               throw new TikHubXTimelineError(
@@ -587,8 +589,6 @@ export class TikHubXTimelineClient {
             }
             const createdAtMs = timestamp(post.data.created_at);
             pageTimes.push(createdAtMs);
-            attempt.rawReturnedCount += 1;
-            memberMetric.rawPosts += 1;
             if (
               post.data.author.screen_name.toLowerCase() !== identity.handle.toLowerCase() ||
               post.data.author.rest_id !== responseUser.rest_id
