@@ -10,6 +10,7 @@ import {
   inspectPickScope,
   parseSeedArguments,
   resolveLivePointsV2SeedDatabaseUrl,
+  resolveSeedObservationCheckedAt,
   type ExistingPickRow,
   type FinalResultSeedRow,
   type LegacyFixtureEvidenceRow,
@@ -76,6 +77,21 @@ describe('Live Points V2 entry-pick seed', () => {
         'postgresql://letletme_data_runtime.current-project@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres',
       ),
     ).not.toThrow();
+  });
+
+  test('uses the persisted event fence without inventing a cutover timestamp', () => {
+    const sourceCheckedAt = new Date('2026-08-30T15:30:08.402Z');
+    const eventSnapshotCheckedAt = new Date('2026-08-30T15:31:08.555Z');
+
+    expect(resolveSeedObservationCheckedAt(sourceCheckedAt, eventSnapshotCheckedAt)).toEqual(
+      eventSnapshotCheckedAt,
+    );
+    expect(
+      resolveSeedObservationCheckedAt(eventSnapshotCheckedAt, new Date('2026-08-30T15:30:08.402Z')),
+    ).toEqual(eventSnapshotCheckedAt);
+    expect(() => resolveSeedObservationCheckedAt(new Date('invalid'), null)).toThrow(
+      'seed source timestamp is invalid',
+    );
   });
 
   test('recognises only zero-contribution out-of-scope fixture rows as no-op evidence', () => {
