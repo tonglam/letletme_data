@@ -292,36 +292,59 @@ export async function persistEntryEventPicksResponse(
     existing !== null &&
     existing.input.finalResult !== null &&
     entryLivePicksBaseContentHash(existing.input) === entryLivePicksBaseContentHash(input);
-  if (sameBaseWithFinalResult) {
+  let generationFloor: number | undefined;
+  let generationNeedsRepair = false;
+  if (existing !== null && (sameBaseWithFinalResult || sameInput)) {
+    try {
+      const durableHead = await entryEventPicksRepository.findHead(season, entryId, eventId);
+      if (durableHead) {
+        generationNeedsRepair =
+          durableHead.generation > existing.publication.generation ||
+          (durableHead.generation === existing.publication.generation &&
+            durableHead.publicationId !== existing.publication.publicationId);
+        generationFloor = durableHead.generation;
+      }
+    } catch (error) {
+      // Redis remains the serving boundary. A later sync retries this lookup
+      // before accepting an unchanged input as fully repaired.
+      logError('Entry V2 durable generation repair lookup unavailable', error, {
+        season: season.seasonCode,
+        entryId,
+        eventId,
+      });
+    }
+  }
+  if (sameBaseWithFinalResult && !generationNeedsRepair) {
     if (desired || existing!.publication.checkpointedAt === null) {
       await ensureEntryLiveCheckpoint(season, eventId, entryId, existing!.publication, desired);
     }
     return { entryId, eventId, changed: false };
   }
-  if (sameInput) {
+  if (sameInput && !generationNeedsRepair) {
     if (desired === null && existing!.publication.checkpointedAt !== null) {
       return { entryId, eventId, changed: false };
     }
     await ensureEntryLiveCheckpoint(season, eventId, entryId, existing!.publication, desired);
     return { entryId, eventId, changed: false };
   }
-  let generationFloor: number | undefined;
-  try {
-    // Redis can lose both the pointer and sequence during a rebuild while the
-    // durable V2 head remains authoritative.  Seed a replacement above that
-    // head so the checkpoint fence can make progress instead of retrying an
-    // equal/older generation forever.
-    generationFloor = (await entryEventPicksRepository.findHead(season, entryId, eventId))
-      ?.generation;
-  } catch (error) {
-    // Redis remains the serving boundary.  If PostgreSQL is unavailable, let
-    // the publication proceed and let the checkpoint/reconciler retry with a
-    // durable generation floor once the database is reachable.
-    logError('Entry V2 durable generation floor unavailable', error, {
-      season: season.seasonCode,
-      entryId,
-      eventId,
-    });
+  if (generationFloor === undefined) {
+    try {
+      // Redis can lose both the pointer and sequence during a rebuild while
+      // the durable V2 head remains authoritative. Seed a replacement above
+      // that head so the checkpoint fence can make progress instead of
+      // retrying an equal/older generation forever.
+      generationFloor = (await entryEventPicksRepository.findHead(season, entryId, eventId))
+        ?.generation;
+    } catch (error) {
+      // Redis remains the serving boundary. If PostgreSQL is unavailable, let
+      // the publication proceed and let the checkpoint/reconciler retry with a
+      // durable generation floor once the database is reachable.
+      logError('Entry V2 durable generation floor unavailable', error, {
+        season: season.seasonCode,
+        entryId,
+        eventId,
+      });
+    }
   }
   const publication = await publishEntryLiveInputV2({
     season: season.seasonCode,
