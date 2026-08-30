@@ -19,6 +19,7 @@ import {
   readEntryLiveInputV2,
   restoreLivePublicationV2Checkpoint,
   readLivePublicationV2,
+  readLivePublicationV2ActiveRaw,
   setEntryCheckpointDesiredV2,
   setLiveCheckpointDesiredV2,
   type EntryLiveInputV2,
@@ -30,8 +31,12 @@ import { redisSingleton } from '../src/cache/singleton';
 import { databaseSingleton } from '../src/db/singleton';
 import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
 import {
+  acquireLivePublicationV2SeedClaim,
   checkpointLivePublicationV2,
+  livePublicationSeedClaimMatchesPublication,
   readLivePublicationV2Checkpoint,
+  readLivePublicationV2SeedClaim,
+  releaseLivePublicationV2SeedClaim,
 } from '../src/services/live-publication-v2-checkpoint.service';
 import { checkpointEntryLiveInputV2 } from '../src/services/entries.service';
 import { canonicalJson, contentHash, postgresJsonbContentHash } from '../src/utils/content-hash';
@@ -2147,6 +2152,10 @@ function sameLiveSeed(
   );
 }
 
+export function liveSeedActivePointerSha256(raw: string): string {
+  return createHash('sha256').update(raw, 'utf8').digest('hex');
+}
+
 /**
  * A failed first cutover can leave a complete Redis publication without its
  * PostgreSQL checkpoint.  A later seed may supersede that orphan only with a
@@ -2192,6 +2201,7 @@ async function checkpointSeededLive(
       'eventLives' | 'fixtures' | 'explains' | 'fixtureEvidence'
     >;
     readonly requireMissingCheckpoint?: boolean;
+    readonly seedClaimId?: string;
   } = {},
 ): Promise<'checkpointed' | 'already-checkpointed' | 'blocked'> {
   const payload = options.payload ?? seed;
@@ -2235,6 +2245,7 @@ async function checkpointSeededLive(
     fixtureEvidence: payload.fixtureEvidence,
     observationCheckedAt: seed.observationCheckedAt,
     requireMissingCheckpoint: options.requireMissingCheckpoint,
+    seedClaimId: options.seedClaimId,
   });
   if (!checkpointed) {
     // A seed candidate may lose to a newer or FINALIZED durable head. Never
@@ -2260,6 +2271,7 @@ async function checkpointSeededLive(
 async function seedLivePublication(
   seed: ValidatedLiveSeed,
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  allowStaleClaimReset = true,
 ): Promise<{
   readonly status: 'published' | 'unchanged' | 'stale' | 'restored' | 'skipped-existing';
   readonly checkpoint: 'checkpointed' | 'already-checkpointed' | 'blocked' | 'not-required';
@@ -2267,15 +2279,51 @@ async function seedLivePublication(
   readonly publicationId: string;
 }> {
   const scope = { season: seed.season.seasonCode, eventId: seed.source.event_id } as const;
-  const current = await readLivePublicationV2(scope, redis);
-  if (sameLiveSeed(current, seed)) {
-    const checkpoint = await checkpointSeededLive(seed, current!.publication, redis);
+  const activeRaw = await readLivePublicationV2ActiveRaw(scope, redis);
+  const activeSha256 = liveSeedActivePointerSha256(activeRaw);
+  const claimCandidate = {
+    candidateState: seed.state,
+    candidateSourceCheckedAt: seed.sourceCheckedAt.toISOString(),
+    candidateEventLiveSha256: contentHash(seed.eventLives),
+    candidateFixturesSha256: contentHash(seed.fixtures),
+  } as const;
+  const [current, existingClaim] = await Promise.all([
+    readLivePublicationV2(scope, redis),
+    readLivePublicationV2SeedClaim(seed.season, seed.source.event_id),
+  ]);
+  const currentMatchesExistingClaim = Boolean(
+    existingClaim &&
+      current?.servedFrom === 'REDIS_CURRENT' &&
+      livePublicationSeedClaimMatchesPublication(existingClaim, current.publication),
+  );
+  if (sameLiveSeed(current, seed) && (!existingClaim || currentMatchesExistingClaim)) {
+    const checkpoint = await checkpointSeededLive(seed, current!.publication, redis, {
+      ...(existingClaim
+        ? { requireMissingCheckpoint: true, seedClaimId: existingClaim.claimId }
+        : {}),
+    });
     return {
       status: 'unchanged',
       checkpoint,
       generation: current!.publication.generation,
       publicationId: current!.publication.publicationId,
     };
+  }
+  if (existingClaim && existingClaim.expectedActiveSha256 !== activeSha256) {
+    // A prior seed either completed its Redis switch before crashing or lost
+    // the active-pointer CAS to another complete writer. The same-seed case
+    // resumed above; otherwise release only this exact claim and re-read the
+    // whole scope once so eligibility is never evaluated across observations.
+    if (!allowStaleClaimReset) {
+      throw new Error('V2 cache seed found a changing stale recovery claim');
+    }
+    const released = await releaseLivePublicationV2SeedClaim(
+      seed.season,
+      seed.source.event_id,
+      existingClaim.claimId,
+    );
+    if (!released) throw new Error('V2 cache seed recovery claim changed during release');
+    return seedLivePublication(seed, redis, false);
   }
   if (current) {
     // A deploy seed is a cutover/bootstrap operation, not a periodic writer.
@@ -2286,6 +2334,26 @@ async function seedLivePublication(
     // the next generation while preserving that orphan as previous.
     const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
     if (!durable && canSupersedeUncheckpointedSeedCurrent(current.publication, seed)) {
+      const acquired = await acquireLivePublicationV2SeedClaim(
+        seed.season,
+        seed.source.event_id,
+        activeSha256,
+        claimCandidate,
+      );
+      if (acquired.status === 'durable') {
+        const winner = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
+        if (!winner) throw new Error('V2 seed durable winner disappeared after claim refusal');
+        const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: winner, redis });
+        return {
+          status: restored.published ? 'restored' : 'stale',
+          checkpoint: restored.published ? 'already-checkpointed' : 'blocked',
+          generation: restored.publication.generation,
+          publicationId: restored.publication.publicationId,
+        };
+      }
+      if (acquired.status === 'blocked') {
+        throw new Error('V2 cache seed recovery claim belongs to another active observation');
+      }
       const promoted = await publishLivePublicationV2({
         season: seed.season.seasonCode,
         eventId: seed.source.event_id,
@@ -2295,10 +2363,16 @@ async function seedLivePublication(
         eventLives: seed.eventLives,
         fixtures: seed.fixtures,
         previous: current.publication,
-        expectedCurrent: current.publication,
+        expectedCurrentRaw: activeRaw,
+        promotionMode: 'seed-recovery',
         redis,
       });
       if (!promoted.published) {
+        await releaseLivePublicationV2SeedClaim(
+          seed.season,
+          seed.source.event_id,
+          acquired.claim.claimId,
+        );
         return {
           status: 'stale',
           checkpoint: 'blocked',
@@ -2308,6 +2382,7 @@ async function seedLivePublication(
       }
       const checkpoint = await checkpointSeededLive(seed, promoted.publication, redis, {
         requireMissingCheckpoint: true,
+        seedClaimId: acquired.claim.claimId,
       });
       return {
         status: 'published',
@@ -2315,6 +2390,13 @@ async function seedLivePublication(
         generation: promoted.publication.generation,
         publicationId: promoted.publication.publicationId,
       };
+    }
+    if (existingClaim) {
+      await releaseLivePublicationV2SeedClaim(
+        seed.season,
+        seed.source.event_id,
+        existingClaim.claimId,
+      );
     }
     const checkpoint = await checkpointSeededLive(seed, current.publication, redis, {
       payload: {
@@ -2331,6 +2413,13 @@ async function seedLivePublication(
   }
   const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
   if (durable) {
+    if (existingClaim) {
+      await releaseLivePublicationV2SeedClaim(
+        seed.season,
+        seed.source.event_id,
+        existingClaim.claimId,
+      );
+    }
     // Redis may have lost its pointer after the first cutover. Restore the
     // exact durable identity rather than manufacturing a new publication from
     // legacy rows (especially important for FINALIZED events).
@@ -2353,6 +2442,26 @@ async function seedLivePublication(
       publicationId: restored.publication.publicationId,
     };
   }
+  const acquired = await acquireLivePublicationV2SeedClaim(
+    seed.season,
+    seed.source.event_id,
+    activeSha256,
+    claimCandidate,
+  );
+  if (acquired.status === 'durable') {
+    const winner = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
+    if (!winner) throw new Error('V2 seed durable winner disappeared after claim refusal');
+    const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: winner, redis });
+    return {
+      status: restored.published ? 'restored' : 'stale',
+      checkpoint: restored.published ? 'already-checkpointed' : 'blocked',
+      generation: restored.publication.generation,
+      publicationId: restored.publication.publicationId,
+    };
+  }
+  if (acquired.status === 'blocked') {
+    throw new Error('V2 cache seed recovery claim belongs to another active observation');
+  }
   const promoted = await publishLivePublicationV2({
     season: seed.season.seasonCode,
     eventId: seed.source.event_id,
@@ -2362,10 +2471,16 @@ async function seedLivePublication(
     eventLives: seed.eventLives,
     fixtures: seed.fixtures,
     previous: null,
-    expectedCurrent: null,
+    expectedCurrentRaw: activeRaw,
+    promotionMode: 'seed-recovery',
     redis,
   });
   if (!promoted.published) {
+    await releaseLivePublicationV2SeedClaim(
+      seed.season,
+      seed.source.event_id,
+      acquired.claim.claimId,
+    );
     return {
       status: 'stale',
       checkpoint: 'not-required',
@@ -2375,6 +2490,7 @@ async function seedLivePublication(
   }
   const checkpoint = await checkpointSeededLive(seed, promoted.publication, redis, {
     requireMissingCheckpoint: true,
+    seedClaimId: acquired.claim.claimId,
   });
   return {
     status: 'published',

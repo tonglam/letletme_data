@@ -23,6 +23,7 @@ import {
   publishEntryLiveFinalResultV2,
   publishEntryLiveInputV2,
   publishLivePublicationV2,
+  readLivePublicationV2ActiveRaw,
   restoreLivePublicationV2Checkpoint,
   readLiveCheckpointDesiredV2,
   readEntryLiveInputV2,
@@ -292,6 +293,8 @@ describe('immutable Redis publication', () => {
       eventLives: [],
       fixtures: [],
       previous: first.publication,
+      expectedCurrentRaw: 'not-json',
+      promotionMode: 'seed-recovery',
       redis,
     });
 
@@ -311,6 +314,7 @@ describe('immutable Redis publication', () => {
       fixtures: [],
       redis,
     });
+    const inspectedRaw = await readLivePublicationV2ActiveRaw(LIVE_SCOPE, redis);
     const winner = await publishLivePublicationV2({
       ...LIVE_SCOPE,
       state: 'LIVE_ACTIVE',
@@ -329,13 +333,43 @@ describe('immutable Redis publication', () => {
         eventLives: [],
         fixtures: [],
         previous: inspected.publication,
-        expectedCurrent: inspected.publication,
+        expectedCurrentRaw: inspectedRaw,
+        promotionMode: 'seed-recovery',
         redis,
       }),
     ).rejects.toMatchObject({ code: 'LIVE_V2_PROMOTE_CHANGED' });
     expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication.publicationId).toBe(
       winner.publication.publicationId,
     );
+  });
+
+  test('claimed seed recovery can replace a valid finalized orphan with a newer final', async () => {
+    const orphan = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    const orphanRaw = await readLivePublicationV2ActiveRaw(LIVE_SCOPE, redis);
+
+    const recovered = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:01:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: orphan.publication,
+      expectedCurrentRaw: orphanRaw,
+      promotionMode: 'seed-recovery',
+      redis,
+    });
+
+    expect(recovered.published).toBe(true);
+    expect(recovered.previous?.publicationId).toBe(orphan.publication.publicationId);
+    expect(recovered.publication).toMatchObject({ state: 'FINALIZED' });
+    expect(recovered.publication.generation).toBeGreaterThan(orphan.publication.generation);
   });
 
   test('rebuild-current restores a corrupted current item at the checkpoint generation', async () => {

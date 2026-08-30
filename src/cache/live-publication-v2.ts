@@ -557,6 +557,7 @@ return {tostring(value), tostring(now[1]), tostring(now[2])}
 const PROMOTE_LIVE_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
 local restoring = ARGV[4] == 'restore'
+local seed_recovery = ARGV[4] == 'seed-recovery'
 local observed_current_raw = ARGV[5] or ''
 local current_raw = redis.call('GET', KEYS[1]) or ''
 if current_raw ~= observed_current_raw then return {'changed', current_raw} end
@@ -613,8 +614,10 @@ end
 if current_state == 'FINALIZED' and not same_identity and not restoring_final then
   -- A valid FINAL is immutable.  If its manifest/items fail validation, allow
   -- only a newer complete FINAL to replace the poisoned pointer; never let a
-  -- provisional heartbeat downgrade the terminal scope.
-  if candidate.state ~= 'FINALIZED' or current ~= nil then return {'stale', current_raw} end
+  -- provisional heartbeat downgrade the terminal scope. A cutover seed may
+  -- replace a valid orphan FINAL only after its PostgreSQL claim was committed
+  -- before this script; normal producers can never select that mode.
+  if candidate.state ~= 'FINALIZED' or (current ~= nil and not seed_recovery) then return {'stale', current_raw} end
 end
 for index, name in ipairs({'eventLive', 'fixtures'}) do
   local item = candidate.items[name]
@@ -1114,12 +1117,13 @@ export async function publishLivePublicationV2(input: {
   readonly fixtures: readonly Fixture[];
   readonly previous?: LivePublicationV2 | null;
   /**
-   * Optional caller-owned CAS base. Seed/recovery callers use this to bind a
-   * decision made from an earlier validated read to the exact active manifest
-   * observed by the promotion script. `null` means the active pointer must
-   * still be absent; `undefined` keeps the normal producer behavior.
+   * Optional caller-owned raw-pointer CAS base. Seed/recovery callers retain
+   * even an invalid active value and bind eligibility to those exact bytes;
+   * an empty string means the active key must still be absent.
    */
-  readonly expectedCurrent?: LivePublicationV2 | null;
+  readonly expectedCurrentRaw?: string;
+  /** PostgreSQL-claimed one-shot cutover recovery; never used by producers. */
+  readonly promotionMode?: 'normal' | 'seed-recovery';
   readonly generationFloor?: number;
   readonly redis?: Redis;
 }): Promise<{
@@ -1165,19 +1169,14 @@ export async function publishLivePublicationV2(input: {
   };
   await stage(redis, [liveItem, fixtureItem]);
   const currentProof = await readLivePromotionProof(redis, scope);
-  if (input.expectedCurrent !== undefined) {
-    const observedCurrent = parseLiveManifest(currentProof.pointerRaw || null, scope);
-    const expectedCurrentMatches =
-      input.expectedCurrent === null
-        ? currentProof.pointerRaw === ''
-        : observedCurrent !== null &&
-          canonicalJson(observedCurrent) === canonicalJson(input.expectedCurrent);
-    if (!expectedCurrentMatches) {
-      throw new CacheError(
-        'V2 promotion no longer observes the expected current publication',
-        'LIVE_V2_PROMOTE_CHANGED',
-      );
-    }
+  if (
+    input.expectedCurrentRaw !== undefined &&
+    currentProof.pointerRaw !== input.expectedCurrentRaw
+  ) {
+    throw new CacheError(
+      'V2 promotion no longer observes the expected current pointer',
+      'LIVE_V2_PROMOTE_CHANGED',
+    );
   }
   const [status, detail] = promotionResult(
     await redis.eval(
@@ -1189,7 +1188,7 @@ export async function publishLivePublicationV2(input: {
       JSON.stringify(manifest),
       String(LIVE_PUBLICATION_PREVIOUS_TTL_MS),
       String(input.state === 'FINALIZED' ? LIVE_PUBLICATION_FINAL_TTL_MS : 0),
-      '',
+      input.promotionMode === 'seed-recovery' ? 'seed-recovery' : '',
       currentProof.pointerRaw,
       currentProof.eventLivePayload,
       currentProof.fixturesPayload,
@@ -1555,6 +1554,16 @@ export async function readLivePublicationV2(
     (await readLiveCandidate(redis, scope, 'active')) ??
     (await readLiveCandidate(redis, scope, 'previous'))
   );
+}
+
+/** Preserve the exact active bytes for cutover eligibility and Lua CAS. */
+export async function readLivePublicationV2ActiveRaw(
+  scope: LiveScope,
+  redisClient?: Redis,
+): Promise<string> {
+  assertSeasonEvent(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  return (await redis.get(liveV2Key(scope, 'active'))) ?? '';
 }
 
 /** Read one pointer for diagnostics and protected repair tooling. */

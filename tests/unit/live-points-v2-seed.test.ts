@@ -10,6 +10,7 @@ import {
   findMissingPickScopes,
   isNoOpLegacyFixtureEvidence,
   inspectPickScope,
+  liveSeedActivePointerSha256,
   parseSeedArguments,
   rebaseLegacyFixturesAtCanonicalFence,
   resolveLivePointsV2SeedDatabaseUrl,
@@ -20,6 +21,11 @@ import {
   type LegacyFixtureFactRow,
   type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
+import type { LivePublicationV2 } from '../../src/cache/live-publication-v2';
+import {
+  livePublicationSeedClaimAllowsCheckpoint,
+  livePublicationSeedClaimMatchesPublication,
+} from '../../src/services/live-publication-v2-checkpoint.service';
 
 function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
   return Array.from({ length: 15 }, (_, index) => ({
@@ -146,6 +152,59 @@ describe('Live Points V2 entry-pick seed', () => {
         { ...seed, state: 'FINALIZED' },
       ),
     ).toBe(true);
+  });
+
+  test('binds checkpoint permission to the exact durable seed claim', () => {
+    const claimId = '00000000-0000-4000-8000-000000000001';
+    expect(livePublicationSeedClaimAllowsCheckpoint(null, undefined)).toBe(true);
+    expect(livePublicationSeedClaimAllowsCheckpoint(null, claimId)).toBe(false);
+    expect(livePublicationSeedClaimAllowsCheckpoint(claimId, undefined)).toBe(false);
+    expect(livePublicationSeedClaimAllowsCheckpoint(claimId, claimId)).toBe(true);
+    expect(
+      livePublicationSeedClaimAllowsCheckpoint(claimId, '00000000-0000-4000-8000-000000000002'),
+    ).toBe(false);
+    expect(liveSeedActivePointerSha256('')).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    );
+  });
+
+  test('binds a durable seed claim to the exact promoted candidate', () => {
+    const sourceCheckedAt = '2026-08-30T15:30:08.402Z';
+    const eventLiveSha256 = 'a'.repeat(64);
+    const fixturesSha256 = 'b'.repeat(64);
+    const publication = {
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt,
+      items: {
+        eventLive: { sha256: eventLiveSha256 },
+        fixtures: { sha256: fixturesSha256 },
+      },
+    } as LivePublicationV2;
+    const claim = {
+      claimId: '00000000-0000-4000-8000-000000000001',
+      expectedActiveSha256: 'c'.repeat(64),
+      candidateState: 'LIVE_ACTIVE' as const,
+      candidateSourceCheckedAt: sourceCheckedAt,
+      candidateEventLiveSha256: eventLiveSha256,
+      candidateFixturesSha256: fixturesSha256,
+    };
+
+    expect(livePublicationSeedClaimMatchesPublication(claim, publication)).toBe(true);
+    expect(
+      livePublicationSeedClaimMatchesPublication(claim, {
+        ...publication,
+        sourceCheckedAt: '2026-08-30T15:30:09.402Z',
+      }),
+    ).toBe(false);
+    expect(
+      livePublicationSeedClaimMatchesPublication(claim, {
+        ...publication,
+        items: {
+          ...publication.items,
+          fixtures: { ...publication.items.fixtures, sha256: 'd'.repeat(64) },
+        },
+      }),
+    ).toBe(false);
   });
 
   test('rebases the fixture sibling from canonical rows at a newer event fence', () => {

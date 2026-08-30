@@ -37,6 +37,7 @@
   "leagueTypeInCompetition",
   "linkStatusInBridge",
   "livePointsPublicationCheckpointsInCompetition",
+  "livePointsPublicationSeedClaimsInCompetition",
   "matchLinksInBridge",
   "matchesInUnderstat",
   "mutationScopesInOps",
