@@ -176,6 +176,8 @@ async function boundedJson(
   response: Response,
   maximumBytes: number,
   signal: AbortSignal,
+  timeoutFailure: Readonly<{ failureClass: string; message: string }>,
+  onBytesRead: (bytes: number) => void,
 ): Promise<{ decoded: unknown; bytes: number; bodyHash: string }> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isSafeInteger(declared) && declared > maximumBytes) {
@@ -192,7 +194,7 @@ async function boundedJson(
     while (true) {
       if (signal.aborted) {
         await reader.cancel('TikHub response timed out').catch(() => undefined);
-        throw new TikHubXTimelineError('TIKHUB_TIMEOUT', 'TikHub timeline request timed out');
+        throw new TikHubXTimelineError(timeoutFailure.failureClass, timeoutFailure.message);
       }
       let abortListener: (() => void) | null = null;
       let abortHandled = false;
@@ -201,7 +203,7 @@ async function boundedJson(
           if (abortHandled) return;
           abortHandled = true;
           void reader.cancel('TikHub response timed out').catch(() => undefined);
-          reject(new TikHubXTimelineError('TIKHUB_TIMEOUT', 'TikHub timeline request timed out'));
+          reject(new TikHubXTimelineError(timeoutFailure.failureClass, timeoutFailure.message));
         };
         signal.addEventListener('abort', abortListener, { once: true });
         if (signal.aborted) abortListener();
@@ -215,6 +217,7 @@ async function boundedJson(
       const { done, value } = chunk;
       if (done) break;
       total += value.byteLength;
+      onBytesRead(value.byteLength);
       if (total > maximumBytes) {
         await reader.cancel('TikHub response exceeded the byte limit');
         throw new TikHubXTimelineError(
@@ -232,7 +235,7 @@ async function boundedJson(
     offset += chunk.byteLength;
   }
   if (signal.aborted) {
-    throw new TikHubXTimelineError('TIKHUB_TIMEOUT', 'TikHub timeline request timed out');
+    throw new TikHubXTimelineError(timeoutFailure.failureClass, timeoutFailure.message);
   }
   let text: string;
   try {
@@ -318,6 +321,14 @@ export class TikHubXTimelineClient {
     if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1_000) {
       throw new Error('TikHub timeout must be at least one second');
     }
+    const runTimeoutMs = input.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(runTimeoutMs) ||
+      runTimeoutMs < 1_000 ||
+      runTimeoutMs > DEFAULT_RUN_TIMEOUT_MS
+    ) {
+      throw new Error('TikHub run timeout must be between one second and five minutes');
+    }
     if (!Number.isSafeInteger(input.maximumResponseBytes) || input.maximumResponseBytes < 1_024) {
       throw new Error('TikHub response limit must be at least 1024 bytes');
     }
@@ -334,7 +345,7 @@ export class TikHubXTimelineClient {
     this.apiKey = input.apiKey.trim();
     this.fetchImpl = input.fetchImpl ?? fetch;
     this.timeoutMs = input.timeoutMs;
-    this.runTimeoutMs = input.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    this.runTimeoutMs = runTimeoutMs;
     this.maximumResponseBytes = input.maximumResponseBytes;
     this.maximumPagesPerMember = input.maximumPagesPerMember;
     this.endpointUrl = input.endpointUrl ?? TIKHUB_TIMELINE_URL;
@@ -363,6 +374,7 @@ export class TikHubXTimelineClient {
       responseBytes: 0,
       httpStatus: null,
     };
+    const runDeadlineAt = attempt.startedAt + this.runTimeoutMs;
     const windowStart = Date.parse(request.windowStart);
     const windowEnd = Date.parse(request.windowEnd);
     const uniquePosts = new Map<string, GrokBuildXPostV1>();
@@ -387,7 +399,7 @@ export class TikHubXTimelineClient {
         let pageCapReached = false;
 
         while (pages < this.maximumPagesPerMember) {
-          if (Date.now() - attempt.startedAt >= this.runTimeoutMs) {
+          if (Date.now() >= runDeadlineAt) {
             throw new TikHubXTimelineError(
               'TIKHUB_RUN_TIMEOUT',
               'TikHub timeline run exceeded its bounded execution time',
@@ -395,6 +407,13 @@ export class TikHubXTimelineClient {
           }
           const callIndex = attempt.providerUnits;
           await hooks.beforeProviderCall?.(callIndex);
+          const remainingRunMs = runDeadlineAt - Date.now();
+          if (remainingRunMs <= 0) {
+            throw new TikHubXTimelineError(
+              'TIKHUB_RUN_TIMEOUT',
+              'TikHub timeline run exceeded its bounded execution time',
+            );
+          }
           const url = new URL(this.endpointUrl);
           url.searchParams.set(identity.key, identity.value);
           if (cursor) url.searchParams.set('cursor', cursor);
@@ -409,7 +428,20 @@ export class TikHubXTimelineClient {
           attempt.providerUnits += 1;
           await hooks.onProviderCallStart?.(callIndex);
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+          const runDeadlineLimitsCall = remainingRunMs <= this.timeoutMs;
+          const timeoutFailure = runDeadlineLimitsCall
+            ? {
+                failureClass: 'TIKHUB_RUN_TIMEOUT',
+                message: 'TikHub timeline run exceeded its bounded execution time',
+              }
+            : {
+                failureClass: 'TIKHUB_TIMEOUT',
+                message: 'TikHub timeline request timed out',
+              };
+          const timer = setTimeout(
+            () => controller.abort(),
+            Math.min(this.timeoutMs, remainingRunMs),
+          );
           let response: Response;
           let body: { decoded: unknown; bytes: number; bodyHash: string };
           try {
@@ -424,14 +456,19 @@ export class TikHubXTimelineClient {
                 signal: controller.signal,
               });
               attempt.httpStatus = response.status;
-              body = await boundedJson(response, this.maximumResponseBytes, controller.signal);
+              body = await boundedJson(
+                response,
+                this.maximumResponseBytes,
+                controller.signal,
+                timeoutFailure,
+                (bytes) => {
+                  attempt.responseBytes += bytes;
+                },
+              );
             } catch (error) {
               if (error instanceof TikHubXTimelineError) throw error;
               if (controller.signal.aborted) {
-                throw new TikHubXTimelineError(
-                  'TIKHUB_TIMEOUT',
-                  'TikHub timeline request timed out',
-                );
+                throw new TikHubXTimelineError(timeoutFailure.failureClass, timeoutFailure.message);
               }
               throw new TikHubXTimelineError(
                 'TIKHUB_TRANSPORT_FAILED',
@@ -441,7 +478,6 @@ export class TikHubXTimelineClient {
           } finally {
             clearTimeout(timer);
           }
-          attempt.responseBytes += body.bytes;
           attempt.responseHashes.push(
             sha256CanonicalJson({
               status: response.status,

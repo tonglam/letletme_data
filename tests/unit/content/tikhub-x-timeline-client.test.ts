@@ -339,7 +339,11 @@ describe('TikHub fixed-account timeline client', () => {
   });
 
   test('keeps the per-call timeout active while the response body stalls', async () => {
+    const partialBody = new TextEncoder().encode('{"code":200,');
     const hangingBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(partialBody);
+      },
       pull: () => new Promise<void>(() => undefined),
     });
     const client = new TikHubXTimelineClient({
@@ -366,9 +370,65 @@ describe('TikHub fixed-account timeline client', () => {
       expect(error).toBeInstanceOf(TikHubXTimelineError);
       expect(error).toMatchObject({
         failureClass: 'TIKHUB_TIMEOUT',
-        evidence: { providerUnits: 1 },
+        evidence: { providerUnits: 1, responseBytes: partialBody.byteLength },
       });
       expect(Date.now() - startedAt).toBeLessThan(3_000);
+    }
+  });
+
+  test('caps later pages by the remaining overall run deadline', async () => {
+    let call = 0;
+    const hangingBody = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+    });
+    const client = new TikHubXTimelineClient({
+      apiKey: 'fixture-secret',
+      timeoutMs: 5_000,
+      runTimeoutMs: 1_200,
+      maximumResponseBytes: 1_000_000,
+      maximumPagesPerMember: 3,
+      fetchImpl: async () => {
+        call += 1;
+        if (call === 1) {
+          return response({
+            code: 200,
+            request_id: 'request-before-run-deadline',
+            data: {
+              user: { rest_id: '123456789' },
+              next_cursor: 'next-page',
+              timeline: [
+                post({
+                  handle: 'FPLFocal',
+                  restId: '123456789',
+                  createdAt: '2026-08-30T17:00:00.000Z',
+                  text: 'First page before the deadline',
+                }),
+              ],
+            },
+          });
+        }
+        return new Response(hangingBody, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+      endpointUrl: 'https://fixture.invalid/timeline',
+    });
+
+    const startedAt = Date.now();
+    try {
+      await client.execute({
+        ...request,
+        partition: { ...request.partition, members: [request.partition.members[0]!] },
+      });
+      throw new Error('Expected TikHub run timeout');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TikHubXTimelineError);
+      expect(error).toMatchObject({
+        failureClass: 'TIKHUB_RUN_TIMEOUT',
+        evidence: { providerUnits: 2 },
+      });
+      expect(Date.now() - startedAt).toBeLessThan(2_500);
     }
   });
 });
