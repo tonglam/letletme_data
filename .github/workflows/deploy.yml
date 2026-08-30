@@ -25,6 +25,8 @@ jobs:
       packages: write
     env:
       REGISTRY: ghcr.io
+      LIVE_POINTS_V2_SEED_SEASON: ${{ vars.LIVE_POINTS_V2_SEED_SEASON }}
+      LIVE_POINTS_V2_SEED_EVENT_ID: ${{ vars.LIVE_POINTS_V2_SEED_EVENT_ID }}
     steps:
       - name: Resolve protected main and CI gate
         id: target
@@ -106,6 +108,8 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          LIVE_POINTS_V2_SEED_SEASON: ${{ vars.LIVE_POINTS_V2_SEED_SEASON }}
+          LIVE_POINTS_V2_SEED_EVENT_ID: ${{ vars.LIVE_POINTS_V2_SEED_EVENT_ID }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
@@ -116,7 +120,7 @@ jobs:
           # leave the SSH command enough time for preflight, migration, and
           # rollback/recovery if readiness never converges.
           timeout: 20m
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,LIVE_POINTS_V2_SEED_SEASON,LIVE_POINTS_V2_SEED_EVENT_ID
           script: |
             set -euo pipefail
             old_image=""
@@ -444,6 +448,35 @@ jobs:
             start_stage roleVerify
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
               bun run db:verify-runtime-logins
+            finish_stage
+            start_stage v2Seed
+            : "${LIVE_POINTS_V2_SEED_SEASON:?deploy requires LIVE_POINTS_V2_SEED_SEASON}"
+            : "${LIVE_POINTS_V2_SEED_EVENT_ID:?deploy requires LIVE_POINTS_V2_SEED_EVENT_ID}"
+            if ! [[ "$LIVE_POINTS_V2_SEED_SEASON" =~ ^[0-9]{4}$ ]]; then
+              echo 'deploy preflight: LIVE_POINTS_V2_SEED_SEASON must be YYYY' >&2
+              exit 1
+            fi
+            if ! [[ "$LIVE_POINTS_V2_SEED_EVENT_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo 'deploy preflight: LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer' >&2
+              exit 1
+            fi
+            # The seed needs the runtime Redis credentials and a direct/session
+            # PostgreSQL URL.  Run the app image with the runtime env file, but
+            # override DATABASE_URL with the runtime URL explicitly so the
+            # seed cannot accidentally use the migration owner login.
+            LIVE_POINTS_SEED_CONFIRM=YES \
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+              -e "DATABASE_URL=$data_runtime_database_url" \
+              -e LIVE_POINTS_SEED_CONFIRM=YES \
+              api bun run seed:live-points-v2 -- --execute --cache \
+              --season "$LIVE_POINTS_V2_SEED_SEASON" \
+              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+              -e "DATABASE_URL=$data_runtime_database_url" \
+              api bun run verify:live-points-v2 -- \
+              --season "$LIVE_POINTS_V2_SEED_SEASON" \
+              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
+              --entry-id 6953
             finish_stage
             start_stage cachePublish
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
