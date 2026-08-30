@@ -165,6 +165,25 @@ describe('Briefing acquisition rollout env control', () => {
     expect(readFileSync(target, 'utf8')).toContain('DATABASE_URL=postgresql://fixture');
   });
 
+  test('can disable X cleanly while retaining a TikHub route selection', () => {
+    const target = fixture([
+      'CONTENT_PUBLICATION_ENABLED=false',
+      'BRIEFING_PUBLIC_ENABLED=false',
+      'CONTENT_X_ACCOUNT_PROVIDER=TIKHUB',
+      'CONTENT_PIPELINE_ENABLED=true',
+      'CONTENT_X_SCAN_ENABLED=true',
+      'CONTENT_REAL_GROK_ENABLED=true',
+    ]);
+
+    expect(parse(run('disabled', target))).toMatchObject({
+      mode: 'disabled',
+      pipeline: false,
+      x: false,
+      xAccountProvider: 'TIKHUB',
+      tikhubReady: false,
+    });
+  });
+
   test('does not stop the shared pipeline when publication is already enabled', () => {
     const target = fixture([
       'CONTENT_PUBLICATION_ENABLED=true',

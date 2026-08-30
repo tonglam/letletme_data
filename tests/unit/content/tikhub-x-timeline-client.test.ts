@@ -337,4 +337,38 @@ describe('TikHub fixed-account timeline client', () => {
       expect(String(error)).not.toContain('top-secret-provider-key');
     }
   });
+
+  test('keeps the per-call timeout active while the response body stalls', async () => {
+    const hangingBody = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+    });
+    const client = new TikHubXTimelineClient({
+      apiKey: 'fixture-secret',
+      timeoutMs: 1_000,
+      maximumResponseBytes: 1_000_000,
+      maximumPagesPerMember: 1,
+      fetchImpl: async () =>
+        new Response(hangingBody, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      endpointUrl: 'https://fixture.invalid/timeline',
+    });
+
+    const startedAt = Date.now();
+    try {
+      await client.execute({
+        ...request,
+        partition: { ...request.partition, members: [request.partition.members[0]!] },
+      });
+      throw new Error('Expected TikHub body timeout');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TikHubXTimelineError);
+      expect(error).toMatchObject({
+        failureClass: 'TIKHUB_TIMEOUT',
+        evidence: { providerUnits: 1 },
+      });
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+    }
+  });
 });

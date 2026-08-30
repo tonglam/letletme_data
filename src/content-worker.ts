@@ -174,8 +174,9 @@ async function ensureFormalXRuntime(): Promise<void> {
   const initialization = (async () => {
     try {
       const executor = createConfiguredHostGrokRunner();
-      const tikhubExecutor =
-        flags.xAccountProvider === 'TIKHUB' ? createConfiguredTikHubXTimeline() : undefined;
+      const tikhubExecutor = flags.tikhubApiKeyPresent
+        ? createConfiguredTikHubXTimeline()
+        : undefined;
       formalXRuntime = createFormalXWorkerRuntime(
         executor,
         xBudgetPolicy ?? undefined,
