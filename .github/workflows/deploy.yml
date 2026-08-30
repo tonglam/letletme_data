@@ -134,6 +134,7 @@ jobs:
             migration_started=false
             services_start_attempted=false
             services_stopped=false
+            old_runtime_rollback_eligible=false
             runner_updated=false
             runner_probe_succeeded=false
             runner_previous_target=""
@@ -212,20 +213,24 @@ jobs:
                   ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
                 if [ "$migration_started" = false ]; then
-                  if [ -n "$old_revision" ]; then
-                    git reset --hard "$old_revision" || true
-                  fi
-                  if [ "$services_stopped" = true ] && [ -n "$old_image" ]; then
+                  if [ "$services_stopped" = true ] && \
+                    [ "$old_runtime_rollback_eligible" = true ]; then
+                    if [ -n "$old_revision" ]; then
+                      git reset --hard "$old_revision" || true
+                    fi
                     echo "Data deployment failed before migration; restoring previous API and worker image" >&2
                     restore_runtime_services \
                       "$old_image" "$old_release_sha" "$old_runner_release_sha" \
                       "$old_media_present" || true
+                  elif [ "$services_stopped" = true ]; then
+                    echo "Data deployment failed with no eligible rollback target; leaving services stopped for forward recovery" >&2
                   fi
                 elif [ "$migration_started" = true ]; then
                   if ! restore_last_known_healthy_if_ledger_unchanged \
                     "$old_image" "$ledger_before" "$old_revision" "$old_release_sha" \
-                    "$old_runner_release_sha" "$old_media_present"; then
-                    echo "Data deployment failed after a ledger change or unverifiable ledger state; leaving services stopped for forward recovery" >&2
+                    "$old_runner_release_sha" "$old_media_present" \
+                    "$old_runtime_rollback_eligible"; then
+                    echo "Data deployment failed without an eligible, ledger-safe rollback target; leaving the deployment in forward recovery" >&2
                   fi
                 fi
               fi
@@ -406,6 +411,11 @@ jobs:
               exit 1
             fi
             echo "deploy preflight: migration plan and queue quiescence passed before stopping services"
+            old_runtime_rollback_eligible=false
+            if rollback_runtime_is_eligible \
+              "$old_container" "$old_image" "$old_revision" "$old_release_sha"; then
+              old_runtime_rollback_eligible=true
+            fi
             services_stopped=true
             # Keep the API/worker gate explicit: API bind recovery must never
             # stop a healthy worker.  (The scheduler is stopped separately.)
@@ -519,7 +529,7 @@ jobs:
             fi
             deployment_committed=true
             docker compose ps
-            if [ -n "$old_image" ]; then
+            if [ -n "$old_image" ] && [ "$old_runtime_rollback_eligible" = true ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-data-previous-image"
               chmod 600 "$HOME/.letletme-data-previous-image"
             fi

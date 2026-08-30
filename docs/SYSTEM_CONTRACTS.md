@@ -113,6 +113,11 @@ See [redis-contract.md](redis-contract.md) and
   Redis-hot GraphQL reads remain available while PostgreSQL is degraded.
   `/health/deploy` is the strict Redis, PostgreSQL, release-identity, and
   worker-heartbeat gate.
+- A deploy may restore the previous runtime only when its checkout, image,
+  running container, exact release identity, healthy state, and strict
+  `/health/deploy` response were coherent immediately before service stop. A
+  failed or missing proof requires forward-only recovery even when the
+  migration ledger did not change.
 - Core discovery commits events, teams, players, phases, and fixtures as one
   season-scoped unit; a different provider season fails before mutation.
 - Live Points V2 publications validate their complete identity baseline before

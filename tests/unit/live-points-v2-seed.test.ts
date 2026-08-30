@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import {
   assertLegacyEvidenceMatchesEventLives,
@@ -15,6 +16,11 @@ import {
   type LegacyFixtureEvidenceRow,
   type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
+
+const checkpointSource = readFileSync(
+  'src/services/live-publication-v2-checkpoint.service.ts',
+  'utf8',
+);
 
 function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
   return Array.from({ length: 15 }, (_, index) => ({
@@ -36,6 +42,17 @@ function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
 }
 
 describe('Live Points V2 entry-pick seed', () => {
+  test('binds raw checkpoint timestamps as typed ISO strings', () => {
+    expect(checkpointSource).toContain(
+      'const observationCheckedAtIso = observationCheckedAt.toISOString()',
+    );
+    expect(checkpointSource).toContain('const checkpointedAtIso = checkpointedAt.toISOString()');
+    expect(checkpointSource).toContain('${observationCheckedAtIso}::timestamptz');
+    expect(checkpointSource).toContain('${checkpointedAtIso}::timestamptz');
+    expect(checkpointSource).not.toContain('${observationCheckedAt}),');
+    expect(checkpointSource).not.toContain('${observationCheckedAt}\n');
+  });
+
   test('keeps the direct seed connection separate from the runtime connection', () => {
     expect(
       resolveLivePointsV2SeedDatabaseUrl({

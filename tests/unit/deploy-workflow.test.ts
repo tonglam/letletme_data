@@ -64,6 +64,49 @@ function expectNonInteractiveComposeRuns(source: string, label: string) {
   }
 }
 
+function runRollbackEligibility(overrides: Record<string, string> = {}) {
+  const script = String.raw`
+    set -euo pipefail
+    source scripts/deploy-state-machine.sh
+    docker() {
+      if [[ "$1" = inspect && "$2" = --format ]]; then
+        case "$3" in
+          '{{.Config.Image}}') printf '%s\n' "$MOCK_CONTAINER_IMAGE" ;;
+          *org.opencontainers.image.revision*) printf '%s\n' "$MOCK_CONTAINER_RELEASE" ;;
+          '{{.State.Status}}') printf '%s\n' "$MOCK_CONTAINER_STATE" ;;
+          *State.Health.Status*) printf '%s\n' "$MOCK_CONTAINER_HEALTH" ;;
+          *) return 1 ;;
+        esac
+        return 0
+      fi
+      if [[ "$1" = exec ]]; then
+        return "$MOCK_STRICT_HEALTH_STATUS"
+      fi
+      return 1
+    }
+    rollback_runtime_is_eligible \
+      old-api "$MOCK_PREVIOUS_IMAGE" "$MOCK_PREVIOUS_REVISION" \
+      "$MOCK_PREVIOUS_RELEASE"
+  `;
+  const exactRelease = '0123456789abcdef0123456789abcdef01234567';
+  return Bun.spawnSync(['bash', '-c', script], {
+    env: {
+      ...process.env,
+      MOCK_CONTAINER_HEALTH: 'healthy',
+      MOCK_CONTAINER_IMAGE: 'ghcr.io/example/data@sha256:abc',
+      MOCK_CONTAINER_RELEASE: exactRelease,
+      MOCK_CONTAINER_STATE: 'running',
+      MOCK_PREVIOUS_IMAGE: 'ghcr.io/example/data@sha256:abc',
+      MOCK_PREVIOUS_RELEASE: exactRelease,
+      MOCK_PREVIOUS_REVISION: exactRelease,
+      MOCK_STRICT_HEALTH_STATUS: '0',
+      ...overrides,
+    },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+}
+
 describe('release workflow gates', () => {
   test('keeps the content worker alive when the pipeline is disabled', () => {
     expect(contentWorker).toContain('publicationOutboxDispatcher = setInterval');
@@ -454,8 +497,16 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('docker image rm "$image_ref"');
   });
 
-  test('restores the rollback image with its own release identity', () => {
+  test('restores only a recently proven coherent rollback runtime', () => {
     expect(deployStateMachine).toContain('release_sha_for_image');
+    expect(deployStateMachine).toContain('rollback_runtime_is_eligible');
+    expect(deployStateMachine).toContain('"$previous_revision" = "$previous_release_sha"');
+    expect(deployStateMachine).toContain('"$container_state" = running');
+    expect(deployStateMachine).toContain('"$container_health" = healthy');
+    expect(deployStateMachine).toContain('http://127.0.0.1:3000/health/deploy');
+    expect(deployStateMachine).toContain('payload?.deploySha !== expected');
+    expect(deployStateMachine).toContain('rollback_eligible=${7:-false}');
+    expect(deployStateMachine).toContain('"$rollback_eligible" != true');
     expect(deployStateMachine).toContain('restore_runtime_services');
     expect(deployStateMachine).toContain('export DEPLOY_SHA="$previous_release_sha"');
     expect(deployStateMachine).toContain(
@@ -465,12 +516,41 @@ describe('release workflow gates', () => {
       'export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"',
     );
     expect(deployScript).toContain('DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_image');
+    expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=false');
+    expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=true');
+    expect(deployScript).toContain('"$DEPLOY_ROLLBACK_ELIGIBLE" != true');
     expect(deployScript).toContain('DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat');
     expect(workflow).toContain('old_release_sha=$(release_sha_for_image "$old_image")');
+    expect(workflow).toContain('old_runtime_rollback_eligible=false');
+    expect(workflow).toContain('old_runtime_rollback_eligible=true');
+    expect(workflow).toContain('[ "$old_runtime_rollback_eligible" = true ]');
+    expect(workflow.lastIndexOf('rollback_runtime_is_eligible')).toBeGreaterThan(
+      workflow.indexOf('migration plan and queue quiescence passed before stopping services'),
+    );
+    expect(workflow.lastIndexOf('rollback_runtime_is_eligible')).toBeLessThan(
+      workflow.indexOf('services_stopped=true'),
+    );
+    expect(deployScript.lastIndexOf('rollback_runtime_is_eligible')).toBeGreaterThan(
+      deployScript.indexOf('Migration plan and queue quiescence passed before stopping services'),
+    );
+    expect(deployScript.lastIndexOf('rollback_runtime_is_eligible')).toBeLessThan(
+      deployScript.indexOf('DEPLOY_SERVICES_STOPPED=true'),
+    );
     expect(workflow).toContain('old_runner_release_sha=$(cat');
     expect(workflow).toContain('"$old_image" "$old_release_sha" "$old_runner_release_sha"');
     expect(runtimeHealthScript).toContain('curl_timeout_with_deadline()');
     expect(runtimeHealthScript).toContain('--max-time "$timeout"');
+  });
+
+  test('rejects a rollback runtime unless identity, health, and strict readiness agree', () => {
+    expect(runRollbackEligibility().exitCode).toBe(0);
+    expect(
+      runRollbackEligibility({
+        MOCK_PREVIOUS_REVISION: '89abcdef0123456789abcdef0123456789abcdef',
+      }).exitCode,
+    ).not.toBe(0);
+    expect(runRollbackEligibility({ MOCK_CONTAINER_HEALTH: 'unhealthy' }).exitCode).not.toBe(0);
+    expect(runRollbackEligibility({ MOCK_STRICT_HEALTH_STATUS: '1' }).exitCode).not.toBe(0);
   });
 
   test('weekly security workflow scans a freshly built production image', () => {

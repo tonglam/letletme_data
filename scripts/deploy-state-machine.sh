@@ -96,6 +96,60 @@ release_sha_for_image() {
   fi
 }
 
+rollback_runtime_is_eligible() {
+  local container_id=${1:-}
+  local previous_image=${2:-}
+  local previous_revision=${3:-}
+  local previous_release_sha=${4:-unknown}
+  local container_image container_release_sha container_state container_health
+  [[ -n "$container_id" && -n "$previous_image" ]] || {
+    echo 'rollback target is ineligible: API container or image is missing' >&2
+    return 1
+  }
+  [[ "$previous_release_sha" =~ ^[0-9a-f]{40}$ ]] || {
+    echo 'rollback target is ineligible: image release identity is invalid' >&2
+    return 1
+  }
+  [[ "$previous_revision" = "$previous_release_sha" ]] || {
+    echo 'rollback target is ineligible: checkout and image revisions differ' >&2
+    return 1
+  }
+  container_image=$(docker inspect --format '{{.Config.Image}}' "$container_id" 2>/dev/null || true)
+  container_release_sha=$(docker inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$container_id" 2>/dev/null || true)
+  container_state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+  container_health=$(docker inspect \
+    --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+    "$container_id" 2>/dev/null || true)
+  [[ "$container_image" = "$previous_image" && \
+    "$container_release_sha" = "$previous_release_sha" ]] || {
+    echo 'rollback target is ineligible: container image identity is inconsistent' >&2
+    return 1
+  }
+  [[ "$container_state" = running && "$container_health" = healthy ]] || {
+    echo 'rollback target is ineligible: API container is not running and healthy' >&2
+    return 1
+  }
+  if ! docker exec \
+    -e "EXPECTED_DEPLOY_SHA=$previous_release_sha" \
+    "$container_id" bun -e '
+      const expected = process.env.EXPECTED_DEPLOY_SHA;
+      const response = await fetch("http://127.0.0.1:3000/health/deploy", {
+        signal: AbortSignal.timeout(5000),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload?.success !== true ||
+          payload?.status !== "deploy_ready" || payload?.deploySha !== expected) {
+        process.exit(1);
+      }
+    ' >/dev/null 2>&1; then
+    echo 'rollback target is ineligible: strict deploy health or release identity failed' >&2
+    return 1
+  fi
+  echo "rollback target eligible at $previous_release_sha"
+}
+
 restore_runtime_services() {
   local previous_image=${1:-}
   local previous_release_sha=${2:-unknown}
@@ -131,7 +185,12 @@ restore_last_known_healthy_if_ledger_unchanged() {
   local previous_release_sha=${4:-unknown}
   local previous_runner_release_sha=${5:-unknown}
   local previous_media_present=${6:-auto}
+  local rollback_eligible=${7:-false}
   local ledger_after
+  if [[ "$rollback_eligible" != true ]]; then
+    echo 'rollback target was not proven healthy before deployment; forward-only recovery required' >&2
+    return 1
+  fi
   [[ -n "$previous_image" && -n "$ledger_before" ]] || return 1
   ledger_after=$(migration_ledger_fingerprint 2>/dev/null || true)
   if [[ -n "$ledger_after" && "$ledger_after" = "$ledger_before" ]]; then
