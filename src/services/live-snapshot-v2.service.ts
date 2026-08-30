@@ -215,7 +215,35 @@ export async function syncLiveSnapshotV2(
   // would make a slow/partially failed observation look fresher than it is.
   const sourceCheckedAt = new Date();
   const state = publicationState(prepared, options.finalizeEvent === true);
-  if (samePayload(current, prepared, state) && current?.servedFrom === 'REDIS_CURRENT') {
+  // Redis is the serving authority, but a rebuilt Redis sequence must not be
+  // allowed to fence an older durable checkpoint forever. Read the durable
+  // floor before taking the heartbeat fast path whenever the current pointer
+  // is absent, came from previous, or has not been checkpointed yet.
+  const durableFloor =
+    current === null ||
+    current.servedFrom === 'REDIS_PREVIOUS' ||
+    current.publication.checkpointedAt === null
+      ? await (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
+          season,
+          eventId,
+        ).catch(() => null)
+      : null;
+  const generationFloor = Math.max(
+    current?.publication.generation ?? 0,
+    durableFloor?.publication.generation ?? 0,
+  );
+  const durableGenerationConflict = Boolean(
+    current &&
+      durableFloor &&
+      (durableFloor.publication.generation > current.publication.generation ||
+        (durableFloor.publication.generation === current.publication.generation &&
+          durableFloor.publication.publicationId !== current.publication.publicationId)),
+  );
+  if (
+    samePayload(current, prepared, state) &&
+    current?.servedFrom === 'REDIS_CURRENT' &&
+    !durableGenerationConflict
+  ) {
     const touched = await touchLivePublicationV2(
       current.publication,
       sourceCheckedAt,
@@ -267,17 +295,6 @@ export async function syncLiveSnapshotV2(
     };
   }
 
-  const durableFloor =
-    current === null || current.servedFrom === 'REDIS_PREVIOUS'
-      ? await (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
-          season,
-          eventId,
-        ).catch(() => null)
-      : null;
-  const generationFloor = Math.max(
-    current?.publication.generation ?? 0,
-    durableFloor?.publication.generation ?? 0,
-  );
   const promoted = await publishLivePublicationV2({
     season: season.seasonCode,
     eventId,

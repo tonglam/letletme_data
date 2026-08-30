@@ -650,6 +650,7 @@ export function createEntrySyncWorker(
                       season,
                       targetEventId,
                       entryIds,
+                      { repairCheckpoint: false },
                     );
                     return {
                       requiredEntryIds,
@@ -835,7 +836,11 @@ export function createEntrySyncWorker(
           // must never make a partial cohort look complete.
           livePicksCoverageComplete = drained.some(Boolean);
         }
-        if (fence.kind === 'complete' && (scoped.value.scanComplete || livePicksCoverageComplete)) {
+        if (
+          fence.kind === 'complete' &&
+          scoped.value.failedUnits === 0 &&
+          (scoped.value.scanComplete || livePicksCoverageComplete)
+        ) {
           await completeSchedulerObligation({
             obligationId: fence.obligationId,
             generation: fence.generation,

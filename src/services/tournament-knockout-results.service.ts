@@ -51,8 +51,10 @@ export async function loadFinalizedKnockoutLiveMap(
     targetSeason: FplSeasonRef,
   ) => Promise<
     ReadonlyArray<Pick<DbEventLive, 'elementId' | 'goalsScored' | 'goalsConceded'>>
-  > = async (targetEventId, targetSeason) =>
-    (await readLivePublicationV2Checkpoint(targetSeason, targetEventId))?.eventLives ?? [],
+  > = async (targetEventId, targetSeason) => {
+    const checkpoint = await readLivePublicationV2Checkpoint(targetSeason, targetEventId);
+    return checkpoint?.publication.state === 'FINALIZED' ? checkpoint.eventLives : [];
+  },
 ) {
   const eventLives = await findRows(eventId, season);
   const liveMap = new Map(

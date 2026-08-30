@@ -533,7 +533,9 @@ export async function findMissingEntryLiveInputIds(
   season: FplSeasonRef,
   eventId: number,
   entryIds: readonly number[],
+  options: { readonly repairCheckpoint?: boolean } = {},
 ): Promise<number[]> {
+  const repairCheckpoint = options.repairCheckpoint !== false;
   const results = await mapWithConcurrency(entryIds, 32, async (entryId) => {
     const scope = {
       season: season.seasonCode,
@@ -545,16 +547,20 @@ export async function findMissingEntryLiveInputIds(
       readEntryCheckpointDesiredV2(scope),
     ]);
     if (input) {
+      if (!repairCheckpoint) return null;
+      if (!desired && input.publication.checkpointedAt !== null) return null;
       // Redis already contains the complete input. Retry only the durable
       // checkpoint; never refetch FPL merely because PostgreSQL was down. A
       // missing desired pointer with an uncheckpointed publication is also a
       // repair case, not a provider-missing case.
+      let checkpointed = false;
       try {
         if (!desired && input.publication.checkpointedAt === null) {
           await setEntryCheckpointDesiredV2(input.publication);
         }
         const checkpointResult = await checkpointEntryLiveInputV2(season, eventId, entryId);
         if (checkpointResult === 'checkpointed') {
+          checkpointed = true;
           // This is a no-op until the cohort pending set is initialized.  Once
           // it exists, it is the durable completion signal for canaries as well
           // as queued entries.
@@ -563,7 +569,7 @@ export async function findMissingEntryLiveInputIds(
       } catch (error) {
         logError('Entry live V2 checkpoint repair failed', error, { entryId, eventId });
       }
-      return null;
+      return checkpointed ? null : entryId;
     }
     return input ? null : entryId;
   });

@@ -341,6 +341,15 @@ async function loadEventLiveScoreBatch(
     const inputRead = inputByEntry.get(entryId);
     const rows = rowsByEntry.get(entryId) ?? [];
     if (!inputRead || !picksMatchInput(rows, inputRead.input)) continue;
+    // Never combine a newer picks publication with an older live authority;
+    // that vector did not exist as one coherent observation.
+    if (
+      !eventLiveProjectedPicksAreCoherent(
+        inputRead.publication.sourceCheckedAt,
+        authority.publication.sourceCheckedAt,
+      )
+    )
+      continue;
     const picks = rows.map((row) => ({
       entryId: row.entryId,
       position: row.position,
