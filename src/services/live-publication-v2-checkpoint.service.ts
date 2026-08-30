@@ -155,8 +155,14 @@ export async function checkpointLivePublicationV2(
   const checkpointedAt = new Date();
   const db = await getDb();
   return db.transaction(async (tx) => {
+    const scopeLock = `${season.seasonCode}:${eventId}`;
+    // Redis-first checkpoint obligations can race with a scheduler retry or a
+    // finalization worker. Serialize the scope before applying the generation
+    // and FINAL fences; a row lock alone cannot protect the initial insert.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
     const existing = await tx
       .select({
+        publicationId: livePointsPublicationCheckpointsInCompetition.publicationId,
         generation: livePointsPublicationCheckpointsInCompetition.generation,
         state: livePointsPublicationCheckpointsInCompetition.state,
       })
@@ -170,7 +176,11 @@ export async function checkpointLivePublicationV2(
       .for('update')
       .limit(1);
     const winner = existing[0];
-    if (winner && (winner.state === 'FINALIZED' || winner.generation >= publication.generation)) {
+    if (
+      winner &&
+      winner.publicationId !== publication.publicationId &&
+      (winner.state === 'FINALIZED' || winner.generation >= publication.generation)
+    ) {
       return false;
     }
 

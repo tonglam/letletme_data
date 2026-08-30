@@ -38,7 +38,6 @@ import { findEventEligibleEntryIds } from '../domain/entry-infos';
 import { latestFreshnessTimestamp } from '../domain/freshness';
 import {
   eventLiveAuthorityCheckedAt,
-  eventLiveHeartbeatIsFresh,
   eventLivePicksAreFresh,
   loadFreshEventLiveAuthoritySnapshot,
 } from './event-live-v2-score.service';
@@ -358,10 +357,8 @@ export function leagueEventLiveInputsAreFresh(
   picksCheckedAt: string,
   nowMs = Date.now(),
 ): boolean {
-  return (
-    eventLiveHeartbeatIsFresh(liveCheckedAt, nowMs) &&
-    eventLivePicksAreFresh(picksCheckedAt, liveCheckedAt)
-  );
+  void nowMs;
+  return eventLivePicksAreFresh(picksCheckedAt, liveCheckedAt);
 }
 
 export function findMissingLeagueResultSourceCheckpoints(
@@ -668,10 +665,7 @@ export async function syncLeagueEventResultsByTournament(
     });
   }
 
-  if (
-    !finalizationCutoff &&
-    (!activeEventLiveCheckedAt || !eventLiveHeartbeatIsFresh(activeEventLiveCheckedAt))
-  ) {
+  if (!finalizationCutoff && !activeEventLiveCheckedAt) {
     const summary = summarizeMissingLeagueEventLiveData(
       tournamentId,
       eventId,
@@ -679,7 +673,7 @@ export async function syncLeagueEventResultsByTournament(
       reusedEntryIds.length,
     );
     throw new IncompleteDataSyncError(
-      'League event results require a fresh official event-live heartbeat',
+      'League event results require a complete same-event event-live publication',
       summary.requiredUnits,
       summary.reusedUnits,
       summary.succeededUnits,

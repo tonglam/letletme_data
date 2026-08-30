@@ -5,6 +5,7 @@ import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { seasonRepository } from '../repositories/seasons';
+import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 
 export function formatOperationalTimestamp(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -48,8 +49,12 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
       })(),
     ]);
     const cachedPublication = redisRead.value;
-    const selectedPublication = cachedPublication?.publication ?? null;
-    const selectedSource = cachedPublication ? cachedPublication.servedFrom : null;
+    const checkpointRead = cachedPublication
+      ? null
+      : await readLivePublicationV2Checkpoint(season, event.id).catch(() => null);
+    const selectedPublication =
+      cachedPublication?.publication ?? checkpointRead?.publication ?? null;
+    const selectedSource = cachedPublication?.servedFrom ?? checkpointRead?.servedFrom ?? null;
     const finishedFixtures = fixtures.filter(
       (fixture) => fixture.finished || fixture.finishedProvisional,
     ).length;
@@ -82,7 +87,10 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
             checkpointedAt: selectedPublication.checkpointedAt,
             source: selectedSource,
             fixtureCount: publishedFixtureCount,
-            eventLiveCount: cachedPublication?.eventLives.length ?? publishedEventLiveCount,
+            eventLiveCount:
+              cachedPublication?.eventLives.length ??
+              checkpointRead?.eventLives.length ??
+              publishedEventLiveCount,
           }
         : null,
       coverage: {
@@ -90,7 +98,7 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         publication: selectedPublication ? 'AVAILABLE' : 'NO_NEW_REVISION',
         fallback: {
           redis: redisRead.error ? 'UNAVAILABLE' : cachedPublication ? 'AVAILABLE' : 'EMPTY',
-          postgres: 'CHECKPOINT_API',
+          postgres: checkpointRead ? 'AVAILABLE' : 'EMPTY',
           selected: selectedSource ?? 'NONE',
         },
       },

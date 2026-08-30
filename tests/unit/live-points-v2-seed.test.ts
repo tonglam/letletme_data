@@ -21,6 +21,7 @@ function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
     is_captain: index === 0,
     is_vice_captain: index === 1,
     chip: index === 0 ? null : null,
+    transfers: index === 0 ? 0 : null,
     transfers_cost: index === 0 ? 0 : null,
     source_created_at: new Date('2026-08-29T10:00:00.000Z'),
     source_updated_at: new Date('2026-08-29T10:01:00.000Z'),

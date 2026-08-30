@@ -42,6 +42,7 @@ export type ExistingPickRow = {
   is_captain: boolean;
   is_vice_captain: boolean;
   chip: string | null;
+  transfers: number | null;
   transfers_cost: number | null;
   source_created_at: TimestampValue;
   source_updated_at: TimestampValue;
@@ -455,6 +456,7 @@ export function buildSeedHead(rows: readonly ExistingPickRow[]): SeedHead {
   const contentSha256 = contentHash({
     picks: normalizedPicks,
     chip: first.chip,
+    transferCount: first.transfers ?? 0,
     transferCost: first.transfers_cost ?? 0,
   });
   const sourceCheckedAt = sorted.reduce((latest, row) => {
@@ -496,7 +498,7 @@ function rowsToFplPicks(rows: readonly ExistingPickRow[]): RawFPLEntryEventPicks
       overall_rank: null,
       bank: 0,
       value: 0,
-      event_transfers: 0,
+      event_transfers: first.transfers ?? 0,
       event_transfers_cost: first.transfers_cost ?? 0,
       points_on_bench: 0,
     },
@@ -712,6 +714,7 @@ async function loadRows(database: postgres.Sql, args: SeedArguments): Promise<Ex
       p.is_captain,
       p.is_vice_captain,
       p.active_chip::text AS chip,
+      p.transfers,
       p.transfers_cost,
       p.source_created_at,
       p.source_updated_at
@@ -779,6 +782,34 @@ async function loadLegacyLivePublications(
   );
 }
 
+async function hasExistingV2LiveCheckpoint(
+  database: postgres.Sql,
+  args: SeedArguments,
+): Promise<boolean> {
+  const parameters: Array<string | number> = [];
+  const predicates = ['TRUE'];
+  if (args.season !== null) {
+    parameters.push(args.season);
+    predicates.push(`season.season_code = $${parameters.length}`);
+  }
+  if (args.eventId !== null) {
+    parameters.push(args.eventId);
+    predicates.push(`checkpoint.event_id = $${parameters.length}`);
+  }
+  const [row] = await database.unsafe<{ exists: boolean }[]>(
+    `
+      SELECT EXISTS (
+        SELECT 1
+        FROM competition.live_points_publication_checkpoints checkpoint
+        JOIN fpl.seasons season ON season.season_id = checkpoint.season_id
+        WHERE ${predicates.join(' AND ')}
+      ) AS exists
+    `,
+    parameters,
+  );
+  return row?.exists === true;
+}
+
 async function loadPreviousTotals(
   database: postgres.Sql,
   season: FplSeasonRef,
@@ -792,11 +823,15 @@ async function loadPreviousTotals(
         result.overall_points AS total_points,
         NULLIF(result.overall_rank, 0) AS overall_rank
       FROM competition.entry_event_results result
+      JOIN competition.entries entry
+        ON entry.season_id = result.season_id
+       AND entry.entry_id = result.entry_id
       JOIN fpl.events event
         ON event.season_id = result.season_id
        AND event.event_id = result.event_id
       WHERE result.season_id = $1
         AND result.event_id < $2
+        AND result.event_id >= COALESCE(entry.started_event, 1)
         AND event.finished = TRUE
         AND event.data_checked = TRUE
         AND result.rich_synced_at IS NOT NULL
@@ -876,6 +911,7 @@ async function writeHeads(database: SqlExecutor, heads: readonly SeedHead[]): Pr
       head.sourceCheckedAt,
       head.contentUpdatedAt,
       head.checkpointedAt,
+      'COMPLETE',
     ]);
     await database.unsafe(
       `
@@ -883,7 +919,7 @@ async function writeHeads(database: SqlExecutor, heads: readonly SeedHead[]): Pr
           (season_id, entry_id, event_id, publication_id, generation,
            picks_base_revision, content_sha256, row_count, source_checked_at,
            content_updated_at, checkpointed_at, state)
-        VALUES ${placeholders(batch.length, 11).replaceAll('$', '$')}
+        VALUES ${placeholders(batch.length, 12)}
         ON CONFLICT (season_id, entry_id, event_id) DO UPDATE SET
           publication_id = EXCLUDED.publication_id,
           generation = EXCLUDED.generation,
@@ -894,7 +930,7 @@ async function writeHeads(database: SqlExecutor, heads: readonly SeedHead[]): Pr
           content_updated_at = EXCLUDED.content_updated_at,
           checkpointed_at = EXCLUDED.checkpointed_at,
           state = EXCLUDED.state
-        WHERE competition.entry_event_pick_heads.generation <= EXCLUDED.generation
+        WHERE competition.entry_event_pick_heads.generation < EXCLUDED.generation
       `,
       values,
     );
@@ -1055,21 +1091,21 @@ async function seedEntryInput(
   } as const;
   const current = await readEntryLiveInputV2(scope, redis);
   if (sameEntrySeed(current, input)) {
-    if (current!.publication.checkpointedAt !== null) {
-      return {
-        status: 'unchanged',
-        checkpoint: 'already-checkpointed',
-        entryId: first.entry_id,
-        generation: current!.publication.generation,
-        publicationId: current!.publication.publicationId,
-        final: input.finalResult !== null,
-      };
-    }
+    // Replaying the exact Redis input is also the repair path for a seed that
+    // wrote a synthetic/older SQL head before the Redis publication existed.
+    // Reconcile the durable head even when Redis already marks this input
+    // checkpointed; the operation is idempotent and does not create a new
+    // publication generation.
     await setEntryCheckpointDesiredV2(current!.publication, new Date(), redis);
     const result = await checkpointEntryLiveInputV2(season, first.event_id, first.entry_id);
     return {
       status: 'unchanged',
-      checkpoint: result === 'checkpointed' ? 'checkpointed' : 'blocked',
+      checkpoint:
+        result === 'checkpointed'
+          ? 'checkpointed'
+          : current!.publication.checkpointedAt !== null
+            ? 'already-checkpointed'
+            : 'blocked',
       entryId: first.entry_id,
       generation: current!.publication.generation,
       publicationId: current!.publication.publicationId,
@@ -1156,7 +1192,11 @@ async function main(): Promise<void> {
           `V2 cache seed refused because ${cacheInvalid.length} legacy live publication scope(s) failed validation`,
         );
       }
-      if (args.execute && cacheCandidates.length === 0) {
+      if (
+        args.execute &&
+        cacheCandidates.length === 0 &&
+        !(await hasExistingV2LiveCheckpoint(database, args))
+      ) {
         throw new Error(
           'V2 cache seed refused because no complete legacy live publication was found',
         );

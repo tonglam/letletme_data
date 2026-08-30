@@ -12,6 +12,10 @@ import {
   entryEventPicksRepository,
   type EventLiveManagerPickRow,
 } from '../repositories/entry-event-picks';
+import {
+  entryEventResultsRepository,
+  type EntryEventResultRevisionEvidence,
+} from '../repositories/entry-event-results';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import type { Fixture } from '../types';
 import {
@@ -21,6 +25,7 @@ import {
   type LivePublicationRead,
 } from '../cache/live-publication-v2';
 import { contentHash } from '../utils/content-hash';
+import { mapWithConcurrency } from '../utils/async';
 
 export type { EventLiveManagerPickRow } from '../repositories/entry-event-picks';
 
@@ -67,8 +72,10 @@ export type EventLiveScoreBatch = {
 export type EventLiveScorePreloadedInputs = {
   readonly pickRows: readonly EventLiveManagerPickRow[];
   readonly entryInfos: readonly { id: number; startedEvent: number | null }[];
+  readonly previousResultEvidence?: readonly EntryEventResultRevisionEvidence[];
 };
 
+/** Age is a delivery-state signal, never an availability expiry for a complete LKG. */
 export const EVENT_LIVE_PICKS_MAX_AGE_MS = 15 * 60_000;
 export const EVENT_LIVE_HEARTBEAT_MAX_AGE_MS = 90_000;
 
@@ -91,13 +98,13 @@ export function eventLivePicksAreFresh(
   liveCheckedAt: string,
   maxAgeMs = EVENT_LIVE_PICKS_MAX_AGE_MS,
 ): boolean {
+  void maxAgeMs;
   const picksTimestamp = Date.parse(picksCheckedAt);
   const liveTimestamp = Date.parse(liveCheckedAt);
   return (
     Number.isFinite(picksTimestamp) &&
     Number.isFinite(liveTimestamp) &&
-    picksTimestamp <= liveTimestamp &&
-    liveTimestamp - picksTimestamp <= maxAgeMs
+    picksTimestamp <= liveTimestamp
   );
 }
 
@@ -134,6 +141,7 @@ export async function loadFreshEventLiveAuthoritySnapshot(
   reference?: { readonly publicationId: string; readonly generation: number },
   nowMs = Date.now(),
 ): Promise<LivePublicationRead | null> {
+  void nowMs;
   const snapshot = reference
     ? await readLivePublicationV2ByReference({ season: season.seasonCode, eventId }, reference)
     : await readLivePublicationV2({ season: season.seasonCode, eventId });
@@ -141,7 +149,7 @@ export async function loadFreshEventLiveAuthoritySnapshot(
     !snapshot ||
     snapshot.publication.eventId !== eventId ||
     snapshot.publication.season !== season.seasonCode ||
-    !eventLiveHeartbeatIsFresh(snapshot.publication.sourceCheckedAt, nowMs)
+    !Number.isFinite(Date.parse(snapshot.publication.sourceCheckedAt))
   ) {
     return null;
   }
@@ -239,6 +247,7 @@ function picksMatchInput(
     multiplier: number;
     isCaptain: boolean;
     isViceCaptain: boolean;
+    transfers: number | null;
     transfersCost: number | null;
   }[],
   input: NonNullable<Awaited<ReturnType<typeof readEntryLiveInputV2>>>['input'],
@@ -255,7 +264,10 @@ function picksMatchInput(
         row.isViceCaptain === pick.isViceCaptain &&
         (row.position === 1
           ? row.transfersCost === input.picksBase.transferCost
-          : row.transfersCost === null),
+          : row.transfersCost === null) &&
+        (row.position === 1
+          ? row.transfers === input.picksBase.transferCount
+          : row.transfers === null),
     );
   });
 }
@@ -287,19 +299,29 @@ async function loadEventLiveScoreBatch(
   const authority = await loadFreshEventLiveAuthoritySnapshot(season, eventId, options.liveRef);
   if (!authority) return null;
 
-  const [pickRows, entryInputs, entryInfos] = await Promise.all([
+  const [pickRows, entryInputs, entryInfos, previousResultEvidence] = await Promise.all([
     options.preloadedInputs?.pickRows ??
       entryEventPicksRepository.findScoringPicksByEventAndEntryIds(season, eventId, uniqueEntryIds),
-    Promise.all(
-      uniqueEntryIds.map(
-        async (entryId) =>
-          [
-            entryId,
-            await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId }),
-          ] as const,
-      ),
+    mapWithConcurrency(
+      uniqueEntryIds,
+      32,
+      async (entryId) =>
+        [
+          entryId,
+          await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId }),
+        ] as const,
     ),
     options.preloadedInputs?.entryInfos ?? entryInfoRepository.findByIds(season, uniqueEntryIds),
+    options.preloadedInputs?.previousResultEvidence ??
+      (eventId > 1
+        ? entryEventResultsRepository.findRevisionEvidenceByEntry(
+            season,
+            uniqueEntryIds,
+            1,
+            eventId - 1,
+            { finalizedOnly: true },
+          )
+        : Promise.resolve([])),
   ]);
   const rowsByEntry = new Map<number, EventLiveManagerPickRow[]>();
   for (const row of pickRows) {
@@ -326,13 +348,22 @@ async function loadEventLiveScoreBatch(
       multiplier: row.multiplier,
       isCaptain: row.isCaptain,
       isViceCaptain: row.isViceCaptain,
+      transfers: row.transfers,
       transfersCost: row.transfersCost,
       sourceUpdatedAt: row.sourceUpdatedAt,
       elementType: row.elementType,
       teamId: row.teamId,
       activeChip: row.activeChip,
     })) satisfies EventLiveManagerPick[];
-    const previousTotal = inputRead.input.previousTotals?.totalPoints ?? (eventId === 1 ? 0 : null);
+    const firstScoringEvent = Math.max(1, startedByEntry.get(entryId) ?? 1);
+    const previousTotal =
+      inputRead.input.previousTotals?.totalPoints ?? (eventId === firstScoringEvent ? 0 : null);
+    const previousEntryResults = previousResultEvidence.filter(
+      (result) =>
+        result.entryId === entryId &&
+        result.eventId >= firstScoringEvent &&
+        result.eventId < eventId,
+    );
     const inputRevisionData = buildScoreInputRevision({
       algorithmVersion,
       authorityRevision,
@@ -340,7 +371,8 @@ async function loadEventLiveScoreBatch(
       entryStartedEvent: startedByEntry.get(entryId) ?? null,
       picks,
       previousTotal,
-      previousTotalsThroughEventId: eventId > 1 ? eventId - 1 : null,
+      previousTotalsThroughEventId: eventId > firstScoringEvent ? eventId - 1 : null,
+      previousResultEvidence: previousEntryResults,
     });
     // picksBase.revision is the source contract's content identity. The
     // richer picksRevision below additionally includes event team and player

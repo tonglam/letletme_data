@@ -42,9 +42,55 @@ const cacheRedisProbe: DependencyProbe = async () => {
 
 const queueRedisProbe: DependencyProbe = () => queueRedisSingleton.healthCheck();
 
+let lastKnownActiveSeasonCode: string | null = null;
+
+async function activeSeasonFromRedis(): Promise<string | null> {
+  const redis = await redisSingleton.getClient();
+  if (lastKnownActiveSeasonCode) {
+    const active = await readActiveDataPublication({
+      dataset: 'fpl:core',
+      seasonCode: lastKnownActiveSeasonCode,
+    }).catch(() => null);
+    if (active) return lastKnownActiveSeasonCode;
+  }
+
+  let cursor = '0';
+  do {
+    const [nextCursor, keys] = await redis.scan(
+      cursor,
+      'MATCH',
+      'llm:data:fpl:core:*:active',
+      'COUNT',
+      '32',
+    );
+    cursor = nextCursor;
+    for (const key of keys) {
+      const match = key.match(/^llm:data:fpl:core:(\d{4}):active$/);
+      if (!match) continue;
+      const active = await readActiveDataPublication({
+        dataset: 'fpl:core',
+        seasonCode: match[1]!,
+      }).catch(() => null);
+      if (active) {
+        lastKnownActiveSeasonCode = match[1]!;
+        return lastKnownActiveSeasonCode;
+      }
+    }
+  } while (cursor !== '0');
+  return null;
+}
+
 const activeSeasonProbe: DependencyProbe = async () => {
-  const season = await seasonRepository.findCurrent();
-  return /^\d{4}$/.test(season.seasonCode);
+  try {
+    const season = await seasonRepository.findCurrent();
+    if (/^\d{4}$/.test(season.seasonCode)) {
+      lastKnownActiveSeasonCode = season.seasonCode;
+      return true;
+    }
+  } catch {
+    // Hot readiness must not disappear solely because PostgreSQL is degraded.
+  }
+  return (await activeSeasonFromRedis()) !== null;
 };
 
 const screenshotRetentionConfiguredProbe: DependencyProbe = async () => {
@@ -93,7 +139,12 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
     }
     publicationMismatchSince.delete(key);
   }
-  if (currentEvent) {
+  const currentEventBeforeDeadline = Boolean(
+    currentEvent?.deadlineTimeEpoch !== null &&
+      currentEvent?.deadlineTimeEpoch !== undefined &&
+      currentEvent.deadlineTimeEpoch * 1000 > Date.now(),
+  );
+  if (currentEvent && !currentEventBeforeDeadline) {
     const liveKey = `live-points-v2:${season.seasonCode}:${currentEvent.id}`;
     const [redisLive, checkpointLive] = await Promise.all([
       readLivePublicationV2({ season: season.seasonCode, eventId: currentEvent.id }).catch(

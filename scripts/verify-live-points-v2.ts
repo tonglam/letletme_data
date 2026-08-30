@@ -15,12 +15,12 @@ import { readLivePublicationV2Checkpoint } from '../src/services/live-publicatio
 type VerifyArguments = {
   readonly season: string;
   readonly eventId: number;
-  readonly entryId: number;
+  readonly entryId: number | null;
 };
 
 function usage(): never {
   throw new Error(
-    'usage: bun scripts/verify-live-points-v2.ts --season YYYY --event-id N --entry-id N',
+    'usage: bun scripts/verify-live-points-v2.ts --season YYYY --event-id N [--entry-id N]',
   );
 }
 
@@ -44,10 +44,11 @@ export function parseVerifyArguments(argv: readonly string[]): VerifyArguments {
   const season = values.get('season') ?? '';
   if (!/^\d{4}$/.test(season)) throw new Error('--season must be a four-digit season code');
   const eventId = Number(values.get('event-id'));
-  const entryId = Number(values.get('entry-id'));
+  const entryIdValue = values.get('entry-id');
+  const entryId = entryIdValue === undefined ? null : Number(entryIdValue);
   if (!Number.isSafeInteger(eventId) || eventId <= 0)
     throw new Error('--event-id must be a positive integer');
-  if (!Number.isSafeInteger(entryId) || entryId <= 0)
+  if (entryId !== null && (!Number.isSafeInteger(entryId) || entryId <= 0))
     throw new Error('--entry-id must be a positive integer');
   return { season, eventId, entryId };
 }
@@ -97,9 +98,27 @@ async function main(): Promise<void> {
   const season = await seasonRepository.requireByCode(args.season);
   const [redis, db] = await Promise.all([redisSingleton.getClient(), getDb()]);
   const scope = { season: args.season, eventId: args.eventId } as const;
-  const entryScope = { ...scope, entryId: args.entryId } as const;
 
   try {
+    const entryId =
+      args.entryId ??
+      (
+        await db
+          .select({ entryId: entryEventPickHeadsInCompetition.entryId })
+          .from(entryEventPickHeadsInCompetition)
+          .where(
+            and(
+              eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+              eq(entryEventPickHeadsInCompetition.eventId, args.eventId),
+              eq(entryEventPickHeadsInCompetition.state, 'COMPLETE'),
+            ),
+          )
+          .orderBy(entryEventPickHeadsInCompetition.entryId)
+          .limit(1)
+      )[0]?.entryId ??
+      null;
+    if (entryId === null) throw new Error('No complete V2 entry pick head exists for this scope');
+    const entryScope = { ...scope, entryId } as const;
     const [active, previous, entry, checkpoint, headRows] = await Promise.all([
       readLivePublicationV2Pointer(scope, 'active', redis),
       readLivePublicationV2Pointer(scope, 'previous', redis),
@@ -118,7 +137,7 @@ async function main(): Promise<void> {
         .where(
           and(
             eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
-            eq(entryEventPickHeadsInCompetition.entryId, args.entryId),
+            eq(entryEventPickHeadsInCompetition.entryId, entryId),
             eq(entryEventPickHeadsInCompetition.eventId, args.eventId),
           ),
         )
@@ -157,7 +176,7 @@ async function main(): Promise<void> {
       write: false,
       season: args.season,
       eventId: args.eventId,
-      entryId: args.entryId,
+      entryId,
       ok: failures.length === 0,
       failures,
       redis: {

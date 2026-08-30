@@ -58,8 +58,9 @@ curl -X POST "$LETLETME_DATA_URL/event-lives/cache/1" -H "x-api-key: $LETLETME_D
 curl -X POST "$LETLETME_DATA_URL/event-lives/sync/1" -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
-`cache` publishes one coherent live revision. `sync` also persists event-live and explain facts.
-Both validate the complete current-season player and fixture identity baseline.
+`cache` and `sync` both publish one coherent live revision. The hot path is Redis-first; `sync`
+also creates the normal asynchronous PostgreSQL checkpoint obligation. Both validate the complete
+current-season player and fixture identity baseline.
 
 ## Live Points V2 publication
 

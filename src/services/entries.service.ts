@@ -7,7 +7,8 @@ import {
 } from '../repositories/entry-event-transfers';
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
 import { eventRepository } from '../repositories/events';
-import { isCompleteEntryPicks } from '../domain/entry-picks';
+import { entryInfoRepository } from '../repositories/entry-infos';
+import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { contentHash } from '../utils/content-hash';
 import { logError, logInfo } from '../utils/logger';
@@ -39,6 +40,7 @@ function entryLiveInputContentHash(input: EntryLiveInputV2): string {
       revision: input.picksBase.revision,
       picks: input.picksBase.picks,
       chip: input.picksBase.chip,
+      transferCount: input.picksBase.transferCount,
       transferCost: input.picksBase.transferCost,
     },
     previousTotals: input.previousTotals,
@@ -52,6 +54,7 @@ function entryLivePicksBaseContentHash(input: EntryLiveInputV2): string {
     revision: input.picksBase.revision,
     picks: input.picksBase.picks,
     chip: input.picksBase.chip,
+    transferCount: input.picksBase.transferCount,
     transferCost: input.picksBase.transferCost,
   });
 }
@@ -74,7 +77,7 @@ function rawPicksFromEntryLiveInput(input: EntryLiveInputV2): RawFPLEntryEventPi
       overall_rank: null,
       bank: 0,
       value: 0,
-      event_transfers: 0,
+      event_transfers: input.picksBase.transferCount,
       event_transfers_cost: input.picksBase.transferCost,
       points_on_bench: 0,
     },
@@ -187,28 +190,53 @@ export async function persistEntryEventPicksResponse(
   if (!Number.isFinite(sourceCheckedAt.getTime())) {
     throw new Error('A valid entry picks source timestamp is required');
   }
+  if (!isEntryPicksPayloadForEvent(picks, eventId)) {
+    throw new Error(
+      `Refusing entry picks for an unexpected event for entry ${entryId}, event ${eventId}`,
+    );
+  }
   const baseInput = entryLiveInputFromFplPicks(season, eventId, entryId, picks, sourceCheckedAt);
   const existing = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
   // Previous totals are independent immutable evidence. Read them only for a
   // first publication; repeated source probes reuse the published value and
   // do not add a PostgreSQL read to the live provider lane.
   let previousTotals = existing?.input.previousTotals ?? null;
-  if (!existing && eventId > 1) {
+  let firstScoringEvent = 1;
+  if (eventId > 1) {
+    try {
+      const entryInfo = (await entryInfoRepository.findByIds(season, [entryId]))[0] ?? null;
+      firstScoringEvent = Math.max(1, entryInfo?.startedEvent ?? 1);
+    } catch (error) {
+      // Previous totals are enrichment, not the serving boundary. If the
+      // database is unavailable, publish the complete picks base and let the
+      // checkpoint/reconciliation lane fill the aggregate later.
+      logError('Entry start event unavailable during live picks publication', error, {
+        season: season.seasonCode,
+        entryId,
+        eventId,
+      });
+    }
+  }
+  const previousTotalsComplete =
+    firstScoringEvent >= eventId
+      ? previousTotals === null
+      : previousTotals?.throughEventId === eventId - 1;
+  if (!previousTotalsComplete) {
     try {
       const previousTotalsRow =
         (
           await createEntryEventResultsRepository().aggregateTotalsByEntry(
             season,
             [entryId],
-            1,
+            firstScoringEvent,
             eventId - 1,
             { finalizedOnly: true },
           )
         )[0] ?? null;
       if (
         previousTotalsRow &&
-        previousTotalsRow.eventCount === eventId - 1 &&
-        previousTotalsRow.firstEventId === 1 &&
+        previousTotalsRow.eventCount === eventId - firstScoringEvent &&
+        previousTotalsRow.firstEventId === firstScoringEvent &&
         previousTotalsRow.lastEventId === eventId - 1
       ) {
         previousTotals = {
@@ -440,7 +468,14 @@ export async function syncEntryEventResults(
           },
         });
         if (finalPublication.publication.checkpointedAt === null) {
-          await markEntryPublicationCheckpointedV2(finalPublication.publication, new Date());
+          const finalPublicationToCheckpoint = finalPublication.publication;
+          await setEntryCheckpointDesiredV2(finalPublicationToCheckpoint);
+          const checkpointed = await checkpointEntryLiveInputV2(season, eventId, entryId);
+          if (checkpointed !== 'checkpointed') {
+            throw new Error(
+              `Final V2 entry publication was not durably checkpointed for ${entryId}/${eventId}`,
+            );
+          }
         }
       }
     }

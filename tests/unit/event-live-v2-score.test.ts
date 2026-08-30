@@ -13,7 +13,7 @@ describe('Live Points V2 freshness boundaries', () => {
     expect(eventLiveHeartbeatIsFresh(heartbeat, Date.parse(heartbeat) + 90_000)).toBe(true);
     expect(eventLiveHeartbeatIsFresh(heartbeat, Date.parse(heartbeat) + 90_001)).toBe(false);
     expect(eventLivePicksAreFresh('2026-08-24T00:00:00.000Z', heartbeat)).toBe(true);
-    expect(eventLivePicksAreFresh('2026-08-23T23:44:59.000Z', heartbeat)).toBe(false);
+    expect(eventLivePicksAreFresh('2026-08-23T23:44:59.000Z', heartbeat)).toBe(true);
   });
 
   test('allows a coherent older picks publication to remain usable', () => {

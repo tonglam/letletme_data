@@ -46,6 +46,7 @@ import {
   syncEntryEventPicks,
   syncEntryEventResults,
   syncEntryEventTransfers,
+  checkpointEntryLiveInputV2,
 } from '../services/entries.service';
 import {
   markEntryInfoSyncedToday,
@@ -65,6 +66,7 @@ import { alertOnFinalFailure } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { withMutationScopes } from '../utils/mutation-scopes';
+import { mapWithConcurrency } from '../utils/async';
 import { getQueueConnection } from '../utils/queue';
 import {
   findMissingEntryLiveInputIds,
@@ -672,15 +674,34 @@ export function createEntrySyncWorker(
                     reusedUnits: existing.size,
                   };
                 },
-                auditRequired: (entryIds) =>
-                  effectiveJobData?.lane === 'live-picks'
-                    ? findMissingEntryLiveInputIds(season, targetEventId!, entryIds)
-                    : entryEventPicksRepository
-                        .findEntryIdsByEvent(season, targetEventId!, entryIds)
-                        .then((persisted) => {
-                          const persistedSet = new Set(persisted);
-                          return entryIds.filter((entryId) => !persistedSet.has(entryId));
-                        }),
+                auditRequired: async (entryIds) => {
+                  if (effectiveJobData?.lane === 'live-picks') {
+                    return findMissingEntryLiveInputIds(season, targetEventId!, entryIds);
+                  }
+                  // syncEntryEventPicks is Redis-first. Complete its merged
+                  // V2 checkpoint obligation before auditing SQL rows, so a
+                  // successful source fetch is not incorrectly retried merely
+                  // because the async durable copy had not run yet.
+                  await mapWithConcurrency(entryIds, 8, async (entryId) => {
+                    const status = await checkpointEntryLiveInputV2(
+                      season,
+                      targetEventId!,
+                      entryId,
+                    );
+                    if (status === 'missing') {
+                      throw new Error(
+                        `Entry ${entryId} has no complete V2 input to checkpoint for event ${targetEventId}`,
+                      );
+                    }
+                  });
+                  const persisted = await entryEventPicksRepository.findEntryIdsByEvent(
+                    season,
+                    targetEventId!,
+                    entryIds,
+                  );
+                  const persistedSet = new Set(persisted);
+                  return entryIds.filter((entryId) => !persistedSet.has(entryId));
+                },
               },
             );
           case 'entry-transfers':

@@ -28,7 +28,7 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
       set.status = 202;
       return {
         success: true,
-        message: `Persistent live snapshot job enqueued for event ${params.eventId}`,
+        message: `Redis-first live snapshot refresh enqueued; PostgreSQL checkpoint is asynchronous for event ${params.eventId}`,
         jobId: job.id,
         eventId: params.eventId,
       };

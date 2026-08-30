@@ -1114,8 +1114,8 @@ const projectedScoreUsesCaptureInputs = (
       sourceUpdatedAt: new Date(pick.source_updated_at),
       activeChip: pick.active_chip,
     })),
-    previousTotal: eventId === 1 ? 0 : previousTotal,
-    previousTotalsThroughEventId: eventId > 1 ? eventId - 1 : null,
+    previousTotal: eventId === firstScoringEvent ? 0 : previousTotal,
+    previousTotalsThroughEventId: eventId > firstScoringEvent ? eventId - 1 : null,
     previousResultEvidence: previousEntryResults.map((row) => ({
       entryId: row.entry_id,
       eventId: row.event_id,
@@ -2102,6 +2102,7 @@ async function captureMyFplSnapshotOnce(
               multiplier: row.multiplier,
               isCaptain: row.is_captain,
               isViceCaptain: row.is_vice_captain,
+              transfers: row.transfers,
               transfersCost: row.transfers_cost,
               sourceUpdatedAt:
                 row.source_updated_at instanceof Date
@@ -2115,6 +2116,14 @@ async function captureMyFplSnapshotOnce(
           entryInfos: entries.map((entry) => ({
             id: entry.entry_id,
             startedEvent: entry.started_event,
+          })),
+          previousResultEvidence: resultRows.map((row) => ({
+            entryId: row.entry_id,
+            eventId: row.event_id,
+            sourceResultId: row.source_result_id,
+            eventNetPoints: row.event_net_points,
+            richSyncedAt: row.rich_synced_at ? new Date(row.rich_synced_at) : null,
+            updatedAt: new Date(row.updated_at),
           })),
         },
       });

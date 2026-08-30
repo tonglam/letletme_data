@@ -128,6 +128,7 @@ export interface EntryLiveInputV2 {
     readonly contentUpdatedAt: string;
     readonly picks: Exactly15Picks;
     readonly chip: string | null;
+    readonly transferCount: number;
     readonly transferCost: number;
   };
   readonly previousTotals: {
@@ -472,6 +473,9 @@ export function validateEntryLiveInputV2(
     !validIso(picksBase.contentUpdatedAt) ||
     !parseExactly15Picks(picksBase.picks) ||
     (picksBase.chip !== null && typeof picksBase.chip !== 'string') ||
+    typeof picksBase.transferCount !== 'number' ||
+    !Number.isSafeInteger(picksBase.transferCount) ||
+    picksBase.transferCount < 0 ||
     typeof picksBase.transferCost !== 'number' ||
     !Number.isSafeInteger(picksBase.transferCost) ||
     picksBase.transferCost < 0
@@ -540,6 +544,9 @@ function buildEntryItem(
 }
 
 const ALLOCATE_GENERATION_SCRIPT = `
+local floor = tonumber(ARGV[1]) or 0
+local current = tonumber(redis.call('GET', KEYS[1]) or '0') or 0
+if current < floor then redis.call('SET', KEYS[1], tostring(floor)) end
 local value = redis.call('INCR', KEYS[1])
 local now = redis.call('TIME')
 return {tostring(value), tostring(now[1]), tostring(now[2])}
@@ -666,9 +673,19 @@ if current then
     redis.call('PEXPIRE', current.item.key .. ':meta', ARGV[2])
   end
 end
-redis.call('PERSIST', item.key)
-redis.call('PERSIST', item.key .. ':meta')
+if candidate.state == 'FINAL' then
+  redis.call('PEXPIRE', item.key, ARGV[3])
+  redis.call('PEXPIRE', item.key .. ':meta', ARGV[3])
+else
+  redis.call('PERSIST', item.key)
+  redis.call('PERSIST', item.key .. ':meta')
+end
 redis.call('SET', KEYS[1], ARGV[1])
+if candidate.state == 'FINAL' then
+  redis.call('PEXPIRE', KEYS[1], ARGV[3])
+else
+  redis.call('PERSIST', KEYS[1])
+end
 local sequence = tonumber(redis.call('GET', KEYS[4]) or '0')
 if sequence < candidate.generation then redis.call('SET', KEYS[4], tostring(candidate.generation)) end
 return {'published', current_raw or ''}
@@ -837,12 +854,14 @@ return {'set', payload}
 async function allocateGeneration(
   redis: Redis,
   sequenceKey: string,
+  generationFloor = 0,
 ): Promise<{ generation: number; now: string }> {
-  const result = (await redis.eval(ALLOCATE_GENERATION_SCRIPT, 1, sequenceKey)) as [
-    string,
-    string,
-    string,
-  ];
+  const result = (await redis.eval(
+    ALLOCATE_GENERATION_SCRIPT,
+    1,
+    sequenceKey,
+    String(generationFloor),
+  )) as [string, string, string];
   const generation = Number(result[0]);
   const seconds = Number(result[1]);
   const micros = Number(result[2]);
@@ -1027,6 +1046,7 @@ export async function publishLivePublicationV2(input: {
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
   readonly previous?: LivePublicationV2 | null;
+  readonly generationFloor?: number;
   readonly redis?: Redis;
 }): Promise<{
   readonly publication: LivePublicationV2;
@@ -1036,7 +1056,11 @@ export async function publishLivePublicationV2(input: {
   const scope = { season: input.season, eventId: input.eventId } as const;
   assertSeasonEvent(scope);
   const redis = input.redis ?? (await redisSingleton.getClient());
-  const allocation = await allocateGeneration(redis, liveV2Key(scope, 'sequence'));
+  const allocation = await allocateGeneration(
+    redis,
+    liveV2Key(scope, 'sequence'),
+    Math.max(0, input.generationFloor ?? input.previous?.generation ?? 0),
+  );
   const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
   const contentUpdatedAt =
     input.contentUpdatedAt == null ? allocation.now : sourceDate(input.contentUpdatedAt);
@@ -1517,6 +1541,7 @@ function buildEntryInputFromPicks(
   const picksRevision = contentHash({
     picks: normalized,
     chip: picks.active_chip,
+    transferCount: picks.entry_history.event_transfers,
     transferCost: picks.entry_history.event_transfers_cost,
   });
   return {
@@ -1529,6 +1554,7 @@ function buildEntryInputFromPicks(
       contentUpdatedAt: sourceCheckedAt,
       picks: normalized,
       chip: picks.active_chip ?? null,
+      transferCount: picks.entry_history.event_transfers,
       transferCost: picks.entry_history.event_transfers_cost,
     },
     previousTotals: null,
@@ -1543,6 +1569,7 @@ export async function publishEntryLiveInputV2(input: {
   readonly entryId: number;
   readonly input: EntryLiveInputV2;
   readonly sourceCheckedAt: Date | string;
+  readonly generationFloor?: number;
   readonly redis?: Redis;
 }): Promise<{
   readonly publication: EntryLivePublicationV2;
@@ -1554,7 +1581,12 @@ export async function publishEntryLiveInputV2(input: {
   if (!validateEntryLiveInputV2(input.input, scope))
     throw new CacheError('Invalid V2 entry input', 'LIVE_V2_ENTRY_INPUT_INVALID');
   const redis = input.redis ?? (await redisSingleton.getClient());
-  const allocation = await allocateGeneration(redis, entryLiveV2Key(scope, 'sequence'));
+  const current = await readEntryLiveInputV2(scope, redis);
+  const allocation = await allocateGeneration(
+    redis,
+    entryLiveV2Key(scope, 'sequence'),
+    Math.max(0, input.generationFloor ?? current?.publication.generation ?? 0),
+  );
   const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
   const item = buildEntryItem(scope, allocation.generation, input.input);
   const publication: EntryLivePublicationV2 = {
@@ -1582,6 +1614,7 @@ export async function publishEntryLiveInputV2(input: {
       entryLiveV2Key(scope, 'sequence'),
       JSON.stringify(publication),
       String(LIVE_PUBLICATION_PREVIOUS_TTL_MS),
+      String(publication.state === 'FINAL' ? LIVE_PUBLICATION_FINAL_TTL_MS : 0),
     ),
   );
   if (status === 'stale') {

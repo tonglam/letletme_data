@@ -17,7 +17,10 @@ import {
   type LiveSnapshotReferenceData,
   type PreparedLiveSnapshot,
 } from './live-coherent-fetch';
-import { checkpointLivePublicationV2 } from './live-publication-v2-checkpoint.service';
+import {
+  checkpointLivePublicationV2,
+  readLivePublicationV2Checkpoint,
+} from './live-publication-v2-checkpoint.service';
 import { fixtureRepository } from '../repositories/fixtures';
 import { logError, logInfo } from '../utils/logger';
 import { canonicalJson } from '../utils/content-hash';
@@ -41,6 +44,10 @@ export interface LiveSnapshotV2Dependencies {
   ) => Promise<readonly number[]>;
   readonly getReferenceData: (season: FplSeasonRef) => Promise<LiveSnapshotReferenceData>;
   readonly readPublished: (season: string, eventId: number) => Promise<LivePublicationRead | null>;
+  readonly readCheckpointed?: (
+    season: FplSeasonRef,
+    eventId: number,
+  ) => Promise<LivePublicationRead | null>;
   readonly checkpointPublication: (request: {
     readonly season: FplSeasonRef;
     readonly eventId: number;
@@ -57,6 +64,8 @@ export interface LiveSnapshotV2SyncResult {
   readonly published: boolean;
   readonly generation: number | null;
   readonly publicationId: string | null;
+  /** Source-check timestamp of the exact publication returned by this call. */
+  readonly sourceCheckedAt: string | null;
   readonly state: LivePublicationState;
   readonly eventLiveCount: number;
   readonly fixtureCount: number;
@@ -71,6 +80,7 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
     (await fixtureRepository.findByEvent(season, eventId)).map((fixture) => fixture.id),
   getReferenceData: loadLiveReferenceData,
   readPublished: (season, eventId) => readLivePublicationV2({ season, eventId }),
+  readCheckpointed: readLivePublicationV2Checkpoint,
   checkpointPublication: checkpointLivePublicationV2,
 };
 
@@ -115,16 +125,16 @@ function shouldCheckpoint(
     current.publication.revisions.displayStats.revision !== promoted.revisions.displayStats.revision
   )
     return true;
+  // A missing checkpoint is an outstanding durability obligation. It must be
+  // repaired immediately even when the desired pointer was written recently;
+  // otherwise a heartbeat can indefinitely postpone the first DB copy.
+  if (!current.publication.checkpointedAt) return true;
   if (desiredRequestedAt !== null) {
     const requestedAt = Date.parse(desiredRequestedAt);
     if (Number.isFinite(requestedAt)) {
       return Date.now() - requestedAt >= SCORE_CHECKPOINT_INTERVAL_MS;
     }
   }
-  // A missing desired pointer means the previous publication never recorded
-  // its coalesced checkpoint obligation. Repair it immediately. Once the
-  // pointer exists, its preserved requestedAt controls the score-only window.
-  if (!current.publication.checkpointedAt) return true;
   const checkpointedAt = Date.parse(current.publication.checkpointedAt);
   return (
     !Number.isFinite(checkpointedAt) || Date.now() - checkpointedAt >= SCORE_CHECKPOINT_INTERVAL_MS
@@ -239,6 +249,7 @@ export async function syncLiveSnapshotV2(
       published: false,
       generation: servedPublication.generation,
       publicationId: servedPublication.publicationId,
+      sourceCheckedAt: servedPublication.sourceCheckedAt,
       state,
       eventLiveCount: prepared.eventLives.eventLives.length,
       fixtureCount: prepared.fixtures.length,
@@ -247,6 +258,17 @@ export async function syncLiveSnapshotV2(
     };
   }
 
+  const durableFloor =
+    current === null || current.servedFrom === 'REDIS_PREVIOUS'
+      ? await (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
+          season,
+          eventId,
+        ).catch(() => null)
+      : null;
+  const generationFloor = Math.max(
+    current?.publication.generation ?? 0,
+    durableFloor?.publication.generation ?? 0,
+  );
   const promoted = await publishLivePublicationV2({
     season: season.seasonCode,
     eventId,
@@ -256,6 +278,7 @@ export async function syncLiveSnapshotV2(
     eventLives: prepared.eventLives.eventLives,
     fixtures: prepared.fixtures,
     previous: current?.publication ?? null,
+    generationFloor,
   });
   if (!promoted.published) {
     // A stale result is an ordering/finalization fence, not a publication
@@ -268,6 +291,7 @@ export async function syncLiveSnapshotV2(
       published: false,
       generation: promoted.publication.generation,
       publicationId: promoted.publication.publicationId,
+      sourceCheckedAt: promoted.publication.sourceCheckedAt,
       state: promoted.publication.state,
       eventLiveCount: current?.eventLives.length ?? 0,
       fixtureCount: current?.fixtures.length ?? 0,
@@ -306,6 +330,7 @@ export async function syncLiveSnapshotV2(
       published: promoted.published,
       generation: promoted.publication.generation,
       publicationId: promoted.publication.publicationId,
+      sourceCheckedAt: promoted.publication.sourceCheckedAt,
       state,
       eventLiveCount: prepared.eventLives.eventLives.length,
       fixtureCount: prepared.fixtures.length,
@@ -327,6 +352,7 @@ export async function syncLiveSnapshotV2(
     eventId,
     generation: promoted.publication.generation,
     publicationId: promoted.publication.publicationId,
+    sourceCheckedAt: promoted.publication.sourceCheckedAt,
     state,
     checkpointed,
     trigger: options.trigger ?? 'queue',
@@ -338,6 +364,7 @@ export async function syncLiveSnapshotV2(
     published: promoted.published,
     generation: promoted.publication.generation,
     publicationId: promoted.publication.publicationId,
+    sourceCheckedAt: promoted.publication.sourceCheckedAt,
     state,
     eventLiveCount: prepared.eventLives.eventLives.length,
     fixtureCount: prepared.fixtures.length,

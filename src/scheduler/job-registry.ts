@@ -62,6 +62,7 @@ import { isMatchDayTime } from '../utils/conditions';
 import {
   decideLiveLifecycle,
   isLivePicksProbeDue,
+  readLifecycleQuietState,
   resolveLiveLifecycleDelay,
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
@@ -985,6 +986,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
       const decision = decideLiveLifecycle(event, fixtures, context.now);
+      const quiet = await readLifecycleQuietState(context.season.seasonCode, event.id);
       // The permanent final checkpoint owns the finalized write. This lane
       // keeps the mutable official heartbeat alive for every unsettled state.
       if (!decision.shouldFetchLive || decision.state === 'FINALIZED') return [];
@@ -993,6 +995,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         context.season,
         event.id,
         context.now,
+        quiet?.unchangedSince,
       );
       if (pollIntervalMs === null) return [];
       const bucket = Math.floor(context.now.getTime() / pollIntervalMs);

@@ -460,23 +460,24 @@ jobs:
               echo 'deploy preflight: LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer' >&2
               exit 1
             fi
-            # The seed needs the runtime Redis credentials and a direct/session
-            # PostgreSQL URL.  Run the app image with the runtime env file, but
-            # override DATABASE_URL with the runtime URL explicitly so the
-            # seed cannot accidentally use the migration owner login.
+            # The cutover seed needs the runtime Redis credentials and a
+            # direct/session PostgreSQL URL. The migration env is the only
+            # deploy-time source guaranteed to be direct/session (the runtime
+            # URL may be a transaction pooler), so pass that URL explicitly to
+            # the one-shot cutover container.
+            v2_seed_database_url="$migration_database_url"
             LIVE_POINTS_SEED_CONFIRM=YES \
               APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
-              -e "DATABASE_URL=$data_runtime_database_url" \
+              -e "DATABASE_URL=$v2_seed_database_url" \
               -e LIVE_POINTS_SEED_CONFIRM=YES \
-              api bun run seed:live-points-v2 -- --execute --cache \
+              api bun run db:cutover-seed-live-points-v2 -- --execute --cache \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
-              -e "DATABASE_URL=$data_runtime_database_url" \
+              -e "DATABASE_URL=$v2_seed_database_url" \
               api bun run verify:live-points-v2 -- \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
-              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
-              --entry-id 6953
+              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
             finish_stage
             start_stage cachePublish
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \

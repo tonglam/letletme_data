@@ -13,6 +13,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
+import { recordFreshnessObservation } from '../services/data-governance.service';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import {
   completeSchedulerObligation,
@@ -67,7 +68,36 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       trigger: source,
       sourceRunId: job.data.runId,
     });
+    if (job.data.freshnessWindowId !== undefined && snapshot.publicationId !== null) {
+      const sourceCheckedAt = snapshot.sourceCheckedAt ? new Date(snapshot.sourceCheckedAt) : null;
+      if (sourceCheckedAt && Number.isFinite(sourceCheckedAt.getTime())) {
+        try {
+          await recordFreshnessObservation({
+            windowId: job.data.freshnessWindowId,
+            sourceCheckedAt,
+            redisSeenAt: new Date(),
+            producerRevision: `${snapshot.publicationId}:${snapshot.generation ?? 0}`,
+            redisRevision: `${snapshot.publicationId}:${snapshot.generation ?? 0}`,
+            completenessStatus: 'COMPLETE',
+          });
+        } catch (error) {
+          // Freshness telemetry is additive. The Redis publication and the
+          // scheduler completion remain authoritative when the governance DB
+          // is temporarily unavailable.
+          logError('Live snapshot freshness evidence update failed', error, {
+            eventId,
+            windowId: job.data.freshnessWindowId,
+            publicationId: snapshot.publicationId,
+          });
+        }
+      }
+    }
     if (snapshot.state === 'FINALIZED') {
+      if (!snapshot.checkpointed) {
+        throw new Error(
+          `Finalized live publication is not durably checkpointed for event ${eventId}`,
+        );
+      }
       await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
     }
     return snapshot;
@@ -101,6 +131,9 @@ export function createLiveDataWorker(): WorkerRuntime {
         queue: liveDataQueueName,
         jobName: job.name,
         eventId: job.data.eventId,
+        ...(job.data.freshnessWindowId === undefined
+          ? {}
+          : { freshnessWindowId: job.data.freshnessWindowId }),
       };
       const completion =
         fence.kind === 'complete'

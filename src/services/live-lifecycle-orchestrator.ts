@@ -179,7 +179,7 @@ async function writePicksCoordinatorState(
   }
 }
 
-async function readLifecycleQuietState(
+export async function readLifecycleQuietState(
   seasonCode: string,
   eventId: number,
 ): Promise<SharedLifecycleQuietState | null> {
@@ -621,6 +621,16 @@ export async function runPicksProbeAndSync(
   const pending = await findMissingEntryLiveInputIds(season, eventId, entryIds);
   const pendingCheckpoints = await findPendingEntryLiveCheckpointIds(season, eventId, entryIds);
   if (pending.length === 0) {
+    const nextProbeAt =
+      pendingCheckpoints.length > 0
+        ? nowMs + PICKS_PROBE_POLL_MS
+        : nowMs + COORDINATOR_STATE_TTL_SECONDS * 1_000;
+    await writePicksCoordinatorState(season.seasonCode, eventId, {
+      attempts: state.attempts,
+      nextProbeAt,
+      canarySucceeded: true,
+      failedCanaryEntryIds: [],
+    });
     return {
       canaryCount: 0,
       synced: 0,
@@ -732,6 +742,15 @@ export async function runPicksProbeAndSync(
     eventId,
     entryIds,
   );
+  const canaryCheckpointIds = await findPendingEntryLiveCheckpointIds(
+    season,
+    eventId,
+    successfulCanaryIds,
+  );
+  const pendingCheckpointIds = uniqueNumbers([
+    ...pendingCheckpointAfterQueue,
+    ...canaryCheckpointIds,
+  ]);
   const reusedCompletedScan = remaining.length > 0 && pendingAfterQueue.length === 0;
   state.attempts += 1;
   state.nextProbeAt = now.getTime() + (PICKS_RETRY_SCHEDULE_MS[0] ?? 120_000);
@@ -750,11 +769,10 @@ export async function runPicksProbeAndSync(
   return {
     canaryCount,
     synced: canaryCount,
-    pending: pendingAfterQueue.length + pendingCheckpointAfterQueue.length,
+    pending: pendingAfterQueue.length + pendingCheckpointIds.length,
     sourceReady: true,
     scanComplete:
-      (pendingAfterQueue.length === 0 || reusedCompletedScan) &&
-      pendingCheckpointAfterQueue.length === 0,
+      (pendingAfterQueue.length === 0 || reusedCompletedScan) && pendingCheckpointIds.length === 0,
   };
 }
 
@@ -993,9 +1011,19 @@ export function registerLiveLifecycleTimer(app: Elysia) {
           const currentEvent = season
             ? await (await import('./events.service')).getCurrentEvent(season).catch(() => null)
             : null;
+          const quiet =
+            season && currentEvent
+              ? await readLifecycleQuietState(season.seasonCode, currentEvent.id)
+              : null;
           schedule(
             decision && season
-              ? resolveLiveLifecycleDelay(decision, season, currentEvent?.id ?? 0, now)
+              ? resolveLiveLifecycleDelay(
+                  decision,
+                  season,
+                  currentEvent?.id ?? 0,
+                  now,
+                  quiet?.unchangedSince,
+                )
               : LIVE_POLL_MS,
           );
         }
@@ -1018,9 +1046,19 @@ export function registerLiveLifecycleTimer(app: Elysia) {
           const currentEvent = season
             ? await (await import('./events.service')).getCurrentEvent(season).catch(() => null)
             : null;
+          const quiet =
+            season && currentEvent
+              ? await readLifecycleQuietState(season.seasonCode, currentEvent.id)
+              : null;
           schedule(
             decision && season
-              ? resolveLiveLifecycleDelay(decision, season, currentEvent?.id ?? 0, now)
+              ? resolveLiveLifecycleDelay(
+                  decision,
+                  season,
+                  currentEvent?.id ?? 0,
+                  now,
+                  quiet?.unchangedSince,
+                )
               : LIVE_POLL_MS,
           );
         }

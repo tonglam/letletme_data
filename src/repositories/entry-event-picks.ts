@@ -21,6 +21,7 @@ export type EventLiveManagerPickRow = {
   multiplier: number;
   isCaptain: boolean;
   isViceCaptain: boolean;
+  transfers: number | null;
   transfersCost: number | null;
   sourceUpdatedAt: Date;
   elementType: number;
@@ -62,6 +63,7 @@ function normalizedPickContent(picks: RawFPLEntryEventPicksResponse) {
       }))
       .sort((left, right) => left.position - right.position),
     chip: picks.active_chip ?? null,
+    transferCount: picks.entry_history.event_transfers,
     transferCost: picks.entry_history.event_transfers_cost,
   };
 }
@@ -89,21 +91,62 @@ async function upsertEntryEventPickHead(
   if (!Number.isFinite(checkpointedAt.getTime())) {
     throw new Error('A valid picks checkpoint timestamp is required');
   }
+  const [existingHead] = await db
+    .select({
+      publicationId: entryEventPickHeadsInCompetition.publicationId,
+      generation: entryEventPickHeadsInCompetition.generation,
+      picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
+      contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+      rowCount: entryEventPickHeadsInCompetition.rowCount,
+      sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+      contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
+      checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
+      state: entryEventPickHeadsInCompetition.state,
+    })
+    .from(entryEventPickHeadsInCompetition)
+    .where(
+      and(
+        eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+        eq(entryEventPickHeadsInCompetition.entryId, entryId),
+        eq(entryEventPickHeadsInCompetition.eventId, eventId),
+      ),
+    )
+    .limit(1);
+  if (
+    existingHead &&
+    publication?.generation !== undefined &&
+    publication.generation < existingHead.generation
+  ) {
+    throw new Error('A stale V2 entry picks publication cannot replace the durable head');
+  }
+  if (
+    existingHead &&
+    publication?.generation === existingHead.generation &&
+    publication.publicationId !== undefined &&
+    publication.publicationId !== existingHead.publicationId
+  ) {
+    throw new Error('A conflicting V2 entry picks publication cannot replace the durable head');
+  }
   const fallbackPublicationId = contentHash({
     season: season.seasonCode,
     entryId,
     eventId,
     contentSha256,
   });
+  const effectivePublicationId =
+    publication?.publicationId ?? existingHead?.publicationId ?? fallbackPublicationId;
+  const effectiveGeneration = publication?.generation ?? existingHead?.generation ?? 1;
+  const effectivePicksBaseRevision =
+    publication?.picksBaseRevision ?? existingHead?.picksBaseRevision ?? contentSha256;
   await db
     .insert(entryEventPickHeadsInCompetition)
     .values({
       seasonId: season.seasonId,
       entryId,
       eventId,
-      publicationId: publication?.publicationId ?? fallbackPublicationId,
-      generation: publication?.generation ?? 1,
-      picksBaseRevision: publication?.picksBaseRevision ?? contentSha256,
+      publicationId: effectivePublicationId,
+      generation: effectiveGeneration,
+      picksBaseRevision: effectivePicksBaseRevision,
       contentSha256,
       rowCount: 15,
       sourceCheckedAt: syncedAt,
@@ -118,9 +161,9 @@ async function upsertEntryEventPickHead(
         entryEventPickHeadsInCompetition.eventId,
       ],
       set: {
-        publicationId: publication?.publicationId ?? fallbackPublicationId,
-        generation: publication?.generation ?? 1,
-        picksBaseRevision: publication?.picksBaseRevision ?? contentSha256,
+        publicationId: effectivePublicationId,
+        generation: effectiveGeneration,
+        picksBaseRevision: effectivePicksBaseRevision,
         contentSha256,
         rowCount: 15,
         sourceCheckedAt: syncedAt,
@@ -186,6 +229,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         multiplier: entryEventPicksInCompetition.multiplier,
         isCaptain: entryEventPicksInCompetition.isCaptain,
         isViceCaptain: entryEventPicksInCompetition.isViceCaptain,
+        transfers: entryEventPicksInCompetition.transfers,
         activeChip: entryEventPicksInCompetition.activeChip,
         transfersCost: entryEventPicksInCompetition.transfersCost,
         sourceCreatedAt: entryEventPicksInCompetition.sourceCreatedAt,
@@ -218,10 +262,12 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         );
       });
     const existingChip = existing.find((row) => row.position === 1)?.activeChip ?? null;
+    const existingTransfers = existing.find((row) => row.position === 1)?.transfers ?? null;
     const existingTransferCost = existing.find((row) => row.position === 1)?.transfersCost ?? null;
     const sameContent =
       existingContentIsComplete &&
       existingChip === candidateContent.chip &&
+      existingTransfers === candidateContent.transferCount &&
       existingTransferCost === candidateContent.transferCost;
 
     // A source heartbeat must not rewrite the 15 rows or move their content
@@ -410,6 +456,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
                 multiplier: entryEventPicksInCompetition.multiplier,
                 isCaptain: entryEventPicksInCompetition.isCaptain,
                 isViceCaptain: entryEventPicksInCompetition.isViceCaptain,
+                transfers: entryEventPicksInCompetition.transfers,
                 transfersCost: entryEventPicksInCompetition.transfersCost,
                 sourceUpdatedAt: entryEventPicksInCompetition.sourceUpdatedAt,
                 elementType: playersInFpl.elementType,
