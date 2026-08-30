@@ -1,0 +1,377 @@
+import {
+  liveMatchDeskKey,
+  liveMatchDetailKey,
+  promotePreviousLiveMatchV2,
+  readLiveMatchCheckpointDesiredV2,
+  readLiveMatchDeskPointerV2,
+  readLiveMatchDetailPointerV2,
+  restoreLiveMatchDeskCheckpointV2,
+  restoreLiveMatchDetailCheckpointV2,
+  setLiveMatchCheckpointDesiredV2,
+  type MatchDeskRead,
+  type MatchDetailRead,
+} from '../cache/live-match-publication-v2';
+import { redisSingleton } from '../cache/singleton';
+import { enqueueLiveMatchCheckpoint } from '../jobs/live-data.jobs';
+import { seasonRepository } from '../repositories/seasons';
+import {
+  readLiveMatchDeskCheckpointV2,
+  readLiveMatchDetailCheckpointV2,
+} from './live-match-v2-checkpoint.service';
+import { ForbiddenError, ValidationError } from '../utils/errors';
+
+export const LIVE_MATCHES_V2_REPAIR_CONFIRMATION = 'LIVE_MATCHES_V2_REPAIR';
+
+export type LiveMatchesV2RepairAction =
+  | 'inspect'
+  | 'promote-previous'
+  | 'rebuild-current'
+  | 'replay-checkpoint';
+export type LiveMatchesV2RepairKind = 'desk' | 'detail';
+
+export type LiveMatchesV2RepairRequest = Readonly<{
+  action: LiveMatchesV2RepairAction;
+  season: string;
+  eventId: number;
+  kind: LiveMatchesV2RepairKind | null;
+  reason: string | null;
+  confirmation: string | null;
+}>;
+
+const REPAIR_ACTIONS = new Set<LiveMatchesV2RepairAction>([
+  'inspect',
+  'promote-previous',
+  'rebuild-current',
+  'replay-checkpoint',
+]);
+const REPAIR_KINDS = new Set<LiveMatchesV2RepairKind>(['desk', 'detail']);
+const REQUEST_FIELDS = new Set(['action', 'season', 'eventId', 'kind', 'reason', 'confirmation']);
+
+function invalidRequest(message: string): never {
+  throw new ValidationError(message, 'LIVE_MATCH_REPAIR_REQUEST_INVALID');
+}
+
+function requestRecord(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return invalidRequest('Live Matches repair request must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!REQUEST_FIELDS.has(key)) invalidRequest(`Unsupported Live Matches repair field: ${key}`);
+  }
+  return record;
+}
+
+function optionalString(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') invalidRequest(`${field} must be a string when provided`);
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function optionalExactString(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') invalidRequest(`${field} must be a string when provided`);
+  return value.length > 0 ? value : null;
+}
+
+/** Validate one exact operator scope before any Redis or PostgreSQL access. */
+export function parseLiveMatchesV2RepairRequest(value: unknown): LiveMatchesV2RepairRequest {
+  const record = requestRecord(value);
+  const action = record.action;
+  if (typeof action !== 'string' || !REPAIR_ACTIONS.has(action as LiveMatchesV2RepairAction)) {
+    invalidRequest(
+      'action must be inspect, promote-previous, rebuild-current, or replay-checkpoint',
+    );
+  }
+  const season = record.season;
+  if (typeof season !== 'string' || !/^\d{4}$/.test(season)) {
+    invalidRequest('season must be a four-digit season code');
+  }
+  const eventId = record.eventId;
+  if (typeof eventId !== 'number' || !Number.isSafeInteger(eventId) || eventId <= 0) {
+    invalidRequest('eventId must be a positive integer');
+  }
+  const rawKind = record.kind;
+  const kind = rawKind === undefined || rawKind === null ? null : optionalString(rawKind, 'kind');
+  if (kind !== null && !REPAIR_KINDS.has(kind as LiveMatchesV2RepairKind)) {
+    invalidRequest('kind must be desk or detail');
+  }
+  const reason = optionalString(record.reason, 'reason');
+  if (action !== 'inspect') {
+    if (kind === null) invalidRequest('write repairs require an exact desk or detail kind');
+    if (reason === null || reason.length < 12) {
+      invalidRequest('write repairs require a reason with at least 12 characters');
+    }
+  }
+  const confirmation = optionalExactString(record.confirmation, 'confirmation');
+  return {
+    action: action as LiveMatchesV2RepairAction,
+    season,
+    eventId,
+    kind: kind as LiveMatchesV2RepairKind | null,
+    reason,
+    confirmation,
+  };
+}
+
+export function assertLiveMatchesV2RepairAuthorization(
+  request: Pick<LiveMatchesV2RepairRequest, 'action' | 'confirmation'>,
+): void {
+  if (
+    request.action !== 'inspect' &&
+    request.confirmation !== LIVE_MATCHES_V2_REPAIR_CONFIRMATION
+  ) {
+    throw new ForbiddenError(
+      `write repair requires confirmation=${LIVE_MATCHES_V2_REPAIR_CONFIRMATION}`,
+      'LIVE_MATCH_REPAIR_CONFIRMATION_REQUIRED',
+    );
+  }
+}
+
+function deskSummary(read: MatchDeskRead | null) {
+  if (!read) return null;
+  return {
+    servedFrom: read.servedFrom,
+    publicationId: read.publication.publicationId,
+    generation: read.publication.generation,
+    state: read.publication.state,
+    revisions: read.publication.revisions,
+    sourceCheckedAt: read.publication.sourceCheckedAt,
+    publishedAt: read.publication.publishedAt,
+    checkpointedAt: read.publication.checkpointedAt,
+    fixtureCount: read.fixtures.length,
+    payloadBytes: read.publication.desk.bytes,
+    payloadSha256: read.publication.desk.sha256,
+  };
+}
+
+function detailSummary(read: MatchDetailRead | null) {
+  if (!read) return null;
+  return {
+    servedFrom: read.servedFrom,
+    publicationId: read.publication.publicationId,
+    generation: read.publication.generation,
+    finalized: read.publication.finalized,
+    observedDeskGeneration: read.publication.observedDeskGeneration,
+    fixtureIdentityRevision: read.publication.fixtureIdentityRevision,
+    detailRevision: read.publication.detail,
+    sourceCheckedAt: read.publication.sourceCheckedAt,
+    publishedAt: read.publication.publishedAt,
+    checkpointedAt: read.publication.checkpointedAt,
+    fixtureCount: read.fixtures.length,
+    itemBytes: read.publication.fixtures.reduce((total, item) => total + item.bytes, 0),
+  };
+}
+
+function sameDeskContent(left: MatchDeskRead | null, right: MatchDeskRead | null): boolean {
+  return Boolean(
+    left &&
+      right &&
+      left.publication.publicationId === right.publication.publicationId &&
+      left.publication.generation === right.publication.generation &&
+      left.publication.desk.sha256 === right.publication.desk.sha256 &&
+      left.publication.revisions.lifecycle.revision ===
+        right.publication.revisions.lifecycle.revision &&
+      left.publication.revisions.fixtureIdentity.revision ===
+        right.publication.revisions.fixtureIdentity.revision &&
+      left.publication.revisions.scoreState.revision ===
+        right.publication.revisions.scoreState.revision,
+  );
+}
+
+function sameDetailContent(left: MatchDetailRead | null, right: MatchDetailRead | null): boolean {
+  return Boolean(
+    left &&
+      right &&
+      left.publication.publicationId === right.publication.publicationId &&
+      left.publication.generation === right.publication.generation &&
+      left.publication.detail.revision === right.publication.detail.revision &&
+      left.publication.observedDeskGeneration === right.publication.observedDeskGeneration &&
+      left.publication.fixtureIdentityRevision === right.publication.fixtureIdentityRevision,
+  );
+}
+
+async function inspectLiveMatchesV2Repair(request: LiveMatchesV2RepairRequest) {
+  const season = await seasonRepository.requireByCode(request.season);
+  const redis = await redisSingleton.getClient();
+  const scope = { season: request.season, eventId: request.eventId } as const;
+  const [
+    deskActive,
+    deskPrevious,
+    detailActive,
+    detailPrevious,
+    deskDesired,
+    detailDesired,
+    deskCheckpoint,
+    detailCheckpoint,
+    deskActiveExists,
+    deskPreviousExists,
+    detailActiveExists,
+    detailPreviousExists,
+  ] = await Promise.all([
+    readLiveMatchDeskPointerV2({ ...scope, redis }, 'active'),
+    readLiveMatchDeskPointerV2({ ...scope, redis }, 'previous'),
+    readLiveMatchDetailPointerV2({ ...scope, redis }, 'active'),
+    readLiveMatchDetailPointerV2({ ...scope, redis }, 'previous'),
+    readLiveMatchCheckpointDesiredV2({ ...scope, kind: 'desk', redis }),
+    readLiveMatchCheckpointDesiredV2({ ...scope, kind: 'detail', redis }),
+    readLiveMatchDeskCheckpointV2(season, request.eventId),
+    readLiveMatchDetailCheckpointV2(season, request.eventId),
+    redis.exists(liveMatchDeskKey(scope, 'active')),
+    redis.exists(liveMatchDeskKey(scope, 'previous')),
+    redis.exists(liveMatchDetailKey(scope, 'active')),
+    redis.exists(liveMatchDetailKey(scope, 'previous')),
+  ]);
+
+  return {
+    contractVersion: 'live-matches-v2',
+    season: request.season,
+    eventId: request.eventId,
+    write: false,
+    desk: {
+      activePointerExists: deskActiveExists === 1,
+      previousPointerExists: deskPreviousExists === 1,
+      active: deskSummary(deskActive),
+      previous: deskSummary(deskPrevious),
+      checkpoint: deskSummary(deskCheckpoint),
+      checkpointMatchesActive: sameDeskContent(deskActive, deskCheckpoint),
+      checkpointDesired: deskDesired,
+    },
+    detail: {
+      activePointerExists: detailActiveExists === 1,
+      previousPointerExists: detailPreviousExists === 1,
+      active: detailSummary(detailActive),
+      previous: detailSummary(detailPrevious),
+      checkpoint: detailSummary(detailCheckpoint),
+      checkpointMatchesActive: sameDetailContent(detailActive, detailCheckpoint),
+      checkpointDesired: detailDesired,
+    },
+    pairCompatible: Boolean(
+      deskActive &&
+        detailActive &&
+        detailActive.publication.observedDeskGeneration === deskActive.publication.generation &&
+        detailActive.publication.fixtureIdentityRevision ===
+          deskActive.publication.revisions.fixtureIdentity.revision,
+    ),
+  };
+}
+
+async function executeLiveMatchesV2Repair(request: LiveMatchesV2RepairRequest) {
+  assertLiveMatchesV2RepairAuthorization(request);
+  if (!request.kind) throw new ValidationError('write repairs require an exact kind');
+  const season = await seasonRepository.requireByCode(request.season);
+  const redis = await redisSingleton.getClient();
+  const scope = { season: request.season, eventId: request.eventId } as const;
+
+  if (request.action === 'promote-previous') {
+    const result = await promotePreviousLiveMatchV2({ ...scope, kind: request.kind, redis });
+    if (result.status !== 'promoted' || !result.publication) {
+      throw new ValidationError(
+        `previous ${request.kind} publication was not promoted: ${result.status}`,
+        'LIVE_MATCH_REPAIR_NOT_PROMOTED',
+      );
+    }
+    return {
+      contractVersion: 'live-matches-v2',
+      action: request.action,
+      kind: request.kind,
+      season: request.season,
+      eventId: request.eventId,
+      status: result.status,
+      publicationId: result.publication.publicationId,
+      generation: result.publication.generation,
+    };
+  }
+
+  if (request.action === 'rebuild-current') {
+    const checkpoint =
+      request.kind === 'desk'
+        ? await readLiveMatchDeskCheckpointV2(season, request.eventId)
+        : await readLiveMatchDetailCheckpointV2(season, request.eventId);
+    if (!checkpoint) {
+      throw new ValidationError(
+        `no complete same-event ${request.kind} PostgreSQL checkpoint is available`,
+        'LIVE_MATCH_REPAIR_CHECKPOINT_MISSING',
+      );
+    }
+    const result =
+      request.kind === 'desk'
+        ? await restoreLiveMatchDeskCheckpointV2({ checkpoint: checkpoint as MatchDeskRead, redis })
+        : await restoreLiveMatchDetailCheckpointV2({
+            checkpoint: checkpoint as MatchDetailRead,
+            redis,
+          });
+    return {
+      contractVersion: 'live-matches-v2',
+      action: request.action,
+      kind: request.kind,
+      season: request.season,
+      eventId: request.eventId,
+      published: result.published,
+      publicationId: result.publication.publicationId,
+      generation: result.publication.generation,
+    };
+  }
+
+  if (request.action === 'replay-checkpoint') {
+    const current =
+      request.kind === 'desk'
+        ? await readLiveMatchDeskPointerV2({ ...scope, redis }, 'active')
+        : await readLiveMatchDetailPointerV2({ ...scope, redis }, 'active');
+    if (!current) {
+      throw new ValidationError(
+        `no valid Redis current exists for exact ${request.kind} scope`,
+        'LIVE_MATCH_REPAIR_CURRENT_MISSING',
+      );
+    }
+    const desired = await setLiveMatchCheckpointDesiredV2({
+      kind: request.kind,
+      publication: current.publication,
+      finalized:
+        request.kind === 'desk'
+          ? (current as MatchDeskRead).publication.state === 'FINALIZED'
+          : (current as MatchDetailRead).publication.finalized,
+      redis,
+    });
+    if (
+      desired.publicationId !== current.publication.publicationId ||
+      desired.generation !== current.publication.generation
+    ) {
+      throw new ValidationError(
+        'retained checkpoint obligation does not match Redis current; refusing to supersede it',
+        'LIVE_MATCH_REPAIR_REVISION_CONFLICT',
+      );
+    }
+    await enqueueLiveMatchCheckpoint(
+      season,
+      request.eventId,
+      request.kind,
+      desired.publicationId,
+      desired.generation,
+    );
+    return {
+      contractVersion: 'live-matches-v2',
+      action: request.action,
+      kind: request.kind,
+      season: request.season,
+      eventId: request.eventId,
+      publicationId: desired.publicationId,
+      generation: desired.generation,
+      final: desired.final,
+      enqueued: true,
+    };
+  }
+
+  throw new ValidationError(`unsupported Live Matches repair action: ${request.action}`);
+}
+
+/**
+ * Protected operator repair entrypoint. The HTTP layer authenticates the ops
+ * key; this service enforces exact scope, write confirmation, and final fences.
+ */
+export async function runLiveMatchesV2Repair(value: unknown) {
+  const request = parseLiveMatchesV2RepairRequest(value);
+  if (request.action === 'inspect') return inspectLiveMatchesV2Repair(request);
+  return executeLiveMatchesV2Repair(request);
+}

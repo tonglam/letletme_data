@@ -198,4 +198,29 @@ describe('Live Points and Live Matches shared observation', () => {
       checkpointScheduled: true,
     });
   });
+
+  test('does not finalize the Match sibling before Live Points accepts exact facts', async () => {
+    const finalizeFlags: boolean[] = [];
+    const sync = syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      dependencies: {
+        getEventLive: async () => ({ elements: [] }),
+        getFixtures: async () => [],
+        getExpectedFixtureIds: async () => [],
+        getReferenceData: async () =>
+          ({ playerById: new Map(), playerTeamById: new Map() }) as never,
+        syncLiveMatches: async (observation) => {
+          finalizeFlags.push(observation.finalizeEvent === true);
+          return {} as never;
+        },
+        readPublished: async () => null,
+        readCheckpointed: async () => null,
+        checkpointPublication: async () => false,
+      },
+    });
+
+    await expect(sync).rejects.toThrow('contains no elements');
+    expect(finalizeFlags).toEqual([false, false]);
+  });
 });

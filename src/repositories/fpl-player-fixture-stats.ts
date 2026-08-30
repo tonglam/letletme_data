@@ -17,10 +17,59 @@ import { contentHash } from '../utils/content-hash';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
+export interface FplPlayerFixtureIdentity {
+  readonly fixtureId: number;
+  readonly elementId: number;
+  readonly teamId: number;
+  readonly elementType: number;
+  readonly webName: string;
+}
+
 export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
+    findIdentityByEvent: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<FplPlayerFixtureIdentity[]> => {
+      try {
+        const db = await getDbInstance();
+        return await db
+          .select({
+            fixtureId: playerFixtureStatsInFpl.fixtureId,
+            elementId: playerFixtureStatsInFpl.elementId,
+            teamId: playerFixtureStatsInFpl.teamId,
+            elementType: playerFixtureStatsInFpl.elementType,
+            webName: playersInFpl.webName,
+          })
+          .from(playerFixtureStatsInFpl)
+          .innerJoin(
+            playersInFpl,
+            and(
+              eq(playerFixtureStatsInFpl.seasonId, playersInFpl.seasonId),
+              eq(playerFixtureStatsInFpl.elementId, playersInFpl.elementId),
+            ),
+          )
+          .where(
+            and(
+              eq(playerFixtureStatsInFpl.seasonId, season.seasonId),
+              eq(playerFixtureStatsInFpl.eventId, eventId),
+            ),
+          );
+      } catch (error) {
+        logError('Failed to retrieve event-pinned player fixture identity', error, {
+          season: season.seasonCode,
+          eventId,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve event-pinned player fixture identity',
+          'FIND_PLAYER_FIXTURE_IDENTITY_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertEvidence: async (
       season: FplSeasonRef,
       evidence: readonly FplPlayerFixtureEvidence[],

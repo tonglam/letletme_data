@@ -90,12 +90,14 @@ the Redis checkpoint watermark used to coalesce non-boundary PostgreSQL writes
 to at most one per ten minutes. Final and lifecycle/identity boundary
 publications bypass that window and are fenced against supersession.
 
-Protected diagnosis and recovery use `bun run ops:repair-live-matches-v2` with
-one explicit season/event. `inspect` validates active, previous, desired, and
-self-contained PostgreSQL checkpoints for both streams. Write actions require
-an explicit desk/detail kind, reason, and confirmation environment variable;
-they may only CAS-promote previous, restore current from the exact checkpoint,
-or replay the latest merged checkpoint obligation.
+Protected diagnosis and recovery use `POST /ops/live-matches-v2/repair` with
+one explicit season/event. An `inspect` request validates active, previous,
+desired, and self-contained PostgreSQL checkpoints for both streams. Write
+requests require an explicit desk/detail kind, a reason of at least 12
+characters, and `confirmation: "LIVE_MATCHES_V2_REPAIR"`; they may only
+CAS-promote previous, restore current from the exact checkpoint, or replay the
+latest merged checkpoint obligation. The endpoint is protected by the existing
+ops API-key guard.
 
 The global publication items are exactly `eventLive` and `fixtures`. An entry
 publication contains one complete `input` item. A V2 manifest is scoped to one

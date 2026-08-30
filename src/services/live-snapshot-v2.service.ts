@@ -1,5 +1,6 @@
 import { fplClient } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import type { RawFPLEventLiveResponse, RawFPLFixture } from '../types';
 import {
   markLivePublicationCheckpointedV2,
   publishLivePublicationV2,
@@ -22,7 +23,10 @@ import {
   checkpointLivePublicationV2,
   readLivePublicationV2Checkpoint,
 } from './live-publication-v2-checkpoint.service';
-import { syncLiveMatchesV2FromObservation } from './live-match-v2.service';
+import {
+  syncLiveMatchesV2FromObservation,
+  type LiveMatchObservationResult,
+} from './live-match-v2.service';
 import type { MatchLifecycleState } from './live-match-v2';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { logError, logInfo } from '../utils/logger';
@@ -47,7 +51,10 @@ export interface LiveSnapshotV2Dependencies {
     season: FplSeasonRef,
     eventId: number,
   ) => Promise<readonly number[]>;
-  readonly getReferenceData: (season: FplSeasonRef) => Promise<LiveSnapshotReferenceData>;
+  readonly getReferenceData: (
+    season: FplSeasonRef,
+    eventId?: number,
+  ) => Promise<LiveSnapshotReferenceData>;
   readonly syncLiveMatches?: typeof syncLiveMatchesV2FromObservation;
   readonly readPublished: (season: string, eventId: number) => Promise<LivePublicationRead | null>;
   readonly readCheckpointed?: (
@@ -96,7 +103,7 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
       .filter((fixture) => fixture.event === eventId)
       .map((fixture) => fixture.id);
   },
-  getReferenceData: loadLiveReferenceData,
+  getReferenceData: (season, eventId) => loadLiveReferenceData(season, eventId),
   syncLiveMatches: syncLiveMatchesV2FromObservation,
   readPublished: (season, eventId) => readLivePublicationV2({ season, eventId }),
   readCheckpointed: readLivePublicationV2Checkpoint,
@@ -221,6 +228,24 @@ async function checkpoint(
 
 type LiveCheckpointDesired = Awaited<ReturnType<typeof setLiveCheckpointDesiredV2>>;
 
+type AcceptedMatchObservation = Readonly<{
+  rawEventLive: RawFPLEventLiveResponse;
+  rawFixtures: readonly RawFPLFixture[];
+  referenceData: LiveSnapshotReferenceData;
+  expectedFixtureIds: readonly number[];
+}>;
+
+function publishedDeskFromMatchResult(
+  result: LiveMatchObservationResult,
+): NonNullable<Parameters<typeof syncLiveMatchesV2FromObservation>[0]['publishedDesk']> {
+  return {
+    publication: result.desk,
+    fixtures: result.deskFixtures,
+    changed: result.deskChanged,
+    checkpointScheduled: result.deskCheckpointScheduled,
+  };
+}
+
 /**
  * A Redis FINAL without a durable row is a recovery obligation, not a reason
  * to checkpoint the two Redis payloads on their own.  Keep one merged desired
@@ -312,7 +337,12 @@ export async function syncLiveSnapshotV2(
     });
   const eventLivePromise = dependencies.getEventLive(eventId);
   const fixturesPromise = dependencies.getFixtures(eventId);
-  const referenceDataPromise = dependencies.getReferenceData(season);
+  const referenceDataPromise = dependencies.getReferenceData(
+    season,
+    options.finalizeEvent === true || current?.publication.state === 'FINALIZED'
+      ? eventId
+      : undefined,
+  );
   const observationPromise = Promise.allSettled([
     eventLivePromise,
     fixturesPromise,
@@ -366,11 +396,12 @@ export async function syncLiveSnapshotV2(
           referenceData: referenceDataResult.value,
           expectedFixtureIds,
           publishedLiveElementIds: current?.eventLives.map((row) => row.elementId),
-          finalizeEvent: options.finalizeEvent && liveResult.status === 'fulfilled',
-          lifecycleState:
-            options.finalizeEvent && liveResult.status === 'fulfilled'
-              ? options.lifecycleState
-              : nonFinalMatchLifecycleState,
+          // The sibling Match publication must remain provisional until the
+          // exact same observation has passed Live Points completeness and
+          // final-facts validation below. Finalizing here would let an event-
+          // live/reference mismatch make Match immutable first.
+          finalizeEvent: false,
+          lifecycleState: nonFinalMatchLifecycleState,
           expectedNextCheckAt: options.expectedNextCheckAt,
           publishedDesk:
             early.result === null
@@ -414,6 +445,29 @@ export async function syncLiveSnapshotV2(
     // boundary both publications are exact durable obligations and therefore
     // fail closed together.
     if (options.finalizeEvent && outcome.error) throw outcome.error;
+  };
+
+  const finalizeAcceptedMatch = async (observation: AcceptedMatchObservation): Promise<void> => {
+    if (!options.finalizeEvent) return;
+    const outcome = await matchPublicationOutcome;
+    const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
+      season,
+      eventId,
+      rawFixtures: observation.rawFixtures,
+      rawEventLive: observation.rawEventLive,
+      referenceData: observation.referenceData,
+      expectedFixtureIds: observation.expectedFixtureIds,
+      publishedLiveElementIds: current?.eventLives.map((row) => row.elementId),
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      expectedNextCheckAt: options.expectedNextCheckAt,
+      publishedDesk: outcome.result ? publishedDeskFromMatchResult(outcome.result) : undefined,
+    });
+    if (result.desk.state !== 'FINALIZED' || result.detail?.finalized !== true) {
+      throw new Error(
+        `Live Match final publication was not complete for event ${eventId}; desk=${result.desk.state}; detail=${result.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
+      );
+    }
   };
 
   const durableRead = await durableReadPromise;
@@ -498,6 +552,7 @@ export async function syncLiveSnapshotV2(
   }
 
   let prepared: PreparedLiveSnapshot;
+  let acceptedMatchObservation: AcceptedMatchObservation | null = null;
   try {
     const [liveResult, fixturesResult, expectedFixtureIdsResult, referenceDataResult] =
       await observationPromise;
@@ -515,6 +570,12 @@ export async function syncLiveSnapshotV2(
         `Live observation did not produce complete upstream facts for event ${eventId}`,
       );
     }
+    acceptedMatchObservation = {
+      rawEventLive: liveResponse,
+      rawFixtures,
+      referenceData: referenceDataResult.value,
+      expectedFixtureIds: expectedFixtureIdsResult.value,
+    };
     prepared = prepareCoherentLiveSnapshot(
       eventId,
       liveResponse,
@@ -608,6 +669,7 @@ export async function syncLiveSnapshotV2(
       desired,
       observationCheckedAt,
     );
+    if (acceptedMatchObservation) await finalizeAcceptedMatch(acceptedMatchObservation);
     return {
       eventId,
       changed: false,
@@ -691,6 +753,7 @@ export async function syncLiveSnapshotV2(
     const servedPublication = checkpointed
       ? ((await dependencies.readPublished(season.seasonCode, eventId))?.publication ?? publication)
       : publication;
+    if (acceptedMatchObservation) await finalizeAcceptedMatch(acceptedMatchObservation);
     return {
       eventId,
       changed: false,
@@ -737,6 +800,7 @@ export async function syncLiveSnapshotV2(
       checkpointed: promoted.publication.checkpointedAt !== null,
     };
   }
+  if (acceptedMatchObservation) await finalizeAcceptedMatch(acceptedMatchObservation);
   let desired = await readLiveCheckpointDesiredV2({
     season: season.seasonCode,
     eventId,

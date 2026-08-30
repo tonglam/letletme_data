@@ -7,7 +7,17 @@ import {
   type MatchDeskFixture,
 } from '../../src/services/live-match-v2';
 import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
-import type { RawFPLFixture } from '../../src/types';
+import type {
+  RawFPLEventExplainFixture,
+  RawFPLEventLiveElement,
+  RawFPLFixture,
+} from '../../src/types';
+
+const cloneRawElement = (element: RawFPLEventLiveElement): RawFPLEventLiveElement =>
+  structuredClone(element) as RawFPLEventLiveElement;
+
+const cloneRawElements = (): RawFPLEventLiveElement[] =>
+  rawExplainElementsFixture.map(cloneRawElement);
 
 const rawFixture = (input: {
   id: number;
@@ -127,7 +137,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       }),
       rawFixture({
         id: 402,
-        teamH: 30,
+        teamH: 10,
         teamA: 40,
         homeScore: 0,
         awayScore: 0,
@@ -141,9 +151,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       referenceData: referenceData(),
       expectedFixtureIds: [401, 402],
     });
-    const elements = structuredClone(rawExplainElementsFixture).filter(
-      (element) => element.id === 101,
-    );
+    const elements = cloneRawElements().filter((element) => element.id === 101);
     const detail = prepareLiveMatchDetail({
       eventId: 2,
       rawElements: elements,
@@ -168,6 +176,128 @@ describe('Live Matches V2 fixture-grain preparation', () => {
         { identifier: 'bps', value: 5, points: 0, pointsModification: null },
       ]),
     });
+  });
+
+  test('includes fixture point modifications in the displayed player total', () => {
+    const fixtures = [
+      rawFixture({
+        id: 401,
+        teamH: 10,
+        teamA: 20,
+        homeScore: 1,
+        awayScore: 0,
+        bpsElement: 101,
+        bps: 30,
+      }),
+    ];
+    const desk = prepareLiveMatchDesk({
+      eventId: 2,
+      rawFixtures: fixtures,
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+    });
+    const originalElement = rawExplainElementsFixture[0];
+    if (!originalElement?.explain?.[0]) throw new Error('event-live fixture is missing');
+    const element = cloneRawElement(originalElement);
+    const explain = element.explain as RawFPLEventExplainFixture[];
+    const firstExplain = explain[0];
+    if (!firstExplain) throw new Error('event-live fixture is missing');
+    element.explain = [firstExplain];
+    const bonus = firstExplain.stats.find((stat) => stat.identifier === 'bonus');
+    if (!bonus) throw new Error('bonus fixture is missing');
+    bonus.points_modification = null;
+
+    const detail = prepareLiveMatchDetail({
+      eventId: 2,
+      rawElements: [element],
+      rawFixtures: fixtures,
+      deskFixtures: desk.fixtures,
+      referenceData: {
+        ...referenceData(),
+        playerTeamById: new Map([[101, 10]]),
+        playerById: new Map([[101, { id: 101, type: 3, teamId: 10, webName: 'Player One' }]]),
+      },
+    });
+
+    expect(detail.fixtures[0]?.players[0]?.totalPoints).toBe(11);
+  });
+
+  test('uses fixture-time identity when a player has since transferred clubs', () => {
+    const fixtures = [
+      rawFixture({
+        id: 401,
+        teamH: 10,
+        teamA: 20,
+        homeScore: 1,
+        awayScore: 0,
+        bpsElement: 101,
+        bps: 30,
+      }),
+    ];
+    const desk = prepareLiveMatchDesk({
+      eventId: 2,
+      rawFixtures: fixtures,
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+    });
+    const currentPlayer = {
+      id: 101,
+      type: 3,
+      teamId: 30,
+      webName: 'Player One',
+    } as const;
+    const detail = prepareLiveMatchDetail({
+      eventId: 2,
+      rawElements: cloneRawElements()
+        .filter((element) => element.id === 101)
+        .map((element) => ({
+          ...element,
+          explain:
+            (element.explain as RawFPLEventExplainFixture[] | null)?.filter(
+              (fixture) => fixture.fixture === 401,
+            ) ?? null,
+        })),
+      rawFixtures: fixtures,
+      deskFixtures: desk.fixtures,
+      referenceData: {
+        ...referenceData(),
+        playerById: new Map([[101, currentPlayer]]),
+        playerByFixtureAndId: new Map([['401:101', { ...currentPlayer, teamId: 10 }]]),
+      },
+      publishedLiveElementIds: [101],
+    });
+
+    expect(detail.fixtures[0]?.players[0]).toMatchObject({ id: 101, teamId: 10 });
+  });
+
+  test('derives active and settled lifecycle from current fixtures on a stale job retry', () => {
+    const playing = rawFixture({
+      id: 401,
+      teamH: 10,
+      teamA: 20,
+      homeScore: 1,
+      awayScore: 0,
+      bpsElement: 101,
+      bps: 30,
+    });
+    expect(
+      prepareLiveMatchDesk({
+        eventId: 2,
+        rawFixtures: [playing],
+        referenceData: referenceData(),
+        expectedFixtureIds: [401],
+        lifecycleState: 'BETWEEN_FIXTURES',
+      }).state,
+    ).toBe('LIVE_ACTIVE');
+    expect(
+      prepareLiveMatchDesk({
+        eventId: 2,
+        rawFixtures: [{ ...playing, finished: true }],
+        referenceData: referenceData(),
+        expectedFixtureIds: [401],
+        lifecycleState: 'LIVE_ACTIVE',
+      }).state,
+    ).toBe('DAY_SETTLING');
   });
 
   test('reuses previous team identity when Core is unavailable', () => {
@@ -230,9 +360,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
     expect(() =>
       prepareLiveMatchDetail({
         eventId: 2,
-        rawElements: structuredClone(rawExplainElementsFixture).filter(
-          (element) => element.id === 101,
-        ),
+        rawElements: cloneRawElements().filter((element) => element.id === 101),
         rawFixtures: fixtures,
         deskFixtures: desk.fixtures,
         referenceData: { ...referenceData(), playerById: new Map() },
@@ -259,7 +387,8 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       referenceData: referenceData(),
       expectedFixtureIds: [401],
     });
-    const first = structuredClone(rawExplainElementsFixture[0]);
+    const originalElement = rawExplainElementsFixture[0];
+    const first = originalElement ? cloneRawElement(originalElement) : undefined;
     if (!first) throw new Error('event-live fixture is missing');
 
     expect(() =>
@@ -274,7 +403,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
     expect(() =>
       prepareLiveMatchDetail({
         eventId: 2,
-        rawElements: [first, structuredClone(first)],
+        rawElements: [first, cloneRawElement(first)],
         rawFixtures: fixtures,
         deskFixtures: desk.fixtures,
         referenceData: referenceData(),
@@ -300,7 +429,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       referenceData: referenceData(),
       expectedFixtureIds: [401],
     });
-    const elements = structuredClone(rawExplainElementsFixture);
+    const elements = cloneRawElements();
     const malformed = elements[0];
     if (!malformed) throw new Error('event-live fixture is missing');
     malformed.stats.minutes = -1;

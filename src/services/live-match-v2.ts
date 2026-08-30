@@ -191,6 +191,28 @@ export function resolveLiveMatchLifecycleState(
   return 'PRE_DEADLINE';
 }
 
+function resolveObservedMatchLifecycleState(
+  fixtures: readonly Pick<MatchDeskFixture, 'started' | 'finished' | 'finishedProvisional'>[],
+  requested: MatchLifecycleState | undefined,
+  finalized: boolean,
+): MatchLifecycleState {
+  if (finalized) return 'FINALIZED';
+  const observed = resolveLiveMatchLifecycleState(fixtures, false);
+
+  // Queue payloads retain the scheduler state captured when they were
+  // enqueued. A retry must not overwrite current fixture evidence with an old
+  // PRE_DEADLINE/LIVE_ACTIVE/BETWEEN_FIXTURES value. GW_REVIEW is the only
+  // non-final milestone that fixtures cannot derive themselves, so preserve it
+  // only after the observed matchday has settled (including a blank event).
+  if (
+    (requested === 'GW_REVIEW' || requested === 'FINALIZED') &&
+    (observed === 'DAY_SETTLING' || (observed === 'PRE_DEADLINE' && fixtures.length === 0))
+  ) {
+    return 'GW_REVIEW';
+  }
+  return observed;
+}
+
 /**
  * Convert only fixture identity and score state into the compact Match desk.
  * This function deliberately ignores raw fixture stats: a BPS-only change is
@@ -253,10 +275,11 @@ export function prepareLiveMatchDesk(input: {
   return {
     eventId,
     fixtures,
-    state:
-      input.finalized === true
-        ? 'FINALIZED'
-        : (input.lifecycleState ?? resolveLiveMatchLifecycleState(fixtures, false)),
+    state: resolveObservedMatchLifecycleState(
+      fixtures,
+      input.lifecycleState,
+      input.finalized === true,
+    ),
   };
 }
 
@@ -291,8 +314,11 @@ function buildDetailPlayer(input: {
   readonly fixtureId: number;
   readonly stats: readonly MatchDetailStat[];
   readonly referenceData: LiveSnapshotReferenceData;
+  readonly fixtureTeamIds: ReadonlySet<number>;
 }): MatchDetailPlayer | null {
-  const player = input.referenceData.playerById?.get(input.elementId);
+  const player =
+    input.referenceData.playerByFixtureAndId?.get(`${input.fixtureId}:${input.elementId}`) ??
+    input.referenceData.playerById?.get(input.elementId);
   if (!player) {
     throw new Error(`Live Match detail is missing player identity for element ${input.elementId}`);
   }
@@ -305,9 +331,17 @@ function buildDetailPlayer(input: {
   if (player.teamId <= 0) {
     throw new Error(`Live Match detail has invalid player team for element ${input.elementId}`);
   }
+  if (!input.fixtureTeamIds.has(player.teamId)) {
+    throw new Error(
+      `Live Match detail has no event-time team identity for fixture ${input.fixtureId} element ${input.elementId}`,
+    );
+  }
   const stats = [...input.stats].sort(statSort);
   if (!statsHaveVisibleValue(stats)) return null;
-  const totalPoints = stats.reduce((sum, stat) => sum + stat.points, 0);
+  const totalPoints = stats.reduce(
+    (sum, stat) => sum + stat.points + (stat.pointsModification ?? 0),
+    0,
+  );
   if (!Number.isSafeInteger(totalPoints)) {
     throw new Error(
       `Live Match detail points are not an integer for fixture ${input.fixtureId} element ${input.elementId}`,
@@ -346,8 +380,8 @@ export function prepareLiveMatchDetail(input: {
     publishedLiveElementIds,
   } = input;
   assertPositiveInteger(eventId, 'Live Match event ID');
-  if (!referenceData.playerById) {
-    throw new Error('Live Match detail requires the current player identity baseline');
+  if (!referenceData.playerById && !referenceData.playerByFixtureAndId) {
+    throw new Error('Live Match detail requires an event player identity baseline');
   }
   validateLiveElementIdentity(
     eventId,
@@ -368,6 +402,12 @@ export function prepareLiveMatchDetail(input: {
     throw new Error(`Live Match detail transformation is incomplete for event ${eventId}`);
   }
   const bps = bpsByFixtureAndPlayer(rawFixtures);
+  const fixtureTeamIds = new Map(
+    deskFixtures.map((fixture) => [
+      fixture.fixtureId,
+      new Set([fixture.homeTeamId, fixture.awayTeamId]),
+    ]),
+  );
   const playersByFixture = new Map<number, Map<number, MatchDetailPlayer>>();
   for (const fixtureId of fixtureIds) playersByFixture.set(fixtureId, new Map());
 
@@ -394,6 +434,7 @@ export function prepareLiveMatchDetail(input: {
         fixtureId: fixture.fixtureId,
         stats,
         referenceData,
+        fixtureTeamIds: fixtureTeamIds.get(fixture.fixtureId) ?? new Set(),
       });
       if (player) playersByFixture.get(fixture.fixtureId)?.set(player.id, player);
     }
@@ -412,6 +453,7 @@ export function prepareLiveMatchDetail(input: {
       fixtureId,
       stats: [{ identifier: 'bps', value: bpsValue, points: 0, pointsModification: null }],
       referenceData,
+      fixtureTeamIds: fixtureTeamIds.get(fixtureId) ?? new Set(),
     });
     if (player) bucket.set(player.id, player);
   }

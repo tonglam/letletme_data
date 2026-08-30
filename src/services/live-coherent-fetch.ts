@@ -1,5 +1,9 @@
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import {
+  createFplPlayerFixtureStatsRepository,
+  type FplPlayerFixtureIdentity,
+} from '../repositories/fpl-player-fixture-stats';
 import { createPlayerRepository } from '../repositories/players';
 import { createTeamRepository } from '../repositories/teams';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
@@ -20,6 +24,15 @@ export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
    * preparation path; Match V2 fails closed for detail when it is absent.
    */
   readonly playerById?: ReadonlyMap<number, Pick<Player, 'id' | 'type' | 'teamId' | 'webName'>>;
+  /**
+   * Event-time identity captured with fixture evidence.  Current Core remains
+   * the normal hot-path baseline, while final/historical reconstruction can
+   * resolve a transferred player to the club represented in that fixture.
+   */
+  readonly playerByFixtureAndId?: ReadonlyMap<
+    string,
+    Pick<Player, 'id' | 'type' | 'teamId' | 'webName'>
+  >;
 }
 
 export interface PreparedLiveSnapshot {
@@ -57,6 +70,7 @@ function referenceDataFromCore(
   season: FplSeasonRef,
   teams: readonly Team[],
   players: readonly Player[],
+  eventPinnedIdentities: readonly FplPlayerFixtureIdentity[] = [],
 ): LiveSnapshotReferenceData {
   if (teams.length === 0 || players.length === 0) {
     throw new DatabaseError(
@@ -64,31 +78,80 @@ function referenceDataFromCore(
       'LIVE_REFERENCE_DATA_INCOMPLETE',
     );
   }
+  const playerById = new Map(
+    players.map((player) => [
+      player.id,
+      { id: player.id, type: player.type, teamId: player.teamId, webName: player.webName },
+    ]),
+  );
+  const playerByFixtureAndId = new Map<
+    string,
+    Pick<Player, 'id' | 'type' | 'teamId' | 'webName'>
+  >();
+  for (const identity of eventPinnedIdentities) {
+    if (
+      !Number.isSafeInteger(identity.fixtureId) ||
+      identity.fixtureId <= 0 ||
+      !Number.isSafeInteger(identity.elementId) ||
+      identity.elementId <= 0 ||
+      !Number.isSafeInteger(identity.teamId) ||
+      identity.teamId <= 0 ||
+      !Number.isSafeInteger(identity.elementType) ||
+      identity.elementType < 1 ||
+      identity.elementType > 4 ||
+      !identity.webName.trim()
+    ) {
+      throw new DatabaseError(
+        `Event-pinned player identity is invalid for event ${identity.fixtureId}`,
+        'LIVE_EVENT_PLAYER_IDENTITY_INVALID',
+      );
+    }
+    const key = `${identity.fixtureId}:${identity.elementId}`;
+    if (playerByFixtureAndId.has(key)) {
+      throw new DatabaseError(
+        `Event-pinned player identity is duplicated for ${key}`,
+        'LIVE_EVENT_PLAYER_IDENTITY_DUPLICATE',
+      );
+    }
+    playerByFixtureAndId.set(key, {
+      id: identity.elementId,
+      type: identity.elementType,
+      teamId: identity.teamId,
+      webName: identity.webName,
+    });
+  }
+
   return {
     season: season.seasonCode,
     ...createLiveFixtureTeamMaps(teams),
     playerTeamById: buildCurrentSeasonPlayerTeamMap(players, season.seasonCode),
-    playerById: new Map(
-      players.map((player) => [
-        player.id,
-        { id: player.id, type: player.type, teamId: player.teamId, webName: player.webName },
-      ]),
-    ),
+    playerById,
+    ...(playerByFixtureAndId.size > 0 ? { playerByFixtureAndId } : {}),
   };
 }
 
 /** Core metadata for coherent validation; it is never a live publication. */
 export async function loadLiveReferenceData(
   season: FplSeasonRef,
+  eventId?: number,
 ): Promise<LiveSnapshotReferenceData> {
   const cached = await readCoreSnapshotCache(season.seasonCode);
-  if (cached) return referenceDataFromCore(season, cached.teams, cached.players);
+  if (cached) {
+    const eventPinnedIdentities =
+      eventId === undefined
+        ? []
+        : await createFplPlayerFixtureStatsRepository().findIdentityByEvent(season, eventId);
+    return referenceDataFromCore(season, cached.teams, cached.players, eventPinnedIdentities);
+  }
   return withCoreSnapshotReadLock(season, async (transaction) => {
-    const [teams, players] = await Promise.all([
+    const [teams, players, eventPinnedIdentities] = await Promise.all([
       createTeamRepository(transaction).findAll(season),
       createPlayerRepository(transaction).findAll(season),
+      eventId === undefined
+        ? Promise.resolve([] as FplPlayerFixtureIdentity[])
+        : createFplPlayerFixtureStatsRepository(transaction).findIdentityByEvent(season, eventId),
     ]);
-    return referenceDataFromCore(season, teams, players);
+    return referenceDataFromCore(season, teams, players, eventPinnedIdentities);
   });
 }
 
