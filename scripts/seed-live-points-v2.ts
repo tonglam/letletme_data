@@ -413,6 +413,8 @@ const EXPLAIN_IDENTIFIERS = [
 ] as const;
 
 type ExplainIdentifier = (typeof EXPLAIN_IDENTIFIERS)[number];
+const SCORING_IDENTIFIERS = [...EXPLAIN_IDENTIFIERS, 'bonus'] as const;
+type ScoringIdentifier = (typeof SCORING_IDENTIFIERS)[number];
 
 type ExplainAggregate = {
   value: number;
@@ -421,12 +423,12 @@ type ExplainAggregate = {
 
 function aggregateBreakdown(
   breakdown: readonly EventLiveFixtureBreakdown[],
-): Map<ExplainIdentifier, ExplainAggregate> {
-  const result = new Map<ExplainIdentifier, ExplainAggregate>();
+): Map<ScoringIdentifier, ExplainAggregate> {
+  const result = new Map<ScoringIdentifier, ExplainAggregate>();
   for (const fixture of breakdown) {
     for (const stat of fixture.stats) {
-      if (!(EXPLAIN_IDENTIFIERS as readonly string[]).includes(stat.identifier)) continue;
-      const identifier = stat.identifier as ExplainIdentifier;
+      if (!(SCORING_IDENTIFIERS as readonly string[]).includes(stat.identifier)) continue;
+      const identifier = stat.identifier as ScoringIdentifier;
       const previous = result.get(identifier) ?? { value: 0, points: 0 };
       result.set(identifier, {
         value: previous.value + stat.value,
@@ -833,6 +835,33 @@ function assertLegacyEventLiveFacts(
   }
 }
 
+function assertLegacyScoringPointsMatchBreakdown(
+  eventLives: readonly EventLive[],
+  rows: readonly LegacyScoringFactRow[],
+): void {
+  const eventLivesByElement = new Map(
+    eventLives.map((eventLive) => [eventLive.elementId, eventLive]),
+  );
+  for (const row of rows) {
+    const eventLive = eventLivesByElement.get(row.element_id);
+    if (!eventLive || row.event_id !== eventLive.eventId) {
+      throw new Error('Legacy scoring item is outside the publication scope');
+    }
+    if (!(SCORING_IDENTIFIERS as readonly string[]).includes(row.scoring_identifier)) continue;
+    const aggregate = aggregateBreakdown(eventLive.fixtureBreakdown ?? []).get(
+      row.scoring_identifier as ScoringIdentifier,
+    );
+    // A missing non-zero breakdown stat is the narrow reason relational
+    // fallback exists. When the publication does carry this identifier, its
+    // complete points value must still match the relational scoring fact.
+    if (aggregate && aggregate.points !== row.points) {
+      throw new Error(
+        `Legacy scoring points disagree with publication: event=${eventLive.eventId} element=${eventLive.elementId} identifier=${row.scoring_identifier}`,
+      );
+    }
+  }
+}
+
 function assertLegacyEvidenceMatchesEventLives(
   seed: ValidatedLiveSeed,
   rows: readonly LegacyFixtureEvidenceRow[],
@@ -1075,6 +1104,7 @@ async function loadLegacyLiveFacts(
   ]);
   assertLegacyEventLiveFacts(seed, eventLiveRows);
   assertLegacyEvidenceMatchesEventLives(seed, evidenceRows);
+  assertLegacyScoringPointsMatchBreakdown(seed.eventLives, scoringRows);
 
   const explainByElement = new Map(
     seed.eventLives.map(
