@@ -2166,14 +2166,16 @@ export function liveSeedActivePointerSha256(raw: string): string {
   return createHash('sha256').update(raw, 'utf8').digest('hex');
 }
 
-function seedClaimMatchesActiveFence(
+export function seedClaimMatchesActiveFence(
   claim: LivePublicationV2SeedClaim | null,
   activeManifest: LivePublicationV2 | null,
   activeFence: LivePublicationV2OrderingFence | null,
 ): boolean {
   if (!claim) return false;
-  if (activeManifest && livePublicationSeedClaimMatchesPublication(claim, activeManifest)) {
-    return true;
+  if (activeManifest) {
+    // A complete manifest carries exact immutable item hashes. Never weaken a
+    // failed identity match to the ordering-only corruption fallback.
+    return livePublicationSeedClaimMatchesPublication(claim, activeManifest);
   }
   // A corrupt revision/item descriptor prevents a complete read. Preserve a
   // potentially active claim conservatively when its independently parsed
@@ -2306,7 +2308,16 @@ async function checkpointSeededLive(
     // mark that rejected candidate durable; restore the accepted checkpoint so
     // the seed cannot leave Redis serving an older publication.
     const winner = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
-    if (!winner) return 'blocked';
+    if (!winner) {
+      if (options.seedClaimId) {
+        await releaseLivePublicationV2SeedClaim(
+          seed.season,
+          seed.source.event_id,
+          options.seedClaimId,
+        );
+      }
+      return 'blocked';
+    }
     const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: winner, redis });
     if (!restored.published) {
       return 'blocked';

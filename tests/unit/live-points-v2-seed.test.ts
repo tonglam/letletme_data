@@ -15,6 +15,7 @@ import {
   rebaseLegacyFixturesAtCanonicalFence,
   resolveLivePointsV2SeedDatabaseUrl,
   resolveSeedObservationCheckedAt,
+  seedClaimMatchesActiveFence,
   type ExistingPickRow,
   type FinalResultSeedRow,
   type LegacyFixtureEvidenceRow,
@@ -233,7 +234,7 @@ describe('Live Points V2 entry-pick seed', () => {
     const scope = { season: '2627', eventId: 2 } as const;
     const raw = JSON.stringify({
       contractVersion: 'live-points-v2',
-      publicationId: '00000000-0000-4000-8000-000000000007',
+      publicationId: 'corrupt-publication-identity',
       generation: 7,
       season: scope.season,
       eventId: scope.eventId,
@@ -249,7 +250,6 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(parseLivePublicationV2Manifest(raw, scope)).toBeNull();
     expect(parseLivePublicationV2OrderingFence(raw, scope)).toEqual({
       contractVersion: 'live-points-v2',
-      publicationId: '00000000-0000-4000-8000-000000000007',
       generation: 7,
       season: '2627',
       eventId: 2,
@@ -257,6 +257,38 @@ describe('Live Points V2 entry-pick seed', () => {
       sourceCheckedAt: '2026-08-30T15:30:08.402Z',
       checkpointedAt: null,
     });
+  });
+
+  test('does not weaken a complete manifest claim mismatch to its ordering fence', () => {
+    const claim = {
+      claimId: '00000000-0000-4000-8000-000000000001',
+      expectedActiveSha256: 'c'.repeat(64),
+      candidateState: 'LIVE_ACTIVE' as const,
+      candidateSourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      candidateEventLiveSha256: 'a'.repeat(64),
+      candidateFixturesSha256: 'b'.repeat(64),
+      claimedAt: '2026-08-30T15:30:07.402Z',
+    };
+    const manifest = {
+      state: claim.candidateState,
+      sourceCheckedAt: claim.candidateSourceCheckedAt,
+      items: {
+        eventLive: { sha256: 'd'.repeat(64) },
+        fixtures: { sha256: claim.candidateFixturesSha256 },
+      },
+    } as LivePublicationV2;
+    const orderingFence = {
+      contractVersion: 'live-points-v2' as const,
+      generation: 7,
+      season: '2627',
+      eventId: 2,
+      state: claim.candidateState,
+      sourceCheckedAt: claim.candidateSourceCheckedAt,
+      checkpointedAt: null,
+    };
+
+    expect(seedClaimMatchesActiveFence(claim, manifest, orderingFence)).toBe(false);
+    expect(seedClaimMatchesActiveFence(claim, null, orderingFence)).toBe(true);
   });
 
   test('rebases the fixture sibling from canonical rows at a newer event fence', () => {

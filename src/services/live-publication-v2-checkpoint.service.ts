@@ -245,10 +245,46 @@ export async function acquireLivePublicationV2SeedClaim(
         candidateSourceCheckedAt: prior.candidateSourceCheckedAt.toISOString(),
         claimedAt: prior.claimedAt.toISOString(),
       };
-      return prior.expectedActiveSha256 === expectedActiveSha256 &&
-        livePublicationSeedClaimMatchesCandidate(normalizedPrior, candidate)
-        ? { status: 'claimed', claim: normalizedPrior }
-        : { status: 'blocked', claim: null };
+      if (
+        prior.expectedActiveSha256 !== expectedActiveSha256 ||
+        !livePublicationSeedClaimMatchesCandidate(normalizedPrior, candidate)
+      ) {
+        return { status: 'blocked', claim: null } as const;
+      }
+
+      // A retry may arrive after the previous owner abandoned the same claim.
+      // Rotate the ownership token and renew the lease using PostgreSQL time;
+      // an old owner can no longer checkpoint after this transaction commits.
+      // An unexpired retry keeps the existing token so concurrent executions
+      // of the exact candidate do not invalidate an owner still promoting it.
+      const renewedClaimId = randomUUID();
+      const renewed = (
+        await tx
+          .update(livePointsPublicationSeedClaimsInCompetition)
+          .set({
+            claimId: renewedClaimId,
+            claimedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+              eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+              eq(livePointsPublicationSeedClaimsInCompetition.claimId, prior.claimId),
+              sql`${livePointsPublicationSeedClaimsInCompetition.claimedAt} <= clock_timestamp() - (${LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS} * interval '1 millisecond')`,
+            ),
+          )
+          .returning({ claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt })
+      )[0];
+      return {
+        status: 'claimed',
+        claim: renewed
+          ? {
+              ...normalizedPrior,
+              claimId: renewedClaimId,
+              claimedAt: renewed.claimedAt.toISOString(),
+            }
+          : normalizedPrior,
+      } as const;
     }
 
     const claimId = randomUUID();
@@ -366,7 +402,8 @@ export async function reclaimAbandonedLivePublicationV2SeedClaim(
 
 /**
  * Reclaim a claim whose candidate is already the Redis active publication but
- * whose owner abandoned the durable checkpoint.  The checkpoint transaction
+ * whose owner abandoned the durable checkpoint, including a retry of the
+ * same candidate.  The checkpoint transaction
  * takes this same scope lock before it can wait on the shared Core lock, so an
  * in-flight owner retains its exact claim even after the wall-clock lease has
  * elapsed.  PostgreSQL owns both the lease clock and the compare/delete.
@@ -400,24 +437,6 @@ export async function reclaimAbandonedPromotedLivePublicationV2SeedClaim(
           sql`${livePointsPublicationSeedClaimsInCompetition.claimedAt} <= clock_timestamp() - (${LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS} * interval '1 millisecond')`,
           sql`${livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt} <= ${candidateSourceCheckedAt.toISOString()}::timestamptz`,
           sql`(${livePointsPublicationSeedClaimsInCompetition.candidateState} <> 'FINALIZED' OR ${candidate.candidateState} = 'FINALIZED')`,
-          or(
-            ne(
-              livePointsPublicationSeedClaimsInCompetition.candidateState,
-              candidate.candidateState,
-            ),
-            ne(
-              livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt,
-              candidateSourceCheckedAt,
-            ),
-            ne(
-              livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
-              candidate.candidateEventLiveSha256,
-            ),
-            ne(
-              livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
-              candidate.candidateFixturesSha256,
-            ),
-          ),
         ),
       )
       .returning({ claimId: livePointsPublicationSeedClaimsInCompetition.claimId });

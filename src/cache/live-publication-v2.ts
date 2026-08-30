@@ -74,7 +74,6 @@ export interface LivePublicationV2 {
 export type LivePublicationV2OrderingFence = Pick<
   LivePublicationV2,
   | 'contractVersion'
-  | 'publicationId'
   | 'generation'
   | 'season'
   | 'eventId'
@@ -432,8 +431,6 @@ export function parseLivePublicationV2OrderingFence(
     if (
       !isRecord(value) ||
       value.contractVersion !== LIVE_POINTS_CONTRACT_VERSION ||
-      typeof value.publicationId !== 'string' ||
-      !/^[0-9a-f-]{36}$/i.test(value.publicationId) ||
       typeof value.generation !== 'number' ||
       !Number.isSafeInteger(value.generation) ||
       value.generation <= 0 ||
@@ -447,7 +444,6 @@ export function parseLivePublicationV2OrderingFence(
     }
     return {
       contractVersion: LIVE_POINTS_CONTRACT_VERSION,
-      publicationId: value.publicationId,
       generation: value.generation,
       season: scope.season,
       eventId: scope.eventId,
