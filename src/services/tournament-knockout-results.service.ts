@@ -5,7 +5,6 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/tournament';
 import type { RawFPLEntryEventPickItem } from '../types';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
-import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import {
@@ -17,6 +16,7 @@ import { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
 
 type KnockoutRoundSummary = {
   matchId: number;
@@ -49,10 +49,9 @@ export async function loadFinalizedKnockoutLiveMap(
   findRows: (
     targetEventId: number,
     targetSeason: FplSeasonRef,
-  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'goalsScored' | 'goalsConceded'>>> = (
-    targetEventId,
-    targetSeason,
-  ) => eventLiveRepository.findFinalizedByEventId(targetSeason, targetEventId),
+  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'goalsScored' | 'goalsConceded'>>> =
+    async (targetEventId, targetSeason) =>
+      (await readLivePublicationV2Checkpoint(targetSeason, targetEventId))?.eventLives ?? [],
 ) {
   const eventLives = await findRows(eventId, season);
   const liveMap = new Map(

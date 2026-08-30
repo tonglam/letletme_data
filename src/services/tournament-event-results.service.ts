@@ -15,7 +15,6 @@ import {
   entryEventTransfersRepository,
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
-import { eventLiveRepository } from '../repositories/event-lives';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -30,6 +29,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { findEventEligibleEntryIds } from '../domain/entry-infos';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { getConfig } from '../utils/config';
+import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
 
 const DEFAULT_CONCURRENCY = 5;
 const runtimeConfig = getConfig();
@@ -140,12 +140,13 @@ async function resolveEventPointsPayload(
   const finalizationBoundary = event?.finished && event.dataChecked && event.dataCheckedAt !== null;
 
   if (finalizationBoundary) {
-    // Once data_checked_at exists, only a season-owned final database snapshot
-    // can satisfy the finalized calculation.
-    const finalized = await eventLiveRepository.findFinalizedByEventId(season, eventId);
-    if (finalized.length > 0) {
+    // Once data_checked_at exists, only the complete V2 checkpoint can satisfy
+    // the finalized calculation. Do not mix a legacy relational rowset into a
+    // V2 publication or allow a final calculation to fetch FPL again.
+    const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
+    if (checkpoint && checkpoint.eventLives.length > 0) {
       return {
-        elements: finalized.map((row) => ({
+        elements: checkpoint.eventLives.map((row) => ({
           id: row.elementId,
           stats: { total_points: row.totalPoints },
         })),
@@ -162,10 +163,10 @@ async function resolveEventPointsPayload(
       };
     }
 
-    const finalized = await eventLiveRepository.findFinalizedByEventId(season, eventId);
-    if (finalized.length > 0) {
+    const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
+    if (checkpoint && checkpoint.eventLives.length > 0) {
       return {
-        elements: finalized.map((row) => ({
+        elements: checkpoint.eventLives.map((row) => ({
           id: row.elementId,
           stats: { total_points: row.totalPoints },
         })),

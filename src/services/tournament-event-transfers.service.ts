@@ -8,7 +8,6 @@ import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
 import { entryInfoRepository } from '../repositories/entry-infos';
-import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
@@ -16,6 +15,7 @@ import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { publishTournamentTrendScopes } from './tournament-trends-publication.service';
+import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -81,10 +81,9 @@ export async function loadCanonicalTournamentTransferPointsMap(
   findCanonicalRows: (
     targetEventId: number,
     targetSeason: FplSeasonRef,
-  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> = (
-    targetEventId,
-    targetSeason,
-  ) => eventLiveRepository.findFinalizedByEventId(targetSeason, targetEventId),
+  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> =
+    async (targetEventId, targetSeason) =>
+      (await readLivePublicationV2Checkpoint(targetSeason, targetEventId))?.eventLives ?? [],
 ): Promise<Map<number, number>> {
   return buildTournamentTransferPointsMap(
     eventId,

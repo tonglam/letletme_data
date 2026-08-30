@@ -17,7 +17,6 @@ import {
   isEntryPicksPayloadForEvent,
   resolveScoringCaptainPick,
 } from '../domain/entry-picks';
-import { eventLiveRepository } from '../repositories/event-lives';
 import { eventRepository } from '../repositories/events';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { EventLive } from '../domain/event-lives';
@@ -41,6 +40,7 @@ import {
   eventLivePicksAreFresh,
   loadFreshEventLiveAuthoritySnapshot,
 } from './event-live-v2-score.service';
+import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
 
 export { latestFreshnessTimestamp } from '../domain/freshness';
 export { findEventEligibleEntryIds } from '../domain/entry-infos';
@@ -494,8 +494,11 @@ export async function syncLeagueEventResultsByTournament(
   const eventLiveAuthority = finalizationCutoff
     ? null
     : await loadFreshEventLiveAuthoritySnapshot(season, eventId);
+  const finalCheckpoint = finalizationCutoff
+    ? await readLivePublicationV2Checkpoint(season, eventId)
+    : null;
   const eventLives = finalizationCutoff
-    ? await eventLiveRepository.findFinalizedByEventId(season, eventId)
+    ? (finalCheckpoint?.eventLives ?? [])
     : (eventLiveAuthority?.eventLives ?? []);
   const activeEventLiveCheckedAt = eventLiveAuthority
     ? eventLiveAuthorityCheckedAt(eventLiveAuthority)
