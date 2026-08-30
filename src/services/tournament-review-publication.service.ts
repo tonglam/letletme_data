@@ -1407,6 +1407,24 @@ async function publishTournamentReviewScopeOnce(
     const eventDataCheckedAt = asDate(event.data_checked_at);
     if (!eventDataCheckedAt)
       throw new TournamentReviewSourceNotReadyError('data_checked_at missing');
+    const previousHead = await tx<Array<{ event_name: string | null }>>`
+      SELECT publication.payload #>> '{event,name}' AS event_name
+      FROM competition.tournament_review_heads head
+      JOIN competition.tournament_review_publications publication
+        ON publication.season_id = head.season_id
+       AND publication.tournament_id = head.tournament_id
+       AND publication.event_id = head.event_id
+       AND publication.revision = head.revision
+      WHERE head.season_id = ${season.seasonId}
+        AND head.tournament_id = ${tournamentId}
+        AND head.event_id = ${eventId}
+      LIMIT 1
+    `;
+    // events.upsertBatch refreshes updated_at on every core sync. Include the
+    // event row timestamp only for a new head or a payload-relevant name
+    // correction, otherwise routine event refreshes would mint revisions.
+    const eventMetadataChanged =
+      previousHead.length === 0 || previousHead[0].event_name !== event.event_name;
     const header = eventReviewPayload(tournament, event, format, {
       sourceMin: eventDataCheckedAt,
       sourceMax: eventDataCheckedAt,
@@ -1417,7 +1435,11 @@ async function publishTournamentReviewScopeOnce(
         : format === 'H2H'
           ? await buildH2HPayload(tx, season.seasonId, tournament, event, header)
           : await buildKnockoutPayload(tx, season.seasonId, tournament, event, header);
-    const freshness = sourceSpan([eventDataCheckedAt, event.updated_at, ...built.sourceTimes]);
+    const freshness = sourceSpan([
+      eventDataCheckedAt,
+      ...(eventMetadataChanged ? [event.updated_at] : []),
+      ...built.sourceTimes,
+    ]);
     const payload = {
       ...built.payload,
       freshness: {

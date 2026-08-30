@@ -117,6 +117,8 @@ describe('My Tournament Review V2 format and retry policy', () => {
   test('reconciles incrementally and retires scopes under the publication lock', () => {
     expect(publicationSource).toContain('COALESCE(state.existing_eligible_at');
     expect(publicationSource).toContain('event.updated_at AS event_updated_at');
+    expect(publicationSource).toContain('const eventMetadataChanged =');
+    expect(publicationSource).toContain('eventMetadataChanged ? [event.updated_at] : []');
     expect(publicationSource).toContain('previous.payload AS existing_payload');
     expect(publicationSource).toContain('state.existing_eligible_at IS NULL');
     expect(publicationSource).toContain('state.existing_payload IS NOT NULL');
@@ -134,9 +136,8 @@ describe('My Tournament Review V2 format and retry policy', () => {
 
   test('includes entry metadata and validated cumulative history in provenance', () => {
     expect(publicationSource).toContain('entry.updated_at AS entry_updated_at');
-    expect(publicationSource).toContain(
-      'sourceSpan([eventDataCheckedAt, event.updated_at, ...built.sourceTimes])',
-    );
+    expect(publicationSource).toContain('const eventMetadataChanged =');
+    expect(publicationSource).toContain('eventMetadataChanged ? [event.updated_at] : []');
     expect(publicationSource).toContain('COALESCE(entry.started_event, 1)');
     expect(publicationSource).toContain('history_sources.source_min_checked_at');
     expect(publicationSource).toContain('sourceTimes.push(...historySourceDates)');
