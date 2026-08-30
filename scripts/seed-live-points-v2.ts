@@ -672,6 +672,34 @@ function emptyLegacyExplain(eventId: number, elementId: number): EventLiveExplai
   };
 }
 
+/**
+ * Older live publications did not always materialize every non-scoring stat
+ * in fixtureBreakdown.  The relational fact tables are the same-publication
+ * evidence for those fields, so use them to complete the explain value while
+ * retaining the scoring points assembled from the scoring-item relation.
+ */
+function hydrateExplainValuesFromEventLive(
+  explain: EventLiveExplain,
+  eventLive: EventLive,
+): EventLiveExplain {
+  return {
+    ...explain,
+    bonus: eventLive.bonus,
+    minutes: eventLive.minutes,
+    goalsScored: eventLive.goalsScored,
+    assists: eventLive.assists,
+    cleanSheets: eventLive.cleanSheets,
+    goalsConceded: eventLive.goalsConceded,
+    ownGoals: eventLive.ownGoals,
+    penaltiesSaved: eventLive.penaltiesSaved,
+    penaltiesMissed: eventLive.penaltiesMissed,
+    yellowCards: eventLive.yellowCards,
+    redCards: eventLive.redCards,
+    saves: eventLive.saves,
+    defensiveContribution: eventLive.defensiveContribution,
+  };
+}
+
 function applyLegacyScoringItem(explain: EventLiveExplain, row: LegacyScoringFactRow): void {
   switch (row.scoring_identifier) {
     case 'minutes':
@@ -887,15 +915,31 @@ async function loadLegacyLiveFacts(
   database: postgres.Sql,
   seed: ValidatedLiveSeed,
 ): Promise<LegacyLiveFacts> {
-  const embedded = factsFromLegacyPayload(
-    seed.eventLives,
-    new Set(seed.fixtures.map((fixture) => fixture.id)),
-  );
+  let embedded: LegacyLiveFacts | null = null;
+  let embeddedError: Error | null = null;
+  try {
+    embedded = factsFromLegacyPayload(
+      seed.eventLives,
+      new Set(seed.fixtures.map((fixture) => fixture.id)),
+    );
+  } catch (error) {
+    // A legacy payload may omit a non-scoring stat from fixtureBreakdown while
+    // its relational snapshot is complete.  Only that narrow, known gap may
+    // fall through to the same-publication relational proof; duplicate,
+    // out-of-scope, or arithmetic errors remain hard validation failures.
+    if (
+      !(error instanceof Error) ||
+      !error.message.startsWith('Legacy fixture breakdown is missing a non-zero stat:')
+    ) {
+      throw error;
+    }
+    embeddedError = error;
+  }
   if (embedded) return embedded;
 
   const persistedAt = nullableDateValue(seed.source.event_live_facts_persisted_at);
   if (!persistedAt || persistedAt.getTime() < seed.sourceCheckedAt.getTime()) {
-    throw new Error('LEGACY_RELATIONAL_FACTS_NOT_PROVEN_FOR_PUBLICATION');
+    throw embeddedError ?? new Error('LEGACY_RELATIONAL_FACTS_NOT_PROVEN_FOR_PUBLICATION');
   }
 
   const [eventLiveRows, scoringRows, evidenceRows] = await Promise.all([
@@ -949,7 +993,10 @@ async function loadLegacyLiveFacts(
     applyLegacyScoringItem(explain, row);
   }
   const explains = seed.eventLives.map((eventLive) => {
-    const explain = explainByElement.get(eventLive.elementId)!;
+    const explain = hydrateExplainValuesFromEventLive(
+      explainByElement.get(eventLive.elementId)!,
+      eventLive,
+    );
     assertExplainValuesMatchEventLive(eventLive, explain);
     if (explainTotalPoints(explain) !== eventLive.totalPoints) {
       throw new Error(
