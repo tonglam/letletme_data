@@ -689,11 +689,8 @@ export const entryEventPickHeadsInCompetition = competition.table(
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
       name: 'entry_event_pick_heads_event_fk',
     }),
-    index('entry_event_pick_heads_event_entry_idx').on(
-      table.seasonId,
-      table.eventId,
-      table.entryId,
-    ),
+    // PostgreSQL migration 0067 owns this covering index because Drizzle
+    // 0.43 cannot express INCLUDE columns in a declaration export.
     check(
       'entry_event_pick_heads_identity_valid',
       sql`entry_id > 0 AND event_id > 0 AND generation > 0 AND row_count = 15 AND state = 'COMPLETE' AND picks_base_revision ~ '^[0-9a-f]{64}$' AND content_sha256 ~ '^[0-9a-f]{64}$'`,
@@ -736,11 +733,9 @@ export const entryEventPickRepairsInCompetition = competition.table(
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
       name: 'entry_event_pick_repairs_event_fk',
     }),
-    index('entry_event_pick_repairs_pending_idx').on(
-      table.seasonId,
-      table.eventId,
-      table.observedAt,
-    ),
+    index('entry_event_pick_repairs_pending_idx')
+      .on(table.seasonId, table.eventId, table.observedAt)
+      .where(sql`status = 'PENDING'::text`),
     check(
       'entry_event_pick_repairs_scope_valid',
       sql`season_id > 0 AND entry_id > 0 AND event_id > 0`,

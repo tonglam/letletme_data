@@ -25,6 +25,14 @@ const SQL_OWNED_MATERIALIZED_VIEW_INDEXES = [
   'tournament_selection_stats_transfer_in_idx',
 ] as const;
 
+// Drizzle 0.43 cannot represent PostgreSQL INCLUDE columns. Keep the
+// production covering index in its SQL migration and exclude it from the
+// declaration-export comparison for the same reason as the materialized-view
+// indexes above.
+const SQL_OWNED_DECLARATION_UNREPRESENTABLE_INDEXES = [
+  'entry_event_pick_heads_event_entry_idx',
+] as const;
+
 const SIGNATURE_QUERIES = {
   relations: `
     SELECT jsonb_build_array(namespace.nspname, relation.relname, relation.relkind)::text AS signature
@@ -244,6 +252,9 @@ parityTest(
       const migratedIndexes = await readIndexes(migrated);
       const exportedIndexes = await readIndexes(exported);
       const sqlOwnedNames = new Set<string>(SQL_OWNED_MATERIALIZED_VIEW_INDEXES);
+      const declarationUnrepresentableNames = new Set<string>(
+        SQL_OWNED_DECLARATION_UNREPRESENTABLE_INDEXES,
+      );
       expect(
         migratedIndexes
           .filter((row) => sqlOwnedNames.has(row.index_name))
@@ -261,9 +272,21 @@ parityTest(
       expect(exportedActive?.nulls_not_distinct).toBe(false);
 
       expect(
-        exportedIndexes.filter((row) => !sqlOwnedNames.has(row.index_name)).map(normalizeIndex),
+        exportedIndexes
+          .filter(
+            (row) =>
+              !sqlOwnedNames.has(row.index_name) &&
+              !declarationUnrepresentableNames.has(row.index_name),
+          )
+          .map(normalizeIndex),
       ).toEqual(
-        migratedIndexes.filter((row) => !sqlOwnedNames.has(row.index_name)).map(normalizeIndex),
+        migratedIndexes
+          .filter(
+            (row) =>
+              !sqlOwnedNames.has(row.index_name) &&
+              !declarationUnrepresentableNames.has(row.index_name),
+          )
+          .map(normalizeIndex),
       );
     } finally {
       await Promise.all([migrated.end(), exported.end()]);
