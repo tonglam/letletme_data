@@ -1,0 +1,20 @@
+{
+  "name": "letletme_data",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "export PATH=\"$HOME/.bun/bin:$PATH\" && bun run dev"
+    },
+    {
+      "name": "worker",
+      "command": "export PATH=\"$HOME/.bun/bin:$PATH\" && bun run worker:dev"
+    }
+  ],
+  "ports": [3000]
+}
