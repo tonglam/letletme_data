@@ -115,7 +115,11 @@ describe('My Tournament Review V2 format and retry policy', () => {
   });
 
   test('reconciles incrementally and retires scopes under the publication lock', () => {
-    expect(publicationSource).toContain('> existing.eligible_at');
+    expect(publicationSource).toContain('COALESCE(state.existing_eligible_at');
+    expect(publicationSource).toContain('event.updated_at AS event_updated_at');
+    expect(publicationSource).toContain('payload #>>');
+    expect(publicationSource).toContain('await tx`');
+    expect(publicationSource).toContain('pg_advisory_xact_lock');
     expect(publicationSource).toContain('locked_stale_scopes AS MATERIALIZED');
     expect(publicationSource).toContain('DELETE FROM competition.tournament_review_heads');
     expect(publicationSource).toContain('DELETE FROM competition.tournament_review_obligations');
@@ -124,7 +128,12 @@ describe('My Tournament Review V2 format and retry policy', () => {
 
   test('includes entry metadata and validated cumulative history in provenance', () => {
     expect(publicationSource).toContain('entry.updated_at AS entry_updated_at');
+    expect(publicationSource).toContain('COALESCE(entry.started_event, 1)');
     expect(publicationSource).toContain('history_sources.source_min_checked_at');
     expect(publicationSource).toContain('sourceTimes.push(...historySourceDates)');
+    expect(publicationSource).toContain(
+      'sourceTimes.push(...brackets.map((bracket) => bracket.updated_at))',
+    );
+    expect(publicationSource).toContain('knockout match source is stale');
   });
 });

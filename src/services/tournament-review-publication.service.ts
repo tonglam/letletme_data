@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
 
-import { getDbClient } from '../db/singleton';
+import { getDbClient, withDatabaseTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { GroupMode, KnockoutMode, LeagueType } from '../domain/tournament';
 import { postgresJsonbCanonicalJson } from '../utils/content-hash';
@@ -287,7 +287,7 @@ async function buildPointsPayload(
                AND history.entry_id = roster.entry_id
                AND history.event_id >= GREATEST(
                  COALESCE(tournament.group_started_event_id, 1),
-                 COALESCE(roster.started_event, 1)
+                 COALESCE(entry.started_event, 1)
                )
                AND history.event_id <= ${event.event_id}
                AND history_event.finished = true
@@ -300,7 +300,7 @@ async function buildPointsPayload(
              WHERE history_event.season_id = roster.season_id
                AND history_event.event_id >= GREATEST(
                  COALESCE(tournament.group_started_event_id, 1),
-                 COALESCE(roster.started_event, 1)
+                 COALESCE(entry.started_event, 1)
                )
                AND history_event.event_id <= ${event.event_id}
                AND history_event.finished = true
@@ -317,7 +317,7 @@ async function buildPointsPayload(
                AND history.entry_id = roster.entry_id
                AND history.event_id >= GREATEST(
                  COALESCE(tournament.group_started_event_id, 1),
-                 COALESCE(roster.started_event, 1)
+                 COALESCE(entry.started_event, 1)
                )
                AND history.event_id <= ${event.event_id}
                AND history_event.finished = true
@@ -346,7 +346,7 @@ async function buildPointsPayload(
                AND history.entry_id = roster.entry_id
                AND history.event_id >= GREATEST(
                  COALESCE(tournament.group_started_event_id, 1),
-                 COALESCE(roster.started_event, 1)
+                 COALESCE(entry.started_event, 1)
                )
                AND history.event_id <= ${event.event_id}
                AND history_event.finished = true
@@ -364,7 +364,7 @@ async function buildPointsPayload(
                AND history.entry_id = roster.entry_id
                AND history.event_id >= GREATEST(
                  COALESCE(tournament.group_started_event_id, 1),
-                 COALESCE(roster.started_event, 1)
+                 COALESCE(entry.started_event, 1)
                )
                AND history.event_id <= ${event.event_id}
                AND history_event.finished = true
@@ -403,7 +403,7 @@ async function buildPointsPayload(
           AND history.entry_id = roster.entry_id
           AND history.event_id >= GREATEST(
             COALESCE(tournament.group_started_event_id, 1),
-            COALESCE(roster.started_event, 1)
+            COALESCE(entry.started_event, 1)
           )
           AND history.event_id <= ${event.event_id}
           AND history_event.finished = true
@@ -422,7 +422,7 @@ async function buildPointsPayload(
           AND history.entry_id = roster.entry_id
           AND history.event_id >= GREATEST(
             COALESCE(tournament.group_started_event_id, 1),
-            COALESCE(roster.started_event, 1)
+            COALESCE(entry.started_event, 1)
           )
           AND history.event_id <= ${event.event_id}
           AND history_event.finished = true
@@ -1116,6 +1116,7 @@ type KnockoutBracketSourceRow = {
   ended_event_id: number | null;
   home_entry_id: number | null;
   away_entry_id: number | null;
+  updated_at: Date | string;
 };
 
 async function buildKnockoutPayload(
@@ -1138,7 +1139,8 @@ async function buildKnockoutPayload(
            started_event_id,
            ended_event_id,
            home_entry_id,
-           away_entry_id
+           away_entry_id,
+           updated_at
     FROM competition.tournament_knockouts
     WHERE season_id = ${seasonId}
       AND tournament_id = ${tournament.tournament_id}
@@ -1220,6 +1222,7 @@ async function buildKnockoutPayload(
     row.entry_updated_at,
     row.roster_created_at,
   ]);
+  sourceTimes.push(...brackets.map((bracket) => bracket.updated_at));
   sourceTimes.push(...eligible.map((row) => row.rich_synced_at));
   const actualKeys = new Set<string>();
   if (matches.length !== expectedByKey.size) {
@@ -1263,6 +1266,9 @@ async function buildKnockoutPayload(
       (match.official_match_id === null ? asDate(match.updated_at) : null);
     if (!sourceCheckedAt) {
       throw new TournamentReviewSourceNotReadyError('knockout match source timestamp is missing');
+    }
+    if (sourceCheckedAt.getTime() < eventDataCheckedAt.getTime()) {
+      throw new TournamentReviewSourceNotReadyError('knockout match source is stale');
     }
     // Keep both timestamps in the freshness span. A present but stale
     // source_checked_at must not be hidden by a newer row updated_at.
@@ -1556,17 +1562,45 @@ export async function reconcileTournamentReviewObligations(
   season: FplSeasonRef,
   now = new Date(),
 ): Promise<number> {
-  const db = await getDbClient();
-  const rows = await db<
-    Array<{
-      upserted_count: number | string;
-      retired_head_count: number | string;
-      retired_obligation_count: number | string;
-    }>
-  >`
+  const rows = await withDatabaseTransaction(async (tx) => {
+    // Take the scope locks in a statement of their own. PostgreSQL assigns a
+    // statement snapshot before evaluating a locking CTE; keeping the lock
+    // acquisition separate ensures the retirement snapshot includes any
+    // publisher that was already holding the scope lock.
+    await tx`
+      WITH stored_scopes AS (
+        SELECT tournament_id, event_id
+        FROM competition.tournament_review_heads
+        WHERE season_id = ${season.seasonId}
+        UNION
+        SELECT tournament_id, event_id
+        FROM competition.tournament_review_obligations
+        WHERE season_id = ${season.seasonId}
+      ), ordered_scopes AS MATERIALIZED (
+        SELECT tournament_id, event_id
+        FROM stored_scopes
+        ORDER BY tournament_id, event_id
+      )
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(
+          'review:' || ${season.seasonId}::text || ':' || ordered.tournament_id::text || ':' || ordered.event_id::text,
+          0
+        )
+      )
+      FROM ordered_scopes ordered
+    `;
+    return tx<
+      Array<{
+        upserted_count: number | string;
+        retired_head_count: number | string;
+        retired_obligation_count: number | string;
+      }>
+    >`
     WITH candidate_formats AS (
       SELECT tournament.tournament_id,
              event.event_id,
+             event.name AS event_name,
+             event.updated_at AS event_updated_at,
              CASE
                WHEN tournament.knockout_mode <> 'no_knockout'
                 AND tournament.knockout_started_event_id IS NOT NULL
@@ -1597,130 +1631,137 @@ export async function reconcileTournamentReviewObligations(
         AND event.finished = true
         AND event.data_checked = true
         AND event.data_checked_at IS NOT NULL
-    ), candidates AS (
+    ), candidate_states AS (
       SELECT candidate.tournament_id,
              candidate.event_id,
+             candidate.event_name,
+             candidate.event_updated_at,
              candidate.format,
-             GREATEST(
-               candidate.base_eligible_at,
-               CASE
-                 WHEN existing.tournament_id IS NULL
-                   THEN ${now.toISOString()}::timestamptz
-                 ELSE GREATEST(
-                   COALESCE((
-                     SELECT max(GREATEST(entry.updated_at, roster.created_at))
-                     FROM competition.tournament_entries roster
-                     JOIN competition.entries entry
-                       ON entry.season_id = roster.season_id
-                      AND entry.entry_id = roster.entry_id
-                     WHERE roster.season_id = ${season.seasonId}
-                       AND roster.tournament_id = candidate.tournament_id
-                       AND GREATEST(entry.updated_at, roster.created_at) > existing.eligible_at
-                   ), '-infinity'::timestamptz),
-                   CASE candidate.format
-                 WHEN 'POINTS' THEN COALESCE((
-                   SELECT max(source_updated_at)
-                   FROM (
-                     SELECT GREATEST(
-                              result.updated_at,
-                              COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
-                            ) AS source_updated_at
-                     FROM competition.entry_event_results result
-                     JOIN competition.tournament_entries roster
-                       ON roster.season_id = result.season_id
-                      AND roster.entry_id = result.entry_id
-                      AND roster.tournament_id = candidate.tournament_id
-                     WHERE result.season_id = ${season.seasonId}
-                       AND result.event_id <= candidate.event_id
-                       AND GREATEST(
-                         result.updated_at,
-                         COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
-                       ) > existing.eligible_at
-                     UNION ALL
-                     SELECT points.updated_at AS source_updated_at
-                     FROM competition.tournament_points_group_results points
-                     WHERE points.season_id = ${season.seasonId}
-                       AND points.tournament_id = candidate.tournament_id
-                       AND points.event_id <= candidate.event_id
-                       AND points.updated_at > existing.eligible_at
-                   ) point_sources
-                 ), '-infinity'::timestamptz)
-                 WHEN 'H2H' THEN COALESCE((
-                   SELECT max(source_updated_at)
-                   FROM (
-                     SELECT GREATEST(
-                              result.updated_at,
-                              COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
-                            ) AS source_updated_at
-                     FROM competition.entry_event_results result
-                     JOIN competition.tournament_entries roster
-                       ON roster.season_id = result.season_id
-                      AND roster.entry_id = result.entry_id
-                      AND roster.tournament_id = candidate.tournament_id
-                     WHERE result.season_id = ${season.seasonId}
-                       AND result.event_id <= candidate.event_id
-                       AND GREATEST(
-                         result.updated_at,
-                         COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
-                       ) > existing.eligible_at
-                     UNION ALL
-                     SELECT battle.updated_at AS source_updated_at
-                     FROM competition.tournament_battle_group_results battle
-                     WHERE battle.season_id = ${season.seasonId}
-                       AND battle.tournament_id = candidate.tournament_id
-                       AND battle.event_id <= candidate.event_id
-                       AND battle.updated_at > existing.eligible_at
-                   ) h2h_sources
-                 ), '-infinity'::timestamptz)
-                 WHEN 'KNOCKOUT' THEN COALESCE((
-                   SELECT max(source_updated_at)
-                   FROM (
-                     SELECT GREATEST(
-                              result.updated_at,
-                              COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
-                            ) AS source_updated_at
-                     FROM competition.entry_event_results result
-                     JOIN competition.tournament_entries roster
-                       ON roster.season_id = result.season_id
-                      AND roster.entry_id = result.entry_id
-                      AND roster.tournament_id = candidate.tournament_id
-                     WHERE result.season_id = ${season.seasonId}
-                       AND result.event_id = candidate.event_id
-                       AND GREATEST(
-                         result.updated_at,
-                         COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
-                       ) > existing.eligible_at
-                     UNION ALL
-                     SELECT knockout.updated_at AS source_updated_at
-                     FROM competition.tournament_knockout_results knockout
-                     WHERE knockout.season_id = ${season.seasonId}
-                       AND knockout.tournament_id = candidate.tournament_id
-                       AND knockout.event_id = candidate.event_id
-                       AND knockout.updated_at > existing.eligible_at
-                     UNION ALL
-                     SELECT bracket.updated_at AS source_updated_at
-                     FROM competition.tournament_knockouts bracket
-                     WHERE bracket.season_id = ${season.seasonId}
-                       AND bracket.tournament_id = candidate.tournament_id
-                       AND bracket.started_event_id <= candidate.event_id
-                       AND (bracket.ended_event_id IS NULL OR bracket.ended_event_id >= candidate.event_id)
-                       AND bracket.updated_at > existing.eligible_at
-                   ) knockout_sources
-                 ), '-infinity'::timestamptz)
-                     ELSE '-infinity'::timestamptz
-                   END
-                 )
-               END
-             ) AS eligible_at
+             candidate.base_eligible_at,
+             existing.eligible_at AS existing_eligible_at
       FROM candidate_formats candidate
       LEFT JOIN competition.tournament_review_obligations existing
         ON existing.season_id = ${season.seasonId}
        AND existing.tournament_id = candidate.tournament_id
        AND existing.event_id = candidate.event_id
+    ), candidates AS (
+      SELECT state.tournament_id,
+             state.event_id,
+             state.format,
+             GREATEST(
+               state.base_eligible_at,
+               COALESCE(source.max_source_updated_at, '-infinity'::timestamptz)
+             ) AS eligible_at
+      FROM candidate_states state
+      LEFT JOIN LATERAL (
+        -- For a new obligation existing_eligible_at is NULL, so the probe
+        -- seeds its watermark from rows visible in this reconciliation
+        -- snapshot. Existing obligations only see post-watermark changes.
+        SELECT max(source_updated_at) AS max_source_updated_at
+        FROM (
+          SELECT GREATEST(entry.updated_at, roster.created_at) AS source_updated_at
+          FROM competition.tournament_entries roster
+          JOIN competition.entries entry
+            ON entry.season_id = roster.season_id
+           AND entry.entry_id = roster.entry_id
+          WHERE roster.season_id = ${season.seasonId}
+            AND roster.tournament_id = state.tournament_id
+            AND GREATEST(entry.updated_at, roster.created_at) > COALESCE(
+              state.existing_eligible_at,
+              '-infinity'::timestamptz
+            )
+          UNION ALL
+          SELECT state.event_updated_at AS source_updated_at
+          WHERE state.event_updated_at > COALESCE(
+              state.existing_eligible_at,
+              '-infinity'::timestamptz
+            )
+            AND (
+              SELECT publication.payload #>> '{event,name}'
+              FROM competition.tournament_review_heads head
+              JOIN competition.tournament_review_publications publication
+                ON publication.season_id = head.season_id
+               AND publication.tournament_id = head.tournament_id
+               AND publication.event_id = head.event_id
+               AND publication.revision = head.revision
+              WHERE head.season_id = ${season.seasonId}
+                AND head.tournament_id = state.tournament_id
+                AND head.event_id = state.event_id
+              LIMIT 1
+            ) IS DISTINCT FROM state.event_name
+          UNION ALL
+          SELECT GREATEST(
+                   result.updated_at,
+                   COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+                 ) AS source_updated_at
+          FROM competition.entry_event_results result
+          JOIN competition.tournament_entries roster
+            ON roster.season_id = result.season_id
+           AND roster.entry_id = result.entry_id
+           AND roster.tournament_id = state.tournament_id
+          WHERE state.format IN ('POINTS', 'H2H')
+            AND result.season_id = ${season.seasonId}
+            AND result.event_id <= state.event_id
+            AND GREATEST(
+              result.updated_at,
+              COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+            ) > COALESCE(state.existing_eligible_at, '-infinity'::timestamptz)
+          UNION ALL
+          SELECT points.updated_at AS source_updated_at
+          FROM competition.tournament_points_group_results points
+          WHERE state.format = 'POINTS'
+            AND points.season_id = ${season.seasonId}
+            AND points.tournament_id = state.tournament_id
+            AND points.event_id <= state.event_id
+            AND points.updated_at > COALESCE(state.existing_eligible_at, '-infinity'::timestamptz)
+          UNION ALL
+          SELECT battle.updated_at AS source_updated_at
+          FROM competition.tournament_battle_group_results battle
+          WHERE state.format = 'H2H'
+            AND battle.season_id = ${season.seasonId}
+            AND battle.tournament_id = state.tournament_id
+            AND battle.event_id <= state.event_id
+            AND battle.updated_at > COALESCE(state.existing_eligible_at, '-infinity'::timestamptz)
+          UNION ALL
+          SELECT GREATEST(
+                   result.updated_at,
+                   COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+                 ) AS source_updated_at
+          FROM competition.entry_event_results result
+          JOIN competition.tournament_entries roster
+            ON roster.season_id = result.season_id
+           AND roster.entry_id = result.entry_id
+           AND roster.tournament_id = state.tournament_id
+          WHERE state.format = 'KNOCKOUT'
+            AND result.season_id = ${season.seasonId}
+            AND result.event_id = state.event_id
+            AND GREATEST(
+              result.updated_at,
+              COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+            ) > COALESCE(state.existing_eligible_at, '-infinity'::timestamptz)
+          UNION ALL
+          SELECT knockout.updated_at AS source_updated_at
+          FROM competition.tournament_knockout_results knockout
+          WHERE state.format = 'KNOCKOUT'
+            AND knockout.season_id = ${season.seasonId}
+            AND knockout.tournament_id = state.tournament_id
+            AND knockout.event_id = state.event_id
+            AND knockout.updated_at > COALESCE(state.existing_eligible_at, '-infinity'::timestamptz)
+          UNION ALL
+          SELECT bracket.updated_at AS source_updated_at
+          FROM competition.tournament_knockouts bracket
+          WHERE state.format = 'KNOCKOUT'
+            AND bracket.season_id = ${season.seasonId}
+            AND bracket.tournament_id = state.tournament_id
+            AND bracket.started_event_id <= state.event_id
+            AND (bracket.ended_event_id IS NULL OR bracket.ended_event_id >= state.event_id)
+            AND bracket.updated_at > COALESCE(state.existing_eligible_at, '-infinity'::timestamptz)
+        ) visible_sources
+      ) source ON true
+      WHERE state.format IS NOT NULL
     ), valid_candidates AS (
       SELECT tournament_id, event_id, format, eligible_at
       FROM candidates
-      WHERE format IS NOT NULL
     ), stored_scopes AS (
       SELECT tournament_id, event_id
       FROM competition.tournament_review_heads
@@ -1737,16 +1778,11 @@ export async function reconcileTournamentReviewObligations(
        AND candidate.event_id = stored.event_id
       WHERE candidate.tournament_id IS NULL
     ), locked_stale_scopes AS MATERIALIZED (
+      -- Scope locks were acquired in the preceding statement of this
+      -- transaction, before this deletion snapshot was established.
       SELECT stale.tournament_id,
-             stale.event_id,
-             pg_advisory_xact_lock(
-               hashtextextended(
-                 'review:' || ${season.seasonId}::text || ':' || stale.tournament_id::text || ':' || stale.event_id::text,
-                 0
-               )
-             ) AS locked
+             stale.event_id
       FROM stale_scopes stale
-      ORDER BY stale.tournament_id, stale.event_id
     ), retired_heads AS (
       DELETE FROM competition.tournament_review_heads head
       USING locked_stale_scopes stale
@@ -1866,6 +1902,7 @@ export async function reconcileTournamentReviewObligations(
            (SELECT count(*) FROM retired_heads)::integer AS retired_head_count,
            (SELECT count(*) FROM retired_obligations)::integer AS retired_obligation_count
   `;
+  });
   const counts = rows[0];
   return (
     Number(counts?.upserted_count ?? 0) +
