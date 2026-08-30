@@ -84,7 +84,10 @@ export async function loadCanonicalTournamentTransferPointsMap(
   ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> = async (
     targetEventId,
     targetSeason,
-  ) => (await readLivePublicationV2Checkpoint(targetSeason, targetEventId))?.eventLives ?? [],
+  ) => {
+    const checkpoint = await readLivePublicationV2Checkpoint(targetSeason, targetEventId);
+    return checkpoint?.publication.state === 'FINALIZED' ? checkpoint.eventLives : [];
+  },
 ): Promise<Map<number, number>> {
   return buildTournamentTransferPointsMap(
     eventId,

@@ -4,6 +4,7 @@ import {
   markLivePublicationCheckpointedV2,
   publishLivePublicationV2,
   readLivePublicationV2,
+  restoreLivePublicationV2Checkpoint,
   clearLiveCheckpointDesiredV2,
   readLiveCheckpointDesiredV2,
   setLiveCheckpointDesiredV2,
@@ -239,6 +240,46 @@ export async function syncLiveSnapshotV2(
         (durableFloor.publication.generation === current.publication.generation &&
           durableFloor.publication.publicationId !== current.publication.publicationId)),
   );
+  const durableFinalNeedsRestore = Boolean(
+    durableFloor?.publication.state === 'FINALIZED' &&
+      !(
+        current?.servedFrom === 'REDIS_CURRENT' &&
+        current.publication.publicationId === durableFloor.publication.publicationId &&
+        current.publication.generation === durableFloor.publication.generation
+      ) &&
+      !(current?.servedFrom === 'REDIS_CURRENT' && current.publication.state === 'FINALIZED'),
+  );
+  if (durableFinalNeedsRestore) {
+    // FINALIZED is an immutable durable boundary. If Redis lost its active
+    // pointer (or only retained an older previous pointer), restore that exact
+    // checkpoint before considering the newly fetched provisional candidate;
+    // otherwise a fresh generation could supersede final data.
+    const restored = await restoreLivePublicationV2Checkpoint({
+      checkpoint: durableFloor!,
+    });
+    logInfo('Restored durable FINALIZED Live Points V2 publication', {
+      season: season.seasonCode,
+      eventId,
+      generation: restored.publication.generation,
+      publicationId: restored.publication.publicationId,
+      published: restored.published,
+      trigger: options.trigger ?? 'queue',
+    });
+    return {
+      eventId,
+      changed: false,
+      stale: true,
+      published: false,
+      generation: restored.publication.generation,
+      publicationId: restored.publication.publicationId,
+      sourceCheckedAt: restored.publication.sourceCheckedAt,
+      state: 'FINALIZED',
+      eventLiveCount: durableFloor!.eventLives.length,
+      fixtureCount: durableFloor!.fixtures.length,
+      checkpointScheduled: false,
+      checkpointed: true,
+    };
+  }
   if (
     samePayload(current, prepared, state) &&
     current?.servedFrom === 'REDIS_CURRENT' &&

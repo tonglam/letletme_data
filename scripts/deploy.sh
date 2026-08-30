@@ -382,6 +382,38 @@ deploy() {
     exit 1
   fi
   finish_stage
+  start_stage v2Seed
+  : "${LIVE_POINTS_V2_SEED_SEASON:?deploy requires LIVE_POINTS_V2_SEED_SEASON}"
+  : "${LIVE_POINTS_V2_SEED_EVENT_ID:?deploy requires LIVE_POINTS_V2_SEED_EVENT_ID}"
+  if ! [[ "$LIVE_POINTS_V2_SEED_SEASON" =~ ^[0-9]{4}$ ]]; then
+    log_error "LIVE_POINTS_V2_SEED_SEASON must be YYYY"
+    exit 1
+  fi
+  if ! [[ "$LIVE_POINTS_V2_SEED_EVENT_ID" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer"
+    exit 1
+  fi
+  log_info "Seeding and verifying the Live Points V2 global and entry publications"
+  # The cutover seed is a one-shot operation: use the migration LOGIN's
+  # direct/session URL, while compose supplies the runtime Redis credentials.
+  if ! compose run --rm -T --interactive=false \
+    -e "DATABASE_URL=${migration_database_url}" \
+    -e LIVE_POINTS_SEED_CONFIRM=YES api \
+    bun run db:cutover-seed-live-points-v2 -- --execute --cache \
+    --season "$LIVE_POINTS_V2_SEED_SEASON" \
+    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
+    log_error "Live Points V2 seed failed; services remain stopped for a forward fix."
+    exit 1
+  fi
+  if ! compose run --rm -T --interactive=false \
+    -e "DATABASE_URL=${migration_database_url}" api \
+    bun run verify:live-points-v2 -- \
+    --season "$LIVE_POINTS_V2_SEED_SEASON" \
+    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
+    log_error "Live Points V2 verification failed; services remain stopped for a forward fix."
+    exit 1
+  fi
+  finish_stage
   start_stage cachePublish
   log_info "Publishing and verifying the canonical core cache"
   if ! compose run --rm -T --interactive=false \

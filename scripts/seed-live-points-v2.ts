@@ -1040,7 +1040,7 @@ async function seedLivePublication(
   seed: ValidatedLiveSeed,
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
 ): Promise<{
-  readonly status: 'published' | 'unchanged' | 'stale';
+  readonly status: 'published' | 'unchanged' | 'stale' | 'restored' | 'skipped-existing';
   readonly checkpoint: 'checkpointed' | 'already-checkpointed' | 'blocked' | 'not-required';
   readonly generation: number;
   readonly publicationId: string;
@@ -1056,6 +1056,45 @@ async function seedLivePublication(
       publicationId: current!.publication.publicationId,
     };
   }
+  if (current) {
+    // A deploy seed is a cutover/bootstrap operation, not a periodic writer.
+    // Once any V2 publication is readable (including a previous fallback), a
+    // legacy snapshot must never replace the live generation on a later deploy.
+    return {
+      status: 'skipped-existing',
+      checkpoint: 'not-required',
+      generation: current.publication.generation,
+      publicationId: current.publication.publicationId,
+    };
+  }
+  const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
+  if (durable) {
+    // Redis may have lost its pointer after the first cutover. Restore the
+    // exact durable identity rather than manufacturing a new publication from
+    // legacy rows (especially important for FINALIZED events).
+    const restored = await restoreLivePublicationV2Checkpoint({
+      checkpoint: durable,
+      redis,
+    });
+    if (
+      !restored.published &&
+      (restored.publication.publicationId !== durable.publication.publicationId ||
+        restored.publication.generation !== durable.publication.generation)
+    ) {
+      return {
+        status: 'stale',
+        checkpoint: 'blocked',
+        generation: restored.publication.generation,
+        publicationId: restored.publication.publicationId,
+      };
+    }
+    return {
+      status: 'restored',
+      checkpoint: 'already-checkpointed',
+      generation: restored.publication.generation,
+      publicationId: restored.publication.publicationId,
+    };
+  }
   const promoted = await publishLivePublicationV2({
     season: seed.season.seasonCode,
     eventId: seed.source.event_id,
@@ -1064,7 +1103,7 @@ async function seedLivePublication(
     contentUpdatedAt: seed.contentUpdatedAt,
     eventLives: seed.eventLives,
     fixtures: seed.fixtures,
-    previous: current?.publication ?? null,
+    previous: null,
     redis,
   });
   if (!promoted.published) {
@@ -1084,11 +1123,32 @@ async function seedLivePublication(
   };
 }
 
+async function readEntryGenerationFloor(
+  database: postgres.Sql,
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+): Promise<number> {
+  const rows = await database<{ generation: number | string }[]>`
+    SELECT generation
+    FROM competition.entry_event_pick_heads
+    WHERE season_id = ${season.seasonId}
+      AND entry_id = ${entryId}
+      AND event_id = ${eventId}
+      AND row_count = 15
+      AND state = 'COMPLETE'
+    LIMIT 1
+  `;
+  const generation = Number(rows[0]?.generation ?? 0);
+  return Number.isSafeInteger(generation) && generation > 0 ? generation : 0;
+}
+
 async function seedEntryInput(
   season: FplSeasonRef,
   rows: readonly ExistingPickRow[],
   previousTotals: PreviousTotalsRow | null,
   finalResult: FinalResultSeedRow | null,
+  database: postgres.Sql,
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
 ): Promise<{
   readonly status: 'published' | 'unchanged' | 'stale';
@@ -1133,12 +1193,19 @@ async function seedEntryInput(
       final: input.finalResult !== null,
     };
   }
+  const generationFloor = await readEntryGenerationFloor(
+    database,
+    season,
+    first.entry_id,
+    first.event_id,
+  );
   const promoted = await publishEntryLiveInputV2({
     season: season.seasonCode,
     eventId: first.event_id,
     entryId: first.entry_id,
     input,
     sourceCheckedAt,
+    generationFloor,
     redis,
   });
   if (!promoted.published) {
@@ -1267,6 +1334,7 @@ async function main(): Promise<void> {
               group,
               previousTotalsByEntry.get(group[0]!.entry_id) ?? null,
               finalResultsByEntry.get(group[0]!.entry_id) ?? null,
+              database,
               redis,
             );
             entryResults.push({

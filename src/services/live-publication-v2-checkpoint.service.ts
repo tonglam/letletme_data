@@ -8,6 +8,7 @@ import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { EventLive } from '../domain/event-lives';
 import type { Fixture } from '../types';
+import { createFixtureRepository } from '../repositories/fixtures';
 import {
   liveV2ItemKey,
   type LivePublicationRead,
@@ -235,6 +236,26 @@ export async function checkpointLivePublicationV2(
           fixturesCount: sql`excluded.fixtures_count`,
         },
       });
+
+    // A V2 checkpoint is also the successful coherent-source observation for
+    // the canonical FPL tables. Keep the fixture rows and the event freshness
+    // marker in the same short transaction as the checkpoint head so recovery
+    // cannot expose a durable publication while core reconciliation still
+    // points at an older fixture snapshot.
+    await createFixtureRepository(tx).upsertBatch(season, [...fixtures]);
+    const sourceCheckedAt = new Date(publication.sourceCheckedAt);
+    await tx
+      .update(eventsInFpl)
+      .set({
+        liveSnapshotCheckedAt: sql`
+          GREATEST(
+            COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${sourceCheckedAt}),
+            ${sourceCheckedAt}
+          )
+        `,
+        updatedAt: checkpointedAt,
+      })
+      .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)));
     if (publication.state === 'FINALIZED') {
       // The V2 checkpoint is the finalization boundary. Keep the existing
       // checked timestamp invariant intact when a late core heartbeat won the
@@ -245,7 +266,8 @@ export async function checkpointLivePublicationV2(
           liveSnapshotFinalizedAt: sql`
             GREATEST(
               COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAt}),
-              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${checkpointedAt})
+              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${sourceCheckedAt}),
+              ${sourceCheckedAt}
             )
           `,
           updatedAt: checkpointedAt,
