@@ -1216,6 +1216,23 @@ function breakdownValue(fixture: EventLiveFixtureBreakdown, identifier: string):
   return fixture.stats.find((stat) => stat.identifier === identifier)?.value ?? null;
 }
 
+/**
+ * Mutable publications may only borrow relational facts that were already
+ * persisted at their source fence. A finalized event is different: official
+ * data_checked evidence makes the scope immutable, so a later backfill may be
+ * used after the field-exact event-live, scoring, fixture-evidence, and fixture
+ * checks below succeed. The seed still retains the historical source and
+ * observation timestamps; this permission never manufactures freshness.
+ */
+export function canUseLegacyRelationalFacts(
+  state: LivePublicationState,
+  sourceCheckedAt: Date,
+  persistedAt: Date | null,
+): boolean {
+  if (!persistedAt || !Number.isFinite(persistedAt.getTime())) return false;
+  return persistedAt.getTime() <= sourceCheckedAt.getTime() || state === 'FINALIZED';
+}
+
 async function loadLegacyLiveFacts(
   database: postgres.Sql,
   seed: ValidatedLiveSeed,
@@ -1247,11 +1264,7 @@ async function loadLegacyLiveFacts(
   }
 
   const persistedAt = nullableDateValue(seed.source.event_live_facts_persisted_at);
-  // The publication may be read after the facts transaction commits. The
-  // complete row/value checks below bind the relational facts to this exact
-  // event publication; reject only a fact marker from the future, which cannot
-  // prove the publication's historical state.
-  if (!persistedAt || persistedAt.getTime() > seed.sourceCheckedAt.getTime()) {
+  if (!canUseLegacyRelationalFacts(seed.state, seed.sourceCheckedAt, persistedAt)) {
     throw embeddedError ?? new Error('LEGACY_RELATIONAL_FACTS_NOT_PROVEN_FOR_PUBLICATION');
   }
 

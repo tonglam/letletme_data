@@ -5,6 +5,7 @@ import {
   assertLivePointsV2SeedDatabaseTarget,
   buildSeedHead,
   buildSeedInput,
+  canUseLegacyRelationalFacts,
   findMissingPickScopes,
   isNoOpLegacyFixtureEvidence,
   inspectPickScope,
@@ -94,6 +95,17 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(() => resolveSeedObservationCheckedAt(new Date('invalid'), null)).toThrow(
       'seed source timestamp is invalid',
     );
+  });
+
+  test('accepts later relational backfills only for immutable finalized events', () => {
+    const sourceCheckedAt = new Date('2026-08-25T16:08:07.277Z');
+    const historicalFacts = new Date('2026-08-25T16:08:00.000Z');
+    const laterBackfill = new Date('2026-08-30T19:31:27.354Z');
+
+    expect(canUseLegacyRelationalFacts('LIVE_ACTIVE', sourceCheckedAt, historicalFacts)).toBe(true);
+    expect(canUseLegacyRelationalFacts('FINALIZED', sourceCheckedAt, laterBackfill)).toBe(true);
+    expect(canUseLegacyRelationalFacts('GW_REVIEW', sourceCheckedAt, laterBackfill)).toBe(false);
+    expect(canUseLegacyRelationalFacts('FINALIZED', sourceCheckedAt, null)).toBe(false);
   });
 
   test('rebases the fixture sibling from canonical rows at a newer event fence', () => {
