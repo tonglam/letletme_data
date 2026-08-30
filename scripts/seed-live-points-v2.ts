@@ -146,6 +146,7 @@ type LegacyLivePublicationRow = {
   event_finished: boolean;
   event_data_checked: boolean;
   event_data_checked_at: TimestampValue | null;
+  event_live_snapshot_checked_at: TimestampValue | null;
   event_live_snapshot_finalized_at: TimestampValue | null;
   event_live_facts_persisted_at: TimestampValue | null;
   event_live_item_count: number | null;
@@ -177,6 +178,7 @@ export type ValidatedLiveSeed = {
   readonly season: FplSeasonRef;
   readonly state: LivePublicationState;
   readonly sourceCheckedAt: Date;
+  readonly observationCheckedAt: Date;
   readonly contentUpdatedAt: Date;
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
@@ -274,6 +276,27 @@ function nullableDateValue(value: unknown): Date | null {
   if (value === null || value === undefined) return null;
   const date = value instanceof Date ? new Date(value.getTime()) : new Date(String(value));
   return Number.isFinite(date.getTime()) ? date : null;
+}
+
+/**
+ * Use the event's persisted source-order fence when it is newer than the
+ * legacy publication timestamp.  A cutover seed must never invent a current
+ * observation time, but it may reuse the timestamp already recorded on the
+ * same event after the legacy facts have passed validation.
+ */
+export function resolveSeedObservationCheckedAt(
+  sourceCheckedAt: Date,
+  eventSnapshotCheckedAt: Date | null,
+): Date {
+  if (!Number.isFinite(sourceCheckedAt.getTime())) {
+    throw new Error('seed source timestamp is invalid');
+  }
+  if (eventSnapshotCheckedAt && !Number.isFinite(eventSnapshotCheckedAt.getTime())) {
+    throw new Error('seed event snapshot timestamp is invalid');
+  }
+  return new Date(
+    Math.max(sourceCheckedAt.getTime(), eventSnapshotCheckedAt?.getTime() ?? -Infinity),
+  );
 }
 
 function normalizeEventLivePayload(value: unknown, eventId: number): EventLive[] {
@@ -374,6 +397,7 @@ export function validateLegacyLiveSeed(
   let eventLives: EventLive[] = [];
   let fixtures: Fixture[] = [];
   let sourceCheckedAt: Date | null = null;
+  let observationCheckedAt: Date | null = null;
   let contentUpdatedAt: Date | null = null;
   let state: LivePublicationState | null = null;
   try {
@@ -408,13 +432,25 @@ export function validateLegacyLiveSeed(
       manifest.lastSuccessfulFetchAt ?? manifest.sourceCheckedAt,
       'legacy lastSuccessfulFetchAt',
     );
+    const eventSnapshotCheckedAt =
+      row.event_live_snapshot_checked_at === null
+        ? null
+        : parseDate(row.event_live_snapshot_checked_at, 'event live snapshot checkedAt');
+    observationCheckedAt = resolveSeedObservationCheckedAt(sourceCheckedAt, eventSnapshotCheckedAt);
     const publishedAt = parseDate(manifest.publishedAt, 'legacy publishedAt');
     if (publishedAt.getTime() < sourceCheckedAt.getTime()) reasons.add('TIME_ORDER_INVALID');
     state = legacyPublicationState(row, manifest);
   } catch (error) {
     reasons.add(error instanceof Error ? error.message : 'LEGACY_PAYLOAD_INVALID');
   }
-  if (reasons.size > 0 || !manifest || !sourceCheckedAt || !contentUpdatedAt || !state) {
+  if (
+    reasons.size > 0 ||
+    !manifest ||
+    !sourceCheckedAt ||
+    !observationCheckedAt ||
+    !contentUpdatedAt ||
+    !state
+  ) {
     return {
       ok: false,
       value: {
@@ -432,6 +468,7 @@ export function validateLegacyLiveSeed(
       season: explicitSeasonRef(row.season_code),
       state,
       sourceCheckedAt,
+      observationCheckedAt,
       contentUpdatedAt,
       eventLives,
       fixtures,
@@ -1710,6 +1747,7 @@ async function loadLegacyLivePublications(
         event.finished AS event_finished,
         event.data_checked AS event_data_checked,
         event.data_checked_at AS event_data_checked_at,
+        event.live_snapshot_checked_at AS event_live_snapshot_checked_at,
         event.live_snapshot_finalized_at AS event_live_snapshot_finalized_at,
         event.live_facts_persisted_at AS event_live_facts_persisted_at,
         event_item.item_count AS event_live_item_count,
@@ -2054,6 +2092,7 @@ async function checkpointSeededLive(
     fixtures: payload.fixtures,
     explains: payload.explains,
     fixtureEvidence: payload.fixtureEvidence,
+    observationCheckedAt: seed.observationCheckedAt,
   });
   if (!checkpointed) {
     // A seed candidate may lose to a newer or FINALIZED durable head. Never
