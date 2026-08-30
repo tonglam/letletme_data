@@ -92,6 +92,32 @@ export type SeedArguments = {
   readonly eventId: number | null;
 };
 
+type SeedDatabaseEnvironment = {
+  readonly DATABASE_URL?: string;
+  /** Direct/session URL used only by the one-shot seed's raw SQL connection. */
+  readonly LIVE_POINTS_V2_SEED_DATABASE_URL?: string;
+};
+
+/**
+ * Cutover runs with two database roles. Raw seed reads and head writes require
+ * the explicit direct/session URL, while checkpoint services must keep using
+ * the runtime DATABASE_URL so their least-privilege role contract remains
+ * active. Local dry-runs may still use DATABASE_URL as their sole connection.
+ */
+export function resolveLivePointsV2SeedDatabaseUrl(
+  environment: SeedDatabaseEnvironment = {
+    DATABASE_URL: process.env.DATABASE_URL,
+    LIVE_POINTS_V2_SEED_DATABASE_URL: process.env.LIVE_POINTS_V2_SEED_DATABASE_URL,
+  },
+): string {
+  const databaseUrl =
+    environment.LIVE_POINTS_V2_SEED_DATABASE_URL?.trim() || environment.DATABASE_URL?.trim();
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL or LIVE_POINTS_V2_SEED_DATABASE_URL is required');
+  }
+  return databaseUrl;
+}
+
 type LegacyLivePublicationRow = {
   publication_id: string;
   season_id: number;
@@ -2293,8 +2319,7 @@ async function seedEntryInput(
 
 async function main(): Promise<void> {
   const args = parseSeedArguments(process.argv.slice(2));
-  const databaseUrl = process.env.DATABASE_URL?.trim();
-  if (!databaseUrl) throw new Error('DATABASE_URL is required');
+  const databaseUrl = resolveLivePointsV2SeedDatabaseUrl();
   if (isTransactionPoolerConnection(databaseUrl)) {
     throw new Error('V2 seed requires direct PostgreSQL or a session-mode pooler connection');
   }

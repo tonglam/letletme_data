@@ -8,6 +8,7 @@ import {
   isNoOpLegacyFixtureEvidence,
   inspectPickScope,
   parseSeedArguments,
+  resolveLivePointsV2SeedDatabaseUrl,
   type ExistingPickRow,
   type FinalResultSeedRow,
   type LegacyFixtureEvidenceRow,
@@ -34,6 +35,21 @@ function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
 }
 
 describe('Live Points V2 entry-pick seed', () => {
+  test('keeps the direct seed connection separate from the runtime connection', () => {
+    expect(
+      resolveLivePointsV2SeedDatabaseUrl({
+        DATABASE_URL: 'postgresql://runtime',
+        LIVE_POINTS_V2_SEED_DATABASE_URL: 'postgresql://migration',
+      }),
+    ).toBe('postgresql://migration');
+    expect(resolveLivePointsV2SeedDatabaseUrl({ DATABASE_URL: 'postgresql://runtime' })).toBe(
+      'postgresql://runtime',
+    );
+    expect(() => resolveLivePointsV2SeedDatabaseUrl({})).toThrow(
+      'DATABASE_URL or LIVE_POINTS_V2_SEED_DATABASE_URL is required',
+    );
+  });
+
   test('recognises only zero-contribution out-of-scope fixture rows as no-op evidence', () => {
     const noOp: LegacyFixtureEvidenceRow = {
       event_id: 2,
