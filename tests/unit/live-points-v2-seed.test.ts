@@ -5,6 +5,7 @@ import {
   assertLivePointsV2SeedDatabaseTarget,
   buildSeedHead,
   buildSeedInput,
+  canSupersedeUncheckpointedSeedCurrent,
   canUseLegacyRelationalFacts,
   findMissingPickScopes,
   isNoOpLegacyFixtureEvidence,
@@ -106,6 +107,45 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(canUseLegacyRelationalFacts('FINALIZED', sourceCheckedAt, laterBackfill)).toBe(true);
     expect(canUseLegacyRelationalFacts('GW_REVIEW', sourceCheckedAt, laterBackfill)).toBe(false);
     expect(canUseLegacyRelationalFacts('FINALIZED', sourceCheckedAt, null)).toBe(false);
+  });
+
+  test('supersedes only a non-durable cutover orphan at a proven source fence', () => {
+    const current = {
+      checkpointedAt: null,
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      state: 'LIVE_ACTIVE' as const,
+    };
+    const seed = {
+      sourceCheckedAt: new Date('2026-08-30T15:30:08.402Z'),
+      observationCheckedAt: new Date('2026-08-30T15:31:08.555Z'),
+      state: 'LIVE_ACTIVE' as const,
+    };
+
+    expect(canSupersedeUncheckpointedSeedCurrent(current, seed)).toBe(true);
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(
+        { ...current, checkpointedAt: '2026-08-30T15:32:00.000Z' },
+        seed,
+      ),
+    ).toBe(false);
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(current, {
+        ...seed,
+        sourceCheckedAt: new Date('2026-08-30T15:29:59.999Z'),
+      }),
+    ).toBe(false);
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(
+        { ...current, state: 'FINALIZED' },
+        { ...seed, state: 'GW_REVIEW' },
+      ),
+    ).toBe(false);
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(
+        { ...current, state: 'FINALIZED' },
+        { ...seed, state: 'FINALIZED' },
+      ),
+    ).toBe(true);
   });
 
   test('rebases the fixture sibling from canonical rows at a newer event fence', () => {

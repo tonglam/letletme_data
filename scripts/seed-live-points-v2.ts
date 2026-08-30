@@ -2147,6 +2147,30 @@ function sameLiveSeed(
   );
 }
 
+/**
+ * A failed first cutover can leave a complete Redis publication without its
+ * PostgreSQL checkpoint.  A later seed may supersede that orphan only with a
+ * fully validated candidate observed at the same or a newer source fence.
+ * Once either side is durable, the normal current/checkpoint recovery path
+ * owns the scope and legacy data must not manufacture another generation.
+ */
+export function canSupersedeUncheckpointedSeedCurrent(
+  current: Pick<
+    Awaited<ReturnType<typeof publishLivePublicationV2>>['publication'],
+    'checkpointedAt' | 'sourceCheckedAt' | 'state'
+  >,
+  seed: Pick<ValidatedLiveSeed, 'sourceCheckedAt' | 'observationCheckedAt' | 'state'>,
+): boolean {
+  if (current.checkpointedAt !== null) return false;
+  const currentSourceCheckedAt = new Date(current.sourceCheckedAt);
+  if (!Number.isFinite(currentSourceCheckedAt.getTime())) return false;
+  if (current.state === 'FINALIZED' && seed.state !== 'FINALIZED') return false;
+  return (
+    seed.sourceCheckedAt.getTime() >= currentSourceCheckedAt.getTime() &&
+    seed.observationCheckedAt.getTime() >= currentSourceCheckedAt.getTime()
+  );
+}
+
 function sameEntrySeed(
   read: Awaited<ReturnType<typeof readEntryLiveInputV2>>,
   input: EntryLiveInputV2,
@@ -2250,8 +2274,40 @@ async function seedLivePublication(
   }
   if (current) {
     // A deploy seed is a cutover/bootstrap operation, not a periodic writer.
-    // Once any V2 publication is readable (including a previous fallback), a
-    // legacy snapshot must never replace the live generation on a later deploy.
+    // Once a durable V2 publication exists, a legacy snapshot must never
+    // replace it on a later deploy. A complete but uncheckpointed Redis
+    // publication is different: it is an interrupted first-cutover orphan. A
+    // fully validated candidate at the same or a newer source fence may create
+    // the next generation while preserving that orphan as previous.
+    const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
+    if (!durable && canSupersedeUncheckpointedSeedCurrent(current.publication, seed)) {
+      const promoted = await publishLivePublicationV2({
+        season: seed.season.seasonCode,
+        eventId: seed.source.event_id,
+        state: seed.state,
+        sourceCheckedAt: seed.sourceCheckedAt,
+        contentUpdatedAt: seed.contentUpdatedAt,
+        eventLives: seed.eventLives,
+        fixtures: seed.fixtures,
+        previous: current.publication,
+        redis,
+      });
+      if (!promoted.published) {
+        return {
+          status: 'stale',
+          checkpoint: 'blocked',
+          generation: promoted.publication.generation,
+          publicationId: promoted.publication.publicationId,
+        };
+      }
+      const checkpoint = await checkpointSeededLive(seed, promoted.publication, redis);
+      return {
+        status: 'published',
+        checkpoint,
+        generation: promoted.publication.generation,
+        publicationId: promoted.publication.publicationId,
+      };
+    }
     const checkpoint = await checkpointSeededLive(seed, current.publication, redis, {
       eventLives: current.eventLives,
       fixtures: current.fixtures,
