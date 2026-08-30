@@ -15,6 +15,7 @@ import {
   entryLiveInputFromFplPicks,
   markLivePublicationCheckpointedV2,
   parseLivePublicationV2Manifest,
+  parseLivePublicationV2OrderingFence,
   publishEntryLiveInputV2,
   publishLivePublicationV2,
   readEntryLiveInputV2,
@@ -26,6 +27,8 @@ import {
   setLiveCheckpointDesiredV2,
   type EntryLiveInputV2,
   type Exactly15Picks,
+  type LivePublicationV2,
+  type LivePublicationV2OrderingFence,
   type LivePublicationState,
   type OfficialSubstitution,
 } from '../src/cache/live-publication-v2';
@@ -38,12 +41,15 @@ import {
   livePublicationSeedClaimMatchesPublication,
   livePublicationSeedClaimMatchesCandidate,
   reclaimAbandonedLivePublicationV2SeedClaim,
+  reclaimAbandonedPromotedLivePublicationV2SeedClaim,
   readLivePublicationV2Checkpoint,
   readLivePublicationV2SeedClaim,
   releaseLivePublicationV2SeedClaim,
+  type LivePublicationV2SeedClaim,
 } from '../src/services/live-publication-v2-checkpoint.service';
 import { checkpointEntryLiveInputV2 } from '../src/services/entries.service';
 import { canonicalJson, contentHash, postgresJsonbContentHash } from '../src/utils/content-hash';
+import { CacheError } from '../src/utils/errors';
 import { assertRuntimeDatabaseTarget } from './runtime-login-contract';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../src/types';
 
@@ -2160,6 +2166,50 @@ export function liveSeedActivePointerSha256(raw: string): string {
   return createHash('sha256').update(raw, 'utf8').digest('hex');
 }
 
+function seedClaimMatchesActiveFence(
+  claim: LivePublicationV2SeedClaim | null,
+  activeManifest: LivePublicationV2 | null,
+  activeFence: LivePublicationV2OrderingFence | null,
+): boolean {
+  if (!claim) return false;
+  if (activeManifest && livePublicationSeedClaimMatchesPublication(claim, activeManifest)) {
+    return true;
+  }
+  // A corrupt revision/item descriptor prevents a complete read. Preserve a
+  // potentially active claim conservatively when its independently parsed
+  // source/state fence still matches; the bounded lease can recover it later.
+  return Boolean(
+    activeFence &&
+      activeFence.state === claim.candidateState &&
+      activeFence.sourceCheckedAt === claim.candidateSourceCheckedAt,
+  );
+}
+
+async function releaseSeedClaimAfterPromotionFailure(
+  seed: ValidatedLiveSeed,
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  acquiredClaim: LivePublicationV2SeedClaim,
+  expectedCurrentRaw: string,
+): Promise<void> {
+  const scope = { season: seed.season.seasonCode, eventId: seed.source.event_id } as const;
+  const observedActiveRaw = await readLivePublicationV2ActiveRaw(scope, redis);
+  const observedActiveManifest = parseLivePublicationV2Manifest(observedActiveRaw, scope);
+  const observedActiveFence = parseLivePublicationV2OrderingFence(observedActiveRaw, scope);
+  // LIVE_V2_PROMOTE_CHANGED proves this invocation did not switch the pointer.
+  // Another process may share the same durable claim and have promoted the
+  // exact candidate, though; retain that owner's checkpoint token in that case.
+  if (
+    observedActiveRaw === expectedCurrentRaw ||
+    !seedClaimMatchesActiveFence(acquiredClaim, observedActiveManifest, observedActiveFence)
+  ) {
+    await releaseLivePublicationV2SeedClaim(
+      seed.season,
+      seed.source.event_id,
+      acquiredClaim.claimId,
+    );
+  }
+}
+
 /**
  * A failed first cutover can leave a complete Redis publication without its
  * PostgreSQL checkpoint.  A later seed may supersede that orphan only with a
@@ -2292,6 +2342,7 @@ async function seedLivePublication(
     candidateFixturesSha256: contentHash(seed.fixtures),
   } as const;
   const activeManifest = parseLivePublicationV2Manifest(activeRaw, scope);
+  const activeOrderingFence = parseLivePublicationV2OrderingFence(activeRaw, scope);
   const [current, previous, existingClaim] = await Promise.all([
     readLivePublicationV2Pointer(scope, 'active', redis),
     readLivePublicationV2Pointer(scope, 'previous', redis),
@@ -2354,6 +2405,47 @@ async function seedLivePublication(
     }
     return seedLivePublication(seed, redis, false);
   }
+  if (
+    existingClaim &&
+    existingClaim.expectedActiveSha256 !== activeSha256 &&
+    seedClaimMatchesActiveFence(existingClaim, activeManifest, activeOrderingFence)
+  ) {
+    // The claim's candidate is already active, so its owner may be waiting on
+    // the durable checkpoint transaction. Reclaim only after the DB-owned
+    // lease expires and only while holding the same scope lock as checkpoint.
+    if (!allowStaleClaimReset) {
+      throw new Error('V2 cache seed found a changing promoted recovery claim');
+    }
+    const reclaimed = await reclaimAbandonedPromotedLivePublicationV2SeedClaim(
+      seed.season,
+      seed.source.event_id,
+      existingClaim.claimId,
+      claimCandidate,
+    );
+    if (!reclaimed) {
+      const [afterClaim, afterDurable] = await Promise.all([
+        readLivePublicationV2SeedClaim(seed.season, seed.source.event_id),
+        readLivePublicationV2Checkpoint(seed.season, seed.source.event_id),
+      ]);
+      if (afterDurable) {
+        const restored = await restoreLivePublicationV2Checkpoint({
+          checkpoint: afterDurable,
+          redis,
+        });
+        return {
+          status: restored.published ? 'restored' : 'stale',
+          checkpoint: restored.published ? 'already-checkpointed' : 'blocked',
+          generation: restored.publication.generation,
+          publicationId: restored.publication.publicationId,
+        };
+      }
+      if (!afterClaim) return seedLivePublication(seed, redis, false);
+      throw new Error(
+        `V2 cache seed promoted claim ${existingClaim.claimId} is still checkpointing or within its bounded lease`,
+      );
+    }
+    return seedLivePublication(seed, redis, false);
+  }
   if (existingClaim && existingClaim.expectedActiveSha256 !== activeSha256) {
     // A prior seed either completed its Redis switch before crashing or lost
     // the active-pointer CAS to another complete writer. The same-seed case
@@ -2392,13 +2484,14 @@ async function seedLivePublication(
     }
     return seedLivePublication(seed, redis, false);
   }
-  // A syntactically valid active manifest remains the primary source/state
-  // fence even if one immutable sibling is damaged. If the active pointer is
-  // absent or malformed, the last complete previous publication is still an
-  // ordering fence: recovery may replace it, but never with an older source or
-  // a provisional downgrade of FINALIZED data.
-  const recoveryCurrent = activeManifest ?? previous?.publication;
-  if (recoveryCurrent) {
+  // Parse ordering independently from revision/item descriptors. A damaged
+  // active publication is unreadable, but its source/state/generation remain a
+  // hard fence alongside the last complete previous publication.
+  const recoveryBase = activeManifest ?? previous?.publication ?? null;
+  const recoveryFences = [activeOrderingFence, previous?.publication ?? null].filter(
+    (value): value is LivePublicationV2OrderingFence => value !== null,
+  );
+  if (recoveryFences.length > 0) {
     // A deploy seed is a cutover/bootstrap operation, not a periodic writer.
     // Once a durable V2 publication exists, a legacy snapshot must never
     // replace it on a later deploy. A complete but uncheckpointed Redis
@@ -2406,7 +2499,10 @@ async function seedLivePublication(
     // fully validated candidate at the same or a newer source fence may create
     // the next generation while preserving that orphan as previous.
     const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
-    if (!durable && canSupersedeUncheckpointedSeedCurrent(recoveryCurrent, seed)) {
+    if (
+      !durable &&
+      recoveryFences.every((fence) => canSupersedeUncheckpointedSeedCurrent(fence, seed))
+    ) {
       const acquired = await acquireLivePublicationV2SeedClaim(
         seed.season,
         seed.source.event_id,
@@ -2427,19 +2523,29 @@ async function seedLivePublication(
       if (acquired.status === 'blocked') {
         throw new Error('V2 cache seed recovery claim belongs to another active observation');
       }
-      const promoted = await publishLivePublicationV2({
-        season: seed.season.seasonCode,
-        eventId: seed.source.event_id,
-        state: seed.state,
-        sourceCheckedAt: seed.sourceCheckedAt,
-        contentUpdatedAt: seed.contentUpdatedAt,
-        eventLives: seed.eventLives,
-        fixtures: seed.fixtures,
-        previous: recoveryCurrent,
-        expectedCurrentRaw: activeRaw,
-        promotionMode: 'seed-recovery',
-        redis,
-      });
+      let promoted: Awaited<ReturnType<typeof publishLivePublicationV2>>;
+      try {
+        promoted = await publishLivePublicationV2({
+          season: seed.season.seasonCode,
+          eventId: seed.source.event_id,
+          state: seed.state,
+          sourceCheckedAt: seed.sourceCheckedAt,
+          contentUpdatedAt: seed.contentUpdatedAt,
+          eventLives: seed.eventLives,
+          fixtures: seed.fixtures,
+          previous: recoveryBase,
+          expectedCurrentRaw: activeRaw,
+          promotionMode: 'seed-recovery',
+          generationFloor: Math.max(...recoveryFences.map((fence) => fence.generation)),
+          redis,
+        });
+      } catch (error) {
+        if (!(error instanceof CacheError) || error.code !== 'LIVE_V2_PROMOTE_CHANGED') {
+          throw error;
+        }
+        await releaseSeedClaimAfterPromotionFailure(seed, redis, acquired.claim, activeRaw);
+        return seedLivePublication(seed, redis, false);
+      }
       if (!promoted.published) {
         await releaseLivePublicationV2SeedClaim(
           seed.season,
@@ -2552,19 +2658,28 @@ async function seedLivePublication(
   if (acquired.status === 'blocked') {
     throw new Error('V2 cache seed recovery claim belongs to another active observation');
   }
-  const promoted = await publishLivePublicationV2({
-    season: seed.season.seasonCode,
-    eventId: seed.source.event_id,
-    state: seed.state,
-    sourceCheckedAt: seed.sourceCheckedAt,
-    contentUpdatedAt: seed.contentUpdatedAt,
-    eventLives: seed.eventLives,
-    fixtures: seed.fixtures,
-    previous: null,
-    expectedCurrentRaw: activeRaw,
-    promotionMode: 'seed-recovery',
-    redis,
-  });
+  let promoted: Awaited<ReturnType<typeof publishLivePublicationV2>>;
+  try {
+    promoted = await publishLivePublicationV2({
+      season: seed.season.seasonCode,
+      eventId: seed.source.event_id,
+      state: seed.state,
+      sourceCheckedAt: seed.sourceCheckedAt,
+      contentUpdatedAt: seed.contentUpdatedAt,
+      eventLives: seed.eventLives,
+      fixtures: seed.fixtures,
+      previous: null,
+      expectedCurrentRaw: activeRaw,
+      promotionMode: 'seed-recovery',
+      redis,
+    });
+  } catch (error) {
+    if (!(error instanceof CacheError) || error.code !== 'LIVE_V2_PROMOTE_CHANGED') {
+      throw error;
+    }
+    await releaseSeedClaimAfterPromotionFailure(seed, redis, acquired.claim, activeRaw);
+    return seedLivePublication(seed, redis, false);
+  }
   if (!promoted.published) {
     await releaseLivePublicationV2SeedClaim(
       seed.season,

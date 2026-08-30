@@ -21,7 +21,11 @@ import {
   type LegacyFixtureFactRow,
   type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
-import type { LivePublicationV2 } from '../../src/cache/live-publication-v2';
+import {
+  parseLivePublicationV2Manifest,
+  parseLivePublicationV2OrderingFence,
+  type LivePublicationV2,
+} from '../../src/cache/live-publication-v2';
 import {
   livePublicationSeedClaimAllowsCheckpoint,
   livePublicationSeedClaimMatchesCandidate,
@@ -223,6 +227,36 @@ describe('Live Points V2 entry-pick seed', () => {
         candidateFixturesSha256: fixturesSha256,
       }),
     ).toBe(false);
+  });
+
+  test('retains ordering fences when revision or item metadata is corrupt', () => {
+    const scope = { season: '2627', eventId: 2 } as const;
+    const raw = JSON.stringify({
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000007',
+      generation: 7,
+      season: scope.season,
+      eventId: scope.eventId,
+      state: 'FINALIZED',
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      publishedAt: '2026-08-30T15:30:09.402Z',
+      checkpointedAt: null,
+      expectedNextCheckAt: null,
+      revisions: { corrupt: true },
+      items: { corrupt: true },
+    });
+
+    expect(parseLivePublicationV2Manifest(raw, scope)).toBeNull();
+    expect(parseLivePublicationV2OrderingFence(raw, scope)).toEqual({
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000007',
+      generation: 7,
+      season: '2627',
+      eventId: 2,
+      state: 'FINALIZED',
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      checkpointedAt: null,
+    });
   });
 
   test('rebases the fixture sibling from canonical rows at a newer event fence', () => {

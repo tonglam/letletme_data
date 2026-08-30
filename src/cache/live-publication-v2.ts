@@ -71,6 +71,18 @@ export interface LivePublicationV2 {
   };
 }
 
+export type LivePublicationV2OrderingFence = Pick<
+  LivePublicationV2,
+  | 'contractVersion'
+  | 'publicationId'
+  | 'generation'
+  | 'season'
+  | 'eventId'
+  | 'state'
+  | 'sourceCheckedAt'
+  | 'checkpointedAt'
+>;
+
 export interface LivePublicationRead {
   readonly publication: LivePublicationV2;
   readonly eventLives: readonly EventLive[];
@@ -312,6 +324,20 @@ function validRevision(value: unknown): value is StreamRevision {
   );
 }
 
+function validLivePublicationState(value: unknown): value is LivePublicationState {
+  return (
+    value === 'PRE_DEADLINE' ||
+    value === 'PICKS_WAIT' ||
+    value === 'PICKS_PROBE' ||
+    value === 'PICKS_SYNC' ||
+    value === 'LIVE_ACTIVE' ||
+    value === 'BETWEEN_FIXTURES' ||
+    value === 'DAY_SETTLING' ||
+    value === 'GW_REVIEW' ||
+    value === 'FINALIZED'
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -347,17 +373,7 @@ function parseLiveManifest(raw: string | null, scope: LiveScope): LivePublicatio
       value.generation <= 0 ||
       value.season !== scope.season ||
       value.eventId !== scope.eventId ||
-      !(
-        value.state === 'PRE_DEADLINE' ||
-        value.state === 'PICKS_WAIT' ||
-        value.state === 'PICKS_PROBE' ||
-        value.state === 'PICKS_SYNC' ||
-        value.state === 'LIVE_ACTIVE' ||
-        value.state === 'BETWEEN_FIXTURES' ||
-        value.state === 'DAY_SETTLING' ||
-        value.state === 'GW_REVIEW' ||
-        value.state === 'FINALIZED'
-      ) ||
+      !validLivePublicationState(value.state) ||
       !validIso(value.sourceCheckedAt) ||
       !validIso(value.publishedAt) ||
       (value.checkpointedAt !== null && !validIso(value.checkpointedAt)) ||
@@ -390,17 +406,58 @@ function parseLiveManifest(raw: string | null, scope: LiveScope): LivePublicatio
   }
 }
 
-/**
- * Parse only manifest identity/ordering metadata from caller-observed bytes.
- * Recovery code deliberately keeps this separate from immutable-item reads so
- * a damaged item cannot erase the source/state fence carried by activeRaw.
- */
+/** Parse a complete manifest without reading immutable payload siblings. */
 export function parseLivePublicationV2Manifest(
   raw: string | null,
   scope: LiveScope,
 ): LivePublicationV2 | null {
   assertSeasonEvent(scope);
   return parseLiveManifest(raw, scope);
+}
+
+/**
+ * Recover only fields that can order a candidate. Revision and item
+ * descriptors are deliberately ignored: corruption there makes the active
+ * publication unreadable, but must not erase a newer source or FINALIZED
+ * fence from the exact active pointer bytes.
+ */
+export function parseLivePublicationV2OrderingFence(
+  raw: string | null,
+  scope: LiveScope,
+): LivePublicationV2OrderingFence | null {
+  assertSeasonEvent(scope);
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (
+      !isRecord(value) ||
+      value.contractVersion !== LIVE_POINTS_CONTRACT_VERSION ||
+      typeof value.publicationId !== 'string' ||
+      !/^[0-9a-f-]{36}$/i.test(value.publicationId) ||
+      typeof value.generation !== 'number' ||
+      !Number.isSafeInteger(value.generation) ||
+      value.generation <= 0 ||
+      value.season !== scope.season ||
+      value.eventId !== scope.eventId ||
+      !validLivePublicationState(value.state) ||
+      !validIso(value.sourceCheckedAt) ||
+      (value.checkpointedAt !== null && !validIso(value.checkpointedAt))
+    ) {
+      return null;
+    }
+    return {
+      contractVersion: LIVE_POINTS_CONTRACT_VERSION,
+      publicationId: value.publicationId,
+      generation: value.generation,
+      season: scope.season,
+      eventId: scope.eventId,
+      state: value.state,
+      sourceCheckedAt: value.sourceCheckedAt,
+      checkpointedAt: value.checkpointedAt,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseEntryManifest(raw: string | null, scope: EntryScope): EntryLivePublicationV2 | null {

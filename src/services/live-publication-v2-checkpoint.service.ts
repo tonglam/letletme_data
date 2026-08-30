@@ -365,6 +365,67 @@ export async function reclaimAbandonedLivePublicationV2SeedClaim(
 }
 
 /**
+ * Reclaim a claim whose candidate is already the Redis active publication but
+ * whose owner abandoned the durable checkpoint.  The checkpoint transaction
+ * takes this same scope lock before it can wait on the shared Core lock, so an
+ * in-flight owner retains its exact claim even after the wall-clock lease has
+ * elapsed.  PostgreSQL owns both the lease clock and the compare/delete.
+ */
+export async function reclaimAbandonedPromotedLivePublicationV2SeedClaim(
+  season: FplSeasonRef,
+  eventId: number,
+  claimId: string,
+  candidate: LivePublicationV2SeedCandidate,
+): Promise<boolean> {
+  const candidateSourceCheckedAt = new Date(candidate.candidateSourceCheckedAt);
+  if (
+    !LIVE_PUBLICATION_STATES.includes(candidate.candidateState) ||
+    !Number.isFinite(candidateSourceCheckedAt.getTime()) ||
+    !/^[0-9a-f]{64}$/.test(candidate.candidateEventLiveSha256) ||
+    !/^[0-9a-f]{64}$/.test(candidate.candidateFixturesSha256)
+  ) {
+    throw new Error('Live Points V2 abandoned promoted claim candidate is invalid');
+  }
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const scopeLock = `${season.seasonCode}:${eventId}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+    const removed = await tx
+      .delete(livePointsPublicationSeedClaimsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+          eq(livePointsPublicationSeedClaimsInCompetition.claimId, claimId),
+          sql`${livePointsPublicationSeedClaimsInCompetition.claimedAt} <= clock_timestamp() - (${LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS} * interval '1 millisecond')`,
+          sql`${livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt} <= ${candidateSourceCheckedAt.toISOString()}::timestamptz`,
+          sql`(${livePointsPublicationSeedClaimsInCompetition.candidateState} <> 'FINALIZED' OR ${candidate.candidateState} = 'FINALIZED')`,
+          or(
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateState,
+              candidate.candidateState,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt,
+              candidateSourceCheckedAt,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
+              candidate.candidateEventLiveSha256,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+              candidate.candidateFixturesSha256,
+            ),
+          ),
+        ),
+      )
+      .returning({ claimId: livePointsPublicationSeedClaimsInCompetition.claimId });
+    return removed.length === 1;
+  });
+}
+
+/**
  * PostgreSQL is the cold fallback only.  It returns the same complete
  * publication shape as Redis and validates the stored byte/hash/count proof
  * before exposing it to a caller.
@@ -543,6 +604,16 @@ export async function checkpointLivePublicationV2(
   const db = await getDb();
   return db
     .transaction(async (tx) => {
+      const scopeLock = `${season.seasonCode}:${eventId}`;
+      // Claim ownership and generation/final ordering are scope-local. Take
+      // this lock first so an already-started checkpoint cannot lose its claim
+      // merely because it waits on the shared Core publication lock.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+      // Core publication writes use this same lock before touching events or
+      // fixtures. Scope -> Core is safe because Core-only writers never wait
+      // for a live scope lock, and it keeps the source fence and mutations in
+      // one ordering domain.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${CORE_SNAPSHOT_WRITE_LOCK_KEY})`);
       // publishedAt comes from Redis TIME. checkpointedAt is deliberately
       // obtained from the same PostgreSQL clock that owns the durable row;
       // never compare or synthesize the durable timestamp from an app host.
@@ -555,16 +626,6 @@ export async function checkpointLivePublicationV2(
       }
       const observationCheckedAtParameter = postgresTimestampParameter(observationCheckedAt);
       const checkpointedAtParameter = postgresTimestampParameter(checkpointedAt);
-      // Core publication writes use this same lock before touching events or
-      // fixtures. Taking it first gives live checkpoint upserts the identical
-      // ordering and prevents a newer core observation from racing between the
-      // source fence and the fixture mutation below.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(${CORE_SNAPSHOT_WRITE_LOCK_KEY})`);
-      const scopeLock = `${season.seasonCode}:${eventId}`;
-      // Redis-first checkpoint obligations can race with a scheduler retry or a
-      // finalization worker. Serialize the scope before applying the generation
-      // and FINAL fences; a row lock alone cannot protect the initial insert.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
       const seedClaims = await tx
         .select({
           claimId: livePointsPublicationSeedClaimsInCompetition.claimId,
