@@ -69,10 +69,15 @@ function runRollbackEligibility(overrides: Record<string, string> = {}) {
     set -euo pipefail
     source scripts/deploy-state-machine.sh
     docker() {
+      if [[ "$1" = image && "$2" = inspect && "$3" = --format ]]; then
+        printf '%s\n' "$MOCK_PREVIOUS_IMAGE_ID"
+        return 0
+      fi
       if [[ "$1" = inspect && "$2" = --format ]]; then
         case "$3" in
-          '{{.Config.Image}}') printf '%s\n' "$MOCK_CONTAINER_IMAGE" ;;
+          '{{.Image}}') printf '%s\n' "$MOCK_CONTAINER_IMAGE_ID" ;;
           *org.opencontainers.image.revision*) printf '%s\n' "$MOCK_CONTAINER_RELEASE" ;;
+          *Config.Env*) printf 'DEPLOY_SHA=%s\n' "$MOCK_CONTAINER_ENV_RELEASE" ;;
           '{{.State.Status}}') printf '%s\n' "$MOCK_CONTAINER_STATE" ;;
           *State.Health.Status*) printf '%s\n' "$MOCK_CONTAINER_HEALTH" ;;
           *) return 1 ;;
@@ -93,10 +98,12 @@ function runRollbackEligibility(overrides: Record<string, string> = {}) {
     env: {
       ...process.env,
       MOCK_CONTAINER_HEALTH: 'healthy',
-      MOCK_CONTAINER_IMAGE: 'ghcr.io/example/data@sha256:abc',
+      MOCK_CONTAINER_IMAGE_ID: 'sha256:old',
       MOCK_CONTAINER_RELEASE: exactRelease,
+      MOCK_CONTAINER_ENV_RELEASE: exactRelease,
       MOCK_CONTAINER_STATE: 'running',
       MOCK_PREVIOUS_IMAGE: 'ghcr.io/example/data@sha256:abc',
+      MOCK_PREVIOUS_IMAGE_ID: 'sha256:old',
       MOCK_PREVIOUS_RELEASE: exactRelease,
       MOCK_PREVIOUS_REVISION: exactRelease,
       MOCK_STRICT_HEALTH_STATUS: '0',
@@ -176,7 +183,7 @@ describe('release workflow gates', () => {
     );
     expect(workflow).toContain('timeout: 20m');
     expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
-    expect(workflow).toContain('"$old_media_present" || true');
+    expect(workflow).toContain('"$old_media_present" "$old_image_id" || true');
     expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployStateMachine).toContain(
@@ -499,6 +506,7 @@ describe('release workflow gates', () => {
 
   test('restores only a recently proven coherent rollback runtime', () => {
     expect(deployStateMachine).toContain('release_sha_for_image');
+    expect(deployStateMachine).toContain('release_sha_for_container');
     expect(deployStateMachine).toContain('rollback_runtime_is_eligible');
     expect(deployStateMachine).toContain('"$previous_revision" = "$previous_release_sha"');
     expect(deployStateMachine).toContain('"$container_state" = running');
@@ -515,12 +523,20 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain(
       'export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"',
     );
-    expect(deployScript).toContain('DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_image');
+    expect(deployScript).toContain(
+      String.raw`DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}'`,
+    );
+    expect(deployScript).toContain(
+      String.raw`DEPLOY_OLD_IMAGE_ID=$(docker inspect --format '{{.Image}}'`,
+    );
+    expect(deployScript).toContain('DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_container');
+    expect(deployScript).toContain('resolved_old_revision=$(git -C');
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=false');
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=true');
     expect(deployScript).toContain('"$DEPLOY_ROLLBACK_ELIGIBLE" != true');
     expect(deployScript).toContain('DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat');
     expect(workflow).toContain('old_release_sha=$(release_sha_for_image "$old_image")');
+    expect(workflow).toContain(String.raw`old_image_id=$(docker inspect --format '{{.Image}}'`);
     expect(workflow).toContain('old_runtime_rollback_eligible=false');
     expect(workflow).toContain('old_runtime_rollback_eligible=true');
     expect(workflow).toContain('[ "$old_runtime_rollback_eligible" = true ]');
@@ -544,6 +560,7 @@ describe('release workflow gates', () => {
 
   test('rejects a rollback runtime unless identity, health, and strict readiness agree', () => {
     expect(runRollbackEligibility().exitCode).toBe(0);
+    expect(runRollbackEligibility({ MOCK_CONTAINER_RELEASE: '' }).exitCode).toBe(0);
     expect(
       runRollbackEligibility({
         MOCK_PREVIOUS_REVISION: '89abcdef0123456789abcdef0123456789abcdef',

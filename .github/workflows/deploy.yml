@@ -124,6 +124,7 @@ jobs:
           script: |
             set -euo pipefail
             old_image=""
+            old_image_id=""
             old_revision=""
             old_release_sha=unknown
             old_runner_release_sha=unknown
@@ -221,7 +222,7 @@ jobs:
                     echo "Data deployment failed before migration; restoring previous API and worker image" >&2
                     restore_runtime_services \
                       "$old_image" "$old_release_sha" "$old_runner_release_sha" \
-                      "$old_media_present" || true
+                      "$old_media_present" "$old_image_id" || true
                   elif [ "$services_stopped" = true ]; then
                     echo "Data deployment failed with no eligible rollback target; leaving services stopped for forward recovery" >&2
                   fi
@@ -229,7 +230,7 @@ jobs:
                   if ! restore_last_known_healthy_if_ledger_unchanged \
                     "$old_image" "$ledger_before" "$old_revision" "$old_release_sha" \
                     "$old_runner_release_sha" "$old_media_present" \
-                    "$old_runtime_rollback_eligible"; then
+                    "$old_runtime_rollback_eligible" "$old_image_id"; then
                     echo "Data deployment failed without an eligible, ledger-safe rollback target; leaving the deployment in forward recovery" >&2
                   fi
                 fi
@@ -340,7 +341,9 @@ jobs:
             old_media_present=false
             if [ -n "$old_container" ]; then
               old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
+              old_image_id=$(docker inspect --format '{{.Image}}' "$old_container")
               test -n "$old_image"
+              test -n "$old_image_id"
             fi
             old_media_container=$(docker compose ps -aq media-worker 2>/dev/null | head -n 1)
             if [ -n "$old_media_container" ]; then old_media_present=true; fi
@@ -413,7 +416,7 @@ jobs:
             echo "deploy preflight: migration plan and queue quiescence passed before stopping services"
             old_runtime_rollback_eligible=false
             if rollback_runtime_is_eligible \
-              "$old_container" "$old_image" "$old_revision" "$old_release_sha"; then
+              "$old_container" "$old_image" "$old_revision" "$old_release_sha" "$old_image_id"; then
               old_runtime_rollback_eligible=true
             fi
             services_stopped=true
