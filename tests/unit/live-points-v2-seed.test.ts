@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  assertLegacyEvidenceMatchesEventLives,
   buildSeedHead,
   buildSeedInput,
   findMissingPickScopes,
@@ -50,6 +51,64 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(isNoOpLegacyFixtureEvidence({ ...noOp, starts: 1 })).toBe(false);
     expect(isNoOpLegacyFixtureEvidence({ ...noOp, minutes: 1 })).toBe(false);
     expect(isNoOpLegacyFixtureEvidence({ ...noOp, goals: 1 })).toBe(false);
+  });
+
+  test('does not let an ignored DGW row suppress start-evidence coverage', () => {
+    const noOp: LegacyFixtureEvidenceRow = {
+      event_id: 2,
+      fixture_id: 20,
+      element_id: 28,
+      minutes: 0,
+      starts: null,
+      goals: 0,
+      assists: 0,
+      own_goals: 0,
+      yellow_cards: 0,
+      red_cards: 0,
+    };
+    const attributableZero: LegacyFixtureEvidenceRow = {
+      ...noOp,
+      fixture_id: 16,
+      starts: 0,
+    };
+    const eventLive = {
+      eventId: 2,
+      elementId: 28,
+      minutes: 0,
+      goalsScored: 0,
+      assists: 0,
+      cleanSheets: 0,
+      goalsConceded: 0,
+      ownGoals: 0,
+      penaltiesSaved: 0,
+      penaltiesMissed: 0,
+      yellowCards: 0,
+      redCards: 0,
+      saves: 0,
+      bonus: 0,
+      bps: 0,
+      defensiveContribution: 0,
+      starts: true,
+      expectedGoals: null,
+      expectedAssists: null,
+      expectedGoalInvolvements: null,
+      expectedGoalsConceded: null,
+      inDreamTeam: false,
+      totalPoints: 0,
+      createdAt: null,
+      fixtureBreakdown: [{ fixtureId: 16, stats: [] }],
+    };
+
+    expect(() =>
+      assertLegacyEvidenceMatchesEventLives(
+        {
+          source: { event_id: 2 },
+          eventLives: [eventLive],
+          fixtures: [{ id: 16 }, { id: 20 }],
+        } as never,
+        [noOp, attributableZero],
+      ),
+    ).toThrow('Legacy fixture evidence has no start marker');
   });
 
   test('creates a deterministic complete head for exactly 15 valid rows', () => {

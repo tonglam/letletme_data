@@ -862,15 +862,13 @@ function assertLegacyScoringPointsMatchBreakdown(
   }
 }
 
-function assertLegacyEvidenceMatchesEventLives(
+export function assertLegacyEvidenceMatchesEventLives(
   seed: ValidatedLiveSeed,
   rows: readonly LegacyFixtureEvidenceRow[],
 ): void {
   const elementIds = new Set(seed.eventLives.map((eventLive) => eventLive.elementId));
   const fixtureIds = new Set(seed.fixtures.map((fixture) => fixture.id));
   const identities = new Set<string>();
-  const elementsWithStartEvidence = new Set<number>();
-  const elementsWithUnknownStartEvidence = new Set<number>();
   const rowsByElement = new Map<number, LegacyFixtureEvidenceRow[]>();
   const totals = new Map<
     number,
@@ -913,15 +911,16 @@ function assertLegacyEvidenceMatchesEventLives(
     total.yellowCards += row.yellow_cards;
     total.redCards += row.red_cards;
     total.starts += row.starts ?? 0;
-    if (row.starts === null) elementsWithUnknownStartEvidence.add(row.element_id);
-    else elementsWithStartEvidence.add(row.element_id);
     const elementRows = rowsByElement.get(row.element_id) ?? [];
     elementRows.push(row);
     rowsByElement.set(row.element_id, elementRows);
     totals.set(row.element_id, total);
   }
   for (const eventLive of seed.eventLives) {
-    assertLegacyFixtureAttribution(eventLive, rowsByElement.get(eventLive.elementId) ?? []);
+    const attributedRows = assertLegacyFixtureAttribution(
+      eventLive,
+      rowsByElement.get(eventLive.elementId) ?? [],
+    );
     const total = totals.get(eventLive.elementId) ?? {
       minutes: 0,
       goals: 0,
@@ -950,11 +949,14 @@ function assertLegacyEvidenceMatchesEventLives(
     // The historical fixture evidence relation legitimately contains NULL for
     // starts. The event-live row is the authoritative start flag; only enforce
     // fixture-level start coverage when that element actually has a non-null
-    // starts marker in the evidence relation.
+    // starts marker in successfully attributed evidence. Out-of-breakdown DGW
+    // no-op rows are intentionally excluded from this decision.
+    const hasStartEvidence = attributedRows.some((row) => row.starts !== null);
+    const hasUnknownStartEvidence = attributedRows.some((row) => row.starts === null);
     if (
       eventLive.starts === true &&
-      elementsWithStartEvidence.has(eventLive.elementId) &&
-      !elementsWithUnknownStartEvidence.has(eventLive.elementId) &&
+      hasStartEvidence &&
+      !hasUnknownStartEvidence &&
       total.starts < 1
     ) {
       throw new Error(
@@ -967,7 +969,7 @@ function assertLegacyEvidenceMatchesEventLives(
 function assertLegacyFixtureAttribution(
   eventLive: EventLive,
   rows: readonly LegacyFixtureEvidenceRow[],
-): void {
+): readonly LegacyFixtureEvidenceRow[] {
   const breakdown = eventLive.fixtureBreakdown;
   if (!breakdown) {
     throw new Error(
@@ -986,6 +988,7 @@ function assertLegacyFixtureAttribution(
   }
 
   const rowsByFixture = new Map<number, LegacyFixtureEvidenceRow>();
+  const attributedRows: LegacyFixtureEvidenceRow[] = [];
   for (const row of rows) {
     const fixture = breakdownByFixture.get(row.fixture_id);
     if (!fixture) {
@@ -1019,6 +1022,7 @@ function assertLegacyFixtureAttribution(
         `Legacy fixture evidence disagrees with publication: event=${eventLive.eventId} fixture=${row.fixture_id} element=${eventLive.elementId} field=${mismatch[0]}`,
       );
     }
+    attributedRows.push(row);
   }
 
   for (const fixture of breakdown) {
@@ -1033,6 +1037,7 @@ function assertLegacyFixtureAttribution(
       );
     }
   }
+  return attributedRows;
 }
 
 export function isNoOpLegacyFixtureEvidence(row: LegacyFixtureEvidenceRow): boolean {
