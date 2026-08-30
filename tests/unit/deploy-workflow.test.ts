@@ -149,6 +149,15 @@ describe('release workflow gates', () => {
     expect(backupScript).toContain('DATABASE_BACKUP_PG_MAJOR must be 15');
   });
 
+  test('keeps the V2 seed connection separate from the runtime connection', () => {
+    const v2Seed = deployScript.slice(deployScript.indexOf('start_stage v2Seed'));
+    expect(v2Seed).toContain('-e "LIVE_POINTS_V2_SEED_DATABASE_URL=${migration_database_url}"');
+    expect(v2Seed).not.toContain('-e "DATABASE_URL=${migration_database_url}"');
+    expect(v2Seed).toMatch(
+      /if ! compose run --rm -T --interactive=false \\\n\s+api \\\n\s+bun run verify:live-points-v2/,
+    );
+  });
+
   test('keeps the read-only backup container able to normalize its writable mount', () => {
     const backupServiceStart = composeFile.indexOf('  backup:');
     const apiServiceStart = composeFile.indexOf('  api:', backupServiceStart);

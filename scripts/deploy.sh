@@ -413,9 +413,10 @@ deploy() {
   start_stage v2Seed
   log_info "Seeding and verifying the Live Points V2 global and entry publications"
   # The cutover seed is a one-shot operation: use the migration LOGIN's
-  # direct/session URL, while compose supplies the runtime Redis credentials.
+  # direct/session URL, while compose supplies the runtime database and Redis
+  # credentials to checkpoint services.
   if ! compose run --rm -T --interactive=false \
-    -e "DATABASE_URL=${migration_database_url}" \
+    -e "LIVE_POINTS_V2_SEED_DATABASE_URL=${migration_database_url}" \
     -e LIVE_POINTS_SEED_CONFIRM=YES api \
     bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
     --season "$LIVE_POINTS_V2_SEED_SEASON" \
@@ -424,7 +425,7 @@ deploy() {
     exit 1
   fi
   if ! compose run --rm -T --interactive=false \
-    -e "DATABASE_URL=${migration_database_url}" api \
+    api \
     bun run verify:live-points-v2 -- \
     --season "$LIVE_POINTS_V2_SEED_SEASON" \
     --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \

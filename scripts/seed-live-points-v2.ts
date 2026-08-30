@@ -35,6 +35,7 @@ import {
 } from '../src/services/live-publication-v2-checkpoint.service';
 import { checkpointEntryLiveInputV2 } from '../src/services/entries.service';
 import { canonicalJson, contentHash, postgresJsonbContentHash } from '../src/utils/content-hash';
+import { assertRuntimeDatabaseTarget } from './runtime-login-contract';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../src/types';
 
 type TimestampValue = Date | string;
@@ -109,13 +110,28 @@ export function resolveLivePointsV2SeedDatabaseUrl(
     DATABASE_URL: process.env.DATABASE_URL,
     LIVE_POINTS_V2_SEED_DATABASE_URL: process.env.LIVE_POINTS_V2_SEED_DATABASE_URL,
   },
+  options: { readonly requireExplicitSeedUrl?: boolean } = {},
 ): string {
-  const databaseUrl =
-    environment.LIVE_POINTS_V2_SEED_DATABASE_URL?.trim() || environment.DATABASE_URL?.trim();
+  const explicitSeedDatabaseUrl = environment.LIVE_POINTS_V2_SEED_DATABASE_URL?.trim();
+  if (options.requireExplicitSeedUrl && !explicitSeedDatabaseUrl) {
+    throw new Error('LIVE_POINTS_V2_SEED_DATABASE_URL is required for destructive execution');
+  }
+  const databaseUrl = explicitSeedDatabaseUrl || environment.DATABASE_URL?.trim();
   if (!databaseUrl) {
     throw new Error('DATABASE_URL or LIVE_POINTS_V2_SEED_DATABASE_URL is required');
   }
   return databaseUrl;
+}
+
+export function assertLivePointsV2SeedDatabaseTarget(
+  seedDatabaseUrl: string,
+  runtimeDatabaseUrl: string,
+): void {
+  assertRuntimeDatabaseTarget(
+    runtimeDatabaseUrl,
+    seedDatabaseUrl,
+    'LIVE_POINTS_V2_SEED_DATABASE_URL',
+  );
 }
 
 type LegacyLivePublicationRow = {
@@ -2319,12 +2335,21 @@ async function seedEntryInput(
 
 async function main(): Promise<void> {
   const args = parseSeedArguments(process.argv.slice(2));
-  const databaseUrl = resolveLivePointsV2SeedDatabaseUrl();
-  if (isTransactionPoolerConnection(databaseUrl)) {
-    throw new Error('V2 seed requires direct PostgreSQL or a session-mode pooler connection');
-  }
   if (args.execute && process.env.LIVE_POINTS_SEED_CONFIRM !== 'YES') {
     throw new Error('seed writes refused: set LIVE_POINTS_SEED_CONFIRM=YES for this exact command');
+  }
+  const databaseUrl = resolveLivePointsV2SeedDatabaseUrl(undefined, {
+    requireExplicitSeedUrl: args.execute,
+  });
+  const runtimeDatabaseUrl = process.env.DATABASE_URL?.trim();
+  if (args.execute && !runtimeDatabaseUrl) {
+    throw new Error('DATABASE_URL is required for destructive V2 seed checkpoint services');
+  }
+  if (runtimeDatabaseUrl) {
+    assertLivePointsV2SeedDatabaseTarget(databaseUrl, runtimeDatabaseUrl);
+  }
+  if (isTransactionPoolerConnection(databaseUrl)) {
+    throw new Error('V2 seed requires direct PostgreSQL or a session-mode pooler connection');
   }
 
   const database = postgres(databaseUrl, { max: 1, prepare: false });
