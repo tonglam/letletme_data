@@ -413,6 +413,8 @@ const EXPLAIN_IDENTIFIERS = [
 ] as const;
 
 type ExplainIdentifier = (typeof EXPLAIN_IDENTIFIERS)[number];
+const SCORING_IDENTIFIERS = [...EXPLAIN_IDENTIFIERS, 'bonus'] as const;
+type ScoringIdentifier = (typeof SCORING_IDENTIFIERS)[number];
 
 type ExplainAggregate = {
   value: number;
@@ -421,12 +423,12 @@ type ExplainAggregate = {
 
 function aggregateBreakdown(
   breakdown: readonly EventLiveFixtureBreakdown[],
-): Map<ExplainIdentifier, ExplainAggregate> {
-  const result = new Map<ExplainIdentifier, ExplainAggregate>();
+): Map<ScoringIdentifier, ExplainAggregate> {
+  const result = new Map<ScoringIdentifier, ExplainAggregate>();
   for (const fixture of breakdown) {
     for (const stat of fixture.stats) {
-      if (!(EXPLAIN_IDENTIFIERS as readonly string[]).includes(stat.identifier)) continue;
-      const identifier = stat.identifier as ExplainIdentifier;
+      if (!(SCORING_IDENTIFIERS as readonly string[]).includes(stat.identifier)) continue;
+      const identifier = stat.identifier as ScoringIdentifier;
       const previous = result.get(identifier) ?? { value: 0, points: 0 };
       result.set(identifier, {
         value: previous.value + stat.value,
@@ -682,21 +684,27 @@ function hydrateExplainValuesFromEventLive(
   explain: EventLiveExplain,
   eventLive: EventLive,
 ): EventLiveExplain {
+  const preserveScoringValue = (current: number | null, published: number | null): number | null =>
+    current === null ? published : current;
+
   return {
     ...explain,
-    bonus: eventLive.bonus,
-    minutes: eventLive.minutes,
-    goalsScored: eventLive.goalsScored,
-    assists: eventLive.assists,
-    cleanSheets: eventLive.cleanSheets,
-    goalsConceded: eventLive.goalsConceded,
-    ownGoals: eventLive.ownGoals,
-    penaltiesSaved: eventLive.penaltiesSaved,
-    penaltiesMissed: eventLive.penaltiesMissed,
-    yellowCards: eventLive.yellowCards,
-    redCards: eventLive.redCards,
-    saves: eventLive.saves,
-    defensiveContribution: eventLive.defensiveContribution,
+    bonus: preserveScoringValue(explain.bonus, eventLive.bonus),
+    minutes: preserveScoringValue(explain.minutes, eventLive.minutes),
+    goalsScored: preserveScoringValue(explain.goalsScored, eventLive.goalsScored),
+    assists: preserveScoringValue(explain.assists, eventLive.assists),
+    cleanSheets: preserveScoringValue(explain.cleanSheets, eventLive.cleanSheets),
+    goalsConceded: preserveScoringValue(explain.goalsConceded, eventLive.goalsConceded),
+    ownGoals: preserveScoringValue(explain.ownGoals, eventLive.ownGoals),
+    penaltiesSaved: preserveScoringValue(explain.penaltiesSaved, eventLive.penaltiesSaved),
+    penaltiesMissed: preserveScoringValue(explain.penaltiesMissed, eventLive.penaltiesMissed),
+    yellowCards: preserveScoringValue(explain.yellowCards, eventLive.yellowCards),
+    redCards: preserveScoringValue(explain.redCards, eventLive.redCards),
+    saves: preserveScoringValue(explain.saves, eventLive.saves),
+    defensiveContribution: preserveScoringValue(
+      explain.defensiveContribution,
+      eventLive.defensiveContribution,
+    ),
   };
 }
 
@@ -827,6 +835,33 @@ function assertLegacyEventLiveFacts(
   }
 }
 
+function assertLegacyScoringPointsMatchBreakdown(
+  eventLives: readonly EventLive[],
+  rows: readonly LegacyScoringFactRow[],
+): void {
+  const eventLivesByElement = new Map(
+    eventLives.map((eventLive) => [eventLive.elementId, eventLive]),
+  );
+  for (const row of rows) {
+    const eventLive = eventLivesByElement.get(row.element_id);
+    if (!eventLive || row.event_id !== eventLive.eventId) {
+      throw new Error('Legacy scoring item is outside the publication scope');
+    }
+    if (!(SCORING_IDENTIFIERS as readonly string[]).includes(row.scoring_identifier)) continue;
+    const aggregate = aggregateBreakdown(eventLive.fixtureBreakdown ?? []).get(
+      row.scoring_identifier as ScoringIdentifier,
+    );
+    // A missing non-zero breakdown stat is the narrow reason relational
+    // fallback exists. When the publication does carry this identifier, its
+    // complete points value must still match the relational scoring fact.
+    if (aggregate && aggregate.points !== row.points) {
+      throw new Error(
+        `Legacy scoring points disagree with publication: event=${eventLive.eventId} element=${eventLive.elementId} identifier=${row.scoring_identifier}`,
+      );
+    }
+  }
+}
+
 function assertLegacyEvidenceMatchesEventLives(
   seed: ValidatedLiveSeed,
   rows: readonly LegacyFixtureEvidenceRow[],
@@ -834,6 +869,9 @@ function assertLegacyEvidenceMatchesEventLives(
   const elementIds = new Set(seed.eventLives.map((eventLive) => eventLive.elementId));
   const fixtureIds = new Set(seed.fixtures.map((fixture) => fixture.id));
   const identities = new Set<string>();
+  const elementsWithStartEvidence = new Set<number>();
+  const elementsWithUnknownStartEvidence = new Set<number>();
+  const rowsByElement = new Map<number, LegacyFixtureEvidenceRow[]>();
   const totals = new Map<
     number,
     {
@@ -875,9 +913,15 @@ function assertLegacyEvidenceMatchesEventLives(
     total.yellowCards += row.yellow_cards;
     total.redCards += row.red_cards;
     total.starts += row.starts ?? 0;
+    if (row.starts === null) elementsWithUnknownStartEvidence.add(row.element_id);
+    else elementsWithStartEvidence.add(row.element_id);
+    const elementRows = rowsByElement.get(row.element_id) ?? [];
+    elementRows.push(row);
+    rowsByElement.set(row.element_id, elementRows);
     totals.set(row.element_id, total);
   }
   for (const eventLive of seed.eventLives) {
+    assertLegacyFixtureAttribution(eventLive, rowsByElement.get(eventLive.elementId) ?? []);
     const total = totals.get(eventLive.elementId) ?? {
       minutes: 0,
       goals: 0,
@@ -903,12 +947,90 @@ function assertLegacyEvidenceMatchesEventLives(
         `Legacy fixture evidence disagrees with publication: event=${eventLive.eventId} element=${eventLive.elementId} field=${mismatch[0]}`,
       );
     }
-    if (eventLive.starts === true && total.starts < 1) {
+    // The historical fixture evidence relation legitimately contains NULL for
+    // starts. The event-live row is the authoritative start flag; only enforce
+    // fixture-level start coverage when that element actually has a non-null
+    // starts marker in the evidence relation.
+    if (
+      eventLive.starts === true &&
+      elementsWithStartEvidence.has(eventLive.elementId) &&
+      !elementsWithUnknownStartEvidence.has(eventLive.elementId) &&
+      total.starts < 1
+    ) {
       throw new Error(
         `Legacy fixture evidence has no start marker: event=${eventLive.eventId} element=${eventLive.elementId}`,
       );
     }
   }
+}
+
+function assertLegacyFixtureAttribution(
+  eventLive: EventLive,
+  rows: readonly LegacyFixtureEvidenceRow[],
+): void {
+  const breakdown = eventLive.fixtureBreakdown;
+  if (!breakdown) {
+    throw new Error(
+      `Legacy fixture evidence cannot be attributed to publication: event=${eventLive.eventId} element=${eventLive.elementId}`,
+    );
+  }
+
+  const breakdownByFixture = new Map<number, EventLiveFixtureBreakdown>();
+  for (const fixture of breakdown) {
+    if (breakdownByFixture.has(fixture.fixtureId)) {
+      throw new Error(
+        `Legacy event live repeats fixture: event=${eventLive.eventId} fixture=${fixture.fixtureId} element=${eventLive.elementId}`,
+      );
+    }
+    breakdownByFixture.set(fixture.fixtureId, fixture);
+  }
+
+  const rowsByFixture = new Map<number, LegacyFixtureEvidenceRow>();
+  for (const row of rows) {
+    const fixture = breakdownByFixture.get(row.fixture_id);
+    if (!fixture) {
+      throw new Error(
+        `Legacy fixture evidence cannot be attributed to publication: event=${eventLive.eventId} fixture=${row.fixture_id} element=${eventLive.elementId}`,
+      );
+    }
+    rowsByFixture.set(row.fixture_id, row);
+
+    const checks: Array<[string, number | null, number | null]> = [
+      ['minutes', row.minutes, breakdownValue(fixture, 'minutes')],
+      ['goals_scored', row.goals, breakdownValue(fixture, 'goals_scored')],
+      ['assists', row.assists, breakdownValue(fixture, 'assists')],
+      ['own_goals', row.own_goals, breakdownValue(fixture, 'own_goals')],
+      ['yellow_cards', row.yellow_cards, breakdownValue(fixture, 'yellow_cards')],
+      ['red_cards', row.red_cards, breakdownValue(fixture, 'red_cards')],
+      ['starts', row.starts, breakdownValue(fixture, 'starts')],
+    ];
+    const mismatch = checks.find(([, actual, expected]) => {
+      if (expected === null || actual === null) return false;
+      return actual !== expected;
+    });
+    if (mismatch) {
+      throw new Error(
+        `Legacy fixture evidence disagrees with publication: event=${eventLive.eventId} fixture=${row.fixture_id} element=${eventLive.elementId} field=${mismatch[0]}`,
+      );
+    }
+  }
+
+  for (const fixture of breakdown) {
+    if (rowsByFixture.has(fixture.fixtureId)) continue;
+    const nonZeroStat = fixture.stats.find(
+      (stat) =>
+        EXPLAIN_IDENTIFIERS.includes(stat.identifier as ExplainIdentifier) && stat.value !== 0,
+    );
+    if (nonZeroStat) {
+      throw new Error(
+        `Legacy fixture evidence is missing publication fixture: event=${eventLive.eventId} fixture=${fixture.fixtureId} element=${eventLive.elementId}`,
+      );
+    }
+  }
+}
+
+function breakdownValue(fixture: EventLiveFixtureBreakdown, identifier: string): number | null {
+  return fixture.stats.find((stat) => stat.identifier === identifier)?.value ?? null;
 }
 
 async function loadLegacyLiveFacts(
@@ -938,7 +1060,11 @@ async function loadLegacyLiveFacts(
   if (embedded) return embedded;
 
   const persistedAt = nullableDateValue(seed.source.event_live_facts_persisted_at);
-  if (!persistedAt || persistedAt.getTime() < seed.sourceCheckedAt.getTime()) {
+  // The publication may be read after the facts transaction commits. The
+  // complete row/value checks below bind the relational facts to this exact
+  // event publication; reject only a fact marker from the future, which cannot
+  // prove the publication's historical state.
+  if (!persistedAt || persistedAt.getTime() > seed.sourceCheckedAt.getTime()) {
     throw embeddedError ?? new Error('LEGACY_RELATIONAL_FACTS_NOT_PROVEN_FOR_PUBLICATION');
   }
 
@@ -978,6 +1104,7 @@ async function loadLegacyLiveFacts(
   ]);
   assertLegacyEventLiveFacts(seed, eventLiveRows);
   assertLegacyEvidenceMatchesEventLives(seed, evidenceRows);
+  assertLegacyScoringPointsMatchBreakdown(seed.eventLives, scoringRows);
 
   const explainByElement = new Map(
     seed.eventLives.map(
