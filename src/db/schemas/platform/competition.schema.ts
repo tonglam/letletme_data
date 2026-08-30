@@ -988,6 +988,12 @@ export const tournamentBattleGroupResultsInCompetition = competition.table(
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
+    index('tournament_review_h2h_results_reconcile_idx').on(
+      table.seasonId,
+      table.tournamentId,
+      table.updatedAt,
+      table.eventId,
+    ),
     index('tournament_battle_group_results_event_idx').using(
       'btree',
       table.seasonId.asc().nullsLast(),
@@ -1105,6 +1111,12 @@ export const tournamentPointsGroupResultsInCompetition = competition.table(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
+    index('tournament_review_points_results_reconcile_idx').on(
+      table.seasonId,
+      table.tournamentId,
+      table.updatedAt,
+      table.eventId,
+    ),
     index('tournament_points_group_results_entry_idx').using(
       'btree',
       table.seasonId.asc().nullsLast(),
@@ -1196,6 +1208,12 @@ export const tournamentKnockoutResultsInCompetition = competition.table(
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
+    index('tournament_review_knockout_results_reconcile_idx').on(
+      table.seasonId,
+      table.tournamentId,
+      table.updatedAt,
+      table.eventId,
+    ),
     index('tournament_knockout_results_away_entry_fk_idx').using(
       'btree',
       table.seasonId.asc().nullsLast(),
@@ -1392,6 +1410,13 @@ export const tournamentKnockoutsInCompetition = competition.table(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
+    index('tournament_review_knockout_brackets_reconcile_idx').on(
+      table.seasonId,
+      table.tournamentId,
+      table.updatedAt,
+      table.startedEventId,
+      table.endedEventId,
+    ),
     index('tournament_knockouts_away_entry_fk_idx').using(
       'btree',
       table.seasonId.asc().nullsLast(),
@@ -1510,6 +1535,12 @@ export const entryEventResultsInCompetition = competition.table(
     eventPicks: jsonb('event_picks').default([]).notNull(),
   },
   (table) => [
+    index('tournament_review_entry_results_reconcile_idx').on(
+      table.seasonId,
+      table.entryId,
+      sql`GREATEST(${table.updatedAt}, COALESCE(${table.richSyncedAt}, '-infinity'::timestamptz))`,
+      table.eventId,
+    ),
     index('entry_event_results_captain_fk_idx').using(
       'btree',
       table.seasonId.asc().nullsLast(),
@@ -2011,7 +2042,7 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
     ),
     check(
       'tournament_review_publications_source_span_check',
-      sql`event_data_checked_at <= source_min_checked_at AND source_min_checked_at <= source_max_checked_at AND source_max_checked_at <= published_at`,
+      sql`source_min_checked_at <= event_data_checked_at AND event_data_checked_at <= source_max_checked_at AND source_max_checked_at <= published_at`,
     ),
   ],
 );
@@ -2277,6 +2308,11 @@ export const entriesInCompetition = competition.table(
     pastSeasonsCount: integer('past_seasons_count'),
   },
   (table) => [
+    index('tournament_review_entries_reconcile_idx').on(
+      table.seasonId,
+      table.updatedAt,
+      table.entryId,
+    ),
     index('entries_entry_id_idx').using(
       'btree',
       table.entryId.asc().nullsLast(),

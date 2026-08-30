@@ -63,8 +63,8 @@ CREATE TABLE competition.tournament_review_publications (
     ),
   CONSTRAINT tournament_review_publications_source_span_check
     CHECK (
-      event_data_checked_at <= source_min_checked_at
-      AND source_min_checked_at <= source_max_checked_at
+      source_min_checked_at <= event_data_checked_at
+      AND event_data_checked_at <= source_max_checked_at
       AND source_max_checked_at <= published_at
     )
 );
@@ -169,6 +169,34 @@ CREATE INDEX tournament_review_obligations_reclaim_idx
     (lease_expires_at, season_id, tournament_id, event_id)
   WHERE state = 'PROCESSING';
 
+-- Reconciliation performs only post-watermark range probes for existing
+-- scopes. These indexes keep the five-minute poll proportional to changed
+-- source rows rather than season history.
+CREATE INDEX tournament_review_entry_results_reconcile_idx
+  ON competition.entry_event_results
+    (season_id, entry_id,
+     (GREATEST(updated_at, COALESCE(rich_synced_at, '-infinity'::timestamptz))),
+     event_id);
+
+CREATE INDEX tournament_review_points_results_reconcile_idx
+  ON competition.tournament_points_group_results
+    (season_id, tournament_id, updated_at, event_id);
+
+CREATE INDEX tournament_review_h2h_results_reconcile_idx
+  ON competition.tournament_battle_group_results
+    (season_id, tournament_id, updated_at, event_id);
+
+CREATE INDEX tournament_review_knockout_results_reconcile_idx
+  ON competition.tournament_knockout_results
+    (season_id, tournament_id, updated_at, event_id);
+
+CREATE INDEX tournament_review_knockout_brackets_reconcile_idx
+  ON competition.tournament_knockouts
+    (season_id, tournament_id, updated_at, started_event_id, ended_event_id);
+
+CREATE INDEX tournament_review_entries_reconcile_idx
+  ON competition.entries (season_id, updated_at, entry_id);
+
 REVOKE ALL ON TABLE
   competition.tournament_review_publications,
   competition.tournament_review_heads,
@@ -178,7 +206,7 @@ FROM PUBLIC;
 GRANT SELECT, INSERT ON TABLE competition.tournament_review_publications
 TO letletme_data_writer;
 
-GRANT SELECT, INSERT, UPDATE ON TABLE
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
   competition.tournament_review_heads,
   competition.tournament_review_obligations
 TO letletme_data_writer;
@@ -208,6 +236,9 @@ CREATE POLICY tournament_review_heads_writer_select
 CREATE POLICY tournament_review_heads_writer_update
   ON competition.tournament_review_heads
   FOR UPDATE TO letletme_data_writer USING (true) WITH CHECK (true);
+CREATE POLICY tournament_review_heads_writer_delete
+  ON competition.tournament_review_heads
+  FOR DELETE TO letletme_data_writer USING (true);
 CREATE POLICY tournament_review_obligations_writer_insert
   ON competition.tournament_review_obligations
   FOR INSERT TO letletme_data_writer WITH CHECK (true);
@@ -217,6 +248,9 @@ CREATE POLICY tournament_review_obligations_writer_select
 CREATE POLICY tournament_review_obligations_writer_update
   ON competition.tournament_review_obligations
   FOR UPDATE TO letletme_data_writer USING (true) WITH CHECK (true);
+CREATE POLICY tournament_review_obligations_writer_delete
+  ON competition.tournament_review_obligations
+  FOR DELETE TO letletme_data_writer USING (true);
 
 CREATE POLICY tournament_review_publications_reader_select
   ON competition.tournament_review_publications

@@ -1,12 +1,19 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 import {
   hasCompleteTournamentReviewH2HGroupCoverage,
+  isTournamentReviewEntryApplicable,
   rankTournamentReviewH2HStandings,
   resolveTournamentReviewFormat,
   tournamentReviewFailureFingerprint,
   tournamentReviewRetryDelayMs,
 } from '../../src/services/tournament-review-publication.service';
+
+const publicationSource = readFileSync(
+  'src/services/tournament-review-publication.service.ts',
+  'utf8',
+);
 
 describe('My Tournament Review V2 format and retry policy', () => {
   test('uses one mutually-exclusive format per finalized event', () => {
@@ -87,6 +94,12 @@ describe('My Tournament Review V2 format and retry policy', () => {
     ).toBe(false);
   });
 
+  test('represents pre-entry H2H participants without treating their scores as ready', () => {
+    expect(isTournamentReviewEntryApplicable(null, 5)).toBe(true);
+    expect(isTournamentReviewEntryApplicable(5, 5)).toBe(true);
+    expect(isTournamentReviewEntryApplicable(6, 5)).toBe(false);
+  });
+
   test('uses competition ranking for tied H2H scoring keys', () => {
     expect(
       rankTournamentReviewH2HStandings([
@@ -99,5 +112,19 @@ describe('My Tournament Review V2 format and retry policy', () => {
       { entryId: 3, rank: 1 },
       { entryId: 2, rank: 3 },
     ]);
+  });
+
+  test('reconciles incrementally and retires scopes under the publication lock', () => {
+    expect(publicationSource).toContain('> existing.eligible_at');
+    expect(publicationSource).toContain('locked_stale_scopes AS MATERIALIZED');
+    expect(publicationSource).toContain('DELETE FROM competition.tournament_review_heads');
+    expect(publicationSource).toContain('DELETE FROM competition.tournament_review_obligations');
+    expect(publicationSource).toContain('\x27review:\x27 || ${season.seasonId}::text');
+  });
+
+  test('includes entry metadata and validated cumulative history in provenance', () => {
+    expect(publicationSource).toContain('entry.updated_at AS entry_updated_at');
+    expect(publicationSource).toContain('history_sources.source_min_checked_at');
+    expect(publicationSource).toContain('sourceTimes.push(...historySourceDates)');
   });
 });

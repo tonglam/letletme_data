@@ -167,15 +167,13 @@ function reviewFingerprint(code: string, bucket: string): string {
     .digest('hex');
 }
 
-function requireFreshSource(
-  eventDataCheckedAt: Date,
-  timestamps: Array<Date | string | null | undefined>,
-  label: string,
-): { sourceMin: Date; sourceMax: Date } {
+function sourceSpan(timestamps: Array<Date | string | null | undefined>): {
+  sourceMin: Date;
+  sourceMax: Date;
+} {
   const dates = timestamps.map(asDate).filter((date): date is Date => date !== null);
-  if (dates.length === 0 || dates.some((date) => date.getTime() < eventDataCheckedAt.getTime())) {
-    throw new TournamentReviewSourceNotReadyError(`${label} is not fresh through data_checked_at`);
-  }
+  if (dates.length === 0)
+    throw new TournamentReviewSourceNotReadyError('review source provenance is missing');
   const sourceMin = dates.reduce(
     (min, date) => (date.getTime() < min.getTime() ? date : min),
     dates[0],
@@ -224,6 +222,8 @@ type PointsSourceRow = {
   entry_name: string;
   player_name: string;
   started_event: number | null;
+  entry_updated_at: Date | string;
+  roster_created_at: Date | string;
   event_points: number | null;
   event_cost: number | null;
   event_net_points: number | null;
@@ -240,6 +240,8 @@ type PointsSourceRow = {
   season_expected_event_count: number | null;
   season_gross_result_count: number | null;
   season_net_result_count: number | null;
+  history_source_min_checked_at: Date | string | null;
+  history_source_max_checked_at: Date | string | null;
   previous_group_rank: number | null;
 };
 
@@ -262,6 +264,8 @@ async function buildPointsPayload(
            entry.entry_name,
            entry.player_name,
            entry.started_event,
+           entry.updated_at AS entry_updated_at,
+           roster.created_at AS roster_created_at,
            result.event_points,
            result.event_transfers_cost AS event_cost,
            result.event_net_points,
@@ -368,7 +372,9 @@ async function buildPointsPayload(
                AND history_event.data_checked_at IS NOT NULL
                AND history.event_net_points IS NOT NULL
                AND history.updated_at >= history_event.data_checked_at
-           ) AS season_net_result_count
+           ) AS season_net_result_count,
+           history_sources.source_min_checked_at AS history_source_min_checked_at,
+           history_sources.source_max_checked_at AS history_source_max_checked_at
     FROM competition.tournament_entries roster
     JOIN competition.entries entry
       ON entry.season_id = roster.season_id AND entry.entry_id = roster.entry_id
@@ -384,6 +390,48 @@ async function buildPointsPayload(
      AND group_result.tournament_id = roster.tournament_id
      AND group_result.entry_id = roster.entry_id
      AND group_result.event_id = ${event.event_id}
+    LEFT JOIN LATERAL (
+      SELECT min(source_checked_at) AS source_min_checked_at,
+             max(source_checked_at) AS source_max_checked_at
+      FROM (
+        SELECT history.rich_synced_at AS source_checked_at
+        FROM competition.entry_event_results history
+        JOIN fpl.events history_event
+          ON history_event.season_id = history.season_id
+         AND history_event.event_id = history.event_id
+        WHERE history.season_id = roster.season_id
+          AND history.entry_id = roster.entry_id
+          AND history.event_id >= GREATEST(
+            COALESCE(tournament.group_started_event_id, 1),
+            COALESCE(roster.started_event, 1)
+          )
+          AND history.event_id <= ${event.event_id}
+          AND history_event.finished = true
+          AND history_event.data_checked = true
+          AND history_event.data_checked_at IS NOT NULL
+          AND history.event_points IS NOT NULL
+          AND history.rich_synced_at >= history_event.data_checked_at
+        UNION ALL
+        SELECT history.updated_at AS source_checked_at
+        FROM competition.tournament_points_group_results history
+        JOIN fpl.events history_event
+          ON history_event.season_id = history.season_id
+         AND history_event.event_id = history.event_id
+        WHERE history.season_id = roster.season_id
+          AND history.tournament_id = roster.tournament_id
+          AND history.entry_id = roster.entry_id
+          AND history.event_id >= GREATEST(
+            COALESCE(tournament.group_started_event_id, 1),
+            COALESCE(roster.started_event, 1)
+          )
+          AND history.event_id <= ${event.event_id}
+          AND history_event.finished = true
+          AND history_event.data_checked = true
+          AND history_event.data_checked_at IS NOT NULL
+          AND history.event_net_points IS NOT NULL
+          AND history.updated_at >= history_event.data_checked_at
+      ) validated_history
+    ) history_sources ON true
     WHERE roster.season_id = ${seasonId}
       AND roster.tournament_id = ${tournament.tournament_id}
     ORDER BY roster.entry_id
@@ -392,7 +440,7 @@ async function buildPointsPayload(
     throw new TournamentReviewSourceNotReadyError('points roster is incomplete');
   }
   const notApplicable = rows.filter(
-    (row) => row.started_event !== null && row.started_event > event.event_id,
+    (row) => !isTournamentReviewEntryApplicable(row.started_event, event.event_id),
   );
   const applicable = rows.filter((row) => !notApplicable.includes(row));
   if (
@@ -409,13 +457,26 @@ async function buildPointsPayload(
         row.season_expected_event_count === null ||
         row.season_gross_result_count === null ||
         row.season_net_result_count === null ||
+        row.history_source_min_checked_at === null ||
+        row.history_source_max_checked_at === null ||
         row.season_gross_result_count !== row.season_expected_event_count ||
         row.season_net_result_count !== row.season_expected_event_count,
     )
   ) {
     throw new TournamentReviewSourceNotReadyError('points result rows are incomplete');
   }
-  const sourceTimes = applicable.flatMap((row) => [row.rich_synced_at, row.group_updated_at]);
+  const sourceTimes: Array<Date | string | null> = rows.flatMap((row) => [
+    row.entry_updated_at,
+    row.roster_created_at,
+  ]);
+  sourceTimes.push(
+    ...applicable.flatMap((row) => [
+      row.rich_synced_at,
+      row.group_updated_at,
+      row.history_source_min_checked_at,
+      row.history_source_max_checked_at,
+    ]),
+  );
   const rankFallback = new Map<number, number>();
   [...applicable]
     .sort((left, right) => {
@@ -511,6 +572,8 @@ type EntryScoreRow = {
   entry_name: string;
   player_name: string;
   started_event: number | null;
+  entry_updated_at: Date | string;
+  roster_created_at: Date | string;
   event_points: number | null;
   event_transfers_cost: number | null;
   event_net_points: number | null;
@@ -528,6 +591,8 @@ async function loadEntryScores(
            entry.entry_name,
            entry.player_name,
            entry.started_event,
+           entry.updated_at AS entry_updated_at,
+           roster.created_at AS roster_created_at,
            result.event_points,
            result.event_transfers_cost,
            result.event_net_points,
@@ -610,6 +675,13 @@ export function rankTournamentReviewH2HStandings<
   });
 }
 
+export function isTournamentReviewEntryApplicable(
+  startedEvent: number | null,
+  eventId: number,
+): boolean {
+  return startedEvent === null || startedEvent <= eventId;
+}
+
 async function buildH2HPayload(
   tx: postgres.TransactionSql,
   seasonId: number,
@@ -647,11 +719,11 @@ async function buildH2HPayload(
   if (scores.size === 0 || scores.size !== tournament.total_team_num) {
     throw new TournamentReviewSourceNotReadyError('H2H roster is incomplete');
   }
-  const eligible = [...scores.values()].filter(
-    (row) => row.started_event === null || row.started_event <= event.event_id,
+  const eligible = [...scores.values()].filter((row) =>
+    isTournamentReviewEntryApplicable(row.started_event, event.event_id),
   );
   const notApplicable = [...scores.values()].filter(
-    (row) => row.started_event !== null && row.started_event > event.event_id,
+    (row) => !isTournamentReviewEntryApplicable(row.started_event, event.event_id),
   );
   const eventDataCheckedAt = asDate(event.data_checked_at);
   if (!eventDataCheckedAt) {
@@ -661,10 +733,14 @@ async function buildH2HPayload(
   const covered = new Set<number>();
   const seenCurrentEntries = new Set<number>();
   const entryGroupIds = new Map<number, number>();
-  const currentEligibleIds = new Set(eligible.map((row) => row.entry_id));
+  const currentParticipantIds = new Set(scores.keys());
   const currentMatchCountByGroup = new Map<number, number>();
   const currentAverageSidesByGroup = new Map<number, number>();
-  const sourceTimes: Array<Date | string | null> = eligible.map((row) => row.rich_synced_at);
+  const sourceTimes: Array<Date | string | null> = [...scores.values()].flatMap((row) => [
+    row.entry_updated_at,
+    row.roster_created_at,
+  ]);
+  sourceTimes.push(...eligible.map((row) => row.rich_synced_at));
   const matchRows = matches.map((match, index) => {
     currentMatchCountByGroup.set(
       match.group_id,
@@ -685,12 +761,6 @@ async function buildH2HPayload(
     if (match.away_entry_id !== null && !match.away_is_average && !away) {
       throw new TournamentReviewSourceNotReadyError('H2H away entry is outside the roster');
     }
-    if (
-      (home && home.started_event !== null && home.started_event > event.event_id) ||
-      (away && away.started_event !== null && away.started_event > event.event_id)
-    ) {
-      throw new TournamentReviewSourceNotReadyError('H2H match contains a not-applicable entry');
-    }
     if (match.home_entry_id !== null && !match.home_is_average) covered.add(match.home_entry_id);
     if (match.away_entry_id !== null && !match.away_is_average) covered.add(match.away_entry_id);
     for (const [entryId, isAverage] of [
@@ -704,7 +774,11 @@ async function buildH2HPayload(
         );
         continue;
       }
-      if (entryId === null || !currentEligibleIds.has(entryId) || seenCurrentEntries.has(entryId)) {
+      if (
+        entryId === null ||
+        !currentParticipantIds.has(entryId) ||
+        seenCurrentEntries.has(entryId)
+      ) {
         throw new TournamentReviewSourceNotReadyError(
           'H2H match participant is outside the roster',
         );
@@ -785,10 +859,10 @@ async function buildH2HPayload(
     };
   });
   if (
-    covered.size !== eligible.length ||
-    eligible.some((row) => !covered.has(row.entry_id)) ||
+    covered.size !== scores.size ||
+    [...scores.keys()].some((entryId) => !covered.has(entryId)) ||
     !hasCompleteTournamentReviewH2HGroupCoverage({
-      eligibleEntryIds: currentEligibleIds,
+      eligibleEntryIds: currentParticipantIds,
       entryGroupIds,
       matchCountByGroup: currentMatchCountByGroup,
       averageSidesByGroup: currentAverageSidesByGroup,
@@ -846,10 +920,8 @@ async function buildH2HPayload(
   }
   for (const expectedEvent of expectedHistoryEvents) {
     const eventMatches = historyByEvent.get(expectedEvent.event_id) ?? [];
-    const eventEligible = eligible.filter(
-      (row) => row.started_event === null || row.started_event <= expectedEvent.event_id,
-    );
-    const eventEligibleIds = new Set(eventEligible.map((row) => row.entry_id));
+    const eventParticipants = [...scores.values()];
+    const eventParticipantIds = new Set(eventParticipants.map((row) => row.entry_id));
     const seenEntries = new Set<number>();
     const eventMatchCountByGroup = new Map<number, number>();
     const eventAverageSidesByGroup = new Map<number, number>();
@@ -869,7 +941,7 @@ async function buildH2HPayload(
           );
           continue;
         }
-        if (entryId === null || !eventEligibleIds.has(entryId) || seenEntries.has(entryId)) {
+        if (entryId === null || !eventParticipantIds.has(entryId) || seenEntries.has(entryId)) {
           throw new TournamentReviewSourceNotReadyError(
             'H2H history participant coverage is invalid',
           );
@@ -883,9 +955,9 @@ async function buildH2HPayload(
       }
     }
     if (
-      seenEntries.size !== eventEligible.length ||
+      seenEntries.size !== eventParticipants.length ||
       !hasCompleteTournamentReviewH2HGroupCoverage({
-        eligibleEntryIds: eventEligibleIds,
+        eligibleEntryIds: eventParticipantIds,
         entryGroupIds,
         matchCountByGroup: eventMatchCountByGroup,
         averageSidesByGroup: eventAverageSidesByGroup,
@@ -946,6 +1018,7 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError('H2H history source rows are stale');
     }
+    sourceTimes.push(...historySourceDates);
     if (!historySourceCheckedAt) {
       throw new TournamentReviewSourceNotReadyError('H2H history source timestamp is missing');
     }
@@ -956,14 +1029,6 @@ async function buildH2HPayload(
       (match.away_entry_id !== null && !match.away_is_average && !scores.has(match.away_entry_id))
     ) {
       throw new TournamentReviewSourceNotReadyError('H2H history entry is outside the roster');
-    }
-    const homeScore = match.home_entry_id === null ? null : scores.get(match.home_entry_id);
-    const awayScore = match.away_entry_id === null ? null : scores.get(match.away_entry_id);
-    if (
-      (homeScore && homeScore.started_event !== null && homeScore.started_event > match.event_id) ||
-      (awayScore && awayScore.started_event !== null && awayScore.started_event > match.event_id)
-    ) {
-      throw new TournamentReviewSourceNotReadyError('H2H history contains a not-applicable entry');
     }
     if (
       (match.home_entry_id === null) !== match.home_is_average ||
@@ -1140,18 +1205,22 @@ async function buildKnockoutPayload(
   if (scores.size === 0 || scores.size !== tournament.total_team_num) {
     throw new TournamentReviewSourceNotReadyError('knockout roster is incomplete');
   }
-  const eligible = [...scores.values()].filter(
-    (row) => row.started_event === null || row.started_event <= event.event_id,
+  const eligible = [...scores.values()].filter((row) =>
+    isTournamentReviewEntryApplicable(row.started_event, event.event_id),
   );
   const notApplicable = [...scores.values()].filter(
-    (row) => row.started_event !== null && row.started_event > event.event_id,
+    (row) => !isTournamentReviewEntryApplicable(row.started_event, event.event_id),
   );
   const eventDataCheckedAt = asDate(event.data_checked_at);
   if (!eventDataCheckedAt) {
     throw new TournamentReviewSourceNotReadyError('knockout event data_checked_at is missing');
   }
   requireFreshEntryScores(eligible, eventDataCheckedAt, 'knockout');
-  const sourceTimes: Array<Date | string | null> = eligible.map((row) => row.rich_synced_at);
+  const sourceTimes: Array<Date | string | null> = [...scores.values()].flatMap((row) => [
+    row.entry_updated_at,
+    row.roster_created_at,
+  ]);
+  sourceTimes.push(...eligible.map((row) => row.rich_synced_at));
   const actualKeys = new Set<string>();
   if (matches.length !== expectedByKey.size) {
     throw new TournamentReviewSourceNotReadyError('knockout result coverage is incomplete');
@@ -1341,11 +1410,7 @@ async function publishTournamentReviewScopeOnce(
         : format === 'H2H'
           ? await buildH2HPayload(tx, season.seasonId, tournament, event, header)
           : await buildKnockoutPayload(tx, season.seasonId, tournament, event, header);
-    const freshness = requireFreshSource(
-      eventDataCheckedAt,
-      [eventDataCheckedAt, ...built.sourceTimes],
-      format,
-    );
+    const freshness = sourceSpan([eventDataCheckedAt, ...built.sourceTimes]);
     const payload = {
       ...built.payload,
       freshness: {
@@ -1492,7 +1557,13 @@ export async function reconcileTournamentReviewObligations(
   now = new Date(),
 ): Promise<number> {
   const db = await getDbClient();
-  const rows = await db<Array<{ tournament_id: number; event_id: number }>>`
+  const rows = await db<
+    Array<{
+      upserted_count: number | string;
+      retired_head_count: number | string;
+      retired_obligation_count: number | string;
+    }>
+  >`
     WITH candidate_formats AS (
       SELECT tournament.tournament_id,
              event.event_id,
@@ -1532,7 +1603,21 @@ export async function reconcileTournamentReviewObligations(
              candidate.format,
              GREATEST(
                candidate.base_eligible_at,
-               CASE candidate.format
+               CASE
+                 WHEN existing.tournament_id IS NULL
+                   THEN ${now.toISOString()}::timestamptz
+                 ELSE GREATEST(
+                   COALESCE((
+                     SELECT max(GREATEST(entry.updated_at, roster.created_at))
+                     FROM competition.tournament_entries roster
+                     JOIN competition.entries entry
+                       ON entry.season_id = roster.season_id
+                      AND entry.entry_id = roster.entry_id
+                     WHERE roster.season_id = ${season.seasonId}
+                       AND roster.tournament_id = candidate.tournament_id
+                       AND GREATEST(entry.updated_at, roster.created_at) > existing.eligible_at
+                   ), '-infinity'::timestamptz),
+                   CASE candidate.format
                  WHEN 'POINTS' THEN COALESCE((
                    SELECT max(source_updated_at)
                    FROM (
@@ -1547,12 +1632,17 @@ export async function reconcileTournamentReviewObligations(
                       AND roster.tournament_id = candidate.tournament_id
                      WHERE result.season_id = ${season.seasonId}
                        AND result.event_id <= candidate.event_id
+                       AND GREATEST(
+                         result.updated_at,
+                         COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+                       ) > existing.eligible_at
                      UNION ALL
                      SELECT points.updated_at AS source_updated_at
                      FROM competition.tournament_points_group_results points
                      WHERE points.season_id = ${season.seasonId}
                        AND points.tournament_id = candidate.tournament_id
                        AND points.event_id <= candidate.event_id
+                       AND points.updated_at > existing.eligible_at
                    ) point_sources
                  ), '-infinity'::timestamptz)
                  WHEN 'H2H' THEN COALESCE((
@@ -1569,12 +1659,17 @@ export async function reconcileTournamentReviewObligations(
                       AND roster.tournament_id = candidate.tournament_id
                      WHERE result.season_id = ${season.seasonId}
                        AND result.event_id <= candidate.event_id
+                       AND GREATEST(
+                         result.updated_at,
+                         COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+                       ) > existing.eligible_at
                      UNION ALL
                      SELECT battle.updated_at AS source_updated_at
                      FROM competition.tournament_battle_group_results battle
                      WHERE battle.season_id = ${season.seasonId}
                        AND battle.tournament_id = candidate.tournament_id
                        AND battle.event_id <= candidate.event_id
+                       AND battle.updated_at > existing.eligible_at
                    ) h2h_sources
                  ), '-infinity'::timestamptz)
                  WHEN 'KNOCKOUT' THEN COALESCE((
@@ -1590,13 +1685,18 @@ export async function reconcileTournamentReviewObligations(
                       AND roster.entry_id = result.entry_id
                       AND roster.tournament_id = candidate.tournament_id
                      WHERE result.season_id = ${season.seasonId}
-                       AND result.event_id <= candidate.event_id
+                       AND result.event_id = candidate.event_id
+                       AND GREATEST(
+                         result.updated_at,
+                         COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+                       ) > existing.eligible_at
                      UNION ALL
                      SELECT knockout.updated_at AS source_updated_at
                      FROM competition.tournament_knockout_results knockout
                      WHERE knockout.season_id = ${season.seasonId}
                        AND knockout.tournament_id = candidate.tournament_id
-                       AND knockout.event_id <= candidate.event_id
+                       AND knockout.event_id = candidate.event_id
+                       AND knockout.updated_at > existing.eligible_at
                      UNION ALL
                      SELECT bracket.updated_at AS source_updated_at
                      FROM competition.tournament_knockouts bracket
@@ -1604,19 +1704,69 @@ export async function reconcileTournamentReviewObligations(
                        AND bracket.tournament_id = candidate.tournament_id
                        AND bracket.started_event_id <= candidate.event_id
                        AND (bracket.ended_event_id IS NULL OR bracket.ended_event_id >= candidate.event_id)
+                       AND bracket.updated_at > existing.eligible_at
                    ) knockout_sources
                  ), '-infinity'::timestamptz)
-                 ELSE '-infinity'::timestamptz
+                     ELSE '-infinity'::timestamptz
+                   END
+                 )
                END
              ) AS eligible_at
       FROM candidate_formats candidate
-    )
+      LEFT JOIN competition.tournament_review_obligations existing
+        ON existing.season_id = ${season.seasonId}
+       AND existing.tournament_id = candidate.tournament_id
+       AND existing.event_id = candidate.event_id
+    ), valid_candidates AS (
+      SELECT tournament_id, event_id, format, eligible_at
+      FROM candidates
+      WHERE format IS NOT NULL
+    ), stored_scopes AS (
+      SELECT tournament_id, event_id
+      FROM competition.tournament_review_heads
+      WHERE season_id = ${season.seasonId}
+      UNION
+      SELECT tournament_id, event_id
+      FROM competition.tournament_review_obligations
+      WHERE season_id = ${season.seasonId}
+    ), stale_scopes AS (
+      SELECT stored.tournament_id, stored.event_id
+      FROM stored_scopes stored
+      LEFT JOIN valid_candidates candidate
+        ON candidate.tournament_id = stored.tournament_id
+       AND candidate.event_id = stored.event_id
+      WHERE candidate.tournament_id IS NULL
+    ), locked_stale_scopes AS MATERIALIZED (
+      SELECT stale.tournament_id,
+             stale.event_id,
+             pg_advisory_xact_lock(
+               hashtextextended(
+                 'review:' || ${season.seasonId}::text || ':' || stale.tournament_id::text || ':' || stale.event_id::text,
+                 0
+               )
+             ) AS locked
+      FROM stale_scopes stale
+      ORDER BY stale.tournament_id, stale.event_id
+    ), retired_heads AS (
+      DELETE FROM competition.tournament_review_heads head
+      USING locked_stale_scopes stale
+      WHERE head.season_id = ${season.seasonId}
+        AND head.tournament_id = stale.tournament_id
+        AND head.event_id = stale.event_id
+      RETURNING head.tournament_id, head.event_id
+    ), retired_obligations AS (
+      DELETE FROM competition.tournament_review_obligations obligation
+      USING locked_stale_scopes stale
+      WHERE obligation.season_id = ${season.seasonId}
+        AND obligation.tournament_id = stale.tournament_id
+        AND obligation.event_id = stale.event_id
+      RETURNING obligation.tournament_id, obligation.event_id
+    ), upserted AS (
     INSERT INTO competition.tournament_review_obligations
       (season_id, tournament_id, event_id, format, state, eligible_at, next_attempt_at)
     SELECT ${season.seasonId}, tournament_id, event_id, format, 'PENDING', eligible_at,
            GREATEST(eligible_at, ${now.toISOString()}::timestamptz)
-    FROM candidates
-    WHERE format IS NOT NULL
+    FROM valid_candidates
     ON CONFLICT (season_id, tournament_id, event_id) DO UPDATE
     SET format = EXCLUDED.format,
         state = CASE
@@ -1711,8 +1861,17 @@ export async function reconcileTournamentReviewObligations(
         OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
       )
     RETURNING tournament_id, event_id
+    )
+    SELECT (SELECT count(*) FROM upserted)::integer AS upserted_count,
+           (SELECT count(*) FROM retired_heads)::integer AS retired_head_count,
+           (SELECT count(*) FROM retired_obligations)::integer AS retired_obligation_count
   `;
-  return rows.length;
+  const counts = rows[0];
+  return (
+    Number(counts?.upserted_count ?? 0) +
+    Number(counts?.retired_head_count ?? 0) +
+    Number(counts?.retired_obligation_count ?? 0)
+  );
 }
 
 type ClaimedReviewObligation = {
