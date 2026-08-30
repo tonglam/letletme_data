@@ -23,11 +23,11 @@ async function cleanup(): Promise<void> {
   const sqlClient = await getDbClient();
   await sqlClient`
     DELETE FROM competition.entry_event_pick_heads
-    WHERE season_id = ${SEASON_ID} AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+    WHERE season_id = ${SEASON_ID} AND entry_id = ANY(${sqlClient.array([...ENTRY_IDS])}::integer[])
   `;
   await sqlClient`
     DELETE FROM competition.entry_event_pick_repairs
-    WHERE season_id = ${SEASON_ID} AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+    WHERE season_id = ${SEASON_ID} AND entry_id = ANY(${sqlClient.array([...ENTRY_IDS])}::integer[])
   `;
   await sqlClient`
     DELETE FROM competition.tournaments

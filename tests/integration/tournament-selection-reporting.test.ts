@@ -26,12 +26,12 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM competition.entry_event_pick_heads
     WHERE season_id = ${SEASON_ID}
-      AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+      AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
   `;
   await sql`
     DELETE FROM competition.entry_event_pick_repairs
     WHERE season_id = ${SEASON_ID}
-      AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+      AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
   `;
   await sql`
     DELETE FROM competition.entry_event_picks
@@ -59,7 +59,7 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM fpl.players
     WHERE season_id = ${SEASON_ID}
-      AND element_id = ANY(${PLAYER_IDS}::integer[])
+      AND element_id = ANY(${sql.array(PLAYER_IDS)}::integer[])
   `;
   await sql`
     DELETE FROM fpl.events
