@@ -1,5 +1,9 @@
-import Redis from 'ioredis';
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
+
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
+import Redis from 'ioredis';
 
 import {
   clearLiveMatchCheckpointDesiredV2,
@@ -30,7 +34,14 @@ import {
 import type { MatchDeskFixture, MatchFixtureDetail } from '../../src/services/live-match-v2';
 import { canonicalJson } from '../../src/utils/content-hash';
 
-const redis = new Redis({ host: '127.0.0.1', port: 6379, db: 15 });
+const redis = new Redis({
+  host: process.env.CACHE_REDIS_HOST,
+  port: Number(process.env.CACHE_REDIS_PORT),
+  password: process.env.CACHE_REDIS_PASSWORD,
+  db: Number(process.env.CACHE_REDIS_DB),
+  lazyConnect: true,
+  maxRetriesPerRequest: 1,
+});
 const scope = { season: '2627', eventId: 9876 } as const;
 const prefix = 'llm:data:v2:fpl:live-match:';
 

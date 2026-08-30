@@ -1,5 +1,9 @@
-import Redis from 'ioredis';
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
+
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
+import Redis from 'ioredis';
 
 import { rawExplainElementsFixture } from '../fixtures/event-live-explains.fixtures';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
@@ -15,7 +19,14 @@ import {
 } from '../../src/services/live-match-v2.service';
 import type { RawFPLFixture, RawFPLEventLiveElement } from '../../src/types';
 
-const redis = new Redis({ host: '127.0.0.1', port: 6379, db: 15 });
+const redis = new Redis({
+  host: process.env.CACHE_REDIS_HOST,
+  port: Number(process.env.CACHE_REDIS_PORT),
+  password: process.env.CACHE_REDIS_PASSWORD,
+  db: Number(process.env.CACHE_REDIS_DB),
+  lazyConnect: true,
+  maxRetriesPerRequest: 1,
+});
 const season = { seasonId: 2026, seasonCode: '2627' } as const;
 const eventId = 2;
 const prefix = 'llm:data:v2:fpl:live-match:';
