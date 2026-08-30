@@ -361,7 +361,7 @@ export async function runFormalXWorker(
       });
       probeReservationIds = null;
     };
-    const reserveAdditionalXCallBudget = async (callIndex: number): Promise<void> => {
+    const reserveAdditionalXCallBudget = async (callIndex: number) => {
       // The recurring scheduler already reserved the first provider call.
       if (callIndex === 0) return;
       if (!dependencies?.xBudgetPolicy) {
@@ -390,6 +390,26 @@ export async function runFormalXWorker(
           `TikHub pagination budget is unavailable (${budget.deferredScope ?? 'unknown scope'})`,
         );
       }
+      return {
+        releaseIfUnused: async (): Promise<void> => {
+          await db.transaction(async (tx) => {
+            const clockRows = await tx.execute<{ dbNow: Date | string }>(
+              sql`SELECT now() AS "dbNow"`,
+            );
+            const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
+            if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
+            const released = await releaseOneXRunBudgetUnit({
+              tx,
+              runId: job.runId,
+              dbNow,
+              reservationIds: budget.reservationIds,
+            });
+            if (!released) {
+              throw new Error('TikHub pagination budget disappeared before release');
+            }
+          });
+        },
+      };
     };
     if (run.request.jobKind === 'X_IDENTITY') {
       const executor = dependencies?.executor;
