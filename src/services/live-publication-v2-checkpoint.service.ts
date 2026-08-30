@@ -33,8 +33,8 @@ export type LivePublicationV2CheckpointRequest = {
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
   /** Facts captured with the same coherent FPL response. */
-  readonly explains?: readonly EventLiveExplain[];
-  readonly fixtureEvidence?: readonly FplPlayerFixtureEvidence[];
+  readonly explains: readonly EventLiveExplain[];
+  readonly fixtureEvidence: readonly FplPlayerFixtureEvidence[];
   /**
    * Fresh observation time used for the ordering fence. A recovery can
    * re-verify an immutable FINAL publication after its original source check;
@@ -205,12 +205,9 @@ export async function checkpointLivePublicationV2(
   if (publication.items.fixtures.count !== fixtures.length) {
     throw new Error('Live Points V2 fixture checkpoint count does not match manifest');
   }
-  if ((explains === undefined) !== (fixtureEvidence === undefined)) {
-    throw new Error('Live Points V2 checkpoint explain/evidence payload is incomplete');
-  }
   if (
-    explains?.some((row) => row.eventId !== eventId) ||
-    fixtureEvidence?.some((row) => row.eventId !== eventId)
+    explains.some((row) => row.eventId !== eventId) ||
+    fixtureEvidence.some((row) => row.eventId !== eventId)
   ) {
     throw new Error('Live Points V2 checkpoint facts contain another event');
   }
@@ -228,7 +225,6 @@ export async function checkpointLivePublicationV2(
     throw new Error('Live Points V2 checkpoint payload failed manifest validation');
   }
 
-  const checkpointedAt = new Date();
   const sourceCheckedAt = new Date(publication.sourceCheckedAt);
   const observationCheckedAt =
     request.observationCheckedAt instanceof Date
@@ -245,6 +241,16 @@ export async function checkpointLivePublicationV2(
   const db = await getDb();
   return db
     .transaction(async (tx) => {
+      // publishedAt comes from Redis TIME. checkpointedAt is deliberately
+      // obtained from the same PostgreSQL clock that owns the durable row;
+      // never compare or synthesize the durable timestamp from an app host.
+      const clockRows = await tx.execute<{ checkpointed_at: Date | string }>(
+        sql`SELECT clock_timestamp() AS checkpointed_at`,
+      );
+      const checkpointedAt = new Date(String(clockRows[0]?.checkpointed_at ?? ''));
+      if (!Number.isFinite(checkpointedAt.getTime())) {
+        throw new Error('PostgreSQL did not return a valid checkpoint clock timestamp');
+      }
       // Core publication writes use this same lock before touching events or
       // fixtures. Taking it first gives live checkpoint upserts the identical
       // ordering and prevents a newer core observation from racing between the
@@ -355,12 +361,8 @@ export async function checkpointLivePublicationV2(
           `Incomplete event live checkpoint: expected ${eventLives.length}, persisted ${savedLives.length}`,
         );
       }
-      if (explains !== undefined && fixtureEvidence !== undefined) {
-        await createEventLiveExplainsRepository(tx).replaceEvent(season, [...explains]);
-        await createFplPlayerFixtureStatsRepository(tx).upsertEvidence(season, [
-          ...fixtureEvidence,
-        ]);
-      }
+      await createEventLiveExplainsRepository(tx).replaceEvent(season, [...explains]);
+      await createFplPlayerFixtureStatsRepository(tx).upsertEvidence(season, [...fixtureEvidence]);
       await createFixtureRepository(tx).upsertBatch(season, [...fixtures]);
       await tx
         .update(eventsInFpl)

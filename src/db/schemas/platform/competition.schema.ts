@@ -809,10 +809,6 @@ export const livePointsPublicationCheckpointsInCompetition = competition.table(
       'live_points_publication_checkpoints_payload_valid',
       sql`jsonb_typeof(revisions) = 'object' AND jsonb_typeof(event_live) = 'array' AND jsonb_typeof(fixtures) = 'array' AND event_live_count = jsonb_array_length(event_live) AND fixtures_count = jsonb_array_length(fixtures) AND event_live_count >= 0 AND fixtures_count >= 0 AND event_live_bytes >= 0 AND fixtures_bytes >= 0 AND event_live_sha256 ~ '^[0-9a-f]{64}$' AND fixtures_sha256 ~ '^[0-9a-f]{64}$'`,
     ),
-    check(
-      'live_points_publication_checkpoints_time_order',
-      sql`checkpointed_at >= published_at AND checkpointed_at >= source_checked_at`,
-    ),
   ],
 );
 

@@ -239,11 +239,12 @@ export function liveV2ItemKey(
 }
 
 /**
- * Staging metadata is kept beside each immutable payload.  Redis Lua cannot
+ * Staging metadata is kept beside each immutable payload. Redis Lua cannot
  * calculate SHA-256, so promotion validates this atomically written tuple
- * against the manifest while the application validates the actual bytes
- * before entering the script.  A payload mutation between those two checks
- * therefore fails closed instead of becoming current.
+ * against the manifest while the application validates the actual bytes.
+ * Promotion also receives an exact read proof for the current pointer and
+ * payloads; the Lua CAS rejects the promotion if either changes between the
+ * application read and the script. This closes the checksum TOCTOU window.
  */
 function itemMetadataKey(itemKey: string): string {
   return `${itemKey}:meta`;
@@ -556,7 +557,10 @@ return {tostring(value), tostring(now[1]), tostring(now[2])}
 const PROMOTE_LIVE_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
 local restoring = ARGV[4] == 'restore'
-local current_raw = redis.call('GET', KEYS[1])
+local observed_current_raw = ARGV[5] or ''
+local current_raw = redis.call('GET', KEYS[1]) or ''
+if current_raw ~= observed_current_raw then return {'changed', current_raw} end
+local current_proof_valid = ARGV[8] == '1'
 local current_generation = nil
 local current_publication_id = nil
 local current_scope_valid = false
@@ -587,7 +591,8 @@ if current_raw then
       local item = decoded.items[name]
       local type_result = item and redis.call('TYPE', item.key) or ''
       local actual_type = type(type_result) == 'table' and type_result['ok'] or type_result
-      if not item or item.type ~= 'string' or actual_type ~= 'string' or redis.call('EXISTS', item.key) ~= 1 or redis.call('STRLEN', item.key) ~= item.bytes or item.count == nil or item.count < 0 or item.sha256 == nil or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then
+      local observed_payload = _ == 1 and (ARGV[6] or '') or (ARGV[7] or '')
+      if not item or item.type ~= 'string' or actual_type ~= 'string' or redis.call('EXISTS', item.key) ~= 1 or redis.call('STRLEN', item.key) ~= item.bytes or item.count == nil or item.count < 0 or item.sha256 == nil or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 or not current_proof_valid or redis.call('GET', item.key) ~= observed_payload then
         valid_current = false
       end
     end
@@ -615,14 +620,15 @@ for index, name in ipairs({'eventLive', 'fixtures'}) do
   local item = candidate.items[name]
   if not item or not item.key or item.type ~= 'string' then return {'invalid_item'} end
   if restoring then
-    local payload = ARGV[index + 4]
+    local payload = ARGV[index + 8]
     if not payload or string.len(payload) ~= item.bytes then return {'invalid_restore_payload', item.key} end
   else
+    local payload = index == 1 and (ARGV[9] or '') or (ARGV[10] or '')
     if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
     local type_result = redis.call('TYPE', item.key)
     local actual_type = type(type_result) == 'table' and type_result['ok'] or type_result
     if actual_type ~= 'string' then return {'wrong_stage_type', item.key} end
-    if redis.call('STRLEN', item.key) ~= item.bytes or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'wrong_stage_metadata', item.key} end
+    if redis.call('STRLEN', item.key) ~= item.bytes or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 or redis.call('GET', item.key) ~= payload then return {'wrong_stage_metadata', item.key} end
   end
 end
 local previous_result = current_raw or ''
@@ -659,7 +665,7 @@ end
 if restoring then
   for index, name in ipairs({'eventLive', 'fixtures'}) do
     local item = candidate.items[name]
-    local payload = ARGV[index + 4]
+    local payload = ARGV[index + 8]
     -- The restore payload was validated against PostgreSQL's durable hash in
     -- the caller.  Write it only after all identity/finalization fences above
     -- have passed; a conflicting same-generation publication can therefore
@@ -690,7 +696,10 @@ return {'published', previous_result}
 
 const PROMOTE_ENTRY_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
-local current_raw = redis.call('GET', KEYS[1])
+local observed_current_raw = ARGV[4] or ''
+local current_raw = redis.call('GET', KEYS[1]) or ''
+if current_raw ~= observed_current_raw then return {'changed', current_raw} end
+local current_proof_valid = ARGV[6] == '1'
 local current_generation = nil
 local current_scope_valid = false
 local current_scope_mismatch = false
@@ -707,7 +716,7 @@ if current_raw then
       current_state = decoded.state
     end
   end
-  if ok and decoded.item and decoded.contractVersion == 'live-points-v2' and decoded.item.type == 'string' and redis.call('EXISTS', decoded.item.key) == 1 and redis.call('STRLEN', decoded.item.key) == decoded.item.bytes and redis.call('GET', decoded.item.key .. ':meta') == tostring(decoded.item.count) .. '|' .. tostring(decoded.item.bytes) .. '|' .. decoded.item.sha256 then current = decoded end
+  if ok and decoded.item and decoded.contractVersion == 'live-points-v2' and decoded.item.type == 'string' and current_proof_valid and redis.call('EXISTS', decoded.item.key) == 1 and redis.call('STRLEN', decoded.item.key) == decoded.item.bytes and redis.call('GET', decoded.item.key .. ':meta') == tostring(decoded.item.count) .. '|' .. tostring(decoded.item.bytes) .. '|' .. decoded.item.sha256 and redis.call('GET', decoded.item.key) == (ARGV[5] or '') then current = decoded end
 end
 if candidate.contractVersion ~= 'live-points-v2' or not candidate.item then return {'invalid_candidate'} end
 if current_scope_mismatch then return {'scope_mismatch'} end
@@ -717,10 +726,11 @@ if current_generation and current_generation >= candidate.generation then return
 -- generation; otherwise the corrupt pointer can block finalization forever.
 if current_state == 'FINAL' and current then return {'stale', current_raw} end
 local item = candidate.item
+local candidate_payload = ARGV[7] or ''
 if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
 local type_result = redis.call('TYPE', item.key)
 local actual_type = type(type_result) == 'table' and type_result['ok'] or type_result
-if actual_type ~= 'string' or redis.call('STRLEN', item.key) ~= item.bytes or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'invalid_stage', item.key} end
+if actual_type ~= 'string' or redis.call('STRLEN', item.key) ~= item.bytes or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 or redis.call('GET', item.key) ~= candidate_payload then return {'invalid_stage', item.key} end
 if current then
   if current.season ~= candidate.season or current.eventId ~= candidate.eventId or current.entryId ~= candidate.entryId then return {'scope_mismatch'} end
   if current.generation >= candidate.generation then return {'stale', current_raw} end
@@ -1147,6 +1157,7 @@ export async function publishLivePublicationV2(input: {
     items: { eventLive: liveItem.manifest, fixtures: fixtureItem.manifest },
   };
   await stage(redis, [liveItem, fixtureItem]);
+  const currentProof = await readLivePromotionProof(redis, scope);
   const [status, detail] = promotionResult(
     await redis.eval(
       PROMOTE_LIVE_SCRIPT,
@@ -1157,6 +1168,13 @@ export async function publishLivePublicationV2(input: {
       JSON.stringify(manifest),
       String(LIVE_PUBLICATION_PREVIOUS_TTL_MS),
       String(input.state === 'FINALIZED' ? LIVE_PUBLICATION_FINAL_TTL_MS : 0),
+      '',
+      currentProof.pointerRaw,
+      currentProof.eventLivePayload,
+      currentProof.fixturesPayload,
+      currentProof.valid ? '1' : '0',
+      liveItem.payload,
+      fixtureItem.payload,
     ),
   );
   if (status === 'stale') {
@@ -1165,6 +1183,11 @@ export async function publishLivePublicationV2(input: {
       throw new CacheError('V2 stale response has invalid current', 'LIVE_V2_PROMOTE_FAILED');
     return { publication: stale, previous: stale, published: false };
   }
+  if (status === 'changed')
+    throw new CacheError(
+      'V2 promotion observed a changed current publication; retry the candidate',
+      'LIVE_V2_PROMOTE_CHANGED',
+    );
   if (status !== 'published')
     throw new CacheError(`V2 promotion failed: ${status}`, 'LIVE_V2_PROMOTE_FAILED');
   return {
@@ -1228,6 +1251,7 @@ export async function restoreLivePublicationV2Checkpoint(input: {
     );
   }
   const redis = input.redis ?? (await redisSingleton.getClient());
+  const currentProof = await readLivePromotionProof(redis, scope);
   // Pass restores directly to the promotion script. The payload has already
   // been validated against PostgreSQL's durable proof; writing it inside the
   // same Lua CAS means a conflicting same-generation publication cannot be
@@ -1243,6 +1267,10 @@ export async function restoreLivePublicationV2Checkpoint(input: {
       String(LIVE_PUBLICATION_PREVIOUS_TTL_MS),
       String(publication.state === 'FINALIZED' ? LIVE_PUBLICATION_FINAL_TTL_MS : 0),
       'restore',
+      currentProof.pointerRaw,
+      currentProof.eventLivePayload,
+      currentProof.fixturesPayload,
+      currentProof.valid ? '1' : '0',
       eventLiveItem.payload,
       fixtureItem.payload,
     ),
@@ -1256,6 +1284,11 @@ export async function restoreLivePublicationV2Checkpoint(input: {
       );
     return { publication: stale, previous: stale, published: false };
   }
+  if (status === 'changed')
+    throw new CacheError(
+      'V2 checkpoint restore observed a changed current publication; retry the repair',
+      'LIVE_V2_CHECKPOINT_RESTORE_CHANGED',
+    );
   if (status !== 'published') {
     throw new CacheError(
       `V2 checkpoint restore failed: ${status}`,
@@ -1384,6 +1417,111 @@ async function readLiveCandidate(
   } catch {
     return null;
   }
+}
+
+type LivePromotionProof = {
+  readonly pointerRaw: string;
+  readonly eventLivePayload: string;
+  readonly fixturesPayload: string;
+  readonly valid: boolean;
+};
+
+function validLivePromotionPayloads(
+  scope: LiveScope,
+  publication: LivePublicationV2,
+  eventLivePayload: string,
+  fixturePayload: string,
+  eventLiveMetadata: string | null,
+  fixtureMetadata: string | null,
+): boolean {
+  if (
+    Buffer.byteLength(eventLivePayload, 'utf8') !== publication.items.eventLive.bytes ||
+    sha256(eventLivePayload) !== publication.items.eventLive.sha256 ||
+    Buffer.byteLength(fixturePayload, 'utf8') !== publication.items.fixtures.bytes ||
+    sha256(fixturePayload) !== publication.items.fixtures.sha256 ||
+    eventLiveMetadata !==
+      `${publication.items.eventLive.count}|${publication.items.eventLive.bytes}|${publication.items.eventLive.sha256}` ||
+    fixtureMetadata !==
+      `${publication.items.fixtures.count}|${publication.items.fixtures.bytes}|${publication.items.fixtures.sha256}`
+  ) {
+    return false;
+  }
+  try {
+    const eventLives = JSON.parse(eventLivePayload) as unknown;
+    const parsedFixtures = JSON.parse(fixturePayload) as unknown;
+    if (
+      !Array.isArray(eventLives) ||
+      !Array.isArray(parsedFixtures) ||
+      itemCount(eventLives) !== publication.items.eventLive.count ||
+      itemCount(parsedFixtures) !== publication.items.fixtures.count ||
+      !eventLives.every(
+        (row) =>
+          row !== null &&
+          typeof row === 'object' &&
+          Number.isSafeInteger((row as { eventId?: unknown }).eventId) &&
+          (row as { eventId: number }).eventId === scope.eventId &&
+          Number.isSafeInteger((row as { elementId?: unknown }).elementId) &&
+          (row as { elementId: number }).elementId > 0 &&
+          Number.isSafeInteger((row as { totalPoints?: unknown }).totalPoints),
+      ) ||
+      new Set(eventLives.map((row) => (row as { elementId: number }).elementId)).size !==
+        eventLives.length ||
+      !parsedFixtures.every(
+        (fixture) =>
+          fixture !== null &&
+          typeof fixture === 'object' &&
+          Number.isSafeInteger((fixture as { id?: unknown }).id) &&
+          (fixture as { id: number }).id > 0 &&
+          Number.isSafeInteger((fixture as { teamH?: unknown }).teamH) &&
+          Number.isSafeInteger((fixture as { teamA?: unknown }).teamA) &&
+          ((fixture as { event?: unknown }).event === null ||
+            (fixture as { event?: unknown }).event === scope.eventId),
+      ) ||
+      new Set(parsedFixtures.map((fixture) => (fixture as { id: number }).id)).size !==
+        parsedFixtures.length
+    ) {
+      return false;
+    }
+    validateSerializedFixtures(parsedFixtures);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readLivePromotionProof(redis: Redis, scope: LiveScope): Promise<LivePromotionProof> {
+  const pointerRaw = (await redis.get(liveV2Key(scope, 'active'))) ?? '';
+  if (!pointerRaw) {
+    return { pointerRaw, eventLivePayload: '', fixturesPayload: '', valid: true };
+  }
+  const publication = parseLiveManifest(pointerRaw, scope);
+  if (!publication) {
+    return { pointerRaw, eventLivePayload: '', fixturesPayload: '', valid: false };
+  }
+  const [eventLivePayload, fixturePayload, eventLiveMetadata, fixtureMetadata] = await redis.mget(
+    publication.items.eventLive.key,
+    publication.items.fixtures.key,
+    itemMetadataKey(publication.items.eventLive.key),
+    itemMetadataKey(publication.items.fixtures.key),
+  );
+  const eventLive = eventLivePayload ?? '';
+  const fixtures = fixturePayload ?? '';
+  return {
+    pointerRaw,
+    eventLivePayload: eventLive,
+    fixturesPayload: fixtures,
+    valid:
+      eventLivePayload !== null &&
+      fixturePayload !== null &&
+      validLivePromotionPayloads(
+        scope,
+        publication,
+        eventLive,
+        fixtures,
+        eventLiveMetadata,
+        fixtureMetadata,
+      ),
+  };
 }
 
 export async function readLivePublicationV2(
@@ -1676,6 +1814,7 @@ export async function publishEntryLiveInputV2(input: {
     item: item.manifest,
   };
   await stage(redis, [item]);
+  const currentProof = await readEntryPromotionProof(redis, scope);
   const [status, detail] = promotionResult(
     await redis.eval(
       PROMOTE_ENTRY_SCRIPT,
@@ -1687,6 +1826,10 @@ export async function publishEntryLiveInputV2(input: {
       JSON.stringify(publication),
       String(LIVE_PUBLICATION_PREVIOUS_TTL_MS),
       String(publication.state === 'FINAL' ? LIVE_PUBLICATION_FINAL_TTL_MS : 0),
+      currentProof.pointerRaw,
+      currentProof.payload,
+      currentProof.valid ? '1' : '0',
+      item.payload,
     ),
   );
   if (status === 'stale') {
@@ -1698,6 +1841,11 @@ export async function publishEntryLiveInputV2(input: {
       );
     return { publication: stale, previous: stale, published: false };
   }
+  if (status === 'changed')
+    throw new CacheError(
+      'V2 entry promotion observed a changed current publication; retry the candidate',
+      'LIVE_V2_ENTRY_PROMOTE_CHANGED',
+    );
   if (status !== 'published')
     throw new CacheError(`V2 entry promotion failed: ${status}`, 'LIVE_V2_ENTRY_PROMOTE_FAILED');
   return { publication, previous: parseEntryManifest(detail ?? null, scope), published: true };
@@ -1822,6 +1970,43 @@ async function readEntryCandidate(
   } catch {
     return null;
   }
+}
+
+type EntryPromotionProof = {
+  readonly pointerRaw: string;
+  readonly payload: string;
+  readonly valid: boolean;
+};
+
+async function readEntryPromotionProof(
+  redis: Redis,
+  scope: EntryScope,
+): Promise<EntryPromotionProof> {
+  const pointerRaw = (await redis.get(entryLiveV2Key(scope, 'active'))) ?? '';
+  if (!pointerRaw) return { pointerRaw, payload: '', valid: true };
+  const publication = parseEntryManifest(pointerRaw, scope);
+  if (!publication) return { pointerRaw, payload: '', valid: false };
+  const [payload, metadata] = await redis.mget(
+    publication.item.key,
+    itemMetadataKey(publication.item.key),
+  );
+  const value = payload ?? '';
+  let valid =
+    payload !== null &&
+    metadata === `${publication.item.count}|${publication.item.bytes}|${publication.item.sha256}` &&
+    Buffer.byteLength(value, 'utf8') === publication.item.bytes &&
+    sha256(value) === publication.item.sha256;
+  if (valid) {
+    try {
+      const input = JSON.parse(value) as unknown;
+      valid =
+        validateEntryLiveInputV2(input, scope) &&
+        itemCount(input.picksBase.picks) === publication.item.count;
+    } catch {
+      valid = false;
+    }
+  }
+  return { pointerRaw, payload: value, valid };
 }
 
 export async function readEntryLiveInputV2(

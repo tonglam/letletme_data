@@ -1,4 +1,4 @@
-import { and, eq, isNotNull } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, lte, or } from 'drizzle-orm';
 
 import {
   type EntryLivePublicationRead,
@@ -8,7 +8,11 @@ import {
 } from '../src/cache/live-publication-v2';
 import { redisSingleton } from '../src/cache/singleton';
 import { databaseSingleton, getDb } from '../src/db/singleton';
-import { entryEventPickHeadsInCompetition, eventsInFpl } from '../src/db/schemas/index.schema';
+import {
+  entriesInCompetition,
+  entryEventPickHeadsInCompetition,
+  eventsInFpl,
+} from '../src/db/schemas/index.schema';
 import { seasonRepository } from '../src/repositories/seasons';
 import { readLivePublicationV2Checkpoint } from '../src/services/live-publication-v2-checkpoint.service';
 
@@ -164,10 +168,21 @@ async function main(): Promise<void> {
         )
         .orderBy(entryEventPickHeadsInCompetition.entryId);
       const headByEntry = new Map(headRows.map((head) => [head.entryId, head] as const));
-      const completeEntryIds = headRows
-        .filter((head) => head.rowCount === 15 && head.state === 'COMPLETE')
-        .map((head) => head.entryId);
-      const entryIds = args.entryId === null ? completeEntryIds : [args.entryId];
+      const eligibleEntryRows = await db
+        .select({ entryId: entriesInCompetition.entryId })
+        .from(entriesInCompetition)
+        .where(
+          and(
+            eq(entriesInCompetition.seasonId, season.seasonId),
+            or(
+              isNull(entriesInCompetition.startedEvent),
+              lte(entriesInCompetition.startedEvent, eventId),
+            ),
+          ),
+        )
+        .orderBy(entriesInCompetition.entryId);
+      const eligibleEntryIds = eligibleEntryRows.map((row) => row.entryId);
+      const entryIds = args.entryId === null ? eligibleEntryIds : [args.entryId];
       if (entryIds.length === 0)
         throw new Error('No complete V2 entry pick head exists for this scope');
       const requireFinalEntries = args.allFinalized;

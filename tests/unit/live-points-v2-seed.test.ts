@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildSeedHead,
   buildSeedInput,
+  findMissingPickScopes,
   inspectPickScope,
   parseSeedArguments,
   type ExistingPickRow,
@@ -56,6 +57,25 @@ describe('Live Points V2 entry-pick seed', () => {
     });
     expect(repair?.reasons).toContain('ELEMENTS_NOT_UNIQUE_POSITIVE');
     expect(() => buildSeedHead(malformed)).toThrow('Cannot seed invalid pick scope');
+  });
+
+  test('creates repair scope for an eligible entry with no pick rows', () => {
+    const missing = findMissingPickScopes(
+      [
+        { seasonId: 2627, entryId: 6953, eventId: 2 },
+        { seasonId: 2627, entryId: 7000, eventId: 2 },
+      ],
+      [rows()],
+    );
+    expect(missing).toEqual([
+      {
+        seasonId: 2627,
+        entryId: 7000,
+        eventId: 2,
+        observedRowCount: 0,
+        reasons: ['PICKS_ROWSET_MISSING'],
+      },
+    ]);
   });
 
   test('seeds previous totals and final evidence only when the data_checked fence is complete', () => {

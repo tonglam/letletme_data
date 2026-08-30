@@ -56,8 +56,8 @@ export interface LiveSnapshotV2Dependencies {
     readonly publication: LivePublicationRead['publication'];
     readonly eventLives: ReadonlyArray<PreparedLiveSnapshot['eventLives']['eventLives'][number]>;
     readonly fixtures: ReadonlyArray<PreparedLiveSnapshot['fixtures'][number]>;
-    readonly explains?: ReadonlyArray<PreparedLiveSnapshot['eventLives']['explains'][number]>;
-    readonly fixtureEvidence?: ReadonlyArray<
+    readonly explains: ReadonlyArray<PreparedLiveSnapshot['eventLives']['explains'][number]>;
+    readonly fixtureEvidence: ReadonlyArray<
       PreparedLiveSnapshot['eventLives']['fixtureEvidence'][number]
     >;
     readonly observationCheckedAt?: Date | string;
@@ -168,8 +168,8 @@ async function checkpoint(
   payload: {
     readonly eventLives: ReadonlyArray<PreparedLiveSnapshot['eventLives']['eventLives'][number]>;
     readonly fixtures: ReadonlyArray<PreparedLiveSnapshot['fixtures'][number]>;
-    readonly explains?: ReadonlyArray<PreparedLiveSnapshot['eventLives']['explains'][number]>;
-    readonly fixtureEvidence?: ReadonlyArray<
+    readonly explains: ReadonlyArray<PreparedLiveSnapshot['eventLives']['explains'][number]>;
+    readonly fixtureEvidence: ReadonlyArray<
       PreparedLiveSnapshot['eventLives']['fixtureEvidence'][number]
     >;
   },

@@ -3,9 +3,12 @@ import { createHash } from 'node:crypto';
 
 import postgres from 'postgres';
 
-import type { EventLive } from '../src/domain/event-lives';
+import type { EventLive, EventLiveFixtureBreakdown } from '../src/domain/event-lives';
 import { validateEventLives } from '../src/domain/event-lives';
+import type { EventLiveExplain } from '../src/domain/event-live-explains';
+import { totalPoints as explainTotalPoints } from '../src/domain/event-live-explains';
 import { explicitSeasonRef, type FplSeasonRef } from '../src/domain/fpl-season';
+import type { FplPlayerFixtureEvidence } from '../src/domain/fpl-player-fixture-stats';
 import { validateFixtures } from '../src/domain/fixtures';
 import {
   clearLiveCheckpointDesiredV2,
@@ -74,6 +77,12 @@ export type InvalidPickScope = {
   reasons: readonly string[];
 };
 
+export type EligibleEntryScope = {
+  readonly seasonId: number;
+  readonly entryId: number;
+  readonly eventId: number;
+};
+
 export type SeedArguments = {
   readonly execute: boolean;
   readonly seedCache: boolean;
@@ -129,6 +138,61 @@ export type ValidatedLiveSeed = {
   readonly contentUpdatedAt: Date;
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
+  /** Facts that were observed with the same legacy publication. */
+  readonly explains?: readonly EventLiveExplain[];
+  readonly fixtureEvidence?: readonly FplPlayerFixtureEvidence[];
+};
+
+type LegacyLiveFacts = {
+  readonly explains: readonly EventLiveExplain[];
+  readonly fixtureEvidence: readonly FplPlayerFixtureEvidence[];
+};
+
+type LegacyEventLiveFactRow = {
+  event_id: number;
+  element_id: number;
+  minutes: number | null;
+  goals_scored: number | null;
+  assists: number | null;
+  clean_sheets: number | null;
+  goals_conceded: number | null;
+  own_goals: number | null;
+  penalties_saved: number | null;
+  penalties_missed: number | null;
+  yellow_cards: number | null;
+  red_cards: number | null;
+  saves: number | null;
+  bonus: number | null;
+  bps: number | null;
+  starts: boolean | null;
+  expected_goals: string | number | null;
+  expected_assists: string | number | null;
+  expected_goal_involvements: string | number | null;
+  expected_goals_conceded: string | number | null;
+  in_dream_team: boolean | null;
+  total_points: number;
+  defensive_contribution: number;
+};
+
+type LegacyScoringFactRow = {
+  event_id: number;
+  element_id: number;
+  scoring_identifier: string;
+  scoring_value: number;
+  points: number;
+};
+
+type LegacyFixtureEvidenceRow = {
+  event_id: number;
+  fixture_id: number;
+  element_id: number;
+  minutes: number;
+  starts: number | null;
+  goals: number;
+  assists: number;
+  own_goals: number;
+  yellow_cards: number;
+  red_cards: number;
 };
 
 export type InvalidLiveSeedScope = {
@@ -333,6 +397,584 @@ export function validateLegacyLiveSeed(
   };
 }
 
+const EXPLAIN_IDENTIFIERS = [
+  'minutes',
+  'goals_scored',
+  'assists',
+  'clean_sheets',
+  'goals_conceded',
+  'own_goals',
+  'penalties_saved',
+  'penalties_missed',
+  'yellow_cards',
+  'red_cards',
+  'saves',
+  'defensive_contribution',
+] as const;
+
+type ExplainIdentifier = (typeof EXPLAIN_IDENTIFIERS)[number];
+
+type ExplainAggregate = {
+  value: number;
+  points: number;
+};
+
+function aggregateBreakdown(
+  breakdown: readonly EventLiveFixtureBreakdown[],
+): Map<ExplainIdentifier, ExplainAggregate> {
+  const result = new Map<ExplainIdentifier, ExplainAggregate>();
+  for (const fixture of breakdown) {
+    for (const stat of fixture.stats) {
+      if (!(EXPLAIN_IDENTIFIERS as readonly string[]).includes(stat.identifier)) continue;
+      const identifier = stat.identifier as ExplainIdentifier;
+      const previous = result.get(identifier) ?? { value: 0, points: 0 };
+      result.set(identifier, {
+        value: previous.value + stat.value,
+        points: previous.points + stat.points + (stat.pointsModification ?? 0),
+      });
+    }
+  }
+  return result;
+}
+
+function assertBreakdownValue(
+  eventLive: EventLive,
+  identifier: ExplainIdentifier,
+  aggregate: ExplainAggregate | undefined,
+  value: number | null,
+): void {
+  const expected = value ?? 0;
+  if (aggregate === undefined) {
+    if (expected !== 0) {
+      throw new Error(
+        `Legacy fixture breakdown is missing a non-zero stat: event=${eventLive.eventId} element=${eventLive.elementId} identifier=${identifier}`,
+      );
+    }
+    return;
+  }
+  if (aggregate.value !== expected) {
+    throw new Error(
+      `Legacy fixture breakdown disagrees with event live: event=${eventLive.eventId} element=${eventLive.elementId} identifier=${identifier}`,
+    );
+  }
+}
+
+function assertExplainValuesMatchEventLive(eventLive: EventLive, explain: EventLiveExplain): void {
+  const checks: Array<[string, number | null, number | null]> = [
+    ['minutes', explain.minutes, eventLive.minutes],
+    ['goals_scored', explain.goalsScored, eventLive.goalsScored],
+    ['assists', explain.assists, eventLive.assists],
+    ['clean_sheets', explain.cleanSheets, eventLive.cleanSheets],
+    ['goals_conceded', explain.goalsConceded, eventLive.goalsConceded],
+    ['own_goals', explain.ownGoals, eventLive.ownGoals],
+    ['penalties_saved', explain.penaltiesSaved, eventLive.penaltiesSaved],
+    ['penalties_missed', explain.penaltiesMissed, eventLive.penaltiesMissed],
+    ['yellow_cards', explain.yellowCards, eventLive.yellowCards],
+    ['red_cards', explain.redCards, eventLive.redCards],
+    ['saves', explain.saves, eventLive.saves],
+    ['defensive_contribution', explain.defensiveContribution, eventLive.defensiveContribution],
+  ];
+  const mismatch = checks.find(([, actual, expected]) => {
+    if (actual === expected) return false;
+    if ((actual === null || actual === 0) && (expected === null || expected === 0)) return false;
+    return true;
+  });
+  if (mismatch) {
+    throw new Error(
+      `Legacy explain disagrees with event live: event=${eventLive.eventId} element=${eventLive.elementId} field=${mismatch[0]}`,
+    );
+  }
+}
+
+function explainFromBreakdown(
+  eventLive: EventLive,
+  breakdown: readonly EventLiveFixtureBreakdown[],
+): EventLiveExplain {
+  const aggregates = aggregateBreakdown(breakdown);
+  assertBreakdownValue(eventLive, 'minutes', aggregates.get('minutes'), eventLive.minutes);
+  assertBreakdownValue(
+    eventLive,
+    'goals_scored',
+    aggregates.get('goals_scored'),
+    eventLive.goalsScored,
+  );
+  assertBreakdownValue(eventLive, 'assists', aggregates.get('assists'), eventLive.assists);
+  assertBreakdownValue(
+    eventLive,
+    'clean_sheets',
+    aggregates.get('clean_sheets'),
+    eventLive.cleanSheets,
+  );
+  assertBreakdownValue(
+    eventLive,
+    'goals_conceded',
+    aggregates.get('goals_conceded'),
+    eventLive.goalsConceded,
+  );
+  assertBreakdownValue(eventLive, 'own_goals', aggregates.get('own_goals'), eventLive.ownGoals);
+  assertBreakdownValue(
+    eventLive,
+    'penalties_saved',
+    aggregates.get('penalties_saved'),
+    eventLive.penaltiesSaved,
+  );
+  assertBreakdownValue(
+    eventLive,
+    'penalties_missed',
+    aggregates.get('penalties_missed'),
+    eventLive.penaltiesMissed,
+  );
+  assertBreakdownValue(
+    eventLive,
+    'yellow_cards',
+    aggregates.get('yellow_cards'),
+    eventLive.yellowCards,
+  );
+  assertBreakdownValue(eventLive, 'red_cards', aggregates.get('red_cards'), eventLive.redCards);
+  assertBreakdownValue(eventLive, 'saves', aggregates.get('saves'), eventLive.saves);
+  assertBreakdownValue(
+    eventLive,
+    'defensive_contribution',
+    aggregates.get('defensive_contribution'),
+    eventLive.defensiveContribution,
+  );
+
+  const points = (identifier: ExplainIdentifier): number | null =>
+    aggregates.get(identifier)?.points ?? null;
+  return {
+    eventId: eventLive.eventId,
+    elementId: eventLive.elementId,
+    bonus: eventLive.bonus,
+    minutes: eventLive.minutes,
+    minutesPoints: points('minutes'),
+    goalsScored: eventLive.goalsScored,
+    goalsScoredPoints: points('goals_scored'),
+    assists: eventLive.assists,
+    assistsPoints: points('assists'),
+    cleanSheets: eventLive.cleanSheets,
+    cleanSheetsPoints: points('clean_sheets'),
+    goalsConceded: eventLive.goalsConceded,
+    goalsConcededPoints: points('goals_conceded'),
+    ownGoals: eventLive.ownGoals,
+    ownGoalsPoints: points('own_goals'),
+    penaltiesSaved: eventLive.penaltiesSaved,
+    penaltiesSavedPoints: points('penalties_saved'),
+    penaltiesMissed: eventLive.penaltiesMissed,
+    penaltiesMissedPoints: points('penalties_missed'),
+    yellowCards: eventLive.yellowCards,
+    yellowCardsPoints: points('yellow_cards'),
+    redCards: eventLive.redCards,
+    redCardsPoints: points('red_cards'),
+    saves: eventLive.saves,
+    savesPoints: points('saves'),
+    defensiveContribution: eventLive.defensiveContribution,
+    defensiveContributionPoints: points('defensive_contribution'),
+  };
+}
+
+function evidenceFromBreakdown(
+  eventLive: EventLive,
+  breakdown: readonly EventLiveFixtureBreakdown[],
+): FplPlayerFixtureEvidence[] {
+  return breakdown.map((fixture) => {
+    const aggregates = aggregateBreakdown([fixture]);
+    const value = (identifier: ExplainIdentifier): number => aggregates.get(identifier)?.value ?? 0;
+    const starts = fixture.stats.find((stat) => stat.identifier === 'starts')?.value ?? null;
+    if (starts !== null && !Number.isSafeInteger(starts)) {
+      throw new Error(
+        `Legacy fixture breakdown starts is not an integer: event=${eventLive.eventId} fixture=${fixture.fixtureId} element=${eventLive.elementId}`,
+      );
+    }
+    return {
+      eventId: eventLive.eventId,
+      fixtureId: fixture.fixtureId,
+      elementId: eventLive.elementId,
+      minutes: value('minutes'),
+      starts,
+      goals: value('goals_scored'),
+      assists: value('assists'),
+      ownGoals: value('own_goals'),
+      yellowCards: value('yellow_cards'),
+      redCards: value('red_cards'),
+    };
+  });
+}
+
+function factsFromLegacyPayload(
+  eventLives: readonly EventLive[],
+  allowedFixtureIds?: ReadonlySet<number>,
+): LegacyLiveFacts | null {
+  if (eventLives.some((eventLive) => !Array.isArray(eventLive.fixtureBreakdown))) return null;
+  const explains: EventLiveExplain[] = [];
+  const fixtureEvidence: FplPlayerFixtureEvidence[] = [];
+  const identities = new Set<string>();
+  for (const eventLive of eventLives) {
+    const breakdown = eventLive.fixtureBreakdown!;
+    const fixtureIds = new Set<number>();
+    for (const fixture of breakdown) {
+      if (fixtureIds.has(fixture.fixtureId)) {
+        throw new Error(
+          `Legacy event live repeats fixture: event=${eventLive.eventId} fixture=${fixture.fixtureId} element=${eventLive.elementId}`,
+        );
+      }
+      fixtureIds.add(fixture.fixtureId);
+      if (allowedFixtureIds && !allowedFixtureIds.has(fixture.fixtureId)) {
+        throw new Error(
+          `Legacy fixture breakdown is outside the publication scope: event=${eventLive.eventId} fixture=${fixture.fixtureId}`,
+        );
+      }
+      const identity = `${fixture.fixtureId}:${eventLive.elementId}`;
+      if (identities.has(identity)) throw new Error(`Legacy fixture evidence repeats ${identity}`);
+      identities.add(identity);
+    }
+    const explain = explainFromBreakdown(eventLive, breakdown);
+    assertExplainValuesMatchEventLive(eventLive, explain);
+    if (explainTotalPoints(explain) !== eventLive.totalPoints) {
+      throw new Error(
+        `Legacy explain total disagrees with event live: event=${eventLive.eventId} element=${eventLive.elementId}`,
+      );
+    }
+    explains.push(explain);
+    fixtureEvidence.push(...evidenceFromBreakdown(eventLive, breakdown));
+  }
+  return { explains, fixtureEvidence };
+}
+
+function emptyLegacyExplain(eventId: number, elementId: number): EventLiveExplain {
+  return {
+    eventId,
+    elementId,
+    bonus: null,
+    minutes: null,
+    minutesPoints: null,
+    goalsScored: null,
+    goalsScoredPoints: null,
+    assists: null,
+    assistsPoints: null,
+    cleanSheets: null,
+    cleanSheetsPoints: null,
+    goalsConceded: null,
+    goalsConcededPoints: null,
+    ownGoals: null,
+    ownGoalsPoints: null,
+    penaltiesSaved: null,
+    penaltiesSavedPoints: null,
+    penaltiesMissed: null,
+    penaltiesMissedPoints: null,
+    yellowCards: null,
+    yellowCardsPoints: null,
+    redCards: null,
+    redCardsPoints: null,
+    saves: null,
+    savesPoints: null,
+    defensiveContribution: null,
+    defensiveContributionPoints: null,
+  };
+}
+
+function applyLegacyScoringItem(explain: EventLiveExplain, row: LegacyScoringFactRow): void {
+  switch (row.scoring_identifier) {
+    case 'minutes':
+      Object.assign(explain, { minutes: row.scoring_value, minutesPoints: row.points });
+      break;
+    case 'goals_scored':
+      Object.assign(explain, { goalsScored: row.scoring_value, goalsScoredPoints: row.points });
+      break;
+    case 'assists':
+      Object.assign(explain, { assists: row.scoring_value, assistsPoints: row.points });
+      break;
+    case 'clean_sheets':
+      Object.assign(explain, { cleanSheets: row.scoring_value, cleanSheetsPoints: row.points });
+      break;
+    case 'goals_conceded':
+      Object.assign(explain, {
+        goalsConceded: row.scoring_value,
+        goalsConcededPoints: row.points,
+      });
+      break;
+    case 'own_goals':
+      Object.assign(explain, { ownGoals: row.scoring_value, ownGoalsPoints: row.points });
+      break;
+    case 'penalties_saved':
+      Object.assign(explain, {
+        penaltiesSaved: row.scoring_value,
+        penaltiesSavedPoints: row.points,
+      });
+      break;
+    case 'penalties_missed':
+      Object.assign(explain, {
+        penaltiesMissed: row.scoring_value,
+        penaltiesMissedPoints: row.points,
+      });
+      break;
+    case 'yellow_cards':
+      Object.assign(explain, { yellowCards: row.scoring_value, yellowCardsPoints: row.points });
+      break;
+    case 'red_cards':
+      Object.assign(explain, { redCards: row.scoring_value, redCardsPoints: row.points });
+      break;
+    case 'saves':
+      Object.assign(explain, { saves: row.scoring_value, savesPoints: row.points });
+      break;
+    case 'bonus':
+      Object.assign(explain, { bonus: row.points });
+      break;
+    case 'defensive_contribution':
+      Object.assign(explain, {
+        defensiveContribution: row.scoring_value,
+        defensiveContributionPoints: row.points,
+      });
+      break;
+    default:
+      throw new Error(
+        `Legacy scoring items contain unsupported identifier ${row.scoring_identifier}`,
+      );
+  }
+}
+
+function sameLegacyFact(left: unknown, right: unknown): boolean {
+  if (left === null || left === undefined || right === null || right === undefined) {
+    return left === right;
+  }
+  if (typeof left === 'number' || typeof right === 'number') {
+    const leftNumber = Number(left);
+    const rightNumber = Number(right);
+    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+      return leftNumber === rightNumber;
+    }
+  }
+  return left === right || String(left) === String(right);
+}
+
+function assertLegacyEventLiveFacts(
+  seed: ValidatedLiveSeed,
+  rows: readonly LegacyEventLiveFactRow[],
+): void {
+  const byElement = new Map(rows.map((row) => [row.element_id, row] as const));
+  if (rows.length !== seed.eventLives.length || byElement.size !== seed.eventLives.length) {
+    throw new Error(
+      `Legacy relational event-live facts are incomplete: expected ${seed.eventLives.length}, got ${rows.length}`,
+    );
+  }
+  for (const eventLive of seed.eventLives) {
+    const row = byElement.get(eventLive.elementId);
+    if (!row || row.event_id !== eventLive.eventId) {
+      throw new Error(
+        `Legacy relational event-live fact is missing element ${eventLive.elementId}`,
+      );
+    }
+    const checks: Array<[string, unknown, unknown]> = [
+      ['minutes', row.minutes, eventLive.minutes],
+      ['goals_scored', row.goals_scored, eventLive.goalsScored],
+      ['assists', row.assists, eventLive.assists],
+      ['clean_sheets', row.clean_sheets, eventLive.cleanSheets],
+      ['goals_conceded', row.goals_conceded, eventLive.goalsConceded],
+      ['own_goals', row.own_goals, eventLive.ownGoals],
+      ['penalties_saved', row.penalties_saved, eventLive.penaltiesSaved],
+      ['penalties_missed', row.penalties_missed, eventLive.penaltiesMissed],
+      ['yellow_cards', row.yellow_cards, eventLive.yellowCards],
+      ['red_cards', row.red_cards, eventLive.redCards],
+      ['saves', row.saves, eventLive.saves],
+      ['bonus', row.bonus, eventLive.bonus],
+      ['bps', row.bps, eventLive.bps],
+      ['starts', row.starts, eventLive.starts],
+      ['expected_goals', row.expected_goals, eventLive.expectedGoals],
+      ['expected_assists', row.expected_assists, eventLive.expectedAssists],
+      [
+        'expected_goal_involvements',
+        row.expected_goal_involvements,
+        eventLive.expectedGoalInvolvements,
+      ],
+      ['expected_goals_conceded', row.expected_goals_conceded, eventLive.expectedGoalsConceded],
+      ['in_dream_team', row.in_dream_team, eventLive.inDreamTeam],
+      ['total_points', row.total_points, eventLive.totalPoints],
+      ['defensive_contribution', row.defensive_contribution, eventLive.defensiveContribution ?? 0],
+    ];
+    const mismatch = checks.find(([, actual, expected]) => !sameLegacyFact(actual, expected));
+    if (mismatch) {
+      throw new Error(
+        `Legacy relational event-live fact disagrees with publication: event=${eventLive.eventId} element=${eventLive.elementId} field=${mismatch[0]}`,
+      );
+    }
+  }
+}
+
+function assertLegacyEvidenceMatchesEventLives(
+  seed: ValidatedLiveSeed,
+  rows: readonly LegacyFixtureEvidenceRow[],
+): void {
+  const elementIds = new Set(seed.eventLives.map((eventLive) => eventLive.elementId));
+  const fixtureIds = new Set(seed.fixtures.map((fixture) => fixture.id));
+  const identities = new Set<string>();
+  const totals = new Map<
+    number,
+    {
+      minutes: number;
+      goals: number;
+      assists: number;
+      ownGoals: number;
+      yellowCards: number;
+      redCards: number;
+      starts: number;
+    }
+  >();
+  for (const row of rows) {
+    if (
+      row.event_id !== seed.source.event_id ||
+      !elementIds.has(row.element_id) ||
+      !fixtureIds.has(row.fixture_id)
+    ) {
+      throw new Error(
+        `Legacy fixture evidence is outside the publication scope: event=${row.event_id} fixture=${row.fixture_id} element=${row.element_id}`,
+      );
+    }
+    const identity = `${row.fixture_id}:${row.element_id}`;
+    if (identities.has(identity)) throw new Error(`Legacy fixture evidence repeats ${identity}`);
+    identities.add(identity);
+    const total = totals.get(row.element_id) ?? {
+      minutes: 0,
+      goals: 0,
+      assists: 0,
+      ownGoals: 0,
+      yellowCards: 0,
+      redCards: 0,
+      starts: 0,
+    };
+    total.minutes += row.minutes;
+    total.goals += row.goals;
+    total.assists += row.assists;
+    total.ownGoals += row.own_goals;
+    total.yellowCards += row.yellow_cards;
+    total.redCards += row.red_cards;
+    total.starts += row.starts ?? 0;
+    totals.set(row.element_id, total);
+  }
+  for (const eventLive of seed.eventLives) {
+    const total = totals.get(eventLive.elementId) ?? {
+      minutes: 0,
+      goals: 0,
+      assists: 0,
+      ownGoals: 0,
+      yellowCards: 0,
+      redCards: 0,
+      starts: 0,
+    };
+    const checks: Array<[string, number | null, number]> = [
+      ['minutes', eventLive.minutes, total.minutes],
+      ['goals_scored', eventLive.goalsScored, total.goals],
+      ['assists', eventLive.assists, total.assists],
+      ['own_goals', eventLive.ownGoals, total.ownGoals],
+      ['yellow_cards', eventLive.yellowCards, total.yellowCards],
+      ['red_cards', eventLive.redCards, total.redCards],
+    ];
+    const mismatch = checks.find(
+      ([, expected, actual]) => expected !== null && expected !== actual,
+    );
+    if (mismatch) {
+      throw new Error(
+        `Legacy fixture evidence disagrees with publication: event=${eventLive.eventId} element=${eventLive.elementId} field=${mismatch[0]}`,
+      );
+    }
+    if (eventLive.starts === true && total.starts < 1) {
+      throw new Error(
+        `Legacy fixture evidence has no start marker: event=${eventLive.eventId} element=${eventLive.elementId}`,
+      );
+    }
+  }
+}
+
+async function loadLegacyLiveFacts(
+  database: postgres.Sql,
+  seed: ValidatedLiveSeed,
+): Promise<LegacyLiveFacts> {
+  const embedded = factsFromLegacyPayload(
+    seed.eventLives,
+    new Set(seed.fixtures.map((fixture) => fixture.id)),
+  );
+  if (embedded) return embedded;
+
+  const persistedAt = nullableDateValue(seed.source.event_live_facts_persisted_at);
+  if (!persistedAt || persistedAt.getTime() < seed.sourceCheckedAt.getTime()) {
+    throw new Error('LEGACY_RELATIONAL_FACTS_NOT_PROVEN_FOR_PUBLICATION');
+  }
+
+  const [eventLiveRows, scoringRows, evidenceRows] = await Promise.all([
+    database.unsafe<LegacyEventLiveFactRow[]>(
+      `
+        SELECT event_id, element_id, minutes, goals_scored, assists, clean_sheets,
+               goals_conceded, own_goals, penalties_saved, penalties_missed,
+               yellow_cards, red_cards, saves, bonus, bps, starts,
+               expected_goals, expected_assists, expected_goal_involvements,
+               expected_goals_conceded, in_dream_team, total_points,
+               defensive_contribution
+        FROM fpl.player_gameweek_stats
+        WHERE season_id = $1 AND event_id = $2
+      `,
+      [seed.season.seasonId, seed.source.event_id],
+    ),
+    database.unsafe<LegacyScoringFactRow[]>(
+      `
+        SELECT event_id, element_id, scoring_identifier, scoring_value, points
+        FROM fpl.player_gameweek_scoring_items
+        WHERE season_id = $1 AND event_id = $2
+        ORDER BY element_id, scoring_identifier
+      `,
+      [seed.season.seasonId, seed.source.event_id],
+    ),
+    database.unsafe<LegacyFixtureEvidenceRow[]>(
+      `
+        SELECT event_id, fixture_id, element_id, minutes, starts, goals,
+               assists, own_goals, yellow_cards, red_cards
+        FROM fpl.player_fixture_stats
+        WHERE season_id = $1 AND event_id = $2
+        ORDER BY fixture_id, element_id
+      `,
+      [seed.season.seasonId, seed.source.event_id],
+    ),
+  ]);
+  assertLegacyEventLiveFacts(seed, eventLiveRows);
+  assertLegacyEvidenceMatchesEventLives(seed, evidenceRows);
+
+  const explainByElement = new Map(
+    seed.eventLives.map(
+      (eventLive) =>
+        [eventLive.elementId, emptyLegacyExplain(eventLive.eventId, eventLive.elementId)] as const,
+    ),
+  );
+  for (const row of scoringRows) {
+    const explain = explainByElement.get(row.element_id);
+    if (!explain || row.event_id !== seed.source.event_id) {
+      throw new Error('Legacy scoring item is outside the publication scope');
+    }
+    applyLegacyScoringItem(explain, row);
+  }
+  const explains = seed.eventLives.map((eventLive) => {
+    const explain = explainByElement.get(eventLive.elementId)!;
+    assertExplainValuesMatchEventLive(eventLive, explain);
+    if (explainTotalPoints(explain) !== eventLive.totalPoints) {
+      throw new Error(
+        `Legacy scoring facts disagree with publication: event=${eventLive.eventId} element=${eventLive.elementId}`,
+      );
+    }
+    return explain;
+  });
+  return {
+    explains,
+    fixtureEvidence: evidenceRows.map((row) => ({
+      eventId: row.event_id,
+      fixtureId: row.fixture_id,
+      elementId: row.element_id,
+      minutes: row.minutes,
+      starts: row.starts,
+      goals: row.goals,
+      assists: row.assists,
+      ownGoals: row.own_goals,
+      yellowCards: row.yellow_cards,
+      redCards: row.red_cards,
+    })),
+  };
+}
+
 type SqlExecutor = postgres.Sql | postgres.TransactionSql;
 
 function usage(): never {
@@ -455,6 +1097,29 @@ export function inspectPickScope(rows: readonly ExistingPickRow[]): InvalidPickS
     observedRowCount: rows.length,
     reasons: [...reasons].sort(),
   };
+}
+
+/**
+ * Return eligible finalized entry scopes that have no source pick rows at all.
+ * A missing group is different from a malformed group: it must still create a
+ * repair record so a headless manager cannot disappear from the cutover gate.
+ */
+export function findMissingPickScopes(
+  eligibleScopes: readonly EligibleEntryScope[],
+  rowGroups: readonly (readonly ExistingPickRow[])[],
+): InvalidPickScope[] {
+  const present = new Set(
+    rowGroups.filter((group) => group[0] !== undefined).map((group) => scopeKey(group[0]!)),
+  );
+  return eligibleScopes
+    .filter((scope) => !present.has(`${scope.seasonId}:${scope.entryId}:${scope.eventId}`))
+    .map((scope) => ({
+      seasonId: scope.seasonId,
+      entryId: scope.entryId,
+      eventId: scope.eventId,
+      observedRowCount: 0,
+      reasons: ['PICKS_ROWSET_MISSING'],
+    }));
 }
 
 export function buildSeedHead(rows: readonly ExistingPickRow[]): SeedHead {
@@ -848,6 +1513,31 @@ async function loadFinalizedEventIds(
   return rows.map((row) => row.event_id);
 }
 
+async function loadEligibleFinalizedEntryScopes(
+  database: postgres.Sql,
+  season: FplSeasonRef,
+  eventIds: readonly number[],
+): Promise<EligibleEntryScope[]> {
+  if (eventIds.length === 0) return [];
+  const rows = await database<EligibleEntryScope[]>`
+    SELECT
+      entry.season_id AS "seasonId",
+      entry.entry_id AS "entryId",
+      event.event_id AS "eventId"
+    FROM competition.entries entry
+    JOIN fpl.events event
+      ON event.season_id = entry.season_id
+     AND event.event_id = ANY(${eventIds})
+    WHERE entry.season_id = ${season.seasonId}
+      AND event.finished = TRUE
+      AND event.data_checked = TRUE
+      AND event.live_snapshot_finalized_at IS NOT NULL
+      AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)
+    ORDER BY event.event_id, entry.entry_id
+  `;
+  return rows;
+}
+
 async function loadExistingV2EventIds(
   database: postgres.Sql,
   season: FplSeasonRef,
@@ -1082,7 +1772,10 @@ async function checkpointSeededLive(
   seed: ValidatedLiveSeed,
   publication: Awaited<ReturnType<typeof publishLivePublicationV2>>['publication'],
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
-  payload: Pick<ValidatedLiveSeed, 'eventLives' | 'fixtures'> = seed,
+  payload: Pick<
+    ValidatedLiveSeed,
+    'eventLives' | 'fixtures' | 'explains' | 'fixtureEvidence'
+  > = seed,
 ): Promise<'checkpointed' | 'already-checkpointed' | 'blocked'> {
   // Redis metadata is not durable proof.  A rebuilt Redis can retain a
   // checkpointedAt value after the PostgreSQL checkpoint row was lost, so
@@ -1107,6 +1800,12 @@ async function checkpointSeededLive(
       return 'already-checkpointed';
     }
   }
+  if (payload.explains === undefined || payload.fixtureEvidence === undefined) {
+    // A seed must never advance liveFactsPersistedAt while leaving the
+    // explain/evidence projections at an older observation. Existing durable
+    // checkpoints were handled above; an incomplete one is a hard block.
+    return 'blocked';
+  }
   const desired = await setLiveCheckpointDesiredV2(publication, new Date(), redis);
   const checkpointed = await checkpointLivePublicationV2({
     season: seed.season,
@@ -1114,6 +1813,8 @@ async function checkpointSeededLive(
     publication,
     eventLives: payload.eventLives,
     fixtures: payload.fixtures,
+    explains: payload.explains,
+    fixtureEvidence: payload.fixtureEvidence,
   });
   if (!checkpointed) {
     // A seed candidate may lose to a newer or FINALIZED durable head. Never
@@ -1421,11 +2122,37 @@ async function main(): Promise<void> {
     const existingV2EventIds = new Set<number>();
     let requestedV2Checkpoint = false;
     if (args.seedCache) {
+      const seedSeason = explicitSeasonRef(args.season!);
+      const finalizedEventIds = args.allFinalized
+        ? await loadFinalizedEventIds(database, seedSeason)
+        : args.eventId === null
+          ? []
+          : (await loadFinalizedEventIds(database, seedSeason)).filter(
+              (eventId) => eventId === args.eventId,
+            );
+      const eligibleFinalizedEntryScopes = await loadEligibleFinalizedEntryScopes(
+        database,
+        seedSeason,
+        finalizedEventIds,
+      );
+      repairs.push(...findMissingPickScopes(eligibleFinalizedEntryScopes, rowGroups));
+
       const legacyPublications = await loadLegacyLivePublications(database, args);
       for (const legacyPublication of legacyPublications) {
         const validated = validateLegacyLiveSeed(legacyPublication);
-        if (validated.ok) cacheCandidates.push(validated.value);
-        else cacheInvalid.push(validated.value);
+        if (validated.ok) {
+          try {
+            const facts = await loadLegacyLiveFacts(database, validated.value);
+            cacheCandidates.push({ ...validated.value, ...facts });
+          } catch (error) {
+            cacheInvalid.push({
+              seasonId: validated.value.source.season_id,
+              eventId: validated.value.source.event_id,
+              publicationId: validated.value.source.publication_id,
+              reasons: [error instanceof Error ? error.message : 'LEGACY_FACTS_INVALID'],
+            });
+          }
+        } else cacheInvalid.push(validated.value);
       }
       const duplicateScopes = new Set<string>();
       for (const seed of cacheCandidates) {
@@ -1446,15 +2173,13 @@ async function main(): Promise<void> {
         );
       }
       if (args.execute && args.allFinalized) {
-        const season = explicitSeasonRef(args.season!);
-        const [finalizedEventIds, existingEventIds] = await Promise.all([
-          loadFinalizedEventIds(database, season),
-          loadExistingV2EventIds(database, season),
+        const [existingEventIds] = await Promise.all([
+          loadExistingV2EventIds(database, seedSeason),
         ]);
         const finalizedEventIdSet = new Set(finalizedEventIds);
         const blockedRepairScopes = repairs.filter(
           (repair) =>
-            repair.seasonId === season.seasonId && finalizedEventIdSet.has(repair.eventId),
+            repair.seasonId === seedSeason.seasonId && finalizedEventIdSet.has(repair.eventId),
         );
         if (blockedRepairScopes.length > 0) {
           throw new Error(
@@ -1484,6 +2209,19 @@ async function main(): Promise<void> {
         if (!requestedCandidate && !requestedV2Checkpoint) {
           throw new Error(
             `V2 cache seed refused because requested event scope ${args.eventId} has no valid legacy publication or V2 checkpoint`,
+          );
+        }
+      }
+      if (args.execute && finalizedEventIds.length > 0) {
+        const selectedFinalizedEventIds = new Set(finalizedEventIds);
+        const blockedSelectedRepairs = repairs.filter(
+          (repair) =>
+            repair.seasonId === seedSeason.seasonId &&
+            selectedFinalizedEventIds.has(repair.eventId),
+        );
+        if (blockedSelectedRepairs.length > 0 && !args.allFinalized) {
+          throw new Error(
+            `V2 cache seed refused because ${blockedSelectedRepairs.length} finalized event entry repair scope(s) remain unresolved`,
           );
         }
       }
