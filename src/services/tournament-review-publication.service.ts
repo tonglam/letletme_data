@@ -562,6 +562,54 @@ function requireFreshEntryScores(
   }
 }
 
+function battleSourceCheckedAt(match: BattleSourceRow): Date | null {
+  const explicit = asDate(match.source_checked_at);
+  if (explicit) return explicit;
+  // Local battle rows have no official source order. Older rows created
+  // before source_checked_at was written can use their durable computation
+  // timestamp; official mirrors must retain their provider checkpoint.
+  return match.source_order === null ? asDate(match.updated_at) : null;
+}
+
+export function hasCompleteTournamentReviewH2HGroupCoverage(input: {
+  eligibleEntryIds: ReadonlySet<number>;
+  entryGroupIds: ReadonlyMap<number, number>;
+  matchCountByGroup: ReadonlyMap<number, number>;
+  averageSidesByGroup: ReadonlyMap<number, number>;
+}): boolean {
+  const entryCountByGroup = new Map<number, number>();
+  for (const entryId of input.eligibleEntryIds) {
+    const groupId = input.entryGroupIds.get(entryId);
+    if (groupId === undefined) return false;
+    entryCountByGroup.set(groupId, (entryCountByGroup.get(groupId) ?? 0) + 1);
+  }
+  if (input.matchCountByGroup.size !== entryCountByGroup.size) return false;
+  return [...entryCountByGroup].every(
+    ([groupId, entryCount]) =>
+      input.matchCountByGroup.get(groupId) === Math.ceil(entryCount / 2) &&
+      (input.averageSidesByGroup.get(groupId) ?? 0) === entryCount % 2,
+  );
+}
+
+export function rankTournamentReviewH2HStandings<
+  T extends { entryId: number; matchPoints: number; pointsFor: number },
+>(rows: readonly T[]): Array<T & { rank: number }> {
+  const ordered = [...rows].sort(
+    (left, right) =>
+      right.matchPoints - left.matchPoints ||
+      right.pointsFor - left.pointsFor ||
+      left.entryId - right.entryId,
+  );
+  let previousKey: string | null = null;
+  let rank = 0;
+  return ordered.map((row, index) => {
+    const key = `${row.matchPoints}:${row.pointsFor}`;
+    if (key !== previousKey) rank = index + 1;
+    previousKey = key;
+    return { ...row, rank };
+  });
+}
+
 async function buildH2HPayload(
   tx: postgres.TransactionSql,
   seasonId: number,
@@ -614,9 +662,14 @@ async function buildH2HPayload(
   const seenCurrentEntries = new Set<number>();
   const entryGroupIds = new Map<number, number>();
   const currentEligibleIds = new Set(eligible.map((row) => row.entry_id));
-  let currentAverageSides = 0;
+  const currentMatchCountByGroup = new Map<number, number>();
+  const currentAverageSidesByGroup = new Map<number, number>();
   const sourceTimes: Array<Date | string | null> = eligible.map((row) => row.rich_synced_at);
   const matchRows = matches.map((match, index) => {
+    currentMatchCountByGroup.set(
+      match.group_id,
+      (currentMatchCountByGroup.get(match.group_id) ?? 0) + 1,
+    );
     if (
       (match.home_entry_id === null) !== match.home_is_average ||
       (match.away_entry_id === null) !== match.away_is_average ||
@@ -645,7 +698,10 @@ async function buildH2HPayload(
       [match.away_entry_id, match.away_is_average],
     ] as const) {
       if (isAverage) {
-        currentAverageSides += 1;
+        currentAverageSidesByGroup.set(
+          match.group_id,
+          (currentAverageSidesByGroup.get(match.group_id) ?? 0) + 1,
+        );
         continue;
       }
       if (entryId === null || !currentEligibleIds.has(entryId) || seenCurrentEntries.has(entryId)) {
@@ -669,12 +725,13 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError('H2H match score is incomplete');
     }
-    if (!asDate(match.source_checked_at)) {
+    const sourceCheckedAt = battleSourceCheckedAt(match);
+    if (!sourceCheckedAt) {
       throw new TournamentReviewSourceNotReadyError('H2H match source timestamp is missing');
     }
     // Keep both timestamps in the freshness span. A present but stale
     // source_checked_at must not be hidden by a newer row updated_at.
-    sourceTimes.push(match.source_checked_at, match.updated_at);
+    sourceTimes.push(sourceCheckedAt, match.updated_at);
     return {
       matchId: `${event.event_id}-${index + 1}`,
       groupId: match.group_id,
@@ -728,10 +785,14 @@ async function buildH2HPayload(
     };
   });
   if (
-    matches.length !== Math.ceil(eligible.length / 2) ||
     covered.size !== eligible.length ||
-    currentAverageSides !== eligible.length % 2 ||
-    eligible.some((row) => !covered.has(row.entry_id))
+    eligible.some((row) => !covered.has(row.entry_id)) ||
+    !hasCompleteTournamentReviewH2HGroupCoverage({
+      eligibleEntryIds: currentEligibleIds,
+      entryGroupIds,
+      matchCountByGroup: currentMatchCountByGroup,
+      averageSidesByGroup: currentAverageSidesByGroup,
+    })
   ) {
     throw new TournamentReviewSourceNotReadyError('H2H roster coverage is incomplete');
   }
@@ -790,14 +851,22 @@ async function buildH2HPayload(
     );
     const eventEligibleIds = new Set(eventEligible.map((row) => row.entry_id));
     const seenEntries = new Set<number>();
-    let averageSides = 0;
+    const eventMatchCountByGroup = new Map<number, number>();
+    const eventAverageSidesByGroup = new Map<number, number>();
     for (const match of eventMatches) {
+      eventMatchCountByGroup.set(
+        match.group_id,
+        (eventMatchCountByGroup.get(match.group_id) ?? 0) + 1,
+      );
       for (const [entryId, isAverage] of [
         [match.home_entry_id, match.home_is_average],
         [match.away_entry_id, match.away_is_average],
       ] as const) {
         if (isAverage) {
-          averageSides += 1;
+          eventAverageSidesByGroup.set(
+            match.group_id,
+            (eventAverageSidesByGroup.get(match.group_id) ?? 0) + 1,
+          );
           continue;
         }
         if (entryId === null || !eventEligibleIds.has(entryId) || seenEntries.has(entryId)) {
@@ -814,9 +883,13 @@ async function buildH2HPayload(
       }
     }
     if (
-      eventMatches.length !== Math.ceil(eventEligible.length / 2) ||
       seenEntries.size !== eventEligible.length ||
-      averageSides !== eventEligible.length % 2
+      !hasCompleteTournamentReviewH2HGroupCoverage({
+        eligibleEntryIds: eventEligibleIds,
+        entryGroupIds,
+        matchCountByGroup: eventMatchCountByGroup,
+        averageSidesByGroup: eventAverageSidesByGroup,
+      })
     ) {
       throw new TournamentReviewSourceNotReadyError(
         'H2H history participant coverage is incomplete',
@@ -863,7 +936,8 @@ async function buildH2HPayload(
     if (!historyCheckpoint || match.event_finished !== true || match.event_data_checked !== true) {
       throw new TournamentReviewSourceNotReadyError('H2H history event is not finalized');
     }
-    const historySourceDates = [match.source_checked_at, match.updated_at]
+    const historySourceCheckedAt = battleSourceCheckedAt(match);
+    const historySourceDates = [historySourceCheckedAt, match.updated_at]
       .map(asDate)
       .filter((date): date is Date => date !== null);
     if (
@@ -872,7 +946,7 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError('H2H history source rows are stale');
     }
-    if (!asDate(match.source_checked_at)) {
+    if (!historySourceCheckedAt) {
       throw new TournamentReviewSourceNotReadyError('H2H history source timestamp is missing');
     }
     if (
@@ -935,14 +1009,7 @@ async function buildH2HPayload(
   const standingRows = [...standingsByGroup.entries()]
     .sort(([leftGroupId], [rightGroupId]) => leftGroupId - rightGroupId)
     .flatMap(([, groupStandings]) =>
-      [...groupStandings.values()]
-        .sort(
-          (left, right) =>
-            right.matchPoints - left.matchPoints ||
-            right.pointsFor - left.pointsFor ||
-            left.entryId - right.entryId,
-        )
-        .map((row, index) => ({ ...row, rank: index + 1 })),
+      rankTournamentReviewH2HStandings([...groupStandings.values()]),
     );
   return {
     payload: {

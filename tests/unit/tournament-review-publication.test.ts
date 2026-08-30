@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  hasCompleteTournamentReviewH2HGroupCoverage,
+  rankTournamentReviewH2HStandings,
   resolveTournamentReviewFormat,
   tournamentReviewFailureFingerprint,
   tournamentReviewRetryDelayMs,
@@ -43,5 +45,59 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(first).toBe(tournamentReviewFailureFingerprint('SOURCE', '6953:1:5:1'));
     expect(first).not.toBe(tournamentReviewFailureFingerprint('SOURCE', '6953:1:5:2'));
+  });
+
+  test('validates H2H fixture coverage independently for every group', () => {
+    const eligibleEntryIds = new Set([1, 2, 3, 4, 5, 6]);
+    const entryGroupIds = new Map([
+      [1, 1],
+      [2, 1],
+      [3, 1],
+      [4, 2],
+      [5, 2],
+      [6, 2],
+    ]);
+    expect(
+      hasCompleteTournamentReviewH2HGroupCoverage({
+        eligibleEntryIds,
+        entryGroupIds,
+        matchCountByGroup: new Map([
+          [1, 2],
+          [2, 2],
+        ]),
+        averageSidesByGroup: new Map([
+          [1, 1],
+          [2, 1],
+        ]),
+      }),
+    ).toBe(true);
+    expect(
+      hasCompleteTournamentReviewH2HGroupCoverage({
+        eligibleEntryIds,
+        entryGroupIds,
+        matchCountByGroup: new Map([
+          [1, 2],
+          [2, 1],
+        ]),
+        averageSidesByGroup: new Map([
+          [1, 1],
+          [2, 0],
+        ]),
+      }),
+    ).toBe(false);
+  });
+
+  test('uses competition ranking for tied H2H scoring keys', () => {
+    expect(
+      rankTournamentReviewH2HStandings([
+        { entryId: 3, matchPoints: 6, pointsFor: 120 },
+        { entryId: 1, matchPoints: 6, pointsFor: 120 },
+        { entryId: 2, matchPoints: 3, pointsFor: 110 },
+      ]).map(({ entryId, rank }) => ({ entryId, rank })),
+    ).toEqual([
+      { entryId: 1, rank: 1 },
+      { entryId: 3, rank: 1 },
+      { entryId: 2, rank: 3 },
+    ]);
   });
 });
