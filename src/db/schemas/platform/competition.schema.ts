@@ -1958,9 +1958,11 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
     contentSha256: text('content_sha256').notNull(),
     payload: jsonb().notNull(),
     publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' })
-      .defaultNow()
+      .default(sql`clock_timestamp()`)
       .notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
   },
   (table) => [
     primaryKey({
@@ -2023,7 +2025,9 @@ export const tournamentReviewHeadsInCompetition = competition.table(
     revision: bigint('revision', { mode: 'number' }).notNull(),
     contentSha256: text('content_sha256').notNull(),
     publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }).notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
   },
   (table) => [
     primaryKey({
@@ -2070,8 +2074,12 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     readyRevision: bigint('ready_revision', { mode: 'number' }),
     lastErrorCode: text('last_error_code'),
     lastFailureFingerprint: text('last_failure_fingerprint'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
   },
   (table) => [
     primaryKey({
