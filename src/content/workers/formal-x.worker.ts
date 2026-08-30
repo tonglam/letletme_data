@@ -191,6 +191,11 @@ function tikhubFailureProviderEvidence(
       durationMs: Math.round(evidence.durationMs),
       responseBytes: evidence.responseBytes,
       httpStatus: evidence.httpStatus,
+      rawReturned: evidence.rawReturnedCount,
+      excludedRetweets: evidence.excludedRetweets,
+      excludedOutsideWindow: evidence.excludedOutsideWindow,
+      duplicatePosts: evidence.duplicatePosts,
+      memberMetrics: evidence.memberMetrics,
       estimatedCostUsd: evidence.estimatedCostUsd,
       pricingRevision: evidence.pricingRevision,
       providerRoute: 'TIKHUB_TIMELINE',
@@ -382,6 +387,7 @@ export async function runFormalXWorker(
           dbNow,
           policy: dependencies.xBudgetPolicy!,
           units: 1,
+          separateReservation: true,
         });
       });
       if (!budget.reserved) {

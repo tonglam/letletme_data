@@ -226,6 +226,19 @@ test('persists a TikHub timeline run with exact call accounting and no Grok foll
     .where(eq(contentAcquisitionBudgetReservations.runId, claimed.runId));
   expect(reservations.length).toBeGreaterThanOrEqual(1);
   expect(reservations.every((row) => row.status === 'COMMITTED')).toBe(true);
+  const reservationRows = await db
+    .select({
+      ledgerId: contentAcquisitionBudgetReservations.ledgerId,
+      units: contentAcquisitionBudgetReservations.units,
+    })
+    .from(contentAcquisitionBudgetReservations)
+    .where(eq(contentAcquisitionBudgetReservations.runId, claimed.runId));
+  const reservationsPerLedger = new Map<string, number>();
+  for (const row of reservationRows) {
+    reservationsPerLedger.set(row.ledgerId, (reservationsPerLedger.get(row.ledgerId) ?? 0) + 1);
+    expect(Number(row.units)).toBe(1);
+  }
+  expect([...reservationsPerLedger.values()].every((count) => count === 2)).toBe(true);
   expect(
     await db
       .select()
@@ -279,6 +292,23 @@ test('records billable TikHub page failures without creating fake empty data', a
               durationMs: 300,
               responseBytes: 8_192,
               httpStatus: 200,
+              rawReturnedCount: 0,
+              excludedRetweets: 0,
+              excludedOutsideWindow: 0,
+              duplicatePosts: 0,
+              memberMetrics: [
+                {
+                  endpointKey: 'official-fpl-x',
+                  pages: 0,
+                  rawPosts: 0,
+                  acceptedPosts: 0,
+                  excludedRetweets: 0,
+                  excludedOutsideWindow: 0,
+                  duplicatePosts: 0,
+                  boundaryComplete: false,
+                  pageCapReached: false,
+                },
+              ],
               estimatedCostUsd: 0.002,
               pricingRevision: '2026-08-30-fetch-user-post-tweet',
             },
@@ -302,6 +332,7 @@ test('records billable TikHub page failures without creating fake empty data', a
       xCallCount: contentAcquisitionRuns.xCallCount,
       checkpointAdvanced: contentAcquisitionRuns.checkpointAdvanced,
       failureClass: contentAcquisitionRuns.failureClass,
+      runMetrics: contentAcquisitionRuns.runMetrics,
     })
     .from(contentAcquisitionRuns)
     .where(eq(contentAcquisitionRuns.runId, claimed.runId));
@@ -312,6 +343,14 @@ test('records billable TikHub page failures without creating fake empty data', a
     xCallCount: 2,
     checkpointAdvanced: false,
     failureClass: 'TIKHUB_SCHEMA_INVALID',
+    runMetrics: expect.anything(),
+  });
+  expect(run?.runMetrics).toMatchObject({
+    rawReturned: 0,
+    excludedRetweets: 0,
+    excludedOutsideWindow: 0,
+    duplicatePosts: 0,
+    memberMetrics: [expect.objectContaining({ endpointKey: 'official-fpl-x', pages: 0 })],
   });
   expect(
     await db
