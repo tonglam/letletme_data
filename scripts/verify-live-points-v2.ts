@@ -170,6 +170,7 @@ async function main(): Promise<void> {
       const entryIds = args.entryId === null ? completeEntryIds : [args.entryId];
       if (entryIds.length === 0)
         throw new Error('No complete V2 entry pick head exists for this scope');
+      const requireFinalEntries = args.allFinalized;
 
       const [active, previous, checkpoint, entryResults] = await Promise.all([
         readLivePublicationV2Pointer(scope, 'active', redis),
@@ -187,6 +188,10 @@ async function main(): Promise<void> {
             failures.push('REDIS_ENTRY_INPUT_NOT_EXACTLY_15');
           if (entry && new Set(entry.input.picksBase.picks.map((pick) => pick.element)).size !== 15)
             failures.push('REDIS_ENTRY_INPUT_ELEMENTS_NOT_UNIQUE');
+          if (requireFinalEntries && entry && entry.publication.state !== 'FINAL')
+            failures.push('REDIS_ENTRY_INPUT_NOT_FINAL');
+          if (requireFinalEntries && entry && entry.input.finalResult === null)
+            failures.push('REDIS_ENTRY_FINAL_RESULT_MISSING');
           if (!head) failures.push('POSTGRES_ENTRY_PICK_HEAD_MISSING');
           if (head && (head.rowCount !== 15 || head.state !== 'COMPLETE'))
             failures.push('POSTGRES_ENTRY_PICK_HEAD_INCOMPLETE');
@@ -210,6 +215,10 @@ async function main(): Promise<void> {
 
       if (!active) globalFailures.push('REDIS_GLOBAL_CURRENT_MISSING_OR_INVALID');
       if (!checkpoint) globalFailures.push('POSTGRES_GLOBAL_CHECKPOINT_MISSING_OR_INVALID');
+      if (args.allFinalized && checkpoint && checkpoint.publication.state !== 'FINALIZED')
+        globalFailures.push('POSTGRES_GLOBAL_CHECKPOINT_NOT_FINALIZED');
+      if (args.allFinalized && active && active.publication.state !== 'FINALIZED')
+        globalFailures.push('REDIS_GLOBAL_CURRENT_NOT_FINALIZED');
       if (active && checkpoint) {
         if (checkpoint.publication.publicationId !== active.publication.publicationId)
           globalFailures.push('POSTGRES_GLOBAL_CHECKPOINT_PUBLICATION_MISMATCH');

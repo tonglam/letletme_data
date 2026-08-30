@@ -34,6 +34,13 @@ export type LivePublicationV2CheckpointRequest = {
   /** Facts captured with the same coherent FPL response. */
   readonly explains?: readonly EventLiveExplain[];
   readonly fixtureEvidence?: readonly FplPlayerFixtureEvidence[];
+  /**
+   * Fresh observation time used for the ordering fence. A recovery can
+   * re-verify an immutable FINAL publication after its original source check;
+   * the publication timestamp stays part of that identity, while this time
+   * proves the facts were observed after the current relational authority.
+   */
+  readonly observationCheckedAt?: Date | string;
 };
 
 const LIVE_PUBLICATION_STATES: readonly LivePublicationState[] = [
@@ -178,6 +185,18 @@ export async function checkpointLivePublicationV2(
 
   const checkpointedAt = new Date();
   const sourceCheckedAt = new Date(publication.sourceCheckedAt);
+  const observationCheckedAt =
+    request.observationCheckedAt instanceof Date
+      ? new Date(request.observationCheckedAt.getTime())
+      : request.observationCheckedAt === undefined
+        ? new Date(sourceCheckedAt.getTime())
+        : new Date(request.observationCheckedAt);
+  if (
+    !Number.isFinite(sourceCheckedAt.getTime()) ||
+    !Number.isFinite(observationCheckedAt.getTime())
+  ) {
+    throw new Error('Live Points V2 checkpoint source timestamp is invalid');
+  }
   const db = await getDb();
   return db
     .transaction(async (tx) => {
@@ -199,7 +218,7 @@ export async function checkpointLivePublicationV2(
         .limit(1);
       if (
         eventAuthority?.liveSnapshotCheckedAt &&
-        eventAuthority.liveSnapshotCheckedAt.getTime() > sourceCheckedAt.getTime()
+        eventAuthority.liveSnapshotCheckedAt.getTime() > observationCheckedAt.getTime()
       ) {
         // A newer Core transaction already owns the canonical fixture state.
         // Reject the older live publication as a whole; otherwise its fixture
@@ -303,8 +322,8 @@ export async function checkpointLivePublicationV2(
         .set({
           liveSnapshotCheckedAt: sql`
           GREATEST(
-            COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${sourceCheckedAt}),
-            ${sourceCheckedAt}
+            COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAt}),
+            ${observationCheckedAt}
           )
         `,
           liveFactsPersistedAt: checkpointedAt,
@@ -321,8 +340,8 @@ export async function checkpointLivePublicationV2(
             liveSnapshotFinalizedAt: sql`
             GREATEST(
               COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAt}),
-              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${sourceCheckedAt}),
-              ${sourceCheckedAt}
+              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAt}),
+              ${observationCheckedAt}
             )
           `,
             updatedAt: checkpointedAt,

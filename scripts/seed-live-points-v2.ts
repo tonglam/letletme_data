@@ -1223,6 +1223,49 @@ async function seedLivePublication(
   };
 }
 
+async function restoreExistingLiveCheckpoint(
+  season: FplSeasonRef,
+  eventId: number,
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<{
+  readonly status: 'unchanged' | 'restored';
+  readonly checkpoint: 'already-checkpointed';
+  readonly generation: number;
+  readonly publicationId: string;
+}> {
+  const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
+  if (!checkpoint) {
+    throw new Error(
+      `V2 cache seed refused because existing checkpoint ${season.seasonCode}:${eventId} is incomplete`,
+    );
+  }
+  const current = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
+  if (
+    current?.servedFrom === 'REDIS_CURRENT' &&
+    current.publication.publicationId === checkpoint.publication.publicationId &&
+    current.publication.generation === checkpoint.publication.generation
+  ) {
+    return {
+      status: 'unchanged',
+      checkpoint: 'already-checkpointed',
+      generation: checkpoint.publication.generation,
+      publicationId: checkpoint.publication.publicationId,
+    };
+  }
+  const restored = await restoreLivePublicationV2Checkpoint({ checkpoint, redis });
+  if (!restored.published) {
+    throw new Error(
+      `V2 cache seed refused because existing checkpoint ${season.seasonCode}:${eventId} could not be restored`,
+    );
+  }
+  return {
+    status: 'restored',
+    checkpoint: 'already-checkpointed',
+    generation: restored.publication.generation,
+    publicationId: restored.publication.publicationId,
+  };
+}
+
 async function readEntryGenerationFloor(
   database: postgres.Sql,
   season: FplSeasonRef,
@@ -1375,6 +1418,8 @@ async function main(): Promise<void> {
 
     const cacheCandidates: ValidatedLiveSeed[] = [];
     const cacheInvalid: InvalidLiveSeedScope[] = [];
+    const existingV2EventIds = new Set<number>();
+    let requestedV2Checkpoint = false;
     if (args.seedCache) {
       const legacyPublications = await loadLegacyLivePublications(database, args);
       for (const legacyPublication of legacyPublications) {
@@ -1402,10 +1447,11 @@ async function main(): Promise<void> {
       }
       if (args.execute && args.allFinalized) {
         const season = explicitSeasonRef(args.season!);
-        const [finalizedEventIds, existingV2EventIds] = await Promise.all([
+        const [finalizedEventIds, existingEventIds] = await Promise.all([
           loadFinalizedEventIds(database, season),
           loadExistingV2EventIds(database, season),
         ]);
+        for (const eventId of existingEventIds) existingV2EventIds.add(eventId);
         const candidateEventIds = new Set(
           cacheCandidates
             .filter((candidate) => candidate.state === 'FINALIZED')
@@ -1420,10 +1466,21 @@ async function main(): Promise<void> {
           );
         }
       }
+      if (args.execute && args.eventId !== null) {
+        requestedV2Checkpoint = await hasExistingV2LiveCheckpoint(database, args);
+        const requestedCandidate = cacheCandidates.some(
+          (candidate) => candidate.source.event_id === args.eventId,
+        );
+        if (!requestedCandidate && !requestedV2Checkpoint) {
+          throw new Error(
+            `V2 cache seed refused because requested event scope ${args.eventId} has no valid legacy publication or V2 checkpoint`,
+          );
+        }
+      }
       if (
         args.execute &&
         cacheCandidates.length === 0 &&
-        !(await hasExistingV2LiveCheckpoint(database, args))
+        !(requestedV2Checkpoint || (await hasExistingV2LiveCheckpoint(database, args)))
       ) {
         throw new Error(
           'V2 cache seed refused because no complete legacy live publication was found',
@@ -1442,35 +1499,41 @@ async function main(): Promise<void> {
     if (args.seedCache && args.execute) {
       const redis = await redisSingleton.getClient();
       try {
-        for (const seed of cacheCandidates) {
-          const globalResult = await seedLivePublication(seed, redis);
+        const seedByEventId = new Map(
+          cacheCandidates.map((seed) => [seed.source.event_id, seed] as const),
+        );
+        const eventIdsToSeed = new Set(cacheCandidates.map((seed) => seed.source.event_id));
+        for (const eventId of existingV2EventIds) eventIdsToSeed.add(eventId);
+        if (args.eventId !== null && requestedV2Checkpoint) eventIdsToSeed.add(args.eventId);
+        const defaultSeason = explicitSeasonRef(args.season!);
+        for (const eventId of [...eventIdsToSeed].sort((left, right) => left - right)) {
+          const seed = seedByEventId.get(eventId);
+          const seedSeason = seed?.season ?? defaultSeason;
+          const globalResult = seed
+            ? await seedLivePublication(seed, redis)
+            : await restoreExistingLiveCheckpoint(seedSeason, eventId, redis);
           cacheResults.push({
-            season: seed.season.seasonCode,
-            eventId: seed.source.event_id,
+            season: seedSeason.seasonCode,
+            eventId,
             ...globalResult,
           });
 
-          const previousTotals = await loadPreviousTotals(
-            database,
-            seed.season,
-            seed.source.event_id,
-          );
+          const previousTotals = await loadPreviousTotals(database, seedSeason, eventId);
           const previousTotalsByEntry = new Map(
             previousTotals.map((row) => [row.entry_id, row] as const),
           );
-          const finalResults = await loadFinalResults(database, seed.season, seed.source.event_id);
+          const finalResults = await loadFinalResults(database, seedSeason, eventId);
           const finalResultsByEntry = new Map(
             finalResults.map((row) => [row.entry_id, row] as const),
           );
           const eventGroups = rowGroups.filter(
             (group) =>
-              group[0]?.season_id === seed.source.season_id &&
-              group[0]?.event_id === seed.source.event_id,
+              group[0]?.season_id === seedSeason.seasonId && group[0]?.event_id === eventId,
           );
           for (const group of eventGroups) {
             if (inspectPickScope(group)) continue;
             const entryResult = await seedEntryInput(
-              seed.season,
+              seedSeason,
               group,
               previousTotalsByEntry.get(group[0]!.entry_id) ?? null,
               finalResultsByEntry.get(group[0]!.entry_id) ?? null,
@@ -1478,8 +1541,8 @@ async function main(): Promise<void> {
               redis,
             );
             entryResults.push({
-              season: seed.season.seasonCode,
-              eventId: seed.source.event_id,
+              season: seedSeason.seasonCode,
+              eventId,
               ...entryResult,
             });
           }

@@ -60,6 +60,7 @@ export interface LiveSnapshotV2Dependencies {
     readonly fixtureEvidence?: ReadonlyArray<
       PreparedLiveSnapshot['eventLives']['fixtureEvidence'][number]
     >;
+    readonly observationCheckedAt?: Date | string;
   }) => Promise<boolean>;
 }
 
@@ -170,6 +171,7 @@ async function checkpoint(
   },
   publication: LivePublicationRead['publication'],
   desired: Awaited<ReturnType<typeof setLiveCheckpointDesiredV2>> | null,
+  observationCheckedAt?: Date | string,
 ): Promise<boolean> {
   try {
     const checkpointed = await dependencies.checkpointPublication({
@@ -180,6 +182,7 @@ async function checkpoint(
       fixtures: payload.fixtures,
       explains: payload.explains,
       fixtureEvidence: payload.fixtureEvidence,
+      observationCheckedAt,
     });
     if (!checkpointed) return false;
     const marked = await markLivePublicationCheckpointedV2(publication, new Date());
@@ -437,6 +440,11 @@ export async function syncLiveSnapshotV2(
     }
 
     const desired = await ensureFinalRecoveryDesired(season, eventId, current.publication);
+    // The immutable FINAL keeps its original publication source timestamp,
+    // but the coherent recovery fetch is a new observation. Carry that
+    // observation through the relational ordering fence so a later core
+    // heartbeat cannot permanently reject recovery of the same facts.
+    const observationCheckedAt = new Date();
     const checkpointed = await checkpoint(
       dependencies,
       season,
@@ -449,6 +457,7 @@ export async function syncLiveSnapshotV2(
       },
       current.publication,
       desired,
+      observationCheckedAt,
     );
     return {
       eventId,
