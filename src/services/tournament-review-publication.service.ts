@@ -69,6 +69,7 @@ type EventRow = {
   finished: boolean;
   data_checked: boolean;
   data_checked_at: Date | string | null;
+  updated_at: Date | string;
 };
 
 export class TournamentReviewSourceNotReadyError extends Error {
@@ -1359,7 +1360,7 @@ async function loadReviewContext(
     LIMIT 1
   `;
   const events = await tx<EventRow[]>`
-    SELECT event_id, name AS event_name, finished, data_checked, data_checked_at
+    SELECT event_id, name AS event_name, finished, data_checked, data_checked_at, updated_at
     FROM fpl.events
     WHERE season_id = ${seasonId} AND event_id = ${eventId}
     LIMIT 1
@@ -1416,7 +1417,7 @@ async function publishTournamentReviewScopeOnce(
         : format === 'H2H'
           ? await buildH2HPayload(tx, season.seasonId, tournament, event, header)
           : await buildKnockoutPayload(tx, season.seasonId, tournament, event, header);
-    const freshness = sourceSpan([eventDataCheckedAt, ...built.sourceTimes]);
+    const freshness = sourceSpan([eventDataCheckedAt, event.updated_at, ...built.sourceTimes]);
     const payload = {
       ...built.payload,
       freshness: {
@@ -1638,12 +1639,26 @@ export async function reconcileTournamentReviewObligations(
              candidate.event_updated_at,
              candidate.format,
              candidate.base_eligible_at,
-             existing.eligible_at AS existing_eligible_at
+             existing.eligible_at AS existing_eligible_at,
+             previous.payload AS existing_payload
       FROM candidate_formats candidate
       LEFT JOIN competition.tournament_review_obligations existing
         ON existing.season_id = ${season.seasonId}
        AND existing.tournament_id = candidate.tournament_id
        AND existing.event_id = candidate.event_id
+      LEFT JOIN LATERAL (
+        SELECT publication.payload
+        FROM competition.tournament_review_heads head
+        JOIN competition.tournament_review_publications publication
+          ON publication.season_id = head.season_id
+         AND publication.tournament_id = head.tournament_id
+         AND publication.event_id = head.event_id
+         AND publication.revision = head.revision
+        WHERE head.season_id = ${season.seasonId}
+          AND head.tournament_id = candidate.tournament_id
+          AND head.event_id = candidate.event_id
+        LIMIT 1
+      ) previous ON true
     ), candidates AS (
       SELECT state.tournament_id,
              state.event_id,
@@ -1670,25 +1685,60 @@ export async function reconcileTournamentReviewObligations(
               state.existing_eligible_at,
               '-infinity'::timestamptz
             )
+            AND (
+              state.existing_eligible_at IS NULL
+              OR (
+                state.existing_payload IS NOT NULL
+                AND state.format = 'POINTS'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(
+                    COALESCE(state.existing_payload->'points'->'rows', '[]'::jsonb)
+                  ) payload_row
+                  WHERE (payload_row->>'entryId')::integer = entry.entry_id
+                    AND payload_row->>'entryName' IS NOT DISTINCT FROM entry.entry_name
+                    AND payload_row->>'playerName' IS NOT DISTINCT FROM entry.player_name
+                    AND (payload_row->>'applicable')::boolean IS NOT DISTINCT FROM (
+                      entry.started_event IS NULL OR entry.started_event <= state.event_id
+                    )
+                )
+              )
+              OR (
+                state.existing_payload IS NOT NULL
+                AND state.format = 'H2H'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(
+                    COALESCE(state.existing_payload->'h2h'->'standings', '[]'::jsonb)
+                  ) payload_row
+                  WHERE (payload_row->>'entryId')::integer = entry.entry_id
+                    AND payload_row->>'entryName' IS NOT DISTINCT FROM entry.entry_name
+                )
+              )
+              OR (
+                state.existing_payload IS NOT NULL
+                AND state.format = 'KNOCKOUT'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(
+                    COALESCE(state.existing_payload->'knockout'->'matches', '[]'::jsonb)
+                  ) match_row
+                  CROSS JOIN LATERAL jsonb_array_elements(
+                    jsonb_build_array(match_row->'home', match_row->'away')
+                  ) side
+                  WHERE (side->>'entryId')::integer = entry.entry_id
+                    AND side->>'entryName' IS NOT DISTINCT FROM entry.entry_name
+                )
+              )
+            )
           UNION ALL
           SELECT state.event_updated_at AS source_updated_at
           WHERE state.event_updated_at > COALESCE(
               state.existing_eligible_at,
               '-infinity'::timestamptz
             )
-            AND (
-              SELECT publication.payload #>> '{event,name}'
-              FROM competition.tournament_review_heads head
-              JOIN competition.tournament_review_publications publication
-                ON publication.season_id = head.season_id
-               AND publication.tournament_id = head.tournament_id
-               AND publication.event_id = head.event_id
-               AND publication.revision = head.revision
-              WHERE head.season_id = ${season.seasonId}
-                AND head.tournament_id = state.tournament_id
-                AND head.event_id = state.event_id
-              LIMIT 1
-            ) IS DISTINCT FROM state.event_name
+            AND state.existing_payload IS NOT NULL
+            AND state.existing_payload #>> '{event,name}' IS DISTINCT FROM state.event_name
           UNION ALL
           SELECT GREATEST(
                    result.updated_at,
