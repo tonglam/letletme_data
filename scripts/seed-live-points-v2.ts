@@ -834,6 +834,7 @@ function assertLegacyEvidenceMatchesEventLives(
   const elementIds = new Set(seed.eventLives.map((eventLive) => eventLive.elementId));
   const fixtureIds = new Set(seed.fixtures.map((fixture) => fixture.id));
   const identities = new Set<string>();
+  const elementsWithStartEvidence = new Set<number>();
   const totals = new Map<
     number,
     {
@@ -875,6 +876,7 @@ function assertLegacyEvidenceMatchesEventLives(
     total.yellowCards += row.yellow_cards;
     total.redCards += row.red_cards;
     total.starts += row.starts ?? 0;
+    if (row.starts !== null) elementsWithStartEvidence.add(row.element_id);
     totals.set(row.element_id, total);
   }
   for (const eventLive of seed.eventLives) {
@@ -903,7 +905,15 @@ function assertLegacyEvidenceMatchesEventLives(
         `Legacy fixture evidence disagrees with publication: event=${eventLive.eventId} element=${eventLive.elementId} field=${mismatch[0]}`,
       );
     }
-    if (eventLive.starts === true && total.starts < 1) {
+    // The historical fixture evidence relation legitimately contains NULL for
+    // starts. The event-live row is the authoritative start flag; only enforce
+    // fixture-level start coverage when that element actually has a non-null
+    // starts marker in the evidence relation.
+    if (
+      eventLive.starts === true &&
+      elementsWithStartEvidence.has(eventLive.elementId) &&
+      total.starts < 1
+    ) {
       throw new Error(
         `Legacy fixture evidence has no start marker: event=${eventLive.eventId} element=${eventLive.elementId}`,
       );
@@ -938,7 +948,11 @@ async function loadLegacyLiveFacts(
   if (embedded) return embedded;
 
   const persistedAt = nullableDateValue(seed.source.event_live_facts_persisted_at);
-  if (!persistedAt || persistedAt.getTime() < seed.sourceCheckedAt.getTime()) {
+  // The publication may be read after the facts transaction commits. The
+  // complete row/value checks below bind the relational facts to this exact
+  // event publication; reject only a fact marker from the future, which cannot
+  // prove the publication's historical state.
+  if (!persistedAt || persistedAt.getTime() > seed.sourceCheckedAt.getTime()) {
     throw embeddedError ?? new Error('LEGACY_RELATIONAL_FACTS_NOT_PROVEN_FOR_PUBLICATION');
   }
 
