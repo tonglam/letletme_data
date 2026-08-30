@@ -35,6 +35,7 @@ import {
 } from '../src/services/live-publication-v2-checkpoint.service';
 import { checkpointEntryLiveInputV2 } from '../src/services/entries.service';
 import { canonicalJson, contentHash, postgresJsonbContentHash } from '../src/utils/content-hash';
+import { assertRuntimeDatabaseTarget } from './runtime-login-contract';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../src/types';
 
 type TimestampValue = Date | string;
@@ -91,6 +92,47 @@ export type SeedArguments = {
   readonly season: string | null;
   readonly eventId: number | null;
 };
+
+type SeedDatabaseEnvironment = {
+  readonly DATABASE_URL?: string;
+  /** Direct/session URL used only by the one-shot seed's raw SQL connection. */
+  readonly LIVE_POINTS_V2_SEED_DATABASE_URL?: string;
+};
+
+/**
+ * Cutover runs with two database roles. Raw seed reads and head writes require
+ * the explicit direct/session URL, while checkpoint services must keep using
+ * the runtime DATABASE_URL so their least-privilege role contract remains
+ * active. Local dry-runs may still use DATABASE_URL as their sole connection.
+ */
+export function resolveLivePointsV2SeedDatabaseUrl(
+  environment: SeedDatabaseEnvironment = {
+    DATABASE_URL: process.env.DATABASE_URL,
+    LIVE_POINTS_V2_SEED_DATABASE_URL: process.env.LIVE_POINTS_V2_SEED_DATABASE_URL,
+  },
+  options: { readonly requireExplicitSeedUrl?: boolean } = {},
+): string {
+  const explicitSeedDatabaseUrl = environment.LIVE_POINTS_V2_SEED_DATABASE_URL?.trim();
+  if (options.requireExplicitSeedUrl && !explicitSeedDatabaseUrl) {
+    throw new Error('LIVE_POINTS_V2_SEED_DATABASE_URL is required for destructive execution');
+  }
+  const databaseUrl = explicitSeedDatabaseUrl || environment.DATABASE_URL?.trim();
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL or LIVE_POINTS_V2_SEED_DATABASE_URL is required');
+  }
+  return databaseUrl;
+}
+
+export function assertLivePointsV2SeedDatabaseTarget(
+  seedDatabaseUrl: string,
+  runtimeDatabaseUrl: string,
+): void {
+  assertRuntimeDatabaseTarget(
+    runtimeDatabaseUrl,
+    seedDatabaseUrl,
+    'LIVE_POINTS_V2_SEED_DATABASE_URL',
+  );
+}
 
 type LegacyLivePublicationRow = {
   publication_id: string;
@@ -2293,13 +2335,21 @@ async function seedEntryInput(
 
 async function main(): Promise<void> {
   const args = parseSeedArguments(process.argv.slice(2));
-  const databaseUrl = process.env.DATABASE_URL?.trim();
-  if (!databaseUrl) throw new Error('DATABASE_URL is required');
-  if (isTransactionPoolerConnection(databaseUrl)) {
-    throw new Error('V2 seed requires direct PostgreSQL or a session-mode pooler connection');
-  }
   if (args.execute && process.env.LIVE_POINTS_SEED_CONFIRM !== 'YES') {
     throw new Error('seed writes refused: set LIVE_POINTS_SEED_CONFIRM=YES for this exact command');
+  }
+  const databaseUrl = resolveLivePointsV2SeedDatabaseUrl(undefined, {
+    requireExplicitSeedUrl: args.execute,
+  });
+  const runtimeDatabaseUrl = process.env.DATABASE_URL?.trim();
+  if (args.execute && !runtimeDatabaseUrl) {
+    throw new Error('DATABASE_URL is required for destructive V2 seed checkpoint services');
+  }
+  if (runtimeDatabaseUrl) {
+    assertLivePointsV2SeedDatabaseTarget(databaseUrl, runtimeDatabaseUrl);
+  }
+  if (isTransactionPoolerConnection(databaseUrl)) {
+    throw new Error('V2 seed requires direct PostgreSQL or a session-mode pooler connection');
   }
 
   const database = postgres(databaseUrl, { max: 1, prepare: false });

@@ -2,12 +2,14 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertLegacyEvidenceMatchesEventLives,
+  assertLivePointsV2SeedDatabaseTarget,
   buildSeedHead,
   buildSeedInput,
   findMissingPickScopes,
   isNoOpLegacyFixtureEvidence,
   inspectPickScope,
   parseSeedArguments,
+  resolveLivePointsV2SeedDatabaseUrl,
   type ExistingPickRow,
   type FinalResultSeedRow,
   type LegacyFixtureEvidenceRow,
@@ -34,6 +36,48 @@ function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
 }
 
 describe('Live Points V2 entry-pick seed', () => {
+  test('keeps the direct seed connection separate from the runtime connection', () => {
+    expect(
+      resolveLivePointsV2SeedDatabaseUrl({
+        DATABASE_URL: 'postgresql://runtime',
+        LIVE_POINTS_V2_SEED_DATABASE_URL: 'postgresql://migration',
+      }),
+    ).toBe('postgresql://migration');
+    expect(resolveLivePointsV2SeedDatabaseUrl({ DATABASE_URL: 'postgresql://runtime' })).toBe(
+      'postgresql://runtime',
+    );
+    expect(() => resolveLivePointsV2SeedDatabaseUrl({})).toThrow(
+      'DATABASE_URL or LIVE_POINTS_V2_SEED_DATABASE_URL is required',
+    );
+  });
+
+  test('requires an explicit seed connection for destructive execution', () => {
+    expect(() =>
+      resolveLivePointsV2SeedDatabaseUrl(
+        { DATABASE_URL: 'postgresql://runtime' },
+        { requireExplicitSeedUrl: true },
+      ),
+    ).toThrow('LIVE_POINTS_V2_SEED_DATABASE_URL is required for destructive execution');
+  });
+
+  test('rejects a seed connection that targets a different database project', () => {
+    expect(() =>
+      assertLivePointsV2SeedDatabaseTarget(
+        'postgresql://postgres@db.other-project.supabase.co:5432/postgres',
+        'postgresql://letletme_data_runtime@db.current-project.supabase.co:5432/postgres',
+      ),
+    ).toThrow('LIVE_POINTS_V2_SEED_DATABASE_URL must target the same PostgreSQL project');
+  });
+
+  test('accepts direct seed and runtime pooler URLs for the same database project', () => {
+    expect(() =>
+      assertLivePointsV2SeedDatabaseTarget(
+        'postgresql://postgres@db.current-project.supabase.co:5432/postgres',
+        'postgresql://letletme_data_runtime.current-project@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres',
+      ),
+    ).not.toThrow();
+  });
+
   test('recognises only zero-contribution out-of-scope fixture rows as no-op evidence', () => {
     const noOp: LegacyFixtureEvidenceRow = {
       event_id: 2,

@@ -469,17 +469,18 @@ jobs:
             # direct/session PostgreSQL URL. The migration env is the only
             # deploy-time source guaranteed to be direct/session (the runtime
             # URL may be a transaction pooler), so pass that URL explicitly to
-            # the one-shot cutover container.
+            # the one-shot cutover container. Keep DATABASE_URL from
+            # .env.deploy so checkpoint services use the least-privilege
+            # runtime role instead of the migration owner role.
             v2_seed_database_url="$migration_database_url"
             LIVE_POINTS_SEED_CONFIRM=YES \
               APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
-              -e "DATABASE_URL=$v2_seed_database_url" \
+              -e "LIVE_POINTS_V2_SEED_DATABASE_URL=$v2_seed_database_url" \
               -e LIVE_POINTS_SEED_CONFIRM=YES \
               api bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
-              -e "DATABASE_URL=$v2_seed_database_url" \
               api bun run verify:live-points-v2 -- \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
