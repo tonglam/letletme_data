@@ -19,15 +19,12 @@ export const LIVE_SNAPSHOT_SCHEDULES = {
 } as const;
 
 /**
- * One coordinated one-minute job replaces four independently racing live jobs.
+ * One coordinated 30-second job replaces four independently racing live jobs.
  * The job fetches event-live and fixtures concurrently, derives every live view
  * from that same pair, and publishes the Redis revision atomically. The larger
- * event-live/explain DB write is enabled every ten minutes only.
+ * event-live/explain DB write is coalesced to at most once every ten minutes.
  */
-export async function runLiveSnapshot(
-  now = new Date(),
-  persistEventLives = false,
-): Promise<unknown | null> {
+export async function runLiveSnapshot(now = new Date()): Promise<unknown | null> {
   const season = await seasonRepository.findCurrent();
   if (!(await isFPLSeason(season, now))) {
     logDebug('Skipping live snapshot - not FPL season', { month: now.getMonth() + 1 });
@@ -47,14 +44,12 @@ export async function runLiveSnapshot(
   }
 
   const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
-    persistEventLives,
     now,
   });
   if (job) {
     logInfo('Live snapshot job enqueued', {
       jobId: job.id,
       eventId: currentEvent.id,
-      persistEventLives,
     });
   }
   return job;
@@ -73,7 +68,6 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
   if (!resultSlot) return null;
 
   const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cascade', {
-    persistEventLives: true,
     // Provisional slots are useful for recovery, but the worker must not be
     // asked to publish a final event checkpoint until FPL marks data checked.
     finalizeEvent: resultSlot.startsWith('final-'),

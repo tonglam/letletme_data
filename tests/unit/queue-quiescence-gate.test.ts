@@ -41,7 +41,6 @@ describe('queue quiescence gate', () => {
       'entry-sync',
       'league-sync',
       'live-data',
-      'manager-live',
       'tournament-sync',
       'tournament-setup',
       'understat-player-sync',
@@ -60,7 +59,7 @@ describe('queue quiescence gate', () => {
       'content-media-transcript',
       'content-x-scan',
     ]);
-    expect(new Set(allQueueNames).size).toBe(24);
+    expect(new Set(allQueueNames).size).toBe(23);
   });
 
   test('accepts a fully settled hard-cut boundary', () => {
@@ -89,23 +88,6 @@ describe('queue quiescence gate', () => {
     expect(() =>
       assertQueueQuiescence({ ...accepted(), unsettledCascadeIds: ['2627-1-123'] }),
     ).toThrow('incomplete');
-  });
-
-  test('allows resumable manager refreshes but still rejects active manager work', () => {
-    expect(() =>
-      assertQueueQuiescence({
-        ...accepted(),
-        runnableQueues: {
-          'manager-live': { waiting: 2, delayed: 1, prioritized: 1, active: 0 },
-        },
-      }),
-    ).not.toThrow();
-    expect(() =>
-      assertQueueQuiescence({
-        ...accepted(),
-        runnableQueues: { 'manager-live': { waiting: 1, active: 1 } },
-      }),
-    ).toThrow('runnable jobs');
   });
 
   test('allows durable delayed jobs but still rejects executing normal-queue work', () => {

@@ -40,19 +40,20 @@ flowchart LR
 Production uses seven long-lived services from one immutable image: `api`,
 `worker`, `scheduler`, `live-picks-worker`, `official-h2h-worker`,
 `content-worker`, and `media-worker`. The standalone scheduler owns durable
-cadence and obligations; API-side cron registrations are compatibility triggers
-only. The worker consumes the core, entry, live, league, tournament, Understat,
-maintenance, and content delivery lanes. An API-only deployment can enqueue
-work but cannot complete it.
+cadence and obligations. Live Points V2 has one scheduler and queue contract;
+there is no legacy live timer path. The worker consumes the core, entry, live,
+league, tournament, Understat, maintenance, and content delivery lanes. An
+API-only deployment can enqueue work but cannot complete it.
 
 The canonical queue inventory contains 24 names (21 core plus three content)
 and lives in [`src/queues/names.ts`](src/queues/names.ts). `GET /jobs` is
-generated from the scheduler registry and compatibility aliases; `GET /jobs/status`
+generated from the scheduler registry and explicit manual adapters; `GET /jobs/status`
 is protected operational evidence.
 
-PostgreSQL is authoritative. Redis is disposable acceleration state. A failed
-FPL request or validation error fails the sync without replacing the last
-accepted canonical state.
+PostgreSQL is the durable checkpoint and cold fallback. Redis V2 current and
+previous are the live serving state. A failed FPL request, validation error, or
+PostgreSQL checkpoint cannot replace or remove the last accepted complete
+publication.
 
 Understat is deliberately PostgreSQL-only at the business-data layer. Its workers use the queue
 Redis endpoint only for BullMQ, host-wide FPL admission, and short-lived request permits;
@@ -187,14 +188,16 @@ The API listens on `http://localhost:3000` by default.
 ## Health and readiness
 
 ```bash
-curl http://localhost:3000/health
-curl http://localhost:3000/ready
+curl http://localhost:3000/health/live
+curl http://localhost:3000/health/ready
+curl http://localhost:3000/health/deploy
 ```
 
-- `/health` checks API process liveness.
-- `/ready` requires PostgreSQL, both Redis endpoints, and exactly one valid
-  `fpl.seasons.is_current` row. Cache publication completeness is monitored
-  separately and does not become season authority.
+- `/health/live` checks process liveness.
+- `/health/ready` is capability readiness: Redis-hot Live Points reads remain
+  available while PostgreSQL is degraded.
+- `/health/deploy` is the strict Redis, PostgreSQL, release identity, and worker
+  heartbeat gate.
 
 To rebuild a missing core publication, trigger the complete core snapshot. Do
 not create Redis manifests manually:
@@ -208,12 +211,14 @@ The header is required when `ENABLE_AUTH=true` and may be omitted in an
 explicitly unauthenticated local environment.
 
 For a release-quality local check, run `bun run coverage:critical`. It writes
-the unit LCOV profile to `coverage/lcov.info` and enforces thresholds only for
-the production Manager Live result/Classic-refresh, My FPL invalidation,
-publication-delivery, scheduler-obligation, tournament-management, and
-runtime-lifecycle implementations. Pure helpers cannot substitute for those
-service gates. The repository-wide percentage is informational; disposable
-database and Redis behavior remains covered by the explicit integration suites.
+the unit LCOV profile to `coverage/lcov.info` and enforces thresholds for the
+production My FPL invalidation, publication-delivery, scheduler-obligation,
+tournament-management, and runtime-lifecycle implementations. The Live
+Points V2 Redis Lua CAS, immutable current/previous publication, and
+PostgreSQL checkpoint paths are intentionally verified by the disposable
+integration suite because the unit job is network-isolated. Pure helpers
+cannot substitute for those service gates. The repository-wide percentage is
+informational; run the explicit integration suite before a release.
 
 ## Manual core-season bootstrap
 
@@ -253,6 +258,7 @@ in the [API cheat sheet](docs/api-cheat-sheet.md).
 | `bun run coverage` | Run unit tests with coverage |
 | `bun run db:migrate` | Apply canonical SQL migrations |
 | `bun run db:migrate:status` | Verify the canonical migration ledger and checksums |
+| `bun run db:cutover-seed-live-points-v2` | Dry-run the Live Points V2 DB/head seed; add `--cache --season YYYY` for the legacy-to-V2 Redis cutover seed |
 
 Integration tests refuse production-like database or Redis targets. See
 [tests/README.md](tests/README.md) for the required isolated setup.

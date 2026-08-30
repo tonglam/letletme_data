@@ -1,9 +1,5 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
-import {
-  shouldCascadePersistedLiveSnapshot,
-  shouldSkipQueuedLiveSnapshot,
-} from '../domain/live-snapshot';
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
   LIVE_JOBS,
@@ -11,15 +7,13 @@ import {
   liveDataQueue,
   liveDataQueueName,
 } from '../queues/live-data.queue';
-import {
-  enqueueFinalLeagueResultsAfterLiveSync,
-  isLiveMatchWindowForEvent,
-} from '../services/live-data-cascade.service';
-import { syncLiveSnapshot } from '../services/live-snapshot.service';
+import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-cascade.service';
+import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
+import { recordFreshnessObservation } from '../services/data-governance.service';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import {
   completeSchedulerObligation,
@@ -39,7 +33,7 @@ import {
  *
  * Processes live data sync jobs:
  * - live-snapshot: coherent upstream fetch + atomic Redis publication (30-sec)
- * - optional durable event-live persistence and the final-results cascade
+ * - asynchronous V2 PostgreSQL checkpointing and the final-results cascade
  */
 async function processLiveDataJob(job: Job<LiveDataJobData>) {
   if (
@@ -69,33 +63,41 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
       throw new Error(`Unknown job name: ${job.name}`);
     }
-    const persistEventLives = job.data.persistEventLives ?? false;
-    if (source === 'cron') {
-      const windowOpen = await isLiveMatchWindowForEvent(season, eventId);
-      if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
-        logInfo('Skipping cache-only live snapshot job - not match time', {
-          season: season.seasonCode,
-          eventId,
-        });
-        return;
-      }
-    }
-    const snapshot = await syncLiveSnapshot(season, eventId, {
-      persistEventLives,
+    const snapshot = await syncLiveSnapshotV2(season, eventId, {
       finalizeEvent: job.data.finalizeEvent === true,
       trigger: source,
-      mutationScopes: ['data-core:fixtures', `live-snapshot:event:${eventId}`],
       sourceRunId: job.data.runId,
-      freshnessWindowId: job.data.freshnessWindowId,
     });
-    // A failed downstream enqueue causes BullMQ to retry this parent after the
-    // canonical live write has already committed. On that retry the unchanged
-    // snapshot path correctly reports `persistedEventLives: false`; the durable
-    // job intent still makes the idempotent cascade eligible.
-    if (
-      shouldCascadePersistedLiveSnapshot(snapshot) ||
-      (job.attemptsMade > 0 && persistEventLives)
-    ) {
+    if (job.data.freshnessWindowId !== undefined && snapshot.publicationId !== null) {
+      const sourceCheckedAt = snapshot.sourceCheckedAt ? new Date(snapshot.sourceCheckedAt) : null;
+      if (sourceCheckedAt && Number.isFinite(sourceCheckedAt.getTime())) {
+        try {
+          await recordFreshnessObservation({
+            windowId: job.data.freshnessWindowId,
+            sourceCheckedAt,
+            redisSeenAt: new Date(),
+            producerRevision: `${snapshot.publicationId}:${snapshot.generation ?? 0}`,
+            redisRevision: `${snapshot.publicationId}:${snapshot.generation ?? 0}`,
+            completenessStatus: 'COMPLETE',
+          });
+        } catch (error) {
+          // Freshness telemetry is additive. The Redis publication and the
+          // scheduler completion remain authoritative when the governance DB
+          // is temporarily unavailable.
+          logError('Live snapshot freshness evidence update failed', error, {
+            eventId,
+            windowId: job.data.freshnessWindowId,
+            publicationId: snapshot.publicationId,
+          });
+        }
+      }
+    }
+    if (snapshot.state === 'FINALIZED') {
+      if (!snapshot.checkpointed) {
+        throw new Error(
+          `Finalized live publication is not durably checkpointed for event ${eventId}`,
+        );
+      }
       await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
     }
     return snapshot;
@@ -129,6 +131,9 @@ export function createLiveDataWorker(): WorkerRuntime {
         queue: liveDataQueueName,
         jobName: job.name,
         eventId: job.data.eventId,
+        ...(job.data.freshnessWindowId === undefined
+          ? {}
+          : { freshnessWindowId: job.data.freshnessWindowId }),
       };
       const completion =
         fence.kind === 'complete'

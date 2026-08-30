@@ -21,16 +21,14 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
     '/sync/:eventId',
     async ({ params, set }) => {
       const season = await seasonRepository.findCurrent();
-      const job = await enqueueLiveSnapshot(season, params.eventId, 'manual', {
-        persistEventLives: true,
-      });
+      const job = await enqueueLiveSnapshot(season, params.eventId, 'manual', {});
       if (!job) {
-        throw new Error('Failed to enqueue event live DB sync job');
+        throw new Error('Failed to enqueue Live Points V2 snapshot job');
       }
       set.status = 202;
       return {
         success: true,
-        message: `Persistent live snapshot job enqueued for event ${params.eventId}`,
+        message: `Redis-first live snapshot refresh enqueued; PostgreSQL checkpoint is asynchronous for event ${params.eventId}`,
         jobId: job.id,
         eventId: params.eventId,
       };

@@ -18,6 +18,14 @@ const LEAGUE_ID = 991_801;
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
   await sql`
+    DELETE FROM competition.entry_event_pick_heads
+    WHERE season_id = ${SEASON_ID} AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
+  `;
+  await sql`
+    DELETE FROM competition.entry_event_pick_repairs
+    WHERE season_id = ${SEASON_ID} AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
+  `;
+  await sql`
     DELETE FROM competition.tournaments
     WHERE tournament_id = ${TOURNAMENT_ID}
   `;

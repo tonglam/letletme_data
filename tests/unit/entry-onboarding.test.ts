@@ -27,7 +27,7 @@ const activePublication = (
   scoreSource: kind === 'FINAL' ? 'FPL_FINAL_RESULT' : 'FPL_EVENT_LIVE',
   livePublicationId: kind === 'FINAL' ? null : '00000000-0000-4000-8000-000000000001',
   liveRevision: kind === 'FINAL' ? null : '8',
-  algorithmVersion: kind === 'FINAL' ? null : 'fpl-projected-autosubs-v1',
+  algorithmVersion: kind === 'FINAL' ? null : 'live-points-v2-algorithm-1',
   sourceMinCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
   sourceMaxCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
   overrideActor: null,

@@ -25,6 +25,8 @@ jobs:
       packages: write
     env:
       REGISTRY: ghcr.io
+      LIVE_POINTS_V2_SEED_SEASON: ${{ vars.LIVE_POINTS_V2_SEED_SEASON }}
+      LIVE_POINTS_V2_SEED_EVENT_ID: ${{ vars.LIVE_POINTS_V2_SEED_EVENT_ID }}
     steps:
       - name: Resolve protected main and CI gate
         id: target
@@ -106,6 +108,8 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          LIVE_POINTS_V2_SEED_SEASON: ${{ vars.LIVE_POINTS_V2_SEED_SEASON }}
+          LIVE_POINTS_V2_SEED_EVENT_ID: ${{ vars.LIVE_POINTS_V2_SEED_EVENT_ID }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
@@ -116,7 +120,7 @@ jobs:
           # leave the SSH command enough time for preflight, migration, and
           # rollback/recovery if readiness never converges.
           timeout: 20m
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,LIVE_POINTS_V2_SEED_SEASON,LIVE_POINTS_V2_SEED_EVENT_ID
           script: |
             set -euo pipefail
             old_image=""
@@ -310,6 +314,21 @@ jobs:
               echo "deploy preflight: DATABASE_URL missing from $migration_env_file"
               exit 1
             fi
+            if [ -z "${LIVE_POINTS_V2_SEED_SEASON:-}" ]; then
+              LIVE_POINTS_V2_SEED_SEASON=$(read_env_setting LIVE_POINTS_V2_SEED_SEASON "$env_file")
+            fi
+            if [ -z "${LIVE_POINTS_V2_SEED_EVENT_ID:-}" ]; then
+              LIVE_POINTS_V2_SEED_EVENT_ID=$(read_env_setting LIVE_POINTS_V2_SEED_EVENT_ID "$env_file")
+            fi
+            if ! [[ "${LIVE_POINTS_V2_SEED_SEASON:-}" =~ ^[0-9]{4}$ ]]; then
+              echo 'deploy preflight: LIVE_POINTS_V2_SEED_SEASON must be YYYY' >&2
+              exit 1
+            fi
+            if ! [[ "${LIVE_POINTS_V2_SEED_EVENT_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+              echo 'deploy preflight: LIVE_POINTS_V2_SEED_EVENT_ID must be a positive integer' >&2
+              exit 1
+            fi
+            export LIVE_POINTS_V2_SEED_SEASON LIVE_POINTS_V2_SEED_EVENT_ID
 
             old_container=$(docker compose ps -aq api | head -n 1)
             old_image=""
@@ -444,6 +463,27 @@ jobs:
             start_stage roleVerify
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
               bun run db:verify-runtime-logins
+            finish_stage
+            start_stage v2Seed
+            # The cutover seed needs the runtime Redis credentials and a
+            # direct/session PostgreSQL URL. The migration env is the only
+            # deploy-time source guaranteed to be direct/session (the runtime
+            # URL may be a transaction pooler), so pass that URL explicitly to
+            # the one-shot cutover container.
+            v2_seed_database_url="$migration_database_url"
+            LIVE_POINTS_SEED_CONFIRM=YES \
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+              -e "DATABASE_URL=$v2_seed_database_url" \
+              -e LIVE_POINTS_SEED_CONFIRM=YES \
+              api bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
+              --season "$LIVE_POINTS_V2_SEED_SEASON" \
+              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+              -e "DATABASE_URL=$v2_seed_database_url" \
+              api bun run verify:live-points-v2 -- \
+              --season "$LIVE_POINTS_V2_SEED_SEASON" \
+              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
+              --all-finalized
             finish_stage
             start_stage cachePublish
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \

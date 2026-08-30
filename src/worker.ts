@@ -3,7 +3,6 @@ import { createFplCriticalSyncWorker } from './workers/fpl-critical-sync.worker'
 import { createFplPriceWatchWorker } from './workers/fpl-price-watch.worker';
 import { createEntrySyncWorker } from './workers/entry-sync.worker';
 import { createLiveDataWorker } from './workers/live-data.worker';
-import { createManagerLiveWorker } from './workers/manager-live.worker';
 import { createLeagueSyncWorker } from './workers/league-sync.worker';
 import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
 import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
@@ -40,7 +39,6 @@ const runtimes: WorkerRuntime[] = [
   createFplPriceWatchWorker(),
   createEntrySyncWorker(),
   createLiveDataWorker(),
-  createManagerLiveWorker(),
   createLeagueSyncWorker(),
   createTournamentSyncWorker(),
   createTournamentSetupWorker(),

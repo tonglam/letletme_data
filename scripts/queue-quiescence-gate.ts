@@ -25,19 +25,11 @@ export function runnableJobCount(counts: RunnableQueueCounts): number {
 
 export function blockingRunnableJobCount(queueName: string, counts: RunnableQueueCounts): number {
   const delayed = counts.delayed ?? 0;
-  if (queueName !== 'manager-live') {
-    // Delayed jobs are durable scheduled/retry records.  They are not being
-    // executed at the hard-cut boundary and BullMQ will resume them after the
-    // new worker starts, so they must not make deployment impossible merely
-    // because a scheduler has already placed its next tick in Redis.
-    return Math.max(0, runnableJobCount(counts) - delayed);
-  }
-  // Manager-live jobs are versioned, idempotent cache/checkpoint refreshes.
-  // Waiting/delayed/prioritized work may safely survive a hard cut and resume
-  // on the new worker; active or structurally paused/parented work must still
-  // settle before migration. This keeps the queue visible to the gate without
-  // making a six-hour hot scope permanently block every deployment.
-  return (counts.active ?? 0) + (counts.paused ?? 0) + (counts['waiting-children'] ?? 0);
+  // Delayed jobs are durable scheduled/retry records. They are not executed
+  // at the hard-cut boundary and resume only after the V2 worker starts.
+  // Waiting, active, paused, prioritized, and parent-owned work must drain;
+  // this prevents an old producer from crossing the migration boundary.
+  return Math.max(0, runnableJobCount(counts) - delayed);
 }
 
 /**

@@ -17,7 +17,6 @@ import {
   isEntryPicksPayloadForEvent,
   resolveScoringCaptainPick,
 } from '../domain/entry-picks';
-import { eventLiveRepository } from '../repositories/event-lives';
 import { eventRepository } from '../repositories/events';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { EventLive } from '../domain/event-lives';
@@ -38,10 +37,10 @@ import { findEventEligibleEntryIds } from '../domain/entry-infos';
 import { latestFreshnessTimestamp } from '../domain/freshness';
 import {
   eventLiveAuthorityCheckedAt,
-  eventLiveHeartbeatIsFresh,
   eventLivePicksAreFresh,
   loadFreshEventLiveAuthoritySnapshot,
-} from './event-live-manager-scores.service';
+} from './event-live-v2-score.service';
+import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
 
 export { latestFreshnessTimestamp } from '../domain/freshness';
 export { findEventEligibleEntryIds } from '../domain/entry-infos';
@@ -358,10 +357,8 @@ export function leagueEventLiveInputsAreFresh(
   picksCheckedAt: string,
   nowMs = Date.now(),
 ): boolean {
-  return (
-    eventLiveHeartbeatIsFresh(liveCheckedAt, nowMs) &&
-    eventLivePicksAreFresh(picksCheckedAt, liveCheckedAt)
-  );
+  void nowMs;
+  return eventLivePicksAreFresh(picksCheckedAt, liveCheckedAt);
 }
 
 export function findMissingLeagueResultSourceCheckpoints(
@@ -462,6 +459,19 @@ export async function syncLeagueEventResultsByTournament(
       failedUnits: 0,
     };
   }
+  const finalCheckpoint = finalizationCutoff
+    ? await readLivePublicationV2Checkpoint(season, eventId)
+    : null;
+  if (finalizationCutoff && finalCheckpoint?.publication.state !== 'FINALIZED') {
+    const summary = summarizeMissingLeagueEventLiveData(tournamentId, eventId, entryIds.length, 0);
+    throw new IncompleteDataSyncError(
+      'League final results require a FINALIZED Live Points V2 checkpoint',
+      summary.requiredUnits,
+      summary.reusedUnits,
+      summary.succeededUnits,
+      summary.failedUnits,
+    );
+  }
   // Active rows are ordered by their paired official source timestamp, not by
   // the database-clock token captured before the source reads. Rebuild them on
   // every scheduled attempt; the guarded upsert will retain a concurrently
@@ -498,7 +508,7 @@ export async function syncLeagueEventResultsByTournament(
     ? null
     : await loadFreshEventLiveAuthoritySnapshot(season, eventId);
   const eventLives = finalizationCutoff
-    ? await eventLiveRepository.findFinalizedByEventId(season, eventId)
+    ? (finalCheckpoint?.eventLives ?? [])
     : (eventLiveAuthority?.eventLives ?? []);
   const activeEventLiveCheckedAt = eventLiveAuthority
     ? eventLiveAuthorityCheckedAt(eventLiveAuthority)
@@ -668,10 +678,7 @@ export async function syncLeagueEventResultsByTournament(
     });
   }
 
-  if (
-    !finalizationCutoff &&
-    (!activeEventLiveCheckedAt || !eventLiveHeartbeatIsFresh(activeEventLiveCheckedAt))
-  ) {
+  if (!finalizationCutoff && !activeEventLiveCheckedAt) {
     const summary = summarizeMissingLeagueEventLiveData(
       tournamentId,
       eventId,
@@ -679,7 +686,7 @@ export async function syncLeagueEventResultsByTournament(
       reusedEntryIds.length,
     );
     throw new IncompleteDataSyncError(
-      'League event results require a fresh official event-live heartbeat',
+      'League event results require a complete same-event event-live publication',
       summary.requiredUnits,
       summary.reusedUnits,
       summary.succeededUnits,

@@ -1,19 +1,19 @@
-import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
+import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
 import type { EventLiveExplain } from '../domain/event-live-explains';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { FplPlayerFixtureEvidence } from '../domain/fpl-player-fixture-stats';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
-import { createEventLiveRepository, eventLiveRepository } from '../repositories/event-lives';
+import { createEventLiveRepository } from '../repositories/event-lives';
 import { createFplPlayerFixtureStatsRepository } from '../repositories/fpl-player-fixture-stats';
-import { syncOperationsRepository } from '../repositories/sync-operations';
 import { transformEventLiveExplains } from '../transformers/event-live-explains';
 import { attachEventLiveFixtureBreakdowns } from '../transformers/event-live-fixture-breakdown';
 import { transformEventLives } from '../transformers/event-lives';
 import { transformFplPlayerFixtureEvidence } from '../transformers/fpl-player-fixture-stats';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
+import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
 
 import type { RawFPLEventLiveElement } from '../types';
 
@@ -122,34 +122,30 @@ export async function getEventLivesByEventId(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<EventLive[]> {
+  let redisError: unknown = null;
   try {
-    const cached = await readLiveSnapshotCache(season.seasonCode, eventId);
+    const cached = await readLivePublicationV2({ season: season.seasonCode, eventId });
     if (cached) {
-      logDebug('Event lives retrieved from coherent live publication', {
+      logDebug('Event lives retrieved from Live Points V2 publication', {
         eventId,
         count: cached.eventLives.length,
       });
       return [...cached.eventLives];
     }
-
-    logDebug('Event lives cache miss - fetching from database', { eventId });
-    const durablePublication = await syncOperationsRepository.findActiveLiveEventLives(
-      season,
-      eventId,
-    );
-    if (durablePublication) {
-      logDebug('Event lives retrieved from durable publication item', {
-        eventId,
-        count: durablePublication.length,
-      });
-      return [...durablePublication];
-    }
-    const dbEventLives = await eventLiveRepository.findByEventId(season, eventId);
-
-    logDebug('Event lives retrieved from database', { eventId, count: dbEventLives.length });
-    return dbEventLives;
   } catch (error) {
-    logError('Failed to get event live data', error, { eventId });
-    throw error;
+    redisError = error;
+    logDebug('Live Points V2 Redis read unavailable; trying complete checkpoint', { eventId });
   }
+  const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
+  if (checkpoint) {
+    logDebug('Event lives retrieved from V2 PostgreSQL checkpoint', {
+      eventId,
+      count: checkpoint.eventLives.length,
+      redisError: redisError ? 'UNAVAILABLE' : undefined,
+    });
+    return [...checkpoint.eventLives];
+  }
+  throw redisError instanceof Error
+    ? redisError
+    : new Error(`No complete Live Points V2 publication for event ${eventId}`);
 }

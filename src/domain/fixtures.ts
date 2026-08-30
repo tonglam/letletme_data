@@ -167,6 +167,33 @@ export function validateFixtures(fixtures: unknown[]): Fixture[] {
   return fixtures.map(validateFixture);
 }
 
+function reviveFixtureDate(value: unknown): unknown {
+  if (value === null || value instanceof Date || typeof value !== 'string') return value;
+  return new Date(value);
+}
+
+/**
+ * Validate fixtures read from JSON/JSONB storage. JSON serialization turns
+ * the three date-bearing fields into strings, while the domain contract
+ * intentionally exposes real Date values to repositories and writers.
+ */
+export function validateSerializedFixtures(fixtures: unknown[]): Fixture[] {
+  return validateFixtures(
+    fixtures.map((fixture) => {
+      if (fixture === null || typeof fixture !== 'object' || Array.isArray(fixture)) {
+        return fixture;
+      }
+      const record = fixture as Record<string, unknown>;
+      return {
+        ...record,
+        kickoffTime: reviveFixtureDate(record.kickoffTime),
+        createdAt: reviveFixtureDate(record.createdAt),
+        updatedAt: reviveFixtureDate(record.updatedAt),
+      };
+    }),
+  );
+}
+
 export function validateRawFPLFixture(rawFixture: unknown): RawFPLFixture {
   return RawFPLFixtureSchema.parse(rawFixture);
 }
