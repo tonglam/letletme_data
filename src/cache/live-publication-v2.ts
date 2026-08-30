@@ -590,10 +590,11 @@ end
 if candidate.contractVersion ~= 'live-points-v2' or not candidate.items then return {'invalid_candidate'} end
 if current_scope_mismatch then return {'scope_mismatch'} end
 local same_identity = current_generation ~= nil and current_generation == candidate.generation and current_publication_id == candidate.publicationId
--- A durable FINAL checkpoint is allowed to repair an absent/corrupt active
--- pointer even when Redis has allocated a higher provisional generation. A
--- valid FINAL active publication remains immutable and still wins.
-local restoring_final = candidate.state == 'FINALIZED' and (current_state ~= 'FINALIZED' or current == nil)
+-- A PostgreSQL durable FINAL checkpoint is the canonical recovery proof.  A
+-- conflicting Redis FINAL may be a stale/rebuilt pointer, so an explicit
+-- restore is allowed to replace it.  Normal producer promotions still keep a
+-- valid FINAL active publication immutable.
+local restoring_final = candidate.state == 'FINALIZED' and restoring
 if current_generation and not restoring_final then
   if current_generation > candidate.generation or (current_generation == candidate.generation and not same_identity) then return {'stale', current_raw} end
 end

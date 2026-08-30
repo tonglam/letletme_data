@@ -43,7 +43,7 @@ The `Deploy` workflow:
 7. applies the migration chain and verifies its checksums/status;
 8. verifies the database ownership and login contract;
 9. rebuilds the active FPL core publication from PostgreSQL;
-10. starts all seven services and verifies `/health`, `/ready`, and the six
+10. starts all seven services and verifies `/health/live`, `/health/ready`, and the six
     worker/scheduler runtime heartbeats.
 
 Failure before migration starts restores the prior image. Once a destructive migration commits,
@@ -111,7 +111,7 @@ docker compose run --rm -T migration bun run db:migration-contract
 docker compose run --rm -T migration bun run db:verify-runtime-logins
 ```
 
-`/health` proves process liveness. `/ready` also requires PostgreSQL, cache Redis, queue Redis, and
+`/health/live` proves process liveness. `/health/ready` also requires PostgreSQL, cache Redis, queue Redis, and
 exactly one current `fpl.seasons` row. Publication integrity is verified independently by the deploy
 workflow and the season-readiness procedure in
 [docs/fpl-season-readiness.md](docs/fpl-season-readiness.md).

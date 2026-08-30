@@ -10,6 +10,7 @@ import {
   setLiveCheckpointDesiredV2,
   touchLivePublicationV2,
   type LivePublicationRead,
+  type LivePublicationV2,
   type LivePublicationState,
 } from '../cache/live-publication-v2';
 import {
@@ -22,9 +23,11 @@ import {
   checkpointLivePublicationV2,
   readLivePublicationV2Checkpoint,
 } from './live-publication-v2-checkpoint.service';
+import { syncLiveMatchPublicationsV2 } from './live-match-publication-v2.service';
 import { fixtureRepository } from '../repositories/fixtures';
 import { logError, logInfo } from '../utils/logger';
 import { canonicalJson } from '../utils/content-hash';
+import { CacheError } from '../utils/errors';
 
 const SCORE_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
@@ -198,13 +201,15 @@ export async function syncLiveSnapshotV2(
   if (!Number.isSafeInteger(eventId) || eventId <= 0)
     throw new Error(`Invalid live event ID: ${eventId}`);
   const dependencies = options.dependencies ?? defaultDependencies;
-  const [liveResponse, rawFixtures, expectedFixtureIds, referenceData, current] = await Promise.all([
-    dependencies.getEventLive(eventId),
-    dependencies.getFixtures(eventId),
-    dependencies.getExpectedFixtureIds(season, eventId),
-    dependencies.getReferenceData(season),
-    dependencies.readPublished(season.seasonCode, eventId),
-  ]);
+  const [liveResponse, rawFixtures, expectedFixtureIds, referenceData, current] = await Promise.all(
+    [
+      dependencies.getEventLive(eventId),
+      dependencies.getFixtures(eventId),
+      dependencies.getExpectedFixtureIds(season, eventId),
+      dependencies.getReferenceData(season),
+      dependencies.readPublished(season.seasonCode, eventId),
+    ],
+  );
   const prepared = prepareCoherentLiveSnapshot(
     eventId,
     liveResponse,
@@ -218,6 +223,30 @@ export async function syncLiveSnapshotV2(
   // would make a slow/partially failed observation look fresher than it is.
   const sourceCheckedAt = new Date();
   const state = publicationState(prepared, options.finalizeEvent === true);
+  const publishMatches = async (globalPublication: LivePublicationV2): Promise<void> => {
+    try {
+      await syncLiveMatchPublicationsV2({
+        season,
+        eventId,
+        fixtures: rawFixtures,
+        eventLive: liveResponse,
+        referenceData,
+        globalPublication,
+        finalizeEvent: options.finalizeEvent === true,
+        expectedNextCheckAt: options.expectedNextCheckAt ?? null,
+        sourceCheckedAt,
+      });
+    } catch (error) {
+      // Match desk/detail are a separate read surface. A valid global
+      // publication remains available when this optional projection fails;
+      // the next exact-event observation retries it from the same source.
+      logError('Live Matches V2 projection failed', error, {
+        season: season.seasonCode,
+        eventId,
+        globalGeneration: globalPublication.generation,
+      });
+    }
+  };
   // Redis is the serving authority, but a rebuilt Redis sequence must not be
   // allowed to fence an older durable checkpoint forever. A provisional Redis
   // publication must also compare against the durable floor: a finalized DB
@@ -260,6 +289,16 @@ export async function syncLiveSnapshotV2(
     const restored = await restoreLivePublicationV2Checkpoint({
       checkpoint: durableFloor!,
     });
+    if (
+      !restored.published &&
+      (restored.publication.publicationId !== durableFloor!.publication.publicationId ||
+        restored.publication.generation !== durableFloor!.publication.generation)
+    ) {
+      throw new CacheError(
+        `Live Points V2 durable FINAL restore lost its CAS race for ${season.seasonCode}:${eventId}`,
+        'LIVE_V2_CHECKPOINT_RESTORE_FAILED',
+      );
+    }
     logInfo('Restored durable FINALIZED Live Points V2 publication', {
       season: season.seasonCode,
       eventId,
@@ -294,6 +333,7 @@ export async function syncLiveSnapshotV2(
       options.expectedNextCheckAt ?? null,
     );
     const publication = touched ?? current.publication;
+    await publishMatches(publication);
     let desired = await readLiveCheckpointDesiredV2({
       season: season.seasonCode,
       eventId,
@@ -369,6 +409,7 @@ export async function syncLiveSnapshotV2(
       checkpointed: promoted.publication.checkpointedAt !== null,
     };
   }
+  await publishMatches(promoted.publication);
   let desired = await readLiveCheckpointDesiredV2({
     season: season.seasonCode,
     eventId,

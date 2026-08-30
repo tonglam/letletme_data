@@ -365,8 +365,13 @@ async function loadEventLiveScoreBatch(
       activeChip: row.activeChip,
     })) satisfies EventLiveManagerPick[];
     const firstScoringEvent = Math.max(1, startedByEntry.get(entryId) ?? 1);
+    const previousTotals = inputRead.input.previousTotals;
     const previousTotal =
-      inputRead.input.previousTotals?.totalPoints ?? (eventId === firstScoringEvent ? 0 : null);
+      eventId === firstScoringEvent
+        ? 0
+        : previousTotals?.throughEventId === eventId - 1
+          ? previousTotals.totalPoints
+          : null;
     const previousEntryResults = previousResultEvidence.filter(
       (result) =>
         result.entryId === entryId &&

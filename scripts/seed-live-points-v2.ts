@@ -1065,7 +1065,33 @@ async function checkpointSeededLive(
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
   payload: Pick<ValidatedLiveSeed, 'eventLives' | 'fixtures'> = seed,
 ): Promise<'checkpointed' | 'already-checkpointed' | 'blocked'> {
-  if (publication.checkpointedAt !== null) return 'already-checkpointed';
+  // Redis metadata is not durable proof.  A rebuilt Redis can retain a
+  // checkpointedAt value after the PostgreSQL checkpoint row was lost, so
+  // verify the durable identity before declaring an existing publication
+  // repaired.  If PostgreSQL has a different durable winner, restore that
+  // exact publication instead of silently accepting the conflicting Redis
+  // pointer.
+  const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
+  if (publication.checkpointedAt !== null) {
+    if (
+      durable &&
+      durable.publication.publicationId === publication.publicationId &&
+      durable.publication.generation === publication.generation
+    ) {
+      return 'already-checkpointed';
+    }
+    if (durable) {
+      const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: durable, redis });
+      if (
+        !restored.published &&
+        (restored.publication.publicationId !== durable.publication.publicationId ||
+          restored.publication.generation !== durable.publication.generation)
+      ) {
+        return 'blocked';
+      }
+      return 'already-checkpointed';
+    }
+  }
   const desired = await setLiveCheckpointDesiredV2(publication, new Date(), redis);
   const checkpointed = await checkpointLivePublicationV2({
     season: seed.season,
@@ -1078,13 +1104,13 @@ async function checkpointSeededLive(
     // A seed candidate may lose to a newer or FINALIZED durable head. Never
     // mark that rejected candidate durable; restore the accepted checkpoint so
     // the seed cannot leave Redis serving an older publication.
-    const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
-    if (!durable) return 'blocked';
-    const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: durable, redis });
+    const winner = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
+    if (!winner) return 'blocked';
+    const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: winner, redis });
     if (
       !restored.published &&
-      (restored.publication.publicationId !== durable.publication.publicationId ||
-        restored.publication.generation !== durable.publication.generation)
+      (restored.publication.publicationId !== winner.publication.publicationId ||
+        restored.publication.generation !== winner.publication.generation)
     ) {
       return 'blocked';
     }
@@ -1449,6 +1475,47 @@ async function main(): Promise<void> {
               eventId: seed.source.event_id,
               ...entryResult,
             });
+          }
+        }
+        const blockedGlobalResults = cacheResults.filter(
+          (result) =>
+            result.checkpoint !== 'checkpointed' && result.checkpoint !== 'already-checkpointed',
+        );
+        const blockedEntryResults = entryResults.filter(
+          (result) =>
+            result.checkpoint !== 'checkpointed' && result.checkpoint !== 'already-checkpointed',
+        );
+        if (blockedGlobalResults.length > 0 || blockedEntryResults.length > 0) {
+          throw new Error(
+            `V2 cache seed refused because ${blockedGlobalResults.length} global and ${blockedEntryResults.length} entry checkpoint result(s) did not converge`,
+          );
+        }
+        if (args.allFinalized) {
+          const season = explicitSeasonRef(args.season!);
+          const finalizedEventIds = await loadFinalizedEventIds(database, season);
+          const unavailableEventIds: number[] = [];
+          for (const eventId of finalizedEventIds) {
+            const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
+            const active = await readLivePublicationV2(
+              { season: season.seasonCode, eventId },
+              redis,
+            );
+            if (
+              !checkpoint ||
+              checkpoint.publication.state !== 'FINALIZED' ||
+              !active ||
+              active.servedFrom !== 'REDIS_CURRENT' ||
+              active.publication.state !== 'FINALIZED' ||
+              active.publication.publicationId !== checkpoint.publication.publicationId ||
+              active.publication.generation !== checkpoint.publication.generation
+            ) {
+              unavailableEventIds.push(eventId);
+            }
+          }
+          if (unavailableEventIds.length > 0) {
+            throw new Error(
+              `V2 cache seed refused because finalized scopes are not durably served: ${unavailableEventIds.join(',')}`,
+            );
           }
         }
       } finally {
