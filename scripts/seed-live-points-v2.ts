@@ -182,7 +182,7 @@ type LegacyScoringFactRow = {
   points: number;
 };
 
-type LegacyFixtureEvidenceRow = {
+export type LegacyFixtureEvidenceRow = {
   event_id: number;
   fixture_id: number;
   element_id: number;
@@ -989,6 +989,12 @@ function assertLegacyFixtureAttribution(
   for (const row of rows) {
     const fixture = breakdownByFixture.get(row.fixture_id);
     if (!fixture) {
+      // player_fixture_stats keeps zero-contribution rows for every fixture in
+      // a double gameweek, even when the publication only carries fixtures
+      // where the player has evidence. They cannot change the published
+      // explain values and are safe to ignore; any non-zero row must still be
+      // attributable to this exact publication.
+      if (isNoOpLegacyFixtureEvidence(row)) continue;
       throw new Error(
         `Legacy fixture evidence cannot be attributed to publication: event=${eventLive.eventId} fixture=${row.fixture_id} element=${eventLive.elementId}`,
       );
@@ -1027,6 +1033,18 @@ function assertLegacyFixtureAttribution(
       );
     }
   }
+}
+
+export function isNoOpLegacyFixtureEvidence(row: LegacyFixtureEvidenceRow): boolean {
+  return (
+    row.minutes === 0 &&
+    (row.starts === null || row.starts === 0) &&
+    row.goals === 0 &&
+    row.assists === 0 &&
+    row.own_goals === 0 &&
+    row.yellow_cards === 0 &&
+    row.red_cards === 0
+  );
 }
 
 function breakdownValue(fixture: EventLiveFixtureBreakdown, identifier: string): number | null {

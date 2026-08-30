@@ -4,10 +4,12 @@ import {
   buildSeedHead,
   buildSeedInput,
   findMissingPickScopes,
+  isNoOpLegacyFixtureEvidence,
   inspectPickScope,
   parseSeedArguments,
   type ExistingPickRow,
   type FinalResultSeedRow,
+  type LegacyFixtureEvidenceRow,
   type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
 
@@ -31,6 +33,25 @@ function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
 }
 
 describe('Live Points V2 entry-pick seed', () => {
+  test('recognises only zero-contribution out-of-scope fixture rows as no-op evidence', () => {
+    const noOp: LegacyFixtureEvidenceRow = {
+      event_id: 2,
+      fixture_id: 20,
+      element_id: 28,
+      minutes: 0,
+      starts: null,
+      goals: 0,
+      assists: 0,
+      own_goals: 0,
+      yellow_cards: 0,
+      red_cards: 0,
+    };
+    expect(isNoOpLegacyFixtureEvidence(noOp)).toBe(true);
+    expect(isNoOpLegacyFixtureEvidence({ ...noOp, starts: 1 })).toBe(false);
+    expect(isNoOpLegacyFixtureEvidence({ ...noOp, minutes: 1 })).toBe(false);
+    expect(isNoOpLegacyFixtureEvidence({ ...noOp, goals: 1 })).toBe(false);
+  });
+
   test('creates a deterministic complete head for exactly 15 valid rows', () => {
     const head = buildSeedHead(rows());
     expect(head).toMatchObject({
