@@ -152,8 +152,17 @@ async function resolveEventPointsPayload(
         })),
       };
     }
+    throw new IncompleteDataSyncError(
+      `Final event-live V2 checkpoint is missing for event ${eventId}; wait for final repair`,
+      1,
+      0,
+      0,
+      1,
+    );
   } else {
-    const cached = await readLivePublicationV2({ season: season.seasonCode, eventId });
+    const cached = await readLivePublicationV2({ season: season.seasonCode, eventId }).catch(
+      () => null,
+    );
     if (cached && cached.eventLives.length > 0) {
       return {
         elements: cached.eventLives.map((row) => ({
