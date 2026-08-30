@@ -114,6 +114,11 @@ export type TikHubXFailureEvidence = Readonly<{
   durationMs: number;
   responseBytes: number;
   httpStatus: number | null;
+  rawReturnedCount: number;
+  excludedRetweets: number;
+  excludedOutsideWindow: number;
+  duplicatePosts: number;
+  memberMetrics: readonly TikHubXMemberMetrics[];
   estimatedCostUsd: number;
   pricingRevision: string;
 }>;
@@ -142,6 +147,21 @@ type AttemptEvidence = {
   providerUnits: number;
   responseBytes: number;
   httpStatus: number | null;
+  rawReturnedCount: number;
+  excludedRetweets: number;
+  excludedOutsideWindow: number;
+  duplicatePosts: number;
+  memberMetrics: Array<{
+    endpointKey: string;
+    pages: number;
+    rawPosts: number;
+    acceptedPosts: number;
+    excludedRetweets: number;
+    excludedOutsideWindow: number;
+    duplicatePosts: number;
+    boundaryComplete: boolean;
+    pageCapReached: boolean;
+  }>;
 };
 
 function aggregateHash(values: readonly string[]): string {
@@ -162,6 +182,11 @@ function failureEvidence(attempt: AttemptEvidence): TikHubXFailureEvidence | nul
     durationMs: Date.now() - attempt.startedAt,
     responseBytes: attempt.responseBytes,
     httpStatus: attempt.httpStatus,
+    rawReturnedCount: attempt.rawReturnedCount,
+    excludedRetweets: attempt.excludedRetweets,
+    excludedOutsideWindow: attempt.excludedOutsideWindow,
+    duplicatePosts: attempt.duplicatePosts,
+    memberMetrics: attempt.memberMetrics.map((member) => ({ ...member })),
     estimatedCostUsd: attempt.providerUnits * OBSERVED_UNIT_PRICE_USD,
     pricingRevision: OBSERVED_PRICING_REVISION,
   };
@@ -382,6 +407,11 @@ export class TikHubXTimelineClient {
       providerUnits: 0,
       responseBytes: 0,
       httpStatus: null,
+      rawReturnedCount: 0,
+      excludedRetweets: 0,
+      excludedOutsideWindow: 0,
+      duplicatePosts: 0,
+      memberMetrics: [],
     };
     if (
       hooks.runDeadlineAtMs !== undefined &&
@@ -399,27 +429,27 @@ export class TikHubXTimelineClient {
     const windowStart = Date.parse(request.windowStart);
     const windowEnd = Date.parse(request.windowEnd);
     const uniquePosts = new Map<string, GrokBuildXPostV1>();
-    const memberMetrics: TikHubXMemberMetrics[] = [];
-    let rawReturnedCount = 0;
-    let excludedRetweets = 0;
-    let excludedOutsideWindow = 0;
-    let duplicatePosts = 0;
+    const memberMetrics = attempt.memberMetrics;
 
     try {
       for (const member of request.partition.members) {
         const identity = memberRequest(member);
+        const memberMetric = {
+          endpointKey: member.endpointKey,
+          pages: 0,
+          rawPosts: 0,
+          acceptedPosts: 0,
+          excludedRetweets: 0,
+          excludedOutsideWindow: 0,
+          duplicatePosts: 0,
+          boundaryComplete: false,
+          pageCapReached: false,
+        };
+        memberMetrics.push(memberMetric);
         let cursor: string | null = null;
         const seenCursors = new Set<string>();
-        let pages = 0;
-        let memberRawPosts = 0;
-        let memberAcceptedPosts = 0;
-        let memberRetweets = 0;
-        let memberOutside = 0;
-        let memberDuplicates = 0;
-        let boundaryComplete = false;
-        let pageCapReached = false;
 
-        while (pages < this.maximumPagesPerMember) {
+        while (memberMetric.pages < this.maximumPagesPerMember) {
           if (Date.now() >= runDeadlineAt) {
             throw new TikHubXTimelineError(
               'TIKHUB_RUN_TIMEOUT',
@@ -455,6 +485,7 @@ export class TikHubXTimelineClient {
             throw error;
           }
           attempt.providerUnits += 1;
+          attempt.httpStatus = null;
           const controller = new AbortController();
           const runDeadlineLimitsCall = remainingRunMs <= this.timeoutMs;
           const timeoutFailure = runDeadlineLimitsCall
@@ -544,7 +575,7 @@ export class TikHubXTimelineClient {
               'TikHub timeline response user does not match the persisted endpoint',
             );
           }
-          pages += 1;
+          memberMetric.pages += 1;
           const pageTimes: number[] = [];
           for (const rawPost of parsed.data.data.timeline) {
             const post = timelinePostSchema.safeParse(rawPost);
@@ -556,8 +587,8 @@ export class TikHubXTimelineClient {
             }
             const createdAtMs = timestamp(post.data.created_at);
             pageTimes.push(createdAtMs);
-            rawReturnedCount += 1;
-            memberRawPosts += 1;
+            attempt.rawReturnedCount += 1;
+            memberMetric.rawPosts += 1;
             if (
               post.data.author.screen_name.toLowerCase() !== identity.handle.toLowerCase() ||
               post.data.author.rest_id !== responseUser.rest_id
@@ -568,13 +599,13 @@ export class TikHubXTimelineClient {
               );
             }
             if (isRetweet(post.data.retweeted_tweet)) {
-              excludedRetweets += 1;
-              memberRetweets += 1;
+              attempt.excludedRetweets += 1;
+              memberMetric.excludedRetweets += 1;
               continue;
             }
             if (createdAtMs < windowStart || createdAtMs > windowEnd) {
-              excludedOutsideWindow += 1;
-              memberOutside += 1;
+              attempt.excludedOutsideWindow += 1;
+              memberMetric.excludedOutsideWindow += 1;
               continue;
             }
             const normalizedPost: GrokBuildXPostV1 = {
@@ -592,17 +623,17 @@ export class TikHubXTimelineClient {
                   'TikHub timeline returned conflicting facts for one post ID',
                 );
               }
-              duplicatePosts += 1;
-              memberDuplicates += 1;
+              attempt.duplicatePosts += 1;
+              memberMetric.duplicatePosts += 1;
               continue;
             }
             uniquePosts.set(normalizedPost.postId, normalizedPost);
-            memberAcceptedPosts += 1;
+            memberMetric.acceptedPosts += 1;
           }
           const pageNewest = pageTimes.length > 0 ? Math.max(...pageTimes) : null;
           cursor = parsed.data.data.next_cursor?.trim() || null;
           if (!cursor) {
-            boundaryComplete = true;
+            memberMetric.boundaryComplete = true;
             break;
           }
           if (seenCursors.has(cursor)) {
@@ -618,22 +649,11 @@ export class TikHubXTimelineClient {
           // is older. This may spend one extra page, but cannot stop early on
           // a pinned or otherwise out-of-order item.
           if (pageNewest !== null && pageNewest < windowStart) {
-            boundaryComplete = true;
+            memberMetric.boundaryComplete = true;
             break;
           }
         }
-        if (!boundaryComplete) pageCapReached = true;
-        memberMetrics.push({
-          endpointKey: member.endpointKey,
-          pages,
-          rawPosts: memberRawPosts,
-          acceptedPosts: memberAcceptedPosts,
-          excludedRetweets: memberRetweets,
-          excludedOutsideWindow: memberOutside,
-          duplicatePosts: memberDuplicates,
-          boundaryComplete,
-          pageCapReached,
-        });
+        if (!memberMetric.boundaryComplete) memberMetric.pageCapReached = true;
       }
     } catch (error) {
       throw withEvidence(error, attempt);
@@ -649,12 +669,12 @@ export class TikHubXTimelineClient {
       providerJobIdHash: aggregateHash(attempt.requestIdHashes),
       durationMs: Date.now() - attempt.startedAt,
       responseBytes: attempt.responseBytes,
-      rawReturnedCount,
-      excludedRetweets,
-      excludedOutsideWindow,
-      duplicatePosts,
+      rawReturnedCount: attempt.rawReturnedCount,
+      excludedRetweets: attempt.excludedRetweets,
+      excludedOutsideWindow: attempt.excludedOutsideWindow,
+      duplicatePosts: attempt.duplicatePosts,
       saturated: memberMetrics.some((member) => member.pageCapReached),
-      memberMetrics,
+      memberMetrics: memberMetrics.map((member) => ({ ...member })),
       estimatedCostUsd: attempt.providerUnits * OBSERVED_UNIT_PRICE_USD,
       pricingRevision: OBSERVED_PRICING_REVISION,
     };

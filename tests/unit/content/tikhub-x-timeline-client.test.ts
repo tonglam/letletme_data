@@ -340,6 +340,90 @@ describe('TikHub fixed-account timeline client', () => {
     }
   });
 
+  test('resets stale HTTP status and retains partial member progress on a later page failure', async () => {
+    const accepted = post({
+      handle: 'FPLFocal',
+      restId: '123456789',
+      createdAt: '2026-08-30T17:00:00.000Z',
+      text: 'Accepted post',
+    });
+    let calls = 0;
+    const client = new TikHubXTimelineClient({
+      apiKey: 'fixture-secret',
+      timeoutMs: 5_000,
+      maximumResponseBytes: 1_000_000,
+      maximumPagesPerMember: 2,
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return response({
+            code: 200,
+            request_id: 'progress-page-1',
+            data: {
+              user: { rest_id: '123456789', screen_name: 'FPLFocal' },
+              next_cursor: 'progress-page-2',
+              timeline: [
+                accepted,
+                accepted,
+                post({
+                  handle: 'FPLFocal',
+                  restId: '123456789',
+                  createdAt: '2026-08-30T16:00:00.000Z',
+                  text: 'Retweet wrapper',
+                  sequence: 1n,
+                  retweet: true,
+                }),
+                post({
+                  handle: 'FPLFocal',
+                  restId: '123456789',
+                  createdAt: '2026-08-30T05:59:00.000Z',
+                  text: 'Outside window',
+                  sequence: 2n,
+                }),
+              ],
+            },
+          });
+        }
+        throw new Error('fixture transport failure on page two');
+      },
+      endpointUrl: 'https://fixture.invalid/timeline',
+    });
+
+    try {
+      await client.execute({
+        ...request,
+        partition: { ...request.partition, members: [request.partition.members[0]!] },
+      });
+      throw new Error('Expected TikHub transport failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TikHubXTimelineError);
+      expect(error).toMatchObject({
+        failureClass: 'TIKHUB_TRANSPORT_FAILED',
+        evidence: {
+          providerUnits: 2,
+          httpStatus: null,
+          rawReturnedCount: 4,
+          excludedRetweets: 1,
+          excludedOutsideWindow: 1,
+          duplicatePosts: 1,
+          memberMetrics: [
+            {
+              endpointKey: 'fpl-focal-x',
+              pages: 1,
+              rawPosts: 4,
+              acceptedPosts: 1,
+              excludedRetweets: 1,
+              excludedOutsideWindow: 1,
+              duplicatePosts: 1,
+              boundaryComplete: false,
+              pageCapReached: false,
+            },
+          ],
+        },
+      });
+    }
+  });
+
   test('rejects a wrong top-level user even when a handle timeline is empty', async () => {
     const client = new TikHubXTimelineClient({
       apiKey: 'fixture-secret',
