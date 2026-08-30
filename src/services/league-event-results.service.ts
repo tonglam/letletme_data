@@ -463,12 +463,7 @@ export async function syncLeagueEventResultsByTournament(
     ? await readLivePublicationV2Checkpoint(season, eventId)
     : null;
   if (finalizationCutoff && finalCheckpoint?.publication.state !== 'FINALIZED') {
-    const summary = summarizeMissingLeagueEventLiveData(
-      tournamentId,
-      eventId,
-      entryIds.length,
-      0,
-    );
+    const summary = summarizeMissingLeagueEventLiveData(tournamentId, eventId, entryIds.length, 0);
     throw new IncompleteDataSyncError(
       'League final results require a FINALIZED Live Points V2 checkpoint',
       summary.requiredUnits,

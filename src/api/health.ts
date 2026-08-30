@@ -284,16 +284,15 @@ export async function checkReadiness(
     livePicksWorker,
     officialH2HWorker,
     publicationConsistency,
-  ] =
-    await Promise.all([
-      safeProbe(configured.scheduler, probeTimeoutMs),
-      safeProbe(configured.queueWorker, probeTimeoutMs),
-      safeProbe(configured.contentWorker, probeTimeoutMs),
-      safeProbe(configured.mediaWorker, probeTimeoutMs),
-      safeProbe(configured.livePicksWorker, probeTimeoutMs),
-      safeProbe(configured.officialH2HWorker, probeTimeoutMs),
-      safeProbe(configured.publicationConsistency, probeTimeoutMs),
-    ]);
+  ] = await Promise.all([
+    safeProbe(configured.scheduler, probeTimeoutMs),
+    safeProbe(configured.queueWorker, probeTimeoutMs),
+    safeProbe(configured.contentWorker, probeTimeoutMs),
+    safeProbe(configured.mediaWorker, probeTimeoutMs),
+    safeProbe(configured.livePicksWorker, probeTimeoutMs),
+    safeProbe(configured.officialH2HWorker, probeTimeoutMs),
+    safeProbe(configured.publicationConsistency, probeTimeoutMs),
+  ]);
   return {
     ready: strict
       ? postgres &&
