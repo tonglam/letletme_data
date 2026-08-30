@@ -74,7 +74,14 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         eventId,
         kind: job.data.checkpointKind,
       });
-      await enqueueRemainingLiveMatchCheckpoint(season, eventId, job.data.checkpointKind);
+      // A failed or coalesced checkpoint leaves the Redis desired marker in
+      // place for the periodic reconciler. Re-enqueue only after a successful
+      // checkpoint, when a newer desired marker could have arrived during the
+      // DB transaction. Calling this on every normal failure creates a zero-
+      // delay successor loop that can starve live snapshot work for 24 hours.
+      if (result.checkpointed) {
+        await enqueueRemainingLiveMatchCheckpoint(season, eventId, job.data.checkpointKind);
+      }
       return result;
     }
     if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
@@ -83,6 +90,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     const snapshot = await syncLiveSnapshotV2(season, eventId, {
       finalizeEvent: job.data.finalizeEvent === true,
       lifecycleState: job.data.lifecycleState,
+      expectedNextCheckAt: job.data.expectedNextCheckAt,
       trigger: source,
       sourceRunId: job.data.runId,
     });

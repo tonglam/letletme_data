@@ -46,6 +46,7 @@ export async function runLiveSnapshot(now = new Date()): Promise<unknown | null>
   const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
     now,
     lifecycleState: 'LIVE_ACTIVE',
+    expectedNextCheckAt: new Date(now.getTime() + LIVE_POLL_MS),
   });
   if (job) {
     logInfo('Live snapshot job enqueued', {

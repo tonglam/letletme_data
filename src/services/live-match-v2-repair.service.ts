@@ -3,6 +3,7 @@ import {
   liveMatchDetailKey,
   promotePreviousLiveMatchV2,
   readLiveMatchCheckpointDesiredV2,
+  readLiveMatchDeskV2,
   readLiveMatchDeskPointerV2,
   readLiveMatchDetailPointerV2,
   restoreLiveMatchDeskCheckpointV2,
@@ -192,6 +193,36 @@ function sameDetailContent(left: MatchDetailRead | null, right: MatchDetailRead 
   );
 }
 
+export function isLiveMatchDetailCompatibleWithDesk(
+  detail: MatchDetailRead | null,
+  desk: MatchDeskRead | null,
+): boolean {
+  if (!detail || !desk) return false;
+  const generationCompatible =
+    detail.publication.finalized || desk.publication.state === 'FINALIZED'
+      ? detail.publication.observedDeskGeneration === desk.publication.generation
+      : detail.publication.observedDeskGeneration <= desk.publication.generation;
+  return (
+    generationCompatible &&
+    detail.publication.fixtureIdentityRevision ===
+      desk.publication.revisions.fixtureIdentity.revision
+  );
+}
+
+async function requireDetailRepairCompatibility(
+  scope: { readonly season: string; readonly eventId: number },
+  detail: MatchDetailRead,
+  redis: Parameters<typeof readLiveMatchDeskV2>[0]['redis'],
+): Promise<void> {
+  const desk = await readLiveMatchDeskV2({ ...scope, redis });
+  if (!isLiveMatchDetailCompatibleWithDesk(detail, desk)) {
+    throw new ValidationError(
+      'detail repair is incompatible with the current same-event desk publication',
+      'LIVE_MATCH_REPAIR_DETAIL_INCOMPATIBLE',
+    );
+  }
+}
+
 async function inspectLiveMatchesV2Repair(request: LiveMatchesV2RepairRequest) {
   const season = await seasonRepository.requireByCode(request.season);
   const redis = await redisSingleton.getClient();
@@ -247,13 +278,16 @@ async function inspectLiveMatchesV2Repair(request: LiveMatchesV2RepairRequest) {
       checkpointMatchesActive: sameDetailContent(detailActive, detailCheckpoint),
       checkpointDesired: detailDesired,
     },
-    pairCompatible: Boolean(
-      deskActive &&
-        detailActive &&
-        detailActive.publication.observedDeskGeneration === deskActive.publication.generation &&
-        detailActive.publication.fixtureIdentityRevision ===
-          deskActive.publication.revisions.fixtureIdentity.revision,
-    ),
+    pairCompatible: isLiveMatchDetailCompatibleWithDesk(detailActive, deskActive),
+    compatibility: {
+      activeDetailWithActiveDesk: isLiveMatchDetailCompatibleWithDesk(detailActive, deskActive),
+      previousDetailWithActiveDesk: isLiveMatchDetailCompatibleWithDesk(detailPrevious, deskActive),
+      activeDetailWithPreviousDesk: isLiveMatchDetailCompatibleWithDesk(detailActive, deskPrevious),
+      detailCheckpointWithActiveDesk: isLiveMatchDetailCompatibleWithDesk(
+        detailCheckpoint,
+        deskActive,
+      ),
+    },
   };
 }
 
@@ -265,6 +299,16 @@ async function executeLiveMatchesV2Repair(request: LiveMatchesV2RepairRequest) {
   const scope = { season: request.season, eventId: request.eventId } as const;
 
   if (request.action === 'promote-previous') {
+    if (request.kind === 'detail') {
+      const previous = await readLiveMatchDetailPointerV2({ ...scope, redis }, 'previous');
+      if (!previous) {
+        throw new ValidationError(
+          'no valid same-event detail previous publication is available',
+          'LIVE_MATCH_REPAIR_PREVIOUS_MISSING',
+        );
+      }
+      await requireDetailRepairCompatibility(scope, previous, redis);
+    }
     const result = await promotePreviousLiveMatchV2({ ...scope, kind: request.kind, redis });
     if (result.status !== 'promoted' || !result.publication) {
       throw new ValidationError(
@@ -295,6 +339,9 @@ async function executeLiveMatchesV2Repair(request: LiveMatchesV2RepairRequest) {
         'LIVE_MATCH_REPAIR_CHECKPOINT_MISSING',
       );
     }
+    if (request.kind === 'detail') {
+      await requireDetailRepairCompatibility(scope, checkpoint as MatchDetailRead, redis);
+    }
     const result =
       request.kind === 'desk'
         ? await restoreLiveMatchDeskCheckpointV2({ checkpoint: checkpoint as MatchDeskRead, redis })
@@ -324,6 +371,9 @@ async function executeLiveMatchesV2Repair(request: LiveMatchesV2RepairRequest) {
         `no valid Redis current exists for exact ${request.kind} scope`,
         'LIVE_MATCH_REPAIR_CURRENT_MISSING',
       );
+    }
+    if (request.kind === 'detail') {
+      await requireDetailRepairCompatibility(scope, current as MatchDetailRead, redis);
     }
     const desired = await setLiveMatchCheckpointDesiredV2({
       kind: request.kind,

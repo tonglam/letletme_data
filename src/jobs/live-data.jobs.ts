@@ -47,12 +47,17 @@ export async function enqueueLiveActiveSnapshot(
   eventId: number,
   now: Date,
   lifecycleState: MatchLifecycleState = 'LIVE_ACTIVE',
+  expectedNextCheckAt: Date | string | null = null,
 ) {
   // V2 publishes every valid source change to Redis. PostgreSQL checkpointing
   // is decided by the publication service (first/boundary/final or at most
   // once per ten minutes), so the scheduler must not manufacture a second
   // periodic write lane.
-  return enqueueLiveSnapshot(season, eventId, 'cron', { now, lifecycleState });
+  return enqueueLiveSnapshot(season, eventId, 'cron', {
+    now,
+    lifecycleState,
+    expectedNextCheckAt,
+  });
 }
 
 /**
@@ -206,6 +211,8 @@ export async function enqueueLiveSnapshot(
     /** Scheduler reconciliation may join an already-enqueued deterministic job. */
     reuseExisting?: boolean;
     lifecycleState?: MatchLifecycleState;
+    /** Deadline of the scheduler observation that produced this job. */
+    expectedNextCheckAt?: Date | string | null;
   } = {},
 ) {
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
@@ -281,6 +288,14 @@ export async function enqueueLiveSnapshot(
         : { freshnessWindowId: options.freshnessWindowId }),
       ...(options.finalizeEvent !== undefined ? { finalizeEvent: options.finalizeEvent } : {}),
       ...(options.lifecycleState !== undefined ? { lifecycleState: options.lifecycleState } : {}),
+      ...(options.expectedNextCheckAt === undefined
+        ? {}
+        : {
+            expectedNextCheckAt:
+              options.expectedNextCheckAt === null
+                ? null
+                : new Date(options.expectedNextCheckAt).toISOString(),
+          }),
     };
     const suffix = 'v2';
     const generatedJobId =

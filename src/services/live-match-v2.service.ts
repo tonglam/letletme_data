@@ -8,6 +8,8 @@ import {
   readLiveMatchDetailV2,
   readLiveMatchCheckpointLastAtV2,
   readLiveMatchCheckpointDesiredV2,
+  restoreLiveMatchDeskCheckpointV2,
+  restoreLiveMatchDetailCheckpointV2,
   setLiveMatchActiveEventV2,
   setLiveMatchCheckpointDesiredV2,
   touchLiveMatchDeskV2,
@@ -17,6 +19,10 @@ import {
   type MatchDeskPublication,
   type MatchDetailPublication,
 } from '../cache/live-match-publication-v2';
+import {
+  readLiveMatchDeskCheckpointV2,
+  readLiveMatchDetailCheckpointV2,
+} from './live-match-v2-checkpoint.service';
 import { enqueueLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import type { LiveSnapshotReferenceData } from './live-coherent-fetch';
 import {
@@ -137,19 +143,83 @@ function sameDetail(
 }
 
 async function readDeskSafely(input: LiveMatchObservation): Promise<MatchDeskRead | null> {
-  return readLiveMatchDeskV2({
+  const cached = await readLiveMatchDeskV2({
     season: input.season.seasonCode,
     eventId: input.eventId,
     redis: input.redis,
   });
+  if (cached?.servedFrom === 'REDIS_CURRENT') return cached;
+
+  // A missing current pointer is a recovery boundary. Use the self-contained
+  // PostgreSQL checkpoint as a generation fence so a restored Redis sequence
+  // cannot restart at one and be rejected forever by the durable head. A
+  // durable final is restored into Redis before it is allowed to fence a new
+  // provisional observation.
+  try {
+    const checkpoint = await readLiveMatchDeskCheckpointV2(input.season, input.eventId);
+    if (
+      checkpoint &&
+      (cached === null ||
+        checkpoint.publication.state === 'FINALIZED' ||
+        checkpoint.publication.generation > cached.publication.generation)
+    ) {
+      if (checkpoint.publication.state === 'FINALIZED') {
+        await restoreLiveMatchDeskCheckpointV2({ checkpoint, redis: input.redis });
+        const restored = await readLiveMatchDeskV2({
+          season: input.season.seasonCode,
+          eventId: input.eventId,
+          redis: input.redis,
+        });
+        if (restored) return restored;
+      }
+      return checkpoint;
+    }
+  } catch (error) {
+    // The checkpoint is only a cold recovery aid. Redis remains the serving
+    // authority, and the caller can still publish from its exact fixture
+    // baseline when PostgreSQL is unavailable.
+    logError('Live Match desk durable generation recovery read failed', error, {
+      season: input.season.seasonCode,
+      eventId: input.eventId,
+    });
+  }
+  return cached;
 }
 
 async function readDetailSafely(input: LiveMatchObservation): Promise<MatchDetailRead | null> {
-  return readLiveMatchDetailV2({
+  const cached = await readLiveMatchDetailV2({
     season: input.season.seasonCode,
     eventId: input.eventId,
     redis: input.redis,
   });
+  if (cached?.servedFrom === 'REDIS_CURRENT') return cached;
+
+  try {
+    const checkpoint = await readLiveMatchDetailCheckpointV2(input.season, input.eventId);
+    if (
+      checkpoint &&
+      (cached === null ||
+        checkpoint.publication.finalized ||
+        checkpoint.publication.generation > cached.publication.generation)
+    ) {
+      if (checkpoint.publication.finalized) {
+        await restoreLiveMatchDetailCheckpointV2({ checkpoint, redis: input.redis });
+        const restored = await readLiveMatchDetailV2({
+          season: input.season.seasonCode,
+          eventId: input.eventId,
+          redis: input.redis,
+        });
+        if (restored) return restored;
+      }
+      return checkpoint;
+    }
+  } catch (error) {
+    logError('Live Match detail durable generation recovery read failed', error, {
+      season: input.season.seasonCode,
+      eventId: input.eventId,
+    });
+  }
+  return cached;
 }
 
 function detailIsStarted(fixtures: readonly RawFPLFixture[]): boolean {
@@ -223,8 +293,11 @@ async function scheduleCheckpoint(
 
 /**
  * Publish the two Match V2 streams from one already-fetched observation. The
- * function never performs provider or PostgreSQL I/O. Desk publication is the
- * gate; detail is best-effort and may remain on its compatible LKG.
+ * function never performs provider I/O. PostgreSQL is consulted only when the
+ * Redis current/previous pointers are absent, so a recovered Redis namespace
+ * can inherit the durable generation fence without putting a DB read on the
+ * normal hot path. Desk publication is the gate; detail is best-effort and may
+ * remain on its compatible LKG.
  */
 export async function syncLiveMatchesV2FromObservation(
   input: LiveMatchObservation,

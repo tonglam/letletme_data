@@ -891,13 +891,13 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
       });
   }
 
-  return { season, currentEvent, fixtures, decision };
+  return { season, currentEvent, fixtures, decision, expectedNextCheckAt: nextRefreshAt };
 }
 
 export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleDecision | null> {
   const tick = await persistLiveLifecycleStatus(now);
   if (!tick) return null;
-  const { season, currentEvent, fixtures, decision } = tick;
+  const { season, currentEvent, fixtures, decision, expectedNextCheckAt } = tick;
 
   // The deadline canary and pre-start retry lane are the only coordinator
   // probes. Once the live publication is active, complete picks are immutable
@@ -921,11 +921,13 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
           currentEvent.id,
           now,
           normalizeMatchLifecycleState(decision.state) ?? 'LIVE_ACTIVE',
+          expectedNextCheckAt,
         );
       } else {
         await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
           finalizeEvent: decision.finalizeEvent,
           lifecycleState: normalizeMatchLifecycleState(decision.state),
+          expectedNextCheckAt,
           now,
         });
       }

@@ -30,6 +30,8 @@ export interface LiveDataJobData {
   finalizeEvent?: boolean;
   /** Lifecycle state captured by the scheduler for the sibling Match desk. */
   lifecycleState?: MatchLifecycleState;
+  /** Scheduler deadline used to derive publication freshness windows. */
+  expectedNextCheckAt?: string | null;
   /** A checkpoint-only job never calls FPL; it consumes Redis publication data. */
   checkpointKind?: 'desk' | 'detail';
   checkpointPublicationId?: string;

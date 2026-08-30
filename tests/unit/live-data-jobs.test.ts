@@ -110,9 +110,12 @@ describe('Live Points V2 snapshot enqueue', () => {
       TEST_SEASON,
       12,
       new Date('2026-08-09T12:34:56.000Z'),
+      'LIVE_ACTIVE',
+      new Date('2026-08-09T12:35:26.000Z'),
     );
     expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v2');
     expect(addCalls[0]?.data).not.toHaveProperty('persistEventLives');
+    expect(addCalls[0]?.data.expectedNextCheckAt).toBe('2026-08-09T12:35:26.000Z');
   });
 
   test('creates a delayed successor when an active checkpoint coalesced a newer desired marker', async () => {

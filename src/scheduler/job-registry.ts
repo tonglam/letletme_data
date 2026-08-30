@@ -1034,6 +1034,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
           evidence: {
             lifecycleState: decision.state,
             pollIntervalMs,
+            expectedNextCheckAt: new Date(context.now.getTime() + pollIntervalMs).toISOString(),
           },
         },
       ];
@@ -1048,6 +1049,10 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         obligationGeneration: generation,
         freshnessWindowId,
         lifecycleState: normalizeMatchLifecycleState(plan.evidence?.lifecycleState),
+        expectedNextCheckAt:
+          typeof plan.evidence?.expectedNextCheckAt === 'string'
+            ? plan.evidence.expectedNextCheckAt
+            : null,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },

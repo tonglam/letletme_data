@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   assertLiveMatchesV2RepairAuthorization,
   LIVE_MATCHES_V2_REPAIR_CONFIRMATION,
+  isLiveMatchDetailCompatibleWithDesk,
   parseLiveMatchesV2RepairRequest,
 } from '../../src/services/live-match-v2-repair.service';
 
@@ -25,6 +26,52 @@ describe('Live Matches V2 repair guardrails', () => {
     expect(() =>
       assertLiveMatchesV2RepairAuthorization({ action: 'inspect', confirmation: null }),
     ).not.toThrow();
+  });
+
+  test('allows lagging provisional detail but requires an exact final desk pair', () => {
+    const desk = {
+      publication: {
+        state: 'LIVE_ACTIVE',
+        generation: 10,
+        revisions: { fixtureIdentity: { revision: 'a'.repeat(64) } },
+      },
+    } as never;
+    expect(
+      isLiveMatchDetailCompatibleWithDesk(
+        {
+          publication: {
+            finalized: false,
+            observedDeskGeneration: 9,
+            fixtureIdentityRevision: 'a'.repeat(64),
+          },
+        } as never,
+        desk,
+      ),
+    ).toBe(true);
+    expect(
+      isLiveMatchDetailCompatibleWithDesk(
+        {
+          publication: {
+            finalized: false,
+            observedDeskGeneration: 11,
+            fixtureIdentityRevision: 'a'.repeat(64),
+          },
+        } as never,
+        desk,
+      ),
+    ).toBe(false);
+    expect(
+      isLiveMatchDetailCompatibleWithDesk(
+        {
+          publication: {
+            finalized: true,
+            observedDeskGeneration: 9,
+            fixtureIdentityRevision: 'a'.repeat(64),
+          },
+        } as never,
+        desk,
+      ),
+    ).toBe(false);
   });
 
   test('requires kind, reason, and explicit request confirmation for writes', () => {
