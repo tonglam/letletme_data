@@ -283,13 +283,13 @@ export async function syncLiveSnapshotV2(
     const restored = await restoreLivePublicationV2Checkpoint({
       checkpoint: durableFloor!,
     });
-    if (
-      !restored.published &&
-      (restored.publication.publicationId !== durableFloor!.publication.publicationId ||
-        restored.publication.generation !== durableFloor!.publication.generation)
-    ) {
+    // A stale response is not proof that the durable FINAL is serving. Even
+    // an equal identity must be rejected here: the active pointer or its
+    // immutable items may still be invalid, and returning success would leave
+    // the next sync retrying the same ineffective restore forever.
+    if (!restored.published) {
       throw new CacheError(
-        `Live Points V2 durable FINAL restore lost its CAS race for ${season.seasonCode}:${eventId}`,
+        `Live Points V2 durable FINAL restore did not publish ${durableFloor!.publication.publicationId} for ${season.seasonCode}:${eventId}`,
         'LIVE_V2_CHECKPOINT_RESTORE_FAILED',
       );
     }

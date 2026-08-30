@@ -329,6 +329,50 @@ describe('immutable Redis publication', () => {
     expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.servedFrom).toBe('REDIS_CURRENT');
   });
 
+  test('durable FINAL restore replaces a conflicting Redis FINAL at the same scope', async () => {
+    const durableFinal = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+
+    await redis.del(liveV2Key(LIVE_SCOPE, 'active'));
+    const conflictingFinal = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:01:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    expect(conflictingFinal.published).toBe(true);
+    expect(conflictingFinal.publication.publicationId).not.toBe(
+      durableFinal.publication.publicationId,
+    );
+
+    const restored = await restoreLivePublicationV2Checkpoint({
+      checkpoint: {
+        publication: durableFinal.publication,
+        eventLives: [],
+        fixtures: [],
+        servedFrom: 'POSTGRES_CHECKPOINT',
+      },
+      redis,
+    });
+
+    expect(restored.published).toBe(true);
+    expect(restored.publication.publicationId).toBe(durableFinal.publication.publicationId);
+    expect(restored.publication.generation).toBe(durableFinal.publication.generation);
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication).toMatchObject({
+      publicationId: durableFinal.publication.publicationId,
+      generation: durableFinal.publication.generation,
+      state: 'FINALIZED',
+    });
+  });
+
   test('a finalized publication cannot be superseded by a provisional candidate, even if an item is corrupt', async () => {
     const finalized = await publishLivePublicationV2({
       ...LIVE_SCOPE,

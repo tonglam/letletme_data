@@ -1085,11 +1085,7 @@ async function checkpointSeededLive(
     }
     if (durable) {
       const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: durable, redis });
-      if (
-        !restored.published &&
-        (restored.publication.publicationId !== durable.publication.publicationId ||
-          restored.publication.generation !== durable.publication.generation)
-      ) {
+      if (!restored.published) {
         return 'blocked';
       }
       return 'already-checkpointed';
@@ -1110,11 +1106,7 @@ async function checkpointSeededLive(
     const winner = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
     if (!winner) return 'blocked';
     const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: winner, redis });
-    if (
-      !restored.published &&
-      (restored.publication.publicationId !== winner.publication.publicationId ||
-        restored.publication.generation !== winner.publication.generation)
-    ) {
+    if (!restored.published) {
       return 'blocked';
     }
     await clearLiveCheckpointDesiredV2(desired, redis);
@@ -1172,11 +1164,7 @@ async function seedLivePublication(
       checkpoint: durable,
       redis,
     });
-    if (
-      !restored.published &&
-      (restored.publication.publicationId !== durable.publication.publicationId ||
-        restored.publication.generation !== durable.publication.generation)
-    ) {
+    if (!restored.published) {
       return {
         status: 'stale',
         checkpoint: 'blocked',
