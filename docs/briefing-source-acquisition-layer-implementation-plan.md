@@ -66,7 +66,8 @@ article、episode 或 video 再触发一次确定性内容 job。跨页面分类
 
 ### 2.3 采集器不使用内容理解模型
 
-- Grok Build 只作为 X transport，通过明确的 X tool contract 取帖子。
+- 固定账号 X scan 可选择 TikHub timeline transport；Grok Build 继续负责 X identity、semantic
+  discovery 和 thread fetch。两条路径都必须把 provider route 固化到 immutable run request。
 - RSS、HTML、Podcast、YouTube 和 provider response 全部由确定性 parser/adapter 处理。
 - Hermes/faster-whisper 只做 speech-to-text，不承担内容分类、摘要或来源判断。
 - 第二层可以批量调用较低成本模型，但不在本文范围内。
@@ -115,6 +116,36 @@ no-new-privileges 的 worker 和固定 bridge group；不安装 Grok、不挂载
 Runner 保留 sanitized child env、版本化 `--disallowed-tools`/deny、`--no-subagents`、启动 tool
 inventory gate 和 2 个全局并发上限。strict sandbox、bubblewrap、版本或 Runner release 不匹配时
 fail closed，不能退回 `--sandbox none`。
+
+#### 2.6.1 TikHub 固定账号 transport
+
+2026-08-30 的真实试验确认 TikHub `fetch_user_post_tweet` 可以按 `screen_name` 或稳定数字
+`rest_id` 读取一个公开账号的帖子，并通过返回 cursor 分页。六个 FPL 账号各取两页的 12 次调用
+全部成功；每个账号得到 39 个唯一 item，页间没有重复，Snowflake 时间与 provider creation time
+相差低于 1 秒。VPS 对 `OfficialFPL` 的同一 endpoint 也返回 HTTP 200、19 个 item，约 3.5 秒。
+
+TikHub X search 不能作为固定账号覆盖主路径：实测十账号 creator query 连续五页仍有 cursor，结果
+混入窗口外内容，并漏掉至少一个目标账号。因此锁定如下职责分工：
+
+- `TIKHUB_TIMELINE` 只用于 `X_ACCOUNT + X_KEYWORD_SCAN`；每个 partition 内的账号逐一分页，不能
+  用一次 search 代替多个账号 timeline。
+- 有可信数字 ID 时用 `rest_id`，`HANDLE_ONLY` endpoint 才用 `screen_name`。每条返回 post 仍须
+  通过持久化 handle/ID、Snowflake、窗口、URL 和 conflict gates。
+- TikHub 不接受业务分类 query。Data 在本地执行精确时间窗口、wrapper retweet 排除和 post ID
+  去重；同一 Receipt 仍由全局 X post ID 唯一约束收敛。
+- end cursor，或整页所有 post 都早于 window start，才证明已到窗口边界。不能因为一个 pinned
+  old post 就提前停止。单账号最多 25 页、整个 run 最多 5 分钟；达到上限时保留已验证 item，写
+  显式 `GAP/TIKHUB_TIMELINE_PAGE_CAP` 后推进 checkpoint，不能伪装成 `EMPTY` 或无限重放第一页。
+- 每个实际 HTTP page 是一个 provider call unit。第一页使用 scheduler reservation；每次后续分页
+  在请求前继续原子 reserve。成功和失败都保存实际 page 数、request/response/request-id hash、
+  bytes、latency、成员级过滤计数和价格 revision，不保存 API key 或完整 provider response。
+- 该 transport 使用 `evidence_mode=PROVIDER_ATTESTED`。它不改变 Grok identity、semantic、thread
+  合同，也不替代 X 公共页面的异步 media archive。
+
+官方 endpoint 参数合同见
+[TikHub Get user post](https://docs.tikhub.io/191321711e0)。启用必须显式设置
+`CONTENT_X_ACCOUNT_PROVIDER=TIKHUB` 和 runtime `TIKHUB_API_KEY`；默认仍为 `GROK_BUILD`，普通
+部署或 shadow mode 不会自动切换 provider。
 
 ### 2.7 首次启用不是历史归档
 
@@ -358,7 +389,8 @@ X 继续使用“高流量单账号、低流量小分区”的原则，但 parti
 不再在代码和文档各维护一份固定数字。
 
 - 同一 X_ACCOUNT Endpoint 最多属于一个 recurring keyword partition。
-- `x_keyword_search` known-source query 只包含 author、时间和 `-is:retweet` 等噪音约束。
+- Grok route 的 `x_keyword_search` known-source query 只包含 author、时间和 `-is:retweet` 等噪音
+  约束；TikHub route 不执行 search，而是逐账号读取 timeline 并在 Data 本地裁剪窗口。
 - 四个 semantic profile 继续覆盖官方变化、availability、lineup/role、analysis/longform。
 - 当前实测单次 keyword 返回 10 条；parser 允许未来超过 10，当前 `10` 是 saturation threshold。
 - keyword 返回 10 条只补一个更早窗口；补偿 run 再饱和则记录 gap，不无限翻页。
@@ -373,7 +405,8 @@ manifest reconciler 始终为 40 个 X_ACCOUNT partition 保留一个 `schedule_
 `CONTENT_X_BACKSTOP_ENABLED=false` 时这些行是 `paused`，开启后才变为 `active` 并参与 claim。
 Backstop 固定在 UTC 00:00/12:00 slot 结束后 10 分钟开始，带 0–10 分钟
 确定性 jitter，读取前 12 小时并重叠 120 秒，最多追补 24 小时。它的 request snapshot 明确写
-`coverageMode=BACKSTOP`，饱和只产生一个更早窗口 follow-up；PRIMARY 与 BACKSTOP 按 X post ID
+`coverageMode=BACKSTOP`。Grok route 饱和只产生一个更早窗口 follow-up；TikHub route 通过 cursor
+读取到窗口边界，达到页数上限则写 GAP，不额外重跑 timeline。PRIMARY 与 BACKSTOP 按 X post ID
 共享 Receipt 去重。开关关闭时不 claim backstop，PRIMARY cadence、checkpoint 和历史保持不变。
 
 Grok final output contract 当前为 revision 3：根对象只能是 `posts` 或 `users`，帖文五个事实字段
@@ -388,7 +421,9 @@ fingerprint、trace/tool hash、字节数、token/cost 和 runner identity，不
 
 预算由 PostgreSQL 原子 reserve，不由 worker 内存计数：
 
-- Grok：global rolling-day、lane 和 FINAL90 call ledger。
+- X provider：共享 global rolling-day、lane 和 FINAL90 call ledger；Grok 的一次 X tool call 与
+  TikHub 的一个 timeline HTTP page 都按实际 unit 计入，provider trace 保留具体来源。数据库中
+  现存 `GROK_BUILD_X` scope key 是兼容性名称，不表示 TikHub page 不计费或另有隐形预算。
 - HTTP：host concurrency、request bytes 和每日请求 ledger。
 - Supadata：native credits、generated credits 和 generated media minutes。
 - Hermes：并发、待处理音频分钟和每日转录分钟。
@@ -444,7 +479,7 @@ Supadata generated 请求在提交前必须已知 video duration，并原子 res
 
 | Profile | Lookback | Max metadata items | Max triggered content jobs |
 | --- | ---: | ---: | ---: |
-| X account | 6 小时 | 10；keyword 饱和时补一次 | 0 |
+| X account | 首次 26 小时；日常按 persisted window | Grok 10 条并有界补一次；TikHub 每账号最多 25 页 | 0 |
 | X semantic | 逻辑 6 小时，持久化起点按 UTC 日期对齐 | 10；不分页 | 0 |
 | News/publication RSS | 14 天 | 50 | 20 |
 | Substack public | 14 天 | 20 | 20 |
@@ -689,8 +724,9 @@ Segment V1 hash `fb159a11abccf8304b6ff224f180f562450f3d8d84390855e5544dbbf88e626
 5. claim 数最多为对应 worker concurrency 的两倍。
 6. 事务内 claim schedule、写 immutable run/request snapshot、reserve budget 和 lease。
 7. 事务外 enqueue；成功后短事务确认。明确 enqueue 失败立即释放 lease，1 分钟后重试。
-8. worker 用 run ID 执行一次 adapter operation。
-9. X 帖子通过 Grok final 的 deterministic post gates 后，原子写 Observation、ReceiptRevision、
+8. worker 用 run ID 执行一次 persisted adapter run；Grok route 恰好一次工具调用，TikHub route
+   对 partition member 执行一到多次有界 timeline page 请求。
+9. X 帖子通过对应 provider 的 deterministic post gates 后，原子写 Observation、ReceiptRevision、
    `SourceMediaGate`、延迟 20 分钟的 outbox、terminal run 和 checkpoint；网络媒体请求不在该事务中。
 10. `media-worker` 独立 claim gate 并处理媒体；它不占用 Grok queue，也不能回写 X run 结果。
 11. crash 由各自 lease reclaimer 恢复；不同 adapter 使用各自合理 lease。
@@ -702,7 +738,7 @@ metrics，不生成假 Receipt 或 gap。
 
 运行时保留三个隔离的 BullMQ queue，避免长音频占满 X 或普通 HTTP worker：
 
-- `content-x-scan`：Grok Build X jobs，并发 2。
+- `content-x-scan`：Grok Build / TikHub X jobs，共享并发 2 和同一 PostgreSQL run 状态机。
 - `content-http-acquisition`：feed、article、YouTube metadata 和 transcript provider jobs，并发 4，
   同 host 并发 2。
 - `content-media-transcript`：Podcast/Hermes media jobs，并发 1。
@@ -728,7 +764,9 @@ discovery 可以先形成 metadata-only ReceiptRevision；article body、publish
 
 ## 10. Adapter 实施合同
 
-### 10.1 X / Grok Build
+### 10.1 X providers
+
+#### Grok Build
 
 宿主机 Runner 锁定 Grok Build 1.0.5，启动用 `grok inspect --json` 验证版本，设置
 `GROK_NO_AUTO_UPDATE=1`，并通过 bubblewrap/strict preflight。版本漂移、Runner release 漂移或
@@ -816,6 +854,23 @@ policy 拒绝，且 attempt 会留在 streaming trace 中。预算边界也以�
 旧容器内 Grok sweep 只作为历史诊断，不是当前生产证据。当前实现必须由 CI/部署环境验证
 standalone host-runner artifact、VPS systemd Runner、`deploy` 用户 1.0.5、strict sandbox、Unix
 socket 连接和四种真实工具 probe；未完成前不能写成 production pass。
+
+#### TikHub fixed-account timeline
+
+TikHub client 只允许固定 endpoint
+`https://api.tikhub.io/api/v1/twitter/web/fetch_user_post_tweet`，Bearer secret 只能进入 Authorization
+header。运行时不能从 manifest 或 job payload 覆盖 host、path、method、headers 或任意 provider
+参数；自定义 endpoint 仅允许测试依赖注入。
+
+响应按有界 UTF-8 JSON 读取，每页默认上限 4 MiB；HTTP、provider code、request ID、user identity、
+timeline item schema 和 cursor 都在 Data 本地验证。provider 返回的时间先解析成 UTC，随后仍通过
+X Snowflake 五秒容差。无 cursor 或明确越过窗口才是完整；transport/auth/schema/identity/cursor
+失败保持 `FAILED`，不写 Receipt、不推进 checkpoint，也绝不转成 `EMPTY`。页上限是唯一允许
+“保存已取得 item + 显式 GAP + 推进”的有界不完整终态。
+
+TikHub search 保留为未来 discovery 候选，不进入 recurring core account scan。本轮也没有把 TikHub
+YouTube stream 当成 VPS media fallback：真实 signed audio URL 在 VPS 最终得到 GoogleVideo 403，
+不能替代已锁定的 transcript/media transport。
 
 ### 10.2 RSS/Atom/Substack
 
@@ -999,6 +1054,11 @@ CONTENT_YOUTUBE_DISCOVERY_ENABLED=false
 CONTENT_YOUTUBE_NATIVE_ENABLED=false
 CONTENT_YOUTUBE_GENERATED_ENABLED=false
 CONTENT_REAL_GROK_ENABLED=false
+CONTENT_X_ACCOUNT_PROVIDER=GROK_BUILD
+CONTENT_TIKHUB_TIMEOUT_MS=45000
+CONTENT_TIKHUB_MAX_OUTPUT_BYTES=4194304
+CONTENT_TIKHUB_MAX_PAGES_PER_MEMBER=25
+TIKHUB_API_KEY=<runtime-secret>
 
 CONTENT_GROK_CONCURRENCY=2
 CONTENT_HTTP_CONCURRENCY=4
@@ -1031,6 +1091,11 @@ CONTENT_HERMES_DAILY_AUDIO_MINUTES=0
 已开启、Endpoint 有 `maxGeneratedMinutes`，且 generated async terminal gate 已通过。关闭真实
 provider 时 fixture 只能产生测试 run，不能制造“已检查但为空”。
 
+`CONTENT_X_ACCOUNT_PROVIDER=TIKHUB` 还必须要求 pipeline、X scanning、Grok semantic support 和
+非空 TikHub key。该选择只影响新 claim 的 `X_ACCOUNT` run；已持久化 run 永远按自身
+`providerRoute` replay，不能随环境变量漂移。status 只展示 provider 名称和 key 是否存在，不能
+打印 secret。
+
 ## 14. 可观测性
 
 结构化日志至少包含：
@@ -1044,7 +1109,8 @@ rejected / bootstrapSkipped / evidenceMode / state / failureClass / remainingBud
 - 每个 Endpoint/schedule 的 next due、due lag、checkpoint age 和 cache-not-before。
 - 最近成功、no-change、失败、饱和、gap 和 content deferred。
 - circuit/probe、p50/p95 latency、result count 和 Candidate yield feedback。
-- X call、Supadata credit、generated minutes、Hermes minutes 和 HTTP host capacity。
+- X call 按 Grok tool/TikHub page 分解、TikHub 成员级页数与过滤计数、Supadata credit、generated
+  minutes、Hermes minutes 和 HTTP host capacity。
 - identity unresolved/conflict、manifest reconcile/coverage 错误。
 - pending provider jobs 及其 age；同一 item 是否存在重复 submission。
 

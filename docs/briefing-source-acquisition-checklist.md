@@ -298,7 +298,34 @@ scheduler；当前宿主机 Runner、认证和工具面合同见 3.2、3.3 和
 - [ ] cgroup/parent 证据证明 Grok 子进程运行在宿主机 Runner，不在 Docker。
 - [ ] host-shadow 之前 publication/public 保持关闭；失败不能变成 `EMPTY` 或推进 checkpoint。
 
-### 3.4 X source-media archive 验收（当前目标）
+### 3.4 TikHub fixed-account timeline（2026-08-30 补充）
+
+真实 provider 试验与本轮代码合同分开记录：
+
+- [x] 六个 FPL 固定账号各读取两页，共 12/12 次 timeline 调用成功；每个账号 39 个唯一 item，
+  页间零重复，provider time 与 Snowflake 推导相差低于 1 秒。
+- [x] VPS 对 `OfficialFPL` timeline 返回 HTTP 200、19 个 item，约 3.5 秒，证明目标宿主机可直连
+  TikHub API。
+- [x] 十账号 X search 连续五页仍有 cursor、混入窗口外内容且漏掉目标账号；因此 search 明确不
+  作为 core account coverage，固定账号只走逐账号 timeline。
+- [x] 本轮 client fixture 覆盖 `rest_id`/`screen_name`、cursor、空 cursor、pinned old post、wrapper
+  retweet、本地时间窗、冲突、页上限、失败证据和 secret redaction。
+- [x] run request 固化 `providerRoute`；TikHub 仅允许 `X_ACCOUNT + X_KEYWORD_SCAN`，Grok 继续处理
+  identity、semantic 和 thread fetch。
+- [x] 每个实际 timeline page 在请求前取得预算并按 provider unit 入账；达到单账号 25 页上限时
+  保留已验证 Receipt、写显式 `TIKHUB_TIMELINE_PAGE_CAP` gap，不伪装成 `EMPTY`。
+- [ ] 在隔离 PostgreSQL/Redis 下执行 TikHub worker integration，证明 Observation、ReceiptRevision、
+  media gate、outbox、provider trace、预算和 checkpoint 同一合同收敛。
+- [ ] 完成 exact-head CI/review/merge；现有临时 dashboard key 会过期，production rollout 前需创建
+  长期、最小 scope 的 runtime key，并经 `.env` 注入，不能提交或打印。
+- [ ] 生产仍未切换 `CONTENT_X_ACCOUNT_PROVIDER=TIKHUB`；切换后须跑完整 12 小时 cohort 并报告
+  40/40 partition coverage、真实 page calls、cost、FAILED/GAP 和 Receipt 增量。
+
+TikHub 官方 endpoint 只承诺按 `screen_name`/`rest_id` 读取用户帖子并以 cursor 分页，见
+[Get user post](https://docs.tikhub.io/191321711e0)。上述完整性结论来自我们的实测和本地 gates，
+不是供应商 SLA。
+
+### 3.5 X source-media archive 验收（当前目标）
 
 运行边界固定为 `media-worker` Docker service；它与 `content-worker` 共用 repo 和 PostgreSQL 内容域，
 但没有 Grok socket、bridge GID 或 Grok auth。worker 使用 PostgreSQL gate 作为 durable queue，pool
