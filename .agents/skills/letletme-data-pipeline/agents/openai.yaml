@@ -1,4 +1,4 @@
 interface:
-  display_name: "LetLetMe Data Pipeline"
-  short_description: "Trace Data ingestion, queues, storage, and publications"
-  default_prompt: "Audit or change this LetLetMe Data pipeline with repository-specific ownership and validation gates."
+  display_name: 'LetLetMe Data Pipeline'
+  short_description: 'Trace Data ingestion, queues, storage, and publications'
+  default_prompt: 'Audit or change this LetLetMe Data pipeline with repository-specific ownership and validation gates.'

@@ -33,6 +33,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: '3.x'
       - name: Validate AGENTS.md and skills
         run: python3 .codex/validate_instructions.py --repo . --contract .codex/instruction-integrity.json --policy .codex/instruction-policy.v1.json --json
