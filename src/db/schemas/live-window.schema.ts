@@ -45,6 +45,7 @@ export const liveLifecycleStatusInOps = ops.table(
         'FINALIZED'
       )`,
     ),
+    check('live_lifecycle_status_generation_valid', sql`generation IS NULL OR generation > 0`),
   ],
 );
 

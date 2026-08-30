@@ -41,6 +41,16 @@ async function cleanup(): Promise<void> {
   const sql = await getDbClient();
   await sql.begin(async (transaction) => {
     await transaction`
+      DELETE FROM competition.entry_event_pick_heads
+      WHERE season_id = ${SEASON_ID}
+        AND entry_id BETWEEN ${FIRST_ENTRY_ID} AND ${FIRST_ENTRY_ID + ENTRY_COUNT - 1}
+    `;
+    await transaction`
+      DELETE FROM competition.entry_event_pick_repairs
+      WHERE season_id = ${SEASON_ID}
+        AND entry_id BETWEEN ${FIRST_ENTRY_ID} AND ${FIRST_ENTRY_ID + ENTRY_COUNT - 1}
+    `;
+    await transaction`
       DELETE FROM competition.entry_event_picks
       WHERE season_id = ${SEASON_ID}
         AND entry_id BETWEEN ${FIRST_ENTRY_ID} AND ${FIRST_ENTRY_ID + ENTRY_COUNT - 1}

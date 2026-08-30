@@ -89,6 +89,16 @@ async function cleanup(): Promise<void> {
       AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
   `;
   await sql`
+    DELETE FROM competition.entry_event_pick_heads
+    WHERE season_id = ${SEASON.seasonId}
+      AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+  `;
+  await sql`
+    DELETE FROM competition.entry_event_pick_repairs
+    WHERE season_id = ${SEASON.seasonId}
+      AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
+  `;
+  await sql`
     DELETE FROM competition.entry_event_picks
     WHERE season_id = ${SEASON.seasonId}
       AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
