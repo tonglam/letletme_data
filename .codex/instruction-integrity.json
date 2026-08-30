@@ -6,5 +6,10 @@
   "policy_version": "1",
   "required_agents": ["AGENTS.md"],
   "required_skills": [".agents/skills/letletme-data-pipeline"],
-  "required_global_skills": ["workspace-instruction-audit", "gh-codex-review-loop", "letletme-stack-audit", "letletme-release-acceptance"]
+  "required_global_skills": [
+    "workspace-instruction-audit",
+    "gh-codex-review-loop",
+    "letletme-stack-audit",
+    "letletme-release-acceptance"
+  ]
 }
