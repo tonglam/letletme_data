@@ -8,7 +8,12 @@ import {
   liveDataQueueName,
 } from '../queues/live-data.queue';
 import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-cascade.service';
+import { enqueueRemainingLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
+import {
+  checkpointLiveMatchScopeV2,
+  hasFinalLiveMatchCheckpointsV2,
+} from '../services/live-match-v2-checkpoint.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -60,11 +65,24 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
   logJobTriggered(context);
 
   return runTrackedJob(context, async () => {
+    if (job.name === LIVE_JOBS.LIVE_MATCH_CHECKPOINT) {
+      if (!job.data.checkpointKind) {
+        throw new Error('Live Match checkpoint job is missing checkpoint kind');
+      }
+      const result = await checkpointLiveMatchScopeV2({
+        season,
+        eventId,
+        kind: job.data.checkpointKind,
+      });
+      await enqueueRemainingLiveMatchCheckpoint(season, eventId, job.data.checkpointKind);
+      return result;
+    }
     if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
       throw new Error(`Unknown job name: ${job.name}`);
     }
     const snapshot = await syncLiveSnapshotV2(season, eventId, {
       finalizeEvent: job.data.finalizeEvent === true,
+      lifecycleState: job.data.lifecycleState,
       trigger: source,
       sourceRunId: job.data.runId,
     });
@@ -96,6 +114,11 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       if (!snapshot.checkpointed) {
         throw new Error(
           `Finalized live publication is not durably checkpointed for event ${eventId}`,
+        );
+      }
+      if (!(await hasFinalLiveMatchCheckpointsV2(season, eventId))) {
+        throw new Error(
+          `Finalized Live Matches desk/detail are not durably checkpointed for event ${eventId}`,
         );
       }
       await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);

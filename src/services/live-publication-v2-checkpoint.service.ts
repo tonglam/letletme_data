@@ -2,6 +2,8 @@ import { and, eq, isNull, ne, or, sql } from 'drizzle-orm';
 
 import {
   eventsInFpl,
+  liveMatchDeskCheckpointsInFpl,
+  liveMatchDetailCheckpointsInFpl,
   livePointsPublicationCheckpointsInCompetition,
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -162,7 +164,8 @@ export async function readLivePublicationV2Checkpoint(
 }
 
 /**
- * Return every terminal event whose V2 checkpoint is absent or not FINALIZED.
+ * Return every terminal event whose Live Points, Match desk, or Match detail
+ * checkpoint is absent or not FINALIZED.
  * This is one set-based query so a scheduler restart can catch up an older
  * event without issuing one checkpoint lookup per historical gameweek.
  */
@@ -180,6 +183,20 @@ export async function findLivePublicationV2FinalizationTargets(
         eq(livePointsPublicationCheckpointsInCompetition.eventId, eventsInFpl.eventId),
       ),
     )
+    .leftJoin(
+      liveMatchDeskCheckpointsInFpl,
+      and(
+        eq(liveMatchDeskCheckpointsInFpl.seasonId, eventsInFpl.seasonId),
+        eq(liveMatchDeskCheckpointsInFpl.eventId, eventsInFpl.eventId),
+      ),
+    )
+    .leftJoin(
+      liveMatchDetailCheckpointsInFpl,
+      and(
+        eq(liveMatchDetailCheckpointsInFpl.seasonId, eventsInFpl.seasonId),
+        eq(liveMatchDetailCheckpointsInFpl.eventId, eventsInFpl.eventId),
+      ),
+    )
     .where(
       and(
         eq(eventsInFpl.seasonId, season.seasonId),
@@ -188,6 +205,12 @@ export async function findLivePublicationV2FinalizationTargets(
         or(
           isNull(livePointsPublicationCheckpointsInCompetition.eventId),
           ne(livePointsPublicationCheckpointsInCompetition.state, 'FINALIZED'),
+          isNull(liveMatchDeskCheckpointsInFpl.eventId),
+          ne(liveMatchDeskCheckpointsInFpl.state, 'FINALIZED'),
+          isNull(liveMatchDetailCheckpointsInFpl.eventId),
+          ne(liveMatchDetailCheckpointsInFpl.state, 'FINALIZED'),
+          sql<boolean>`${liveMatchDetailCheckpointsInFpl.observedDeskGeneration} <> ${liveMatchDeskCheckpointsInFpl.generation}`,
+          sql<boolean>`${liveMatchDetailCheckpointsInFpl.fixtureIdentityRevision} <> (${liveMatchDeskCheckpointsInFpl.revisions} -> 'fixtureIdentity' ->> 'revision')`,
         ),
       ),
     )

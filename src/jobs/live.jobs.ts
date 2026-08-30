@@ -45,6 +45,7 @@ export async function runLiveSnapshot(now = new Date()): Promise<unknown | null>
 
   const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
     now,
+    lifecycleState: 'LIVE_ACTIVE',
   });
   if (job) {
     logInfo('Live snapshot job enqueued', {
@@ -71,6 +72,7 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
     // Provisional slots are useful for recovery, but the worker must not be
     // asked to publish a final event checkpoint until FPL marks data checked.
     finalizeEvent: resultSlot.startsWith('final-'),
+    lifecycleState: resultSlot.startsWith('final-') ? 'FINALIZED' : 'GW_REVIEW',
     jobId: `live-snapshot-e${currentEvent.id}-post-${resultSlot}`,
   });
   if (job) {

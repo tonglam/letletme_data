@@ -33,6 +33,7 @@ import { redisSingleton } from '../cache/singleton';
 import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
+import { normalizeMatchLifecycleState } from './live-match-v2';
 
 const runtimeConfig = getConfig();
 /** The live producer cadence is a data contract: one fresh poll every 30s by default. */
@@ -915,10 +916,16 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       : false;
     if (!decision.finalizeEvent || shouldEnqueueFinalization) {
       if (decision.state === 'LIVE_ACTIVE') {
-        await enqueueLiveActiveSnapshot(season, currentEvent.id, now);
+        await enqueueLiveActiveSnapshot(
+          season,
+          currentEvent.id,
+          now,
+          normalizeMatchLifecycleState(decision.state) ?? 'LIVE_ACTIVE',
+        );
       } else {
         await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
           finalizeEvent: decision.finalizeEvent,
+          lifecycleState: normalizeMatchLifecycleState(decision.state),
           now,
         });
       }

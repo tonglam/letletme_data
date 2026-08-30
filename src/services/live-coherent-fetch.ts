@@ -14,6 +14,12 @@ export type LiveSnapshotState = 'scheduled' | 'live' | 'settled';
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   readonly season: string;
   readonly playerTeamById: Map<number, number>;
+  /**
+   * Minimum player identity required by the fixture-grain Live Matches
+   * detail publication.  It is optional for the existing Live Points
+   * preparation path; Match V2 fails closed for detail when it is absent.
+   */
+  readonly playerById?: ReadonlyMap<number, Pick<Player, 'id' | 'type' | 'teamId' | 'webName'>>;
 }
 
 export interface PreparedLiveSnapshot {
@@ -62,6 +68,12 @@ function referenceDataFromCore(
     season: season.seasonCode,
     ...createLiveFixtureTeamMaps(teams),
     playerTeamById: buildCurrentSeasonPlayerTeamMap(players, season.seasonCode),
+    playerById: new Map(
+      players.map((player) => [
+        player.id,
+        { id: player.id, type: player.type, teamId: player.teamId, webName: player.webName },
+      ]),
+    ),
   };
 }
 
@@ -97,25 +109,12 @@ function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
     : 'scheduled';
 }
 
-/**
- * Fetch validation is a single coherent boundary: event-live, fixtures, the
- * expected fixture set and the player/team baseline are all checked before a
- * V2 candidate can be staged. No Redis or PostgreSQL writes happen here.
- */
-export function prepareCoherentLiveSnapshot(
+export function validateLiveElementIdentity(
   eventId: number,
-  liveResponse: RawFPLEventLiveResponse,
-  rawFixtures: RawFPLFixture[],
-  referenceData: LiveSnapshotReferenceData,
-  expectedFixtureIds: readonly number[],
+  liveElementIds: readonly number[],
+  referenceData: Pick<LiveSnapshotReferenceData, 'playerTeamById'>,
   publishedLiveElementIds: readonly number[] = [],
-): PreparedLiveSnapshot {
-  if (!Number.isInteger(eventId) || eventId <= 0)
-    throw new Error(`Invalid live snapshot event ID: ${eventId}`);
-  if (!Array.isArray(liveResponse.elements) || liveResponse.elements.length === 0) {
-    throw new Error('FPL event live response contains no elements');
-  }
-  const liveElementIds = liveResponse.elements.map((element) => element.id);
+): 'current-roster' | 'published-event' {
   const expectedLiveElementIds = [...referenceData.playerTeamById.keys()];
   if (
     new Set(liveElementIds).size !== liveElementIds.length ||
@@ -138,6 +137,34 @@ export function prepareCoherentLiveSnapshot(
       `Player identity mismatch for live snapshot event ${eventId}; missing=${missingPlayers.sort((a, b) => a - b).join(',') || 'none'}; unexpected=${unexpectedPlayers.sort((a, b) => a - b).join(',') || 'none'}`,
     );
   }
+  return matchesCurrentRoster ? 'current-roster' : 'published-event';
+}
+
+/**
+ * Fetch validation is a single coherent boundary: event-live, fixtures, the
+ * expected fixture set and the player/team baseline are all checked before a
+ * V2 candidate can be staged. No Redis or PostgreSQL writes happen here.
+ */
+export function prepareCoherentLiveSnapshot(
+  eventId: number,
+  liveResponse: RawFPLEventLiveResponse,
+  rawFixtures: RawFPLFixture[],
+  referenceData: LiveSnapshotReferenceData,
+  expectedFixtureIds: readonly number[],
+  publishedLiveElementIds: readonly number[] = [],
+): PreparedLiveSnapshot {
+  if (!Number.isInteger(eventId) || eventId <= 0)
+    throw new Error(`Invalid live snapshot event ID: ${eventId}`);
+  if (!Array.isArray(liveResponse.elements) || liveResponse.elements.length === 0) {
+    throw new Error('FPL event live response contains no elements');
+  }
+  const liveElementIds = liveResponse.elements.map((element) => element.id);
+  const liveIdentityBaseline = validateLiveElementIdentity(
+    eventId,
+    liveElementIds,
+    referenceData,
+    publishedLiveElementIds,
+  );
 
   if (!Array.isArray(rawFixtures)) throw new Error('FPL fixtures response contains no fixtures');
   const wrongEventFixture = rawFixtures.find(
@@ -186,6 +213,6 @@ export function prepareCoherentLiveSnapshot(
     eventLives,
     fixtures,
     state: resolveSnapshotState(fixtures),
-    liveIdentityBaseline: matchesCurrentRoster ? 'current-roster' : 'published-event',
+    liveIdentityBaseline,
   };
 }

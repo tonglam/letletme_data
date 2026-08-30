@@ -36,6 +36,8 @@
   "leagueEventResultsInCompetition",
   "leagueTypeInCompetition",
   "linkStatusInBridge",
+  "liveMatchDeskCheckpointsInFpl",
+  "liveMatchDetailCheckpointsInFpl",
   "livePointsPublicationCheckpointsInCompetition",
   "matchLinksInBridge",
   "matchesInUnderstat",

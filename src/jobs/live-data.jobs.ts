@@ -3,6 +3,13 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { liveDataQueue, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
 import { logError, logInfo } from '../utils/logger';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
+import type { MatchLifecycleState } from '../services/live-match-v2';
+import {
+  readLiveMatchCheckpointDesiredV2,
+  readLiveMatchCheckpointLastAtV2,
+} from '../cache/live-match-publication-v2';
+
+const LIVE_MATCH_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
@@ -35,12 +42,153 @@ export function liveSnapshotMinuteBucket(date: Date): string {
   return `${date.toISOString().slice(0, 16).replace(/\D/g, '')}${String(seconds).padStart(2, '0')}`;
 }
 
-export async function enqueueLiveActiveSnapshot(season: FplSeasonRef, eventId: number, now: Date) {
+export async function enqueueLiveActiveSnapshot(
+  season: FplSeasonRef,
+  eventId: number,
+  now: Date,
+  lifecycleState: MatchLifecycleState = 'LIVE_ACTIVE',
+) {
   // V2 publishes every valid source change to Redis. PostgreSQL checkpointing
   // is decided by the publication service (first/boundary/final or at most
   // once per ten minutes), so the scheduler must not manufacture a second
   // periodic write lane.
-  return enqueueLiveSnapshot(season, eventId, 'cron', { now });
+  return enqueueLiveSnapshot(season, eventId, 'cron', { now, lifecycleState });
+}
+
+/**
+ * Enqueue one coalesced Redis-first Match checkpoint obligation. A retained
+ * completed/failed Bull record is never treated as evidence for a new desired
+ * publication; it receives a bounded retry id while the Redis marker remains
+ * the source of truth.
+ */
+export async function enqueueLiveMatchCheckpoint(
+  season: FplSeasonRef,
+  eventId: number,
+  kind: 'desk' | 'detail',
+  publicationId: string,
+  generation: number,
+  options: { readonly successor?: boolean; readonly delayMs?: number } = {},
+) {
+  try {
+    const queue = liveDataQueue;
+    if (await isQueueDrainOnly(queue.name)) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
+    const baseJobId = `live-match-checkpoint-${season.seasonCode}-e${eventId}-${kind}-v2`;
+    const pending = await queue.getJobs(
+      options.successor
+        ? ['waiting', 'delayed', 'paused']
+        : ['waiting', 'delayed', 'active', 'paused'],
+    );
+    const existingPending = pending.find(
+      (job) =>
+        job.name === LIVE_JOBS.LIVE_MATCH_CHECKPOINT &&
+        job.data.seasonId === season.seasonId &&
+        job.data.eventId === eventId &&
+        job.data.checkpointKind === kind,
+    );
+    if (existingPending) {
+      logInfo('Live Match checkpoint scope already pending; coalescing desired publication', {
+        jobId: existingPending.id,
+        season: season.seasonCode,
+        eventId,
+        kind,
+        generation,
+      });
+      return existingPending;
+    }
+    const existing = options.successor ? null : await queue.getJob(baseJobId);
+    let jobId = options.successor ? `${baseJobId}-successor-${randomUUID()}` : baseJobId;
+    if (existing) {
+      const state = await existing.getState();
+      if (['waiting', 'waiting-children', 'delayed', 'active', 'paused'].includes(state)) {
+        logInfo('Live Match checkpoint job already pending; coalescing desired publication', {
+          jobId: existing.id,
+          season: season.seasonCode,
+          eventId,
+          kind,
+          generation,
+        });
+        return existing;
+      }
+      // A retained terminal record cannot provide a future completion event
+      // for the newer Redis desired marker. Keep the evidence and use a
+      // bounded retry ID; the marker remains the source of truth.
+      jobId = `${baseJobId}-retry-${randomUUID()}`;
+    }
+    const job = await queue.add(
+      LIVE_JOBS.LIVE_MATCH_CHECKPOINT,
+      {
+        seasonId: season.seasonId,
+        seasonCode: season.seasonCode,
+        eventId,
+        source: 'reconcile',
+        triggeredAt: new Date().toISOString(),
+        checkpointKind: kind,
+        checkpointPublicationId: publicationId,
+        checkpointGeneration: generation,
+      } satisfies LiveDataJobData,
+      {
+        jobId,
+        ...(options.delayMs && options.delayMs > 0 ? { delay: Math.ceil(options.delayMs) } : {}),
+      },
+    );
+    logInfo('Live Match checkpoint job enqueued', {
+      jobId: job.id,
+      season: season.seasonCode,
+      eventId,
+      kind,
+      generation,
+      queue: queue.name,
+    });
+    return job;
+  } catch (error) {
+    logError('Failed to enqueue Live Match checkpoint job', error, {
+      season: season.seasonCode,
+      eventId,
+      kind,
+      generation,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Re-enqueue the desired marker after the active checkpoint job reaches its
+ * batch boundary. This closes both the active-job coalescing race and the
+ * non-final ten-minute delay without touching FPL or PostgreSQL.
+ */
+export async function enqueueRemainingLiveMatchCheckpoint(
+  season: FplSeasonRef,
+  eventId: number,
+  kind: 'desk' | 'detail',
+) {
+  const desired = await readLiveMatchCheckpointDesiredV2({
+    season: season.seasonCode,
+    eventId,
+    kind,
+  });
+  if (!desired) return null;
+  let delayMs = 0;
+  if (!desired.final) {
+    const lastAt = await readLiveMatchCheckpointLastAtV2({
+      season: season.seasonCode,
+      eventId,
+      kind,
+    });
+    const lastMs = lastAt === null ? Number.NaN : Date.parse(lastAt);
+    if (Number.isFinite(lastMs)) {
+      delayMs = Math.max(0, lastMs + LIVE_MATCH_CHECKPOINT_INTERVAL_MS - Date.now());
+    }
+  }
+  return enqueueLiveMatchCheckpoint(
+    season,
+    eventId,
+    kind,
+    desired.publicationId,
+    desired.generation,
+    { successor: true, delayMs },
+  );
 }
 
 export async function enqueueLiveSnapshot(
@@ -57,6 +205,7 @@ export async function enqueueLiveSnapshot(
     freshnessWindowId?: number;
     /** Scheduler reconciliation may join an already-enqueued deterministic job. */
     reuseExisting?: boolean;
+    lifecycleState?: MatchLifecycleState;
   } = {},
 ) {
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
@@ -131,6 +280,7 @@ export async function enqueueLiveSnapshot(
         ? {}
         : { freshnessWindowId: options.freshnessWindowId }),
       ...(options.finalizeEvent !== undefined ? { finalizeEvent: options.finalizeEvent } : {}),
+      ...(options.lifecycleState !== undefined ? { lifecycleState: options.lifecycleState } : {}),
     };
     const suffix = 'v2';
     const generatedJobId =
